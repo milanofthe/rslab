@@ -30,7 +30,8 @@ use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, LdltFactors};
 use crate::error::FeralError;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
-use crate::symbolic::{symbolic_factorize, SupernodeParams};
+use crate::symbolic::{symbolic_factorize, SupernodeParams, SymbolicFactorization};
+use rayon::prelude::*;
 
 /// Per-front partial-factorization output, in within-front pivot order.
 struct FrontFactors<T> {
@@ -233,6 +234,107 @@ fn factor_front<T: Scalar>(
 struct NodeFactor<T> {
     front: FrontFactors<T>,
     row_indices: Vec<usize>,
+    /// This front's contribution block (`cnrow × cnrow` column-major lower
+    /// triangle), consumed by the parent's extend-add. Kept on the node (rather
+    /// than a separate take-able slot) so independent subtrees factor in
+    /// parallel without a shared mutable contribution pool.
+    contrib: Vec<T>,
+}
+
+/// Borrow a child node's result, erroring if it is somehow not yet computed
+/// (cannot happen: children occupy strictly lower assembly-tree levels).
+fn child_ref<T: Scalar>(
+    node_results: &[Option<NodeFactor<T>>],
+    ch: usize,
+) -> Result<&NodeFactor<T>, FeralError> {
+    node_results
+        .get(ch)
+        .and_then(|o| o.as_ref())
+        .ok_or_else(|| FeralError::InvalidInput("internal: missing child node".to_string()))
+}
+
+/// Factor one supernode's front: build its row structure, assemble the original
+/// (permuted) entries and the children's contribution blocks, then partially
+/// factor the fully-summed columns. Reads only already-computed children, so
+/// supernodes on the same assembly-tree level run concurrently.
+fn factor_one_node<T: Scalar>(
+    s: usize,
+    sym: &SymbolicFactorization,
+    a_perm: &CscMatrix<T>,
+    node_results: &[Option<NodeFactor<T>>],
+) -> Result<NodeFactor<T>, FeralError> {
+    let snode = &sym.supernodes[s];
+    let n = sym.n;
+    let ncol = snode.ncol;
+    let own_last = snode.first_col + ncol;
+
+    // Front row structure: own columns ++ sorted trailing rows (from the
+    // permuted pattern of the own columns plus the children contribution rows).
+    let mut trailing: Vec<usize> = Vec::new();
+    for j in snode.first_col..own_last {
+        for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
+            let r = sym.permuted_pattern.row_idx[k];
+            if r >= own_last {
+                trailing.push(r);
+            }
+        }
+    }
+    for &ch in &snode.children {
+        let child = child_ref(node_results, ch)?;
+        for &r in &child.row_indices[child.front.nelim..] {
+            if r >= own_last {
+                trailing.push(r);
+            }
+        }
+    }
+    trailing.sort_unstable();
+    trailing.dedup();
+    let mut ri = Vec::with_capacity(ncol + trailing.len());
+    ri.extend(snode.first_col..own_last);
+    ri.extend(trailing);
+    let nrow = ri.len();
+
+    let mut gloc = vec![usize::MAX; n]; // permuted-global → front-local
+    for (li, &g) in ri.iter().enumerate() {
+        gloc[g] = li;
+    }
+
+    let mut f = vec![T::zero(); nrow * nrow];
+
+    // Scatter original entries of the eliminated columns.
+    for p in 0..ncol {
+        let c = snode.first_col + p;
+        for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
+            let g = a_perm.row_idx[k];
+            let lr = gloc[g];
+            debug_assert!(lr != usize::MAX, "original entry outside front");
+            let (hi, lo) = if lr >= p { (lr, p) } else { (p, lr) };
+            f[lo * nrow + hi] = f[lo * nrow + hi] + a_perm.values[k];
+        }
+    }
+
+    // Extend-add each child's contribution block.
+    for &ch in &snode.children {
+        let child = child_ref(node_results, ch)?;
+        let cn = child.front.nrow - child.front.nelim;
+        let crows = &child.row_indices[child.front.nelim..];
+        let cb = &child.contrib;
+        for j in 0..cn {
+            let lj = gloc[crows[j]];
+            for i in j..cn {
+                let li = gloc[crows[i]];
+                let (hi, lo) = if li >= lj { (li, lj) } else { (lj, li) };
+                f[lo * nrow + hi] = f[lo * nrow + hi] + cb[j * cn + i];
+            }
+        }
+    }
+
+    let (front, contrib) = factor_front(&mut f, nrow, ncol)?;
+    Ok(NodeFactor {
+        front,
+        row_indices: ri,
+        contrib,
+    })
 }
 
 /// Factor a sparse symmetric matrix `A` as `Pᵀ A P = L D Lᵀ` via generic
@@ -293,102 +395,51 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
     }
     let a_perm = CscMatrix::<T>::from_triplets(n, &rows, &cols, &vals)?;
 
-    // 3. Multifrontal numeric factorization. Supernodes are in postorder, so a
-    //    child's index is always less than its parent's: processing in order
-    //    means every child's contribution block is ready before its parent.
+    // 3. Multifrontal numeric factorization, parallelized over the assembly
+    //    tree. Assign each supernode a level = 1 + max(children levels); nodes
+    //    at the same level are mutually independent (none is an ancestor of
+    //    another), so each level is factored concurrently with rayon. A node
+    //    reads only its children's contribution blocks, all computed in lower
+    //    levels. The sequential reference is the same `factor_one_node` run
+    //    level-by-level.
     let nsuper = sym.supernodes.len();
-    let mut nodes: Vec<NodeFactor<T>> = Vec::with_capacity(nsuper);
-    let mut contrib: Vec<Option<Vec<T>>> = (0..nsuper).map(|_| None).collect();
-    let mut gloc = vec![usize::MAX; n]; // permuted-global → front-local scratch
+    let mut level = vec![0usize; nsuper];
+    let mut max_level = 0usize;
+    for s in 0..nsuper {
+        let mut lv = 0usize;
+        for &ch in &sym.supernodes[s].children {
+            lv = lv.max(level[ch] + 1);
+        }
+        level[s] = lv;
+        max_level = max_level.max(lv);
+    }
+    let mut by_level: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+    for (s, &lv) in level.iter().enumerate() {
+        by_level[lv].push(s);
+    }
 
-    for (s, snode) in sym.supernodes.iter().enumerate() {
-        let ncol = snode.ncol;
-        let own_last = snode.first_col + ncol;
-        // Build the front's row structure from the permuted pattern and the
-        // children's contribution rows (mirrors the f64 driver's
-        // `build_row_indices`). The stored `snode.row_indices` is a
-        // symbolic-phase artifact in a different numbering and is intentionally
-        // not used; `first_col`/`ncol` index the permuted pattern (and `A_perm`)
-        // directly.
-        let mut trailing: Vec<usize> = Vec::new();
-        for j in snode.first_col..own_last {
-            for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
-                let r = sym.permuted_pattern.row_idx[k];
-                if r >= own_last {
-                    trailing.push(r);
-                }
+    let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
+    for level_nodes in &by_level {
+        let computed: Vec<(usize, NodeFactor<T>)> = level_nodes
+            .par_iter()
+            .map(|&s| factor_one_node(s, &sym, &a_perm, &node_results).map(|nf| (s, nf)))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (s, nf) in computed {
+            node_results[s] = Some(nf);
+        }
+    }
+
+    // Collect the factored nodes in supernode (= elimination) order.
+    let mut nodes: Vec<&NodeFactor<T>> = Vec::with_capacity(nsuper);
+    for node_opt in &node_results {
+        match node_opt {
+            Some(nd) => nodes.push(nd),
+            None => {
+                return Err(FeralError::InvalidInput(
+                    "internal: unfactored supernode".to_string(),
+                ))
             }
         }
-        for &ch in &snode.children {
-            let child = &nodes[ch];
-            for &r in &child.row_indices[child.front.nelim..] {
-                if r >= own_last {
-                    trailing.push(r);
-                }
-            }
-        }
-        trailing.sort_unstable();
-        trailing.dedup();
-        let mut ri = Vec::with_capacity(ncol + trailing.len());
-        ri.extend(snode.first_col..own_last);
-        ri.extend(trailing);
-        let nrow = ri.len();
-        for (li, &g) in ri.iter().enumerate() {
-            gloc[g] = li;
-        }
-
-        let mut f = vec![T::zero(); nrow * nrow];
-
-        // Scatter the original (permuted) entries of the eliminated columns.
-        // Local column position `p` corresponds to permuted-global column
-        // `first_col + p` (the own columns occupy front positions `0..ncol`).
-        for p in 0..ncol {
-            let c = snode.first_col + p;
-            for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
-                let g = a_perm.row_idx[k];
-                let lr = gloc[g];
-                debug_assert!(lr != usize::MAX, "original entry outside front");
-                let (hi, lo) = if lr >= p { (lr, p) } else { (p, lr) };
-                f[lo * nrow + hi] = f[lo * nrow + hi] + a_perm.values[k];
-            }
-        }
-
-        // Extend-add each child's contribution block.
-        for &ch in &snode.children {
-            let child = &nodes[ch];
-            let cn = child.front.nrow - child.front.nelim;
-            let crows = &child.row_indices[child.front.nelim..];
-            let cb = match contrib[ch].take() {
-                Some(cb) => cb,
-                // Unreachable: children are processed before parents, so each
-                // child's block is present exactly once. Treated as an internal
-                // invariant violation rather than panicking.
-                None => {
-                    return Err(FeralError::InvalidInput(
-                        "internal: missing child contribution block".to_string(),
-                    ))
-                }
-            };
-            for j in 0..cn {
-                let lj = gloc[crows[j]];
-                for i in j..cn {
-                    let li = gloc[crows[i]];
-                    let (hi, lo) = if li >= lj { (li, lj) } else { (lj, li) };
-                    f[lo * nrow + hi] = f[lo * nrow + hi] + cb[j * cn + i];
-                }
-            }
-        }
-
-        for &g in ri.iter() {
-            gloc[g] = usize::MAX;
-        }
-
-        let (front, cb) = factor_front(&mut f, nrow, ncol)?;
-        contrib[s] = Some(cb);
-        nodes.push(NodeFactor {
-            front,
-            row_indices: ri,
-        });
     }
 
     // 4a. Assign factorization order e and gather D in e-order.
@@ -551,6 +602,50 @@ mod tests {
         let x = solve_ldlt(&f, &b).unwrap();
         assert!(
             residual_inf(&a, &x, &b) < 1e-10,
+            "residual {}",
+            residual_inf(&a, &x, &b)
+        );
+    }
+
+    #[test]
+    fn complex_sparse_large_grid_parallel() {
+        // 12×12 complex-symmetric grid (n=144): a deep, bushy assembly tree
+        // that genuinely exercises multiple parallel levels in the rayon driver.
+        let c = |re, im| Complex::new(re, im);
+        let m = 12;
+        let n = m * m;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        let idx = |r: usize, cc: usize| r * m + cc;
+        for r in 0..m {
+            for cc in 0..m {
+                let p = idx(r, cc);
+                rows.push(p);
+                cols.push(p);
+                vals.push(c(4.0, 0.5));
+                if cc + 1 < m {
+                    let q = idx(r, cc + 1);
+                    let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(c(-1.0, 0.1));
+                }
+                if r + 1 < m {
+                    let q = idx(r + 1, cc);
+                    let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(c(-1.0, 0.1));
+                }
+            }
+        }
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 11) as f64 - 5.0, 1.0)).collect();
+        let f = factor_sparse_ldlt(&a).unwrap();
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(
+            residual_inf(&a, &x, &b) < 1e-9,
             "residual {}",
             residual_inf(&a, &x, &b)
         );

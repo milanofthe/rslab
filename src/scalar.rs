@@ -26,6 +26,8 @@ pub trait Scalar:
     Copy
     + PartialEq
     + Debug
+    + Send
+    + Sync
     + Add<Output = Self>
     + Sub<Output = Self>
     + Mul<Output = Self>
