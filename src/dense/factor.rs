@@ -785,15 +785,15 @@ impl Default for BunchKaufmanParams {
 
 /// Factorization result: P·L·D_bk·Lᵀ·Pᵀ = D_eq·A·D_eq.
 #[derive(Debug)]
-pub struct Factors {
+pub struct Factors<T = f64> {
     pub n: usize,
     /// Unit lower triangular L in full n×n column-major storage.
     /// Diagonal entries are 1.0 (stored explicitly).
-    pub l: Vec<f64>,
+    pub l: Vec<T>,
     /// D_bk diagonal entries in pivot order. Length n.
-    pub d_diag: Vec<f64>,
+    pub d_diag: Vec<T>,
     /// D_bk sub-diagonal entries. Length n. Zero for 1×1 pivots.
-    pub d_subdiag: Vec<f64>,
+    pub d_subdiag: Vec<T>,
     /// BK pivot permutation (forward). Length n.
     /// perm[i] = j means original row j was moved to pivot position i.
     pub perm: Vec<usize>,
@@ -1286,8 +1286,12 @@ pub fn factor_single_front(
 }
 
 /// Result of partial frontal factorization for the multifrontal solver.
+///
+/// Generic over the scalar field `T` (defaulting to `f64`). The value-carrying
+/// fields (`l`, `d_diag`, `d_subdiag`, `contrib`) are `Vec<T>`; the
+/// equilibration/threshold scalars and the inertia counts remain real.
 #[derive(Debug)]
-pub struct FrontalFactors {
+pub struct FrontalFactors<T = f64> {
     /// Number of rows in the frontal (nrow).
     pub nrow: usize,
     /// Attempted column count (the `ncol` argument passed to `factor_frontal`).
@@ -1301,11 +1305,11 @@ pub struct FrontalFactors {
     pub nelim: usize,
     /// L factor: nrow × nelim column-major. Unit diagonal (implicit).
     /// L[j*nrow + i] for i in [0, nrow), j in [0, nelim).
-    pub l: Vec<f64>,
+    pub l: Vec<T>,
     /// D block diagonal (length nelim).
-    pub d_diag: Vec<f64>,
+    pub d_diag: Vec<T>,
     /// D block subdiagonal for 2×2 pivots (length nelim).
-    pub d_subdiag: Vec<f64>,
+    pub d_subdiag: Vec<T>,
     /// BK pivot permutation within the first nelim rows.
     /// perm[i] = j means original row j was moved to pivot position i.
     /// Only indices 0..nelim are permuted; nelim..nrow are identity.
@@ -1324,7 +1328,7 @@ pub struct FrontalFactors {
     /// before storing the `FrontalFactors` into a `NodeFactors`. Direct
     /// callers of `factor_frontal*` (tests, examples, the bit-parity
     /// reference) see the populated `contrib` as documented.
-    pub contrib: Vec<f64>,
+    pub contrib: Vec<T>,
     /// Dimension of the contribution block (`nrow - nelim`).
     pub contrib_dim: usize,
     /// Number of delayed fully-summed columns in the contribution block,
