@@ -1,19 +1,23 @@
 use crate::error::FeralError;
+use crate::scalar::Scalar;
 
 /// Symmetric matrix stored as full n×n column-major. Only the lower triangle
 /// is meaningful; the strict upper triangle is ignored on input.
-/// Entry (i, j) is at index j*n + i. Size: n*n f64 values.
-pub struct SymmetricMatrix {
+/// Entry (i, j) is at index j*n + i. Size: n*n `T` values.
+///
+/// Generic over the scalar field `T` (defaulting to `f64`). This is the dense
+/// per-front representation consumed by the Bunch-Kaufman kernel.
+pub struct SymmetricMatrix<T = f64> {
     pub n: usize,
-    pub data: Vec<f64>,
+    pub data: Vec<T>,
 }
 
-impl SymmetricMatrix {
+impl<T: Scalar> SymmetricMatrix<T> {
     /// Create a new n×n symmetric matrix initialized to zero.
     pub fn zeros(n: usize) -> Self {
         Self {
             n,
-            data: vec![0.0; n * n],
+            data: vec![T::zero(); n * n],
         }
     }
 
@@ -36,7 +40,7 @@ impl SymmetricMatrix {
     /// kernel only touches lower triangle (`dense/factor.rs:1138-1140`),
     /// `extend_add` normalises to lower (`numeric/factorize.rs:2371`),
     /// `symv` and `validate` iterate only `i >= j`.
-    pub fn from_pooled_buf(n: usize, mut buf: Vec<f64>) -> Self {
+    pub fn from_pooled_buf(n: usize, mut buf: Vec<T>) -> Self {
         let needed = n * n;
         // `resize` grows the tail with zeros or truncates. It does
         // NOT re-zero entries `[0, min(old_len, needed))`, which is
@@ -44,19 +48,19 @@ impl SymmetricMatrix {
         // (capacity already reached after the first few large
         // supernodes; subsequent calls only re-zero the lower
         // triangle).
-        buf.resize(needed, 0.0);
+        buf.resize(needed, T::zero());
         // Zero only the lower triangle of the n×n column-major layout:
         // for each column j, positions `[j*n + j, j*n + n)`.
         for j in 0..n {
             let col_base = j * n;
-            buf[col_base + j..col_base + n].fill(0.0);
+            buf[col_base + j..col_base + n].fill(T::zero());
         }
         Self { n, data: buf }
     }
 
     /// Create a symmetric matrix from a flat column-major vector.
     /// The lower triangle is authoritative; the upper triangle is ignored.
-    pub fn from_column_major(n: usize, data: Vec<f64>) -> Result<Self, FeralError> {
+    pub fn from_column_major(n: usize, data: Vec<T>) -> Result<Self, FeralError> {
         if data.len() != n * n {
             return Err(FeralError::InvalidInput(format!(
                 "matrix data length {} != expected {} for n={}",
@@ -70,7 +74,7 @@ impl SymmetricMatrix {
 
     /// Create a symmetric matrix from a dense 2D lower-triangular representation.
     /// `entries` provides (i, j, value) triples where i >= j.
-    pub fn from_lower_triangle(n: usize, entries: &[(usize, usize, f64)]) -> Self {
+    pub fn from_lower_triangle(n: usize, entries: &[(usize, usize, T)]) -> Self {
         let mut mat = Self::zeros(n);
         for &(i, j, v) in entries {
             mat.set(i, j, v);
@@ -82,7 +86,7 @@ impl SymmetricMatrix {
     /// For i >= j, returns data[j*n + i].
     /// For i < j, returns data[i*n + j] (symmetric).
     #[inline]
-    pub fn get(&self, i: usize, j: usize) -> f64 {
+    pub fn get(&self, i: usize, j: usize) -> T {
         if i >= j {
             self.data[j * self.n + i]
         } else {
@@ -93,7 +97,7 @@ impl SymmetricMatrix {
     /// Set entry (i, j) in the lower triangle.
     /// Also sets (j, i) for symmetry in the stored data.
     #[inline]
-    pub fn set(&mut self, i: usize, j: usize, val: f64) {
+    pub fn set(&mut self, i: usize, j: usize, val: T) {
         if i >= j {
             self.data[j * self.n + i] = val;
         } else {
@@ -121,7 +125,7 @@ impl SymmetricMatrix {
         for j in 0..self.n {
             for i in j..self.n {
                 let val = self.data[j * self.n + i];
-                if val.is_nan() || val.is_infinite() {
+                if !val.is_finite() {
                     return Err(FeralError::InvalidInput(format!(
                         "matrix contains NaN or Inf at index ({},{})",
                         i, j
@@ -134,19 +138,19 @@ impl SymmetricMatrix {
 
     /// Symmetric matrix-vector product: y = A * x.
     /// Uses only the lower triangle.
-    pub fn symv(&self, x: &[f64], y: &mut [f64]) {
+    pub fn symv(&self, x: &[T], y: &mut [T]) {
         let n = self.n;
         for yi in y.iter_mut().take(n) {
-            *yi = 0.0;
+            *yi = T::zero();
         }
         for j in 0..n {
             // Diagonal
-            y[j] += self.data[j * n + j] * x[j];
+            y[j] = y[j] + self.data[j * n + j] * x[j];
             // Off-diagonal (lower triangle)
             for i in (j + 1)..n {
                 let a_ij = self.data[j * n + i];
-                y[i] += a_ij * x[j];
-                y[j] += a_ij * x[i];
+                y[i] = y[i] + a_ij * x[j];
+                y[j] = y[j] + a_ij * x[i];
             }
         }
     }

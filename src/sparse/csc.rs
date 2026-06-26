@@ -1,30 +1,22 @@
 use crate::error::FeralError;
+use crate::scalar::Scalar;
 
 /// Compressed Sparse Column (CSC) matrix storage for symmetric matrices.
 ///
 /// Only the lower triangle is stored. `col_ptr[j]..col_ptr[j+1]` gives the
 /// range of entries in column j. Row indices within each column are sorted
 /// in ascending order.
-#[derive(Debug)]
-pub struct CscMatrix {
+///
+/// Generic over the scalar field `T` (defaulting to `f64`): `T = f64` is the
+/// real symmetric path, `T = Complex<f64>` the complex-symmetric (PARDISO
+/// `mtype 6`) path. The sparsity structure (`col_ptr`/`row_idx`) is
+/// scalar-agnostic; only `values` carries the field.
+#[derive(Debug, Clone)]
+pub struct CscMatrix<T = f64> {
     pub n: usize,
     pub col_ptr: Vec<usize>,
     pub row_idx: Vec<usize>,
-    pub values: Vec<f64>,
-}
-
-// Manual `Clone` so test builds can count clones (see `CSC_MATRIX_CLONES`).
-// The explicit field literal is intentional: adding a field to `CscMatrix`
-// will fail to compile here, forcing this impl to be kept in sync.
-impl Clone for CscMatrix {
-    fn clone(&self) -> Self {
-        Self {
-            n: self.n,
-            col_ptr: self.col_ptr.clone(),
-            row_idx: self.row_idx.clone(),
-            values: self.values.clone(),
-        }
-    }
+    pub values: Vec<T>,
 }
 
 /// Symmetric sparsity pattern (full, not just lower triangle).
@@ -36,7 +28,7 @@ pub struct CscPattern {
     pub row_idx: Vec<usize>,
 }
 
-impl CscMatrix {
+impl<T: Scalar> CscMatrix<T> {
     /// Number of stored nonzeros (lower triangle only).
     pub fn nnz(&self) -> usize {
         self.values.len()
@@ -50,7 +42,7 @@ impl CscMatrix {
         n: usize,
         rows: &[usize],
         cols: &[usize],
-        vals: &[f64],
+        vals: &[T],
     ) -> Result<Self, FeralError> {
         if rows.len() != cols.len() || cols.len() != vals.len() {
             return Err(FeralError::InvalidInput(
@@ -79,7 +71,7 @@ impl CscMatrix {
 
         // Place entries
         let mut row_idx = vec![0usize; nnz];
-        let mut values = vec![0.0f64; nnz];
+        let mut values = vec![T::zero(); nnz];
         let mut offsets = col_ptr[..n].to_vec();
         for k in 0..rows.len() {
             let (r, c) = (rows[k], cols[k]);
@@ -132,7 +124,7 @@ impl CscMatrix {
             }
 
             // Collect (row, val) pairs for this column and sort by row
-            let mut pairs: Vec<(usize, f64)> = (start..end)
+            let mut pairs: Vec<(usize, T)> = (start..end)
                 .map(|k| (self.row_idx[k], self.values[k]))
                 .collect();
             pairs.sort_unstable_by_key(|&(r, _)| r);
@@ -142,7 +134,7 @@ impl CscMatrix {
             let mut prev_val = pairs[0].1;
             for &(r, v) in &pairs[1..] {
                 if r == prev_row {
-                    prev_val += v;
+                    prev_val = prev_val + v;
                 } else {
                     new_row_idx.push(prev_row);
                     new_values.push(prev_val);
@@ -299,24 +291,24 @@ impl CscMatrix {
     /// Symmetric matrix-vector product: y = A * x.
     ///
     /// Uses only the stored lower triangle; implicitly applies symmetry.
-    pub fn symv(&self, x: &[f64], y: &mut [f64]) {
+    pub fn symv(&self, x: &[T], y: &mut [T]) {
         for yi in y.iter_mut().take(self.n) {
-            *yi = 0.0;
+            *yi = T::zero();
         }
         for j in 0..self.n {
             for k in self.col_ptr[j]..self.col_ptr[j + 1] {
                 let i = self.row_idx[k];
                 let v = self.values[k];
-                y[i] += v * x[j];
+                y[i] = y[i] + v * x[j];
                 if i != j {
-                    y[j] += v * x[i];
+                    y[j] = y[j] + v * x[i];
                 }
             }
         }
     }
 
     /// Convert to dense symmetric matrix.
-    pub fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix {
+    pub fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix<T> {
         self.to_dense_into(Vec::new())
     }
 
@@ -329,10 +321,10 @@ impl CscMatrix {
     /// Used by `FactorWorkspace` to pool the dense-fast-path buffer
     /// across calls — see
     /// `dev/research/phase-2.5.x-to-dense-pooling.md`.
-    pub fn to_dense_into(&self, mut buf: Vec<f64>) -> crate::dense::matrix::SymmetricMatrix {
+    pub fn to_dense_into(&self, mut buf: Vec<T>) -> crate::dense::matrix::SymmetricMatrix<T> {
         let nn = self.n * self.n;
         buf.clear();
-        buf.resize(nn, 0.0);
+        buf.resize(nn, T::zero());
         // `from_triplets` guarantees all stored entries are lower-
         // triangle (row >= col), so every `(i, j)` lands at
         // `data[j*n + i]`.
@@ -475,9 +467,45 @@ mod tests {
         );
     }
 
+    /// The storage layer must hold a complex-symmetric matrix (A = Aᵀ with
+    /// complex entries), not just `f64`. This is the point of the generic
+    /// threading: structure code is shared, only `values` carries the field.
+    /// Oracle hand-computed below.
+    #[test]
+    fn complex_storage_symv_and_dense() {
+        use num_complex::Complex;
+        let c = |re, im| Complex::new(re, im);
+        // Lower triangle of A = [[1+i, 2], [2, 3-i]] (symmetric, A = Aᵀ).
+        let m: CscMatrix<Complex<f64>> = CscMatrix::from_triplets(
+            2,
+            &[0, 1, 1],
+            &[0, 0, 1],
+            &[c(1.0, 1.0), c(2.0, 0.0), c(3.0, -1.0)],
+        )
+        .unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.nnz(), 3);
+
+        // y = A·x with x = [1, i].
+        //   y0 = (1+i)·1 + 2·i        = 1 + 3i
+        //   y1 = 2·1     + (3-i)·i    = 3 + 3i   (since -i² = +1)
+        let x = [c(1.0, 0.0), c(0.0, 1.0)];
+        let mut y = [c(0.0, 0.0); 2];
+        m.symv(&x, &mut y);
+        assert_eq!(y[0], c(1.0, 3.0));
+        assert_eq!(y[1], c(3.0, 3.0));
+
+        // Densify and read back, including the symmetric upper-triangle access.
+        let dense = m.to_dense();
+        assert_eq!(dense.get(0, 0), c(1.0, 1.0));
+        assert_eq!(dense.get(1, 0), c(2.0, 0.0));
+        assert_eq!(dense.get(0, 1), c(2.0, 0.0)); // symmetry
+        assert_eq!(dense.get(1, 1), c(3.0, -1.0));
+    }
+
     #[test]
     fn test_diagonal_matrix() {
-        let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 2.0, 3.0]).unwrap();
+        let m: CscMatrix = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 2.0, 3.0]).unwrap();
         assert_eq!(m.nnz(), 3);
         let pat = m.symmetric_pattern();
         assert_eq!(pat.col_ptr[3], 3); // no off-diagonal, so 3 entries total
@@ -485,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_empty_matrix() {
-        let m = CscMatrix::from_triplets(3, &[], &[], &[]).unwrap();
+        let m: CscMatrix = CscMatrix::from_triplets(3, &[], &[], &[]).unwrap();
         assert_eq!(m.nnz(), 0);
         m.validate().unwrap();
         let pat = m.symmetric_pattern();
