@@ -53,7 +53,7 @@ pub struct LdltFactors<T> {
 
 /// The Bunch-Kaufman pivot threshold `α = (1 + √17)/8 ≈ 0.6404`.
 #[inline]
-fn bk_alpha() -> f64 {
+pub(crate) fn bk_alpha() -> f64 {
     (1.0 + 17.0_f64.sqrt()) / 8.0
 }
 
@@ -62,7 +62,7 @@ fn bk_alpha() -> f64 {
 /// columns across the whole matrix — including the already-computed `L`
 /// columns to the left — so the partial factorization stays consistent. The
 /// crossing element `(q, p)` maps to itself and is left in place.
-fn swap_sym_lower<T: Scalar>(a: &mut [T], n: usize, p: usize, q: usize) {
+pub(crate) fn swap_sym_lower<T: Scalar>(a: &mut [T], n: usize, p: usize, q: usize) {
     debug_assert!(p < q && q < n);
     // Column segment strictly below q: (i, p) <-> (i, q) for i > q.
     for i in (q + 1)..n {

@@ -1,0 +1,601 @@
+//! Generic multifrontal sparse LDLᵀ factorization over any [`Scalar`] field.
+//!
+//! This drives a full sparse symmetric-indefinite solve for both the real
+//! (`f64`) and complex-*symmetric* (`Complex<f64>`, PARDISO `mtype 6`) paths by
+//! reusing the existing **value-agnostic** symbolic analysis (ordering,
+//! elimination tree, supernode amalgamation) and applying the generic dense
+//! Bunch-Kaufman kernel from [`crate::dense::ldlt_generic`] front-by-front.
+//!
+//! As with the dense kernel, this does **not** touch the heavily optimized f64
+//! multifrontal driver in [`crate::numeric::factorize`] (blocked, SIMD,
+//! delayed pivoting, inertia, rayon). That stays the f64 performance path; this
+//! is the shared generic reference and the complex-symmetric driver.
+//!
+//! ## Correctness-first scope
+//!
+//! * Pivoting is restricted to the **fully-summed block** of each front (no
+//!   delayed pivoting). This produces a valid factorization whenever each
+//!   fully-summed block is nonsingular; pathological indefinite cases that
+//!   would require delaying a pivot to the parent are out of scope for now and
+//!   surface as [`FeralError::NumericallyRankDeficient`].
+//! * The reassembled factor is held as a dense `n×n` global `L`. This is
+//!   `O(n²)` memory and is a correctness-first choice; a sparse-CSC global `L`
+//!   with a supernodal triangular solve is a later optimization.
+//!
+//! The result is returned as an [`LdltFactors`] in factorization order, so the
+//! generic [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt) handles the
+//! triangular/diagonal solves and permutation directly.
+
+use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, LdltFactors};
+use crate::error::FeralError;
+use crate::scalar::Scalar;
+use crate::sparse::csc::CscMatrix;
+use crate::symbolic::{symbolic_factorize, SupernodeParams};
+
+/// Per-front partial-factorization output, in within-front pivot order.
+struct FrontFactors<T> {
+    /// Total front size (eliminated + contribution rows).
+    nrow: usize,
+    /// Number of eliminated (fully-summed) columns.
+    nelim: usize,
+    /// Pivot position → local row index (length `nrow`). Identity on the
+    /// contribution rows `[nelim, nrow)`, which are never interchanged.
+    perm: Vec<usize>,
+    /// Unit lower `L` of the front, `nrow × nelim` column-major in pivot order.
+    l: Vec<T>,
+    /// `D` block diagonal, length `nelim`.
+    d_diag: Vec<T>,
+    /// `D` sub-diagonal, length `nelim`.
+    d_subdiag: Vec<T>,
+    /// `true` at the first column of each 2×2 block, length `nelim`.
+    two_by_two: Vec<bool>,
+}
+
+/// Partially factor the first `ncol` (fully-summed) columns of a dense
+/// lower-triangle front `f` (`nrow × nrow`, column-major) with Bunch-Kaufman
+/// pivoting restricted to the fully-summed block. The entire trailing front is
+/// updated; the trailing `[ncol, nrow)` block is returned as the contribution
+/// block (`cnrow × cnrow` column-major lower triangle).
+fn factor_front<T: Scalar>(
+    f: &mut [T],
+    nrow: usize,
+    ncol: usize,
+) -> Result<(FrontFactors<T>, Vec<T>), FeralError> {
+    let n = nrow; // column stride
+    let alpha = bk_alpha();
+    let one = T::one();
+
+    let mut perm: Vec<usize> = (0..nrow).collect();
+    let mut d_diag = vec![T::zero(); ncol];
+    let mut d_subdiag = vec![T::zero(); ncol];
+    let mut two_by_two = vec![false; ncol];
+
+    let mut k = 0;
+    while k < ncol {
+        let absakk = f[k * n + k].magnitude();
+
+        // colmax restricted to the fully-summed block rows (k+1)..ncol.
+        let mut colmax = 0.0;
+        let mut imax = k;
+        for i in (k + 1)..ncol {
+            let m = f[k * n + i].magnitude();
+            if m > colmax {
+                colmax = m;
+                imax = i;
+            }
+        }
+
+        let kstep;
+        let kp;
+        if absakk.max(colmax) == 0.0 {
+            return Err(FeralError::NumericallyRankDeficient);
+        } else if absakk >= alpha * colmax {
+            kstep = 1;
+            kp = k;
+        } else {
+            // rowmax in row imax, restricted to the fully-summed block.
+            let mut rowmax = 0.0;
+            for j in k..imax {
+                let m = f[j * n + imax].magnitude();
+                if m > rowmax {
+                    rowmax = m;
+                }
+            }
+            for i in (imax + 1)..ncol {
+                let m = f[imax * n + i].magnitude();
+                if m > rowmax {
+                    rowmax = m;
+                }
+            }
+            if absakk >= alpha * colmax * (colmax / rowmax) {
+                kstep = 1;
+                kp = k;
+            } else if f[imax * n + imax].magnitude() >= alpha * rowmax {
+                kstep = 1;
+                kp = imax;
+            } else {
+                kstep = 2;
+                kp = imax;
+            }
+        }
+
+        if kstep == 1 {
+            if kp != k {
+                swap_sym_lower(f, n, k, kp);
+                perm.swap(k, kp);
+            }
+            let d = f[k * n + k];
+            if d == T::zero() {
+                return Err(FeralError::NumericallyRankDeficient);
+            }
+            d_diag[k] = d;
+            let dinv = d.recip();
+            // Update the entire trailing front (rows up to nrow), then store
+            // multipliers.
+            for j in (k + 1)..n {
+                let wj_dinv = f[k * n + j] * dinv;
+                if wj_dinv != T::zero() {
+                    for i in j..n {
+                        f[j * n + i] = f[j * n + i] - f[k * n + i] * wj_dinv;
+                    }
+                }
+            }
+            for i in (k + 1)..n {
+                f[k * n + i] = f[k * n + i] * dinv;
+            }
+            k += 1;
+        } else {
+            if kp != k + 1 {
+                swap_sym_lower(f, n, k + 1, kp);
+                perm.swap(k + 1, kp);
+            }
+            let d11 = f[k * n + k];
+            let d21 = f[k * n + (k + 1)];
+            let d22 = f[(k + 1) * n + (k + 1)];
+            let det = d11 * d22 - d21 * d21;
+            if det == T::zero() {
+                return Err(FeralError::NumericallyRankDeficient);
+            }
+            let detinv = det.recip();
+            d_diag[k] = d11;
+            d_subdiag[k] = d21;
+            d_diag[k + 1] = d22;
+            two_by_two[k] = true;
+
+            let mut l1 = vec![T::zero(); nrow];
+            let mut l2 = vec![T::zero(); nrow];
+            for i in (k + 2)..n {
+                let wik = f[k * n + i];
+                let wik1 = f[(k + 1) * n + i];
+                l1[i] = (d22 * wik - d21 * wik1) * detinv;
+                l2[i] = (d11 * wik1 - d21 * wik) * detinv;
+            }
+            for j in (k + 2)..n {
+                let l1j = l1[j];
+                let l2j = l2[j];
+                for i in j..n {
+                    f[j * n + i] = f[j * n + i] - f[k * n + i] * l1j - f[(k + 1) * n + i] * l2j;
+                }
+            }
+            for i in (k + 2)..n {
+                f[k * n + i] = l1[i];
+                f[(k + 1) * n + i] = l2[i];
+            }
+            k += 2;
+        }
+    }
+
+    // Extract the front's L (nrow × ncol, pivot order).
+    let mut l = vec![T::zero(); nrow * ncol];
+    let mut c = 0;
+    while c < ncol {
+        if two_by_two[c] {
+            l[c * nrow + c] = one;
+            l[(c + 1) * nrow + (c + 1)] = one;
+            for i in (c + 2)..nrow {
+                l[c * nrow + i] = f[c * nrow + i];
+                l[(c + 1) * nrow + i] = f[(c + 1) * nrow + i];
+            }
+            c += 2;
+        } else {
+            l[c * nrow + c] = one;
+            for i in (c + 1)..nrow {
+                l[c * nrow + i] = f[c * nrow + i];
+            }
+            c += 1;
+        }
+    }
+
+    // Contribution block = updated trailing [ncol, nrow) lower triangle.
+    let cnrow = nrow - ncol;
+    let mut cb = vec![T::zero(); cnrow * cnrow];
+    for j in 0..cnrow {
+        for i in j..cnrow {
+            cb[j * cnrow + i] = f[(ncol + j) * nrow + (ncol + i)];
+        }
+    }
+
+    Ok((
+        FrontFactors {
+            nrow,
+            nelim: ncol,
+            perm,
+            l,
+            d_diag,
+            d_subdiag,
+            two_by_two,
+        },
+        cb,
+    ))
+}
+
+/// Reassembled per-front factor, retained for the global pass.
+struct NodeFactor<T> {
+    front: FrontFactors<T>,
+    row_indices: Vec<usize>,
+}
+
+/// Factor a sparse symmetric matrix `A` as `Pᵀ A P = L D Lᵀ` via generic
+/// multifrontal Bunch-Kaufman. Works for `T = f64` and `T = Complex<f64>`
+/// (complex symmetric, `A = Aᵀ`).
+///
+/// Returns an [`LdltFactors`] in factorization order; solve with
+/// [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
+pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, FeralError> {
+    a.validate()?;
+    let n = a.n;
+    if n == 0 {
+        return Ok(LdltFactors {
+            n: 0,
+            l: Vec::new(),
+            d_diag: Vec::new(),
+            d_subdiag: Vec::new(),
+            two_by_two: Vec::new(),
+            perm: Vec::new(),
+        });
+    }
+
+    // 1. Symbolic analysis on the structure only. The analysis never reads
+    //    values, so feed it a structurally identical f64 pattern matrix.
+    let pattern = CscMatrix::<f64> {
+        n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: vec![1.0; a.row_idx.len()],
+    };
+    // Disable the LdltCompress preprocessing: it transforms the pattern via a
+    // quotient-graph compression beyond a plain permutation, so `sym.perm`
+    // would no longer be consistent with the `A_perm` we build here. `None`
+    // keeps the fill-reducing ordering a pure symmetric permutation. (Slightly
+    // more fill on some matrices; revisit when wiring compression in.)
+    let snode_params = SupernodeParams {
+        preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
+        ..SupernodeParams::default()
+    };
+    let sym = symbolic_factorize(&pattern, &snode_params)?;
+
+    // 2. Permuted matrix A_perm = Pᵀ A P in permuted (new) numbering, lower
+    //    triangle. `perm_inv` is old→new.
+    let nnz = a.row_idx.len();
+    let mut rows = Vec::with_capacity(nnz);
+    let mut cols = Vec::with_capacity(nnz);
+    let mut vals = Vec::with_capacity(nnz);
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            let gi = sym.perm_inv[i];
+            let gj = sym.perm_inv[j];
+            let (r, c) = if gi >= gj { (gi, gj) } else { (gj, gi) };
+            rows.push(r);
+            cols.push(c);
+            vals.push(a.values[k]);
+        }
+    }
+    let a_perm = CscMatrix::<T>::from_triplets(n, &rows, &cols, &vals)?;
+
+    // 3. Multifrontal numeric factorization. Supernodes are in postorder, so a
+    //    child's index is always less than its parent's: processing in order
+    //    means every child's contribution block is ready before its parent.
+    let nsuper = sym.supernodes.len();
+    let mut nodes: Vec<NodeFactor<T>> = Vec::with_capacity(nsuper);
+    let mut contrib: Vec<Option<Vec<T>>> = (0..nsuper).map(|_| None).collect();
+    let mut gloc = vec![usize::MAX; n]; // permuted-global → front-local scratch
+
+    for (s, snode) in sym.supernodes.iter().enumerate() {
+        let ncol = snode.ncol;
+        let own_last = snode.first_col + ncol;
+        // Build the front's row structure from the permuted pattern and the
+        // children's contribution rows (mirrors the f64 driver's
+        // `build_row_indices`). The stored `snode.row_indices` is a
+        // symbolic-phase artifact in a different numbering and is intentionally
+        // not used; `first_col`/`ncol` index the permuted pattern (and `A_perm`)
+        // directly.
+        let mut trailing: Vec<usize> = Vec::new();
+        for j in snode.first_col..own_last {
+            for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
+                let r = sym.permuted_pattern.row_idx[k];
+                if r >= own_last {
+                    trailing.push(r);
+                }
+            }
+        }
+        for &ch in &snode.children {
+            let child = &nodes[ch];
+            for &r in &child.row_indices[child.front.nelim..] {
+                if r >= own_last {
+                    trailing.push(r);
+                }
+            }
+        }
+        trailing.sort_unstable();
+        trailing.dedup();
+        let mut ri = Vec::with_capacity(ncol + trailing.len());
+        ri.extend(snode.first_col..own_last);
+        ri.extend(trailing);
+        let nrow = ri.len();
+        for (li, &g) in ri.iter().enumerate() {
+            gloc[g] = li;
+        }
+
+        let mut f = vec![T::zero(); nrow * nrow];
+
+        // Scatter the original (permuted) entries of the eliminated columns.
+        // Local column position `p` corresponds to permuted-global column
+        // `first_col + p` (the own columns occupy front positions `0..ncol`).
+        for p in 0..ncol {
+            let c = snode.first_col + p;
+            for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
+                let g = a_perm.row_idx[k];
+                let lr = gloc[g];
+                debug_assert!(lr != usize::MAX, "original entry outside front");
+                let (hi, lo) = if lr >= p { (lr, p) } else { (p, lr) };
+                f[lo * nrow + hi] = f[lo * nrow + hi] + a_perm.values[k];
+            }
+        }
+
+        // Extend-add each child's contribution block.
+        for &ch in &snode.children {
+            let child = &nodes[ch];
+            let cn = child.front.nrow - child.front.nelim;
+            let crows = &child.row_indices[child.front.nelim..];
+            let cb = match contrib[ch].take() {
+                Some(cb) => cb,
+                // Unreachable: children are processed before parents, so each
+                // child's block is present exactly once. Treated as an internal
+                // invariant violation rather than panicking.
+                None => {
+                    return Err(FeralError::InvalidInput(
+                        "internal: missing child contribution block".to_string(),
+                    ))
+                }
+            };
+            for j in 0..cn {
+                let lj = gloc[crows[j]];
+                for i in j..cn {
+                    let li = gloc[crows[i]];
+                    let (hi, lo) = if li >= lj { (li, lj) } else { (lj, li) };
+                    f[lo * nrow + hi] = f[lo * nrow + hi] + cb[j * cn + i];
+                }
+            }
+        }
+
+        for &g in ri.iter() {
+            gloc[g] = usize::MAX;
+        }
+
+        let (front, cb) = factor_front(&mut f, nrow, ncol)?;
+        contrib[s] = Some(cb);
+        nodes.push(NodeFactor {
+            front,
+            row_indices: ri,
+        });
+    }
+
+    // 4a. Assign factorization order e and gather D in e-order.
+    let mut e_of_g = vec![usize::MAX; n];
+    let mut perm = vec![0usize; n];
+    let mut d_diag = vec![T::zero(); n];
+    let mut d_subdiag = vec![T::zero(); n];
+    let mut two_by_two = vec![false; n];
+    let mut e = 0usize;
+    for node in &nodes {
+        let ff = &node.front;
+        for j in 0..ff.nelim {
+            let g = node.row_indices[ff.perm[j]];
+            e_of_g[g] = e;
+            perm[e] = sym.perm[g];
+            d_diag[e] = ff.d_diag[j];
+            d_subdiag[e] = ff.d_subdiag[j];
+            two_by_two[e] = ff.two_by_two[j];
+            e += 1;
+        }
+    }
+    debug_assert_eq!(e, n, "every index eliminated exactly once");
+
+    // 4b. Scatter each front's L into the global (e-order) dense L.
+    let mut l = vec![T::zero(); n * n];
+    let one = T::one();
+    for node in &nodes {
+        let ff = &node.front;
+        let nrow = ff.nrow;
+        for j in 0..ff.nelim {
+            let diag_e = e_of_g[node.row_indices[ff.perm[j]]];
+            l[diag_e * n + diag_e] = one;
+            for i in (j + 1)..nrow {
+                let v = ff.l[j * nrow + i];
+                if v != T::zero() {
+                    let row_e = e_of_g[node.row_indices[ff.perm[i]]];
+                    l[diag_e * n + row_e] = v;
+                }
+            }
+        }
+    }
+
+    Ok(LdltFactors {
+        n,
+        l,
+        d_diag,
+        d_subdiag,
+        two_by_two,
+        perm,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dense::ldlt_generic::solve_ldlt;
+    use num_complex::Complex;
+
+    fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
+        let mut ax = vec![T::zero(); a.n];
+        a.symv(x, &mut ax);
+        (0..a.n)
+            .map(|i| (ax[i] - b[i]).magnitude())
+            .fold(0.0, f64::max)
+    }
+
+    /// 1D Laplacian-style SPD tridiagonal of size n (diag 2+something, off −1).
+    fn tridiag_spd_f64(n: usize) -> CscMatrix<f64> {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            vals.push(4.0);
+            if j + 1 < n {
+                rows.push(j + 1);
+                cols.push(j);
+                vals.push(-1.0);
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    #[test]
+    fn f64_sparse_tridiag_residual() {
+        let a = tridiag_spd_f64(20);
+        let b: Vec<f64> = (0..20).map(|i| (i as f64) - 9.5).collect();
+        let f = factor_sparse_ldlt(&a).unwrap();
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(residual_inf(&a, &x, &b) < 1e-10);
+    }
+
+    #[test]
+    fn f64_sparse_2d_grid_residual() {
+        // 2D 5-point Laplacian on a 5×5 grid (n=25), SPD.
+        let m = 5;
+        let n = m * m;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        let idx = |r: usize, c: usize| r * m + c;
+        for r in 0..m {
+            for c in 0..m {
+                let p = idx(r, c);
+                rows.push(p);
+                cols.push(p);
+                vals.push(4.0);
+                // lower-triangle neighbors only
+                if c + 1 < m {
+                    let q = idx(r, c + 1);
+                    let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(-1.0);
+                }
+                if r + 1 < m {
+                    let q = idx(r + 1, c);
+                    let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| ((i % 7) as f64) - 3.0).collect();
+        let f = factor_sparse_ldlt(&a).unwrap();
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(
+            residual_inf(&a, &x, &b) < 1e-9,
+            "residual {}",
+            residual_inf(&a, &x, &b)
+        );
+    }
+
+    #[test]
+    fn complex_sparse_tridiag_residual() {
+        // Complex-symmetric Helmholtz-style tridiagonal: diagonal (4 + 0.5i),
+        // off-diagonal (−1 + 0.1i). Complex symmetric (A = Aᵀ), diagonally
+        // dominant so the fully-summed blocks stay nonsingular.
+        let c = |re, im| Complex::new(re, im);
+        let n = 16;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            vals.push(c(4.0, 0.5));
+            if j + 1 < n {
+                rows.push(j + 1);
+                cols.push(j);
+                vals.push(c(-1.0, 0.1));
+            }
+        }
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 7.5, 1.0 - i as f64)).collect();
+        let f = factor_sparse_ldlt(&a).unwrap();
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(
+            residual_inf(&a, &x, &b) < 1e-10,
+            "residual {}",
+            residual_inf(&a, &x, &b)
+        );
+    }
+
+    #[test]
+    fn complex_sparse_2d_grid_residual() {
+        // 2D complex-symmetric grid: diagonal (4 + i), neighbor (−1 + 0.2i).
+        let c = |re, im| Complex::new(re, im);
+        let m = 5;
+        let n = m * m;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        let idx = |r: usize, cc: usize| r * m + cc;
+        for r in 0..m {
+            for cc in 0..m {
+                let p = idx(r, cc);
+                rows.push(p);
+                cols.push(p);
+                vals.push(c(4.0, 1.0));
+                if cc + 1 < m {
+                    let q = idx(r, cc + 1);
+                    let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(c(-1.0, 0.2));
+                }
+                if r + 1 < m {
+                    let q = idx(r + 1, cc);
+                    let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(c(-1.0, 0.2));
+                }
+            }
+        }
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        let f = factor_sparse_ldlt(&a).unwrap();
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(
+            residual_inf(&a, &x, &b) < 1e-9,
+            "residual {}",
+            residual_inf(&a, &x, &b)
+        );
+    }
+}
