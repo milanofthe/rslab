@@ -1,0 +1,6 @@
+# Build artifacts
+/target
+
+# OS / editor / agent runtime junk
+.DS_Store
+.claude/
