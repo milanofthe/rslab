@@ -49,6 +49,10 @@ name = "feral"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Complex scalar field for the complex-symmetric (PARDISO mtype 6) path.
+# Pure-Rust, already in the dependency tree transitively. Used by the
+# `Scalar` trait in src/scalar.rs and the generic numeric kernels.
+num-complex = "0.4"
 # SIMD backbone for the Schur-update micro-kernel (Phase 2.4.2).
 # Pinned to faer 0.22.x's exact version. Usage is confined to
 # src/dense/schur_kernel.rs; see dev/decisions.md for the

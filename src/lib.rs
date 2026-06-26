@@ -14,6 +14,7 @@ pub mod inertia;
 pub mod io;
 pub mod numeric;
 pub mod ordering;
+pub mod scalar;
 pub mod scaling;
 pub mod sparse;
 pub mod symbolic;
@@ -25,6 +26,7 @@ pub use dense::factor::{
 pub use dense::matrix::SymmetricMatrix;
 pub use dense::solve::{solve, solve_refined};
 pub use error::FeralError;
+pub use scalar::Scalar;
 pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
