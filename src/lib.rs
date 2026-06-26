@@ -27,6 +27,10 @@ pub use dense::matrix::SymmetricMatrix;
 pub use dense::solve::{solve, solve_refined};
 pub use error::FeralError;
 pub use scalar::Scalar;
+// Generic (real + complex-symmetric) sparse direct solver — the RLA entry point.
+pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, LdltFactors};
+pub use numeric::multifrontal_generic::factor_sparse_ldlt;
+pub use numeric::sparse_solver::SparseSymmetricLdlt;
 pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
