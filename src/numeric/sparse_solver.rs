@@ -105,6 +105,51 @@ impl<T: Scalar> SparseSymmetricLdlt<T> {
         }
         Ok(x)
     }
+
+    /// Solve `A · x = rhs` with iterative refinement against the original
+    /// matrix `a` (which must be the matrix this was factored from). Each step
+    /// computes the residual `r = rhs − A x` and applies the correction
+    /// `x ← x + A⁻¹ r`, stopping once `‖r‖∞` stops improving or `max_iter` is
+    /// reached. This recovers accuracy lost to the within-fully-summed-block
+    /// pivoting on harder indefinite systems, at the cost of a few extra solves.
+    pub fn solve_refined(
+        &self,
+        a: &CscMatrix<T>,
+        rhs: &[T],
+        max_iter: usize,
+    ) -> Result<Vec<T>, FeralError> {
+        let n = self.factors.n;
+        if a.n != n {
+            return Err(FeralError::DimensionMismatch {
+                expected: n,
+                got: a.n,
+            });
+        }
+        let mut x = self.solve(rhs)?;
+        let mut ax = vec![T::zero(); n];
+        let mut best_x = x.clone();
+        let mut best_res = f64::INFINITY;
+        // `max_iter` correction steps, plus the initial residual evaluation.
+        for _ in 0..=max_iter {
+            a.symv(&x, &mut ax);
+            let r: Vec<T> = rhs.iter().zip(&ax).map(|(&b, &axi)| b - axi).collect();
+            let res = r.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+            // Track the best iterate — refinement can be non-monotone on very
+            // ill-conditioned systems.
+            if res < best_res {
+                best_res = res;
+                best_x.clone_from(&x);
+            }
+            if res == 0.0 {
+                break;
+            }
+            let dx = self.solve(&r)?;
+            for (xi, &d) in x.iter_mut().zip(&dx) {
+                *xi = *xi + d;
+            }
+        }
+        Ok(best_x)
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +240,37 @@ mod tests {
                 residual_inf(&a, &x, &b)
             );
         }
+    }
+
+    #[test]
+    fn refined_solve_is_no_worse_than_plain() {
+        // Complex-symmetric tridiagonal; refinement must not increase the
+        // residual and should reach near machine precision.
+        let c = |re, im| Complex::new(re, im);
+        let n = 30;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            vals.push(c(3.0, 0.4));
+            if j + 1 < n {
+                rows.push(j + 1);
+                cols.push(j);
+                vals.push(c(-1.0, 0.2));
+            }
+        }
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 15.0, 2.0)).collect();
+        let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+
+        let x_plain = solver.solve(&b).unwrap();
+        let x_ref = solver.solve_refined(&a, &b, 3).unwrap();
+        let r_plain = residual_inf(&a, &x_plain, &b);
+        let r_ref = residual_inf(&a, &x_ref, &b);
+        assert!(r_ref <= r_plain.max(1e-300), "refined {} vs plain {}", r_ref, r_plain);
+        assert!(r_ref < 1e-12, "refined residual {}", r_ref);
     }
 
     #[test]
