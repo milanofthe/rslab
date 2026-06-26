@@ -35,6 +35,14 @@ impl<T: Scalar> SparseSymmetricLdlt<T> {
         self.factors.n
     }
 
+    /// Number of stored nonzeros in the global lower-triangular factor `L`
+    /// (the fill). The primary sparse memory metric: RLA stores only `L` of
+    /// the symmetric factorization, against which a general LU stores both
+    /// `L` and `U` of the full (two-triangle) matrix.
+    pub fn factor_nnz(&self) -> usize {
+        self.factors.l_values.len()
+    }
+
     /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P`.
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, FeralError> {
         a.validate()?;

@@ -77,6 +77,12 @@ feral-kahip = { path = "crates/feral-kahip", version = "0.2" }
 [dev-dependencies]
 approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
+# Reference competitor for the complex-symmetric benchmark. faer's sparse
+# path has no complex-*symmetric* LDLᵀ (its BK/LDLT is Hermitian), so the
+# fair analogue is its sparse LU on the full matrix — exactly the 2×
+# storage/flops we beat by exploiting A = Aᵀ. Dev-only: pulls its own pulp,
+# independent of our pinned 0.22.2. faer's `c64` is `num_complex::Complex<f64>`.
+faer = "0.22"
 # rmumps used only for reference timing comparisons in benchmarks:
 # rmumps = { path = "../ripopt/rmumps" }  # uncomment when needed
 
@@ -94,6 +100,10 @@ harness = false
 
 [[bench]]
 name = "issue52_baseline"
+harness = false
+
+[[bench]]
+name = "vs_faer"
 harness = false
 
 [profile.release]
