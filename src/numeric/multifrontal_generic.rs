@@ -349,7 +349,9 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
     if n == 0 {
         return Ok(LdltFactors {
             n: 0,
-            l: Vec::new(),
+            l_col_ptr: vec![0],
+            l_row_idx: Vec::new(),
+            l_values: Vec::new(),
             d_diag: Vec::new(),
             d_subdiag: Vec::new(),
             two_by_two: Vec::new(),
@@ -463,28 +465,44 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
     }
     debug_assert_eq!(e, n, "every index eliminated exactly once");
 
-    // 4b. Scatter each front's L into the global (e-order) dense L.
-    let mut l = vec![T::zero(); n * n];
+    // 4b. Emit each front's L columns into the global CSC L, in e-order. A
+    //     supernode's eliminated columns form a contiguous increasing e-range,
+    //     so iterating nodes then `j` yields columns in ascending CSC order;
+    //     rows within a column are sorted.
     let one = T::one();
+    let mut l_col_ptr = Vec::with_capacity(n + 1);
+    l_col_ptr.push(0);
+    let mut l_row_idx: Vec<usize> = Vec::new();
+    let mut l_values: Vec<T> = Vec::new();
+    let mut col: Vec<(usize, T)> = Vec::new();
     for node in &nodes {
         let ff = &node.front;
         let nrow = ff.nrow;
         for j in 0..ff.nelim {
+            col.clear();
             let diag_e = e_of_g[node.row_indices[ff.perm[j]]];
-            l[diag_e * n + diag_e] = one;
+            col.push((diag_e, one));
             for i in (j + 1)..nrow {
                 let v = ff.l[j * nrow + i];
                 if v != T::zero() {
                     let row_e = e_of_g[node.row_indices[ff.perm[i]]];
-                    l[diag_e * n + row_e] = v;
+                    col.push((row_e, v));
                 }
             }
+            col.sort_unstable_by_key(|&(r, _)| r);
+            for &(r, v) in &col {
+                l_row_idx.push(r);
+                l_values.push(v);
+            }
+            l_col_ptr.push(l_row_idx.len());
         }
     }
 
     Ok(LdltFactors {
         n,
-        l,
+        l_col_ptr,
+        l_row_idx,
+        l_values,
         d_diag,
         d_subdiag,
         two_by_two,

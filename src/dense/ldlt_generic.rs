@@ -31,11 +31,15 @@ use crate::scalar::Scalar;
 #[derive(Debug, Clone)]
 pub struct LdltFactors<T> {
     pub n: usize,
-    /// Unit lower triangular `L`, full n×n column-major (entry (i,j) at
-    /// `j*n + i`). The diagonal is an explicit `1`; the strict upper triangle
-    /// is zero. For a 2×2 pivot at columns `(k, k+1)` the intra-block entry
-    /// `L[k+1][k]` is `0` (that coupling lives in `D`, not `L`).
-    pub l: Vec<T>,
+    /// Unit lower triangular `L` in CSC (compressed sparse column). Column `j`
+    /// is `l_row_idx[l_col_ptr[j]..l_col_ptr[j+1]]` with matching `l_values`,
+    /// sorted by row, and includes the explicit unit diagonal `(j, 1)`. For a
+    /// 2×2 pivot the intra-block entry `L[k+1][k]` is `0` (that coupling lives
+    /// in `D`, not `L`). Storing `L` sparsely keeps the factor `O(nnz(L))`
+    /// rather than `O(n²)`.
+    pub l_col_ptr: Vec<usize>,
+    pub l_row_idx: Vec<usize>,
+    pub l_values: Vec<T>,
     /// Diagonal of the block-diagonal `D`, length `n`.
     pub d_diag: Vec<T>,
     /// Sub-diagonal of `D`, length `n`. `d_subdiag[k]` is the `(k+1, k)` entry
@@ -225,32 +229,45 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
         }
     }
 
-    // Extract L from the working storage, honoring block structure.
-    let mut l = vec![T::zero(); n * n];
+    // Extract L into CSC, honoring block structure. Columns are emitted in
+    // increasing order; within a column the explicit unit diagonal comes first,
+    // then the strictly-lower multipliers in ascending row order.
     let one = T::one();
+    let mut l_col_ptr = Vec::with_capacity(n + 1);
+    l_col_ptr.push(0);
+    let mut l_row_idx: Vec<usize> = Vec::new();
+    let mut l_values: Vec<T> = Vec::new();
+    let mut push_col = |col: usize, src_off: usize, start_row: usize| {
+        l_row_idx.push(col);
+        l_values.push(one);
+        for i in start_row..n {
+            let v = a[src_off + i];
+            if v != T::zero() {
+                l_row_idx.push(i);
+                l_values.push(v);
+            }
+        }
+        l_col_ptr.push(l_row_idx.len());
+    };
     let mut c = 0;
     while c < n {
         if two_by_two[c] {
-            l[c * n + c] = one;
-            l[(c + 1) * n + (c + 1)] = one;
-            // L[c+1][c] stays 0 (intra-block coupling lives in D).
-            for i in (c + 2)..n {
-                l[c * n + i] = a[c * n + i];
-                l[(c + 1) * n + i] = a[(c + 1) * n + i];
-            }
+            // L[c+1][c] is omitted (intra-block coupling lives in D); both
+            // columns' multipliers start at row c+2.
+            push_col(c, c * n, c + 2);
+            push_col(c + 1, (c + 1) * n, c + 2);
             c += 2;
         } else {
-            l[c * n + c] = one;
-            for i in (c + 1)..n {
-                l[c * n + i] = a[c * n + i];
-            }
+            push_col(c, c * n, c + 1);
             c += 1;
         }
     }
 
     Ok(LdltFactors {
         n,
-        l,
+        l_col_ptr,
+        l_row_idx,
+        l_values,
         d_diag,
         d_subdiag,
         two_by_two,
@@ -269,21 +286,22 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
             got: rhs.len(),
         });
     }
-    let l = &factors.l;
-
     // y = Pᵀ · rhs : y[i] = rhs[perm[i]].
     let mut y = vec![T::zero(); n];
-    for i in 0..n {
-        y[i] = rhs[factors.perm[i]];
+    for (i, yi) in y.iter_mut().enumerate() {
+        *yi = rhs[factors.perm[i]];
     }
 
-    // Forward solve L · z = y (unit lower triangular), in place in y.
-    for i in 0..n {
-        let mut acc = y[i];
-        for j in 0..i {
-            acc = acc - l[j * n + i] * y[j];
+    // Forward solve L · z = y (unit lower, CSC column-oriented): once y[j] is
+    // final, propagate it down its column.
+    for j in 0..n {
+        let zj = y[j];
+        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
+            let i = factors.l_row_idx[k];
+            if i != j {
+                y[i] = y[i] - factors.l_values[k] * zj;
+            }
         }
-        y[i] = acc;
     }
 
     // D-block solve: w = D⁻¹ · z, in place in y.
@@ -313,19 +331,23 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
         }
     }
 
-    // Backward solve Lᵀ · v = w (unit upper triangular), in place in y.
-    for i in (0..n).rev() {
-        let mut acc = y[i];
-        for j in (i + 1)..n {
-            acc = acc - l[i * n + j] * y[j];
+    // Backward solve Lᵀ · v = w (CSC column j = row j of Lᵀ): dot column j's
+    // multipliers against the already-solved tail.
+    for j in (0..n).rev() {
+        let mut acc = y[j];
+        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
+            let i = factors.l_row_idx[k];
+            if i != j {
+                acc = acc - factors.l_values[k] * y[i];
+            }
         }
-        y[i] = acc;
+        y[j] = acc;
     }
 
     // x = P · v : x[perm[i]] = v[i].
     let mut x = vec![T::zero(); n];
-    for i in 0..n {
-        x[factors.perm[i]] = y[i];
+    for (i, &vi) in y.iter().enumerate() {
+        x[factors.perm[i]] = vi;
     }
     Ok(x)
 }
