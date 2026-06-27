@@ -91,7 +91,8 @@ pub use numeric::multifrontal_generic::{analyze, factor_numeric, GenericSymbolic
 pub use numeric::multifrontal_lu::{factor_general_lu, solve_lu, solve_lu_refined, LuFactors};
 pub use numeric::sparse_solver::{SparseSymmetricLdlt, SymbolicAnalysis};
 pub use numeric::iterative::{
-    cocg, cocr, KrylovResult, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+    cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionPreconditioner,
+    NoPreconditioner, Preconditioner,
 };
 pub use inertia::Inertia;
 pub use io::mtx::{
@@ -116,9 +117,11 @@ pub use symbolic::SymbolicProfileReport;
 /// options enums, and the Matrix Market loaders.
 pub mod prelude {
     pub use crate::{
-        analyze, cocg, cocr, factor_numeric, parse_mtx, parse_mtx_complex, read_mtx,
-        read_mtx_complex, CscMatrix, FeralError, GenericFactorOptions, GenericSymbolic,
-        KrylovResult, LowPrecisionPreconditioner, MtxMatrix, NoPreconditioner, Preconditioner,
-        Scalar, SparseSymmetricLdlt, SymbolicAnalysis, ZeroPivotAction,
+        analyze, cocg, cocr, factor_general_lu, factor_numeric, gmres, parse_mtx,
+        parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, solve_lu,
+        solve_lu_refined, CscMatrix, Factorization, FeralError, GeneralCsc, GenericFactorOptions,
+        GenericSymbolic, KrylovResult, LinearOperator, LowPrecisionPreconditioner, LuFactors,
+        MtxMatrix, NoPreconditioner, Preconditioner, Scalar, SparseSymmetricLdlt, SymbolicAnalysis,
+        ZeroPivotAction,
     };
 }

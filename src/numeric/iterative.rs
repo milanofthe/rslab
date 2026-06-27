@@ -20,7 +20,38 @@ use crate::numeric::multifrontal_generic::GenericFactorOptions;
 use crate::numeric::sparse_solver::SparseSymmetricLdlt;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
+use crate::sparse::general::GeneralCsc;
 use num_complex::Complex;
+
+/// A linear operator `A`: applies `y = A x`. The Krylov solvers depend only on
+/// this trait, so the operator may be an explicit sparse matrix
+/// ([`CscMatrix`] symmetric / [`GeneralCsc`] general) **or matrix-free** — e.g.
+/// a fast multipole (FMM/MLFMA) MoM operator the caller implements. RLA then
+/// only factors the sparse near-field as the [`Preconditioner`].
+pub trait LinearOperator<T: Scalar> {
+    /// The system dimension.
+    fn n(&self) -> usize;
+    /// Write `y ← A x`. `x` and `y` have length `n`.
+    fn apply(&self, x: &[T], y: &mut [T]);
+}
+
+impl<T: Scalar> LinearOperator<T> for CscMatrix<T> {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn apply(&self, x: &[T], y: &mut [T]) {
+        self.symv(x, y);
+    }
+}
+
+impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn apply(&self, x: &[T], y: &mut [T]) {
+        self.matvec(x, y);
+    }
+}
 
 /// A preconditioner `M ≈ A`: applies `z = M⁻¹ r`. Implemented by a factored
 /// [`SparseSymmetricLdlt`](crate::numeric::sparse_solver::SparseSymmetricLdlt)
@@ -151,8 +182,8 @@ pub struct KrylovResult<T> {
 /// Breakdown (a zero bilinear denominator `pᵀAp` or `rᵀz`, possible for an
 /// indefinite complex-symmetric operator) stops the iteration and returns the
 /// best iterate with `converged = false`.
-pub fn cocg<T, M>(
-    a: &CscMatrix<T>,
+pub fn cocg<T, A, M>(
+    op: &A,
     b: &[T],
     precond: &M,
     tol: f64,
@@ -160,9 +191,10 @@ pub fn cocg<T, M>(
 ) -> Result<KrylovResult<T>, FeralError>
 where
     T: Scalar,
+    A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
-    let n = a.n;
+    let n = op.n();
     if b.len() != n {
         return Err(FeralError::DimensionMismatch {
             expected: n,
@@ -193,7 +225,7 @@ where
     let mut converged = false;
     let mut iters = 0;
     while iters < max_iter {
-        a.symv(&p, &mut q); // q = A p
+        op.apply(&p, &mut q); // q = A p
         let pq = dotu(&p, &q);
         if pq == T::zero() {
             break; // breakdown
@@ -238,8 +270,8 @@ where
 /// Same interface and conventions as [`cocg`]. Costs one matrix–vector product
 /// and one preconditioner apply per iteration. Reduces to preconditioned CR
 /// for `T = f64`.
-pub fn cocr<T, M>(
-    a: &CscMatrix<T>,
+pub fn cocr<T, A, M>(
+    op: &A,
     b: &[T],
     precond: &M,
     tol: f64,
@@ -247,9 +279,10 @@ pub fn cocr<T, M>(
 ) -> Result<KrylovResult<T>, FeralError>
 where
     T: Scalar,
+    A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
-    let n = a.n;
+    let n = op.n();
     if b.len() != n {
         return Err(FeralError::DimensionMismatch {
             expected: n,
@@ -273,7 +306,7 @@ where
     precond.apply(&r, &mut z)?;
     let mut p = z.clone();
     let mut ap = vec![T::zero(); n];
-    a.symv(&p, &mut ap); // A p
+    op.apply(&p, &mut ap); // A p
     let mut az = ap.clone(); // A z (= A p at init since p = z)
     let mut gamma = dotu(&z, &az); // zᵀ A z
     let mut w = vec![T::zero(); n]; // M⁻¹ A p
@@ -284,7 +317,7 @@ where
     let mut iters = 0;
     while iters < max_iter {
         precond.apply(&ap, &mut w)?; // w = M⁻¹ A p
-        a.symv(&w, &mut aw); // A w
+        op.apply(&w, &mut aw); // A w
         let denom = dotu(&ap, &w); // (A p)ᵀ M⁻¹ (A p)
         if denom == T::zero() {
             break;
@@ -320,6 +353,220 @@ where
         converged,
         final_res,
     })
+}
+
+/// Conjugated (Hermitian) inner product `⟨x, y⟩ = Σ conj(xᵢ)·yᵢ` — the geometry
+/// GMRES orthogonalises in (distinct from COCG's unconjugated form).
+#[inline]
+fn dotc<T: Scalar>(x: &[T], y: &[T]) -> T {
+    let mut s = T::zero();
+    for (&xi, &yi) in x.iter().zip(y) {
+        s = s + xi.conj() * yi;
+    }
+    s
+}
+
+/// Complex Givens rotation `(c, s)` that zeroes `g` against `f`: with the
+/// rotation `[[conj(c), conj(s)], [-s, c]]`, `conj(c)·f + conj(s)·g = r` (real)
+/// and `-s·f + c·g = 0`, `|c|²+|s|² = 1`.
+#[inline]
+fn givens<T: Scalar>(f: T, g: T) -> (T, T) {
+    if g == T::zero() {
+        return (T::one(), T::zero());
+    }
+    if f == T::zero() {
+        return (T::zero(), T::one());
+    }
+    let r = (f.magnitude_sq() + g.magnitude_sq()).sqrt();
+    let inv = T::from_real(1.0 / r);
+    (f * inv, g * inv)
+}
+
+/// Right-preconditioned restarted **GMRES(`restart`)** for a general
+/// (unsymmetric) operator — the natural Krylov method for unsymmetric MoM/FEM
+/// systems where COCG/COCR do not apply. `op` may be matrix-free; `precond`
+/// supplies `M⁻¹` (e.g. an RLA [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors)
+/// near-field factor). Solves `A x = b` from `x₀ = 0`.
+pub fn gmres<T, A, M>(
+    op: &A,
+    b: &[T],
+    precond: &M,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+) -> Result<KrylovResult<T>, FeralError>
+where
+    T: Scalar,
+    A: LinearOperator<T> + ?Sized,
+    M: Preconditioner<T> + ?Sized,
+{
+    let n = op.n();
+    if b.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: b.len(),
+        });
+    }
+    let m = restart.max(1);
+    let bnorm = norm2(b);
+    let mut x = vec![T::zero(); n];
+    if bnorm == 0.0 {
+        return Ok(KrylovResult {
+            x,
+            iters: 0,
+            converged: true,
+            final_res: 0.0,
+        });
+    }
+
+    let mut total = 0usize;
+    let mut z = vec![T::zero(); n];
+    let mut w = vec![T::zero(); n];
+    let mut ax = vec![T::zero(); n];
+
+    while total < max_iter {
+        op.apply(&x, &mut ax);
+        let r: Vec<T> = (0..n).map(|i| b[i] - ax[i]).collect();
+        let beta = norm2(&r);
+        if beta / bnorm <= tol {
+            break;
+        }
+        // Arnoldi basis V (m+1 vectors), Hessenberg H, Givens, and LS RHS g.
+        let mut v: Vec<Vec<T>> = Vec::with_capacity(m + 1);
+        let inv_beta = T::from_real(1.0 / beta);
+        v.push(r.iter().map(|&ri| ri * inv_beta).collect());
+        let mut h = vec![vec![T::zero(); m]; m + 1];
+        let mut cs = vec![T::zero(); m];
+        let mut sn = vec![T::zero(); m];
+        let mut g = vec![T::zero(); m + 1];
+        g[0] = T::from_real(beta);
+        let mut jdim = 0usize;
+        let mut converged_inner = false;
+        for j in 0..m {
+            if total >= max_iter {
+                break;
+            }
+            // Right preconditioning: w = A · M⁻¹ · v[j].
+            precond.apply(&v[j], &mut z)?;
+            op.apply(&z, &mut w);
+            // Modified Gram–Schmidt against the existing basis.
+            for i in 0..=j {
+                let hij = dotc(&v[i], &w);
+                h[i][j] = hij;
+                for k in 0..n {
+                    w[k] = w[k] - hij * v[i][k];
+                }
+            }
+            let hn = norm2(&w);
+            h[j + 1][j] = T::from_real(hn);
+            if hn > 0.0 {
+                let inv = T::from_real(1.0 / hn);
+                v.push(w.iter().map(|&wk| wk * inv).collect());
+            } else {
+                v.push(vec![T::zero(); n]);
+            }
+            // Apply previous rotations to the new Hessenberg column.
+            for i in 0..j {
+                let temp = cs[i].conj() * h[i][j] + sn[i].conj() * h[i + 1][j];
+                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j];
+                h[i][j] = temp;
+            }
+            // New rotation zeroing h[j+1][j]; apply to H and the LS RHS g.
+            let (c, s) = givens(h[j][j], h[j + 1][j]);
+            cs[j] = c;
+            sn[j] = s;
+            h[j][j] = c.conj() * h[j][j] + s.conj() * h[j + 1][j];
+            h[j + 1][j] = T::zero();
+            let g_next = -s * g[j];
+            g[j] = c.conj() * g[j];
+            g[j + 1] = g_next;
+            total += 1;
+            jdim = j + 1;
+            if g[j + 1].magnitude() / bnorm <= tol {
+                converged_inner = true;
+                break;
+            }
+        }
+        // Back-substitute the upper-triangular H for y, then x += M⁻¹·(V·y).
+        let mut y = vec![T::zero(); jdim];
+        for i in (0..jdim).rev() {
+            let mut s = g[i];
+            for k in (i + 1)..jdim {
+                s = s - h[i][k] * y[k];
+            }
+            y[i] = s * h[i][i].recip();
+        }
+        let mut vy = vec![T::zero(); n];
+        for i in 0..jdim {
+            let yi = y[i];
+            for k in 0..n {
+                vy[k] = vy[k] + v[i][k] * yi;
+            }
+        }
+        precond.apply(&vy, &mut z)?;
+        for k in 0..n {
+            x[k] = x[k] + z[k];
+        }
+        if converged_inner {
+            break;
+        }
+    }
+
+    op.apply(&x, &mut ax);
+    let r: Vec<T> = (0..n).map(|i| b[i] - ax[i]).collect();
+    let final_res = norm2(&r) / bnorm;
+    Ok(KrylovResult {
+        x,
+        iters: total,
+        converged: final_res <= tol,
+        final_res,
+    })
+}
+
+/// A factorization usable as both a **direct solver** and a [`Preconditioner`].
+/// Implemented by the symmetric [`SparseSymmetricLdlt`] and the general
+/// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors), so a caller's
+/// solver loop can hold `&dyn Factorization` and swap symmetric/general,
+/// exact/incomplete, or `f64`/`f32` factors freely.
+pub trait Factorization<T: Scalar>: Preconditioner<T> {
+    /// Solve `A x = b` directly from the stored factor.
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError>;
+    /// Stored fill (factor nonzeros) — the memory metric.
+    fn factor_nnz(&self) -> usize;
+    /// Number of statically perturbed pivots (0 for an exact factor).
+    fn n_perturbed(&self) -> usize;
+}
+
+impl<T: Scalar> Factorization<T> for SparseSymmetricLdlt<T> {
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+        SparseSymmetricLdlt::solve(self, b)
+    }
+    fn factor_nnz(&self) -> usize {
+        SparseSymmetricLdlt::factor_nnz(self)
+    }
+    fn n_perturbed(&self) -> usize {
+        SparseSymmetricLdlt::n_perturbed(self)
+    }
+}
+
+impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors<T> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+        let x = crate::numeric::multifrontal_lu::solve_lu(self, r)?;
+        z.copy_from_slice(&x);
+        Ok(())
+    }
+}
+
+impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<T> {
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+        crate::numeric::multifrontal_lu::solve_lu(self, b)
+    }
+    fn factor_nnz(&self) -> usize {
+        crate::numeric::multifrontal_lu::LuFactors::factor_nnz(self)
+    }
+    fn n_perturbed(&self) -> usize {
+        self.n_perturbed
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +640,61 @@ mod tests {
         let m = SparseSymmetricLdlt::factor(&a).unwrap();
         let pre = cocr(&a, &b, &m, 1e-10, 3000).unwrap();
         assert!(pre.converged && pre.iters <= 3, "iters {}", pre.iters);
+    }
+
+    #[test]
+    fn gmres_solves_unsymmetric_with_lu_preconditioner() {
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::sparse::general::GeneralCsc;
+        // Genuinely unsymmetric complex 2D grid (right ≠ left couplings).
+        let c = |re, im| Complex::new(re, im);
+        let m = 8;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(8.0, 1.0));
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.0, 0.2));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-2.0, 0.1));
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.5, 0.3));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-0.5, 0.4));
+                }
+            }
+        }
+        let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+
+        // Unpreconditioned GMRES converges (well-conditioned).
+        let un = gmres(&a, &b, &NoPreconditioner, 1e-10, 2000, 40).unwrap();
+        assert!(un.converged, "GMRES res={}", un.final_res);
+
+        // LU factor as preconditioner → 1–2 iterations.
+        let lu = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let pre = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
+        assert!(pre.converged, "preconditioned GMRES res={}", pre.final_res);
+        assert!(pre.iters <= 3, "LU-preconditioned GMRES iters {}", pre.iters);
+        // Verify the true residual.
+        let mut y = vec![C::default(); n];
+        a.matvec(&pre.x, &mut y);
+        let res = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(res < 1e-8, "residual {}", res);
     }
 
     #[test]
