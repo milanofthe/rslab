@@ -213,6 +213,12 @@ fn lu_front<T: Scalar>(
     profile: bool,
 ) -> Result<(FrontLu<T>, Vec<T>), FeralError> {
     let n = nrow;
+    // BLR compressibility probe (opt-in `RLA_BLR_PROBE`): on large fronts, report
+    // how low-rank the assembled off-diagonal blocks are — the empirical go/no-go
+    // and rank distribution for the BLR front factorization.
+    if nrow >= 512 && std::env::var("RLA_BLR_PROBE").is_ok() {
+        crate::numeric::blr::probe_front(f, nrow, ncol, 256);
+    }
     let t_panel = profile.then(std::time::Instant::now);
     let mut pivots = vec![T::zero(); ncol];
     let mut n_perturbed = 0usize;
