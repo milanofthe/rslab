@@ -61,7 +61,35 @@ pub struct SupernodeParams {
     /// — zero overhead. See
     /// `dev/research/phase-2.13b-symbolic-profiler.md`.
     pub symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
+
+    /// Relaxed/fill-tolerant amalgamation — the multifrontal-throughput lever.
+    /// When `Some`, an adjacent child is merged into its parent even when it is
+    /// neither a trivial chain nor size-based, as long as the merged supernode
+    /// stays within `max_width` columns and the merge introduces at most
+    /// `max_extra_rows` explicit-zero rows. This trades a little fill for much
+    /// wider dense fronts (higher-rank Schur GEMMs), the lever that closes most
+    /// of the per-front-overhead gap on MoM/FEM matrices whose fundamental
+    /// supernodes are very narrow (mean ~2 columns). Implies the `Renumber`
+    /// merge order so bushy multi-child trees can actually merge. Applied only
+    /// above [`RELAX_MIN_N`] unknowns so small problems are unaffected. `None`
+    /// (default) = structural / size-based merges only.
+    pub relax: Option<RelaxAmalgamation>,
 }
+
+/// Relaxed (fill-tolerant) amalgamation thresholds. See
+/// [`SupernodeParams::relax`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelaxAmalgamation {
+    /// Cap on the merged supernode width (eliminated columns).
+    pub max_width: usize,
+    /// Maximum explicit-zero rows a single relaxed merge may introduce.
+    pub max_extra_rows: usize,
+}
+
+/// Relaxed amalgamation is applied only to problems with at least this many
+/// unknowns; below it the structural/size-based merges already suffice and the
+/// extra fill is not worth it (and keeps small-matrix supernode tests stable).
+pub const RELAX_MIN_N: usize = 1024;
 
 /// Phase 2.12 amalgamation strategy selector. See
 /// [`SupernodeParams::amalgamation_strategy`].
@@ -117,6 +145,7 @@ impl Default for SupernodeParams {
             small_leaf: SmallLeafParams::default(),
             amalgamation_strategy: AmalgamationStrategy::default(),
             symbolic_profiler: None,
+            relax: None,
         }
     }
 }
@@ -248,25 +277,15 @@ pub fn find_supernodes(
         return Vec::new();
     }
 
-    // EXPERIMENTAL (relaxed-amalgamation study): env-gated overrides to widen
-    // supernodes for the MoM throughput investigation. All default to the
-    // current behavior, so unset env = unchanged (every test stays green).
-    //   RLA_NEMIN        — override the size-based merge threshold `nemin`.
-    //   RLA_RELAX_WIDTH  — enable fill-tolerant merging up to this merged width.
-    //   RLA_RELAX_ROWS   — extra explicit-zero rows tolerated per relaxed merge.
-    //   RLA_RENUMBER     — force the Renumber (reverse) merge order.
-    let nemin_eff = std::env::var("RLA_NEMIN")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(params.nemin);
-    let relax_width = std::env::var("RLA_RELAX_WIDTH")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-    let relax_rows = std::env::var("RLA_RELAX_ROWS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
-    let force_renumber = std::env::var("RLA_RENUMBER").map(|v| v == "1").unwrap_or(false);
+    // Relaxed/fill-tolerant amalgamation (the MoM/FEM throughput lever), applied
+    // only at scale (`n >= RELAX_MIN_N`) so small problems — and their supernode
+    // structure tests — are unaffected. When active it widens supernodes and
+    // implies the Renumber merge order (bushy multi-child trees only merge with
+    // the renumbered postorder).
+    let relax = if n >= RELAX_MIN_N { params.relax } else { None };
+    let relax_width = relax.map(|r| r.max_width);
+    let relax_rows = relax.map_or(0, |r| r.max_extra_rows);
+    let force_renumber = relax.is_some();
 
     // Step 1: Find fundamental supernodes (shared with predict_merges)
     let fund = find_fundamental_supernodes(etree, col_counts);
@@ -364,7 +383,7 @@ pub fn find_supernodes(
             };
 
             // 2. Size-based: both have < nemin columns
-            let size_based = child_ncol < nemin_eff && parent_ncol < nemin_eff;
+            let size_based = child_ncol < params.nemin && parent_ncol < params.nemin;
 
             // Phase B4 (issue #55): defensive root-supernode width cap.
             // On IPM-KKT matrices with a wide top-level Schur complement

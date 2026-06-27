@@ -679,8 +679,18 @@ pub fn analyze(
     // Disable LdltCompress: it transforms the pattern via a quotient-graph
     // compression beyond a plain permutation, so `sym.perm` would no longer be
     // consistent with the `A_perm` built in `factor_numeric`.
+    // Relaxed/fill-tolerant amalgamation: the generic path serves the complex
+    // MoM/FEM and unsymmetric LU workloads, whose fundamental supernodes are
+    // very narrow (mean ~2 columns) — leaving the Schur GEMMs low-rank and
+    // memory-bound. Widening fronts to ~512 columns (tolerating ≤128
+    // explicit-zero rows per merge) roughly doubles factor throughput on the
+    // real MoM matrices. Gated to `n >= RELAX_MIN_N` inside `find_supernodes`.
     let snode_params = SupernodeParams {
         preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
+        relax: Some(crate::symbolic::supernode::RelaxAmalgamation {
+            max_width: 512,
+            max_extra_rows: 128,
+        }),
         ..SupernodeParams::default()
     };
     let sym = symbolic_factorize(&pattern, &snode_params)?;
