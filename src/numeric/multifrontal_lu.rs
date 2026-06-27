@@ -135,9 +135,11 @@ fn lu_front<T: Scalar>(
         // |entry| in column k among rows [k, ncol) and swap the full rows
         // (carrying the already-computed L multipliers along).
         let mut p = k;
-        let mut best = f[k * n + k].magnitude();
+        // Compare squared magnitudes — same argmax, one fewer `sqrt`/`hypot`
+        // per candidate than `magnitude()`.
+        let mut best = f[k * n + k].magnitude_sq();
         for i in (k + 1)..ncol {
-            let m = f[k * n + i].magnitude();
+            let m = f[k * n + i].magnitude_sq();
             if m > best {
                 best = m;
                 p = i;
@@ -208,57 +210,39 @@ fn lu_front<T: Scalar>(
     // untouched trailing block; L21 the below-block multipliers; U12 the
     // eliminated rows in the trailing columns.
     let cnrow = nrow - ncol;
-    let mut cb = vec![T::zero(); cnrow * cnrow];
-    for c in 0..cnrow {
-        for r in 0..cnrow {
-            cb[c * cnrow + r] = f[(ncol + c) * n + (ncol + r)];
-        }
-    }
     if cnrow > 0 && ncol > 0 {
-        // L21 (cnrow × ncol col-major): l21[c*cnrow + r] = f[c*n + ncol+r].
-        let mut l21 = vec![T::zero(); cnrow * ncol];
-        // U12 (ncol × cnrow col-major): u12[c*ncol + k] = f[(ncol+c)*n + k].
-        let mut u12 = vec![T::zero(); ncol * cnrow];
-        for c in 0..ncol {
-            for r in 0..cnrow {
-                l21[c * cnrow + r] = f[c * n + (ncol + r)];
-            }
-        }
-        for c in 0..cnrow {
-            for k in 0..ncol {
-                u12[c * ncol + k] = f[(ncol + c) * n + k];
-            }
-        }
-        // Intra-front parallelism for the dominant Schur GEMM: large fronts
-        // (near the root, where assembly-tree parallelism is exhausted) use all
-        // rayon threads; small fronts stay sequential to avoid oversubscribing
-        // the tree-level parallel driver.
+        // Schur the A22 block in place: `f_A22 ← f_A22 − L21·U12`, where all
+        // three operands are *disjoint sub-blocks of `f` itself* (no repacking
+        // into temporaries). In column-major `f` (col-stride `n`):
+        //   A22 (dst): base `ncol*n + ncol`, cs=n, rs=1   (cnrow × cnrow)
+        //   L21 (lhs): base `ncol`,          cs=n, rs=1   (cnrow × ncol)
+        //   U12 (rhs): base `ncol*n`,        cs=n, rs=1   (ncol × cnrow)
         let flops = (cnrow as u128) * (cnrow as u128) * (ncol as u128);
         let par = if flops >= 8_000_000 {
             gemm::Parallelism::Rayon(0)
         } else {
             gemm::Parallelism::None
         };
-        // cb ← cb − L21·U12. Column-major: cb cs=cnrow rs=1; L21 cs=cnrow rs=1;
-        // U12 cs=ncol rs=1. m=cnrow, n=cnrow, k=ncol.
-        // SAFETY: `cb`, `l21`, `u12` are distinct, non-overlapping allocations
-        // sized for the (cnrow, cnrow, ncol) access pattern under these strides.
-        // `T` is `f64`/`Complex<f64>`/`f32`/`Complex<f32>` — all gemm element
-        // types — so the runtime dispatch cannot hit the unsupported-type panic.
+        // SAFETY: the three sub-blocks are pairwise disjoint regions of `f`
+        // (A22 = rows≥ncol×cols≥ncol, L21 = rows≥ncol×cols<ncol, U12 =
+        // rows<ncol×cols≥ncol), each in bounds of the `nrow*nrow` buffer under
+        // the strides given, so gemm may read L21/U12 while writing A22. `T` is
+        // f64/Complex<f64>/f32/Complex<f32> — all gemm element types.
+        let base = f.as_mut_ptr();
         unsafe {
             gemm::gemm(
                 cnrow,
                 cnrow,
                 ncol,
-                cb.as_mut_ptr(),
-                cnrow as isize,
+                base.add(ncol * n + ncol),
+                n as isize,
                 1,
                 true,
-                l21.as_ptr(),
-                cnrow as isize,
+                base.add(ncol) as *const T,
+                n as isize,
                 1,
-                u12.as_ptr(),
-                ncol as isize,
+                base.add(ncol * n) as *const T,
+                n as isize,
                 1,
                 T::one(),
                 -T::one(),
@@ -267,6 +251,14 @@ fn lu_front<T: Scalar>(
                 false,
                 par,
             );
+        }
+    }
+    // Extract the (now Schur-updated) contribution block from `f`'s trailing
+    // block into its own column-major buffer for the parent's extend-add.
+    let mut cb = vec![T::zero(); cnrow * cnrow];
+    for c in 0..cnrow {
+        for r in 0..cnrow {
+            cb[c * cnrow + r] = f[(ncol + c) * n + (ncol + r)];
         }
     }
 

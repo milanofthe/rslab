@@ -158,10 +158,11 @@ impl Scalar for Complex<f64> {
 
     #[inline]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        // num-complex has no fused complex FMA; the four real products are
-        // evaluated and summed. Kept behind the trait so an optimized complex
-        // kernel can override the lowering later.
-        self * a + b
+        // (self·a + b) lowered to four real FMAs — uses the hardware FMA pipes
+        // and halves the rounding versus `self * a + b` on `num_complex`.
+        let re = f64::mul_add(self.re, a.re, f64::mul_add(-self.im, a.im, b.re));
+        let im = f64::mul_add(self.re, a.im, f64::mul_add(self.im, a.re, b.im));
+        Complex::new(re, im)
     }
 
     #[inline]
@@ -260,7 +261,9 @@ impl Scalar for Complex<f32> {
 
     #[inline]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        self * a + b
+        let re = f32::mul_add(self.re, a.re, f32::mul_add(-self.im, a.im, b.re));
+        let im = f32::mul_add(self.re, a.im, f32::mul_add(self.im, a.re, b.im));
+        Complex::new(re, im)
     }
 
     #[inline]

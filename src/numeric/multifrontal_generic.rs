@@ -135,21 +135,30 @@ fn factor_front<T: Scalar>(
     let mut d_subdiag = vec![T::zero(); ncol];
     let mut two_by_two = vec![false; ncol];
     let mut n_perturbed = 0usize;
+    // Reusable 2×2-pivot multiplier scratch, hoisted out of the pivot loop so an
+    // indefinite front with many 2×2 blocks does not allocate per pivot. Only
+    // entries `[k+2, n)` are ever written/read each step, so stale values left
+    // below are never observed.
+    let mut l1 = vec![T::zero(); nrow];
+    let mut l2 = vec![T::zero(); nrow];
 
     let mut k = 0;
     while k < ncol {
         let absakk = f[k * n + k].magnitude();
 
-        // colmax restricted to the fully-summed block rows (k+1)..ncol.
-        let mut colmax = 0.0;
+        // colmax restricted to the fully-summed block rows (k+1)..ncol. Scan in
+        // the squared-magnitude domain (same argmax, no per-entry `hypot`); take
+        // a single `sqrt` on the winner.
+        let mut colmax_sq = 0.0;
         let mut imax = k;
         for i in (k + 1)..ncol {
-            let m = f[k * n + i].magnitude();
-            if m > colmax {
-                colmax = m;
+            let m = f[k * n + i].magnitude_sq();
+            if m > colmax_sq {
+                colmax_sq = m;
                 imax = i;
             }
         }
+        let colmax = colmax_sq.sqrt();
 
         let kstep;
         let kp;
@@ -166,20 +175,22 @@ fn factor_front<T: Scalar>(
             kstep = 1;
             kp = k;
         } else {
-            // rowmax in row imax, restricted to the fully-summed block.
-            let mut rowmax = 0.0;
+            // rowmax in row imax, restricted to the fully-summed block (squared
+            // domain, single final sqrt).
+            let mut rowmax_sq = 0.0;
             for j in k..imax {
-                let m = f[j * n + imax].magnitude();
-                if m > rowmax {
-                    rowmax = m;
+                let m = f[j * n + imax].magnitude_sq();
+                if m > rowmax_sq {
+                    rowmax_sq = m;
                 }
             }
             for i in (imax + 1)..ncol {
-                let m = f[imax * n + i].magnitude();
-                if m > rowmax {
-                    rowmax = m;
+                let m = f[imax * n + i].magnitude_sq();
+                if m > rowmax_sq {
+                    rowmax_sq = m;
                 }
             }
+            let rowmax = rowmax_sq.sqrt();
             if absakk >= alpha * colmax * (colmax / rowmax) {
                 kstep = 1;
                 kp = k;
@@ -259,8 +270,6 @@ fn factor_front<T: Scalar>(
             d_diag[k + 1] = d22;
             two_by_two[k] = true;
 
-            let mut l1 = vec![T::zero(); nrow];
-            let mut l2 = vec![T::zero(); nrow];
             for i in (k + 2)..n {
                 let wik = f[k * n + i];
                 let wik1 = f[(k + 1) * n + i];
@@ -347,6 +356,15 @@ fn factor_front<T: Scalar>(
                 c += 1;
             }
         }
+        // Intra-front parallelism for the dominant Schur GEMM: large fronts
+        // (near the root, where assembly-tree parallelism is exhausted) use all
+        // rayon threads; small fronts stay sequential to avoid oversubscribing
+        // the level-parallel driver.
+        let par = if (cnrow as u128) * (cnrow as u128) * (ncol as u128) >= 8_000_000 {
+            gemm::Parallelism::Rayon(0)
+        } else {
+            gemm::Parallelism::None
+        };
         // cb ← cb − G·L21ᵀ. Column-major: cb and G have col-stride `cnrow`,
         // row-stride 1; L21ᵀ (ncol × cnrow) reads L21 with strides swapped.
         if USE_GEMM_SCHUR.load(Ordering::Relaxed) {
@@ -376,7 +394,7 @@ fn factor_front<T: Scalar>(
                     false,
                     false,
                     false,
-                    gemm::Parallelism::None,
+                    par,
                 );
             }
         } else {
