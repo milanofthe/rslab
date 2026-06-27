@@ -695,6 +695,19 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
                     col.push((row_e, v));
                 }
             }
+            // Incomplete factorization: drop sub-threshold fill (relative to the
+            // column's largest multiplier), keeping the unit diagonal. Shrinks
+            // nnz(L) and the apply cost — an approximate factor for use as a
+            // preconditioner. `None` keeps the factor complete.
+            if let Some(tau) = opts.drop_tol {
+                let colmax = col
+                    .iter()
+                    .filter(|&&(r, _)| r != diag_e)
+                    .map(|&(_, v)| v.magnitude())
+                    .fold(0.0, f64::max);
+                let thresh = tau * colmax;
+                col.retain(|&(r, v)| r == diag_e || v.magnitude() >= thresh);
+            }
             col.sort_unstable_by_key(|&(r, _)| r);
             for &(r, v) in &col {
                 l_row_idx.push(r);

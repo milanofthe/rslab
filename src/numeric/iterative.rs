@@ -418,6 +418,43 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_factor_reduces_fill_and_still_preconditions() {
+        // Threshold dropping shrinks the factor (less memory) at the cost of a
+        // weaker preconditioner — but COCG must still converge to the true
+        // f64 solution. Demonstrates the memory ↔ iteration tradeoff.
+        let c = |re, im| Complex::new(re, im);
+        let a = grid(16, c(4.0, 1.0), c(-1.0, 0.2));
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
+
+        let full = SparseSymmetricLdlt::factor(&a).unwrap();
+        let opts = GenericFactorOptions {
+            on_zero_pivot: ZeroPivotAction::Fail,
+            drop_tol: Some(5e-2),
+        };
+        let inc = SparseSymmetricLdlt::factor_with(&a, &opts).unwrap();
+
+        assert!(
+            inc.factor_nnz() < full.factor_nnz(),
+            "dropping should reduce fill: incomplete {} vs complete {}",
+            inc.factor_nnz(),
+            full.factor_nnz()
+        );
+
+        let rf = cocg(&a, &b, &full, 1e-10, 1000).unwrap();
+        let ri = cocg(&a, &b, &inc, 1e-10, 1000).unwrap();
+        assert!(ri.converged, "incomplete-preconditioned COCG must converge");
+        assert!(
+            ri.iters >= rf.iters,
+            "incomplete factor should need ≥ complete-factor iterations"
+        );
+        let mut ax = vec![C::default(); n];
+        a.symv(&ri.x, &mut ax);
+        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(res < 1e-8, "residual {}", res);
+    }
+
+    #[test]
     fn f32_preconditioner_keeps_f64_accuracy() {
         // Factor the preconditioner in Complex<f32> (half memory) but iterate in
         // f64: the solution must still reach f64-level residual, and the f32
