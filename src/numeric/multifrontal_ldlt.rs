@@ -78,6 +78,19 @@ pub fn set_use_gemm_schur(on: bool) {
     USE_GEMM_SCHUR.store(on, Ordering::Relaxed);
 }
 
+/// Liu (1986) contribution-stack minimization, applied at analysis time by
+/// reordering each supernode's children. When `true` (default) it shrinks the
+/// transient contribution-block stack — the dominant factorization peak-RSS
+/// driver on large fronts — at a modest factor-throughput cost (the
+/// memory-optimal child order is not always the parallel-load-optimal one).
+/// Set `false` to recover maximum throughput when memory is not the constraint.
+pub(crate) static USE_LIU_REORDER: AtomicBool = AtomicBool::new(true);
+
+/// Toggle Liu child-reordering (memory-light vs max-throughput). Process-wide.
+pub fn set_use_liu_reorder(on: bool) {
+    USE_LIU_REORDER.store(on, Ordering::Relaxed);
+}
+
 /// Options controlling the generic multifrontal factorization. Defaults give an
 /// **exact** complete factorization that fails on rank deficiency. Relaxing
 /// them turns the factorization into a robust, memory-light **preconditioner**.
@@ -824,11 +837,50 @@ pub fn analyze(
         }),
         ..SupernodeParams::default()
     };
-    let sym = symbolic_factorize(&pattern, &snode_params)?;
+    let mut sym = symbolic_factorize(&pattern, &snode_params)?;
+
+    // Liu (1986) contribution-stack minimization. Reorder each supernode's
+    // children so the live contribution-block stack peak is minimized during
+    // factorization. This is a pure **scheduling hint**: supernode IDs, the
+    // e-numbering and the factor are unchanged (the global emit walks IDs, not
+    // children, and trailing rows are sorted), so it is correctness-, fill- and
+    // throughput-neutral — it only shrinks the transient CB-stack that drives
+    // factorization peak RSS.
+    //
+    // Each node leaves a contribution block of size `cb = (nrow−ncol)²` for its
+    // parent and needs `peak` working-stack to factor its subtree. Processing
+    // children in order, the stack while doing child `i` is `Σ_{j<i} cb_j +
+    // peak_i`; Liu's theorem minimizes `maxᵢ(Σ_{j<i} cb_j + peak_i)` by ordering
+    // children by `(peak − cb)` descending. Supernodes are in postorder, so a
+    // single forward sweep has every child's `(peak, cb)` ready.
+    let nsuper = sym.supernodes.len();
+    if USE_LIU_REORDER.load(Ordering::Relaxed) {
+        let mut cb = vec![0.0f64; nsuper];
+        let mut peak = vec![0.0f64; nsuper];
+        for s in 0..nsuper {
+            let cn = (sym.supernodes[s].nrow - sym.supernodes[s].ncol) as f64;
+            cb[s] = cn * cn;
+            let mut kids = std::mem::take(&mut sym.supernodes[s].children);
+            kids.sort_by(|&a, &b| {
+                (peak[b] - cb[b])
+                    .partial_cmp(&(peak[a] - cb[a]))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut acc = 0.0f64; // Σ cb of already-processed children
+            let mut pk = 0.0f64;
+            for &ch in &kids {
+                pk = pk.max(acc + peak[ch]);
+                acc += cb[ch];
+            }
+            // Assembly step: all children CBs live at once (acc), then this
+            // node's own CB remains.
+            peak[s] = pk.max(acc).max(cb[s]);
+            sym.supernodes[s].children = kids;
+        }
+    }
 
     // Assembly-tree levels: level(s) = 1 + max(level(children)); same-level
     // supernodes are mutually independent.
-    let nsuper = sym.supernodes.len();
     let mut level = vec![0usize; nsuper];
     let mut max_level = 0usize;
     for s in 0..nsuper {
