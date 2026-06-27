@@ -505,12 +505,22 @@ where
             // Right preconditioning: w = A · M⁻¹ · v[j].
             precond.apply(&v[j], &mut z)?;
             op.apply(&z, &mut w);
-            // Modified Gram–Schmidt against the existing basis.
+            // Modified Gram–Schmidt against the existing basis, with one
+            // reorthogonalization pass — essential on ill-conditioned operators
+            // (MoM near-field) where a single MGS pass loses orthogonality and
+            // the Hessenberg residual estimate drifts from the true residual.
             for i in 0..=j {
                 let hij = dotc(&v[i], &w);
                 h[i][j] = hij;
                 for k in 0..n {
                     w[k] = w[k] - hij * v[i][k];
+                }
+            }
+            for i in 0..=j {
+                let s = dotc(&v[i], &w);
+                h[i][j] = h[i][j] + s;
+                for k in 0..n {
+                    w[k] = w[k] - s * v[i][k];
                 }
             }
             let hn = norm2(&w);

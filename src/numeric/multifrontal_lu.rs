@@ -476,6 +476,7 @@ pub fn factor_general_lu<T: Scalar>(
 
 /// PARDISO phases 2–3 for the general path: numeric LU reusing a [`LuSymbolic`].
 /// `a` must share the analyzed pattern (`n`, `nnz`).
+#[allow(clippy::needless_range_loop)] // CSC column loops index col_ptr + scaling
 pub fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
@@ -724,6 +725,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
 }
 
 /// Solve `A x = b` from an unsymmetric LU factorization (`Pᵀ A P = L U`).
+#[allow(clippy::needless_range_loop)] // CSC/CSR solves index col_ptr/row_ptr + scaling
 pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, FeralError> {
     let n = f.n;
     if b.len() != n {
