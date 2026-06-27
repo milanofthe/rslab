@@ -24,7 +24,9 @@
 
 use crate::error::FeralError;
 use crate::numeric::blr::BlrMatrix;
-use crate::numeric::multifrontal_ldlt::{analyze, perturb_pivot, FactorOptions, ZeroPivotAction};
+use crate::numeric::multifrontal_ldlt::{
+    analyze_with, perturb_pivot, AnalyzeOptions, BlrMode, FactorOptions, ZeroPivotAction,
+};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -148,36 +150,7 @@ impl<T: Scalar> Contribution<T> {
     }
 }
 
-/// Opt-in BLR CB-compression config, read once from the environment:
-/// `RLA_BLR_CB` enables it; `RLA_BLR_CB_MIN` (CB size threshold, default 256),
-/// `RLA_BLR_CB_B` (tile size, default 256), `RLA_BLR_CB_EPS` (per-tile
-/// tolerance, default 1e-4) tune it.
-struct BlrCbConfig {
-    enabled: bool,
-    min_cnrow: usize,
-    b: usize,
-    eps: f64,
-}
-
-fn blr_cb_config() -> &'static BlrCbConfig {
-    use std::sync::OnceLock;
-    static C: OnceLock<BlrCbConfig> = OnceLock::new();
-    C.get_or_init(|| {
-        let env = |k: &str| std::env::var(k).ok();
-        BlrCbConfig {
-            enabled: env("RLA_BLR_CB").is_some(),
-            min_cnrow: env("RLA_BLR_CB_MIN")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(256),
-            b: env("RLA_BLR_CB_B").and_then(|s| s.parse().ok()).unwrap_or(256),
-            eps: env("RLA_BLR_CB_EPS")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1e-4),
-        }
-    })
-}
-
-// Aggregate CB-compression accounting (only written when `RLA_BLR_CB` is set).
+// Aggregate CB-compression accounting (written when CB-BLR is active).
 static CB_DENSE_SCALARS: AtomicU64 = AtomicU64::new(0);
 static CB_BLR_SCALARS: AtomicU64 = AtomicU64::new(0);
 
@@ -312,6 +285,7 @@ fn lu_front<T: Scalar>(
     nrow: usize,
     ncol: usize,
     perturb_floor: Option<f64>,
+    blr: BlrMode,
     profile: bool,
 ) -> Result<(FrontLu<T>, Contribution<T>), FeralError> {
     let n = nrow;
@@ -477,17 +451,18 @@ fn lu_front<T: Scalar>(
     if let Some(t) = t_extract {
         PROF_EXTRACT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
-    // Compress large CBs for the stack (opt-in). The off-diagonal tiles of the
-    // frontal Schur complement are low-rank; storing them compressed shrinks the
-    // live CB-stack transient. Densified tile-by-tile at the parent extend-add.
-    let cfg = blr_cb_config();
-    let contribution = if cfg.enabled && cnrow >= cfg.min_cnrow {
-        let blr = BlrMatrix::from_dense(&cb, cnrow, cnrow, cfg.b, cfg.eps);
-        CB_DENSE_SCALARS.fetch_add((cnrow * cnrow) as u64, Ordering::Relaxed);
-        CB_BLR_SCALARS.fetch_add(blr.storage() as u64, Ordering::Relaxed);
-        Contribution::Blr(blr)
-    } else {
-        Contribution::Dense(cb)
+    // Compress large CBs for the stack (BlrMode::ContributionBlocks). The
+    // off-diagonal tiles of the frontal Schur complement are low-rank; storing
+    // them compressed shrinks the live CB-stack transient. Densified
+    // tile-by-tile at the parent extend-add.
+    let contribution = match blr {
+        BlrMode::ContributionBlocks { eps, min_cnrow, b } if cnrow >= min_cnrow => {
+            let blr = BlrMatrix::from_dense(&cb, cnrow, cnrow, b, eps);
+            CB_DENSE_SCALARS.fetch_add((cnrow * cnrow) as u64, Ordering::Relaxed);
+            CB_BLR_SCALARS.fetch_add(blr.storage() as u64, Ordering::Relaxed);
+            Contribution::Blr(blr)
+        }
+        _ => Contribution::Dense(cb),
     };
     Ok((
         FrontLu {
@@ -513,6 +488,7 @@ fn factor_one_node_lu<T: Scalar>(
     a_perm_t: &GeneralCsc<T>,
     child_refs: &[&NodeLu<T>],
     perturb_floor: Option<f64>,
+    blr: BlrMode,
     pool: &FrontPool<T>,
     profile: bool,
 ) -> Result<NodeLu<T>, FeralError> {
@@ -614,7 +590,7 @@ fn factor_one_node_lu<T: Scalar>(
         PROF_ASM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     let t_front = profile.then(std::time::Instant::now);
-    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, profile)?;
+    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, blr, profile)?;
     if let Some(t) = t_front {
         PROF_FRONT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -649,6 +625,7 @@ fn factor_subtree<T: Scalar>(
     a_perm: &GeneralCsc<T>,
     a_perm_t: &GeneralCsc<T>,
     perturb_floor: Option<f64>,
+    blr: BlrMode,
     pool: &FrontPool<T>,
     profile: bool,
 ) -> Result<SubtreeFactors<T>, FeralError> {
@@ -656,7 +633,7 @@ fn factor_subtree<T: Scalar>(
     // Factor the child subtrees concurrently.
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, pool, profile))
+        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, blr, pool, profile))
         .collect::<Result<Vec<_>, _>>()?;
     // Factor this node from the children's own (subtree-root) factors.
     let nf = {
@@ -668,6 +645,7 @@ fn factor_subtree<T: Scalar>(
             a_perm_t,
             &child_refs,
             perturb_floor,
+            blr,
             pool,
             profile,
         )?
@@ -708,18 +686,27 @@ impl LuSymbolic {
     ///
     /// [`LdltSymbolic::analyze`]: crate::numeric::sparse_solver::LdltSymbolic::analyze
     pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, FeralError> {
+        Self::analyze_with(a, &AnalyzeOptions::default())
+    }
+
+    /// [`analyze`](Self::analyze) with explicit composable [`AnalyzeOptions`]
+    /// (child-reordering strategy).
+    pub fn analyze_with<T: Scalar>(
+        a: &GeneralCsc<T>,
+        opts: &AnalyzeOptions,
+    ) -> Result<LuSymbolic, FeralError> {
         a.validate()?;
         let n = a.n;
         let nnz = a.row_idx.len();
         if n == 0 {
             return Ok(LuSymbolic {
-                symb: analyze(0, &[0], &[])?,
+                symb: analyze_with(0, &[0], &[], opts)?,
                 n: 0,
                 nnz: 0,
             });
         }
         let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
-        let symb = analyze(n, &col_ptr, &row_idx)?;
+        let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
         Ok(LuSymbolic { symb, n, nnz })
     }
 
@@ -871,6 +858,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             Some(anorm.max(1.0) * f64::EPSILON)
         }
     };
+    let blr = opts.blr;
 
     // The assembly-tree levels are no longer needed: the driver is a
     // work-stealing tree recursion, not a level-synchronous sweep.
@@ -948,7 +936,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let pool = FrontPool::<T>::new();
     let root_outs: Vec<SubtreeFactors<T>> = roots
         .par_iter()
-        .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, &pool, profile))
+        .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, profile))
         .collect::<Result<Vec<_>, _>>()?;
     // Scatter the subtree factors into `node_results` (indexed by supernode id)
     // for the global emit pass, which still walks supernodes in postorder.
@@ -1576,6 +1564,7 @@ mod tests {
         let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: Some(5e-2),
+            ..Default::default()
         };
         let inc = factor_general_lu(&a, &opts).unwrap();
         assert!(

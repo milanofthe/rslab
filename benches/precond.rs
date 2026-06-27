@@ -118,6 +118,7 @@ fn main() {
             FactorOptions {
                 on_zero_pivot: fail.clone(),
                 drop_tol: None,
+                ..Default::default()
             },
         ),
         (
@@ -125,6 +126,7 @@ fn main() {
             FactorOptions {
                 on_zero_pivot: fail.clone(),
                 drop_tol: Some(1e-2),
+                ..Default::default()
             },
         ),
         (
@@ -132,6 +134,7 @@ fn main() {
             FactorOptions {
                 on_zero_pivot: fail.clone(),
                 drop_tol: Some(5e-2),
+                ..Default::default()
             },
         ),
     ];
@@ -149,6 +152,7 @@ fn main() {
             FactorOptions {
                 on_zero_pivot: fail.clone(),
                 drop_tol: None,
+                ..Default::default()
             },
         ),
         (
@@ -156,6 +160,7 @@ fn main() {
             FactorOptions {
                 on_zero_pivot: fail.clone(),
                 drop_tol: Some(5e-2),
+                ..Default::default()
             },
         ),
     ];

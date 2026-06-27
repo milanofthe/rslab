@@ -849,6 +849,7 @@ mod tests {
         let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 },
             drop_tol: None,
+            ..Default::default()
         };
         let m = LdltSolver::factor_with(&a, &opts).unwrap();
         let pre = cocr(&a, &b, &m, 1e-9, 500).unwrap();
@@ -877,6 +878,7 @@ mod tests {
         let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: Some(5e-2),
+            ..Default::default()
         };
         let inc = LdltSolver::factor_with(&a, &opts).unwrap();
 

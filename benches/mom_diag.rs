@@ -17,7 +17,7 @@
 use std::time::Instant;
 
 use rla::prelude::*;
-use rla::LuSymbolic;
+use rla::{AnalyzeOptions, BlrMode, LuSymbolic, MemoryMode, ReorderMode};
 
 /// Peak working-set (RSS high-water) of this process, in MB. Windows-only,
 /// queried via the OS — benches may use FFI; the solver library stays pure Rust.
@@ -153,7 +153,7 @@ fn bucket_of(nrow: usize) -> usize {
     BUCKETS.iter().position(|&b| nrow <= b).unwrap_or(5)
 }
 
-fn diag_file(path: &std::path::Path) {
+fn diag_file(path: &std::path::Path, reorder: ReorderMode) {
     let name = path.file_name().unwrap().to_string_lossy().to_string();
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -182,7 +182,7 @@ fn diag_file(path: &std::path::Path) {
 
     // Phase split: analyze (symbolic) vs numeric factor.
     let t = Instant::now();
-    let sym = match LuSymbolic::analyze(&a) {
+    let sym = match LuSymbolic::analyze_with(&a, &AnalyzeOptions::default().with_reorder(reorder)) {
         Ok(s) => s,
         Err(e) => {
             println!("{name}: analyze error {e:?}");
@@ -191,7 +191,15 @@ fn diag_file(path: &std::path::Path) {
     };
     let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
 
-    let opts = FactorOptions::preconditioner(1e-10);
+    // Compose the preconditioner with opt-in BLR contribution-block compression
+    // (RLA_BLR_CB) and low-memory emit (RLA_LOW_MEM) — selected via the API.
+    let mut opts = FactorOptions::preconditioner(1e-10);
+    if std::env::var("RLA_BLR_CB").is_ok() {
+        opts = opts.with_blr(BlrMode::contribution_blocks(1e-4));
+    }
+    if std::env::var("RLA_LOW_MEM").is_ok() {
+        opts = opts.with_memory(MemoryMode::LowMemory);
+    }
     let ws_before = cur_ws_mb();
     let sampler = WsSampler::start();
     let t = Instant::now();
@@ -307,14 +315,16 @@ fn main() {
     // Optional substring filter for fast single-matrix iteration during the
     // amalgamation sweep.
     let filter = std::env::var("RLA_DIAG_FILTER").unwrap_or_default();
-    if std::env::var("RLA_NO_LIU").is_ok() {
-        rla::set_use_liu_reorder(false);
+    let reorder = if std::env::var("RLA_NO_LIU").is_ok() {
         println!("[Liu child-reorder DISABLED]");
-    }
+        ReorderMode::Off
+    } else {
+        ReorderMode::HybridLiu
+    };
     println!("MoM factorization-cost diagnostic (RLA unsymmetric LU)\n");
     for f in &files {
         if filter.is_empty() || f.file_name().unwrap().to_string_lossy().contains(&filter) {
-            diag_file(f);
+            diag_file(f, reorder);
         }
     }
 }

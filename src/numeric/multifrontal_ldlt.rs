@@ -78,22 +78,80 @@ pub fn set_use_gemm_schur(on: bool) {
     USE_GEMM_SCHUR.store(on, Ordering::Relaxed);
 }
 
-/// Liu (1986) contribution-stack minimization, applied at analysis time by
-/// reordering each supernode's children. When `true` (default) it shrinks the
-/// transient contribution-block stack — the dominant factorization peak-RSS
-/// driver on large fronts — at a modest factor-throughput cost (the
-/// memory-optimal child order is not always the parallel-load-optimal one).
-/// Set `false` to recover maximum throughput when memory is not the constraint.
-pub(crate) static USE_LIU_REORDER: AtomicBool = AtomicBool::new(true);
+/// Child-reordering strategy, selected per analysis via [`AnalyzeOptions`] — the
+/// composable replacement for the old process-wide Liu toggle. A pure scheduling
+/// hint: it changes neither the factor, the fill, nor the e-numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReorderMode {
+    /// Hybrid Liu (1986) contribution-stack minimization (default): reorder
+    /// children to shrink the transient CB-stack peak where it is large, keep
+    /// the natural leaf order elsewhere. Memory-light, ≈ throughput-neutral.
+    #[default]
+    HybridLiu,
+    /// No child reordering: maximum leaf parallelism, larger CB-stack peak — for
+    /// when memory is not the constraint.
+    Off,
+}
 
-/// Toggle Liu child-reordering (memory-light vs max-throughput). Process-wide.
-pub fn set_use_liu_reorder(on: bool) {
-    USE_LIU_REORDER.store(on, Ordering::Relaxed);
+/// Analysis-time options (composable, value-independent). Selects the choices
+/// fixed at [`analyze_with`] time. The factor-time knobs live in
+/// [`FactorOptions`]; together they form the per-call feature selection.
+#[derive(Debug, Clone, Default)]
+pub struct AnalyzeOptions {
+    /// Child-reordering strategy (CB-stack peak vs leaf parallelism).
+    pub reorder: ReorderMode,
+}
+
+impl AnalyzeOptions {
+    /// Builder: set the child-reordering strategy.
+    pub fn with_reorder(mut self, reorder: ReorderMode) -> Self {
+        self.reorder = reorder;
+        self
+    }
+}
+
+/// Factor emit/memory strategy — composable via [`FactorOptions::with_memory`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryMode {
+    /// Collect every front's factor, then emit the global `L`/`U` (default).
+    #[default]
+    Eager,
+    /// Free each front's dense factor as soon as it is emitted into the global
+    /// structure — lower peak RSS at no accuracy cost (removes the emit-time
+    /// per-front + global overlap).
+    LowMemory,
+}
+
+/// Block-Low-Rank strategy — composable via [`FactorOptions::with_blr`]. BLR
+/// makes the factor **approximate** (a preconditioner); drive iterative
+/// refinement against the original matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BlrMode {
+    /// Dense fronts and contribution blocks (default, exact).
+    #[default]
+    Off,
+    /// Store each large contribution block block-low-rank on the assembly stack:
+    /// `eps` per-tile Frobenius tolerance, `min_cnrow` CB-size threshold, `b`
+    /// tile size. Shrinks the live CB-stack transient.
+    ContributionBlocks { eps: f64, min_cnrow: usize, b: usize },
+}
+
+impl BlrMode {
+    /// BLR contribution blocks at per-tile tolerance `eps` with the default
+    /// `min_cnrow = 256`, `b = 256`.
+    pub fn contribution_blocks(eps: f64) -> Self {
+        BlrMode::ContributionBlocks {
+            eps,
+            min_cnrow: 256,
+            b: 256,
+        }
+    }
 }
 
 /// Options controlling the generic multifrontal factorization. Defaults give an
 /// **exact** complete factorization that fails on rank deficiency. Relaxing
 /// them turns the factorization into a robust, memory-light **preconditioner**.
+/// All knobs compose via the `with_*` builders.
 #[derive(Debug, Clone)]
 pub struct FactorOptions {
     /// Near-zero pivot policy. Reuses feral's [`ZeroPivotAction`]: `Fail`
@@ -109,6 +167,14 @@ pub struct FactorOptions {
     /// discarded, trading factor accuracy for memory. `None` = complete
     /// factorization. (Wired in a later stage.)
     pub drop_tol: Option<f64>,
+    /// Factor emit/memory strategy (peak-RSS vs simplicity). Default [`Eager`].
+    ///
+    /// [`Eager`]: MemoryMode::Eager
+    pub memory: MemoryMode,
+    /// Block-Low-Rank strategy. Default [`Off`] (exact dense fronts).
+    ///
+    /// [`Off`]: BlrMode::Off
+    pub blr: BlrMode,
 }
 
 impl Default for FactorOptions {
@@ -116,6 +182,8 @@ impl Default for FactorOptions {
         Self {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: None,
+            memory: MemoryMode::Eager,
+            blr: BlrMode::Off,
         }
     }
 }
@@ -134,7 +202,7 @@ impl FactorOptions {
     pub fn preconditioner(abs_floor: f64) -> Self {
         Self {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor },
-            drop_tol: None,
+            ..Self::default()
         }
     }
 
@@ -148,6 +216,19 @@ impl FactorOptions {
     /// Builder: set the near-zero pivot policy.
     pub fn with_pivot(mut self, policy: ZeroPivotAction) -> Self {
         self.on_zero_pivot = policy;
+        self
+    }
+
+    /// Builder: set the factor emit/memory strategy.
+    pub fn with_memory(mut self, memory: MemoryMode) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// Builder: set the Block-Low-Rank strategy (makes the factor a
+    /// preconditioner — refine against the original matrix).
+    pub fn with_blr(mut self, blr: BlrMode) -> Self {
+        self.blr = blr;
         self
     }
 }
@@ -803,6 +884,17 @@ pub fn analyze(
     col_ptr: &[usize],
     row_idx: &[usize],
 ) -> Result<MultifrontalSymbolic, FeralError> {
+    analyze_with(n, col_ptr, row_idx, &AnalyzeOptions::default())
+}
+
+/// [`analyze`] with explicit composable [`AnalyzeOptions`] (child-reordering
+/// strategy). Reuse the result across many `factor` calls that share the pattern.
+pub fn analyze_with(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    opts: &AnalyzeOptions,
+) -> Result<MultifrontalSymbolic, FeralError> {
     let nnz = row_idx.len();
     if n == 0 {
         return Ok(MultifrontalSymbolic {
@@ -863,7 +955,7 @@ pub fn analyze(
     // parallel-load-optimal one). `peak[s]` is always computed against the order
     // actually used, so the propagation stays exact.
     let nsuper = sym.supernodes.len();
-    if USE_LIU_REORDER.load(Ordering::Relaxed) {
+    if opts.reorder == ReorderMode::HybridLiu {
         // ~64 MB of `Complex<f64>` contribution blocks: below this the reorder
         // saves little memory but can still disturb leaf parallelism.
         const LIU_MIN_STACK: f64 = 4_000_000.0;
@@ -1348,6 +1440,7 @@ mod tests {
         let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
             drop_tol: None,
+            ..Default::default()
         };
         let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
         assert!(
@@ -1386,6 +1479,7 @@ mod tests {
         let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
             drop_tol: None,
+            ..Default::default()
         };
         let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
         assert_eq!(

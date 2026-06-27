@@ -106,6 +106,7 @@ fn bench_file(path: &std::path::Path) {
     let opts = FactorOptions {
         on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 },
         drop_tol: None,
+        ..Default::default()
     };
     let t = Instant::now();
     let rla = match factor_general_lu(&g, &opts) {

@@ -52,10 +52,7 @@
 //! let a = CscMatrix::<Complex<f64>>::from_triplets(
 //!     3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!     &[c(4.0, 1.0), c(4.0, 1.0), c(4.0, 1.0), c(-1.0, 0.2)])?;
-//! let opts = FactorOptions {
-//!     on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
-//!     drop_tol: Some(1e-2),
-//! };
+//! let opts = FactorOptions::preconditioner(1e-8).with_drop_tol(1e-2); // composable
 //! let m = LdltSolver::factor_with(&a, &opts)?;          // preconditioner
 //! let b = vec![c(1.0, 0.0); 3];
 //! let res = cocg(&a, &b, &m, 1e-10, 100)?;
@@ -91,8 +88,9 @@ pub use scalar::Scalar;
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
-    analyze, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur,
-    set_use_liu_reorder, FactorOptions, MultifrontalSymbolic, ZeroPivotAction,
+    analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
+    set_use_gemm_schur, AnalyzeOptions, BlrMode, FactorOptions, MemoryMode, MultifrontalSymbolic,
+    ReorderMode, ZeroPivotAction,
 };
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
