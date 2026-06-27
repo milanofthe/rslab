@@ -18,7 +18,9 @@ use faer::sparse::{SparseColMat, Triplet};
 use faer::{c64, Mat};
 use num_complex::Complex;
 use rla::prelude::*;
-use rla::{AnalyzeOptions, BlrMode, FactorOptions, LuSymbolic, MemoryMode, ReorderMode};
+use rla::{
+    AnalyzeOptions, BlrMode, FactorMethod, FactorOptions, LuSymbolic, MemoryMode, ReorderMode,
+};
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 type C = Complex<f64>;
@@ -73,6 +75,9 @@ fn run(path: &std::path::Path) {
     }
     if std::env::var("RLA_BLR_CB").is_ok() {
         opts = opts.with_blr(BlrMode::contribution_blocks(1e-4));
+    }
+    if std::env::var("RLA_LEFTLOOKING").is_ok() {
+        opts = opts.with_method(FactorMethod::LeftLooking);
     }
     let t = Instant::now();
     let sym = LuSymbolic::analyze_with(&a, &AnalyzeOptions::default().with_reorder(reorder)).unwrap();
