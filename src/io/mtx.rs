@@ -1,26 +1,27 @@
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
+use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
+use num_complex::Complex;
 use std::path::Path;
 
-/// A sparse symmetric matrix in coordinate (COO) format, as read from a Matrix Market file.
-/// Entries are 0-indexed, lower triangle only (i >= j).
-#[derive(Debug)]
-pub struct MtxMatrix {
+/// A sparse symmetric matrix in coordinate (COO) format, as read from a Matrix
+/// Market file. Entries are 0-indexed, lower triangle only (i >= j). Generic
+/// over the scalar field: [`f64`] (`real symmetric`, PARDISO `mtype 2`) or
+/// [`Complex<f64>`] (`complex symmetric`, PARDISO `mtype 6`).
+#[derive(Debug, Clone)]
+pub struct MtxMatrix<T = f64> {
     pub n: usize,
-    pub entries: Vec<(usize, usize, f64)>,
+    pub entries: Vec<(usize, usize, T)>,
 }
 
-impl MtxMatrix {
+impl<T: Scalar> MtxMatrix<T> {
     /// Convert to a dense symmetric matrix.
     ///
     /// X2 (REG-4): duplicate coordinates are **summed**, matching `to_csc`
     /// (which sums via `CscMatrix::from_triplets`) and the Matrix Market /
-    /// COO convention used by scipy and MATLAB. The previous
-    /// `from_lower_triangle` path *overwrote* duplicates (last-wins), so the
-    /// same file produced two different matrices depending on the conversion
-    /// path. See `dev/decisions.md` (2026-06-11) for the rationale.
-    pub fn to_dense(&self) -> SymmetricMatrix {
+    /// COO convention used by scipy and MATLAB.
+    pub fn to_dense(&self) -> SymmetricMatrix<T> {
         let mut mat = SymmetricMatrix::zeros(self.n);
         for &(i, j, v) in &self.entries {
             let prev = mat.get(i, j);
@@ -30,27 +31,66 @@ impl MtxMatrix {
     }
 
     /// Convert to a CSC sparse matrix (lower triangle).
-    pub fn to_csc(&self) -> Result<CscMatrix, FeralError> {
+    pub fn to_csc(&self) -> Result<CscMatrix<T>, FeralError> {
         let rows: Vec<usize> = self.entries.iter().map(|&(r, _, _)| r).collect();
         let cols: Vec<usize> = self.entries.iter().map(|&(_, c, _)| c).collect();
-        let vals: Vec<f64> = self.entries.iter().map(|&(_, _, v)| v).collect();
+        let vals: Vec<T> = self.entries.iter().map(|&(_, _, v)| v).collect();
         CscMatrix::from_triplets(self.n, &rows, &cols, &vals)
     }
 }
 
-/// Read a Matrix Market file containing a symmetric real coordinate matrix.
+/// Read a **real** symmetric Matrix Market file (`mtype 2`).
 ///
-/// Accepts only `%%MatrixMarket matrix coordinate real symmetric` format.
-/// Indices are converted from 1-based (MTX) to 0-based. Upper-triangle entries
-/// (i < j) are silently transposed to lower-triangle.
-pub fn read_mtx(path: &Path) -> Result<MtxMatrix, FeralError> {
+/// Accepts only `%%MatrixMarket matrix coordinate real symmetric`. Indices are
+/// converted from 1-based (MTX) to 0-based; upper-triangle entries are
+/// transposed to the lower triangle.
+pub fn read_mtx(path: &Path) -> Result<MtxMatrix<f64>, FeralError> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| FeralError::IoError(format!("{}: {}", path.display(), e)))?;
     parse_mtx(&contents, path.to_string_lossy().as_ref())
 }
 
-/// Parse Matrix Market content from a string. `source` is used in error messages.
-pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> {
+/// Read a **complex** symmetric Matrix Market file (`mtype 6`).
+///
+/// Accepts `%%MatrixMarket matrix coordinate complex symmetric`. Each data line
+/// is `i j re im`. Indices 1-based → 0-based; upper triangle → lower triangle.
+pub fn read_mtx_complex(path: &Path) -> Result<MtxMatrix<Complex<f64>>, FeralError> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| FeralError::IoError(format!("{}: {}", path.display(), e)))?;
+    parse_mtx_complex(&contents, path.to_string_lossy().as_ref())
+}
+
+/// Parse a **real** symmetric Matrix Market string (`mtype 2`).
+pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix<f64>, FeralError> {
+    parse_mtx_with(contents, source, "real", 1, |toks| toks[0].parse::<f64>().ok())
+}
+
+/// Parse a **complex** symmetric Matrix Market string (`mtype 6`). Data lines
+/// carry two value tokens, the real and imaginary parts: `i j re im`.
+pub fn parse_mtx_complex(
+    contents: &str,
+    source: &str,
+) -> Result<MtxMatrix<Complex<f64>>, FeralError> {
+    parse_mtx_with(contents, source, "complex", 2, |toks| {
+        let re = toks[0].parse::<f64>().ok()?;
+        let im = toks[1].parse::<f64>().ok()?;
+        Some(Complex::new(re, im))
+    })
+}
+
+/// Generic Matrix Market coordinate-symmetric parser. `field` is the expected
+/// header field token (`"real"` / `"complex"`); `n_value_tokens` is how many
+/// whitespace tokens the value spans (1 real, 2 complex); `parse_val` builds the
+/// scalar from those tokens. All the hardening (banner tokenization, untrusted
+/// `nnz` clamp + validation, bounds, non-finite rejection, lower-triangle
+/// normalization, duplicate-summing) is shared across both fields.
+fn parse_mtx_with<T: Scalar>(
+    contents: &str,
+    source: &str,
+    field: &str,
+    n_value_tokens: usize,
+    parse_val: impl Fn(&[&str]) -> Option<T>,
+) -> Result<MtxMatrix<T>, FeralError> {
     let mut lines = contents.lines().enumerate();
 
     // Header line
@@ -62,23 +102,17 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
     // reference NIST `mmio` reader tokenize the banner on arbitrary
     // whitespace, so a legal banner whose fields are separated by multiple
     // spaces or tabs must be accepted, not rejected as "unsupported header".
-    const BANNER: [&str; 5] = [
-        "%%matrixmarket",
-        "matrix",
-        "coordinate",
-        "real",
-        "symmetric",
-    ];
+    let banner: [&str; 5] = ["%%matrixmarket", "matrix", "coordinate", field, "symmetric"];
     let mut header_tokens = header.split_whitespace();
-    let banner_ok = BANNER.iter().all(|expected| {
+    let banner_ok = banner.iter().all(|expected| {
         header_tokens
             .next()
             .is_some_and(|tok| tok.eq_ignore_ascii_case(expected))
     }) && header_tokens.next().is_none();
     if !banner_ok {
         return Err(FeralError::IoError(format!(
-            "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate real symmetric)",
-            source, header.trim()
+            "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate {} symmetric)",
+            source, header.trim(), field
         )));
     }
 
@@ -157,11 +191,13 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
             continue;
         }
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() != 3 {
+        let expected_tokens = 2 + n_value_tokens;
+        if parts.len() != expected_tokens {
             return Err(FeralError::IoError(format!(
-                "{}: line {}: expected 'i j value', got '{}'",
+                "{}: line {}: expected 'i j {}', got '{}'",
                 source,
                 line_no + 1,
+                if n_value_tokens == 2 { "re im" } else { "value" },
                 trimmed
             )));
         }
@@ -181,25 +217,23 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
                 parts[1]
             ))
         })?;
-        let v: f64 = parts[2].parse().map_err(|_| {
+        let v: T = parse_val(&parts[2..]).ok_or_else(|| {
             FeralError::IoError(format!(
                 "{}: line {}: invalid value '{}'",
                 source,
                 line_no + 1,
-                parts[2]
+                parts[2..].join(" ")
             ))
         })?;
-        // X11: f64::from_str silently accepts "nan", "inf", "-inf". Such a
-        // value would build an MtxMatrix carrying a non-finite entry that
-        // poisons any downstream factorization; reject it here so library
-        // callers (parse_mtx / read_mtx) get a clean error like the bench
-        // harness already enforces.
+        // f64::from_str silently accepts "nan", "inf", "-inf"; such a value
+        // would build an MtxMatrix carrying a non-finite entry that poisons any
+        // downstream factorization. Reject it (for complex, either part).
         if !v.is_finite() {
             return Err(FeralError::IoError(format!(
                 "{}: line {}: non-finite value '{}'",
                 source,
                 line_no + 1,
-                parts[2]
+                parts[2..].join(" ")
             )));
         }
 
@@ -510,7 +544,8 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_complex() {
+    fn test_real_parser_rejects_complex_header() {
+        // The real parser must still reject a complex file (use parse_mtx_complex).
         let mtx = "\
 %%MatrixMarket matrix coordinate complex symmetric
 2 2 1
@@ -519,6 +554,90 @@ mod tests {
         let err = parse_mtx(mtx, "test").unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("unsupported header"), "got: {}", msg);
+    }
+
+    #[test]
+    fn complex_parser_reads_complex_symmetric() {
+        // mtype 6: `i j re im`. Upper-triangle entry normalized to lower.
+        let mtx = "\
+%%MatrixMarket matrix coordinate complex symmetric
+3 3 4
+1 1 2.0 1.0
+2 1 -1.0 0.3
+2 2 3.0 -0.5
+1 3 0.5 0.2
+";
+        let m = parse_mtx_complex(mtx, "test").unwrap();
+        assert_eq!(m.n, 3);
+        assert_eq!(m.entries.len(), 4);
+        let dense = m.to_dense();
+        assert_eq!(dense.get(0, 0), Complex::new(2.0, 1.0));
+        assert_eq!(dense.get(1, 0), Complex::new(-1.0, 0.3));
+        assert_eq!(dense.get(0, 1), Complex::new(-1.0, 0.3)); // symmetric (no conj)
+        // (1,3) → normalized to lower (2,0).
+        assert_eq!(dense.get(2, 0), Complex::new(0.5, 0.2));
+    }
+
+    #[test]
+    fn complex_parser_rejects_real_header() {
+        let mtx = "\
+%%MatrixMarket matrix coordinate real symmetric
+2 2 1
+1 1 1.0
+";
+        let err = parse_mtx_complex(mtx, "test").unwrap_err();
+        assert!(format!("{}", err).contains("unsupported header"));
+    }
+
+    #[test]
+    fn complex_parser_rejects_wrong_token_count() {
+        // A complex line needs two value tokens; one is malformed.
+        let mtx = "\
+%%MatrixMarket matrix coordinate complex symmetric
+2 2 1
+1 1 1.0
+";
+        let err = parse_mtx_complex(mtx, "test").unwrap_err();
+        assert!(format!("{}", err).contains("expected 'i j re im'"));
+    }
+
+    #[test]
+    fn complex_parser_rejects_non_finite() {
+        let mtx = "\
+%%MatrixMarket matrix coordinate complex symmetric
+2 2 1
+1 1 1.0 nan
+";
+        let err = parse_mtx_complex(mtx, "test").unwrap_err();
+        assert!(format!("{}", err).contains("non-finite"));
+    }
+
+    #[test]
+    fn complex_mtx_round_trips_through_solver() {
+        use crate::SparseSymmetricLdlt;
+        // A small diagonally-dominant complex-symmetric system read from MTX,
+        // factored and solved — the end-to-end PARDISO-style path.
+        let mtx = "\
+%%MatrixMarket matrix coordinate complex symmetric
+3 3 5
+1 1 4.0 1.0
+2 1 -1.0 0.2
+2 2 4.0 1.0
+3 2 -1.0 0.2
+3 3 4.0 1.0
+";
+        let a = parse_mtx_complex(mtx, "test").unwrap().to_csc().unwrap();
+        let b = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.0, 1.0),
+            Complex::new(-1.0, 0.5),
+        ];
+        let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+        let x = solver.solve(&b).unwrap();
+        let mut ax = vec![Complex::new(0.0, 0.0); 3];
+        a.symv(&x, &mut ax);
+        let res = (0..3).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(res < 1e-12, "residual {}", res);
     }
 
     #[test]

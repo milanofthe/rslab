@@ -37,7 +37,7 @@ pub use numeric::iterative::{
     cocg, cocr, KrylovResult, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
 };
 pub use inertia::Inertia;
-pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
+pub use io::mtx::{parse_mtx, parse_mtx_complex, read_mtx, read_mtx_complex, MtxMatrix};
 pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
 pub use numeric::factorize::{
     factorize_multifrontal_with_schur, LdltExport, NumericParams, ProfileReport, SchurBlock,
