@@ -153,66 +153,117 @@ fn lu_front<T: Scalar>(
     // the fully-summed rows [0, ncol) are ever interchanged.
     let mut rperm: Vec<usize> = (0..nrow).collect();
 
+    // Blocked right-looking LU (LAPACK getrf-style): factor the fully-summed
+    // columns in panels of width `NB`. Each panel is factored unblocked (getf2,
+    // within-block partial pivoting), then the dominant trailing update runs as
+    // a single SIMD `gemm` (rank-`NB`) — routing the O(ncol²·nrow) work through
+    // the complex BLAS-3 kernel instead of scalar BLAS-2 column sweeps. This is
+    // the structure MKL/PARDISO use for the supernodal panel.
+    const NB: usize = 64;
+    let mut kb = 0;
+    while kb < ncol {
+        let ke = (kb + NB).min(ncol);
+        // --- Panel factor (getf2) over columns [kb, ke), full height ---
+        for k in kb..ke {
+            // Partial pivoting within the fully-summed block (rows [k, ncol));
+            // compare squared magnitudes (same argmax, no per-candidate sqrt).
+            let mut p = k;
+            let mut best = f[k * n + k].magnitude_sq();
+            for i in (k + 1)..ncol {
+                let m = f[k * n + i].magnitude_sq();
+                if m > best {
+                    best = m;
+                    p = i;
+                }
+            }
+            if p != k {
+                for c in 0..nrow {
+                    f.swap(c * n + k, c * n + p);
+                }
+                rperm.swap(k, p);
+            }
+            let mut piv = f[k * n + k];
+            match perturb_floor {
+                Some(floor) if piv.magnitude() < floor => {
+                    piv = perturb_pivot(piv, floor);
+                    n_perturbed += 1;
+                }
+                None if piv == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                _ => {}
+            }
+            f[k * n + k] = piv;
+            let pinv = piv.recip();
+            // L multipliers: column k below the diagonal (full height).
+            for i in (k + 1)..n {
+                f[k * n + i] = f[k * n + i] * pinv;
+            }
+            // Within-panel Schur update only (columns [k+1, ke)); the trailing
+            // block is deferred to the panel GEMM.
+            for j in (k + 1)..ke {
+                let ukj = f[j * n + k];
+                if ukj != T::zero() {
+                    for i in (k + 1)..n {
+                        f[j * n + i] = f[j * n + i] - f[k * n + i] * ukj;
+                    }
+                }
+            }
+        }
+        let pw = ke - kb; // panel width
+        // --- TRSM: U[kb:ke, ke:nrow] = L11⁻¹ · A[kb:ke, ke:nrow] ---
+        // L11 is the unit-lower `pw×pw` diagonal block; forward-substitute each
+        // trailing column over the panel rows.
+        for j in ke..n {
+            for r in (kb + 1)..ke {
+                let mut s = f[j * n + r];
+                for i in kb..r {
+                    s = s - f[i * n + r] * f[j * n + i]; // L11(r,i)·U12(i,j)
+                }
+                f[j * n + r] = s;
+            }
+        }
+        // --- GEMM: A[ke:, ke:] −= L[ke:, kb:ke] · U[kb:ke, ke:] (rank-`pw`) ---
+        let mt = n - ke; // trailing rows = cols
+        if mt > 0 && pw > 0 {
+            let flops = (mt as u128) * (mt as u128) * (pw as u128);
+            let par = if flops >= 8_000_000 {
+                gemm::Parallelism::Rayon(0)
+            } else {
+                gemm::Parallelism::None
+            };
+            // SAFETY: L21 (rows≥ke × cols[kb,ke)), U12 (rows[kb,ke) × cols≥ke)
+            // and the A22 dst (rows≥ke × cols≥ke) are pairwise-disjoint
+            // sub-blocks of `f`, all in bounds under col-stride `n`. `T` is a
+            // supported gemm element type.
+            let base = f.as_mut_ptr();
+            unsafe {
+                gemm::gemm(
+                    mt,
+                    mt,
+                    pw,
+                    base.add(ke * n + ke),
+                    n as isize,
+                    1,
+                    true,
+                    base.add(kb * n + ke) as *const T,
+                    n as isize,
+                    1,
+                    base.add(ke * n + kb) as *const T,
+                    n as isize,
+                    1,
+                    T::one(),
+                    -T::one(),
+                    false,
+                    false,
+                    false,
+                    par,
+                );
+            }
+        }
+        kb = ke;
+    }
+    // Pivots from the factored diagonal of the fully-summed block.
     for k in 0..ncol {
-        // Partial pivoting within the fully-summed block: choose the largest
-        // |entry| in column k among rows [k, ncol) and swap the full rows
-        // (carrying the already-computed L multipliers along).
-        let mut p = k;
-        // Compare squared magnitudes — same argmax, one fewer `sqrt`/`hypot`
-        // per candidate than `magnitude()`.
-        let mut best = f[k * n + k].magnitude_sq();
-        for i in (k + 1)..ncol {
-            let m = f[k * n + i].magnitude_sq();
-            if m > best {
-                best = m;
-                p = i;
-            }
-        }
-        if p != k {
-            for c in 0..nrow {
-                f.swap(c * n + k, c * n + p);
-            }
-            rperm.swap(k, p);
-        }
-
-        let mut piv = f[k * n + k];
-        match perturb_floor {
-            Some(floor) if piv.magnitude() < floor => {
-                piv = perturb_pivot(piv, floor);
-                n_perturbed += 1;
-            }
-            None if piv == T::zero() => return Err(FeralError::NumericallyRankDeficient),
-            _ => {}
-        }
-        f[k * n + k] = piv;
-        pivots[k] = piv;
-        let pinv = piv.recip();
-
-        // L multipliers: column k below the diagonal (all trailing rows).
-        for i in (k + 1)..n {
-            f[k * n + i] = f[k * n + i] * pinv;
-        }
-        // Schur update of the fully-summed trailing columns (all rows: the
-        // remaining block + the L21 multiplier rows). f[j*n+i] -= L_ik · U_kj.
-        for j in (k + 1)..ncol {
-            let ukj = f[j * n + k];
-            if ukj != T::zero() {
-                for i in (k + 1)..n {
-                    f[j * n + i] = f[j * n + i] - f[k * n + i] * ukj;
-                }
-            }
-        }
-        // Schur update of U12 (eliminated rows c in trailing columns r). The
-        // A22 block (trailing × trailing) is deliberately left untouched and
-        // computed once, after the panel, by the GEMM below.
-        for r in ncol..n {
-            let ukr = f[r * n + k]; // U(k, r)
-            if ukr != T::zero() {
-                for c in (k + 1)..ncol {
-                    f[r * n + c] = f[r * n + c] - f[k * n + c] * ukr;
-                }
-            }
-        }
+        pivots[k] = f[k * n + k];
     }
 
     // Extract L (nrow × ncol col-major, unit lower) and U (nrow × ncol
@@ -229,55 +280,10 @@ fn lu_front<T: Scalar>(
         }
     }
 
-    // Contribution block: CB = A22 − L21·U12 (full cnrow×cnrow). A22 is the
-    // untouched trailing block; L21 the below-block multipliers; U12 the
-    // eliminated rows in the trailing columns.
+    // Contribution block: `f`'s trailing block now holds the fully
+    // Schur-updated A22 = A22 − L21·U12, accumulated across the per-panel GEMMs
+    // above. Copy it out (column-major) for the parent's extend-add.
     let cnrow = nrow - ncol;
-    if cnrow > 0 && ncol > 0 {
-        // Schur the A22 block in place: `f_A22 ← f_A22 − L21·U12`, where all
-        // three operands are *disjoint sub-blocks of `f` itself* (no repacking
-        // into temporaries). In column-major `f` (col-stride `n`):
-        //   A22 (dst): base `ncol*n + ncol`, cs=n, rs=1   (cnrow × cnrow)
-        //   L21 (lhs): base `ncol`,          cs=n, rs=1   (cnrow × ncol)
-        //   U12 (rhs): base `ncol*n`,        cs=n, rs=1   (ncol × cnrow)
-        let flops = (cnrow as u128) * (cnrow as u128) * (ncol as u128);
-        let par = if flops >= 8_000_000 {
-            gemm::Parallelism::Rayon(0)
-        } else {
-            gemm::Parallelism::None
-        };
-        // SAFETY: the three sub-blocks are pairwise disjoint regions of `f`
-        // (A22 = rows≥ncol×cols≥ncol, L21 = rows≥ncol×cols<ncol, U12 =
-        // rows<ncol×cols≥ncol), each in bounds of the `nrow*nrow` buffer under
-        // the strides given, so gemm may read L21/U12 while writing A22. `T` is
-        // f64/Complex<f64>/f32/Complex<f32> — all gemm element types.
-        let base = f.as_mut_ptr();
-        unsafe {
-            gemm::gemm(
-                cnrow,
-                cnrow,
-                ncol,
-                base.add(ncol * n + ncol),
-                n as isize,
-                1,
-                true,
-                base.add(ncol) as *const T,
-                n as isize,
-                1,
-                base.add(ncol * n) as *const T,
-                n as isize,
-                1,
-                T::one(),
-                -T::one(),
-                false,
-                false,
-                false,
-                par,
-            );
-        }
-    }
-    // Extract the (now Schur-updated) contribution block from `f`'s trailing
-    // block into its own column-major buffer for the parent's extend-add.
     let mut cb = vec![T::zero(); cnrow * cnrow];
     for c in 0..cnrow {
         for r in 0..cnrow {
