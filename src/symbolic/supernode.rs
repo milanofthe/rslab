@@ -248,6 +248,26 @@ pub fn find_supernodes(
         return Vec::new();
     }
 
+    // EXPERIMENTAL (relaxed-amalgamation study): env-gated overrides to widen
+    // supernodes for the MoM throughput investigation. All default to the
+    // current behavior, so unset env = unchanged (every test stays green).
+    //   RLA_NEMIN        — override the size-based merge threshold `nemin`.
+    //   RLA_RELAX_WIDTH  — enable fill-tolerant merging up to this merged width.
+    //   RLA_RELAX_ROWS   — extra explicit-zero rows tolerated per relaxed merge.
+    //   RLA_RENUMBER     — force the Renumber (reverse) merge order.
+    let nemin_eff = std::env::var("RLA_NEMIN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(params.nemin);
+    let relax_width = std::env::var("RLA_RELAX_WIDTH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let relax_rows = std::env::var("RLA_RELAX_ROWS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let force_renumber = std::env::var("RLA_RENUMBER").map(|v| v == "1").unwrap_or(false);
+
     // Step 1: Find fundamental supernodes (shared with predict_merges)
     let fund = find_fundamental_supernodes(etree, col_counts);
     let snode_starts = fund.snode_starts;
@@ -276,7 +296,8 @@ pub fn find_supernodes(
     // postorder (which places desired-merge children adjacent to
     // their parent in the column numbering), every desired merge
     // succeeds.
-    let reverse = matches!(params.amalgamation_strategy, AmalgamationStrategy::Renumber);
+    let reverse =
+        force_renumber || matches!(params.amalgamation_strategy, AmalgamationStrategy::Renumber);
     let order: Box<dyn Iterator<Item = usize>> = if reverse {
         Box::new((0..n_snodes).rev())
     } else {
@@ -343,7 +364,7 @@ pub fn find_supernodes(
             };
 
             // 2. Size-based: both have < nemin columns
-            let size_based = child_ncol < params.nemin && parent_ncol < params.nemin;
+            let size_based = child_ncol < nemin_eff && parent_ncol < nemin_eff;
 
             // Phase B4 (issue #55): defensive root-supernode width cap.
             // On IPM-KKT matrices with a wide top-level Schur complement
@@ -371,7 +392,20 @@ pub fn find_supernodes(
             };
             let root_cap_exceeded = parent_is_root && merged_ncol > root_cap;
 
-            if (trivial_chain || size_based) && !root_cap_exceeded {
+            // EXPERIMENTAL relaxed/fill-tolerant merge: merge an adjacent child
+            // even when it is not size-based, as long as the merged supernode
+            // stays under `relax_width` and the extra explicit-zero fill (the
+            // gap between the child's post-elimination structure and the
+            // parent's) is within `relax_rows`. This is the PARDISO/MUMPS
+            // relaxed-amalgamation lever: trade a little fill for much wider
+            // dense fronts (higher-rank Schur GEMMs).
+            let relaxed = relax_width.is_some_and(|w| {
+                let child_last = s_first + s_ncol - 1;
+                let extra = col_counts[child_last].saturating_sub(1 + col_counts[p_first]);
+                merged_ncol <= w && extra <= relax_rows
+            });
+
+            if (trivial_chain || size_based || relaxed) && !root_cap_exceeded {
                 merged_into[root_s] = Some(root_p);
                 // Transfer columns to parent and update first column.
                 // Adjacency invariant guarantees s_first < p_first,

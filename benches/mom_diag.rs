@@ -102,6 +102,10 @@ fn diag_file(path: &std::path::Path) {
     let mut total_flop = 0.0f64;
     let mut max_nrow = 0usize;
     let mut sum_ncol = 0usize;
+    let mut max_ncol = 0usize;
+    // Flop-weighted mean front width = effective Schur-GEMM rank — the metric
+    // that governs compute-bound vs memory-bound throughput.
+    let mut fw_ncol_num = 0.0f64;
     for &(ncol, nrow) in &dims {
         let fl = front_flops(ncol, nrow);
         let b = bucket_of(nrow);
@@ -110,7 +114,10 @@ fn diag_file(path: &std::path::Path) {
         total_flop += fl;
         max_nrow = max_nrow.max(nrow);
         sum_ncol += ncol;
+        max_ncol = max_ncol.max(ncol);
+        fw_ncol_num += fl * ncol as f64;
     }
+    let fw_ncol = if total_flop > 0.0 { fw_ncol_num / total_flop } else { 0.0 };
 
     println!("=== {name}  n={n}  nnz(A)={nnz_a} ===");
     println!(
@@ -123,9 +130,14 @@ fn diag_file(path: &std::path::Path) {
         fill as f64 * 16.0 / 1e6,
     );
     println!(
-        "  flops:   est {:.2} Gflop   fronts={}   max front nrow={max_nrow}   Σncol={sum_ncol}",
+        "  flops:   est {:.2} Gflop   {:.1} Gflop/s   fronts={}   max nrow={max_nrow}",
         total_flop / 1e9,
+        total_flop / 1e9 / (factor_ms / 1e3),
         dims.len(),
+    );
+    println!(
+        "  width:   mean ncol={:.1}   flop-weighted ncol={fw_ncol:.0}   max ncol={max_ncol}   (GEMM rank)",
+        sum_ncol as f64 / dims.len() as f64,
     );
     println!("  front-size histogram (flop share):");
     for b in 0..6 {
@@ -158,8 +170,13 @@ fn main() {
         }
     };
     files.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+    // Optional substring filter for fast single-matrix iteration during the
+    // amalgamation sweep.
+    let filter = std::env::var("RLA_DIAG_FILTER").unwrap_or_default();
     println!("MoM factorization-cost diagnostic (RLA unsymmetric LU)\n");
     for f in &files {
-        diag_file(f);
+        if filter.is_empty() || f.file_name().unwrap().to_string_lossy().contains(&filter) {
+            diag_file(f);
+        }
     }
 }
