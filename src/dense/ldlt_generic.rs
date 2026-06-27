@@ -53,6 +53,12 @@ pub struct LdltFactors<T> {
     /// Symmetric pivot permutation (forward): `perm[i] = j` means original
     /// index `j` occupies pivot position `i`.
     pub perm: Vec<usize>,
+    /// Number of pivots that were statically perturbed (replaced by a floor)
+    /// to avoid a singular/tiny pivot. Zero for an exact factorization;
+    /// nonzero only when static-pivoting (preconditioner) mode is enabled. The
+    /// factor then reconstructs `A + E` for a small `E`, which is exactly what
+    /// a preconditioner wants.
+    pub n_perturbed: usize,
 }
 
 /// The Bunch-Kaufman pivot threshold `α = (1 + √17)/8 ≈ 0.6404`.
@@ -272,6 +278,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
         d_subdiag,
         two_by_two,
         perm,
+        n_perturbed: 0,
     })
 }
 

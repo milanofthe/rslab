@@ -16,7 +16,7 @@
 
 use crate::dense::ldlt_generic::{solve_ldlt, LdltFactors};
 use crate::error::FeralError;
-use crate::numeric::multifrontal_generic::factor_sparse_ldlt;
+use crate::numeric::multifrontal_generic::{factor_sparse_ldlt_with, GenericFactorOptions};
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
@@ -43,8 +43,22 @@ impl<T: Scalar> SparseSymmetricLdlt<T> {
         self.factors.l_values.len()
     }
 
-    /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P`.
+    /// Number of statically perturbed pivots (preconditioner mode). Zero for
+    /// an exact factorization. A nonzero count means the stored factor is of a
+    /// slightly perturbed `A + E`; solve via iterative refinement / Krylov.
+    pub fn n_perturbed(&self) -> usize {
+        self.factors.n_perturbed
+    }
+
+    /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P` (exact mode).
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, FeralError> {
+        Self::factor_with(a, &GenericFactorOptions::default())
+    }
+
+    /// Equilibrate and factor `A` with explicit options — notably
+    /// static-pivoting (never-fail preconditioner) mode. See
+    /// [`GenericFactorOptions`].
+    pub fn factor_with(a: &CscMatrix<T>, opts: &GenericFactorOptions) -> Result<Self, FeralError> {
         a.validate()?;
         let n = a.n;
 
@@ -86,7 +100,7 @@ impl<T: Scalar> SparseSymmetricLdlt<T> {
             values: scaled_values,
         };
 
-        let factors = factor_sparse_ldlt(&scaled)?;
+        let factors = factor_sparse_ldlt_with(&scaled, opts)?;
         Ok(Self { factors, scale })
     }
 

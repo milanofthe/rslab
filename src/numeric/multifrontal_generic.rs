@@ -26,6 +26,7 @@
 //! generic [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt) handles the
 //! triangular/diagonal solves and permutation directly.
 
+use crate::dense::factor::ZeroPivotAction;
 use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, LdltFactors};
 use crate::error::FeralError;
 use crate::scalar::Scalar;
@@ -48,6 +49,51 @@ pub fn set_use_gemm_schur(on: bool) {
     USE_GEMM_SCHUR.store(on, Ordering::Relaxed);
 }
 
+/// Options controlling the generic multifrontal factorization. Defaults give an
+/// **exact** complete factorization that fails on rank deficiency. Relaxing
+/// them turns the factorization into a robust, memory-light **preconditioner**.
+#[derive(Debug, Clone)]
+pub struct GenericFactorOptions {
+    /// Near-zero pivot policy. Reuses feral's [`ZeroPivotAction`]: `Fail`
+    /// (exact, default) returns [`FeralError::NumericallyRankDeficient`] on a
+    /// singular pivot; `PerturbToEps { abs_floor }` is robust static pivoting —
+    /// a pivot below `abs_floor` is lifted to that floor (the
+    /// complex-symmetric analogue of feral's f64 `perturb_to_floor`), so the
+    /// factorization never fails and produces `L D Lᵀ = A + E` for small `E`.
+    /// That is exactly the never-fail behaviour a preconditioner needs.
+    pub on_zero_pivot: ZeroPivotAction,
+    /// Threshold dropping for incomplete factorization. When `Some(tau)`, fill
+    /// entries of `L` with magnitude below `tau` (relative to the column) are
+    /// discarded, trading factor accuracy for memory. `None` = complete
+    /// factorization. (Wired in a later stage.)
+    pub drop_tol: Option<f64>,
+}
+
+impl Default for GenericFactorOptions {
+    fn default() -> Self {
+        Self {
+            on_zero_pivot: ZeroPivotAction::Fail,
+            drop_tol: None,
+        }
+    }
+}
+
+/// Static-pivot perturbation, the complex-symmetric analogue of feral's f64
+/// `perturb_to_floor` (`dense::factor`): lift a pivot whose magnitude is below
+/// `abs_floor` up to that floor, preserving phase. For `T = f64` this reduces
+/// to `sign(d)·max(|d|, abs_floor)`, matching the real kernel.
+#[inline]
+fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
+    let mag = d.magnitude();
+    if mag >= abs_floor {
+        d
+    } else if mag == 0.0 {
+        T::from_real(abs_floor)
+    } else {
+        d * T::from_real(abs_floor / mag)
+    }
+}
+
 /// Per-front partial-factorization output, in within-front pivot order.
 struct FrontFactors<T> {
     /// Total front size (eliminated + contribution rows).
@@ -65,6 +111,8 @@ struct FrontFactors<T> {
     d_subdiag: Vec<T>,
     /// `true` at the first column of each 2×2 block, length `nelim`.
     two_by_two: Vec<bool>,
+    /// Number of pivots statically perturbed in this front.
+    n_perturbed: usize,
 }
 
 /// Partially factor the first `ncol` (fully-summed) columns of a dense
@@ -76,6 +124,7 @@ fn factor_front<T: Scalar>(
     f: &mut [T],
     nrow: usize,
     ncol: usize,
+    perturb_floor: Option<f64>,
 ) -> Result<(FrontFactors<T>, Vec<T>), FeralError> {
     let n = nrow; // column stride
     let alpha = bk_alpha();
@@ -85,6 +134,7 @@ fn factor_front<T: Scalar>(
     let mut d_diag = vec![T::zero(); ncol];
     let mut d_subdiag = vec![T::zero(); ncol];
     let mut two_by_two = vec![false; ncol];
+    let mut n_perturbed = 0usize;
 
     let mut k = 0;
     while k < ncol {
@@ -104,7 +154,14 @@ fn factor_front<T: Scalar>(
         let kstep;
         let kp;
         if absakk.max(colmax) == 0.0 {
-            return Err(FeralError::NumericallyRankDeficient);
+            // Fully zero pivot column. Exact mode fails; static-pivot mode
+            // takes a 1×1 step and lets the perturbation below lift the zero
+            // diagonal up to the floor.
+            if perturb_floor.is_none() {
+                return Err(FeralError::NumericallyRankDeficient);
+            }
+            kstep = 1;
+            kp = k;
         } else if absakk >= alpha * colmax {
             kstep = 1;
             kp = k;
@@ -140,9 +197,15 @@ fn factor_front<T: Scalar>(
                 swap_sym_lower(f, n, k, kp);
                 perm.swap(k, kp);
             }
-            let d = f[k * n + k];
-            if d == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+            let mut d = f[k * n + k];
+            match perturb_floor {
+                Some(floor) if d.magnitude() < floor => {
+                    d = perturb_pivot(d, floor);
+                    f[k * n + k] = d;
+                    n_perturbed += 1;
+                }
+                None if d == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                _ => {}
             }
             d_diag[k] = d;
             let dinv = d.recip();
@@ -167,12 +230,28 @@ fn factor_front<T: Scalar>(
                 swap_sym_lower(f, n, k + 1, kp);
                 perm.swap(k + 1, kp);
             }
-            let d11 = f[k * n + k];
+            let mut d11 = f[k * n + k];
             let d21 = f[k * n + (k + 1)];
-            let d22 = f[(k + 1) * n + (k + 1)];
-            let det = d11 * d22 - d21 * d21;
-            if det == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+            let mut d22 = f[(k + 1) * n + (k + 1)];
+            let mut det = d11 * d22 - d21 * d21;
+            // Static-pivot the 2×2 when its determinant is near-singular. The
+            // real kernel (feral's `perturb_2x2_to_floor`) shifts the small
+            // eigenvalue; for complex-symmetric blocks the eigenvalues are
+            // complex, so we shift both diagonals by the floor (lifting |det|)
+            // and, as a last resort, nudge det itself — enough to keep the
+            // preconditioner factor live.
+            match perturb_floor {
+                Some(floor) if det.magnitude() < floor * floor => {
+                    d11 = d11 + T::from_real(floor);
+                    d22 = d22 + T::from_real(floor);
+                    det = d11 * d22 - d21 * d21;
+                    if det.magnitude() < floor * floor {
+                        det = det + T::from_real(floor * floor);
+                    }
+                    n_perturbed += 1;
+                }
+                None if det == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                _ => {}
             }
             let detinv = det.recip();
             d_diag[k] = d11;
@@ -326,6 +405,7 @@ fn factor_front<T: Scalar>(
             d_diag,
             d_subdiag,
             two_by_two,
+            n_perturbed,
         },
         cb,
     ))
@@ -363,6 +443,7 @@ fn factor_one_node<T: Scalar>(
     sym: &SymbolicFactorization,
     a_perm: &CscMatrix<T>,
     node_results: &[Option<NodeFactor<T>>],
+    perturb_floor: Option<f64>,
 ) -> Result<NodeFactor<T>, FeralError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
@@ -430,7 +511,7 @@ fn factor_one_node<T: Scalar>(
         }
     }
 
-    let (front, contrib) = factor_front(&mut f, nrow, ncol)?;
+    let (front, contrib) = factor_front(&mut f, nrow, ncol, perturb_floor)?;
     Ok(NodeFactor {
         front,
         row_indices: ri,
@@ -445,6 +526,15 @@ fn factor_one_node<T: Scalar>(
 /// Returns an [`LdltFactors`] in factorization order; solve with
 /// [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
 pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, FeralError> {
+    factor_sparse_ldlt_with(a, &GenericFactorOptions::default())
+}
+
+/// Like [`factor_sparse_ldlt`] but with explicit [`GenericFactorOptions`] —
+/// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
+pub fn factor_sparse_ldlt_with<T: Scalar>(
+    a: &CscMatrix<T>,
+    opts: &GenericFactorOptions,
+) -> Result<LdltFactors<T>, FeralError> {
     a.validate()?;
     let n = a.n;
     if n == 0 {
@@ -457,8 +547,21 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
             d_subdiag: Vec::new(),
             two_by_two: Vec::new(),
             perm: Vec::new(),
+            n_perturbed: 0,
         });
     }
+
+    // Static-pivot floor (absolute), translated from feral's ZeroPivotAction.
+    // `PerturbToEps { abs_floor }` is taken as given (feral convention: an
+    // absolute floor, typically `eps_rel · ‖A‖∞`); `Fail` disables perturbation.
+    let perturb_floor: Option<f64> = match opts.on_zero_pivot {
+        ZeroPivotAction::Fail => None,
+        ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
+        ZeroPivotAction::ForceAccept => {
+            let anorm = a.values.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+            Some(anorm.max(1.0) * f64::EPSILON)
+        }
+    };
 
     // 1. Symbolic analysis on the structure only. The analysis never reads
     //    values, so feed it a structurally identical f64 pattern matrix.
@@ -525,7 +628,9 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
     for level_nodes in &by_level {
         let computed: Vec<(usize, NodeFactor<T>)> = level_nodes
             .par_iter()
-            .map(|&s| factor_one_node(s, &sym, &a_perm, &node_results).map(|nf| (s, nf)))
+            .map(|&s| {
+                factor_one_node(s, &sym, &a_perm, &node_results, perturb_floor).map(|nf| (s, nf))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         for (s, nf) in computed {
             node_results[s] = Some(nf);
@@ -599,6 +704,8 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
         }
     }
 
+    let n_perturbed: usize = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
+
     Ok(LdltFactors {
         n,
         l_col_ptr,
@@ -608,6 +715,7 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
         d_subdiag,
         two_by_two,
         perm,
+        n_perturbed,
     })
 }
 
@@ -768,6 +876,63 @@ mod tests {
             "residual {}",
             residual_inf(&a, &x, &b)
         );
+    }
+
+    #[test]
+    fn perturb_rescues_singular_complex() {
+        // Structurally singular complex-symmetric system: index 1 is fully
+        // decoupled with a zero diagonal (zero row/column). Exact mode must
+        // fail; static-pivoting (preconditioner) mode must succeed, report a
+        // perturbation, and produce a finite, solvable factor of `A + E`.
+        let c = |re, im| Complex::new(re, im);
+        let n = 3;
+        let rows = vec![0, 2, 1];
+        let cols = vec![0, 0, 1];
+        let vals = vec![c(2.0, 1.0), c(-1.0, 0.3), c(0.0, 0.0)];
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+
+        assert!(
+            factor_sparse_ldlt(&a).is_err(),
+            "exact mode should reject the singular pivot"
+        );
+
+        let opts = GenericFactorOptions {
+            on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
+            drop_tol: None,
+        };
+        let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
+        assert!(f.n_perturbed >= 1, "expected ≥1 perturbation, got {}", f.n_perturbed);
+        let b = vec![c(1.0, 0.0); n];
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(x.iter().all(|v| v.norm().is_finite()), "factor must stay finite");
+    }
+
+    #[test]
+    fn exact_mode_never_perturbs_well_conditioned() {
+        // A diagonally dominant complex-symmetric grid factors exactly with no
+        // perturbation — the static-pivot path must not trigger spuriously.
+        let a = {
+            let c = |re, im| Complex::new(re, im);
+            let n = 16;
+            let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+            for j in 0..n {
+                r.push(j);
+                cc.push(j);
+                v.push(c(4.0, 0.5));
+                if j + 1 < n {
+                    r.push(j + 1);
+                    cc.push(j);
+                    v.push(c(-1.0, 0.1));
+                }
+            }
+            CscMatrix::<Complex<f64>>::from_triplets(n, &r, &cc, &v).unwrap()
+        };
+        let opts = GenericFactorOptions {
+            on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
+            drop_tol: None,
+        };
+        let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
+        assert_eq!(f.n_perturbed, 0, "well-conditioned matrix needs no perturbation");
     }
 
     #[test]
