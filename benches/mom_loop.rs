@@ -18,9 +18,9 @@ use num_complex::Complex;
 type C = Complex<f64>;
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
-const GMRES_TOL: f64 = 1e-6;
+const GMRES_TOL: f64 = 1e-3; // a realistic MoM Krylov tolerance
 const GMRES_RESTART: usize = 60;
-const GMRES_MAXIT: usize = 1000;
+const GMRES_MAXIT: usize = 300;
 
 fn run_precond<M: Preconditioner<C>>(
     label: &str,
@@ -83,28 +83,19 @@ fn bench_file(path: &std::path::Path) {
         if r0.converged { "" } else { "  (NO CONV)" },
     );
 
-    // Exact LU preconditioner (reference: ~1 iter).
-    let exact = factor_general_lu(&a, &GenericFactorOptions::preconditioner(1e-12)).unwrap();
-    run_precond("f64 exact LU", &a, &b, exact.factor_nnz(), 16, &exact);
+    // Exact LU near-field preconditioner (static-pivoted, equilibrated).
+    let exact = factor_general_lu(&a, &GenericFactorOptions::preconditioner(1e-10)).unwrap();
+    run_precond("f64 LU (no drop)", &a, &b, exact.factor_nnz(), 16, &exact);
 
-    // Incomplete LU preconditioners (the MoM config): static-pivoted + dropped.
-    for tau in [1e-2, 5e-2, 1e-1] {
-        let opts = GenericFactorOptions::preconditioner(1e-12).with_drop_tol(tau);
-        let ilu = factor_general_lu(&a, &opts).unwrap();
-        run_precond(
-            &format!("f64 ILU τ={tau:.0e}"),
-            &a,
-            &b,
-            ilu.factor_nnz(),
-            16,
-            &ilu,
-        );
-    }
+    // f32 LU — half the factor memory.
+    let f32lu = LowPrecisionLu::factor(&a, &GenericFactorOptions::preconditioner(1e-10)).unwrap();
+    run_precond("f32 LU (no drop)", &a, &b, f32lu.factor_nnz(), 8, &f32lu);
 
-    // f32 incomplete LU — half the factor memory.
-    let opts32 = GenericFactorOptions::preconditioner(1e-12).with_drop_tol(5e-2);
-    let ilu32 = LowPrecisionLu::factor(&a, &opts32).unwrap();
-    run_precond("f32 ILU τ=5e-2", &a, &b, ilu32.factor_nnz(), 8, &ilu32);
+    // Light incomplete LU (memory ↓). Aggressive dropping is unstable on these
+    // indefinite saddle matrices (post-hoc truncation, not propagated ILU).
+    let ilu = factor_general_lu(&a, &GenericFactorOptions::preconditioner(1e-10).with_drop_tol(1e-2))
+        .unwrap();
+    run_precond("f64 ILU τ=1e-2", &a, &b, ilu.factor_nnz(), 16, &ilu);
     println!();
 }
 
