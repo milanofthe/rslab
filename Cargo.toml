@@ -113,5 +113,9 @@ harness = false
 name = "vs_faer"
 harness = false
 
+[[bench]]
+name = "precond"
+harness = false
+
 [profile.release]
 debug = true
