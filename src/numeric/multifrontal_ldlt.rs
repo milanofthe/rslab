@@ -1351,6 +1351,15 @@ fn factor_left_looking<T: Scalar>(
     let mut dvals: Vec<Vec<T>> = vec![Vec::new(); nsuper];
     let mut n_perturbed = 0usize;
     let mut local_map = vec![usize::MAX; n];
+    // Reusable cmod scratch: `vc` (scalar path), `vd_buf` = D-scaled update
+    // columns, `u_buf` = the dense `cmod` GEMM result before scatter.
+    let mut vc: Vec<T> = Vec::new();
+    let mut vd_buf: Vec<T> = Vec::new();
+    let mut u_buf: Vec<T> = Vec::new();
+    // Route a `cmod` update through the SIMD GEMM once it is large enough to beat
+    // the scalar triple loop; parallelize the (few) very large separator updates.
+    const LL_GEMM_GATE: usize = 4096;
+    const LL_GEMM_PAR: usize = 1_000_000;
 
     for s in 0..nsuper {
         let snode = &sym.supernodes[s];
@@ -1369,6 +1378,9 @@ fn factor_left_looking<T: Scalar>(
             }
         }
         // cmod: pull each updater's contribution columns that land here.
+        // Update `s`'s panel by `−L_k[Ok,:]·D_k·L_k[Pk,:]ᵀ`, where `Ok` are `k`'s
+        // off-diagonal rows (all ⊆ `s`'s structure) and `Pk ⊆ Ok` the ones that
+        // are columns of `s` — a contiguous run `[p0, p1)` of the sorted `Ok`.
         for &kk in &update_list[s] {
             let nck = sym.supernodes[kk].ncol;
             let nrk = rs[kk].len();
@@ -1376,29 +1388,84 @@ fn factor_left_looking<T: Scalar>(
             let nok = ok.len();
             let pk = &panels[kk];
             let dk = &dvals[kk];
-            // Off-diag rows of k that are columns of s form a contiguous run.
-            let mut vc = vec![T::zero(); nck];
-            for c_idx in 0..nok {
-                let gcol = ok[c_idx];
-                if gcol < first {
-                    continue;
-                }
-                if gcol >= first + ncol {
-                    break;
-                }
-                let tcol = gcol - first; // = local_map[gcol]
-                // vc[ck] = D_k[ck] · L_k[ok[c_idx], ck]
-                for ck in 0..nck {
-                    vc[ck] = dk[ck] * pk[(nck + c_idx) + ck * nrk];
-                }
-                for r_idx in c_idx..nok {
-                    let trow = local_map[ok[r_idx]];
-                    let mut acc = T::zero();
+            let p0 = ok.partition_point(|&g| g < first);
+            let p1 = ok.partition_point(|&g| g < first + ncol);
+            let npk = p1 - p0;
+            if npk == 0 {
+                continue;
+            }
+            if nok * npk * nck < LL_GEMM_GATE {
+                // Scalar path for small updates.
+                vc.clear();
+                vc.resize(nck, T::zero());
+                for c_idx in p0..p1 {
+                    let tcol = ok[c_idx] - first;
                     for ck in 0..nck {
-                        acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
+                        vc[ck] = dk[ck] * pk[(nck + c_idx) + ck * nrk];
                     }
-                    let dst = trow + tcol * nrow;
-                    panel[dst] = panel[dst] - acc;
+                    for r_idx in c_idx..nok {
+                        let trow = local_map[ok[r_idx]];
+                        let mut acc = T::zero();
+                        for ck in 0..nck {
+                            acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
+                        }
+                        let dst = trow + tcol * nrow;
+                        panel[dst] = panel[dst] - acc;
+                    }
+                }
+            } else {
+                // BLAS-3 path: `U = W · Vdᵀ` with `W = L_k[Ok,:]` (nok×nck) and
+                // `Vd = D_k-scaled L_k[Pk,:]` (npk×nck), then scatter-subtract the
+                // lower triangle into the panel.
+                vd_buf.clear();
+                vd_buf.resize(npk * nck, T::zero());
+                for ck in 0..nck {
+                    let dkc = dk[ck];
+                    for i in 0..npk {
+                        vd_buf[i + ck * npk] = pk[(nck + p0 + i) + ck * nrk] * dkc;
+                    }
+                }
+                u_buf.clear();
+                u_buf.resize(nok * npk, T::zero());
+                let par = if nok * npk * nck >= LL_GEMM_PAR {
+                    gemm::Parallelism::Rayon(0)
+                } else {
+                    gemm::Parallelism::None
+                };
+                // SAFETY: lhs (`pk` off-diagonal block, read), rhs (`vd_buf`,
+                // read) and dst (`u_buf`, write) are pairwise-disjoint
+                // allocations; all strides are in bounds; `T` is a supported gemm
+                // element. `Vdᵀ` is passed via swapped rhs strides.
+                unsafe {
+                    gemm::gemm(
+                        nok,
+                        npk,
+                        nck,
+                        u_buf.as_mut_ptr(),
+                        nok as isize,
+                        1,
+                        false,
+                        pk.as_ptr().add(nck),
+                        nrk as isize,
+                        1,
+                        vd_buf.as_ptr(),
+                        1,
+                        npk as isize,
+                        T::zero(),
+                        T::one(),
+                        false,
+                        false,
+                        false,
+                        par,
+                    );
+                }
+                for c in 0..npk {
+                    let tcol = ok[p0 + c] - first;
+                    let ucol = &u_buf[c * nok..c * nok + nok];
+                    for r in (p0 + c)..nok {
+                        let dst = local_map[ok[r]] + tcol * nrow;
+                        panel[dst] = panel[dst] - ucol[r];
+                    }
                 }
             }
         }
