@@ -302,6 +302,9 @@ fn lu_front<T: Scalar>(
     // Extract L (nrow × ncol col-major, unit lower) and U (nrow × ncol
     // col-major over the row index, with the pivot on the diagonal), plus the
     // contribution block (`f`'s Schur-updated trailing A22 = A22 − L21·U12).
+    // Kept serial: the work-stealing driver already overlaps each front's serial
+    // tail with other subtrees' work, so per-front extraction parallelism finds
+    // no idle threads to use (measured: no gain).
     let one = T::one();
     let cnrow = nrow - ncol;
     let mut l = vec![T::zero(); nrow * ncol];
@@ -465,6 +468,10 @@ fn factor_one_node_lu<T: Scalar>(
     })
 }
 
+/// A supernode's own factor plus the flat `(supernode-id, factor)` list for the
+/// rest of its subtree — the return shape of [`factor_subtree`].
+type SubtreeFactors<T> = (NodeLu<T>, Vec<(usize, NodeLu<T>)>);
+
 /// Recursively factor the assembly subtree rooted at supernode `s` with a
 /// **work-stealing tree schedule**: the children's subtrees are factored
 /// concurrently (`par_iter`) and this node is factored only once they are done.
@@ -476,7 +483,6 @@ fn factor_one_node_lu<T: Scalar>(
 /// Returns this node's factor plus a flat `(supernode-id, factor)` list for the
 /// whole subtree, which the caller scatters into `node_results` for the global
 /// emit pass.
-#[allow(clippy::type_complexity)]
 fn factor_subtree<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
@@ -484,10 +490,10 @@ fn factor_subtree<T: Scalar>(
     a_perm_t: &GeneralCsc<T>,
     perturb_floor: Option<f64>,
     profile: bool,
-) -> Result<(NodeLu<T>, Vec<(usize, NodeLu<T>)>), FeralError> {
+) -> Result<SubtreeFactors<T>, FeralError> {
     let children = &sym.supernodes[s].children;
     // Factor the child subtrees concurrently.
-    let outs: Vec<(NodeLu<T>, Vec<(usize, NodeLu<T>)>)> = children
+    let outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
         .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, profile))
         .collect::<Result<Vec<_>, _>>()?;
@@ -677,7 +683,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
     // Factor every root subtree with the work-stealing tree schedule; the
     // children-before-parent dependency is the recursion structure itself.
-    let root_outs: Vec<(NodeLu<T>, Vec<(usize, NodeLu<T>)>)> = roots
+    let root_outs: Vec<SubtreeFactors<T>> = roots
         .par_iter()
         .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, profile))
         .collect::<Result<Vec<_>, _>>()?;
