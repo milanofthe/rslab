@@ -531,25 +531,128 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
 
 /// Like [`factor_sparse_ldlt`] but with explicit [`GenericFactorOptions`] —
 /// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
+///
+/// Convenience wrapper: runs [`analyze`] then [`factor_numeric`]. For the
+/// PARDISO-style *analyze once, factor many* workflow — FEM Newton steps or a
+/// frequency sweep that reuse one sparsity pattern — call them separately and
+/// keep the [`GenericSymbolic`] across factorizations.
 pub fn factor_sparse_ldlt_with<T: Scalar>(
     a: &CscMatrix<T>,
     opts: &GenericFactorOptions,
 ) -> Result<LdltFactors<T>, FeralError> {
-    a.validate()?;
-    let n = a.n;
-    if n == 0 {
-        return Ok(LdltFactors {
-            n: 0,
-            l_col_ptr: vec![0],
-            l_row_idx: Vec::new(),
-            l_values: Vec::new(),
-            d_diag: Vec::new(),
-            d_subdiag: Vec::new(),
-            two_by_two: Vec::new(),
-            perm: Vec::new(),
-            n_perturbed: 0,
-        });
+    let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
+    factor_numeric(&symb, a, opts)
+}
+
+/// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
+/// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
+/// and pass to [`factor_numeric`] for each set of numeric values sharing the
+/// pattern — the PARDISO phase-1 analysis.
+pub struct GenericSymbolic {
+    inner: Option<SymbolicInner>,
+    n: usize,
+    nnz: usize,
+}
+
+struct SymbolicInner {
+    sym: SymbolicFactorization,
+    /// Assembly-tree levels: `by_level[l]` are the supernodes at level `l`, all
+    /// mutually independent (factored concurrently by the rayon driver).
+    by_level: Vec<Vec<usize>>,
+}
+
+impl GenericSymbolic {
+    /// The analyzed dimension.
+    pub fn n(&self) -> usize {
+        self.n
     }
+}
+
+/// PARDISO phase 1: analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`,
+/// lower triangle). The result is value-independent and reusable across many
+/// [`factor_numeric`] calls that share the pattern.
+pub fn analyze(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+) -> Result<GenericSymbolic, FeralError> {
+    let nnz = row_idx.len();
+    if n == 0 {
+        return Ok(GenericSymbolic { inner: None, n: 0, nnz });
+    }
+    // Symbolic analysis on the structure only; feed a unit-valued f64 pattern.
+    let pattern = CscMatrix::<f64> {
+        n,
+        col_ptr: col_ptr.to_vec(),
+        row_idx: row_idx.to_vec(),
+        values: vec![1.0; nnz],
+    };
+    // Disable LdltCompress: it transforms the pattern via a quotient-graph
+    // compression beyond a plain permutation, so `sym.perm` would no longer be
+    // consistent with the `A_perm` built in `factor_numeric`.
+    let snode_params = SupernodeParams {
+        preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
+        ..SupernodeParams::default()
+    };
+    let sym = symbolic_factorize(&pattern, &snode_params)?;
+
+    // Assembly-tree levels: level(s) = 1 + max(level(children)); same-level
+    // supernodes are mutually independent.
+    let nsuper = sym.supernodes.len();
+    let mut level = vec![0usize; nsuper];
+    let mut max_level = 0usize;
+    for s in 0..nsuper {
+        let mut lv = 0usize;
+        for &ch in &sym.supernodes[s].children {
+            lv = lv.max(level[ch] + 1);
+        }
+        level[s] = lv;
+        max_level = max_level.max(lv);
+    }
+    let mut by_level: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+    for (s, &lv) in level.iter().enumerate() {
+        by_level[lv].push(s);
+    }
+
+    Ok(GenericSymbolic {
+        inner: Some(SymbolicInner { sym, by_level }),
+        n,
+        nnz,
+    })
+}
+
+/// PARDISO phases 2–3: numeric factorization reusing a [`GenericSymbolic`].
+/// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
+/// from. Honours static pivoting and incomplete-factor dropping via `opts`.
+pub fn factor_numeric<T: Scalar>(
+    symb: &GenericSymbolic,
+    a: &CscMatrix<T>,
+    opts: &GenericFactorOptions,
+) -> Result<LdltFactors<T>, FeralError> {
+    a.validate()?;
+    let n = symb.n;
+    if a.n != n || a.row_idx.len() != symb.nnz {
+        return Err(FeralError::InvalidInput(
+            "factor_numeric: matrix does not match the analyzed pattern".to_string(),
+        ));
+    }
+    let inner = match &symb.inner {
+        None => {
+            return Ok(LdltFactors {
+                n: 0,
+                l_col_ptr: vec![0],
+                l_row_idx: Vec::new(),
+                l_values: Vec::new(),
+                d_diag: Vec::new(),
+                d_subdiag: Vec::new(),
+                two_by_two: Vec::new(),
+                perm: Vec::new(),
+                n_perturbed: 0,
+            });
+        }
+        Some(i) => i,
+    };
+    let sym = &inner.sym;
 
     // Static-pivot floor (absolute), translated from feral's ZeroPivotAction.
     // `PerturbToEps { abs_floor }` is taken as given (feral convention: an
@@ -562,25 +665,6 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
             Some(anorm.max(1.0) * f64::EPSILON)
         }
     };
-
-    // 1. Symbolic analysis on the structure only. The analysis never reads
-    //    values, so feed it a structurally identical f64 pattern matrix.
-    let pattern = CscMatrix::<f64> {
-        n,
-        col_ptr: a.col_ptr.clone(),
-        row_idx: a.row_idx.clone(),
-        values: vec![1.0; a.row_idx.len()],
-    };
-    // Disable the LdltCompress preprocessing: it transforms the pattern via a
-    // quotient-graph compression beyond a plain permutation, so `sym.perm`
-    // would no longer be consistent with the `A_perm` we build here. `None`
-    // keeps the fill-reducing ordering a pure symmetric permutation. (Slightly
-    // more fill on some matrices; revisit when wiring compression in.)
-    let snode_params = SupernodeParams {
-        preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
-        ..SupernodeParams::default()
-    };
-    let sym = symbolic_factorize(&pattern, &snode_params)?;
 
     // 2. Permuted matrix A_perm = Pᵀ A P in permuted (new) numbering, lower
     //    triangle. `perm_inv` is old→new.
@@ -601,35 +685,19 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
     }
     let a_perm = CscMatrix::<T>::from_triplets(n, &rows, &cols, &vals)?;
 
-    // 3. Multifrontal numeric factorization, parallelized over the assembly
-    //    tree. Assign each supernode a level = 1 + max(children levels); nodes
-    //    at the same level are mutually independent (none is an ancestor of
-    //    another), so each level is factored concurrently with rayon. A node
-    //    reads only its children's contribution blocks, all computed in lower
-    //    levels. The sequential reference is the same `factor_one_node` run
-    //    level-by-level.
+    // 3. Multifrontal numeric factorization, parallelized level-by-level over
+    //    the assembly tree (levels precomputed in `analyze`). Same-level
+    //    supernodes are mutually independent and factored concurrently; each
+    //    reads only its children's contribution blocks from lower levels.
+    let by_level = &inner.by_level;
     let nsuper = sym.supernodes.len();
-    let mut level = vec![0usize; nsuper];
-    let mut max_level = 0usize;
-    for s in 0..nsuper {
-        let mut lv = 0usize;
-        for &ch in &sym.supernodes[s].children {
-            lv = lv.max(level[ch] + 1);
-        }
-        level[s] = lv;
-        max_level = max_level.max(lv);
-    }
-    let mut by_level: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
-    for (s, &lv) in level.iter().enumerate() {
-        by_level[lv].push(s);
-    }
 
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
-    for level_nodes in &by_level {
+    for level_nodes in by_level {
         let computed: Vec<(usize, NodeFactor<T>)> = level_nodes
             .par_iter()
             .map(|&s| {
-                factor_one_node(s, &sym, &a_perm, &node_results, perturb_floor).map(|nf| (s, nf))
+                factor_one_node(s, sym, &a_perm, &node_results, perturb_floor).map(|nf| (s, nf))
             })
             .collect::<Result<Vec<_>, _>>()?;
         for (s, nf) in computed {

@@ -16,7 +16,9 @@
 
 use crate::dense::ldlt_generic::{solve_ldlt, LdltFactors};
 use crate::error::FeralError;
-use crate::numeric::multifrontal_generic::{factor_sparse_ldlt_with, GenericFactorOptions};
+use crate::numeric::multifrontal_generic::{
+    analyze as analyze_pattern, factor_numeric, GenericFactorOptions, GenericSymbolic,
+};
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
@@ -57,51 +59,11 @@ impl<T: Scalar> SparseSymmetricLdlt<T> {
 
     /// Equilibrate and factor `A` with explicit options — notably
     /// static-pivoting (never-fail preconditioner) mode. See
-    /// [`GenericFactorOptions`].
+    /// [`GenericFactorOptions`]. Runs analysis + numeric factorization in one
+    /// call; for the *analyze once, factor many* workflow use
+    /// [`SymbolicAnalysis`].
     pub fn factor_with(a: &CscMatrix<T>, opts: &GenericFactorOptions) -> Result<Self, FeralError> {
-        a.validate()?;
-        let n = a.n;
-
-        // Row magnitudes rᵢ = maxⱼ |Aᵢⱼ| over the symmetric matrix (lower
-        // triangle stored, so each off-diagonal updates both endpoints).
-        let mut row_max = vec![0.0f64; n];
-        for j in 0..n {
-            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let i = a.row_idx[k];
-                let m = a.values[k].magnitude();
-                if m > row_max[i] {
-                    row_max[i] = m;
-                }
-                if i != j && m > row_max[j] {
-                    row_max[j] = m;
-                }
-            }
-        }
-        // sᵢ = 1/√rᵢ; an all-zero row (rᵢ = 0) is left unscaled and will surface
-        // as a singular pivot during factorization.
-        let scale: Vec<f64> = row_max
-            .iter()
-            .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
-            .collect();
-
-        // Scaled values Âᵢⱼ = sᵢ · Aᵢⱼ · sⱼ (structure unchanged). Built in CSC
-        // order so it lines up with `a.col_ptr`/`a.row_idx`.
-        let mut scaled_values = Vec::with_capacity(a.values.len());
-        for j in 0..n {
-            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let i = a.row_idx[k];
-                scaled_values.push(a.values[k] * T::from_real(scale[i] * scale[j]));
-            }
-        }
-        let scaled = CscMatrix::<T> {
-            n,
-            col_ptr: a.col_ptr.clone(),
-            row_idx: a.row_idx.clone(),
-            values: scaled_values,
-        };
-
-        let factors = factor_sparse_ldlt_with(&scaled, opts)?;
-        Ok(Self { factors, scale })
+        SymbolicAnalysis::analyze(a)?.factor(a, opts)
     }
 
     /// Solve `A · x = rhs` using the stored factors.
@@ -174,6 +136,101 @@ impl<T: Scalar> SparseSymmetricLdlt<T> {
     }
 }
 
+/// Symmetric infinity-norm equilibration `Â = D A D`, `D = diag(s)`,
+/// `sᵢ = 1/√maxⱼ|Aᵢⱼ|`. Returns the scaled matrix (identical pattern) and the
+/// real scaling `s`. An all-zero row is left unscaled (surfaces as a singular
+/// pivot during factorization).
+fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
+    let n = a.n;
+    let mut row_max = vec![0.0f64; n];
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            let m = a.values[k].magnitude();
+            if m > row_max[i] {
+                row_max[i] = m;
+            }
+            if i != j && m > row_max[j] {
+                row_max[j] = m;
+            }
+        }
+    }
+    let scale: Vec<f64> = row_max
+        .iter()
+        .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
+        .collect();
+    let mut scaled_values = Vec::with_capacity(a.values.len());
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            scaled_values.push(a.values[k] * T::from_real(scale[i] * scale[j]));
+        }
+    }
+    let scaled = CscMatrix::<T> {
+        n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: scaled_values,
+    };
+    (scaled, scale)
+}
+
+/// Reusable PARDISO-style **phase-1 analysis** for [`SparseSymmetricLdlt`].
+///
+/// Analyze a sparsity pattern once, then [`factor`](Self::factor) many value
+/// sets that share it — FEM Newton steps, time stepping, or a frequency sweep
+/// where only the matrix entries change. The analysis (fill-reducing ordering,
+/// supernodes, assembly-tree levels) is the expensive value-independent part;
+/// reusing it across factorizations is the core PARDISO efficiency win.
+///
+/// One analysis serves any scalar field: the same [`SymbolicAnalysis`] can
+/// [`factor`](Self::factor) an `f64` matrix and a `Complex<f64>` matrix that
+/// share the pattern.
+///
+/// ```
+/// use feral::{SymbolicAnalysis, GenericFactorOptions, CscMatrix};
+/// # fn demo(pattern_vals: &[f64], updated_vals: &[f64]) -> Result<(), feral::FeralError> {
+/// let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0])?;
+/// let analysis = SymbolicAnalysis::analyze(&a)?;        // phase 1, once
+/// let f1 = analysis.factor(&a, &GenericFactorOptions::default())?; // phase 2/3
+/// let _x = f1.solve(&[1.0, 1.0])?;
+/// // ... later, same pattern, new values: analysis.factor(&a2, &opts)? ...
+/// # Ok(()) }
+/// ```
+pub struct SymbolicAnalysis {
+    symbolic: GenericSymbolic,
+}
+
+impl SymbolicAnalysis {
+    /// Phase 1: analyze the sparsity pattern of `a`. The values are ignored, so
+    /// any matrix with the target pattern (even a zero-valued template) works.
+    pub fn analyze<T: Scalar>(a: &CscMatrix<T>) -> Result<Self, FeralError> {
+        a.validate()?;
+        Ok(Self {
+            symbolic: analyze_pattern(a.n, &a.col_ptr, &a.row_idx)?,
+        })
+    }
+
+    /// The analyzed matrix dimension.
+    pub fn n(&self) -> usize {
+        self.symbolic.n()
+    }
+
+    /// Phases 2–3: equilibrate and factor `a`, reusing this analysis. `a` must
+    /// carry the same sparsity pattern the analysis was built from (same `n`
+    /// and `nnz`), otherwise an [`FeralError::InvalidInput`] is returned.
+    pub fn factor<T: Scalar>(
+        &self,
+        a: &CscMatrix<T>,
+        opts: &GenericFactorOptions,
+    ) -> Result<SparseSymmetricLdlt<T>, FeralError> {
+        a.validate()?;
+        let (scaled, scale) = equilibrate(a);
+        let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
+        Ok(SparseSymmetricLdlt { factors, scale })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +273,68 @@ mod tests {
             .map(|i| (ax[i] - b[i]).abs() / b[i].abs().max(1.0))
             .fold(0.0, f64::max);
         assert!(rel < 1e-10, "relative residual {}", rel);
+    }
+
+    #[test]
+    fn phased_analyze_then_factor_many_matches_one_shot() {
+        // PARDISO workflow: analyze the pattern once, factor two different
+        // value sets that share it. Each must match the one-shot factor and
+        // solve its own system — the FEM Newton / frequency-sweep use case.
+        let c = |re, im| Complex::new(re, im);
+        let n = 8;
+        let (mut rows, mut cols) = (Vec::new(), Vec::new());
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            if j + 1 < n {
+                rows.push(j + 1);
+                cols.push(j);
+            }
+        }
+        // Pattern template (values irrelevant for analysis).
+        let template = CscMatrix::<Complex<f64>>::from_triplets(
+            n,
+            &rows,
+            &cols,
+            &vec![c(1.0, 0.0); rows.len()],
+        )
+        .unwrap();
+        let analysis = SymbolicAnalysis::analyze(&template).unwrap();
+        assert_eq!(analysis.n(), n);
+
+        for shift in [0.0, 2.0, -1.5] {
+            // Same pattern, different values.
+            let vals: Vec<Complex<f64>> = rows
+                .iter()
+                .zip(&cols)
+                .map(|(&i, &j)| if i == j { c(4.0 + shift, 1.0) } else { c(-1.0, 0.2) })
+                .collect();
+            let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+            let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 1.0)).collect();
+
+            let phased = analysis
+                .factor(&a, &GenericFactorOptions::default())
+                .unwrap();
+            let one_shot = SparseSymmetricLdlt::factor(&a).unwrap();
+            let x_phased = phased.solve(&b).unwrap();
+            let x_one = one_shot.solve(&b).unwrap();
+
+            // Same factor → identical solve.
+            for (p, o) in x_phased.iter().zip(&x_one) {
+                assert!((p - o).norm() < 1e-12);
+            }
+            assert!(residual_inf(&a, &x_phased, &b) < 1e-9);
+        }
+    }
+
+    #[test]
+    fn analysis_rejects_mismatched_pattern() {
+        let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0]).unwrap();
+        let analysis = SymbolicAnalysis::analyze(&a).unwrap();
+        // A different pattern (extra off-diagonal) must be rejected.
+        let a2 = CscMatrix::<f64>::from_triplets(3, &[0, 1, 1, 2], &[0, 0, 1, 2], &[2.0, -1.0, 2.0, 2.0])
+            .unwrap();
+        assert!(analysis.factor(&a2, &GenericFactorOptions::default()).is_err());
     }
 
     #[test]
