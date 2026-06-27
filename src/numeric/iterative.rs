@@ -169,9 +169,104 @@ where
     })
 }
 
+/// Preconditioned COCR (Conjugate Orthogonal Conjugate Residual, Sogabe &
+/// Zhang 2007) for complex-symmetric `A = Aᵀ`. The CR-family analogue of
+/// [`cocg`]: it minimises a residual-like quantity and is typically **smoother
+/// and more robust on strongly indefinite** operators (high-frequency 3D
+/// Helmholtz) where COCG's residual can oscillate or break down.
+///
+/// Same interface and conventions as [`cocg`]. Costs one matrix–vector product
+/// and one preconditioner apply per iteration. Reduces to preconditioned CR
+/// for `T = f64`.
+pub fn cocr<T, M>(
+    a: &CscMatrix<T>,
+    b: &[T],
+    precond: &M,
+    tol: f64,
+    max_iter: usize,
+) -> Result<KrylovResult<T>, FeralError>
+where
+    T: Scalar,
+    M: Preconditioner<T> + ?Sized,
+{
+    let n = a.n;
+    if b.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: b.len(),
+        });
+    }
+
+    let mut x = vec![T::zero(); n];
+    let mut r = b.to_vec(); // r₀ = b (x₀ = 0)
+    let bnorm = norm2(b);
+    if bnorm == 0.0 {
+        return Ok(KrylovResult {
+            x,
+            iters: 0,
+            converged: true,
+            final_res: 0.0,
+        });
+    }
+
+    let mut z = vec![T::zero(); n]; // z = M⁻¹ r
+    precond.apply(&r, &mut z)?;
+    let mut p = z.clone();
+    let mut ap = vec![T::zero(); n];
+    a.symv(&p, &mut ap); // A p
+    let mut az = ap.clone(); // A z (= A p at init since p = z)
+    let mut gamma = dotu(&z, &az); // zᵀ A z
+    let mut w = vec![T::zero(); n]; // M⁻¹ A p
+    let mut aw = vec![T::zero(); n]; // A w
+
+    let mut final_res = norm2(&r) / bnorm;
+    let mut converged = false;
+    let mut iters = 0;
+    while iters < max_iter {
+        precond.apply(&ap, &mut w)?; // w = M⁻¹ A p
+        a.symv(&w, &mut aw); // A w
+        let denom = dotu(&ap, &w); // (A p)ᵀ M⁻¹ (A p)
+        if denom == T::zero() {
+            break;
+        }
+        let alpha = gamma * denom.recip();
+        for i in 0..n {
+            x[i] = x[i] + alpha * p[i];
+            r[i] = r[i] - alpha * ap[i];
+            z[i] = z[i] - alpha * w[i];
+            az[i] = az[i] - alpha * aw[i];
+        }
+        iters += 1;
+        final_res = norm2(&r) / bnorm;
+        if final_res <= tol {
+            converged = true;
+            break;
+        }
+        let gamma_new = dotu(&z, &az);
+        if gamma == T::zero() {
+            break;
+        }
+        let beta = gamma_new * gamma.recip();
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+            ap[i] = az[i] + beta * ap[i];
+        }
+        gamma = gamma_new;
+    }
+
+    Ok(KrylovResult {
+        x,
+        iters,
+        converged,
+        final_res,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dense::factor::ZeroPivotAction;
+    use crate::numeric::multifrontal_generic::GenericFactorOptions;
     use num_complex::Complex;
 
     type C = Complex<f64>;
@@ -217,6 +312,49 @@ mod tests {
         a.symv(&res.x, &mut ax);
         let r = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
         assert!(r < 1e-7, "residual {}", r);
+    }
+
+    #[test]
+    fn cocr_solves_complex_symmetric_pre_and_unpre() {
+        let c = |re, im| Complex::new(re, im);
+        let a = grid(10, c(4.0, 0.5), c(-1.0, 0.1));
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+
+        // Unpreconditioned COCR converges to the true solution.
+        let un = cocr(&a, &b, &NoPreconditioner, 1e-10, 3000).unwrap();
+        assert!(un.converged, "COCR res={}", un.final_res);
+        let mut ax = vec![C::default(); n];
+        a.symv(&un.x, &mut ax);
+        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(res < 1e-7, "COCR residual {}", res);
+
+        // RLA-preconditioned COCR collapses to a handful of iterations.
+        let m = SparseSymmetricLdlt::factor(&a).unwrap();
+        let pre = cocr(&a, &b, &m, 1e-10, 3000).unwrap();
+        assert!(pre.converged && pre.iters <= 3, "iters {}", pre.iters);
+    }
+
+    #[test]
+    fn cocr_handles_indefinite_helmholtz() {
+        // Indefinite complex-symmetric: high-frequency 2D Helmholtz with a
+        // negative-real diagonal shift (`diag = -1 + 0.3i`). A robust
+        // preconditioner (static-pivoted RLA) plus COCR must still converge.
+        let c = |re, im| Complex::new(re, im);
+        let a = grid(10, c(-1.0, 0.3), c(1.0, 0.05));
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c(1.0, (i % 3) as f64 - 1.0)).collect();
+        let opts = GenericFactorOptions {
+            on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 },
+            drop_tol: None,
+        };
+        let m = SparseSymmetricLdlt::factor_with(&a, &opts).unwrap();
+        let pre = cocr(&a, &b, &m, 1e-9, 500).unwrap();
+        assert!(pre.converged, "indefinite COCR res={} iters={}", pre.final_res, pre.iters);
+        let mut ax = vec![C::default(); n];
+        a.symv(&pre.x, &mut ax);
+        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(res < 1e-6, "residual {}", res);
     }
 
     #[test]

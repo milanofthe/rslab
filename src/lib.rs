@@ -33,7 +33,7 @@ pub use numeric::multifrontal_generic::{
     factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur, GenericFactorOptions,
 };
 pub use numeric::sparse_solver::SparseSymmetricLdlt;
-pub use numeric::iterative::{cocg, KrylovResult, NoPreconditioner, Preconditioner};
+pub use numeric::iterative::{cocg, cocr, KrylovResult, NoPreconditioner, Preconditioner};
 pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
