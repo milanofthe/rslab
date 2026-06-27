@@ -28,7 +28,6 @@ use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
-use std::collections::BTreeSet;
 
 /// Per-front unsymmetric partial-factorization output, in elimination order
 /// (static pivoting → no interchange, so front-local order is pivot order).
@@ -93,20 +92,44 @@ impl<T: Scalar> LuFactors<T> {
 /// the elimination tree carries fill for both `L` and `U`.
 fn symmetrized_lower_pattern<T: Scalar>(a: &GeneralCsc<T>) -> (Vec<usize>, Vec<usize>) {
     let n = a.n;
-    let mut cols: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    // Counting-scatter (no `BTreeSet`: no per-element heap allocation, no
+    // pointer-chasing). Each entry contributes a lower-triangle pair `(hi, lo)`
+    // to bucket `lo`; buckets are then sorted + deduped into CSC.
+    let mut counts = vec![0usize; n];
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            let lo = if i < j { i } else { j };
+            counts[lo] += 1;
+        }
+    }
+    let mut start = vec![0usize; n + 1];
+    for j in 0..n {
+        start[j + 1] = start[j] + counts[j];
+    }
+    let total = start[n];
+    let mut scattered = vec![0usize; total];
+    let mut cursor = start[..n].to_vec();
     for j in 0..n {
         for k in a.col_ptr[j]..a.col_ptr[j + 1] {
             let i = a.row_idx[k];
             let (hi, lo) = if i >= j { (i, j) } else { (j, i) };
-            cols[lo].insert(hi);
+            scattered[cursor[lo]] = hi;
+            cursor[lo] += 1;
         }
     }
     let mut col_ptr = Vec::with_capacity(n + 1);
     col_ptr.push(0);
-    let mut row_idx = Vec::new();
-    for set in &cols {
-        for &i in set {
-            row_idx.push(i);
+    let mut row_idx = Vec::with_capacity(total);
+    for j in 0..n {
+        let seg = &mut scattered[start[j]..start[j + 1]];
+        seg.sort_unstable();
+        let mut last = usize::MAX;
+        for &i in seg.iter() {
+            if i != last {
+                row_idx.push(i);
+                last = i;
+            }
         }
         col_ptr.push(row_idx.len());
     }
@@ -296,6 +319,8 @@ fn factor_one_node_lu<T: Scalar>(
     a_perm_t: &GeneralCsc<T>,
     node_results: &[Option<NodeLu<T>>],
     perturb_floor: Option<f64>,
+    gloc: &mut [usize],
+    fbuf: &mut Vec<T>,
 ) -> Result<NodeLu<T>, FeralError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
@@ -328,12 +353,17 @@ fn factor_one_node_lu<T: Scalar>(
     ri.extend(trailing);
     let nrow = ri.len();
 
-    let mut gloc = vec![usize::MAX; n];
+    // Caller-owned per-thread scratch held at the all-`usize::MAX` invariant;
+    // only `ri`'s entries are set and cleared again below. `fbuf` is the pooled
+    // front buffer.
+    debug_assert_eq!(gloc.len(), n);
     for (li, &g) in ri.iter().enumerate() {
         gloc[g] = li;
     }
 
-    let mut f = vec![T::zero(); nrow * nrow];
+    fbuf.clear();
+    fbuf.resize(nrow * nrow, T::zero());
+    let f = &mut fbuf[..];
 
     // Owned columns (full): scatter a_perm column c into front column p.
     for p in 0..ncol {
@@ -374,7 +404,12 @@ fn factor_one_node_lu<T: Scalar>(
         }
     }
 
-    let (front, contrib) = lu_front(&mut f, nrow, ncol, perturb_floor)?;
+    // Restore the `gloc` all-`usize::MAX` invariant for the next front.
+    for &g in &ri {
+        gloc[g] = usize::MAX;
+    }
+
+    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor)?;
     Ok(NodeLu {
         front,
         row_indices: ri,
@@ -447,10 +482,22 @@ pub fn factor_general_lu<T: Scalar>(
     for level_nodes in by_level {
         let computed: Vec<(usize, NodeLu<T>)> = level_nodes
             .par_iter()
-            .map(|&s| {
-                factor_one_node_lu(s, sym, &a_perm, &a_perm_t, &node_results, perturb_floor)
+            .map_init(
+                || (vec![usize::MAX; n], Vec::<T>::new()),
+                |(gloc, fbuf), &s| {
+                    factor_one_node_lu(
+                        s,
+                        sym,
+                        &a_perm,
+                        &a_perm_t,
+                        &node_results,
+                        perturb_floor,
+                        gloc,
+                        fbuf,
+                    )
                     .map(|nf| (s, nf))
-            })
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
         for (s, nf) in computed {
             node_results[s] = Some(nf);

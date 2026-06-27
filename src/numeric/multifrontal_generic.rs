@@ -462,6 +462,8 @@ fn factor_one_node<T: Scalar>(
     a_perm: &CscMatrix<T>,
     node_results: &[Option<NodeFactor<T>>],
     perturb_floor: Option<f64>,
+    gloc: &mut [usize],
+    fbuf: &mut Vec<T>,
 ) -> Result<NodeFactor<T>, FeralError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
@@ -494,12 +496,18 @@ fn factor_one_node<T: Scalar>(
     ri.extend(trailing);
     let nrow = ri.len();
 
-    let mut gloc = vec![usize::MAX; n]; // permuted-global → front-local
+    // `gloc` (permuted-global → front-local) is a caller-owned per-thread
+    // scratch held at the all-`usize::MAX` invariant; we set only `ri`'s entries
+    // and clear them again below, so it never costs an O(n) alloc/memset per
+    // front. `fbuf` is the pooled front buffer, zeroed to `nrow*nrow`.
+    debug_assert_eq!(gloc.len(), n);
     for (li, &g) in ri.iter().enumerate() {
         gloc[g] = li;
     }
 
-    let mut f = vec![T::zero(); nrow * nrow];
+    fbuf.clear();
+    fbuf.resize(nrow * nrow, T::zero());
+    let f = &mut fbuf[..];
 
     // Scatter original entries of the eliminated columns.
     for p in 0..ncol {
@@ -529,7 +537,13 @@ fn factor_one_node<T: Scalar>(
         }
     }
 
-    let (front, contrib) = factor_front(&mut f, nrow, ncol, perturb_floor)?;
+    // Restore the `gloc` all-`usize::MAX` invariant for the next front on this
+    // worker (clear only the entries we touched).
+    for &g in &ri {
+        gloc[g] = usize::MAX;
+    }
+
+    let (front, contrib) = factor_front(f, nrow, ncol, perturb_floor)?;
     Ok(NodeFactor {
         front,
         row_indices: ri,
@@ -721,11 +735,18 @@ pub fn factor_numeric<T: Scalar>(
 
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
     for level_nodes in by_level {
+        // Per-rayon-worker reusable scratch: the `gloc` map (held all-MAX) and
+        // the front buffer. `map_init` keeps one set per worker, reused across
+        // all fronts that worker processes — no per-front O(n) allocation.
         let computed: Vec<(usize, NodeFactor<T>)> = level_nodes
             .par_iter()
-            .map(|&s| {
-                factor_one_node(s, sym, &a_perm, &node_results, perturb_floor).map(|nf| (s, nf))
-            })
+            .map_init(
+                || (vec![usize::MAX; n], Vec::<T>::new()),
+                |(gloc, fbuf), &s| {
+                    factor_one_node(s, sym, &a_perm, &node_results, perturb_floor, gloc, fbuf)
+                        .map(|nf| (s, nf))
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
         for (s, nf) in computed {
             node_results[s] = Some(nf);
