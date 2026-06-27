@@ -14,7 +14,7 @@
 //! diagonal (common in complex-symmetric and saddle-point systems). Solving
 //! `A x = b` becomes: factor `Â`, then `x = D · (Â⁻¹ · (D b))`.
 
-use crate::dense::ldlt_generic::{solve_ldlt, LdltFactors};
+use crate::dense::ldlt_generic::{solve_ldlt, solve_ldlt_many, LdltFactors};
 use crate::error::FeralError;
 use crate::numeric::multifrontal_ldlt::{
     analyze as analyze_pattern, factor_numeric, FactorOptions, MultifrontalSymbolic,
@@ -95,6 +95,38 @@ impl<T: Scalar> LdltSolver<T> {
         // x = D ẑ
         for (xi, &s) in x.iter_mut().zip(&self.scale) {
             *xi = *xi * T::from_real(s);
+        }
+        Ok(x)
+    }
+
+    /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the
+    /// returned `x` are **row-major** `n × nrhs` buffers (`b[i*nrhs + c]` is
+    /// RHS `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve)
+    /// calls — the factor structure is traversed once and each value applied to
+    /// all RHS (the FEM multiple-load-case / block-Krylov use).
+    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, FeralError> {
+        let n = self.factors.n;
+        if nrhs == 0 || b.len() != n * nrhs {
+            return Err(FeralError::DimensionMismatch {
+                expected: n * nrhs,
+                got: b.len(),
+            });
+        }
+        // B̂ = D B (real diagonal scale per row, applied to every RHS column).
+        let mut b_hat = b.to_vec();
+        for i in 0..n {
+            let s = T::from_real(self.scale[i]);
+            for c in 0..nrhs {
+                b_hat[i * nrhs + c] = b_hat[i * nrhs + c] * s;
+            }
+        }
+        let mut x = solve_ldlt_many(&self.factors, &b_hat, nrhs)?;
+        // X = D X̂
+        for i in 0..n {
+            let s = T::from_real(self.scale[i]);
+            for c in 0..nrhs {
+                x[i * nrhs + c] = x[i * nrhs + c] * s;
+            }
         }
         Ok(x)
     }
@@ -282,6 +314,35 @@ mod tests {
             .map(|i| (ax[i] - b[i]).abs() / b[i].abs().max(1.0))
             .fold(0.0, f64::max);
         assert!(rel < 1e-10, "relative residual {}", rel);
+    }
+
+    #[test]
+    fn ldlt_solve_many_matches_single() {
+        let n = 7;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            r.push(j);
+            cc.push(j);
+            v.push(4.0_f64);
+            if j + 1 < n {
+                r.push(j + 1);
+                cc.push(j);
+                v.push(-1.0);
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let f = LdltSolver::factor(&a).unwrap();
+        let nrhs = 4;
+        // Row-major B.
+        let b: Vec<f64> = (0..n * nrhs).map(|k| (k % 5) as f64 - 2.0).collect();
+        let x = f.solve_many(&b, nrhs).unwrap();
+        for c in 0..nrhs {
+            let bc: Vec<f64> = (0..n).map(|i| b[i * nrhs + c]).collect();
+            let xc = f.solve(&bc).unwrap();
+            for i in 0..n {
+                assert!((x[i * nrhs + c] - xc[i]).abs() < 1e-10, "rhs {c} row {i}");
+            }
+        }
     }
 
     #[test]

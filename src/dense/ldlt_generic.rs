@@ -391,6 +391,104 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     Ok(x)
 }
 
+/// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the returned
+/// `x` are **row-major** `n × nrhs` buffers (row `i`'s `nrhs` values contiguous,
+/// i.e. `b[i*nrhs + c]` is RHS `c` at row `i`). Processing the RHS as a block
+/// loads each `L`/`D` value once and applies it to all `nrhs` columns — the
+/// memory-bound amortization that makes one block solve beat `nrhs` separate
+/// [`solve_ldlt`] calls.
+pub fn solve_ldlt_many<T: Scalar>(
+    factors: &LdltFactors<T>,
+    b: &[T],
+    nrhs: usize,
+) -> Result<Vec<T>, FeralError> {
+    let n = factors.n;
+    if nrhs == 0 || b.len() != n * nrhs {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * nrhs,
+            got: b.len(),
+        });
+    }
+    // Y = Pᵀ B (gather rows; each row's `nrhs` block moves as a unit).
+    let mut y = vec![T::zero(); n * nrhs];
+    for i in 0..n {
+        let src = factors.perm[i] * nrhs;
+        y[i * nrhs..i * nrhs + nrhs].copy_from_slice(&b[src..src + nrhs]);
+    }
+
+    // Forward solve L Z = Y.
+    for j in 0..n {
+        let jb = j * nrhs;
+        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
+            let i = factors.l_row_idx[k];
+            if i != j {
+                let lval = factors.l_values[k];
+                let ib = i * nrhs;
+                for c in 0..nrhs {
+                    y[ib + c] = y[ib + c] - lval * y[jb + c];
+                }
+            }
+        }
+    }
+
+    // D-block solve W = D⁻¹ Z, in place.
+    let mut k = 0;
+    while k < n {
+        if factors.two_by_two[k] {
+            let d11 = factors.d_diag[k];
+            let d21 = factors.d_subdiag[k];
+            let d22 = factors.d_diag[k + 1];
+            let det = d11 * d22 - d21 * d21;
+            if det == T::zero() {
+                return Err(FeralError::NumericallyRankDeficient);
+            }
+            let detinv = det.recip();
+            let (k0, k1) = (k * nrhs, (k + 1) * nrhs);
+            for c in 0..nrhs {
+                let z0 = y[k0 + c];
+                let z1 = y[k1 + c];
+                y[k0 + c] = (d22 * z0 - d21 * z1) * detinv;
+                y[k1 + c] = (d11 * z1 - d21 * z0) * detinv;
+            }
+            k += 2;
+        } else {
+            let d = factors.d_diag[k];
+            if d == T::zero() {
+                return Err(FeralError::NumericallyRankDeficient);
+            }
+            let dinv = d.recip();
+            let kb = k * nrhs;
+            for c in 0..nrhs {
+                y[kb + c] = y[kb + c] * dinv;
+            }
+            k += 1;
+        }
+    }
+
+    // Backward solve Lᵀ V = W.
+    for j in (0..n).rev() {
+        let jb = j * nrhs;
+        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
+            let i = factors.l_row_idx[k];
+            if i != j {
+                let lval = factors.l_values[k];
+                let ib = i * nrhs;
+                for c in 0..nrhs {
+                    y[jb + c] = y[jb + c] - lval * y[ib + c];
+                }
+            }
+        }
+    }
+
+    // X = P V (scatter rows).
+    let mut x = vec![T::zero(); n * nrhs];
+    for i in 0..n {
+        let dst = factors.perm[i] * nrhs;
+        x[dst..dst + nrhs].copy_from_slice(&y[i * nrhs..i * nrhs + nrhs]);
+    }
+    Ok(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

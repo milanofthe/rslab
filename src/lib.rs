@@ -88,7 +88,7 @@ pub use error::FeralError;
 pub use error::FeralError as RlaError;
 pub use scalar::Scalar;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
-pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, LdltFactors};
+pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur,
@@ -99,8 +99,8 @@ pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,
 // plus the raw factor type and free building blocks.
 pub use numeric::multifrontal_lu::{
-    factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_refined, LuFactors, LuSolver,
-    LuSymbolic,
+    factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
+    LuFactors, LuSolver, LuSymbolic,
 };
 pub use numeric::iterative::{
     cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,

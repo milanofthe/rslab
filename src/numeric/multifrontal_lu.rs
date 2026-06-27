@@ -601,6 +601,13 @@ impl<T: Scalar> LuSolver<T> {
         solve_lu(&self.factors, b)
     }
 
+    /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the
+    /// returned `x` are **row-major** `n × nrhs` buffers (`b[i*nrhs + c]` is RHS
+    /// `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve) calls.
+    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, FeralError> {
+        solve_lu_many(&self.factors, b, nrhs)
+    }
+
     /// Solve `A x = b` with iterative refinement against the original matrix `a`
     /// (which must be the matrix this was factored from) — recovers accuracy on
     /// hard systems where the static-pivoted factor alone is insufficient.
@@ -968,6 +975,80 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, FeralErr
     Ok(out)
 }
 
+/// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the returned
+/// `x` are **row-major** `n × nrhs` buffers (`b[i*nrhs + c]` is RHS `c` at row
+/// `i`). The `L`/`U` structure is traversed once and each value applied to all
+/// `nrhs` columns — faster than `nrhs` separate [`solve_lu`] calls.
+pub fn solve_lu_many<T: Scalar>(
+    f: &LuFactors<T>,
+    b: &[T],
+    nrhs: usize,
+) -> Result<Vec<T>, FeralError> {
+    let n = f.n;
+    if nrhs == 0 || b.len() != n * nrhs {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * nrhs,
+            got: b.len(),
+        });
+    }
+    // Ŷ = P_row · (D_r B): row-equilibrate then row-permute each RHS block.
+    let mut y = vec![T::zero(); n * nrhs];
+    for e in 0..n {
+        let orig = f.perm_row[e];
+        let s = T::from_real(f.d_row[orig]);
+        let (eb, ob) = (e * nrhs, orig * nrhs);
+        for c in 0..nrhs {
+            y[eb + c] = b[ob + c] * s;
+        }
+    }
+    // Forward solve L Y = Ŷ (CSC, unit diagonal).
+    for e in 0..n {
+        let eb = e * nrhs;
+        for k in f.l_col_ptr[e]..f.l_col_ptr[e + 1] {
+            let i = f.l_row_idx[k];
+            if i != e {
+                let lval = f.l_values[k];
+                let ib = i * nrhs;
+                for c in 0..nrhs {
+                    y[ib + c] = y[ib + c] - lval * y[eb + c];
+                }
+            }
+        }
+    }
+    // Backward solve U X = Y (CSR by row), in place in `y`.
+    for e in (0..n).rev() {
+        let eb = e * nrhs;
+        let mut diag = T::one();
+        for k in f.u_row_ptr[e]..f.u_row_ptr[e + 1] {
+            let c_col = f.u_col_idx[k];
+            let uval = f.u_values[k];
+            if c_col == e {
+                diag = uval;
+            } else {
+                let cb = c_col * nrhs;
+                for c in 0..nrhs {
+                    y[eb + c] = y[eb + c] - uval * y[cb + c];
+                }
+            }
+        }
+        let dinv = diag.recip();
+        for c in 0..nrhs {
+            y[eb + c] = y[eb + c] * dinv;
+        }
+    }
+    // Undo column permutation + column equilibration: out[perm[e]] = D_c · x̂[e].
+    let mut out = vec![T::zero(); n * nrhs];
+    for e in 0..n {
+        let orig = f.perm[e];
+        let s = T::from_real(f.d_col[orig]);
+        let (ob, eb) = (orig * nrhs, e * nrhs);
+        for c in 0..nrhs {
+            out[ob + c] = y[eb + c] * s;
+        }
+    }
+    Ok(out)
+}
+
 /// Solve `A x = b` with iterative refinement against the original matrix `a`.
 /// Each step computes the residual `r = b − A x` and applies the correction
 /// `x ← x + (LU)⁻¹ r`, stopping once `‖r‖∞` stops improving or `max_iter` is
@@ -1043,6 +1124,37 @@ mod tests {
         let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-10, "residual {}", resid(&a, &x, &b));
+    }
+
+    #[test]
+    fn lu_solve_many_matches_single() {
+        let n = 12;
+        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            r.push(i);
+            c.push(i);
+            v.push(5.0_f64);
+            if i + 1 < n {
+                r.push(i + 1);
+                c.push(i);
+                v.push(-1.0);
+                r.push(i);
+                c.push(i + 1);
+                v.push(-2.0);
+            }
+        }
+        let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
+        let solver = LuSolver::factor(&a, &FactorOptions::default()).unwrap();
+        let nrhs = 5;
+        let b: Vec<f64> = (0..n * nrhs).map(|k| (k % 7) as f64 - 3.0).collect();
+        let x = solver.solve_many(&b, nrhs).unwrap();
+        for col in 0..nrhs {
+            let bc: Vec<f64> = (0..n).map(|i| b[i * nrhs + col]).collect();
+            let xc = solver.solve(&bc).unwrap();
+            for i in 0..n {
+                assert!((x[i * nrhs + col] - xc[i]).abs() < 1e-10, "rhs {col} row {i}");
+            }
+        }
     }
 
     #[test]
