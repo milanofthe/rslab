@@ -423,16 +423,67 @@ fn factor_one_node_lu<T: Scalar>(
     })
 }
 
+/// Reusable symbolic analysis for the unsymmetric LU path — the symmetrized
+/// pattern `A ∪ Aᵀ` analyzed once. Pass to [`factor_general_lu_numeric`] for
+/// each value-set that shares the pattern (frequency sweep / Newton).
+pub struct LuSymbolic {
+    symb: crate::numeric::multifrontal_generic::GenericSymbolic,
+    n: usize,
+    nnz: usize,
+}
+
+impl LuSymbolic {
+    /// The analyzed dimension.
+    pub fn n(&self) -> usize {
+        self.n
+    }
+}
+
+/// PARDISO phase 1 for the general path: analyze the symmetrized pattern of `a`
+/// (values ignored). Reuse the result across many [`factor_general_lu_numeric`]
+/// calls that share the pattern.
+pub fn analyze_general<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, FeralError> {
+    a.validate()?;
+    let n = a.n;
+    let nnz = a.row_idx.len();
+    if n == 0 {
+        return Ok(LuSymbolic {
+            symb: analyze(0, &[0], &[])?,
+            n: 0,
+            nnz: 0,
+        });
+    }
+    let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
+    let symb = analyze(n, &col_ptr, &row_idx)?;
+    Ok(LuSymbolic { symb, n, nnz })
+}
+
 /// Factor a general (unsymmetric) sparse matrix `A` as `Pᵀ A P = L U` via
-/// generic multifrontal LU with static pivoting. `a` holds the **full** matrix
-/// (both triangles). Works for `T = f64`/`Complex<f64>` (and the `f32`
-/// variants). Solve with [`solve_lu`].
+/// generic multifrontal LU with partial pivoting. `a` holds the **full** matrix
+/// (both triangles). Convenience wrapper over [`analyze_general`] +
+/// [`factor_general_lu_numeric`]; for *analyze once, factor many* keep the
+/// [`LuSymbolic`] across calls. Solve with [`solve_lu`] / [`solve_lu_refined`].
 pub fn factor_general_lu<T: Scalar>(
     a: &GeneralCsc<T>,
     opts: &GenericFactorOptions,
 ) -> Result<LuFactors<T>, FeralError> {
+    factor_general_lu_numeric(&analyze_general(a)?, a, opts)
+}
+
+/// PARDISO phases 2–3 for the general path: numeric LU reusing a [`LuSymbolic`].
+/// `a` must share the analyzed pattern (`n`, `nnz`).
+pub fn factor_general_lu_numeric<T: Scalar>(
+    lusym: &LuSymbolic,
+    a: &GeneralCsc<T>,
+    opts: &GenericFactorOptions,
+) -> Result<LuFactors<T>, FeralError> {
     a.validate()?;
-    let n = a.n;
+    let n = lusym.n;
+    if a.n != n || a.row_idx.len() != lusym.nnz {
+        return Err(FeralError::InvalidInput(
+            "factor_general_lu_numeric: matrix does not match the analyzed pattern".to_string(),
+        ));
+    }
     if n == 0 {
         return Ok(LuFactors {
             n: 0,
@@ -457,10 +508,8 @@ pub fn factor_general_lu<T: Scalar>(
         }
     };
 
-    // Analyze the symmetrized pattern (reuses the symmetric ordering / tree).
-    let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
-    let symb = analyze(n, &col_ptr, &row_idx)?;
-    let (sym, by_level) = symb
+    let (sym, by_level) = lusym
+        .symb
         .sym_and_levels()
         .ok_or_else(|| FeralError::InvalidInput("internal: empty symbolic".to_string()))?;
 
@@ -843,6 +892,62 @@ mod tests {
         let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
+    }
+
+    #[test]
+    fn phased_general_lu_analyze_once_factor_many() {
+        // PARDISO workflow for the unsymmetric path: analyze the pattern once,
+        // factor several value sets that share it — each must match the
+        // one-shot factor's solve. The frequency-sweep / Newton use case.
+        let c = |re, im| Complex::new(re, im);
+        let m = 7;
+        let n = m * m;
+        let (mut rr, mut cc) = (Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                if b + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a, b + 1));
+                    rr.push(idx(a, b + 1));
+                    cc.push(p);
+                }
+                if a + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a + 1, b));
+                    rr.push(idx(a + 1, b));
+                    cc.push(p);
+                }
+            }
+        }
+        // Template (values irrelevant) → analyze once.
+        let template =
+            GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vec![c(1.0, 0.0); rr.len()])
+                .unwrap();
+        let analysis = analyze_general(&template).unwrap();
+        assert_eq!(analysis.n(), n);
+
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 1.0)).collect();
+        for shift in [0.0, 2.5, -1.0] {
+            let vv: Vec<Complex<f64>> = rr
+                .iter()
+                .zip(&cc)
+                .map(|(&i, &j)| if i == j { c(8.0 + shift, 1.0) } else { c(-1.0, 0.2) })
+                .collect();
+            let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+            let phased =
+                factor_general_lu_numeric(&analysis, &a, &GenericFactorOptions::default()).unwrap();
+            let one_shot = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+            let xp = solve_lu(&phased, &b).unwrap();
+            let xo = solve_lu(&one_shot, &b).unwrap();
+            for (p, o) in xp.iter().zip(&xo) {
+                assert!((p - o).norm() < 1e-10);
+            }
+            assert!(resid(&a, &xp, &b) < 1e-8);
+        }
     }
 
     #[test]

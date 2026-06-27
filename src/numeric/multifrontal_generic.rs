@@ -78,6 +78,38 @@ impl Default for GenericFactorOptions {
     }
 }
 
+impl GenericFactorOptions {
+    /// Exact, complete factorization (the default): fail on a singular pivot,
+    /// no fill dropping. Use for a direct solve where accuracy is required.
+    pub fn exact() -> Self {
+        Self::default()
+    }
+
+    /// Robust never-fail **preconditioner** mode: static pivoting replaces any
+    /// pivot below `abs_floor` (typically `eps_rel·‖A‖`) so the factorization
+    /// always succeeds. Compose with [`with_drop_tol`](Self::with_drop_tol) for
+    /// an incomplete preconditioner.
+    pub fn preconditioner(abs_floor: f64) -> Self {
+        Self {
+            on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor },
+            drop_tol: None,
+        }
+    }
+
+    /// Builder: enable incomplete-factor threshold dropping (`|fill| < tau` is
+    /// discarded, relative to the column/row).
+    pub fn with_drop_tol(mut self, tau: f64) -> Self {
+        self.drop_tol = Some(tau);
+        self
+    }
+
+    /// Builder: set the near-zero pivot policy.
+    pub fn with_pivot(mut self, policy: ZeroPivotAction) -> Self {
+        self.on_zero_pivot = policy;
+        self
+    }
+}
+
 /// Static-pivot perturbation, the complex-symmetric analogue of feral's f64
 /// `perturb_to_floor` (`dense::factor`): lift a pivot whose magnitude is below
 /// `abs_floor` up to that floor, preserving phase. For `T = f64` this reduces

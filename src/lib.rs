@@ -88,7 +88,10 @@ pub use numeric::multifrontal_generic::{
     factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur, GenericFactorOptions,
 };
 pub use numeric::multifrontal_generic::{analyze, factor_numeric, GenericSymbolic};
-pub use numeric::multifrontal_lu::{factor_general_lu, solve_lu, solve_lu_refined, LuFactors};
+pub use numeric::multifrontal_lu::{
+    analyze_general, factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_refined,
+    LuFactors, LuSymbolic,
+};
 pub use numeric::sparse_solver::{SparseSymmetricLdlt, SymbolicAnalysis};
 pub use numeric::iterative::{
     cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionPreconditioner,
