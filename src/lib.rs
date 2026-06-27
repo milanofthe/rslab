@@ -94,8 +94,8 @@ pub use numeric::multifrontal_lu::{
 };
 pub use numeric::sparse_solver::{SparseSymmetricLdlt, SymbolicAnalysis};
 pub use numeric::iterative::{
-    cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionPreconditioner,
-    NoPreconditioner, Preconditioner,
+    cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,
+    LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
 };
 pub use inertia::Inertia;
 pub use io::mtx::{

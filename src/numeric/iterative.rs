@@ -141,6 +141,62 @@ impl Preconditioner<Complex<f64>> for LowPrecisionPreconditioner {
     }
 }
 
+/// Memory-halved **unsymmetric** preconditioner: factor the general matrix `A`
+/// (given in `Complex<f64>`) in `Complex<f32>` LU and apply it inside an `f64`
+/// GMRES iteration. The `Complex<f32>` factor uses half the bytes (and gemm
+/// `c32`); the outer GMRES keeps full `f64` accuracy. The unsymmetric analogue
+/// of [`LowPrecisionPreconditioner`], for MoM/FEM general systems.
+pub struct LowPrecisionLu {
+    inner: crate::numeric::multifrontal_lu::LuFactors<Complex<f32>>,
+}
+
+impl LowPrecisionLu {
+    /// Down-cast `A` to `Complex<f32>` and LU-factor it (options honoured —
+    /// static pivoting and/or incomplete dropping for a preconditioner).
+    pub fn factor(
+        a: &GeneralCsc<Complex<f64>>,
+        opts: &GenericFactorOptions,
+    ) -> Result<Self, FeralError> {
+        let a32 = GeneralCsc::<Complex<f32>> {
+            n: a.n,
+            col_ptr: a.col_ptr.clone(),
+            row_idx: a.row_idx.clone(),
+            values: a
+                .values
+                .iter()
+                .map(|v| Complex::new(v.re as f32, v.im as f32))
+                .collect(),
+        };
+        Ok(Self {
+            inner: crate::numeric::multifrontal_lu::factor_general_lu(&a32, opts)?,
+        })
+    }
+
+    /// Stored fill `nnz(L)+nnz(U)`, in single-precision entries.
+    pub fn factor_nnz(&self) -> usize {
+        crate::numeric::multifrontal_lu::LuFactors::factor_nnz(&self.inner)
+    }
+
+    /// Number of statically perturbed pivots.
+    pub fn n_perturbed(&self) -> usize {
+        self.inner.n_perturbed
+    }
+}
+
+impl Preconditioner<Complex<f64>> for LowPrecisionLu {
+    fn apply(&self, r: &[Complex<f64>], z: &mut [Complex<f64>]) -> Result<(), FeralError> {
+        let r32: Vec<Complex<f32>> = r
+            .iter()
+            .map(|v| Complex::new(v.re as f32, v.im as f32))
+            .collect();
+        let z32 = crate::numeric::multifrontal_lu::solve_lu(&self.inner, &r32)?;
+        for (zi, v) in z.iter_mut().zip(z32) {
+            *zi = Complex::new(v.re as f64, v.im as f64);
+        }
+        Ok(())
+    }
+}
+
 /// Unconjugated bilinear inner product `xᵀy = Σ xᵢyᵢ` (no complex conjugation —
 /// the defining choice of the COCG geometry for `A = Aᵀ`).
 #[inline]
@@ -695,6 +751,56 @@ mod tests {
         a.matvec(&pre.x, &mut y);
         let res = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
         assert!(res < 1e-8, "residual {}", res);
+    }
+
+    #[test]
+    fn f32_lu_preconditioner_keeps_f64_accuracy_in_gmres() {
+        use crate::sparse::general::GeneralCsc;
+        let c = |re, im| Complex::new(re, im);
+        let m = 10;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(20.0, 2.0)); // strongly diagonally dominant → f32 factor is accurate
+                if b + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a, b + 1));
+                    vv.push(c(-1.0, 0.2));
+                    rr.push(idx(a, b + 1));
+                    cc.push(p);
+                    vv.push(c(-2.0, 0.1));
+                }
+                if a + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a + 1, b));
+                    vv.push(c(-1.5, 0.3));
+                    rr.push(idx(a + 1, b));
+                    cc.push(p);
+                    vv.push(c(-0.5, 0.4));
+                }
+            }
+        }
+        let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
+        // The f32 LU factor is a half-memory preconditioner accurate to ~1e-6
+        // (the f32 apply floor). f64 GMRES reaches that floor in a couple of
+        // iterations — ample for a MoM/FEM Krylov tolerance, at half the factor
+        // memory. (A residual below ~1e-6 is not attainable with an f32 apply;
+        // use the f64 factor for tighter tolerances.)
+        let pc = LowPrecisionLu::factor(&a, &GenericFactorOptions::default()).unwrap();
+        assert!(pc.factor_nnz() > 0);
+        let res = gmres(&a, &b, &pc, 1e-6, 200, 50).unwrap();
+        assert!(res.converged, "mixed-precision GMRES res={}", res.final_res);
+        assert!(res.iters <= 6, "iters {}", res.iters);
+        let mut y = vec![C::default(); n];
+        a.matvec(&res.x, &mut y);
+        let r = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(r < 1e-5, "residual {}", r);
     }
 
     #[test]

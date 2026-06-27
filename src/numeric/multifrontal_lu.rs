@@ -895,6 +895,46 @@ mod tests {
     }
 
     #[test]
+    fn complex_f32_lu_solves() {
+        // The Complex<f32> LU path (used by the mixed-precision preconditioner).
+        let c = |re: f32, im: f32| num_complex::Complex::<f32>::new(re, im);
+        let m = 10;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(20.0, 2.0));
+                if b + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a, b + 1));
+                    vv.push(c(-1.0, 0.2));
+                    rr.push(idx(a, b + 1));
+                    cc.push(p);
+                    vv.push(c(-2.0, 0.1));
+                }
+                if a + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a + 1, b));
+                    vv.push(c(-1.5, 0.3));
+                    rr.push(idx(a + 1, b));
+                    cc.push(p);
+                    vv.push(c(-0.5, 0.4));
+                }
+            }
+        }
+        let a = GeneralCsc::<num_complex::Complex<f32>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<num_complex::Complex<f32>> = (0..n).map(|i| c((i % 5) as f32 - 2.0, 1.0)).collect();
+        let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let x = solve_lu(&f, &b).unwrap();
+        let r = resid(&a, &x, &b);
+        assert!(r < 1e-3, "f32 LU residual {}", r);
+    }
+
+    #[test]
     fn phased_general_lu_analyze_once_factor_many() {
         // PARDISO workflow for the unsymmetric path: analyze the pattern once,
         // factor several value sets that share it — each must match the
