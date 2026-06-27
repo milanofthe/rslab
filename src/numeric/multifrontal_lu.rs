@@ -524,6 +524,43 @@ pub struct LuSymbolic {
 }
 
 impl LuSymbolic {
+    /// PARDISO **phase 1**: analyze the symmetrized pattern `A ∪ Aᵀ` of `a`
+    /// (values ignored, so any matrix with the target pattern works). Reuse the
+    /// result across many [`factor`](Self::factor) calls that share the pattern
+    /// — the unsymmetric twin of [`LdltSymbolic::analyze`].
+    ///
+    /// [`LdltSymbolic::analyze`]: crate::numeric::sparse_solver::LdltSymbolic::analyze
+    pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, FeralError> {
+        a.validate()?;
+        let n = a.n;
+        let nnz = a.row_idx.len();
+        if n == 0 {
+            return Ok(LuSymbolic {
+                symb: analyze(0, &[0], &[])?,
+                n: 0,
+                nnz: 0,
+            });
+        }
+        let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
+        let symb = analyze(n, &col_ptr, &row_idx)?;
+        Ok(LuSymbolic { symb, n, nnz })
+    }
+
+    /// PARDISO **phases 2–3**: equilibrate and LU-factor `a`, reusing this
+    /// analysis, into a ready-to-solve [`LuSolver`]. `a` must share the analyzed
+    /// pattern. The unsymmetric twin of [`LdltSymbolic::factor`].
+    ///
+    /// [`LdltSymbolic::factor`]: crate::numeric::sparse_solver::LdltSymbolic::factor
+    pub fn factor<T: Scalar>(
+        &self,
+        a: &GeneralCsc<T>,
+        opts: &FactorOptions,
+    ) -> Result<LuSolver<T>, FeralError> {
+        Ok(LuSolver {
+            factors: factor_general_lu_numeric(self, a, opts)?,
+        })
+    }
+
     /// The analyzed dimension.
     pub fn n(&self) -> usize {
         self.n
@@ -542,35 +579,72 @@ impl LuSymbolic {
     }
 }
 
-/// PARDISO phase 1 for the general path: analyze the symmetrized pattern of `a`
-/// (values ignored). Reuse the result across many [`factor_general_lu_numeric`]
-/// calls that share the pattern.
-pub fn analyze_general<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, FeralError> {
-    a.validate()?;
-    let n = a.n;
-    let nnz = a.row_idx.len();
-    if n == 0 {
-        return Ok(LuSymbolic {
-            symb: analyze(0, &[0], &[])?,
-            n: 0,
-            nnz: 0,
-        });
+/// A factored unsymmetric LU solver, ready to solve against many right-hand
+/// sides — the high-level, equilibrated counterpart of the raw [`LuFactors`]
+/// (and the unsymmetric twin of [`LdltSolver`](crate::numeric::sparse_solver::LdltSolver)).
+/// Build via [`LuSymbolic::factor`] (analyze once, factor many) or the one-shot
+/// [`LuSolver::factor`].
+pub struct LuSolver<T> {
+    factors: LuFactors<T>,
+}
+
+impl<T: Scalar> LuSolver<T> {
+    /// One-shot analyze + equilibrate + factor of a general matrix `A`.
+    pub fn factor(a: &GeneralCsc<T>, opts: &FactorOptions) -> Result<Self, FeralError> {
+        Ok(Self {
+            factors: factor_general_lu(a, opts)?,
+        })
     }
-    let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
-    let symb = analyze(n, &col_ptr, &row_idx)?;
-    Ok(LuSymbolic { symb, n, nnz })
+
+    /// Solve `A x = b` using the stored factors.
+    pub fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+        solve_lu(&self.factors, b)
+    }
+
+    /// Solve `A x = b` with iterative refinement against the original matrix `a`
+    /// (which must be the matrix this was factored from) — recovers accuracy on
+    /// hard systems where the static-pivoted factor alone is insufficient.
+    pub fn solve_refined(
+        &self,
+        a: &GeneralCsc<T>,
+        b: &[T],
+        max_iter: usize,
+    ) -> Result<Vec<T>, FeralError> {
+        solve_lu_refined(&self.factors, a, b, max_iter)
+    }
+
+    /// Stored fill `nnz(L) + nnz(U)`.
+    pub fn factor_nnz(&self) -> usize {
+        self.factors.factor_nnz()
+    }
+
+    /// Number of statically perturbed pivots (preconditioner mode).
+    pub fn n_perturbed(&self) -> usize {
+        self.factors.n_perturbed
+    }
+
+    /// The matrix dimension.
+    pub fn n(&self) -> usize {
+        self.factors.n
+    }
+
+    /// Borrow the underlying raw factors (CSC `L` / CSR `U`, permutations,
+    /// equilibration), e.g. to use as a [`Preconditioner`](crate::Preconditioner).
+    pub fn factors(&self) -> &LuFactors<T> {
+        &self.factors
+    }
 }
 
 /// Factor a general (unsymmetric) sparse matrix `A` as `Pᵀ A P = L U` via
 /// generic multifrontal LU with partial pivoting. `a` holds the **full** matrix
-/// (both triangles). Convenience wrapper over [`analyze_general`] +
+/// (both triangles). Convenience wrapper over [`LuSymbolic::analyze`] +
 /// [`factor_general_lu_numeric`]; for *analyze once, factor many* keep the
 /// [`LuSymbolic`] across calls. Solve with [`solve_lu`] / [`solve_lu_refined`].
 pub fn factor_general_lu<T: Scalar>(
     a: &GeneralCsc<T>,
     opts: &FactorOptions,
 ) -> Result<LuFactors<T>, FeralError> {
-    factor_general_lu_numeric(&analyze_general(a)?, a, opts)
+    factor_general_lu_numeric(&LuSymbolic::analyze(a)?, a, opts)
 }
 
 /// PARDISO phases 2–3 for the general path: numeric LU reusing a [`LuSymbolic`].
@@ -1129,7 +1203,7 @@ mod tests {
         let template =
             GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vec![c(1.0, 0.0); rr.len()])
                 .unwrap();
-        let analysis = analyze_general(&template).unwrap();
+        let analysis = LuSymbolic::analyze(&template).unwrap();
         assert_eq!(analysis.n(), n);
 
         let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 1.0)).collect();

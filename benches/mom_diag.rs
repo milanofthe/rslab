@@ -17,10 +17,7 @@
 use std::time::Instant;
 
 use rla::prelude::*;
-use rla::{analyze_general, factor_general_lu_numeric};
-use num_complex::Complex;
-
-type C = Complex<f64>;
+use rla::LuSymbolic;
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 
@@ -73,7 +70,7 @@ fn diag_file(path: &std::path::Path) {
 
     // Phase split: analyze (symbolic) vs numeric factor.
     let t = Instant::now();
-    let sym = match analyze_general(&a) {
+    let sym = match LuSymbolic::analyze(&a) {
         Ok(s) => s,
         Err(e) => {
             println!("{name}: analyze error {e:?}");
@@ -84,7 +81,7 @@ fn diag_file(path: &std::path::Path) {
 
     let opts = FactorOptions::preconditioner(1e-10);
     let t = Instant::now();
-    let f = match factor_general_lu_numeric(&sym, &a, &opts) {
+    let f = match sym.factor(&a, &opts) {
         Ok(f) => f,
         Err(e) => {
             println!("{name}: factor error {e:?}");

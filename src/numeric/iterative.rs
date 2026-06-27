@@ -635,6 +635,29 @@ impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<
     }
 }
 
+/// The high-level [`LuSolver`](crate::numeric::multifrontal_lu::LuSolver) is a
+/// preconditioner / factorization too — the unsymmetric twin of the
+/// [`LdltSolver`] impls, so solver-in-the-loop code can be generic over either.
+impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<T> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+        let x = self.solve(r)?;
+        z.copy_from_slice(&x);
+        Ok(())
+    }
+}
+
+impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuSolver<T> {
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+        crate::numeric::multifrontal_lu::LuSolver::solve(self, b)
+    }
+    fn factor_nnz(&self) -> usize {
+        crate::numeric::multifrontal_lu::LuSolver::factor_nnz(self)
+    }
+    fn n_perturbed(&self) -> usize {
+        crate::numeric::multifrontal_lu::LuSolver::n_perturbed(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
