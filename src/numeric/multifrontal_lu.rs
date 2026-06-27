@@ -1,12 +1,12 @@
 //! Generic **unsymmetric** sparse LU factorization over any [`Scalar`] field —
 //! the general (non-symmetric) complex path, complementing the symmetric LDLᵀ
-//! path in [`crate::numeric::multifrontal_generic`].
+//! path in [`crate::numeric::multifrontal_ldlt`].
 //!
 //! It targets matrices whose *values* are unsymmetric (e.g. MoM A-EFIE
 //! near-field saddle preconditioners, where the symmetric and antisymmetric
 //! parts are comparable) but reuses the full symmetric machinery: the
 //! fill-reducing ordering, supernodes, assembly tree, level parallelism
-//! ([`analyze`](crate::numeric::multifrontal_generic::analyze)) and the SIMD
+//! ([`analyze`](crate::numeric::multifrontal_ldlt::analyze)) and the SIMD
 //! `gemm` Schur kernel. Only the per-front kernel changes — an unsymmetric LU
 //! producing separate `L` and `U` — and the analysis runs on the **symmetrized
 //! pattern** `A ∪ Aᵀ` so the elimination structure carries fill for both
@@ -23,8 +23,8 @@
 //!   (CSR, upper with the pivots on the diagonal), in factorization order.
 
 use crate::error::FeralError;
-use crate::numeric::multifrontal_generic::{
-    analyze, perturb_pivot, GenericFactorOptions, ZeroPivotAction,
+use crate::numeric::multifrontal_ldlt::{
+    analyze, perturb_pivot, FactorOptions, ZeroPivotAction,
 };
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
@@ -518,7 +518,7 @@ fn factor_subtree<T: Scalar>(
 /// pattern `A ∪ Aᵀ` analyzed once. Pass to [`factor_general_lu_numeric`] for
 /// each value-set that shares the pattern (frequency sweep / Newton).
 pub struct LuSymbolic {
-    symb: crate::numeric::multifrontal_generic::GenericSymbolic,
+    symb: crate::numeric::multifrontal_ldlt::MultifrontalSymbolic,
     n: usize,
     nnz: usize,
 }
@@ -531,7 +531,7 @@ impl LuSymbolic {
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)` of the symmetrized
     /// pattern — for factorization-cost diagnostics (front-size distribution and
-    /// a factor-flop estimate). See [`GenericSymbolic::front_dims`].
+    /// a factor-flop estimate). See [`MultifrontalSymbolic::front_dims`].
     pub fn front_dims(&self) -> Vec<(usize, usize)> {
         self.symb.front_dims()
     }
@@ -568,7 +568,7 @@ pub fn analyze_general<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, Feral
 /// [`LuSymbolic`] across calls. Solve with [`solve_lu`] / [`solve_lu_refined`].
 pub fn factor_general_lu<T: Scalar>(
     a: &GeneralCsc<T>,
-    opts: &GenericFactorOptions,
+    opts: &FactorOptions,
 ) -> Result<LuFactors<T>, FeralError> {
     factor_general_lu_numeric(&analyze_general(a)?, a, opts)
 }
@@ -579,7 +579,7 @@ pub fn factor_general_lu<T: Scalar>(
 pub fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
-    opts: &GenericFactorOptions,
+    opts: &FactorOptions,
 ) -> Result<LuFactors<T>, FeralError> {
     a.validate()?;
     let n = lusym.n;
@@ -966,7 +966,7 @@ mod tests {
         }
         let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
         let b: Vec<f64> = (0..n).map(|i| i as f64 - 9.5).collect();
-        let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-10, "residual {}", resid(&a, &x, &b));
     }
@@ -1010,7 +1010,7 @@ mod tests {
         }
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-        let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
     }
@@ -1051,7 +1051,7 @@ mod tests {
         }
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-        let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
     }
@@ -1090,7 +1090,7 @@ mod tests {
         }
         let a = GeneralCsc::<num_complex::Complex<f32>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<num_complex::Complex<f32>> = (0..n).map(|i| c((i % 5) as f32 - 2.0, 1.0)).collect();
-        let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         let r = resid(&a, &x, &b);
         assert!(r < 1e-3, "f32 LU residual {}", r);
@@ -1141,8 +1141,8 @@ mod tests {
                 .collect();
             let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
             let phased =
-                factor_general_lu_numeric(&analysis, &a, &GenericFactorOptions::default()).unwrap();
-            let one_shot = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+                factor_general_lu_numeric(&analysis, &a, &FactorOptions::default()).unwrap();
+            let one_shot = factor_general_lu(&a, &FactorOptions::default()).unwrap();
             let xp = solve_lu(&phased, &b).unwrap();
             let xo = solve_lu(&one_shot, &b).unwrap();
             for (p, o) in xp.iter().zip(&xo) {
@@ -1154,7 +1154,7 @@ mod tests {
 
     #[test]
     fn incomplete_lu_reduces_fill_and_still_solves() {
-        use crate::numeric::multifrontal_generic::ZeroPivotAction;
+        use crate::numeric::multifrontal_ldlt::ZeroPivotAction;
         // Unsymmetric grid: incomplete LU (drop_tol) must shrink nnz(L+U) yet
         // still drive iterative refinement to a small residual — the MoM
         // sparse-preconditioner configuration.
@@ -1192,8 +1192,8 @@ mod tests {
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
 
-        let full = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
-        let opts = GenericFactorOptions {
+        let full = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: Some(5e-2),
         };

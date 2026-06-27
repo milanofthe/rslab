@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn complex_mtx_round_trips_through_solver() {
-        use crate::SparseSymmetricLdlt;
+        use crate::LdltSolver;
         // A small diagonally-dominant complex-symmetric system read from MTX,
         // factored and solved — the end-to-end PARDISO-style path.
         let mtx = "\
@@ -663,7 +663,7 @@ mod tests {
             Complex::new(0.0, 1.0),
             Complex::new(-1.0, 0.5),
         ];
-        let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+        let solver = LdltSolver::factor(&a).unwrap();
         let x = solver.solve(&b).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); 3];
         a.symv(&x, &mut ax);

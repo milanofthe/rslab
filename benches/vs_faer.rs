@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use rla::sparse::csc::CscMatrix;
-use rla::SparseSymmetricLdlt;
+use rla::LdltSolver;
 use num_complex::Complex;
 
 use faer::linalg::solvers::Solve;
@@ -99,7 +99,7 @@ fn run_case(label: &str, n: usize, rows: &[usize], cols: &[usize], vals: &[C]) {
     // ---- RLA: lower triangle, LDLᵀ ----
     let a = CscMatrix::<C>::from_triplets(n, rows, cols, vals).unwrap();
     let t = Instant::now();
-    let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+    let solver = LdltSolver::factor(&a).unwrap();
     let rla_fac = t.elapsed().as_secs_f64() * 1e3;
     let t = Instant::now();
     let x = solver.solve(&b).unwrap();

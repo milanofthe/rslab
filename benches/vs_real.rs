@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use rla::sparse::general::GeneralCsc;
 use rla::{
-    factor_general_lu, parse_mtx_complex_general, solve_lu, solve_lu_refined, GenericFactorOptions,
+    factor_general_lu, parse_mtx_complex_general, solve_lu, solve_lu_refined, FactorOptions,
     ZeroPivotAction,
 };
 use num_complex::Complex;
@@ -101,7 +101,7 @@ fn bench_file(path: &std::path::Path) {
             return;
         }
     };
-    let opts = GenericFactorOptions {
+    let opts = FactorOptions {
         on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 },
         drop_tol: None,
     };

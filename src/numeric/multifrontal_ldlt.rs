@@ -36,7 +36,7 @@ use rayon::prelude::*;
 /// Action to take when a near-zero pivot is encountered during factorization.
 ///
 /// This is the static-pivoting policy knob shared by the symmetric LDLᵀ and the
-/// unsymmetric LU paths (via [`GenericFactorOptions`] and the LU options).
+/// unsymmetric LU paths (via [`FactorOptions`] and the LU options).
 #[derive(Debug, Clone)]
 pub enum ZeroPivotAction {
     /// Accept the tiny pivot at face value (zero the column, count as a zero in
@@ -74,7 +74,7 @@ pub fn set_use_gemm_schur(on: bool) {
 /// **exact** complete factorization that fails on rank deficiency. Relaxing
 /// them turns the factorization into a robust, memory-light **preconditioner**.
 #[derive(Debug, Clone)]
-pub struct GenericFactorOptions {
+pub struct FactorOptions {
     /// Near-zero pivot policy. Reuses feral's [`ZeroPivotAction`]: `Fail`
     /// (exact, default) returns [`FeralError::NumericallyRankDeficient`] on a
     /// singular pivot; `PerturbToEps { abs_floor }` is robust static pivoting —
@@ -90,7 +90,7 @@ pub struct GenericFactorOptions {
     pub drop_tol: Option<f64>,
 }
 
-impl Default for GenericFactorOptions {
+impl Default for FactorOptions {
     fn default() -> Self {
         Self {
             on_zero_pivot: ZeroPivotAction::Fail,
@@ -99,7 +99,7 @@ impl Default for GenericFactorOptions {
     }
 }
 
-impl GenericFactorOptions {
+impl FactorOptions {
     /// Exact, complete factorization (the default): fail on a singular pivot,
     /// no fill dropping. Use for a direct solve where accuracy is required.
     pub fn exact() -> Self {
@@ -640,19 +640,19 @@ fn factor_subtree<T: Scalar>(
 /// Returns an [`LdltFactors`] in factorization order; solve with
 /// [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
 pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, FeralError> {
-    factor_sparse_ldlt_with(a, &GenericFactorOptions::default())
+    factor_sparse_ldlt_with(a, &FactorOptions::default())
 }
 
-/// Like [`factor_sparse_ldlt`] but with explicit [`GenericFactorOptions`] —
+/// Like [`factor_sparse_ldlt`] but with explicit [`FactorOptions`] —
 /// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
 ///
 /// Convenience wrapper: runs [`analyze`] then [`factor_numeric`]. For the
 /// PARDISO-style *analyze once, factor many* workflow — FEM Newton steps or a
 /// frequency sweep that reuse one sparsity pattern — call them separately and
-/// keep the [`GenericSymbolic`] across factorizations.
+/// keep the [`MultifrontalSymbolic`] across factorizations.
 pub fn factor_sparse_ldlt_with<T: Scalar>(
     a: &CscMatrix<T>,
-    opts: &GenericFactorOptions,
+    opts: &FactorOptions,
 ) -> Result<LdltFactors<T>, FeralError> {
     let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
     factor_numeric(&symb, a, opts)
@@ -662,7 +662,7 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
 /// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
 /// and pass to [`factor_numeric`] for each set of numeric values sharing the
 /// pattern — the PARDISO phase-1 analysis.
-pub struct GenericSymbolic {
+pub struct MultifrontalSymbolic {
     inner: Option<SymbolicInner>,
     n: usize,
     nnz: usize,
@@ -675,7 +675,7 @@ struct SymbolicInner {
     by_level: Vec<Vec<usize>>,
 }
 
-impl GenericSymbolic {
+impl MultifrontalSymbolic {
     /// The analyzed dimension.
     pub fn n(&self) -> usize {
         self.n
@@ -714,10 +714,10 @@ pub fn analyze(
     n: usize,
     col_ptr: &[usize],
     row_idx: &[usize],
-) -> Result<GenericSymbolic, FeralError> {
+) -> Result<MultifrontalSymbolic, FeralError> {
     let nnz = row_idx.len();
     if n == 0 {
-        return Ok(GenericSymbolic { inner: None, n: 0, nnz });
+        return Ok(MultifrontalSymbolic { inner: None, n: 0, nnz });
     }
     // Symbolic analysis on the structure only; feed a unit-valued f64 pattern.
     let pattern = CscMatrix::<f64> {
@@ -765,20 +765,20 @@ pub fn analyze(
         by_level[lv].push(s);
     }
 
-    Ok(GenericSymbolic {
+    Ok(MultifrontalSymbolic {
         inner: Some(SymbolicInner { sym, by_level }),
         n,
         nnz,
     })
 }
 
-/// PARDISO phases 2–3: numeric factorization reusing a [`GenericSymbolic`].
+/// PARDISO phases 2–3: numeric factorization reusing a [`MultifrontalSymbolic`].
 /// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
 /// from. Honours static pivoting and incomplete-factor dropping via `opts`.
 pub fn factor_numeric<T: Scalar>(
-    symb: &GenericSymbolic,
+    symb: &MultifrontalSymbolic,
     a: &CscMatrix<T>,
-    opts: &GenericFactorOptions,
+    opts: &FactorOptions,
 ) -> Result<LdltFactors<T>, FeralError> {
     a.validate()?;
     let n = symb.n;
@@ -840,7 +840,7 @@ pub fn factor_numeric<T: Scalar>(
     //    the assembly tree: each subtree factors independently (children before
     //    parent), filling idle threads without a level barrier, and the per-front
     //    GEMM shares the same rayon pool. The precomputed `by_level` is no longer
-    //    consulted here (it remains available via `GenericSymbolic::n_levels`).
+    //    consulted here (it remains available via `MultifrontalSymbolic::n_levels`).
     let nsuper = sym.supernodes.len();
 
     // Roots of the assembly forest: supernodes that are no node's child.
@@ -1137,7 +1137,7 @@ mod tests {
             "exact mode should reject the singular pivot"
         );
 
-        let opts = GenericFactorOptions {
+        let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
             drop_tol: None,
         };
@@ -1168,7 +1168,7 @@ mod tests {
             }
             CscMatrix::<Complex<f64>>::from_triplets(n, &r, &cc, &v).unwrap()
         };
-        let opts = GenericFactorOptions {
+        let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
             drop_tol: None,
         };

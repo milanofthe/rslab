@@ -16,8 +16,8 @@
 //! working precision `T`.
 
 use crate::error::FeralError;
-use crate::numeric::multifrontal_generic::GenericFactorOptions;
-use crate::numeric::sparse_solver::SparseSymmetricLdlt;
+use crate::numeric::multifrontal_ldlt::FactorOptions;
+use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
@@ -54,7 +54,7 @@ impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
 }
 
 /// A preconditioner `M ≈ A`: applies `z = M⁻¹ r`. Implemented by a factored
-/// [`SparseSymmetricLdlt`](crate::numeric::sparse_solver::SparseSymmetricLdlt)
+/// [`LdltSolver`](crate::numeric::sparse_solver::LdltSolver)
 /// and by [`NoPreconditioner`] (the unpreconditioned baseline).
 pub trait Preconditioner<T: Scalar> {
     /// Write `z ← M⁻¹ r`. `r` and `z` have length `n`.
@@ -75,7 +75,7 @@ impl<T: Scalar> Preconditioner<T> for NoPreconditioner {
 
 /// A factored RLA solver is a preconditioner: `M⁻¹ r` is one forward/back
 /// substitution against the stored `LDLᵀ` factor.
-impl<T: Scalar> Preconditioner<T> for SparseSymmetricLdlt<T> {
+impl<T: Scalar> Preconditioner<T> for LdltSolver<T> {
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
@@ -90,7 +90,7 @@ impl<T: Scalar> Preconditioner<T> for SparseSymmetricLdlt<T> {
 /// iterates in `f64`, the *solution* keeps full `f64` accuracy. This is the
 /// standard mixed-precision setup for large 3D EM FEM / MOM preconditioning.
 pub struct LowPrecisionPreconditioner {
-    inner: SparseSymmetricLdlt<Complex<f32>>,
+    inner: LdltSolver<Complex<f32>>,
 }
 
 impl LowPrecisionPreconditioner {
@@ -98,7 +98,7 @@ impl LowPrecisionPreconditioner {
     /// via `opts`, e.g. `ZeroPivotAction::PerturbToEps`).
     pub fn factor(
         a: &CscMatrix<Complex<f64>>,
-        opts: &GenericFactorOptions,
+        opts: &FactorOptions,
     ) -> Result<Self, FeralError> {
         let a32 = CscMatrix::<Complex<f32>> {
             n: a.n,
@@ -111,7 +111,7 @@ impl LowPrecisionPreconditioner {
                 .collect(),
         };
         Ok(Self {
-            inner: SparseSymmetricLdlt::factor_with(&a32, opts)?,
+            inner: LdltSolver::factor_with(&a32, opts)?,
         })
     }
 
@@ -121,7 +121,7 @@ impl LowPrecisionPreconditioner {
         self.inner.factor_nnz()
     }
 
-    /// Number of statically perturbed pivots (see [`SparseSymmetricLdlt::n_perturbed`]).
+    /// Number of statically perturbed pivots (see [`LdltSolver::n_perturbed`]).
     pub fn n_perturbed(&self) -> usize {
         self.inner.n_perturbed()
     }
@@ -155,7 +155,7 @@ impl LowPrecisionLu {
     /// static pivoting and/or incomplete dropping for a preconditioner).
     pub fn factor(
         a: &GeneralCsc<Complex<f64>>,
-        opts: &GenericFactorOptions,
+        opts: &FactorOptions,
     ) -> Result<Self, FeralError> {
         let a32 = GeneralCsc::<Complex<f32>> {
             n: a.n,
@@ -590,7 +590,7 @@ where
 }
 
 /// A factorization usable as both a **direct solver** and a [`Preconditioner`].
-/// Implemented by the symmetric [`SparseSymmetricLdlt`] and the general
+/// Implemented by the symmetric [`LdltSolver`] and the general
 /// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors), so a caller's
 /// solver loop can hold `&dyn Factorization` and swap symmetric/general,
 /// exact/incomplete, or `f64`/`f32` factors freely.
@@ -603,15 +603,15 @@ pub trait Factorization<T: Scalar>: Preconditioner<T> {
     fn n_perturbed(&self) -> usize;
 }
 
-impl<T: Scalar> Factorization<T> for SparseSymmetricLdlt<T> {
+impl<T: Scalar> Factorization<T> for LdltSolver<T> {
     fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
-        SparseSymmetricLdlt::solve(self, b)
+        LdltSolver::solve(self, b)
     }
     fn factor_nnz(&self) -> usize {
-        SparseSymmetricLdlt::factor_nnz(self)
+        LdltSolver::factor_nnz(self)
     }
     fn n_perturbed(&self) -> usize {
-        SparseSymmetricLdlt::n_perturbed(self)
+        LdltSolver::n_perturbed(self)
     }
 }
 
@@ -638,7 +638,7 @@ impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric::multifrontal_generic::{GenericFactorOptions, ZeroPivotAction};
+    use crate::numeric::multifrontal_ldlt::{FactorOptions, ZeroPivotAction};
     use num_complex::Complex;
 
     type C = Complex<f64>;
@@ -702,7 +702,7 @@ mod tests {
         assert!(res < 1e-7, "COCR residual {}", res);
 
         // RLA-preconditioned COCR collapses to a handful of iterations.
-        let m = SparseSymmetricLdlt::factor(&a).unwrap();
+        let m = LdltSolver::factor(&a).unwrap();
         let pre = cocr(&a, &b, &m, 1e-10, 3000).unwrap();
         assert!(pre.converged && pre.iters <= 3, "iters {}", pre.iters);
     }
@@ -751,7 +751,7 @@ mod tests {
         assert!(un.converged, "GMRES res={}", un.final_res);
 
         // LU factor as preconditioner → 1–2 iterations.
-        let lu = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let pre = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
         assert!(pre.converged, "preconditioned GMRES res={}", pre.final_res);
         assert!(pre.iters <= 3, "LU-preconditioned GMRES iters {}", pre.iters);
@@ -801,7 +801,7 @@ mod tests {
         // iterations — ample for a MoM/FEM Krylov tolerance, at half the factor
         // memory. (A residual below ~1e-6 is not attainable with an f32 apply;
         // use the f64 factor for tighter tolerances.)
-        let pc = LowPrecisionLu::factor(&a, &GenericFactorOptions::default()).unwrap();
+        let pc = LowPrecisionLu::factor(&a, &FactorOptions::default()).unwrap();
         assert!(pc.factor_nnz() > 0);
         let res = gmres(&a, &b, &pc, 1e-6, 200, 50).unwrap();
         assert!(res.converged, "mixed-precision GMRES res={}", res.final_res);
@@ -821,11 +821,11 @@ mod tests {
         let a = grid(10, c(-1.0, 0.3), c(1.0, 0.05));
         let n = a.n;
         let b: Vec<C> = (0..n).map(|i| c(1.0, (i % 3) as f64 - 1.0)).collect();
-        let opts = GenericFactorOptions {
+        let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 },
             drop_tol: None,
         };
-        let m = SparseSymmetricLdlt::factor_with(&a, &opts).unwrap();
+        let m = LdltSolver::factor_with(&a, &opts).unwrap();
         let pre = cocr(&a, &b, &m, 1e-9, 500).unwrap();
         assert!(pre.converged, "indefinite COCR res={} iters={}", pre.final_res, pre.iters);
         let mut ax = vec![C::default(); n];
@@ -844,12 +844,12 @@ mod tests {
         let n = a.n;
         let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
-        let full = SparseSymmetricLdlt::factor(&a).unwrap();
-        let opts = GenericFactorOptions {
+        let full = LdltSolver::factor(&a).unwrap();
+        let opts = FactorOptions {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: Some(5e-2),
         };
-        let inc = SparseSymmetricLdlt::factor_with(&a, &opts).unwrap();
+        let inc = LdltSolver::factor_with(&a, &opts).unwrap();
 
         assert!(
             inc.factor_nnz() < full.factor_nnz(),
@@ -881,7 +881,7 @@ mod tests {
         let n = a.n;
         let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
-        let m = LowPrecisionPreconditioner::factor(&a, &GenericFactorOptions::default()).unwrap();
+        let m = LowPrecisionPreconditioner::factor(&a, &FactorOptions::default()).unwrap();
         let res = cocg(&a, &b, &m, 1e-10, 500).unwrap();
         assert!(res.converged, "mixed-precision COCG res={}", res.final_res);
         // A few iterations suffice; the f32 factor is a strong preconditioner.
@@ -904,7 +904,7 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
         let unpre = cocg(&a, &b, &NoPreconditioner, 1e-10, 5000).unwrap();
-        let m = SparseSymmetricLdlt::factor(&a).unwrap();
+        let m = LdltSolver::factor(&a).unwrap();
         let pre = cocg(&a, &b, &m, 1e-10, 5000).unwrap();
 
         assert!(pre.converged && unpre.converged);

@@ -82,7 +82,7 @@ fn diag_file(path: &std::path::Path) {
     };
     let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
 
-    let opts = GenericFactorOptions::preconditioner(1e-10);
+    let opts = FactorOptions::preconditioner(1e-10);
     let t = Instant::now();
     let f = match factor_general_lu_numeric(&sym, &a, &opts) {
         Ok(f) => f,

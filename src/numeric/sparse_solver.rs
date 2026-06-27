@@ -1,7 +1,7 @@
 //! High-level generic sparse symmetric direct solver.
 //!
-//! [`SparseSymmetricLdlt`] wraps the generic multifrontal factorization
-//! ([`crate::numeric::multifrontal_generic`]) with symmetric equilibration and
+//! [`LdltSolver`] wraps the generic multifrontal factorization
+//! ([`crate::numeric::multifrontal_ldlt`]) with symmetric equilibration and
 //! a convenient factor-once / solve-many interface. It works for both `f64`
 //! (real symmetric) and `Complex<f64>` (complex symmetric, PARDISO `mtype 6`).
 //!
@@ -16,22 +16,22 @@
 
 use crate::dense::ldlt_generic::{solve_ldlt, LdltFactors};
 use crate::error::FeralError;
-use crate::numeric::multifrontal_generic::{
-    analyze as analyze_pattern, factor_numeric, GenericFactorOptions, GenericSymbolic,
+use crate::numeric::multifrontal_ldlt::{
+    analyze as analyze_pattern, factor_numeric, FactorOptions, MultifrontalSymbolic,
 };
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
 /// A factored sparse symmetric matrix, ready to solve against many right-hand
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
-pub struct SparseSymmetricLdlt<T> {
+pub struct LdltSolver<T> {
     /// Factors of the equilibrated matrix `Â = D A D`, in factorization order.
     factors: LdltFactors<T>,
     /// Real symmetric equilibration diagonal `s` (`D = diag(s)`).
     scale: Vec<f64>,
 }
 
-impl<T: Scalar> SparseSymmetricLdlt<T> {
+impl<T: Scalar> LdltSolver<T> {
     /// The matrix dimension.
     pub fn n(&self) -> usize {
         self.factors.n
@@ -54,16 +54,16 @@ impl<T: Scalar> SparseSymmetricLdlt<T> {
 
     /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P` (exact mode).
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, FeralError> {
-        Self::factor_with(a, &GenericFactorOptions::default())
+        Self::factor_with(a, &FactorOptions::default())
     }
 
     /// Equilibrate and factor `A` with explicit options — notably
     /// static-pivoting (never-fail preconditioner) mode. See
-    /// [`GenericFactorOptions`]. Runs analysis + numeric factorization in one
+    /// [`FactorOptions`]. Runs analysis + numeric factorization in one
     /// call; for the *analyze once, factor many* workflow use
-    /// [`SymbolicAnalysis`].
-    pub fn factor_with(a: &CscMatrix<T>, opts: &GenericFactorOptions) -> Result<Self, FeralError> {
-        SymbolicAnalysis::analyze(a)?.factor(a, opts)
+    /// [`LdltSymbolic`].
+    pub fn factor_with(a: &CscMatrix<T>, opts: &FactorOptions) -> Result<Self, FeralError> {
+        LdltSymbolic::analyze(a)?.factor(a, opts)
     }
 
     /// Solve `A · x = rhs` using the stored factors.
@@ -175,7 +175,7 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
     (scaled, scale)
 }
 
-/// Reusable PARDISO-style **phase-1 analysis** for [`SparseSymmetricLdlt`].
+/// Reusable PARDISO-style **phase-1 analysis** for [`LdltSolver`].
 ///
 /// Analyze a sparsity pattern once, then [`factor`](Self::factor) many value
 /// sets that share it — FEM Newton steps, time stepping, or a frequency sweep
@@ -183,25 +183,25 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
 /// supernodes, assembly-tree levels) is the expensive value-independent part;
 /// reusing it across factorizations is the core PARDISO efficiency win.
 ///
-/// One analysis serves any scalar field: the same [`SymbolicAnalysis`] can
+/// One analysis serves any scalar field: the same [`LdltSymbolic`] can
 /// [`factor`](Self::factor) an `f64` matrix and a `Complex<f64>` matrix that
 /// share the pattern.
 ///
 /// ```
-/// use rla::{SymbolicAnalysis, GenericFactorOptions, CscMatrix};
+/// use rla::{LdltSymbolic, FactorOptions, CscMatrix};
 /// # fn demo(pattern_vals: &[f64], updated_vals: &[f64]) -> Result<(), rla::FeralError> {
 /// let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0])?;
-/// let analysis = SymbolicAnalysis::analyze(&a)?;        // phase 1, once
-/// let f1 = analysis.factor(&a, &GenericFactorOptions::default())?; // phase 2/3
+/// let analysis = LdltSymbolic::analyze(&a)?;        // phase 1, once
+/// let f1 = analysis.factor(&a, &FactorOptions::default())?; // phase 2/3
 /// let _x = f1.solve(&[1.0, 1.0])?;
 /// // ... later, same pattern, new values: analysis.factor(&a2, &opts)? ...
 /// # Ok(()) }
 /// ```
-pub struct SymbolicAnalysis {
-    symbolic: GenericSymbolic,
+pub struct LdltSymbolic {
+    symbolic: MultifrontalSymbolic,
 }
 
-impl SymbolicAnalysis {
+impl LdltSymbolic {
     /// Phase 1: analyze the sparsity pattern of `a`. The values are ignored, so
     /// any matrix with the target pattern (even a zero-valued template) works.
     pub fn analyze<T: Scalar>(a: &CscMatrix<T>) -> Result<Self, FeralError> {
@@ -222,12 +222,12 @@ impl SymbolicAnalysis {
     pub fn factor<T: Scalar>(
         &self,
         a: &CscMatrix<T>,
-        opts: &GenericFactorOptions,
-    ) -> Result<SparseSymmetricLdlt<T>, FeralError> {
+        opts: &FactorOptions,
+    ) -> Result<LdltSolver<T>, FeralError> {
         a.validate()?;
         let (scaled, scale) = equilibrate(a);
         let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
-        Ok(SparseSymmetricLdlt { factors, scale })
+        Ok(LdltSolver { factors, scale })
     }
 }
 
@@ -264,7 +264,7 @@ mod tests {
         }
         let a = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
         let b: Vec<f64> = (0..n).map(|i| (i as f64) + 1.0).collect();
-        let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+        let solver = LdltSolver::factor(&a).unwrap();
         let x = solver.solve(&b).unwrap();
         // Relative residual (the absolute one is dominated by the 1e5 row).
         let mut ax = vec![0.0; n];
@@ -299,7 +299,7 @@ mod tests {
             &vec![c(1.0, 0.0); rows.len()],
         )
         .unwrap();
-        let analysis = SymbolicAnalysis::analyze(&template).unwrap();
+        let analysis = LdltSymbolic::analyze(&template).unwrap();
         assert_eq!(analysis.n(), n);
 
         for shift in [0.0, 2.0, -1.5] {
@@ -313,9 +313,9 @@ mod tests {
             let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 1.0)).collect();
 
             let phased = analysis
-                .factor(&a, &GenericFactorOptions::default())
+                .factor(&a, &FactorOptions::default())
                 .unwrap();
-            let one_shot = SparseSymmetricLdlt::factor(&a).unwrap();
+            let one_shot = LdltSolver::factor(&a).unwrap();
             let x_phased = phased.solve(&b).unwrap();
             let x_one = one_shot.solve(&b).unwrap();
 
@@ -330,11 +330,11 @@ mod tests {
     #[test]
     fn analysis_rejects_mismatched_pattern() {
         let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0]).unwrap();
-        let analysis = SymbolicAnalysis::analyze(&a).unwrap();
+        let analysis = LdltSymbolic::analyze(&a).unwrap();
         // A different pattern (extra off-diagonal) must be rejected.
         let a2 = CscMatrix::<f64>::from_triplets(3, &[0, 1, 1, 2], &[0, 0, 1, 2], &[2.0, -1.0, 2.0, 2.0])
             .unwrap();
-        assert!(analysis.factor(&a2, &GenericFactorOptions::default()).is_err());
+        assert!(analysis.factor(&a2, &FactorOptions::default()).is_err());
     }
 
     #[test]
@@ -369,7 +369,7 @@ mod tests {
             }
         }
         let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
-        let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+        let solver = LdltSolver::factor(&a).unwrap();
 
         // Solve against two different right-hand sides with the one factor.
         for shift in [0.0, 1.0] {
@@ -404,7 +404,7 @@ mod tests {
         }
         let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 15.0, 2.0)).collect();
-        let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+        let solver = LdltSolver::factor(&a).unwrap();
 
         let x_plain = solver.solve(&b).unwrap();
         let x_ref = solver.solve_refined(&a, &b, 3).unwrap();
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn dimension_mismatch_is_rejected() {
         let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0]).unwrap();
-        let solver = SparseSymmetricLdlt::factor(&a).unwrap();
+        let solver = LdltSolver::factor(&a).unwrap();
         assert!(matches!(
             solver.solve(&[1.0, 2.0, 3.0]),
             Err(FeralError::DimensionMismatch { .. })

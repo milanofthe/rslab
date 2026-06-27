@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use rla::sparse::csc::CscMatrix;
 use rla::FeralError;
-use rla::SparseSymmetricLdlt;
+use rla::LdltSolver;
 use num_complex::Complex;
 
 /// Build a 2D 5-point grid (m×m, n=m²) with the given diagonal and neighbor
@@ -64,7 +64,7 @@ where
     let b: Vec<T> = (0..n).map(&b_fn).collect();
 
     let t0 = Instant::now();
-    let solver = match SparseSymmetricLdlt::factor(&a) {
+    let solver = match LdltSolver::factor(&a) {
         Ok(s) => s,
         Err(e) => {
             println!("{label} m={m} factor error: {e}");

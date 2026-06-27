@@ -33,8 +33,8 @@
 //! // Real symmetric matrix, lower triangle (i ≥ j).
 //! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!                                         &[2.0, 2.0, 2.0, -1.0])?;
-//! let analysis = SymbolicAnalysis::analyze(&a)?;                 // phase 1
-//! let factor = analysis.factor(&a, &GenericFactorOptions::default())?; // 2/3
+//! let analysis = LdltSymbolic::analyze(&a)?;                 // phase 1
+//! let factor = analysis.factor(&a, &FactorOptions::default())?; // 2/3
 //! let x = factor.solve(&[1.0, 2.0, 3.0])?;
 //! # let _ = x; Ok(()) }
 //! ```
@@ -52,11 +52,11 @@
 //! let a = CscMatrix::<Complex<f64>>::from_triplets(
 //!     3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!     &[c(4.0, 1.0), c(4.0, 1.0), c(4.0, 1.0), c(-1.0, 0.2)])?;
-//! let opts = GenericFactorOptions {
+//! let opts = FactorOptions {
 //!     on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
 //!     drop_tol: Some(1e-2),
 //! };
-//! let m = SparseSymmetricLdlt::factor_with(&a, &opts)?;          // preconditioner
+//! let m = LdltSolver::factor_with(&a, &opts)?;          // preconditioner
 //! let b = vec![c(1.0, 0.0); 3];
 //! let res = cocg(&a, &b, &m, 1e-10, 100)?;
 //! assert!(res.converged);
@@ -90,16 +90,16 @@ pub use scalar::Scalar;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, LdltFactors};
 // Generic symmetric LDLᵀ multifrontal direct solver.
-pub use numeric::multifrontal_generic::{
+pub use numeric::multifrontal_ldlt::{
     analyze, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur,
-    GenericFactorOptions, GenericSymbolic, ZeroPivotAction,
+    FactorOptions, MultifrontalSymbolic, ZeroPivotAction,
 };
 // Generic unsymmetric LU multifrontal direct solver.
 pub use numeric::multifrontal_lu::{
     analyze_general, factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_refined,
     LuFactors, LuSymbolic,
 };
-pub use numeric::sparse_solver::{SparseSymmetricLdlt, SymbolicAnalysis};
+pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 pub use numeric::iterative::{
     cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,
     LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
@@ -120,9 +120,9 @@ pub mod prelude {
     pub use crate::{
         analyze, cocg, cocr, factor_general_lu, factor_numeric, gmres, parse_mtx,
         parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, solve_lu,
-        solve_lu_refined, CscMatrix, Factorization, FeralError, GeneralCsc, GenericFactorOptions,
-        GenericSymbolic, KrylovResult, LinearOperator, LowPrecisionPreconditioner, LuFactors,
-        MtxMatrix, NoPreconditioner, Preconditioner, Scalar, SparseSymmetricLdlt, SymbolicAnalysis,
+        solve_lu_refined, CscMatrix, Factorization, FeralError, GeneralCsc, FactorOptions,
+        MultifrontalSymbolic, KrylovResult, LinearOperator, LowPrecisionPreconditioner, LuFactors,
+        MtxMatrix, NoPreconditioner, Preconditioner, Scalar, LdltSolver, LdltSymbolic,
         ZeroPivotAction,
     };
 }
