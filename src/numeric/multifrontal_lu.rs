@@ -23,6 +23,7 @@
 //!   (CSR, upper with the pivots on the diagonal), in factorization order.
 
 use crate::error::FeralError;
+use crate::numeric::blr::BlrMatrix;
 use crate::numeric::multifrontal_ldlt::{analyze, perturb_pivot, FactorOptions, ZeroPivotAction};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
@@ -90,6 +91,106 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+// --- BLR contribution-block compression (opt-in `RLA_BLR_CB`) --------------
+//
+// The dominant factorization transient is the live contribution-block (CB)
+// stack — `Σ cnrow²` across the active assembly frontier, ≈5× the L/U volume and
+// the source of the memory spike / OOM. A CB is a frontal Schur complement of a
+// smooth (MoM near-field) operator, so its off-diagonal tiles are numerically
+// low-rank. Storing each large CB block-low-rank on the stack — and densifying
+// it tile-by-tile only at the parent's extend-add — shrinks the live stack by
+// the tile compression ratio at a small per-tile densify transient. The factor
+// then becomes approximate (a preconditioner), exactly the LU/MoM use case
+// where GMRES refinement absorbs the BLR tolerance. The fast dense `gemm`
+// `lu_front` kernel is unchanged; only the CB *storage* is compressed.
+
+/// A front's contribution block: dense, or BLR-compressed for the stack.
+enum Contribution<T> {
+    Dense(Vec<T>),
+    Blr(BlrMatrix<T>),
+}
+
+impl<T: Scalar> Contribution<T> {
+    /// Extend-add this CB into front `f` (`nrow`-tall, column-major) at the
+    /// parent-local positions `loc` (CB index → front-local). `cn` is the CB
+    /// dimension (used by the dense case; the BLR case carries its own).
+    fn extend_add_into(&self, loc: &[usize], cn: usize, f: &mut [T], nrow: usize) {
+        match self {
+            Contribution::Dense(cb) => {
+                for jc in 0..cn {
+                    let frow = loc[jc] * nrow;
+                    let cb_col = &cb[jc * cn..jc * cn + cn];
+                    for ic in 0..cn {
+                        let dst = frow + loc[ic];
+                        f[dst] = f[dst] + cb_col[ic];
+                    }
+                }
+            }
+            Contribution::Blr(blr) => {
+                // Densify one tile at a time (≤ b×b transient) and scatter.
+                for ib in 0..blr.nbr {
+                    let (r0, bm) = blr.row_extent(ib);
+                    for jb in 0..blr.nbc {
+                        let (c0, bn) = blr.col_extent(jb);
+                        let tile = blr.block(ib, jb).to_dense();
+                        for jj in 0..bn {
+                            let frow = loc[c0 + jj] * nrow;
+                            let tcol = &tile[jj * bm..jj * bm + bm];
+                            for ii in 0..bm {
+                                let dst = frow + loc[r0 + ii];
+                                f[dst] = f[dst] + tcol[ii];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Opt-in BLR CB-compression config, read once from the environment:
+/// `RLA_BLR_CB` enables it; `RLA_BLR_CB_MIN` (CB size threshold, default 256),
+/// `RLA_BLR_CB_B` (tile size, default 256), `RLA_BLR_CB_EPS` (per-tile
+/// tolerance, default 1e-4) tune it.
+struct BlrCbConfig {
+    enabled: bool,
+    min_cnrow: usize,
+    b: usize,
+    eps: f64,
+}
+
+fn blr_cb_config() -> &'static BlrCbConfig {
+    use std::sync::OnceLock;
+    static C: OnceLock<BlrCbConfig> = OnceLock::new();
+    C.get_or_init(|| {
+        let env = |k: &str| std::env::var(k).ok();
+        BlrCbConfig {
+            enabled: env("RLA_BLR_CB").is_some(),
+            min_cnrow: env("RLA_BLR_CB_MIN")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(256),
+            b: env("RLA_BLR_CB_B").and_then(|s| s.parse().ok()).unwrap_or(256),
+            eps: env("RLA_BLR_CB_EPS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1e-4),
+        }
+    })
+}
+
+// Aggregate CB-compression accounting (only written when `RLA_BLR_CB` is set).
+static CB_DENSE_SCALARS: AtomicU64 = AtomicU64::new(0);
+static CB_BLR_SCALARS: AtomicU64 = AtomicU64::new(0);
+
+/// Read and reset the BLR-CB accounting: `(dense_equiv_scalars, stored_scalars)`
+/// summed over the CBs compressed since the last call — the realized CB-stack
+/// compression ratio. Returns `(0, 0)` when CB compression is disabled.
+pub fn take_blr_cb_stats() -> (u64, u64) {
+    (
+        CB_DENSE_SCALARS.swap(0, Ordering::Relaxed),
+        CB_BLR_SCALARS.swap(0, Ordering::Relaxed),
+    )
+}
+
 /// Per-front unsymmetric partial-factorization output, in elimination order
 /// (static pivoting → no interchange, so front-local order is pivot order).
 struct FrontLu<T> {
@@ -114,8 +215,9 @@ struct FrontLu<T> {
 struct NodeLu<T> {
     front: FrontLu<T>,
     row_indices: Vec<usize>,
-    /// Full `cnrow × cnrow` column-major contribution block `A22 − L21·U12`.
-    contrib: Vec<T>,
+    /// The `cnrow × cnrow` contribution block `A22 − L21·U12` — dense, or
+    /// BLR-compressed for the stack (opt-in `RLA_BLR_CB`).
+    contrib: Contribution<T>,
 }
 
 /// Stored unsymmetric LU factors, in factorization order. Solve with
@@ -211,7 +313,7 @@ fn lu_front<T: Scalar>(
     ncol: usize,
     perturb_floor: Option<f64>,
     profile: bool,
-) -> Result<(FrontLu<T>, Vec<T>), FeralError> {
+) -> Result<(FrontLu<T>, Contribution<T>), FeralError> {
     let n = nrow;
     // BLR compressibility probe (opt-in `RLA_BLR_PROBE`): on large fronts, report
     // how low-rank the assembled off-diagonal blocks are — the empirical go/no-go
@@ -375,6 +477,18 @@ fn lu_front<T: Scalar>(
     if let Some(t) = t_extract {
         PROF_EXTRACT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
+    // Compress large CBs for the stack (opt-in). The off-diagonal tiles of the
+    // frontal Schur complement are low-rank; storing them compressed shrinks the
+    // live CB-stack transient. Densified tile-by-tile at the parent extend-add.
+    let cfg = blr_cb_config();
+    let contribution = if cfg.enabled && cnrow >= cfg.min_cnrow {
+        let blr = BlrMatrix::from_dense(&cb, cnrow, cnrow, cfg.b, cfg.eps);
+        CB_DENSE_SCALARS.fetch_add((cnrow * cnrow) as u64, Ordering::Relaxed);
+        CB_BLR_SCALARS.fetch_add(blr.storage() as u64, Ordering::Relaxed);
+        Contribution::Blr(blr)
+    } else {
+        Contribution::Dense(cb)
+    };
     Ok((
         FrontLu {
             nrow,
@@ -384,7 +498,7 @@ fn lu_front<T: Scalar>(
             rperm,
             n_perturbed,
         },
-        cb,
+        contribution,
     ))
 }
 
@@ -484,17 +598,9 @@ fn factor_one_node_lu<T: Scalar>(
     for child in child_refs {
         let cn = child.front.nrow - child.front.nelim;
         let crows = &child.row_indices[child.front.nelim..];
-        let cb = &child.contrib;
         loc.clear();
         loc.extend(crows.iter().map(|&g| gloc[g]));
-        for jc in 0..cn {
-            let frow = loc[jc] * nrow;
-            let cb_col = &cb[jc * cn..jc * cn + cn];
-            for ic in 0..cn {
-                let dst = frow + loc[ic];
-                f[dst] = f[dst] + cb_col[ic];
-            }
-        }
+        child.contrib.extend_add_into(&loc, cn, f, nrow);
     }
 
     // Restore the all-`usize::MAX` invariant and return the scratch to the
@@ -573,7 +679,7 @@ fn factor_subtree<T: Scalar>(
     // each CB the moment its parent consumes it keeps only the active
     // contribution frontier live — the standard multifrontal CB-stack.
     for (own, _) in outs.iter_mut() {
-        own.contrib = Vec::new();
+        own.contrib = Contribution::Dense(Vec::new());
     }
     // Flatten the subtree's factors for the global pass (child `i` is the i-th
     // entry of `children`).

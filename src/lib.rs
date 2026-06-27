@@ -108,7 +108,7 @@ pub use numeric::iterative::{
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
-    LuFactors, LuSolver, LuSymbolic,
+    take_blr_cb_stats, LuFactors, LuSolver, LuSymbolic,
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;

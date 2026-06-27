@@ -209,6 +209,17 @@ fn diag_file(path: &std::path::Path) {
         "  memory:  going-in {ws_before:.0} MB  →  factor-peak {factor_peak:.0} MB  →  after {ws_after:.0} MB   (factor transient +{:.0} MB)",
         factor_peak - ws_before,
     );
+    // Realized CB-stack compression when RLA_BLR_CB is set (else 0,0).
+    let (cb_dense, cb_blr) = rla::take_blr_cb_stats();
+    if cb_dense > 0 {
+        println!(
+            "  BLR-CB:  compressed CBs {:.0} MB → {:.0} MB  ({:.0}% of dense, {:.1}× smaller)",
+            cb_dense as f64 * 16.0 / 1e6,
+            cb_blr as f64 * 16.0 / 1e6,
+            100.0 * cb_blr as f64 / cb_dense as f64,
+            cb_dense as f64 / cb_blr as f64,
+        );
+    }
 
     let fill = f.factor_nnz();
     let dims = sym.front_dims();
