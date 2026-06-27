@@ -206,199 +206,298 @@ fn factor_front<T: Scalar>(
     // below are never observed.
     let mut l1 = vec![T::zero(); nrow];
     let mut l2 = vec![T::zero(); nrow];
+    // Per-panel trailing-GEMM scratch (reused across panels).
+    let mut l21buf: Vec<T> = Vec::new();
+    let mut gbuf: Vec<T> = Vec::new();
+    let mut tmp: Vec<T> = Vec::new();
 
-    let mut k = 0;
-    while k < ncol {
-        let absakk = f[k * n + k].magnitude();
+    // Blocked Bunch-Kaufman: factor the fully-summed columns in panels of width
+    // `NB` with pivoting **bounded to the panel**, deferring each panel's
+    // trailing Schur update to one SIMD GEMM (the BLAS-3 bulk, replacing the
+    // scalar BLAS-2 column sweeps that dominated large fronts). The last column
+    // of a panel has no in-panel candidate below it, so it is always a 1×1 step
+    // — a 2×2 block can never straddle a panel boundary.
+    const NB: usize = 64;
+    let mut kb = 0;
+    while kb < ncol {
+        let ke = (kb + NB).min(ncol);
+        let mut k = kb;
+        while k < ke {
+            let absakk = f[k * n + k].magnitude();
 
-        // colmax restricted to the fully-summed block rows (k+1)..ncol. Scan in
-        // the squared-magnitude domain (same argmax, no per-entry `hypot`); take
-        // a single `sqrt` on the winner.
-        let mut colmax_sq = 0.0;
-        let mut imax = k;
-        for i in (k + 1)..ncol {
-            let m = f[k * n + i].magnitude_sq();
-            if m > colmax_sq {
-                colmax_sq = m;
-                imax = i;
-            }
-        }
-        let colmax = colmax_sq.sqrt();
-
-        let kstep;
-        let kp;
-        if absakk.max(colmax) == 0.0 {
-            // Fully zero pivot column. Exact mode fails; static-pivot mode
-            // takes a 1×1 step and lets the perturbation below lift the zero
-            // diagonal up to the floor.
-            if perturb_floor.is_none() {
-                return Err(FeralError::NumericallyRankDeficient);
-            }
-            kstep = 1;
-            kp = k;
-        } else if absakk >= alpha * colmax {
-            kstep = 1;
-            kp = k;
-        } else {
-            // rowmax in row imax, restricted to the fully-summed block (squared
-            // domain, single final sqrt).
-            let mut rowmax_sq = 0.0;
-            for j in k..imax {
-                let m = f[j * n + imax].magnitude_sq();
-                if m > rowmax_sq {
-                    rowmax_sq = m;
+            // colmax restricted to the in-panel rows (k+1)..ke.
+            let mut colmax_sq = 0.0;
+            let mut imax = k;
+            for i in (k + 1)..ke {
+                let m = f[k * n + i].magnitude_sq();
+                if m > colmax_sq {
+                    colmax_sq = m;
+                    imax = i;
                 }
             }
-            for i in (imax + 1)..ncol {
-                let m = f[imax * n + i].magnitude_sq();
-                if m > rowmax_sq {
-                    rowmax_sq = m;
+            let colmax = colmax_sq.sqrt();
+
+            let kstep;
+            let kp;
+            if absakk.max(colmax) == 0.0 {
+                // Fully zero pivot column. Exact mode fails; static-pivot mode
+                // takes a 1×1 step and lets the perturbation below lift the zero
+                // diagonal up to the floor.
+                if perturb_floor.is_none() {
+                    return Err(FeralError::NumericallyRankDeficient);
                 }
-            }
-            let rowmax = rowmax_sq.sqrt();
-            if absakk >= alpha * colmax * (colmax / rowmax) {
                 kstep = 1;
                 kp = k;
-            } else if f[imax * n + imax].magnitude() >= alpha * rowmax {
+            } else if absakk >= alpha * colmax {
                 kstep = 1;
-                kp = imax;
+                kp = k;
             } else {
-                kstep = 2;
-                kp = imax;
-            }
-        }
-
-        if kstep == 1 {
-            if kp != k {
-                swap_sym_lower(f, n, k, kp);
-                perm.swap(k, kp);
-            }
-            let mut d = f[k * n + k];
-            match perturb_floor {
-                Some(floor) if d.magnitude() < floor => {
-                    d = perturb_pivot(d, floor);
-                    f[k * n + k] = d;
-                    n_perturbed += 1;
-                }
-                None if d == T::zero() => return Err(FeralError::NumericallyRankDeficient),
-                _ => {}
-            }
-            d_diag[k] = d;
-            // Inertia: sign of the 1×1 pivot (real part).
-            let r = d.real();
-            if r > 0.0 {
-                inertia.positive += 1;
-            } else if r < 0.0 {
-                inertia.negative += 1;
-            } else {
-                inertia.zero += 1;
-            }
-            let dinv = d.recip();
-            // Update only the fully-summed trailing columns `(k+1)..ncol`
-            // (across all rows, so the L21 multiplier rows are formed), then
-            // store multipliers. The contribution block `[ncol,nrow)²` is left
-            // untouched and updated once, after the panel, by a single GEMM.
-            for j in (k + 1)..ncol {
-                let wj_dinv = f[k * n + j] * dinv;
-                if wj_dinv != T::zero() {
-                    for i in j..n {
-                        f[j * n + i] = f[j * n + i] - f[k * n + i] * wj_dinv;
+                // rowmax in row imax, restricted to the fully-summed block (squared
+                // domain, single final sqrt).
+                let mut rowmax_sq = 0.0;
+                for j in k..imax {
+                    let m = f[j * n + imax].magnitude_sq();
+                    if m > rowmax_sq {
+                        rowmax_sq = m;
                     }
                 }
+                for i in (imax + 1)..ke {
+                    let m = f[imax * n + i].magnitude_sq();
+                    if m > rowmax_sq {
+                        rowmax_sq = m;
+                    }
+                }
+                let rowmax = rowmax_sq.sqrt();
+                if absakk >= alpha * colmax * (colmax / rowmax) {
+                    kstep = 1;
+                    kp = k;
+                } else if f[imax * n + imax].magnitude() >= alpha * rowmax {
+                    kstep = 1;
+                    kp = imax;
+                } else {
+                    kstep = 2;
+                    kp = imax;
+                }
             }
-            for i in (k + 1)..n {
-                f[k * n + i] = f[k * n + i] * dinv;
-            }
-            k += 1;
-        } else {
-            if kp != k + 1 {
-                swap_sym_lower(f, n, k + 1, kp);
-                perm.swap(k + 1, kp);
-            }
-            let mut d11 = f[k * n + k];
-            let d21 = f[k * n + (k + 1)];
-            let mut d22 = f[(k + 1) * n + (k + 1)];
-            let mut det = d11 * d22 - d21 * d21;
-            // Scale-invariant singularity / growth guard: a 2×2 whose `|det|`
-            // is below `GROWTH_EPS · scale²` would inject `1/|det|` growth into
-            // the trailing update. `scale` is the largest block-entry magnitude.
-            let scale = d11
-                .magnitude()
-                .max(d22.magnitude())
-                .max(d21.magnitude());
-            let growth_floor = GROWTH_EPS * scale * scale;
-            // Static-pivot the 2×2 when its determinant is near-singular. The
-            // real kernel (feral's `perturb_2x2_to_floor`) shifts the small
-            // eigenvalue; for complex-symmetric blocks the eigenvalues are
-            // complex, so we shift both diagonals by the floor (lifting |det|)
-            // and, as a last resort, nudge det itself — enough to keep the
-            // preconditioner factor live.
-            match perturb_floor {
-                Some(floor) => {
-                    let fl = (floor * floor).max(growth_floor);
-                    if det.magnitude() < fl {
-                        let lift = floor.max(scale * GROWTH_EPS.sqrt());
-                        d11 = d11 + T::from_real(lift);
-                        d22 = d22 + T::from_real(lift);
-                        det = d11 * d22 - d21 * d21;
-                        if det.magnitude() < fl {
-                            det = det + T::from_real(fl);
-                        }
+
+            if kstep == 1 {
+                if kp != k {
+                    swap_sym_lower(f, n, k, kp);
+                    perm.swap(k, kp);
+                }
+                let mut d = f[k * n + k];
+                match perturb_floor {
+                    Some(floor) if d.magnitude() < floor => {
+                        d = perturb_pivot(d, floor);
+                        f[k * n + k] = d;
                         n_perturbed += 1;
                     }
+                    None if d == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                    _ => {}
                 }
-                None if det.magnitude() <= growth_floor => {
-                    return Err(FeralError::NumericallyRankDeficient)
-                }
-                _ => {}
-            }
-            let detinv = det.recip();
-            d_diag[k] = d11;
-            d_subdiag[k] = d21;
-            d_diag[k + 1] = d22;
-            two_by_two[k] = true;
-            // Inertia of the 2×2 block from det / trace (real parts): det<0 →
-            // one +, one −; det>0 → two of sign(trace); det≈0 → one 0, one
-            // sign(trace).
-            let det_r = det.real();
-            let tr_r = (d11 + d22).real();
-            if det_r < 0.0 {
-                inertia.positive += 1;
-                inertia.negative += 1;
-            } else if det_r > 0.0 {
-                if tr_r >= 0.0 {
-                    inertia.positive += 2;
+                d_diag[k] = d;
+                // Inertia: sign of the 1×1 pivot (real part).
+                let r = d.real();
+                if r > 0.0 {
+                    inertia.positive += 1;
+                } else if r < 0.0 {
+                    inertia.negative += 1;
                 } else {
-                    inertia.negative += 2;
+                    inertia.zero += 1;
+                }
+                let dinv = d.recip();
+                // Update only the in-panel trailing columns `(k+1)..ke` (across all
+                // rows, so the panel's L21 multiplier rows are formed). The columns
+                // beyond `ke` are deferred to this panel's trailing GEMM.
+                for j in (k + 1)..ke {
+                    let wj_dinv = f[k * n + j] * dinv;
+                    if wj_dinv != T::zero() {
+                        for i in j..n {
+                            f[j * n + i] = f[j * n + i] - f[k * n + i] * wj_dinv;
+                        }
+                    }
+                }
+                for i in (k + 1)..n {
+                    f[k * n + i] = f[k * n + i] * dinv;
+                }
+                k += 1;
+            } else {
+                if kp != k + 1 {
+                    swap_sym_lower(f, n, k + 1, kp);
+                    perm.swap(k + 1, kp);
+                }
+                let mut d11 = f[k * n + k];
+                let d21 = f[k * n + (k + 1)];
+                let mut d22 = f[(k + 1) * n + (k + 1)];
+                let mut det = d11 * d22 - d21 * d21;
+                // Scale-invariant singularity / growth guard: a 2×2 whose `|det|`
+                // is below `GROWTH_EPS · scale²` would inject `1/|det|` growth into
+                // the trailing update. `scale` is the largest block-entry magnitude.
+                let scale = d11.magnitude().max(d22.magnitude()).max(d21.magnitude());
+                let growth_floor = GROWTH_EPS * scale * scale;
+                // Static-pivot the 2×2 when its determinant is near-singular. The
+                // real kernel (feral's `perturb_2x2_to_floor`) shifts the small
+                // eigenvalue; for complex-symmetric blocks the eigenvalues are
+                // complex, so we shift both diagonals by the floor (lifting |det|)
+                // and, as a last resort, nudge det itself — enough to keep the
+                // preconditioner factor live.
+                match perturb_floor {
+                    Some(floor) => {
+                        let fl = (floor * floor).max(growth_floor);
+                        if det.magnitude() < fl {
+                            let lift = floor.max(scale * GROWTH_EPS.sqrt());
+                            d11 = d11 + T::from_real(lift);
+                            d22 = d22 + T::from_real(lift);
+                            det = d11 * d22 - d21 * d21;
+                            if det.magnitude() < fl {
+                                det = det + T::from_real(fl);
+                            }
+                            n_perturbed += 1;
+                        }
+                    }
+                    None if det.magnitude() <= growth_floor => {
+                        return Err(FeralError::NumericallyRankDeficient)
+                    }
+                    _ => {}
+                }
+                let detinv = det.recip();
+                d_diag[k] = d11;
+                d_subdiag[k] = d21;
+                d_diag[k + 1] = d22;
+                two_by_two[k] = true;
+                // Inertia of the 2×2 block from det / trace (real parts): det<0 →
+                // one +, one −; det>0 → two of sign(trace); det≈0 → one 0, one
+                // sign(trace).
+                let det_r = det.real();
+                let tr_r = (d11 + d22).real();
+                if det_r < 0.0 {
+                    inertia.positive += 1;
+                    inertia.negative += 1;
+                } else if det_r > 0.0 {
+                    if tr_r >= 0.0 {
+                        inertia.positive += 2;
+                    } else {
+                        inertia.negative += 2;
+                    }
+                } else {
+                    inertia.zero += 1;
+                    if tr_r >= 0.0 {
+                        inertia.positive += 1;
+                    } else {
+                        inertia.negative += 1;
+                    }
+                }
+
+                for i in (k + 2)..n {
+                    let wik = f[k * n + i];
+                    let wik1 = f[(k + 1) * n + i];
+                    l1[i] = (d22 * wik - d21 * wik1) * detinv;
+                    l2[i] = (d11 * wik1 - d21 * wik) * detinv;
+                }
+                for j in (k + 2)..ke {
+                    let l1j = l1[j];
+                    let l2j = l2[j];
+                    for i in j..n {
+                        f[j * n + i] = f[j * n + i] - f[k * n + i] * l1j - f[(k + 1) * n + i] * l2j;
+                    }
+                }
+                for i in (k + 2)..n {
+                    f[k * n + i] = l1[i];
+                    f[(k + 1) * n + i] = l2[i];
+                }
+                k += 2;
+            }
+        }
+
+        // Deferred panel trailing update: f[ke.., ke..] −= L21·D·L21ᵀ. Build the
+        // panel's L21 (trailing rows × panel cols) and G = L21·D (block-diagonal
+        // D), GEMM into a temp, then subtract its lower triangle into `f`.
+        let pw = ke - kb;
+        let mt = n - ke;
+        if mt > 0 && pw > 0 {
+            l21buf.clear();
+            l21buf.resize(mt * pw, T::zero());
+            for (cc, c) in (kb..ke).enumerate() {
+                for (rr, r) in (ke..n).enumerate() {
+                    l21buf[cc * mt + rr] = f[c * n + r];
+                }
+            }
+            gbuf.clear();
+            gbuf.resize(mt * pw, T::zero());
+            let mut c = kb;
+            while c < ke {
+                let cc = c - kb;
+                if two_by_two[c] {
+                    let (d11, d21, d22) = (d_diag[c], d_subdiag[c], d_diag[c + 1]);
+                    for rr in 0..mt {
+                        let a = l21buf[cc * mt + rr];
+                        let b = l21buf[(cc + 1) * mt + rr];
+                        gbuf[cc * mt + rr] = a * d11 + b * d21;
+                        gbuf[(cc + 1) * mt + rr] = a * d21 + b * d22;
+                    }
+                    c += 2;
+                } else {
+                    let d = d_diag[c];
+                    for rr in 0..mt {
+                        gbuf[cc * mt + rr] = l21buf[cc * mt + rr] * d;
+                    }
+                    c += 1;
+                }
+            }
+            tmp.clear();
+            tmp.resize(mt * mt, T::zero());
+            let par = if (mt as u128) * (mt as u128) * (pw as u128) >= 8_000_000 {
+                gemm::Parallelism::Rayon(0)
+            } else {
+                gemm::Parallelism::None
+            };
+            if USE_GEMM_SCHUR.load(Ordering::Relaxed) {
+                // SAFETY: `tmp`, `gbuf`, `l21buf` are three distinct,
+                // non-overlapping allocations sized for (m,n,k)=(mt,mt,pw) under
+                // the strides passed; `T` is `f64`/`Complex<f64>` (gemm-supported).
+                unsafe {
+                    gemm::gemm(
+                        mt,
+                        mt,
+                        pw,
+                        tmp.as_mut_ptr(),
+                        mt as isize,
+                        1,
+                        false,
+                        gbuf.as_ptr(),
+                        mt as isize,
+                        1,
+                        l21buf.as_ptr(),
+                        1,
+                        mt as isize,
+                        T::zero(),
+                        T::one(),
+                        false,
+                        false,
+                        false,
+                        par,
+                    );
                 }
             } else {
-                inertia.zero += 1;
-                if tr_r >= 0.0 {
-                    inertia.positive += 1;
-                } else {
-                    inertia.negative += 1;
+                for jj in 0..mt {
+                    for ii in jj..mt {
+                        let mut acc = T::zero();
+                        for cc in 0..pw {
+                            acc = acc + gbuf[cc * mt + ii] * l21buf[cc * mt + jj];
+                        }
+                        tmp[jj * mt + ii] = acc;
+                    }
                 }
             }
-
-            for i in (k + 2)..n {
-                let wik = f[k * n + i];
-                let wik1 = f[(k + 1) * n + i];
-                l1[i] = (d22 * wik - d21 * wik1) * detinv;
-                l2[i] = (d11 * wik1 - d21 * wik) * detinv;
-            }
-            for j in (k + 2)..ncol {
-                let l1j = l1[j];
-                let l2j = l2[j];
-                for i in j..n {
-                    f[j * n + i] = f[j * n + i] - f[k * n + i] * l1j - f[(k + 1) * n + i] * l2j;
+            for jj in 0..mt {
+                let cj = ke + jj;
+                for ii in jj..mt {
+                    let ri = ke + ii;
+                    f[cj * n + ri] = f[cj * n + ri] - tmp[jj * mt + ii];
                 }
             }
-            for i in (k + 2)..n {
-                f[k * n + i] = l1[i];
-                f[(k + 1) * n + i] = l2[i];
-            }
-            k += 2;
         }
+        kb = ke;
     }
 
     // Extract the front's L (nrow × ncol, pivot order).
@@ -422,105 +521,17 @@ fn factor_front<T: Scalar>(
         }
     }
 
-    // Contribution block: the trailing [ncol, nrow) cells were deliberately
-    // NOT touched by the panel elimination above (the update loops stop at
-    // `ncol`), so they still hold the original A22. Apply the whole deferred
-    // symmetric Schur update CB = A22 − L21·D·L21ᵀ as one SIMD GEMM. This is
-    // the FLOP-dominant step; gemm gives AVX2/AVX-512 complex/real kernels.
+    // Contribution block CB = A22 − L21·D·L21ᵀ. The per-panel trailing GEMMs
+    // above already applied the whole Schur update into `f`'s trailing
+    // `[ncol, nrow)²` lower triangle, so extract it directly (mirrored to both
+    // triangles for the parent's extend-add).
     let cnrow = nrow - ncol;
     let mut cb = vec![T::zero(); cnrow * cnrow];
-    // Seed cb with A22, mirrored to both triangles (A is symmetric; no conj).
     for j in 0..cnrow {
         for i in j..cnrow {
             let v = f[(ncol + j) * n + (ncol + i)];
             cb[j * cnrow + i] = v;
             cb[i * cnrow + j] = v;
-        }
-    }
-    if cnrow > 0 && ncol > 0 {
-        // L21 (cnrow × ncol, column-major): the off-block multiplier rows.
-        let mut l21 = vec![T::zero(); cnrow * ncol];
-        for c in 0..ncol {
-            for r in 0..cnrow {
-                l21[c * cnrow + r] = f[c * n + (ncol + r)];
-            }
-        }
-        // G = L21·D (cnrow × ncol, column-major); D is block-diagonal.
-        let mut g = vec![T::zero(); cnrow * ncol];
-        let mut c = 0;
-        while c < ncol {
-            if two_by_two[c] {
-                let (d11, d21, d22) = (d_diag[c], d_subdiag[c], d_diag[c + 1]);
-                for r in 0..cnrow {
-                    let a = l21[c * cnrow + r];
-                    let b = l21[(c + 1) * cnrow + r];
-                    g[c * cnrow + r] = a * d11 + b * d21;
-                    g[(c + 1) * cnrow + r] = a * d21 + b * d22;
-                }
-                c += 2;
-            } else {
-                let d = d_diag[c];
-                for r in 0..cnrow {
-                    g[c * cnrow + r] = l21[c * cnrow + r] * d;
-                }
-                c += 1;
-            }
-        }
-        // Intra-front parallelism for the dominant Schur GEMM: large fronts
-        // (near the root, where assembly-tree parallelism is exhausted) use all
-        // rayon threads; small fronts stay sequential to avoid oversubscribing
-        // the level-parallel driver.
-        let par = if (cnrow as u128) * (cnrow as u128) * (ncol as u128) >= 8_000_000 {
-            gemm::Parallelism::Rayon(0)
-        } else {
-            gemm::Parallelism::None
-        };
-        // cb ← cb − G·L21ᵀ. Column-major: cb and G have col-stride `cnrow`,
-        // row-stride 1; L21ᵀ (ncol × cnrow) reads L21 with strides swapped.
-        if USE_GEMM_SCHUR.load(Ordering::Relaxed) {
-            // SAFETY: `cb`, `g`, `l21` are three distinct, non-overlapping
-            // allocations, each sized for the (m,n,k) = (cnrow, cnrow, ncol)
-            // access pattern under the strides passed. The only `Scalar` impls
-            // are `f64` and `Complex<f64>`, both supported gemm element types,
-            // so the runtime element-type dispatch cannot hit the
-            // unsupported-type panic.
-            unsafe {
-                gemm::gemm(
-                    cnrow,
-                    cnrow,
-                    ncol,
-                    cb.as_mut_ptr(),
-                    cnrow as isize,
-                    1,
-                    true,
-                    g.as_ptr(),
-                    cnrow as isize,
-                    1,
-                    l21.as_ptr(),
-                    1,
-                    cnrow as isize,
-                    T::one(),
-                    -T::one(),
-                    false,
-                    false,
-                    false,
-                    par,
-                );
-            }
-        } else {
-            // Scalar reference: same data, same result, no SIMD. cb[i,j] -=
-            // Σ_c g[i,c]·l21[j,c] (= (G·L21ᵀ)[i,j]); lower triangle only, then
-            // mirror, since CB is symmetric.
-            for j in 0..cnrow {
-                for i in j..cnrow {
-                    let mut acc = cb[j * cnrow + i];
-                    for c in 0..ncol {
-                        acc = acc - g[c * cnrow + i] * l21[c * cnrow + j];
-                    }
-                    cb[j * cnrow + i] = acc;
-                    cb[i * cnrow + j] = acc;
-                }
-            }
         }
     }
 
@@ -743,9 +754,7 @@ impl MultifrontalSymbolic {
     /// factorization and the precomputed assembly-tree levels. `None` for the
     /// empty (`n == 0`) analysis.
     pub(crate) fn sym_and_levels(&self) -> Option<(&SymbolicFactorization, &[Vec<usize>])> {
-        self.inner
-            .as_ref()
-            .map(|i| (&i.sym, i.by_level.as_slice()))
+        self.inner.as_ref().map(|i| (&i.sym, i.by_level.as_slice()))
     }
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)`: the number of
@@ -775,7 +784,11 @@ pub fn analyze(
 ) -> Result<MultifrontalSymbolic, FeralError> {
     let nnz = row_idx.len();
     if n == 0 {
-        return Ok(MultifrontalSymbolic { inner: None, n: 0, nnz });
+        return Ok(MultifrontalSymbolic {
+            inner: None,
+            n: 0,
+            nnz,
+        });
     }
     // Symbolic analysis on the structure only; feed a unit-valued f64 pattern.
     let pattern = CscMatrix::<f64> {
@@ -1069,6 +1082,59 @@ mod tests {
     }
 
     #[test]
+    fn f64_dense_front_blocked_multi_panel() {
+        // A fully dense symmetric matrix is one front of width n=100 > NB(64),
+        // so factoring it exercises the blocked **multi-panel** Bunch-Kaufman
+        // path (which the small n≤50 tests never reach). Diagonally dominant SPD.
+        let n = 100;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            for i in j..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(if i == j {
+                    n as f64 + 1.0
+                } else {
+                    ((i + 2 * j) % 5) as f64 - 2.0
+                });
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+        let f = factor_sparse_ldlt(&a).unwrap();
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(
+            residual_inf(&a, &x, &b) < 1e-9,
+            "residual {}",
+            residual_inf(&a, &x, &b)
+        );
+    }
+
+    #[test]
+    fn complex_dense_front_blocked_multi_panel() {
+        // Dense complex-symmetric, one front of width 90 > NB → multi-panel.
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let n = 90;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            for i in j..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(if i == j {
+                    c(n as f64, 1.0)
+                } else {
+                    c(((i + 3 * j) % 5) as f64 - 2.0, 0.2)
+                });
+            }
+        }
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b = vec![c(1.0, 0.5); n];
+        let f = factor_sparse_ldlt(&a).unwrap();
+        let x = solve_ldlt(&f, &b).unwrap();
+        assert!(residual_inf(&a, &x, &b) < 1e-9);
+    }
+
+    #[test]
     fn f64_sparse_2d_grid_residual() {
         // 2D 5-point Laplacian on a 5×5 grid (n=25), SPD.
         let m = 5;
@@ -1209,10 +1275,17 @@ mod tests {
             drop_tol: None,
         };
         let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
-        assert!(f.n_perturbed >= 1, "expected ≥1 perturbation, got {}", f.n_perturbed);
+        assert!(
+            f.n_perturbed >= 1,
+            "expected ≥1 perturbation, got {}",
+            f.n_perturbed
+        );
         let b = vec![c(1.0, 0.0); n];
         let x = solve_ldlt(&f, &b).unwrap();
-        assert!(x.iter().all(|v| v.norm().is_finite()), "factor must stay finite");
+        assert!(
+            x.iter().all(|v| v.norm().is_finite()),
+            "factor must stay finite"
+        );
     }
 
     #[test]
@@ -1240,7 +1313,10 @@ mod tests {
             drop_tol: None,
         };
         let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
-        assert_eq!(f.n_perturbed, 0, "well-conditioned matrix needs no perturbation");
+        assert_eq!(
+            f.n_perturbed, 0,
+            "well-conditioned matrix needs no perturbation"
+        );
     }
 
     #[test]

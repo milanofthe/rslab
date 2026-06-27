@@ -96,10 +96,7 @@ pub struct LowPrecisionPreconditioner {
 impl LowPrecisionPreconditioner {
     /// Down-cast `A` to `Complex<f32>` and factor it (static-pivoting honoured
     /// via `opts`, e.g. `ZeroPivotAction::PerturbToEps`).
-    pub fn factor(
-        a: &CscMatrix<Complex<f64>>,
-        opts: &FactorOptions,
-    ) -> Result<Self, FeralError> {
+    pub fn factor(a: &CscMatrix<Complex<f64>>, opts: &FactorOptions) -> Result<Self, FeralError> {
         let a32 = CscMatrix::<Complex<f32>> {
             n: a.n,
             col_ptr: a.col_ptr.clone(),
@@ -153,10 +150,7 @@ pub struct LowPrecisionLu {
 impl LowPrecisionLu {
     /// Down-cast `A` to `Complex<f32>` and LU-factor it (options honoured —
     /// static pivoting and/or incomplete dropping for a preconditioner).
-    pub fn factor(
-        a: &GeneralCsc<Complex<f64>>,
-        opts: &FactorOptions,
-    ) -> Result<Self, FeralError> {
+    pub fn factor(a: &GeneralCsc<Complex<f64>>, opts: &FactorOptions) -> Result<Self, FeralError> {
         let a32 = GeneralCsc::<Complex<f32>> {
             n: a.n,
             col_ptr: a.col_ptr.clone(),
@@ -777,7 +771,11 @@ mod tests {
         let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let pre = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
         assert!(pre.converged, "preconditioned GMRES res={}", pre.final_res);
-        assert!(pre.iters <= 3, "LU-preconditioned GMRES iters {}", pre.iters);
+        assert!(
+            pre.iters <= 3,
+            "LU-preconditioned GMRES iters {}",
+            pre.iters
+        );
         // Verify the true residual.
         let mut y = vec![C::default(); n];
         a.matvec(&pre.x, &mut y);
@@ -850,7 +848,11 @@ mod tests {
         };
         let m = LdltSolver::factor_with(&a, &opts).unwrap();
         let pre = cocr(&a, &b, &m, 1e-9, 500).unwrap();
-        assert!(pre.converged, "indefinite COCR res={} iters={}", pre.final_res, pre.iters);
+        assert!(
+            pre.converged,
+            "indefinite COCR res={} iters={}",
+            pre.final_res, pre.iters
+        );
         let mut ax = vec![C::default(); n];
         a.symv(&pre.x, &mut ax);
         let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);

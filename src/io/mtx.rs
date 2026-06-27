@@ -142,7 +142,10 @@ fn parse_mtx_with<T: Scalar>(
     if !banner_ok {
         return Err(FeralError::IoError(format!(
             "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate {} {})",
-            source, header.trim(), field, symmetry
+            source,
+            header.trim(),
+            field,
+            symmetry
         )));
     }
 
@@ -227,7 +230,11 @@ fn parse_mtx_with<T: Scalar>(
                 "{}: line {}: expected 'i j {}', got '{}'",
                 source,
                 line_no + 1,
-                if n_value_tokens == 2 { "re im" } else { "value" },
+                if n_value_tokens == 2 {
+                    "re im"
+                } else {
+                    "value"
+                },
                 trimmed
             )));
         }
@@ -605,7 +612,7 @@ mod tests {
         assert_eq!(dense.get(0, 0), Complex::new(2.0, 1.0));
         assert_eq!(dense.get(1, 0), Complex::new(-1.0, 0.3));
         assert_eq!(dense.get(0, 1), Complex::new(-1.0, 0.3)); // symmetric (no conj)
-        // (1,3) → normalized to lower (2,0).
+                                                              // (1,3) → normalized to lower (2,0).
         assert_eq!(dense.get(2, 0), Complex::new(0.5, 0.2));
     }
 

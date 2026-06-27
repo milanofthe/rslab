@@ -151,7 +151,9 @@ impl<T: Scalar> GeneralCsc<T> {
     /// Validate structural invariants (lengths, bounds).
     pub fn validate(&self) -> Result<(), FeralError> {
         if self.col_ptr.len() != self.n + 1 {
-            return Err(FeralError::InvalidInput("GeneralCsc: bad col_ptr length".to_string()));
+            return Err(FeralError::InvalidInput(
+                "GeneralCsc: bad col_ptr length".to_string(),
+            ));
         }
         if self.row_idx.len() != self.values.len() {
             return Err(FeralError::InvalidInput(
@@ -159,11 +161,15 @@ impl<T: Scalar> GeneralCsc<T> {
             ));
         }
         if *self.col_ptr.last().unwrap_or(&0) != self.row_idx.len() {
-            return Err(FeralError::InvalidInput("GeneralCsc: col_ptr[n] != nnz".to_string()));
+            return Err(FeralError::InvalidInput(
+                "GeneralCsc: col_ptr[n] != nnz".to_string(),
+            ));
         }
         for &i in &self.row_idx {
             if i >= self.n {
-                return Err(FeralError::InvalidInput("GeneralCsc: row index out of bounds".to_string()));
+                return Err(FeralError::InvalidInput(
+                    "GeneralCsc: row index out of bounds".to_string(),
+                ));
             }
         }
         Ok(())

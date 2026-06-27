@@ -11,9 +11,9 @@
 
 use std::time::Instant;
 
+use num_complex::Complex;
 use rla::sparse::csc::CscMatrix;
 use rla::LdltSolver;
-use num_complex::Complex;
 
 use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
@@ -148,8 +148,17 @@ fn main() {
     );
     println!(
         "{:>5} {:>7} {:>9} {:>9}  {:>9} {:>9} {:>8}  {:>9} {:>9} {:>8}  {:>7}",
-        "grid", "n", "nnzA/2", "nnzA", "RLA_fac", "RLA_slv", "RLA_res", "faer_fac", "faer_slv",
-        "faer_res", "fac×"
+        "grid",
+        "n",
+        "nnzA/2",
+        "nnzA",
+        "RLA_fac",
+        "RLA_slv",
+        "RLA_res",
+        "faer_fac",
+        "faer_slv",
+        "faer_res",
+        "fac×"
     );
 
     let diag = Complex::new(4.0, 1.0);

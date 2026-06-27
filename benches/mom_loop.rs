@@ -11,9 +11,9 @@
 
 use std::time::Instant;
 
+use num_complex::Complex;
 use rla::prelude::*;
 use rla::LowPrecisionLu;
-use num_complex::Complex;
 
 type C = Complex<f64>;
 
@@ -93,8 +93,11 @@ fn bench_file(path: &std::path::Path) {
 
     // Light incomplete LU (memory ↓). Aggressive dropping is unstable on these
     // indefinite saddle matrices (post-hoc truncation, not propagated ILU).
-    let ilu = LuSolver::factor(&a, &FactorOptions::preconditioner(1e-10).with_drop_tol(1e-2))
-        .unwrap();
+    let ilu = LuSolver::factor(
+        &a,
+        &FactorOptions::preconditioner(1e-10).with_drop_tol(1e-2),
+    )
+    .unwrap();
     run_precond("f64 ILU τ=1e-2", &a, &b, ilu.factor_nnz(), 16, &ilu);
     println!();
 }

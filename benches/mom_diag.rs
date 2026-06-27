@@ -114,7 +114,11 @@ fn diag_file(path: &std::path::Path) {
         max_ncol = max_ncol.max(ncol);
         fw_ncol_num += fl * ncol as f64;
     }
-    let fw_ncol = if total_flop > 0.0 { fw_ncol_num / total_flop } else { 0.0 };
+    let fw_ncol = if total_flop > 0.0 {
+        fw_ncol_num / total_flop
+    } else {
+        0.0
+    };
 
     println!("=== {name}  n={n}  nnz(A)={nnz_a} ===");
     println!(

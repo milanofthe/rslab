@@ -23,9 +23,7 @@
 //!   (CSR, upper with the pivots on the diagonal), in factorization order.
 
 use crate::error::FeralError;
-use crate::numeric::multifrontal_ldlt::{
-    analyze, perturb_pivot, FactorOptions, ZeroPivotAction,
-};
+use crate::numeric::multifrontal_ldlt::{analyze, perturb_pivot, FactorOptions, ZeroPivotAction};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -240,9 +238,9 @@ fn lu_front<T: Scalar>(
             }
         }
         let pw = ke - kb; // panel width
-        // --- TRSM: U[kb:ke, ke:nrow] = L11⁻¹ · A[kb:ke, ke:nrow] ---
-        // L11 is the unit-lower `pw×pw` diagonal block; forward-substitute each
-        // trailing column over the panel rows.
+                          // --- TRSM: U[kb:ke, ke:nrow] = L11⁻¹ · A[kb:ke, ke:nrow] ---
+                          // L11 is the unit-lower `pw×pw` diagonal block; forward-substitute each
+                          // trailing column over the panel rows.
         for j in ke..n {
             for r in (kb + 1)..ke {
                 let mut s = f[j * n + r];
@@ -502,7 +500,15 @@ fn factor_subtree<T: Scalar>(
     // Factor this node from the children's own (subtree-root) factors.
     let nf = {
         let child_refs: Vec<&NodeLu<T>> = outs.iter().map(|(own, _)| own).collect();
-        factor_one_node_lu(s, sym, a_perm, a_perm_t, &child_refs, perturb_floor, profile)?
+        factor_one_node_lu(
+            s,
+            sym,
+            a_perm,
+            a_perm_t,
+            &child_refs,
+            perturb_floor,
+            profile,
+        )?
     };
     // Flatten the subtree's factors for the global pass (child `i` is the i-th
     // entry of `children`).
@@ -749,7 +755,9 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let a_perm = GeneralCsc::<T>::from_triplets(n, &rows, &cols, &vals)?;
     let a_perm_t = a_perm.transpose();
 
-    let profile = std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false);
+    let profile = std::env::var("RLA_PROFILE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     if profile {
         PROF_ASM_NS.store(0, Ordering::Relaxed);
         PROF_FRONT_NS.store(0, Ordering::Relaxed);
@@ -836,8 +844,10 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // e). A supernode's eliminated columns form a contiguous increasing
     // e-range, so iterating nodes then `j` yields columns/rows in order.
     let one = T::one();
-    let (mut l_col_ptr, mut l_row_idx, mut l_values) = (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
-    let (mut u_row_ptr, mut u_col_idx, mut u_values) = (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
+    let (mut l_col_ptr, mut l_row_idx, mut l_values) =
+        (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
+    let (mut u_row_ptr, mut u_col_idx, mut u_values) =
+        (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
     l_col_ptr.push(0);
     u_row_ptr.push(0);
     let mut lcol: Vec<(usize, T)> = Vec::new();
@@ -1098,7 +1108,9 @@ mod tests {
     fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
         let mut y = vec![T::zero(); a.n];
         a.matvec(x, &mut y);
-        (0..a.n).map(|i| (y[i] - b[i]).magnitude()).fold(0.0, f64::max)
+        (0..a.n)
+            .map(|i| (y[i] - b[i]).magnitude())
+            .fold(0.0, f64::max)
     }
 
     #[test]
@@ -1152,7 +1164,10 @@ mod tests {
             let bc: Vec<f64> = (0..n).map(|i| b[i * nrhs + col]).collect();
             let xc = solver.solve(&bc).unwrap();
             for i in 0..n {
-                assert!((x[i * nrhs + col] - xc[i]).abs() < 1e-10, "rhs {col} row {i}");
+                assert!(
+                    (x[i * nrhs + col] - xc[i]).abs() < 1e-10,
+                    "rhs {col} row {i}"
+                );
             }
         }
     }
@@ -1275,7 +1290,8 @@ mod tests {
             }
         }
         let a = GeneralCsc::<num_complex::Complex<f32>>::from_triplets(n, &rr, &cc, &vv).unwrap();
-        let b: Vec<num_complex::Complex<f32>> = (0..n).map(|i| c((i % 5) as f32 - 2.0, 1.0)).collect();
+        let b: Vec<num_complex::Complex<f32>> =
+            (0..n).map(|i| c((i % 5) as f32 - 2.0, 1.0)).collect();
         let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         let r = resid(&a, &x, &b);
@@ -1323,7 +1339,13 @@ mod tests {
             let vv: Vec<Complex<f64>> = rr
                 .iter()
                 .zip(&cc)
-                .map(|(&i, &j)| if i == j { c(8.0 + shift, 1.0) } else { c(-1.0, 0.2) })
+                .map(|(&i, &j)| {
+                    if i == j {
+                        c(8.0 + shift, 1.0)
+                    } else {
+                        c(-1.0, 0.2)
+                    }
+                })
                 .collect();
             let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
             let phased =

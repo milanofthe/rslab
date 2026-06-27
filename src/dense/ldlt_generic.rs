@@ -254,8 +254,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
                 let l1j = l1[j];
                 let l2j = l2[j];
                 for i in j..n {
-                    a[j * n + i] =
-                        a[j * n + i] - a[k * n + i] * l1j - a[(k + 1) * n + i] * l2j;
+                    a[j * n + i] = a[j * n + i] - a[k * n + i] * l1j - a[(k + 1) * n + i] * l2j;
                 }
             }
             for i in (k + 2)..n {
@@ -508,7 +507,10 @@ mod tests {
     #[test]
     fn f64_indefinite_2x2_pivot() {
         // A = [[0, 1], [1, 0]] has a zero diagonal: forces a 2×2 pivot.
-        let a = SymmetricMatrix::<f64>::from_lower_triangle(2, &[(0, 0, 0.0), (1, 0, 1.0), (1, 1, 0.0)]);
+        let a = SymmetricMatrix::<f64>::from_lower_triangle(
+            2,
+            &[(0, 0, 0.0), (1, 0, 1.0), (1, 1, 0.0)],
+        );
         let f = factor_ldlt(&a).unwrap();
         let b = vec![3.0, 5.0];
         let x = solve_ldlt(&f, &b).unwrap();
@@ -568,7 +570,11 @@ mod tests {
         // A = [[0, 1], [1, 0]] (complex symmetric, zero diagonal -> 2×2 pivot).
         let a = SymmetricMatrix::<Complex<f64>>::from_lower_triangle(
             2,
-            &[(0, 0, c(0.0, 0.0)), (1, 0, c(1.0, 0.0)), (1, 1, c(0.0, 0.0))],
+            &[
+                (0, 0, c(0.0, 0.0)),
+                (1, 0, c(1.0, 0.0)),
+                (1, 1, c(0.0, 0.0)),
+            ],
         );
         let f = factor_ldlt(&a).unwrap();
         let b = vec![c(1.0, 1.0), c(2.0, -1.0)];

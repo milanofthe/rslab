@@ -11,12 +11,12 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use num_complex::Complex;
 use rla::sparse::general::GeneralCsc;
 use rla::{
     factor_general_lu, parse_mtx_complex_general, solve_lu, solve_lu_refined, FactorOptions,
     ZeroPivotAction,
 };
-use num_complex::Complex;
 
 use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
@@ -39,7 +39,9 @@ fn matvec(entries: &[(usize, usize, C)], x: &[C], y: &mut [C]) {
 fn resid(entries: &[(usize, usize, C)], x: &[C], b: &[C]) -> f64 {
     let mut y = vec![C::default(); b.len()];
     matvec(entries, x, &mut y);
-    (0..b.len()).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max)
+    (0..b.len())
+        .map(|i| (y[i] - b[i]).norm())
+        .fold(0.0, f64::max)
 }
 
 fn bench_file(path: &std::path::Path) {
@@ -162,7 +164,10 @@ fn bench_file(path: &std::path::Path) {
     if faer_ok {
         println!("  faer : factor={faer_fac:8.1} ms  solve={faer_slv:7.2} ms  res={faer_res:.2e}");
         if faer_fac > 0.0 {
-            println!("  speedup factor (faer/RLA): {:.2}x", faer_fac / rla_fac.max(1e-9));
+            println!(
+                "  speedup factor (faer/RLA): {:.2}x",
+                faer_fac / rla_fac.max(1e-9)
+            );
         }
     } else {
         println!("  faer : FAILED");

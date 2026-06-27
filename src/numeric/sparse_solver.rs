@@ -355,7 +355,10 @@ mod tests {
         let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &diag).unwrap();
         let f = LdltSolver::factor(&a).unwrap();
         let inertia = f.inertia();
-        assert_eq!((inertia.positive, inertia.negative, inertia.zero), (3, 2, 0));
+        assert_eq!(
+            (inertia.positive, inertia.negative, inertia.zero),
+            (3, 2, 0)
+        );
         assert_eq!(inertia.total(), n);
     }
 
@@ -403,14 +406,18 @@ mod tests {
             let vals: Vec<Complex<f64>> = rows
                 .iter()
                 .zip(&cols)
-                .map(|(&i, &j)| if i == j { c(4.0 + shift, 1.0) } else { c(-1.0, 0.2) })
+                .map(|(&i, &j)| {
+                    if i == j {
+                        c(4.0 + shift, 1.0)
+                    } else {
+                        c(-1.0, 0.2)
+                    }
+                })
                 .collect();
             let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
             let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 1.0)).collect();
 
-            let phased = analysis
-                .factor(&a, &FactorOptions::default())
-                .unwrap();
+            let phased = analysis.factor(&a, &FactorOptions::default()).unwrap();
             let one_shot = LdltSolver::factor(&a).unwrap();
             let x_phased = phased.solve(&b).unwrap();
             let x_one = one_shot.solve(&b).unwrap();
@@ -425,11 +432,17 @@ mod tests {
 
     #[test]
     fn analysis_rejects_mismatched_pattern() {
-        let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0]).unwrap();
+        let a =
+            CscMatrix::<f64>::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0]).unwrap();
         let analysis = LdltSymbolic::analyze(&a).unwrap();
         // A different pattern (extra off-diagonal) must be rejected.
-        let a2 = CscMatrix::<f64>::from_triplets(3, &[0, 1, 1, 2], &[0, 0, 1, 2], &[2.0, -1.0, 2.0, 2.0])
-            .unwrap();
+        let a2 = CscMatrix::<f64>::from_triplets(
+            3,
+            &[0, 1, 1, 2],
+            &[0, 0, 1, 2],
+            &[2.0, -1.0, 2.0, 2.0],
+        )
+        .unwrap();
         assert!(analysis.factor(&a2, &FactorOptions::default()).is_err());
     }
 
@@ -506,7 +519,12 @@ mod tests {
         let x_ref = solver.solve_refined(&a, &b, 3).unwrap();
         let r_plain = residual_inf(&a, &x_plain, &b);
         let r_ref = residual_inf(&a, &x_ref, &b);
-        assert!(r_ref <= r_plain.max(1e-300), "refined {} vs plain {}", r_ref, r_plain);
+        assert!(
+            r_ref <= r_plain.max(1e-300),
+            "refined {} vs plain {}",
+            r_ref,
+            r_plain
+        );
         assert!(r_ref < 1e-12, "refined residual {}", r_ref);
     }
 

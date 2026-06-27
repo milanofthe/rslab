@@ -14,12 +14,12 @@
 
 use std::time::Instant;
 
+use num_complex::Complex;
 use rla::sparse::csc::CscMatrix;
 use rla::{
-    cocg, FactorOptions, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
-    LdltSolver, ZeroPivotAction,
+    cocg, FactorOptions, LdltSolver, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+    ZeroPivotAction,
 };
-use num_complex::Complex;
 
 type C = Complex<f64>;
 
@@ -113,9 +113,27 @@ fn main() {
 
     let fail = ZeroPivotAction::Fail;
     let configs: [(&str, FactorOptions); 3] = [
-        ("f64 complete", FactorOptions { on_zero_pivot: fail.clone(), drop_tol: None }),
-        ("f64 incomplete τ=1e-2", FactorOptions { on_zero_pivot: fail.clone(), drop_tol: Some(1e-2) }),
-        ("f64 incomplete τ=5e-2", FactorOptions { on_zero_pivot: fail.clone(), drop_tol: Some(5e-2) }),
+        (
+            "f64 complete",
+            FactorOptions {
+                on_zero_pivot: fail.clone(),
+                drop_tol: None,
+            },
+        ),
+        (
+            "f64 incomplete τ=1e-2",
+            FactorOptions {
+                on_zero_pivot: fail.clone(),
+                drop_tol: Some(1e-2),
+            },
+        ),
+        (
+            "f64 incomplete τ=5e-2",
+            FactorOptions {
+                on_zero_pivot: fail.clone(),
+                drop_tol: Some(5e-2),
+            },
+        ),
     ];
     for (label, opts) in &configs {
         let t = Instant::now();
@@ -126,8 +144,20 @@ fn main() {
 
     // Mixed precision: Complex<f32> factor (8 bytes/entry).
     let f32_configs: [(&str, FactorOptions); 2] = [
-        ("f32 complete", FactorOptions { on_zero_pivot: fail.clone(), drop_tol: None }),
-        ("f32 incomplete τ=5e-2", FactorOptions { on_zero_pivot: fail.clone(), drop_tol: Some(5e-2) }),
+        (
+            "f32 complete",
+            FactorOptions {
+                on_zero_pivot: fail.clone(),
+                drop_tol: None,
+            },
+        ),
+        (
+            "f32 incomplete τ=5e-2",
+            FactorOptions {
+                on_zero_pivot: fail.clone(),
+                drop_tol: Some(5e-2),
+            },
+        ),
     ];
     for (label, opts) in &f32_configs {
         let t = Instant::now();

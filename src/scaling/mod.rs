@@ -1462,5 +1462,4 @@ mod tests {
             "the spread guard must not fire below the threshold, got {info:?}"
         );
     }
-
 }

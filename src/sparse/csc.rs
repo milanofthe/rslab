@@ -505,7 +505,8 @@ mod tests {
 
     #[test]
     fn test_diagonal_matrix() {
-        let m: CscMatrix = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 2.0, 3.0]).unwrap();
+        let m: CscMatrix =
+            CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 2.0, 3.0]).unwrap();
         assert_eq!(m.nnz(), 3);
         let pat = m.symmetric_pattern();
         assert_eq!(pat.col_ptr[3], 3); // no off-diagonal, so 3 entries total

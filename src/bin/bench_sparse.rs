@@ -10,10 +10,10 @@
 
 use std::time::Instant;
 
+use num_complex::Complex;
 use rla::sparse::csc::CscMatrix;
 use rla::FeralError;
 use rla::LdltSolver;
-use num_complex::Complex;
 
 /// Build a 2D 5-point grid (m×m, n=m²) with the given diagonal and neighbor
 /// values. Lower triangle only.

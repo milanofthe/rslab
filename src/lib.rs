@@ -98,17 +98,17 @@ pub use numeric::multifrontal_ldlt::{
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,
 // plus the raw factor type and free building blocks.
-pub use numeric::multifrontal_lu::{
-    factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
-    LuFactors, LuSolver, LuSymbolic,
+pub use inertia::Inertia;
+pub use io::mtx::{
+    parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, MtxMatrix,
 };
 pub use numeric::iterative::{
     cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,
     LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
 };
-pub use inertia::Inertia;
-pub use io::mtx::{
-    parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, MtxMatrix,
+pub use numeric::multifrontal_lu::{
+    factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
+    LuFactors, LuSolver, LuSymbolic,
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
@@ -120,15 +120,35 @@ pub use symbolic::SymbolicProfileReport;
 /// options enums, and the Matrix Market loaders.
 pub mod prelude {
     pub use crate::{
-        // matrices, options, scalar field
-        CscMatrix, FactorOptions, GeneralCsc, MtxMatrix, Scalar, ZeroPivotAction,
-        // high-level phased solvers: `XSymbolic::analyze → .factor → XSolver`
-        LdltSolver, LdltSymbolic, LuSolver, LuSymbolic,
         // iterative solvers, operators, preconditioners (solver-in-the-loop)
-        cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator,
-        LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+        cocg,
+        cocr,
+        gmres,
         // Matrix Market loaders + error type
-        parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex,
+        parse_mtx,
+        parse_mtx_complex,
+        parse_mtx_complex_general,
+        read_mtx,
+        read_mtx_complex,
+        // matrices, options, scalar field
+        CscMatrix,
+        FactorOptions,
+        Factorization,
         FeralError,
+        GeneralCsc,
+        KrylovResult,
+        // high-level phased solvers: `XSymbolic::analyze → .factor → XSolver`
+        LdltSolver,
+        LdltSymbolic,
+        LinearOperator,
+        LowPrecisionLu,
+        LowPrecisionPreconditioner,
+        LuSolver,
+        LuSymbolic,
+        MtxMatrix,
+        NoPreconditioner,
+        Preconditioner,
+        Scalar,
+        ZeroPivotAction,
     };
 }
