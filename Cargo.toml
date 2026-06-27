@@ -63,6 +63,13 @@ pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
 # the opt-in parallel driver in src/numeric/factorize.rs; the
 # sequential path remains the default and reference implementation.
 rayon = "1.10"
+# Complex/real SIMD GEMM (sarah-quinones, the faer author) for the trailing
+# Schur-complement update in the generic multifrontal front kernel. `c64` is
+# `num_complex::Complex<f64>`, so our `Scalar` values pass through unchanged;
+# runtime AVX2/AVX-512 dispatch. The small panel Bunch-Kaufman stays scalar
+# (PARDISO-style: tiny panel scalar, BLAS-3 trailing update). f64 production
+# keeps its own kernel in src/numeric/factorize.rs — this is the complex path.
+gemm = "0.18"
 # Ordering crates are consumed by `symbolic_factorize_with_method`
 # via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
 # src/ordering/amd.rs is still the default (OrderingMethod::Amd)

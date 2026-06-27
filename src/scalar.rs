@@ -23,7 +23,8 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 /// A scalar field element supporting the operations the dense and multifrontal
 /// numeric kernels require.
 pub trait Scalar:
-    Copy
+    'static
+    + Copy
     + PartialEq
     + Debug
     + Send

@@ -32,6 +32,21 @@ use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::{symbolic_factorize, SupernodeParams, SymbolicFactorization};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Diagnostic toggle for the contribution-block Schur update kernel. When
+/// `true` (default) the deferred update `CB = A22 − L21·D·L21ᵀ` runs as a
+/// single SIMD GEMM ([`gemm`]); when `false` the identical update runs as a
+/// scalar triple loop over the same `l21`/`g`/`cb` buffers. Both paths produce
+/// the same factor — this exists only to A/B the kernel, mirroring feral's
+/// `FORCE_SCALAR_FRONTAL`.
+pub(crate) static USE_GEMM_SCHUR: AtomicBool = AtomicBool::new(true);
+
+/// Set the contribution-block kernel: `true` = SIMD GEMM, `false` = scalar.
+/// Process-wide; intended for benchmarks and tests, not the solve path.
+pub fn set_use_gemm_schur(on: bool) {
+    USE_GEMM_SCHUR.store(on, Ordering::Relaxed);
+}
 
 /// Per-front partial-factorization output, in within-front pivot order.
 struct FrontFactors<T> {
@@ -131,9 +146,11 @@ fn factor_front<T: Scalar>(
             }
             d_diag[k] = d;
             let dinv = d.recip();
-            // Update the entire trailing front (rows up to nrow), then store
-            // multipliers.
-            for j in (k + 1)..n {
+            // Update only the fully-summed trailing columns `(k+1)..ncol`
+            // (across all rows, so the L21 multiplier rows are formed), then
+            // store multipliers. The contribution block `[ncol,nrow)²` is left
+            // untouched and updated once, after the panel, by a single GEMM.
+            for j in (k + 1)..ncol {
                 let wj_dinv = f[k * n + j] * dinv;
                 if wj_dinv != T::zero() {
                     for i in j..n {
@@ -171,7 +188,7 @@ fn factor_front<T: Scalar>(
                 l1[i] = (d22 * wik - d21 * wik1) * detinv;
                 l2[i] = (d11 * wik1 - d21 * wik) * detinv;
             }
-            for j in (k + 2)..n {
+            for j in (k + 2)..ncol {
                 let l1j = l1[j];
                 let l2j = l2[j];
                 for i in j..n {
@@ -207,12 +224,96 @@ fn factor_front<T: Scalar>(
         }
     }
 
-    // Contribution block = updated trailing [ncol, nrow) lower triangle.
+    // Contribution block: the trailing [ncol, nrow) cells were deliberately
+    // NOT touched by the panel elimination above (the update loops stop at
+    // `ncol`), so they still hold the original A22. Apply the whole deferred
+    // symmetric Schur update CB = A22 − L21·D·L21ᵀ as one SIMD GEMM. This is
+    // the FLOP-dominant step; gemm gives AVX2/AVX-512 complex/real kernels.
     let cnrow = nrow - ncol;
     let mut cb = vec![T::zero(); cnrow * cnrow];
+    // Seed cb with A22, mirrored to both triangles (A is symmetric; no conj).
     for j in 0..cnrow {
         for i in j..cnrow {
-            cb[j * cnrow + i] = f[(ncol + j) * nrow + (ncol + i)];
+            let v = f[(ncol + j) * n + (ncol + i)];
+            cb[j * cnrow + i] = v;
+            cb[i * cnrow + j] = v;
+        }
+    }
+    if cnrow > 0 && ncol > 0 {
+        // L21 (cnrow × ncol, column-major): the off-block multiplier rows.
+        let mut l21 = vec![T::zero(); cnrow * ncol];
+        for c in 0..ncol {
+            for r in 0..cnrow {
+                l21[c * cnrow + r] = f[c * n + (ncol + r)];
+            }
+        }
+        // G = L21·D (cnrow × ncol, column-major); D is block-diagonal.
+        let mut g = vec![T::zero(); cnrow * ncol];
+        let mut c = 0;
+        while c < ncol {
+            if two_by_two[c] {
+                let (d11, d21, d22) = (d_diag[c], d_subdiag[c], d_diag[c + 1]);
+                for r in 0..cnrow {
+                    let a = l21[c * cnrow + r];
+                    let b = l21[(c + 1) * cnrow + r];
+                    g[c * cnrow + r] = a * d11 + b * d21;
+                    g[(c + 1) * cnrow + r] = a * d21 + b * d22;
+                }
+                c += 2;
+            } else {
+                let d = d_diag[c];
+                for r in 0..cnrow {
+                    g[c * cnrow + r] = l21[c * cnrow + r] * d;
+                }
+                c += 1;
+            }
+        }
+        // cb ← cb − G·L21ᵀ. Column-major: cb and G have col-stride `cnrow`,
+        // row-stride 1; L21ᵀ (ncol × cnrow) reads L21 with strides swapped.
+        if USE_GEMM_SCHUR.load(Ordering::Relaxed) {
+            // SAFETY: `cb`, `g`, `l21` are three distinct, non-overlapping
+            // allocations, each sized for the (m,n,k) = (cnrow, cnrow, ncol)
+            // access pattern under the strides passed. The only `Scalar` impls
+            // are `f64` and `Complex<f64>`, both supported gemm element types,
+            // so the runtime element-type dispatch cannot hit the
+            // unsupported-type panic.
+            unsafe {
+                gemm::gemm(
+                    cnrow,
+                    cnrow,
+                    ncol,
+                    cb.as_mut_ptr(),
+                    cnrow as isize,
+                    1,
+                    true,
+                    g.as_ptr(),
+                    cnrow as isize,
+                    1,
+                    l21.as_ptr(),
+                    1,
+                    cnrow as isize,
+                    T::one(),
+                    -T::one(),
+                    false,
+                    false,
+                    false,
+                    gemm::Parallelism::None,
+                );
+            }
+        } else {
+            // Scalar reference: same data, same result, no SIMD. cb[i,j] -=
+            // Σ_c g[i,c]·l21[j,c] (= (G·L21ᵀ)[i,j]); lower triangle only, then
+            // mirror, since CB is symmetric.
+            for j in 0..cnrow {
+                for i in j..cnrow {
+                    let mut acc = cb[j * cnrow + i];
+                    for c in 0..ncol {
+                        acc = acc - g[c * cnrow + i] * l21[c * cnrow + j];
+                    }
+                    cb[j * cnrow + i] = acc;
+                    cb[i * cnrow + j] = acc;
+                }
+            }
         }
     }
 
