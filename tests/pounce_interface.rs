@@ -5,10 +5,10 @@
 //! Solver grows: this file lands the Step-2 set (I1, I5, I6) and
 //! grows in subsequent commits.
 
-use feral::numeric::factorize::{NumericParams, SmallLeafBatch};
-use feral::scaling::ScalingStrategy;
-use feral::symbolic::SupernodeParams;
-use feral::{
+use rla::numeric::factorize::{NumericParams, SmallLeafBatch};
+use rla::scaling::ScalingStrategy;
+use rla::symbolic::SupernodeParams;
+use rla::{
     BunchKaufmanParams, CscMatrix, FactorStatus, FeralError, Inertia, QualityLevel, Solver,
     ZeroPivotAction,
 };

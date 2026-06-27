@@ -24,11 +24,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use feral::numeric::factorize::{
+use rla::numeric::factorize::{
     factorize_multifrontal_supernodal_parallel, NumericParams, Profiler,
 };
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::CscMatrix;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::CscMatrix;
 
 /// Tridiagonal SPD (diagonal 4, subdiagonal -1): strictly diagonally
 /// dominant ⇒ SPD ⇒ LDLᵀ needs no pivoting. Amalgamates into a deep

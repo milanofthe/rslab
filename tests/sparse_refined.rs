@@ -4,10 +4,10 @@
 //! and tests/dense_ldlt.rs. See FERAL-PROJECT-SPEC.md §1709 for the
 //! Phase 1b solve convention requiring refinement on all KKT solves.
 
-use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
-use feral::numeric::solve::{solve_sparse, solve_sparse_refined};
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{factor, solve_refined, BunchKaufmanParams, CscMatrix, ZeroPivotAction};
+use rla::numeric::factorize::{factorize_multifrontal, NumericParams};
+use rla::numeric::solve::{solve_sparse, solve_sparse_refined};
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{factor, solve_refined, BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
 fn ldlt_params() -> NumericParams {
     NumericParams::with_bk(BunchKaufmanParams {

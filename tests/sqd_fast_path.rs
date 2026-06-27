@@ -12,10 +12,10 @@
 //! listed in `dev/plans/sqd-fast-path.md` (and the user-approved
 //! plan at `~/.claude/plans/let-s-work-on-a-reflective-anchor.md`).
 
-use feral::dense::factor::{
+use rla::dense::factor::{
     factor_diagonal, factor_frontal_diagonal_in_place, BunchKaufmanParams, Factors,
 };
-use feral::{CscMatrix, FactorStatus, FeralError, Inertia, Solver, SymmetricMatrix};
+use rla::{CscMatrix, FactorStatus, FeralError, Inertia, Solver, SymmetricMatrix};
 
 fn params() -> BunchKaufmanParams {
     BunchKaufmanParams::default()
@@ -172,7 +172,7 @@ fn sqd_vs_bk_reference_parity_spd_diag() {
         data: data.clone(),
     };
 
-    let (f_bk, i_bk) = feral::factor(&mat, &params()).expect("bk");
+    let (f_bk, i_bk) = rla::factor(&mat, &params()).expect("bk");
     let (f_sqd, i_sqd) = factor_diagonal(&mat, &params()).expect("sqd");
 
     assert_eq!(i_bk, i_sqd, "inertia disagrees");
@@ -222,7 +222,7 @@ fn sqd_vs_bk_reference_parity_kkt_4x4() {
         data: data.clone(),
     };
 
-    let (f_bk, i_bk) = feral::factor(&mat, &params()).expect("bk");
+    let (f_bk, i_bk) = rla::factor(&mat, &params()).expect("bk");
     let (f_sqd, i_sqd) = factor_diagonal(&mat, &params()).expect("sqd");
 
     let expected_inertia = Inertia {

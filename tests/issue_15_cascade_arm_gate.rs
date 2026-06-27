@@ -13,12 +13,12 @@
 
 use std::path::Path;
 
-use feral::numeric::factorize::{
+use rla::numeric::factorize::{
     factorize_multifrontal_parallel, NumericParams, CASCADE_BREAK_MIN_N,
 };
-use feral::scaling::ScalingStrategy;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, BunchKaufmanParams, ZeroPivotAction};
+use rla::scaling::ScalingStrategy;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{read_mtx, BunchKaufmanParams, ZeroPivotAction};
 
 #[test]
 fn cascade_break_min_n_constant_locked() {

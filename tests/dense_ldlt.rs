@@ -5,7 +5,7 @@
 //! inertia counting for 2×2 blocks.
 
 #![allow(clippy::ok_expect, clippy::needless_range_loop)]
-use feral::{
+use rla::{
     factor, solve, solve_refined, BunchKaufmanParams, FeralError, Inertia, SymmetricMatrix,
     ZeroPivotAction,
 };
@@ -31,7 +31,7 @@ fn default_params() -> BunchKaufmanParams {
 }
 
 /// Helper: verify P·L·D·Lᵀ·Pᵀ = D_eq·A·D_eq by computing the product and comparing.
-fn verify_factorization(mat: &SymmetricMatrix, factors: &feral::Factors, tol: f64) {
+fn verify_factorization(mat: &SymmetricMatrix, factors: &rla::Factors, tol: f64) {
     let n = factors.n;
 
     // Reconstruct P·L·D·Lᵀ·Pᵀ

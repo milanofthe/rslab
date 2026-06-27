@@ -32,9 +32,9 @@
 
 use std::path::Path;
 
-use feral::numeric::factorize::NumericParams;
-use feral::numeric::solver::{FactorStatus, Solver};
-use feral::{read_mtx, Inertia};
+use rla::numeric::factorize::NumericParams;
+use rla::numeric::solver::{FactorStatus, Solver};
+use rla::{read_mtx, Inertia};
 
 #[test]
 fn default_numeric_params_have_phase_b_cb_armed() {

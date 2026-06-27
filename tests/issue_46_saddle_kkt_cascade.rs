@@ -33,10 +33,10 @@
 //! within a small multiple of the symbolic no-delay estimate, whereas
 //! the #46 cascade blew it up 20×+.
 
-use feral::numeric::factorize::factorize_multifrontal;
-use feral::scaling::ScalingStrategy;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{solve_sparse, CscMatrix, NumericParams};
+use rla::numeric::factorize::factorize_multifrontal;
+use rla::scaling::ScalingStrategy;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{solve_sparse, CscMatrix, NumericParams};
 
 /// Build the lower triangle of a saddle-point KKT in *constraints-first*
 /// layout

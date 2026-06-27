@@ -25,8 +25,8 @@
 use std::fs;
 use std::path::Path;
 
-use feral::numeric::solver::{FactorStatus, Solver};
-use feral::{read_mtx, CscMatrix, Inertia};
+use rla::numeric::solver::{FactorStatus, Solver};
+use rla::{read_mtx, CscMatrix, Inertia};
 
 fn check_iter(iter: usize) {
     let mtx_path = format!("data/matrices/kkt-mittelmann/NARX_CFy/NARX_CFy_{iter:04}.mtx");

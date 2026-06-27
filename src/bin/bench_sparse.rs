@@ -10,9 +10,9 @@
 
 use std::time::Instant;
 
-use feral::sparse::csc::CscMatrix;
-use feral::FeralError;
-use feral::SparseSymmetricLdlt;
+use rla::sparse::csc::CscMatrix;
+use rla::FeralError;
+use rla::SparseSymmetricLdlt;
 use num_complex::Complex;
 
 /// Build a 2D 5-point grid (m×m, n=m²) with the given diagonal and neighbor
@@ -49,7 +49,7 @@ fn grid<T: Copy>(m: usize, diag: T, off: T) -> (Vec<usize>, Vec<usize>, Vec<T>) 
 
 fn bench_one<T>(label: &str, m: usize, diag: T, off: T, b_fn: impl Fn(usize) -> T)
 where
-    T: feral::Scalar,
+    T: rla::Scalar,
 {
     let n = m * m;
     let (rows, cols, vals) = grid(m, diag, off);

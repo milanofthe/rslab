@@ -18,12 +18,12 @@
 //! dense kernel's `perturb_to_floor` site through `FrontalFactors`,
 //! `SparseFactors::n_tiny()`, and `FactorStats::n_tiny`.
 
-use feral::dense::factor::ZeroPivotAction;
-use feral::numeric::factorize::NumericParams;
-use feral::numeric::solver::{FactorStatus, Solver};
-use feral::sparse::csc::CscMatrix;
-use feral::symbolic::SupernodeParams;
-use feral::{BunchKaufmanParams, Inertia};
+use rla::dense::factor::ZeroPivotAction;
+use rla::numeric::factorize::NumericParams;
+use rla::numeric::solver::{FactorStatus, Solver};
+use rla::sparse::csc::CscMatrix;
+use rla::symbolic::SupernodeParams;
+use rla::{BunchKaufmanParams, Inertia};
 
 /// Build A = diag(values) as a symmetric CSC matrix (lower triangle).
 fn diag_csc(values: &[f64]) -> CscMatrix {

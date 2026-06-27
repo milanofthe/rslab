@@ -18,8 +18,8 @@
 //! (`dfac_front_aux.F:1494-1606`) and SSIDS
 //! (`block_ldlt.hxx::test_2x2`) acceptance formulas.
 
-use feral::dense::factor::factor_frontal;
-use feral::{factor, solve, BunchKaufmanParams, Factors, SymmetricMatrix, ZeroPivotAction};
+use rla::dense::factor::factor_frontal;
+use rla::{factor, solve, BunchKaufmanParams, Factors, SymmetricMatrix, ZeroPivotAction};
 
 /// Count d_diag entries that were force-accepted as zero (dense factor).
 fn n_zero_pivots(f: &Factors) -> usize {

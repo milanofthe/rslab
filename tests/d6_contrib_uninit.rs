@@ -18,8 +18,8 @@
 //! with `ncol < nrow` (forcing a non-empty contribution block,
 //! `cdim = nrow - nelim > 0`) and reads back **every** cell of `contrib`.
 
-use feral::dense::factor::{factor_frontal, factor_frontal_blocked};
-use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
+use rla::dense::factor::{factor_frontal, factor_frontal_blocked};
+use rla::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
 
 fn params() -> BunchKaufmanParams {
     BunchKaufmanParams {

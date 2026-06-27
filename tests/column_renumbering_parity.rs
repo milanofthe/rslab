@@ -10,12 +10,12 @@
 //!    of permutation when the pivoting threshold is the same).
 //! 3. Both produce a relative residual ≤ 1e-8 on the synthetic RHS.
 
-use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
-use feral::numeric::solve::solve_sparse_refined;
-use feral::symbolic::{
+use rla::numeric::factorize::{factorize_multifrontal, NumericParams};
+use rla::numeric::solve::solve_sparse_refined;
+use rla::symbolic::{
     symbolic_factorize_with_method, AmalgamationStrategy, OrderingMethod, SupernodeParams,
 };
-use feral::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
+use rla::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
 fn ldlt_params() -> NumericParams {
     NumericParams::with_bk(BunchKaufmanParams {
@@ -150,7 +150,7 @@ fn tail_matrix_strategies_agree_on_inertia_and_residual() {
     if !Path::new(path).exists() {
         return;
     }
-    let csc = match feral::read_mtx(Path::new(path)) {
+    let csc = match rla::read_mtx(Path::new(path)) {
         Ok(m) => match m.to_csc() {
             Ok(c) => c,
             Err(_) => return,

@@ -46,10 +46,10 @@
 //!      reaches the same factorization as the dense path.
 
 #![allow(clippy::int_plus_one)]
-use feral::dense::factor::{factor, factor_frontal};
-use feral::numeric::factorize::factorize_multifrontal_supernodal;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{BunchKaufmanParams, CscMatrix, SymmetricMatrix, ZeroPivotAction};
+use rla::dense::factor::{factor, factor_frontal};
+use rla::numeric::factorize::factorize_multifrontal_supernodal;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{BunchKaufmanParams, CscMatrix, SymmetricMatrix, ZeroPivotAction};
 
 fn delay_params() -> BunchKaufmanParams {
     BunchKaufmanParams {
@@ -350,15 +350,15 @@ fn delay_sparse_params() -> SupernodeParams {
     }
 }
 
-fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
-    feral::numeric::factorize::NumericParams {
+fn delay_numeric_params() -> rla::numeric::factorize::NumericParams {
+    rla::numeric::factorize::NumericParams {
         bk: BunchKaufmanParams {
             on_zero_pivot: ZeroPivotAction::ForceAccept,
             pivot_threshold: 0.01,
             ..BunchKaufmanParams::default()
         },
-        scaling: feral::scaling::ScalingStrategy::Identity,
-        small_leaf: feral::numeric::factorize::SmallLeafBatch::default(),
+        scaling: rla::scaling::ScalingStrategy::Identity,
+        small_leaf: rla::numeric::factorize::SmallLeafBatch::default(),
         profiler: None,
         parallel_telemetry: None,
         fma: false,

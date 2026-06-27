@@ -27,8 +27,8 @@
     clippy::approx_constant,
     clippy::needless_range_loop
 )]
-use feral::scaling::{compute_scaling, ScalingInfo, ScalingStrategy};
-use feral::CscMatrix;
+use rla::scaling::{compute_scaling, ScalingInfo, ScalingStrategy};
+use rla::CscMatrix;
 
 /// Helper: scaled matrix entry value `s[i] * A_{ij} * s[j]`.
 fn scaled_entry(csc: &CscMatrix, scaling: &[f64], i: usize, j: usize) -> f64 {

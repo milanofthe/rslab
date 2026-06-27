@@ -19,13 +19,13 @@
 //! and the kernel path is identical at tiny n. Adding a duplicate
 //! n=4 case here would not change coverage.
 
-use feral::numeric::factorize::{
+use rla::numeric::factorize::{
     factorize_multifrontal, factorize_multifrontal_supernodal, should_use_dense_fast_path,
     NumericParams,
 };
-use feral::numeric::solve::solve_sparse;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
+use rla::numeric::solve::solve_sparse;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
 use std::path::Path;
 
 fn default_params() -> NumericParams {

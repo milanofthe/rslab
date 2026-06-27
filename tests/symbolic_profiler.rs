@@ -14,11 +14,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use feral::symbolic::supernode::OrderingPreprocess;
-use feral::symbolic::{
+use rla::symbolic::supernode::OrderingPreprocess;
+use rla::symbolic::{
     pick_ordering_preprocess, symbolic_factorize, SupernodeParams, SymbolicProfiler,
 };
-use feral::CscMatrix;
+use rla::CscMatrix;
 
 /// Arrow matrix: a dense hub column 0 plus `n-1` degree-1 leaf columns.
 /// Stored as the lower triangle, columns `1..n` each hold only their

@@ -14,9 +14,9 @@
 //! threshold for the Step 5 scalar-fallback guard.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use feral::dense::schur_kernel::{axpy2_minus, axpy_minus};
+use rla::dense::schur_kernel::{axpy2_minus, axpy_minus};
 #[cfg(target_arch = "aarch64")]
-use feral::dense::schur_kernel::{
+use rla::dense::schur_kernel::{
     axpy2_minus_direct, axpy2_minus_unroll4, axpy2_minus_unroll4_nofma, axpy_minus_direct,
     axpy_minus_unroll4, axpy_minus_unroll4_nofma,
 };

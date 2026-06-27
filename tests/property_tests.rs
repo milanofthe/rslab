@@ -10,7 +10,7 @@
 //! 5. L is unit lower triangular
 //! 6. D blocks are correctly structured (subdiag discriminant)
 
-use feral::{
+use rla::{
     factor, solve, solve_refined, BunchKaufmanParams, Inertia, SymmetricMatrix, ZeroPivotAction,
 };
 
@@ -143,7 +143,7 @@ fn random_badly_scaled(n: usize, rng: &mut Rng) -> SymmetricMatrix {
 // -----------------------------------------------------------------------
 
 /// Verify that P·L·D·Lᵀ·Pᵀ = D_eq·A·D_eq.
-fn check_reconstruction(mat: &SymmetricMatrix, factors: &feral::Factors, tol: f64) {
+fn check_reconstruction(mat: &SymmetricMatrix, factors: &rla::Factors, tol: f64) {
     let n = factors.n;
 
     // Build D as full matrix
@@ -239,7 +239,7 @@ fn check_solve_residual(mat: &SymmetricMatrix, x: &[f64], rhs: &[f64], tol: f64)
 }
 
 /// Check structural invariants of the factors.
-fn check_factor_structure(factors: &feral::Factors, inertia: &Inertia) {
+fn check_factor_structure(factors: &rla::Factors, inertia: &Inertia) {
     let n = factors.n;
 
     // 1. Inertia sums to n

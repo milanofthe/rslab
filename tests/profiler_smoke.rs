@@ -14,9 +14,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use feral::numeric::factorize::{factorize_multifrontal, NumericParams, Profiler};
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
+use rla::numeric::factorize::{factorize_multifrontal, NumericParams, Profiler};
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
 fn block_diag_spd(k: usize) -> CscMatrix {
     let n = 2 * k;

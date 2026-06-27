@@ -21,10 +21,10 @@
 //!      scale; the structural defaults assertion is what locks in
 //!      the fix.)
 
-use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
-use feral::numeric::solve::solve_sparse_refined;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
+use rla::numeric::factorize::{factorize_multifrontal, NumericParams};
+use rla::numeric::solve::solve_sparse_refined;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
 #[test]
 fn numeric_params_default_uses_sparse_pivot_threshold() {

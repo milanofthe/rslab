@@ -32,10 +32,10 @@
 //! from the scaled ∞-norm) both use `floor ≈ t · O(1) = O(1e-6)`, neither
 //! perturbs, and the two agree.
 
-use feral::numeric::factorize::NumericParams;
-use feral::scaling::ScalingStrategy;
-use feral::symbolic::supernode::SupernodeParams;
-use feral::{CscMatrix, FactorStatus, Solver};
+use rla::numeric::factorize::NumericParams;
+use rla::scaling::ScalingStrategy;
+use rla::symbolic::supernode::SupernodeParams;
+use rla::{CscMatrix, FactorStatus, Solver};
 
 /// Build a CSC lower-triangle matrix from (row, col, val) triplets
 /// (col-major, row >= col).

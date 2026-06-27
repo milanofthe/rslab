@@ -2,7 +2,7 @@
 //! LAPACK extension pivot path, arrow/bordered diagonal structure, and
 //! matrices requiring many 2×2 pivots.
 
-use feral::{
+use rla::{
     factor, solve, solve_refined, BunchKaufmanParams, Inertia, SymmetricMatrix, ZeroPivotAction,
 };
 

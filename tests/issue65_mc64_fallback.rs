@@ -14,11 +14,11 @@
 //! Ipopt MA27/MA57 both give sawpath `(789,786,0)` and twirism1 iter-0
 //! `(.,313,0)`.
 
-use feral::scaling::ScalingStrategy;
-use feral::{read_mtx, Inertia, Solver};
+use rla::scaling::ScalingStrategy;
+use rla::{read_mtx, Inertia, Solver};
 use std::path::Path;
 
-fn load(name: &str) -> Option<feral::CscMatrix> {
+fn load(name: &str) -> Option<rla::CscMatrix> {
     let path = format!("tests/data/large/{name}.mtx");
     let p = Path::new(&path);
     if !p.is_file() {

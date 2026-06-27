@@ -23,7 +23,7 @@
 //! make a "minimal" pathological example brittle. The unit tests cover
 //! the helper; the bratu3d gated test covers the wiring.
 
-use feral::{factor as dense_factor, BunchKaufmanParams, SymmetricMatrix};
+use rla::{factor as dense_factor, BunchKaufmanParams, SymmetricMatrix};
 
 #[test]
 fn well_conditioned_spd_does_not_flag_growth() {
@@ -51,8 +51,8 @@ fn well_conditioned_spd_does_not_flag_growth() {
 #[test]
 #[ignore]
 fn bratu3d_default_factor_flags_refinement() {
-    use feral::numeric::solver::{FactorStatus, Solver};
-    use feral::read_mtx;
+    use rla::numeric::solver::{FactorStatus, Solver};
+    use rla::read_mtx;
     use std::path::Path;
 
     let path = Path::new("tests/data/large/bratu3d.mtx");

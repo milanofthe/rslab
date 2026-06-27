@@ -16,10 +16,10 @@
 //! `diag(eps, 1, eps, 1, eps)` with off-diagonal coupling triggers
 //! the rejection path reliably.
 
-use feral::numeric::factorize::factorize_multifrontal;
-use feral::symbolic::supernode::SupernodeParams;
-use feral::symbolic::symbolic_factorize;
-use feral::{BunchKaufmanParams, CscMatrix, FeralError, NumericParams, ZeroPivotAction};
+use rla::numeric::factorize::factorize_multifrontal;
+use rla::symbolic::supernode::SupernodeParams;
+use rla::symbolic::symbolic_factorize;
+use rla::{BunchKaufmanParams, CscMatrix, FeralError, NumericParams, ZeroPivotAction};
 
 /// Build a small indefinite matrix that exercises the BK-rejection +
 /// delay path. Symmetric, sparse, with a near-zero pivot in the

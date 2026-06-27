@@ -25,7 +25,7 @@
 //! degrades correctness on well-conditioned problems; it only changes
 //! the per-element rounding chain by at most the documented bound.
 
-use feral::{CscMatrix, NumericParams, Solver};
+use rla::{CscMatrix, NumericParams, Solver};
 
 const N_BLOCK: usize = 96;
 const N_CONS: usize = 16;
@@ -102,11 +102,11 @@ fn fma_opt_in_matches_nofma_inertia_and_solves_accurately() {
     // Path 1: default (FMA off).
     let mut solver_nofma = Solver::with_params(
         NumericParams::default(),
-        feral::symbolic::SupernodeParams::default(),
+        rla::symbolic::SupernodeParams::default(),
     );
     let status_nofma = solver_nofma.factor(&kkt, None);
     assert!(
-        matches!(status_nofma, feral::numeric::solver::FactorStatus::Success),
+        matches!(status_nofma, rla::numeric::solver::FactorStatus::Success),
         "nofma factor failed: {:?}",
         status_nofma
     );
@@ -121,7 +121,7 @@ fn fma_opt_in_matches_nofma_inertia_and_solves_accurately() {
     let mut solver_fma = Solver::new().with_fma(true);
     let status_fma = solver_fma.factor(&kkt, None);
     assert!(
-        matches!(status_fma, feral::numeric::solver::FactorStatus::Success),
+        matches!(status_fma, rla::numeric::solver::FactorStatus::Success),
         "fma factor failed: {:?}",
         status_fma
     );
@@ -171,7 +171,7 @@ fn fma_opt_in_matches_nofma_inertia_and_solves_accurately() {
 /// the solver syncs `bk.fma = fma`, FMA dispatches, and the bits diverge.
 #[test]
 fn fma_opt_in_actually_dispatches_fma_kernels() {
-    use feral::numeric::solver::FactorStatus;
+    use rla::numeric::solver::FactorStatus;
 
     let kkt = build_saddle_kkt();
     let n = kkt.n;

@@ -32,8 +32,8 @@
 //! admissibility + the delayed-pivoting contract), not a property read
 //! off the implementation.
 
-use feral::dense::factor::{factor_frontal, factor_frontal_blocked};
-use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
+use rla::dense::factor::{factor_frontal, factor_frontal_blocked};
+use rla::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
 
 /// `ForceAccept` + a 1 % column-relative threshold, matching the
 /// kernel-level delayed-pivot tests in `tests/delayed_pivoting.rs`.

@@ -17,11 +17,11 @@
 //! * VESUVIO_0000 — drawn from the `factor_workspace_parity.rs` corpus
 //!   as a cross-phase regression canary.
 
-use feral::numeric::factorize::{
+use rla::numeric::factorize::{
     factorize_multifrontal, NodeFactors, NumericParams, SmallLeafBatch, SparseFactors,
 };
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
 use std::path::Path;
 
 fn load_csc(path: &str) -> CscMatrix {

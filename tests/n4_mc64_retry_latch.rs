@@ -34,8 +34,8 @@
 //!   * Post-fix (per-pattern latch): call 1 runs the retry (count 1); call 2
 //!     is suppressed by the latch (count stays 1) — GREEN.
 
-use feral::scaling::ScalingStrategy;
-use feral::{CscMatrix, Inertia, Solver};
+use rla::scaling::ScalingStrategy;
+use rla::{CscMatrix, Inertia, Solver};
 
 /// `[[1,1,0],[1,1,0],[0,0,1]]` as a lower-triangle CSC: genuinely rank-2.
 fn rank_deficient_3x3() -> CscMatrix {

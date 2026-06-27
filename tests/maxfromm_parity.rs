@@ -8,8 +8,8 @@
 //! and every numerical regime. Parity = correctness; perf is gated by
 //! Phase 2 corpus validation in a separate diag binary.
 
-use feral::dense::factor::{factor_frontal, factor_frontal_blocked, FrontalFactors, TppMethod};
-use feral::{BunchKaufmanParams, SymmetricMatrix};
+use rla::dense::factor::{factor_frontal, factor_frontal_blocked, FrontalFactors, TppMethod};
+use rla::{BunchKaufmanParams, SymmetricMatrix};
 
 fn rng_scalar(state: &mut u64, idx: usize) -> f64 {
     *state = state

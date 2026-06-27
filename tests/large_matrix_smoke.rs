@@ -35,8 +35,8 @@
 //! residual and wall-clock for each phase. Fails only on factor
 //! error, dimension mismatch, or refined residual > `RES_TOL`.
 
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, FactorStatus, Solver};
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{read_mtx, FactorStatus, Solver};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -281,7 +281,7 @@ fn emit(args: std::fmt::Arguments<'_>) {
     let _ = err.flush();
 }
 
-fn relative_residual(a: &feral::CscMatrix, x: &[f64], b: &[f64]) -> f64 {
+fn relative_residual(a: &rla::CscMatrix, x: &[f64], b: &[f64]) -> f64 {
     let n = a.n;
     let mut ax = vec![0.0f64; n];
     a.symv(x, &mut ax);

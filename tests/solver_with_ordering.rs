@@ -5,9 +5,9 @@
 //! different orderings (so the knob is actually live, not silently
 //! ignored), and (c) both produce numerically correct factorizations.
 
-use feral::numeric::factorize::factorize_multifrontal;
-use feral::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
-use feral::{CscMatrix, FactorStatus, NumericParams, Solver};
+use rla::numeric::factorize::factorize_multifrontal;
+use rla::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
+use rla::{CscMatrix, FactorStatus, NumericParams, Solver};
 
 /// Build a tridiagonal SPD matrix of order `n`:
 ///   diag = 2.0, off-diag = -1.0

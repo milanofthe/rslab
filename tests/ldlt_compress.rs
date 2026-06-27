@@ -9,9 +9,9 @@
 //! no-preprocessing baseline bit-exactly, as required by the
 //! "0 inertia regressions" criterion in the plan's Step 8.
 
-use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
-use feral::symbolic::{symbolic_factorize, OrderingPreprocess, SupernodeParams};
-use feral::CscMatrix;
+use rla::numeric::factorize::{factorize_multifrontal, NumericParams};
+use rla::symbolic::{symbolic_factorize, OrderingPreprocess, SupernodeParams};
+use rla::CscMatrix;
 
 /// 4×4 block-anti-diagonal: MC64 will match (0,2) and (1,3) on the
 /// large off-diagonals. Under compression, the ordering graph is 2×2.

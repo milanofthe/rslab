@@ -7,12 +7,12 @@
 //! 4. Workspace reuse across calls.
 //! 5. Scaling-active path correctness on every column.
 
-use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
-use feral::numeric::solve::{
+use rla::numeric::factorize::{factorize_multifrontal, NumericParams};
+use rla::numeric::solve::{
     solve_sparse, solve_sparse_many, solve_sparse_many_into, SolveManyWorkspace,
 };
-use feral::sparse::csc::CscMatrix;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::sparse::csc::CscMatrix;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
 
 fn small_indef_matrix() -> CscMatrix {
     // 5×5 arrow KKT-shape: dense first column, identity tail.
@@ -72,7 +72,7 @@ fn xorshift_fill(len: usize, seed: u64) -> Vec<f64> {
     out
 }
 
-fn factor_for(m: &CscMatrix) -> feral::numeric::factorize::SparseFactors {
+fn factor_for(m: &CscMatrix) -> rla::numeric::factorize::SparseFactors {
     let sym = symbolic_factorize(m, &SupernodeParams::default()).unwrap();
     let params = NumericParams::default();
     let (factors, _) = factorize_multifrontal(m, &sym, &params).unwrap();
@@ -231,7 +231,7 @@ fn solve_many_refined_band_16_31_is_bit_identical_to_per_column() {
     // single-RHS solve. With the per-column convergence logic mirrored
     // exactly, batched-refined must equal per-column single-RHS refined
     // BIT-FOR-BIT. (issue #58)
-    use feral::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
+    use rla::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
 
     let mat = laplacian_2d(12); // n = 144, SPD, well-conditioned
     let n = mat.n;
@@ -257,7 +257,7 @@ fn solve_many_refined_indef_band_is_bit_identical_to_per_column() {
     // Same bit-identical guarantee on a small indefinite matrix (n=5),
     // exercising 2x2 pivots and a non-SPD inertia in the refined batched
     // path. nrhs=20 is in the rank-1 band.
-    use feral::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
+    use rla::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
 
     let mat = small_indef_matrix();
     let n = mat.n;
@@ -283,7 +283,7 @@ fn solve_many_refined_panel_band_matches_oracle_and_residual() {
     // reassociation (~kappa*eps). Both refine to the same residual
     // target, so the batched-refined solution (a) matches the per-column
     // oracle closely and (b) has a small per-column residual. (issue #58)
-    use feral::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
+    use rla::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
 
     let mat = laplacian_2d(12); // n = 144
     let n = mat.n;
@@ -378,7 +378,7 @@ fn solve_many_rejects_dim_mismatch() {
 
 #[test]
 fn solve_many_refinement_per_column_parity() {
-    use feral::numeric::solve::solve_sparse_refined;
+    use rla::numeric::solve::solve_sparse_refined;
 
     let m = small_indef_matrix();
     let factors = factor_for(&m);

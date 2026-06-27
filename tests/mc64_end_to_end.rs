@@ -12,10 +12,10 @@
 //! applied on both ends — not its inverse — by constructing cases
 //! where the expected answer can be written down exactly.
 
-use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
-use feral::numeric::solve::solve_sparse;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
+use rla::numeric::factorize::{factorize_multifrontal, NumericParams};
+use rla::numeric::solve::solve_sparse;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
 fn ldlt_params() -> NumericParams {
     NumericParams::with_bk(BunchKaufmanParams {

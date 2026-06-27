@@ -31,8 +31,8 @@
 //! checked against a hand-computed sign pattern.
 
 #![allow(clippy::erasing_op, clippy::identity_op)]
-use feral::dense::factor::{factor_frontal, factor_frontal_blocked};
-use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
+use rla::dense::factor::{factor_frontal, factor_frontal_blocked};
+use rla::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
 
 /// Params that exercise the rook-rescue path: `pivot_threshold = 0.01`
 /// (the MUMPS/SSIDS default that requires rescue or delay on small
@@ -68,7 +68,7 @@ fn spd_shifted(n: usize) -> SymmetricMatrix {
 
 /// Reconstruct A from (L, D, perm) and return max|A_rec - A_orig|.
 /// Used by Tests 2 and 3 as the numerical acceptance criterion.
-fn reconstruct_residual(ff: &feral::dense::factor::FrontalFactors, orig_lower: &[f64]) -> f64 {
+fn reconstruct_residual(ff: &rla::dense::factor::FrontalFactors, orig_lower: &[f64]) -> f64 {
     let n = ff.nrow;
     let nelim = ff.nelim;
     debug_assert_eq!(nelim, n, "reconstruction assumes full elimination");

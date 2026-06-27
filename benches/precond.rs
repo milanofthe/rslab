@@ -14,8 +14,8 @@
 
 use std::time::Instant;
 
-use feral::sparse::csc::CscMatrix;
-use feral::{
+use rla::sparse::csc::CscMatrix;
+use rla::{
     cocg, GenericFactorOptions, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
     SparseSymmetricLdlt, ZeroPivotAction,
 };

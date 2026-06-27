@@ -11,12 +11,12 @@
 //! These tests are the guardrail for the Step C exit criterion in
 //! `dev/plans/phase-2.5.2-rayon-assembly-tree.md`.
 
-use feral::numeric::factorize::{
+use rla::numeric::factorize::{
     factorize_multifrontal, factorize_multifrontal_supernodal_parallel, NodeFactors, NumericParams,
     SparseFactors,
 };
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
 use std::path::Path;
 
 fn load_csc(path: &str) -> CscMatrix {

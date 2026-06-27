@@ -9,11 +9,11 @@ members = [".", "crates/feral-ordering-core", "crates/feral-amd", "crates/feral-
 resolver = "2"
 
 [package]
-name = "feral"
+name = "rla"
 version = "0.11.2"
 edition = "2021"
 license = "MIT"
-description = "Sparse symmetric indefinite direct solver in pure Rust, with certified inertia counts."
+description = "RLA — pure-Rust sparse complex/real direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
 repository = "https://github.com/jkitchin/feral"
 homepage = "https://github.com/jkitchin/feral"
@@ -44,7 +44,7 @@ exclude = [
 ]
 
 [lib]
-name = "feral"
+name = "rla"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

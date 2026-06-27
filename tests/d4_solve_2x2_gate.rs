@@ -36,8 +36,8 @@
 //! the gate skips the block and returns `x ≈ rhs` (off by orders of
 //! magnitude); post-fix it returns `x_true`.
 
-use feral::dense::factor::Factors;
-use feral::solve;
+use rla::dense::factor::Factors;
+use rla::solve;
 
 /// Build a 2×2 `Factors`: `L = I`, identity perm, unit `d_eq`, one 2×2
 /// block `[[a, b], [b, c]]`. `zero_tol`/`zero_tol_2x2` are the library

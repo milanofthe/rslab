@@ -6,8 +6,8 @@
 //! the pre-issue-52 baseline.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use feral::scaling::ScalingStrategy;
-use feral::{CscMatrix, FactorStatus, Solver};
+use rla::scaling::ScalingStrategy;
+use rla::{CscMatrix, FactorStatus, Solver};
 
 fn tridiagonal_spd(n: usize) -> CscMatrix {
     let mut rows = Vec::with_capacity(2 * n);

@@ -13,8 +13,8 @@
 //! MetisND ≈ 3.6–4.4M. The `< 1.0e6` threshold separates them with wide
 //! margin and is robust to ordering-impl / METIS-seed drift.
 
-use feral::read_mtx;
-use feral::symbolic::{symbolic_factorize, OrderingMethod, SupernodeParams};
+use rla::read_mtx;
+use rla::symbolic::{symbolic_factorize, OrderingMethod, SupernodeParams};
 use std::path::Path;
 
 #[test]

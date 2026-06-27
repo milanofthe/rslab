@@ -16,10 +16,10 @@
 //! (pre-fix). The companion test pins bit-parity with the `factor_frontal`
 //! oracle so the overhead removal cannot change numerics.
 
-use feral::dense::factor::{
+use rla::dense::factor::{
     factor_frontal, factor_frontal_blocked_in_place_with_scratch, FactorScratch, FrontalFactors,
 };
-use feral::{BunchKaufmanParams, SymmetricMatrix};
+use rla::{BunchKaufmanParams, SymmetricMatrix};
 
 const BS: usize = 32;
 

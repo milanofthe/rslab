@@ -11,8 +11,8 @@
 
 use std::time::Instant;
 
-use feral::sparse::csc::CscMatrix;
-use feral::SparseSymmetricLdlt;
+use rla::sparse::csc::CscMatrix;
+use rla::SparseSymmetricLdlt;
 use num_complex::Complex;
 
 use faer::linalg::solvers::Solve;
@@ -141,7 +141,7 @@ fn main() {
     faer::set_global_parallelism(faer::Par::rayon(0));
     // A/B the Schur kernel: set RLA_NO_GEMM=1 to force the scalar reference.
     let gemm_on = std::env::var("RLA_NO_GEMM").is_err();
-    feral::set_use_gemm_schur(gemm_on);
+    rla::set_use_gemm_schur(gemm_on);
     println!(
         "Complex-symmetric direct solve: RLA LDLᵀ vs faer sparse LU (both parallel) [RLA Schur={}]\n",
         if gemm_on { "gemm" } else { "scalar" }

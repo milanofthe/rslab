@@ -28,8 +28,8 @@
 //! (Newton steps, time stepping, frequency sweep):
 //!
 //! ```
-//! # fn main() -> Result<(), feral::FeralError> {
-//! use feral::prelude::*;
+//! # fn main() -> Result<(), rla::FeralError> {
+//! use rla::prelude::*;
 //! // Real symmetric matrix, lower triangle (i ≥ j).
 //! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!                                         &[2.0, 2.0, 2.0, -1.0])?;
@@ -45,8 +45,8 @@
 //! dropping) used to precondition COCG:
 //!
 //! ```
-//! # fn main() -> Result<(), feral::FeralError> {
-//! use feral::prelude::*;
+//! # fn main() -> Result<(), rla::FeralError> {
+//! use rla::prelude::*;
 //! use num_complex::Complex;
 //! let c = |re, im| Complex::new(re, im);
 //! let a = CscMatrix::<Complex<f64>>::from_triplets(
@@ -81,6 +81,8 @@ pub use dense::factor::{
 pub use dense::matrix::SymmetricMatrix;
 pub use dense::solve::{solve, solve_refined};
 pub use error::FeralError;
+/// Ergonomic alias for the crate error type ([`FeralError`]).
+pub use error::FeralError as RlaError;
 pub use scalar::Scalar;
 // Generic (real + complex-symmetric) sparse direct solver — the RLA entry point.
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, LdltFactors};
@@ -115,7 +117,7 @@ pub use sparse::general::GeneralCsc;
 pub use symbolic::SymbolicProfileReport;
 
 /// Ergonomic imports for embedding RLA as a PARDISO-style sparse solver /
-/// preconditioner. `use feral::prelude::*;` brings in the matrix type, the
+/// preconditioner. `use rla::prelude::*;` brings in the matrix type, the
 /// phased analysis/factor API, the iterative solvers and preconditioners, the
 /// options enums, and the Matrix Market loaders.
 pub mod prelude {

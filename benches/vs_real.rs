@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use feral::sparse::general::GeneralCsc;
-use feral::{
+use rla::sparse::general::GeneralCsc;
+use rla::{
     factor_general_lu, parse_mtx_complex_general, solve_lu, solve_lu_refined, GenericFactorOptions,
     ZeroPivotAction,
 };

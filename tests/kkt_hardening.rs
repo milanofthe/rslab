@@ -7,7 +7,7 @@
 //! 5. Reconstruction accuracy diagnosis for ill-conditioned KKT
 
 #![allow(clippy::needless_range_loop)]
-use feral::{
+use rla::{
     factor, solve, solve_refined, BunchKaufmanParams, Inertia, SymmetricMatrix, ZeroPivotAction,
 };
 

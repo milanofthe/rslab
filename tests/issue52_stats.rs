@@ -19,8 +19,8 @@
 //! - B2: `profile_report_some_when_profiling_enabled`
 //! - B3: `symbolic_profile_report_only_on_cache_miss_factor`
 
-use feral::scaling::ScalingStrategy;
-use feral::{CscMatrix, FactorStats, FactorStatus, ProfileReport, Solver, SymbolicProfileReport};
+use rla::scaling::ScalingStrategy;
+use rla::{CscMatrix, FactorStats, FactorStatus, ProfileReport, Solver, SymbolicProfileReport};
 
 /// Build a 2×2 SPD diagonal matrix `diag(2, 2)` (lower-triangle CSC).
 fn diag2_spd() -> CscMatrix {

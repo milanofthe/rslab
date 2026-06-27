@@ -21,13 +21,13 @@
 //! correctly routes OR does NOT route. The stub dispatcher in
 //! RED has no gate wired, so those tests would be vacuous.
 
-use feral::numeric::factorize::{
+use rla::numeric::factorize::{
     dense_fast_factor, factorize_multifrontal_supernodal, should_use_dense_fast_path,
     NumericParams, SparseFactors,
 };
-use feral::numeric::solve::solve_sparse;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
+use rla::numeric::solve::solve_sparse;
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
 use std::path::Path;
 
 fn default_params() -> NumericParams {

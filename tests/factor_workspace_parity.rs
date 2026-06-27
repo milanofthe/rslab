@@ -19,12 +19,12 @@
 //! between calls. A rank-deficient matrix with delayed pivots is
 //! also included.
 
-use feral::numeric::factorize::{
+use rla::numeric::factorize::{
     factorize_multifrontal, factorize_multifrontal_with_workspace, FactorWorkspace, NodeFactors,
     NumericParams, SparseFactors,
 };
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
+use rla::symbolic::{symbolic_factorize, SupernodeParams};
+use rla::{read_mtx, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
 use std::path::Path;
 
 fn load_csc(path: &str) -> CscMatrix {

@@ -12,11 +12,11 @@
 //! All three must produce byte-identical `(L, D_diag, D_subdiag, perm,
 //! perm_inv, contrib, inertia, n_delayed, needs_refinement, n_rook_rescues)`.
 
-use feral::dense::factor::{
+use rla::dense::factor::{
     factor_frontal_blocked_in_place, factor_frontal_blocked_in_place_with_scratch, FactorScratch,
     FrontalFactors,
 };
-use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
+use rla::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
 
 fn rng(state: &mut u64, idx: usize) -> f64 {
     *state = state

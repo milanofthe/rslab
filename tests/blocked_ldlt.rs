@@ -20,10 +20,10 @@
 //! Parity ORACLE is exact byte-identity of `(L, D_diag, D_subdiag,
 //! perm, inertia, contrib, nelim, n_delayed, needs_refinement)`.
 
-use feral::dense::factor::{
+use rla::dense::factor::{
     factor_frontal, factor_frontal_blocked, panel_diag, FrontalFactors, PANEL_DIAG_ENABLED,
 };
-use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
+use rla::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
 use std::sync::atomic::Ordering;
 
 /// Deterministic pseudo-random f64 in (-1, 1). Matches the style used

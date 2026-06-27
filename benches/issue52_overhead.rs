@@ -22,8 +22,8 @@
 //! limited to the numeric per-supernode timer).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use feral::scaling::ScalingStrategy;
-use feral::{CscMatrix, FactorStatus, Solver};
+use rla::scaling::ScalingStrategy;
+use rla::{CscMatrix, FactorStatus, Solver};
 
 /// SPD tridiagonal with `4` on the diagonal and `-1` on the first
 /// sub-diagonal. Lower-triangle CSC.

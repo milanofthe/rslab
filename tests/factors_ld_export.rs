@@ -17,7 +17,7 @@
 //! - `symbolic_accessor_after_factor`: `Solver::symbolic()` is populated
 //!   and self-consistent; the predicted nnz bounds the realized nnz.
 
-use feral::{CscMatrix, FactorStatus, Solver};
+use rla::{CscMatrix, FactorStatus, Solver};
 
 /// Dense full symmetric matrix (row-major `n×n`) from a lower-triangle
 /// triplet list. Mirrors the upper triangle.
