@@ -1248,7 +1248,9 @@ pub fn factor_numeric<T: Scalar>(
 /// trailing rows and its children's off-diagonal rows. `rs[s][0..ncol]` are the
 /// eliminated columns `first_col..first_col+ncol`; `rs[s][ncol..]` are the
 /// (sorted) below-diagonal fill rows.
-fn compute_supernode_row_structures(sym: &SymbolicFactorization) -> Vec<Vec<usize>> {
+pub(crate) fn compute_supernode_row_structures(
+    sym: &SymbolicFactorization,
+) -> Vec<Vec<usize>> {
     let nsuper = sym.supernodes.len();
     let mut rs: Vec<Vec<usize>> = Vec::with_capacity(nsuper);
     for s in 0..nsuper {
