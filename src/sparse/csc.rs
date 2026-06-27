@@ -528,7 +528,7 @@ mod tests {
         // [ 2    0    1  ]
         // [ 0    3    1  ]
         // [ 1    1  -1e-8]
-        let m = CscMatrix::from_triplets(
+        let m: CscMatrix<f64> = CscMatrix::from_triplets(
             3,
             &[0, 1, 2, 2, 2],
             &[0, 1, 0, 1, 2],

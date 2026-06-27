@@ -16,9 +16,11 @@
 //! working precision `T`.
 
 use crate::error::FeralError;
+use crate::numeric::multifrontal_generic::GenericFactorOptions;
 use crate::numeric::sparse_solver::SparseSymmetricLdlt;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
+use num_complex::Complex;
 
 /// A preconditioner `M ≈ A`: applies `z = M⁻¹ r`. Implemented by a factored
 /// [`SparseSymmetricLdlt`](crate::numeric::sparse_solver::SparseSymmetricLdlt)
@@ -46,6 +48,64 @@ impl<T: Scalar> Preconditioner<T> for SparseSymmetricLdlt<T> {
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
+        Ok(())
+    }
+}
+
+/// A memory-halved preconditioner: factor `A` (supplied in `Complex<f64>`) in
+/// `Complex<f32>` and apply it inside an `f64` Krylov iteration. The stored
+/// factor occupies **half the bytes** and its triangular solves run in single
+/// precision (gemm `c32` during the factor); because the outer COCG/COCR still
+/// iterates in `f64`, the *solution* keeps full `f64` accuracy. This is the
+/// standard mixed-precision setup for large 3D EM FEM / MOM preconditioning.
+pub struct LowPrecisionPreconditioner {
+    inner: SparseSymmetricLdlt<Complex<f32>>,
+}
+
+impl LowPrecisionPreconditioner {
+    /// Down-cast `A` to `Complex<f32>` and factor it (static-pivoting honoured
+    /// via `opts`, e.g. `ZeroPivotAction::PerturbToEps`).
+    pub fn factor(
+        a: &CscMatrix<Complex<f64>>,
+        opts: &GenericFactorOptions,
+    ) -> Result<Self, FeralError> {
+        let a32 = CscMatrix::<Complex<f32>> {
+            n: a.n,
+            col_ptr: a.col_ptr.clone(),
+            row_idx: a.row_idx.clone(),
+            values: a
+                .values
+                .iter()
+                .map(|v| Complex::new(v.re as f32, v.im as f32))
+                .collect(),
+        };
+        Ok(Self {
+            inner: SparseSymmetricLdlt::factor_with(&a32, opts)?,
+        })
+    }
+
+    /// Stored factor fill (nnz of `L`); each entry is a single-precision
+    /// `Complex<f32>` (8 bytes vs 16 for `Complex<f64>`).
+    pub fn factor_nnz(&self) -> usize {
+        self.inner.factor_nnz()
+    }
+
+    /// Number of statically perturbed pivots (see [`SparseSymmetricLdlt::n_perturbed`]).
+    pub fn n_perturbed(&self) -> usize {
+        self.inner.n_perturbed()
+    }
+}
+
+impl Preconditioner<Complex<f64>> for LowPrecisionPreconditioner {
+    fn apply(&self, r: &[Complex<f64>], z: &mut [Complex<f64>]) -> Result<(), FeralError> {
+        let r32: Vec<Complex<f32>> = r
+            .iter()
+            .map(|v| Complex::new(v.re as f32, v.im as f32))
+            .collect();
+        let z32 = self.inner.solve(&r32)?;
+        for (zi, v) in z.iter_mut().zip(z32) {
+            *zi = Complex::new(v.re as f64, v.im as f64);
+        }
         Ok(())
     }
 }
@@ -355,6 +415,29 @@ mod tests {
         a.symv(&pre.x, &mut ax);
         let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
         assert!(res < 1e-6, "residual {}", res);
+    }
+
+    #[test]
+    fn f32_preconditioner_keeps_f64_accuracy() {
+        // Factor the preconditioner in Complex<f32> (half memory) but iterate in
+        // f64: the solution must still reach f64-level residual, and the f32
+        // factor — though approximate — keeps the iteration count tiny.
+        let c = |re, im| Complex::new(re, im);
+        let a = grid(14, c(4.0, 1.0), c(-1.0, 0.2));
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
+
+        let m = LowPrecisionPreconditioner::factor(&a, &GenericFactorOptions::default()).unwrap();
+        let res = cocg(&a, &b, &m, 1e-10, 500).unwrap();
+        assert!(res.converged, "mixed-precision COCG res={}", res.final_res);
+        // A few iterations suffice; the f32 factor is a strong preconditioner.
+        assert!(res.iters <= 12, "f32-preconditioned iters {}", res.iters);
+        // Full f64 accuracy recovered despite the single-precision factor.
+        let mut ax = vec![C::default(); n];
+        a.symv(&res.x, &mut ax);
+        let r = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(r < 1e-8, "mixed-precision residual {}", r);
+        assert!(m.factor_nnz() > 0);
     }
 
     #[test]

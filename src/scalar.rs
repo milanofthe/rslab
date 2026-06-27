@@ -170,6 +170,105 @@ impl Scalar for Complex<f64> {
     }
 }
 
+impl Scalar for f32 {
+    #[inline]
+    fn zero() -> Self {
+        0.0
+    }
+
+    #[inline]
+    fn one() -> Self {
+        1.0
+    }
+
+    #[inline]
+    fn from_real(r: f64) -> Self {
+        r as f32
+    }
+
+    #[inline]
+    fn magnitude(self) -> f64 {
+        (self as f64).abs()
+    }
+
+    #[inline]
+    fn magnitude_sq(self) -> f64 {
+        let v = self as f64;
+        v * v
+    }
+
+    #[inline]
+    fn conj(self) -> Self {
+        self
+    }
+
+    #[inline]
+    fn recip(self) -> Self {
+        1.0 / self
+    }
+
+    #[inline]
+    fn mul_add(self, a: Self, b: Self) -> Self {
+        f32::mul_add(self, a, b)
+    }
+
+    #[inline]
+    fn is_finite(self) -> bool {
+        f32::is_finite(self)
+    }
+}
+
+impl Scalar for Complex<f32> {
+    #[inline]
+    fn zero() -> Self {
+        Complex::new(0.0, 0.0)
+    }
+
+    #[inline]
+    fn one() -> Self {
+        Complex::new(1.0, 0.0)
+    }
+
+    #[inline]
+    fn from_real(r: f64) -> Self {
+        Complex::new(r as f32, 0.0)
+    }
+
+    #[inline]
+    fn magnitude(self) -> f64 {
+        // Compute the modulus in f64 to keep pivot thresholds accurate and
+        // avoid f32 overflow on extreme inputs.
+        (self.re as f64).hypot(self.im as f64)
+    }
+
+    #[inline]
+    fn magnitude_sq(self) -> f64 {
+        let re = self.re as f64;
+        let im = self.im as f64;
+        re * re + im * im
+    }
+
+    #[inline]
+    fn conj(self) -> Self {
+        Complex::conj(&self)
+    }
+
+    #[inline]
+    fn recip(self) -> Self {
+        Complex::inv(&self)
+    }
+
+    #[inline]
+    fn mul_add(self, a: Self, b: Self) -> Self {
+        self * a + b
+    }
+
+    #[inline]
+    fn is_finite(self) -> bool {
+        self.re.is_finite() && self.im.is_finite()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +296,7 @@ mod tests {
 
     #[test]
     fn complex_recip_is_algebraic_inverse() {
-        let z = Complex::new(1.0, 1.0);
+        let z: Complex<f64> = Complex::new(1.0, 1.0);
         // 1/(1+i) = (1-i)/2 = 0.5 - 0.5i
         let r = z.recip();
         assert!((r.re - 0.5).abs() < 1e-15);
@@ -222,7 +321,7 @@ mod tests {
 
     #[test]
     fn complex_mul_add() {
-        let z = Complex::new(1.0, 1.0);
+        let z: Complex<f64> = Complex::new(1.0, 1.0);
         // (1+i)*(1+i) + 1 = (1 + 2i - 1) + 1 = 1 + 2i
         let r = z.mul_add(Complex::new(1.0, 1.0), Complex::new(1.0, 0.0));
         assert!((r.re - 1.0).abs() < 1e-15);
