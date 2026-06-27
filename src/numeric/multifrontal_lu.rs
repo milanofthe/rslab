@@ -1237,6 +1237,7 @@ fn factor_lu_left_looking<T: Scalar>(
     d_row: &[f64],
     d_col: &[f64],
     perturb_floor: Option<f64>,
+    drop_tol: Option<f64>,
 ) -> Result<LuFactors<T>, FeralError> {
     let n = sym.n;
     let nsuper = sym.supernodes.len();
@@ -1340,6 +1341,15 @@ fn factor_lu_left_looking<T: Scalar>(
                     lcol.push((e_of_g[rs[s][i]], v));
                 }
             }
+            if let Some(tau) = drop_tol {
+                let colmax = lcol
+                    .iter()
+                    .filter(|&&(r, _)| r != diag_e)
+                    .map(|&(_, v)| v.magnitude())
+                    .fold(0.0, f64::max);
+                let thr = tau * colmax;
+                lcol.retain(|&(r, v)| r == diag_e || v.magnitude() >= thr);
+            }
             lcol.sort_unstable_by_key(|&(r, _)| r);
             for &(r, v) in &lcol {
                 l_row_idx.push(r);
@@ -1361,6 +1371,15 @@ fn factor_lu_left_looking<T: Scalar>(
                 if v != T::zero() {
                     urow.push((e_of_g[rs[s][ncol + t]], v));
                 }
+            }
+            if let Some(tau) = drop_tol {
+                let rowmax = urow
+                    .iter()
+                    .filter(|&&(cc, _)| cc != diag_e)
+                    .map(|&(_, v)| v.magnitude())
+                    .fold(0.0, f64::max);
+                let thr = tau * rowmax;
+                urow.retain(|&(cc, v)| cc == diag_e || v.magnitude() >= thr);
             }
             urow.sort_unstable_by_key(|&(c, _)| c);
             for &(c, v) in &urow {
@@ -1485,7 +1504,15 @@ pub fn factor_general_lu_numeric<T: Scalar>(
 
     // Supernodal left-looking LU: same factor, low transient (no CB stack).
     if opts.method == FactorMethod::LeftLooking {
-        return factor_lu_left_looking(sym, &a_perm, &a_perm_t, &d_row, &d_col, perturb_floor);
+        return factor_lu_left_looking(
+            sym,
+            &a_perm,
+            &a_perm_t,
+            &d_row,
+            &d_col,
+            perturb_floor,
+            opts.drop_tol,
+        );
     }
 
     let profile = std::env::var("RLA_PROFILE")

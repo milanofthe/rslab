@@ -153,15 +153,23 @@ impl BlrMode {
 /// transient-memory and scheduling profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FactorMethod {
-    /// Multifrontal (default): assembly-tree of dense fronts, rayon
-    /// work-stealing parallel. Fastest today, but carries the contribution-block
-    /// stack and a per-front extract transient.
+    /// Multifrontal (the `exact`/`default` choice): assembly-tree of dense
+    /// fronts, rayon work-stealing parallel, with full pivoting (Bunch-Kaufman
+    /// 2×2 for LDLᵀ, partial for LU). Carries the contribution-block stack + a
+    /// per-front extract transient. Robust for **exact indefinite direct solves**
+    /// that need pivoting for stability.
     #[default]
     Multifrontal,
-    /// Supernodal left-looking: each supernode panel pulls updates from its
-    /// factored descendants — **no contribution-block stack, no extract phase**
-    /// (the PARDISO transient profile). Currently serial, 1×1 pivots; the
-    /// low-transient path for memory-bound problems.
+    /// Supernodal left-looking (the [`preconditioner`] choice): each panel pulls
+    /// BLAS-3 updates from its factored descendants — **no contribution-block
+    /// stack, no extract phase** (the PARDISO transient profile), parallel over
+    /// the assembly tree, lower fill, faster than multifrontal on the MoM
+    /// matrices. Uses **1×1 static pivoting** (no interchange), so it is the
+    /// memory/throughput-optimal path for the equilibrated preconditioner and
+    /// well-scaled/definite systems; pair with iterative refinement. Not for
+    /// zero-/tiny-diagonal indefinite matrices that need a 2×2 pivot.
+    ///
+    /// [`preconditioner`]: FactorOptions::preconditioner
     LeftLooking,
 }
 
@@ -225,6 +233,10 @@ impl FactorOptions {
     pub fn preconditioner(abs_floor: f64) -> Self {
         Self {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor },
+            // The equilibrated, refined preconditioner is exactly where the
+            // memory/throughput-optimal left-looking path (1×1 static pivoting)
+            // belongs; override with `with_method` if a case needs pivoting.
+            method: FactorMethod::LeftLooking,
             ..Self::default()
         }
     }
