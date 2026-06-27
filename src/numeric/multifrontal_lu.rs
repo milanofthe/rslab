@@ -493,7 +493,7 @@ fn factor_subtree<T: Scalar>(
 ) -> Result<SubtreeFactors<T>, FeralError> {
     let children = &sym.supernodes[s].children;
     // Factor the child subtrees concurrently.
-    let outs: Vec<SubtreeFactors<T>> = children
+    let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
         .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, profile))
         .collect::<Result<Vec<_>, _>>()?;
@@ -510,6 +510,15 @@ fn factor_subtree<T: Scalar>(
             profile,
         )?
     };
+    // Free the children's contribution blocks NOW: they have just been
+    // extend-added into this front and are never read again (the global emit
+    // pass uses only L/U). The CB stack is `Σ cnrow²` ≈ 5× the L/U volume and,
+    // when retained to the end, dominated peak memory and caused OOMs. Dropping
+    // each CB the moment its parent consumes it keeps only the active
+    // contribution frontier live — the standard multifrontal CB-stack.
+    for (own, _) in outs.iter_mut() {
+        own.contrib = Vec::new();
+    }
     // Flatten the subtree's factors for the global pass (child `i` is the i-th
     // entry of `children`).
     let mut subtree = Vec::new();

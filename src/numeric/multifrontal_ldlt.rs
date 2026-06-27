@@ -686,7 +686,7 @@ fn factor_subtree<T: Scalar>(
     perturb_floor: Option<f64>,
 ) -> Result<SubtreeFactors<T>, FeralError> {
     let children = &sym.supernodes[s].children;
-    let outs: Vec<SubtreeFactors<T>> = children
+    let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
         .map(|&ch| factor_subtree(ch, sym, a_perm, perturb_floor))
         .collect::<Result<Vec<_>, _>>()?;
@@ -694,6 +694,14 @@ fn factor_subtree<T: Scalar>(
         let child_refs: Vec<&NodeFactor<T>> = outs.iter().map(|(own, _)| own).collect();
         factor_one_node(s, sym, a_perm, &child_refs, perturb_floor)?
     };
+    // Free the children's contribution blocks NOW: they have been extend-added
+    // into this front and are never read again (the global emit uses only the
+    // L/D factor). Retaining the whole `Σ cnrow²` CB stack to the end was the
+    // dominant transient-memory cost (OOMs on large fronts); dropping each CB as
+    // its parent consumes it keeps only the active contribution frontier live.
+    for (own, _) in outs.iter_mut() {
+        own.contrib = Vec::new();
+    }
     let mut subtree = Vec::new();
     for (i, (own, rest)) in outs.into_iter().enumerate() {
         subtree.push((children[i], own));

@@ -117,5 +117,9 @@ harness = false
 name = "gemm_peak"
 harness = false
 
+[[bench]]
+name = "front_mem"
+harness = false
+
 [profile.release]
 debug = true
