@@ -35,6 +35,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // kernel, summed across all worker threads. Zero overhead when disabled.
 static PROF_ASM_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_FRONT_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_PANEL_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_EXTRACT_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Per-front unsymmetric partial-factorization output, in elimination order
 /// (static pivoting → no interchange, so front-local order is pivot order).
@@ -156,8 +158,10 @@ fn lu_front<T: Scalar>(
     nrow: usize,
     ncol: usize,
     perturb_floor: Option<f64>,
+    profile: bool,
 ) -> Result<(FrontLu<T>, Vec<T>), FeralError> {
     let n = nrow;
+    let t_panel = profile.then(std::time::Instant::now);
     let mut pivots = vec![T::zero(); ncol];
     let mut n_perturbed = 0usize;
     // Row permutation of the front (partial pivoting interchanges rows). Only
@@ -170,7 +174,11 @@ fn lu_front<T: Scalar>(
     // a single SIMD `gemm` (rank-`NB`) — routing the O(ncol²·nrow) work through
     // the complex BLAS-3 kernel instead of scalar BLAS-2 column sweeps. This is
     // the structure MKL/PARDISO use for the supernodal panel.
-    const NB: usize = 64;
+    // Panel width. Smaller than the LAPACK-typical 64 because the `gemm` complex
+    // kernel is very fast (≈460 Gflop/s rank-64) while the unblocked getf2 panel
+    // is serial BLAS-2: a narrower panel shifts work off the slow serial path
+    // onto the fast parallel GEMM. NB=32 measured best on the MoM fronts.
+    const NB: usize = 32;
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + NB).min(ncol);
@@ -272,6 +280,10 @@ fn lu_front<T: Scalar>(
         }
         kb = ke;
     }
+    if let Some(t) = t_panel {
+        PROF_PANEL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_extract = profile.then(std::time::Instant::now);
     // Pivots from the factored diagonal of the fully-summed block.
     for k in 0..ncol {
         pivots[k] = f[k * n + k];
@@ -302,6 +314,9 @@ fn lu_front<T: Scalar>(
         }
     }
 
+    if let Some(t) = t_extract {
+        PROF_EXTRACT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
     Ok((
         FrontLu {
             nrow,
@@ -440,7 +455,7 @@ fn factor_one_node_lu<T: Scalar>(
         PROF_ASM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     let t_front = profile.then(std::time::Instant::now);
-    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor)?;
+    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, profile)?;
     if let Some(t) = t_front {
         PROF_FRONT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -639,9 +654,13 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     if profile {
         let asm = PROF_ASM_NS.load(Ordering::Relaxed) as f64 / 1e6;
         let front = PROF_FRONT_NS.load(Ordering::Relaxed) as f64 / 1e6;
+        let panel = PROF_PANEL_NS.load(Ordering::Relaxed) as f64 / 1e6;
+        let extract = PROF_EXTRACT_NS.load(Ordering::Relaxed) as f64 / 1e6;
+        let total = (asm + front).max(1.0);
         eprintln!(
-            "[RLA_PROFILE] assembly(scatter+extend-add) {asm:.0} ms-CPU   front-LU {front:.0} ms-CPU   assembly={:.0}%",
-            100.0 * asm / (asm + front).max(1.0)
+            "[RLA_PROFILE] CPU-ms  assembly {asm:.0} ({:.0}%)  front-LU {front:.0} ({:.0}%)  [panel {panel:.0} | extract {extract:.0}]",
+            100.0 * asm / total,
+            100.0 * front / total,
         );
     }
 
