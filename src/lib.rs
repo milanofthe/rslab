@@ -8,6 +8,61 @@
 // The lib build keeps default clippy strictness.
 #![cfg_attr(test, allow(clippy::needless_range_loop))]
 
+//! # RLA — a pure-Rust sparse symmetric direct solver and preconditioner
+//!
+//! A self-contained replacement for PARDISO's sparse symmetric path, with no
+//! MKL or other native dependency. RLA factors **real symmetric** (`f64`,
+//! PARDISO `mtype 2`) and **complex symmetric** (`Complex<f64>`, `mtype 6`)
+//! matrices as `Pᵀ A P = L D Lᵀ` by a rayon-parallel multifrontal
+//! Bunch-Kaufman method with a SIMD (`gemm`) Schur kernel.
+//!
+//! Two intended uses:
+//! * **FEM direct solve** — factor once, solve many right-hand sides.
+//! * **MoM sparse preconditioner** — a robust, memory-light approximate factor
+//!   (static pivoting, `f32` mixed precision, incomplete-factor dropping)
+//!   driving a [`cocg`]/[`cocr`] iteration.
+//!
+//! ## PARDISO-style phased workflow (FEM)
+//!
+//! Analyze the sparsity pattern once, then factor many value sets that share it
+//! (Newton steps, time stepping, frequency sweep):
+//!
+//! ```
+//! # fn main() -> Result<(), feral::FeralError> {
+//! use feral::prelude::*;
+//! // Real symmetric matrix, lower triangle (i ≥ j).
+//! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
+//!                                         &[2.0, 2.0, 2.0, -1.0])?;
+//! let analysis = SymbolicAnalysis::analyze(&a)?;                 // phase 1
+//! let factor = analysis.factor(&a, &GenericFactorOptions::default())?; // 2/3
+//! let x = factor.solve(&[1.0, 2.0, 3.0])?;
+//! # let _ = x; Ok(()) }
+//! ```
+//!
+//! ## Complex-symmetric MoM preconditioner
+//!
+//! A robust, low-memory factor (never-fail static pivoting + incomplete
+//! dropping) used to precondition COCG:
+//!
+//! ```
+//! # fn main() -> Result<(), feral::FeralError> {
+//! use feral::prelude::*;
+//! use num_complex::Complex;
+//! let c = |re, im| Complex::new(re, im);
+//! let a = CscMatrix::<Complex<f64>>::from_triplets(
+//!     3, &[0, 1, 2, 1], &[0, 1, 2, 0],
+//!     &[c(4.0, 1.0), c(4.0, 1.0), c(4.0, 1.0), c(-1.0, 0.2)])?;
+//! let opts = GenericFactorOptions {
+//!     on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
+//!     drop_tol: Some(1e-2),
+//! };
+//! let m = SparseSymmetricLdlt::factor_with(&a, &opts)?;          // preconditioner
+//! let b = vec![c(1.0, 0.0); 3];
+//! let res = cocg(&a, &b, &m, 1e-10, 100)?;
+//! assert!(res.converged);
+//! # Ok(()) }
+//! ```
+
 pub mod dense;
 pub mod error;
 pub mod inertia;
@@ -50,3 +105,16 @@ pub use numeric::solve::{
 pub use numeric::solver::{FactorStats, FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use symbolic::SymbolicProfileReport;
+
+/// Ergonomic imports for embedding RLA as a PARDISO-style sparse solver /
+/// preconditioner. `use feral::prelude::*;` brings in the matrix type, the
+/// phased analysis/factor API, the iterative solvers and preconditioners, the
+/// options enums, and the Matrix Market loaders.
+pub mod prelude {
+    pub use crate::{
+        analyze, cocg, cocr, factor_numeric, parse_mtx, parse_mtx_complex, read_mtx,
+        read_mtx_complex, CscMatrix, FeralError, GenericFactorOptions, GenericSymbolic,
+        KrylovResult, LowPrecisionPreconditioner, MtxMatrix, NoPreconditioner, Preconditioner,
+        Scalar, SparseSymmetricLdlt, SymbolicAnalysis, ZeroPivotAction,
+    };
+}
