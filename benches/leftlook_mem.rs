@@ -141,7 +141,7 @@ fn run(k: usize) {
 
 fn main() {
     println!("LDLᵀ transient-memory: multifrontal (CB stack + extract) vs left-looking (panels only)\n");
-    for &k in &[14usize, 18, 22] {
+    for &k in &[18usize, 24, 30] {
         run(k);
     }
 }
