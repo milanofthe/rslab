@@ -13,12 +13,10 @@
 //! symmetric `A = Aᵀ`, not Hermitian). The pivot threshold is the classical
 //! `α = (1 + √17)/8`.
 //!
-//! This module intentionally does **not** reuse the heavily optimized f64 path
-//! in [`crate::dense::factor`] (blocked, SIMD Schur updates, peek-ahead, rook
-//! rescue, inertia). That path stays the f64 performance specialization; this
-//! one is the shared generic reference and the complex-symmetric kernel.
-//! Performance work (blocking, a complex Schur micro-kernel) comes later;
-//! correctness first.
+//! This is the shared, data-type-generic dense kernel that every multifrontal
+//! front reduces to (the former f64-dedicated dense path, with its blocked SIMD
+//! Schur kernel and rook rescue, has been removed in favour of this single
+//! generic path). Further performance work happens here.
 
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
@@ -389,8 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn f64_spd_matches_reference_solver() {
-        // Cross-validate against the validated production f64 solver.
+    fn f64_spd_solves_to_tight_residual() {
         let entries = [
             (0, 0, 4.0),
             (1, 0, 1.0),
@@ -404,20 +401,6 @@ mod tests {
 
         let f = factor_ldlt(&a).unwrap();
         let x = solve_ldlt(&f, &b).unwrap();
-
-        let params = crate::dense::factor::BunchKaufmanParams::default();
-        let (ref_factors, _inertia) = crate::dense::factor::factor(&a, &params).unwrap();
-        let x_ref = crate::dense::solve::solve(&ref_factors, &b).unwrap();
-
-        for i in 0..3 {
-            assert!(
-                (x[i] - x_ref[i]).abs() < 1e-9,
-                "x[{}]={} vs ref {}",
-                i,
-                x[i],
-                x_ref[i]
-            );
-        }
         assert!(residual_inf(&a, &x, &b) < 1e-12);
     }
 

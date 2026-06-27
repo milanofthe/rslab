@@ -638,8 +638,7 @@ impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dense::factor::ZeroPivotAction;
-    use crate::numeric::multifrontal_generic::GenericFactorOptions;
+    use crate::numeric::multifrontal_generic::{GenericFactorOptions, ZeroPivotAction};
     use num_complex::Complex;
 
     type C = Complex<f64>;

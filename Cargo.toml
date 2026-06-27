@@ -94,22 +94,6 @@ faer = "0.22"
 # rmumps = { path = "../ripopt/rmumps" }  # uncomment when needed
 
 [[bench]]
-name = "dense_factor"
-harness = false
-
-[[bench]]
-name = "schur_kernel"
-harness = false
-
-[[bench]]
-name = "issue52_overhead"
-harness = false
-
-[[bench]]
-name = "issue52_baseline"
-harness = false
-
-[[bench]]
 name = "vs_faer"
 harness = false
 

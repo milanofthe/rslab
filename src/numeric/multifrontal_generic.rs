@@ -6,12 +6,12 @@
 //! elimination tree, supernode amalgamation) and applying the generic dense
 //! Bunch-Kaufman kernel from [`crate::dense::ldlt_generic`] front-by-front.
 //!
-//! As with the dense kernel, this does **not** touch the heavily optimized f64
-//! multifrontal driver in [`crate::numeric::factorize`] (blocked, SIMD,
-//! delayed pivoting, inertia, rayon). That stays the f64 performance path; this
-//! is the shared generic reference and the complex-symmetric driver.
+//! This is the single, data-type-generic symmetric multifrontal driver (the
+//! former f64-dedicated driver has been removed). It is rayon-parallel with a
+//! `gemm` BLAS-3 Schur update and relaxed amalgamation; delayed pivoting and
+//! the remaining feral robustness features are being ported in.
 //!
-//! ## Correctness-first scope
+//! ## Current pivoting scope
 //!
 //! * Pivoting is restricted to the **fully-summed block** of each front (no
 //!   delayed pivoting). This produces a valid factorization whenever each
@@ -26,13 +26,34 @@
 //! generic [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt) handles the
 //! triangular/diagonal solves and permutation directly.
 
-use crate::dense::factor::ZeroPivotAction;
 use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, LdltFactors};
 use crate::error::FeralError;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::{symbolic_factorize, SupernodeParams, SymbolicFactorization};
 use rayon::prelude::*;
+
+/// Action to take when a near-zero pivot is encountered during factorization.
+///
+/// This is the static-pivoting policy knob shared by the symmetric LDLᵀ and the
+/// unsymmetric LU paths (via [`GenericFactorOptions`] and the LU options).
+#[derive(Debug, Clone)]
+pub enum ZeroPivotAction {
+    /// Accept the tiny pivot at face value (zero the column, count as a zero in
+    /// the inertia signature, flag for iterative refinement). The perturbation
+    /// magnitude is unbounded — use only when downstream code tolerates sign
+    /// loss in the perturbed positions and re-checks inertia.
+    ForceAccept,
+    /// Return [`FeralError::NumericallyRankDeficient`].
+    Fail,
+    /// Replace the tiny pivot with `sign(d) · max(|d|, abs_floor)`, keeping the
+    /// column live (LAPACK / MA57-style static pivoting). The factor satisfies
+    /// `L·D·Lᵀ = A + Δ` for the produced `L`, `D`; `Δ` is bounded in the worst
+    /// case by `‖A[:,k]‖² / abs_floor`, so drive iterative refinement against
+    /// the unperturbed `A` for tight tolerances. A typical recipe is
+    /// `abs_floor = eps_rel · ‖A‖∞` with `eps_rel ∈ [1e-12, 1e-8]`.
+    PerturbToEps { abs_floor: f64 },
+}
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Diagnostic toggle for the contribution-block Schur update kernel. When

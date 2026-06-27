@@ -369,7 +369,10 @@ pub struct SymbolicFactorization {
     /// preprocessor. When `Some`, the numeric phase reuses it to
     /// derive the `Mc64Symmetric` scaling vector in O(n) instead of
     /// rerunning the Hungarian kernel. `None` when no MC64 matching
-    /// was computed during symbolic factorization.
+    /// was computed during symbolic factorization. (Consumed by the
+    /// numeric path again once MC64 scaling is ported to the generic
+    /// solver — see the feral feature port.)
+    #[allow(dead_code)]
     pub(crate) cached_mc64: Option<crate::scaling::Mc64Cache>,
 
     /// Concrete ordering method actually dispatched. Records the

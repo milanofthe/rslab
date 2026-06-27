@@ -71,6 +71,7 @@ pub(crate) use mc64::Mc64Cache;
 /// [`mc64_value_bound_passes`] to decide reuse-vs-recompute without
 /// rerunning the Hungarian. See
 /// `dev/plans/mc64-value-bounded-cache.md`.
+#[allow(unused_imports)] // re-attached when MC64 scaling is ported to the generic path
 pub(crate) use value_bound::{
     mc64_value_bound_passes, precompute_mc64_validity, Mc64CacheValidity,
 };
@@ -1462,44 +1463,4 @@ mod tests {
         );
     }
 
-    /// T4 — Issue #45 non-regression. The spread guard must not
-    /// regress a matrix that genuinely reaches the new code path.
-    /// `build_synth_kkt(8, 80, 1e8, 1.1, 0.5, 120)` is well-conditioned
-    /// (`probe_mc64_synth`: chain-block InfNorm relres 4.4e-11, MC64
-    /// relres 3.6e-11; the 120 unit slack columns add only trivial
-    /// 1×1 pivots). Factoring and solving it through `Auto` must still
-    /// produce a small residual. Oracle: the relative residual
-    /// `‖A·x−b‖ / ‖b‖` is a mathematical identity.
-    #[test]
-    fn auto_solves_below_guard_matrix_correctly() {
-        use crate::numeric::factorize::factorize_multifrontal;
-        use crate::numeric::solve::solve_sparse;
-        use crate::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
-        use crate::NumericParams;
-
-        let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5, 120);
-        let snode = SupernodeParams::default();
-        let np = NumericParams {
-            scaling: ScalingStrategy::Auto,
-            ..NumericParams::default()
-        };
-        let sym = symbolic_factorize_with_method(&csc, &snode, OrderingMethod::Auto)
-            .expect("symbolic factorization should succeed");
-        let (factors, _inertia) =
-            factorize_multifrontal(&csc, &sym, &np).expect("numeric factorization should succeed");
-        let rhs = vec![1.0_f64; csc.n];
-        let x = solve_sparse(&factors, &rhs).expect("solve should succeed");
-        let mut ax = vec![0.0; csc.n];
-        csc.symv(&x, &mut ax);
-        let num = ax
-            .iter()
-            .zip(&rhs)
-            .fold(0.0_f64, |m, (&a, &b)| m.max((a - b).abs()));
-        let den = rhs.iter().fold(0.0_f64, |m, &b| m.max(b.abs())).max(1.0);
-        let relres = num / den;
-        assert!(
-            relres <= 1e-6,
-            "Auto solve relres {relres:.3e} exceeds 1e-6"
-        );
-    }
 }

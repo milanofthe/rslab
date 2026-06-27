@@ -5,11 +5,9 @@ use std::sync::{Arc, Mutex};
 
 /// Parameters controlling supernode amalgamation.
 ///
-/// β refactor (`dev/plans/scaling-in-numeric.md`): the
-/// `scaling_strategy` field used to live here, but scaling is a
-/// numeric-time concern and now lives on
-/// [`crate::numeric::factorize::NumericParams`]. This struct
-/// covers only the symbolic phase.
+/// Parameters for the **symbolic** phase only (ordering, supernode
+/// amalgamation, small-leaf grouping). Scaling and other numeric-time concerns
+/// live on the numeric factor options, not here.
 #[derive(Clone)]
 pub struct SupernodeParams {
     /// Minimum number of eliminated columns in a supernode. Nodes with
@@ -30,10 +28,8 @@ pub struct SupernodeParams {
     /// Small-leaf-subtree grouping parameters (Phase 2.9). Controls
     /// which true-leaf supernodes are packed into batch groups for
     /// the numeric small-leaf fast path. The detection runs
-    /// unconditionally at symbolic time; whether the numeric phase
-    /// uses the groups is gated by
-    /// [`crate::numeric::factorize::NumericParams::small_leaf`].
-    /// See `dev/research/phase-2.9-small-leaf-subtree.md`.
+    /// unconditionally at symbolic time; the numeric phase chooses whether to
+    /// use the groups. See `dev/research/phase-2.9-small-leaf-subtree.md`.
     pub small_leaf: SmallLeafParams,
 
     /// Phase 2.12 amalgamation strategy: controls whether

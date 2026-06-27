@@ -8,12 +8,10 @@
 //! Research: `dev/research/phase-2.9-small-leaf-subtree.md`.
 //! Plan:     `dev/plans/phase-2.9-small-leaf-subtree.md`.
 //!
-//! The grouping logic here is cheap (one pass over `supernodes`) and
-//! runs unconditionally at symbolic time. Whether the groups are
-//! actually used at numeric time is gated by
-//! [`crate::numeric::factorize::NumericParams::small_leaf`]; when
-//! off, `small_leaf_groups` is ignored and the regular per-supernode
-//! driver runs as before.
+//! The grouping logic here is cheap (one pass over `supernodes`) and runs
+//! unconditionally at symbolic time. Whether the groups are actually used is a
+//! numeric-time choice; when unused, `small_leaf_groups` is ignored and the
+//! regular per-supernode driver runs.
 
 use crate::sparse::csc::CscPattern;
 use crate::symbolic::supernode::Supernode;

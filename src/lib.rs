@@ -70,26 +70,31 @@ pub mod io;
 pub mod numeric;
 pub mod ordering;
 pub mod scalar;
+// MC64 max-product matching + equilibration. Currently only the symbolic MC64
+// cache is wired; the numeric consumption (and the dense f64 scaling helpers)
+// will be re-attached to the generic path during the feral feature port, so the
+// not-yet-wired items are allowed dead for now rather than deleted.
+#[allow(dead_code)]
 pub mod scaling;
 pub mod sparse;
 pub mod symbolic;
 
-// Flat public API re-exported at crate root:
-pub use dense::factor::{
-    factor, factor_single_front, BunchKaufmanParams, Factors, ZeroPivotAction,
-};
+// Flat public API re-exported at crate root — a single data-type-generic
+// (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
+// stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use dense::matrix::SymmetricMatrix;
-pub use dense::solve::{solve, solve_refined};
 pub use error::FeralError;
 /// Ergonomic alias for the crate error type ([`FeralError`]).
 pub use error::FeralError as RlaError;
 pub use scalar::Scalar;
-// Generic (real + complex-symmetric) sparse direct solver — the RLA entry point.
+// Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, LdltFactors};
+// Generic symmetric LDLᵀ multifrontal direct solver.
 pub use numeric::multifrontal_generic::{
-    factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur, GenericFactorOptions,
+    analyze, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur,
+    GenericFactorOptions, GenericSymbolic, ZeroPivotAction,
 };
-pub use numeric::multifrontal_generic::{analyze, factor_numeric, GenericSymbolic};
+// Generic unsymmetric LU multifrontal direct solver.
 pub use numeric::multifrontal_lu::{
     analyze_general, factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_refined,
     LuFactors, LuSymbolic,
@@ -103,15 +108,6 @@ pub use inertia::Inertia;
 pub use io::mtx::{
     parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, MtxMatrix,
 };
-pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
-pub use numeric::factorize::{
-    factorize_multifrontal_with_schur, LdltExport, NumericParams, ProfileReport, SchurBlock,
-};
-pub use numeric::solve::{
-    solve_sparse, solve_sparse_refined, solve_sparse_refined_with_diagnostics,
-    RefinementDiagnostics, RefinementStep,
-};
-pub use numeric::solver::{FactorStats, FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
 pub use symbolic::SymbolicProfileReport;

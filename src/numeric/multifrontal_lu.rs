@@ -23,7 +23,9 @@
 //!   (CSR, upper with the pivots on the diagonal), in factorization order.
 
 use crate::error::FeralError;
-use crate::numeric::multifrontal_generic::{analyze, perturb_pivot, GenericFactorOptions};
+use crate::numeric::multifrontal_generic::{
+    analyze, perturb_pivot, GenericFactorOptions, ZeroPivotAction,
+};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -604,9 +606,9 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     }
 
     let perturb_floor: Option<f64> = match opts.on_zero_pivot {
-        crate::dense::factor::ZeroPivotAction::Fail => None,
-        crate::dense::factor::ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
-        crate::dense::factor::ZeroPivotAction::ForceAccept => {
+        ZeroPivotAction::Fail => None,
+        ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
+        ZeroPivotAction::ForceAccept => {
             let anorm = a.values.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
             Some(anorm.max(1.0) * f64::EPSILON)
         }
@@ -1152,7 +1154,7 @@ mod tests {
 
     #[test]
     fn incomplete_lu_reduces_fill_and_still_solves() {
-        use crate::dense::factor::ZeroPivotAction;
+        use crate::numeric::multifrontal_generic::ZeroPivotAction;
         // Unsymmetric grid: incomplete LU (drop_tol) must shrink nnz(L+U) yet
         // still drive iterative refinement to a small residual — the MoM
         // sparse-preconditioner configuration.
