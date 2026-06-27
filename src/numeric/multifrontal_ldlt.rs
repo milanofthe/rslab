@@ -853,19 +853,34 @@ pub fn analyze(
     // peak_i`; Liu's theorem minimizes `maxᵢ(Σ_{j<i} cb_j + peak_i)` by ordering
     // children by `(peak − cb)` descending. Supernodes are in postorder, so a
     // single forward sweep has every child's `(peak, cb)` ready.
+    //
+    // **Hybrid Liu**: reordering is only applied where the contribution stack is
+    // actually large (`Σ children cb ≥ LIU_MIN_STACK`) — the upper/mid tree,
+    // which is a handful of nodes carrying the spike. The vast majority of small
+    // leaf nodes keep their natural order, whose rayon spawn pattern parallelizes
+    // better. This keeps almost all of Liu's memory win while shedding most of
+    // its throughput cost (the memory-optimal child order is not the
+    // parallel-load-optimal one). `peak[s]` is always computed against the order
+    // actually used, so the propagation stays exact.
     let nsuper = sym.supernodes.len();
     if USE_LIU_REORDER.load(Ordering::Relaxed) {
+        // ~64 MB of `Complex<f64>` contribution blocks: below this the reorder
+        // saves little memory but can still disturb leaf parallelism.
+        const LIU_MIN_STACK: f64 = 4_000_000.0;
         let mut cb = vec![0.0f64; nsuper];
         let mut peak = vec![0.0f64; nsuper];
         for s in 0..nsuper {
             let cn = (sym.supernodes[s].nrow - sym.supernodes[s].ncol) as f64;
             cb[s] = cn * cn;
             let mut kids = std::mem::take(&mut sym.supernodes[s].children);
-            kids.sort_by(|&a, &b| {
-                (peak[b] - cb[b])
-                    .partial_cmp(&(peak[a] - cb[a]))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            let stack_total: f64 = kids.iter().map(|&c| cb[c]).sum();
+            if stack_total >= LIU_MIN_STACK {
+                kids.sort_by(|&a, &b| {
+                    (peak[b] - cb[b])
+                        .partial_cmp(&(peak[a] - cb[a]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
             let mut acc = 0.0f64; // Σ cb of already-processed children
             let mut pk = 0.0f64;
             for &ch in &kids {

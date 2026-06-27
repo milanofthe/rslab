@@ -296,6 +296,10 @@ fn main() {
     // Optional substring filter for fast single-matrix iteration during the
     // amalgamation sweep.
     let filter = std::env::var("RLA_DIAG_FILTER").unwrap_or_default();
+    if std::env::var("RLA_NO_LIU").is_ok() {
+        rla::set_use_liu_reorder(false);
+        println!("[Liu child-reorder DISABLED]");
+    }
     println!("MoM factorization-cost diagnostic (RLA unsymmetric LU)\n");
     for f in &files {
         if filter.is_empty() || f.file_name().unwrap().to_string_lossy().contains(&filter) {
