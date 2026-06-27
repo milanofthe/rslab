@@ -567,9 +567,13 @@ where
         for k in 0..n {
             x[k] = x[k] + z[k];
         }
-        if converged_inner {
-            break;
-        }
+        // NOTE: do **not** stop on the inner (Hessenberg LS) residual estimate
+        // alone. On ill-conditioned operators (MoM near-field) the estimate can
+        // dip below `tol` while the *true* residual ‖b−Ax‖ is orders larger
+        // (loss of Arnoldi orthogonality). Restart and let the outer loop's
+        // top-of-cycle TRUE-residual check decide convergence. `converged_inner`
+        // only governs early-exit of the inner Arnoldi sweep, not termination.
+        let _ = converged_inner;
     }
 
     op.apply(&x, &mut ax);
