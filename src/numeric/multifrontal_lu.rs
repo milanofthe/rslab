@@ -290,10 +290,13 @@ fn lu_front<T: Scalar>(
     }
 
     // Extract L (nrow × ncol col-major, unit lower) and U (nrow × ncol
-    // col-major over the row index, with the pivot on the diagonal).
+    // col-major over the row index, with the pivot on the diagonal), plus the
+    // contribution block (`f`'s Schur-updated trailing A22 = A22 − L21·U12).
     let one = T::one();
+    let cnrow = nrow - ncol;
     let mut l = vec![T::zero(); nrow * ncol];
     let mut u = vec![T::zero(); nrow * ncol];
+    let mut cb = vec![T::zero(); cnrow * cnrow];
     for c in 0..ncol {
         l[c * nrow + c] = one;
         u[c * nrow + c] = pivots[c];
@@ -302,16 +305,10 @@ fn lu_front<T: Scalar>(
             u[c * nrow + r] = f[r * nrow + c]; // U(c, r)
         }
     }
-
-    // Contribution block: `f`'s trailing block now holds the fully
-    // Schur-updated A22 = A22 − L21·U12, accumulated across the per-panel GEMMs
-    // above. Copy it out (column-major) for the parent's extend-add.
-    let cnrow = nrow - ncol;
-    let mut cb = vec![T::zero(); cnrow * cnrow];
+    // Each CB column is a contiguous run of `f`'s trailing block → memcpy.
     for c in 0..cnrow {
-        for r in 0..cnrow {
-            cb[c * cnrow + r] = f[(ncol + c) * n + (ncol + r)];
-        }
+        let base = (ncol + c) * n + ncol;
+        cb[c * cnrow..c * cnrow + cnrow].copy_from_slice(&f[base..base + cnrow]);
     }
 
     if let Some(t) = t_extract {
