@@ -1472,7 +1472,12 @@ mod tests {
         }
         let a = GeneralCsc::<f64>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let sym = LuSymbolic::analyze(&a).unwrap();
-        let eager = factor_general_lu_numeric(&sym, &a, &FactorOptions::default()).unwrap();
+        let eager = factor_general_lu_numeric(
+            &sym,
+            &a,
+            &FactorOptions::default().with_memory(MemoryMode::Eager),
+        )
+        .unwrap();
         let low = factor_general_lu_numeric(
             &sym,
             &a,

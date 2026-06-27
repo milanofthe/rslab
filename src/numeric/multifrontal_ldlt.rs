@@ -113,12 +113,12 @@ impl AnalyzeOptions {
 /// Factor emit/memory strategy — composable via [`FactorOptions::with_memory`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryMode {
-    /// Collect every front's factor, then emit the global `L`/`U` (default).
-    #[default]
+    /// Collect every front's factor, then emit the global `L`/`U`.
     Eager,
     /// Free each front's dense factor as soon as it is emitted into the global
-    /// structure — lower peak RSS at no accuracy cost (removes the emit-time
-    /// per-front + global overlap).
+    /// structure (default) — lower peak RSS at no accuracy cost: bit-identical
+    /// factors, removes the emit-time per-front + global overlap.
+    #[default]
     LowMemory,
 }
 
@@ -167,9 +167,10 @@ pub struct FactorOptions {
     /// discarded, trading factor accuracy for memory. `None` = complete
     /// factorization. (Wired in a later stage.)
     pub drop_tol: Option<f64>,
-    /// Factor emit/memory strategy (peak-RSS vs simplicity). Default [`Eager`].
+    /// Factor emit/memory strategy (peak-RSS vs simplicity). Default
+    /// [`LowMemory`] (lower peak, bit-identical factors).
     ///
-    /// [`Eager`]: MemoryMode::Eager
+    /// [`LowMemory`]: MemoryMode::LowMemory
     pub memory: MemoryMode,
     /// Block-Low-Rank strategy. Default [`Off`] (exact dense fronts).
     ///
@@ -182,7 +183,7 @@ impl Default for FactorOptions {
         Self {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: None,
-            memory: MemoryMode::Eager,
+            memory: MemoryMode::LowMemory,
             blr: BlrMode::Off,
         }
     }

@@ -197,8 +197,9 @@ fn diag_file(path: &std::path::Path, reorder: ReorderMode) {
     if std::env::var("RLA_BLR_CB").is_ok() {
         opts = opts.with_blr(BlrMode::contribution_blocks(1e-4));
     }
-    if std::env::var("RLA_LOW_MEM").is_ok() {
-        opts = opts.with_memory(MemoryMode::LowMemory);
+    // LowMemory is the default now; RLA_EAGER opts back out for A/B.
+    if std::env::var("RLA_EAGER").is_ok() {
+        opts = opts.with_memory(MemoryMode::Eager);
     }
     let ws_before = cur_ws_mb();
     let sampler = WsSampler::start();
