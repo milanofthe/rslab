@@ -958,16 +958,18 @@ pub fn analyze_with(
     // Relaxed/fill-tolerant amalgamation — a standard sparse-direct technique
     // (PARDISO/MUMPS apply it to every matrix): when fundamental supernodes are
     // narrow the Schur-update GEMMs are low-rank and memory-bound, so trade a
-    // little explicit-zero fill for wider, higher-rank dense fronts. These
-    // defaults (≤512-wide, ≤128 extra rows/merge) are tuned to roughly double
-    // factor throughput on the EM FEM / MoM matrices RLA targets, but the lever
-    // is workload-agnostic; it is exposed as the general `SupernodeParams.relax`
-    // knob and gated to `n >= RELAX_MIN_N` inside `find_supernodes`.
+    // little explicit-zero fill for wider, higher-rank dense fronts. The width is
+    // a sweet spot: too narrow → memory-bound BLAS-2; too wide → flops wasted on
+    // explicit zeros. `≤256-wide, ≤64 extra rows/merge` measured best across the
+    // EM FEM / MoM matrices for **both** the multifrontal and left-looking
+    // kernels (≈ −15…−25 % factor time vs the previous 512/128). The lever is
+    // workload-agnostic; it rides the general `SupernodeParams.relax` knob and is
+    // gated to `n >= RELAX_MIN_N` inside `find_supernodes`.
     let snode_params = SupernodeParams {
         preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
         relax: Some(crate::symbolic::supernode::RelaxAmalgamation {
-            max_width: 512,
-            max_extra_rows: 128,
+            max_width: 256,
+            max_extra_rows: 64,
         }),
         ..SupernodeParams::default()
     };
