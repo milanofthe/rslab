@@ -29,6 +29,48 @@ use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+/// Reusable dense front-buffer pool. The multifrontal driver factors thousands
+/// of fronts, each needing a transient `nrow² ` working buffer. Allocating one
+/// per front (and freeing it) churns the system allocator with large, varying
+/// sizes; on Windows the heap retains the freed blocks rather than returning
+/// them to the OS, so peak RSS balloons far above the live set (the OOM the
+/// pure-per-front allocation caused). This pool recycles a handful of buffers
+/// (≈ the concurrency level) instead, capping the transient at the live set.
+struct FrontPool<T>(Mutex<Vec<Vec<T>>>);
+
+/// Only buffers up to this many entries are recycled. The churning majority of
+/// small/medium fronts (which drive fragmentation) stay pooled; the rare huge
+/// root/separator fronts are freed immediately rather than pinning their (GB-
+/// scale) capacity in the pool for the whole factorization. 4M entries ≈ 64 MB
+/// for `Complex<f64>` (front height ~2000).
+const POOL_MAX_LEN: usize = 4_000_000;
+
+impl<T: Scalar> FrontPool<T> {
+    fn new() -> Self {
+        FrontPool(Mutex::new(Vec::new()))
+    }
+    /// Take a buffer (reused if available) and zero-fill it to `len`.
+    fn take(&self, len: usize) -> Vec<T> {
+        let mut buf = self
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop()
+            .unwrap_or_default();
+        buf.clear();
+        buf.resize(len, T::zero());
+        buf
+    }
+    /// Return a buffer for reuse, unless it is an oversized (huge-front) buffer
+    /// whose capacity we do not want to pin in the pool — those are dropped.
+    fn give(&self, buf: Vec<T>) {
+        if buf.capacity() <= POOL_MAX_LEN {
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).push(buf);
+        }
+    }
+}
 
 // Opt-in coarse factorization profiler (set `RLA_PROFILE=1`): CPU-nanosecond
 // accumulators for the assembly (scatter + extend-add) vs the per-front LU
@@ -351,6 +393,7 @@ fn factor_one_node_lu<T: Scalar>(
     a_perm_t: &GeneralCsc<T>,
     child_refs: &[&NodeLu<T>],
     perturb_floor: Option<f64>,
+    pool: &FrontPool<T>,
     profile: bool,
 ) -> Result<NodeLu<T>, FeralError> {
     let snode = &sym.supernodes[s];
@@ -384,9 +427,11 @@ fn factor_one_node_lu<T: Scalar>(
     ri.extend(trailing);
     let nrow = ri.len();
 
-    // Front buffer (transient — the unavoidable nrow² zeroing dominates, so a
-    // per-front allocation adds only negligible malloc over a pooled one).
-    let mut fbuf: Vec<T> = vec![T::zero(); nrow * nrow];
+    // Front buffer (transient `nrow²`), drawn from the reuse pool so the
+    // thousands of large per-front buffers become a handful of recycled ones —
+    // the fragmentation fix for the transient-memory OOM. Returned via
+    // `pool.give` once `lu_front` has consumed it below.
+    let mut fbuf: Vec<T> = pool.take(nrow * nrow);
     let f = &mut fbuf[..];
 
     // Take the thread-local global→local scratch for the assembly (held at the
@@ -461,6 +506,8 @@ fn factor_one_node_lu<T: Scalar>(
     if let Some(t) = t_front {
         PROF_FRONT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
+    // `lu_front` has copied L/U/CB out; recycle the front buffer.
+    pool.give(fbuf);
     Ok(NodeLu {
         front,
         row_indices: ri,
@@ -483,19 +530,21 @@ type SubtreeFactors<T> = (NodeLu<T>, Vec<(usize, NodeLu<T>)>);
 /// Returns this node's factor plus a flat `(supernode-id, factor)` list for the
 /// whole subtree, which the caller scatters into `node_results` for the global
 /// emit pass.
+#[allow(clippy::too_many_arguments)]
 fn factor_subtree<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
     a_perm: &GeneralCsc<T>,
     a_perm_t: &GeneralCsc<T>,
     perturb_floor: Option<f64>,
+    pool: &FrontPool<T>,
     profile: bool,
 ) -> Result<SubtreeFactors<T>, FeralError> {
     let children = &sym.supernodes[s].children;
     // Factor the child subtrees concurrently.
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, profile))
+        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, pool, profile))
         .collect::<Result<Vec<_>, _>>()?;
     // Factor this node from the children's own (subtree-root) factors.
     let nf = {
@@ -507,6 +556,7 @@ fn factor_subtree<T: Scalar>(
             a_perm_t,
             &child_refs,
             perturb_floor,
+            pool,
             profile,
         )?
     };
@@ -783,9 +833,10 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
     // Factor every root subtree with the work-stealing tree schedule; the
     // children-before-parent dependency is the recursion structure itself.
+    let pool = FrontPool::<T>::new();
     let root_outs: Vec<SubtreeFactors<T>> = roots
         .par_iter()
-        .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, profile))
+        .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, &pool, profile))
         .collect::<Result<Vec<_>, _>>()?;
     // Scatter the subtree factors into `node_results` (indexed by supernode id)
     // for the global emit pass, which still walks supernodes in postorder.

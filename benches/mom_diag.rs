@@ -19,6 +19,45 @@ use std::time::Instant;
 use rla::prelude::*;
 use rla::LuSymbolic;
 
+/// Peak working-set (RSS high-water) of this process, in MB. Windows-only,
+/// queried via the OS — benches may use FFI; the solver library stays pure Rust.
+#[cfg(windows)]
+fn peak_ws_mb() -> f64 {
+    #[repr(C)]
+    struct Pmc {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool: usize,
+        quota_paged_pool: usize,
+        quota_peak_nonpaged_pool: usize,
+        quota_nonpaged_pool: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(process: isize, ppsmemcounters: *mut Pmc, cb: u32) -> i32;
+    }
+    // SAFETY: `pmc` is a correctly-sized, fully-initialized POD output buffer for
+    // the documented PROCESS_MEMORY_COUNTERS layout; `GetCurrentProcess` returns
+    // a pseudo-handle that needs no closing.
+    unsafe {
+        let mut pmc: Pmc = std::mem::zeroed();
+        pmc.cb = std::mem::size_of::<Pmc>() as u32;
+        if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) != 0 {
+            pmc.peak_working_set_size as f64 / 1e6
+        } else {
+            0.0
+        }
+    }
+}
+#[cfg(not(windows))]
+fn peak_ws_mb() -> f64 {
+    0.0
+}
+
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 
 /// Estimated factorization flops to eliminate `ncol` pivots from an `nrow`-tall
@@ -122,8 +161,10 @@ fn diag_file(path: &std::path::Path) {
 
     println!("=== {name}  n={n}  nnz(A)={nnz_a} ===");
     println!(
-        "  phases:  analyze {analyze_ms:8.1} ms   factor {factor_ms:8.1} ms   levels {}",
-        sym.n_levels()
+        "  phases:  analyze {analyze_ms:8.1} ms   factor {factor_ms:8.1} ms   levels {}   \
+         peak-RSS {:.0} MB",
+        sym.n_levels(),
+        peak_ws_mb(),
     );
     println!(
         "  fill:    nnz(L+U)={fill:>10}   growth {:.1}× over nnz(A)   ({:.0} MB f64-complex)",
