@@ -679,12 +679,14 @@ pub fn analyze(
     // Disable LdltCompress: it transforms the pattern via a quotient-graph
     // compression beyond a plain permutation, so `sym.perm` would no longer be
     // consistent with the `A_perm` built in `factor_numeric`.
-    // Relaxed/fill-tolerant amalgamation: the generic path serves the complex
-    // MoM/FEM and unsymmetric LU workloads, whose fundamental supernodes are
-    // very narrow (mean ~2 columns) — leaving the Schur GEMMs low-rank and
-    // memory-bound. Widening fronts to ~512 columns (tolerating ≤128
-    // explicit-zero rows per merge) roughly doubles factor throughput on the
-    // real MoM matrices. Gated to `n >= RELAX_MIN_N` inside `find_supernodes`.
+    // Relaxed/fill-tolerant amalgamation — a standard sparse-direct technique
+    // (PARDISO/MUMPS apply it to every matrix): when fundamental supernodes are
+    // narrow the Schur-update GEMMs are low-rank and memory-bound, so trade a
+    // little explicit-zero fill for wider, higher-rank dense fronts. These
+    // defaults (≤512-wide, ≤128 extra rows/merge) are tuned to roughly double
+    // factor throughput on the EM FEM / MoM matrices RLA targets, but the lever
+    // is workload-agnostic; it is exposed as the general `SupernodeParams.relax`
+    // knob and gated to `n >= RELAX_MIN_N` inside `find_supernodes`.
     let snode_params = SupernodeParams {
         preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
         relax: Some(crate::symbolic::supernode::RelaxAmalgamation {

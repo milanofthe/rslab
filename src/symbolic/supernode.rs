@@ -67,9 +67,10 @@ pub struct SupernodeParams {
     /// neither a trivial chain nor size-based, as long as the merged supernode
     /// stays within `max_width` columns and the merge introduces at most
     /// `max_extra_rows` explicit-zero rows. This trades a little fill for much
-    /// wider dense fronts (higher-rank Schur GEMMs), the lever that closes most
-    /// of the per-front-overhead gap on MoM/FEM matrices whose fundamental
-    /// supernodes are very narrow (mean ~2 columns). Implies the `Renumber`
+    /// wider dense fronts (higher-rank Schur GEMMs), the standard sparse-direct
+    /// lever (PARDISO/MUMPS apply it universally) that closes most of the
+    /// per-front-overhead gap on any matrix whose fundamental supernodes are
+    /// narrow. Implies the `Renumber`
     /// merge order so bushy multi-child trees can actually merge. Applied only
     /// above [`RELAX_MIN_N`] unknowns so small problems are unaffected. `None`
     /// (default) = structural / size-based merges only.
