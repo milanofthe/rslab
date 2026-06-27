@@ -121,5 +121,9 @@ harness = false
 name = "vs_real"
 harness = false
 
+[[bench]]
+name = "mom_loop"
+harness = false
+
 [profile.release]
 debug = true

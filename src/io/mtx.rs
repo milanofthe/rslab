@@ -37,6 +37,15 @@ impl<T: Scalar> MtxMatrix<T> {
         let vals: Vec<T> = self.entries.iter().map(|&(_, _, v)| v).collect();
         CscMatrix::from_triplets(self.n, &rows, &cols, &vals)
     }
+
+    /// Convert to a general (full, unsymmetric) CSC matrix, keeping every entry
+    /// as given — the form the unsymmetric LU path / a `LinearOperator` uses.
+    pub fn to_general_csc(&self) -> Result<crate::sparse::general::GeneralCsc<T>, FeralError> {
+        let rows: Vec<usize> = self.entries.iter().map(|&(r, _, _)| r).collect();
+        let cols: Vec<usize> = self.entries.iter().map(|&(_, c, _)| c).collect();
+        let vals: Vec<T> = self.entries.iter().map(|&(_, _, v)| v).collect();
+        crate::sparse::general::GeneralCsc::from_triplets(self.n, &rows, &cols, &vals)
+    }
 }
 
 /// Read a **real** symmetric Matrix Market file (`mtype 2`).
