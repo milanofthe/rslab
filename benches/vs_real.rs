@@ -11,9 +11,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use feral::sparse::csc::CscMatrix;
+use feral::sparse::general::GeneralCsc;
 use feral::{
-    cocg, parse_mtx_complex_general, GenericFactorOptions, SparseSymmetricLdlt, ZeroPivotAction,
+    factor_general_lu, parse_mtx_complex_general, solve_lu, GenericFactorOptions, ZeroPivotAction,
 };
 use num_complex::Complex;
 
@@ -81,17 +81,20 @@ fn bench_file(path: &std::path::Path) {
 
     let b: Vec<C> = vec![C::new(1.0, 0.0); n];
 
-    // ---- RLA: lower triangle, complex-symmetric LDLᵀ (static-pivoted) ----
-    let (mut lr, mut lc, mut lv) = (Vec::new(), Vec::new(), Vec::new());
-    for &(i, j, v) in entries {
-        if i >= j {
-            lr.push(i);
-            lc.push(j);
-            lv.push(v);
+    // ---- RLA: general (unsymmetric) complex multifrontal LU ----
+    let (rr, cc, vv): (Vec<usize>, Vec<usize>, Vec<C>) = {
+        let mut rr = Vec::with_capacity(nnz);
+        let mut cc = Vec::with_capacity(nnz);
+        let mut vv = Vec::with_capacity(nnz);
+        for &(i, j, v) in entries {
+            rr.push(i);
+            cc.push(j);
+            vv.push(v);
         }
-    }
-    let a_low = match CscMatrix::<C>::from_triplets(n, &lr, &lc, &lv) {
-        Ok(a) => a,
+        (rr, cc, vv)
+    };
+    let g = match GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv) {
+        Ok(g) => g,
         Err(e) => {
             println!("{name}: RLA build error {e}");
             return;
@@ -102,7 +105,7 @@ fn bench_file(path: &std::path::Path) {
         drop_tol: None,
     };
     let t = Instant::now();
-    let rla = match SparseSymmetricLdlt::factor_with(&a_low, &opts) {
+    let rla = match factor_general_lu(&g, &opts) {
         Ok(s) => s,
         Err(e) => {
             println!("{name}: RLA factor error {e}");
@@ -111,11 +114,9 @@ fn bench_file(path: &std::path::Path) {
     };
     let rla_fac = t.elapsed().as_secs_f64() * 1e3;
     let t = Instant::now();
-    let xr = rla.solve(&b).unwrap_or_default();
+    let xr = solve_lu(&rla, &b).unwrap_or_default();
     let rla_slv = t.elapsed().as_secs_f64() * 1e3;
     let rla_res = resid(entries, &xr, &b);
-    // RLA as a preconditioner: COCG on the (symmetric) system.
-    let pc = cocg(&a_low, &b, &rla, 1e-8, 500).map(|r| (r.iters, r.converged));
 
     // ---- faer: full matrix, sparse LU ----
     let mut trip: Vec<Triplet<usize, usize, c64>> = Vec::with_capacity(nnz);
@@ -145,14 +146,10 @@ fn bench_file(path: &std::path::Path) {
     println!("=== {name} ===");
     println!("  n={n}  nnz(full)={nnz}  rel.asymmetry={rel_asym:.2e}  |A|max={amax:.2e}");
     println!(
-        "  RLA  : factor={rla_fac:8.1} ms  solve={rla_slv:7.2} ms  fill={:9}  perturbed={}  res={rla_res:.2e}",
+        "  RLA-LU: factor={rla_fac:8.1} ms  solve={rla_slv:7.2} ms  fill={:9}  perturbed={}  res={rla_res:.2e}",
         rla.factor_nnz(),
-        rla.n_perturbed(),
+        rla.n_perturbed,
     );
-    match pc {
-        Ok((it, conv)) => println!("  RLA-COCG: {it} iters (converged={conv})"),
-        Err(e) => println!("  RLA-COCG: error {e}"),
-    }
     if faer_ok {
         println!("  faer : factor={faer_fac:8.1} ms  solve={faer_slv:7.2} ms  res={faer_res:.2e}");
         if faer_fac > 0.0 {

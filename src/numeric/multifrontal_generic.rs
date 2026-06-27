@@ -83,7 +83,7 @@ impl Default for GenericFactorOptions {
 /// `abs_floor` up to that floor, preserving phase. For `T = f64` this reduces
 /// to `sign(d)·max(|d|, abs_floor)`, matching the real kernel.
 #[inline]
-fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
+pub(crate) fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
     let mag = d.magnitude();
     if mag >= abs_floor {
         d
@@ -565,6 +565,15 @@ impl GenericSymbolic {
     /// The analyzed dimension.
     pub fn n(&self) -> usize {
         self.n
+    }
+
+    /// Internal accessor for the unsymmetric LU driver: the symbolic
+    /// factorization and the precomputed assembly-tree levels. `None` for the
+    /// empty (`n == 0`) analysis.
+    pub(crate) fn sym_and_levels(&self) -> Option<(&SymbolicFactorization, &[Vec<usize>])> {
+        self.inner
+            .as_ref()
+            .map(|i| (&i.sym, i.by_level.as_slice()))
     }
 }
 

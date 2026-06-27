@@ -88,6 +88,7 @@ pub use numeric::multifrontal_generic::{
     factor_sparse_ldlt, factor_sparse_ldlt_with, set_use_gemm_schur, GenericFactorOptions,
 };
 pub use numeric::multifrontal_generic::{analyze, factor_numeric, GenericSymbolic};
+pub use numeric::multifrontal_lu::{factor_general_lu, solve_lu, LuFactors};
 pub use numeric::sparse_solver::{SparseSymmetricLdlt, SymbolicAnalysis};
 pub use numeric::iterative::{
     cocg, cocr, KrylovResult, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
@@ -106,6 +107,7 @@ pub use numeric::solve::{
 };
 pub use numeric::solver::{FactorStats, FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};
+pub use sparse::general::GeneralCsc;
 pub use symbolic::SymbolicProfileReport;
 
 /// Ergonomic imports for embedding RLA as a PARDISO-style sparse solver /
