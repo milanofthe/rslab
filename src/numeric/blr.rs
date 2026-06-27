@@ -146,6 +146,201 @@ pub fn compress_aca<T: Scalar>(
     LowRank { m, n, rank, u, v }
 }
 
+/// One tile of a block-partitioned matrix: stored either dense (column-major,
+/// `rows × cols`) or in compressed low-rank form `U·Vᵀ`. Diagonal tiles and
+/// off-diagonal tiles that do not compress below the break-even rank stay
+/// `Dense`; admissible (geometrically separated, smooth-kernel) off-diagonal
+/// tiles become `LowRank`. The BLR factorization dispatches on this enum: dense
+/// tiles take the ordinary kernels, low-rank tiles take the cheap
+/// `U(VᵀU)Vᵀ`-style block arithmetic.
+#[derive(Debug, Clone)]
+pub enum Block<T> {
+    /// Column-major `rows × cols` dense tile.
+    Dense {
+        rows: usize,
+        cols: usize,
+        data: Vec<T>,
+    },
+    /// Compressed tile `U·Vᵀ`.
+    LowRank(LowRank<T>),
+}
+
+impl<T: Scalar> Block<T> {
+    pub fn rows(&self) -> usize {
+        match self {
+            Block::Dense { rows, .. } => *rows,
+            Block::LowRank(lr) => lr.m,
+        }
+    }
+
+    pub fn cols(&self) -> usize {
+        match self {
+            Block::Dense { cols, .. } => *cols,
+            Block::LowRank(lr) => lr.n,
+        }
+    }
+
+    /// Stored scalar count — `rows·cols` dense, `rank·(rows+cols)` low-rank.
+    pub fn storage(&self) -> usize {
+        match self {
+            Block::Dense { rows, cols, .. } => rows * cols,
+            Block::LowRank(lr) => lr.storage(),
+        }
+    }
+
+    pub fn is_low_rank(&self) -> bool {
+        matches!(self, Block::LowRank(_))
+    }
+
+    /// Dense `rows × cols` column-major reconstruction of the tile.
+    pub fn to_dense(&self) -> Vec<T> {
+        match self {
+            Block::Dense { data, .. } => data.clone(),
+            Block::LowRank(lr) => lr.to_dense(),
+        }
+    }
+}
+
+/// Extent `(start, len)` of block index `k` along an axis of length `full`
+/// partitioned into tiles of size `b` (the trailing tile may be shorter).
+fn block_extent(full: usize, b: usize, k: usize) -> (usize, usize) {
+    let start = k * b;
+    (start, b.min(full - start))
+}
+
+/// A block-partitioned (Block Low-Rank) representation of a dense column-major
+/// `nrow × ncol` matrix: a `nbr × nbc` grid of [`Block`]s over a fixed block
+/// size `b` (the trailing row/column tile may be smaller). The grid is stored
+/// row-major (`blocks[ib·nbc + jb]`).
+///
+/// This is the data structure the BLR-aware front factorization operates on:
+/// Stage 1 builds and reconstructs it; later stages factor it block-by-block
+/// with low-rank tile arithmetic.
+#[derive(Debug, Clone)]
+pub struct BlrMatrix<T> {
+    pub nrow: usize,
+    pub ncol: usize,
+    pub b: usize,
+    pub nbr: usize,
+    pub nbc: usize,
+    blocks: Vec<Block<T>>,
+}
+
+impl<T: Scalar> BlrMatrix<T> {
+    fn idx(&self, ib: usize, jb: usize) -> usize {
+        ib * self.nbc + jb
+    }
+
+    pub fn block(&self, ib: usize, jb: usize) -> &Block<T> {
+        &self.blocks[self.idx(ib, jb)]
+    }
+
+    pub fn block_mut(&mut self, ib: usize, jb: usize) -> &mut Block<T> {
+        let i = self.idx(ib, jb);
+        &mut self.blocks[i]
+    }
+
+    /// Row extent `(start, len)` of block-row `ib`.
+    pub fn row_extent(&self, ib: usize) -> (usize, usize) {
+        block_extent(self.nrow, self.b, ib)
+    }
+
+    /// Column extent `(start, len)` of block-column `jb`.
+    pub fn col_extent(&self, jb: usize) -> (usize, usize) {
+        block_extent(self.ncol, self.b, jb)
+    }
+
+    /// Total stored scalars across all tiles — the BLR memory footprint.
+    pub fn storage(&self) -> usize {
+        self.blocks.iter().map(Block::storage).sum()
+    }
+
+    /// Footprint of the equivalent dense matrix, `nrow·ncol`.
+    pub fn dense_storage(&self) -> usize {
+        self.nrow * self.ncol
+    }
+
+    /// Number of off-diagonal tiles stored compressed.
+    pub fn n_low_rank(&self) -> usize {
+        self.blocks.iter().filter(|b| b.is_low_rank()).count()
+    }
+
+    /// Build a BLR partition of the dense column-major `nrow × ncol` matrix `a`
+    /// at block size `b` and per-tile relative Frobenius tolerance `eps`.
+    ///
+    /// Diagonal tiles (`ib == jb`) are always dense. Each off-diagonal tile is
+    /// compressed by ACA, capped at the **break-even rank**
+    /// `⌊rows·cols/(rows+cols)⌋` (the rank above which `U·Vᵀ` stores no less than
+    /// the dense tile): a tile that reaches that cap without converging is kept
+    /// dense, which also bounds the ACA cost on incompressible near-diagonal
+    /// tiles to `O(breakeven · rows·cols)`.
+    pub fn from_dense(a: &[T], nrow: usize, ncol: usize, b: usize, eps: f64) -> BlrMatrix<T> {
+        assert!(b > 0, "block size must be positive");
+        let nbr = nrow.div_ceil(b);
+        let nbc = ncol.div_ceil(b);
+        let mut blocks = Vec::with_capacity(nbr * nbc);
+        for ib in 0..nbr {
+            let (r0, bm) = block_extent(nrow, b, ib);
+            for jb in 0..nbc {
+                let (c0, bn) = block_extent(ncol, b, jb);
+                // Extract the tile column-major from `a` (col stride `nrow`).
+                let mut tile = vec![T::zero(); bm * bn];
+                for jj in 0..bn {
+                    let src = (c0 + jj) * nrow + r0;
+                    tile[jj * bm..jj * bm + bm].copy_from_slice(&a[src..src + bm]);
+                }
+                let blk = if ib == jb {
+                    Block::Dense {
+                        rows: bm,
+                        cols: bn,
+                        data: tile,
+                    }
+                } else {
+                    let breakeven = (bm * bn / (bm + bn)).max(1);
+                    let lr = compress_aca(&tile, bm, bn, eps, breakeven);
+                    if lr.rank < breakeven && lr.storage() < bm * bn {
+                        Block::LowRank(lr)
+                    } else {
+                        Block::Dense {
+                            rows: bm,
+                            cols: bn,
+                            data: tile,
+                        }
+                    }
+                };
+                blocks.push(blk);
+            }
+        }
+        BlrMatrix {
+            nrow,
+            ncol,
+            b,
+            nbr,
+            nbc,
+            blocks,
+        }
+    }
+
+    /// Reconstruct the dense column-major `nrow × ncol` approximation by writing
+    /// every tile into place. For tests / diagnostics and the dense-fallback
+    /// path; the factorization never densifies the whole matrix.
+    pub fn to_dense(&self) -> Vec<T> {
+        let mut out = vec![T::zero(); self.nrow * self.ncol];
+        for ib in 0..self.nbr {
+            let (r0, bm) = self.row_extent(ib);
+            for jb in 0..self.nbc {
+                let (c0, bn) = self.col_extent(jb);
+                let tile = self.block(ib, jb).to_dense();
+                for jj in 0..bn {
+                    let dst = (c0 + jj) * self.nrow + r0;
+                    out[dst..dst + bm].copy_from_slice(&tile[jj * bm..jj * bm + bm]);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Diagnostic: partition a dense front `f` (`n × n` column-major, of which the
 /// leading `ncol` columns are eliminated) into `b × b` blocks and report how
 /// compressible its strictly-lower-triangle off-diagonal blocks are at several
@@ -207,8 +402,8 @@ mod tests {
         // Build a rank-3 block U0·V0ᵀ (m=40, n=30) and check ACA recovers it at a
         // tiny tolerance with rank ≤ 3.
         let (m, n, r0) = (40usize, 30usize, 3usize);
-        let u0: Vec<f64> = (0..m * r0).map(|t| ((t * 7 % 11) as f64 - 5.0)).collect();
-        let v0: Vec<f64> = (0..n * r0).map(|t| ((t * 5 % 13) as f64 - 6.0)).collect();
+        let u0: Vec<f64> = (0..m * r0).map(|t| (t * 7 % 11) as f64 - 5.0).collect();
+        let v0: Vec<f64> = (0..n * r0).map(|t| (t * 5 % 13) as f64 - 6.0).collect();
         let mut b = vec![0.0f64; m * n];
         for k in 0..r0 {
             for j in 0..n {
@@ -247,6 +442,79 @@ mod tests {
         );
         let err = max_abs_diff(&b, &lr.to_dense());
         assert!(err <= 1e-5 * frob(&b), "reconstruction error {err}");
+    }
+
+    /// A front-like dense matrix: strong diagonal, off-diagonal coupling through
+    /// a smooth separated-cluster kernel — compressible away from the diagonal.
+    fn smooth_front(n: usize) -> Vec<Complex<f64>> {
+        let mut a = vec![Complex::new(0.0, 0.0); n * n];
+        for j in 0..n {
+            for i in 0..n {
+                a[j * n + i] = if i == j {
+                    Complex::new(n as f64, 1.0)
+                } else {
+                    // Smooth kernel in the index separation; rows/cols of a tile
+                    // far from the diagonal sit in well-separated clusters.
+                    let d = (i as f64 - j as f64).abs() + 1.0;
+                    Complex::new(1.0 / d, 0.5 / (d * d))
+                };
+            }
+        }
+        a
+    }
+
+    #[test]
+    fn blr_roundtrip_within_tolerance() {
+        // BLR partition of a smooth front must reconstruct within the per-tile
+        // tolerance and actually store fewer scalars than dense.
+        let (n, b, eps) = (256usize, 64usize, 1e-4);
+        let a = smooth_front(n);
+        let blr = BlrMatrix::from_dense(&a, n, n, b, eps);
+        let recon = blr.to_dense();
+        let err = max_abs_diff(&a, &recon);
+        // Loose bound: per-tile relative eps accumulates mildly across the grid.
+        assert!(
+            err <= 1e-2 * frob(&a),
+            "reconstruction error {err} vs ‖A‖={}",
+            frob(&a)
+        );
+        assert!(
+            blr.storage() < blr.dense_storage(),
+            "BLR storage {} should beat dense {}",
+            blr.storage(),
+            blr.dense_storage()
+        );
+        assert!(blr.n_low_rank() > 0, "some off-diag tiles should compress");
+    }
+
+    #[test]
+    fn blr_diagonal_tiles_stay_dense() {
+        let (n, b) = (128usize, 32usize);
+        let a = smooth_front(n);
+        let blr = BlrMatrix::from_dense(&a, n, n, b, 1e-6);
+        for k in 0..blr.nbr.min(blr.nbc) {
+            assert!(
+                !blr.block(k, k).is_low_rank(),
+                "diagonal tile ({k},{k}) must stay dense"
+            );
+        }
+    }
+
+    #[test]
+    fn blr_ragged_partition_reconstructs() {
+        // Block size that does not divide the dimension → trailing short tiles.
+        let (m, n, b) = (100usize, 70usize, 32usize);
+        let mut a = vec![0.0f64; m * n];
+        for j in 0..n {
+            for i in 0..m {
+                a[j * m + i] = ((i * 13 + j * 7) % 17) as f64;
+            }
+        }
+        let blr = BlrMatrix::from_dense(&a, m, n, b, 1e-12);
+        assert_eq!(blr.nbr, 4);
+        assert_eq!(blr.nbc, 3);
+        let recon = blr.to_dense();
+        assert!(max_abs_diff(&a, &recon) < 1e-9 * frob(&a).max(1.0));
     }
 
     #[test]
