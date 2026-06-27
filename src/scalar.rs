@@ -52,6 +52,11 @@ pub trait Scalar:
     /// when only comparisons are needed (the hot path in pivot selection).
     fn magnitude_sq(self) -> f64;
 
+    /// The real part as an `f64`. For real fields this is the value itself; for
+    /// complex fields it is `re`. Used for pivot-sign / inertia classification,
+    /// which is exact for real symmetric matrices and advisory for complex.
+    fn real(self) -> f64;
+
     /// Complex conjugate. The identity for `f64` and for the
     /// complex-*symmetric* factorization path; meaningful only for a future
     /// Hermitian path.
@@ -92,6 +97,11 @@ impl Scalar for f64 {
     #[inline]
     fn magnitude_sq(self) -> f64 {
         self * self
+    }
+
+    #[inline]
+    fn real(self) -> f64 {
+        self
     }
 
     #[inline]
@@ -141,6 +151,11 @@ impl Scalar for Complex<f64> {
     #[inline]
     fn magnitude_sq(self) -> f64 {
         self.norm_sqr()
+    }
+
+    #[inline]
+    fn real(self) -> f64 {
+        self.re
     }
 
     #[inline]
@@ -199,6 +214,11 @@ impl Scalar for f32 {
     }
 
     #[inline]
+    fn real(self) -> f64 {
+        self as f64
+    }
+
+    #[inline]
     fn conj(self) -> Self {
         self
     }
@@ -247,6 +267,11 @@ impl Scalar for Complex<f32> {
         let re = self.re as f64;
         let im = self.im as f64;
         re * re + im * im
+    }
+
+    #[inline]
+    fn real(self) -> f64 {
+        self.re as f64
     }
 
     #[inline]

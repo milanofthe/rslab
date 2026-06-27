@@ -28,7 +28,15 @@
 
 use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, LdltFactors};
 use crate::error::FeralError;
+use crate::inertia::Inertia;
 use crate::scalar::Scalar;
+
+/// Scale-invariant singularity floor for a 2×2 Bunch-Kaufman pivot: a block
+/// whose `|det|` falls below `GROWTH_EPS · scale²` (scale = the largest block
+/// entry magnitude) is numerically singular — rejected in exact mode and lifted
+/// in static-pivot mode. Bounds the element growth `1/|det|` can otherwise
+/// inject into the trailing update.
+const GROWTH_EPS: f64 = 1e-14;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::{symbolic_factorize, SupernodeParams, SymbolicFactorization};
 use rayon::prelude::*;
@@ -166,6 +174,9 @@ struct FrontFactors<T> {
     two_by_two: Vec<bool>,
     /// Number of pivots statically perturbed in this front.
     n_perturbed: usize,
+    /// Inertia (signs of `D`) over this front's eliminated pivots. Exact for a
+    /// real symmetric matrix; advisory (pivot real-part signs) for complex.
+    inertia: Inertia,
 }
 
 /// Partially factor the first `ncol` (fully-summed) columns of a dense
@@ -188,6 +199,7 @@ fn factor_front<T: Scalar>(
     let mut d_subdiag = vec![T::zero(); ncol];
     let mut two_by_two = vec![false; ncol];
     let mut n_perturbed = 0usize;
+    let mut inertia = Inertia::new(0, 0, 0);
     // Reusable 2×2-pivot multiplier scratch, hoisted out of the pivot loop so an
     // indefinite front with many 2×2 blocks does not allocate per pivot. Only
     // entries `[k+2, n)` are ever written/read each step, so stale values left
@@ -272,6 +284,15 @@ fn factor_front<T: Scalar>(
                 _ => {}
             }
             d_diag[k] = d;
+            // Inertia: sign of the 1×1 pivot (real part).
+            let r = d.real();
+            if r > 0.0 {
+                inertia.positive += 1;
+            } else if r < 0.0 {
+                inertia.negative += 1;
+            } else {
+                inertia.zero += 1;
+            }
             let dinv = d.recip();
             // Update only the fully-summed trailing columns `(k+1)..ncol`
             // (across all rows, so the L21 multiplier rows are formed), then
@@ -298,6 +319,14 @@ fn factor_front<T: Scalar>(
             let d21 = f[k * n + (k + 1)];
             let mut d22 = f[(k + 1) * n + (k + 1)];
             let mut det = d11 * d22 - d21 * d21;
+            // Scale-invariant singularity / growth guard: a 2×2 whose `|det|`
+            // is below `GROWTH_EPS · scale²` would inject `1/|det|` growth into
+            // the trailing update. `scale` is the largest block-entry magnitude.
+            let scale = d11
+                .magnitude()
+                .max(d22.magnitude())
+                .max(d21.magnitude());
+            let growth_floor = GROWTH_EPS * scale * scale;
             // Static-pivot the 2×2 when its determinant is near-singular. The
             // real kernel (feral's `perturb_2x2_to_floor`) shifts the small
             // eigenvalue; for complex-symmetric blocks the eigenvalues are
@@ -305,16 +334,22 @@ fn factor_front<T: Scalar>(
             // and, as a last resort, nudge det itself — enough to keep the
             // preconditioner factor live.
             match perturb_floor {
-                Some(floor) if det.magnitude() < floor * floor => {
-                    d11 = d11 + T::from_real(floor);
-                    d22 = d22 + T::from_real(floor);
-                    det = d11 * d22 - d21 * d21;
-                    if det.magnitude() < floor * floor {
-                        det = det + T::from_real(floor * floor);
+                Some(floor) => {
+                    let fl = (floor * floor).max(growth_floor);
+                    if det.magnitude() < fl {
+                        let lift = floor.max(scale * GROWTH_EPS.sqrt());
+                        d11 = d11 + T::from_real(lift);
+                        d22 = d22 + T::from_real(lift);
+                        det = d11 * d22 - d21 * d21;
+                        if det.magnitude() < fl {
+                            det = det + T::from_real(fl);
+                        }
+                        n_perturbed += 1;
                     }
-                    n_perturbed += 1;
                 }
-                None if det == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                None if det.magnitude() <= growth_floor => {
+                    return Err(FeralError::NumericallyRankDeficient)
+                }
                 _ => {}
             }
             let detinv = det.recip();
@@ -322,6 +357,28 @@ fn factor_front<T: Scalar>(
             d_subdiag[k] = d21;
             d_diag[k + 1] = d22;
             two_by_two[k] = true;
+            // Inertia of the 2×2 block from det / trace (real parts): det<0 →
+            // one +, one −; det>0 → two of sign(trace); det≈0 → one 0, one
+            // sign(trace).
+            let det_r = det.real();
+            let tr_r = (d11 + d22).real();
+            if det_r < 0.0 {
+                inertia.positive += 1;
+                inertia.negative += 1;
+            } else if det_r > 0.0 {
+                if tr_r >= 0.0 {
+                    inertia.positive += 2;
+                } else {
+                    inertia.negative += 2;
+                }
+            } else {
+                inertia.zero += 1;
+                if tr_r >= 0.0 {
+                    inertia.positive += 1;
+                } else {
+                    inertia.negative += 1;
+                }
+            }
 
             for i in (k + 2)..n {
                 let wik = f[k * n + i];
@@ -477,6 +534,7 @@ fn factor_front<T: Scalar>(
             d_subdiag,
             two_by_two,
             n_perturbed,
+            inertia,
         },
         cb,
     ))
@@ -799,6 +857,7 @@ pub fn factor_numeric<T: Scalar>(
                 two_by_two: Vec::new(),
                 perm: Vec::new(),
                 n_perturbed: 0,
+                inertia: Inertia::new(0, 0, 0),
             });
         }
         Some(i) => i,
@@ -946,6 +1005,13 @@ pub fn factor_numeric<T: Scalar>(
     }
 
     let n_perturbed: usize = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
+    // Inertia is additive over the assembly tree: sum the per-front signatures.
+    let mut inertia = Inertia::new(0, 0, 0);
+    for nd in &nodes {
+        inertia.positive += nd.front.inertia.positive;
+        inertia.negative += nd.front.inertia.negative;
+        inertia.zero += nd.front.inertia.zero;
+    }
 
     Ok(LdltFactors {
         n,
@@ -957,6 +1023,7 @@ pub fn factor_numeric<T: Scalar>(
         two_by_two,
         perm,
         n_perturbed,
+        inertia,
     })
 }
 

@@ -52,6 +52,15 @@ impl<T: Scalar> LdltSolver<T> {
         self.factors.n_perturbed
     }
 
+    /// Inertia (counts of positive/negative/zero eigenvalues) of the factored
+    /// matrix. **Exact only for a real symmetric matrix** (`T = f64`/`f32`);
+    /// equilibration uses a real diagonal `D > 0`, so the signs are preserved.
+    /// For a complex-symmetric matrix the eigenvalues are complex and have no
+    /// sign — there it is advisory (classified by each pivot's real part).
+    pub fn inertia(&self) -> &crate::inertia::Inertia {
+        &self.factors.inertia
+    }
+
     /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P` (exact mode).
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, FeralError> {
         Self::factor_with(a, &FactorOptions::default())
@@ -273,6 +282,32 @@ mod tests {
             .map(|i| (ax[i] - b[i]).abs() / b[i].abs().max(1.0))
             .fold(0.0, f64::max);
         assert!(rel < 1e-10, "relative residual {}", rel);
+    }
+
+    #[test]
+    fn f64_inertia_diagonal_signs() {
+        // Pure diagonal → all 1×1 pivots; (positive) equilibration preserves
+        // signs, so the inertia is the diagonal's signature.
+        let diag = [2.0_f64, -3.0, 4.0, -1.0, 5.0];
+        let n = diag.len();
+        let (rows, cols): (Vec<_>, Vec<_>) = (0..n).map(|i| (i, i)).unzip();
+        let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &diag).unwrap();
+        let f = LdltSolver::factor(&a).unwrap();
+        let inertia = f.inertia();
+        assert_eq!((inertia.positive, inertia.negative, inertia.zero), (3, 2, 0));
+        assert_eq!(inertia.total(), n);
+    }
+
+    #[test]
+    fn f64_inertia_indefinite_2x2() {
+        // [[0,1],[1,0]] has eigenvalues ±1 → Bunch-Kaufman takes one 2×2 block
+        // with det < 0, classified as one positive + one negative.
+        let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 0], &[0.0, 1.0]).unwrap();
+        let f = LdltSolver::factor(&a).unwrap();
+        assert_eq!(
+            (f.inertia().positive, f.inertia().negative, f.inertia().zero),
+            (1, 1, 0)
+        );
     }
 
     #[test]

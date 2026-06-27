@@ -57,6 +57,11 @@ pub struct LdltFactors<T> {
     /// factor then reconstructs `A + E` for a small `E`, which is exactly what
     /// a preconditioner wants.
     pub n_perturbed: usize,
+    /// Inertia (counts of positive/negative/zero `D` pivots). Exact for a real
+    /// symmetric matrix (`T = f64`/`f32`); for a complex-symmetric matrix the
+    /// eigenvalues are complex and have no sign — there it is advisory only
+    /// (classified by each pivot's real part).
+    pub inertia: crate::inertia::Inertia,
 }
 
 /// The Bunch-Kaufman pivot threshold `α = (1 + √17)/8 ≈ 0.6404`.
@@ -106,6 +111,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
     let mut d_diag = vec![T::zero(); n];
     let mut d_subdiag = vec![T::zero(); n];
     let mut two_by_two = vec![false; n];
+    let mut inertia = crate::inertia::Inertia::new(0, 0, 0);
 
     let mut k = 0;
     while k < n {
@@ -170,6 +176,14 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
                 return Err(FeralError::NumericallyRankDeficient);
             }
             d_diag[k] = d;
+            let r = d.real();
+            if r > 0.0 {
+                inertia.positive += 1;
+            } else if r < 0.0 {
+                inertia.negative += 1;
+            } else {
+                inertia.zero += 1;
+            }
             let dinv = d.recip();
 
             // Rank-1 trailing update using the original pivot column, then
@@ -204,6 +218,25 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
             d_subdiag[k] = d21;
             d_diag[k + 1] = d22;
             two_by_two[k] = true;
+            let det_r = det.real();
+            let tr_r = (d11 + d22).real();
+            if det_r < 0.0 {
+                inertia.positive += 1;
+                inertia.negative += 1;
+            } else if det_r > 0.0 {
+                if tr_r >= 0.0 {
+                    inertia.positive += 2;
+                } else {
+                    inertia.negative += 2;
+                }
+            } else {
+                inertia.zero += 1;
+                if tr_r >= 0.0 {
+                    inertia.positive += 1;
+                } else {
+                    inertia.negative += 1;
+                }
+            }
 
             // Multiplier columns L_i = D⁻¹ · [A[i][k], A[i][k+1]]ᵀ for i >= k+2,
             // with D⁻¹ = (1/det)·[[d22, -d21], [-d21, d11]].
@@ -277,6 +310,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
         two_by_two,
         perm,
         n_perturbed: 0,
+        inertia,
     })
 }
 
