@@ -62,7 +62,7 @@ pub enum ZeroPivotAction {
     /// `abs_floor = eps_rel · ‖A‖∞` with `eps_rel ∈ [1e-12, 1e-8]`.
     PerturbToEps { abs_floor: f64 },
 }
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Diagnostic toggle for the contribution-block Schur update kernel. When
 /// `true` (default) the deferred update `CB = A22 − L21·D·L21ᵀ` runs as a
@@ -1281,6 +1281,259 @@ fn compute_supernode_row_structures(sym: &SymbolicFactorization) -> Vec<Vec<usiz
     rs
 }
 
+/// Concurrently-filled store of the left-looking factor panels. Each cell is
+/// written exactly once — by its owning supernode's factorization, which
+/// completes before any ancestor (its only reader) runs, per the subtree
+/// recursion — and concurrent writers touch disjoint indices, so the unsynchronized
+/// interior mutability is sound.
+struct LlStore<T> {
+    panels: Vec<std::cell::UnsafeCell<Vec<T>>>,
+    dvals: Vec<std::cell::UnsafeCell<Vec<T>>>,
+}
+// SAFETY: see the type doc — single-writer-before-readers, disjoint indices.
+unsafe impl<T: Send> Sync for LlStore<T> {}
+
+impl<T: Scalar> LlStore<T> {
+    fn new(nsuper: usize) -> Self {
+        LlStore {
+            panels: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
+                .collect(),
+            dvals: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
+                .collect(),
+        }
+    }
+    /// SAFETY: `k` must be a fully-factored descendant of the current node.
+    unsafe fn panel(&self, k: usize) -> &Vec<T> {
+        &*self.panels[k].get()
+    }
+    /// SAFETY: as [`panel`](Self::panel).
+    unsafe fn dval(&self, k: usize) -> &Vec<T> {
+        &*self.dvals[k].get()
+    }
+    /// SAFETY: only the owner of supernode `s` calls this, exactly once.
+    unsafe fn set(&self, s: usize, panel: Vec<T>, d: Vec<T>) {
+        *self.panels[s].get() = panel;
+        *self.dvals[s].get() = d;
+    }
+}
+
+/// Factor one supernode's panel: assemble `A`, apply every descendant's `cmod`
+/// update (BLAS-3 with scalar fallback), then `cdiv` (partial 1×1 LDLᵀ). Reads
+/// only already-factored descendant panels from `store`, so sibling subtrees run
+/// concurrently. Writes the factored panel + diagonal into `store`.
+#[allow(clippy::too_many_arguments)]
+fn ll_factor_node<T: Scalar>(
+    s: usize,
+    sym: &SymbolicFactorization,
+    a_perm: &CscMatrix<T>,
+    rs: &[Vec<usize>],
+    update_list: &[Vec<usize>],
+    store: &LlStore<T>,
+    perturb_floor: Option<f64>,
+    n_perturbed: &AtomicUsize,
+) -> Result<(), FeralError> {
+    const LL_GEMM_GATE: usize = 4096;
+    const LL_GEMM_PAR: usize = 1_000_000;
+    let snode = &sym.supernodes[s];
+    let (first, ncol) = (snode.first_col, snode.ncol);
+    let nrow = rs[s].len();
+    let n = sym.n;
+    let mut panel = vec![T::zero(); nrow * ncol];
+
+    // Thread-local global→local scratch (held at all-`usize::MAX`).
+    let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    if gloc.len() < n {
+        gloc.resize(n, usize::MAX);
+    }
+    for (li, &g) in rs[s].iter().enumerate() {
+        gloc[g] = li;
+    }
+    // Assemble A's lower-triangle columns of this supernode.
+    for p in 0..ncol {
+        let c = first + p;
+        for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
+            let li = gloc[a_perm.row_idx[k]];
+            panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
+        }
+    }
+    // cmod from every updater (all are factored descendants).
+    let mut vc: Vec<T> = Vec::new();
+    let mut vd_buf: Vec<T> = Vec::new();
+    let mut u_buf: Vec<T> = Vec::new();
+    for &kk in &update_list[s] {
+        let nck = sym.supernodes[kk].ncol;
+        let nrk = rs[kk].len();
+        let ok = &rs[kk][nck..];
+        let nok = ok.len();
+        // SAFETY: `kk` is a factored descendant of `s` (its update reaches `s`),
+        // so its panel/dval cells are written and never mutated again.
+        let pk = unsafe { store.panel(kk) };
+        let dk = unsafe { store.dval(kk) };
+        let p0 = ok.partition_point(|&g| g < first);
+        let p1 = ok.partition_point(|&g| g < first + ncol);
+        let npk = p1 - p0;
+        if npk == 0 {
+            continue;
+        }
+        if nok * npk * nck < LL_GEMM_GATE {
+            vc.clear();
+            vc.resize(nck, T::zero());
+            for c_idx in p0..p1 {
+                let tcol = ok[c_idx] - first;
+                for ck in 0..nck {
+                    vc[ck] = dk[ck] * pk[(nck + c_idx) + ck * nrk];
+                }
+                for r_idx in c_idx..nok {
+                    let trow = gloc[ok[r_idx]];
+                    let mut acc = T::zero();
+                    for ck in 0..nck {
+                        acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
+                    }
+                    panel[trow + tcol * nrow] = panel[trow + tcol * nrow] - acc;
+                }
+            }
+        } else {
+            vd_buf.clear();
+            vd_buf.resize(npk * nck, T::zero());
+            for ck in 0..nck {
+                let dkc = dk[ck];
+                for i in 0..npk {
+                    vd_buf[i + ck * npk] = pk[(nck + p0 + i) + ck * nrk] * dkc;
+                }
+            }
+            u_buf.clear();
+            u_buf.resize(nok * npk, T::zero());
+            let par = if nok * npk * nck >= LL_GEMM_PAR {
+                gemm::Parallelism::Rayon(0)
+            } else {
+                gemm::Parallelism::None
+            };
+            // SAFETY: lhs (`pk` off-diag block, read), rhs (`vd_buf`, read), dst
+            // (`u_buf`, write) are pairwise-disjoint; strides in bounds.
+            unsafe {
+                gemm::gemm(
+                    nok,
+                    npk,
+                    nck,
+                    u_buf.as_mut_ptr(),
+                    nok as isize,
+                    1,
+                    false,
+                    pk.as_ptr().add(nck),
+                    nrk as isize,
+                    1,
+                    vd_buf.as_ptr(),
+                    1,
+                    npk as isize,
+                    T::zero(),
+                    T::one(),
+                    false,
+                    false,
+                    false,
+                    par,
+                );
+            }
+            for c in 0..npk {
+                let tcol = ok[p0 + c] - first;
+                let ucol = &u_buf[c * nok..c * nok + nok];
+                for r in (p0 + c)..nok {
+                    let dst = gloc[ok[r]] + tcol * nrow;
+                    panel[dst] = panel[dst] - ucol[r];
+                }
+            }
+        }
+    }
+    // cdiv: partial 1×1 LDLᵀ.
+    let mut d = vec![T::zero(); ncol];
+    let mut local_perturbed = 0usize;
+    for k in 0..ncol {
+        let mut dk = panel[k + k * nrow];
+        match perturb_floor {
+            Some(floor) if dk.magnitude() < floor => {
+                dk = perturb_pivot(dk, floor);
+                local_perturbed += 1;
+            }
+            None if dk == T::zero() => {
+                // Restore the scratch invariant before bailing out.
+                for &g in &rs[s] {
+                    gloc[g] = usize::MAX;
+                }
+                GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
+                return Err(FeralError::NumericallyRankDeficient);
+            }
+            _ => {}
+        }
+        d[k] = dk;
+        let dinv = dk.recip();
+        for i in (k + 1)..nrow {
+            panel[i + k * nrow] = panel[i + k * nrow] * dinv;
+        }
+        for j in (k + 1)..ncol {
+            let ljk = panel[j + k * nrow];
+            if ljk != T::zero() {
+                let f = dk * ljk;
+                for i in j..nrow {
+                    panel[i + j * nrow] = panel[i + j * nrow] - panel[i + k * nrow] * f;
+                }
+            }
+        }
+    }
+    if local_perturbed > 0 {
+        n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
+    }
+    for &g in &rs[s] {
+        gloc[g] = usize::MAX;
+    }
+    GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
+    // SAFETY: this thread owns supernode `s` and writes its cell exactly once.
+    unsafe { store.set(s, panel, d) };
+    Ok(())
+}
+
+/// Factor the assembly subtree rooted at `s` with a work-stealing schedule:
+/// children subtrees concurrently, then this node (whose updaters all lie in the
+/// now-factored subtree). The left-looking analogue of the multifrontal driver.
+#[allow(clippy::too_many_arguments)]
+fn ll_factor_subtree<T: Scalar>(
+    s: usize,
+    sym: &SymbolicFactorization,
+    a_perm: &CscMatrix<T>,
+    rs: &[Vec<usize>],
+    update_list: &[Vec<usize>],
+    store: &LlStore<T>,
+    perturb_floor: Option<f64>,
+    n_perturbed: &AtomicUsize,
+) -> Result<(), FeralError> {
+    sym.supernodes[s]
+        .children
+        .par_iter()
+        .map(|&ch| {
+            ll_factor_subtree(
+                ch,
+                sym,
+                a_perm,
+                rs,
+                update_list,
+                store,
+                perturb_floor,
+                n_perturbed,
+            )
+        })
+        .collect::<Result<Vec<()>, _>>()?;
+    ll_factor_node(
+        s,
+        sym,
+        a_perm,
+        rs,
+        update_list,
+        store,
+        perturb_floor,
+        n_perturbed,
+    )
+}
+
 /// Supernodal **left-looking** LDLᵀ (1×1 pivots, static perturbation). Each
 /// supernode's dense panel is assembled from `A`, updated by every previously
 /// factored descendant (`cmod`: pull the descendant's contribution columns that
@@ -1346,162 +1599,35 @@ fn factor_left_looking<T: Scalar>(
         }
     }
 
-    // Factored panels (retained — they are the factor) and their diagonals.
-    let mut panels: Vec<Vec<T>> = vec![Vec::new(); nsuper];
-    let mut dvals: Vec<Vec<T>> = vec![Vec::new(); nsuper];
-    let mut n_perturbed = 0usize;
-    let mut local_map = vec![usize::MAX; n];
-    // Reusable cmod scratch: `vc` (scalar path), `vd_buf` = D-scaled update
-    // columns, `u_buf` = the dense `cmod` GEMM result before scatter.
-    let mut vc: Vec<T> = Vec::new();
-    let mut vd_buf: Vec<T> = Vec::new();
-    let mut u_buf: Vec<T> = Vec::new();
-    // Route a `cmod` update through the SIMD GEMM once it is large enough to beat
-    // the scalar triple loop; parallelize the (few) very large separator updates.
-    const LL_GEMM_GATE: usize = 4096;
-    const LL_GEMM_PAR: usize = 1_000_000;
-
-    for s in 0..nsuper {
-        let snode = &sym.supernodes[s];
-        let (first, ncol) = (snode.first_col, snode.ncol);
-        let nrow = rs[s].len();
-        let mut panel = vec![T::zero(); nrow * ncol];
-        for (li, &g) in rs[s].iter().enumerate() {
-            local_map[g] = li;
+    // Factor in parallel over the assembly forest: sibling subtrees concurrently,
+    // each node after its subtree (whose panels are its only updaters). Panels are
+    // written once and read only by ancestors → no synchronization needed beyond
+    // the recursion structure (see `LlStore`).
+    let store = LlStore::<T>::new(nsuper);
+    let n_perturbed_atomic = AtomicUsize::new(0);
+    let mut is_child = vec![false; nsuper];
+    for snode in &sym.supernodes {
+        for &ch in &snode.children {
+            is_child[ch] = true;
         }
-        // Assemble A's lower-triangle columns of this supernode.
-        for p in 0..ncol {
-            let c = first + p;
-            for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
-                let li = local_map[a_perm.row_idx[k]]; // row ≥ c → li ≥ p
-                panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
-            }
-        }
-        // cmod: pull each updater's contribution columns that land here.
-        // Update `s`'s panel by `−L_k[Ok,:]·D_k·L_k[Pk,:]ᵀ`, where `Ok` are `k`'s
-        // off-diagonal rows (all ⊆ `s`'s structure) and `Pk ⊆ Ok` the ones that
-        // are columns of `s` — a contiguous run `[p0, p1)` of the sorted `Ok`.
-        for &kk in &update_list[s] {
-            let nck = sym.supernodes[kk].ncol;
-            let nrk = rs[kk].len();
-            let ok = &rs[kk][nck..];
-            let nok = ok.len();
-            let pk = &panels[kk];
-            let dk = &dvals[kk];
-            let p0 = ok.partition_point(|&g| g < first);
-            let p1 = ok.partition_point(|&g| g < first + ncol);
-            let npk = p1 - p0;
-            if npk == 0 {
-                continue;
-            }
-            if nok * npk * nck < LL_GEMM_GATE {
-                // Scalar path for small updates.
-                vc.clear();
-                vc.resize(nck, T::zero());
-                for c_idx in p0..p1 {
-                    let tcol = ok[c_idx] - first;
-                    for ck in 0..nck {
-                        vc[ck] = dk[ck] * pk[(nck + c_idx) + ck * nrk];
-                    }
-                    for r_idx in c_idx..nok {
-                        let trow = local_map[ok[r_idx]];
-                        let mut acc = T::zero();
-                        for ck in 0..nck {
-                            acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
-                        }
-                        let dst = trow + tcol * nrow;
-                        panel[dst] = panel[dst] - acc;
-                    }
-                }
-            } else {
-                // BLAS-3 path: `U = W · Vdᵀ` with `W = L_k[Ok,:]` (nok×nck) and
-                // `Vd = D_k-scaled L_k[Pk,:]` (npk×nck), then scatter-subtract the
-                // lower triangle into the panel.
-                vd_buf.clear();
-                vd_buf.resize(npk * nck, T::zero());
-                for ck in 0..nck {
-                    let dkc = dk[ck];
-                    for i in 0..npk {
-                        vd_buf[i + ck * npk] = pk[(nck + p0 + i) + ck * nrk] * dkc;
-                    }
-                }
-                u_buf.clear();
-                u_buf.resize(nok * npk, T::zero());
-                let par = if nok * npk * nck >= LL_GEMM_PAR {
-                    gemm::Parallelism::Rayon(0)
-                } else {
-                    gemm::Parallelism::None
-                };
-                // SAFETY: lhs (`pk` off-diagonal block, read), rhs (`vd_buf`,
-                // read) and dst (`u_buf`, write) are pairwise-disjoint
-                // allocations; all strides are in bounds; `T` is a supported gemm
-                // element. `Vdᵀ` is passed via swapped rhs strides.
-                unsafe {
-                    gemm::gemm(
-                        nok,
-                        npk,
-                        nck,
-                        u_buf.as_mut_ptr(),
-                        nok as isize,
-                        1,
-                        false,
-                        pk.as_ptr().add(nck),
-                        nrk as isize,
-                        1,
-                        vd_buf.as_ptr(),
-                        1,
-                        npk as isize,
-                        T::zero(),
-                        T::one(),
-                        false,
-                        false,
-                        false,
-                        par,
-                    );
-                }
-                for c in 0..npk {
-                    let tcol = ok[p0 + c] - first;
-                    let ucol = &u_buf[c * nok..c * nok + nok];
-                    for r in (p0 + c)..nok {
-                        let dst = local_map[ok[r]] + tcol * nrow;
-                        panel[dst] = panel[dst] - ucol[r];
-                    }
-                }
-            }
-        }
-        // cdiv: partial 1×1 LDLᵀ of the `ncol` columns over `nrow` rows.
-        let mut d = vec![T::zero(); ncol];
-        for k in 0..ncol {
-            let mut dk = panel[k + k * nrow];
-            match perturb_floor {
-                Some(floor) if dk.magnitude() < floor => {
-                    dk = perturb_pivot(dk, floor);
-                    n_perturbed += 1;
-                }
-                None if dk == T::zero() => return Err(FeralError::NumericallyRankDeficient),
-                _ => {}
-            }
-            d[k] = dk;
-            let dinv = dk.recip();
-            for i in (k + 1)..nrow {
-                panel[i + k * nrow] = panel[i + k * nrow] * dinv;
-            }
-            for j in (k + 1)..ncol {
-                let ljk = panel[j + k * nrow];
-                if ljk != T::zero() {
-                    let f = dk * ljk;
-                    for i in j..nrow {
-                        panel[i + j * nrow] = panel[i + j * nrow] - panel[i + k * nrow] * f;
-                    }
-                }
-            }
-        }
-        for &g in &rs[s] {
-            local_map[g] = usize::MAX;
-        }
-        panels[s] = panel;
-        dvals[s] = d;
     }
+    let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    roots
+        .par_iter()
+        .map(|&r| {
+            ll_factor_subtree(
+                r,
+                sym,
+                &a_perm,
+                &rs,
+                &update_list,
+                &store,
+                perturb_floor,
+                &n_perturbed_atomic,
+            )
+        })
+        .collect::<Result<Vec<()>, _>>()?;
+    let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
 
     // Emit global L (CSC) + D in elimination order (no within-panel pivoting →
     // elimination order is supernode/column order).
@@ -1511,7 +1637,9 @@ fn factor_left_looking<T: Scalar>(
     let mut inertia = Inertia::new(0, 0, 0);
     let mut e = 0usize;
     for (s, snode) in sym.supernodes.iter().enumerate() {
-        for (p, &dv) in dvals[s].iter().enumerate() {
+        // SAFETY: factorization is complete; every panel/dval cell is written.
+        let dvs = unsafe { store.dval(s) };
+        for (p, &dv) in dvs.iter().enumerate() {
             let g = snode.first_col + p;
             e_of_g[g] = e;
             perm[e] = sym.perm[g];
@@ -1539,7 +1667,8 @@ fn factor_left_looking<T: Scalar>(
         let snode = &sym.supernodes[s];
         let (first, ncol) = (snode.first_col, snode.ncol);
         let nrow = rs[s].len();
-        let panel = &panels[s];
+        // SAFETY: factorization is complete; the panel cell is written.
+        let panel = unsafe { store.panel(s) };
         for p in 0..ncol {
             col.clear();
             let diag_e = e_of_g[first + p];
