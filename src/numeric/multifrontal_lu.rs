@@ -441,6 +441,18 @@ impl LuSymbolic {
     pub fn n(&self) -> usize {
         self.n
     }
+
+    /// Per-supernode frontal-matrix dimensions `(ncol, nrow)` of the symmetrized
+    /// pattern — for factorization-cost diagnostics (front-size distribution and
+    /// a factor-flop estimate). See [`GenericSymbolic::front_dims`].
+    pub fn front_dims(&self) -> Vec<(usize, usize)> {
+        self.symb.front_dims()
+    }
+
+    /// Number of assembly-tree levels (level-parallel factorization depth).
+    pub fn n_levels(&self) -> usize {
+        self.symb.n_levels()
+    }
 }
 
 /// PARDISO phase 1 for the general path: analyze the symmetrized pattern of `a`

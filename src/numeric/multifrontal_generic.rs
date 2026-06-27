@@ -639,6 +639,22 @@ impl GenericSymbolic {
             .as_ref()
             .map(|i| (&i.sym, i.by_level.as_slice()))
     }
+
+    /// Per-supernode frontal-matrix dimensions `(ncol, nrow)`: the number of
+    /// eliminated columns and the full front height. The raw material for
+    /// factorization-cost diagnostics — front-size distribution (small vs dense
+    /// fronts → BLAS-2 vs BLAS-3 efficiency) and a factor-flop estimate.
+    pub fn front_dims(&self) -> Vec<(usize, usize)> {
+        match &self.inner {
+            Some(i) => i.sym.supernodes.iter().map(|s| (s.ncol, s.nrow)).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Number of assembly-tree levels (the level-parallel factorization depth).
+    pub fn n_levels(&self) -> usize {
+        self.inner.as_ref().map_or(0, |i| i.by_level.len())
+    }
 }
 
 /// PARDISO phase 1: analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`,
