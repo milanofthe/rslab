@@ -28,6 +28,13 @@ use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Opt-in coarse factorization profiler (set `RLA_PROFILE=1`): CPU-nanosecond
+// accumulators for the assembly (scatter + extend-add) vs the per-front LU
+// kernel, summed across all worker threads. Zero overhead when disabled.
+static PROF_ASM_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_FRONT_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Per-front unsymmetric partial-factorization output, in elimination order
 /// (static pivoting → no interchange, so front-local order is pivot order).
@@ -331,11 +338,13 @@ fn factor_one_node_lu<T: Scalar>(
     perturb_floor: Option<f64>,
     gloc: &mut [usize],
     fbuf: &mut Vec<T>,
+    profile: bool,
 ) -> Result<NodeLu<T>, FeralError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
     let ncol = snode.ncol;
     let own_last = snode.first_col + ncol;
+    let t_asm = profile.then(std::time::Instant::now);
 
     // Front row structure: own columns ++ sorted trailing rows (symmetrized
     // pattern of own columns plus children contribution rows).
@@ -399,17 +408,25 @@ fn factor_one_node_lu<T: Scalar>(
         }
     }
 
-    // Extend-add each child's full contribution block.
+    // Extend-add each child's full contribution block. Map the child's
+    // contribution rows to parent-front-local positions ONCE per child (`loc`,
+    // reused across children) rather than re-indexing `gloc` inside the inner
+    // loop — turning the cn² global→local lookups into cn, and slicing the
+    // contiguous contribution column for the inner accumulation.
+    let mut loc: Vec<usize> = Vec::new();
     for &ch in &snode.children {
         let child = child_ref(node_results, ch)?;
         let cn = child.front.nrow - child.front.nelim;
         let crows = &child.row_indices[child.front.nelim..];
         let cb = &child.contrib;
+        loc.clear();
+        loc.extend(crows.iter().map(|&g| gloc[g]));
         for jc in 0..cn {
-            let lj = gloc[crows[jc]];
+            let frow = loc[jc] * nrow;
+            let cb_col = &cb[jc * cn..jc * cn + cn];
             for ic in 0..cn {
-                let li = gloc[crows[ic]];
-                f[lj * nrow + li] = f[lj * nrow + li] + cb[jc * cn + ic];
+                let dst = frow + loc[ic];
+                f[dst] = f[dst] + cb_col[ic];
             }
         }
     }
@@ -419,7 +436,14 @@ fn factor_one_node_lu<T: Scalar>(
         gloc[g] = usize::MAX;
     }
 
+    if let Some(t) = t_asm {
+        PROF_ASM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_front = profile.then(std::time::Instant::now);
     let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor)?;
+    if let Some(t) = t_front {
+        PROF_FRONT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
     Ok(NodeLu {
         front,
         row_indices: ri,
@@ -579,6 +603,12 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let a_perm = GeneralCsc::<T>::from_triplets(n, &rows, &cols, &vals)?;
     let a_perm_t = a_perm.transpose();
 
+    let profile = std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false);
+    if profile {
+        PROF_ASM_NS.store(0, Ordering::Relaxed);
+        PROF_FRONT_NS.store(0, Ordering::Relaxed);
+    }
+
     let nsuper = sym.supernodes.len();
     let mut node_results: Vec<Option<NodeLu<T>>> = (0..nsuper).map(|_| None).collect();
     for level_nodes in by_level {
@@ -596,6 +626,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
                         perturb_floor,
                         gloc,
                         fbuf,
+                        profile,
                     )
                     .map(|nf| (s, nf))
                 },
@@ -604,6 +635,14 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         for (s, nf) in computed {
             node_results[s] = Some(nf);
         }
+    }
+    if profile {
+        let asm = PROF_ASM_NS.load(Ordering::Relaxed) as f64 / 1e6;
+        let front = PROF_FRONT_NS.load(Ordering::Relaxed) as f64 / 1e6;
+        eprintln!(
+            "[RLA_PROFILE] assembly(scatter+extend-add) {asm:.0} ms-CPU   front-LU {front:.0} ms-CPU   assembly={:.0}%",
+            100.0 * asm / (asm + front).max(1.0)
+        );
     }
 
     let mut nodes: Vec<&NodeLu<T>> = Vec::with_capacity(nsuper);
