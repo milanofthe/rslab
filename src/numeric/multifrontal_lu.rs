@@ -578,6 +578,17 @@ pub fn factor_general_lu<T: Scalar>(
                     lcol.push((row_pos_of_g[node.row_indices[ff.rperm[i]]], v));
                 }
             }
+            // Incomplete factorization (ILU): drop sub-threshold fill relative
+            // to the column's largest multiplier, keeping the unit diagonal.
+            if let Some(tau) = opts.drop_tol {
+                let colmax = lcol
+                    .iter()
+                    .filter(|&&(r, _)| r != diag_e)
+                    .map(|&(_, v)| v.magnitude())
+                    .fold(0.0, f64::max);
+                let thr = tau * colmax;
+                lcol.retain(|&(r, v)| r == diag_e || v.magnitude() >= thr);
+            }
             lcol.sort_unstable_by_key(|&(r, _)| r);
             for &(r, v) in &lcol {
                 l_row_idx.push(r);
@@ -593,6 +604,15 @@ pub fn factor_general_lu<T: Scalar>(
                 if v != T::zero() {
                     urow.push((col_pos_of_g[node.row_indices[i]], v));
                 }
+            }
+            if let Some(tau) = opts.drop_tol {
+                let rowmax = urow
+                    .iter()
+                    .filter(|&&(cc, _)| cc != diag_e)
+                    .map(|&(_, v)| v.magnitude())
+                    .fold(0.0, f64::max);
+                let thr = tau * rowmax;
+                urow.retain(|&(cc, v)| cc == diag_e || v.magnitude() >= thr);
             }
             urow.sort_unstable_by_key(|&(c, _)| c);
             for &(c, v) in &urow {
@@ -823,5 +843,62 @@ mod tests {
         let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
+    }
+
+    #[test]
+    fn incomplete_lu_reduces_fill_and_still_solves() {
+        use crate::dense::factor::ZeroPivotAction;
+        // Unsymmetric grid: incomplete LU (drop_tol) must shrink nnz(L+U) yet
+        // still drive iterative refinement to a small residual — the MoM
+        // sparse-preconditioner configuration.
+        let c = |re, im| Complex::new(re, im);
+        let m = 14;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(8.0, 1.0));
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.0, 0.2));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-2.0, 0.1));
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.5, 0.3));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-0.5, 0.4));
+                }
+            }
+        }
+        let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+
+        let full = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let opts = GenericFactorOptions {
+            on_zero_pivot: ZeroPivotAction::Fail,
+            drop_tol: Some(5e-2),
+        };
+        let inc = factor_general_lu(&a, &opts).unwrap();
+        assert!(
+            inc.factor_nnz() < full.factor_nnz(),
+            "ILU should reduce fill: {} vs {}",
+            inc.factor_nnz(),
+            full.factor_nnz()
+        );
+        // The incomplete factor + a few refinement steps still solves accurately.
+        let x = solve_lu_refined(&inc, &a, &b, 10).unwrap();
+        assert!(resid(&a, &x, &b) < 1e-6, "residual {}", resid(&a, &x, &b));
     }
 }
