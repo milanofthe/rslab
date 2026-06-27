@@ -58,6 +58,79 @@ fn peak_ws_mb() -> f64 {
     0.0
 }
 
+/// Current (live) working-set in MB.
+#[cfg(windows)]
+fn cur_ws_mb() -> f64 {
+    #[repr(C)]
+    struct Pmc {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        q1: usize,
+        q2: usize,
+        q3: usize,
+        q4: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(process: isize, ppsmemcounters: *mut Pmc, cb: u32) -> i32;
+    }
+    // SAFETY: as in `peak_ws_mb`.
+    unsafe {
+        let mut pmc: Pmc = std::mem::zeroed();
+        pmc.cb = std::mem::size_of::<Pmc>() as u32;
+        if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) != 0 {
+            pmc.working_set_size as f64 / 1e6
+        } else {
+            0.0
+        }
+    }
+}
+#[cfg(not(windows))]
+fn cur_ws_mb() -> f64 {
+    0.0
+}
+
+/// Sample the live working set on a background thread; returns a handle whose
+/// `stop()` joins and yields the peak (MB) observed while sampling.
+struct WsSampler {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    peak: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+impl WsSampler {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(AtomicU64::new(0));
+        let (s, p) = (stop.clone(), peak.clone());
+        let handle = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                let mb = cur_ws_mb() as u64;
+                p.fetch_max(mb, Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        WsSampler {
+            stop,
+            peak,
+            handle: Some(handle),
+        }
+    }
+    fn stop(mut self) -> f64 {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        self.peak.load(Ordering::Relaxed) as f64
+    }
+}
+
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 
 /// Estimated factorization flops to eliminate `ncol` pivots from an `nrow`-tall
@@ -119,6 +192,8 @@ fn diag_file(path: &std::path::Path) {
     let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
 
     let opts = FactorOptions::preconditioner(1e-10);
+    let ws_before = cur_ws_mb();
+    let sampler = WsSampler::start();
     let t = Instant::now();
     let f = match sym.factor(&a, &opts) {
         Ok(f) => f,
@@ -128,6 +203,12 @@ fn diag_file(path: &std::path::Path) {
         }
     };
     let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+    let factor_peak = sampler.stop();
+    let ws_after = cur_ws_mb();
+    println!(
+        "  memory:  going-in {ws_before:.0} MB  →  factor-peak {factor_peak:.0} MB  →  after {ws_after:.0} MB   (factor transient +{:.0} MB)",
+        factor_peak - ws_before,
+    );
 
     let fill = f.factor_nnz();
     let dims = sym.front_dims();
