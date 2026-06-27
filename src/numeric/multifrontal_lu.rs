@@ -83,6 +83,10 @@ static PROF_ASM_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_FRONT_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_PANEL_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_EXTRACT_NS: AtomicU64 = AtomicU64::new(0);
+// Left-looking phase profiler (assembly / cmod updates / cdiv panel factor).
+static PROF_LL_ASM_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_LL_CMOD_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_LL_CDIV_NS: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     /// Per-worker global→front-local index scratch (`usize`, scalar-independent),
@@ -901,6 +905,7 @@ fn lu_ll_factor_node<T: Scalar>(
     for (li, &g) in rs[s].iter().enumerate() {
         gloc[g] = li;
     }
+    let t_asm = std::time::Instant::now();
     // Assemble columns of s (full) into lbuf, and the U12 rows into ubuf.
     for p in 0..ncol {
         let c = first + p;
@@ -917,6 +922,8 @@ fn lu_ll_factor_node<T: Scalar>(
             }
         }
     }
+    PROF_LL_ASM_NS.fetch_add(t_asm.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let t_cmod = std::time::Instant::now();
     // cmod from every factored descendant.
     let mut lupd: Vec<T> = Vec::new();
     let mut uupd: Vec<T> = Vec::new();
@@ -1043,46 +1050,145 @@ fn lu_ll_factor_node<T: Scalar>(
             }
         }
     }
-    // cdiv: in-place panel LU (1×1 static pivoting), no trailing/CB update.
+    PROF_LL_CMOD_NS.fetch_add(t_cmod.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let t_cdiv = std::time::Instant::now();
+    // cdiv: in-place **blocked** panel LU (1×1 static pivoting), no trailing/CB
+    // update. Mirrors the multifrontal `lu_front` getrf — unblocked `getf2` over
+    // an NB-wide panel, then the dominant trailing update as a single SIMD GEMM
+    // (rank-NB) — but restricted to the panel: the trailing is the remaining
+    // panel columns (`lbuf`) plus the `U12` rows (`ubuf`), with no `A22`/CB. This
+    // routes the `O(ncol²·nrow)` cdiv work (the measured 77 % of the left-looking
+    // factor) through BLAS-3 instead of scalar rank-1 sweeps.
+    const NB_CDIV: usize = 32;
+    const LL_CDIV_PAR: usize = 8_000_000;
     let mut local_perturbed = 0usize;
-    for k in 0..ncol {
-        let mut piv = lbuf[k * nrow + k];
-        match perturb_floor {
-            Some(floor) if piv.magnitude() < floor => {
-                piv = perturb_pivot(piv, floor);
-                local_perturbed += 1;
-            }
-            None if piv == T::zero() => {
-                for &g in &rs[s] {
-                    gloc[g] = usize::MAX;
+    let mut kb = 0;
+    while kb < ncol {
+        let ke = (kb + NB_CDIV).min(ncol);
+        // getf2: unblocked factor of columns [kb, ke), full height.
+        for k in kb..ke {
+            let mut piv = lbuf[k * nrow + k];
+            match perturb_floor {
+                Some(floor) if piv.magnitude() < floor => {
+                    piv = perturb_pivot(piv, floor);
+                    local_perturbed += 1;
                 }
-                GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
-                return Err(FeralError::NumericallyRankDeficient);
-            }
-            _ => {}
-        }
-        lbuf[k * nrow + k] = piv;
-        let pinv = piv.recip();
-        for i in (k + 1)..nrow {
-            lbuf[k * nrow + i] = lbuf[k * nrow + i] * pinv;
-        }
-        for j in (k + 1)..ncol {
-            let u_kj = lbuf[j * nrow + k];
-            if u_kj != T::zero() {
-                for i in (k + 1)..nrow {
-                    lbuf[j * nrow + i] = lbuf[j * nrow + i] - lbuf[k * nrow + i] * u_kj;
+                None if piv == T::zero() => {
+                    for &g in &rs[s] {
+                        gloc[g] = usize::MAX;
+                    }
+                    GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
+                    return Err(FeralError::NumericallyRankDeficient);
                 }
+                _ => {}
+            }
+            lbuf[k * nrow + k] = piv;
+            let pinv = piv.recip();
+            for i in (k + 1)..nrow {
+                lbuf[k * nrow + i] = lbuf[k * nrow + i] * pinv;
+            }
+            for j in (k + 1)..ke {
+                let u_kj = lbuf[j * nrow + k];
+                if u_kj != T::zero() {
+                    for i in (k + 1)..nrow {
+                        lbuf[j * nrow + i] = lbuf[j * nrow + i] - lbuf[k * nrow + i] * u_kj;
+                    }
+                }
+            }
+        }
+        let pw = ke - kb;
+        // TRSM: U = L11⁻¹ · (trailing panel columns of lbuf) and the U12 rows.
+        for j in ke..ncol {
+            for r in (kb + 1)..ke {
+                let mut acc = lbuf[j * nrow + r];
+                for i in kb..r {
+                    acc = acc - lbuf[i * nrow + r] * lbuf[j * nrow + i];
+                }
+                lbuf[j * nrow + r] = acc;
             }
         }
         for t in 0..cnrow {
-            let u_kt = ubuf[k + t * ncol];
-            if u_kt != T::zero() {
-                for i in (k + 1)..ncol {
-                    ubuf[i + t * ncol] = ubuf[i + t * ncol] - lbuf[k * nrow + i] * u_kt;
+            for r in (kb + 1)..ke {
+                let mut acc = ubuf[r + t * ncol];
+                for i in kb..r {
+                    acc = acc - lbuf[i * nrow + r] * ubuf[i + t * ncol];
                 }
+                ubuf[r + t * ncol] = acc;
             }
         }
+        // GEMM: lbuf[ke.., ke..ncol] −= L21[ke.., kb..ke] · U[kb..ke, ke..ncol].
+        let mt = nrow - ke;
+        let nt = ncol - ke;
+        if mt > 0 && nt > 0 {
+            let par = if (mt * nt * pw) >= LL_CDIV_PAR {
+                gemm::Parallelism::Rayon(0)
+            } else {
+                gemm::Parallelism::None
+            };
+            let base = lbuf.as_mut_ptr();
+            // SAFETY: the three sub-blocks of `lbuf` are disjoint; strides in bounds.
+            unsafe {
+                gemm::gemm(
+                    mt,
+                    nt,
+                    pw,
+                    base.add(ke * nrow + ke),
+                    nrow as isize,
+                    1,
+                    true,
+                    base.add(kb * nrow + ke),
+                    nrow as isize,
+                    1,
+                    base.add(ke * nrow + kb),
+                    nrow as isize,
+                    1,
+                    T::one(),
+                    T::zero() - T::one(),
+                    false,
+                    false,
+                    false,
+                    par,
+                );
+            }
+        }
+        // GEMM: ubuf[ke..ncol, :] −= L[ke..ncol, kb..ke] · U12[kb..ke, :].
+        if cnrow > 0 && nt > 0 {
+            let par = if (nt * cnrow * pw) >= LL_CDIV_PAR {
+                gemm::Parallelism::Rayon(0)
+            } else {
+                gemm::Parallelism::None
+            };
+            let lptr = lbuf.as_ptr();
+            let uptr = ubuf.as_mut_ptr();
+            // SAFETY: dst (`ubuf` trailing rows) is disjoint from the read
+            // sub-blocks of `lbuf`/`ubuf`; strides in bounds.
+            unsafe {
+                gemm::gemm(
+                    nt,
+                    cnrow,
+                    pw,
+                    uptr.add(ke),
+                    ncol as isize,
+                    1,
+                    true,
+                    lptr.add(kb * nrow + ke),
+                    nrow as isize,
+                    1,
+                    uptr.add(kb),
+                    ncol as isize,
+                    1,
+                    T::one(),
+                    T::zero() - T::one(),
+                    false,
+                    false,
+                    false,
+                    par,
+                );
+            }
+        }
+        kb = ke;
     }
+    PROF_LL_CDIV_NS.fetch_add(t_cdiv.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
     }
@@ -1179,6 +1285,18 @@ fn factor_lu_left_looking<T: Scalar>(
         })
         .collect::<Result<Vec<()>, _>>()?;
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
+    if std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false) {
+        let asm = PROF_LL_ASM_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let cmod = PROF_LL_CMOD_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let cdiv = PROF_LL_CDIV_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let tot = (asm + cmod + cdiv).max(1.0);
+        eprintln!(
+            "[RLA_LL_PROFILE] CPU-ms  asm {asm:.0} ({:.0}%)  cmod {cmod:.0} ({:.0}%)  cdiv {cdiv:.0} ({:.0}%)",
+            100.0 * asm / tot,
+            100.0 * cmod / tot,
+            100.0 * cdiv / tot,
+        );
+    }
 
     // Elimination order = supernode/column order (no row interchange).
     let mut e_of_g = vec![usize::MAX; n];
