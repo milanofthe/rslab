@@ -62,7 +62,9 @@ pub fn read_mtx_complex(path: &Path) -> Result<MtxMatrix<Complex<f64>>, FeralErr
 
 /// Parse a **real** symmetric Matrix Market string (`mtype 2`).
 pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix<f64>, FeralError> {
-    parse_mtx_with(contents, source, "real", 1, |toks| toks[0].parse::<f64>().ok())
+    parse_mtx_with(contents, source, "real", "symmetric", 1, |toks| {
+        toks[0].parse::<f64>().ok()
+    })
 }
 
 /// Parse a **complex** symmetric Matrix Market string (`mtype 6`). Data lines
@@ -71,26 +73,45 @@ pub fn parse_mtx_complex(
     contents: &str,
     source: &str,
 ) -> Result<MtxMatrix<Complex<f64>>, FeralError> {
-    parse_mtx_with(contents, source, "complex", 2, |toks| {
+    parse_mtx_with(contents, source, "complex", "symmetric", 2, |toks| {
         let re = toks[0].parse::<f64>().ok()?;
         let im = toks[1].parse::<f64>().ok()?;
         Some(Complex::new(re, im))
     })
 }
 
-/// Generic Matrix Market coordinate-symmetric parser. `field` is the expected
-/// header field token (`"real"` / `"complex"`); `n_value_tokens` is how many
+/// Parse a **complex general** Matrix Market string (both triangles stored, e.g.
+/// MoM near-field matrices written as `general`). Entries are kept as given
+/// (0-indexed, no lower-triangle folding); the caller decides how to treat
+/// symmetry (e.g. extract the lower triangle for the symmetric solver, or feed
+/// the full pattern to a general LU). Data lines are `i j re im`.
+pub fn parse_mtx_complex_general(
+    contents: &str,
+    source: &str,
+) -> Result<MtxMatrix<Complex<f64>>, FeralError> {
+    parse_mtx_with(contents, source, "complex", "general", 2, |toks| {
+        let re = toks[0].parse::<f64>().ok()?;
+        let im = toks[1].parse::<f64>().ok()?;
+        Some(Complex::new(re, im))
+    })
+}
+
+/// Generic Matrix Market coordinate parser. `field` is the expected header
+/// field token (`"real"` / `"complex"`); `symmetry` is the structure token
+/// (`"symmetric"` folds upper-triangle entries to the lower triangle;
+/// `"general"` keeps every entry as given). `n_value_tokens` is how many
 /// whitespace tokens the value spans (1 real, 2 complex); `parse_val` builds the
-/// scalar from those tokens. All the hardening (banner tokenization, untrusted
-/// `nnz` clamp + validation, bounds, non-finite rejection, lower-triangle
-/// normalization, duplicate-summing) is shared across both fields.
+/// scalar. All the hardening (banner tokenization, untrusted `nnz` clamp +
+/// validation, bounds, non-finite rejection) is shared.
 fn parse_mtx_with<T: Scalar>(
     contents: &str,
     source: &str,
     field: &str,
+    symmetry: &str,
     n_value_tokens: usize,
     parse_val: impl Fn(&[&str]) -> Option<T>,
 ) -> Result<MtxMatrix<T>, FeralError> {
+    let fold_to_lower = symmetry == "symmetric";
     let mut lines = contents.lines().enumerate();
 
     // Header line
@@ -102,7 +123,7 @@ fn parse_mtx_with<T: Scalar>(
     // reference NIST `mmio` reader tokenize the banner on arbitrary
     // whitespace, so a legal banner whose fields are separated by multiple
     // spaces or tabs must be accepted, not rejected as "unsupported header".
-    let banner: [&str; 5] = ["%%matrixmarket", "matrix", "coordinate", field, "symmetric"];
+    let banner: [&str; 5] = ["%%matrixmarket", "matrix", "coordinate", field, symmetry];
     let mut header_tokens = header.split_whitespace();
     let banner_ok = banner.iter().all(|expected| {
         header_tokens
@@ -111,8 +132,8 @@ fn parse_mtx_with<T: Scalar>(
     }) && header_tokens.next().is_none();
     if !banner_ok {
         return Err(FeralError::IoError(format!(
-            "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate {} symmetric)",
-            source, header.trim(), field
+            "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate {} {})",
+            source, header.trim(), field, symmetry
         )));
     }
 
@@ -250,12 +271,13 @@ fn parse_mtx_with<T: Scalar>(
             )));
         }
 
-        // Convert to 0-indexed, normalize to lower triangle (i >= j)
+        // Convert to 0-indexed. For `symmetric` files fold the upper triangle
+        // down to the lower (i >= j); for `general` keep the entry as given.
         let (i0, j0) = (i - 1, j - 1);
-        if i0 >= j0 {
-            entries.push((i0, j0, v));
-        } else {
+        if fold_to_lower && i0 < j0 {
             entries.push((j0, i0, v));
+        } else {
+            entries.push((i0, j0, v));
         }
     }
 
