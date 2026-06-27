@@ -25,7 +25,8 @@
 use crate::error::FeralError;
 use crate::numeric::blr::BlrMatrix;
 use crate::numeric::multifrontal_ldlt::{
-    analyze_with, perturb_pivot, AnalyzeOptions, BlrMode, FactorOptions, ZeroPivotAction,
+    analyze_with, perturb_pivot, AnalyzeOptions, BlrMode, FactorOptions, MemoryMode,
+    ZeroPivotAction,
 };
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
@@ -1000,6 +1001,13 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     }
     debug_assert_eq!(e, n, "every index eliminated exactly once");
 
+    // Sum the static-perturbation count before the emit may free the fronts.
+    let n_perturbed = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
+    // End the `nodes` immutable borrow so the emit can take `node_results`
+    // mutably (LowMemory frees each front's dense factor as it is emitted).
+    drop(nodes);
+    let low_mem = opts.memory == MemoryMode::LowMemory;
+
     // Emit global L (CSC, columns in ascending e) and U (CSR, rows in ascending
     // e). A supernode's eliminated columns form a contiguous increasing
     // e-range, so iterating nodes then `j` yields columns/rows in order.
@@ -1012,7 +1020,10 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     u_row_ptr.push(0);
     let mut lcol: Vec<(usize, T)> = Vec::new();
     let mut urow: Vec<(usize, T)> = Vec::new();
-    for node in &nodes {
+    for node_opt in node_results.iter_mut() {
+        let node = node_opt
+            .as_mut()
+            .ok_or_else(|| FeralError::InvalidInput("internal: unfactored supernode".to_string()))?;
         let ff = &node.front;
         let nr = ff.nrow;
         for j in 0..ff.nelim {
@@ -1073,9 +1084,16 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             }
             u_row_ptr.push(u_col_idx.len());
         }
+        // LowMemory: free this front's dense L/U the moment it is emitted, so
+        // the per-front store shrinks as the global structure grows (removes the
+        // per-front + global emit-time overlap) instead of holding every front's
+        // dense factor until the end.
+        if low_mem {
+            node.front.l = Vec::new();
+            node.front.u = Vec::new();
+        }
     }
 
-    let n_perturbed = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
     Ok(LuFactors {
         n,
         l_col_ptr,
@@ -1415,6 +1433,56 @@ mod tests {
         let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
+    }
+
+    #[test]
+    fn low_memory_emit_is_bit_identical() {
+        // MemoryMode::LowMemory frees each front's dense factor during emit; it
+        // must produce exactly the same global L/U (it only changes when the
+        // dense per-front buffers are dropped, never the emitted values).
+        let m = 10;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(7.0_f64);
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(-1.0);
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(-2.0);
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(-1.5);
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(-0.5);
+                }
+            }
+        }
+        let a = GeneralCsc::<f64>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let sym = LuSymbolic::analyze(&a).unwrap();
+        let eager = factor_general_lu_numeric(&sym, &a, &FactorOptions::default()).unwrap();
+        let low = factor_general_lu_numeric(
+            &sym,
+            &a,
+            &FactorOptions::default().with_memory(MemoryMode::LowMemory),
+        )
+        .unwrap();
+        assert_eq!(eager.l_values, low.l_values, "L differs under LowMemory");
+        assert_eq!(eager.u_values, low.u_values, "U differs under LowMemory");
+        assert_eq!(eager.l_row_idx, low.l_row_idx);
+        assert_eq!(eager.u_col_idx, low.u_col_idx);
     }
 
     #[test]
