@@ -76,6 +76,10 @@ pub struct LuFactors<T> {
     /// Row permutation: factorization position → original row index. Differs
     /// from `perm` when partial pivoting interchanged rows.
     pub perm_row: Vec<usize>,
+    /// Two-sided equilibration: the factor is of `Â = diag(d_row)·A·diag(d_col)`.
+    /// Solve applies `D_r` to the RHS and `D_c` to the result. Both length `n`.
+    pub d_row: Vec<f64>,
+    pub d_col: Vec<f64>,
     /// Number of statically perturbed pivots.
     pub n_perturbed: usize,
 }
@@ -495,6 +499,8 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             u_values: Vec::new(),
             perm: Vec::new(),
             perm_row: Vec::new(),
+            d_row: Vec::new(),
+            d_col: Vec::new(),
             n_perturbed: 0,
         });
     }
@@ -513,8 +519,36 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         .sym_and_levels()
         .ok_or_else(|| FeralError::InvalidInput("internal: empty symbolic".to_string()))?;
 
-    // Full permuted matrix A_perm = Pᵀ A P and its transpose, both in permuted
-    // numbering (no triangle folding — unsymmetric values are kept distinct).
+    // Two-sided equilibration Â = D_r A D_c with d_r[i] = 1/√maxⱼ|Aᵢⱼ|,
+    // d_c[j] = 1/√maxᵢ|Aᵢⱼ|. Tames the dynamic range (these MoM near-field
+    // matrices span ~6 orders) so the LU factor — and any incomplete drop —
+    // stays well-scaled; the solve undoes it transparently. Computed from the
+    // original (unpermuted) A.
+    let mut rmax = vec![0.0f64; n];
+    let mut cmax = vec![0.0f64; n];
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            let m = a.values[k].magnitude();
+            if m > rmax[i] {
+                rmax[i] = m;
+            }
+            if m > cmax[j] {
+                cmax[j] = m;
+            }
+        }
+    }
+    let d_row: Vec<f64> = rmax
+        .iter()
+        .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
+        .collect();
+    let d_col: Vec<f64> = cmax
+        .iter()
+        .map(|&c| if c > 0.0 { 1.0 / c.sqrt() } else { 1.0 })
+        .collect();
+
+    // Full permuted, equilibrated matrix Â_perm = Pᵀ (D_r A D_c) P and its
+    // transpose (no triangle folding — unsymmetric values kept distinct).
     let nnz = a.row_idx.len();
     let (mut rows, mut cols, mut vals) = (
         Vec::with_capacity(nnz),
@@ -526,7 +560,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             let i = a.row_idx[k];
             rows.push(sym.perm_inv[i]);
             cols.push(sym.perm_inv[j]);
-            vals.push(a.values[k]);
+            vals.push(a.values[k] * T::from_real(d_row[i] * d_col[j]));
         }
     }
     let a_perm = GeneralCsc::<T>::from_triplets(n, &rows, &cols, &vals)?;
@@ -683,6 +717,8 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         u_values,
         perm,
         perm_row,
+        d_row,
+        d_col,
         n_perturbed,
     })
 }
@@ -696,8 +732,13 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, FeralErr
             got: b.len(),
         });
     }
-    // ŷ = P_row b (apply the row permutation to the right-hand side).
-    let mut y: Vec<T> = (0..n).map(|e| b[f.perm_row[e]]).collect();
+    // ŷ = P_row · (D_r b): row-equilibrate then row-permute the RHS.
+    let mut y: Vec<T> = (0..n)
+        .map(|e| {
+            let orig = f.perm_row[e];
+            b[orig] * T::from_real(f.d_row[orig])
+        })
+        .collect();
     // Forward solve L y = ŷ (CSC, unit diagonal). Column-oriented: once y[e] is
     // final, eliminate it from the rows below.
     for e in 0..n {
@@ -724,10 +765,12 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, FeralErr
         }
         x[e] = acc * diag.recip();
     }
-    // Undo the permutation: out[perm[e]] = x[e].
+    // Undo the column permutation and apply the column equilibration:
+    // x_orig[perm[e]] = D_c[perm[e]] · x̂[e].
     let mut out = vec![T::zero(); n];
     for e in 0..n {
-        out[f.perm[e]] = x[e];
+        let orig = f.perm[e];
+        out[orig] = x[e] * T::from_real(f.d_col[orig]);
     }
     Ok(out)
 }
