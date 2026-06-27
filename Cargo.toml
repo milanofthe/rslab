@@ -102,6 +102,10 @@ name = "vs_mom"
 harness = false
 
 [[bench]]
+name = "leftlook_mem"
+harness = false
+
+[[bench]]
 name = "precond"
 harness = false
 
