@@ -42,6 +42,10 @@ struct FrontLu<T> {
     /// index: `u[c*nrow + r]` is `U(c, r)` for `r >= c` (the eliminated row `c`
     /// against front position `r`). The diagonal `u[c*nrow + c]` is the pivot.
     u: Vec<T>,
+    /// Front row permutation from partial pivoting (`rperm[k]` is the original
+    /// front-local row that supplied pivot position `k`). Identity on trailing
+    /// rows. Drives the global row permutation `perm_row`.
+    rperm: Vec<usize>,
     n_perturbed: usize,
 }
 
@@ -67,8 +71,12 @@ pub struct LuFactors<T> {
     pub u_row_ptr: Vec<usize>,
     pub u_col_idx: Vec<usize>,
     pub u_values: Vec<T>,
-    /// Factorization order → original index.
+    /// Column permutation: factorization position → original column index
+    /// (`Pᵀ A P = L U`, the fill-reducing ordering).
     pub perm: Vec<usize>,
+    /// Row permutation: factorization position → original row index. Differs
+    /// from `perm` when partial pivoting interchanged rows.
+    pub perm_row: Vec<usize>,
     /// Number of statically perturbed pivots.
     pub n_perturbed: usize,
 }
@@ -118,8 +126,30 @@ fn lu_front<T: Scalar>(
     let n = nrow;
     let mut pivots = vec![T::zero(); ncol];
     let mut n_perturbed = 0usize;
+    // Row permutation of the front (partial pivoting interchanges rows). Only
+    // the fully-summed rows [0, ncol) are ever interchanged.
+    let mut rperm: Vec<usize> = (0..nrow).collect();
 
     for k in 0..ncol {
+        // Partial pivoting within the fully-summed block: choose the largest
+        // |entry| in column k among rows [k, ncol) and swap the full rows
+        // (carrying the already-computed L multipliers along).
+        let mut p = k;
+        let mut best = f[k * n + k].magnitude();
+        for i in (k + 1)..ncol {
+            let m = f[k * n + i].magnitude();
+            if m > best {
+                best = m;
+                p = i;
+            }
+        }
+        if p != k {
+            for c in 0..nrow {
+                f.swap(c * n + k, c * n + p);
+            }
+            rperm.swap(k, p);
+        }
+
         let mut piv = f[k * n + k];
         match perturb_floor {
             Some(floor) if piv.magnitude() < floor => {
@@ -199,6 +229,16 @@ fn lu_front<T: Scalar>(
                 u12[c * ncol + k] = f[(ncol + c) * n + k];
             }
         }
+        // Intra-front parallelism for the dominant Schur GEMM: large fronts
+        // (near the root, where assembly-tree parallelism is exhausted) use all
+        // rayon threads; small fronts stay sequential to avoid oversubscribing
+        // the tree-level parallel driver.
+        let flops = (cnrow as u128) * (cnrow as u128) * (ncol as u128);
+        let par = if flops >= 8_000_000 {
+            gemm::Parallelism::Rayon(0)
+        } else {
+            gemm::Parallelism::None
+        };
         // cb ← cb − L21·U12. Column-major: cb cs=cnrow rs=1; L21 cs=cnrow rs=1;
         // U12 cs=ncol rs=1. m=cnrow, n=cnrow, k=ncol.
         // SAFETY: `cb`, `l21`, `u12` are distinct, non-overlapping allocations
@@ -225,7 +265,7 @@ fn lu_front<T: Scalar>(
                 false,
                 false,
                 false,
-                gemm::Parallelism::None,
+                par,
             );
         }
     }
@@ -236,6 +276,7 @@ fn lu_front<T: Scalar>(
             nelim: ncol,
             l,
             u,
+            rperm,
             n_perturbed,
         },
         cb,
@@ -369,6 +410,7 @@ pub fn factor_general_lu<T: Scalar>(
             u_col_idx: Vec::new(),
             u_values: Vec::new(),
             perm: Vec::new(),
+            perm_row: Vec::new(),
             n_perturbed: 0,
         });
     }
@@ -437,15 +479,27 @@ pub fn factor_general_lu<T: Scalar>(
 
     // Assign factorization order e (static pivoting → front-local order is just
     // the column order) and the permutation.
-    let mut e_of_g = vec![usize::MAX; n];
+    // Two index maps, distinct under row pivoting:
+    //   col_pos_of_g[g] = factorization position eliminating COLUMN g
+    //                     (→ U column indices, L column indices).
+    //   row_pos_of_g[g] = factorization position whose PIVOT ROW is g
+    //                     (→ L row indices). Equal to col_pos when no pivoting.
+    let mut col_pos_of_g = vec![usize::MAX; n];
+    let mut row_pos_of_g = vec![usize::MAX; n];
     let mut perm = vec![0usize; n];
+    let mut perm_row = vec![0usize; n];
     let mut e = 0usize;
     for node in &nodes {
         let ff = &node.front;
         for j in 0..ff.nelim {
-            let g = node.row_indices[j];
-            e_of_g[g] = e;
-            perm[e] = sym.perm[g];
+            // Columns are not interchanged, so position j maps to column
+            // `row_indices[j]`; the pivot row is `row_indices[rperm[j]]`.
+            let g_col = node.row_indices[j];
+            let g_row = node.row_indices[ff.rperm[j]];
+            col_pos_of_g[g_col] = e;
+            row_pos_of_g[g_row] = e;
+            perm[e] = sym.perm[g_col];
+            perm_row[e] = sym.perm[g_row];
             e += 1;
         }
     }
@@ -465,14 +519,18 @@ pub fn factor_general_lu<T: Scalar>(
         let ff = &node.front;
         let nr = ff.nrow;
         for j in 0..ff.nelim {
-            let diag_e = e_of_g[node.row_indices[j]];
-            // L column (unit lower).
+            // Diagonal position (= column position = pivot-row position).
+            let diag_e = col_pos_of_g[node.row_indices[j]];
+            // L column (unit lower). Below-diagonal rows are indexed by the
+            // *pivot-row* position of the front row physically at position `i`
+            // (`rperm[i]`), which differs from its column position under
+            // pivoting — this is the crux for a correct unsymmetric factor.
             lcol.clear();
             lcol.push((diag_e, one));
             for i in (j + 1)..nr {
                 let v = ff.l[j * nr + i];
                 if v != T::zero() {
-                    lcol.push((e_of_g[node.row_indices[i]], v));
+                    lcol.push((row_pos_of_g[node.row_indices[ff.rperm[i]]], v));
                 }
             }
             lcol.sort_unstable_by_key(|&(r, _)| r);
@@ -481,13 +539,14 @@ pub fn factor_general_lu<T: Scalar>(
                 l_values.push(v);
             }
             l_col_ptr.push(l_row_idx.len());
-            // U row (upper, diagonal carries the pivot).
+            // U row (upper, diagonal carries the pivot). Columns are not
+            // interchanged → indexed by column position.
             urow.clear();
             urow.push((diag_e, ff.u[j * nr + j]));
             for i in (j + 1)..nr {
                 let v = ff.u[j * nr + i];
                 if v != T::zero() {
-                    urow.push((e_of_g[node.row_indices[i]], v));
+                    urow.push((col_pos_of_g[node.row_indices[i]], v));
                 }
             }
             urow.sort_unstable_by_key(|&(c, _)| c);
@@ -509,6 +568,7 @@ pub fn factor_general_lu<T: Scalar>(
         u_col_idx,
         u_values,
         perm,
+        perm_row,
         n_perturbed,
     })
 }
@@ -522,8 +582,8 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, FeralErr
             got: b.len(),
         });
     }
-    // ŷ = Pᵀ b (factorization order).
-    let mut y: Vec<T> = (0..n).map(|e| b[f.perm[e]]).collect();
+    // ŷ = P_row b (apply the row permutation to the right-hand side).
+    let mut y: Vec<T> = (0..n).map(|e| b[f.perm_row[e]]).collect();
     // Forward solve L y = ŷ (CSC, unit diagonal). Column-oriented: once y[e] is
     // final, eliminate it from the rows below.
     for e in 0..n {
@@ -556,6 +616,47 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, FeralErr
         out[f.perm[e]] = x[e];
     }
     Ok(out)
+}
+
+/// Solve `A x = b` with iterative refinement against the original matrix `a`.
+/// Each step computes the residual `r = b − A x` and applies the correction
+/// `x ← x + (LU)⁻¹ r`, stopping once `‖r‖∞` stops improving or `max_iter` is
+/// reached. This recovers the accuracy a static / within-block-pivoted factor
+/// loses on ill-conditioned matrices, at the cost of a few extra solves.
+pub fn solve_lu_refined<T: Scalar>(
+    f: &LuFactors<T>,
+    a: &GeneralCsc<T>,
+    b: &[T],
+    max_iter: usize,
+) -> Result<Vec<T>, FeralError> {
+    let n = f.n;
+    if a.n != n || b.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: b.len(),
+        });
+    }
+    let mut x = solve_lu(f, b)?;
+    let mut ax = vec![T::zero(); n];
+    let mut best_x = x.clone();
+    let mut best_res = f64::INFINITY;
+    for _ in 0..=max_iter {
+        a.matvec(&x, &mut ax);
+        let r: Vec<T> = b.iter().zip(&ax).map(|(&bi, &axi)| bi - axi).collect();
+        let res = r.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+        if res < best_res {
+            best_res = res;
+            best_x.clone_from(&x);
+        }
+        if res == 0.0 {
+            break;
+        }
+        let dx = solve_lu(f, &r)?;
+        for (xi, &d) in x.iter_mut().zip(&dx) {
+            *xi = *xi + d;
+        }
+    }
+    Ok(best_x)
 }
 
 #[cfg(test)]
@@ -592,6 +693,50 @@ mod tests {
         let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-10, "residual {}", resid(&a, &x, &b));
+    }
+
+    #[test]
+    fn pivoting_triggered_small_diagonal() {
+        // Small diagonal, large off-diagonals → partial pivoting fires on
+        // (nearly) every column. Well-conditioned overall, so the solve must
+        // still hit a tiny residual: this isolates the pivoting/perm logic
+        // (correctness) from numerical stability.
+        let c = |re, im| Complex::new(re, im);
+        let m = 6;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(0.3, 0.05)); // small diagonal
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(2.0, 0.3)); // large off-diagonal
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(1.5, -0.2));
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(1.8, 0.1));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(2.2, 0.4));
+                }
+            }
+        }
+        let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        let f = factor_general_lu(&a, &GenericFactorOptions::default()).unwrap();
+        let x = solve_lu(&f, &b).unwrap();
+        assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
     }
 
     #[test]

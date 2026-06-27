@@ -13,7 +13,8 @@ use std::time::Instant;
 
 use feral::sparse::general::GeneralCsc;
 use feral::{
-    factor_general_lu, parse_mtx_complex_general, solve_lu, GenericFactorOptions, ZeroPivotAction,
+    factor_general_lu, parse_mtx_complex_general, solve_lu, solve_lu_refined, GenericFactorOptions,
+    ZeroPivotAction,
 };
 use num_complex::Complex;
 
@@ -117,6 +118,11 @@ fn bench_file(path: &std::path::Path) {
     let xr = solve_lu(&rla, &b).unwrap_or_default();
     let rla_slv = t.elapsed().as_secs_f64() * 1e3;
     let rla_res = resid(entries, &xr, &b);
+    // With a few iterative-refinement steps against the original matrix.
+    let t = Instant::now();
+    let xr_ref = solve_lu_refined(&rla, &g, &b, 5).unwrap_or_default();
+    let rla_ref_ms = t.elapsed().as_secs_f64() * 1e3;
+    let rla_ref_res = resid(entries, &xr_ref, &b);
 
     // ---- faer: full matrix, sparse LU ----
     let mut trip: Vec<Triplet<usize, usize, c64>> = Vec::with_capacity(nnz);
@@ -145,11 +151,14 @@ fn bench_file(path: &std::path::Path) {
 
     println!("=== {name} ===");
     println!("  n={n}  nnz(full)={nnz}  rel.asymmetry={rel_asym:.2e}  |A|max={amax:.2e}");
+    // Factor memory ≈ nnz(L+U) · (16-byte Complex<f64> value + 8-byte index).
+    let rla_mb = rla.factor_nnz() as f64 * 24.0 / 1e6;
     println!(
-        "  RLA-LU: factor={rla_fac:8.1} ms  solve={rla_slv:7.2} ms  fill={:9}  perturbed={}  res={rla_res:.2e}",
+        "  RLA-LU: factor={rla_fac:8.1} ms  solve={rla_slv:7.2} ms  fill={:9}  mem={rla_mb:7.1} MB  perturbed={}  res={rla_res:.2e}",
         rla.factor_nnz(),
         rla.n_perturbed,
     );
+    println!("  RLA-LU+refine(5): {rla_ref_ms:7.2} ms  res={rla_ref_res:.2e}");
     if faer_ok {
         println!("  faer : factor={faer_fac:8.1} ms  solve={faer_slv:7.2} ms  res={faer_res:.2e}");
         if faer_fac > 0.0 {
