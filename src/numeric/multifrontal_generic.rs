@@ -472,17 +472,18 @@ struct NodeFactor<T> {
     contrib: Vec<T>,
 }
 
-/// Borrow a child node's result, erroring if it is somehow not yet computed
-/// (cannot happen: children occupy strictly lower assembly-tree levels).
-fn child_ref<T: Scalar>(
-    node_results: &[Option<NodeFactor<T>>],
-    ch: usize,
-) -> Result<&NodeFactor<T>, FeralError> {
-    node_results
-        .get(ch)
-        .and_then(|o| o.as_ref())
-        .ok_or_else(|| FeralError::InvalidInput("internal: missing child node".to_string()))
+thread_local! {
+    /// Per-worker global→front-local index scratch (`usize`, scalar-independent),
+    /// reused across every front a thread factors and held at the all-`usize::MAX`
+    /// invariant between uses. Replaces the old `map_init` workspace now that the
+    /// driver is a work-stealing tree recursion rather than a level `par_iter`.
+    static GLOC_SCRATCH: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
+
+/// A supernode's own factor plus the flat `(supernode-id, factor)` list for the
+/// rest of its subtree — the return shape of [`factor_subtree`].
+type SubtreeFactors<T> = (NodeFactor<T>, Vec<(usize, NodeFactor<T>)>);
 
 /// Factor one supernode's front: build its row structure, assemble the original
 /// (permuted) entries and the children's contribution blocks, then partially
@@ -492,10 +493,8 @@ fn factor_one_node<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
     a_perm: &CscMatrix<T>,
-    node_results: &[Option<NodeFactor<T>>],
+    child_refs: &[&NodeFactor<T>],
     perturb_floor: Option<f64>,
-    gloc: &mut [usize],
-    fbuf: &mut Vec<T>,
 ) -> Result<NodeFactor<T>, FeralError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
@@ -513,8 +512,7 @@ fn factor_one_node<T: Scalar>(
             }
         }
     }
-    for &ch in &snode.children {
-        let child = child_ref(node_results, ch)?;
+    for child in child_refs {
         for &r in &child.row_indices[child.front.nelim..] {
             if r >= own_last {
                 trailing.push(r);
@@ -528,18 +526,21 @@ fn factor_one_node<T: Scalar>(
     ri.extend(trailing);
     let nrow = ri.len();
 
-    // `gloc` (permuted-global → front-local) is a caller-owned per-thread
-    // scratch held at the all-`usize::MAX` invariant; we set only `ri`'s entries
-    // and clear them again below, so it never costs an O(n) alloc/memset per
-    // front. `fbuf` is the pooled front buffer, zeroed to `nrow*nrow`.
-    debug_assert_eq!(gloc.len(), n);
+    // Front buffer (transient — the unavoidable nrow² zeroing dominates, so a
+    // per-front allocation adds only negligible malloc over a pooled one).
+    let mut fbuf: Vec<T> = vec![T::zero(); nrow * nrow];
+    let f = &mut fbuf[..];
+
+    // Take the thread-local global→local scratch (held at all-`usize::MAX`) for
+    // the assembly; returned before `factor_front` so the front GEMM's
+    // work-stealing tasks can never re-enter the borrow.
+    let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    if gloc.len() < n {
+        gloc.resize(n, usize::MAX);
+    }
     for (li, &g) in ri.iter().enumerate() {
         gloc[g] = li;
     }
-
-    fbuf.clear();
-    fbuf.resize(nrow * nrow, T::zero());
-    let f = &mut fbuf[..];
 
     // Scatter original entries of the eliminated columns.
     for p in 0..ncol {
@@ -554,8 +555,7 @@ fn factor_one_node<T: Scalar>(
     }
 
     // Extend-add each child's contribution block.
-    for &ch in &snode.children {
-        let child = child_ref(node_results, ch)?;
+    for child in child_refs {
         let cn = child.front.nrow - child.front.nelim;
         let crows = &child.row_indices[child.front.nelim..];
         let cb = &child.contrib;
@@ -569,11 +569,12 @@ fn factor_one_node<T: Scalar>(
         }
     }
 
-    // Restore the `gloc` all-`usize::MAX` invariant for the next front on this
-    // worker (clear only the entries we touched).
+    // Restore the all-`usize::MAX` invariant and return the scratch to the
+    // thread-local before `factor_front` (which spawns work-stealing GEMM tasks).
     for &g in &ri {
         gloc[g] = usize::MAX;
     }
+    GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
 
     let (front, contrib) = factor_front(f, nrow, ncol, perturb_floor)?;
     Ok(NodeFactor {
@@ -581,6 +582,34 @@ fn factor_one_node<T: Scalar>(
         row_indices: ri,
         contrib,
     })
+}
+
+/// Recursively factor the assembly subtree rooted at supernode `s` with a
+/// work-stealing tree schedule: the children's subtrees factor concurrently and
+/// this node only after they finish. Independent subtrees fill idle threads and
+/// the per-front GEMM shares the same rayon pool — no level-barrier stall. See
+/// the unsymmetric twin in [`crate::numeric::multifrontal_lu`].
+fn factor_subtree<T: Scalar>(
+    s: usize,
+    sym: &SymbolicFactorization,
+    a_perm: &CscMatrix<T>,
+    perturb_floor: Option<f64>,
+) -> Result<SubtreeFactors<T>, FeralError> {
+    let children = &sym.supernodes[s].children;
+    let outs: Vec<SubtreeFactors<T>> = children
+        .par_iter()
+        .map(|&ch| factor_subtree(ch, sym, a_perm, perturb_floor))
+        .collect::<Result<Vec<_>, _>>()?;
+    let nf = {
+        let child_refs: Vec<&NodeFactor<T>> = outs.iter().map(|(own, _)| own).collect();
+        factor_one_node(s, sym, a_perm, &child_refs, perturb_floor)?
+    };
+    let mut subtree = Vec::new();
+    for (i, (own, rest)) in outs.into_iter().enumerate() {
+        subtree.push((children[i], own));
+        subtree.extend(rest);
+    }
+    Ok((nf, subtree))
 }
 
 /// Factor a sparse symmetric matrix `A` as `Pᵀ A P = L D Lᵀ` via generic
@@ -786,29 +815,31 @@ pub fn factor_numeric<T: Scalar>(
     }
     let a_perm = CscMatrix::<T>::from_triplets(n, &rows, &cols, &vals)?;
 
-    // 3. Multifrontal numeric factorization, parallelized level-by-level over
-    //    the assembly tree (levels precomputed in `analyze`). Same-level
-    //    supernodes are mutually independent and factored concurrently; each
-    //    reads only its children's contribution blocks from lower levels.
-    let by_level = &inner.by_level;
+    // 3. Multifrontal numeric factorization with a work-stealing schedule over
+    //    the assembly tree: each subtree factors independently (children before
+    //    parent), filling idle threads without a level barrier, and the per-front
+    //    GEMM shares the same rayon pool. The precomputed `by_level` is no longer
+    //    consulted here (it remains available via `GenericSymbolic::n_levels`).
     let nsuper = sym.supernodes.len();
 
+    // Roots of the assembly forest: supernodes that are no node's child.
+    let mut is_child = vec![false; nsuper];
+    for snode in &sym.supernodes {
+        for &ch in &snode.children {
+            is_child[ch] = true;
+        }
+    }
+    let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    let root_outs: Vec<SubtreeFactors<T>> = roots
+        .par_iter()
+        .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Scatter the subtree factors into `node_results` (by supernode id) for the
+    // global emit pass, which still walks supernodes in postorder.
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
-    for level_nodes in by_level {
-        // Per-rayon-worker reusable scratch: the `gloc` map (held all-MAX) and
-        // the front buffer. `map_init` keeps one set per worker, reused across
-        // all fronts that worker processes — no per-front O(n) allocation.
-        let computed: Vec<(usize, NodeFactor<T>)> = level_nodes
-            .par_iter()
-            .map_init(
-                || (vec![usize::MAX; n], Vec::<T>::new()),
-                |(gloc, fbuf), &s| {
-                    factor_one_node(s, sym, &a_perm, &node_results, perturb_floor, gloc, fbuf)
-                        .map(|nf| (s, nf))
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-        for (s, nf) in computed {
+    for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
+        node_results[roots[i]] = Some(own);
+        for (s, nf) in subtree {
             node_results[s] = Some(nf);
         }
     }
