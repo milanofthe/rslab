@@ -148,6 +148,23 @@ impl BlrMode {
     }
 }
 
+/// Numeric factorization algorithm — composable via [`FactorOptions::with_method`].
+/// Both produce the same factor (numerically equivalent); they differ in the
+/// transient-memory and scheduling profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FactorMethod {
+    /// Multifrontal (default): assembly-tree of dense fronts, rayon
+    /// work-stealing parallel. Fastest today, but carries the contribution-block
+    /// stack and a per-front extract transient.
+    #[default]
+    Multifrontal,
+    /// Supernodal left-looking: each supernode panel pulls updates from its
+    /// factored descendants — **no contribution-block stack, no extract phase**
+    /// (the PARDISO transient profile). Currently serial, 1×1 pivots; the
+    /// low-transient path for memory-bound problems.
+    LeftLooking,
+}
+
 /// Options controlling the generic multifrontal factorization. Defaults give an
 /// **exact** complete factorization that fails on rank deficiency. Relaxing
 /// them turns the factorization into a robust, memory-light **preconditioner**.
@@ -176,6 +193,10 @@ pub struct FactorOptions {
     ///
     /// [`Off`]: BlrMode::Off
     pub blr: BlrMode,
+    /// Numeric factorization algorithm. Default [`Multifrontal`].
+    ///
+    /// [`Multifrontal`]: FactorMethod::Multifrontal
+    pub method: FactorMethod,
 }
 
 impl Default for FactorOptions {
@@ -185,6 +206,7 @@ impl Default for FactorOptions {
             drop_tol: None,
             memory: MemoryMode::LowMemory,
             blr: BlrMode::Off,
+            method: FactorMethod::Multifrontal,
         }
     }
 }
@@ -230,6 +252,13 @@ impl FactorOptions {
     /// preconditioner — refine against the original matrix).
     pub fn with_blr(mut self, blr: BlrMode) -> Self {
         self.blr = blr;
+        self
+    }
+
+    /// Builder: select the numeric factorization algorithm (multifrontal vs
+    /// supernodal left-looking).
+    pub fn with_method(mut self, method: FactorMethod) -> Self {
+        self.method = method;
         self
     }
 }
@@ -1045,6 +1074,11 @@ pub fn factor_numeric<T: Scalar>(
     };
     let sym = &inner.sym;
 
+    // Supernodal left-looking path: same factor, low transient (no CB stack).
+    if opts.method == FactorMethod::LeftLooking {
+        return factor_left_looking(sym, a, opts);
+    }
+
     // Static-pivot floor (absolute), translated from feral's ZeroPivotAction.
     // `PerturbToEps { abs_floor }` is taken as given (feral convention: an
     // absolute floor, typically `eps_rel · ‖A‖∞`); `Fail` disables perturbation.
@@ -1208,6 +1242,279 @@ pub fn factor_numeric<T: Scalar>(
     })
 }
 
+/// Filled `L` row structure of every supernode (bottom-up, children before
+/// parents), mirroring the multifrontal assembly value-free: a supernode's
+/// structure is its own columns ++ the sorted union of its column patterns'
+/// trailing rows and its children's off-diagonal rows. `rs[s][0..ncol]` are the
+/// eliminated columns `first_col..first_col+ncol`; `rs[s][ncol..]` are the
+/// (sorted) below-diagonal fill rows.
+fn compute_supernode_row_structures(sym: &SymbolicFactorization) -> Vec<Vec<usize>> {
+    let nsuper = sym.supernodes.len();
+    let mut rs: Vec<Vec<usize>> = Vec::with_capacity(nsuper);
+    for s in 0..nsuper {
+        let snode = &sym.supernodes[s];
+        let own_last = snode.first_col + snode.ncol;
+        let mut trailing: Vec<usize> = Vec::new();
+        for j in snode.first_col..own_last {
+            for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
+                let r = sym.permuted_pattern.row_idx[k];
+                if r >= own_last {
+                    trailing.push(r);
+                }
+            }
+        }
+        for &ch in &snode.children {
+            let nck = sym.supernodes[ch].ncol;
+            for &r in &rs[ch][nck..] {
+                if r >= own_last {
+                    trailing.push(r);
+                }
+            }
+        }
+        trailing.sort_unstable();
+        trailing.dedup();
+        let mut ri = Vec::with_capacity(snode.ncol + trailing.len());
+        ri.extend(snode.first_col..own_last);
+        ri.extend(trailing);
+        rs.push(ri);
+    }
+    rs
+}
+
+/// Supernodal **left-looking** LDLᵀ (1×1 pivots, static perturbation). Each
+/// supernode's dense panel is assembled from `A`, updated by every previously
+/// factored descendant (`cmod`: pull the descendant's contribution columns that
+/// land in this panel), then factored in place (`cdiv`: partial LDLᵀ, no
+/// trailing update). There is **no contribution-block stack and no extract
+/// copy-out** — the panels are the factor — so the transient is just the factor
+/// itself (the PARDISO memory profile). Produces the same [`LdltFactors`] as the
+/// multifrontal path (numerically equivalent up to summation order).
+fn factor_left_looking<T: Scalar>(
+    sym: &SymbolicFactorization,
+    a: &CscMatrix<T>,
+    opts: &FactorOptions,
+) -> Result<LdltFactors<T>, FeralError> {
+    let n = sym.n;
+    let perturb_floor: Option<f64> = match opts.on_zero_pivot {
+        ZeroPivotAction::Fail => None,
+        ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
+        ZeroPivotAction::ForceAccept => {
+            let anorm = a.values.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+            Some(anorm.max(1.0) * f64::EPSILON)
+        }
+    };
+
+    // A_perm = Pᵀ A P, lower triangle (same build as the multifrontal path).
+    let nnz = a.row_idx.len();
+    let (mut rows, mut cols, mut vals) = (
+        Vec::with_capacity(nnz),
+        Vec::with_capacity(nnz),
+        Vec::with_capacity(nnz),
+    );
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            let (gi, gj) = (sym.perm_inv[i], sym.perm_inv[j]);
+            let (r, c) = if gi >= gj { (gi, gj) } else { (gj, gi) };
+            rows.push(r);
+            cols.push(c);
+            vals.push(a.values[k]);
+        }
+    }
+    let a_perm = CscMatrix::<T>::from_triplets(n, &rows, &cols, &vals)?;
+
+    let nsuper = sym.supernodes.len();
+    let rs = compute_supernode_row_structures(sym);
+
+    // Map each global column to its owning supernode, and build per-supernode
+    // updater lists: `k` updates `s` iff one of `k`'s off-diagonal rows is an
+    // eliminated column of `s` (its sorted off-diag rows hit `s`'s column run).
+    let mut col_to_snode = vec![0usize; n];
+    for (s, snode) in sym.supernodes.iter().enumerate() {
+        col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
+    }
+    let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
+    for (k, rsk) in rs.iter().enumerate() {
+        let nck = sym.supernodes[k].ncol;
+        let mut last = usize::MAX;
+        for &r in &rsk[nck..] {
+            let s = col_to_snode[r];
+            if s != last {
+                update_list[s].push(k);
+                last = s;
+            }
+        }
+    }
+
+    // Factored panels (retained — they are the factor) and their diagonals.
+    let mut panels: Vec<Vec<T>> = vec![Vec::new(); nsuper];
+    let mut dvals: Vec<Vec<T>> = vec![Vec::new(); nsuper];
+    let mut n_perturbed = 0usize;
+    let mut local_map = vec![usize::MAX; n];
+
+    for s in 0..nsuper {
+        let snode = &sym.supernodes[s];
+        let (first, ncol) = (snode.first_col, snode.ncol);
+        let nrow = rs[s].len();
+        let mut panel = vec![T::zero(); nrow * ncol];
+        for (li, &g) in rs[s].iter().enumerate() {
+            local_map[g] = li;
+        }
+        // Assemble A's lower-triangle columns of this supernode.
+        for p in 0..ncol {
+            let c = first + p;
+            for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
+                let li = local_map[a_perm.row_idx[k]]; // row ≥ c → li ≥ p
+                panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
+            }
+        }
+        // cmod: pull each updater's contribution columns that land here.
+        for &kk in &update_list[s] {
+            let nck = sym.supernodes[kk].ncol;
+            let nrk = rs[kk].len();
+            let ok = &rs[kk][nck..];
+            let nok = ok.len();
+            let pk = &panels[kk];
+            let dk = &dvals[kk];
+            // Off-diag rows of k that are columns of s form a contiguous run.
+            let mut vc = vec![T::zero(); nck];
+            for c_idx in 0..nok {
+                let gcol = ok[c_idx];
+                if gcol < first {
+                    continue;
+                }
+                if gcol >= first + ncol {
+                    break;
+                }
+                let tcol = gcol - first; // = local_map[gcol]
+                // vc[ck] = D_k[ck] · L_k[ok[c_idx], ck]
+                for ck in 0..nck {
+                    vc[ck] = dk[ck] * pk[(nck + c_idx) + ck * nrk];
+                }
+                for r_idx in c_idx..nok {
+                    let trow = local_map[ok[r_idx]];
+                    let mut acc = T::zero();
+                    for ck in 0..nck {
+                        acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
+                    }
+                    let dst = trow + tcol * nrow;
+                    panel[dst] = panel[dst] - acc;
+                }
+            }
+        }
+        // cdiv: partial 1×1 LDLᵀ of the `ncol` columns over `nrow` rows.
+        let mut d = vec![T::zero(); ncol];
+        for k in 0..ncol {
+            let mut dk = panel[k + k * nrow];
+            match perturb_floor {
+                Some(floor) if dk.magnitude() < floor => {
+                    dk = perturb_pivot(dk, floor);
+                    n_perturbed += 1;
+                }
+                None if dk == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                _ => {}
+            }
+            d[k] = dk;
+            let dinv = dk.recip();
+            for i in (k + 1)..nrow {
+                panel[i + k * nrow] = panel[i + k * nrow] * dinv;
+            }
+            for j in (k + 1)..ncol {
+                let ljk = panel[j + k * nrow];
+                if ljk != T::zero() {
+                    let f = dk * ljk;
+                    for i in j..nrow {
+                        panel[i + j * nrow] = panel[i + j * nrow] - panel[i + k * nrow] * f;
+                    }
+                }
+            }
+        }
+        for &g in &rs[s] {
+            local_map[g] = usize::MAX;
+        }
+        panels[s] = panel;
+        dvals[s] = d;
+    }
+
+    // Emit global L (CSC) + D in elimination order (no within-panel pivoting →
+    // elimination order is supernode/column order).
+    let mut e_of_g = vec![usize::MAX; n];
+    let mut perm = vec![0usize; n];
+    let mut d_diag = vec![T::zero(); n];
+    let mut inertia = Inertia::new(0, 0, 0);
+    let mut e = 0usize;
+    for (s, snode) in sym.supernodes.iter().enumerate() {
+        for (p, &dv) in dvals[s].iter().enumerate() {
+            let g = snode.first_col + p;
+            e_of_g[g] = e;
+            perm[e] = sym.perm[g];
+            d_diag[e] = dv;
+            let r = dv.real();
+            if r > 0.0 {
+                inertia.positive += 1;
+            } else if r < 0.0 {
+                inertia.negative += 1;
+            } else {
+                inertia.zero += 1;
+            }
+            e += 1;
+        }
+    }
+    debug_assert_eq!(e, n, "every index eliminated exactly once");
+
+    let one = T::one();
+    let mut l_col_ptr = Vec::with_capacity(n + 1);
+    l_col_ptr.push(0);
+    let mut l_row_idx: Vec<usize> = Vec::new();
+    let mut l_values: Vec<T> = Vec::new();
+    let mut col: Vec<(usize, T)> = Vec::new();
+    for s in 0..nsuper {
+        let snode = &sym.supernodes[s];
+        let (first, ncol) = (snode.first_col, snode.ncol);
+        let nrow = rs[s].len();
+        let panel = &panels[s];
+        for p in 0..ncol {
+            col.clear();
+            let diag_e = e_of_g[first + p];
+            col.push((diag_e, one));
+            for i in (p + 1)..nrow {
+                let v = panel[i + p * nrow];
+                if v != T::zero() {
+                    col.push((e_of_g[rs[s][i]], v));
+                }
+            }
+            if let Some(tau) = opts.drop_tol {
+                let colmax = col
+                    .iter()
+                    .filter(|&&(r, _)| r != diag_e)
+                    .map(|&(_, v)| v.magnitude())
+                    .fold(0.0, f64::max);
+                let thresh = tau * colmax;
+                col.retain(|&(r, v)| r == diag_e || v.magnitude() >= thresh);
+            }
+            col.sort_unstable_by_key(|&(r, _)| r);
+            for &(r, v) in &col {
+                l_row_idx.push(r);
+                l_values.push(v);
+            }
+            l_col_ptr.push(l_row_idx.len());
+        }
+    }
+
+    Ok(LdltFactors {
+        n,
+        l_col_ptr,
+        l_row_idx,
+        l_values,
+        d_diag,
+        d_subdiag: vec![T::zero(); n],
+        two_by_two: vec![false; n],
+        perm,
+        n_perturbed,
+        inertia,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1247,6 +1554,89 @@ mod tests {
         let f = factor_sparse_ldlt(&a).unwrap();
         let x = solve_ldlt(&f, &b).unwrap();
         assert!(residual_inf(&a, &x, &b) < 1e-10);
+    }
+
+    /// 2D 5-point grid (m×m), lower triangle, complex-symmetric, diagonally
+    /// dominant. Branching assembly tree → exercises multi-child `cmod`.
+    fn grid2d_lower<T: Scalar>(m: usize, diag: T, off: T) -> CscMatrix<T> {
+        let n = m * m;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |r: usize, c: usize| r * m + c;
+        let mut push = |i: usize, j: usize, v: T| {
+            let (hi, lo) = if i >= j { (i, j) } else { (j, i) };
+            rows.push(hi);
+            cols.push(lo);
+            vals.push(v);
+        };
+        for r in 0..m {
+            for c in 0..m {
+                let p = idx(r, c);
+                push(p, p, diag);
+                if c + 1 < m {
+                    push(p, idx(r, c + 1), off);
+                }
+                if r + 1 < m {
+                    push(p, idx(r + 1, c), off);
+                }
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    #[test]
+    fn left_looking_matches_multifrontal_f64() {
+        // Chain assembly tree (tridiagonal): exercises the basic left-looking
+        // cmod/cdiv. Same fill and same solution as the multifrontal path.
+        let a = tridiag_spd_f64(50);
+        let b: Vec<f64> = (0..50).map(|i| (i % 7) as f64 - 3.0).collect();
+        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let ll = factor_sparse_ldlt_with(
+            &a,
+            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+        )
+        .unwrap();
+        assert_eq!(mf.l_values.len(), ll.l_values.len(), "fill must match");
+        let xm = solve_ldlt(&mf, &b).unwrap();
+        let xl = solve_ldlt(&ll, &b).unwrap();
+        assert!(residual_inf(&a, &xl, &b) < 1e-9, "left-looking residual");
+        let diff = (0..50).map(|i| (xm[i] - xl[i]).abs()).fold(0.0, f64::max);
+        assert!(diff < 1e-9, "solutions differ by {diff}");
+    }
+
+    #[test]
+    fn left_looking_2d_grid_matches_multifrontal() {
+        // Branching assembly tree → multi-child cmod and deeper update lists.
+        let a = grid2d_lower::<f64>(12, 8.0, -1.0);
+        let n = a.n;
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let ll = factor_sparse_ldlt_with(
+            &a,
+            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+        )
+        .unwrap();
+        assert_eq!(mf.l_values.len(), ll.l_values.len(), "fill must match");
+        let xl = solve_ldlt(&ll, &b).unwrap();
+        assert!(residual_inf(&a, &xl, &b) < 1e-9, "left-looking grid residual");
+    }
+
+    #[test]
+    fn left_looking_complex_symmetric_type_agnostic() {
+        // The left-looking path is generic over `Scalar`: complex-symmetric here.
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let a = grid2d_lower::<Complex<f64>>(10, c(8.0, 1.0), c(-1.0, 0.2));
+        let n = a.n;
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
+        let ll = factor_sparse_ldlt_with(
+            &a,
+            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+        )
+        .unwrap();
+        let xl = solve_ldlt(&ll, &b).unwrap();
+        assert!(
+            residual_inf(&a, &xl, &b) < 1e-9,
+            "complex left-looking residual"
+        );
     }
 
     #[test]

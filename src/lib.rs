@@ -89,8 +89,8 @@ pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFact
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
-    set_use_gemm_schur, AnalyzeOptions, BlrMode, FactorOptions, MemoryMode, MultifrontalSymbolic,
-    ReorderMode, ZeroPivotAction,
+    set_use_gemm_schur, AnalyzeOptions, BlrMode, FactorMethod, FactorOptions, MemoryMode,
+    MultifrontalSymbolic, ReorderMode, ZeroPivotAction,
 };
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};

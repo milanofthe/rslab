@@ -98,6 +98,10 @@ name = "vs_faer"
 harness = false
 
 [[bench]]
+name = "vs_mom"
+harness = false
+
+[[bench]]
 name = "precond"
 harness = false
 
