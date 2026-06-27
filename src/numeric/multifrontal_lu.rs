@@ -845,6 +845,10 @@ pub fn factor_general_lu<T: Scalar>(
 struct LuLlStore<T> {
     lbuf: Vec<std::cell::UnsafeCell<Vec<T>>>,
     ubuf: Vec<std::cell::UnsafeCell<Vec<T>>>,
+    /// Per-node within-front row permutation from partial pivoting: `rperm[i]` is
+    /// the row-structure index (`rs[s]`) physically at panel position `i`.
+    /// Identity on the trailing rows (never interchanged); only read by the emit.
+    rperm: Vec<std::cell::UnsafeCell<Vec<usize>>>,
 }
 // SAFETY: single-writer-before-readers, disjoint indices (see LDLᵀ `LlStore`).
 unsafe impl<T: Send> Sync for LuLlStore<T> {}
@@ -858,6 +862,9 @@ impl<T: Scalar> LuLlStore<T> {
             ubuf: (0..nsuper)
                 .map(|_| std::cell::UnsafeCell::new(Vec::new()))
                 .collect(),
+            rperm: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
+                .collect(),
         }
     }
     /// SAFETY: `k` must be a fully-factored descendant of the current node.
@@ -868,10 +875,15 @@ impl<T: Scalar> LuLlStore<T> {
     unsafe fn u(&self, k: usize) -> &Vec<T> {
         &*self.ubuf[k].get()
     }
+    /// SAFETY: factorization of `k` is complete.
+    unsafe fn rperm(&self, k: usize) -> &Vec<usize> {
+        &*self.rperm[k].get()
+    }
     /// SAFETY: only the owner of supernode `s` calls this, exactly once.
-    unsafe fn set(&self, s: usize, l: Vec<T>, u: Vec<T>) {
+    unsafe fn set(&self, s: usize, l: Vec<T>, u: Vec<T>, rperm: Vec<usize>) {
         *self.lbuf[s].get() = l;
         *self.ubuf[s].get() = u;
+        *self.rperm[s].get() = rperm;
     }
 }
 
@@ -1062,11 +1074,42 @@ fn lu_ll_factor_node<T: Scalar>(
     const NB_CDIV: usize = 32;
     const LL_CDIV_PAR: usize = 8_000_000;
     let mut local_perturbed = 0usize;
+    // Restricted partial pivoting: row interchanges within the fully-summed block
+    // `[0, ncol)` only (the standard sparse-direct choice). `rperm[i]` is the
+    // row-structure index physically at position `i`; the trailing rows are never
+    // interchanged, so the contribution rows `Ok` ancestors pull are unaffected
+    // and `cmod` needs no permutation awareness.
+    let mut rperm: Vec<usize> = (0..nrow).collect();
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + NB_CDIV).min(ncol);
         // getf2: unblocked factor of columns [kb, ke), full height.
         for k in kb..ke {
+            // **Threshold** partial pivoting (UMFPACK-style): keep the diagonal
+            // pivot unless it is below `THRESH` of the largest candidate in the
+            // fully-summed block — so a well-scaled/equilibrated matrix never
+            // interchanges (no fill or accuracy cost) while small/zero diagonals
+            // still get a stable pivot. `THRESH²` compared on squared magnitudes.
+            const THRESH_SQ: f64 = 0.01; // THRESH = 0.1
+            let mut p = k;
+            let mut best = lbuf[k * nrow + k].magnitude_sq();
+            for i in (k + 1)..ncol {
+                let m = lbuf[k * nrow + i].magnitude_sq();
+                if m > best {
+                    best = m;
+                    p = i;
+                }
+            }
+            let diag_sq = lbuf[k * nrow + k].magnitude_sq();
+            if p != k && diag_sq < THRESH_SQ * best {
+                for c in 0..ncol {
+                    lbuf.swap(c * nrow + k, c * nrow + p);
+                }
+                for t in 0..cnrow {
+                    ubuf.swap(k + t * ncol, p + t * ncol);
+                }
+                rperm.swap(k, p);
+            }
             let mut piv = lbuf[k * nrow + k];
             match perturb_floor {
                 Some(floor) if piv.magnitude() < floor => {
@@ -1197,7 +1240,7 @@ fn lu_ll_factor_node<T: Scalar>(
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
     // SAFETY: this thread owns `s`, writes its cells exactly once.
-    unsafe { store.set(s, lbuf, ubuf) };
+    unsafe { store.set(s, lbuf, ubuf, rperm) };
     Ok(())
 }
 
@@ -1299,15 +1342,24 @@ fn factor_lu_left_looking<T: Scalar>(
         );
     }
 
-    // Elimination order = supernode/column order (no row interchange).
+    // Two index maps (distinct under row pivoting): `e_of_g` = factorization
+    // position eliminating COLUMN g (→ U/L column indices); `row_pos_of_g` =
+    // position whose PIVOT ROW is g (→ L row indices). Equal without pivoting.
     let mut e_of_g = vec![usize::MAX; n];
+    let mut row_pos_of_g = vec![usize::MAX; n];
     let mut perm = vec![0usize; n];
+    let mut perm_row = vec![0usize; n];
     let mut e = 0usize;
-    for snode in &sym.supernodes {
+    for (s, snode) in sym.supernodes.iter().enumerate() {
+        // SAFETY: factorization complete; the rperm cell is written.
+        let rperm = unsafe { store.rperm(s) };
         for p in 0..snode.ncol {
-            let g = snode.first_col + p;
-            e_of_g[g] = e;
-            perm[e] = sym.perm[g];
+            let g_col = snode.first_col + p;
+            let g_row = rs[s][rperm[p]];
+            e_of_g[g_col] = e;
+            row_pos_of_g[g_row] = e;
+            perm[e] = sym.perm[g_col];
+            perm_row[e] = sym.perm[g_row];
             e += 1;
         }
     }
@@ -1330,15 +1382,18 @@ fn factor_lu_left_looking<T: Scalar>(
         // SAFETY: factorization is complete; the cells are written.
         let lbuf = unsafe { store.l(s) };
         let ubuf = unsafe { store.u(s) };
+        let rperm = unsafe { store.rperm(s) };
         for p in 0..ncol {
             let diag_e = e_of_g[first + p];
-            // L column: unit diagonal + strict-lower (rows of rs[s] below p).
+            // L column: unit diagonal + strict-lower. Row physically at position
+            // `i` originated from `rs[s][rperm[i]]` (partial pivoting) → its
+            // pivot-row position is the correct global L row index.
             lcol.clear();
             lcol.push((diag_e, one));
             for i in (p + 1)..nrow {
                 let v = lbuf[p * nrow + i];
                 if v != T::zero() {
-                    lcol.push((e_of_g[rs[s][i]], v));
+                    lcol.push((row_pos_of_g[rs[s][rperm[i]]], v));
                 }
             }
             if let Some(tau) = drop_tol {
@@ -1398,8 +1453,8 @@ fn factor_lu_left_looking<T: Scalar>(
         u_row_ptr,
         u_col_idx,
         u_values,
-        perm: perm.clone(),
-        perm_row: perm,
+        perm,
+        perm_row,
         d_row: d_row.to_vec(),
         d_col: d_col.to_vec(),
         n_perturbed,
@@ -1992,6 +2047,61 @@ mod tests {
         let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
+    }
+
+    #[test]
+    fn lu_left_looking_pivoting_small_diagonal() {
+        // Small diagonal, large off-diagonals → restricted partial pivoting must
+        // fire on (nearly) every column. The left-looking path (1×1 static) would
+        // eliminate on the tiny pivots and lose accuracy; with pivoting it must
+        // match the multifrontal and hit a tiny residual.
+        let c = |re, im| Complex::new(re, im);
+        let m = 6;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(0.05, 0.01)); // tiny diagonal → threshold pivoting fires
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(2.0, 0.3));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(1.5, -0.2));
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(1.8, 0.1));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(2.2, 0.4));
+                }
+            }
+        }
+        let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        let ll = factor_general_lu(
+            &a,
+            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+        )
+        .unwrap();
+        let mf = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let xl = solve_lu(&ll, &b).unwrap();
+        let xm = solve_lu(&mf, &b).unwrap();
+        let mut ax = vec![Complex::new(0.0, 0.0); n];
+        a.matvec(&xl, &mut ax);
+        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(res < 1e-9, "left-looking pivoting residual {res}");
+        let diff = (0..n).map(|i| (xl[i] - xm[i]).norm()).fold(0.0, f64::max);
+        assert!(diff < 1e-9, "left-looking vs multifrontal differ {diff}");
     }
 
     #[test]
