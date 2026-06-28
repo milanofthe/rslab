@@ -917,6 +917,9 @@ unsafe fn apply_panel_trailing<T: Scalar>(
     r0: usize,
     r1: usize,
 ) {
+    // `kk` indexes pinv_blk and drives the column arithmetic (`k`, `j`) and inner
+    // range — not a plain slice walk.
+    #[allow(clippy::needless_range_loop)]
     for kk in 0..pw {
         let k = kb + kk;
         let pinv_k = pinv_blk[kk];
@@ -1173,6 +1176,9 @@ fn lu_ll_factor_node<T: Scalar>(
     // panel columns (`lbuf`) plus the `U12` rows (`ubuf`), with no `A22`/CB. This
     // routes the `O(ncol²·nrow)` cdiv work (the measured 77 % of the left-looking
     // factor) through BLAS-3 instead of scalar rank-1 sweeps.
+    // Panel width. Swept 32/48/64/96 on the MoM fronts (even with the deep trailing
+    // rows now factored in a parallel apply): 32 stays optimal — wider panels add
+    // serial fully-summed getf2 without a matching trailing-GEMM efficiency gain.
     const NB_CDIV: usize = 32;
     const LL_CDIV_PAR: usize = 8_000_000;
     let mut local_perturbed = 0usize;
