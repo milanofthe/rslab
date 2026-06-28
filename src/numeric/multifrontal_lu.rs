@@ -12,15 +12,18 @@
 //! pattern** `A ∪ Aᵀ` so the elimination structure carries fill for both
 //! factors.
 //!
-//! ## Scope (v1)
+//! ## Pivoting
 //!
-//! * **Static pivoting only** (no row interchange): pivots are taken in order,
-//!   with sub-floor pivots perturbed (the [`ZeroPivotAction::PerturbToEps`]
-//!   knob). This is the standard, fast choice for a **preconditioner** (PARDISO
-//!   defaults to static pivoting too) and is well-suited to the equilibrated,
-//!   unit-diagonal MoM matrices. Threshold partial pivoting is a later add.
+//! * **Threshold partial pivoting** (UMFPACK-style, `THRESH = 0.1`), bounded to
+//!   each panel's fully-summed block: the diagonal is kept unless it falls below
+//!   `THRESH · |colmax|`, in which case the column max is brought up. Sub-floor
+//!   pivots are perturbed in preconditioner mode ([`ZeroPivotAction::PerturbToEps`])
+//!   or rejected in exact mode. Pivoting stays cheap on the equilibrated,
+//!   unit-diagonal MoM matrices while guarding the genuinely ill-scaled columns.
 //! * The reassembled factors are global sparse `L` (CSC, unit lower) and `U`
-//!   (CSR, upper with the pivots on the diagonal), in factorization order.
+//!   (CSR, upper with the pivots on the diagonal), in factorization order. The
+//!   default factor path is the supernodal **left-looking** kernel (low transient,
+//!   no CB stack); the multifrontal path is opt-in via [`FactorOptions::with_method`].
 
 use crate::error::FeralError;
 use crate::numeric::blr::BlrMatrix;

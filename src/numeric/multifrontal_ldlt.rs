@@ -153,23 +153,28 @@ impl BlrMode {
 /// transient-memory and scheduling profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FactorMethod {
-    /// Multifrontal (the `exact`/`default` choice): assembly-tree of dense
-    /// fronts, rayon work-stealing parallel, with full pivoting (Bunch-Kaufman
-    /// 2×2 for LDLᵀ, partial for LU). Carries the contribution-block stack + a
-    /// per-front extract transient. Robust for **exact indefinite direct solves**
-    /// that need pivoting for stability.
-    #[default]
+    /// Multifrontal: assembly-tree of dense fronts, rayon work-stealing parallel,
+    /// with full pivoting (Bunch-Kaufman 2×2 for LDLᵀ, partial for LU). Carries
+    /// the contribution-block stack + a per-front extract transient. Kept as the
+    /// opt-in alternative (via [`with_method`]) for cross-checking and for fronts
+    /// where the per-front extract layout is preferable; the default is
+    /// [`LeftLooking`](Self::LeftLooking).
+    ///
+    /// [`with_method`]: FactorOptions::with_method
     Multifrontal,
-    /// Supernodal left-looking (the [`preconditioner`] choice): each panel pulls
-    /// BLAS-3 updates from its factored descendants — **no contribution-block
-    /// stack, no extract phase** (the PARDISO transient profile), parallel over
-    /// the assembly tree, lower fill, faster than multifrontal on the MoM
-    /// matrices. Uses **Bunch-Kaufman 1×1/2×2 pivoting** bounded to each panel's
-    /// fully-summed block, so it handles indefinite (zero-/tiny-diagonal) systems
-    /// directly — the memory/throughput-optimal path for both the equilibrated
-    /// preconditioner and exact indefinite direct solves.
+    /// Supernodal left-looking (**the default**, and the [`preconditioner`]
+    /// choice): each panel pulls BLAS-3 updates from its factored descendants —
+    /// **no contribution-block stack, no extract phase** (the PARDISO transient
+    /// profile), parallel over the assembly tree, lower fill, faster than
+    /// multifrontal on the MoM matrices. Uses **Bunch-Kaufman 1×1/2×2 pivoting**
+    /// (LDLᵀ) / **threshold partial pivoting** (LU), bounded to each panel's
+    /// fully-summed block — pivoting parity with the multifrontal path — so it
+    /// handles indefinite (zero-/tiny-diagonal) systems directly. The
+    /// memory/throughput-optimal path for both exact direct solves and the
+    /// equilibrated preconditioner.
     ///
     /// [`preconditioner`]: FactorOptions::preconditioner
+    #[default]
     LeftLooking,
 }
 
@@ -201,8 +206,11 @@ pub struct FactorOptions {
     ///
     /// [`Off`]: BlrMode::Off
     pub blr: BlrMode,
-    /// Numeric factorization algorithm. Default [`Multifrontal`].
+    /// Numeric factorization algorithm. Default [`LeftLooking`] (lower transient
+    /// memory + faster); override with [`with_method`](Self::with_method) to force
+    /// the [`Multifrontal`] path.
     ///
+    /// [`LeftLooking`]: FactorMethod::LeftLooking
     /// [`Multifrontal`]: FactorMethod::Multifrontal
     pub method: FactorMethod,
 }
@@ -214,7 +222,7 @@ impl Default for FactorOptions {
             drop_tol: None,
             memory: MemoryMode::LowMemory,
             blr: BlrMode::Off,
-            method: FactorMethod::Multifrontal,
+            method: FactorMethod::LeftLooking,
         }
     }
 }
