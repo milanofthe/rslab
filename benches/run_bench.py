@@ -58,8 +58,11 @@ STYLE = {  # solver -> (label, color, marker)
     "mf": ("RSLAB multifrontal", "#06b6d4", "s"),
     "faer": ("faer LU", "#f59e0b", "^"),
     "pardiso": ("MKL PARDISO", "#22c55e", "D"),
+    "pc": ("RSLAB precond+GMRES", "#a855f7", "v"),
 }
 ORDER = ["ll", "mf", "faer", "pardiso"]
+# Solver order for the corpus bars (includes the preconditioner+refinement series).
+CORPUS_ORDER = ["ll", "mf", "faer", "pardiso", "pc"]
 
 # Neutral gray for axes/text/grid so figures read on both light and dark pages;
 # data colours stay saturated (visible on either). Backgrounds are transparent.
@@ -354,14 +357,18 @@ def fig_corpus(recs):
     # One wide figure per metric (split, not a cramped 3-panel) for ~30 matrices.
     metrics = [
         ("time", "fac_ms", "SuiteSparse corpus - factor time", "factor wall-clock (ms)", "corpus_time.png"),
+        ("time", "slv_ms", "SuiteSparse corpus - solve time (pc = GMRES refinement)",
+         "solve wall-clock (ms)", "corpus_solve.png"),
         ("mem", "mem_mb", "SuiteSparse corpus - factor memory", "factor memory (MB)", "corpus_memory.png"),
         ("time", "res", "SuiteSparse corpus - relative residual ||Ax-b||/||b|| (accuracy)",
          "relative residual", "corpus_residual.png"),
     ]
-    fig_w = max(12, len(names) * 0.62 + 3)
+    width = 0.16
+    nsolv = len(CORPUS_ORDER)
+    fig_w = max(12, len(names) * 0.7 + 3)
     for metric, ykey, title, ylab, fname in metrics:
         fig, ax = plt.subplots(figsize=(fig_w, 5.6))
-        for i, s in enumerate(ORDER):
+        for i, s in enumerate(CORPUS_ORDER):
             vals = []
             for nm in names:
                 v = next((r[ykey] for r in recs
@@ -370,7 +377,7 @@ def fig_corpus(recs):
             if all(np.isnan(v) for v in vals):
                 continue
             label, color, _ = STYLE[s]
-            ax.bar(x + (i - 1.5) * width, vals, width, label=label, color=color)
+            ax.bar(x + (i - (nsolv - 1) / 2) * width, vals, width, label=label, color=color)
         ax.set_yscale("log")
         ax.set_title(title)
         ax.set_ylabel(ylab)
@@ -388,12 +395,21 @@ def fig_corpus(recs):
         return [r["res"] for r in recs
                 if r["solver"] == s and r["metric"] == "time" and r["res"] > 0 and r["name"] in names]
     print(f"\n=== corpus validation ({len(names)} solvable matrices) ===")
-    for s in ORDER:
+    for s in CORPUS_ORDER:
         rs = res_list(s)
         if not rs:
             continue
         acc = sum(1 for v in rs if v < 1e-8)
-        print(f"  {STYLE[s][0]:<20} worst residual: {max(rs):.1e}   accurate (<1e-8): {acc}/{len(rs)}")
+        print(f"  {STYLE[s][0]:<22} worst residual: {max(rs):.1e}   accurate (<1e-8): {acc}/{len(rs)}")
+    # Matrices RSLAB's exact factorization could not factor, that pc (static pivot +
+    # GMRES refinement) rescued to a usable residual.
+    ll_solved = {r["name"] for r in recs
+                 if r["solver"] == "ll" and r["metric"] == "time" and r["res"] > 0 and r["name"] in names}
+    pc_rescued = [nm for nm in names if nm not in ll_solved and any(
+        r["solver"] == "pc" and r["name"] == nm and r["metric"] == "time" and 0 < r["res"] < 1e-6
+        for r in recs)]
+    if pc_rescued:
+        print(f"  pc rescued (exact factorization failed -> solved): {', '.join(pc_rescued)}")
 
     def geomean_ratio(a, b, metric, ykey):
         ratios = []

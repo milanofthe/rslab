@@ -88,11 +88,15 @@ residual `||Ax-b||/||b||` as the accuracy check (`python benches/run_bench.py --
   is faster and lighter than both on this mostly-structural corpus (about 7x time, 2.8x
   memory); the gap narrows on the larger complex EM/MoM matrices (see the scaling
   figures).
-- Limitation: RSLAB's exact-mode LDLᵀ (pivoting bounded to each supernode) fails on
-  indefinite saddle-point / KKT matrices (stokes64, bratu3d, cont-201) that PARDISO
-  factors directly; those need RSLAB's preconditioner mode (static pivoting + Krylov
-  refinement). RSLAB targets the complex-symmetric EM/FEM regime, not general indefinite
-  KKT.
+- Exact-mode limit: RSLAB's exact LDLᵀ (pivoting bounded to each supernode) cannot
+  factor some indefinite saddle-point / KKT matrices (stokes64, bratu3d, cont-201) that
+  PARDISO factors directly.
+- Preconditioner mode covers most of that gap: a never-fail static-pivot factor used as
+  a GMRES preconditioner reaches 28/33 below `1e-8` (matching PARDISO) and rescues the
+  exact-mode failures bratu3d and cont-201; it also refines RSLAB's one inaccurate exact
+  solve (qc2534, `3.6e-4` to `1.8e-13`). Its cost moves from the factor to the iteration
+  (the solve-time figure). The hardest saddle-point/CFD cases (stokes64, ex11) stay out
+  of reach. RSLAB targets the complex-symmetric EM/FEM regime, not general indefinite KKT.
 
 ## Install
 

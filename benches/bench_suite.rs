@@ -29,8 +29,8 @@ use faer::{c64, Mat as FaerMat};
 use num_complex::Complex;
 use rslab::matgen::{bem, stencil};
 use rslab::{
-    parse_mtx_complex_general, CscMatrix, FactorMethod, FactorOptions, GeneralCsc, LdltSymbolic,
-    LuSymbolic,
+    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, FactorOptions, GeneralCsc,
+    LdltSymbolic, LuSymbolic,
 };
 #[cfg(feature = "matgen-download")]
 use rslab::{read_mtx_any, MtxLoaded};
@@ -420,6 +420,55 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
             }
         } else {
             eprintln!("[bench] PARDISO unavailable (mkl_rt not found)");
+        }
+    }
+
+    // --- RSLAB preconditioner mode (static pivoting, never-fail) + GMRES refinement.
+    // Factors a perturbed Â (never rank-deficient), then refines A x = b with GMRES
+    // preconditioned by that factor - so the indefinite / hard matrices where exact
+    // factorization fails are still solved. `slv_ms` here is the Krylov refinement cost.
+    if has("pc") {
+        // floor 1e-4: regularizes the indefinite zero/tiny pivots enough for a
+        // well-conditioned preconditioner (GMRES then corrects back to A); a
+        // well-conditioned matrix has O(1) equilibrated pivots, so none are perturbed
+        // and pc reduces to the exact factor (1 GMRES step).
+        let envf = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let floor = envf("RLA_BENCH_PC_FLOOR", 1e-4);
+        let maxit = envf("RLA_BENCH_PC_MAXIT", 200.0) as usize;
+        let restart = envf("RLA_BENCH_PC_RESTART", 100.0) as usize;
+        let pc_opts = FactorOptions::preconditioner(floor).with_threads(threads.max(1) as usize);
+        let outcome = match mat {
+            Mat::Sym(a) => LdltSymbolic::analyze(a).and_then(|sym| {
+                let t = Instant::now();
+                let (fr, mm) = live_peak(|| sym.factor(a, &pc_opts));
+                let f = fr?;
+                let fac = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                let kr = gmres(a, &b, &f, 1e-10, maxit, restart)?;
+                let slv = t.elapsed().as_secs_f64() * 1e3;
+                let mut ax = vec![Complex::new(0.0, 0.0); n];
+                a.symv(&kr.x, &mut ax);
+                Ok((fac, slv, mm, f.factor_nnz(), rel(&ax, &b), kr.iters, kr.converged))
+            }),
+            Mat::Unsym(a) => LuSymbolic::analyze(a).and_then(|sym| {
+                let t = Instant::now();
+                let (fr, mm) = live_peak(|| sym.factor(a, &pc_opts));
+                let f = fr?;
+                let fac = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                let kr = gmres(a, &b, &f, 1e-10, maxit, restart)?;
+                let slv = t.elapsed().as_secs_f64() * 1e3;
+                let mut ax = vec![Complex::new(0.0, 0.0); n];
+                a.matvec(&kr.x, &mut ax);
+                Ok((fac, slv, mm, f.factor_nnz(), rel(&ax, &b), kr.iters, kr.converged))
+            }),
+        };
+        match outcome {
+            Ok((fac, slv, mm, fill, res, iters, conv)) => {
+                eprintln!("[pc] {name}: {iters} GMRES iters, converged={conv}, res={res:.1e}");
+                emit(out, "pc", family, name, n, nnz, threads, mem, 0.0, fac, slv, mm, fill, res);
+            }
+            Err(e) => eprintln!("[pc] {name}: factor/refine failed: {e:?}"),
         }
     }
 }
