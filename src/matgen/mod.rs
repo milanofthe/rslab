@@ -189,3 +189,80 @@ pub fn catalog() -> Vec<MatrixSpec> {
     random::add_to_catalog(&mut c);
     c
 }
+
+#[cfg(test)]
+mod integration {
+    //! Every family must produce matrices the solver actually factors and solves —
+    //! the whole point. Small instances, exact factorization, true residual.
+    use super::*;
+    use crate::{FactorOptions, LdltSymbolic, LuSymbolic};
+
+    type C = Complex<f64>;
+
+    fn rhs(n: usize) -> Vec<C> {
+        (0..n).map(|i| Complex::new((i % 5) as f64 - 2.0, (i % 3) as f64 - 1.0)).collect()
+    }
+
+    fn ldlt_resid(a: &CscMatrix<C>) -> f64 {
+        let b = rhs(a.n);
+        let f = LdltSymbolic::analyze(a).unwrap().factor(a, &FactorOptions::default()).unwrap();
+        let x = f.solve(&b).unwrap();
+        let mut ax = vec![Complex::new(0.0, 0.0); a.n];
+        a.symv(&x, &mut ax);
+        let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();
+        let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+        num / den.max(1e-300)
+    }
+
+    fn lu_resid(a: &GeneralCsc<C>) -> f64 {
+        let b = rhs(a.n);
+        let f = LuSymbolic::analyze(a).unwrap().factor(a, &FactorOptions::default()).unwrap();
+        let x = f.solve(&b).unwrap();
+        let mut ax = vec![Complex::new(0.0, 0.0); a.n];
+        a.matvec(&x, &mut ax);
+        let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();
+        let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+        num / den.max(1e-300)
+    }
+
+    #[test]
+    fn symmetric_families_factor_and_solve() {
+        // SPD stencil, complex-symmetric Helmholtz, banded, indefinite KKT (2×2 BK),
+        // and an exactly-ill-conditioned spectral matrix.
+        let cases: Vec<(&str, CscMatrix<C>)> = vec![
+            ("poisson3d", stencil::laplacian(&[8, 8, 8], &stencil::StencilOpts::default())),
+            ("helmholtz", stencil::helmholtz(&[8, 8, 8], Complex::new(3.0, 0.1), &stencil::StencilOpts::default())),
+            ("banded", structured::banded(400, 6, 1.0, 1)),
+            ("kkt_arrow", structured::arrow(400, 16, 1e-2, 1)),
+            ("spectral_ill", random::spectral(200, 1e8, false, 1)),
+            ("rand_spd", random::random_spd(500, 12, 1.0, 1)),
+        ];
+        for (name, a) in cases {
+            let r = ldlt_resid(&a);
+            assert!(r < 1e-6, "{name}: LDLᵀ residual {r:.1e} too large");
+        }
+    }
+
+    #[test]
+    fn unsymmetric_families_factor_and_solve() {
+        let bem = bem::kernel(600, &bem::BemOpts::default());
+        assert!(lu_resid(&bem) < 1e-6, "BEM LU residual too large");
+        let r = random::random_unsym::<C>(500, 12, 2.0, 1);
+        assert!(lu_resid(&r) < 1e-6, "random unsymmetric LU residual too large");
+    }
+
+    #[test]
+    fn catalog_is_well_formed() {
+        let cat = catalog();
+        assert!(cat.len() >= 15, "catalog has a useful number of entries");
+        // Names unique.
+        let mut names: Vec<&str> = cat.iter().map(|m| m.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), cat.len(), "catalog names are unique");
+        // Every symmetry class is represented.
+        for sym in [Symmetry::Spd, Symmetry::ComplexSymmetric, Symmetry::SymIndefinite, Symmetry::Unsymmetric] {
+            assert!(cat.iter().any(|m| m.symmetry == sym), "missing symmetry {sym:?}");
+        }
+    }
+}
