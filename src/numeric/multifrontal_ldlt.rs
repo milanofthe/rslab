@@ -40,6 +40,17 @@ const GROWTH_EPS: f64 = 1e-14;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::{symbolic_factorize, SupernodeParams, SymbolicFactorization};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+// Opt-in cdiv sub-phase profiler (set `RLA_PROFILE=1`): serial BK panel (getf2)
+// vs the deferred Schur update, summed across worker threads. Zero cost when off.
+static PROF_LDLT_GETF2_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_LDLT_SCHUR_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_LDLT_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[inline]
+fn ldlt_prof_on() -> bool {
+    *PROF_LDLT_FLAG.get_or_init(|| std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false))
+}
 
 /// Action to take when a near-zero pivot is encountered during factorization.
 ///
@@ -1581,9 +1592,11 @@ fn ll_factor_node<T: Scalar>(
             GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
         }};
     }
+    let prof = ldlt_prof_on();
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + NB).min(ncol);
+        let t_g = if prof { Some(std::time::Instant::now()) } else { None };
         // getf2: unblocked Bunch-Kaufman over the panel columns [kb, ke), with the
         // pivot candidate and rank-1/rank-2 trailing updates bounded to `ke` (the
         // columns beyond `ke` are deferred to the panel GEMM below). The L21
@@ -1737,6 +1750,10 @@ fn ll_factor_node<T: Scalar>(
             }
         }
 
+        if let Some(t) = t_g {
+            PROF_LDLT_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+        }
+        let t_s = if prof { Some(std::time::Instant::now()) } else { None };
         // Deferred panel trailing update: panel[ke.., ke..ncol] −= L21·D·Rᵀ, where
         // L21 = panel rows [ke,nrow) × panel cols [kb,ke) (mt×pw), G = L21·D (block-
         // diagonal D), and R = the first `cw` rows of L21 (the rows that are
@@ -1830,6 +1847,9 @@ fn ll_factor_node<T: Scalar>(
                     panel[dst] = panel[dst] - tmp[rr + cc2 * mt];
                 }
             }
+        }
+        if let Some(t) = t_s {
+            PROF_LDLT_SCHUR_NS.fetch_add(t.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
         }
         kb = ke;
     }
@@ -1985,6 +2005,16 @@ fn factor_left_looking<T: Scalar>(
         })
         .collect::<Result<Vec<()>, _>>()?;
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
+    if ldlt_prof_on() {
+        let g = PROF_LDLT_GETF2_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
+        let s = PROF_LDLT_SCHUR_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
+        let t = (g + s).max(1.0);
+        eprintln!(
+            "[RLA_LDLT_CDIV] CPU-ms  getf2(BK panel) {g:.0} ({:.0}% ser)  schur(deferred GEMM) {s:.0} ({:.0}% par)",
+            100.0 * g / t,
+            100.0 * s / t,
+        );
+    }
 
     // Emit global L (CSC) + D in elimination order. Within a supernode the
     // eliminated columns are in the panel's **pivoted** order, so pivoted column
