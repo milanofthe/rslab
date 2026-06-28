@@ -31,13 +31,23 @@ THREADS = OUTDIR / "threads.jsonl"
 REAL = OUTDIR / "real.jsonl"
 ESTIMATE = OUTDIR / "estimate.jsonl"
 
-# Problem sizes (≈ nodes). faer factors the symmetric family as full LU (2× work),
-# so the symmetric max is kept tractable. The unsymmetric BEM kernel now keeps a
-# constant ≈120 nnz/row (density-matched cutoff), so it scales to larger n.
-SYM_SIZES = [4000, 8000, 16000, 32000, 64000]
-UNSYM_SIZES = [2000, 4000, 8000, 16000, 32000]
+# Problem sizes (≈ nodes). The symmetric family is RSLAB's LDLᵀ path (3D Helmholtz)
+# vs faer full LU + PARDISO mtype 6; the unsymmetric is RSLAB LU (MoM) vs faer +
+# PARDISO mtype 13. faer factors the symmetric matrix as full LU (2× work), so it
+# bounds the largest tractable symmetric size.
+SYM_SIZES = [8000, 27000, 64000, 125000, 216000]  # k = 20,30,40,50,60
+# The BEM kernel build is O(n²) (all pairs), so the unsymmetric sweep tops out at a
+# size whose *construction* stays tractable; RSLAB factors much larger n in practice.
+UNSYM_SIZES = [4000, 8000, 16000, 32000, 64000]
+# faer factors the symmetric matrix as a *full* LU (2× work + memory), so it can
+# only reach the smaller sizes before OOM/impracticality; RSLAB and PARDISO run the
+# whole sweep. Above these caps we drop faer (RSLAB-LL/MF + PARDISO continue).
+SYM_FAER_MAX = 64000
+UNSYM_FAER_MAX = 32000
+# Memory-estimate sweep is a-priori (no factoring) so it reaches much larger DOFs.
+ESTIMATE_SIZES = [64000, 125000, 216000, 343000, 512000]  # k = 40,50,60,70,80
 THREAD_COUNTS = [1, 2, 4, 6, 8, 12, 16, 24]
-SYM_FIXED, UNSYM_FIXED = 32000, 16000
+SYM_FIXED, UNSYM_FIXED = 64000, 32000
 
 STYLE = {  # solver -> (label, color, marker)
     "ll": ("RSLAB left-looking", "#3b82f6", "o"),
@@ -71,13 +81,13 @@ def setup_style():
     })
 
 
-def env_for(family, sizes, mem, out, threads=None):
+def env_for(family, sizes, mem, out, threads=None, solvers="ll,mf,faer,pardiso"):
     e = dict(os.environ)
     e["PATH"] = MKL + os.pathsep + e.get("PATH", "")
     e["RLA_BENCH_FAMILY"] = family
     e["RLA_BENCH_SIZES"] = ",".join(map(str, sizes))
     e["RLA_BENCH_MEM"] = "1" if mem else ""
-    e["RLA_BENCH_SOLVERS"] = "ll,mf,faer,pardiso"
+    e["RLA_BENCH_SOLVERS"] = solvers
     e["RLA_BENCH_OUT"] = str(out)
     if threads is not None:
         for k in ("RAYON_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS"):
@@ -117,18 +127,26 @@ def collect():
     exe = build_engine()
     for p in (SCALING, THREADS, REAL, ESTIMATE):
         p.unlink(missing_ok=True)
-    # Scaling: time + memory passes, default (all) threads.
-    for family, sizes in (("sym", SYM_SIZES), ("unsym", UNSYM_SIZES)):
+    # Scaling: time + memory passes, default (all) threads. faer only up to its cap;
+    # above it RSLAB-LL/MF + PARDISO continue to larger DOFs.
+    for family, sizes, cap in (("sym", SYM_SIZES, SYM_FAER_MAX), ("unsym", UNSYM_SIZES, UNSYM_FAER_MAX)):
+        small = [n for n in sizes if n <= cap]
+        big = [n for n in sizes if n > cap]
         for mem in (False, True):
-            print(f"scaling {family} metric={'mem' if mem else 'time'} ...", flush=True)
-            run(exe, env_for(family, sizes, mem, SCALING))
+            tag = "mem" if mem else "time"
+            print(f"scaling {family} metric={tag} (all solvers) ...", flush=True)
+            if small:
+                run(exe, env_for(family, small, mem, SCALING))
+            if big:
+                print(f"scaling {family} metric={tag} (RSLAB+PARDISO, large) ...", flush=True)
+                run(exe, env_for(family, big, mem, SCALING, solvers="ll,mf,pardiso"))
     # Real precond_matrices (realism anchor) — time + memory.
     for mem in (False, True):
         print(f"real metric={'mem' if mem else 'time'} ...", flush=True)
         run(exe, env_for("real", [], mem, REAL))
-    # A-priori memory-estimate breakdown (instant, no factoring) over the sym sweep.
+    # A-priori memory-estimate breakdown (instant, no factoring) — reaches large DOFs.
     print("estimate sweep ...", flush=True)
-    e = env_for("sym", SYM_SIZES, False, ESTIMATE)
+    e = env_for("sym", ESTIMATE_SIZES, False, ESTIMATE)
     e["RLA_BENCH_ESTIMATE"] = "1"
     run(exe, e)
     # Thread sweep at a fixed size, time only.
@@ -207,10 +225,10 @@ def fig_threads(recs):
 
 def fig_real(recs):
     """Grouped bars per real matrix: factor time and factor memory, per solver."""
-    names = sorted({r["name"] for r in recs},
-                   key=lambda nm: next(r["n"] for r in recs if r["name"] == nm))
-    short = [nm.replace("_D300_N3", "").replace("_D350_N3", "").replace("_D280_N4_w16", "")
-             for nm in names]
+    n_of = {r["name"]: r["n"] for r in recs}
+    names = sorted({r["name"] for r in recs}, key=lambda nm: n_of[nm])
+    # Label by DOF count, not file name.
+    short = [f"{n_of[nm] / 1000:.1f}k" for nm in names]
     x = np.arange(len(names))
     width = 0.2
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
@@ -229,12 +247,13 @@ def fig_real(recs):
         ax.set_yscale("log")
         ax.set_title(title)
         ax.set_ylabel(ylab)
+        ax.set_xlabel("n (DOFs)")
         ax.set_xticks(x)
-        ax.set_xticklabels(short, rotation=30, ha="right", fontsize=7)
+        ax.set_xticklabels(short, fontsize=8)
         ax.grid(True, axis="y", ls=":", alpha=0.5)
         ax.legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig(OUTDIR / "real_matrices.png", dpi=130)
+    fig.savefig(OUTDIR / "real_matrices.png", dpi=130, transparent=True)
     print("wrote", OUTDIR / "real_matrices.png")
 
 
