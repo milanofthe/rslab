@@ -1,0 +1,6 @@
+
+{"name":"helmholtz_4096","n":4096,"panels_mb":17.9,"factor_mb":19.2,"scratch_mb":41.7,"transient_mb":78.8,"freed_floor_mb":19.2}
+{"name":"helmholtz_8000","n":8000,"panels_mb":36.4,"factor_mb":40.7,"scratch_mb":52.0,"transient_mb":129.1,"freed_floor_mb":40.7}
+{"name":"helmholtz_15625","n":15625,"panels_mb":83.0,"factor_mb":99.4,"scratch_mb":79.1,"transient_mb":261.5,"freed_floor_mb":99.4}
+{"name":"helmholtz_32768","n":32768,"panels_mb":216.2,"factor_mb":265.4,"scratch_mb":155.5,"transient_mb":637.1,"freed_floor_mb":265.4}
+{"name":"helmholtz_64000","n":64000,"panels_mb":511.0,"factor_mb":641.6,"scratch_mb":326.2,"transient_mb":1478.8,"freed_floor_mb":641.6}

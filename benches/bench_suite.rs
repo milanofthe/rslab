@@ -465,7 +465,28 @@ fn main() {
     // RLA now runs in a scoped pool of `opts.threads`; drive it from the sweep var.
     let opts = FactorOptions::default().with_threads(threads.max(1) as usize);
 
+    // Estimate-only mode (`RLA_BENCH_ESTIMATE=1`): emit the a-priori memory-estimate
+    // breakdown per matrix and skip all factoring (instant — no numeric work).
+    let estimate_only = std::env::var("RLA_BENCH_ESTIMATE").map(|v| v == "1").unwrap_or(false);
+
     for (name, mat) in build_family(&family, &sizes) {
+        if estimate_only {
+            let e = match &mat {
+                Mat::Sym(a) => LdltSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>()),
+                Mat::Unsym(a) => LuSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>()),
+            };
+            if let Some(e) = e {
+                let mb = |b: u64| b as f64 / 1e6;
+                let scratch = mb(e.transient_peak_bytes) - mb(e.panels_all_bytes) - mb(e.factor_bytes);
+                let _ = writeln!(
+                    out,
+                    "{{\"name\":\"{name}\",\"n\":{},\"panels_mb\":{:.1},\"factor_mb\":{:.1},\"scratch_mb\":{:.1},\"transient_mb\":{:.1},\"freed_floor_mb\":{:.1}}}",
+                    mat.n(), mb(e.panels_all_bytes), mb(e.factor_bytes), scratch.max(0.0),
+                    mb(e.transient_peak_bytes), mb(e.panel_live_peak_bytes),
+                );
+            }
+            continue;
+        }
         eprintln!("[bench] family={family} name={name} n={} threads={threads} metric={}", mat.n(), if mem { "mem" } else { "time" });
         run_matrix(&mut out, &family, &name, &mat, threads, mem, &solvers, &opts);
     }

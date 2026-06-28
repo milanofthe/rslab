@@ -29,6 +29,7 @@ OUTDIR.mkdir(parents=True, exist_ok=True)
 SCALING = OUTDIR / "scaling.jsonl"
 THREADS = OUTDIR / "threads.jsonl"
 REAL = OUTDIR / "real.jsonl"
+ESTIMATE = OUTDIR / "estimate.jsonl"
 
 # Problem sizes (≈ nodes). faer factors the symmetric family as full LU (2× work),
 # so the symmetric max is kept tractable. The unsymmetric BEM kernel now keeps a
@@ -39,12 +40,35 @@ THREAD_COUNTS = [1, 2, 4, 6, 8, 12, 16, 24]
 SYM_FIXED, UNSYM_FIXED = 32000, 16000
 
 STYLE = {  # solver -> (label, color, marker)
-    "ll": ("RLA left-looking", "#1f77b4", "o"),
-    "mf": ("RLA multifrontal", "#17becf", "s"),
-    "faer": ("faer LU", "#ff7f0e", "^"),
-    "pardiso": ("MKL PARDISO", "#2ca02c", "D"),
+    "ll": ("RSLAB left-looking", "#3b82f6", "o"),
+    "mf": ("RSLAB multifrontal", "#06b6d4", "s"),
+    "faer": ("faer LU", "#f59e0b", "^"),
+    "pardiso": ("MKL PARDISO", "#22c55e", "D"),
 }
 ORDER = ["ll", "mf", "faer", "pardiso"]
+
+# Neutral gray for axes/text/grid so figures read on both light and dark pages;
+# data colours stay saturated (visible on either). Backgrounds are transparent.
+GRAY = "#808080"
+
+
+def setup_style():
+    plt.rcParams.update({
+        "figure.facecolor": "none",
+        "axes.facecolor": "none",
+        "savefig.facecolor": "none",
+        "savefig.transparent": True,
+        "text.color": GRAY,
+        "axes.edgecolor": GRAY,
+        "axes.labelcolor": GRAY,
+        "axes.titlecolor": GRAY,
+        "xtick.color": GRAY,
+        "ytick.color": GRAY,
+        "grid.color": GRAY,
+        "legend.framealpha": 0.0,
+        "legend.labelcolor": GRAY,
+        "font.size": 10,
+    })
 
 
 def env_for(family, sizes, mem, out, threads=None):
@@ -91,7 +115,7 @@ def load(path):
 
 def collect():
     exe = build_engine()
-    for p in (SCALING, THREADS, REAL):
+    for p in (SCALING, THREADS, REAL, ESTIMATE):
         p.unlink(missing_ok=True)
     # Scaling: time + memory passes, default (all) threads.
     for family, sizes in (("sym", SYM_SIZES), ("unsym", UNSYM_SIZES)):
@@ -102,6 +126,11 @@ def collect():
     for mem in (False, True):
         print(f"real metric={'mem' if mem else 'time'} ...", flush=True)
         run(exe, env_for("real", [], mem, REAL))
+    # A-priori memory-estimate breakdown (instant, no factoring) over the sym sweep.
+    print("estimate sweep ...", flush=True)
+    e = env_for("sym", SYM_SIZES, False, ESTIMATE)
+    e["RLA_BENCH_ESTIMATE"] = "1"
+    run(exe, e)
     # Thread sweep at a fixed size, time only.
     for family, fixed in (("sym", SYM_FIXED), ("unsym", UNSYM_FIXED)):
         for t in THREAD_COUNTS:
@@ -209,21 +238,84 @@ def fig_real(recs):
     print("wrote", OUTDIR / "real_matrices.png")
 
 
+def fig_wct_breakdown(recs):
+    """Stacked analyze / factor / solve wall-clock per solver, at the largest size
+    of each family — where each solver spends its time."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
+    for ax, family in ((axes[0], "sym"), (axes[1], "unsym")):
+        rows = [r for r in recs if r["family"] == family and r["metric"] == "time"]
+        if not rows:
+            continue
+        nmax = max(r["n"] for r in rows)
+        rows = [r for r in rows if r["n"] == nmax]
+        present = [s for s in ORDER if any(r["solver"] == s for r in rows)]
+        x = np.arange(len(present))
+        ana = [next((r["ana_ms"] for r in rows if r["solver"] == s), 0) for s in present]
+        fac = [next((r["fac_ms"] for r in rows if r["solver"] == s), 0) for s in present]
+        slv = [next((r["slv_ms"] for r in rows if r["solver"] == s), 0) for s in present]
+        ax.bar(x, ana, 0.6, label="analyze", color=GRAY, alpha=0.55)
+        ax.bar(x, fac, 0.6, bottom=ana, label="factor", color="#3b82f6")
+        ax.bar(x, slv, 0.6, bottom=[a + f for a, f in zip(ana, fac)], label="solve", color="#f59e0b")
+        ax.set_yscale("log")
+        ax.set_title(f"WCT breakdown — {family} (n={nmax})")
+        ax.set_ylabel("wall-clock (ms)")
+        ax.set_xticks(x)
+        ax.set_xticklabels([STYLE[s][0] for s in present], rotation=20, ha="right", fontsize=8)
+        ax.grid(True, axis="y", ls=":", alpha=0.5)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(OUTDIR / "wct_breakdown.png", dpi=130, transparent=True)
+    print("wrote", OUTDIR / "wct_breakdown.png")
+
+
+def fig_memory_breakdown(recs):
+    """Stacked a-priori memory estimate (dense panels / compact factor / scratch)
+    vs DOFs, with the panel-freed live floor marked."""
+    recs = sorted(recs, key=lambda r: r["n"])
+    ns = [r["n"] for r in recs]
+    x = np.arange(len(ns))
+    panels = [r["panels_mb"] for r in recs]
+    factor = [r["factor_mb"] for r in recs]
+    scratch = [r["scratch_mb"] for r in recs]
+    floor = [r["freed_floor_mb"] for r in recs]
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    ax.bar(x, panels, 0.6, label="dense panels", color="#3b82f6")
+    ax.bar(x, factor, 0.6, bottom=panels, label="compact factor (CSC)", color="#06b6d4")
+    ax.bar(x, scratch, 0.6, bottom=[p + f for p, f in zip(panels, factor)],
+           label="input + scratch", color=GRAY, alpha=0.55)
+    ax.plot(x, floor, "o--", color="#f59e0b", label="panel-freed live floor", lw=1.6, ms=5)
+    ax.set_title("A-priori factor-memory breakdown — symmetric (3D)")
+    ax.set_xlabel("n (DOFs)")
+    ax.set_ylabel("estimated memory (MB)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{n//1000}k" for n in ns])
+    ax.grid(True, axis="y", ls=":", alpha=0.5)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(OUTDIR / "memory_breakdown.png", dpi=130, transparent=True)
+    print("wrote", OUTDIR / "memory_breakdown.png")
+
+
 def main():
+    setup_style()
     if "--plot-only" not in sys.argv:
         collect()
     sc = load(SCALING)
     th = load(THREADS)
     rl = load(REAL)
+    es = load(ESTIMATE)
     if not sc:
         sys.exit("no scaling records collected")
     fig_scaling(sc, "fac_ms", "factor wall-clock (ms)", "scaling_factor.png", "Factor time")
     fig_scaling(sc, "slv_ms", "solve wall-clock (ms)", "scaling_solve.png", "Solve time")
     fig_scaling(sc, "mem_mb", "factor memory (MB)", "scaling_memory.png", "Factor memory")
+    fig_wct_breakdown(sc)
     if th:
         fig_threads(th)
     if rl:
         fig_real(rl)
+    if es:
+        fig_memory_breakdown(es)
     print("done.")
 
 
