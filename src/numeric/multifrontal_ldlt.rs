@@ -224,6 +224,33 @@ pub struct FactorOptions {
     /// [`LeftLooking`]: FactorMethod::LeftLooking
     /// [`Multifrontal`]: FactorMethod::Multifrontal
     pub method: FactorMethod,
+    /// Worker-thread budget for this factorization, run in a **scoped** rayon pool
+    /// (not the global pool) — so multiple concurrent solves (solver-in-the-loop)
+    /// share the machine instead of each grabbing every core. `0` = all logical
+    /// cores. **Default `2`** (the in-the-loop default). The numeric result is
+    /// bit-identical regardless of this value.
+    pub threads: usize,
+}
+
+/// The default worker-thread budget: small, so concurrent solves coexist. Override
+/// with [`FactorOptions::with_threads`] (or `0` for all cores) for max single-solve
+/// throughput.
+pub const DEFAULT_THREADS: usize = 2;
+
+/// Run `f` inside a **scoped** rayon thread pool of `threads` workers, so this
+/// factorization's parallelism is bounded and concurrent solves coexist instead of
+/// each grabbing the global pool. Falls back to running on the current pool if the
+/// build fails. `threads == 0` means all logical cores.
+pub(crate) fn in_scoped_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+    let n = if threads == 0 {
+        std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
+    } else {
+        threads
+    };
+    match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+        Ok(pool) => pool.install(f),
+        Err(_) => f(),
+    }
 }
 
 impl Default for FactorOptions {
@@ -234,6 +261,7 @@ impl Default for FactorOptions {
             memory: MemoryMode::LowMemory,
             blr: BlrMode::Off,
             method: FactorMethod::LeftLooking,
+            threads: DEFAULT_THREADS,
         }
     }
 }
@@ -291,6 +319,22 @@ impl FactorOptions {
     pub fn with_method(mut self, method: FactorMethod) -> Self {
         self.method = method;
         self
+    }
+
+    /// Builder: set the worker-thread budget (`0` = all logical cores). The factor
+    /// runs in a scoped pool of this size so concurrent solves don't oversubscribe.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// The resolved worker count: `threads`, or all logical cores when `0`.
+    pub fn resolved_threads(&self) -> usize {
+        if self.threads == 0 {
+            std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
+        } else {
+            self.threads
+        }
     }
 }
 
@@ -1107,9 +1151,10 @@ pub fn factor_numeric<T: Scalar>(
     };
     let sym = &inner.sym;
 
-    // Supernodal left-looking path: same factor, low transient (no CB stack).
+    // Supernodal left-looking path: same factor, low transient (no CB stack). Run
+    // in a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        return factor_left_looking(sym, a, opts);
+        return in_scoped_pool(opts.threads, || factor_left_looking(sym, a, opts));
     }
 
     // Static-pivot floor (absolute), translated from feral's ZeroPivotAction.

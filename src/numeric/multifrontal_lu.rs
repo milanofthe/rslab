@@ -1957,17 +1957,20 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let a_perm = GeneralCsc::<T>::from_triplets(n, &rows, &cols, &vals)?;
     let a_perm_t = a_perm.transpose();
 
-    // Supernodal left-looking LU: same factor, low transient (no CB stack).
+    // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
+    // a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        return factor_lu_left_looking(
-            sym,
-            &a_perm,
-            &a_perm_t,
-            &d_row,
-            &d_col,
-            perturb_floor,
-            opts.drop_tol,
-        );
+        return crate::numeric::multifrontal_ldlt::in_scoped_pool(opts.threads, || {
+            factor_lu_left_looking(
+                sym,
+                &a_perm,
+                &a_perm_t,
+                &d_row,
+                &d_col,
+                perturb_floor,
+                opts.drop_tol,
+            )
+        });
     }
 
     let profile = std::env::var("RLA_PROFILE")

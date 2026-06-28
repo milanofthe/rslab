@@ -455,7 +455,8 @@ fn main() {
         .append(true)
         .open(&out_path)
         .expect("open RLA_BENCH_OUT");
-    let opts = FactorOptions::default();
+    // RLA now runs in a scoped pool of `opts.threads`; drive it from the sweep var.
+    let opts = FactorOptions::default().with_threads(threads.max(1) as usize);
 
     for (name, mat) in build_family(&family, &sizes) {
         eprintln!("[bench] family={family} name={name} n={} threads={threads} metric={}", mat.n(), if mem { "mem" } else { "time" });
