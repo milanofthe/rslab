@@ -14,6 +14,8 @@
 //! `RLA_BENCH_OUT=path.jsonl`, `RAYON_NUM_THREADS=N` (threads, also drives faer/MKL).
 //!
 //! Run via the driver; standalone: `cargo bench --bench bench_suite --features matgen`.
+// CSC/COO conversion loops use the index as a value (col_ptr[c], next[c]).
+#![allow(clippy::needless_range_loop)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::c_void;
@@ -30,6 +32,8 @@ use rslab::{
     parse_mtx_complex_general, CscMatrix, FactorMethod, FactorOptions, GeneralCsc, LdltSymbolic,
     LuSymbolic,
 };
+#[cfg(feature = "matgen-download")]
+use rslab::{read_mtx_any, MtxLoaded};
 
 type C = Complex<f64>;
 
@@ -282,16 +286,30 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
             continue;
         }
         let o = opts.clone().with_method(method);
+        // Error-tolerant: a singular / numerically hard corpus matrix must skip
+        // (with a note) rather than panic and abort the whole sweep.
+        macro_rules! skip_err {
+            ($what:expr, $r:expr) => {
+                match $r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[{tag}] {name}: {} failed: {e:?}", $what);
+                        continue;
+                    }
+                }
+            };
+        }
         match mat {
             Mat::Sym(a) => {
                 let t = Instant::now();
-                let sym = LdltSymbolic::analyze(a).unwrap();
+                let sym = skip_err!("analyze", LdltSymbolic::analyze(a));
                 let ana = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
-                let (f, mm) = live_peak(|| sym.factor(a, &o).unwrap());
+                let (fr, mm) = live_peak(|| sym.factor(a, &o));
+                let f = skip_err!("factor", fr);
                 let fac = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
-                let x = f.solve(&b).unwrap();
+                let x = skip_err!("solve", f.solve(&b));
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.symv(&x, &mut ax);
@@ -299,13 +317,14 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
             }
             Mat::Unsym(a) => {
                 let t = Instant::now();
-                let sym = LuSymbolic::analyze(a).unwrap();
+                let sym = skip_err!("analyze", LuSymbolic::analyze(a));
                 let ana = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
-                let (f, mm) = live_peak(|| sym.factor(a, &o).unwrap());
+                let (fr, mm) = live_peak(|| sym.factor(a, &o));
+                let f = skip_err!("factor", fr);
                 let fac = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
-                let x = f.solve(&b).unwrap();
+                let x = skip_err!("solve", f.solve(&b));
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.matvec(&x, &mut ax);
@@ -314,8 +333,30 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
         }
     }
 
-    // --- faer (full LU) ---
-    if has("faer") {
+    // --- faer (full LU) --- memory-gated: faer factors the FULL matrix as a complex
+    // LU (several x the memory of RSLAB's structure-exploiting factor), so skip it
+    // when RSLAB's *a-priori* transient estimate already implies faer would blow the
+    // budget (dogfooding the estimator) or above a generous n cap. RSLAB + PARDISO
+    // still run. Tunable via RLA_BENCH_FAER_MAX / RLA_BENCH_FAER_EST_MB.
+    let faer_max: usize = std::env::var("RLA_BENCH_FAER_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000);
+    let faer_est_mb: f64 = std::env::var("RLA_BENCH_FAER_EST_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000.0);
+    let rslab_est_mb = match mat {
+        Mat::Sym(a) => LdltSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>().transient_peak_bytes),
+        Mat::Unsym(a) => LuSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>().transient_peak_bytes),
+    }
+    .map(|b| b as f64 / 1e6)
+    .unwrap_or(0.0);
+    let faer_ok = n <= faer_max && rslab_est_mb < faer_est_mb;
+    if has("faer") && !faer_ok {
+        eprintln!("[faer] skip {name} (n={n}, RSLAB est {rslab_est_mb:.0} MB ⇒ faer over budget)");
+    }
+    if has("faer") && faer_ok {
         let fa = match mat {
             Mat::Sym(a) => build_faer(&sym_to_full(a)),
             Mat::Unsym(a) => build_faer(a),
@@ -407,6 +448,7 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 (format!("mom_{}", a.n), Mat::Unsym(a))
             })
             .collect(),
+        "corpus" => build_corpus(),
         "real" => {
             let dir = std::env::var("RLA_BENCH_REAL_DIR")
                 .unwrap_or_else(|_| r"C:\Repositories\rapidmom\precond_matrices".into());
@@ -433,6 +475,61 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
         }
         _ => Vec::new(),
     }
+}
+
+/// SuiteSparse validation corpus: download each `group/name`, auto-detect its type,
+/// and route symmetric → LDLᵀ, general → LU. Curated to be diverse (SPD / CFD /
+/// circuit / complex), non-singular, and memory-safe (n ≤ ~30k, run sequentially).
+/// Override with `RLA_BENCH_CORPUS` as a comma-separated `group/name` list. A
+/// matrix that fails to download/parse is skipped with a note.
+#[cfg(feature = "matgen-download")]
+fn build_corpus() -> Vec<(String, Mat)> {
+    // Default set spanning the axes; all comfortably < a few GB factored.
+    // Diverse, non-singular, ~1k-100k. (cryg10000 is a near-singular eigenvalue test
+    // matrix - no solver gets a small Ax=b residual - so it is omitted.) A name that
+    // fails to download is skipped with a note, so the list can be generous.
+    const DEFAULT: &str = "\
+        HB/bcsstk27,HB/bcsstk14,HB/bcsstk16,HB/bcsstk17,HB/bcsstk18,HB/bcsstk25,\
+        Cylshell/s3rmt3m3,Boeing/msc10848,Boeing/crystk03,Boeing/bcsstk39,\
+        GHS_psdef/wathen100,GHS_psdef/wathen120,GHS_psdef/oilpan,GHS_psdef/s3dkt3m2,\
+        Williams/pdb1HYS,Williams/cant,Nasa/nasasrb,Rothberg/cfd1,Schmid/thermal1,\
+        Um/2cubes_sphere,\
+        GHS_indef/stokes64,GHS_indef/bratu3d,GHS_indef/copter2,GHS_indef/dixmaanl,\
+        GHS_indef/cont-201,\
+        HB/sherman5,HB/sherman3,FIDAP/ex11,Hamm/memplus,Simon/raefsky3,Wang/wang3,\
+        Bai/af23560,Mallya/lhr34,Goodwin/rim,\
+        Bai/qc2534,Bai/mhd4800b";
+    let list = std::env::var("RLA_BENCH_CORPUS").unwrap_or_else(|_| DEFAULT.into());
+    let mut mats: Vec<(String, Mat)> = list
+        .split(',')
+        .filter_map(|gn| {
+            let gn = gn.trim();
+            let (group, name) = gn.split_once('/')?;
+            let path = match rslab::matgen::download::fetch(group, name) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[corpus] fetch {gn} failed: {e}");
+                    return None;
+                }
+            };
+            match read_mtx_any(&path) {
+                Ok(MtxLoaded::Symmetric(a)) => Some((name.to_string(), Mat::Sym(a))),
+                Ok(MtxLoaded::General(a)) => Some((name.to_string(), Mat::Unsym(a))),
+                Err(e) => {
+                    eprintln!("[corpus] read {gn} failed: {e:?}");
+                    None
+                }
+            }
+        })
+        .collect();
+    mats.sort_by_key(|(_, m)| m.n());
+    mats
+}
+
+#[cfg(not(feature = "matgen-download"))]
+fn build_corpus() -> Vec<(String, Mat)> {
+    eprintln!("[corpus] needs --features matgen-download");
+    Vec::new()
 }
 
 fn main() {

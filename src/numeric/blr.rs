@@ -2,8 +2,8 @@
 //!
 //! Frontal matrices from elliptic-PDE FEM (Helmholtz) and integral-equation MoM
 //! near-fields are not low-rank themselves, but their **off-diagonal sub-blocks**
-//! - which couple geometrically separated index clusters through a smooth kernel
-//! - are numerically low-rank. Compressing those blocks shrinks both the
+//! (which couple geometrically separated index clusters through a smooth kernel)
+//! are numerically low-rank. Compressing those blocks shrinks both the
 //! factorization flop count and the front/contribution memory, the two levers
 //! behind the PARDISO throughput gap and the transient-memory spike. This module
 //! provides the low-rank block type and a pure-Rust rank-revealing compressor;
@@ -699,8 +699,8 @@ fn block_sub<T: Scalar>(target: &mut Block<T>, prod: Block<T>, eps: f64) {
 }
 
 /// `T ⊖ P` for two low-rank tiles: concatenate `[U_t | −U_p]`, `[V_t | V_p]`
-/// (rank `r_t + r_p`), then recompress if the rank exceeds the break-even point
-/// - densify the small tile and re-run ACA, falling back to dense if it no
+/// (rank `r_t + r_p`), then recompress if the rank exceeds the break-even point:
+/// densify the small tile and re-run ACA, falling back to dense if it no
 /// longer pays.
 fn concat_recompress<T: Scalar>(t: LowRank<T>, mut p: LowRank<T>, eps: f64) -> Block<T> {
     let (m, n) = (t.m, t.n);

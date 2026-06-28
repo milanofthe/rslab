@@ -54,7 +54,7 @@ pub struct SupernodeParams {
     /// `symbolic_factorize_with_method` driver records elapsed time
     /// per stage (ordering, etree, postorder, col_counts, renumber,
     /// find_supernodes, etc.). When `None`, every timer is bypassed
-    /// - zero overhead. See
+    /// (zero overhead). See
     /// `dev/research/phase-2.13b-symbolic-profiler.md`.
     pub symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
 

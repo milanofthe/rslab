@@ -135,8 +135,8 @@ pub enum OrderingMethod {
 ///   - thin-large (issues #67 + #73): whenever the size rule would still
 ///     pick `MetisND` (after the avg_deg<5 → AMD and arrow → AMF catches),
 ///     override to `Amf` at every `n`. Corpus A/Bs on real factor+solve
-///     wall-time found AMF wins or ties MetisND across the whole population
-///     - 36/36 in the `(10_000, 100_000]` band (#67) and every measured
+///     wall-time found AMF wins or ties MetisND across the whole population:
+///     36/36 in the `(10_000, 100_000]` band (#67) and every measured
 ///     `n > 100_000 && avg_deg >= 5` non-arrow family (#73), including the
 ///     one matrix (nql180) where MetisND has smaller fill but AMF is still
 ///     2× faster on the real factor+solve.

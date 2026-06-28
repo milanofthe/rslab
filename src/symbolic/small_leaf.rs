@@ -50,8 +50,8 @@ pub struct SmallLeafGroup {
     /// symbolic time so the batched numeric path can reuse it across
     /// every factorization that shares this `SymbolicFactorization`.
     ///
-    /// Layout is `[first_col..first_col+ncol, trailing rows sorted]`
-    /// - identical to the build_row_indices output for a leaf (no
+    /// Layout is `[first_col..first_col+ncol, trailing rows sorted]`,
+    /// identical to the build_row_indices output for a leaf (no
     /// children, no delayed columns).
     ///
     /// The actual per-member frontal dimension is

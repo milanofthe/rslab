@@ -2181,7 +2181,7 @@ fn ll_factor_subtree<T: Scalar>(
 /// each panel's fully-summed block, so the off-diagonal rows keep their identity
 /// and the descendant→ancestor `cmod` is unaffected by a panel's internal
 /// permutation. There is **no contribution-block stack and no extract copy-out**
-/// - the panels are the factor - so the transient is just the factor itself (the
+/// (the panels are the factor), so the transient is just the factor itself (the
 /// PARDISO memory profile). Produces the same [`LdltFactors`] as the multifrontal
 /// path (numerically equivalent up to pivot order), including indefinite
 /// (zero-/tiny-diagonal) systems via the 2×2 blocks.

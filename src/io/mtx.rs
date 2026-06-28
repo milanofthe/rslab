@@ -69,6 +69,61 @@ pub fn read_mtx_complex(path: &Path) -> Result<MtxMatrix<Complex<f64>>, RslabErr
     parse_mtx_complex(&contents, path.to_string_lossy().as_ref())
 }
 
+/// A Matrix Market file loaded with its structure tag, values widened to
+/// `Complex<f64>` (a real input gets a zero imaginary part). Auto-detected by
+/// [`read_mtx_any`] so a heterogeneous corpus (SuiteSparse) routes each matrix to
+/// the right solver path.
+pub enum MtxLoaded {
+    /// `symmetric` file: lower triangle, for the LDLᵀ path.
+    Symmetric(CscMatrix<Complex<f64>>),
+    /// `general` file: full pattern, for the LU path.
+    General(crate::sparse::general::GeneralCsc<Complex<f64>>),
+}
+
+/// Read any `real`/`complex`/`integer` × `symmetric`/`general` Matrix Market
+/// coordinate file, widening values to `Complex<f64>`. The header is auto-detected;
+/// `pattern`, `hermitian`, and `skew-symmetric` are rejected (not the
+/// complex-symmetric / general forms the solvers take).
+pub fn read_mtx_any(path: &Path) -> Result<MtxLoaded, RslabError> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| RslabError::IoError(format!("{}: {}", path.display(), e)))?;
+    let source = path.to_string_lossy();
+    let header = contents.lines().next().unwrap_or("");
+    let t: Vec<String> = header.split_whitespace().map(|s| s.to_ascii_lowercase()).collect();
+    if t.len() != 5 || t[0] != "%%matrixmarket" || t[1] != "matrix" || t[2] != "coordinate" {
+        return Err(RslabError::IoError(format!(
+            "{source}: unsupported header '{}'",
+            header.trim()
+        )));
+    }
+    let (field, symmetry) = (t[3].clone(), t[4].clone());
+    if field != "real" && field != "complex" && field != "integer" {
+        return Err(RslabError::IoError(format!(
+            "{source}: unsupported field '{field}' (real/complex/integer only)"
+        )));
+    }
+    let is_complex = field == "complex";
+    let nvt = if is_complex { 2 } else { 1 };
+    let to_c = move |toks: &[&str]| -> Option<Complex<f64>> {
+        let re = toks.first()?.parse::<f64>().ok()?;
+        let im = if is_complex { toks.get(1)?.parse::<f64>().ok()? } else { 0.0 };
+        Some(Complex::new(re, im))
+    };
+    match symmetry.as_str() {
+        "symmetric" => {
+            let m = parse_mtx_with(&contents, &source, &field, "symmetric", nvt, to_c)?;
+            Ok(MtxLoaded::Symmetric(m.to_csc()?))
+        }
+        "general" => {
+            let m = parse_mtx_with(&contents, &source, &field, "general", nvt, to_c)?;
+            Ok(MtxLoaded::General(m.to_general_csc()?))
+        }
+        other => Err(RslabError::IoError(format!(
+            "{source}: unsupported symmetry '{other}' (symmetric/general only)"
+        ))),
+    }
+}
+
 /// Parse a **real** symmetric Matrix Market string (`mtype 2`).
 pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix<f64>, RslabError> {
     parse_mtx_with(contents, source, "real", "symmetric", 1, |toks| {

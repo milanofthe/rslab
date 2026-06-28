@@ -30,6 +30,10 @@ SCALING = OUTDIR / "scaling.jsonl"
 THREADS = OUTDIR / "threads.jsonl"
 REAL = OUTDIR / "real.jsonl"
 ESTIMATE = OUTDIR / "estimate.jsonl"
+CORPUS = OUTDIR / "corpus.jsonl"
+# Moderate thread budget for the corpus validation run, so it leaves headroom on a
+# shared machine (the run is sequential per matrix anyway).
+CORPUS_THREADS = 8
 
 # Problem sizes (≈ nodes). The symmetric family is RSLAB's LDLᵀ path (3D Helmholtz)
 # vs faer full LU + PARDISO mtype 6; the unsymmetric is RSLAB LU (MoM) vs faer +
@@ -101,7 +105,7 @@ def env_for(family, sizes, mem, out, threads=None, solvers="ll,mf,faer,pardiso")
 def build_engine():
     print("building bench_suite ...", flush=True)
     subprocess.run(
-        ["cargo", "bench", "--bench", "bench_suite", "--features", "matgen", "--no-run"],
+        ["cargo", "bench", "--bench", "bench_suite", "--features", "matgen-download", "--no-run"],
         cwd=REPO, check=True,
     )
     exes = [
@@ -315,14 +319,121 @@ def fig_memory_breakdown(recs):
     print("wrote", OUTDIR / "memory_breakdown.png")
 
 
+def collect_corpus():
+    exe = build_engine()
+    CORPUS.unlink(missing_ok=True)
+    for mem in (False, True):
+        print(f"corpus metric={'mem' if mem else 'time'} (threads={CORPUS_THREADS}) ...", flush=True)
+        run(exe, env_for("corpus", [0], mem, CORPUS, threads=CORPUS_THREADS))
+
+
+def fig_corpus(recs):
+    """SuiteSparse validation: per-matrix grouped bars for factor time, factor
+    memory, and relative residual (accuracy), vs faer and PARDISO."""
+    n_of = {r["name"]: r["n"] for r in recs}
+    all_names = sorted({r["name"] for r in recs}, key=lambda nm: n_of[nm])
+
+    # Exclude matrices no solver can solve (min residual > 0.1 ⇒ (near-)singular /
+    # eigenvalue test matrix, not a valid linear-solve entry).
+    def min_res(nm):
+        rs = [r["res"] for r in recs if r["name"] == nm and r["metric"] == "time" and r["res"] > 0]
+        return min(rs) if rs else float("inf")
+    names = [nm for nm in all_names if min_res(nm) < 1e-1]
+    excluded = [nm for nm in all_names if nm not in names]
+    if excluded:
+        print("excluded (no solver < 0.1 residual, (near-)singular): "
+              + ", ".join(f"{nm} (min {min_res(nm):.0e})" for nm in excluded))
+
+    def lab(nm):
+        n = n_of[nm]
+        return f"{nm}\n{n//1000}k" if n >= 1000 else f"{nm}\n{n}"
+
+    labels = [lab(nm) for nm in names]
+    x = np.arange(len(names))
+    width = 0.2
+    # One wide figure per metric (split, not a cramped 3-panel) for ~30 matrices.
+    metrics = [
+        ("time", "fac_ms", "SuiteSparse corpus - factor time", "factor wall-clock (ms)", "corpus_time.png"),
+        ("mem", "mem_mb", "SuiteSparse corpus - factor memory", "factor memory (MB)", "corpus_memory.png"),
+        ("time", "res", "SuiteSparse corpus - relative residual ||Ax-b||/||b|| (accuracy)",
+         "relative residual", "corpus_residual.png"),
+    ]
+    fig_w = max(12, len(names) * 0.62 + 3)
+    for metric, ykey, title, ylab, fname in metrics:
+        fig, ax = plt.subplots(figsize=(fig_w, 5.6))
+        for i, s in enumerate(ORDER):
+            vals = []
+            for nm in names:
+                v = next((r[ykey] for r in recs
+                          if r["name"] == nm and r["solver"] == s and r["metric"] == metric), None)
+                vals.append(v if (v is not None and v > 0) else np.nan)
+            if all(np.isnan(v) for v in vals):
+                continue
+            label, color, _ = STYLE[s]
+            ax.bar(x + (i - 1.5) * width, vals, width, label=label, color=color)
+        ax.set_yscale("log")
+        ax.set_title(title)
+        ax.set_ylabel(ylab)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=7)
+        ax.grid(True, axis="y", ls=":", alpha=0.5)
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        fig.savefig(OUTDIR / fname, dpi=130, transparent=True)
+        print("wrote", OUTDIR / fname)
+
+    # Console validation summary: worst residual per solver, and geometric-mean
+    # factor-time / memory ratio of RSLAB-LL vs faer and PARDISO over shared matrices.
+    def res_list(s):
+        return [r["res"] for r in recs
+                if r["solver"] == s and r["metric"] == "time" and r["res"] > 0 and r["name"] in names]
+    print(f"\n=== corpus validation ({len(names)} solvable matrices) ===")
+    for s in ORDER:
+        rs = res_list(s)
+        if not rs:
+            continue
+        acc = sum(1 for v in rs if v < 1e-8)
+        print(f"  {STYLE[s][0]:<20} worst residual: {max(rs):.1e}   accurate (<1e-8): {acc}/{len(rs)}")
+
+    def geomean_ratio(a, b, metric, ykey):
+        ratios = []
+        for nm in names:
+            va = next((r[ykey] for r in recs if r["name"] == nm and r["solver"] == a and r["metric"] == metric), None)
+            vb = next((r[ykey] for r in recs if r["name"] == nm and r["solver"] == b and r["metric"] == metric), None)
+            if va and vb and va > 0 and vb > 0:
+                ratios.append(vb / va)
+        if not ratios:
+            return float("nan"), 0
+        prod = 1.0
+        for r in ratios:
+            prod *= r
+        return prod ** (1.0 / len(ratios)), len(ratios)
+    for other in ("faer", "pardiso"):
+        sp, k = geomean_ratio("ll", other, "time", "fac_ms")
+        mr, _ = geomean_ratio("ll", other, "mem", "mem_mb")
+        print(f"  RSLAB-LL vs {other}: factor {sp:.2f}x time, {mr:.2f}x memory (geomean, n={k})")
+
+
 def main():
     setup_style()
-    if "--plot-only" not in sys.argv:
+    plot_only = "--plot-only" in sys.argv
+    if "--corpus-only" in sys.argv:
+        if not plot_only:
+            collect_corpus()
+        cp = load(CORPUS)
+        if not cp:
+            sys.exit("no corpus records collected")
+        fig_corpus(cp)
+        print("done.")
+        return
+    if not plot_only:
         collect()
+        collect_corpus()
     sc = load(SCALING)
     th = load(THREADS)
     rl = load(REAL)
     es = load(ESTIMATE)
+    cp = load(CORPUS)
     if not sc:
         sys.exit("no scaling records collected")
     fig_scaling(sc, "fac_ms", "factor wall-clock (ms)", "scaling_factor.png", "Factor time")
@@ -335,6 +446,8 @@ def main():
         fig_real(rl)
     if es:
         fig_memory_breakdown(es)
+    if cp:
+        fig_corpus(cp)
     print("done.")
 
 

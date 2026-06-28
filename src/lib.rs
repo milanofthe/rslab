@@ -109,7 +109,8 @@ pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // plus the raw factor type and free building blocks.
 pub use inertia::Inertia;
 pub use io::mtx::{
-    parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, MtxMatrix,
+    parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_any,
+    read_mtx_complex, MtxLoaded, MtxMatrix,
 };
 pub use numeric::iterative::{
     cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_fn, BlockKrylovResult, Factorization,

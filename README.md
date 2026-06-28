@@ -73,6 +73,27 @@ not under-predict.
 On the real matrices RSLAB left-looking uses less time and memory than faer, and
 about half the memory of its own multifrontal path.
 
+### Validation (SuiteSparse)
+
+33 solvable matrices from the SuiteSparse collection (1k-100k DOFs; SPD, indefinite,
+unsymmetric, complex), factored and solved against faer and PARDISO with the relative
+residual `||Ax-b||/||b||` as the accuracy check (`python benches/run_bench.py --corpus-only`).
+
+![SuiteSparse residual](benches/bench_out/corpus_residual.png)
+
+- Where RSLAB factors, it is accurate: 24/30 matrices below `1e-8` residual, matching
+  PARDISO and ahead of faer, which returns a degraded or garbage solution on several
+  (pdb1HYS, bcsstk18, msc10848, wang3).
+- RSLAB factors faster and lighter than faer (geomean 1.9x time, 1.8x memory). PARDISO
+  is faster and lighter than both on this mostly-structural corpus (about 7x time, 2.8x
+  memory); the gap narrows on the larger complex EM/MoM matrices (see the scaling
+  figures).
+- Limitation: RSLAB's exact-mode LDLᵀ (pivoting bounded to each supernode) fails on
+  indefinite saddle-point / KKT matrices (stokes64, bratu3d, cont-201) that PARDISO
+  factors directly; those need RSLAB's preconditioner mode (static pivoting + Krylov
+  refinement). RSLAB targets the complex-symmetric EM/FEM regime, not general indefinite
+  KKT.
+
 ## Install
 
 ```toml

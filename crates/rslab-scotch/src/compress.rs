@@ -11,8 +11,8 @@
 //! `N(u) \ {v} = N(v) \ {u}`, which is exactly the case that arises
 //! from repeated rows/columns in structured KKT and FE-mesh patterns.
 //!
-//! We **do not** detect the disjoint case `(u, v) ∉ E ∧ N(u) = N(v)`
-//! - it is rare in the SCOTCH target workloads, and conflating it
+//! We **do not** detect the disjoint case `(u, v) ∉ E ∧ N(u) = N(v)`;
+//! it is rare in the SCOTCH target workloads, and conflating it
 //! with the closed-neighborhood test would require either two hash
 //! passes or a per-pair fix-up at compare time. The research note
 //! documents this as a deliberate, conservative S1 decision.
