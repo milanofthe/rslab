@@ -90,6 +90,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # storage/flops we beat by exploiting A = Aᵀ. Dev-only: pulls its own pulp,
 # independent of our pinned 0.22.2. faer's `c64` is `num_complex::Complex<f64>`.
 faer = "0.22"
+# Dynamic loader for the MKL PARDISO reference comparison (bench-only FFI; the
+# solver library stays 100% pure Rust). `vs_all` loads `mkl_rt` at runtime.
+libloading = "0.8"
 # rmumps used only for reference timing comparisons in benchmarks:
 # rmumps = { path = "../ripopt/rmumps" }  # uncomment when needed
 
@@ -99,6 +102,10 @@ harness = false
 
 [[bench]]
 name = "vs_mom"
+harness = false
+
+[[bench]]
+name = "vs_all"
 harness = false
 
 [[bench]]
