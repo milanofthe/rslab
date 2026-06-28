@@ -1545,12 +1545,20 @@ fn ll_factor_node<T: Scalar>(
             }
         }
     }
-    // cdiv: partial **Bunch-Kaufman** LDLᵀ (1×1 and 2×2 pivots), the rectangular
-    // `nrow × ncol` analogue of `factor_front`'s panel kernel. Pivoting is bounded
-    // to the fully-summed block `0..ncol` (candidate rows `(k+1)..ncol`), so the
-    // off-diagonal rows `[ncol, nrow)` keep their identity — `s`'s contribution to
-    // ancestors is unaffected by this internal permutation. Each rank-1/rank-2
-    // trailing update runs over all rows down to `nrow`, forming the full L21.
+    // cdiv: partial **blocked** Bunch-Kaufman LDLᵀ (1×1 and 2×2 pivots), the
+    // rectangular `nrow × ncol` analogue of `factor_front`'s panel kernel. The
+    // fully-summed columns are factored in panels of width `NB` with pivoting
+    // **bounded to the panel** (candidate rows `(k+1)..ke`), then each panel's
+    // trailing update — the remaining panel columns `[ke, ncol)` over all rows
+    // `[ke, nrow)` — is deferred to one SIMD GEMM (the BLAS-3 bulk, replacing the
+    // scalar rank-1/rank-2 sweeps that dominated wide separators). Unlike
+    // `factor_front` there is **no `A22` block** (the panel has no columns beyond
+    // `ncol`; that Schur update is the ancestors' `cmod`), so the trailing region
+    // is the rectangular `(nrow-ke) × (ncol-ke)` lower part. Pivoting stays inside
+    // `0..ncol`, so the off-diagonal rows `[ncol, nrow)` keep their identity and
+    // `s`'s contribution to ancestors is unaffected by this internal permutation.
+    const NB: usize = 64;
+    const LL_CDIV_PAR: usize = 8_000_000;
     let alpha = bk_alpha();
     let mut d = vec![T::zero(); ncol];
     let mut d_subdiag = vec![T::zero(); ncol];
@@ -1559,6 +1567,10 @@ fn ll_factor_node<T: Scalar>(
     // 2×2 multiplier scratch (reused; only `[k+2, nrow)` is ever read each step).
     let mut l1 = vec![T::zero(); nrow];
     let mut l2 = vec![T::zero(); nrow];
+    // Per-panel deferred-GEMM scratch (reused across panels).
+    let mut l21buf: Vec<T> = Vec::new();
+    let mut gbuf: Vec<T> = Vec::new();
+    let mut tmp: Vec<T> = Vec::new();
     let mut local_perturbed = 0usize;
     // Helper to restore the `gloc` scratch invariant before an early return.
     macro_rules! restore_gloc {
@@ -1569,152 +1581,257 @@ fn ll_factor_node<T: Scalar>(
             GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
         }};
     }
-    let mut k = 0;
-    while k < ncol {
-        let absakk = panel[k + k * nrow].magnitude();
-        // colmax over the in-block candidate rows (k+1)..ncol.
-        let mut colmax_sq = 0.0;
-        let mut imax = k;
-        for i in (k + 1)..ncol {
-            let m = panel[k * nrow + i].magnitude_sq();
-            if m > colmax_sq {
-                colmax_sq = m;
-                imax = i;
+    let mut kb = 0;
+    while kb < ncol {
+        let ke = (kb + NB).min(ncol);
+        // getf2: unblocked Bunch-Kaufman over the panel columns [kb, ke), with the
+        // pivot candidate and rank-1/rank-2 trailing updates bounded to `ke` (the
+        // columns beyond `ke` are deferred to the panel GEMM below). The L21
+        // multipliers are still formed over all rows down to `nrow`.
+        let mut k = kb;
+        while k < ke {
+            let absakk = panel[k + k * nrow].magnitude();
+            // colmax over the in-panel candidate rows (k+1)..ke.
+            let mut colmax_sq = 0.0;
+            let mut imax = k;
+            for i in (k + 1)..ke {
+                let m = panel[k * nrow + i].magnitude_sq();
+                if m > colmax_sq {
+                    colmax_sq = m;
+                    imax = i;
+                }
             }
-        }
-        let colmax = colmax_sq.sqrt();
+            let colmax = colmax_sq.sqrt();
 
-        let kstep;
-        let kp;
-        if absakk.max(colmax) == 0.0 {
-            if perturb_floor.is_none() {
-                restore_gloc!();
-                return Err(FeralError::NumericallyRankDeficient);
-            }
-            kstep = 1;
-            kp = k;
-        } else if absakk >= alpha * colmax {
-            kstep = 1;
-            kp = k;
-        } else {
-            // rowmax in row `imax`, restricted to the fully-summed block.
-            let mut rowmax_sq = 0.0;
-            for j in k..imax {
-                let m = panel[j * nrow + imax].magnitude_sq();
-                if m > rowmax_sq {
-                    rowmax_sq = m;
+            let kstep;
+            let kp;
+            if absakk.max(colmax) == 0.0 {
+                if perturb_floor.is_none() {
+                    restore_gloc!();
+                    return Err(FeralError::NumericallyRankDeficient);
                 }
-            }
-            for i in (imax + 1)..ncol {
-                let m = panel[imax * nrow + i].magnitude_sq();
-                if m > rowmax_sq {
-                    rowmax_sq = m;
-                }
-            }
-            let rowmax = rowmax_sq.sqrt();
-            if absakk >= alpha * colmax * (colmax / rowmax) {
                 kstep = 1;
                 kp = k;
-            } else if panel[imax * nrow + imax].magnitude() >= alpha * rowmax {
+            } else if absakk >= alpha * colmax {
                 kstep = 1;
-                kp = imax;
+                kp = k;
             } else {
-                kstep = 2;
-                kp = imax;
+                // rowmax in row `imax`, restricted to the panel.
+                let mut rowmax_sq = 0.0;
+                for j in k..imax {
+                    let m = panel[j * nrow + imax].magnitude_sq();
+                    if m > rowmax_sq {
+                        rowmax_sq = m;
+                    }
+                }
+                for i in (imax + 1)..ke {
+                    let m = panel[imax * nrow + i].magnitude_sq();
+                    if m > rowmax_sq {
+                        rowmax_sq = m;
+                    }
+                }
+                let rowmax = rowmax_sq.sqrt();
+                if absakk >= alpha * colmax * (colmax / rowmax) {
+                    kstep = 1;
+                    kp = k;
+                } else if panel[imax * nrow + imax].magnitude() >= alpha * rowmax {
+                    kstep = 1;
+                    kp = imax;
+                } else {
+                    kstep = 2;
+                    kp = imax;
+                }
+            }
+
+            if kstep == 1 {
+                if kp != k {
+                    swap_sym_lower(&mut panel, nrow, k, kp);
+                    lperm.swap(k, kp);
+                }
+                let mut dk = panel[k + k * nrow];
+                match perturb_floor {
+                    Some(floor) if dk.magnitude() < floor => {
+                        dk = perturb_pivot(dk, floor);
+                        panel[k + k * nrow] = dk;
+                        local_perturbed += 1;
+                    }
+                    None if dk == T::zero() => {
+                        restore_gloc!();
+                        return Err(FeralError::NumericallyRankDeficient);
+                    }
+                    _ => {}
+                }
+                d[k] = dk;
+                let dinv = dk.recip();
+                // Update the in-panel trailing columns (k+1)..ke (all rows, so the
+                // L21 multiplier rows form), then scale column k → its L column.
+                for j in (k + 1)..ke {
+                    let wj_dinv = panel[k * nrow + j] * dinv;
+                    if wj_dinv != T::zero() {
+                        for i in j..nrow {
+                            panel[j * nrow + i] =
+                                panel[j * nrow + i] - panel[k * nrow + i] * wj_dinv;
+                        }
+                    }
+                }
+                for i in (k + 1)..nrow {
+                    panel[k * nrow + i] = panel[k * nrow + i] * dinv;
+                }
+                k += 1;
+            } else {
+                if kp != k + 1 {
+                    swap_sym_lower(&mut panel, nrow, k + 1, kp);
+                    lperm.swap(k + 1, kp);
+                }
+                let mut d11 = panel[k + k * nrow];
+                let d21 = panel[k * nrow + (k + 1)];
+                let mut d22 = panel[(k + 1) + (k + 1) * nrow];
+                let mut det = d11 * d22 - d21 * d21;
+                let scale = d11.magnitude().max(d22.magnitude()).max(d21.magnitude());
+                let growth_floor = GROWTH_EPS * scale * scale;
+                match perturb_floor {
+                    Some(floor) => {
+                        let fl = (floor * floor).max(growth_floor);
+                        if det.magnitude() < fl {
+                            let lift = floor.max(scale * GROWTH_EPS.sqrt());
+                            d11 = d11 + T::from_real(lift);
+                            d22 = d22 + T::from_real(lift);
+                            det = d11 * d22 - d21 * d21;
+                            if det.magnitude() < fl {
+                                det = det + T::from_real(fl);
+                            }
+                            local_perturbed += 1;
+                        }
+                    }
+                    None if det.magnitude() <= growth_floor => {
+                        restore_gloc!();
+                        return Err(FeralError::NumericallyRankDeficient);
+                    }
+                    _ => {}
+                }
+                let detinv = det.recip();
+                d[k] = d11;
+                d_subdiag[k] = d21;
+                d[k + 1] = d22;
+                two_by_two[k] = true;
+                for i in (k + 2)..nrow {
+                    let wik = panel[k * nrow + i];
+                    let wik1 = panel[(k + 1) * nrow + i];
+                    l1[i] = (d22 * wik - d21 * wik1) * detinv;
+                    l2[i] = (d11 * wik1 - d21 * wik) * detinv;
+                }
+                for j in (k + 2)..ke {
+                    let l1j = l1[j];
+                    let l2j = l2[j];
+                    for i in j..nrow {
+                        panel[j * nrow + i] = panel[j * nrow + i]
+                            - panel[k * nrow + i] * l1j
+                            - panel[(k + 1) * nrow + i] * l2j;
+                    }
+                }
+                for i in (k + 2)..nrow {
+                    panel[k * nrow + i] = l1[i];
+                    panel[(k + 1) * nrow + i] = l2[i];
+                }
+                k += 2;
             }
         }
 
-        if kstep == 1 {
-            if kp != k {
-                swap_sym_lower(&mut panel, nrow, k, kp);
-                lperm.swap(k, kp);
-            }
-            let mut dk = panel[k + k * nrow];
-            match perturb_floor {
-                Some(floor) if dk.magnitude() < floor => {
-                    dk = perturb_pivot(dk, floor);
-                    panel[k + k * nrow] = dk;
-                    local_perturbed += 1;
+        // Deferred panel trailing update: panel[ke.., ke..ncol] −= L21·D·Rᵀ, where
+        // L21 = panel rows [ke,nrow) × panel cols [kb,ke) (mt×pw), G = L21·D (block-
+        // diagonal D), and R = the first `cw` rows of L21 (the rows that are
+        // themselves remaining panel columns [ke,ncol)). The result `tmp` is the
+        // rectangular `mt × cw` Schur block; only its lower part is written back.
+        let pw = ke - kb;
+        let cw = ncol - ke; // remaining fully-summed columns to update
+        let mt = nrow - ke; // trailing rows (left-factor height)
+        if pw > 0 && cw > 0 && mt > 0 {
+            l21buf.clear();
+            l21buf.resize(mt * pw, T::zero());
+            for cc in 0..pw {
+                let c = kb + cc;
+                for rr in 0..mt {
+                    l21buf[rr + cc * mt] = panel[(ke + rr) + c * nrow];
                 }
-                None if dk == T::zero() => {
-                    restore_gloc!();
-                    return Err(FeralError::NumericallyRankDeficient);
-                }
-                _ => {}
             }
-            d[k] = dk;
-            let dinv = dk.recip();
-            // Form L21 multipliers for column k (all trailing rows), then apply the
-            // symmetric rank-1 update to the trailing columns (k+1)..ncol.
-            for j in (k + 1)..ncol {
-                let wj_dinv = panel[k * nrow + j] * dinv;
-                if wj_dinv != T::zero() {
-                    for i in j..nrow {
-                        panel[j * nrow + i] = panel[j * nrow + i] - panel[k * nrow + i] * wj_dinv;
+            gbuf.clear();
+            gbuf.resize(mt * pw, T::zero());
+            let mut cc = 0;
+            while cc < pw {
+                let c = kb + cc;
+                if two_by_two[c] {
+                    let (d11, d21, d22) = (d[c], d_subdiag[c], d[c + 1]);
+                    for rr in 0..mt {
+                        let a = l21buf[rr + cc * mt];
+                        let b = l21buf[rr + (cc + 1) * mt];
+                        gbuf[rr + cc * mt] = a * d11 + b * d21;
+                        gbuf[rr + (cc + 1) * mt] = a * d21 + b * d22;
                     }
+                    cc += 2;
+                } else {
+                    let dc = d[c];
+                    for rr in 0..mt {
+                        gbuf[rr + cc * mt] = l21buf[rr + cc * mt] * dc;
+                    }
+                    cc += 1;
                 }
             }
-            for i in (k + 1)..nrow {
-                panel[k * nrow + i] = panel[k * nrow + i] * dinv;
-            }
-            k += 1;
-        } else {
-            if kp != k + 1 {
-                swap_sym_lower(&mut panel, nrow, k + 1, kp);
-                lperm.swap(k + 1, kp);
-            }
-            let mut d11 = panel[k + k * nrow];
-            let d21 = panel[k * nrow + (k + 1)];
-            let mut d22 = panel[(k + 1) + (k + 1) * nrow];
-            let mut det = d11 * d22 - d21 * d21;
-            let scale = d11.magnitude().max(d22.magnitude()).max(d21.magnitude());
-            let growth_floor = GROWTH_EPS * scale * scale;
-            match perturb_floor {
-                Some(floor) => {
-                    let fl = (floor * floor).max(growth_floor);
-                    if det.magnitude() < fl {
-                        let lift = floor.max(scale * GROWTH_EPS.sqrt());
-                        d11 = d11 + T::from_real(lift);
-                        d22 = d22 + T::from_real(lift);
-                        det = d11 * d22 - d21 * d21;
-                        if det.magnitude() < fl {
-                            det = det + T::from_real(fl);
+            tmp.clear();
+            tmp.resize(mt * cw, T::zero());
+            let par = if (mt as u128) * (cw as u128) * (pw as u128) >= LL_CDIV_PAR as u128 {
+                gemm::Parallelism::Rayon(0)
+            } else {
+                gemm::Parallelism::None
+            };
+            if USE_GEMM_SCHUR.load(Ordering::Relaxed) {
+                // SAFETY: `tmp`, `gbuf`, `l21buf` are three distinct, non-overlapping
+                // allocations sized for (m,n,k)=(mt,cw,pw); `R` is the top `cw` rows
+                // of `l21buf` (cw ≤ mt), addressed via the rhs strides. `T` is
+                // `f64`/`Complex<f64>` (gemm-supported).
+                unsafe {
+                    gemm::gemm(
+                        mt,
+                        cw,
+                        pw,
+                        tmp.as_mut_ptr(),
+                        mt as isize,
+                        1,
+                        false,
+                        gbuf.as_ptr(),
+                        mt as isize,
+                        1,
+                        l21buf.as_ptr(),
+                        1,
+                        mt as isize,
+                        T::zero(),
+                        T::one(),
+                        false,
+                        false,
+                        false,
+                        par,
+                    );
+                }
+            } else {
+                for cc2 in 0..cw {
+                    for rr in 0..mt {
+                        let mut acc = T::zero();
+                        for kk2 in 0..pw {
+                            acc = acc + gbuf[rr + kk2 * mt] * l21buf[cc2 + kk2 * mt];
                         }
-                        local_perturbed += 1;
+                        tmp[rr + cc2 * mt] = acc;
                     }
                 }
-                None if det.magnitude() <= growth_floor => {
-                    restore_gloc!();
-                    return Err(FeralError::NumericallyRankDeficient);
-                }
-                _ => {}
             }
-            let detinv = det.recip();
-            d[k] = d11;
-            d_subdiag[k] = d21;
-            d[k + 1] = d22;
-            two_by_two[k] = true;
-            for i in (k + 2)..nrow {
-                let wik = panel[k * nrow + i];
-                let wik1 = panel[(k + 1) * nrow + i];
-                l1[i] = (d22 * wik - d21 * wik1) * detinv;
-                l2[i] = (d11 * wik1 - d21 * wik) * detinv;
-            }
-            for j in (k + 2)..ncol {
-                let l1j = l1[j];
-                let l2j = l2[j];
-                for i in j..nrow {
-                    panel[j * nrow + i] = panel[j * nrow + i]
-                        - panel[k * nrow + i] * l1j
-                        - panel[(k + 1) * nrow + i] * l2j;
+            // Subtract the lower part: column c = ke+cc2 gets rows r = ke+rr, rr ≥ cc2.
+            for cc2 in 0..cw {
+                let c = ke + cc2;
+                for rr in cc2..mt {
+                    let dst = (ke + rr) + c * nrow;
+                    panel[dst] = panel[dst] - tmp[rr + cc2 * mt];
                 }
             }
-            for i in (k + 2)..nrow {
-                panel[k * nrow + i] = l1[i];
-                panel[(k + 1) * nrow + i] = l2[i];
-            }
-            k += 2;
         }
+        kb = ke;
     }
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);

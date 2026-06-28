@@ -3,8 +3,9 @@
 //! supernodal left-looking (panels only — no CB stack, no extract). Reports the
 //! peak working-set sampled *during* each factorization and the factor time.
 //!
-//! The left-looking path is currently serial + scalar, so it is slower; this
-//! bench isolates the **memory transient**, the reason it exists.
+//! The left-looking path is rayon-parallel with a blocked BLAS-3 cmod/cdiv, so
+//! on wide separators it is both **faster** and **lighter** than multifrontal;
+//! this bench tracks the factor time alongside the **memory transient**.
 //!
 //! Run: `cargo bench --bench leftlook_mem`.
 
