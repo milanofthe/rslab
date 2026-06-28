@@ -54,6 +54,34 @@ impl<T: Scalar> LinearOperator<T> for CscMatrix<T> {
     fn apply(&self, x: &[T], y: &mut [T]) {
         self.symv(x, y);
     }
+    /// Amortized block symv: each lower-triangle entry `(i,j,v)` is loaded once
+    /// and scattered to all `s` columns (`y[:,c] += v·x[j,c]`, and symmetrically
+    /// `y[j,c] += v·x[i,c]` off the diagonal) — the BLAS-3 reuse a multi-RHS
+    /// solve buys over `s` separate `symv`s.
+    fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
+        let n = self.n;
+        for v in y.iter_mut() {
+            *v = T::zero();
+        }
+        for j in 0..n {
+            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
+                let i = self.row_idx[k];
+                let v = self.values[k];
+                if i != j {
+                    for c in 0..s {
+                        let cb = c * n;
+                        y[cb + i] = y[cb + i] + v * x[cb + j];
+                        y[cb + j] = y[cb + j] + v * x[cb + i];
+                    }
+                } else {
+                    for c in 0..s {
+                        let cb = c * n;
+                        y[cb + i] = y[cb + i] + v * x[cb + j];
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
@@ -62,6 +90,24 @@ impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
     }
     fn apply(&self, x: &[T], y: &mut [T]) {
         self.matvec(x, y);
+    }
+    /// Amortized block matvec: each entry `(i,j,v)` is loaded once and applied to
+    /// all `s` columns (`y[i,c] += v·x[j,c]`).
+    fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
+        let n = self.n;
+        for v in y.iter_mut() {
+            *v = T::zero();
+        }
+        for j in 0..n {
+            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
+                let i = self.row_idx[k];
+                let v = self.values[k];
+                for c in 0..s {
+                    let cb = c * n;
+                    y[cb + i] = y[cb + i] + v * x[cb + j];
+                }
+            }
+        }
     }
 }
 
@@ -101,6 +147,25 @@ impl<T: Scalar> Preconditioner<T> for LdltSolver<T> {
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
+        Ok(())
+    }
+    /// Block apply via [`solve_many`](LdltSolver::solve_many): one block
+    /// triangular solve loads each `L`/`D` value once for all `s` columns. The
+    /// Krylov block is column-major; `solve_many` is row-major, so it is
+    /// transposed in/out (`O(n·s)`, cheap against the solve).
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+        let mut rowmaj = vec![T::zero(); n * s];
+        for c in 0..s {
+            for i in 0..n {
+                rowmaj[i * s + c] = r[c * n + i];
+            }
+        }
+        let x = self.solve_many(&rowmaj, s)?;
+        for c in 0..s {
+            for i in 0..n {
+                z[c * n + i] = x[i * s + c];
+            }
+        }
         Ok(())
     }
 }
@@ -914,6 +979,23 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors
         z.copy_from_slice(&x);
         Ok(())
     }
+    /// Block apply via `solve_lu_many` (one block triangular solve over all `s`
+    /// columns). Column-major Krylov block ↔ row-major `solve_lu_many` transpose.
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+        let mut rowmaj = vec![T::zero(); n * s];
+        for c in 0..s {
+            for i in 0..n {
+                rowmaj[i * s + c] = r[c * n + i];
+            }
+        }
+        let x = crate::numeric::multifrontal_lu::solve_lu_many(self, &rowmaj, s)?;
+        for c in 0..s {
+            for i in 0..n {
+                z[c * n + i] = x[i * s + c];
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<T> {
@@ -935,6 +1017,22 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
+        Ok(())
+    }
+    /// Block apply via [`LuSolver::solve_many`](crate::numeric::multifrontal_lu::LuSolver::solve_many).
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+        let mut rowmaj = vec![T::zero(); n * s];
+        for c in 0..s {
+            for i in 0..n {
+                rowmaj[i * s + c] = r[c * n + i];
+            }
+        }
+        let x = self.solve_many(&rowmaj, s)?;
+        for c in 0..s {
+            for i in 0..n {
+                z[c * n + i] = x[i * s + c];
+            }
+        }
         Ok(())
     }
 }

@@ -101,8 +101,8 @@ pub use io::mtx::{
     parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, MtxMatrix,
 };
 pub use numeric::iterative::{
-    cocg, cocr, gmres, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,
-    LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+    cocg, cocr, gmres, gmres_block, BlockKrylovResult, Factorization, KrylovResult, LinearOperator,
+    LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,

@@ -106,6 +106,10 @@ name = "leftlook_mem"
 harness = false
 
 [[bench]]
+name = "block_gmres"
+harness = false
+
+[[bench]]
 name = "precond"
 harness = false
 
