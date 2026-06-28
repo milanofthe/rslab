@@ -97,7 +97,7 @@ pub fn laplacian<T: Scalar>(dims: &[usize], opts: &StencilOpts) -> CscMatrix<T> 
         cols.push(c);
         vals.push(T::from_real(w));
     }
-    CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("valid lower-triangle triplets")
+    super::build_sym(n, &rows, &cols, &vals)
 }
 
 /// Complex-symmetric **Helmholtz** operator `Δ − k² I` on a grid (lower triangle).
@@ -125,7 +125,7 @@ pub fn helmholtz(
         cols.push(c);
         vals.push(Complex::new(w, 0.0));
     }
-    CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("valid lower-triangle triplets")
+    super::build_sym(n, &rows, &cols, &vals)
 }
 
 /// A roughly-cubic 3D grid dimension triple with `≈ target` nodes.

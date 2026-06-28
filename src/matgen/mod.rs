@@ -17,8 +17,37 @@
 
 use num_complex::Complex;
 
+use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
+
+/// Build a lower-triangle [`CscMatrix`] from generator triplets. The generators
+/// construct valid triplets by definition, so a failure is an internal invariant
+/// violation (panic, not an error path) — avoids `unwrap`/`expect` in `src/`.
+pub(crate) fn build_sym<T: Scalar>(
+    n: usize,
+    rows: &[usize],
+    cols: &[usize],
+    vals: &[T],
+) -> CscMatrix<T> {
+    match CscMatrix::from_triplets(n, rows, cols, vals) {
+        Ok(m) => m,
+        Err(e) => panic!("matgen: internal invariant — invalid symmetric triplets: {e}"),
+    }
+}
+
+/// As [`build_sym`] but for the full unsymmetric [`GeneralCsc`].
+pub(crate) fn build_gen<T: Scalar>(
+    n: usize,
+    rows: &[usize],
+    cols: &[usize],
+    vals: &[T],
+) -> GeneralCsc<T> {
+    match GeneralCsc::from_triplets(n, rows, cols, vals) {
+        Ok(m) => m,
+        Err(e) => panic!("matgen: internal invariant — invalid triplets: {e}"),
+    }
+}
 
 pub mod bem;
 #[cfg(feature = "matgen-download")]
