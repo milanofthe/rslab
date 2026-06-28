@@ -27,6 +27,63 @@ use rla::{AnalyzeOptions, FactorMethod, FactorOptions, LuSymbolic, ReorderMode};
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 type C = Complex<f64>;
 
+// ---- peak working-set sampler (Windows), for the memory transient ----
+#[cfg(windows)]
+fn cur_ws_mb() -> f64 {
+    #[repr(C)]
+    struct Pmc {
+        cb: u32,
+        pfc: u32,
+        peak_ws: usize,
+        ws: usize,
+        q1: usize,
+        q2: usize,
+        q3: usize,
+        q4: usize,
+        pf: usize,
+        peak_pf: usize,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(p: isize, c: *mut Pmc, cb: u32) -> i32;
+    }
+    // SAFETY: POD output buffer of the documented PROCESS_MEMORY_COUNTERS size.
+    unsafe {
+        let mut pmc: Pmc = std::mem::zeroed();
+        pmc.cb = std::mem::size_of::<Pmc>() as u32;
+        if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) != 0 {
+            pmc.ws as f64 / 1e6
+        } else {
+            0.0
+        }
+    }
+}
+#[cfg(not(windows))]
+fn cur_ws_mb() -> f64 {
+    0.0
+}
+
+/// Run `f`, sampling the process working set every 5 ms, and return its result
+/// alongside the peak transient (MB above the working set just before `f`).
+fn sample<R>(f: impl FnOnce() -> R) -> (R, f64) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    let before = cur_ws_mb();
+    let stop = Arc::new(AtomicBool::new(false));
+    let peak = Arc::new(AtomicU64::new(before as u64));
+    let (s, p) = (stop.clone(), peak.clone());
+    let h = std::thread::spawn(move || {
+        while !s.load(Ordering::Relaxed) {
+            p.fetch_max(cur_ws_mb() as u64, Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    let r = f();
+    stop.store(true, Ordering::Relaxed);
+    let _ = h.join();
+    (r, (peak.load(Ordering::Relaxed) as f64 - before).max(0.0))
+}
+
 fn rel_resid(a: &rla::GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
     let mut ax = vec![Complex::new(0.0, 0.0); a.n];
     a.matvec(x, &mut ax);
@@ -193,14 +250,15 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
     for (label, method) in [("RLA-LL ", FactorMethod::LeftLooking), ("RLA-MF ", FactorMethod::Multifrontal)] {
         let opts = FactorOptions::default().with_method(method);
         let t = Instant::now();
-        match sym.factor(&a, &opts) {
+        let (fres, mem) = sample(|| sym.factor(&a, &opts));
+        match fres {
             Ok(f) => {
                 let fac = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
                 let x = f.solve(&b).unwrap();
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 println!(
-                    "  {label}  ana {ana:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {}",
+                    "  {label}  ana {ana:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {:9}  mem +{mem:.0}",
                     rel_resid(&a, &x, &b),
                     f.factor_nnz()
                 );
@@ -220,7 +278,8 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
         match SparseColMat::<usize, c64>::try_new_from_triplets(n, n, &trip) {
             Ok(fa) => {
                 let t = Instant::now();
-                match fa.sp_lu() {
+                let (lures, mem) = sample(|| fa.sp_lu());
+                match lures {
                     Ok(lu) => {
                         let fac = t.elapsed().as_secs_f64() * 1e3;
                         let mut xb = Mat::<c64>::from_fn(n, 1, |i, _| c64::new(b[i].re, b[i].im));
@@ -229,7 +288,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
                         let slv = t.elapsed().as_secs_f64() * 1e3;
                         let xf: Vec<C> = (0..n).map(|i| Complex::new(xb[(i, 0)].re, xb[(i, 0)].im)).collect();
                         println!(
-                            "  faer     ana       —  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}",
+                            "  faer     ana       —  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill         —  mem +{mem:.0}",
                             rel_resid(&a, &xf, &b)
                         );
                     }
@@ -250,7 +309,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
             let e1 = ps.call(11, ni, &ia, &ja, &va, &mut dum_b, &mut dum_x);
             let ana_p = t.elapsed().as_secs_f64() * 1e3;
             let t = Instant::now();
-            let e2 = ps.call(22, ni, &ia, &ja, &va, &mut dum_b, &mut dum_x);
+            let (e2, mem) = sample(|| ps.call(22, ni, &ia, &ja, &va, &mut dum_b, &mut dum_x));
             let fac = t.elapsed().as_secs_f64() * 1e3;
             if e1 != 0 || e2 != 0 {
                 println!("  PARDISO  analyze/factor error {e1}/{e2}");
@@ -265,7 +324,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
                     println!("  PARDISO  solve error {e3}");
                 } else {
                     println!(
-                        "  PARDISO  ana {ana_p:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {fill}",
+                        "  PARDISO  ana {ana_p:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {fill:9}  mem +{mem:.0}",
                         rel_resid(&a, &x, &b)
                     );
                 }
