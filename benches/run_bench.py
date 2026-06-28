@@ -20,6 +20,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 
 REPO = Path(r"C:\Repositories\RLA")
 MKL = r"C:\Users\milan\anaconda3\Library\bin"
@@ -27,13 +28,15 @@ OUTDIR = Path(os.environ.get("RLA_BENCH_DIR", REPO / "benches" / "bench_out"))
 OUTDIR.mkdir(parents=True, exist_ok=True)
 SCALING = OUTDIR / "scaling.jsonl"
 THREADS = OUTDIR / "threads.jsonl"
+REAL = OUTDIR / "real.jsonl"
 
 # Problem sizes (≈ nodes). faer factors the symmetric family as full LU (2× work),
-# so the symmetric max is kept tractable.
+# so the symmetric max is kept tractable. The unsymmetric BEM kernel now keeps a
+# constant ≈120 nnz/row (density-matched cutoff), so it scales to larger n.
 SYM_SIZES = [4000, 8000, 16000, 32000, 64000]
-UNSYM_SIZES = [1000, 2000, 4000, 8000, 16000]
+UNSYM_SIZES = [2000, 4000, 8000, 16000, 32000]
 THREAD_COUNTS = [1, 2, 4, 6, 8, 12, 16, 24]
-SYM_FIXED, UNSYM_FIXED = 32000, 8000
+SYM_FIXED, UNSYM_FIXED = 32000, 16000
 
 STYLE = {  # solver -> (label, color, marker)
     "ll": ("RLA left-looking", "#1f77b4", "o"),
@@ -88,13 +91,17 @@ def load(path):
 
 def collect():
     exe = build_engine()
-    for p in (SCALING, THREADS):
+    for p in (SCALING, THREADS, REAL):
         p.unlink(missing_ok=True)
     # Scaling: time + memory passes, default (all) threads.
     for family, sizes in (("sym", SYM_SIZES), ("unsym", UNSYM_SIZES)):
         for mem in (False, True):
             print(f"scaling {family} metric={'mem' if mem else 'time'} ...", flush=True)
             run(exe, env_for(family, sizes, mem, SCALING))
+    # Real precond_matrices (realism anchor) — time + memory.
+    for mem in (False, True):
+        print(f"real metric={'mem' if mem else 'time'} ...", flush=True)
+        run(exe, env_for("real", [], mem, REAL))
     # Thread sweep at a fixed size, time only.
     for family, fixed in (("sym", SYM_FIXED), ("unsym", UNSYM_FIXED)):
         for t in THREAD_COUNTS:
@@ -169,11 +176,45 @@ def fig_threads(recs):
     print("wrote", OUTDIR / "thread_scaling.png")
 
 
+def fig_real(recs):
+    """Grouped bars per real matrix: factor time and factor memory, per solver."""
+    names = sorted({r["name"] for r in recs},
+                   key=lambda nm: next(r["n"] for r in recs if r["name"] == nm))
+    short = [nm.replace("_D300_N3", "").replace("_D350_N3", "").replace("_D280_N4_w16", "")
+             for nm in names]
+    x = np.arange(len(names))
+    width = 0.2
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    for ax, metric, ykey, title, ylab in (
+        (axes[0], "time", "fac_ms", "Real MoM matrices — factor time", "factor wall-clock (ms)"),
+        (axes[1], "mem", "mem_mb", "Real MoM matrices — factor memory", "factor memory (MB)"),
+    ):
+        for i, s in enumerate(ORDER):
+            label, color, _ = STYLE[s]
+            vals = []
+            for nm in names:
+                v = [r[ykey] for r in recs
+                     if r["name"] == nm and r["solver"] == s and r["metric"] == metric]
+                vals.append(v[0] if v else 0)
+            ax.bar(x + (i - 1.5) * width, vals, width, label=label, color=color)
+        ax.set_yscale("log")
+        ax.set_title(title)
+        ax.set_ylabel(ylab)
+        ax.set_xticks(x)
+        ax.set_xticklabels(short, rotation=30, ha="right", fontsize=7)
+        ax.grid(True, axis="y", ls=":", alpha=0.5)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(OUTDIR / "real_matrices.png", dpi=130)
+    print("wrote", OUTDIR / "real_matrices.png")
+
+
 def main():
     if "--plot-only" not in sys.argv:
         collect()
     sc = load(SCALING)
     th = load(THREADS)
+    rl = load(REAL)
     if not sc:
         sys.exit("no scaling records collected")
     fig_scaling(sc, "fac_ms", "factor wall-clock (ms)", "scaling_factor.png", "Factor time")
@@ -181,6 +222,8 @@ def main():
     fig_scaling(sc, "mem_mb", "factor memory (MB)", "scaling_memory.png", "Factor memory")
     if th:
         fig_threads(th)
+    if rl:
+        fig_real(rl)
     print("done.")
 
 
