@@ -1471,6 +1471,46 @@ fn factor_lu_left_looking<T: Scalar>(
         }
     }
 
+    // Diagnostic (RLA_PROFILE): simulate the achievable peak panel memory under a
+    // refcount free-schedule (free a panel once its last consumer has pulled it),
+    // in elimination/postorder, vs the current all-panels-resident peak. Decides
+    // whether panel-freeing is worth the concurrent machinery before building it.
+    if cmod_prof_on() {
+        let tb = std::mem::size_of::<T>();
+        let bytes = |k: usize| -> usize {
+            let nc = sym.supernodes[k].ncol;
+            let nr = rs[k].len();
+            (nr * nc + nc * (nr - nc)) * tb
+        };
+        let total: usize = (0..nsuper).map(bytes).sum();
+        let mut refc = vec![0usize; nsuper];
+        for ul in &update_list {
+            for &k in ul {
+                refc[k] += 1;
+            }
+        }
+        let mut live = 0usize;
+        let mut peak = 0usize;
+        for s in 0..nsuper {
+            live += bytes(s);
+            for &k in &update_list[s] {
+                refc[k] -= 1;
+                if refc[k] == 0 {
+                    live -= bytes(k);
+                }
+            }
+            if refc[s] == 0 {
+                live -= bytes(s);
+            }
+            peak = peak.max(live);
+        }
+        eprintln!(
+            "[RLA_LL_MEMSIM] panels: all-resident {:.0}MB  refcount-freed peak {:.0}MB  ({:.2}x reduction)",
+            total as f64 / 1e6,
+            peak as f64 / 1e6,
+            total as f64 / (peak.max(1) as f64),
+        );
+    }
     let store = LuLlStore::<T>::new(nsuper);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let mut is_child = vec![false; nsuper];
