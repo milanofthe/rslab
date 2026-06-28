@@ -457,6 +457,9 @@ where
             got: b.len(),
         });
     }
+    // DGKS reorthogonalization threshold: redo the projection only when a single
+    // MGS pass cancelled more than this fraction of the vector's length.
+    const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
     let bnorm = norm2(b);
     let mut x = vec![T::zero(); n];
@@ -473,6 +476,10 @@ where
     let mut z = vec![T::zero(); n];
     let mut w = vec![T::zero(); n];
     let mut ax = vec![T::zero(); n];
+    // Arnoldi basis as one **flat** `n × (m+1)` buffer (column `i` is
+    // `v[i*n .. (i+1)*n]`) — contiguous, no per-iteration vector allocation, and
+    // cache-friendly for the Gram–Schmidt sweeps.
+    let mut v = vec![T::zero(); n * (m + 1)];
 
     while total < max_iter {
         op.apply(&x, &mut ax);
@@ -481,10 +488,11 @@ where
         if beta / bnorm <= tol {
             break;
         }
-        // Arnoldi basis V (m+1 vectors), Hessenberg H, Givens, and LS RHS g.
-        let mut v: Vec<Vec<T>> = Vec::with_capacity(m + 1);
+        // Column 0 of the basis = r / ‖r‖. Hessenberg H, Givens, and LS RHS g.
         let inv_beta = T::from_real(1.0 / beta);
-        v.push(r.iter().map(|&ri| ri * inv_beta).collect());
+        for k in 0..n {
+            v[k] = r[k] * inv_beta;
+        }
         let mut h = vec![vec![T::zero(); m]; m + 1];
         let mut cs = vec![T::zero(); m];
         let mut sn = vec![T::zero(); m];
@@ -497,33 +505,46 @@ where
                 break;
             }
             // Right preconditioning: w = A · M⁻¹ · v[j].
-            precond.apply(&v[j], &mut z)?;
+            precond.apply(&v[j * n..j * n + n], &mut z)?;
             op.apply(&z, &mut w);
-            // Modified Gram–Schmidt against the existing basis, with one
-            // reorthogonalization pass — essential on ill-conditioned operators
-            // (MoM near-field) where a single MGS pass loses orthogonality and
-            // the Hessenberg residual estimate drifts from the true residual.
+            // Modified Gram–Schmidt against the existing basis, with **conditional**
+            // reorthogonalization (DGKS): the second pass — essential on
+            // ill-conditioned operators (MoM near-field) where a single MGS pass
+            // loses orthogonality and the Hessenberg residual estimate drifts from
+            // the true residual — runs only when the projection cancelled most of
+            // the vector (‖w‖ dropped below `η·‖w₀‖`, η = 1/√2). Well-conditioned
+            // cycles skip it, halving the orthogonalization cost.
+            let wnorm0 = norm2(&w);
             for i in 0..=j {
-                let hij = dotc(&v[i], &w);
+                let hij = dotc(&v[i * n..i * n + n], &w);
                 h[i][j] = hij;
                 for k in 0..n {
-                    w[k] = w[k] - hij * v[i][k];
+                    w[k] = w[k] - hij * v[i * n + k];
                 }
             }
-            for i in 0..=j {
-                let s = dotc(&v[i], &w);
-                h[i][j] = h[i][j] + s;
-                for k in 0..n {
-                    w[k] = w[k] - s * v[i][k];
+            let mut hn = norm2(&w);
+            if hn < REORTH_ETA * wnorm0 {
+                for i in 0..=j {
+                    let s = dotc(&v[i * n..i * n + n], &w);
+                    h[i][j] = h[i][j] + s;
+                    for k in 0..n {
+                        w[k] = w[k] - s * v[i * n + k];
+                    }
                 }
+                hn = norm2(&w);
             }
-            let hn = norm2(&w);
             h[j + 1][j] = T::from_real(hn);
             if hn > 0.0 {
                 let inv = T::from_real(1.0 / hn);
-                v.push(w.iter().map(|&wk| wk * inv).collect());
+                for k in 0..n {
+                    v[(j + 1) * n + k] = w[k] * inv;
+                }
             } else {
-                v.push(vec![T::zero(); n]);
+                // Invariant subspace: zero the (reused) basis column so a later
+                // sweep never reads stale data from a previous restart cycle.
+                for k in 0..n {
+                    v[(j + 1) * n + k] = T::zero();
+                }
             }
             // Apply previous rotations to the new Hessenberg column.
             for i in 0..j {
@@ -560,7 +581,7 @@ where
         for i in 0..jdim {
             let yi = y[i];
             for k in 0..n {
-                vy[k] = vy[k] + v[i][k] * yi;
+                vy[k] = vy[k] + v[i * n + k] * yi;
             }
         }
         precond.apply(&vy, &mut z)?;
