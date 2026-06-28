@@ -145,8 +145,9 @@ impl Calibration {
     }
 }
 
-/// Resource budget the factorization must live within.
-#[derive(Debug, Clone)]
+/// Resource budget the factorization must live within. The default (no memory
+/// limit, all-cores, no approximations) is an unconstrained exact plan.
+#[derive(Debug, Clone, Default)]
 pub struct Budget {
     /// Hard memory ceiling (bytes). `None` = no limit.
     pub max_mem_bytes: Option<u64>,
@@ -159,18 +160,6 @@ pub struct Budget {
     pub allow_drop_tol: Option<f64>,
     /// When over budget, may it BLR-compress the big fronts?
     pub allow_blr: bool,
-}
-
-impl Default for Budget {
-    fn default() -> Self {
-        Budget {
-            max_mem_bytes: None,
-            max_threads: 0,
-            allow_mixed_precision: false,
-            allow_drop_tol: None,
-            allow_blr: false,
-        }
-    }
 }
 
 /// A concrete factorization plan: tuned options + predictions + decisions.
@@ -238,7 +227,10 @@ pub fn plan(
         }
     }
 
-    let fits = budget.max_mem_bytes.map_or(true, |m| peak <= m);
+    let fits = match budget.max_mem_bytes {
+        Some(m) => peak <= m,
+        None => true,
+    };
     if notes.is_empty() {
         notes.push(format!("exact, {threads} threads"));
     }
