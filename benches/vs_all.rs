@@ -14,8 +14,76 @@
 //!
 //! Run: `cargo bench --bench vs_all` (optionally `RLA_DIAG_FILTER=spiral`).
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+
+// Counting allocator: tracks **live** bytes (current allocation, not OS working
+// set), so the panel-freeing transient is visible even when the system allocator
+// retains freed pages. Only sees Rust allocations — MKL/PARDISO bypass it.
+struct Counting;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+// Counting is opt-in (`RLA_LIVE_MEM=1`): off, the allocator is a thin System
+// passthrough so factor timings are not perturbed by the per-alloc atomics.
+static COUNTING_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc(l);
+        if !p.is_null() && COUNTING_ON.load(Ordering::Relaxed) {
+            let now = LIVE.fetch_add(l.size(), Ordering::Relaxed) + l.size();
+            PEAK.fetch_max(now, Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        if COUNTING_ON.load(Ordering::Relaxed) {
+            LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+        }
+        System.dealloc(p, l);
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, ns: usize) -> *mut u8 {
+        let np = System.realloc(p, l, ns);
+        if !np.is_null() && COUNTING_ON.load(Ordering::Relaxed) {
+            if ns >= l.size() {
+                let now = LIVE.fetch_add(ns - l.size(), Ordering::Relaxed) + (ns - l.size());
+                PEAK.fetch_max(now, Ordering::Relaxed);
+            } else {
+                LIVE.fetch_sub(l.size() - ns, Ordering::Relaxed);
+            }
+        }
+        np
+    }
+}
+#[global_allocator]
+static ALLOC: Counting = Counting;
+fn live_enabled() -> bool {
+    COUNTING_ON.load(Ordering::Relaxed)
+}
+
+/// Run `f` tracking the **live-bytes** peak above the entry level. Returns the
+/// result and the live transient in MB (the structural memory the factor needs).
+fn live_peak<R>(f: impl FnOnce() -> R) -> (R, f64) {
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let r = f();
+    let peak = PEAK.load(Ordering::Relaxed);
+    (r, (peak.saturating_sub(before)) as f64 / 1e6)
+}
+
+/// Factor-memory of a Rust solver: live-bytes peak in `RLA_LIVE_MEM=1` mode (the
+/// accurate structural metric), else the OS working-set transient. The tag labels
+/// which was used.
+fn factor_mem<R>(f: impl FnOnce() -> R) -> (R, f64, &'static str) {
+    if live_enabled() {
+        let (r, m) = live_peak(f);
+        (r, m, "live")
+    } else {
+        let (r, m) = sample(f);
+        (r, m, "ws")
+    }
+}
 
 use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
@@ -250,7 +318,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
     for (label, method) in [("RLA-LL ", FactorMethod::LeftLooking), ("RLA-MF ", FactorMethod::Multifrontal)] {
         let opts = FactorOptions::default().with_method(method);
         let t = Instant::now();
-        let (fres, mem) = sample(|| sym.factor(&a, &opts));
+        let (fres, mem, tag) = factor_mem(|| sym.factor(&a, &opts));
         match fres {
             Ok(f) => {
                 let fac = t.elapsed().as_secs_f64() * 1e3;
@@ -258,7 +326,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
                 let x = f.solve(&b).unwrap();
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 println!(
-                    "  {label}  ana {ana:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {:9}  mem +{mem:.0}",
+                    "  {label}  ana {ana:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {:9}  {tag} +{mem:.0}MB",
                     rel_resid(&a, &x, &b),
                     f.factor_nnz()
                 );
@@ -278,7 +346,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
         match SparseColMat::<usize, c64>::try_new_from_triplets(n, n, &trip) {
             Ok(fa) => {
                 let t = Instant::now();
-                let (lures, mem) = sample(|| fa.sp_lu());
+                let (lures, mem, tag) = factor_mem(|| fa.sp_lu());
                 match lures {
                     Ok(lu) => {
                         let fac = t.elapsed().as_secs_f64() * 1e3;
@@ -288,7 +356,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
                         let slv = t.elapsed().as_secs_f64() * 1e3;
                         let xf: Vec<C> = (0..n).map(|i| Complex::new(xb[(i, 0)].re, xb[(i, 0)].im)).collect();
                         println!(
-                            "  faer     ana       —  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill         —  mem +{mem:.0}",
+                            "  faer     ana       —  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill         —  {tag} +{mem:.0}MB",
                             rel_resid(&a, &xf, &b)
                         );
                     }
@@ -324,7 +392,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
                     println!("  PARDISO  solve error {e3}");
                 } else {
                     println!(
-                        "  PARDISO  ana {ana_p:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {fill:9}  mem +{mem:.0}",
+                        "  PARDISO  ana {ana_p:7.0}  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill {fill:9}  ws +{mem:.0}MB",
                         rel_resid(&a, &x, &b)
                     );
                 }
@@ -335,6 +403,9 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
 
 fn main() {
     faer::set_global_parallelism(faer::Par::rayon(0));
+    if std::env::var("RLA_LIVE_MEM").map(|v| v == "1").unwrap_or(false) {
+        COUNTING_ON.store(true, Ordering::Relaxed);
+    }
     let pardiso_ok = Pardiso::try_new().is_some();
     if !pardiso_ok {
         println!("(PARDISO: mkl_rt not found — skipping; install MKL or add it to PATH)");
