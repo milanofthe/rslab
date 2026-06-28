@@ -303,14 +303,21 @@ impl LdltSymbolic {
             ((nc * (nc + 1) / 2 + cnrow * nc) * (value_bytes + 8)) as u64
         };
         let input_bytes = (self.nnz * (value_bytes + 8)) as u64;
-        crate::diagnostics::estimate_left_looking(
+        let mut est = crate::diagnostics::estimate_left_looking(
             nsuper,
             &panel_bytes,
             &compact_bytes,
             &update_list,
             value_bytes,
             input_bytes,
-        )
+        );
+        est.factor_flops = (0..nsuper)
+            .map(|s| {
+                let (nc, nr) = (sym.supernodes[s].ncol as u64, rs[s].len() as u64);
+                nr * nr * nc
+            })
+            .sum();
+        est
     }
 
     /// Phases 2–3: equilibrate and factor `a`, reusing this analysis. `a` must

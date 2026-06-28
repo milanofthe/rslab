@@ -28,6 +28,10 @@ pub struct MemoryEstimate {
     /// Estimated overall transient peak: live panels + accumulated compact factor +
     /// the equilibrated input copy/copies. The number to compare against RAM.
     pub transient_peak_bytes: u64,
+    /// Geometric factorization work proxy `Σ nrow²·ncol` over supernodes (type-
+    /// independent). Divide by a calibrated geometric-flops/s rate for a runtime
+    /// estimate — see [`est_runtime_ms`](Self::est_runtime_ms).
+    pub factor_flops: u64,
 }
 
 impl MemoryEstimate {
@@ -40,6 +44,15 @@ impl MemoryEstimate {
     /// Does the estimated transient peak fit in `available` bytes?
     pub fn fits_in(&self, available_bytes: u64) -> bool {
         self.transient_peak_bytes <= available_bytes
+    }
+
+    /// Estimated factor wall-clock in ms: `factor_flops` divided by a calibrated
+    /// geometric-flops/s rate (`gflops` = giga-geom-flops/s on one thread) scaled by
+    /// the measured `parallel_speedup` at the chosen thread count. Both come from
+    /// the calibration (`tuning` feature); pass machine defaults otherwise.
+    pub fn est_runtime_ms(&self, gflops: f64, parallel_speedup: f64) -> f64 {
+        let rate = (gflops.max(1e-6) * parallel_speedup.max(1e-6)) * 1e9;
+        (self.factor_flops as f64 / rate) * 1e3
     }
 }
 
@@ -118,6 +131,7 @@ pub(crate) fn estimate_left_looking(
         panels_all_bytes: panels_all,
         panel_live_peak_bytes: panel_live_peak,
         transient_peak_bytes: panels_all + factor_bytes + input_bytes + scratch,
+        factor_flops: 0, // set by the caller (needs supernode dimensions)
     }
 }
 

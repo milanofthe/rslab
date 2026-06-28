@@ -83,6 +83,10 @@ pub mod scalar;
 pub mod scaling;
 pub mod sparse;
 pub mod symbolic;
+/// Hardware-aware auto-tuning + resource governor (feature `tuning`): hardware
+/// probe, calibration cache, and a budget-driven factorization planner.
+#[cfg(feature = "tuning")]
+pub mod tuning;
 
 // Flat public API re-exported at crate root — a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative

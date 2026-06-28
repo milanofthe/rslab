@@ -829,14 +829,21 @@ impl LuSymbolic {
         // Persistent input copies: the equilibrated permuted `a_perm` and its
         // transpose `a_perm_t` (both held through the left-looking factor).
         let input_bytes = (2 * self.nnz * (value_bytes + 8)) as u64;
-        crate::diagnostics::estimate_left_looking(
+        let mut est = crate::diagnostics::estimate_left_looking(
             nsuper,
             &panel_bytes,
             &compact_bytes,
             &update_list,
             value_bytes,
             input_bytes,
-        )
+        );
+        est.factor_flops = (0..nsuper)
+            .map(|s| {
+                let (nc, nr) = (sym.supernodes[s].ncol as u64, rs[s].len() as u64);
+                nr * nr * nc
+            })
+            .sum();
+        est
     }
 }
 

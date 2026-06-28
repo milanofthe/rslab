@@ -52,6 +52,9 @@ name = "rla"
 matgen = []
 # Adds a SuiteSparse / Matrix Market downloader (pure-Rust HTTP/TLS + gzip + tar).
 matgen-download = ["matgen", "dep:ureq", "dep:flate2", "dep:tar"]
+# Hardware-aware auto-tuning + resource governor (HardwareInfo via sysinfo,
+# calibration cache, budget planner). Pure-Rust dep.
+tuning = ["dep:sysinfo"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -92,6 +95,8 @@ feral-kahip = { path = "crates/feral-kahip", version = "0.2" }
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
+# Hardware probe (cores + RAM) for the `tuning` feature. Pure Rust.
+sysinfo = { version = "0.31", optional = true, default-features = false, features = ["system"] }
 
 [dev-dependencies]
 approx = "0.5"
