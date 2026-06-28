@@ -146,14 +146,17 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
     fn cu(m: GeneralCsc<C>) -> Generated {
         Generated::Unsymmetric(m)
     }
+    // NOTE: random patterns are the worst case for a direct solver (no structure
+    // for the ordering ⇒ near-dense fill), so these stay deliberately small — they
+    // stress the symbolic/ordering stage, not large-n throughput.
     c.push(MatrixSpec {
         name: "rand_spd",
         structure: Structure::Random,
         symmetry: Symmetry::Spd,
         cond: Cond::Moderate,
         density: Density::Sparse,
-        size: 20_000,
-        build: || cs(random_spd(20_000, 16, 1.0, 21)),
+        size: 6_000,
+        build: || cs(random_spd(6_000, 16, 1.0, 21)),
     });
     c.push(MatrixSpec {
         name: "rand_spd_ill",
@@ -161,8 +164,8 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         symmetry: Symmetry::Spd,
         cond: Cond::Ill,
         density: Density::Sparse,
-        size: 20_000,
-        build: || cs(random_spd(20_000, 16, 1e-3, 22)),
+        size: 6_000,
+        build: || cs(random_spd(6_000, 16, 1e-3, 22)),
     });
     c.push(MatrixSpec {
         name: "rand_unsym",
@@ -170,8 +173,8 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         symmetry: Symmetry::Unsymmetric,
         cond: Cond::Moderate,
         density: Density::Sparse,
-        size: 20_000,
-        build: || cu(random_unsym(20_000, 16, 2.0, 23)),
+        size: 5_000,
+        build: || cu(random_unsym(5_000, 16, 2.0, 23)),
     });
     // Spectral, exact condition numbers (dense, small).
     c.push(MatrixSpec {
