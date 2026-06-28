@@ -90,6 +90,27 @@ static PROF_EXTRACT_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_LL_ASM_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_LL_CMOD_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_LL_CDIV_NS: AtomicU64 = AtomicU64::new(0);
+// cmod descendant-distribution profiler: counts/flops split by path
+// (scalar tiny / serial gemm / parallel gemm) to expose update fragmentation.
+static PROF_CMOD_SCAL_N: AtomicU64 = AtomicU64::new(0);
+static PROF_CMOD_SCAL_F: AtomicU64 = AtomicU64::new(0);
+static PROF_CMOD_GSER_N: AtomicU64 = AtomicU64::new(0);
+static PROF_CMOD_GSER_F: AtomicU64 = AtomicU64::new(0);
+static PROF_CMOD_GPAR_N: AtomicU64 = AtomicU64::new(0);
+static PROF_CMOD_GPAR_F: AtomicU64 = AtomicU64::new(0);
+static PROF_CMOD_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[inline]
+fn cmod_prof_on() -> bool {
+    *PROF_CMOD_FLAG.get_or_init(|| std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false))
+}
+// Experiment gate: force all left-looking GEMMs serial (no nested rayon), so the
+// node-internal parallelism can be isolated from the tree-level `par_iter`.
+static LL_GEMM_SERIAL_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[inline]
+fn ll_gemm_serial() -> bool {
+    *LL_GEMM_SERIAL_FLAG
+        .get_or_init(|| std::env::var("RLA_GEMM_SERIAL").map(|v| v == "1").unwrap_or(false))
+}
 
 thread_local! {
     /// Per-worker global→front-local index scratch (`usize`, scalar-independent),
@@ -939,7 +960,12 @@ fn lu_ll_factor_node<T: Scalar>(
     }
     PROF_LL_ASM_NS.fetch_add(t_asm.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t_cmod = std::time::Instant::now();
-    // cmod from every factored descendant.
+    // cmod from every factored descendant. NOTE: cmod-aggregation (K-stacking many
+    // descendant updates into one fat GEMM) was measured and rejected — across MoM
+    // topologies 91–95 % of cmod flop already runs as large parallel GEMMs, and the
+    // only aggregation reaching those dominant updates carries an 11–15× zero-pad
+    // blowup (each top-of-tree descendant touches a small, distinct row/col subset
+    // of the large target). The `RLA_CMOD_DIST` histogram below documents this.
     let mut lupd: Vec<T> = Vec::new();
     let mut uupd: Vec<T> = Vec::new();
     for &kk in &update_list[s] {
@@ -958,6 +984,19 @@ fn lu_ll_factor_node<T: Scalar>(
         }
         let mrows = nok - p0; // rows used by the L update (Ok ⊆ rs[s] from here)
         let ntrail = nok - p1;
+        if cmod_prof_on() {
+            let flop = (mrows * npk * nck) as u64;
+            if mrows * npk * nck < LL_GEMM_GATE {
+                PROF_CMOD_SCAL_N.fetch_add(1, Ordering::Relaxed);
+                PROF_CMOD_SCAL_F.fetch_add(flop, Ordering::Relaxed);
+            } else if mrows * npk * nck >= LL_GEMM_PAR {
+                PROF_CMOD_GPAR_N.fetch_add(1, Ordering::Relaxed);
+                PROF_CMOD_GPAR_F.fetch_add(flop, Ordering::Relaxed);
+            } else {
+                PROF_CMOD_GSER_N.fetch_add(1, Ordering::Relaxed);
+                PROF_CMOD_GSER_F.fetch_add(flop, Ordering::Relaxed);
+            }
+        }
         if mrows * npk * nck < LL_GEMM_GATE {
             // Scalar path.
             for jj in 0..npk {
@@ -985,7 +1024,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 }
             }
         } else {
-            let par = if mrows * npk * nck >= LL_GEMM_PAR {
+            let par = if !ll_gemm_serial() && mrows * npk * nck >= LL_GEMM_PAR {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1166,7 +1205,7 @@ fn lu_ll_factor_node<T: Scalar>(
         let mt = nrow - ke;
         let nt = ncol - ke;
         if mt > 0 && nt > 0 {
-            let par = if (mt * nt * pw) >= LL_CDIV_PAR {
+            let par = if !ll_gemm_serial() && (mt * nt * pw) >= LL_CDIV_PAR {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1199,7 +1238,7 @@ fn lu_ll_factor_node<T: Scalar>(
         }
         // GEMM: ubuf[ke..ncol, :] −= L[ke..ncol, kb..ke] · U12[kb..ke, :].
         if cnrow > 0 && nt > 0 {
-            let par = if (nt * cnrow * pw) >= LL_CDIV_PAR {
+            let par = if !ll_gemm_serial() && (nt * cnrow * pw) >= LL_CDIV_PAR {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1342,6 +1381,19 @@ fn factor_lu_left_looking<T: Scalar>(
             100.0 * asm / tot,
             100.0 * cmod / tot,
             100.0 * cdiv / tot,
+        );
+        let sn = PROF_CMOD_SCAL_N.swap(0, Ordering::Relaxed);
+        let sf = PROF_CMOD_SCAL_F.swap(0, Ordering::Relaxed);
+        let rn = PROF_CMOD_GSER_N.swap(0, Ordering::Relaxed);
+        let rf = PROF_CMOD_GSER_F.swap(0, Ordering::Relaxed);
+        let pn = PROF_CMOD_GPAR_N.swap(0, Ordering::Relaxed);
+        let pf = PROF_CMOD_GPAR_F.swap(0, Ordering::Relaxed);
+        let ftot = (sf + rf + pf).max(1) as f64;
+        eprintln!(
+            "[RLA_CMOD_DIST] updates  scalar n={sn} ({:.1}% flop)  gemm-ser n={rn} ({:.1}% flop)  gemm-par n={pn} ({:.1}% flop)",
+            100.0 * sf as f64 / ftot,
+            100.0 * rf as f64 / ftot,
+            100.0 * pf as f64 / ftot,
         );
     }
 
