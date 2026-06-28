@@ -164,10 +164,10 @@ pub enum FactorMethod {
     /// BLAS-3 updates from its factored descendants — **no contribution-block
     /// stack, no extract phase** (the PARDISO transient profile), parallel over
     /// the assembly tree, lower fill, faster than multifrontal on the MoM
-    /// matrices. Uses **1×1 static pivoting** (no interchange), so it is the
-    /// memory/throughput-optimal path for the equilibrated preconditioner and
-    /// well-scaled/definite systems; pair with iterative refinement. Not for
-    /// zero-/tiny-diagonal indefinite matrices that need a 2×2 pivot.
+    /// matrices. Uses **Bunch-Kaufman 1×1/2×2 pivoting** bounded to each panel's
+    /// fully-summed block, so it handles indefinite (zero-/tiny-diagonal) systems
+    /// directly — the memory/throughput-optimal path for both the equilibrated
+    /// preconditioner and exact indefinite direct solves.
     ///
     /// [`preconditioner`]: FactorOptions::preconditioner
     LeftLooking,
@@ -234,8 +234,8 @@ impl FactorOptions {
         Self {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor },
             // The equilibrated, refined preconditioner is exactly where the
-            // memory/throughput-optimal left-looking path (1×1 static pivoting)
-            // belongs; override with `with_method` if a case needs pivoting.
+            // memory/throughput-optimal left-looking path (Bunch-Kaufman 1×1/2×2)
+            // belongs; override with `with_method` to force the multifrontal path.
             method: FactorMethod::LeftLooking,
             ..Self::default()
         }
@@ -1305,6 +1305,16 @@ pub(crate) fn compute_supernode_row_structures(
 struct LlStore<T> {
     panels: Vec<std::cell::UnsafeCell<Vec<T>>>,
     dvals: Vec<std::cell::UnsafeCell<Vec<T>>>,
+    /// Sub-diagonal D entry of each 2×2 Bunch-Kaufman block (per eliminated
+    /// column, in the panel's pivoted order; zero on 1×1 columns and on the
+    /// second column of a 2×2 block).
+    dsubs: Vec<std::cell::UnsafeCell<Vec<T>>>,
+    /// `true` at the first column of each 2×2 block (pivoted order).
+    twos: Vec<std::cell::UnsafeCell<Vec<bool>>>,
+    /// Local within-panel pivot permutation (length = panel `nrow`, identity on
+    /// the off-diagonal rows `[ncol, nrow)` since pivoting is bounded to the
+    /// fully-summed block). Pivoted index `i` ↔ original local index `lperm[i]`.
+    lperms: Vec<std::cell::UnsafeCell<Vec<usize>>>,
 }
 // SAFETY: see the type doc — single-writer-before-readers, disjoint indices.
 unsafe impl<T: Send> Sync for LlStore<T> {}
@@ -1318,6 +1328,15 @@ impl<T: Scalar> LlStore<T> {
             dvals: (0..nsuper)
                 .map(|_| std::cell::UnsafeCell::new(Vec::new()))
                 .collect(),
+            dsubs: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
+                .collect(),
+            twos: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
+                .collect(),
+            lperms: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
+                .collect(),
         }
     }
     /// SAFETY: `k` must be a fully-factored descendant of the current node.
@@ -1328,10 +1347,33 @@ impl<T: Scalar> LlStore<T> {
     unsafe fn dval(&self, k: usize) -> &Vec<T> {
         &*self.dvals[k].get()
     }
+    /// SAFETY: as [`panel`](Self::panel).
+    unsafe fn dsub(&self, k: usize) -> &Vec<T> {
+        &*self.dsubs[k].get()
+    }
+    /// SAFETY: as [`panel`](Self::panel).
+    unsafe fn two(&self, k: usize) -> &Vec<bool> {
+        &*self.twos[k].get()
+    }
+    /// SAFETY: as [`panel`](Self::panel).
+    unsafe fn lperm(&self, k: usize) -> &Vec<usize> {
+        &*self.lperms[k].get()
+    }
     /// SAFETY: only the owner of supernode `s` calls this, exactly once.
-    unsafe fn set(&self, s: usize, panel: Vec<T>, d: Vec<T>) {
+    unsafe fn set(
+        &self,
+        s: usize,
+        panel: Vec<T>,
+        d: Vec<T>,
+        dsub: Vec<T>,
+        two: Vec<bool>,
+        lperm: Vec<usize>,
+    ) {
         *self.panels[s].get() = panel;
         *self.dvals[s].get() = d;
+        *self.dsubs[s].get() = dsub;
+        *self.twos[s].get() = two;
+        *self.lperms[s].get() = lperm;
     }
 }
 
@@ -1387,6 +1429,11 @@ fn ll_factor_node<T: Scalar>(
         // so its panel/dval cells are written and never mutated again.
         let pk = unsafe { store.panel(kk) };
         let dk = unsafe { store.dval(kk) };
+        // Bunch-Kaufman block structure of `kk`'s D (pivoted column order). The
+        // cmod `L·D·Lᵀ` is invariant under `kk`'s internal column permutation, so
+        // only the block-diagonal `D`-apply has to honor the 2×2 blocks.
+        let dsub_k = unsafe { store.dsub(kk) };
+        let two_k = unsafe { store.two(kk) };
         let p0 = ok.partition_point(|&g| g < first);
         let p1 = ok.partition_point(|&g| g < first + ncol);
         let npk = p1 - p0;
@@ -1398,8 +1445,21 @@ fn ll_factor_node<T: Scalar>(
             vc.resize(nck, T::zero());
             for c_idx in p0..p1 {
                 let tcol = ok[c_idx] - first;
-                for ck in 0..nck {
-                    vc[ck] = dk[ck] * pk[(nck + c_idx) + ck * nrk];
+                // vc = D · (column `c_idx` of kk's off-diagonal block), with D
+                // block-diagonal (1×1 and complex-symmetric 2×2 blocks).
+                let mut ck = 0;
+                while ck < nck {
+                    let a = pk[(nck + c_idx) + ck * nrk];
+                    if two_k[ck] {
+                        let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
+                        let b = pk[(nck + c_idx) + (ck + 1) * nrk];
+                        vc[ck] = d11 * a + d21 * b;
+                        vc[ck + 1] = d21 * a + d22 * b;
+                        ck += 2;
+                    } else {
+                        vc[ck] = dk[ck] * a;
+                        ck += 1;
+                    }
                 }
                 for r_idx in c_idx..nok {
                     let trow = gloc[ok[r_idx]];
@@ -1413,10 +1473,26 @@ fn ll_factor_node<T: Scalar>(
         } else {
             vd_buf.clear();
             vd_buf.resize(npk * nck, T::zero());
-            for ck in 0..nck {
-                let dkc = dk[ck];
-                for i in 0..npk {
-                    vd_buf[i + ck * npk] = pk[(nck + p0 + i) + ck * nrk] * dkc;
+            // G = (kk's in-panel off-diagonal block) · D, stored column-major as
+            // `vd_buf[c + ck*npk]`. D is block-diagonal (1×1 and 2×2 blocks); a
+            // 2×2 block mixes its two columns. GEMM below is unchanged.
+            let mut ck = 0;
+            while ck < nck {
+                if two_k[ck] {
+                    let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
+                    for i in 0..npk {
+                        let a = pk[(nck + p0 + i) + ck * nrk];
+                        let b = pk[(nck + p0 + i) + (ck + 1) * nrk];
+                        vd_buf[i + ck * npk] = d11 * a + d21 * b;
+                        vd_buf[i + (ck + 1) * npk] = d21 * a + d22 * b;
+                    }
+                    ck += 2;
+                } else {
+                    let dkc = dk[ck];
+                    for i in 0..npk {
+                        vd_buf[i + ck * npk] = pk[(nck + p0 + i) + ck * nrk] * dkc;
+                    }
+                    ck += 1;
                 }
             }
             u_buf.clear();
@@ -1461,39 +1537,175 @@ fn ll_factor_node<T: Scalar>(
             }
         }
     }
-    // cdiv: partial 1×1 LDLᵀ.
+    // cdiv: partial **Bunch-Kaufman** LDLᵀ (1×1 and 2×2 pivots), the rectangular
+    // `nrow × ncol` analogue of `factor_front`'s panel kernel. Pivoting is bounded
+    // to the fully-summed block `0..ncol` (candidate rows `(k+1)..ncol`), so the
+    // off-diagonal rows `[ncol, nrow)` keep their identity — `s`'s contribution to
+    // ancestors is unaffected by this internal permutation. Each rank-1/rank-2
+    // trailing update runs over all rows down to `nrow`, forming the full L21.
+    let alpha = bk_alpha();
     let mut d = vec![T::zero(); ncol];
+    let mut d_subdiag = vec![T::zero(); ncol];
+    let mut two_by_two = vec![false; ncol];
+    let mut lperm: Vec<usize> = (0..nrow).collect();
+    // 2×2 multiplier scratch (reused; only `[k+2, nrow)` is ever read each step).
+    let mut l1 = vec![T::zero(); nrow];
+    let mut l2 = vec![T::zero(); nrow];
     let mut local_perturbed = 0usize;
-    for k in 0..ncol {
-        let mut dk = panel[k + k * nrow];
-        match perturb_floor {
-            Some(floor) if dk.magnitude() < floor => {
-                dk = perturb_pivot(dk, floor);
-                local_perturbed += 1;
+    // Helper to restore the `gloc` scratch invariant before an early return.
+    macro_rules! restore_gloc {
+        () => {{
+            for &g in &rs[s] {
+                gloc[g] = usize::MAX;
             }
-            None if dk == T::zero() => {
-                // Restore the scratch invariant before bailing out.
-                for &g in &rs[s] {
-                    gloc[g] = usize::MAX;
-                }
-                GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
+            GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
+        }};
+    }
+    let mut k = 0;
+    while k < ncol {
+        let absakk = panel[k + k * nrow].magnitude();
+        // colmax over the in-block candidate rows (k+1)..ncol.
+        let mut colmax_sq = 0.0;
+        let mut imax = k;
+        for i in (k + 1)..ncol {
+            let m = panel[k * nrow + i].magnitude_sq();
+            if m > colmax_sq {
+                colmax_sq = m;
+                imax = i;
+            }
+        }
+        let colmax = colmax_sq.sqrt();
+
+        let kstep;
+        let kp;
+        if absakk.max(colmax) == 0.0 {
+            if perturb_floor.is_none() {
+                restore_gloc!();
                 return Err(FeralError::NumericallyRankDeficient);
             }
-            _ => {}
-        }
-        d[k] = dk;
-        let dinv = dk.recip();
-        for i in (k + 1)..nrow {
-            panel[i + k * nrow] = panel[i + k * nrow] * dinv;
-        }
-        for j in (k + 1)..ncol {
-            let ljk = panel[j + k * nrow];
-            if ljk != T::zero() {
-                let f = dk * ljk;
-                for i in j..nrow {
-                    panel[i + j * nrow] = panel[i + j * nrow] - panel[i + k * nrow] * f;
+            kstep = 1;
+            kp = k;
+        } else if absakk >= alpha * colmax {
+            kstep = 1;
+            kp = k;
+        } else {
+            // rowmax in row `imax`, restricted to the fully-summed block.
+            let mut rowmax_sq = 0.0;
+            for j in k..imax {
+                let m = panel[j * nrow + imax].magnitude_sq();
+                if m > rowmax_sq {
+                    rowmax_sq = m;
                 }
             }
+            for i in (imax + 1)..ncol {
+                let m = panel[imax * nrow + i].magnitude_sq();
+                if m > rowmax_sq {
+                    rowmax_sq = m;
+                }
+            }
+            let rowmax = rowmax_sq.sqrt();
+            if absakk >= alpha * colmax * (colmax / rowmax) {
+                kstep = 1;
+                kp = k;
+            } else if panel[imax * nrow + imax].magnitude() >= alpha * rowmax {
+                kstep = 1;
+                kp = imax;
+            } else {
+                kstep = 2;
+                kp = imax;
+            }
+        }
+
+        if kstep == 1 {
+            if kp != k {
+                swap_sym_lower(&mut panel, nrow, k, kp);
+                lperm.swap(k, kp);
+            }
+            let mut dk = panel[k + k * nrow];
+            match perturb_floor {
+                Some(floor) if dk.magnitude() < floor => {
+                    dk = perturb_pivot(dk, floor);
+                    panel[k + k * nrow] = dk;
+                    local_perturbed += 1;
+                }
+                None if dk == T::zero() => {
+                    restore_gloc!();
+                    return Err(FeralError::NumericallyRankDeficient);
+                }
+                _ => {}
+            }
+            d[k] = dk;
+            let dinv = dk.recip();
+            // Form L21 multipliers for column k (all trailing rows), then apply the
+            // symmetric rank-1 update to the trailing columns (k+1)..ncol.
+            for j in (k + 1)..ncol {
+                let wj_dinv = panel[k * nrow + j] * dinv;
+                if wj_dinv != T::zero() {
+                    for i in j..nrow {
+                        panel[j * nrow + i] = panel[j * nrow + i] - panel[k * nrow + i] * wj_dinv;
+                    }
+                }
+            }
+            for i in (k + 1)..nrow {
+                panel[k * nrow + i] = panel[k * nrow + i] * dinv;
+            }
+            k += 1;
+        } else {
+            if kp != k + 1 {
+                swap_sym_lower(&mut panel, nrow, k + 1, kp);
+                lperm.swap(k + 1, kp);
+            }
+            let mut d11 = panel[k + k * nrow];
+            let d21 = panel[k * nrow + (k + 1)];
+            let mut d22 = panel[(k + 1) + (k + 1) * nrow];
+            let mut det = d11 * d22 - d21 * d21;
+            let scale = d11.magnitude().max(d22.magnitude()).max(d21.magnitude());
+            let growth_floor = GROWTH_EPS * scale * scale;
+            match perturb_floor {
+                Some(floor) => {
+                    let fl = (floor * floor).max(growth_floor);
+                    if det.magnitude() < fl {
+                        let lift = floor.max(scale * GROWTH_EPS.sqrt());
+                        d11 = d11 + T::from_real(lift);
+                        d22 = d22 + T::from_real(lift);
+                        det = d11 * d22 - d21 * d21;
+                        if det.magnitude() < fl {
+                            det = det + T::from_real(fl);
+                        }
+                        local_perturbed += 1;
+                    }
+                }
+                None if det.magnitude() <= growth_floor => {
+                    restore_gloc!();
+                    return Err(FeralError::NumericallyRankDeficient);
+                }
+                _ => {}
+            }
+            let detinv = det.recip();
+            d[k] = d11;
+            d_subdiag[k] = d21;
+            d[k + 1] = d22;
+            two_by_two[k] = true;
+            for i in (k + 2)..nrow {
+                let wik = panel[k * nrow + i];
+                let wik1 = panel[(k + 1) * nrow + i];
+                l1[i] = (d22 * wik - d21 * wik1) * detinv;
+                l2[i] = (d11 * wik1 - d21 * wik) * detinv;
+            }
+            for j in (k + 2)..ncol {
+                let l1j = l1[j];
+                let l2j = l2[j];
+                for i in j..nrow {
+                    panel[j * nrow + i] = panel[j * nrow + i]
+                        - panel[k * nrow + i] * l1j
+                        - panel[(k + 1) * nrow + i] * l2j;
+                }
+            }
+            for i in (k + 2)..nrow {
+                panel[k * nrow + i] = l1[i];
+                panel[(k + 1) * nrow + i] = l2[i];
+            }
+            k += 2;
         }
     }
     if local_perturbed > 0 {
@@ -1504,7 +1716,7 @@ fn ll_factor_node<T: Scalar>(
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
     // SAFETY: this thread owns supernode `s` and writes its cell exactly once.
-    unsafe { store.set(s, panel, d) };
+    unsafe { store.set(s, panel, d, d_subdiag, two_by_two, lperm) };
     Ok(())
 }
 
@@ -1550,14 +1762,18 @@ fn ll_factor_subtree<T: Scalar>(
     )
 }
 
-/// Supernodal **left-looking** LDLᵀ (1×1 pivots, static perturbation). Each
+/// Supernodal **left-looking** LDLᵀ with **Bunch-Kaufman 1×1/2×2 pivoting**. Each
 /// supernode's dense panel is assembled from `A`, updated by every previously
 /// factored descendant (`cmod`: pull the descendant's contribution columns that
-/// land in this panel), then factored in place (`cdiv`: partial LDLᵀ, no
-/// trailing update). There is **no contribution-block stack and no extract
-/// copy-out** — the panels are the factor — so the transient is just the factor
-/// itself (the PARDISO memory profile). Produces the same [`LdltFactors`] as the
-/// multifrontal path (numerically equivalent up to summation order).
+/// land in this panel, applying its block-diagonal `D`), then factored in place
+/// (`cdiv`: partial Bunch-Kaufman, no trailing update). Pivoting is bounded to
+/// each panel's fully-summed block, so the off-diagonal rows keep their identity
+/// and the descendant→ancestor `cmod` is unaffected by a panel's internal
+/// permutation. There is **no contribution-block stack and no extract copy-out**
+/// — the panels are the factor — so the transient is just the factor itself (the
+/// PARDISO memory profile). Produces the same [`LdltFactors`] as the multifrontal
+/// path (numerically equivalent up to pivot order), including indefinite
+/// (zero-/tiny-diagonal) systems via the 2×2 blocks.
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     a: &CscMatrix<T>,
@@ -1645,30 +1861,73 @@ fn factor_left_looking<T: Scalar>(
         .collect::<Result<Vec<()>, _>>()?;
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
 
-    // Emit global L (CSC) + D in elimination order (no within-panel pivoting →
-    // elimination order is supernode/column order).
+    // Emit global L (CSC) + D in elimination order. Within a supernode the
+    // eliminated columns are in the panel's **pivoted** order, so pivoted column
+    // `p` carries global index `rs[s][lperm[p]]`. The factorization order `e` is
+    // assigned per column; 2×2 Bunch-Kaufman blocks span two consecutive columns
+    // (block start carries `two_by_two`/`d_subdiag`). Inertia is computed
+    // block-aware from each D block's det/trace (real parts).
     let mut e_of_g = vec![usize::MAX; n];
     let mut perm = vec![0usize; n];
     let mut d_diag = vec![T::zero(); n];
+    let mut d_subdiag = vec![T::zero(); n];
+    let mut two_by_two = vec![false; n];
     let mut inertia = Inertia::new(0, 0, 0);
     let mut e = 0usize;
     for (s, snode) in sym.supernodes.iter().enumerate() {
-        // SAFETY: factorization is complete; every panel/dval cell is written.
+        let ncol = snode.ncol;
+        // SAFETY: factorization is complete; every D/lperm cell is written.
         let dvs = unsafe { store.dval(s) };
-        for (p, &dv) in dvs.iter().enumerate() {
-            let g = snode.first_col + p;
+        let dsub = unsafe { store.dsub(s) };
+        let t2 = unsafe { store.two(s) };
+        let lperm = unsafe { store.lperm(s) };
+        let mut p = 0;
+        while p < ncol {
+            let g = rs[s][lperm[p]];
             e_of_g[g] = e;
             perm[e] = sym.perm[g];
-            d_diag[e] = dv;
-            let r = dv.real();
-            if r > 0.0 {
-                inertia.positive += 1;
-            } else if r < 0.0 {
-                inertia.negative += 1;
+            d_diag[e] = dvs[p];
+            if t2[p] {
+                // 2×2 block: emit both columns, inertia from det/trace.
+                let g2 = rs[s][lperm[p + 1]];
+                e_of_g[g2] = e + 1;
+                perm[e + 1] = sym.perm[g2];
+                d_diag[e + 1] = dvs[p + 1];
+                d_subdiag[e] = dsub[p];
+                two_by_two[e] = true;
+                let det_r = (dvs[p] * dvs[p + 1] - dsub[p] * dsub[p]).real();
+                let tr_r = (dvs[p] + dvs[p + 1]).real();
+                if det_r < 0.0 {
+                    inertia.positive += 1;
+                    inertia.negative += 1;
+                } else if det_r > 0.0 {
+                    if tr_r >= 0.0 {
+                        inertia.positive += 2;
+                    } else {
+                        inertia.negative += 2;
+                    }
+                } else {
+                    inertia.zero += 1;
+                    if tr_r >= 0.0 {
+                        inertia.positive += 1;
+                    } else {
+                        inertia.negative += 1;
+                    }
+                }
+                e += 2;
+                p += 2;
             } else {
-                inertia.zero += 1;
+                let r = dvs[p].real();
+                if r > 0.0 {
+                    inertia.positive += 1;
+                } else if r < 0.0 {
+                    inertia.negative += 1;
+                } else {
+                    inertia.zero += 1;
+                }
+                e += 1;
+                p += 1;
             }
-            e += 1;
         }
     }
     debug_assert_eq!(e, n, "every index eliminated exactly once");
@@ -1681,18 +1940,25 @@ fn factor_left_looking<T: Scalar>(
     let mut col: Vec<(usize, T)> = Vec::new();
     for s in 0..nsuper {
         let snode = &sym.supernodes[s];
-        let (first, ncol) = (snode.first_col, snode.ncol);
+        let ncol = snode.ncol;
         let nrow = rs[s].len();
-        // SAFETY: factorization is complete; the panel cell is written.
+        // SAFETY: factorization is complete; the panel/lperm/two cells are written.
         let panel = unsafe { store.panel(s) };
+        let lperm = unsafe { store.lperm(s) };
+        let t2 = unsafe { store.two(s) };
         for p in 0..ncol {
             col.clear();
-            let diag_e = e_of_g[first + p];
+            // Pivoted column `p` / row `i` carry global indices `rs[s][lperm[·]]`.
+            // L has a unit diagonal; the entry below the diagonal of a 2×2 block's
+            // first column is the `D` coupling `d21` (still resident in the panel),
+            // not an `L` multiplier, so skip that row (mirror `factor_front`).
+            let diag_e = e_of_g[rs[s][lperm[p]]];
             col.push((diag_e, one));
-            for i in (p + 1)..nrow {
+            let i0 = if t2[p] { p + 2 } else { p + 1 };
+            for i in i0..nrow {
                 let v = panel[i + p * nrow];
                 if v != T::zero() {
-                    col.push((e_of_g[rs[s][i]], v));
+                    col.push((e_of_g[rs[s][lperm[i]]], v));
                 }
             }
             if let Some(tau) = opts.drop_tol {
@@ -1719,8 +1985,8 @@ fn factor_left_looking<T: Scalar>(
         l_row_idx,
         l_values,
         d_diag,
-        d_subdiag: vec![T::zero(); n],
-        two_by_two: vec![false; n],
+        d_subdiag,
+        two_by_two,
         perm,
         n_perturbed,
         inertia,
@@ -1848,6 +2114,91 @@ mod tests {
         assert!(
             residual_inf(&a, &xl, &b) < 1e-9,
             "complex left-looking residual"
+        );
+    }
+
+    #[test]
+    fn left_looking_indefinite_2x2_inertia() {
+        // [[0,1],[1,0]] (eigenvalues ±1) forces a single 2×2 Bunch-Kaufman block.
+        // The left-looking path must take that 2×2 (zero diagonal → no 1×1 pivot)
+        // and report inertia (1+, 1−) just like the multifrontal kernel.
+        let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 0], &[0.0, 1.0]).unwrap();
+        let ll = factor_sparse_ldlt_with(
+            &a,
+            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+        )
+        .unwrap();
+        assert!(ll.two_by_two.iter().any(|&t| t), "expected a 2×2 block");
+        assert_eq!(
+            (ll.inertia.positive, ll.inertia.negative, ll.inertia.zero),
+            (1, 1, 0)
+        );
+        let b = [1.0_f64, -2.0];
+        let x = solve_ldlt(&ll, &b).unwrap();
+        assert!(residual_inf(&a, &x, &b) < 1e-12, "2×2 residual");
+    }
+
+    #[test]
+    fn left_looking_indefinite_matches_multifrontal() {
+        // 2D 5-point grid with a *small* diagonal (0.5 ≪ 2·|off|): far from
+        // diagonally dominant → genuinely indefinite, so Bunch-Kaufman must take
+        // many 2×2 pivots across several supernodes. The left-looking path must
+        // match the multifrontal reference in inertia and give a true solve — the
+        // exact indefinite EM-FEM case the 2×2 pivoting is for.
+        let a = grid2d_lower::<f64>(10, 0.5, -1.0);
+        let n = a.n;
+        let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let ll = factor_sparse_ldlt_with(
+            &a,
+            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+        )
+        .unwrap();
+        assert!(
+            ll.two_by_two.iter().filter(|&&t| t).count() > 0,
+            "indefinite system should use 2×2 pivots"
+        );
+        assert_eq!(
+            (mf.inertia.positive, mf.inertia.negative, mf.inertia.zero),
+            (ll.inertia.positive, ll.inertia.negative, ll.inertia.zero),
+            "inertia must match the multifrontal reference"
+        );
+        let xm = solve_ldlt(&mf, &b).unwrap();
+        let xl = solve_ldlt(&ll, &b).unwrap();
+        assert!(residual_inf(&a, &xl, &b) < 1e-9, "left-looking indefinite residual");
+        assert!(residual_inf(&a, &xm, &b) < 1e-9, "multifrontal indefinite residual");
+        let diff = (0..n).map(|i| (xm[i] - xl[i]).abs()).fold(0.0, f64::max);
+        assert!(diff < 1e-7, "solutions differ by {diff}");
+    }
+
+    #[test]
+    fn left_looking_indefinite_complex_symmetric() {
+        // Complex-symmetric indefinite grid: the 2×2 path is type-agnostic. The
+        // 2×2 blocks here are complex-symmetric (not Hermitian), exercising the
+        // generic det/detinv arithmetic. Compare inertia + solve to multifrontal.
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let a = grid2d_lower::<Complex<f64>>(9, c(0.4, 0.3), c(-1.0, 0.1));
+        let n = a.n;
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
+        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let ll = factor_sparse_ldlt_with(
+            &a,
+            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+        )
+        .unwrap();
+        assert!(
+            ll.two_by_two.iter().filter(|&&t| t).count() > 0,
+            "indefinite system should use 2×2 pivots"
+        );
+        assert_eq!(
+            (mf.inertia.positive, mf.inertia.negative, mf.inertia.zero),
+            (ll.inertia.positive, ll.inertia.negative, ll.inertia.zero),
+            "inertia must match the multifrontal reference"
+        );
+        let xl = solve_ldlt(&ll, &b).unwrap();
+        assert!(
+            residual_inf(&a, &xl, &b) < 1e-9,
+            "complex left-looking indefinite residual"
         );
     }
 
