@@ -39,13 +39,15 @@ Helmholtz (LDLᵀ path) and MoM near-field kernels (LU path); plus the real MoM
 only up to where that is tractable; RSLAB and PARDISO continue to larger sizes.
 Figures use transparent backgrounds. Reproduce with `python benches/run_bench.py`.
 
-### Factor time and memory vs DOFs
+### Factor / solve time and memory vs DOFs
 
 ![Factor time vs DOFs](benches/bench_out/scaling_factor.png)
 ![Factor memory vs DOFs](benches/bench_out/scaling_memory.png)
+![Solve time vs DOFs](benches/bench_out/scaling_solve.png)
 
 On these matrices RSLAB left-looking factors faster than faer and uses less
 memory. PARDISO factors faster than both, with the same asymptotic slope as RSLAB.
+The solve (triangular back-substitution) is cheap for all three.
 
 ### Thread scaling
 
@@ -80,6 +82,9 @@ unsymmetric, complex), factored and solved against faer and PARDISO with the rel
 residual `||Ax-b||/||b||` as the accuracy check (`python benches/run_bench.py --corpus-only`).
 
 ![SuiteSparse residual](benches/bench_out/corpus_residual.png)
+![SuiteSparse factor time](benches/bench_out/corpus_time.png)
+![SuiteSparse solve time](benches/bench_out/corpus_solve.png)
+![SuiteSparse factor memory](benches/bench_out/corpus_memory.png)
 
 - Where RSLAB factors, it is accurate: 24/30 matrices below `1e-8` residual, matching
   PARDISO and ahead of faer, which returns a degraded or garbage solution on several
