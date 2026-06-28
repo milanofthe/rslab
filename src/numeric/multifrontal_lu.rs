@@ -98,6 +98,11 @@ static PROF_CMOD_GSER_N: AtomicU64 = AtomicU64::new(0);
 static PROF_CMOD_GSER_F: AtomicU64 = AtomicU64::new(0);
 static PROF_CMOD_GPAR_N: AtomicU64 = AtomicU64::new(0);
 static PROF_CMOD_GPAR_F: AtomicU64 = AtomicU64::new(0);
+// cdiv internal sub-phase profiler: serial getf2 panel / serial TRSM / parallel
+// trailing GEMM — to locate the serial fraction inside the dense node factor.
+static PROF_CDIV_GETF2_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_CDIV_TRSM_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_CDIV_GEMM_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_CMOD_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 fn cmod_prof_on() -> bool {
@@ -877,6 +882,61 @@ struct LuLlStore<T> {
 // SAFETY: single-writer-before-readers, disjoint indices (see LDLᵀ `LlStore`).
 unsafe impl<T: Send> Sync for LuLlStore<T> {}
 
+/// Raw base pointer of a panel buffer, smuggled across rayon workers so each task
+/// can write its own **disjoint row range** of a column-major panel. Safe only
+/// because callers partition the rows so no two tasks touch the same cell.
+#[derive(Clone, Copy)]
+struct PanelPtr<T>(*mut T);
+// SAFETY: the pointer is only dereferenced on disjoint, caller-partitioned cells.
+unsafe impl<T> Send for PanelPtr<T> {}
+unsafe impl<T> Sync for PanelPtr<T> {}
+impl<T> PanelPtr<T> {
+    /// Extract the raw pointer. Taking `self` by value forces a closure to capture
+    /// the whole (Send+Sync) wrapper rather than disjoint-capturing the bare field.
+    #[inline]
+    fn get(self) -> *mut T {
+        self.0
+    }
+}
+
+/// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
+/// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
+/// based at `base` with column stride `nrow`. Bit-identical to the corresponding
+/// rows of a full-height `getf2`. Used for the deep trailing rows, which are never
+/// pivot candidates, so each caller's row range is independent.
+///
+/// SAFETY: `[r0, r1)` must be this caller's exclusive rows and within the buffer;
+/// columns `[kb, kb+pw)` must be in bounds under stride `nrow`.
+#[inline]
+unsafe fn apply_panel_trailing<T: Scalar>(
+    base: *mut T,
+    nrow: usize,
+    kb: usize,
+    pw: usize,
+    pinv_blk: &[T],
+    r0: usize,
+    r1: usize,
+) {
+    for kk in 0..pw {
+        let k = kb + kk;
+        let pinv_k = pinv_blk[kk];
+        let colk = base.add(k * nrow);
+        for i in r0..r1 {
+            *colk.add(i) = *colk.add(i) * pinv_k;
+        }
+        for jj in (kk + 1)..pw {
+            let j = kb + jj;
+            let ukj = *base.add(j * nrow + k);
+            if ukj != T::zero() {
+                let colj = base.add(j * nrow);
+                for i in r0..r1 {
+                    *colj.add(i) = *colj.add(i) - *colk.add(i) * ukj;
+                }
+            }
+        }
+    }
+}
+
 impl<T: Scalar> LuLlStore<T> {
     fn new(nsuper: usize) -> Self {
         LuLlStore {
@@ -1122,10 +1182,16 @@ fn lu_ll_factor_node<T: Scalar>(
     // interchanged, so the contribution rows `Ok` ancestors pull are unaffected
     // and `cmod` needs no permutation awareness.
     let mut rperm: Vec<usize> = (0..nrow).collect();
+    let prof = cmod_prof_on();
+    // Pivot reciprocals of the current panel, reused by the parallel trailing apply.
+    let mut pinv_blk: Vec<T> = vec![T::zero(); NB_CDIV];
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + NB_CDIV).min(ncol);
-        // getf2: unblocked factor of columns [kb, ke), full height.
+        let t_g = if prof { Some(std::time::Instant::now()) } else { None };
+        // getf2: factor columns [kb, ke) over the **fully-summed rows [k+1, ncol)**
+        // only — the deep trailing rows [ncol, nrow) (never pivot candidates) are
+        // lifted off this serial path into the parallel apply below.
         for k in kb..ke {
             // **Threshold** partial pivoting (UMFPACK-style): keep the diagonal
             // pivot unless it is below `THRESH` of the largest candidate in the
@@ -1169,19 +1235,55 @@ fn lu_ll_factor_node<T: Scalar>(
             }
             lbuf[k * nrow + k] = piv;
             let pinv = piv.recip();
-            for i in (k + 1)..nrow {
+            pinv_blk[k - kb] = pinv;
+            for i in (k + 1)..ncol {
                 lbuf[k * nrow + i] = lbuf[k * nrow + i] * pinv;
             }
             for j in (k + 1)..ke {
                 let u_kj = lbuf[j * nrow + k];
                 if u_kj != T::zero() {
-                    for i in (k + 1)..nrow {
+                    for i in (k + 1)..ncol {
                         lbuf[j * nrow + i] = lbuf[j * nrow + i] - lbuf[k * nrow + i] * u_kj;
                     }
                 }
             }
         }
         let pw = ke - kb;
+        // Trailing-row L21 panel [ncol, nrow): apply the just-computed panel
+        // transform (scale by `pinv_blk`, within-panel rank-1 against `U11`) to the
+        // deep rows, parallel over **disjoint** row chunks. Bit-identical to the
+        // full-height getf2 — same per-row op sequence — but the dominant `cnrow`
+        // work now runs on all idle workers instead of the serial panel path.
+        if cnrow > 0 {
+            let par = !ll_gemm_serial() && cnrow * pw * pw >= LL_CDIV_PAR;
+            if par {
+                let pp = PanelPtr(lbuf.as_mut_ptr());
+                let nthreads = rayon::current_num_threads().max(1);
+                let cs = (nrow - ncol).div_ceil(nthreads).max(1);
+                let ranges: Vec<(usize, usize)> = (0..nthreads)
+                    .map(|c| {
+                        let r0 = ncol + c * cs;
+                        (r0.min(nrow), (r0 + cs).min(nrow))
+                    })
+                    .filter(|(a, b)| a < b)
+                    .collect();
+                // Capture the whole `pp` (Send+Sync) — destructure inside so Rust
+                // does not disjoint-capture the bare `*mut T`.
+                ranges.par_iter().for_each(|&(r0, r1)| {
+                    // SAFETY: disjoint row chunk; see `apply_panel_trailing`.
+                    unsafe { apply_panel_trailing(pp.get(), nrow, kb, pw, &pinv_blk, r0, r1) };
+                });
+            } else {
+                // SAFETY: single-threaded over all trailing rows.
+                unsafe {
+                    apply_panel_trailing(lbuf.as_mut_ptr(), nrow, kb, pw, &pinv_blk, ncol, nrow)
+                };
+            }
+        }
+        if let Some(t) = t_g {
+            PROF_CDIV_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        let t_t = if prof { Some(std::time::Instant::now()) } else { None };
         // TRSM: U = L11⁻¹ · (trailing panel columns of lbuf) and the U12 rows.
         for j in ke..ncol {
             for r in (kb + 1)..ke {
@@ -1192,15 +1294,30 @@ fn lu_ll_factor_node<T: Scalar>(
                 lbuf[j * nrow + r] = acc;
             }
         }
-        for t in 0..cnrow {
+        // U12 rows (the `cnrow` contribution columns of U): each `t`-column is an
+        // independent forward-substitution over the panel rows — parallel over the
+        // contiguous `ncol`-strided `ubuf` columns (safe: disjoint chunks).
+        let trsm_u = |col: &mut [T], lref: &[T]| {
             for r in (kb + 1)..ke {
-                let mut acc = ubuf[r + t * ncol];
+                let mut acc = col[r];
                 for i in kb..r {
-                    acc = acc - lbuf[i * nrow + r] * ubuf[i + t * ncol];
+                    acc = acc - lref[i * nrow + r] * col[i];
                 }
-                ubuf[r + t * ncol] = acc;
+                col[r] = acc;
+            }
+        };
+        if !ll_gemm_serial() && cnrow * pw * pw >= LL_CDIV_PAR {
+            let lref: &[T] = &lbuf;
+            ubuf.par_chunks_mut(ncol).for_each(|col| trsm_u(col, lref));
+        } else {
+            for t in 0..cnrow {
+                trsm_u(&mut ubuf[t * ncol..t * ncol + ncol], &lbuf);
             }
         }
+        if let Some(t) = t_t {
+            PROF_CDIV_TRSM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        let t_m = if prof { Some(std::time::Instant::now()) } else { None };
         // GEMM: lbuf[ke.., ke..ncol] −= L21[ke.., kb..ke] · U[kb..ke, ke..ncol].
         let mt = nrow - ke;
         let nt = ncol - ke;
@@ -1270,6 +1387,9 @@ fn lu_ll_factor_node<T: Scalar>(
                     par,
                 );
             }
+        }
+        if let Some(t) = t_m {
+            PROF_CDIV_GEMM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         kb = ke;
     }
@@ -1394,6 +1514,16 @@ fn factor_lu_left_looking<T: Scalar>(
             100.0 * sf as f64 / ftot,
             100.0 * rf as f64 / ftot,
             100.0 * pf as f64 / ftot,
+        );
+        let g2 = PROF_CDIV_GETF2_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let tr = PROF_CDIV_TRSM_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let gm = PROF_CDIV_GEMM_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let ct = (g2 + tr + gm).max(1.0);
+        eprintln!(
+            "[RLA_CDIV_SUB] CPU-ms  getf2 {g2:.0} ({:.0}% ser)  trsm {tr:.0} ({:.0}% ser)  gemm {gm:.0} ({:.0}% par)",
+            100.0 * g2 / ct,
+            100.0 * tr / ct,
+            100.0 * gm / ct,
         );
     }
 
