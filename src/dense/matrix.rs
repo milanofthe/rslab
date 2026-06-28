@@ -23,7 +23,7 @@ impl<T: Scalar> SymmetricMatrix<T> {
 
     /// Reuse a pooled buffer to construct an n×n `SymmetricMatrix`
     /// with the lower triangle zeroed. The strict upper triangle is
-    /// left with whatever stale contents the buffer held — the
+    /// left with whatever stale contents the buffer held - the
     /// multifrontal kernel (`factor_frontal_blocked_in_place`) and
     /// every accessor on this type read only the lower triangle, so
     /// the upper-triangle bytes are dead memory and the memset

@@ -23,7 +23,7 @@ use crate::sparse::general::GeneralCsc;
 
 /// Build a lower-triangle [`CscMatrix`] from generator triplets. The generators
 /// construct valid triplets by definition, so a failure is an internal invariant
-/// violation (panic, not an error path) — avoids `unwrap`/`expect` in `src/`.
+/// violation (panic, not an error path) - avoids `unwrap`/`expect` in `src/`.
 pub(crate) fn build_sym<T: Scalar>(
     n: usize,
     rows: &[usize],
@@ -32,7 +32,7 @@ pub(crate) fn build_sym<T: Scalar>(
 ) -> CscMatrix<T> {
     match CscMatrix::from_triplets(n, rows, cols, vals) {
         Ok(m) => m,
-        Err(e) => panic!("matgen: internal invariant — invalid symmetric triplets: {e}"),
+        Err(e) => panic!("matgen: internal invariant - invalid symmetric triplets: {e}"),
     }
 }
 
@@ -45,7 +45,7 @@ pub(crate) fn build_gen<T: Scalar>(
 ) -> GeneralCsc<T> {
     match GeneralCsc::from_triplets(n, rows, cols, vals) {
         Ok(m) => m,
-        Err(e) => panic!("matgen: internal invariant — invalid triplets: {e}"),
+        Err(e) => panic!("matgen: internal invariant - invalid triplets: {e}"),
     }
 }
 
@@ -56,7 +56,7 @@ pub mod random;
 pub mod stencil;
 pub mod structured;
 
-/// Small, fast, deterministic PRNG (xorshift64*). Pure Rust, no `rand` dep — so
+/// Small, fast, deterministic PRNG (xorshift64*). Pure Rust, no `rand` dep - so
 /// generated matrices are exactly reproducible from a seed across runs/platforms.
 #[derive(Clone)]
 pub struct Rng(u64);
@@ -84,7 +84,7 @@ impl Rng {
     pub fn range(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.unit()
     }
-    /// Standard normal via Box–Muller (one of the pair).
+    /// Standard normal via Box-Muller (one of the pair).
     #[inline]
     pub fn normal(&mut self) -> f64 {
         let u1 = (self.unit()).max(1e-300);
@@ -109,12 +109,12 @@ pub enum Structure {
     Spectral,
 }
 
-/// Symmetry class — selects the solver path (LDLᵀ vs LU).
+/// Symmetry class - selects the solver path (LDLᵀ vs LU).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Symmetry {
     /// Real or complex symmetric positive definite.
     Spd,
-    /// Complex-symmetric (A = Aᵀ, not Hermitian) — the EM-FEM case.
+    /// Complex-symmetric (A = Aᵀ, not Hermitian) - the EM-FEM case.
     ComplexSymmetric,
     /// Symmetric indefinite (saddle/KKT).
     SymIndefinite,
@@ -192,7 +192,7 @@ pub fn catalog() -> Vec<MatrixSpec> {
 
 #[cfg(test)]
 mod integration {
-    //! Every family must produce matrices the solver actually factors and solves —
+    //! Every family must produce matrices the solver actually factors and solves -
     //! the whole point. Small instances, exact factorization, true residual.
     use super::*;
     use crate::{FactorOptions, LdltSymbolic, LuSymbolic};
@@ -253,7 +253,7 @@ mod integration {
 
     #[test]
     fn solver_is_type_agnostic_all_four_scalars() {
-        // Prove end-to-end that factor+solve works for **every** Scalar type — not
+        // Prove end-to-end that factor+solve works for **every** Scalar type - not
         // just the f64/Complex<f64> the other tests use. A latent f32/Complex<f32>
         // monomorphization gap (e.g. a GEMM only specialized for f64/c64) would fail
         // to compile or solve here.
@@ -280,7 +280,7 @@ mod integration {
             let den: f64 = b.iter().map(|v| v.magnitude().powi(2)).sum::<f64>().sqrt();
             assert!(num / den.max(1e-30) < tol, "unsym {} residual {:.2e}", std::any::type_name::<T>(), num / den);
         }
-        // f64 / f32 / Complex<f64> / Complex<f32> — the four Scalar impls.
+        // f64 / f32 / Complex<f64> / Complex<f32> - the four Scalar impls.
         sym_ok::<f64>(1e-10);
         sym_ok::<f32>(1e-2);
         sym_ok::<C>(1e-10);
@@ -290,7 +290,7 @@ mod integration {
         unsym_ok::<C>(1e-10);
         unsym_ok::<Complex<f32>>(1e-2);
 
-        // The memory estimator scales with the scalar size — agnostic too.
+        // The memory estimator scales with the scalar size - agnostic too.
         let a32 = random::random_unsym::<f32>(150, 8, 2.0, 1);
         let e32 = LuSymbolic::analyze(&a32).unwrap().estimate_memory::<f32>();
         let ac64 = random::random_unsym::<Complex<f64>>(150, 8, 2.0, 1);

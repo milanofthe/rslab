@@ -3,7 +3,7 @@
 //! Random sparse matrices stress the ordering/symbolic stage on irregular
 //! patterns; conditioning is steered by **diagonal loading**. The spectral family
 //! follows LAPACK `xLATMS`: build `A = Q Λ Qᵀ` with a *prescribed* spectrum, so the
-//! condition number is **exact** — the right tool for accuracy/stability tests.
+//! condition number is **exact** - the right tool for accuracy/stability tests.
 //! `QΛQᵀ` is dense, so this family is small-`n` by nature.
 // Diagonal/triplet loops use the index as a value (push `k`, read `colsum[k]`).
 #![allow(clippy::needless_range_loop)]
@@ -149,7 +149,7 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         Generated::Unsymmetric(m)
     }
     // NOTE: random patterns are the worst case for a direct solver (no structure
-    // for the ordering ⇒ near-dense fill), so these stay deliberately small — they
+    // for the ordering ⇒ near-dense fill), so these stay deliberately small - they
     // stress the symbolic/ordering stage, not large-n throughput.
     c.push(MatrixSpec {
         name: "rand_spd",

@@ -494,9 +494,9 @@ mod tests {
             .map(|k| if (k as usize / 7) < 3 { PART_A } else { PART_B })
             .collect();
         let mut labels = labels_init.clone();
-        // Width 1 — band stays close to the row 2/3 boundary.
+        // Width 1 - band stays close to the row 2/3 boundary.
         let returned = band_fm_refine(&g, &mut labels, 1, 0.10, 8);
-        // I1 — band FM also reports a cut; it must match.
+        // I1 - band FM also reports a cut; it must match.
         assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
         // Out-of-band: rows 5 and 6 (and row 0). With width=1, band
         // is rows 1, 2, 3, 4. Verify rows 0, 5, 6 unchanged.

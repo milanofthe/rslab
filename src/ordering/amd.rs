@@ -29,7 +29,7 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
 
     // Pass 1: count entries per new column. Since the input is a full
     // symmetric pattern, column `old_j` has exactly one entry for every
-    // off-diagonal neighbor (plus any diagonal) — we just re-bucket them
+    // off-diagonal neighbor (plus any diagonal) - we just re-bucket them
     // into column `inv_perm[old_j]` one-for-one.
     let mut col_ptr = vec![0usize; n + 1];
     for old_j in 0..n {

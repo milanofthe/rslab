@@ -1,7 +1,7 @@
-# feral-amd oracle fixture: band_20_3
+# rslab-amd oracle fixture: band_20_3
 # generator: SuiteSparse AMD Rust crate (amd = 0.2.2)
 # provenance:
-#   generator: band(n=20, b=3) — banded + diagonal; programmatic, no RNG
+#   generator: band(n=20, b=3) - banded + diagonal; programmatic, no RNG
 status: OK
 n: 20
 nz: 128

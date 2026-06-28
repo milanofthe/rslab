@@ -41,7 +41,7 @@ pub enum OrderingMethod {
     #[default]
     Amd,
     /// Approximate Minimum Fill (`rslab-amf` crate: HAMF4 variant
-    /// of Amestoy 1999 — quotient-graph elimination scored by
+    /// of Amestoy 1999 - quotient-graph elimination scored by
     /// approximate fill `RMF(i) = (deg(i)·(deg(i)-1+2·degme) -
     /// WF(i)) / (nv(i)+1)` rather than approximate degree).
     /// Same downstream pipeline as `Amd`.
@@ -86,8 +86,8 @@ pub enum OrderingMethod {
     /// to 0.58 because the (pre-F11) small-and-sparse branch routed
     /// thousands of n<500 IPM iteration dumps to KaHIP, where K1 +
     /// multilevel setup cost 2-3× per call vs AMD. That branch is
-    /// gone — `Auto`'s small-and-sparse path is now AMF via the
-    /// default — but the original `Auto` warning is preserved here
+    /// gone - `Auto`'s small-and-sparse path is now AMF via the
+    /// default - but the original `Auto` warning is preserved here
     /// since the historical-bench regression evidence remains a
     /// reason to default to `Amd` outside known IPM workloads.
     ///
@@ -105,13 +105,13 @@ pub enum OrderingMethod {
     ///
     /// Unlike [`Auto`], which guesses the winner from cheap pattern
     /// features, `AutoRace` measures the actual symbolic outcome. Cost
-    /// is ~4× a single symbolic pass (~50–500 ms total at n≈10⁵), paid
+    /// is ~4× a single symbolic pass (~50-500 ms total at n≈10⁵), paid
     /// once per problem because symbolic factorization is reused across
     /// numeric refactorizations with the same sparsity pattern.
     ///
     /// Motivated by issue #8: on `pinene_3200_0009` the
     /// [`pick_default_method`] heuristic picks `MetisND` (88 s numeric
-    /// factor), but `Amd` factors in 19.5 s on the same matrix — a 4.5×
+    /// factor), but `Amd` factors in 19.5 s on the same matrix - a 4.5×
     /// win that the cheap predicate misses. Racing eliminates the
     /// guess: whichever candidate wins on this matrix is the one we
     /// use, no calibration required.
@@ -136,7 +136,7 @@ pub enum OrderingMethod {
 ///     pick `MetisND` (after the avg_deg<5 → AMD and arrow → AMF catches),
 ///     override to `Amf` at every `n`. Corpus A/Bs on real factor+solve
 ///     wall-time found AMF wins or ties MetisND across the whole population
-///     — 36/36 in the `(10_000, 100_000]` band (#67) and every measured
+///     - 36/36 in the `(10_000, 100_000]` band (#67) and every measured
 ///     `n > 100_000 && avg_deg >= 5` non-arrow family (#73), including the
 ///     one matrix (nql180) where MetisND has smaller fill but AMF is still
 ///     2× faster on the real factor+solve.
@@ -160,7 +160,7 @@ pub enum OrderingMethod {
 /// inventory: `dev/research/issue-50-numeric-inventory.csv` shows
 /// the IPM corpus's [100k, 200k) bucket has AMD/MetisND num_nnz_l
 /// ratio 1.00 on both representatives. See
-/// `dev/research/issue-50-metisnd-symbolic-cost.md` §F7–F8.
+/// `dev/research/issue-50-metisnd-symbolic-cost.md` §F7-F8.
 ///
 /// The small-and-sparse branch (`n < 10_000 && avg_deg < 15 →
 /// KahipND`) was deleted by the F11 side finding from issue #50
@@ -217,18 +217,18 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     // across the whole would-be-MetisND population:
     //   - #67: 36/36 in-scope `(10_000, 100_000]` families, worst case 0.99×
     //     (noise), median ~1.5×, up to 4.5×.
-    //   - #73: the `n > 100_000 && avg_deg >= 5` non-arrow families — dtoc2
-    //     2.49×, pinene 1.18×, cont5_1_l 2.75×, nql180 2.05×, YATP1NE 2.13× —
+    //   - #73: the `n > 100_000 && avg_deg >= 5` non-arrow families - dtoc2
+    //     2.49×, pinene 1.18×, cont5_1_l 2.75×, nql180 2.05×, YATP1NE 2.13× -
     //     AMF wins factor+solve on every measured matrix. Critically nql180 is
     //     the lone case where MetisND has *smaller* symbolic fill (nnz_L 0.98×)
     //     yet AMF is still 2.05× faster on real factor+solve, so fill (nnz_L /
     //     flop_proxy) is NOT a reliable speed predictor and a fill-guarded race
     //     would wrongly demote nql180. The simple unconditional reroute is the
-    //     one the evidence supports — see `dev/research/issue-73-n100k-thin-
+    //     one the evidence supports - see `dev/research/issue-73-n100k-thin-
     //     regime.md` and `dev/research/issue-67-thin-large-ordering.md`.
     //
     // MetisND's separators do not pay off on these uniformly-thin discretization
-    // patterns, and its symbolic ordering is 2–5× more expensive than AMF's, so
+    // patterns, and its symbolic ordering is 2-5× more expensive than AMF's, so
     // racing the two is a net loss. Route every would-be-MetisND decision to AMF
     // outright. Only the would-be-MetisND decision is touched; the earlier
     // `n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and arrow → AMF (#64)
@@ -371,7 +371,7 @@ pub struct SymbolicFactorization {
     /// rerunning the Hungarian kernel. `None` when no MC64 matching
     /// was computed during symbolic factorization. (Consumed by the
     /// numeric path again once MC64 scaling is ported to the generic
-    /// solver — see the rslab feature port.)
+    /// solver - see the rslab feature port.)
     #[allow(dead_code)]
     pub(crate) cached_mc64: Option<crate::scaling::Mc64Cache>,
 
@@ -403,7 +403,7 @@ pub struct SymbolicFactorization {
 }
 
 /// Size-only base ordering rule from cheap matrix dimensions (no pattern
-/// walk). Narrow on purpose — see comment on `Auto` for why a broad
+/// walk). Narrow on purpose - see comment on `Auto` for why a broad
 /// dispatcher regressed the IPM bench. `choose_adaptive` calls this for
 /// the bulk of patterns, then layers the pattern-aware catches on top
 /// (very-large-and-sparse → AMD; arrow/bordered → AMF, issue #64).
@@ -443,7 +443,7 @@ pub struct SymbolicFactorization {
 /// AMD/MetisND num_nnz_l ratio ≥ 1.5×. The catches now route 113-s
 /// nested-dissection symbolic on `powerflow22` (n=2.8 M, stored
 /// avg_deg ≈ 2.4) where AMD does the same job in 55 s with smaller
-/// fill. See `dev/research/issue-50-metisnd-symbolic-cost.md` §F7–F8.
+/// fill. See `dev/research/issue-50-metisnd-symbolic-cost.md` §F7-F8.
 fn pick_default_method(n: usize, _stored_nnz: usize) -> OrderingMethod {
     if n == 0 {
         return OrderingMethod::Amd;
@@ -559,7 +559,7 @@ fn run_external_ordering(
     let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
     let pat = rslab_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
         .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
-    // `method` is expected to be concrete here — `Auto` is resolved
+    // `method` is expected to be concrete here - `Auto` is resolved
     // upstream by `symbolic_factorize_with_method` against the
     // original matrix's pattern, before any preprocessing.
     debug_assert_ne!(method, OrderingMethod::Auto);
@@ -755,8 +755,8 @@ pub fn symbolic_factorize_with_method(
     }
     // The fill-reducing ordering and (when enabled) the LdltCompress
     // preprocessor are timed under *separate* stages. The preprocessor's
-    // MC64 matching can dwarf the ordering itself — on the pf22 powerflow
-    // KKT (n=2.8M) MC64 is ~53s while `rslab_amd::amd_order` is ~0.3s — so
+    // MC64 matching can dwarf the ordering itself - on the pf22 powerflow
+    // KKT (n=2.8M) MC64 is ~53s while `rslab_amd::amd_order` is ~0.3s - so
     // folding both into one "ordering" stage mis-attributes the cost and
     // led to the wrong diagnosis in issue #80. `record_ordering` wraps the
     // actual `run_external_ordering` call so every path records exactly one
@@ -777,7 +777,7 @@ pub fn symbolic_factorize_with_method(
             // numeric phase can reuse it for `Mc64Symmetric` scaling
             // (Phase 2.4.4: eliminates ~70% of compression symbolic
             // overhead on matrices where scaling also runs MC64). MC64 is
-            // the expensive part — record it under its own `ldlt_compress`
+            // the expensive part - record it under its own `ldlt_compress`
             // stage (issue #80).
             let t_pre = prof.map(|_| std::time::Instant::now());
             let cache = crate::scaling::compute_mc64_cache(matrix)?;
@@ -810,7 +810,7 @@ pub fn symbolic_factorize_with_method(
     };
 
     // Step 2: Build the etree on the permuted pattern. This etree is
-    // intermediate — we use it to compute the postorder and then discard it.
+    // intermediate - we use it to compute the postorder and then discard it.
     // The local name `amd_*` is kept from the AMD-only era to minimise the
     // diff; semantically these are now "ordering output" and "permuted
     // pattern from that ordering", regardless of method.
@@ -859,7 +859,7 @@ pub fn symbolic_factorize_with_method(
     // Step 5b: Build the final elimination tree by renumbering `amd_etree`
     // through the postorder. Postorder is a topological relabeling of the
     // elimination tree nodes, so `etree(P·A·Pᵀ) = post-renumbering of
-    // etree(A)` when P is a postorder of etree(A) — the tree structure is
+    // etree(A)` when P is a postorder of etree(A) - the tree structure is
     // preserved and only the node labels change. This lets us produce the
     // final etree in O(n) instead of re-running `from_pattern` at
     // O(nnz · α(n)). A 3-run bench shows ~3% small-frontal p90 improvement
@@ -883,7 +883,7 @@ pub fn symbolic_factorize_with_method(
     // Phase 2.5.1 switched this from the O(n²) elimination simulation
     // (still available as `column_counts`) to Gilbert-Ng-Peyton at
     // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
-    // KKT matrices — see `dev/validation/phase-2.5.1-*`.
+    // KKT matrices - see `dev/validation/phase-2.5.1-*`.
     let t_cc = prof.map(|_| std::time::Instant::now());
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
     if let Some(t) = t_cc {
@@ -913,7 +913,7 @@ pub fn symbolic_factorize_with_method(
     // Phase 2.13a: resolve `Auto` to a concrete strategy via a cheap
     // O(n) etree shape predicate. The downstream Renumber gate and
     // `find_supernodes` reverse-iteration check need a concrete
-    // variant — `Auto` is a top-level dispatch sentinel only.
+    // variant - `Auto` is a top-level dispatch sentinel only.
     let mut effective_params = snode_params.clone();
     if matches!(
         effective_params.amalgamation_strategy,
@@ -1029,7 +1029,7 @@ pub fn symbolic_factorize_with_method(
 ///
 /// Like [`symbolic_factorize_with_method`] except the last `n_schur`
 /// columns of the produced permutation are pinned to `schur_indices` in
-/// the supplied order — i.e. `perm[n - n_schur + i] == schur_indices[i]`
+/// the supplied order - i.e. `perm[n - n_schur + i] == schur_indices[i]`
 /// for every `i`. This is the symbolic side of the Schur-complement API
 /// described in `dev/research/schur-complement.md` (F3.0).
 ///
@@ -1115,7 +1115,7 @@ pub fn symbolic_factorize_with_schur(
     let (post, post_inv) =
         crate::ordering::postorder::schur_constrained_postorder(&initial_etree, &is_schur);
 
-    // Postorder identity check on the Schur tail (defensive — the
+    // Postorder identity check on the Schur tail (defensive - the
     // top-forest invariant should make this hold by construction).
     for (k, &p) in post.iter().enumerate().skip(n - n_schur) {
         debug_assert_eq!(
@@ -1156,7 +1156,7 @@ pub fn symbolic_factorize_with_schur(
     let col_counts = column_counts::column_counts_gnp(&permuted_pattern, &etree);
     let factor_nnz = column_counts::total_factor_nnz(&col_counts);
 
-    // Step 8: supernode detection. Adjacency strategy only — Renumber
+    // Step 8: supernode detection. Adjacency strategy only - Renumber
     // would re-postorder and break the tail invariant.
     let mut supernodes = supernode::find_supernodes(&etree, &col_counts, &effective_params);
 
@@ -1166,7 +1166,7 @@ pub fn symbolic_factorize_with_schur(
     // `ana_orderings.F:9187-9220`), where all Schur variables collapse
     // into one supervariable so the numeric stopping rule lives in one
     // place. rslab's adjacency-only amalgamation (size_based with
-    // nemin=32, trivial_chain) does not always merge the Schur tail —
+    // nemin=32, trivial_chain) does not always merge the Schur tail -
     // when the Schur block is large or the row patterns of constituent
     // Schur cols differ enough, multiple supernodes carry Schur cols,
     // and the F3.2b numeric driver would reject. The merge here keeps
@@ -1177,7 +1177,7 @@ pub fn symbolic_factorize_with_schur(
     // Safety: the F3.2a postorder pins Schur cols to `[n - n_schur, n)`
     // and the supernode column ranges are contiguous in this numbering,
     // so the merged supernode covers the contiguous range
-    // `[n - n_schur, n)` — preserving the find_supernodes contiguity
+    // `[n - n_schur, n)` - preserving the find_supernodes contiguity
     // invariant downstream code relies on.
     merge_schur_tail_supernodes(&mut supernodes, n, n_schur)?;
 
@@ -1226,7 +1226,7 @@ pub fn symbolic_factorize_with_schur(
 ///
 /// Returns `InvalidInput` if the Schur-bearing supernodes are not
 /// contiguous at the tail of the supernode list (would only arise from
-/// a reducible matrix where the Schur set spans multiple etree roots —
+/// a reducible matrix where the Schur set spans multiple etree roots -
 /// not encountered in the KKT use cases this API targets).
 fn merge_schur_tail_supernodes(
     supernodes: &mut Vec<Supernode>,
@@ -1292,7 +1292,7 @@ fn merge_schur_tail_supernodes(
         ));
     };
     if start == supernodes.len() - 1 {
-        // Already a single Schur supernode at the tail — nothing to do.
+        // Already a single Schur supernode at the tail - nothing to do.
         // Verify it covers the full Schur range.
         let last = &supernodes[start];
         let col_lo = last.first_col;
@@ -1377,7 +1377,7 @@ fn merge_schur_tail_supernodes(
         (merged_first_col..merged_first_col + merged_nrow).collect();
 
     // Replace supernodes[start] with the merged supernode and drop the
-    // rest. Children indices in the surviving supernodes don't shift —
+    // rest. Children indices in the surviving supernodes don't shift -
     // all merged supernodes are at the tail, so their indices were the
     // largest in the old list.
     supernodes[start] = Supernode {
@@ -1423,7 +1423,7 @@ fn split_straddling_supernode(
             if straddle_idx.is_some() {
                 return Err(RslabError::InvalidInput(format!(
                     "F3.2b split: multiple supernodes straddle schur_lo={} \
-                     (impossible after find_supernodes — column ranges are disjoint)",
+                     (impossible after find_supernodes - column ranges are disjoint)",
                     schur_lo
                 )));
             }
@@ -1610,7 +1610,7 @@ mod tests {
         for s in &report.stages {
             assert!(
                 seen.insert(s.name),
-                "stage '{}' recorded more than once — AutoRace leaked {} candidates' \
+                "stage '{}' recorded more than once - AutoRace leaked {} candidates' \
                  stages into the shared profiler (stages: {:?})",
                 s.name,
                 RACE_CANDIDATES.len(),
@@ -1964,7 +1964,7 @@ mod tests {
     fn is_arrow_bordered_rejects_many_hubs() {
         // Exercises the count guard: 1000 columns of degree 1000 (10% of
         // n) carry 99% of the nnz, but a heavy set this large is not a
-        // thin border — nested dissection is not obviously wrong, so the
+        // thin border - nested dissection is not obviously wrong, so the
         // arrow override must NOT fire. heavy_count=1000 = 10% > 5%.
         let mut degrees = vec![1000usize; 1000];
         degrees.extend(std::iter::repeat_n(1usize, 9000));
@@ -2007,7 +2007,7 @@ mod tests {
         // A uniform large-dense pattern (n > 100_000, avg_deg >= 5,
         // non-arrow) now routes to AMF via the #73 thin-large catch (the
         // would-be-MetisND decision is overridden to AMF at every n). This
-        // does not exercise the arrow catch — the point is only that a
+        // does not exercise the arrow catch - the point is only that a
         // non-arrow shape still lands on AMF, just through #73 rather than
         // #64.
         let uniform = pattern_with_degrees(&vec![16usize; 120_000]);
@@ -2175,7 +2175,7 @@ mod tests {
 
     #[test]
     fn schur_symbolic_tail_invariant_reversed_user_order() {
-        // schur_indices = [5, 4] — user-supplied order MUST be preserved
+        // schur_indices = [5, 4] - user-supplied order MUST be preserved
         // exactly, not sorted.
         let m = small_kkt_6x6();
         let params = SupernodeParams::default();
@@ -2308,9 +2308,9 @@ mod tests {
     #[test]
     fn issue_3_scotchnd_on_kkt_recurses_after_o13() {
         // History: SCOTCH bisection used to produce no separator on
-        // bordered-KKT patterns — its vertex-separator FM stopped the
+        // bordered-KKT patterns - its vertex-separator FM stopped the
         // whole pass the first time both PQ heads were imbalance-
-        // rejected, abandoning feasible queued moves — so the recursion
+        // rejected, abandoning feasible queued moves - so the recursion
         // collapsed into amd_leaf for the entire graph and
         // `resolved_method` reported `Amd`.
         //
@@ -2319,7 +2319,7 @@ mod tests {
         // `crates/rslab-scotch/tests/issue_3_kkt_repro.rs`:
         // `issue_3_scotch_recurses_on_kkt_after_o13`), so ScotchND no
         // longer degenerates: `resolved_method` reports the requested
-        // ScotchND, and the ordering is genuinely SCOTCH's — not a
+        // ScotchND, and the ordering is genuinely SCOTCH's - not a
         // relabelled AMD leaf. This test guards that post-O13 behavior
         // at the `rslab` symbolic boundary.
         //
@@ -2349,7 +2349,7 @@ mod tests {
             seen[p] = true;
         }
 
-        // And it must differ from AMD's ordering — proof the recursion
+        // And it must differ from AMD's ordering - proof the recursion
         // ran SCOTCH nested dissection rather than collapsing to the
         // AMD leaf (which would return AMD's permutation verbatim).
         let amd = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();

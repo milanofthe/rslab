@@ -2,8 +2,8 @@
 ///
 /// This is a plain triple of counts. `total()` returns their sum, which equals
 /// the dimension of whatever (sub)matrix the inertia describes. The type is
-/// also used for sub-blocks — e.g. the 2×2 pivot classification in
-/// `dense::factor` returns inertias with `total() == 2` — so the sum is the
+/// also used for sub-blocks - e.g. the 2×2 pivot classification in
+/// `dense::factor` returns inertias with `total() == 2` - so the sum is the
 /// described block's order, not necessarily the global matrix order `n`. The
 /// counts are caller-supplied and not validated against any dimension; keeping
 /// them consistent is the caller's responsibility (see `new`).

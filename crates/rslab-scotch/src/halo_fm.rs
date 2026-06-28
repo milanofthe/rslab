@@ -291,7 +291,7 @@ fn update_after_move(
         let nx: Vec<i32> = graph.neighbors(x as i32).to_vec();
         for &y in &nx {
             let yy = y as usize;
-            // Recompute halo_cnt[yy] from scratch — small fanout in
+            // Recompute halo_cnt[yy] from scratch - small fanout in
             // typical graphs, and avoids tracking signed deltas
             // through arbitrary boundary transitions.
             let mut h: i32 = 0;
@@ -312,7 +312,7 @@ fn update_after_move(
         }
     }
     // Also push any halo-newly-eligible vertices among the
-    // changed-boundary set's neighbours — they may not be in `nbrs`.
+    // changed-boundary set's neighbours - they may not be in `nbrs`.
     for &x in &boundary_changed {
         for &y in graph.neighbors(x as i32) {
             let yy = y as usize;

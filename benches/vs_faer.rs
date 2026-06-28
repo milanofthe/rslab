@@ -3,7 +3,7 @@
 //! RLA factors `A = LDLᵀ` exploiting `A = Aᵀ` (PARDISO mtype 6), storing only
 //! the lower triangle and a single factor `L`. faer has no complex-*symmetric*
 //! sparse path (its sparse Cholesky/BK is Hermitian), so the fair analogue is
-//! faer's sparse **LU** on the *full* matrix — which cannot exploit symmetry
+//! faer's sparse **LU** on the *full* matrix - which cannot exploit symmetry
 //! and stores both `L` and `U`. This bench reports factor time, solve time,
 //! residual, and factor fill so the symmetry advantage is visible.
 //!
@@ -52,7 +52,7 @@ fn grid_lower(m: usize, diag: C, off: C) -> (usize, Vec<usize>, Vec<usize>, Vec<
 }
 
 /// 3D 7-point grid (k×k×k, n=k³), complex-symmetric. Lower-triangle triplets.
-/// Far larger frontal matrices than the 2D grid — the regime where a dense
+/// Far larger frontal matrices than the 2D grid - the regime where a dense
 /// SIMD Schur kernel (gemm) is supposed to pay off.
 fn grid3d_lower(k: usize, diag: C, off: C) -> (usize, Vec<usize>, Vec<usize>, Vec<C>) {
     let n = k * k * k;
@@ -170,7 +170,7 @@ fn main() {
         run_case("2D", n, &rows, &cols, &vals);
     }
     println!();
-    // 3D 7-point grids: large frontal matrices — the dense-GEMM regime.
+    // 3D 7-point grids: large frontal matrices - the dense-GEMM regime.
     let diag3 = Complex::new(6.0, 1.0);
     for &k in &[12usize, 18, 24, 30] {
         let (n, rows, cols, vals) = grid3d_lower(k, diag3, off);

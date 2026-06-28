@@ -1,12 +1,12 @@
-//! Sweep the generated test-matrix [`catalog`] — factor + solve each tagged
+//! Sweep the generated test-matrix [`catalog`] - factor + solve each tagged
 //! matrix and report dimension, fill, factor/solve time and the true residual.
 //! The default consumer of the `matgen` generators: a structured benchmark across
 //! size / structure / symmetry / conditioning / density without depending on any
 //! external matrix files.
 //!
 //! Run: `cargo bench --bench catalog --features matgen`
-//!   * `RLA_CAT_FILTER=helmholtz`  — only matrices whose name contains the string
-//!   * `RLA_CAT_MAXN=40000`        — skip matrices larger than this (default 60k)
+//!   * `RLA_CAT_FILTER=helmholtz`  - only matrices whose name contains the string
+//!   * `RLA_CAT_MAXN=40000`        - skip matrices larger than this (default 60k)
 
 use std::time::Instant;
 

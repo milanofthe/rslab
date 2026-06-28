@@ -4,7 +4,7 @@
 //! sparse near-field as a [`GeneralCsc`] `LinearOperator`, factor an **ILU**
 //! preconditioner (static-pivoted + threshold-dropped, optionally `f32`), and
 //! solve `A x = b` with **GMRES** using that preconditioner. Reports the
-//! preconditioner fill/memory and the GMRES iteration count + residual — the
+//! preconditioner fill/memory and the GMRES iteration count + residual - the
 //! memory ↔ iterations tradeoff on genuine MoM data.
 //!
 //! Run: `cargo bench --bench mom_loop`.
@@ -87,7 +87,7 @@ fn bench_file(path: &std::path::Path) {
     let exact = LuSolver::factor(&a, &FactorOptions::preconditioner(1e-10)).unwrap();
     run_precond("f64 LU (no drop)", &a, &b, exact.factor_nnz(), 16, &exact);
 
-    // f32 LU — half the factor memory.
+    // f32 LU - half the factor memory.
     let f32lu = LowPrecisionLu::factor(&a, &FactorOptions::preconditioner(1e-10)).unwrap();
     run_precond("f32 LU (no drop)", &a, &b, f32lu.factor_nnz(), 8, &f32lu);
 

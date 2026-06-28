@@ -1,8 +1,8 @@
 """Benchmark driver: orchestrates the scaling + thread sweeps over the Rust
 `bench_suite` engine and renders the matplotlib plots.
 
-  * Scaling sweep  — one process per (family, metric), looping sizes.
-  * Thread sweep   — one process per (family, thread-count) at a fixed size,
+  * Scaling sweep  - one process per (family, metric), looping sizes.
+  * Thread sweep   - one process per (family, thread-count) at a fixed size,
                      with RAYON / MKL / OMP thread counts pinned.
 
 Produces: scaling_factor.png, scaling_memory.png, scaling_solve.png,
@@ -140,11 +140,11 @@ def collect():
             if big:
                 print(f"scaling {family} metric={tag} (RSLAB+PARDISO, large) ...", flush=True)
                 run(exe, env_for(family, big, mem, SCALING, solvers="ll,mf,pardiso"))
-    # Real precond_matrices (realism anchor) — time + memory.
+    # Real precond_matrices (realism anchor) - time + memory.
     for mem in (False, True):
         print(f"real metric={'mem' if mem else 'time'} ...", flush=True)
         run(exe, env_for("real", [], mem, REAL))
-    # A-priori memory-estimate breakdown (instant, no factoring) — reaches large DOFs.
+    # A-priori memory-estimate breakdown (instant, no factoring) - reaches large DOFs.
     print("estimate sweep ...", flush=True)
     e = env_for("sym", ESTIMATE_SIZES, False, ESTIMATE)
     e["RLA_BENCH_ESTIMATE"] = "1"
@@ -187,9 +187,9 @@ def panel(ax, data, title, xlabel, ylabel, logx=True, logy=True):
 def fig_scaling(recs, ykey, ylabel, fname, title):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
     panel(axes[0], series(recs, "sym", "time" if ykey != "mem_mb" else "mem", "n", ykey),
-          f"{title} — symmetric (LDLᵀ / 3D Helmholtz)", "n (DOFs)", ylabel)
+          f"{title} - symmetric (LDLᵀ / 3D Helmholtz)", "n (DOFs)", ylabel)
     panel(axes[1], series(recs, "unsym", "time" if ykey != "mem_mb" else "mem", "n", ykey),
-          f"{title} — unsymmetric (LU / MoM near-field)", "n (DOFs)", ylabel)
+          f"{title} - unsymmetric (LU / MoM near-field)", "n (DOFs)", ylabel)
     fig.tight_layout()
     fig.savefig(OUTDIR / fname, dpi=130)
     print("wrote", OUTDIR / fname)
@@ -213,7 +213,7 @@ def fig_threads(recs):
             tmax = max(tmax, max(ts))
         if tmax:
             ax.plot([1, tmax], [1, tmax], ls="--", color="gray", alpha=0.6, label="ideal")
-        ax.set_title(f"thread scaling — {family} (n={fixed})")
+        ax.set_title(f"thread scaling - {family} (n={fixed})")
         ax.set_xlabel("threads")
         ax.set_ylabel("speedup vs 1 thread (factor)")
         ax.grid(True, ls=":", alpha=0.5)
@@ -233,8 +233,8 @@ def fig_real(recs):
     width = 0.2
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     for ax, metric, ykey, title, ylab in (
-        (axes[0], "time", "fac_ms", "Real MoM matrices — factor time", "factor wall-clock (ms)"),
-        (axes[1], "mem", "mem_mb", "Real MoM matrices — factor memory", "factor memory (MB)"),
+        (axes[0], "time", "fac_ms", "Real MoM matrices - factor time", "factor wall-clock (ms)"),
+        (axes[1], "mem", "mem_mb", "Real MoM matrices - factor memory", "factor memory (MB)"),
     ):
         for i, s in enumerate(ORDER):
             label, color, _ = STYLE[s]
@@ -259,7 +259,7 @@ def fig_real(recs):
 
 def fig_wct_breakdown(recs):
     """Stacked analyze / factor / solve wall-clock per solver, at the largest size
-    of each family — where each solver spends its time."""
+    of each family - where each solver spends its time."""
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
     for ax, family in ((axes[0], "sym"), (axes[1], "unsym")):
         rows = [r for r in recs if r["family"] == family and r["metric"] == "time"]
@@ -276,7 +276,7 @@ def fig_wct_breakdown(recs):
         ax.bar(x, fac, 0.6, bottom=ana, label="factor", color="#3b82f6")
         ax.bar(x, slv, 0.6, bottom=[a + f for a, f in zip(ana, fac)], label="solve", color="#f59e0b")
         ax.set_yscale("log")
-        ax.set_title(f"WCT breakdown — {family} (n={nmax})")
+        ax.set_title(f"WCT breakdown - {family} (n={nmax})")
         ax.set_ylabel("wall-clock (ms)")
         ax.set_xticks(x)
         ax.set_xticklabels([STYLE[s][0] for s in present], rotation=20, ha="right", fontsize=8)
@@ -303,7 +303,7 @@ def fig_memory_breakdown(recs):
     ax.bar(x, scratch, 0.6, bottom=[p + f for p, f in zip(panels, factor)],
            label="input + scratch", color=GRAY, alpha=0.55)
     ax.plot(x, floor, "o--", color="#f59e0b", label="panel-freed live floor", lw=1.6, ms=5)
-    ax.set_title("A-priori factor-memory breakdown — symmetric (3D)")
+    ax.set_title("A-priori factor-memory breakdown - symmetric (3D)")
     ax.set_xlabel("n (DOFs)")
     ax.set_ylabel("estimated memory (MB)")
     ax.set_xticks(x)

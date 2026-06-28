@@ -77,7 +77,7 @@ pub fn refine_bisection(
         let mut a_w = part_weight(graph, labels, PART_A);
         let mut b_w = total - a_w;
         // If the pass starts imbalanced, best_prefix = None means
-        // "no balanced state seen yet" — rollback to prefix 0 would
+        // "no balanced state seen yet" - rollback to prefix 0 would
         // keep the imbalanced start, which defeats the purpose of
         // FM on imbalanced input. The first balanced state the
         // trajectory reaches is unconditionally recorded.
@@ -94,7 +94,7 @@ pub fn refine_bisection(
                 continue;
             }
             if stamp != gain[vu] {
-                // Stale — re-push if we haven't moved it yet.
+                // Stale - re-push if we haven't moved it yet.
                 continue;
             }
             // Tentatively move v to the other side.
@@ -162,7 +162,7 @@ pub fn refine_bisection(
 
         // Roll back moves after best_prefix. If the pass started
         // imbalanced and never reached a balanced state, best_prefix
-        // is None — keep the full move sequence (labels at the
+        // is None - keep the full move sequence (labels at the
         // post-last-move state) so the next pass starts from the
         // closest-to-balance configuration FM found, rather than
         // rolling all the way back to the imbalanced start.
@@ -412,13 +412,13 @@ mod tests {
 
         let after = refine_bisection(&g, &mut labels, 0.20, 32);
 
-        // I1 — the assertion that catches the sign bug directly.
+        // I1 - the assertion that catches the sign bug directly.
         assert_eq!(
             after,
             cut_size(&g, &labels),
             "returned cut must equal cut_size(labels) recomputed from scratch"
         );
-        // Quality — FM must actually move at least one vertex on this
+        // Quality - FM must actually move at least one vertex on this
         // adversarial input.
         assert!(
             after < before,
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn refine_bisection_bad_init_improves() {
         // Start from an adversarial labeling (all on one side, one
-        // vertex on the other) — FM must rebalance. I2 (cut never
+        // vertex on the other) - FM must rebalance. I2 (cut never
         // grows) does not apply across the imbalanced → balanced
         // transition: the starting cut of 2 is achievable only
         // because 15 vertices are on one side.
@@ -510,16 +510,16 @@ mod tests {
         assert_eq!(separator_weight(&g, &labels), 3);
     }
 
-    // Adversarial set A1–A10 from
+    // Adversarial set A1-A10 from
     // dev/research/metis-fm-sign-bug.md §5. Standing regression tests
     // enforcing I1 (bookkeeping consistency) and, where meaningful,
     // I2 (cut never grows), I4 (balance respected at exit),
     // I6 (determinism).
     //
     // A1 is covered by `fm_sign_invariant_on_alternating_path` above.
-    // A2–A10 follow. Each constructs `initial cut` and (where
-    // applicable) `optimum` by hand — never by running the solver
-    // under test — per CLAUDE.md's oracle-independence rule.
+    // A2-A10 follow. Each constructs `initial cut` and (where
+    // applicable) `optimum` by hand - never by running the solver
+    // under test - per CLAUDE.md's oracle-independence rule.
 
     fn path(n: usize) -> Graph {
         let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn a8_path_p10_all_a_empty_side() {
-        // P_10 with all A labels. Cut = 0. Degenerate empty B side —
+        // P_10 with all A labels. Cut = 0. Degenerate empty B side -
         // FM must not panic and must not grow the cut.
         let g = path(10);
         let mut labels = vec![PART_A; 10];
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn a9_single_vertex_returns_zero() {
-        // n=1 — the n<2 short-circuit must fire.
+        // n=1 - the n<2 short-circuit must fire.
         let cp: Vec<i32> = vec![0, 0];
         let ri: Vec<i32> = vec![];
         let pat = CscPattern::new(1, &cp, &ri).unwrap();
@@ -761,7 +761,7 @@ mod tests {
     #[test]
     fn refine_separator_reduces_weight_on_padded_case() {
         // Construct a 3x3 grid with middle row SEP and the middle
-        // vertex "padded" — add an extra SEP vertex adjacent only to
+        // vertex "padded" - add an extra SEP vertex adjacent only to
         // A-side. Refinement should pull it out to A.
         let g = grid(3, 3);
         let mut labels: Vec<u8> = (0..9u8)

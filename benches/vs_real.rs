@@ -26,7 +26,7 @@ type C = Complex<f64>;
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 
-/// COO matrix–vector product `y = A x` over the full (general) entry list.
+/// COO matrix-vector product `y = A x` over the full (general) entry list.
 fn matvec(entries: &[(usize, usize, C)], x: &[C], y: &mut [C]) {
     for v in y.iter_mut() {
         *v = C::default();

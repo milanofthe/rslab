@@ -1,4 +1,4 @@
-//! KaHIP Phase K5 — multilevel edge bisection controller.
+//! KaHIP Phase K5 - multilevel edge bisection controller.
 //!
 //! One coarsen → initial-bisect → uncoarsen pass. At each uncoarsening
 //! level we apply a cheap FM bootstrap (reusing `rslab_metis::internals`

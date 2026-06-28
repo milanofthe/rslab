@@ -22,7 +22,7 @@ use rslab::CscMatrix;
 
 /// Arrow matrix: a dense hub column 0 plus `n-1` degree-1 leaf columns.
 /// Stored as the lower triangle, columns `1..n` each hold only their
-/// diagonal, so the `nnz_col <= 2` share is `(n-1)/n` — well above the
+/// diagonal, so the `nnz_col <= 2` share is `(n-1)/n` - well above the
 /// 0.30 `LOW_DEGREE_THRESHOLD`. This is the arrow/slack-KKT signature
 /// that `pick_ordering_preprocess` routes to `LdltCompress` (issue #80),
 /// so it is the minimal pattern that exercises the MC64 preprocessor.
@@ -31,7 +31,7 @@ fn arrow_kkt(n: usize) -> CscMatrix {
     let mut cols = vec![0usize];
     let mut vals = vec![2.0f64];
     for j in 1..n {
-        // off-diagonal (j, 0) — stored in column 0 (the hub)
+        // off-diagonal (j, 0) - stored in column 0 (the hub)
         rows.push(j);
         cols.push(0);
         vals.push(1.0);

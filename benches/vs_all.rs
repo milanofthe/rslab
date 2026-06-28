@@ -1,9 +1,9 @@
-//! Head-to-head **exact** direct solve on the complex MoM matrices — RLA's two
+//! Head-to-head **exact** direct solve on the complex MoM matrices - RLA's two
 //! factorization paths against the field:
-//!   * **RLA-LL**  — supernodal left-looking LU (the default path)
-//!   * **RLA-MF**  — multifrontal LU (assembly-tree of dense fronts)
-//!   * **faer**    — faer sparse LU (pure-Rust competitor)
-//!   * **PARDISO** — Intel MKL PARDISO, mtype=13 (complex unsymmetric), loaded at
+//!   * **RLA-LL**  - supernodal left-looking LU (the default path)
+//!   * **RLA-MF**  - multifrontal LU (assembly-tree of dense fronts)
+//!   * **faer**    - faer sparse LU (pure-Rust competitor)
+//!   * **PARDISO** - Intel MKL PARDISO, mtype=13 (complex unsymmetric), loaded at
 //!                   runtime via `mkl_rt` (bench-only FFI; the solver lib stays
 //!                   100% pure Rust). Skipped with a note if MKL is absent.
 //!
@@ -21,7 +21,7 @@ use std::time::Instant;
 
 // Counting allocator: tracks **live** bytes (current allocation, not OS working
 // set), so the panel-freeing transient is visible even when the system allocator
-// retains freed pages. Only sees Rust allocations — MKL/PARDISO bypass it.
+// retains freed pages. Only sees Rust allocations - MKL/PARDISO bypass it.
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
@@ -161,7 +161,7 @@ fn rel_resid(a: &rslab::GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
 }
 
 /// CSC → 0-based CSR (transpose of storage; same matrix). PARDISO wants CSR with
-/// ascending column indices per row — produced here by scanning columns in order.
+/// ascending column indices per row - produced here by scanning columns in order.
 fn build_full_csr(a: &rslab::GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let n = a.n;
     let nnz = a.values.len();
@@ -233,7 +233,7 @@ impl Pardiso {
         iparm[0] = 1; // non-default iparm
         iparm[1] = 3; // parallel (OpenMP) nested dissection fill-reduction
         iparm[2] = nthreads; // OpenMP threads
-        iparm[7] = 2; // iterative refinement (≤2 steps) — PARDISO's default accuracy
+        iparm[7] = 2; // iterative refinement (≤2 steps) - PARDISO's default accuracy
         iparm[9] = 13; // pivot perturbation 1e-13
         iparm[10] = 1; // scaling (recommended for unsymmetric)
         iparm[12] = 1; // weighted matching (recommended for unsymmetric)
@@ -356,7 +356,7 @@ fn run(path: &std::path::Path, pardiso_ok: bool) {
                         let slv = t.elapsed().as_secs_f64() * 1e3;
                         let xf: Vec<C> = (0..n).map(|i| Complex::new(xb[(i, 0)].re, xb[(i, 0)].im)).collect();
                         println!(
-                            "  faer     ana       —  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill         —  {tag} +{mem:.0}MB",
+                            "  faer     ana       -  fac {fac:8.1}  slv {slv:6.1}  res {:.1e}  fill         -  {tag} +{mem:.0}MB",
                             rel_resid(&a, &xf, &b)
                         );
                     }
@@ -408,7 +408,7 @@ fn main() {
     }
     let pardiso_ok = Pardiso::try_new().is_some();
     if !pardiso_ok {
-        println!("(PARDISO: mkl_rt not found — skipping; install MKL or add it to PATH)");
+        println!("(PARDISO: mkl_rt not found - skipping; install MKL or add it to PATH)");
     }
     let mut files: Vec<_> = match std::fs::read_dir(DIR) {
         Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "mtx")).collect(),

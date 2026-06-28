@@ -32,22 +32,22 @@ algorithm.
 
 - **Amestoy, P. R., Davis, T. A., and Duff, I. S. (1996).** *An
   Approximate Minimum Degree Ordering Algorithm.* SIAM Journal on
-  Matrix Analysis and Applications, 17(4), 886–905. Introduces the
+  Matrix Analysis and Applications, 17(4), 886-905. Introduces the
   approximate external degree bound that makes the algorithm O(|A|)
   per pivot instead of O(|A|·n).
 - **Amestoy, P. R., Davis, T. A., and Duff, I. S. (2004).**
   *Algorithm 837: AMD, an Approximate Minimum Degree Ordering
   Algorithm.* ACM Transactions on Mathematical Software, 30(3),
-  381–388. Describes the implementation details pinned down in
+  381-388. Describes the implementation details pinned down in
   SuiteSparse: dense-row handling, mass elimination, supervariable
   detection, the in-place quotient graph, and garbage collection.
 - **George, A. (1973).** *Nested Dissection of a Regular Finite
-  Element Mesh.* SIAM Journal on Numerical Analysis, 10(2), 345–363.
+  Element Mesh.* SIAM Journal on Numerical Analysis, 10(2), 345-363.
   The alternative ordering paradigm; AMD is complementary rather
-  than competitive — they target different matrix regimes.
+  than competitive - they target different matrix regimes.
 - **Davis, T. A., Rajamanickam, S., and Sid-Lakhdar, W. M. (2016).**
   *A Survey of Direct Methods for Sparse Linear Systems.* Acta
-  Numerica, 25, 383–566. Places AMD in the broader ecosystem of
+  Numerica, 25, 383-566. Places AMD in the broader ecosystem of
   direct methods.
 
 Full BibTeX entries live in `../../dev/references.bib`. Curated
@@ -70,7 +70,7 @@ of supervariables eliminated so far. At each step it:
    Dead elements encountered during the degree computation are
    folded into `me` on the spot (*aggressive absorption*).
 4. **Mass-eliminates** neighbours `i` whose only remaining element is
-   `me` and whose outside variable list is empty — they pivot
+   `me` and whose outside variable list is empty - they pivot
    concurrently with `me`.
 5. **Detects and merges supervariables** that are structurally
    indistinguishable: variables with the same adjacency hash, same
@@ -84,7 +84,7 @@ of supervariables eliminated so far. At each step it:
 
 Variables whose initial degree exceeds `max(16, min(n, α·√n))` with
 `α = 10` by default are classified as "dense" and deferred to the end
-of the permutation. This is a structural device — it keeps a few hub
+of the permutation. This is a structural device - it keeps a few hub
 vertices (e.g. an arrow-matrix's central row) from dominating the
 degree computation for every other variable. A negative `α` disables
 the heuristic.
@@ -133,7 +133,7 @@ let opts = AmdOptions { aggressive: true, dense_alpha: 10.0 };
 let _ = rslab_amd::amd_order_opts(&pattern, &opts);
 ```
 
-The input must be the full symmetric pattern — both the upper and
+The input must be the full symmetric pattern - both the upper and
 lower triangles. If your matrix is stored as upper-triangular only,
 symmetrise with `A + Aᵀ - diag(A)` before handing it to `rslab-amd`.
 
@@ -178,7 +178,7 @@ produced.
 
 `tests/oracle_match.rs` rebuilds each pattern from the same
 programmatic generator the harness used, runs
-`amd_order_with_stats`, and asserts exact equality — not just on
+`amd_order_with_stats`, and asserts exact equality - not just on
 the permutation, but on `ncmpa`, `ndiv`, `nms_ldl`, `nms_lu`, and
 `n_dense_deferred`.
 
@@ -248,17 +248,17 @@ $ grep -r 'amd = "' crates/rslab-amd/Cargo.toml | grep -v harness
 src/
 ├── lib.rs         Public surface: amd_order, amd_order_with_stats,
 │                  amd_order_opts, AmdOptions.
-├── pattern.rs     CscPattern — borrowed CSC sparsity pattern with
+├── pattern.rs     CscPattern - borrowed CSC sparsity pattern with
 │                  validation.
 ├── error.rs       AmdError (IndexOverflow, NonSymmetric,
 │                  MalformedInput).
 ├── stats.rs       AmdStats (ncmpa, n_mass_elim, n_supervar_merge,
 │                  n_dense_deferred, ndiv, nms_ldl, nms_lu).
-├── workspace.rs   AmdWorkspace::new — owns pe/iw/len/nv/elen/degree
+├── workspace.rs   AmdWorkspace::new - owns pe/iw/len/nv/elen/degree
 │                  scratch arrays and runs initialization (dense-row
 │                  classification, zero-degree fast path, degree-bucket
 │                  construction).
-├── algo.rs        run_elimination + finalize_permutation — the main
+├── algo.rs        run_elimination + finalize_permutation - the main
 │                  loop and the post-order expansion.
 └── bin/
     ├── rslab-amd.rs       Triplet-file CLI.

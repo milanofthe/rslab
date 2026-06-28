@@ -4,7 +4,7 @@
 //! degree order (ties broken by a seeded random permutation) and, for
 //! each unmatched vertex, pair it with its unmatched neighbor of
 //! maximum edge weight (ties broken by lower vertex id). Visiting
-//! low-degree vertices first — the "sorted" in SHEM — keeps a leaf
+//! low-degree vertices first - the "sorted" in SHEM - keeps a leaf
 //! from being stranded when its sole neighbor is claimed by a
 //! higher-degree vertex. If the reduction ratio falls below the
 //! configured threshold (default 0.85 per METIS 5.2.0), a simple
@@ -63,7 +63,7 @@ pub fn coarsen_level(
     // Sorted Heavy-Edge Matching: visit vertices in ascending degree
     // order, breaking ties by the seeded random permutation. METIS
     // Match_SHEM bucket-sorts the random permutation by degree so that
-    // low-degree vertices — which have the fewest matching options —
+    // low-degree vertices - which have the fewest matching options -
     // are matched before their few neighbors are claimed by a
     // higher-degree vertex. Plain shuffle order (HEM) strands those
     // leaves as self-matches, inflating the coarse graph on the
@@ -103,7 +103,7 @@ pub fn coarsen_level(
             cmap[vu] = cnvtxs;
             cmap[best as usize] = cnvtxs;
         } else {
-            // No unmatched neighbor — self-match for now, may be
+            // No unmatched neighbor - self-match for now, may be
             // revisited by 2-hop.
             match_[vu] = v;
             cmap[vu] = cnvtxs;
@@ -248,7 +248,7 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
                 let nbr = fine.adjncy[k];
                 let cn2 = cmap[nbr as usize];
                 if cn2 == c as i32 {
-                    // self-loop after contraction — drop
+                    // self-loop after contraction - drop
                     continue;
                 }
                 let cu = cn2 as usize;

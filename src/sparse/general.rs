@@ -101,7 +101,7 @@ impl<T: Scalar> GeneralCsc<T> {
         self.values.len()
     }
 
-    /// General matrix–vector product `y = A x` (no symmetry).
+    /// General matrix-vector product `y = A x` (no symmetry).
     pub fn matvec(&self, x: &[T], y: &mut [T]) {
         for v in y.iter_mut() {
             *v = T::zero();

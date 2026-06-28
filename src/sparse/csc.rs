@@ -171,7 +171,7 @@ impl<T: Scalar> CscMatrix<T> {
         // must start at 0. A monotone `col_ptr` beginning at `k > 0` with
         // `col_ptr[n] == nnz` passes every other check (length, monotone,
         // in-bounds, sorted, lower-triangle) while positions `0..k` of
-        // `row_idx`/`values` are never covered by any column range —
+        // `row_idx`/`values` are never covered by any column range -
         // silently dropped and never factored. Completes the column-pointer
         // contract the monotonicity check below began.
         if self.col_ptr[0] != 0 {
@@ -185,8 +185,8 @@ impl<T: Scalar> CscMatrix<T> {
         }
         // col_ptr must be monotonically non-decreasing (X6). Without this a
         // non-monotone `ia` whose endpoints line up (col_ptr[0] == 0,
-        // col_ptr[n] == nnz) passes every check below — in-bounds, sorted,
-        // lower-triangle — yet `col_ptr[j] > col_ptr[j+1]` makes column j's
+        // col_ptr[n] == nnz) passes every check below - in-bounds, sorted,
+        // lower-triangle - yet `col_ptr[j] > col_ptr[j+1]` makes column j's
         // range empty and overlaps adjacent columns, silently dropping entries
         // and factoring the wrong matrix. Checked up front so the `start..end`
         // ranges used below are well-formed.
@@ -267,7 +267,7 @@ impl<T: Scalar> CscMatrix<T> {
                 pat_row_idx[offsets[j]] = i;
                 offsets[j] += 1;
                 if i != j {
-                    // (j, i) — transpose
+                    // (j, i) - transpose
                     pat_row_idx[offsets[i]] = j;
                     offsets[i] += 1;
                 }
@@ -319,7 +319,7 @@ impl<T: Scalar> CscMatrix<T> {
     ///
     /// Byte-exact equivalent to `to_dense()` for the same input.
     /// Used by `FactorWorkspace` to pool the dense-fast-path buffer
-    /// across calls — see
+    /// across calls - see
     /// `dev/research/phase-2.5.x-to-dense-pooling.md`.
     pub fn to_dense_into(&self, mut buf: Vec<T>) -> crate::dense::matrix::SymmetricMatrix<T> {
         let nn = self.n * self.n;
@@ -436,7 +436,7 @@ mod tests {
         lower.validate().unwrap();
 
         // Upper-triangle form of the same matrix: (0,0)=2, (0,1)=1, (1,1)=2.
-        // Must be rejected — previously was silently accepted.
+        // Must be rejected - previously was silently accepted.
         let err = CscMatrix::from_triplets(2, &[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, 2.0])
             .expect_err("upper-triangle triplet must be rejected");
         let msg = format!("{}", err);
@@ -587,7 +587,7 @@ mod tests {
     /// `col_ptr` beginning at `k > 0` with `col_ptr[n] == nnz` passes the
     /// length, monotonicity, `col_ptr[n] == nnz`, in-bounds, sorted and
     /// lower-triangle checks, yet positions `0..k` of `row_idx`/`values`
-    /// fall outside every column range and are silently dropped — the
+    /// fall outside every column range and are silently dropped - the
     /// matrix factored is missing those entries.
     ///
     /// Witness: n = 2, nnz = 2, `col_ptr = [1, 1, 2]`. Monotone,

@@ -18,8 +18,8 @@
 //! [`OrderingStats`], [`OrderingError`], and [`CONTRACT_VERSION`] are
 //! re-exported from `rslab-ordering-core`.
 //!
-//! **Status: S1–S5 complete.** [`scotch_order`] and
-//! [`scotch_order_full`] run the full pipeline — graph compression,
+//! **Status: S1-S5 complete.** [`scotch_order`] and
+//! [`scotch_order_full`] run the full pipeline - graph compression,
 //! connected-component split, multilevel coarsening, best-of-
 //! `n_sep_trials` initial bisection, halo-FM uncoarsening, direct
 //! vertex separator, and recursive ND with an AMD leaf fallback.
@@ -152,11 +152,11 @@ pub fn scotch_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError>
 /// [`OrderingError`].
 ///
 /// `OrderingStats.time_us` is the wall-clock time of this call.
-/// `fill_estimate` and `flop_estimate` stay `None` — SCOTCH does not
+/// `fill_estimate` and `flop_estimate` stay `None` - SCOTCH does not
 /// produce them at the ordering boundary; they belong to a downstream
 /// symbolic analysis.
 ///
-/// Runs the S1–S5 pipeline: optional graph compression, connected-
+/// Runs the S1-S5 pipeline: optional graph compression, connected-
 /// component split, multilevel coarsening, best-of-`n_sep_trials`
 /// initial bisection, halo-FM uncoarsening refinement, direct
 /// vertex-separator via two-sided FM, recursion on each side with an
@@ -250,7 +250,7 @@ mod tests {
         let ri: Vec<i32> = Vec::new();
         // CscPattern::new with n=2 and col_ptr of length 2 rejects at
         // construction; go through the public API by constructing a
-        // valid n=0 pattern and mutating — since we don't have public
+        // valid n=0 pattern and mutating - since we don't have public
         // mutation, simply verify that CscPattern::new rejects the
         // malformed case (the scotch_order_full guard is a defence-
         // in-depth and is covered by tests in node_nd).

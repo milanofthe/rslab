@@ -2,14 +2,14 @@
 //!
 //! Frontal matrices from elliptic-PDE FEM (Helmholtz) and integral-equation MoM
 //! near-fields are not low-rank themselves, but their **off-diagonal sub-blocks**
-//! — which couple geometrically separated index clusters through a smooth kernel
-//! — are numerically low-rank. Compressing those blocks shrinks both the
+//! - which couple geometrically separated index clusters through a smooth kernel
+//! - are numerically low-rank. Compressing those blocks shrinks both the
 //! factorization flop count and the front/contribution memory, the two levers
 //! behind the PARDISO throughput gap and the transient-memory spike. This module
 //! provides the low-rank block type and a pure-Rust rank-revealing compressor;
 //! the BLR-aware front factorization builds on it.
 //!
-//! Compression uses **fully-pivoted Adaptive Cross Approximation (ACA)** — the
+//! Compression uses **fully-pivoted Adaptive Cross Approximation (ACA)** - the
 //! integral-equation-community standard: a truncated, rank-revealing
 //! Gaussian-elimination cross approximation that needs no SVD (which has no
 //! pure-Rust complex implementation here). For a dense `m×n` block it is
@@ -36,7 +36,7 @@ pub struct LowRank<T> {
 }
 
 impl<T: Scalar> LowRank<T> {
-    /// Stored entries `rank·(m + n)` vs the dense `m·n` — the compression only
+    /// Stored entries `rank·(m + n)` vs the dense `m·n` - the compression only
     /// pays off when this is smaller.
     pub fn storage(&self) -> usize {
         self.rank * (self.m + self.n)
@@ -122,7 +122,7 @@ pub fn compress_aca<T: Scalar>(
             }
         }
         if bmag == 0.0 {
-            break; // residual exactly zero — exact low-rank
+            break; // residual exactly zero - exact low-rank
         }
         let pinv = r[bj * m + bi].recip();
         // Cross factors: u = R[:, bj], v = R[bi, :]·(1/pivot).
@@ -182,7 +182,7 @@ impl<T: Scalar> Block<T> {
         }
     }
 
-    /// Stored scalar count — `rows·cols` dense, `rank·(rows+cols)` low-rank.
+    /// Stored scalar count - `rows·cols` dense, `rank·(rows+cols)` low-rank.
     pub fn storage(&self) -> usize {
         match self {
             Block::Dense { rows, cols, .. } => rows * cols,
@@ -252,7 +252,7 @@ impl<T: Scalar> BlrMatrix<T> {
         block_extent(self.ncol, self.b, jb)
     }
 
-    /// Total stored scalars across all tiles — the BLR memory footprint.
+    /// Total stored scalars across all tiles - the BLR memory footprint.
     pub fn storage(&self) -> usize {
         self.blocks.iter().map(Block::storage).sum()
     }
@@ -344,12 +344,12 @@ impl<T: Scalar> BlrMatrix<T> {
 }
 
 // ===========================================================================
-// Stage 2 — BLR-aware LU factorization
+// Stage 2 - BLR-aware LU factorization
 //
 // Block right-looking LU over the tile grid with **block-restricted partial
 // pivoting**: pivoting is confined to within each diagonal tile (rows never
 // cross a tile boundary), so the low-rank structure of the off-diagonal tiles
-// is preserved — a row interchange of a low-rank tile `U·Vᵀ` is just a row
+// is preserved - a row interchange of a low-rank tile `U·Vᵀ` is just a row
 // interchange of `U`. This is weaker than global partial pivoting, but the MoM
 // preconditioner runs on a two-sided-equilibrated matrix with static pivot
 // perturbation and GMRES refinement, where block-local pivoting is the standard
@@ -360,7 +360,7 @@ impl<T: Scalar> BlrMatrix<T> {
 // products `(U₁V₁ᵀ)(U₂V₂ᵀ) = U₁(V₁ᵀU₂)V₂ᵀ`. Updated low-rank tiles accumulate
 // rank by factor concatenation and are **recompressed** once the rank exceeds
 // the break-even point. Recompression here densifies the (small, ≤b×b) tile and
-// re-runs ACA — correct and pure-Rust; a QR-based recompression that avoids the
+// re-runs ACA - correct and pure-Rust; a QR-based recompression that avoids the
 // densify is the later performance refinement.
 // ===========================================================================
 
@@ -438,7 +438,7 @@ fn apply_swaps_rows<T: Scalar>(data: &mut [T], rows: usize, cols: usize, swaps: 
 }
 
 /// Apply the diagonal tile's row interchanges to another tile in the same
-/// block-row — dense tiles swap rows, low-rank tiles swap rows of `U`.
+/// block-row - dense tiles swap rows, low-rank tiles swap rows of `U`.
 fn apply_swaps_block<T: Scalar>(blk: &mut Block<T>, swaps: &[(usize, usize)]) {
     match blk {
         Block::Dense { rows, cols, data } => apply_swaps_rows(data, *rows, *cols, swaps),
@@ -565,7 +565,7 @@ fn upper_transpose_solve_left<T: Scalar>(u: &[T], n: usize, y: &mut [T], nrhs: u
     }
 }
 
-/// `U_kj = L_kk⁻¹ · A_kj` — apply the unit-lower diagonal-tile solve to a panel
+/// `U_kj = L_kk⁻¹ · A_kj` - apply the unit-lower diagonal-tile solve to a panel
 /// tile (whole dense tile, or just the `U` factor of a low-rank tile).
 fn solve_lower_panel<T: Scalar>(diag: &[T], n: usize, blk: &mut Block<T>) {
     match blk {
@@ -574,7 +574,7 @@ fn solve_lower_panel<T: Scalar>(diag: &[T], n: usize, blk: &mut Block<T>) {
     }
 }
 
-/// `L_ik = A_ik · U_kk⁻¹` — apply the upper diagonal-tile solve to a panel tile
+/// `L_ik = A_ik · U_kk⁻¹` - apply the upper diagonal-tile solve to a panel tile
 /// from the right (dense tile), or as `U_kk⁻ᵀ` on the `V` factor (low-rank).
 fn solve_upper_panel<T: Scalar>(diag: &[T], n: usize, blk: &mut Block<T>) {
     match blk {
@@ -620,7 +620,7 @@ fn block_product<T: Scalar>(a: &Block<T>, b: &Block<T>) -> Block<T> {
             })
         }
         (Block::LowRank(a1), Block::LowRank(b1)) => {
-            // U1·(V1ᵀU2)·V2ᵀ — fold the inner r1×r2 matrix into the thinner side.
+            // U1·(V1ᵀU2)·V2ᵀ - fold the inner r1×r2 matrix into the thinner side.
             let (r1, r2) = (a1.rank, b1.rank);
             let mm = matmul_at_b(&a1.v, p, r1, &b1.u, r2); // r1×r2
             if r1 == 0 || r2 == 0 {
@@ -700,7 +700,7 @@ fn block_sub<T: Scalar>(target: &mut Block<T>, prod: Block<T>, eps: f64) {
 
 /// `T ⊖ P` for two low-rank tiles: concatenate `[U_t | −U_p]`, `[V_t | V_p]`
 /// (rank `r_t + r_p`), then recompress if the rank exceeds the break-even point
-/// — densify the small tile and re-run ACA, falling back to dense if it no
+/// - densify the small tile and re-run ACA, falling back to dense if it no
 /// longer pays.
 fn concat_recompress<T: Scalar>(t: LowRank<T>, mut p: LowRank<T>, eps: f64) -> Block<T> {
     let (m, n) = (t.m, t.n);
@@ -868,7 +868,7 @@ pub fn blr_lu_solve<T: Scalar>(lu: &BlrLu<T>, x: &mut [T]) {
     let nb = a.nbr;
     debug_assert_eq!(x.len(), a.nrow);
 
-    // P·rhs — apply each diagonal tile's local interchanges to its row segment.
+    // P·rhs - apply each diagonal tile's local interchanges to its row segment.
     for (k, swaps) in lu.block_swaps.iter().enumerate() {
         let (r0, nk) = a.row_extent(k);
         apply_swaps_vec(&mut x[r0..r0 + nk], swaps);
@@ -900,7 +900,7 @@ pub fn blr_lu_solve<T: Scalar>(lu: &BlrLu<T>, x: &mut [T]) {
 /// Diagnostic: partition a dense front `f` (`n × n` column-major, of which the
 /// leading `ncol` columns are eliminated) into `b × b` blocks and report how
 /// compressible its strictly-lower-triangle off-diagonal blocks are at several
-/// Frobenius tolerances. This is the empirical BLR-benefit estimate — mean rank
+/// Frobenius tolerances. This is the empirical BLR-benefit estimate - mean rank
 /// and compressed-vs-dense storage of the off-diagonal blocks that BLR would
 /// represent in low-rank form. Prints to stderr; gated by the caller.
 pub fn probe_front<T: Scalar>(f: &[T], n: usize, ncol: usize, b: usize) {
@@ -977,7 +977,7 @@ mod tests {
     #[test]
     fn aca_compresses_smooth_kernel_block() {
         // A smooth-kernel off-diagonal block (1/(2 + |i−j|) type, separated
-        // clusters) — the EM near-field analogue — must compress to low rank at a
+        // clusters) - the EM near-field analogue - must compress to low rank at a
         // loose preconditioner tolerance.
         let (m, n) = (64usize, 64usize);
         let mut b = vec![Complex::new(0.0, 0.0); m * n];
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     /// A front-like dense matrix: strong diagonal, off-diagonal coupling through
-    /// a smooth separated-cluster kernel — compressible away from the diagonal.
+    /// a smooth separated-cluster kernel - compressible away from the diagonal.
     fn smooth_front(n: usize) -> Vec<Complex<f64>> {
         let mut a = vec![Complex::new(0.0, 0.0); n * n];
         for j in 0..n {
@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     /// Strongly diagonally dominant complex matrix (block-local pivoting is
-    /// stable, no equilibration needed) — off-diagonal blocks are full-rank
+    /// stable, no equilibration needed) - off-diagonal blocks are full-rank
     /// random and stay dense at tight tolerance.
     fn diag_dominant_complex(n: usize) -> Vec<Complex<f64>> {
         let mut a = vec![Complex::new(0.0, 0.0); n * n];

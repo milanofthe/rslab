@@ -6,13 +6,13 @@ This crate defines the locked contract surface that every sibling
 ordering crate in RSLAB (`rslab-amd`, `rslab-metis`, `rslab-scotch`,
 `rslab-kahip`) implements:
 
-- `CscPattern<'_>` — borrowed, full-symmetric, 0-based, `i32`-indexed
+- `CscPattern<'_>` - borrowed, full-symmetric, 0-based, `i32`-indexed
   sparsity pattern.
-- `OrderingStats` — producer-agnostic diagnostic counters (time,
+- `OrderingStats` - producer-agnostic diagnostic counters (time,
   optional fill / flop estimates).
-- `OrderingError` — shared error shape with a static `Internal(&str)`
+- `OrderingError` - shared error shape with a static `Internal(&str)`
   escape hatch.
-- `CONTRACT_VERSION: u32` — bumped on breaking changes.
+- `CONTRACT_VERSION: u32` - bumped on breaking changes.
 
 Zero dependencies beyond `std`. The full design rationale lives in
 `dev/plans/ordering-crate-contract.md`.

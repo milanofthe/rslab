@@ -2,7 +2,7 @@
 
 Reads the same complex MoM matrices as `benches/vs_all.rs`, builds the **same**
 right-hand side, runs an exact SuperLU factor + solve, and prints factor/solve
-time and the true relative residual — one line per matrix, to sit beside the
+time and the true relative residual - one line per matrix, to sit beside the
 Rust table (RLA-LL / RLA-MF / faer / PARDISO).
 
 Run:  python benches/superlu_mom.py  [substring-filter]

@@ -1,4 +1,4 @@
-//! Raw `gemm`-crate complex throughput ceiling — the reference for how much of
+//! Raw `gemm`-crate complex throughput ceiling - the reference for how much of
 //! the per-front kernel gap is the crate vs how we drive it (panel rank, serial
 //! getf2). Times a single large `C -= A·B` complex GEMM at a few shapes.
 //!

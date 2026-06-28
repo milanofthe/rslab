@@ -1,16 +1,16 @@
 //! Issue #64 regression: the default ordering must not pick MetisND on
 //! r05's arrow/bordered IPM KKT, where nested dissection blows the LDLᵀ
-//! factor up ~7–9× vs AMF/AMD.
+//! factor up ~7-9× vs AMF/AMD.
 //!
 //! The fixture `tests/data/large/r05_kkt.mtx` is a generated IPM KKT
 //! (n=14842, nnz=118968), not a SuiteSparse download, so it is
 //! gitignored and regenerated on demand via
 //! `dev/scripts/regen_r05_kkt.sh`. When the fixture is absent (e.g. CI),
-//! this test prints a SKIP line and passes — it is a local/opt-in
+//! this test prints a SKIP line and passes - it is a local/opt-in
 //! regression guard, not a CI gate.
 //!
-//! Oracle (external — the issue's measured fill): AMF/AMD ≈ 0.53–0.61M,
-//! MetisND ≈ 3.6–4.4M. The `< 1.0e6` threshold separates them with wide
+//! Oracle (external - the issue's measured fill): AMF/AMD ≈ 0.53-0.61M,
+//! MetisND ≈ 3.6-4.4M. The `< 1.0e6` threshold separates them with wide
 //! margin and is robust to ordering-impl / METIS-seed drift.
 
 use rslab::read_mtx;

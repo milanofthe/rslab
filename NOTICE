@@ -1,17 +1,18 @@
-RLA — Rust Linear Algebra
+RSLAB - Rust Sparse Linear Algebra Backend
 Copyright (c) 2026 Milan Rother
 Licensed under the MIT License (see LICENSE).
 
-RLA is a fork of feral (https://github.com/jkitchin/feral),
-Copyright (c) 2026 John Kitchin, distributed under the MIT License. The original
-feral MIT license text is retained in LICENSE. RLA thins feral down to the core
-sparse LDLᵀ path and generalizes it toward complex-symmetric systems.
+RSLAB is a fork of feral (https://github.com/jkitchin/feral),
+Copyright (c) 2026 John Kitchin, distributed under the MIT License. feral is the
+basis of this project; its MIT license text is retained in LICENSE. RSLAB builds on
+feral's sparse LDLᵀ core, adds an unsymmetric LU path, complex-symmetric support,
+and solver-in-the-loop tooling (a-priori estimates, diagnostics, tuning).
 
 ================================================================================
 Third-Party Attributions
 ================================================================================
 
-RLA (via feral) incorporates algorithmic content derived from the SPRAL library
+RSLAB (via feral) incorporates algorithmic content derived from the SPRAL library
 (Science and Technology Facilities Council), specifically the Hungarian matching
 and MC64-style scaling routines. The Rust implementations in:
 
@@ -29,9 +30,9 @@ are also used and are cited in source comments.
 
 --------------------------------------------------------------------------------
 
-Feral's source comments cite the following projects for scholarly purposes
+feral's source comments cite the following projects for scholarly purposes
 (algorithm references, parameter names, design rationale). No source code from
-these projects is incorporated into Feral:
+these projects is incorporated into RSLAB or feral:
 
   - MUMPS 5.8.2 (CeCILL-C)        https://mumps-solver.org/
   - Ipopt 3.14   (EPL-2.0)        https://github.com/coin-or/Ipopt

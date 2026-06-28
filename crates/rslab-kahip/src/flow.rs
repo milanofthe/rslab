@@ -268,8 +268,8 @@ fn discharge(
                 new_height = height[e.to] + 1;
             }
         }
-        // An active vertex always has a residual reverse edge — the reverse
-        // of whichever edge delivered its excess — so the relabel scan above
+        // An active vertex always has a residual reverse edge - the reverse
+        // of whichever edge delivered its excess - so the relabel scan above
         // always finds a finite height. The branch below is therefore
         // unreachable while `excess[u] > 0`, which holds here: we did not
         // return at the `excess[u] == 0` check above. The debug_assert pins
@@ -285,7 +285,7 @@ fn discharge(
             // Unreachable defensive fallback (see the debug_assert above).
             // NOTE: this returns *without* the `height_count[old_h] -= 1`
             // that the normal relabel path performs below, so reaching it
-            // would corrupt the gap histogram — another reason to assert
+            // would corrupt the gap histogram - another reason to assert
             // entry rather than silently proceed on a bad count.
             height[u] = 2 * n;
             return;
@@ -399,7 +399,7 @@ mod tests {
         }
         let (f, side) = push_relabel(n, &edges, 0, n - 1).unwrap();
         assert_eq!(f, 1);
-        // Min-cut here is any single edge along the path — the first
+        // Min-cut here is any single edge along the path - the first
         // saturating edge is the first (0->1), so source side = {0}.
         assert!(side[0]);
         assert!(!side[n - 1]);

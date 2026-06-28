@@ -68,7 +68,7 @@ pub trait Scalar:
     /// `self * a + b`, using a fused multiply-add where the hardware offers one.
     fn mul_add(self, a: Self, b: Self) -> Self;
 
-    /// Whether every component is finite (no `NaN`/`inf`) — used by pivot
+    /// Whether every component is finite (no `NaN`/`inf`) - used by pivot
     /// health checks.
     fn is_finite(self) -> bool;
 }
@@ -173,7 +173,7 @@ impl Scalar for Complex<f64> {
 
     #[inline]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        // (self·a + b) lowered to four real FMAs — uses the hardware FMA pipes
+        // (self·a + b) lowered to four real FMAs - uses the hardware FMA pipes
         // and halves the rounding versus `self * a + b` on `num_complex`.
         let re = f64::mul_add(self.re, a.re, f64::mul_add(-self.im, a.im, b.re));
         let im = f64::mul_add(self.re, a.im, f64::mul_add(self.im, a.re, b.im));

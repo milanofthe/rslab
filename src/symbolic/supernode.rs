@@ -54,11 +54,11 @@ pub struct SupernodeParams {
     /// `symbolic_factorize_with_method` driver records elapsed time
     /// per stage (ordering, etree, postorder, col_counts, renumber,
     /// find_supernodes, etc.). When `None`, every timer is bypassed
-    /// — zero overhead. See
+    /// - zero overhead. See
     /// `dev/research/phase-2.13b-symbolic-profiler.md`.
     pub symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
 
-    /// Relaxed/fill-tolerant amalgamation — the multifrontal-throughput lever.
+    /// Relaxed/fill-tolerant amalgamation - the multifrontal-throughput lever.
     /// When `Some`, an adjacent child is merged into its parent even when it is
     /// neither a trivial chain nor size-based, as long as the merged supernode
     /// stays within `max_width` columns and the merge introduces at most
@@ -167,10 +167,10 @@ pub struct Supernode {
     /// pivots from descendants at numeric time. The numeric phase
     /// enforces `n_delayed_in <= delayed_capacity` per supernode; on
     /// overflow it can return `RslabError::DelayBudgetExceeded` (B3)
-    /// or — under the rewired CB trigger (B5) — fall back to
+    /// or - under the rewired CB trigger (B5) - fall back to
     /// MUMPS-style static perturbation as a last-resort recovery.
     ///
-    /// `usize::MAX` is the sentinel for "unbounded" — equivalent to
+    /// `usize::MAX` is the sentinel for "unbounded" - equivalent to
     /// the pre-Phase-B behavior where the numeric phase grew its
     /// frontal in place to accommodate any number of delays. The
     /// symbolic phase replaces this with a finite estimate during
@@ -201,7 +201,7 @@ impl Supernode {
     }
 }
 
-/// Phase 2.13a — shape predicate threshold.
+/// Phase 2.13a - shape predicate threshold.
 ///
 /// `multi_child_frac < THRESH` ⇒ path / near-path tree, dispatch to
 /// `Adjacency`. Otherwise dispatch to `Renumber`. Threshold chosen
@@ -212,7 +212,7 @@ impl Supernode {
 /// gap. See `dev/research/phase-2.13a-amalgamation-auto.md`.
 pub const AUTO_MULTI_CHILD_FRAC_THRESHOLD: f64 = 0.05;
 
-/// Phase 2.13a — pick `Adjacency` vs `Renumber` from the etree
+/// Phase 2.13a - pick `Adjacency` vs `Renumber` from the etree
 /// shape. O(n) on the etree; called once per
 /// `symbolic_factorize_with_method` invocation.
 ///
@@ -233,7 +233,7 @@ pub fn pick_amalgamation_strategy(etree: &EliminationTree) -> AmalgamationStrate
     let n_leaves = child_count.iter().filter(|&&c| c == 0).count();
     let n_internal = n - n_leaves;
     if n_internal == 0 {
-        // Forest of isolated nodes — no amalgamation opportunities
+        // Forest of isolated nodes - no amalgamation opportunities
         // either way. `Adjacency` is the cheap default.
         return AmalgamationStrategy::Adjacency;
     }
@@ -275,8 +275,8 @@ pub fn find_supernodes(
     }
 
     // Relaxed/fill-tolerant amalgamation (the MoM/FEM throughput lever), applied
-    // only at scale (`n >= RELAX_MIN_N`) so small problems — and their supernode
-    // structure tests — are unaffected. When active it widens supernodes and
+    // only at scale (`n >= RELAX_MIN_N`) so small problems - and their supernode
+    // structure tests - are unaffected. When active it widens supernodes and
     // implies the Renumber merge order (bushy multi-child trees only merge with
     // the renumbered postorder).
     let relax = if n >= RELAX_MIN_N { params.relax } else { None };
@@ -298,7 +298,7 @@ pub fn find_supernodes(
     let mut snode_first_col: Vec<usize> = snode_starts.clone();
 
     // Iteration order: forward (legacy / `Adjacency` strategy) is the
-    // historical behavior — children processed in increasing postorder
+    // historical behavior - children processed in increasing postorder
     // index. On a multi-child parent only the highest-index child is
     // adjacent to the parent, so only one child merges per multi-child
     // parent (this is what `dev/research/phase-2.12-column-renumbering.md`
@@ -345,7 +345,7 @@ pub fn find_supernodes(
             //
             // In a postorder-column-numbered elimination tree every
             // parent's columns come after all its descendants', so in
-            // a multi-child parent at most one child is adjacent —
+            // a multi-child parent at most one child is adjacent -
             // the one whose last column is parent_first - 1. Merging
             // any other child breaks contiguity. The arrow matrix
             // (variables 0..n-2 all parented by variable n-1) is the
@@ -387,7 +387,7 @@ pub fn find_supernodes(
             // (e.g. nql180, pinene_3200), unrestricted amalgamation can
             // grow the root supernode to many thousands of columns. The
             // root frontal is then effectively dense AND receives all
-            // delayed-pivot catchment from the subtree — the worst
+            // delayed-pivot catchment from the subtree - the worst
             // possible combination for memory.
             //
             // The cap applies only above `ROOT_CAP_MIN_N` (small
@@ -395,7 +395,7 @@ pub fn find_supernodes(
             // only manifests at scale and the existing `nemin` logic
             // is the right constraint for small trees). Above the
             // threshold the merged root is capped at
-            // `min(0.05 * n, 2048)` columns — loose enough not to
+            // `min(0.05 * n, 2048)` columns - loose enough not to
             // disturb non-pathological problems, tight enough that
             // nql180-class KKTs cannot grow back to a dense root.
             const ROOT_CAP_MIN_N: usize = 1024;
@@ -450,7 +450,7 @@ pub fn find_supernodes(
 
         // Row indices: the first_col..first_col+ncol are the eliminated columns,
         // plus the remaining rows from col_counts
-        // For now, store just the column range — actual row indices are
+        // For now, store just the column range - actual row indices are
         // determined during symbolic factorization with the full pattern
         let row_indices = (first_col..first_col + nrow).collect();
 
@@ -507,7 +507,7 @@ pub const DELAY_CAPACITY_MULTIPLIER: usize = 4;
 /// otherwise have `capacity = 4`, which routinely under-shoots even
 /// modest non-pathological delay catchment. The floor ensures every
 /// supernode can absorb at least 16 incoming delays before the
-/// budget trips — generous for small supernodes, irrelevant for
+/// budget trips - generous for small supernodes, irrelevant for
 /// wide supernodes where `K * own_ncol >> 16`. The worst-case bound
 /// (`subtree_ncol - own_ncol`) still caps capacity for leaves and
 /// near-leaves, so the floor cannot create artificially-large
@@ -536,7 +536,7 @@ pub const DELAY_CAPACITY_MIN_FLOOR: usize = 16;
 ///
 /// The `min` of the two is the cap actually enforced. For leaves
 /// (no children, `subtree_ncol == own_ncol`) the first term is 0,
-/// so leaves always get `delayed_capacity == 0` — which is
+/// so leaves always get `delayed_capacity == 0` - which is
 /// trivially correct (leaves have no children that could send
 /// delays). For interior nodes the K-bound is usually tighter
 /// than the worst-case bound; for tall thin chains the
@@ -662,7 +662,7 @@ pub(crate) fn find_fundamental_supernodes(
 /// Predict desired merges (Phase 2.12) for the SSIDS-style column
 /// renumbering. Runs the same fundamental-supernode detection and
 /// SSIDS size rule as `find_supernodes`, but **does not enforce
-/// adjacency** — the caller uses the merge predictions to drive a
+/// adjacency** - the caller uses the merge predictions to drive a
 /// merge-biased postorder that *makes* the merges adjacent in the
 /// re-postordered numbering.
 ///
@@ -671,7 +671,7 @@ pub(crate) fn find_fundamental_supernodes(
 /// that the fundamental supernode containing `c` should be merged
 /// into its parent fundamental supernode (whose first column is
 /// `parent_first_col`). Columns belonging to non-merging
-/// supernodes — and the parent supernode of every merge — get `None`.
+/// supernodes - and the parent supernode of every merge - get `None`.
 ///
 /// The encoding is per-column (not per-supernode) so the caller can
 /// drive a per-node bias on the etree directly.
@@ -709,7 +709,7 @@ pub(crate) fn predict_merges(
 
         if trivial_chain || size_based {
             // Mark every column of this child supernode as "biased
-            // late" — its subtree should be emitted adjacent to its
+            // late" - its subtree should be emitted adjacent to its
             // parent in the merge-biased postorder.
             for b in bias.iter_mut().skip(s_first).take(child_ncol) {
                 *b = true;

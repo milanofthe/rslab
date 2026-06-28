@@ -1,7 +1,7 @@
-# feral-amd oracle fixture: arrow_200
+# rslab-amd oracle fixture: arrow_200
 # generator: SuiteSparse AMD Rust crate (amd = 0.2.2)
 # provenance:
-#   generator: arrow(n=200) — hub at var 0 + diagonal; programmatic, no RNG
+#   generator: arrow(n=200) - hub at var 0 + diagonal; programmatic, no RNG
 status: OK
 n: 200
 nz: 598

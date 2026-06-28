@@ -28,7 +28,7 @@ SCOTCH-style refinement on top.
 - Pellegrini, F., and Roman, J. (1996). *SCOTCH: A software package
   for static mapping by dual recursive bipartitioning of process and
   architecture graphs.* Lecture Notes in Computer Science 1067,
-  493–498.
+  493-498.
 
 Full BibTeX in `dev/references.bib` of the parent repository.
 

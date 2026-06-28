@@ -453,7 +453,7 @@ mod tests {
         let before = g.cut_weight(&w);
         assert_eq!(before, 2);
         // With tight balance = 0.0 (max part size = 3), moving 3 to
-        // part 1 would give {0,1,2} | {3,4,5} with cut 1 — that's
+        // part 1 would give {0,1,2} | {3,4,5} with cut 1 - that's
         // balanced and should be accepted.
         let changed = flow_refine_bisection(&g, &mut w, 3, 0.0);
         assert!(changed);
@@ -498,7 +498,7 @@ mod tests {
         // O16 reproduction. 7×7 grid with a deliberately bad diagonal
         // bisection (lower-left triangle r+c<7 in part 0). Flow
         // refinement strictly improves the cut by pulling a handful of
-        // part-1 vertices — including vertex 13 — into part 0, leaving
+        // part-1 vertices - including vertex 13 - into part 0, leaving
         // counts 33|16. With ε = 0.4 the COUNT slack is ⌊1.4·25⌋ = 35,
         // so a count-based balance check accepts the move.
         //

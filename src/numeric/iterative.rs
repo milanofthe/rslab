@@ -7,7 +7,7 @@
 //! preconditioner. The iterative method of choice for `A = Aᵀ` is **COCG**
 //! (Conjugate Orthogonal Conjugate Gradient, van der Vorst & Melissen 1990):
 //! structurally CG, but every inner product is the *unconjugated* bilinear
-//! form `xᵀy = Σ xᵢyᵢ` — the correct geometry for a complex-symmetric (not
+//! form `xᵀy = Σ xᵢyᵢ` - the correct geometry for a complex-symmetric (not
 //! Hermitian) operator. For `T = f64` it reduces exactly to preconditioned CG.
 //!
 //! The [`Preconditioner`] trait decouples the iteration from the factorization
@@ -25,7 +25,7 @@ use num_complex::Complex;
 
 /// A linear operator `A`: applies `y = A x`. The Krylov solvers depend only on
 /// this trait, so the operator may be an explicit sparse matrix
-/// ([`CscMatrix`] symmetric / [`GeneralCsc`] general) **or matrix-free** — e.g.
+/// ([`CscMatrix`] symmetric / [`GeneralCsc`] general) **or matrix-free** - e.g.
 /// a fast multipole (FMM/MLFMA) MoM operator the caller implements. RLA then
 /// only factors the sparse near-field as the [`Preconditioner`].
 pub trait LinearOperator<T: Scalar> {
@@ -37,7 +37,7 @@ pub trait LinearOperator<T: Scalar> {
     /// major** `n×s` (RHS `c` is the contiguous slice `[c·n, (c+1)·n)`). The
     /// default loops the single-vector [`apply`](Self::apply); explicit-matrix
     /// operators override it with an amortized block matvec (each matrix entry
-    /// loaded once for all `s` columns — the BLAS-3 arithmetic intensity that
+    /// loaded once for all `s` columns - the BLAS-3 arithmetic intensity that
     /// makes a multi-RHS solve pay over `s` separate ones).
     fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
         let n = self.n();
@@ -56,7 +56,7 @@ impl<T: Scalar> LinearOperator<T> for CscMatrix<T> {
     }
     /// Amortized block symv: each lower-triangle entry `(i,j,v)` is loaded once
     /// and scattered to all `s` columns (`y[:,c] += v·x[j,c]`, and symmetrically
-    /// `y[j,c] += v·x[i,c]` off the diagonal) — the BLAS-3 reuse a multi-RHS
+    /// `y[j,c] += v·x[i,c]` off the diagonal) - the BLAS-3 reuse a multi-RHS
     /// solve buys over `s` separate `symv`s.
     fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
         let n = self.n;
@@ -235,7 +235,7 @@ pub struct LowPrecisionLu {
 }
 
 impl LowPrecisionLu {
-    /// Down-cast `A` to `Complex<f32>` and LU-factor it (options honoured —
+    /// Down-cast `A` to `Complex<f32>` and LU-factor it (options honoured -
     /// static pivoting and/or incomplete dropping for a preconditioner).
     pub fn factor(a: &GeneralCsc<Complex<f64>>, opts: &FactorOptions) -> Result<Self, RslabError> {
         let a32 = GeneralCsc::<Complex<f32>> {
@@ -278,7 +278,7 @@ impl Preconditioner<Complex<f64>> for LowPrecisionLu {
     }
 }
 
-/// Unconjugated bilinear inner product `xᵀy = Σ xᵢyᵢ` (no complex conjugation —
+/// Unconjugated bilinear inner product `xᵀy = Σ xᵢyᵢ` (no complex conjugation -
 /// the defining choice of the COCG geometry for `A = Aᵀ`).
 #[inline]
 fn dotu<T: Scalar>(x: &[T], y: &[T]) -> T {
@@ -289,7 +289,7 @@ fn dotu<T: Scalar>(x: &[T], y: &[T]) -> T {
     s
 }
 
-/// Euclidean norm `‖x‖₂ = √Σ|xᵢ|²` (genuine modulus — used only for the stopping
+/// Euclidean norm `‖x‖₂ = √Σ|xᵢ|²` (genuine modulus - used only for the stopping
 /// test, never inside the Krylov recurrences).
 #[inline]
 fn norm2<T: Scalar>(x: &[T]) -> f64 {
@@ -404,7 +404,7 @@ where
 /// and more robust on strongly indefinite** operators (high-frequency 3D
 /// Helmholtz) where COCG's residual can oscillate or break down.
 ///
-/// Same interface and conventions as [`cocg`]. Costs one matrix–vector product
+/// Same interface and conventions as [`cocg`]. Costs one matrix-vector product
 /// and one preconditioner apply per iteration. Reduces to preconditioned CR
 /// for `T = f64`.
 pub fn cocr<T, A, M>(
@@ -492,7 +492,7 @@ where
     })
 }
 
-/// Conjugated (Hermitian) inner product `⟨x, y⟩ = Σ conj(xᵢ)·yᵢ` — the geometry
+/// Conjugated (Hermitian) inner product `⟨x, y⟩ = Σ conj(xᵢ)·yᵢ` - the geometry
 /// GMRES orthogonalises in (distinct from COCG's unconjugated form).
 #[inline]
 fn dotc<T: Scalar>(x: &[T], y: &[T]) -> T {
@@ -520,7 +520,7 @@ fn givens<T: Scalar>(f: T, g: T) -> (T, T) {
 }
 
 /// Right-preconditioned restarted **GMRES(`restart`)** for a general
-/// (unsymmetric) operator — the natural Krylov method for unsymmetric MoM/FEM
+/// (unsymmetric) operator - the natural Krylov method for unsymmetric MoM/FEM
 /// systems where COCG/COCR do not apply. `op` may be matrix-free; `precond`
 /// supplies `M⁻¹` (e.g. an RLA [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors)
 /// near-field factor). Solves `A x = b` from `x₀ = 0`.
@@ -564,8 +564,8 @@ where
     let mut w = vec![T::zero(); n];
     let mut ax = vec![T::zero(); n];
     // Arnoldi basis as one **flat** `n × (m+1)` buffer (column `i` is
-    // `v[i*n .. (i+1)*n]`) — contiguous, no per-iteration vector allocation, and
-    // cache-friendly for the Gram–Schmidt sweeps.
+    // `v[i*n .. (i+1)*n]`) - contiguous, no per-iteration vector allocation, and
+    // cache-friendly for the Gram-Schmidt sweeps.
     let mut v = vec![T::zero(); n * (m + 1)];
 
     while total < max_iter {
@@ -594,11 +594,11 @@ where
             // Right preconditioning: w = A · M⁻¹ · v[j].
             precond.apply(&v[j * n..j * n + n], &mut z)?;
             op.apply(&z, &mut w);
-            // Modified Gram–Schmidt against the existing basis, with **conditional**
-            // reorthogonalization (DGKS): the second pass — essential on
+            // Modified Gram-Schmidt against the existing basis, with **conditional**
+            // reorthogonalization (DGKS): the second pass - essential on
             // ill-conditioned operators (MoM near-field) where a single MGS pass
             // loses orthogonality and the Hessenberg residual estimate drifts from
-            // the true residual — runs only when the projection cancelled most of
+            // the true residual - runs only when the projection cancelled most of
             // the vector (‖w‖ dropped below `η·‖w₀‖`, η = 1/√2). Well-conditioned
             // cycles skip it, halving the orthogonalization cost.
             let wnorm0 = norm2(&w);
@@ -710,7 +710,7 @@ pub struct BlockKrylovResult<T> {
 
 /// Right-preconditioned restarted **block GMRES** for `s` right-hand sides `b`
 /// (column-major `n×s`). The `s` systems advance in lockstep so the two expensive
-/// operations — the operator matvec and the preconditioner solve — are issued
+/// operations - the operator matvec and the preconditioner solve - are issued
 /// once per step as **block** applies ([`LinearOperator::apply_block`] /
 /// [`Preconditioner::apply_block`]), reaching BLAS-3 arithmetic intensity (each
 /// factor / matrix value touched once for all `s` columns). Each RHS keeps its
@@ -719,7 +719,7 @@ pub struct BlockKrylovResult<T> {
 /// preconditioner calls. Solves `A X = B` from `X₀ = 0`.
 ///
 /// **Deflation:** a RHS whose true residual reaches `tol` drops out of the block,
-/// so the batched applies shrink to the active width as columns converge — the
+/// so the batched applies shrink to the active width as columns converge - the
 /// fast-converging RHS are never dragged along by the slowest one.
 ///
 /// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
@@ -846,7 +846,7 @@ where
                 }
                 all_done = false;
                 let wb = ap * n;
-                // Modified Gram–Schmidt against this RHS's own basis, DGKS reorth.
+                // Modified Gram-Schmidt against this RHS's own basis, DGKS reorth.
                 let wnorm0 = norm2(&wblk[wb..wb + n]);
                 for i in 0..=j {
                     let vb = (i * sa + ap) * n;
@@ -969,7 +969,7 @@ where
 
 /// Adapter: a closure block-matvec `op(x, y, s)` (`Y ← A·X`, column-major `n×s`) as a
 /// [`LinearOperator`] for the matrix-free call path. `FnMut` (the Arnoldi issues applies
-/// sequentially) so the operator's own scratch lives in the closure capture — no struct, no
+/// sequentially) so the operator's own scratch lives in the closure capture - no struct, no
 /// interior-mutability dance at the call site. The `RefCell` is borrowed for one apply at a time.
 struct FnOp<F> {
     f: std::cell::RefCell<F>,
@@ -1001,7 +1001,7 @@ impl<T: Scalar, G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>> Preco
 }
 
 /// Closure entry point for [`gmres_block`]: pass the block matvec and block preconditioner as
-/// `FnMut` closures plus the dimension `n` — the natural form for a **matrix-free** MoM/FEM
+/// `FnMut` closures plus the dimension `n` - the natural form for a **matrix-free** MoM/FEM
 /// operator that captures its own assembly data + scratch, with no `LinearOperator`/`Preconditioner`
 /// boilerplate. For an unpreconditioned solve pass `|r, z, _| { z.copy_from_slice(r); Ok(()) }`.
 #[allow(clippy::too_many_arguments)]
@@ -1025,7 +1025,7 @@ where
     gmres_block(&op, b, s, &pc, tol, max_iter, restart)
 }
 
-/// Closure entry point for [`gmres`] (single RHS) — see [`gmres_block_fn`].
+/// Closure entry point for [`gmres`] (single RHS) - see [`gmres_block_fn`].
 #[allow(clippy::too_many_arguments)]
 pub fn gmres_fn<T, F, G>(
     op: F,
@@ -1054,7 +1054,7 @@ where
 pub trait Factorization<T: Scalar>: Preconditioner<T> {
     /// Solve `A x = b` directly from the stored factor.
     fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError>;
-    /// Stored fill (factor nonzeros) — the memory metric.
+    /// Stored fill (factor nonzeros) - the memory metric.
     fn factor_nnz(&self) -> usize;
     /// Number of statically perturbed pivots (0 for an exact factor).
     fn n_perturbed(&self) -> usize;
@@ -1110,7 +1110,7 @@ impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<
 }
 
 /// The high-level [`LuSolver`](crate::numeric::multifrontal_lu::LuSolver) is a
-/// preconditioner / factorization too — the unsymmetric twin of the
+/// preconditioner / factorization too - the unsymmetric twin of the
 /// [`LdltSolver`] impls, so solver-in-the-loop code can be generic over either.
 impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<T> {
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
@@ -1263,7 +1263,7 @@ mod tests {
         let un = gmres(&a, &b, &NoPreconditioner, 1e-10, 2000, 40).unwrap();
         assert!(un.converged, "GMRES res={}", un.final_res);
 
-        // LU factor as preconditioner → 1–2 iterations.
+        // LU factor as preconditioner → 1-2 iterations.
         let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
         let pre = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
         assert!(pre.converged, "preconditioned GMRES res={}", pre.final_res);
@@ -1413,7 +1413,7 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
         // The f32 LU factor is a half-memory preconditioner accurate to ~1e-6
         // (the f32 apply floor). f64 GMRES reaches that floor in a couple of
-        // iterations — ample for a MoM/FEM Krylov tolerance, at half the factor
+        // iterations - ample for a MoM/FEM Krylov tolerance, at half the factor
         // memory. (A residual below ~1e-6 is not attainable with an f32 apply;
         // use the f64 factor for tighter tolerances.)
         let pc = LowPrecisionLu::factor(&a, &FactorOptions::default()).unwrap();
@@ -1457,7 +1457,7 @@ mod tests {
     #[test]
     fn incomplete_factor_reduces_fill_and_still_preconditions() {
         // Threshold dropping shrinks the factor (less memory) at the cost of a
-        // weaker preconditioner — but COCG must still converge to the true
+        // weaker preconditioner - but COCG must still converge to the true
         // f64 solution. Demonstrates the memory ↔ iteration tradeoff.
         let c = |re, im| Complex::new(re, im);
         let a = grid(16, c(4.0, 1.0), c(-1.0, 0.2));
@@ -1496,7 +1496,7 @@ mod tests {
     fn f32_preconditioner_keeps_f64_accuracy() {
         // Factor the preconditioner in Complex<f32> (half memory) but iterate in
         // f64: the solution must still reach f64-level residual, and the f32
-        // factor — though approximate — keeps the iteration count tiny.
+        // factor - though approximate - keeps the iteration count tiny.
         let c = |re, im| Complex::new(re, im);
         let a = grid(14, c(4.0, 1.0), c(-1.0, 0.2));
         let n = a.n;
@@ -1518,7 +1518,7 @@ mod tests {
     #[test]
     fn rla_preconditioner_collapses_iteration_count() {
         // A complete RLA factorization is ≈ A⁻¹, so preconditioned COCG must
-        // converge in a handful of iterations — vastly fewer than without.
+        // converge in a handful of iterations - vastly fewer than without.
         let c = |re, im| Complex::new(re, im);
         let a = grid(12, c(4.0, 1.0), c(-1.0, 0.2));
         let n = a.n;

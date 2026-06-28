@@ -6,13 +6,13 @@
 //! back to the original vertex set.
 //!
 //! ## Rules
-//! 1. **Degree-1 elimination** (with cascading) — leaves removed first.
-//! 2. **Degree-2 path compression** — two sub-cases:
+//! 1. **Degree-1 elimination** (with cascading) - leaves removed first.
+//! 2. **Degree-2 path compression** - two sub-cases:
 //!    - simplicial (endpoints adjacent): zero fill, no edge added;
 //!    - non-simplicial: one fill edge `(u, w)` added.
-//! 3. **Twin detection** — both open (`N(u) = N(v)`, `u ≁ v`) and
+//! 3. **Twin detection** - both open (`N(u) = N(v)`, `u ≁ v`) and
 //!    closed (`N[u] = N[v]`, `u ∼ v`) twins.
-//! 4. **Subset elimination** — `v` is dominated by a neighbor `u`
+//! 4. **Subset elimination** - `v` is dominated by a neighbor `u`
 //!    if `N(v) \ {u} ⊆ N(u)`.
 //!
 //! ## Expansion
@@ -152,7 +152,7 @@ impl MutAdj {
 /// The higher rules remain implemented so that unit tests continue to
 /// validate them, but the driver's default preset enables only Rule 1.
 /// The reason for the Rule 2-4 regressions is an open question tracked
-/// in `dev/tried-and-rejected.md` — see the K1 rollout entry.
+/// in `dev/tried-and-rejected.md` - see the K1 rollout entry.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReduceOptions {
     pub degree2_simplicial: bool,
@@ -162,7 +162,7 @@ pub(crate) struct ReduceOptions {
 }
 
 impl ReduceOptions {
-    /// Rule 1 only — the driver's empirical safe choice.
+    /// Rule 1 only - the driver's empirical safe choice.
     pub(crate) const fn conservative() -> Self {
         Self {
             degree2_simplicial: false,
@@ -172,7 +172,7 @@ impl ReduceOptions {
         }
     }
 
-    /// All four rules — used by unit tests.
+    /// All four rules - used by unit tests.
     #[cfg(test)]
     pub(crate) const fn full() -> Self {
         Self {
@@ -192,7 +192,7 @@ impl ReduceOptions {
 ///
 /// `max_ratio` in `(0, 1]`: e.g. 0.7 accepts reductions of 30% or more.
 /// `max_ratio >= 1.0` accepts any reduction including the empty case.
-/// `opts` selects which reduction rules fire — see [`ReduceOptions`].
+/// `opts` selects which reduction rules fire - see [`ReduceOptions`].
 pub(crate) fn reduce_graph(
     pattern: &CscPattern<'_>,
     max_ratio: f64,
@@ -309,7 +309,7 @@ fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>, allow_nonsimplicial
     // costs O(n^2) in seed-scanning alone. A non-rewinding cursor is NOT a safe
     // drop-in replacement: the simplicial collapse below (lines ~399-405) adds
     // no compensating (u, w) edge when `u ~ w` already, so removing the chain
-    // interior drops each branch endpoint by one degree — a degree-3 endpoint
+    // interior drops each branch endpoint by one degree - a degree-3 endpoint
     // can become a fresh degree-2 seed at an index *below* the current `seed`.
     // The from-0 scan always picks the lowest-index eligible vertex, so it
     // collapses that endpoint within this same call; a cursor advanced past it
@@ -319,7 +319,7 @@ fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>, allow_nonsimplicial
     // op stack in reverse). The order-preserving O(n log n) fix is a min-index
     // worklist (a binary heap keyed by vertex index, with a lazy
     // alive/!skip/degree==2 staleness check on pop), not a cursor. Left as-is
-    // for now: Rule 2 is test-only — the driver runs
+    // for now: Rule 2 is test-only - the driver runs
     // `ReduceOptions::conservative()` (Rule 1 only), so this cost is latent.
     'outer: loop {
         // Find any unskipped degree-2 vertex (lowest index first).
@@ -357,7 +357,7 @@ fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>, allow_nonsimplicial
         };
 
         // Pure-cycle case: mark every visited chain vertex as skipped
-        // and move on — Rule 3 (twins) may still collapse the cycle
+        // and move on - Rule 3 (twins) may still collapse the cycle
         // later this pass.
         if g.degree(u) == 2 {
             for &v in &visited {
@@ -391,7 +391,7 @@ fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>, allow_nonsimplicial
         }
         let w = cur;
 
-        // If u == w, the "chain" is a cycle-through-a-single-branch —
+        // If u == w, the "chain" is a cycle-through-a-single-branch -
         // compressing would require a self-loop on u. Skip the chain.
         if u == w || path.is_empty() {
             for &v in &path {
@@ -439,8 +439,8 @@ fn apply_twins(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
     let n = g.adj.len();
 
     // Closed twins first: group by closed signature, merge within group.
-    // `BTreeMap` (not `HashMap`) so the group iteration order — and therefore
-    // the emitted `Twin` op-stack order — is sorted by signature and identical
+    // `BTreeMap` (not `HashMap`) so the group iteration order - and therefore
+    // the emitted `Twin` op-stack order - is sorted by signature and identical
     // run-to-run; a `HashMap` here iterates in `RandomState`-seed order and
     // breaks the crate's determinism contract (O2, repo-review-2026-06-09.md).
     let mut closed_groups: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
@@ -492,7 +492,7 @@ fn apply_twins(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
         }
         let sig: Vec<usize> = g.adj[v].iter().copied().collect();
         if sig.is_empty() {
-            continue; // isolated vertex — not useful as a twin
+            continue; // isolated vertex - not useful as a twin
         }
         open_groups.entry(sig).or_default().push(v);
     }
@@ -512,7 +512,7 @@ fn apply_twins(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
             // Open twin condition requires they not be adjacent.
             // Since N(rep) == N(dup), adjacency would mean rep ∈ N(rep),
             // a self-loop, which we forbid. So this holds automatically
-            // — but assert defensively.
+            // - but assert defensively.
             debug_assert!(!g.adjacent(rep, dup));
             g.remove_vertex(dup);
             ops.push(ReductionOp::Twin {
@@ -601,7 +601,7 @@ fn apply_subset(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
 
 /// Expand a permutation from the reduced graph back to original indices.
 ///
-/// `reduced_perm[i]` is a new-index in `0..reduced.n` — the i-th vertex
+/// `reduced_perm[i]` is a new-index in `0..reduced.n` - the i-th vertex
 /// to eliminate on the reduced graph. The returned permutation is in
 /// original-index space and has length `n_original`.
 ///
@@ -657,7 +657,7 @@ pub(crate) fn expand_permutation(
     for v in 0..n_original {
         if survives[v] && anchor[v] != v {
             return Err(OrderingError::Internal(
-                "KaHIP K1: surviving vertex had an anchor written — expansion invariant broken",
+                "KaHIP K1: surviving vertex had an anchor written - expansion invariant broken",
             ));
         }
     }
@@ -702,7 +702,7 @@ pub(crate) fn expand_permutation(
     // is then the desired pre-anchor elimination sequence.
     // `HashMap` is safe here (unlike `closed_groups`/`open_groups`, O2): this
     // map is only consumed via keyed `group.remove(&old)` in the deterministic
-    // `reduced_perm` order below — it is never iterated for output order.
+    // `reduced_perm` order below - it is never iterated for output order.
     let mut group: HashMap<usize, Vec<usize>> = HashMap::new();
     for op in &reduced.ops {
         match op {
@@ -836,8 +836,8 @@ mod tests {
 
     /// O2 (repo-review-2026-06-09.md): twin reduction grouped vertices in
     /// `HashMap`s (`closed_groups`, `open_groups`) and iterated them
-    /// directly, so the order twin groups were merged — and therefore the
-    /// `ReductionOp::Twin` stack order — varied run-to-run with the
+    /// directly, so the order twin groups were merged - and therefore the
+    /// `ReductionOp::Twin` stack order - varied run-to-run with the
     /// per-instance `RandomState` seed, violating the crate's determinism
     /// contract. With independent twin groups, the map iteration order is
     /// the only thing deciding the op order.
@@ -850,7 +850,7 @@ mod tests {
     /// `apply_twins` on fresh graphs must produce byte-identical ops every
     /// time. Pre-fix (`HashMap`) the orders diverge across runs; post-fix
     /// (`BTreeMap`) they are sorted by signature and identical. Oracle:
-    /// determinism — same input must give the same output.
+    /// determinism - same input must give the same output.
     #[test]
     fn apply_twins_op_order_is_deterministic() {
         const K: usize = 12;
@@ -901,7 +901,7 @@ mod tests {
         for op in &reduced.ops {
             assert!(matches!(op, ReductionOp::Degree1 { .. }));
         }
-        // Expand identity perm on the reduced graph — must be a bijection.
+        // Expand identity perm on the reduced graph - must be a bijection.
         let expanded = expand_permutation(&reduced, &[0], n).unwrap();
         assert!(is_permutation(&expanded, n));
         // The surviving vertex appears last in the expanded perm.
@@ -980,7 +980,7 @@ mod tests {
         //          Edges {5-6, 5-7, 6-7, 4-5}. deg(5)=3.
         // Rule 1 has no degree-1 vertex initially. Rule 2 sees vertex 4
         // with degree 2 (neighbors 3, 5) between branch endpoints 3 and
-        // 5 — BUT 3 has degree 2 too (neighbors 0 and 4). So walking
+        // 5 - BUT 3 has degree 2 too (neighbors 0 and 4). So walking
         // backward from seed=4 lands on u=0 (the first deg ≥ 3 vertex).
         // Then forward through 3, 4 lands at w=5 (deg 3). Endpoints 0, 5
         // are not adjacent → non-simplicial compression with path [3, 4].
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn k_2_3_collapses_via_degree2_then_closed_twins() {
         // K_{2,3}: vertices 0,1 (size-2 side); 2,3,4 (size-3 side).
-        // All of {2,3,4} have degree 2 with neighbors {0,1} — the
+        // All of {2,3,4} have degree 2 with neighbors {0,1} - the
         // degree-2 rule processes them first. Walking backward from
         // seed=2 lands on u=0 (deg 3), then forward through 2 reaches
         // w=1 (deg 3 after it loses 2). First compression: path=[2],
@@ -1151,7 +1151,7 @@ mod tests {
 
     #[test]
     fn max_ratio_accepts_full_collapse() {
-        // Star: collapses to 1 vertex (90% reduction) — must pass any
+        // Star: collapses to 1 vertex (90% reduction) - must pass any
         // reasonable max_ratio.
         let n = 10;
         let (cp, ri) = make_pattern(n, &star_edges(n));

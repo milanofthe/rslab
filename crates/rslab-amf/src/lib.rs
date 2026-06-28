@@ -3,7 +3,7 @@
 //! Standalone clean-room implementation of the AMF quotient-graph
 //! algorithm (Amestoy 1999 habilitation thesis, MUMPS HAMF4
 //! variant). The metric is approximate fill rather than approximate
-//! degree — the per-variable score is
+//! degree - the per-variable score is
 //!
 //! ```text
 //! RMF(i) = ( deg(i) * (deg(i) - 1 + 2*degme) - WF(i) ) / (nv(i) + 1)
@@ -45,7 +45,7 @@ use std::time::Instant;
 pub struct AmfOptions {
     /// Dense-row threshold multiplier. A variable with initial
     /// degree exceeding `min(max(16, floor(dense_alpha * sqrt(n))), n)`
-    /// is deferred to the end of the ordering — the `max(16)` floor is
+    /// is deferred to the end of the ordering - the `max(16)` floor is
     /// applied before the `min(n)` cap, matching faer `amd.rs:173-179`.
     /// A negative value uses a raw threshold of `n - 2` with the same
     /// clamps; for `n >= 18` that is exactly `n - 2`, suppressing
@@ -101,7 +101,7 @@ pub fn amf_order_opts(
 /// errors in [`OrderingError`].
 ///
 /// `OrderingStats.time_us` is the wall-clock time of this call.
-/// `fill_estimate` and `flop_estimate` are left as `None` for AMF —
+/// `fill_estimate` and `flop_estimate` are left as `None` for AMF -
 /// the per-crate [`AmfStats`] carries `ndiv` / `nms_lu` / `nms_ldl`
 /// flop counters that may be surfaced here in a future revision
 /// without bumping the contract.

@@ -45,13 +45,13 @@ pub struct SmallLeafGroup {
     /// Indices into `SymbolicFactorization::supernodes`, in postorder.
     pub members: Vec<usize>,
     /// Per-leaf precomputed frontal row layouts. `member_rows[k]` is
-    /// the full row_indices Vec for `members[k]` — what the numeric
+    /// the full row_indices Vec for `members[k]` - what the numeric
     /// `build_row_indices` would produce, but computed once at
     /// symbolic time so the batched numeric path can reuse it across
     /// every factorization that shares this `SymbolicFactorization`.
     ///
     /// Layout is `[first_col..first_col+ncol, trailing rows sorted]`
-    /// — identical to the build_row_indices output for a leaf (no
+    /// - identical to the build_row_indices output for a leaf (no
     /// children, no delayed columns).
     ///
     /// The actual per-member frontal dimension is
@@ -74,15 +74,15 @@ pub struct SmallLeafGroup {
 ///
 /// Returns:
 ///
-/// * `groups` — the groups, in postorder. Each group carries the
+/// * `groups` - the groups, in postorder. Each group carries the
 ///   precomputed per-member row_indices so the numeric batched path
 ///   can skip `build_row_indices`.
-/// * `snode_group` — for each supernode, `Some(g)` if it belongs to
+/// * `snode_group` - for each supernode, `Some(g)` if it belongs to
 ///   `groups[g]`, else `None`.
 ///
 /// A supernode qualifies as a batch member iff:
 ///
-///   1. `children.is_empty()` (true leaf — no contributions to
+///   1. `children.is_empty()` (true leaf - no contributions to
 ///      assemble).
 ///   2. `ncol <= params.ncol_max`.
 ///   3. `nrow <= params.nrow_max`.
@@ -93,7 +93,7 @@ pub struct SmallLeafGroup {
 /// started.
 ///
 /// A non-leaf or over-size supernode breaks the current group even
-/// if the group has capacity — the batched path assumes strict
+/// if the group has capacity - the batched path assumes strict
 /// postorder adjacency so that non-grouped siblings can be processed
 /// in the regular per-supernode loop without gap tracking.
 ///
@@ -234,7 +234,7 @@ mod tests {
     use super::*;
 
     /// Build a small leaf at column offset `first_col`. `ncol == nrow`
-    /// and the pattern is a self-diagonal block — the simplest
+    /// and the pattern is a self-diagonal block - the simplest
     /// pattern that produces row_indices equal to just the own cols.
     fn mk_leaf(first_col: usize, ncol: usize, nrow: usize) -> Supernode {
         Supernode {

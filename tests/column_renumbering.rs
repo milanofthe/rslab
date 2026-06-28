@@ -16,7 +16,7 @@ use rslab::CscMatrix;
 
 /// Arrow matrix: variables 0..n-2 are coupled only to variable n-1
 /// (the "tip" of the arrow). With nemin=32, the SSIDS size rule
-/// admits all sibling-merges into the parent — but the adjacency
+/// admits all sibling-merges into the parent - but the adjacency
 /// check at supernode.rs blocks every merge except the one whose
 /// last column equals parent_first - 1.
 ///

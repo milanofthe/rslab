@@ -1,11 +1,11 @@
-//! Factorization-cost diagnostic for the real MoM matrices — the data that
+//! Factorization-cost diagnostic for the real MoM matrices - the data that
 //! decides where the PARDISO performance gap lives.
 //!
 //! For each `*.mtx` in `rapidmom/precond_matrices` it reports, per matrix:
-//!   * analyze (symbolic) vs numeric-factor wall time — the phase split,
+//!   * analyze (symbolic) vs numeric-factor wall time - the phase split,
 //!   * factor fill `nnz(L)+nnz(U)` and the growth ratio over `nnz(A)`,
 //!   * an estimated factorization flop count,
-//!   * a front-size histogram with the **flop share per bucket** — the key
+//!   * a front-size histogram with the **flop share per bucket** - the key
 //!     signal: if most flops sit in small fronts the kernel is BLAS-2-bound and
 //!     amalgamation (not a faster kernel) is the lever.
 //!
@@ -20,7 +20,7 @@ use rslab::prelude::*;
 use rslab::{AnalyzeOptions, BlrMode, LuSymbolic, MemoryMode, ReorderMode};
 
 /// Peak working-set (RSS high-water) of this process, in MB. Windows-only,
-/// queried via the OS — benches may use FFI; the solver library stays pure Rust.
+/// queried via the OS - benches may use FFI; the solver library stays pure Rust.
 #[cfg(windows)]
 fn peak_ws_mb() -> f64 {
     #[repr(C)]
@@ -192,7 +192,7 @@ fn diag_file(path: &std::path::Path, reorder: ReorderMode) {
     let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
 
     // Compose the preconditioner with opt-in BLR contribution-block compression
-    // (RLA_BLR_CB) and low-memory emit (RLA_LOW_MEM) — selected via the API.
+    // (RLA_BLR_CB) and low-memory emit (RLA_LOW_MEM) - selected via the API.
     let mut opts = FactorOptions::preconditioner(1e-10);
     if std::env::var("RLA_BLR_CB").is_ok() {
         opts = opts.with_blr(BlrMode::contribution_blocks(1e-4));
@@ -240,7 +240,7 @@ fn diag_file(path: &std::path::Path, reorder: ReorderMode) {
     let mut max_nrow = 0usize;
     let mut sum_ncol = 0usize;
     let mut max_ncol = 0usize;
-    // Flop-weighted mean front width = effective Schur-GEMM rank — the metric
+    // Flop-weighted mean front width = effective Schur-GEMM rank - the metric
     // that governs compute-bound vs memory-bound throughput.
     let mut fw_ncol_num = 0.0f64;
     for &(ncol, nrow) in &dims {

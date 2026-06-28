@@ -1,11 +1,11 @@
-//! BEM/MoM kernel generator — the complex **unsymmetric** family modelling the
+//! BEM/MoM kernel generator - the complex **unsymmetric** family modelling the
 //! method-of-moments preconditioner blocks (the `precond_matrices` workflow).
 //!
 //! Collocation double-layer operator on a point cloud over the unit sphere: with
 //! the Helmholtz Green's function `G(r) = e^{ikr}/(4πr)`, the entry is the
 //! observation-normal derivative
 //! `A_ij = ∂G/∂n_i (r_ij) = G(r) (ik − 1/r) ((p_i − p_j)·n_i)/r`,
-//! which depends on the *row*'s normal `n_i` and is therefore unsymmetric — a
+//! which depends on the *row*'s normal `n_i` and is therefore unsymmetric - a
 //! genuine BEM operator, not a scaled symmetric matrix. Trimming to a near-field
 //! radius makes it sparse (and tunes density); the wavenumber `k` tunes
 //! conditioning (near a sphere resonance it is ill-conditioned).
@@ -50,7 +50,7 @@ impl Default for BemOpts {
 }
 
 /// A rough quasi-spherical point cloud: even Fibonacci **directions** (the unit
-/// normals `n_i`), each pushed to radius `1 + rough·jitter` so radii vary — which
+/// normals `n_i`), each pushed to radius `1 + rough·jitter` so radii vary - which
 /// breaks the sphere's symmetry and makes the double-layer operator unsymmetric.
 /// Returns `(points, normals)`.
 fn surface_points(n: usize, rough: f64, seed: u64) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {

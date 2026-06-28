@@ -275,7 +275,7 @@ fn graph_to_csc_pattern(graph: &Graph) -> (Vec<i32>, Vec<i32>) {
 /// into the old→new permutation `perm` (where `perm[new_pos] = old`).
 ///
 /// Rejects an out-of-range or duplicated target position rather than
-/// silently emitting a non-bijection — parity with the scotch/kahip
+/// silently emitting a non-bijection - parity with the scotch/kahip
 /// `invert_iperm` helpers (O20).
 fn invert_iperm(iperm: &[i32], n: usize) -> Result<Vec<i32>, OrderingError> {
     let mut perm: Vec<i32> = vec![-1; n];

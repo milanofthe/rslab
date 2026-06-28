@@ -9,7 +9,7 @@
 //! scaling vector `D₀` computed on iter 0 is usually still good for
 //! iter N. "Still good" means: applying `D₀` to the current matrix
 //! `A_N` keeps it diagonally dominant enough that Bunch-Kaufman
-//! pivoting selects pivots — and hence computes inertia — the same
+//! pivoting selects pivots - and hence computes inertia - the same
 //! way fresh scaling `D_N` would.
 //!
 //! This module provides the O(nnz) check that decides reuse-vs-
@@ -22,7 +22,7 @@
 //! a structurally-zero `(2,2)` block has rows with a zero diagonal
 //! and nonzero off-diagonals; their dominance ratio is `+∞`, which
 //! would neuter the growth-factor and growth-count conditions. The
-//! check therefore aggregates only over **qualifying rows** — rows
+//! check therefore aggregates only over **qualifying rows** - rows
 //! whose diagonal entry is structurally present and nonzero in the
 //! cache-baseline matrix. `rocket_12800` (the B2 target) has a
 //! fully-populated, all-nonzero diagonal, so every row qualifies and
@@ -66,14 +66,14 @@ pub(crate) struct Mc64CacheValidity {
     /// Per-row mask: `true` where the diagonal was structurally
     /// present and nonzero in the baseline matrix. Length `n`.
     qualifying: Vec<bool>,
-    /// `max(1.0, baseline max_ratio)` — the growth-factor reference.
+    /// `max(1.0, baseline max_ratio)` - the growth-factor reference.
     /// Clamped to `>= 1` so a well-conditioned baseline still
     /// permits the off-diagonals to reach the diagonal magnitude
     /// before the cache is rejected.
     r0: f64,
     /// Baseline count of off-dominant qualifying rows.
     n_off_dominant_0: usize,
-    /// Baseline mean `|scaled diagonal|` — a fixed reference for the
+    /// Baseline mean `|scaled diagonal|` - a fixed reference for the
     /// collapse check (does not drift with the current matrix).
     mean_diag_0: f64,
 }
@@ -84,7 +84,7 @@ pub(crate) struct Mc64CacheValidity {
 /// `matrix` is a symmetric matrix in lower-triangle CSC; each stored
 /// off-diagonal `a[i,j]` (`i > j`) updates the running off-max of
 /// both row `i` and row `j`. `scaling` and `qualifying` must both
-/// have length `matrix.n` — callers guarantee this.
+/// have length `matrix.n` - callers guarantee this.
 fn scaled_dominance_stats(
     matrix: &CscMatrix,
     scaling: &[f64],
@@ -183,7 +183,7 @@ pub(crate) fn precompute_mc64_validity(matrix: &CscMatrix, scaling: &[f64]) -> M
         // fingerprint is a safe placeholder that is never actually
         // consulted to make a decision: it is produced only when
         // `scaling.len() != matrix.n`, and `mc64_value_bound_passes`
-        // tests that *same* length mismatch first — its length gate
+        // tests that *same* length mismatch first - its length gate
         // returns `false` before any condition is evaluated. The
         // fingerprint values do NOT by themselves force a reject: with
         // `mean_diag_0 = 0` the diagonal-collapse threshold
@@ -208,7 +208,7 @@ pub(crate) fn precompute_mc64_validity(matrix: &CscMatrix, scaling: &[f64]) -> M
 }
 
 /// `true` when reusing the cached `scaling` on `matrix` is within
-/// the value bound — the matching's diagonal-dominance guarantee
+/// the value bound - the matching's diagonal-dominance guarantee
 /// still holds and Bunch-Kaufman will see a qualitatively equivalent
 /// matrix.
 ///
@@ -219,7 +219,7 @@ pub(crate) fn precompute_mc64_validity(matrix: &CscMatrix, scaling: &[f64]) -> M
 ///    `EPS_DIAG · mean_diag₀`.
 ///
 /// A length mismatch (`scaling` or the stored mask not `matrix.n`)
-/// also returns `false` — recompute fresh, never index out of
+/// also returns `false` - recompute fresh, never index out of
 /// bounds.
 pub(crate) fn mc64_value_bound_passes(
     matrix: &CscMatrix,
@@ -354,7 +354,7 @@ mod tests {
     }
 
     /// Round trip: precompute on a matrix, then check the same
-    /// matrix with the same scaling — the value bound must pass
+    /// matrix with the same scaling - the value bound must pass
     /// (zero drift).
     #[test]
     fn value_bound_passes_on_identical_matrix() {
@@ -417,7 +417,7 @@ mod tests {
     }
 
     /// Condition 3 (diagonal collapse) is the lone trigger.
-    /// A_N is diagonal [[1e-20, ·],[·, 1.0]] — no off-diagonals, so
+    /// A_N is diagonal [[1e-20, ·],[·, 1.0]] - no off-diagonals, so
     /// max_ratio 0 and n_off_dominant 0 keep conditions 1 and 2
     /// satisfied. min_diag 1e-20 < `EPS_DIAG·mean_diag_0 = 1e-12`
     /// → reject.

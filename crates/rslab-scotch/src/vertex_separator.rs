@@ -197,7 +197,7 @@ fn fm_pass(
     let mut locked: Vec<bool> = vec![false; n];
 
     // Two PQs: pq_to_a[v] = best gain of moving v from S to A, etc.
-    // Stored as (gain, Reverse(v), stamp) — stamp lets us discard
+    // Stored as (gain, Reverse(v), stamp) - stamp lets us discard
     // stale entries cheaply.
     let mut pq_to_a: BinaryHeap<(i64, Reverse<i32>, i64)> = BinaryHeap::new();
     let mut pq_to_b: BinaryHeap<(i64, Reverse<i32>, i64)> = BinaryHeap::new();
@@ -326,11 +326,11 @@ fn fm_pass(
                 // The pop drains the heap monotonically, so the pass
                 // still terminates; but we must keep going this outer
                 // iteration (and across iterations) because a feasible
-                // lower-gain move may sit below this head — SCOTCH skips
+                // lower-gain move may sit below this head - SCOTCH skips
                 // the infeasible head and continues (O13). Record the
                 // rejection so the post-loop break does not mistake "no
                 // move" for "frontier exhausted". (Don't pop the other
-                // side's peek — that's a separate, independent move.)
+                // side's peek - that's a separate, independent move.)
                 let pq2 = if pick_a { &mut pq_to_a } else { &mut pq_to_b };
                 pq2.pop();
                 rejected_this_iter = true;
@@ -411,8 +411,8 @@ fn fm_pass(
                 }
                 // lu == side: v was in S contributing 0 to u's loads;
                 // now in side contributing vwgt[v]. But u is in `side`
-                // too — its load arrays only matter while u is in S,
-                // and it isn't — so no update.
+                // too - its load arrays only matter while u is in S,
+                // and it isn't - so no update.
             }
 
             // Re-stamp PQ entries for any S-vertex whose load may have
@@ -434,7 +434,7 @@ fn fm_pass(
                 }
             }
             // For each freshly-pulled u, push its PQ entries (if not
-            // locked — and we just locked them above, so they will
+            // locked - and we just locked them above, so they will
             // never enter the heap as candidates this pass; but their
             // load updates have been applied).
             // Locked vertices are skipped at pop time, so even if they
@@ -494,7 +494,7 @@ fn fm_pass(
             labels[vu] = PART_SEP;
             let _ = side; // side is implied by the move
         }
-        // Recompute loads from scratch — cheaper than mirroring every
+        // Recompute loads from scratch - cheaper than mirroring every
         // delta in reverse.
         recompute_loads(graph, labels, load_a, load_b);
     }
@@ -751,7 +751,7 @@ mod tests {
         // still queued (SCOTCH skips infeasible heads and continues).
         //
         // Weighted graph; each S vertex is adjacent to exactly one
-        // side, so moving it pulls nothing — fully predictable:
+        // side, so moving it pulls nothing - fully predictable:
         //   0=a1 (A, w4) - 3=s1 (S, w3)
         //   1=a3 (A, w4) - 5=s3 (S, w1)
         //   2=b2 (B, w9) - 4=s2 (S, w2)
@@ -761,7 +761,7 @@ mod tests {
         //   s2->B: post B=11 > 10  reject  (pq_to_b head, gain 2)
         //   s3->A: post A= 9 <=10  FEASIBLE (pq_to_a, gain 1) sep 6->5
         // Pre-fix code rejects both heads in iter 1, sets
-        // moved_this_iter=false, and breaks — never reaching s3, so it
+        // moved_this_iter=false, and breaks - never reaching s3, so it
         // returns sep_w=6. The fix continues to s3 for sep_w=5.
         let mut g = build(6, &[(0, 3), (1, 5), (2, 4)]);
         g.vwgt = vec![4, 4, 9, 3, 2, 1];

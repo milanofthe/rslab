@@ -95,17 +95,17 @@ pub fn select_pivot(ws: &mut Workspace) -> Option<usize> {
 ///   correction made by Pass-2).
 ///
 /// Post-conditions also persisted on the workspace:
-/// - `nv[me] = -nvpiv` (marker — Pass-2 will flip sign back via
+/// - `nv[me] = -nvpiv` (marker - Pass-2 will flip sign back via
 ///   `-nv[i]`).
 /// - `nv[i] = -nv[i]` for every `i` assembled into the new element
-///   (ditto — marker for Pass-2's w-seed walk).
+///   (ditto - marker for Pass-2's w-seed walk).
 /// - `pe[me] = pme1`, `len[me] = pme2 - pme1 + 1`, `elen[me] =
 ///   flip(nvpiv + degme)` (dead-variable sentinel carrying the
 ///   pivot-front size for the postorder phase).
 /// - `degree[me] = degme` (temporary; Pass-2 overwrites).
 /// - For every absorbed element `e != me` in the elenme>0 branch:
 ///   `pe[e] = flip(me)`, `w[e] = 0`. This is **standard absorption**
-///   (faer `amd.rs:355-358`) — it fires unconditionally at each
+///   (faer `amd.rs:355-358`) - it fires unconditionally at each
 ///   `knt1` iter's end. Aggressive absorption (Pass-2 only) lands
 ///   in Commit 5.
 /// - `ws.wflg` bumped via `clear_flag`.
@@ -125,7 +125,7 @@ pub fn create_element(
     let pme2: i32;
 
     if elenme == 0 {
-        // In-place: me has no elements in its list — just variables.
+        // In-place: me has no elements in its list - just variables.
         // Compact them at pe[me]: advance pme2 to the final position,
         // overwriting absorbed entries in-place.
         let pme1_s = ws.pe[me];
@@ -280,7 +280,7 @@ pub fn create_element(
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
 
     // Convert the inclusive `pme2` (which is `pme1 - 1` when the
-    // pivot's variable list ended up empty — every neighbour was
+    // pivot's variable list ended up empty - every neighbour was
     // already absorbed) to an exclusive end so downstream loops can
     // use a `usize` half-open range without the wrap-around bug
     // `(-1i32) as usize == usize::MAX`.
@@ -406,7 +406,7 @@ pub fn finalize_step(
                 if we != 0 {
                     // Invariant (O4): a live element in the non-aggressive pass
                     // always has `we >= ws.wflg`, so the difference is
-                    // non-negative. Guard the unchecked `as usize` cast — a
+                    // non-negative. Guard the unchecked `as usize` cast - a
                     // future regression that broke the invariant would
                     // sign-extend a negative difference to ~2^64 here.
                     debug_assert!(
@@ -962,15 +962,15 @@ pub fn finalize_step_amf(
                     // 0, so the Pass-2 `if wf[e] == 0` check re-treats it as
                     // uncached and recomputes the surface for every member
                     // that touches `e`. This is benign: `amf_wf_surface` is
-                    // pure in (dext, degree[e]) — both stable across one
-                    // Pass-2 — so the recompute yields the same 0 and the
+                    // pure in (dext, degree[e]) - both stable across one
+                    // Pass-2 - so the recompute yields the same 0 and the
                     // accumulated `wf4` (hence the RMF score and the
                     // permutation) is unchanged; only a few integer multiplies
                     // are redundant. A distinguishing sentinel (e.g. -1) was
                     // rejected: `wf` is reused for variable scores
                     // (supervariable-merge `max`, re-insertion bucket
                     // quantization), so -1 would have to be proven never to
-                    // leak into either across the AMD and AMF paths — added
+                    // leak into either across the AMD and AMF paths - added
                     // correctness risk for a handful of saved ops.
                     // "Correctness before performance." See
                     // dev/tried-and-rejected.md (O21).
@@ -1003,7 +1003,7 @@ pub fn finalize_step_amf(
                     let dext = we - ws.wflg;
                     if dext > 0 {
                         // `wf[e] == 0` means "uncached this iter" OR a genuine
-                        // 0 surface (O21) — recompute on the latter is benign
+                        // 0 surface (O21) - recompute on the latter is benign
                         // (same value). See the Pass-1 reset comment above.
                         if ws.wf[e] == 0 {
                             // First touch this iter: cache the surface
@@ -1038,7 +1038,7 @@ pub fn finalize_step_amf(
                         ws.wflg
                     );
                     // `wf[e] == 0` means "uncached this iter" OR a genuine 0
-                    // surface (O21) — recompute on the latter is benign (same
+                    // surface (O21) - recompute on the latter is benign (same
                     // value). See the Pass-1 reset comment above.
                     if ws.wf[e] == 0 {
                         ws.wf[e] = amf_wf_surface(dext as i64, ws.degree[e] as i64);
@@ -1083,7 +1083,7 @@ pub fn finalize_step_amf(
         } else {
             // Loose-degree special case: if the prior degree estimate
             // is already tighter, keep it but the WF accumulator is
-            // not subtraction-safe — zero it.
+            // not subtraction-safe - zero it.
             if ws.degree[i] < deg as i32 {
                 wf3 = 0;
                 wf4 = 0;
@@ -1342,7 +1342,7 @@ pub fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops
 /// 2. Path compression (`amd.rs:573-590`): each absorbed
 ///    supervariable `i` (`nv[i] == 0`) has its `pe` chain walked
 ///    until a pivot is found, then all intermediates are rewritten
-///    to point at that pivot directly. Inert in Slice A — becomes
+///    to point at that pivot directly. Inert in Slice A - becomes
 ///    active once supervariable detection (Slice B) lands.
 /// 3. Assembly-tree postorder with big-child-last heuristic
 ///    (`amd.rs:5-49`, `amd.rs:51-124`, `amd.rs:593-599`). Reuses
@@ -1692,7 +1692,7 @@ mod tests {
         assert_eq!(degme, 1);
     }
 
-    /// Drive the full loop on diag_4 — every var pre-eliminated,
+    /// Drive the full loop on diag_4 - every var pre-eliminated,
     /// loop terminates immediately.
     #[test]
     fn run_elimination_diag_4() {
@@ -1722,7 +1722,7 @@ mod tests {
     }
 
     /// Tridiag 10 full-symmetric: loop should terminate cleanly.
-    /// Oracle lnz = 9 — verified indirectly by the flop counter.
+    /// Oracle lnz = 9 - verified indirectly by the flop counter.
     #[test]
     fn run_elimination_tridiag_10() {
         let n = 10usize;
@@ -1917,7 +1917,7 @@ mod tests {
     }
 
     /// Tridiag 10: valid permutation of 0..10. No structural
-    /// oracle here — just bijection + length checks.
+    /// oracle here - just bijection + length checks.
     #[test]
     fn permutation_tridiag_10() {
         let n = 10usize;

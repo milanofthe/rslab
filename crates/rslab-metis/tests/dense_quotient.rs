@@ -1,4 +1,4 @@
-//! Tests for Fix A — quasi-dense column quotient inside
+//! Tests for Fix A - quasi-dense column quotient inside
 //! `rslab-metis::metis_order_full`.
 //!
 //! Oracle: research note `dev/research/orbit2-cluster-regression.md`,
@@ -6,7 +6,7 @@
 //! §3.2 and AMD §5; see the docstring on
 //! `MetisOptions::dense_quotient_enabled`.
 //!
-//! These tests do NOT touch the ORBIT2_0000 fixture — that is an
+//! These tests do NOT touch the ORBIT2_0000 fixture - that is an
 //! integration measurement that lives in the bench / diag harness.
 //! Here we only verify:
 //!

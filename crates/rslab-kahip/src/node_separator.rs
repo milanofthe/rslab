@@ -79,7 +79,7 @@ pub(crate) fn flow_node_separator(
         .filter(|&v| where_[v] == 1 && on_boundary[v])
         .collect();
     if b0.is_empty() || b1.is_empty() {
-        // No cross-cut edges — trivial empty separator.
+        // No cross-cut edges - trivial empty separator.
         return None;
     }
 
@@ -97,7 +97,7 @@ pub(crate) fn flow_node_separator(
 
     // INF = (sum of boundary vertex weights) + 1. Bounded by the
     // sum of source-arc and sink-arc capacities, so no flow can
-    // actually saturate INF on a cross-arc — guaranteeing the min
+    // actually saturate INF on a cross-arc - guaranteeing the min
     // cut lies on source/sink arcs only.
     let mut total_bnd_weight: i64 = 0;
     for &v in b0.iter().chain(b1.iter()) {

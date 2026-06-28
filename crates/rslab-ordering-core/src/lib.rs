@@ -8,10 +8,10 @@
 //!
 //! The public surface is deliberately minimal:
 //!
-//! - [`CscPattern`] — borrowed, full-symmetric, 0-based, `i32`-indexed.
-//! - [`OrderingStats`] — producer-agnostic diagnostic counters.
-//! - [`OrderingError`] — shared error shape.
-//! - [`CONTRACT_VERSION`] — bumped on any breaking change.
+//! - [`CscPattern`] - borrowed, full-symmetric, 0-based, `i32`-indexed.
+//! - [`OrderingStats`] - producer-agnostic diagnostic counters.
+//! - [`OrderingError`] - shared error shape.
+//! - [`CONTRACT_VERSION`] - bumped on any breaking change.
 //!
 //! Each ordering crate exposes exactly one contract-conforming
 //! function with the signature:
@@ -47,7 +47,7 @@ pub const CONTRACT_VERSION: u32 = 1;
 
 /// Borrowed symmetric sparsity pattern in CSC form.
 ///
-/// The pattern must be **full-symmetric** — both the upper and lower
+/// The pattern must be **full-symmetric** - both the upper and lower
 /// halves are present. Row indices within each column must be sorted
 /// in ascending order. Indices are 0-based.
 ///
@@ -171,7 +171,7 @@ pub enum OrderingError {
     /// disconnected components in its current form.
     DisconnectedGraph,
     /// Crate-specific failure with a short static message. Keep
-    /// short — this is a status channel, not a rich diagnostic.
+    /// short - this is a status channel, not a rich diagnostic.
     Internal(&'static str),
 }
 
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn rejects_unsorted_rows_within_column() {
-        // Column 0 has rows [1, 0] — descending, violating the documented
+        // Column 0 has rows [1, 0] - descending, violating the documented
         // ascending-order invariant. `new` must reject it: rslab-metis's
         // adjacency builder dedups only *adjacent* duplicates, so unsorted
         // rows would let a non-adjacent duplicate survive as a spurious edge.

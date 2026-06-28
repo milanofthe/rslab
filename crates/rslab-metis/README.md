@@ -20,7 +20,7 @@ separator from the resulting edge bisection. The two halves recurse
 independently; small subgraphs fall through to AMD as the leaf
 algorithm. The resulting permutation tends to outperform AMD on
 large 2D / 3D mesh-shaped problems and underperform AMD on small or
-arrow-structured matrices — picking the right backend is a
+arrow-structured matrices - picking the right backend is a
 problem-dependent choice that downstream solvers (and RSLAB itself)
 make at the analysis boundary.
 
@@ -28,7 +28,7 @@ make at the analysis boundary.
 
 - Karypis, G., and Kumar, V. (1998). *A Fast and Highly Quality
   Multilevel Scheme for Partitioning Irregular Graphs.* SIAM Journal
-  on Scientific Computing, 20(1), 359–392. The original METIS paper
+  on Scientific Computing, 20(1), 359-392. The original METIS paper
   describing multilevel coarsening, initial partitioning, and FM
   refinement.
 - Karypis, G., and Kumar, V. (1999). *A Fast and Highly Quality

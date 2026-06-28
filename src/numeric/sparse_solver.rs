@@ -64,7 +64,7 @@ impl<T: Scalar> LdltSolver<T> {
     /// matrix. **Exact only for a real symmetric matrix** (`T = f64`/`f32`);
     /// equilibration uses a real diagonal `D > 0`, so the signs are preserved.
     /// For a complex-symmetric matrix the eigenvalues are complex and have no
-    /// sign — there it is advisory (classified by each pivot's real part).
+    /// sign - there it is advisory (classified by each pivot's real part).
     pub fn inertia(&self) -> &crate::inertia::Inertia {
         &self.factors.inertia
     }
@@ -74,7 +74,7 @@ impl<T: Scalar> LdltSolver<T> {
         Self::factor_with(a, &FactorOptions::default())
     }
 
-    /// Equilibrate and factor `A` with explicit options — notably
+    /// Equilibrate and factor `A` with explicit options - notably
     /// static-pivoting (never-fail preconditioner) mode. See
     /// [`FactorOptions`]. Runs analysis + numeric factorization in one
     /// call; for the *analyze once, factor many* workflow use
@@ -110,7 +110,7 @@ impl<T: Scalar> LdltSolver<T> {
     /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the
     /// returned `x` are **row-major** `n × nrhs` buffers (`b[i*nrhs + c]` is
     /// RHS `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve)
-    /// calls — the factor structure is traversed once and each value applied to
+    /// calls - the factor structure is traversed once and each value applied to
     /// all RHS (the FEM multiple-load-case / block-Krylov use).
     pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
         let n = self.factors.n;
@@ -167,7 +167,7 @@ impl<T: Scalar> LdltSolver<T> {
             a.symv(&x, &mut ax);
             let r: Vec<T> = rhs.iter().zip(&ax).map(|(&b, &axi)| b - axi).collect();
             let res = r.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
-            // Track the best iterate — refinement can be non-monotone on very
+            // Track the best iterate - refinement can be non-monotone on very
             // ill-conditioned systems.
             if res < best_res {
                 best_res = res;
@@ -227,7 +227,7 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
 /// Reusable PARDISO-style **phase-1 analysis** for [`LdltSolver`].
 ///
 /// Analyze a sparsity pattern once, then [`factor`](Self::factor) many value
-/// sets that share it — FEM Newton steps, time stepping, or a frequency sweep
+/// sets that share it - FEM Newton steps, time stepping, or a frequency sweep
 /// where only the matrix entries change. The analysis (fill-reducing ordering,
 /// supernodes, assembly-tree levels) is the expensive value-independent part;
 /// reusing it across factorizations is the core PARDISO efficiency win.
@@ -268,7 +268,7 @@ impl LdltSymbolic {
     }
 
     /// **A-priori** peak-memory estimate for factoring a matrix of scalar type `T`
-    /// (LDLᵀ path) — a pure, deterministic function of the symbolic structure, for
+    /// (LDLᵀ path) - a pure, deterministic function of the symbolic structure, for
     /// fail-fast / scheduling before any numeric work. See
     /// [`LuSymbolic::estimate_memory`](crate::LuSymbolic::estimate_memory).
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
@@ -320,7 +320,7 @@ impl LdltSymbolic {
         est
     }
 
-    /// Phases 2–3: equilibrate and factor `a`, reusing this analysis. `a` must
+    /// Phases 2-3: equilibrate and factor `a`, reusing this analysis. `a` must
     /// carry the same sparsity pattern the analysis was built from (same `n`
     /// and `nnz`), otherwise an [`RslabError::InvalidInput`] is returned.
     pub fn factor<T: Scalar>(
@@ -451,7 +451,7 @@ mod tests {
     fn phased_analyze_then_factor_many_matches_one_shot() {
         // PARDISO workflow: analyze the pattern once, factor two different
         // value sets that share it. Each must match the one-shot factor and
-        // solve its own system — the FEM Newton / frequency-sweep use case.
+        // solve its own system - the FEM Newton / frequency-sweep use case.
         let c = |re, im| Complex::new(re, im);
         let n = 8;
         let (mut rows, mut cols) = (Vec::new(), Vec::new());

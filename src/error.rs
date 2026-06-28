@@ -25,7 +25,7 @@ pub enum RslabError {
     /// implied L-column growth `||l_col||_∞ / sqrt(|d_kk|)` would
     /// exceed `1 / sqrt(EPS) ≈ 6.7e7`, breaking the
     /// Gill-Saunders-Shinnerl 1996 stability bound for diagonal
-    /// LDL^T on SQD matrices. The factorization aborts immediately —
+    /// LDL^T on SQD matrices. The factorization aborts immediately -
     /// SQD never falls back silently to BK 1x1-vs-2x2. Caller
     /// must either re-factor with `with_sqd_mode(false)` (BK
     /// fallback) or investigate the input (Vanderbei 1995's
@@ -60,7 +60,7 @@ pub enum RslabError {
     /// A rank-1 LU basis update (column replacement) could not be applied
     /// within the stability / update-count budget (`LuParams::max_updates`
     /// or `max_growth`), a stability monitor tripped, or the replacement
-    /// produced a vanishing bump pivot (a singular update — the incoming
+    /// produced a vanishing bump pivot (a singular update - the incoming
     /// column is linearly dependent on the retained basis; L8, see the
     /// `dense_update.rs` method docs). The factorization is left
     /// unchanged; the caller must call `refactor()` with the current basic

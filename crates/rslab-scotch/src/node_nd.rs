@@ -285,7 +285,7 @@ fn multilevel_node_bisection(
 /// for several original rows), and those weights ride down through
 /// bisection into the leaves. `graph_to_csc_pattern` emits only the
 /// adjacency *structure*, so the AMD call below orders on the pattern
-/// alone — `rslab_amd` exposes no weighted entry point — and a
+/// alone - `rslab_amd` exposes no weighted entry point - and a
 /// weight-7 supervariable is scored as a unit vertex. This can skew
 /// AMD's degree-based pivot choice on heavily-compressed inputs, but
 /// the leaf still emits a valid bijection over its vertices, so
@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn small_grid_uses_amd_leaf() {
         // 10x10 grid, 100 vertices. amd_switch=120 so the top-level
-        // bottoms out in AMD (after compression is rejected — a grid
+        // bottoms out in AMD (after compression is rejected - a grid
         // has very few indistinguishable vertices, ratio ≈ 1).
         let t = grid_triples(10, 10);
         let (cp, ri) = csc_from_triples(100, &t);
@@ -649,7 +649,7 @@ mod tests {
         //
         // To keep the test self-contained we use a denser construction:
         // four cliques of 5 vertices each, sharing structure.
-        // Indistinguishability needs *closed* neighborhoods to match —
+        // Indistinguishability needs *closed* neighborhoods to match -
         // simplest way is parallel duplicate vertices that each connect
         // to the same anchor set. Here: 1 anchor (vertex 0) with 6
         // pendant vertices (1..7), all attached only to vertex 0.

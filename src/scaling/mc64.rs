@@ -100,8 +100,8 @@ pub(crate) struct Mc64Cache {
 pub static MC64_RECOMPUTE_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Run the expensive MC64 pipeline — build the cost graph and run
-/// the Hungarian kernel — and return the full output. The cheap
+/// Run the expensive MC64 pipeline - build the cost graph and run
+/// the Hungarian kernel - and return the full output. The cheap
 /// scaling-vector post-processing is in [`scaling_from_cache`].
 pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabError> {
     let n = matrix.n;
@@ -163,7 +163,7 @@ pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, Scaling
 /// returning its work counters plus the cost-graph nnz. Used by the
 /// scaling audit to localize where the MC64 matching time goes
 /// (dense-column edge scans vs heap reset vs phase-3). Not on any hot
-/// path — no caching, no scaling-vector post-processing.
+/// path - no caching, no scaling-vector post-processing.
 pub(crate) fn compute_matching_stats(
     matrix: &CscMatrix,
 ) -> Result<(HungarianStats, usize), RslabError> {
@@ -217,8 +217,8 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
     for i in 0..n {
         // If the column had no usable entries at all, cmax[i] is
         // `f64::NEG_INFINITY` (see `build_cost_graph`). Any such
-        // index is "empty" — the Hungarian kernel cannot match
-        // that column meaningfully — so we fall back to identity
+        // index is "empty" - the Hungarian kernel cannot match
+        // that column meaningfully - so we fall back to identity
         // scaling for it. This is the structurally empty-column
         // case from the research note.
         if !cmax[i].is_finite() {
@@ -373,7 +373,7 @@ fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), RslabEr
     // log-absolute value and subtract it from every entry in that
     // column. Entries of an all-zero column are absent, so the
     // `cmax` for an empty column is `f64::NEG_INFINITY` and its
-    // range is already empty — nothing to normalize.
+    // range is already empty - nothing to normalize.
     let mut cmax = vec![f64::NEG_INFINITY; n];
     for j in 0..n {
         let start = col_ptr[j];
@@ -432,11 +432,11 @@ mod tests {
     }
 
     /// X4 (dev/research/repo-review-2026-06-09.md): on a partial matching an
-    /// index `i` can have its COLUMN matched while its ROW is unmatched — the
+    /// index `i` can have its COLUMN matched while its ROW is unmatched - the
     /// matched-row and matched-column sets differ even on symmetric patterns.
     /// `build_matching` zeroes `u[i]` for an unmatched row, so the symmetric
     /// average `s[i] = exp((u[i] + v[i] - cmax[i]) / 2)` folds a meaningless
-    /// zero half-dual into the scaling — exactly the "duals are meaningless on
+    /// zero half-dual into the scaling - exactly the "duals are meaningless on
     /// the unmatched part" condition the adjacent comments warn about. The
     /// documented contract (step 9 in the module header,
     /// `dev/research/mc64-scaling.md`) is identity scaling for any index whose
@@ -449,7 +449,7 @@ mod tests {
     /// `cmax`). The contract requires `s[0] = 1.0` (row 0 unmatched) and
     /// `s[1] = 1.0` (column 1 unmatched). Pre-fix the code only skipped on an
     /// unmatched COLUMN, so index 0 took `exp((0 + v[0] - cmax[0]) / 2)
-    /// = exp((0 + 2 - 1) / 2) = exp(0.5) ≈ 1.6487` — the witness.
+    /// = exp((0 + 2 - 1) / 2) = exp(0.5) ≈ 1.6487` - the witness.
     #[test]
     fn unmatched_row_with_matched_column_falls_back_to_identity() {
         let cache = Mc64Cache {

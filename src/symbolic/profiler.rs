@@ -1,4 +1,4 @@
-//! Phase 2.13b — per-stage symbolic profiler.
+//! Phase 2.13b - per-stage symbolic profiler.
 //!
 //! Mirrors the numeric `Profiler` (`src/numeric/factorize.rs`) but
 //! records per-stage timings inside `symbolic_factorize_with_method`
@@ -9,7 +9,7 @@
 //!
 //! Attached to `SupernodeParams::symbolic_profiler` as
 //! `Some(Arc<Mutex<SymbolicProfiler>>)`. When `None` the symbolic
-//! driver does no timing work — zero overhead.
+//! driver does no timing work - zero overhead.
 //!
 //! See `dev/research/phase-2.13b-symbolic-profiler.md`.
 use std::sync::{Arc, Mutex};

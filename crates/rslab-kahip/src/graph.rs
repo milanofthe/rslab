@@ -28,11 +28,11 @@ pub(crate) struct UndirectedGraph {
     /// multilevel coarsening each vertex stands for a supervertex and
     /// carries the summed mass of the original vertices it absorbed.
     /// K3 flow refinement measures its balance constraint against these
-    /// weights, not against vertex counts — a count-balanced cut on a
+    /// weights, not against vertex counts - a count-balanced cut on a
     /// graph with `vweight ≫ 1` can be badly weight-imbalanced. K4's flow
     /// node separator *consumes* `vweight` but does not itself enforce a
     /// balance constraint (the separator is always returned; balance
-    /// checking is the caller's responsibility — see
+    /// checking is the caller's responsibility - see
     /// `dev/research/ordering-kahip-k4.md`).
     pub vweight: Vec<i64>,
 }

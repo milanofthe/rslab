@@ -8,16 +8,16 @@ tests T4 and T12 in `dev/plans/ordering-amd-upgrade.md`.
 ## What is here
 
 Each `*.txt` file records the result of running
-[`amd` crate v0.2.2](https://crates.io/crates/amd) — a Rust port of
-Timothy Davis's SuiteSparse AMD (BSD-3-Clause) — against one fixed
+[`amd` crate v0.2.2](https://crates.io/crates/amd) - a Rust port of
+Timothy Davis's SuiteSparse AMD (BSD-3-Clause) - against one fixed
 input, captured during Commit 2 of the `rslab-amd` development plan:
 
 - `n`, `nz`, `nz_a_plus_at`, `n_dense`, `ncmpa`
-- `lnz` — nonzeros in L (excluding diagonal). This is the
+- `lnz` - nonzeros in L (excluding diagonal). This is the
   primary quality metric tests compare against.
-- `ndiv`, `nms_ldl`, `nms_lu` — flop counters.
-- `d_max` — maximum column count in L.
-- `perm` — the computed permutation.
+- `ndiv`, `nms_ldl`, `nms_lu` - flop counters.
+- `d_max` - maximum column count in L.
+- `perm` - the computed permutation.
 
 Each file is self-describing; the header comments name the fixture
 and quote its provenance (generator spec or file SHA-256).
@@ -32,7 +32,7 @@ and quote its provenance (generator spec or file SHA-256).
 | `diag_4`        | 4   | programmatic: diagonal (bandwidth 0)               |
 | `tridiag_10`    | 10  | programmatic: tridiagonal                          |
 | `grid_7x7`      | 49  | programmatic: 2D 5-point stencil                   |
-| `amd_demo_24`   | 24  | programmatic (6×4 grid) — SYNTHETIC SUBSTITUTE (§) |
+| `amd_demo_24`   | 24  | programmatic (6×4 grid) - SYNTHETIC SUBSTITUTE (§) |
 | `gh_258`        | 52  | file: faer-rs regression matrix (SHA-256 below)    |
 
 ### Provenance of `gh_258`

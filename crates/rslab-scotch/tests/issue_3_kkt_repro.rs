@@ -5,7 +5,7 @@
 //! `rslab_scotch::scotch_order_full` and `rslab_amd::amd_order` on the
 //! same full-symmetric pattern, and compares them.
 //!
-//! History: originally this test *locked in* the degenerate symptom —
+//! History: originally this test *locked in* the degenerate symptom -
 //! the vertex-separator FM stopped as soon as both priority-queue heads
 //! were imbalance-rejected (the O13 bug), leaving a one-sided bisection;
 //! `node_nd` then hit its `a_verts.is_empty() || b_verts.is_empty()`
@@ -16,8 +16,8 @@
 //! O13 lets FM skip the infeasible heads and keep refining, so the
 //! bisection is now balanced and genuine nested dissection proceeds.
 //! This test now guards against regressing back to that degenerate
-//! path. (It does not by itself close issue #3 — the upper-layer
-//! visibility/fallback machinery is unaffected — but the specific KKT
+//! path. (It does not by itself close issue #3 - the upper-layer
+//! visibility/fallback machinery is unaffected - but the specific KKT
 //! degeneracy that motivated the issue no longer reproduces here.)
 
 use rslab_amd::amd_order;
@@ -109,7 +109,7 @@ fn issue_3_scotch_recurses_on_kkt_after_o13() {
     eprintln!("issue #3 (post-O13): n={}, scotch stats={:?}", n, sstats);
 
     // Post-O13: bisection is no longer degenerate, so ND produces a
-    // genuine separator. (Pre-O13 this was 0 — a whole-graph fallback.)
+    // genuine separator. (Pre-O13 this was 0 - a whole-graph fallback.)
     assert!(
         sstats.n_separator_vertices > 0,
         "post-O13 ScotchND must produce a real separator on KKT (no \

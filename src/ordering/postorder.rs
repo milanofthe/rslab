@@ -33,13 +33,13 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
 
     // DFS stack carries each node's already-sorted child list plus a cursor:
     // `(node, sorted_children, child_idx)`. The sort runs exactly once per
-    // node — when the node is first pushed — not once per stack visit.
+    // node - when the node is first pushed - not once per stack visit.
     //
     // The previous version stored only `(node, child_idx)` and re-cloned and
     // re-sorted `children[node]` on every `stack.last_mut()` iteration. A node
     // with `c` children sits on top of the stack `c+1` times (once per child
     // push + once for the final pop), so it paid `O(c²·log c)`. On a star
-    // etree (one root with `n-1` children — the arrow/bordered-KKT shape AMD
+    // etree (one root with `n-1` children - the arrow/bordered-KKT shape AMD
     // produces for a dense trailing border) that made the default symbolic
     // pipeline `O(n²·log n)`. See S1, dev/research/repo-review-2026-06-09.md,
     // and the matching cursor layout in `biased_postorder` /
@@ -61,7 +61,7 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
                 let next = sorted_children_by_size(&children[child], &sizes);
                 stack.push((child, next, 0));
             } else {
-                // All children visited — emit this node (postorder)
+                // All children visited - emit this node (postorder)
                 order.push(node_id);
                 stack.pop();
             }
@@ -193,7 +193,7 @@ pub fn schur_constrained_postorder(
 
     // Phase 1: emit non-Schur nodes only. Walk the entire etree in DFS
     // postorder but only push non-Schur nodes onto `order`. A Schur node
-    // is "transparent" — we recurse through it (so its non-Schur
+    // is "transparent" - we recurse through it (so its non-Schur
     // descendants are reached) but we skip emitting it. After phase 1,
     // every non-Schur node sits at some position in `[0, n_f)` in a
     // valid postorder of the non-Schur subgraph (where each non-Schur's
@@ -225,7 +225,7 @@ pub fn schur_constrained_postorder(
     // `[n - n_schur, n)`, so iterating `k` from `0..n` and pushing when
     // `is_schur[k]` yields exactly the identity tail: `post[n_f + i] ==
     // n_f + i` for every Schur position. A DFS over the Schur subtree
-    // would emit them in tree-walk order — correct only when the Schur
+    // would emit them in tree-walk order - correct only when the Schur
     // etree is a single ascending chain. With a forest of Schur roots
     // (e.g. KKT matrices like ACOPP30 where Schur cols 158, 159, 160,
     // 161, 167, 168 are roots while 157 is parented under chain root
@@ -278,7 +278,7 @@ fn sorted_children_by_size(children: &[usize], sizes: &[usize]) -> Vec<usize> {
 ///
 /// Partition: `bias[child] == false` first (emit early), then
 /// `bias[child] == true` (emit late, adjacent to the parent). Within
-/// each partition, ascending subtree size — the same heuristic as
+/// each partition, ascending subtree size - the same heuristic as
 /// the unbiased postorder, applied independently to each partition.
 fn merge_bias_partition(children: &[usize], sizes: &[usize], bias: &[bool]) -> Vec<usize> {
     let mut early: Vec<usize> = children.iter().copied().filter(|&c| !bias[c]).collect();
@@ -546,7 +546,7 @@ mod tests {
     /// Build a star elimination tree: nodes `0..n-1` are leaves whose only
     /// parent is the last node `n-1` (the root). This is the etree of an
     /// arrow/bordered matrix whose dense border sits at the *trailing*
-    /// index (`A[n-1, i] != 0` for every `i < n-1`) — exactly the shape
+    /// index (`A[n-1, i] != 0` for every `i < n-1`) - exactly the shape
     /// AMD produces for the dense-border KKT rows in this codebase's tests.
     fn star_etree(n: usize) -> EliminationTree {
         // Lower-triangle: diagonal + a dense trailing column n-1.
@@ -570,7 +570,7 @@ mod tests {
     /// re-cloned and re-sorted `children[node]` on every stack visit, so a
     /// node with `c` children (on top of the stack `c+1` times) paid
     /// O(c²·log c). On a star etree (one root with `n-1` children) that is
-    /// O(n²·log n) — quadratic — in the default symbolic pipeline.
+    /// O(n²·log n) - quadratic - in the default symbolic pipeline.
     ///
     /// Reproduction is deterministic via the `SORT_WORK` counter (total
     /// child-list elements materialized across all per-node sorts), so no

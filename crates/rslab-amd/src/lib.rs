@@ -39,7 +39,7 @@ pub struct AmdOptions {
     pub aggressive: bool,
     /// Dense-row threshold multiplier. A variable with initial
     /// degree exceeding `min(max(16, floor(dense_alpha * sqrt(n))), n)`
-    /// is deferred to the end of the ordering — the `max(16)` floor is
+    /// is deferred to the end of the ordering - the `max(16)` floor is
     /// applied before the `min(n)` cap, matching faer `amd.rs:173-179`
     /// / SuiteSparse AMD (the order matters: it guarantees the
     /// threshold is `<= n`). A negative value uses a raw threshold of
@@ -101,7 +101,7 @@ pub fn amd_order_opts(
 /// errors in [`OrderingError`].
 ///
 /// `OrderingStats.time_us` is the wall-clock time of this call.
-/// `fill_estimate` and `flop_estimate` are left as `None` for AMD —
+/// `fill_estimate` and `flop_estimate` are left as `None` for AMD -
 /// the per-crate [`AmdStats`] carries `ndiv` / `nms_lu` / `nms_ldl`
 /// flop counters that may be surfaced here in a future revision
 /// without bumping the contract.
@@ -164,7 +164,7 @@ pub struct AmdSubstages {
 /// Behaves identically to [`amd_order_full`] but additionally
 /// returns an [`AmdSubstages`] split of the wall-clock time across
 /// `workspace::new`, `run_elimination`, and `finalize_permutation`.
-/// Diagnostic-only — production callers should keep using
+/// Diagnostic-only - production callers should keep using
 /// [`amd_order`] / [`amd_order_full`]. The `Instant::now()` calls
 /// add at most ~100 ns vs the un-profiled path, but the API surface
 /// is intentionally separate to avoid polluting the stable

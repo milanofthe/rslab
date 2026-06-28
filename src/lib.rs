@@ -4,11 +4,11 @@
 // unwrap in `src/`, replacing the ad-hoc grep check in CI.
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::expect_used))]
-// Style lints that fire only in test scaffolding — relaxed under cfg(test).
+// Style lints that fire only in test scaffolding - relaxed under cfg(test).
 // The lib build keeps default clippy strictness.
 #![cfg_attr(test, allow(clippy::needless_range_loop))]
 
-//! # RSLAB — a pure-Rust sparse symmetric direct solver and preconditioner
+//! # RSLAB - a pure-Rust sparse symmetric direct solver and preconditioner
 //!
 //! A self-contained replacement for PARDISO's sparse symmetric path, with no
 //! MKL or other native dependency. RSLAB factors **real symmetric** (`f64`,
@@ -17,8 +17,8 @@
 //! Bunch-Kaufman method with a SIMD (`gemm`) Schur kernel.
 //!
 //! Two intended uses:
-//! * **FEM direct solve** — factor once, solve many right-hand sides.
-//! * **MoM sparse preconditioner** — a robust, memory-light approximate factor
+//! * **FEM direct solve** - factor once, solve many right-hand sides.
+//! * **MoM sparse preconditioner** - a robust, memory-light approximate factor
 //!   (static pivoting, `f32` mixed precision, incomplete-factor dropping)
 //!   driving a [`cocg`]/[`cocr`] iteration.
 //!
@@ -88,7 +88,7 @@ pub mod symbolic;
 #[cfg(feature = "tuning")]
 pub mod tuning;
 
-// Flat public API re-exported at crate root — a single data-type-generic
+// Flat public API re-exported at crate root - a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use dense::matrix::SymmetricMatrix;

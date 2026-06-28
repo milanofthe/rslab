@@ -11,7 +11,7 @@
 //! Reference: citet:duff2001mc64 §4. Source model:
 //! `ref/spral/src/scaling.f90::hungarian_match` (lines 938-1171),
 //! itself a clean-room rewrite of HSL_MC80. The algorithm is the
-//! standard shortest-augmenting-path variant — each augmenting
+//! standard shortest-augmenting-path variant - each augmenting
 //! path is a Dijkstra-like search on the reduced-cost graph, and
 //! the dual variables are updated to preserve complementary
 //! slackness.
@@ -22,7 +22,7 @@
 //! that supports decrease-key (mirroring SPRAL's `q`/`d`/`l` arrays).
 //! The custom heap is used instead of `std::collections::BinaryHeap`
 //! because BinaryHeap lacks decrease-key, and lazy deletion would
-//! require wrapping `f64` distances in a tie-breakable ordered type —
+//! require wrapping `f64` distances in a tie-breakable ordered type -
 //! mirroring SPRAL's index-based heap produces cleaner code.
 
 /// A sparse non-negative cost graph for the Hungarian algorithm.
@@ -66,7 +66,7 @@ const NONE: usize = usize::MAX;
 /// *algorithmic work*, not wall-clock, so the guard is immune to CI
 /// timing noise.
 ///
-/// - `heap_init_slots`: total `pos[]` entries zeroed across the run —
+/// - `heap_init_slots`: total `pos[]` entries zeroed across the run -
 ///   `m` for the single `IndexHeap::new` plus `|touched|` for each
 ///   per-search `reset`. With the #80 fix this is `m + touched_total`
 ///   (linear in `n + nnz`). If the heap were reallocated per
@@ -83,8 +83,8 @@ const NONE: usize = usize::MAX;
 /// - `main_loop_edge_scans`: total edges examined in the main
 ///   shortest-path loop (root-column scan + each popped row's matched
 ///   column). A near-dense coupling column makes each scan touching it
-///   O(degree), so on a dense-column matrix this counter — not the
-///   heap work — is the dominant cost. Counted once per column-scan
+///   O(degree), so on a dense-column matrix this counter - not the
+///   heap work - is the dominant cost. Counted once per column-scan
 ///   (by column length), so the kernel overhead is O(1) per scan.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct HungarianStats {
@@ -142,7 +142,7 @@ impl IndexHeap {
 
     /// Return the heap to the empty state for reuse across augmenting
     /// searches without reallocating. `rows` must list every index whose
-    /// `pos` could be nonzero — in `hungarian_match` that is exactly the
+    /// `pos` could be nonzero - in `hungarian_match` that is exactly the
     /// `touched` set, since an index is only ever heap-inserted right
     /// after being pushed to `touched`. The `heap` backing array is left
     /// with stale entries; `len = 0` makes them unreachable. This turns
@@ -510,7 +510,7 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
     // Allocated once and reused across all augmenting searches; reset
     // incrementally (over `touched`) at the end of each iteration, the
     // same way `d` and `visited` are. Previously this was reallocated
-    // per unmatched column — O(n·m) alloc+zeroing that dominated MC64 on
+    // per unmatched column - O(n·m) alloc+zeroing that dominated MC64 on
     // large near-tree KKTs (issue #80).
     let mut heap = IndexHeap::new(m, &mut stats);
 
@@ -676,7 +676,7 @@ fn finalize_duals(cost: &CostGraph, iperm: &[usize], jperm: &[usize], u: &[f64],
         }
     }
     // Caller updates `u` in place; here we only need to zero out
-    // rows that were never matched (defensive — the main loop does
+    // rows that were never matched (defensive - the main loop does
     // not touch `u[i]` for such rows, but `hungarian_init_heuristic`
     // may have left a row-minimum value in `u[i]` from phase 1).
     let _ = iperm; // unused beyond its role in the main loop
@@ -721,7 +721,7 @@ mod tests {
     //! on small cost graphs where the answer can be hand-derived.
     //! Pre-Step 3 (the stub), tests that assert on identity-like
     //! behavior pass; tests that assert on non-trivial matchings
-    //! or non-zero duals fail. This is intentional — the test file
+    //! or non-zero duals fail. This is intentional - the test file
     //! is the red→green gate for Step 3.
     //!
     //! Hand-derivation method: any minimum-cost perfect matching on
@@ -734,7 +734,7 @@ mod tests {
     use super::*;
 
     /// Build a `CostGraph` from dense (row, col, cost) triples.
-    /// Only used in tests — converts a small list of entries into
+    /// Only used in tests - converts a small list of entries into
     /// the CSC format the Hungarian kernel expects.
     fn build_cost_graph(n: usize, entries: &[(usize, usize, f64)]) -> CostGraph {
         let mut by_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -847,7 +847,7 @@ mod tests {
     /// Alternative matching 0↔0, 1↔2, 2↔1 has cost 3 + 4 + 5 = 12.
     /// Only the first is optimal. The stub returns identity
     /// `perm = [0, 1, 2]`, which on this cost graph would be
-    /// 0↔0, 1↔1, 2↔2 — but (1,1) has no entry in our graph, so
+    /// 0↔0, 1↔1, 2↔2 - but (1,1) has no entry in our graph, so
     /// the stub's matching is not even feasible.
     ///
     /// Step 3 has landed; the real Hungarian kernel handles this.
@@ -987,7 +987,7 @@ mod tests {
     /// Build an n×n cost graph with `deg` distinct random rows per
     /// column and random positive costs. With small constant `deg`,
     /// the greedy init leaves a constant fraction of columns unmatched,
-    /// so the main augmenting loop runs Θ(n) shortest-path searches —
+    /// so the main augmenting loop runs Θ(n) shortest-path searches -
     /// exactly the near-tree regime where the issue #80 per-column heap
     /// reallocation was O(n·m). nnz = deg·n grows linearly in n.
     fn gen_random_sparse(n: usize, deg: usize, seed: u64) -> CostGraph {
@@ -1039,7 +1039,7 @@ mod tests {
     ///    O(n) allocation plus Σ|touched| reset work). A revert that
     ///    re-allocates per search routes O(m) per search through the
     ///    same counter, breaking the equality at every size. This is a
-    ///    stronger, threshold-free guard than a growth ratio — and
+    ///    stronger, threshold-free guard than a growth ratio - and
     ///    necessary, because on a hard matching the *legitimate*
     ///    `touched_total` is itself super-linear (long augmenting
     ///    paths), so total heap work is not linear to begin with.
@@ -1052,7 +1052,7 @@ mod tests {
     ///
     /// The family is `gen_random_sparse(n, deg=3)`: with small constant
     /// degree, greedy init leaves a constant fraction of columns
-    /// unmatched, so the main augmenting loop runs (searches > 0) — the
+    /// unmatched, so the main augmenting loop runs (searches > 0) - the
     /// exact regime where the #80 realloc was the dominant cost.
     #[test]
     fn mc64_hungarian_no_quadratic_heap_realloc_regression() {
@@ -1100,7 +1100,7 @@ mod tests {
         assert!(
             phase3_last < 16 * phase3_first,
             "phase-3 inner iterations grew {}->{} ( >16x over 8x size ) \
-             — possible O(nnz^2) augmentation regression",
+             - possible O(nnz^2) augmentation regression",
             phase3_first,
             phase3_last,
         );

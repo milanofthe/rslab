@@ -10,7 +10,7 @@
 //! Phase 2.2.3 follow-up: the dense BK factorization succeeds on
 //! HYDCAR20 / METHANL8 / SWOPF / HATFLDG because it equilibrates the
 //! matrix before BK. The sparse multifrontal path was missing this
-//! step — MC64 matching happens to classify these matrices as already
+//! step - MC64 matching happens to classify these matrices as already
 //! balanced even when their row norms span 4+ orders of magnitude.
 //! Porting the dense path's equilibration recovers these matrices for
 //! the sparse path.
@@ -40,7 +40,7 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     let mut d = vec![1.0f64; n];
 
     // 10 iterations is the same cap the dense path uses. Most matrices
-    // converge in 2–4 iterations; a few pathological ones need all 10.
+    // converge in 2-4 iterations; a few pathological ones need all 10.
     let max_iter = 10;
     let tol = 1e-8;
 
@@ -60,7 +60,7 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
         // The row-j accumulation is hoisted to a register-resident
         // `col_max` across the inner k-loop, then folded into
         // `row_max[j]` once at column end. The diagonal entry (i == j)
-        // is folded into `col_max` only — its `row_max[i]` write would
+        // is folded into `col_max` only - its `row_max[i]` write would
         // be overwritten by the end-of-column store, so we skip the
         // memory traffic and rely on `col_max` to carry the diagonal's
         // contribution. Off-diagonal entries (i > j) update both
@@ -102,7 +102,7 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
                 }
             }
             // Rows with all-zero entries keep d[i] at the current value
-            // (initially 1.0) — they are structurally zero and the
+            // (initially 1.0) - they are structurally zero and the
             // downstream numeric phase will reject them as singular
             // pivots.
         }
@@ -123,15 +123,15 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
 /// store the same set of nonzeros (i.e. zeros at "missing" positions
 /// in the sparse storage). All such fast-path-gate matrices satisfy
 /// this, since `CscMatrix::to_dense_into` writes only the stored
-/// entries and leaves the rest as zero — and the inner KR step
+/// entries and leaves the rest as zero - and the inner KR step
 /// `max(v, row_max[i])` is a no-op for `v == 0.0`.
 ///
 /// The win over [`compute_infnorm`] on small-dense matrices comes
-/// from removing the `row_idx[k]` indirection — the dense loop walks
+/// from removing the `row_idx[k]` indirection - the dense loop walks
 /// contiguous columns with the compiler able to keep `d[j]` in a
 /// register and stride `data[col + i]` linearly. On TRO3X3_0013
 /// (n=69, density 0.73) this halves the scaling phase from ~34 µs
-/// to ~17 µs — see
+/// to ~17 µs - see
 /// `dev/results/lever-d3/stage1-stage2-2026-04-19.md` §1 for the
 /// pre-change breakdown.
 ///
@@ -174,7 +174,7 @@ pub fn compute_infnorm_dense(sym: &SymmetricMatrix) -> (Vec<f64>, ScalingInfo) {
             // Diagonal entry: `v_diag = |dj * data[col+j] * dj|`.
             // In the prior code this updated `row_max[j]` via the
             // i-branch (and never the j-branch, gated by `i != j`).
-            // Here we fold it into the local accumulator only — the
+            // Here we fold it into the local accumulator only - the
             // end-of-column store overwrites `row_max[j]` anyway.
             let v_diag = (dj * sym.data[col + j] * dj).abs();
             let mut col_max = row_max[j].max(v_diag);
@@ -220,7 +220,7 @@ pub fn compute_infnorm_dense(sym: &SymmetricMatrix) -> (Vec<f64>, ScalingInfo) {
 /// `row_max_off ← max(row_max_off, v)`, and returns the max value over
 /// all lanes (the column-max contribution from the off-diagonal sweep).
 ///
-/// Dispatched through `pulp::Arch::new()` — picks AVX-512 / AVX2+FMA /
+/// Dispatched through `pulp::Arch::new()` - picks AVX-512 / AVX2+FMA /
 /// SSE2 / NEON / scalar fallback per host CPU. All three slices must
 /// be equal length; an empty input returns `0.0`.
 ///
@@ -272,7 +272,7 @@ fn scan_offdiag_simd(d_off: &[f64], data_off: &[f64], dj: f64, row_max_off: &mut
                 // `partial_load` zero-pads beyond the tail length;
                 // `partial_store` writes only the valid prefix. The
                 // out-of-range lanes compute `|0·0·dj| = 0`, which is
-                // the identity for max — safe to fold into `col_max`.
+                // the identity for max - safe to fold into `col_max`.
                 let dv = simd.partial_load_f64s(d_tail);
                 let dav = simd.partial_load_f64s(da_tail);
                 let rmv = simd.partial_load_f64s(rm_tail);
@@ -377,7 +377,7 @@ mod tests {
         }
     }
 
-    /// Bit-exact parity on a fully-dense small matrix — the dense
+    /// Bit-exact parity on a fully-dense small matrix - the dense
     /// fast-path's target regime.
     #[test]
     fn dense_matches_sparse_on_dense_5x5() {

@@ -1,7 +1,7 @@
-# feral-amd oracle fixture: grid_7x7
+# rslab-amd oracle fixture: grid_7x7
 # generator: SuiteSparse AMD Rust crate (amd = 0.2.2)
 # provenance:
-#   generator: grid_2d(7x7) — 5-point stencil + diagonal; programmatic, no RNG
+#   generator: grid_2d(7x7) - 5-point stencil + diagonal; programmatic, no RNG
 status: OK
 n: 49
 nz: 217

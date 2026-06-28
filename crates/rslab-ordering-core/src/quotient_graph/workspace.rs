@@ -98,7 +98,7 @@ pub struct Workspace {
     pub wflg: i32,
     /// Overflow ceiling for `wflg`: `i32::MAX - n`.
     pub wbig: i32,
-    /// Largest element size encountered so far — used by supervariable
+    /// Largest element size encountered so far - used by supervariable
     /// detection (Slice B) to bump `wflg` safely.
     pub lemax: i32,
     /// Lower bound on the next pivot's degree. Monotone non-decreasing.
@@ -121,11 +121,11 @@ impl Workspace {
     /// initialization. On return, all variables have been classified
     /// into one of three buckets:
     ///
-    /// 1. **Zero-degree** (`deg == 0`) — pre-eliminated. `pe[i] = NONE`,
+    /// 1. **Zero-degree** (`deg == 0`) - pre-eliminated. `pe[i] = NONE`,
     ///    `elen[i] = flip(1)`, `w[i] = 0`, `nel` incremented.
-    /// 2. **Dense-deferred** (`deg > dense`) — moved to the dense tail.
+    /// 2. **Dense-deferred** (`deg > dense`) - moved to the dense tail.
     ///    `pe[i] = NONE`, `nv[i] = 0`, `elen[i] = NONE`, `nel` incremented.
-    /// 3. **Live** — inserted LIFO into the degree-indexed linked list
+    /// 3. **Live** - inserted LIFO into the degree-indexed linked list
     ///    headed by `head[deg]`, threaded through `next`/`last`.
     ///
     /// `pattern` must be the full-symmetric graph (both halves). The
@@ -236,7 +236,7 @@ impl Workspace {
         for i in 0..n {
             let deg = degree[i] as usize;
             if deg == 0 {
-                // Zero-degree fast path — pre-eliminated.
+                // Zero-degree fast path - pre-eliminated.
                 elen[i] = flip(1);
                 nel += 1;
                 pe[i] = NONE;
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(ws.nv[0], 0, "hub marked deferred");
         assert_eq!(ws.pe[0], NONE);
         assert_eq!(ws.elen[0], NONE);
-        // Spokes all land in head[1] — LIFO, last in is n-1.
+        // Spokes all land in head[1] - LIFO, last in is n-1.
         assert_eq!(ws.head[1], (n - 1) as i32);
     }
 
@@ -478,7 +478,7 @@ mod tests {
     }
 
     /// Diagonal entries in the input are ignored when computing
-    /// adjacency lists — only off-diagonal neighbors contribute to
+    /// adjacency lists - only off-diagonal neighbors contribute to
     /// `len`, `degree`, and `iw`.
     #[test]
     fn diagonal_entries_skipped() {

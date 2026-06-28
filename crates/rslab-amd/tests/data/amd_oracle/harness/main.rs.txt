@@ -1,11 +1,11 @@
-//! feral-amd oracle harness.
+//! rslab-amd oracle harness.
 //!
 //! Runs the SuiteSparse AMD Rust crate (`amd = "0.2.2"`) against a
 //! fixed set of fixtures and dumps the resulting permutation and
 //! fill statistics to plain-text files.
 //!
-//! Intentionally throwaway — lives OUTSIDE the feral-amd crate and
-//! must never be linked against feral-amd code.
+//! Intentionally throwaway - lives OUTSIDE the rslab-amd crate and
+//! must never be linked against rslab-amd code.
 //!
 //! Usage: `cargo run --release -- <out_dir>`
 
@@ -79,7 +79,7 @@ fn arrow(n: usize) -> Pattern {
         n,
         &t,
         format!(
-            "generator: arrow(n={}) — hub at var 0 + diagonal; programmatic, no RNG",
+            "generator: arrow(n={}) - hub at var 0 + diagonal; programmatic, no RNG",
             n
         ),
     )
@@ -99,7 +99,7 @@ fn band(n: usize, b: usize) -> Pattern {
         n,
         &t,
         format!(
-            "generator: band(n={}, b={}) — banded + diagonal; programmatic, no RNG",
+            "generator: band(n={}, b={}) - banded + diagonal; programmatic, no RNG",
             n, b
         ),
     )
@@ -125,18 +125,18 @@ fn grid_2d(m: usize, n: usize) -> Pattern {
         total,
         &t,
         format!(
-            "generator: grid_2d({}x{}) — 5-point stencil + diagonal; programmatic, no RNG",
+            "generator: grid_2d({}x{}) - 5-point stencil + diagonal; programmatic, no RNG",
             m, n
         ),
     )
 }
 
-/// Representative 24-var sparse pattern — SYNTHETIC SUBSTITUTE for
+/// Representative 24-var sparse pattern - SYNTHETIC SUBSTITUTE for
 /// the canonical `AMD/Demo/can_24.mtx`, which requires a network
 /// fetch we do not perform here. Uses a 6x4 2D grid.
 fn amd_demo_24() -> Pattern {
     let mut p = grid_2d(6, 4);
-    p.provenance = "SYNTHETIC SUBSTITUTE for AMD Demo 24x24 — using 6x4 grid \
+    p.provenance = "SYNTHETIC SUBSTITUTE for AMD Demo 24x24 - using 6x4 grid \
                     because the canonical can_24.mtx requires network fetch. \
                     Replace in a follow-up commit once can_24.mtx is downloaded."
         .to_string();
@@ -194,7 +194,7 @@ fn write_oracle(name: &str, p: &Pattern, out_dir: &Path) -> std::io::Result<()> 
 
     match result {
         Ok((perm, _perm_inv, info)) => {
-            writeln!(f, "# feral-amd oracle fixture: {}", name)?;
+            writeln!(f, "# rslab-amd oracle fixture: {}", name)?;
             writeln!(f, "# generator: SuiteSparse AMD Rust crate (amd = 0.2.2)")?;
             writeln!(f, "# provenance:")?;
             for line in p.provenance.lines() {
@@ -233,7 +233,7 @@ fn write_oracle(name: &str, p: &Pattern, out_dir: &Path) -> std::io::Result<()> 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
-        eprintln!("usage: feral-amd-oracle <out_dir>");
+        eprintln!("usage: rslab-amd-oracle <out_dir>");
         return ExitCode::from(2);
     }
     let out_dir = PathBuf::from(&args[1]);

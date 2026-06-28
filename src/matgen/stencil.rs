@@ -1,4 +1,4 @@
-//! PDE finite-difference stencil generators — the workhorse family, modelling the
+//! PDE finite-difference stencil generators - the workhorse family, modelling the
 //! EM-FEM structure. A Dirichlet Laplacian on a 2D/3D grid is SPD with condition
 //! number ∼ h⁻² (steered by grid size); a complex Helmholtz shift makes it
 //! complex-symmetric and, near a resonance, ill-conditioned; anisotropy and
@@ -165,7 +165,7 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         size: 160_000,
         build: || cx(laplacian(&square(160_000), &StencilOpts::default())),
     });
-    // 3D Poisson (SPD) — the EM-FEM sparsity, small and large.
+    // 3D Poisson (SPD) - the EM-FEM sparsity, small and large.
     c.push(MatrixSpec {
         name: "poisson3d_small",
         structure: Structure::Stencil3D,

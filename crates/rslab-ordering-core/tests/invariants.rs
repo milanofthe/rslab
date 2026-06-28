@@ -49,7 +49,7 @@ fn arrow_3() -> (Vec<i32>, Vec<i32>) {
 ///
 /// Hub structure: row 0 connects to {1, 2, 3, 4}; row 4 connects to
 /// {0, 1, 2, 3}; rows 1-3 each connect to {0, 4}. Both hubs share
-/// the same fill cost — AMF should not eliminate either before the
+/// the same fill cost - AMF should not eliminate either before the
 /// inner spine variables are processed.
 fn dual_arrow_5() -> (Vec<i32>, Vec<i32>) {
     // Adjacencies (excluding diagonal):

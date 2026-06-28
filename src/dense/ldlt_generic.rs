@@ -59,7 +59,7 @@ pub struct LdltFactors<T> {
     pub n_perturbed: usize,
     /// Inertia (counts of positive/negative/zero `D` pivots). Exact for a real
     /// symmetric matrix (`T = f64`/`f32`); for a complex-symmetric matrix the
-    /// eigenvalues are complex and have no sign — there it is advisory only
+    /// eigenvalues are complex and have no sign - there it is advisory only
     /// (classified by each pivot's real part).
     pub inertia: crate::inertia::Inertia,
 }
@@ -72,8 +72,8 @@ pub(crate) fn bk_alpha() -> f64 {
 
 /// Swap symmetric indices `p` and `q` (`p < q`) in a lower-triangle,
 /// column-major working matrix. This swaps the corresponding rows *and*
-/// columns across the whole matrix — including the already-computed `L`
-/// columns to the left — so the partial factorization stays consistent. The
+/// columns across the whole matrix - including the already-computed `L`
+/// columns to the left - so the partial factorization stays consistent. The
 /// crossing element `(q, p)` maps to itself and is left in place.
 pub(crate) fn swap_sym_lower<T: Scalar>(a: &mut [T], n: usize, p: usize, q: usize) {
     debug_assert!(p < q && q < n);
@@ -393,7 +393,7 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
 /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the returned
 /// `x` are **row-major** `n × nrhs` buffers (row `i`'s `nrhs` values contiguous,
 /// i.e. `b[i*nrhs + c]` is RHS `c` at row `i`). Processing the RHS as a block
-/// loads each `L`/`D` value once and applies it to all `nrhs` columns — the
+/// loads each `L`/`D` value once and applies it to all `nrhs` columns - the
 /// memory-bound amortization that makes one block solve beat `nrhs` separate
 /// [`solve_ldlt`] calls.
 pub fn solve_ldlt_many<T: Scalar>(

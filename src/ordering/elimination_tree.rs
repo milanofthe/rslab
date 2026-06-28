@@ -195,7 +195,7 @@ mod tests {
         // among 1-4. So the etree should be 0→1→2→3→4 (chain from fill).
         // Actually: parent[j] = min { i > j : L(i,j) != 0 }
         // For column 0: rows 1,2,3,4 all have entries → parent[0] = 1 (not a root!)
-        // Wait — arrow has column 0 connected to rows 1,2,3,4
+        // Wait - arrow has column 0 connected to rows 1,2,3,4
         // Column 0: entries at rows 1,2,3,4 → parent[0] = min(1,2,3,4) = 1
         // Column 1: entry at row 0 (but 0 < 1, skip). Fill from eliminating 0: rows 2,3,4
         //   → parent[1] = 2

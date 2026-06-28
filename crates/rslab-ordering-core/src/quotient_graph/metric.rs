@@ -20,9 +20,9 @@
 //!    formula `min(deg_prev, scan2_deg) + degme - nvi` clamped at
 //!    `nleft - nvi`; AMF's quantized RMF (Amestoy 1999 thesis).
 //!
-//! The trait below covers (1)–(5). Site (6) is metric-specific in the
+//! The trait below covers (1)-(5). Site (6) is metric-specific in the
 //! Pass-2 inner loop and is reached via the `run_elimination`
-//! dispatch — each metric impl wires its own concrete loop in
+//! dispatch - each metric impl wires its own concrete loop in
 //! `algo.rs` (AMD: `run_elimination`, AMF: `run_elimination_amf`).
 //! The trait stays light: keeping the inner loops as parallel
 //! concrete functions trades ~300 LoC duplication for zero risk to
@@ -61,7 +61,7 @@ pub trait Metric {
     /// for `s ≤ n`, coarse-stride above.
     fn bucket(score: Self::Score, n: usize) -> usize;
 
-    /// Whether `idx` falls in the "coarse" bucket region — i.e.
+    /// Whether `idx` falls in the "coarse" bucket region - i.e.
     /// `select_pivot` must linear-scan the bucket chain to pick the
     /// minimum-score entry, rather than just taking the head. AMD
     /// always returns `false`; AMF returns `idx > n`.
@@ -79,7 +79,7 @@ pub trait Metric {
     fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError>;
 }
 
-/// Minimum-degree metric — the AMD selection rule of Amestoy, Davis,
+/// Minimum-degree metric - the AMD selection rule of Amestoy, Davis,
 /// Duff (1996).
 ///
 /// Score is the running degree. Bucket index is the score itself.
@@ -125,7 +125,7 @@ impl Metric for MinDegree {
     }
 }
 
-/// Approximate Minimum Fill metric (HAMF4) — Amestoy 1999 thesis.
+/// Approximate Minimum Fill metric (HAMF4) - Amestoy 1999 thesis.
 ///
 /// AMF selects the next pivot to minimise the *fill* introduced by
 /// the elimination, rather than the candidate's degree. On bipartite-
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(MinFill::bucket(9, 4), 8);
     }
 
-    /// Negative or zero scores clamp to bucket 0 (defensive — the
+    /// Negative or zero scores clamp to bucket 0 (defensive - the
     /// AMF math should never produce them after the `RMF / (NVI + 1)`
     /// division but the saturated-RMF branch can underflow on tiny
     /// problems).
@@ -346,7 +346,7 @@ mod tests {
         }
     }
 
-    /// Supervariable merge takes the max — the larger of the two
+    /// Supervariable merge takes the max - the larger of the two
     /// fill estimates becomes the merged score.
     #[test]
     fn min_fill_merge_takes_max() {

@@ -14,7 +14,7 @@ use std::fmt;
 pub struct MemoryEstimate {
     /// Scalar size in bytes (`16` for `Complex<f64>`, `8` for `f64`, …).
     pub value_bytes: usize,
-    /// Structural nonzeros in the factor (`L`+`U` for LU, `L` for LDLᵀ) — an upper
+    /// Structural nonzeros in the factor (`L`+`U` for LU, `L` for LDLᵀ) - an upper
     /// bound on the emitted factor (numeric cancellation can only lower it).
     pub factor_nnz: u64,
     /// Bytes of the resident factor (the CSC output): `factor_nnz·(value+index)`.
@@ -22,7 +22,7 @@ pub struct MemoryEstimate {
     /// Dense supernode panels if **all** were held at once (the naive left-looking
     /// peak, i.e. without panel-freeing).
     pub panels_all_bytes: u64,
-    /// Peak of the **live** dense panels under the refcount free-schedule — what
+    /// Peak of the **live** dense panels under the refcount free-schedule - what
     /// the left-looking path actually holds at once.
     pub panel_live_peak_bytes: u64,
     /// Estimated overall transient peak: live panels + accumulated compact factor +
@@ -30,7 +30,7 @@ pub struct MemoryEstimate {
     pub transient_peak_bytes: u64,
     /// Geometric factorization work proxy `Σ nrow²·ncol` over supernodes (type-
     /// independent). Divide by a calibrated geometric-flops/s rate for a runtime
-    /// estimate — see [`est_runtime_ms`](Self::est_runtime_ms).
+    /// estimate - see [`est_runtime_ms`](Self::est_runtime_ms).
     pub factor_flops: u64,
 }
 
@@ -75,7 +75,7 @@ impl fmt::Display for MemoryEstimate {
 /// panel size; `compact_bytes(s)` its CSC-fragment size; `update_list[s]` its
 /// factored descendants (consumers). Simulates the refcount free-schedule in
 /// elimination/postorder (supernodes are numbered in postorder) to get the live
-/// panel peak and the accumulating compact factor — the same schedule the numeric
+/// panel peak and the accumulating compact factor - the same schedule the numeric
 /// path runs, so the estimate matches what it allocates.
 pub(crate) fn estimate_left_looking(
     nsuper: usize,
@@ -115,14 +115,14 @@ pub(crate) fn estimate_left_looking(
     let panel_live_peak = peak.max(0) as u64;
     // Conservative transient upper bound. At many threads the parallel frontier of
     // a top-heavy tree holds nearly all panels at once, and the emit builds the full
-    // factor CSC on top — so the safe estimate is all-resident panels + the factor +
+    // factor CSC on top - so the safe estimate is all-resident panels + the factor +
     // the input copies + a per-thread scratch margin (cmod/cdiv buffers, gloc). This
     // is the number to compare against RAM for a fail-fast / scheduling decision; the
     // panel-freeing path makes the *actual* peak lower (down to `panel_live_peak`),
     // so this never under-predicts.
     // Per-thread scratch (cmod/cdiv buffers, gloc, the emit double-buffer) plus a
-    // small absolute floor — tuned so the bound stays ≥ the measured peak across
-    // sizes (validated: est/measured ≈ 1.0–1.2×), never under-predicting.
+    // small absolute floor - tuned so the bound stays ≥ the measured peak across
+    // sizes (validated: est/measured ≈ 1.0-1.2×), never under-predicting.
     let scratch = (panels_all + factor_bytes) / 4 + 32_000_000;
     MemoryEstimate {
         value_bytes,

@@ -1,4 +1,4 @@
-# feral-amd oracle fixture: gh_258
+# rslab-amd oracle fixture: gh_258
 # generator: SuiteSparse AMD Rust crate (amd = 0.2.2)
 # provenance:
 #   file: /Users/jkitchin/Dropbox/projects/ripopt/ref/faer-rs/faer/test_data/sparse_cholesky/gh_258.txt

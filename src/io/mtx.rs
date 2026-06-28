@@ -39,7 +39,7 @@ impl<T: Scalar> MtxMatrix<T> {
     }
 
     /// Convert to a general (full, unsymmetric) CSC matrix, keeping every entry
-    /// as given — the form the unsymmetric LU path / a `LinearOperator` uses.
+    /// as given - the form the unsymmetric LU path / a `LinearOperator` uses.
     pub fn to_general_csc(&self) -> Result<crate::sparse::general::GeneralCsc<T>, RslabError> {
         let rows: Vec<usize> = self.entries.iter().map(|&(r, _, _)| r).collect();
         let cols: Vec<usize> = self.entries.iter().map(|&(_, c, _)| c).collect();
@@ -213,7 +213,7 @@ fn parse_mtx_with<T: Scalar>(
     // request; the allocator returns null and `handle_alloc_error` aborts
     // the process instead of returning an `Err`. `nnz` is only a hint here
     // (never validated against the actual entry count), so clamp the
-    // reservation to the source byte length — each entry occupies at least
+    // reservation to the source byte length - each entry occupies at least
     // one byte in the file, so that is a hard upper bound on the true
     // count. Valid files (where `nnz <= contents.len()` always holds) get
     // the same exact reservation as before.
@@ -302,7 +302,7 @@ fn parse_mtx_with<T: Scalar>(
     // by X10) and never validated against the actual entry count. The
     // Matrix Market spec defines that field as the number of entries that
     // follow, so a body with more or fewer data lines than the header
-    // declares is a malformed file — previously it parsed silently into a
+    // declares is a malformed file - previously it parsed silently into a
     // matrix that did not match its own declaration (a truncated file read
     // as a valid smaller matrix). Validate it now. This also turns the
     // bogus-huge-nnz case (X10) from an `Ok` carrying the unvalidated
@@ -352,17 +352,17 @@ mod tests {
     /// reserved with `Vec::with_capacity(nnz)` straight from the untrusted
     /// MTX size line. A corrupt header declaring an enormous nnz turns that
     /// into a multi-exabyte allocation request; the allocator returns null
-    /// and Rust's `handle_alloc_error` ABORTS the process — a hard crash,
+    /// and Rust's `handle_alloc_error` ABORTS the process - a hard crash,
     /// not a recoverable `RslabError`, on malformed input a library caller
     /// cannot guard against. The reservation is clamped to the source byte
-    /// length — a hard upper bound on the true entry count — so the parse
+    /// length - a hard upper bound on the true entry count - so the parse
     /// runs to completion instead of aborting.
     ///
     /// Revised for X2 (REG-4): the declared nnz is now also *validated*
     /// against the real entry count, so this file (10^17 declared, two
     /// real) returns a recoverable count-mismatch `Err` rather than an `Ok`
-    /// carrying the unvalidated entries. The property X10 protects — a
-    /// bogus huge nnz must not *abort the process* — still holds: the call
+    /// carrying the unvalidated entries. The property X10 protects - a
+    /// bogus huge nnz must not *abort the process* - still holds: the call
     /// RETURNS an `Err`, which it could only do by surviving the clamped
     /// `with_capacity` (an unclamped reservation would abort here before any
     /// count check could run).
@@ -389,7 +389,7 @@ mod tests {
     /// declared nnz was parsed but never checked against the actual number
     /// of data lines, so a truncated or corrupt file parsed silently into a
     /// matrix that did not match its own declaration. The count is now
-    /// validated. Oracle: the Matrix Market spec — the size line's third
+    /// validated. Oracle: the Matrix Market spec - the size line's third
     /// field is the number of entries that follow. Here the header declares
     /// 4 entries but the body has 2; pre-fix this returned `Ok` with
     /// `entries.len() == 2`, post-fix it is rejected.
@@ -654,7 +654,7 @@ mod tests {
     fn complex_mtx_round_trips_through_solver() {
         use crate::LdltSolver;
         // A small diagonally-dominant complex-symmetric system read from MTX,
-        // factored and solved — the end-to-end PARDISO-style path.
+        // factored and solved - the end-to-end PARDISO-style path.
         let mtx = "\
 %%MatrixMarket matrix coordinate complex symmetric
 3 3 5

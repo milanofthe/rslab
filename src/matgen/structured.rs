@@ -1,4 +1,4 @@
-//! Banded and arrow/KKT generators — direct control over fill (bandwidth) and the
+//! Banded and arrow/KKT generators - direct control over fill (bandwidth) and the
 //! symmetric-indefinite saddle-point structure that exercises Bunch-Kaufman 2×2
 //! pivoting.
 // Diagonal/triplet loops use the index as a value (push `k`, read `absum[k]`).
@@ -45,7 +45,7 @@ pub fn banded<T: Scalar>(n: usize, bandwidth: usize, alpha: f64, seed: u64) -> C
 /// **Arrow / bordered KKT** saddle-point matrix (symmetric **indefinite**):
 /// `[[A11, Bᵀ], [B, −C]]` with a tridiagonal SPD interior `A11` of size
 /// `n − border`, a dense coupling `B` (the `border` arrow rows), and a small
-/// negative `(2,2)` block — so the system is genuinely indefinite and drives 2×2
+/// negative `(2,2)` block - so the system is genuinely indefinite and drives 2×2
 /// pivots. `border` sets the (dense) border width; `gamma` the `(2,2)` regulariser.
 pub fn arrow<T: Scalar>(n: usize, border: usize, gamma: f64, seed: u64) -> CscMatrix<T> {
     let mut rng = Rng::new(seed);

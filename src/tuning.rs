@@ -4,7 +4,7 @@
 //! measures this machine's factorization throughput once (by factoring a
 //! representative grid) and caches it (FFTW-"wisdom" style, keyed by a hardware
 //! fingerprint); [`plan`] then turns a [`MemoryEstimate`] + a [`Budget`] into a
-//! concrete [`FactorPlan`] — picking the thread count, predicting peak memory and
+//! concrete [`FactorPlan`] - picking the thread count, predicting peak memory and
 //! wall-clock, and (when over budget) selecting approximations (mixed precision /
 //! incomplete factor / BLR) or recommending fail-fast. Deterministic given a fixed
 //! calibration, so solver-in-the-loop scheduling is reproducible.
@@ -15,7 +15,7 @@ use crate::diagnostics::MemoryEstimate;
 use crate::sparse::csc::CscMatrix;
 use crate::{BlrMode, FactorOptions, LdltSymbolic};
 
-/// Detected machine capabilities — for budgeting and the calibration key.
+/// Detected machine capabilities - for budgeting and the calibration key.
 #[derive(Debug, Clone)]
 pub struct HardwareInfo {
     pub logical_cores: usize,
@@ -47,7 +47,7 @@ impl HardwareInfo {
     }
 }
 
-/// Measured cost-model constants for this machine — the cached "wisdom".
+/// Measured cost-model constants for this machine - the cached "wisdom".
 #[derive(Debug, Clone, Copy)]
 pub struct Calibration {
     /// One-thread throughput in the `factor_flops` proxy unit, ×1e9 (giga/s).
@@ -220,7 +220,7 @@ pub fn plan(
         }
         if peak > maxm {
             notes.push(format!(
-                "STILL over budget ({:.0}>{:.0} MB) — recommend fail-fast",
+                "STILL over budget ({:.0}>{:.0} MB) - recommend fail-fast",
                 peak as f64 / 1e6,
                 maxm as f64 / 1e6
             ));
@@ -290,7 +290,7 @@ mod tests {
     }
 }
 
-/// 3D 7-point Laplacian (k³ grid, Dirichlet, SPD `f64`, lower triangle) — the
+/// 3D 7-point Laplacian (k³ grid, Dirichlet, SPD `f64`, lower triangle) - the
 /// calibration's representative matrix.
 fn grid3d_spd(k: usize) -> CscMatrix<f64> {
     let n = k * k * k;

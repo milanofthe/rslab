@@ -1,14 +1,14 @@
 //! Preconditioner memory ↔ convergence tradeoff for 3D complex-symmetric
-//! systems — the 3D EM FEM / MOM use case.
+//! systems - the 3D EM FEM / MOM use case.
 //!
 //! For one 3D 7-point complex-symmetric grid we factor several preconditioner
 //! configurations and drive COCG with each, reporting factor fill (memory),
 //! factor time, and the COCG iteration count + residual. This makes the
 //! memory-reduction levers measurable:
-//!   * f64 complete      — the exact reference factor.
-//!   * f64 incomplete(τ) — threshold dropping; less fill, more iterations.
-//!   * f32 complete      — half the bytes per entry (mixed precision).
-//!   * f32 + incomplete  — the aggressive low-memory preconditioner.
+//!   * f64 complete      - the exact reference factor.
+//!   * f64 incomplete(τ) - threshold dropping; less fill, more iterations.
+//!   * f32 complete      - half the bytes per entry (mixed precision).
+//!   * f32 + incomplete  - the aggressive low-memory preconditioner.
 //!
 //! Run: `cargo bench --bench precond`.
 
@@ -92,7 +92,7 @@ fn main() {
         .map(|i| Complex::new((i % 7) as f64 - 3.0, 0.5))
         .collect();
     println!(
-        "3D complex-symmetric preconditioning — grid {k}³ = {n} unknowns, nnz(A,lower)={}\n",
+        "3D complex-symmetric preconditioning - grid {k}³ = {n} unknowns, nnz(A,lower)={}\n",
         a.values.len()
     );
 

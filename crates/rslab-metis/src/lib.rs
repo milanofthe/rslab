@@ -11,11 +11,11 @@
 //! `OrderingStats`, `OrderingError`, and `CONTRACT_VERSION` are
 //! re-exported from `rslab-ordering-core`.
 //!
-//! **Status: M1–M7 complete.** `metis_order_full` coarsens the graph
+//! **Status: M1-M7 complete.** `metis_order_full` coarsens the graph
 //! (SHEM + 2-hop), picks the best of `niparts` initial bisections
 //! scored on their post-FM cut, uncoarsens with FM refinement, turns
 //! the final edge bisection into a node separator via min vertex
-//! cover (König's theorem), and recursively orders the two sides —
+//! cover (König's theorem), and recursively orders the two sides -
 //! handing off to AMD on subgraphs no larger than
 //! `nd_to_amd_switch`. M8 (integration into the main solver) is
 //! tracked separately in `dev/plans/ordering-metis.md`.
@@ -109,7 +109,7 @@ pub struct MetisOptions {
     /// (b) MUMPS handles dense rows *inside* its AMD/AMF
     /// (`MUMPS_QAMD` in `ana_orderings.F:5226+` with the `THRESM`
     /// parameter and `HEAD(N)` quasi-dense list); and
-    /// (c) SSIDS does not special-case dense rows at all — it relies
+    /// (c) SSIDS does not special-case dense rows at all - it relies
     /// on METIS placing them in the top separator and supernodal
     /// amalgamation collapsing the resulting chain into one dense
     /// BLAS-3 root frontal. Neither solver pre-strips the graph.
@@ -193,11 +193,11 @@ pub fn metis_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> 
 /// [`OrderingError`].
 ///
 /// `OrderingStats.time_us` is the wall-clock time of this call.
-/// `fill_estimate` and `flop_estimate` stay `None` — METIS does not
+/// `fill_estimate` and `flop_estimate` stay `None` - METIS does not
 /// produce them at the ordering boundary; they belong to a downstream
 /// symbolic analysis.
 ///
-/// Runs the M1–M7 pipeline: coarsen, initial bisection, FM, separator
+/// Runs the M1-M7 pipeline: coarsen, initial bisection, FM, separator
 /// construction, and recursive nested dissection with an AMD leaf
 /// fallback for subgraphs of at most `nd_to_amd_switch` vertices.
 pub fn metis_order_full(
@@ -210,17 +210,17 @@ pub fn metis_order_full(
     let t0 = std::time::Instant::now();
     let mut stats = MetisStats::default();
 
-    // Fix A — quasi-dense column quotient.
+    // Fix A - quasi-dense column quotient.
     //
     // Pull columns with off-diagonal degree above the
     // `dense_quotient_threshold` (default `max(40, 10*sqrt(n))`) out
-    // of the ND input graph, run M1–M7 ND on the *sparse-induced*
+    // of the ND input graph, run M1-M7 ND on the *sparse-induced*
     // subgraph, and append the dense columns at the end of the
     // returned permutation. This was originally modelled on a belief
     // that HSL_MC68 / MUMPS ICNTL(6) / SSIDS pre-strip dense rows, but
     // a 2026-04-27 audit of the MUMPS and SPRAL sources found that
     // belief wrong: ICNTL(6) is MC64 matching, MUMPS defers dense rows
-    // inside QAMD, and SSIDS does not special-case them — neither
+    // inside QAMD, and SSIDS does not special-case them - neither
     // pre-strips the graph. See `MetisOptions::dense_quotient_enabled`
     // for the full finding. The path is kept opt-in (default off) for
     // diagnostic use only.
@@ -239,7 +239,7 @@ pub fn metis_order_full(
         let sub_pat = CscPattern::new(sub_n, cp, ri).ok_or(OrderingError::MalformedInput)?;
         let sub_perm = node_nd::nd_order(&sub_pat, opts, &mut stats)?;
         // Lift sub-perm back to original indices and append dense
-        // columns at the end (in descending degree order — Davis &
+        // columns at the end (in descending degree order - Davis &
         // Hager 2009 §3.2 ordering choice; ties broken by ascending
         // original index).
         let mut perm: Vec<i32> = Vec::with_capacity(pattern.n);
@@ -335,7 +335,7 @@ fn split_dense_columns(
     }
 
     // Sort dense columns by *descending* degree, ties by ascending
-    // original index — Davis & Hager 2009 §3.2: "eliminate the densest
+    // original index - Davis & Hager 2009 §3.2: "eliminate the densest
     // last".
     dense.sort_by(|&a, &b| {
         deg[b as usize]
@@ -383,7 +383,7 @@ fn split_dense_columns(
             }
             let lr = orig_to_local[r];
             if lr < 0 {
-                // Edge crosses into the dense set — drop it from the
+                // Edge crosses into the dense set - drop it from the
                 // sparse-induced subgraph; the dense column carries
                 // that coupling and is eliminated at the end.
                 continue;

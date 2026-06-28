@@ -127,7 +127,7 @@ impl Drop for Pardiso {
 }
 
 // ---- CSC/CSR helpers ---------------------------------------------------------
-/// Full CSR (0-based) of an unsymmetric `GeneralCsc` — for PARDISO mtype 13.
+/// Full CSR (0-based) of an unsymmetric `GeneralCsc` - for PARDISO mtype 13.
 fn full_csr(a: &GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let n = a.n;
     let mut ia = vec![0i32; n + 1];
@@ -152,7 +152,7 @@ fn full_csr(a: &GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     (ia, ja, va)
 }
 
-/// Upper-triangle CSR (0-based) from a lower-triangle symmetric `CscMatrix` — for
+/// Upper-triangle CSR (0-based) from a lower-triangle symmetric `CscMatrix` - for
 /// PARDISO mtype 6. A lower entry `(r,c)` (r≥c) maps to the upper CSR cell `(c,r)`.
 fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let n = a.n;
@@ -180,7 +180,7 @@ fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
 }
 
 /// Full unsymmetric `GeneralCsc` from a lower-triangle symmetric `CscMatrix`
-/// (`A = Aᵀ`, complex-symmetric, no conjugate) — for faer's LU.
+/// (`A = Aᵀ`, complex-symmetric, no conjugate) - for faer's LU.
 fn sym_to_full(a: &CscMatrix<C>) -> GeneralCsc<C> {
     let n = a.n;
     let mut rows = Vec::with_capacity(a.values.len() * 2);
@@ -366,7 +366,7 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 if e3 == 0 {
                     // MKL self-reported peak memory (KB): max(iparm(15), iparm(16)+iparm(17)),
-                    // 0-based indices 14/15/16 — the analogue of the live-bytes peak.
+                    // 0-based indices 14/15/16 - the analogue of the live-bytes peak.
                     let peak_kb = ps.iparm[14].max(ps.iparm[15] + ps.iparm[16]);
                     let mm = peak_kb.max(0) as f64 / 1024.0;
                     let fill = ps.iparm[17].max(0) as usize;
@@ -398,7 +398,7 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
         "unsym" => sizes
             .iter()
             .map(|&sz| {
-                // cutoff ∝ 1/√n keeps ≈`deg` neighbours per row independent of n —
+                // cutoff ∝ 1/√n keeps ≈`deg` neighbours per row independent of n -
                 // a realistic near-field (constant degree under mesh refinement),
                 // unlike a fixed cutoff whose density grows with n.
                 let deg = 120.0;
@@ -466,7 +466,7 @@ fn main() {
     let opts = FactorOptions::default().with_threads(threads.max(1) as usize);
 
     // Estimate-only mode (`RLA_BENCH_ESTIMATE=1`): emit the a-priori memory-estimate
-    // breakdown per matrix and skip all factoring (instant — no numeric work).
+    // breakdown per matrix and skip all factoring (instant - no numeric work).
     let estimate_only = std::env::var("RLA_BENCH_ESTIMATE").map(|v| v == "1").unwrap_or(false);
 
     for (name, mat) in build_family(&family, &sizes) {

@@ -10,7 +10,7 @@ use crate::sparse::csc::CscPattern;
 /// - All fill entries propagated from earlier columns
 ///
 /// For indefinite factorization (LDL^T), the fill pattern is the same as
-/// Cholesky — pivoting changes values but not structure (ignoring delayed
+/// Cholesky - pivoting changes values but not structure (ignoring delayed
 /// pivots, which are Phase 2).
 ///
 /// Input `pattern` should be the full symmetric pattern (both triangles).
@@ -99,7 +99,7 @@ pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<u
 
     // delta[i] starts at 1 iff i is a leaf of the etree (the row subtree
     // T^r_i trivially contains i as a leaf whenever i has no etree children
-    // — the contribution of every node i to its own column count).
+    // - the contribution of every node i to its own column count).
     let mut delta: Vec<i64> = (0..n)
         .map(|i| if children[i].is_empty() { 1 } else { 0 })
         .collect();
@@ -110,7 +110,7 @@ pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<u
     //              current i via disjoint-set `find` on the partial etree.
     // ancestor[i]: DSU pointer; after node i is "processed" (below), it
     //              points (eventually) to the deepest still-unprocessed
-    //              ancestor — which is the LCA of any two descendants.
+    //              ancestor - which is the LCA of any two descendants.
     let mut maxfirst = vec![-1i64; n];
     let mut prevleaf = vec![-1i64; n];
     let mut ancestor: Vec<usize> = (0..n).collect();

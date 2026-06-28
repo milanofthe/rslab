@@ -33,7 +33,7 @@ use crate::scalar::Scalar;
 
 /// Scale-invariant singularity floor for a 2×2 Bunch-Kaufman pivot: a block
 /// whose `|det|` falls below `GROWTH_EPS · scale²` (scale = the largest block
-/// entry magnitude) is numerically singular — rejected in exact mode and lifted
+/// entry magnitude) is numerically singular - rejected in exact mode and lifted
 /// in static-pivot mode. Bounds the element growth `1/|det|` can otherwise
 /// inject into the trailing update.
 const GROWTH_EPS: f64 = 1e-14;
@@ -60,7 +60,7 @@ fn ldlt_prof_on() -> bool {
 pub enum ZeroPivotAction {
     /// Accept the tiny pivot at face value (zero the column, count as a zero in
     /// the inertia signature, flag for iterative refinement). The perturbation
-    /// magnitude is unbounded — use only when downstream code tolerates sign
+    /// magnitude is unbounded - use only when downstream code tolerates sign
     /// loss in the perturbed positions and re-checks inertia.
     ForceAccept,
     /// Return [`RslabError::NumericallyRankDeficient`].
@@ -79,7 +79,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// `true` (default) the deferred update `CB = A22 − L21·D·L21ᵀ` runs as a
 /// single SIMD GEMM ([`gemm`]); when `false` the identical update runs as a
 /// scalar triple loop over the same `l21`/`g`/`cb` buffers. Both paths produce
-/// the same factor — this exists only to A/B the kernel, mirroring rslab's
+/// the same factor - this exists only to A/B the kernel, mirroring rslab's
 /// `FORCE_SCALAR_FRONTAL`.
 pub(crate) static USE_GEMM_SCHUR: AtomicBool = AtomicBool::new(true);
 
@@ -89,7 +89,7 @@ pub fn set_use_gemm_schur(on: bool) {
     USE_GEMM_SCHUR.store(on, Ordering::Relaxed);
 }
 
-/// Child-reordering strategy, selected per analysis via [`AnalyzeOptions`] — the
+/// Child-reordering strategy, selected per analysis via [`AnalyzeOptions`] - the
 /// composable replacement for the old process-wide Liu toggle. A pure scheduling
 /// hint: it changes neither the factor, the fill, nor the e-numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,7 +99,7 @@ pub enum ReorderMode {
     /// the natural leaf order elsewhere. Memory-light, ≈ throughput-neutral.
     #[default]
     HybridLiu,
-    /// No child reordering: maximum leaf parallelism, larger CB-stack peak — for
+    /// No child reordering: maximum leaf parallelism, larger CB-stack peak - for
     /// when memory is not the constraint.
     Off,
 }
@@ -121,19 +121,19 @@ impl AnalyzeOptions {
     }
 }
 
-/// Factor emit/memory strategy — composable via [`FactorOptions::with_memory`].
+/// Factor emit/memory strategy - composable via [`FactorOptions::with_memory`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryMode {
     /// Collect every front's factor, then emit the global `L`/`U`.
     Eager,
     /// Free each front's dense factor as soon as it is emitted into the global
-    /// structure (default) — lower peak RSS at no accuracy cost: bit-identical
+    /// structure (default) - lower peak RSS at no accuracy cost: bit-identical
     /// factors, removes the emit-time per-front + global overlap.
     #[default]
     LowMemory,
 }
 
-/// Block-Low-Rank strategy — composable via [`FactorOptions::with_blr`]. BLR
+/// Block-Low-Rank strategy - composable via [`FactorOptions::with_blr`]. BLR
 /// makes the factor **approximate** (a preconditioner); drive iterative
 /// refinement against the original matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -159,7 +159,7 @@ impl BlrMode {
     }
 }
 
-/// Numeric factorization algorithm — composable via [`FactorOptions::with_method`].
+/// Numeric factorization algorithm - composable via [`FactorOptions::with_method`].
 /// Both produce the same factor (numerically equivalent); they differ in the
 /// transient-memory and scheduling profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -174,12 +174,12 @@ pub enum FactorMethod {
     /// [`with_method`]: FactorOptions::with_method
     Multifrontal,
     /// Supernodal left-looking (**the default**, and the [`preconditioner`]
-    /// choice): each panel pulls BLAS-3 updates from its factored descendants —
+    /// choice): each panel pulls BLAS-3 updates from its factored descendants -
     /// **no contribution-block stack, no extract phase** (the PARDISO transient
     /// profile), parallel over the assembly tree, lower fill, faster than
     /// multifrontal on the MoM matrices. Uses **Bunch-Kaufman 1×1/2×2 pivoting**
     /// (LDLᵀ) / **threshold partial pivoting** (LU), bounded to each panel's
-    /// fully-summed block — pivoting parity with the multifrontal path — so it
+    /// fully-summed block - pivoting parity with the multifrontal path - so it
     /// handles indefinite (zero-/tiny-diagonal) systems directly. The
     /// memory/throughput-optimal path for both exact direct solves and the
     /// equilibrated preconditioner.
@@ -197,7 +197,7 @@ pub enum FactorMethod {
 pub struct FactorOptions {
     /// Near-zero pivot policy. Reuses rslab's [`ZeroPivotAction`]: `Fail`
     /// (exact, default) returns [`RslabError::NumericallyRankDeficient`] on a
-    /// singular pivot; `PerturbToEps { abs_floor }` is robust static pivoting —
+    /// singular pivot; `PerturbToEps { abs_floor }` is robust static pivoting -
     /// a pivot below `abs_floor` is lifted to that floor (the
     /// complex-symmetric analogue of rslab's f64 `perturb_to_floor`), so the
     /// factorization never fails and produces `L D Lᵀ = A + E` for small `E`.
@@ -225,7 +225,7 @@ pub struct FactorOptions {
     /// [`Multifrontal`]: FactorMethod::Multifrontal
     pub method: FactorMethod,
     /// Worker-thread budget for this factorization, run in a **scoped** rayon pool
-    /// (not the global pool) — so multiple concurrent solves (solver-in-the-loop)
+    /// (not the global pool) - so multiple concurrent solves (solver-in-the-loop)
     /// share the machine instead of each grabbing every core. `0` = all logical
     /// cores. **Default `2`** (the in-the-loop default). The numeric result is
     /// bit-identical regardless of this value.
@@ -308,7 +308,7 @@ impl FactorOptions {
     }
 
     /// Builder: set the Block-Low-Rank strategy (makes the factor a
-    /// preconditioner — refine against the original matrix).
+    /// preconditioner - refine against the original matrix).
     pub fn with_blr(mut self, blr: BlrMode) -> Self {
         self.blr = blr;
         self
@@ -415,7 +415,7 @@ fn factor_front<T: Scalar>(
     // trailing Schur update to one SIMD GEMM (the BLAS-3 bulk, replacing the
     // scalar BLAS-2 column sweeps that dominated large fronts). The last column
     // of a panel has no in-panel candidate below it, so it is always a 1×1 step
-    // — a 2×2 block can never straddle a panel boundary.
+    // - a 2×2 block can never straddle a panel boundary.
     const NB: usize = 64;
     let mut kb = 0;
     while kb < ncol {
@@ -538,7 +538,7 @@ fn factor_front<T: Scalar>(
                 // real kernel (rslab's `perturb_2x2_to_floor`) shifts the small
                 // eigenvalue; for complex-symmetric blocks the eigenvalues are
                 // complex, so we shift both diagonals by the floor (lifting |det|)
-                // and, as a last resort, nudge det itself — enough to keep the
+                // and, as a last resort, nudge det itself - enough to keep the
                 // preconditioner factor live.
                 match perturb_floor {
                     Some(floor) => {
@@ -771,7 +771,7 @@ thread_local! {
 }
 
 /// A supernode's own factor plus the flat `(supernode-id, factor)` list for the
-/// rest of its subtree — the return shape of [`factor_subtree`].
+/// rest of its subtree - the return shape of [`factor_subtree`].
 type SubtreeFactors<T> = (NodeFactor<T>, Vec<(usize, NodeFactor<T>)>);
 
 /// Factor one supernode's front: build its row structure, assemble the original
@@ -815,7 +815,7 @@ fn factor_one_node<T: Scalar>(
     ri.extend(trailing);
     let nrow = ri.len();
 
-    // Front buffer (transient — the unavoidable nrow² zeroing dominates, so a
+    // Front buffer (transient - the unavoidable nrow² zeroing dominates, so a
     // per-front allocation adds only negligible malloc over a pooled one).
     let mut fbuf: Vec<T> = vec![T::zero(); nrow * nrow];
     let f = &mut fbuf[..];
@@ -876,7 +876,7 @@ fn factor_one_node<T: Scalar>(
 /// Recursively factor the assembly subtree rooted at supernode `s` with a
 /// work-stealing tree schedule: the children's subtrees factor concurrently and
 /// this node only after they finish. Independent subtrees fill idle threads and
-/// the per-front GEMM shares the same rayon pool — no level-barrier stall. See
+/// the per-front GEMM shares the same rayon pool - no level-barrier stall. See
 /// the unsymmetric twin in [`crate::numeric::multifrontal_lu`].
 fn factor_subtree<T: Scalar>(
     s: usize,
@@ -919,12 +919,12 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
     factor_sparse_ldlt_with(a, &FactorOptions::default())
 }
 
-/// Like [`factor_sparse_ldlt`] but with explicit [`FactorOptions`] —
+/// Like [`factor_sparse_ldlt`] but with explicit [`FactorOptions`] -
 /// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
 ///
 /// Convenience wrapper: runs [`analyze`] then [`factor_numeric`]. For the
-/// PARDISO-style *analyze once, factor many* workflow — FEM Newton steps or a
-/// frequency sweep that reuse one sparsity pattern — call them separately and
+/// PARDISO-style *analyze once, factor many* workflow - FEM Newton steps or a
+/// frequency sweep that reuse one sparsity pattern - call them separately and
 /// keep the [`MultifrontalSymbolic`] across factorizations.
 pub fn factor_sparse_ldlt_with<T: Scalar>(
     a: &CscMatrix<T>,
@@ -937,7 +937,7 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
 /// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
 /// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
 /// and pass to [`factor_numeric`] for each set of numeric values sharing the
-/// pattern — the PARDISO phase-1 analysis.
+/// pattern - the PARDISO phase-1 analysis.
 pub struct MultifrontalSymbolic {
     inner: Option<SymbolicInner>,
     n: usize,
@@ -966,7 +966,7 @@ impl MultifrontalSymbolic {
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)`: the number of
     /// eliminated columns and the full front height. The raw material for
-    /// factorization-cost diagnostics — front-size distribution (small vs dense
+    /// factorization-cost diagnostics - front-size distribution (small vs dense
     /// fronts → BLAS-2 vs BLAS-3 efficiency) and a factor-flop estimate.
     pub fn front_dims(&self) -> Vec<(usize, usize)> {
         match &self.inner {
@@ -1018,7 +1018,7 @@ pub fn analyze_with(
     // Disable LdltCompress: it transforms the pattern via a quotient-graph
     // compression beyond a plain permutation, so `sym.perm` would no longer be
     // consistent with the `A_perm` built in `factor_numeric`.
-    // Relaxed/fill-tolerant amalgamation — a standard sparse-direct technique
+    // Relaxed/fill-tolerant amalgamation - a standard sparse-direct technique
     // (PARDISO/MUMPS apply it to every matrix): when fundamental supernodes are
     // narrow the Schur-update GEMMs are low-rank and memory-bound, so trade a
     // little explicit-zero fill for wider, higher-rank dense fronts. The width is
@@ -1043,7 +1043,7 @@ pub fn analyze_with(
     // factorization. This is a pure **scheduling hint**: supernode IDs, the
     // e-numbering and the factor are unchanged (the global emit walks IDs, not
     // children, and trailing rows are sorted), so it is correctness-, fill- and
-    // throughput-neutral — it only shrinks the transient CB-stack that drives
+    // throughput-neutral - it only shrinks the transient CB-stack that drives
     // factorization peak RSS.
     //
     // Each node leaves a contribution block of size `cb = (nrow−ncol)²` for its
@@ -1054,7 +1054,7 @@ pub fn analyze_with(
     // single forward sweep has every child's `(peak, cb)` ready.
     //
     // **Hybrid Liu**: reordering is only applied where the contribution stack is
-    // actually large (`Σ children cb ≥ LIU_MIN_STACK`) — the upper/mid tree,
+    // actually large (`Σ children cb ≥ LIU_MIN_STACK`) - the upper/mid tree,
     // which is a handful of nodes carrying the spike. The vast majority of small
     // leaf nodes keep their natural order, whose rayon spawn pattern parallelizes
     // better. This keeps almost all of Liu's memory win while shedding most of
@@ -1117,7 +1117,7 @@ pub fn analyze_with(
     })
 }
 
-/// PARDISO phases 2–3: numeric factorization reusing a [`MultifrontalSymbolic`].
+/// PARDISO phases 2-3: numeric factorization reusing a [`MultifrontalSymbolic`].
 /// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
 /// from. Honours static pivoting and incomplete-factor dropping via `opts`.
 pub fn factor_numeric<T: Scalar>(
@@ -1277,7 +1277,7 @@ pub fn factor_numeric<T: Scalar>(
             }
             // Incomplete factorization: drop sub-threshold fill (relative to the
             // column's largest multiplier), keeping the unit diagonal. Shrinks
-            // nnz(L) and the apply cost — an approximate factor for use as a
+            // nnz(L) and the apply cost - an approximate factor for use as a
             // preconditioner. `None` keeps the factor complete.
             if let Some(tau) = opts.drop_tol {
                 let colmax = col
@@ -1362,9 +1362,9 @@ pub(crate) fn compute_supernode_row_structures(
 }
 
 /// Concurrently-filled store of the left-looking factor panels. Each cell is
-/// written exactly once — by its owning supernode's factorization, which
+/// written exactly once - by its owning supernode's factorization, which
 /// completes before any ancestor (its only reader) runs, per the subtree
-/// recursion — and concurrent writers touch disjoint indices, so the unsynchronized
+/// recursion - and concurrent writers touch disjoint indices, so the unsynchronized
 /// interior mutability is sound.
 struct LlStore<T> {
     panels: Vec<std::cell::UnsafeCell<Vec<T>>>,
@@ -1380,7 +1380,7 @@ struct LlStore<T> {
     /// fully-summed block). Pivoted index `i` ↔ original local index `lperm[i]`.
     lperms: Vec<std::cell::UnsafeCell<Vec<usize>>>,
 }
-// SAFETY: see the type doc — single-writer-before-readers, disjoint indices.
+// SAFETY: see the type doc - single-writer-before-readers, disjoint indices.
 unsafe impl<T: Send> Sync for LlStore<T> {}
 
 impl<T: Scalar> LlStore<T> {
@@ -1440,7 +1440,7 @@ impl<T: Scalar> LlStore<T> {
         *self.lperms[s].get() = lperm;
     }
     /// Release `k`'s dense panel + D/lperm once it has been compacted.
-    /// SAFETY: `k`'s last consumer is done — no other thread reads its cells.
+    /// SAFETY: `k`'s last consumer is done - no other thread reads its cells.
     unsafe fn free(&self, k: usize) {
         *self.panels[k].get() = Vec::new();
         *self.dvals[k].get() = Vec::new();
@@ -1533,7 +1533,7 @@ fn ldlt_emit_and_free<T: Scalar>(
 ) {
     let ncol = sym.supernodes[k].ncol;
     let nrow = rs[k].len();
-    // SAFETY: `k` is fully factored and its last consumer is done — exclusive.
+    // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
     let panel = unsafe { store.panel(k) };
     let lperm = unsafe { store.lperm(k) };
     let t2 = unsafe { store.two(k) };
@@ -1572,7 +1572,7 @@ fn ldlt_emit_and_free<T: Scalar>(
     }
     // SAFETY: exactly one thread emits `k`; `compact[k]` is written once.
     unsafe { *emit.compact[k].get() = cl };
-    // SAFETY: last consumer done — no other thread reads `k`'s cells.
+    // SAFETY: last consumer done - no other thread reads `k`'s cells.
     if !ldlt_no_free() {
         unsafe { store.free(k) };
     }
@@ -1751,8 +1751,8 @@ fn ll_factor_node<T: Scalar>(
     // rectangular `nrow × ncol` analogue of `factor_front`'s panel kernel. The
     // fully-summed columns are factored in panels of width `NB` with pivoting
     // **bounded to the panel** (candidate rows `(k+1)..ke`), then each panel's
-    // trailing update — the remaining panel columns `[ke, ncol)` over all rows
-    // `[ke, nrow)` — is deferred to one SIMD GEMM (the BLAS-3 bulk, replacing the
+    // trailing update - the remaining panel columns `[ke, ncol)` over all rows
+    // `[ke, nrow)` - is deferred to one SIMD GEMM (the BLAS-3 bulk, replacing the
     // scalar rank-1/rank-2 sweeps that dominated wide separators). Unlike
     // `factor_front` there is **no `A22` block** (the panel has no columns beyond
     // `ncol`; that Schur update is the ancestors' `cmod`), so the trailing region
@@ -2151,7 +2151,7 @@ fn ll_factor_subtree<T: Scalar>(
         .collect::<Result<Vec<()>, _>>()?;
     ll_factor_node(s, sym, a_perm, rs, update_list, store, emit, perturb_floor, n_perturbed)?;
     // Free each descendant whose last consumer this node was (refcount→0), and `s`
-    // itself if it has no consumers — compacting before releasing the dense panel.
+    // itself if it has no consumers - compacting before releasing the dense panel.
     // Disjoint `k`, so the wide top-of-tree free runs in parallel.
     const FREE_PAR: usize = 64;
     if update_list[s].len() >= FREE_PAR {
@@ -2181,7 +2181,7 @@ fn ll_factor_subtree<T: Scalar>(
 /// each panel's fully-summed block, so the off-diagonal rows keep their identity
 /// and the descendant→ancestor `cmod` is unaffected by a panel's internal
 /// permutation. There is **no contribution-block stack and no extract copy-out**
-/// — the panels are the factor — so the transient is just the factor itself (the
+/// - the panels are the factor - so the transient is just the factor itself (the
 /// PARDISO memory profile). Produces the same [`LdltFactors`] as the multifrontal
 /// path (numerically equivalent up to pivot order), including indefinite
 /// (zero-/tiny-diagonal) systems via the 2×2 blocks.
@@ -2287,7 +2287,7 @@ fn factor_left_looking<T: Scalar>(
     }
 
     // Assemble global L (CSC) by concatenating the per-supernode compact fragments
-    // produced (and freed) incrementally during factorization — taken by value and
+    // produced (and freed) incrementally during factorization - taken by value and
     // dropped right after appending, so the peak is the growing CSC + one fragment,
     // not all fragments + the full CSC. D / perm / inertia were populated in-node.
     let mut l_col_ptr = Vec::with_capacity(n + 1);
@@ -2479,7 +2479,7 @@ mod tests {
         // 2D 5-point grid with a *small* diagonal (0.5 ≪ 2·|off|): far from
         // diagonally dominant → genuinely indefinite, so Bunch-Kaufman must take
         // many 2×2 pivots across several supernodes. The left-looking path must
-        // match the multifrontal reference in inertia and give a true solve — the
+        // match the multifrontal reference in inertia and give a true solve - the
         // exact indefinite EM-FEM case the 2×2 pivoting is for.
         let a = grid2d_lower::<f64>(10, 0.5, -1.0);
         let n = a.n;
@@ -2749,7 +2749,7 @@ mod tests {
     #[test]
     fn exact_mode_never_perturbs_well_conditioned() {
         // A diagonally dominant complex-symmetric grid factors exactly with no
-        // perturbation — the static-pivot path must not trigger spuriously.
+        // perturbation - the static-pivot path must not trigger spuriously.
         let a = {
             let c = |re, im| Complex::new(re, im);
             let n = 16;

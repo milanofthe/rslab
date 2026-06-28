@@ -42,7 +42,7 @@ use crate::sparse::csc::{CscMatrix, CscPattern};
 /// - `InvalidInput("schur_indices.len() == n is not allowed")`
 ///   (would mean elimination set is empty; the user almost
 ///   certainly meant a partial Schur and `n_schur == n` is a
-///   logic bug upstream — see F3.0 D-Question 3.)
+///   logic bug upstream - see F3.0 D-Question 3.)
 pub fn compute_schur_aware_perm(
     matrix: &CscMatrix,
     schur_indices: &[usize],
@@ -180,7 +180,7 @@ fn restrict_pattern_to_subgraph(full: &CscPattern, sub_of: &[usize], n_f: usize)
 ///
 /// Mirrors the `run_external_ordering` path in `src/symbolic/mod.rs`
 /// but specialized to AMD only. We keep this local because F3.1 doesn't
-/// need to plumb a `method` parameter — F3.2 will, when it integrates
+/// need to plumb a `method` parameter - F3.2 will, when it integrates
 /// the Schur-aware ordering into `symbolic_factorize_with_schur` and
 /// dispatches over all four ordering methods.
 fn run_amd(pattern: &CscPattern) -> Result<Vec<usize>, RslabError> {
@@ -330,7 +330,7 @@ mod tests {
         sub_of[3] = 3;
         let sub = restrict_pattern_to_subgraph(&full, &sub_of, 4);
         assert_eq!(sub.n, 4);
-        // Diagonal entries — each column has exactly 1 entry (the diagonal).
+        // Diagonal entries - each column has exactly 1 entry (the diagonal).
         for j in 0..4 {
             let nnz_j = sub.col_ptr[j + 1] - sub.col_ptr[j];
             assert_eq!(nnz_j, 1, "column {} expected 1 entry, got {}", j, nnz_j);

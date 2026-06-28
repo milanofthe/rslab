@@ -2,7 +2,7 @@
 //!
 //! Fetches a matrix archive from the SuiteSparse Matrix Collection
 //! (`https://sparse.tamu.edu/MM/<group>/<name>.tar.gz`), extracts the `.mtx`, and
-//! caches it locally — so benchmarks can sweep **real application matrices**
+//! caches it locally - so benchmarks can sweep **real application matrices**
 //! alongside the generated ones (the realism gold standard). Pure Rust:
 //! `ureq` + `rustls` (no OpenSSL), `flate2`/`miniz_oxide`, `tar`.
 //!
@@ -71,7 +71,7 @@ mod tests {
 }
 
 /// A small curated set of real SuiteSparse matrices spanning the benchmark axes
-/// (size / symmetry / conditioning / density) — convenient starting points for a
+/// (size / symmetry / conditioning / density) - convenient starting points for a
 /// "real matrices" sweep. `(group, name, note)`.
 pub fn suggested() -> &'static [(&'static str, &'static str, &'static str)] {
     &[

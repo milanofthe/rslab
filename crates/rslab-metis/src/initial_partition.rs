@@ -88,7 +88,7 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
     }
 
     // Add v's still-in-B neighbours to the boundary and credit each
-    // with the v–u edge weight on the A side.
+    // with the v-u edge weight on the A side.
     let push_neighbors = |v: usize,
                           graph: &Graph,
                           labels: &[u8],

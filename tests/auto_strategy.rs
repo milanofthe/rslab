@@ -1,4 +1,4 @@
-//! Phase 2.13a — `AmalgamationStrategy::Auto` dispatch tests.
+//! Phase 2.13a - `AmalgamationStrategy::Auto` dispatch tests.
 //!
 //! Verifies the cheap O(n) etree shape predicate routes:
 //!   * pure path etree → `Adjacency` (Renumber over-merging case)

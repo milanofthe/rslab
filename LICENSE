@@ -1,6 +1,10 @@
 MIT License
 
 Copyright (c) 2026 Milan Rother
+Copyright (c) 2026 John Kitchin (feral, https://github.com/jkitchin/feral)
+
+RSLAB is a fork of feral; this license covers both the original feral code and the
+RSLAB modifications. See NOTICE for attribution details.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

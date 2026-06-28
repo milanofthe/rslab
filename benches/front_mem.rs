@@ -1,10 +1,10 @@
-//! Multifrontal LU **memory accounting** — diagnoses the transient peak that
+//! Multifrontal LU **memory accounting** - diagnoses the transient peak that
 //! causes OOMs. Uses only the (cheap) symbolic analysis `front_dims` so it never
 //! runs the (potentially OOM-ing) numeric factorization.
 //!
 //! For each `*.mtx` it reports, in 16-byte complex-f64 units:
 //!   * retained dense `L`+`U` panels   = Σ 2·nrow·ncol  (held until the global emit)
-//!   * retained dense contribution `CB` = Σ (nrow−ncol)² (held until the parent consumes — currently to the end)
+//!   * retained dense contribution `CB` = Σ (nrow−ncol)² (held until the parent consumes - currently to the end)
 //!   * peak single-front transient      = max(nrow²[fbuf] + 2·nrow·ncol[l,u] + (nrow−ncol)²[cb])
 //!   * the largest front (ncol, nrow)
 //!

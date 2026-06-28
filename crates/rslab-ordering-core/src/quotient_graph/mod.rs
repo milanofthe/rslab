@@ -7,8 +7,8 @@
 //! (`PE / IW / LEN / NV / ELEN`), the standard / aggressive element
 //! absorption logic, the mass-elimination fast path, the
 //! supervariable hash bucket detection, and the inline garbage
-//! collector. They differ only in the *selection metric* —
-//! approximate degree (AMD) vs approximate fill (AMF) — which is
+//! collector. They differ only in the *selection metric* -
+//! approximate degree (AMD) vs approximate fill (AMF) - which is
 //! abstracted behind the [`Metric`] trait. Phase A shipped the trait
 //! plus the AMD-specialised [`MinDegree`] impl; Phase B.2 added
 //! [`MinFill`] driving the parallel `run_elimination_amf` /
@@ -50,7 +50,7 @@ pub struct WorkspaceOptions {
     /// Dense-row threshold multiplier (Davis 1996 §5). A variable
     /// with initial degree exceeding
     /// `min(max(16, floor(dense_alpha * sqrt(n))), n)` is deferred to
-    /// the end of the ordering — the `max(16)` floor is applied before
+    /// the end of the ordering - the `max(16)` floor is applied before
     /// the `min(n)` cap, matching faer `amd.rs:173-179`. A negative
     /// value uses a raw threshold of `n - 2` with the same clamps; for
     /// `n >= 18` that is exactly `n - 2`, suppressing deferral for

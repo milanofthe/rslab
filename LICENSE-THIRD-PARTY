@@ -3,10 +3,10 @@ Third-Party License Texts
 ================================================================================
 
 This file reproduces the license texts of third-party software whose code is
-incorporated into Feral. See NOTICE for a summary of where and how each is used.
+incorporated into RSLAB. See NOTICE for a summary of where and how each is used.
 
 --------------------------------------------------------------------------------
-SPRAL — Science and Technology Facilities Council
+SPRAL - Science and Technology Facilities Council
 --------------------------------------------------------------------------------
 
 Portions of src/scaling/hungarian.rs and src/scaling/mc64.rs are derived from

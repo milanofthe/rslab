@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn compress_dedups_parallel_edges() {
         // 4 variables, pair {0,2}, pair {1,3}. Edges 0-1 and 2-3 both
-        // contract to super-0 ↔ super-1 — the accumulator must emit
+        // contract to super-0 ↔ super-1 - the accumulator must emit
         // the edge once per direction.
         let pat = build_full_pattern(4, &[(0, 1), (2, 3)]);
         let map = build_supermap(&[2, 3, 0, 1]);
@@ -380,7 +380,7 @@ mod tests {
         for &(r, c) in &edges {
             assert!(
                 edges.contains(&(c, r)),
-                "edge ({}, {}) present but ({}, {}) not — asymmetry",
+                "edge ({}, {}) present but ({}, {}) not - asymmetry",
                 r,
                 c,
                 c,

@@ -21,13 +21,13 @@
 //!     re-coarsening for monotone quality improvement).
 //!   - K6: Driver and Fast / Eco / Strong modes.
 //!
-//! **Reference papers** (published, public-domain algorithms — the
+//! **Reference papers** (published, public-domain algorithms - the
 //! implementation must be clean-room from these sources, not from
 //! KaHIP's C++ codebase):
 //!   - Sanders & Schulz, "Engineering Multilevel Graph Partitioning
-//!     Algorithms" (2011) — the kaffpa framework.
+//!     Algorithms" (2011) - the kaffpa framework.
 //!   - Ost, Schulz & Strash, "Engineering Data Reduction for Nested
-//!     Dissection" (2021) — the K1 reduction rules.
+//!     Dissection" (2021) - the K1 reduction rules.
 //!
 //! The public surface conforms to the RSLAB ordering-crate contract
 //! (`dev/plans/ordering-crate-contract.md`): `CscPattern`,
@@ -91,7 +91,7 @@ pub struct KahipStats {
     /// Largest max-flow subproblem size, in vertices, encountered
     /// during flow-based refinement. `0` while scaffolded.
     pub max_flow_vertices: usize,
-    /// Number of multilevel bisections performed — one per node-separator
+    /// Number of multilevel bisections performed - one per node-separator
     /// computation across the nested-dissection tree. Each is a single
     /// V-cycle (one coarsen followed by one uncoarsen). `0` while
     /// scaffolded.
@@ -121,7 +121,7 @@ pub enum KahipMode {
 
 /// Tunable parameters for KaHIP nested-dissection ordering.
 ///
-/// Kept intentionally narrow while the crate is a scaffold —
+/// Kept intentionally narrow while the crate is a scaffold -
 /// defaults will match KaHIP's library defaults (seed=0, mode=Fast)
 /// once phase K6 is implemented.
 #[derive(Debug, Clone)]
@@ -168,7 +168,7 @@ pub fn kahip_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> 
 /// fallback for subgraphs below the mode-dependent switch.
 ///
 /// `OrderingStats.time_us` is the wall-clock time of this call.
-/// `fill_estimate` and `flop_estimate` stay `None` — KaHIP does not
+/// `fill_estimate` and `flop_estimate` stay `None` - KaHIP does not
 /// produce them at the ordering boundary; they belong to a downstream
 /// symbolic analysis.
 pub fn kahip_order_full(
@@ -220,7 +220,7 @@ mod tests {
     fn scaffold_propagates_malformed_input_to_caller() {
         // Caller-side malformed check: col_ptr len mismatch.
         // We have to construct this manually since CscPattern::new
-        // refuses it — so build the struct through a sibling-crate
+        // refuses it - so build the struct through a sibling-crate
         // pattern then corrupt through direct field access is not
         // possible. Instead, test the same invariant via public API.
         let col_ptr = [0i32, 2];

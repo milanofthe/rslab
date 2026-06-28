@@ -96,7 +96,7 @@ where
 }
 
 fn main() -> Result<(), RslabError> {
-    println!("RLA generic sparse solver — baseline (release)\n");
+    println!("RLA generic sparse solver - baseline (release)\n");
     let sizes = [20usize, 40, 60, 80, 100];
 
     println!("== f64 (diag 4, off -1) ==");

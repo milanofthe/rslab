@@ -1,6 +1,6 @@
 //! Transient-memory comparison of the two LDLᵀ factor methods on a
 //! complex-symmetric 3D grid: multifrontal (CB stack + per-front extract) vs
-//! supernodal left-looking (panels only — no CB stack, no extract). Reports the
+//! supernodal left-looking (panels only - no CB stack, no extract). Reports the
 //! peak working-set sampled *during* each factorization and the factor time.
 //!
 //! The left-looking path is rayon-parallel with a blocked BLAS-3 cmod/cdiv, so

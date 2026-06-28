@@ -12,7 +12,7 @@
 //! from repeated rows/columns in structured KKT and FE-mesh patterns.
 //!
 //! We **do not** detect the disjoint case `(u, v) ∉ E ∧ N(u) = N(v)`
-//! — it is rare in the SCOTCH target workloads, and conflating it
+//! - it is rare in the SCOTCH target workloads, and conflating it
 //! with the closed-neighborhood test would require either two hash
 //! passes or a per-pair fix-up at compare time. The research note
 //! documents this as a deliberate, conservative S1 decision.
@@ -187,7 +187,7 @@ pub(crate) fn compress_graph(g: &Graph, max_ratio: f64) -> Option<CompressedGrap
 
 /// Build the sorted closed neighborhood `N[v] = N(v) ∪ {v}` of `v`.
 ///
-/// Relies on `g.neighbors(v)` already being sorted ascending — the
+/// Relies on `g.neighbors(v)` already being sorted ascending - the
 /// from-CSC constructor guarantees this on intake. Uses
 /// `partition_point` to insert `v` at the correct sorted position
 /// without re-sorting.
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn high_threshold_rejects_modest_compression() {
-        // Block-diagonal compresses to ratio 0.25 — below 0.7 default.
+        // Block-diagonal compresses to ratio 0.25 - below 0.7 default.
         // With threshold = 0.2 (only accept *very* aggressive
         // compression), 0.25 >= 0.2 so we reject.
         let g = three_k4_blocks();
@@ -328,7 +328,7 @@ mod tests {
 
     // --- Edge-weight summing -------------------------------------------
 
-    /// Two K_3 blocks bridged by a single edge (vertex 2 — vertex 3).
+    /// Two K_3 blocks bridged by a single edge (vertex 2 - vertex 3).
     /// After compression: 4 supervariables { {0,1}, {2}, {3}, {4,5} }.
     /// The {0,1}→{2} compressed edge must carry weight 2 (one
     /// contribution from edge (0,2), one from edge (1,2)). Likewise
@@ -450,17 +450,17 @@ mod tests {
         // Original edges: 3 in each K_3 + 1 bridge = 7 undirected,
         // each stored twice = 14 directed entries with unit weight.
         // Self-loops after compression: all 3 K_3 edges in each block
-        // collapse — 6 undirected = 12 directed entries.
+        // collapse - 6 undirected = 12 directed entries.
         // Surviving directed weight: 14 - 12 = 2 (the bridge x2).
         // Plus the inter-class edges {0,1}↔{2} and {3}↔{4,5} are
         // unchanged in directed-weight total because each original
         // directed entry maps 1:1 to a directed compressed entry.
-        // Wait — those K_3 edges are intra-class for the {0,1} and
+        // Wait - those K_3 edges are intra-class for the {0,1} and
         // {4,5} classes, but the (0,2), (1,2), (3,4), (3,5) edges are
         // inter-class. Let me redo:
         //   Intra-class K_3 edges (collapsed to self-loops):
-        //     (0,1) — {0,1} ↔ {0,1}: self-loop. 2 directed entries.
-        //     (4,5) — {4,5} ↔ {4,5}: self-loop. 2 directed entries.
+        //     (0,1) - {0,1} ↔ {0,1}: self-loop. 2 directed entries.
+        //     (4,5) - {4,5} ↔ {4,5}: self-loop. 2 directed entries.
         //   Total intra-class = 4 directed entries dropped.
         //   Surviving directed weight = 14 - 4 = 10.
         let total_out: i32 = cg.graph.adjwgt.iter().sum();

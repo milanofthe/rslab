@@ -2,7 +2,7 @@
 //!
 //! Mirrors METIS 5.2.0's `graph_t` (see `libmetis/struct.h`) with
 //! Rust-idiomatic `Vec` storage. Diagonal entries of the input
-//! matrix (self-loops in the graph) are dropped — they carry no
+//! matrix (self-loops in the graph) are dropped - they carry no
 //! information for fill-reducing ordering and would otherwise need
 //! to be stripped in every downstream kernel.
 //!
@@ -44,7 +44,7 @@ impl Graph {
     /// Diagonal entries are dropped. The input is assumed to be
     /// already structurally symmetric per the contract (debug-
     /// asserted elsewhere). Row indices within each CSC column are
-    /// sorted ascending — `CscPattern::new` enforces this — so any
+    /// sorted ascending - `CscPattern::new` enforces this - so any
     /// duplicates are adjacent and a running "last seen" check drops
     /// all of them without needing a hash set.
     ///

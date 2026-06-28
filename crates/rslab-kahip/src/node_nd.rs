@@ -1,4 +1,4 @@
-//! KaHIP Phase K6 — recursive nested-dissection driver.
+//! KaHIP Phase K6 - recursive nested-dissection driver.
 //!
 //! Walks connected components of the input graph; for each, recurses
 //! with a contiguous numbering window. At each recursion level: if the
@@ -36,7 +36,7 @@ pub(crate) fn kahip_nd_order(
     stats: &mut KahipStats,
 ) -> Result<Vec<i32>, OrderingError> {
     // K1: Ost-Schulz-Strash data reduction. We apply only Rule 1
-    // (degree-1 cascading) — Rules 2-4 hurt fill empirically on our
+    // (degree-1 cascading) - Rules 2-4 hurt fill empirically on our
     // corpus even with a corrected expansion; see `ReduceOptions`.
     // Rule 1 alone cleanly strips the leaf-heavy parts of arrow-
     // structured KKTs before we hand the core to multilevel
