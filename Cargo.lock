@@ -1461,7 +1461,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rla"
+name = "rslab"
 version = "0.11.2"
 dependencies = [
  "approx",

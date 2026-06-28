@@ -9,11 +9,11 @@ members = [".", "crates/feral-ordering-core", "crates/feral-amd", "crates/feral-
 resolver = "2"
 
 [package]
-name = "rla"
+name = "rslab"
 version = "0.11.2"
 edition = "2021"
 license = "MIT"
-description = "RLA — pure-Rust sparse complex/real direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
+description = "RSLAB — pure-Rust sparse complex/real direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
 repository = "https://github.com/jkitchin/feral"
 homepage = "https://github.com/jkitchin/feral"
@@ -44,7 +44,7 @@ exclude = [
 ]
 
 [lib]
-name = "rla"
+name = "rslab"
 
 [features]
 # Parametrized test-matrix generators (pure Rust, no extra deps). Off by default

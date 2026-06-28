@@ -237,8 +237,8 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
 /// share the pattern.
 ///
 /// ```
-/// use rla::{LdltSymbolic, FactorOptions, CscMatrix};
-/// # fn demo(pattern_vals: &[f64], updated_vals: &[f64]) -> Result<(), rla::FeralError> {
+/// use rslab::{LdltSymbolic, FactorOptions, CscMatrix};
+/// # fn demo(pattern_vals: &[f64], updated_vals: &[f64]) -> Result<(), rslab::FeralError> {
 /// let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0])?;
 /// let analysis = LdltSymbolic::analyze(&a)?;        // phase 1, once
 /// let f1 = analysis.factor(&a, &FactorOptions::default())?; // phase 2/3

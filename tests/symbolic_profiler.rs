@@ -14,11 +14,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use rla::symbolic::supernode::OrderingPreprocess;
-use rla::symbolic::{
+use rslab::symbolic::supernode::OrderingPreprocess;
+use rslab::symbolic::{
     pick_ordering_preprocess, symbolic_factorize, SupernodeParams, SymbolicProfiler,
 };
-use rla::CscMatrix;
+use rslab::CscMatrix;
 
 /// Arrow matrix: a dense hub column 0 plus `n-1` degree-1 leaf columns.
 /// Stored as the lower triangle, columns `1..n` each hold only their

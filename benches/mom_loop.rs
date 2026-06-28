@@ -12,8 +12,8 @@
 use std::time::Instant;
 
 use num_complex::Complex;
-use rla::prelude::*;
-use rla::LowPrecisionLu;
+use rslab::prelude::*;
+use rslab::LowPrecisionLu;
 
 type C = Complex<f64>;
 

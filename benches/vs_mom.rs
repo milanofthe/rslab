@@ -17,15 +17,15 @@ use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{c64, Mat};
 use num_complex::Complex;
-use rla::prelude::*;
-use rla::{
+use rslab::prelude::*;
+use rslab::{
     AnalyzeOptions, BlrMode, FactorMethod, FactorOptions, LuSymbolic, MemoryMode, ReorderMode,
 };
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 type C = Complex<f64>;
 
-fn rel_resid(a: &rla::GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
+fn rel_resid(a: &rslab::GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
     let mut ax = vec![Complex::new(0.0, 0.0); a.n];
     a.matvec(x, &mut ax);
     let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();

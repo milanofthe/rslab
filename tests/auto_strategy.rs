@@ -8,8 +8,8 @@
 //! See `dev/research/phase-2.13a-amalgamation-auto.md`.
 
 #![allow(clippy::assertions_on_constants, clippy::needless_range_loop)]
-use rla::ordering::elimination_tree::EliminationTree;
-use rla::symbolic::{
+use rslab::ordering::elimination_tree::EliminationTree;
+use rslab::symbolic::{
     pick_amalgamation_strategy, AmalgamationStrategy, AUTO_MULTI_CHILD_FRAC_THRESHOLD,
 };
 

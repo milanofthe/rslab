@@ -25,8 +25,8 @@ use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{c64, Mat as FaerMat};
 use num_complex::Complex;
-use rla::matgen::{bem, stencil};
-use rla::{
+use rslab::matgen::{bem, stencil};
+use rslab::{
     parse_mtx_complex_general, CscMatrix, FactorMethod, FactorOptions, GeneralCsc, LdltSymbolic,
     LuSymbolic,
 };

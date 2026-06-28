@@ -9,10 +9,10 @@
 //! Plan: `dev/plans/phase-2.12-column-renumbering.md`.
 //! Research: `dev/research/phase-2.12-column-renumbering.md`.
 
-use rla::symbolic::{
+use rslab::symbolic::{
     symbolic_factorize_with_method, AmalgamationStrategy, OrderingMethod, SupernodeParams,
 };
-use rla::CscMatrix;
+use rslab::CscMatrix;
 
 /// Arrow matrix: variables 0..n-2 are coupled only to variable n-1
 /// (the "tip" of the arrow). With nemin=32, the SSIDS size rule

@@ -8,10 +8,10 @@
 // The lib build keeps default clippy strictness.
 #![cfg_attr(test, allow(clippy::needless_range_loop))]
 
-//! # RLA — a pure-Rust sparse symmetric direct solver and preconditioner
+//! # RSLAB — a pure-Rust sparse symmetric direct solver and preconditioner
 //!
 //! A self-contained replacement for PARDISO's sparse symmetric path, with no
-//! MKL or other native dependency. RLA factors **real symmetric** (`f64`,
+//! MKL or other native dependency. RSLAB factors **real symmetric** (`f64`,
 //! PARDISO `mtype 2`) and **complex symmetric** (`Complex<f64>`, `mtype 6`)
 //! matrices as `Pᵀ A P = L D Lᵀ` by a rayon-parallel multifrontal
 //! Bunch-Kaufman method with a SIMD (`gemm`) Schur kernel.
@@ -28,8 +28,8 @@
 //! (Newton steps, time stepping, frequency sweep):
 //!
 //! ```
-//! # fn main() -> Result<(), rla::FeralError> {
-//! use rla::prelude::*;
+//! # fn main() -> Result<(), rslab::FeralError> {
+//! use rslab::prelude::*;
 //! // Real symmetric matrix, lower triangle (i ≥ j).
 //! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!                                         &[2.0, 2.0, 2.0, -1.0])?;
@@ -45,8 +45,8 @@
 //! dropping) used to precondition COCG:
 //!
 //! ```
-//! # fn main() -> Result<(), rla::FeralError> {
-//! use rla::prelude::*;
+//! # fn main() -> Result<(), rslab::FeralError> {
+//! use rslab::prelude::*;
 //! use num_complex::Complex;
 //! let c = |re, im| Complex::new(re, im);
 //! let a = CscMatrix::<Complex<f64>>::from_triplets(
@@ -95,7 +95,7 @@ pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::FeralError;
 /// Ergonomic alias for the crate error type ([`FeralError`]).
-pub use error::FeralError as RlaError;
+pub use error::FeralError as RslabError;
 pub use scalar::Scalar;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
@@ -126,8 +126,8 @@ pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
 pub use symbolic::SymbolicProfileReport;
 
-/// Ergonomic imports for embedding RLA as a PARDISO-style sparse solver /
-/// preconditioner. `use rla::prelude::*;` brings in the matrix type, the
+/// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /
+/// preconditioner. `use rslab::prelude::*;` brings in the matrix type, the
 /// phased analysis/factor API, the iterative solvers and preconditioners, the
 /// options enums, and the Matrix Market loaders.
 pub mod prelude {

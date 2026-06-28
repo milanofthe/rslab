@@ -10,8 +10,8 @@
 //!
 //! Run: `cargo bench --bench front_mem`.
 
-use rla::prelude::*;
-use rla::LuSymbolic;
+use rslab::prelude::*;
+use rslab::LuSymbolic;
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 const B: f64 = 16.0; // bytes per Complex<f64>

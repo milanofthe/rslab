@@ -38,11 +38,11 @@
 //!     factor; HAMF4 cuts it to ~95k). Skips with SKIP if the
 //!     matrix is absent.
 
-use rla::ordering::amd::permute_pattern;
-use rla::ordering::elimination_tree::EliminationTree;
-use rla::read_mtx;
-use rla::sparse::csc::{CscMatrix, CscPattern};
-use rla::symbolic::{column_counts_gnp, total_factor_nnz};
+use rslab::ordering::amd::permute_pattern;
+use rslab::ordering::elimination_tree::EliminationTree;
+use rslab::read_mtx;
+use rslab::sparse::csc::{CscMatrix, CscPattern};
+use rslab::symbolic::{column_counts_gnp, total_factor_nnz};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 

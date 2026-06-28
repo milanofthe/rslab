@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use num_complex::Complex;
-use rla::sparse::general::GeneralCsc;
-use rla::{
+use rslab::sparse::general::GeneralCsc;
+use rslab::{
     factor_general_lu, parse_mtx_complex_general, solve_lu, solve_lu_refined, FactorOptions,
     ZeroPivotAction,
 };

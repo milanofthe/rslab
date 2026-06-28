@@ -11,9 +11,9 @@
 use std::time::Instant;
 
 use num_complex::Complex;
-use rla::sparse::csc::CscMatrix;
-use rla::FeralError;
-use rla::LdltSolver;
+use rslab::sparse::csc::CscMatrix;
+use rslab::FeralError;
+use rslab::LdltSolver;
 
 /// Build a 2D 5-point grid (m×m, n=m²) with the given diagonal and neighbor
 /// values. Lower triangle only.
@@ -49,7 +49,7 @@ fn grid<T: Copy>(m: usize, diag: T, off: T) -> (Vec<usize>, Vec<usize>, Vec<T>) 
 
 fn bench_one<T>(label: &str, m: usize, diag: T, off: T, b_fn: impl Fn(usize) -> T)
 where
-    T: rla::Scalar,
+    T: rslab::Scalar,
 {
     let n = m * m;
     let (rows, cols, vals) = grid(m, diag, off);

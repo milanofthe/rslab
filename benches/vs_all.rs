@@ -89,8 +89,8 @@ use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{c64, Mat};
 use num_complex::Complex;
-use rla::prelude::*;
-use rla::{AnalyzeOptions, FactorMethod, FactorOptions, LuSymbolic, ReorderMode};
+use rslab::prelude::*;
+use rslab::{AnalyzeOptions, FactorMethod, FactorOptions, LuSymbolic, ReorderMode};
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 type C = Complex<f64>;
@@ -152,7 +152,7 @@ fn sample<R>(f: impl FnOnce() -> R) -> (R, f64) {
     (r, (peak.load(Ordering::Relaxed) as f64 - before).max(0.0))
 }
 
-fn rel_resid(a: &rla::GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
+fn rel_resid(a: &rslab::GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
     let mut ax = vec![Complex::new(0.0, 0.0); a.n];
     a.matvec(x, &mut ax);
     let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();
@@ -162,7 +162,7 @@ fn rel_resid(a: &rla::GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
 
 /// CSC → 0-based CSR (transpose of storage; same matrix). PARDISO wants CSR with
 /// ascending column indices per row — produced here by scanning columns in order.
-fn build_full_csr(a: &rla::GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
+fn build_full_csr(a: &rslab::GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let n = a.n;
     let nnz = a.values.len();
     let mut ia = vec![0i32; n + 1];

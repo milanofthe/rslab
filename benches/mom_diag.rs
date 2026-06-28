@@ -16,8 +16,8 @@
 
 use std::time::Instant;
 
-use rla::prelude::*;
-use rla::{AnalyzeOptions, BlrMode, LuSymbolic, MemoryMode, ReorderMode};
+use rslab::prelude::*;
+use rslab::{AnalyzeOptions, BlrMode, LuSymbolic, MemoryMode, ReorderMode};
 
 /// Peak working-set (RSS high-water) of this process, in MB. Windows-only,
 /// queried via the OS — benches may use FFI; the solver library stays pure Rust.
@@ -219,7 +219,7 @@ fn diag_file(path: &std::path::Path, reorder: ReorderMode) {
         factor_peak - ws_before,
     );
     // Realized CB-stack compression when RLA_BLR_CB is set (else 0,0).
-    let (cb_dense, cb_blr) = rla::take_blr_cb_stats();
+    let (cb_dense, cb_blr) = rslab::take_blr_cb_stats();
     if cb_dense > 0 {
         println!(
             "  BLR-CB:  compressed CBs {:.0} MB → {:.0} MB  ({:.0}% of dense, {:.1}× smaller)",

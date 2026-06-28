@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use num_complex::Complex;
-use rla::prelude::*;
-use rla::{factor_sparse_ldlt_with, FactorMethod, FactorOptions};
+use rslab::prelude::*;
+use rslab::{factor_sparse_ldlt_with, FactorMethod, FactorOptions};
 
 type C = Complex<f64>;
 

@@ -18,8 +18,8 @@
 //! The `resolved_method == Amf` assertion is the routing regression; the
 //! nnz_L ceiling separates AMF from the MetisND fill with margin.
 
-use rla::read_mtx;
-use rla::symbolic::{symbolic_factorize, OrderingMethod, SupernodeParams};
+use rslab::read_mtx;
+use rslab::symbolic::{symbolic_factorize, OrderingMethod, SupernodeParams};
 use std::path::Path;
 
 fn check(file: &str, n_expect: usize, nnz_l_ceiling: usize, metis_nnz_l: usize) {

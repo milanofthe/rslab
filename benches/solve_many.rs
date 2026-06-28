@@ -10,8 +10,8 @@
 use std::time::Instant;
 
 use num_complex::Complex;
-use rla::prelude::*;
-use rla::{factor_general_lu, solve_lu, solve_lu_many, FactorOptions};
+use rslab::prelude::*;
+use rslab::{factor_general_lu, solve_lu, solve_lu_many, FactorOptions};
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 type C = Complex<f64>;

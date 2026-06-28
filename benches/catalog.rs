@@ -11,8 +11,8 @@
 use std::time::Instant;
 
 use num_complex::Complex;
-use rla::matgen::{catalog, Generated};
-use rla::{FactorOptions, LdltSymbolic, LuSymbolic};
+use rslab::matgen::{catalog, Generated};
+use rslab::{FactorOptions, LdltSymbolic, LuSymbolic};
 
 type C = Complex<f64>;
 
@@ -80,9 +80,9 @@ fn main() {
 
 fn a_factor_sym(
     sym: &LdltSymbolic,
-    a: &rla::CscMatrix<C>,
+    a: &rslab::CscMatrix<C>,
     opts: &FactorOptions,
-) -> rla::LdltSolver<C> {
+) -> rslab::LdltSolver<C> {
     sym.factor(a, opts).unwrap()
 }
 
