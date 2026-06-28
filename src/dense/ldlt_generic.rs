@@ -415,16 +415,24 @@ pub fn solve_ldlt_many<T: Scalar>(
         y[i * nrhs..i * nrhs + nrhs].copy_from_slice(&b[src..src + nrhs]);
     }
 
-    // Forward solve L Z = Y.
+    // Reusable single-row scratch: hoisting the reused row into a **local** buffer
+    // breaks `y`'s apparent self-aliasing so the `nrhs`-wide AXPY kernels operate
+    // on non-aliasing contiguous slices the compiler can vectorize (and the row is
+    // loaded once per column, not once per nonzero).
+    let mut row = vec![T::zero(); nrhs];
+    // Forward solve L Z = Y. `y[j]` (the source row) is read by every nonzero of
+    // column `j` and is not written in this sweep.
     for j in 0..n {
         let jb = j * nrhs;
+        row.copy_from_slice(&y[jb..jb + nrhs]);
         for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
             let i = factors.l_row_idx[k];
             if i != j {
                 let lval = factors.l_values[k];
                 let ib = i * nrhs;
+                let tgt = &mut y[ib..ib + nrhs];
                 for c in 0..nrhs {
-                    y[ib + c] = y[ib + c] - lval * y[jb + c];
+                    tgt[c] = tgt[c] - lval * row[c];
                 }
             }
         }
@@ -464,19 +472,24 @@ pub fn solve_ldlt_many<T: Scalar>(
         }
     }
 
-    // Backward solve Lᵀ V = W.
+    // Backward solve Lᵀ V = W. Accumulate column `j`'s update in the local buffer
+    // (the sources `y[i]`, `i > j`, are already solved and not touched here), then
+    // write it back.
     for j in (0..n).rev() {
         let jb = j * nrhs;
+        row.copy_from_slice(&y[jb..jb + nrhs]);
         for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
             let i = factors.l_row_idx[k];
             if i != j {
                 let lval = factors.l_values[k];
                 let ib = i * nrhs;
+                let src = &y[ib..ib + nrhs];
                 for c in 0..nrhs {
-                    y[jb + c] = y[jb + c] - lval * y[ib + c];
+                    row[c] = row[c] - lval * src[c];
                 }
             }
         }
+        y[jb..jb + nrhs].copy_from_slice(&row);
     }
 
     // X = P V (scatter rows).

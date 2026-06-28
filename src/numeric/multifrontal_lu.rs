@@ -1847,23 +1847,35 @@ pub fn solve_lu_many<T: Scalar>(
             y[eb + c] = b[ob + c] * s;
         }
     }
-    // Forward solve L Y = Ŷ (CSC, unit diagonal).
+    // Reusable single-row scratch. Hoisting the row that is reused across an inner
+    // sweep into a **local** buffer breaks the apparent aliasing of `y[..]` with
+    // itself, so the `nrhs`-wide AXPY kernels below operate on non-aliasing,
+    // contiguous slices the compiler can vectorize (and the hoisted row is loaded
+    // once per outer step, not once per nonzero).
+    let mut row = vec![T::zero(); nrhs];
+    // Forward solve L Y = Ŷ (CSC, unit diagonal). `y[e]` (the column's source row)
+    // is read by every nonzero of column `e` and is not written in this sweep.
     for e in 0..n {
         let eb = e * nrhs;
+        row.copy_from_slice(&y[eb..eb + nrhs]);
         for k in f.l_col_ptr[e]..f.l_col_ptr[e + 1] {
             let i = f.l_row_idx[k];
             if i != e {
                 let lval = f.l_values[k];
                 let ib = i * nrhs;
+                let tgt = &mut y[ib..ib + nrhs];
                 for c in 0..nrhs {
-                    y[ib + c] = y[ib + c] - lval * y[eb + c];
+                    tgt[c] = tgt[c] - lval * row[c];
                 }
             }
         }
     }
-    // Backward solve U X = Y (CSR by row), in place in `y`.
+    // Backward solve U X = Y (CSR by row), in place in `y`. Accumulate row `e`'s
+    // update in the local buffer (the off-diagonal sources `y[c_col]`, `c_col > e`,
+    // are already solved and not touched here), then scale and write it back.
     for e in (0..n).rev() {
         let eb = e * nrhs;
+        row.copy_from_slice(&y[eb..eb + nrhs]);
         let mut diag = T::one();
         for k in f.u_row_ptr[e]..f.u_row_ptr[e + 1] {
             let c_col = f.u_col_idx[k];
@@ -1872,14 +1884,15 @@ pub fn solve_lu_many<T: Scalar>(
                 diag = uval;
             } else {
                 let cb = c_col * nrhs;
+                let src = &y[cb..cb + nrhs];
                 for c in 0..nrhs {
-                    y[eb + c] = y[eb + c] - uval * y[cb + c];
+                    row[c] = row[c] - uval * src[c];
                 }
             }
         }
         let dinv = diag.recip();
         for c in 0..nrhs {
-            y[eb + c] = y[eb + c] * dinv;
+            y[eb + c] = row[c] * dinv;
         }
     }
     // Undo column permutation + column equilibration: out[perm[e]] = D_c · x̂[e].

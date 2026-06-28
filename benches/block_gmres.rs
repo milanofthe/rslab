@@ -37,8 +37,16 @@ fn run(path: &std::path::Path, s: usize) {
         }
     }
 
-    let lu = factor_general_lu(&a, &FactorOptions::preconditioner(1e-10)).unwrap();
-    let (tol, maxit, restart) = (1e-8, 200, 50);
+    // Optional incomplete factor (`RLA_DROPTOL`) to land in a realistic
+    // *iterative* regime (e.g. ~30 GMRES iters at ~50k DOFs) where the triangular
+    // solve per iteration dominates — the multi-RHS payoff regime.
+    let droptol: f64 = std::env::var("RLA_DROPTOL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let mut opts = FactorOptions::preconditioner(1e-10);
+    if droptol > 0.0 {
+        opts = opts.with_drop_tol(droptol);
+    }
+    let lu = factor_general_lu(&a, &opts).unwrap();
+    let (tol, maxit, restart) = (1e-6, 400, 80);
 
     // s separate single-RHS GMRES runs.
     let t = Instant::now();
@@ -81,8 +89,12 @@ fn main() {
         }
     };
     files.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
-    println!("Multi-RHS GMRES: s separate runs vs one block run  [s={s}]\n");
-    for f in files.iter().take(4) {
-        run(f, s);
+    let filter = std::env::var("RLA_DIAG_FILTER").unwrap_or_default();
+    let droptol = std::env::var("RLA_DROPTOL").unwrap_or_else(|_| "0".into());
+    println!("Multi-RHS GMRES: s separate runs vs one block run  [s={s}  drop_tol={droptol}]\n");
+    for f in &files {
+        if filter.is_empty() || f.file_name().unwrap().to_string_lossy().contains(&filter) {
+            run(f, s);
+        }
     }
 }

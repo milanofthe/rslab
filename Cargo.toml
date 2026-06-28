@@ -110,6 +110,10 @@ name = "block_gmres"
 harness = false
 
 [[bench]]
+name = "solve_many"
+harness = false
+
+[[bench]]
 name = "precond"
 harness = false
 
