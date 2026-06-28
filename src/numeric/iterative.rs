@@ -718,6 +718,10 @@ pub struct BlockKrylovResult<T> {
 /// the single-RHS [`gmres`]; the systems share only the batched operator and
 /// preconditioner calls. Solves `A X = B` from `X₀ = 0`.
 ///
+/// **Deflation:** a RHS whose true residual reaches `tol` drops out of the block,
+/// so the batched applies shrink to the active width as columns converge — the
+/// fast-converging RHS are never dragged along by the slowest one.
+///
 /// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
 /// drive all right-hand sides through one block iteration.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
@@ -747,16 +751,19 @@ where
     let mut x = vec![T::zero(); n * s];
     let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
 
-    // Flat per-block-step basis: block `j`, column `c` is the length-`n` slice at
-    // `vbas[(j*s + c)*n ..]`, so block `j` (the `n×s` input to one block apply) is
-    // the contiguous `vbas[j*s*n .. (j+1)*s*n]`.
+    // Scratch sized for the **full** width `s` and reused; each restart cycle uses
+    // only the first `sa` columns, where `sa` is the count of still-active RHS.
+    // The basis stride is therefore `sa` (recomputed per cycle): block `j`, active
+    // column `a` lives at `vbas[(j*sa + a)*n ..]`, so block `j` (the `n×sa` input
+    // to one block apply) is the contiguous prefix `vbas[j*sa*n .. (j+1)*sa*n]`.
     let mut vbas = vec![T::zero(); n * s * (m + 1)];
     let mut zblk = vec![T::zero(); n * s]; // M⁻¹ · (block j)
     let mut wblk = vec![T::zero(); n * s]; // A · zblk
     let mut axblk = vec![T::zero(); n * s];
     let mut vyblk = vec![T::zero(); n * s];
+    let mut xc = vec![T::zero(); n * s]; // compact live-RHS solutions for the residual matvec
 
-    // Per-RHS Arnoldi state.
+    // Per-active-position Arnoldi state (indexed `0..sa`, reset each cycle).
     let mut h: Vec<Vec<Vec<T>>> = (0..s).map(|_| vec![vec![T::zero(); m]; m + 1]).collect();
     let mut cs: Vec<Vec<T>> = (0..s).map(|_| vec![T::zero(); m]).collect();
     let mut sn: Vec<Vec<T>> = (0..s).map(|_| vec![T::zero(); m]).collect();
@@ -771,70 +778,80 @@ where
         }
     }
 
-    while total < max_iter && !converged.iter().all(|&v| v) {
-        // Block residual R = B − A X, and start a fresh Arnoldi cycle per RHS whose
-        // **true** residual still exceeds `tol`.
-        op.apply_block(&x, &mut axblk, s);
-        let mut any_active = false;
-        for c in 0..s {
-            if converged[c] {
-                continue;
-            }
+    while total < max_iter {
+        // **Deflation:** gather the not-yet-converged ("live") RHS into a compact
+        // block, recompute their true residual with one block matvec, and keep
+        // only those still above `tol` as the active set for this cycle. Converged
+        // columns never re-enter the (expensive) inner block applies again.
+        let live: Vec<usize> = (0..s).filter(|&c| !converged[c]).collect();
+        if live.is_empty() {
+            break;
+        }
+        let lw = live.len();
+        for (a, &c) in live.iter().enumerate() {
+            xc[a * n..a * n + n].copy_from_slice(&x[c * n..c * n + n]);
+        }
+        op.apply_block(&xc[..lw * n], &mut axblk[..lw * n], lw);
+        // Active set = live RHS whose true residual still exceeds `tol`.
+        let mut act: Vec<usize> = Vec::new();
+        for (a, &c) in live.iter().enumerate() {
             let cb = c * n;
-            let mut beta_sq = 0.0;
+            let ab = a * n;
+            let mut rn = 0.0;
             for i in 0..n {
-                beta_sq += (b[cb + i] - axblk[cb + i]).magnitude_sq();
+                rn += (b[cb + i] - axblk[ab + i]).magnitude_sq();
             }
-            let beta = beta_sq.sqrt();
+            let beta = rn.sqrt();
             final_res[c] = beta / bnorm[c];
             if final_res[c] <= tol {
                 converged[c] = true;
-                continue;
-            }
-            any_active = true;
-            let inv = T::from_real(1.0 / beta);
-            for i in 0..n {
-                vbas[cb + i] = (b[cb + i] - axblk[cb + i]) * inv; // block 0, col c
-            }
-            for row in h[c].iter_mut() {
-                for e in row.iter_mut() {
+            } else {
+                // Initialize active position `act.len()` from this residual.
+                let ap = act.len();
+                let inv = T::from_real(1.0 / beta);
+                for i in 0..n {
+                    vbas[ap * n + i] = (b[cb + i] - axblk[ab + i]) * inv; // block 0, col ap
+                }
+                for row in h[ap].iter_mut() {
+                    for e in row.iter_mut() {
+                        *e = T::zero();
+                    }
+                }
+                for e in g[ap].iter_mut() {
                     *e = T::zero();
                 }
+                g[ap][0] = T::from_real(beta);
+                jdim[ap] = 0;
+                act.push(c);
             }
-            for e in g[c].iter_mut() {
-                *e = T::zero();
-            }
-            g[c][0] = T::from_real(beta);
-            jdim[c] = 0;
         }
-        if !any_active {
+        let sa = act.len();
+        if sa == 0 {
             break;
         }
 
-        // RHS that are already at tol take no inner steps this cycle.
-        let mut inner_done: Vec<bool> = converged.clone();
-
+        let mut inner_done = vec![false; sa];
         for j in 0..m {
             if total >= max_iter {
                 break;
             }
-            let jblock = j * s * n;
-            // Batched right preconditioning + operator apply over all RHS at once.
-            precond.apply_block(&vbas[jblock..jblock + n * s], &mut zblk, s, n)?;
-            op.apply_block(&zblk, &mut wblk, s);
+            let jblock = j * sa * n;
+            // Batched right preconditioning + operator apply over the active block.
+            precond.apply_block(&vbas[jblock..jblock + sa * n], &mut zblk[..sa * n], sa, n)?;
+            op.apply_block(&zblk[..sa * n], &mut wblk[..sa * n], sa);
             let mut all_done = true;
-            for c in 0..s {
-                if inner_done[c] {
+            for ap in 0..sa {
+                if inner_done[ap] {
                     continue;
                 }
                 all_done = false;
-                let wb = c * n;
+                let wb = ap * n;
                 // Modified Gram–Schmidt against this RHS's own basis, DGKS reorth.
                 let wnorm0 = norm2(&wblk[wb..wb + n]);
                 for i in 0..=j {
-                    let vb = (i * s + c) * n;
+                    let vb = (i * sa + ap) * n;
                     let hij = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
-                    h[c][i][j] = hij;
+                    h[ap][i][j] = hij;
                     for k in 0..n {
                         wblk[wb + k] = wblk[wb + k] - hij * vbas[vb + k];
                     }
@@ -842,17 +859,17 @@ where
                 let mut hn = norm2(&wblk[wb..wb + n]);
                 if hn < REORTH_ETA * wnorm0 {
                     for i in 0..=j {
-                        let vb = (i * s + c) * n;
+                        let vb = (i * sa + ap) * n;
                         let ss = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
-                        h[c][i][j] = h[c][i][j] + ss;
+                        h[ap][i][j] = h[ap][i][j] + ss;
                         for k in 0..n {
                             wblk[wb + k] = wblk[wb + k] - ss * vbas[vb + k];
                         }
                     }
                     hn = norm2(&wblk[wb..wb + n]);
                 }
-                h[c][j + 1][j] = T::from_real(hn);
-                let v1 = ((j + 1) * s + c) * n;
+                h[ap][j + 1][j] = T::from_real(hn);
+                let v1 = ((j + 1) * sa + ap) * n;
                 if hn > 0.0 {
                     let inv = T::from_real(1.0 / hn);
                     for k in 0..n {
@@ -865,21 +882,21 @@ where
                 }
                 // Previous rotations, then a new one to zero h[j+1][j]; update g.
                 for i in 0..j {
-                    let temp = cs[c][i].conj() * h[c][i][j] + sn[c][i].conj() * h[c][i + 1][j];
-                    h[c][i + 1][j] = -sn[c][i] * h[c][i][j] + cs[c][i] * h[c][i + 1][j];
-                    h[c][i][j] = temp;
+                    let temp = cs[ap][i].conj() * h[ap][i][j] + sn[ap][i].conj() * h[ap][i + 1][j];
+                    h[ap][i + 1][j] = -sn[ap][i] * h[ap][i][j] + cs[ap][i] * h[ap][i + 1][j];
+                    h[ap][i][j] = temp;
                 }
-                let (cj, sj) = givens(h[c][j][j], h[c][j + 1][j]);
-                cs[c][j] = cj;
-                sn[c][j] = sj;
-                h[c][j][j] = cj.conj() * h[c][j][j] + sj.conj() * h[c][j + 1][j];
-                h[c][j + 1][j] = T::zero();
-                let g_next = -sj * g[c][j];
-                g[c][j] = cj.conj() * g[c][j];
-                g[c][j + 1] = g_next;
-                jdim[c] = j + 1;
-                if g[c][j + 1].magnitude() / bnorm[c] <= tol {
-                    inner_done[c] = true;
+                let (cj, sj) = givens(h[ap][j][j], h[ap][j + 1][j]);
+                cs[ap][j] = cj;
+                sn[ap][j] = sj;
+                h[ap][j][j] = cj.conj() * h[ap][j][j] + sj.conj() * h[ap][j + 1][j];
+                h[ap][j + 1][j] = T::zero();
+                let g_next = -sj * g[ap][j];
+                g[ap][j] = cj.conj() * g[ap][j];
+                g[ap][j + 1] = g_next;
+                jdim[ap] = j + 1;
+                if g[ap][j + 1].magnitude() / bnorm[act[ap]] <= tol {
+                    inner_done[ap] = true;
                 }
             }
             total += 1;
@@ -888,36 +905,39 @@ where
             }
         }
 
-        // x_c += M⁻¹ (V_c y_c): back-substitute each RHS, build the VY block, then
-        // one batched preconditioner apply for the whole update.
-        for e in vyblk.iter_mut() {
+        // x_c += M⁻¹ (V_a y_a): back-substitute each active RHS, build the compact
+        // VY block, one batched preconditioner apply, then scatter to global `x`.
+        for e in vyblk[..sa * n].iter_mut() {
             *e = T::zero();
         }
-        for c in 0..s {
-            let jd = jdim[c];
+        for ap in 0..sa {
+            let jd = jdim[ap];
             if jd == 0 {
                 continue;
             }
             let mut y = vec![T::zero(); jd];
             for i in (0..jd).rev() {
-                let mut acc = g[c][i];
+                let mut acc = g[ap][i];
                 for k in (i + 1)..jd {
-                    acc = acc - h[c][i][k] * y[k];
+                    acc = acc - h[ap][i][k] * y[k];
                 }
-                y[i] = acc * h[c][i][i].recip();
+                y[i] = acc * h[ap][i][i].recip();
             }
-            let vyb = c * n;
+            let vyb = ap * n;
             for i in 0..jd {
                 let yi = y[i];
-                let vb = (i * s + c) * n;
+                let vb = (i * sa + ap) * n;
                 for k in 0..n {
                     vyblk[vyb + k] = vyblk[vyb + k] + vbas[vb + k] * yi;
                 }
             }
         }
-        precond.apply_block(&vyblk, &mut zblk, s, n)?;
-        for idx in 0..n * s {
-            x[idx] = x[idx] + zblk[idx];
+        precond.apply_block(&vyblk[..sa * n], &mut zblk[..sa * n], sa, n)?;
+        for ap in 0..sa {
+            let c = act[ap];
+            for i in 0..n {
+                x[c * n + i] = x[c * n + i] + zblk[ap * n + i];
+            }
         }
     }
 
