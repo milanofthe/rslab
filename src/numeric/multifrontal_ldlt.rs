@@ -1394,6 +1394,151 @@ impl<T: Scalar> LlStore<T> {
         *self.twos[s].get() = two;
         *self.lperms[s].get() = lperm;
     }
+    /// Release `k`'s dense panel + D/lperm once it has been compacted.
+    /// SAFETY: `k`'s last consumer is done — no other thread reads its cells.
+    unsafe fn free(&self, k: usize) {
+        *self.panels[k].get() = Vec::new();
+        *self.dvals[k].get() = Vec::new();
+        *self.dsubs[k].get() = Vec::new();
+        *self.twos[k].get() = Vec::new();
+        *self.lperms[k].get() = Vec::new();
+    }
+}
+
+/// Compact (CSC-fragment) form of one supernode's L factor, produced the moment
+/// its last consumer pulls from it so the dense panel can be freed during
+/// factorization. Row indices are already final elimination positions.
+struct CompactL<T> {
+    ptr: Vec<usize>,
+    idx: Vec<usize>,
+    val: Vec<T>,
+}
+impl<T> Default for CompactL<T> {
+    fn default() -> Self {
+        CompactL { ptr: Vec::new(), idx: Vec::new(), val: Vec::new() }
+    }
+}
+
+/// Incremental-emit state for the LDLᵀ left-looking path: consumer refcounts (free
+/// the panel at 0), the compact L sink, and the O(n) maps populated in-node
+/// (block-aware for Bunch-Kaufman 1×1/2×2 D) and read after the barrier.
+struct LlEmitLdlt<T> {
+    refcount: Vec<AtomicUsize>,
+    e_offset: Vec<usize>,
+    compact: Vec<std::cell::UnsafeCell<CompactL<T>>>,
+    e_of_g: Vec<std::cell::UnsafeCell<usize>>,
+    perm: Vec<std::cell::UnsafeCell<usize>>,
+    d_diag: Vec<std::cell::UnsafeCell<T>>,
+    d_subdiag: Vec<std::cell::UnsafeCell<T>>,
+    two_by_two: Vec<std::cell::UnsafeCell<bool>>,
+    // Inertia accumulated across supernodes (block-aware).
+    inertia_pos: AtomicUsize,
+    inertia_neg: AtomicUsize,
+    inertia_zero: AtomicUsize,
+}
+// SAFETY: disjoint-index writes; visibility via the refcount AcqRel + subtree join.
+unsafe impl<T: Send> Sync for LlEmitLdlt<T> {}
+
+impl<T: Scalar> LlEmitLdlt<T> {
+    fn new(sym: &SymbolicFactorization, update_list: &[Vec<usize>]) -> Self {
+        let nsuper = sym.supernodes.len();
+        let n = sym.n;
+        let mut refcount: Vec<AtomicUsize> = (0..nsuper).map(|_| AtomicUsize::new(0)).collect();
+        for ul in update_list {
+            for &k in ul {
+                *refcount[k].get_mut() += 1;
+            }
+        }
+        let mut e_offset = vec![0usize; nsuper];
+        let mut acc = 0usize;
+        for (s, snode) in sym.supernodes.iter().enumerate() {
+            e_offset[s] = acc;
+            acc += snode.ncol;
+        }
+        LlEmitLdlt {
+            refcount,
+            e_offset,
+            compact: (0..nsuper).map(|_| std::cell::UnsafeCell::new(CompactL::default())).collect(),
+            e_of_g: (0..n).map(|_| std::cell::UnsafeCell::new(usize::MAX)).collect(),
+            perm: (0..n).map(|_| std::cell::UnsafeCell::new(0)).collect(),
+            d_diag: (0..n).map(|_| std::cell::UnsafeCell::new(T::zero())).collect(),
+            d_subdiag: (0..n).map(|_| std::cell::UnsafeCell::new(T::zero())).collect(),
+            two_by_two: (0..n).map(|_| std::cell::UnsafeCell::new(false)).collect(),
+            inertia_pos: AtomicUsize::new(0),
+            inertia_neg: AtomicUsize::new(0),
+            inertia_zero: AtomicUsize::new(0),
+        }
+    }
+    #[inline]
+    unsafe fn eg(&self, g: usize) -> usize {
+        *self.e_of_g[g].get()
+    }
+}
+
+/// Compact supernode `k`'s L factor and free its dense panel + D/lperm. Called the
+/// instant `k`'s last consumer pulled from it. Mirrors the per-supernode body of
+/// the legacy L emit (unit diagonal, skip the 2×2 `d21` coupling row).
+fn ldlt_emit_and_free<T: Scalar>(
+    k: usize,
+    store: &LlStore<T>,
+    emit: &LlEmitLdlt<T>,
+    sym: &SymbolicFactorization,
+    rs: &[Vec<usize>],
+    drop_tol: Option<f64>,
+) {
+    let ncol = sym.supernodes[k].ncol;
+    let nrow = rs[k].len();
+    // SAFETY: `k` is fully factored and its last consumer is done — exclusive.
+    let panel = unsafe { store.panel(k) };
+    let lperm = unsafe { store.lperm(k) };
+    let t2 = unsafe { store.two(k) };
+    let one = T::one();
+    let mut cl = CompactL::<T>::default();
+    cl.ptr.reserve(ncol + 1);
+    cl.ptr.push(0);
+    let mut col: Vec<(usize, T)> = Vec::with_capacity(nrow);
+    for p in 0..ncol {
+        col.clear();
+        let diag_e = unsafe { emit.eg(rs[k][lperm[p]]) };
+        col.push((diag_e, one));
+        // Skip the 2×2 block's `d21` coupling row (D, not an L multiplier).
+        let i0 = if t2[p] { p + 2 } else { p + 1 };
+        for i in i0..nrow {
+            let v = panel[i + p * nrow];
+            if v != T::zero() {
+                col.push((unsafe { emit.eg(rs[k][lperm[i]]) }, v));
+            }
+        }
+        if let Some(tau) = drop_tol {
+            let colmax = col
+                .iter()
+                .filter(|&&(r, _)| r != diag_e)
+                .map(|&(_, v)| v.magnitude())
+                .fold(0.0, f64::max);
+            let thresh = tau * colmax;
+            col.retain(|&(r, v)| r == diag_e || v.magnitude() >= thresh);
+        }
+        col.sort_unstable_by_key(|&(r, _)| r);
+        for &(r, v) in &col {
+            cl.idx.push(r);
+            cl.val.push(v);
+        }
+        cl.ptr.push(cl.idx.len());
+    }
+    // SAFETY: exactly one thread emits `k`; `compact[k]` is written once.
+    unsafe { *emit.compact[k].get() = cl };
+    // SAFETY: last consumer done — no other thread reads `k`'s cells.
+    if !ldlt_no_free() {
+        unsafe { store.free(k) };
+    }
+}
+
+// A/B toggle (`RLA_NO_FREE=1`): keep dense panels resident, to isolate the
+// live-memory effect of incremental freeing.
+static LDLT_NO_FREE_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[inline]
+fn ldlt_no_free() -> bool {
+    *LDLT_NO_FREE_FLAG.get_or_init(|| std::env::var("RLA_NO_FREE").map(|v| v == "1").unwrap_or(false))
 }
 
 /// Factor one supernode's panel: assemble `A`, apply every descendant's `cmod`
@@ -1408,6 +1553,7 @@ fn ll_factor_node<T: Scalar>(
     rs: &[Vec<usize>],
     update_list: &[Vec<usize>],
     store: &LlStore<T>,
+    emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
 ) -> Result<(), FeralError> {
@@ -1860,6 +2006,65 @@ fn ll_factor_node<T: Scalar>(
         gloc[g] = usize::MAX;
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
+    // Populate the O(n) emit maps + inertia for `s` (block-aware over its 1×1/2×2
+    // Bunch-Kaufman D), mirroring the legacy pass-1 emit. The `e`-numbering is one
+    // position per column, so `e_offset[s] + p` is column `p`'s elimination index.
+    let eoff = emit.e_offset[s];
+    let (mut ipos, mut ineg, mut izero) = (0usize, 0usize, 0usize);
+    let mut pp = 0;
+    while pp < ncol {
+        let g = rs[s][lperm[pp]];
+        let e = eoff + pp;
+        // SAFETY: each global index / position is written by exactly one supernode.
+        unsafe {
+            *emit.e_of_g[g].get() = e;
+            *emit.perm[e].get() = sym.perm[g];
+            *emit.d_diag[e].get() = d[pp];
+        }
+        if two_by_two[pp] {
+            let g2 = rs[s][lperm[pp + 1]];
+            unsafe {
+                *emit.e_of_g[g2].get() = e + 1;
+                *emit.perm[e + 1].get() = sym.perm[g2];
+                *emit.d_diag[e + 1].get() = d[pp + 1];
+                *emit.d_subdiag[e].get() = d_subdiag[pp];
+                *emit.two_by_two[e].get() = true;
+            }
+            let det_r = (d[pp] * d[pp + 1] - d_subdiag[pp] * d_subdiag[pp]).real();
+            let tr_r = (d[pp] + d[pp + 1]).real();
+            if det_r < 0.0 {
+                ipos += 1;
+                ineg += 1;
+            } else if det_r > 0.0 {
+                if tr_r >= 0.0 {
+                    ipos += 2;
+                } else {
+                    ineg += 2;
+                }
+            } else {
+                izero += 1;
+                if tr_r >= 0.0 {
+                    ipos += 1;
+                } else {
+                    ineg += 1;
+                }
+            }
+            pp += 2;
+        } else {
+            let r = d[pp].real();
+            if r > 0.0 {
+                ipos += 1;
+            } else if r < 0.0 {
+                ineg += 1;
+            } else {
+                izero += 1;
+            }
+            pp += 1;
+        }
+    }
+    emit.inertia_pos.fetch_add(ipos, Ordering::Relaxed);
+    emit.inertia_neg.fetch_add(ineg, Ordering::Relaxed);
+    emit.inertia_zero.fetch_add(izero, Ordering::Relaxed);
     // SAFETY: this thread owns supernode `s` and writes its cell exactly once.
     unsafe { store.set(s, panel, d, d_subdiag, two_by_two, lperm) };
     Ok(())
@@ -1876,7 +2081,9 @@ fn ll_factor_subtree<T: Scalar>(
     rs: &[Vec<usize>],
     update_list: &[Vec<usize>],
     store: &LlStore<T>,
+    emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
+    drop_tol: Option<f64>,
     n_perturbed: &AtomicUsize,
 ) -> Result<(), FeralError> {
     sym.supernodes[s]
@@ -1890,21 +2097,35 @@ fn ll_factor_subtree<T: Scalar>(
                 rs,
                 update_list,
                 store,
+                emit,
                 perturb_floor,
+                drop_tol,
                 n_perturbed,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
-    ll_factor_node(
-        s,
-        sym,
-        a_perm,
-        rs,
-        update_list,
-        store,
-        perturb_floor,
-        n_perturbed,
-    )
+    ll_factor_node(s, sym, a_perm, rs, update_list, store, emit, perturb_floor, n_perturbed)?;
+    // Free each descendant whose last consumer this node was (refcount→0), and `s`
+    // itself if it has no consumers — compacting before releasing the dense panel.
+    // Disjoint `k`, so the wide top-of-tree free runs in parallel.
+    const FREE_PAR: usize = 64;
+    if update_list[s].len() >= FREE_PAR {
+        update_list[s].par_iter().for_each(|&k| {
+            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
+                ldlt_emit_and_free(k, store, emit, sym, rs, drop_tol);
+            }
+        });
+    } else {
+        for &k in &update_list[s] {
+            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
+                ldlt_emit_and_free(k, store, emit, sym, rs, drop_tol);
+            }
+        }
+    }
+    if emit.refcount[s].load(Ordering::Relaxed) == 0 {
+        ldlt_emit_and_free(s, store, emit, sym, rs, drop_tol);
+    }
+    Ok(())
 }
 
 /// Supernodal **left-looking** LDLᵀ with **Bunch-Kaufman 1×1/2×2 pivoting**. Each
@@ -1981,6 +2202,7 @@ fn factor_left_looking<T: Scalar>(
     // written once and read only by ancestors → no synchronization needed beyond
     // the recursion structure (see `LlStore`).
     let store = LlStore::<T>::new(nsuper);
+    let emit = LlEmitLdlt::<T>::new(sym, &update_list);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let mut is_child = vec![false; nsuper];
     for snode in &sym.supernodes {
@@ -1999,11 +2221,14 @@ fn factor_left_looking<T: Scalar>(
                 &rs,
                 &update_list,
                 &store,
+                &emit,
                 perturb_floor,
+                opts.drop_tol,
                 &n_perturbed_atomic,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
+    drop(store); // panels freed incrementally; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     if ldlt_prof_on() {
         let g = PROF_LDLT_GETF2_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
@@ -2016,123 +2241,34 @@ fn factor_left_looking<T: Scalar>(
         );
     }
 
-    // Emit global L (CSC) + D in elimination order. Within a supernode the
-    // eliminated columns are in the panel's **pivoted** order, so pivoted column
-    // `p` carries global index `rs[s][lperm[p]]`. The factorization order `e` is
-    // assigned per column; 2×2 Bunch-Kaufman blocks span two consecutive columns
-    // (block start carries `two_by_two`/`d_subdiag`). Inertia is computed
-    // block-aware from each D block's det/trace (real parts).
-    let mut e_of_g = vec![usize::MAX; n];
-    let mut perm = vec![0usize; n];
-    let mut d_diag = vec![T::zero(); n];
-    let mut d_subdiag = vec![T::zero(); n];
-    let mut two_by_two = vec![false; n];
-    let mut inertia = Inertia::new(0, 0, 0);
-    let mut e = 0usize;
-    for (s, snode) in sym.supernodes.iter().enumerate() {
-        let ncol = snode.ncol;
-        // SAFETY: factorization is complete; every D/lperm cell is written.
-        let dvs = unsafe { store.dval(s) };
-        let dsub = unsafe { store.dsub(s) };
-        let t2 = unsafe { store.two(s) };
-        let lperm = unsafe { store.lperm(s) };
-        let mut p = 0;
-        while p < ncol {
-            let g = rs[s][lperm[p]];
-            e_of_g[g] = e;
-            perm[e] = sym.perm[g];
-            d_diag[e] = dvs[p];
-            if t2[p] {
-                // 2×2 block: emit both columns, inertia from det/trace.
-                let g2 = rs[s][lperm[p + 1]];
-                e_of_g[g2] = e + 1;
-                perm[e + 1] = sym.perm[g2];
-                d_diag[e + 1] = dvs[p + 1];
-                d_subdiag[e] = dsub[p];
-                two_by_two[e] = true;
-                let det_r = (dvs[p] * dvs[p + 1] - dsub[p] * dsub[p]).real();
-                let tr_r = (dvs[p] + dvs[p + 1]).real();
-                if det_r < 0.0 {
-                    inertia.positive += 1;
-                    inertia.negative += 1;
-                } else if det_r > 0.0 {
-                    if tr_r >= 0.0 {
-                        inertia.positive += 2;
-                    } else {
-                        inertia.negative += 2;
-                    }
-                } else {
-                    inertia.zero += 1;
-                    if tr_r >= 0.0 {
-                        inertia.positive += 1;
-                    } else {
-                        inertia.negative += 1;
-                    }
-                }
-                e += 2;
-                p += 2;
-            } else {
-                let r = dvs[p].real();
-                if r > 0.0 {
-                    inertia.positive += 1;
-                } else if r < 0.0 {
-                    inertia.negative += 1;
-                } else {
-                    inertia.zero += 1;
-                }
-                e += 1;
-                p += 1;
-            }
-        }
-    }
-    debug_assert_eq!(e, n, "every index eliminated exactly once");
-
-    let one = T::one();
+    // Assemble global L (CSC) by concatenating the per-supernode compact fragments
+    // produced (and freed) incrementally during factorization — taken by value and
+    // dropped right after appending, so the peak is the growing CSC + one fragment,
+    // not all fragments + the full CSC. D / perm / inertia were populated in-node.
     let mut l_col_ptr = Vec::with_capacity(n + 1);
     l_col_ptr.push(0);
     let mut l_row_idx: Vec<usize> = Vec::new();
     let mut l_values: Vec<T> = Vec::new();
-    let mut col: Vec<(usize, T)> = Vec::new();
-    for s in 0..nsuper {
-        let snode = &sym.supernodes[s];
-        let ncol = snode.ncol;
-        let nrow = rs[s].len();
-        // SAFETY: factorization is complete; the panel/lperm/two cells are written.
-        let panel = unsafe { store.panel(s) };
-        let lperm = unsafe { store.lperm(s) };
-        let t2 = unsafe { store.two(s) };
-        for p in 0..ncol {
-            col.clear();
-            // Pivoted column `p` / row `i` carry global indices `rs[s][lperm[·]]`.
-            // L has a unit diagonal; the entry below the diagonal of a 2×2 block's
-            // first column is the `D` coupling `d21` (still resident in the panel),
-            // not an `L` multiplier, so skip that row (mirror `factor_front`).
-            let diag_e = e_of_g[rs[s][lperm[p]]];
-            col.push((diag_e, one));
-            let i0 = if t2[p] { p + 2 } else { p + 1 };
-            for i in i0..nrow {
-                let v = panel[i + p * nrow];
-                if v != T::zero() {
-                    col.push((e_of_g[rs[s][lperm[i]]], v));
-                }
-            }
-            if let Some(tau) = opts.drop_tol {
-                let colmax = col
-                    .iter()
-                    .filter(|&&(r, _)| r != diag_e)
-                    .map(|&(_, v)| v.magnitude())
-                    .fold(0.0, f64::max);
-                let thresh = tau * colmax;
-                col.retain(|&(r, v)| r == diag_e || v.magnitude() >= thresh);
-            }
-            col.sort_unstable_by_key(|&(r, _)| r);
-            for &(r, v) in &col {
-                l_row_idx.push(r);
-                l_values.push(v);
-            }
+    for (s, snode) in sym.supernodes.iter().enumerate() {
+        // SAFETY: factorization complete; `compact[s]` written exactly once.
+        let cl = unsafe { std::mem::take(&mut *emit.compact[s].get()) };
+        for c in 0..snode.ncol {
+            let (a, b) = (cl.ptr[c], cl.ptr[c + 1]);
+            l_row_idx.extend_from_slice(&cl.idx[a..b]);
+            l_values.extend_from_slice(&cl.val[a..b]);
             l_col_ptr.push(l_row_idx.len());
         }
     }
+    // SAFETY: factorization complete; every position written exactly once in-node.
+    let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm[e].get() }).collect();
+    let d_diag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_diag[e].get() }).collect();
+    let d_subdiag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_subdiag[e].get() }).collect();
+    let two_by_two: Vec<bool> = (0..n).map(|e| unsafe { *emit.two_by_two[e].get() }).collect();
+    let inertia = Inertia::new(
+        emit.inertia_pos.load(Ordering::Relaxed),
+        emit.inertia_neg.load(Ordering::Relaxed),
+        emit.inertia_zero.load(Ordering::Relaxed),
+    );
 
     Ok(LdltFactors {
         n,

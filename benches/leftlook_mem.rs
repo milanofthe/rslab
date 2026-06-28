@@ -9,6 +9,8 @@
 //!
 //! Run: `cargo bench --bench leftlook_mem`.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use num_complex::Complex;
@@ -16,6 +18,38 @@ use rla::prelude::*;
 use rla::{factor_sparse_ldlt_with, FactorMethod, FactorOptions};
 
 type C = Complex<f64>;
+
+// Counting allocator (opt-in `RLA_LIVE_MEM=1`): tracks **live** bytes so the
+// panel-freeing transient is visible even when the OS retains freed pages.
+struct Counting;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+static COUNTING_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc(l);
+        if !p.is_null() && COUNTING_ON.load(Ordering::Relaxed) {
+            let now = LIVE.fetch_add(l.size(), Ordering::Relaxed) + l.size();
+            PEAK.fetch_max(now, Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        if COUNTING_ON.load(Ordering::Relaxed) {
+            LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+        }
+        System.dealloc(p, l);
+    }
+}
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+fn live_peak<R>(f: impl FnOnce() -> R) -> (R, f64) {
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let r = f();
+    (r, PEAK.load(Ordering::Relaxed).saturating_sub(before) as f64 / 1e6)
+}
 
 #[cfg(windows)]
 fn cur_ws_mb() -> f64 {
@@ -128,12 +162,16 @@ fn run(k: usize) {
         let opts = FactorOptions::default().with_method(method);
         let sampler = Sampler::start();
         let t = Instant::now();
-        let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
+        let (f, live) = live_peak(|| factor_sparse_ldlt_with(&a, &opts).unwrap());
         let ms = t.elapsed().as_secs_f64() * 1e3;
         let peak = sampler.stop();
+        let memcol = if COUNTING_ON.load(Ordering::Relaxed) {
+            format!("live +{live:.0} MB")
+        } else {
+            format!("peak-WS {peak:6.0} MB (transient +{:.0})", peak - base)
+        };
         println!(
-            "  k={k:2} n={n:6}  {label}  factor {ms:8.1} ms   peak-WS {peak:6.0} MB  (transient +{:.0})   nnz(L)={}",
-            peak - base,
+            "  k={k:2} n={n:6}  {label}  factor {ms:8.1} ms   {memcol}   nnz(L)={}",
             f.l_values.len(),
         );
     }
@@ -141,6 +179,9 @@ fn run(k: usize) {
 }
 
 fn main() {
+    if std::env::var("RLA_LIVE_MEM").map(|v| v == "1").unwrap_or(false) {
+        COUNTING_ON.store(true, Ordering::Relaxed);
+    }
     println!("LDLᵀ transient-memory: multifrontal (CB stack + extract) vs left-looking (panels only)\n");
     for &k in &[18usize, 24, 30] {
         run(k);
