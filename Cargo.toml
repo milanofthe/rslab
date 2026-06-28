@@ -46,6 +46,13 @@ exclude = [
 [lib]
 name = "rla"
 
+[features]
+# Parametrized test-matrix generators (pure Rust, no extra deps). Off by default
+# so downstream solver users don't pull it in; enable for tests/benches.
+matgen = []
+# Adds a SuiteSparse / Matrix Market downloader (pure-Rust HTTP/TLS + gzip + tar).
+matgen-download = ["matgen", "dep:ureq", "dep:flate2", "dep:tar"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -80,6 +87,11 @@ feral-amf = { path = "crates/feral-amf", version = "0.2" }
 feral-metis = { path = "crates/feral-metis", version = "0.2" }
 feral-scotch = { path = "crates/feral-scotch", version = "0.2" }
 feral-kahip = { path = "crates/feral-kahip", version = "0.2" }
+# Optional, only for the `matgen-download` feature (SuiteSparse/Matrix Market
+# fetcher). Pure Rust: ureq+rustls (no OpenSSL), flate2/miniz_oxide, tar.
+ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
 
 [dev-dependencies]
 approx = "0.5"

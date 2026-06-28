@@ -64,6 +64,11 @@ pub mod dense;
 pub mod error;
 pub mod inertia;
 pub mod io;
+/// Parametrized test-matrix generators (feature `matgen`): PDE stencils, BEM/MoM
+/// kernels, banded/arrow, random + spectral, plus a tagged catalog for benchmarks.
+/// Optional `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
+#[cfg(feature = "matgen")]
+pub mod matgen;
 pub mod numeric;
 pub mod ordering;
 pub mod scalar;

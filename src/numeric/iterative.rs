@@ -967,6 +967,85 @@ where
     })
 }
 
+/// Adapter: a closure block-matvec `op(x, y, s)` (`Y ← A·X`, column-major `n×s`) as a
+/// [`LinearOperator`] for the matrix-free call path. `FnMut` (the Arnoldi issues applies
+/// sequentially) so the operator's own scratch lives in the closure capture — no struct, no
+/// interior-mutability dance at the call site. The `RefCell` is borrowed for one apply at a time.
+struct FnOp<F> {
+    f: std::cell::RefCell<F>,
+    n: usize,
+}
+impl<T: Scalar, F: FnMut(&[T], &mut [T], usize)> LinearOperator<T> for FnOp<F> {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn apply(&self, x: &[T], y: &mut [T]) {
+        (self.f.borrow_mut())(x, y, 1)
+    }
+    fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
+        (self.f.borrow_mut())(x, y, s)
+    }
+}
+
+/// Adapter: a closure block-preconditioner `pc(r, z, s)` (`Z ← M⁻¹·R`) as a [`Preconditioner`].
+struct FnPc<G> {
+    f: std::cell::RefCell<G>,
+}
+impl<T: Scalar, G: FnMut(&[T], &mut [T], usize) -> Result<(), FeralError>> Preconditioner<T> for FnPc<G> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+        (self.f.borrow_mut())(r, z, 1)
+    }
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, _n: usize) -> Result<(), FeralError> {
+        (self.f.borrow_mut())(r, z, s)
+    }
+}
+
+/// Closure entry point for [`gmres_block`]: pass the block matvec and block preconditioner as
+/// `FnMut` closures plus the dimension `n` — the natural form for a **matrix-free** MoM/FEM
+/// operator that captures its own assembly data + scratch, with no `LinearOperator`/`Preconditioner`
+/// boilerplate. For an unpreconditioned solve pass `|r, z, _| { z.copy_from_slice(r); Ok(()) }`.
+#[allow(clippy::too_many_arguments)]
+pub fn gmres_block_fn<T, F, G>(
+    op: F,
+    precond: G,
+    b: &[T],
+    s: usize,
+    n: usize,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+) -> Result<BlockKrylovResult<T>, FeralError>
+where
+    T: Scalar,
+    F: FnMut(&[T], &mut [T], usize),
+    G: FnMut(&[T], &mut [T], usize) -> Result<(), FeralError>,
+{
+    let op = FnOp { f: std::cell::RefCell::new(op), n };
+    let pc = FnPc { f: std::cell::RefCell::new(precond) };
+    gmres_block(&op, b, s, &pc, tol, max_iter, restart)
+}
+
+/// Closure entry point for [`gmres`] (single RHS) — see [`gmres_block_fn`].
+#[allow(clippy::too_many_arguments)]
+pub fn gmres_fn<T, F, G>(
+    op: F,
+    precond: G,
+    b: &[T],
+    n: usize,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+) -> Result<KrylovResult<T>, FeralError>
+where
+    T: Scalar,
+    F: FnMut(&[T], &mut [T], usize),
+    G: FnMut(&[T], &mut [T], usize) -> Result<(), FeralError>,
+{
+    let op = FnOp { f: std::cell::RefCell::new(op), n };
+    let pc = FnPc { f: std::cell::RefCell::new(precond) };
+    gmres(&op, b, &pc, tol, max_iter, restart)
+}
+
 /// A factorization usable as both a **direct solver** and a [`Preconditioner`].
 /// Implemented by the symmetric [`LdltSolver`] and the general
 /// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors), so a caller's
