@@ -3,4 +3,19 @@
 
 # OS / editor / agent runtime junk
 .DS_Store
+.idea/
+.vscode/
 .claude/
+
+# Python
+__pycache__/
+*.pyc
+
+# Benchmark run artifacts (regeneratable). The figures (*.png) are committed so the
+# README renders; the raw JSONL data and run logs are not.
+benches/bench_out/*.jsonl
+benches/bench_out/*.log
+
+# Local calibration cache (the `tuning` feature also writes this to the OS temp dir)
+rslab-calib/
+rla-calib/
