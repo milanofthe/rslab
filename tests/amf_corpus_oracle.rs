@@ -1,4 +1,4 @@
-//! Cross-check feral-amf nnz_L against MUMPS HAMF4 (ICNTL(7) = 2)
+//! Cross-check rslab-amf nnz_L against MUMPS HAMF4 (ICNTL(7) = 2)
 //! on every matrix that has a `<stem>.hamf4.json` sidecar under
 //! `data/matrices/`.
 //!
@@ -6,12 +6,12 @@
 //! `external_benchmarks/mumps_oracle/run_mumps_amf.py`, which drives
 //! the `mumps_amf_oracle` Fortran harness in analyze-only mode. Each
 //! sidecar carries MUMPS's `INFOG(20)` (estimated nnz_L) under the
-//! key `nnz_l_estimated`. Feral's nnz_L is computed by running
-//! `feral_amf::amf_order_full` on the matrix's symmetric pattern,
+//! key `nnz_l_estimated`. Rslab's nnz_L is computed by running
+//! `rslab_amf::amf_order_full` on the matrix's symmetric pattern,
 //! applying the resulting permutation, and summing the
 //! Gilbert-Ng-Peyton column counts of the permuted pattern.
 //!
-//! The corpus gate is `feral nnz_L <= 1.10 * MUMPS HAMF4 nnz_L` per
+//! The corpus gate is `rslab nnz_L <= 1.10 * MUMPS HAMF4 nnz_L` per
 //! `dev/plans/amf-clean-room.md` Phase C. The clean-room
 //! implementation does not aim for bit-parity; the 10% slack
 //! absorbs ordering tie-breaking differences while still catching
@@ -32,7 +32,7 @@
 //!     regen completes).
 //!
 //!   - `amf_orbit2_nnz_l_budget` is the dedicated ORBIT2_0000 pin:
-//!     feral-amf nnz_L on this matrix must be `<= 120_000`. ORBIT2
+//!     rslab-amf nnz_L on this matrix must be `<= 120_000`. ORBIT2
 //!     is the kkt-expansion arrow-class shape that motivated the
 //!     AMF clean-room (AMD orders ORBIT2_0000 into a 1.4M-nnz_L
 //!     factor; HAMF4 cuts it to ~95k). Skips with SKIP if the
@@ -53,11 +53,11 @@ const ORBIT2_NNZ_L_BUDGET: usize = 120_000;
 /// 1.10× HAMF4 nnz_L gate, with one entry per matrix family:
 ///
 /// - **`CHARDIS1_0000`** (n=2999, nnz=1_003_997, ~334 nnz/row): on
-///   this dense KKT shape feral-amf and feral-amd both produce
+///   this dense KKT shape rslab-amf and rslab-amd both produce
 ///   identical `nnz_L = 2_001_000`, while MUMPS HAMF4 reports
 ///   `nnz_l_estimated = 1_758_486` (ratio 1.138). Both metrics are
 ///   approximate and rank columns within ties differently;
-///   feral-amf's RMF metric does not distinguish from AMD on a
+///   rslab-amf's RMF metric does not distinguish from AMD on a
 ///   pattern this dense. Preserving the sharp 1.10× gate for the
 ///   remaining 183_256 matrices is more valuable than absorbing
 ///   this one outlier by widening the threshold corpus-wide.
@@ -137,10 +137,10 @@ fn amf_corpus_gate() {
             continue;
         }
 
-        let feral_nnz_l = match feral_amf_nnz_l(&csc) {
+        let rslab_nnz_l = match rslab_amf_nnz_l(&csc) {
             Some(v) => v,
             None => {
-                failures.push(format!("{stem}: feral-amf failed"));
+                failures.push(format!("{stem}: rslab-amf failed"));
                 continue;
             }
         };
@@ -149,11 +149,11 @@ fn amf_corpus_gate() {
             n_skipped += 1;
             continue;
         }
-        let ratio = feral_nnz_l as f64 / oracle as f64;
+        let ratio = rslab_nnz_l as f64 / oracle as f64;
         if ratio > RATIO_LIMIT {
             failures.push(format!(
-                "{stem}: feral nnz_L = {} vs MUMPS HAMF4 nnz_L = {} (ratio {:.3} > {:.2})",
-                feral_nnz_l, oracle, ratio, RATIO_LIMIT
+                "{stem}: rslab nnz_L = {} vs MUMPS HAMF4 nnz_L = {} (ratio {:.3} > {:.2})",
+                rslab_nnz_l, oracle, ratio, RATIO_LIMIT
             ));
         } else {
             n_ok += 1;
@@ -189,11 +189,11 @@ fn amf_orbit2_nnz_l_budget() {
         return;
     }
     let csc = load_csc(&path).expect("ORBIT2_0000.mtx must parse");
-    let nnz_l = feral_amf_nnz_l(&csc).expect("feral-amf must succeed on ORBIT2_0000");
-    eprintln!("ORBIT2_0000 feral-amf nnz_L = {}", nnz_l);
+    let nnz_l = rslab_amf_nnz_l(&csc).expect("rslab-amf must succeed on ORBIT2_0000");
+    eprintln!("ORBIT2_0000 rslab-amf nnz_L = {}", nnz_l);
     assert!(
         nnz_l <= ORBIT2_NNZ_L_BUDGET,
-        "ORBIT2_0000 feral-amf nnz_L = {} exceeds budget {}",
+        "ORBIT2_0000 rslab-amf nnz_L = {} exceeds budget {}",
         nnz_l,
         ORBIT2_NNZ_L_BUDGET
     );
@@ -236,10 +236,10 @@ fn load_csc(path: &Path) -> Option<CscMatrix> {
     mtx.to_csc().ok()
 }
 
-/// Run feral-amf on the symmetric pattern of `csc` and return the
+/// Run rslab-amf on the symmetric pattern of `csc` and return the
 /// Gilbert-Ng-Peyton column-count sum (i.e. nnz of L including the
 /// diagonal) on the perm-applied pattern.
-fn feral_amf_nnz_l(csc: &CscMatrix) -> Option<usize> {
+fn rslab_amf_nnz_l(csc: &CscMatrix) -> Option<usize> {
     let full = csc.symmetric_pattern();
     let n = full.n;
     if n == 0 {
@@ -255,9 +255,9 @@ fn feral_amf_nnz_l(csc: &CscMatrix) -> Option<usize> {
         .iter()
         .map(|&x| i32::try_from(x).ok())
         .collect::<Option<_>>()?;
-    let pat = feral_amf::CscPattern::new(n, &col_ptr_i32, &row_idx_i32)?;
-    let opts = feral_amf::AmfOptions::default();
-    let (perm_i32, _stats, _amf) = feral_amf::amf_order_full(&pat, &opts).ok()?;
+    let pat = rslab_amf::CscPattern::new(n, &col_ptr_i32, &row_idx_i32)?;
+    let opts = rslab_amf::AmfOptions::default();
+    let (perm_i32, _stats, _amf) = rslab_amf::amf_order_full(&pat, &opts).ok()?;
     if perm_i32.len() != n {
         return None;
     }

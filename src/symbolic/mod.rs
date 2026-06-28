@@ -4,7 +4,7 @@ pub mod profiler;
 pub mod small_leaf;
 pub mod supernode;
 
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::ordering::amd::permute_pattern;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::{biased_postorder, postorder};
@@ -26,7 +26,7 @@ pub use supernode::{
 /// and memory planning are identical regardless of method.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum OrderingMethod {
-    /// Approximate Minimum Degree (`feral-amd` crate: approximate
+    /// Approximate Minimum Degree (`rslab-amd` crate: approximate
     /// external degree with aggressive element absorption and
     /// supervariable detection, per Amestoy/Davis/Duff 1996+2004).
     /// Default. Matches SuiteSparse/faer on the oracle fixture suite.
@@ -40,7 +40,7 @@ pub enum OrderingMethod {
     /// 17-23% better and 18-88× faster on large).
     #[default]
     Amd,
-    /// Approximate Minimum Fill (`feral-amf` crate: HAMF4 variant
+    /// Approximate Minimum Fill (`rslab-amf` crate: HAMF4 variant
     /// of Amestoy 1999 — quotient-graph elimination scored by
     /// approximate fill `RMF(i) = (deg(i)·(deg(i)-1+2·degme) -
     /// WF(i)) / (nv(i)+1)` rather than approximate degree).
@@ -49,19 +49,19 @@ pub enum OrderingMethod {
     /// Default for `n <= 10_000` per `pick_default_method`,
     /// matching MUMPS's `ana_set_ordering.F` rule for SYM=2 small
     /// matrices. Validated against MUMPS HAMF4 on the 183_293-
-    /// sidecar corpus by `tests/amf_corpus_oracle.rs`: feral nnz_L
+    /// sidecar corpus by `tests/amf_corpus_oracle.rs`: rslab nnz_L
     /// is within 1.10× MUMPS HAMF4 nnz_L on 183_277 matrices, with
     /// CHARDIS1_0000 the lone documented metric-divergence skip.
     Amf,
-    /// feral-metis multilevel nested dissection.
+    /// rslab-metis multilevel nested dissection.
     MetisND,
-    /// feral-scotch nested dissection.
+    /// rslab-scotch nested dissection.
     ScotchND,
-    /// feral-kahip flow-based nested dissection.
+    /// rslab-kahip flow-based nested dissection.
     ///
     /// Includes K1 (Ost-Schulz-Strash 2021 Rule 1, conservative
     /// termination) preprocessing inside the KaHIP pipeline. Wired
-    /// at `crates/feral-kahip/src/node_nd.rs`.
+    /// at `crates/rslab-kahip/src/node_nd.rs`.
     ///
     /// **Not selected by `pick_default_method`.** The session 08
     /// 41-matrix bake-off (`dev/research/ordering-kahip-driver-
@@ -371,7 +371,7 @@ pub struct SymbolicFactorization {
     /// rerunning the Hungarian kernel. `None` when no MC64 matching
     /// was computed during symbolic factorization. (Consumed by the
     /// numeric path again once MC64 scaling is ported to the generic
-    /// solver — see the feral feature port.)
+    /// solver — see the rslab feature port.)
     #[allow(dead_code)]
     pub(crate) cached_mc64: Option<crate::scaling::Mc64Cache>,
 
@@ -483,7 +483,7 @@ fn pick_default_method(n: usize, _stored_nnz: usize) -> OrderingMethod {
 ///
 /// No published compression-benefit predictor exists in the MUMPS /
 /// SPRAL literature (see consult of 2026-04-23). These thresholds are
-/// calibrated against the feral corpus and documented in
+/// calibrated against the rslab corpus and documented in
 /// `dev/journal/2026-04-23-02.org`.
 pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
     const MIN_N_FOR_COMPRESSION: usize = 128;
@@ -528,21 +528,21 @@ pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
 pub fn symbolic_factorize(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
-) -> Result<SymbolicFactorization, FeralError> {
+) -> Result<SymbolicFactorization, RslabError> {
     symbolic_factorize_with_method(matrix, snode_params, OrderingMethod::Auto)
 }
 
 /// Convert an owned-`usize` `CscPattern` into the contract's borrowed-`i32`
-/// shape used by `feral-metis` / `feral-scotch`. Returns buffers the
+/// shape used by `rslab-metis` / `rslab-scotch`. Returns buffers the
 /// caller must keep alive for the lifetime of the produced `CscPattern<'_>`.
-fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), FeralError> {
+fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), RslabError> {
     let col_ptr: Result<Vec<i32>, _> = pattern.col_ptr.iter().map(|&x| i32::try_from(x)).collect();
     let col_ptr = col_ptr.map_err(|_| {
-        FeralError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
+        RslabError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
     })?;
     let row_idx: Result<Vec<i32>, _> = pattern.row_idx.iter().map(|&x| i32::try_from(x)).collect();
     let row_idx = row_idx.map_err(|_| {
-        FeralError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
+        RslabError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
     })?;
     Ok((col_ptr, row_idx))
 }
@@ -555,10 +555,10 @@ fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>)
 fn run_external_ordering(
     pattern: &CscPattern,
     method: OrderingMethod,
-) -> Result<(Vec<usize>, OrderingMethod), FeralError> {
+) -> Result<(Vec<usize>, OrderingMethod), RslabError> {
     let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
-    let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
-        .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
+    let pat = rslab_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
+        .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
     // `method` is expected to be concrete here — `Auto` is resolved
     // upstream by `symbolic_factorize_with_method` against the
     // original matrix's pattern, before any preprocessing.
@@ -569,19 +569,19 @@ fn run_external_ordering(
     // `resolved_method` field must report Amd, not ScotchND.
     let mut actual = method;
     let perm_i32 = match method {
-        OrderingMethod::Amd => feral_amd::amd_order(&pat),
-        OrderingMethod::Amf => feral_amf::amf_order(&pat),
-        OrderingMethod::MetisND => feral_metis::metis_order(&pat),
+        OrderingMethod::Amd => rslab_amd::amd_order(&pat),
+        OrderingMethod::Amf => rslab_amf::amf_order(&pat),
+        OrderingMethod::MetisND => rslab_metis::metis_order(&pat),
         OrderingMethod::ScotchND => {
-            let opts = feral_scotch::ScotchOptions::default();
-            feral_scotch::scotch_order_full(&pat, &opts).map(|(perm, _, sstats)| {
+            let opts = rslab_scotch::ScotchOptions::default();
+            rslab_scotch::scotch_order_full(&pat, &opts).map(|(perm, _, sstats)| {
                 if sstats.n_separator_vertices == 0 {
                     actual = OrderingMethod::Amd;
                 }
                 perm
             })
         }
-        OrderingMethod::KahipND => feral_kahip::kahip_order(&pat),
+        OrderingMethod::KahipND => rslab_kahip::kahip_order(&pat),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
         }
@@ -590,9 +590,9 @@ fn run_external_ordering(
         }
     };
     let perm_i32 = perm_i32
-        .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
+        .map_err(|e| RslabError::InvalidInput(format!("external ordering failed: {}", e)))?;
     if perm_i32.len() != pattern.n {
-        return Err(FeralError::InvalidInput(format!(
+        return Err(RslabError::InvalidInput(format!(
             "external ordering returned {} entries for n={}",
             perm_i32.len(),
             pattern.n
@@ -601,10 +601,10 @@ fn run_external_ordering(
     let mut out: Vec<usize> = Vec::with_capacity(perm_i32.len());
     for x in perm_i32 {
         let u = usize::try_from(x).map_err(|_| {
-            FeralError::InvalidInput("external ordering returned negative index".to_string())
+            RslabError::InvalidInput("external ordering returned negative index".to_string())
         })?;
         if u >= pattern.n {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "external ordering returned out-of-range index".to_string(),
             ));
         }
@@ -632,7 +632,7 @@ const RACE_CANDIDATES: &[OrderingMethod] = &[
 fn symbolic_factorize_race(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
-) -> Result<SymbolicFactorization, FeralError> {
+) -> Result<SymbolicFactorization, RslabError> {
     let mut best: Option<SymbolicFactorization> = None;
     // S7: when a symbolic profiler is attached, give each candidate its
     // own fresh profiler instead of letting all RACE_CANDIDATES append
@@ -643,7 +643,7 @@ fn symbolic_factorize_race(
     // into the caller's shared profiler at the end, so the report
     // reflects exactly one ordering run.
     let mut best_prof: Option<SymbolicProfiler> = None;
-    let mut last_err: Option<FeralError> = None;
+    let mut last_err: Option<RslabError> = None;
     for &cand in RACE_CANDIDATES {
         let cand_prof = snode_params
             .symbolic_profiler
@@ -678,7 +678,7 @@ fn symbolic_factorize_race(
     }
     best.ok_or_else(|| {
         last_err.unwrap_or_else(|| {
-            FeralError::InvalidInput("AutoRace: no candidates available".to_string())
+            RslabError::InvalidInput("AutoRace: no candidates available".to_string())
         })
     })
 }
@@ -692,7 +692,7 @@ pub fn symbolic_factorize_with_method(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
-) -> Result<SymbolicFactorization, FeralError> {
+) -> Result<SymbolicFactorization, RslabError> {
     // AutoRace is resolved here by running each concrete candidate
     // through this same function and picking the smallest
     // `factor_nnz_estimate`. The recursive call passes a concrete
@@ -756,12 +756,12 @@ pub fn symbolic_factorize_with_method(
     // The fill-reducing ordering and (when enabled) the LdltCompress
     // preprocessor are timed under *separate* stages. The preprocessor's
     // MC64 matching can dwarf the ordering itself — on the pf22 powerflow
-    // KKT (n=2.8M) MC64 is ~53s while `feral_amd::amd_order` is ~0.3s — so
+    // KKT (n=2.8M) MC64 is ~53s while `rslab_amd::amd_order` is ~0.3s — so
     // folding both into one "ordering" stage mis-attributes the cost and
     // led to the wrong diagnosis in issue #80. `record_ordering` wraps the
     // actual `run_external_ordering` call so every path records exactly one
     // `ordering` stage.
-    let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), FeralError> {
+    let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), RslabError> {
         let t_ord = prof.map(|_| std::time::Instant::now());
         let r = run_external_ordering(pat, method)?;
         if let Some(t) = t_ord {
@@ -1070,7 +1070,7 @@ pub fn symbolic_factorize_with_schur(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     schur_indices: &[usize],
-) -> Result<SymbolicFactorization, FeralError> {
+) -> Result<SymbolicFactorization, RslabError> {
     let n = matrix.n;
     let n_schur = schur_indices.len();
 
@@ -1165,7 +1165,7 @@ pub fn symbolic_factorize_with_schur(
     // HALO-SCHUR amalgamation (`PE[schur[i]] = -schur[0]`,
     // `ana_orderings.F:9187-9220`), where all Schur variables collapse
     // into one supervariable so the numeric stopping rule lives in one
-    // place. feral's adjacency-only amalgamation (size_based with
+    // place. rslab's adjacency-only amalgamation (size_based with
     // nemin=32, trivial_chain) does not always merge the Schur tail —
     // when the Schur block is large or the row patterns of constituent
     // Schur cols differ enough, multiple supernodes carry Schur cols,
@@ -1232,7 +1232,7 @@ fn merge_schur_tail_supernodes(
     supernodes: &mut Vec<Supernode>,
     n: usize,
     n_schur: usize,
-) -> Result<(), FeralError> {
+) -> Result<(), RslabError> {
     let schur_lo = n - n_schur;
 
     // Step 0: split any supernode that straddles `schur_lo` into a
@@ -1271,7 +1271,7 @@ fn merge_schur_tail_supernodes(
             let col_hi = col_lo + snode.ncol();
             let intersects = col_hi > schur_lo && col_lo < n;
             if intersects {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "Schur-bearing supernodes are not contiguous at the \
                      tail (snode {} bears Schur cols but lies below \
                      non-Schur supernode(s) preceding the tail run \
@@ -1285,7 +1285,7 @@ fn merge_schur_tail_supernodes(
     }
 
     let Some(start) = tail_start else {
-        return Err(FeralError::InvalidInput(
+        return Err(RslabError::InvalidInput(
             "F3.2b merge: no Schur-bearing supernodes found despite \
              n_schur > 0 (symbolic invariant broken)"
                 .to_string(),
@@ -1298,7 +1298,7 @@ fn merge_schur_tail_supernodes(
         let col_lo = last.first_col;
         let col_hi = col_lo + last.ncol();
         if col_lo > schur_lo || col_hi != n {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "F3.2b merge: single Schur supernode at index {} does not \
                  cover the full Schur tail [{}, {}) (covers [{}, {}))",
                 start, schur_lo, n, col_lo, col_hi
@@ -1323,7 +1323,7 @@ fn merge_schur_tail_supernodes(
     //     all merged supernodes share rows in `[merged_first_col, n)`.
     let merged_first_col = supernodes[start].first_col;
     if merged_first_col != schur_lo {
-        return Err(FeralError::InvalidInput(format!(
+        return Err(RslabError::InvalidInput(format!(
             "F3.2b merge: tail run starts at col {} but Schur tail \
              begins at {}",
             merged_first_col, schur_lo
@@ -1334,7 +1334,7 @@ fn merge_schur_tail_supernodes(
     let mut expected = merged_first_col;
     for (s, snode) in supernodes.iter().enumerate().skip(start) {
         if snode.first_col != expected {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "F3.2b merge: supernode {} starts at col {} but expected {} \
                  (Schur supernode column ranges must be contiguous)",
                 s, snode.first_col, expected
@@ -1343,7 +1343,7 @@ fn merge_schur_tail_supernodes(
         expected = snode.first_col + snode.ncol();
     }
     if expected != n {
-        return Err(FeralError::InvalidInput(format!(
+        return Err(RslabError::InvalidInput(format!(
             "F3.2b merge: tail run ends at col {} but Schur tail ends at {}",
             expected, n
         )));
@@ -1414,14 +1414,14 @@ fn merge_schur_tail_supernodes(
 fn split_straddling_supernode(
     supernodes: &mut Vec<Supernode>,
     schur_lo: usize,
-) -> Result<(), FeralError> {
+) -> Result<(), RslabError> {
     let mut straddle_idx: Option<usize> = None;
     for (s, snode) in supernodes.iter().enumerate() {
         let lo = snode.first_col;
         let hi = lo + snode.ncol;
         if lo < schur_lo && hi > schur_lo {
             if straddle_idx.is_some() {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "F3.2b split: multiple supernodes straddle schur_lo={} \
                      (impossible after find_supernodes — column ranges are disjoint)",
                     schur_lo
@@ -1439,7 +1439,7 @@ fn split_straddling_supernode(
     let ncol_sc = original.ncol - ncol_ns;
     let nrow_total = original.nrow;
     if original.row_indices.len() != nrow_total {
-        return Err(FeralError::InvalidInput(format!(
+        return Err(RslabError::InvalidInput(format!(
             "F3.2b split: supernode {} has nrow={} but row_indices len={}",
             b,
             nrow_total,
@@ -2213,7 +2213,7 @@ mod tests {
         let m = small_kkt_6x6();
         let params = SupernodeParams::default();
         let result = symbolic_factorize_with_schur(&m, &params, &[0, 1, 2, 3, 4, 5]);
-        assert!(matches!(result, Err(FeralError::InvalidInput(_))));
+        assert!(matches!(result, Err(RslabError::InvalidInput(_))));
     }
 
     #[test]
@@ -2221,7 +2221,7 @@ mod tests {
         let m = small_kkt_6x6();
         let params = SupernodeParams::default();
         let result = symbolic_factorize_with_schur(&m, &params, &[4, 4]);
-        assert!(matches!(result, Err(FeralError::InvalidInput(_))));
+        assert!(matches!(result, Err(RslabError::InvalidInput(_))));
     }
 
     #[test]
@@ -2316,12 +2316,12 @@ mod tests {
         //
         // Finding O13 fixed that early stop. SCOTCH now finds a real
         // separator on this KKT pattern (verified directly in
-        // `crates/feral-scotch/tests/issue_3_kkt_repro.rs`:
+        // `crates/rslab-scotch/tests/issue_3_kkt_repro.rs`:
         // `issue_3_scotch_recurses_on_kkt_after_o13`), so ScotchND no
         // longer degenerates: `resolved_method` reports the requested
         // ScotchND, and the ordering is genuinely SCOTCH's — not a
         // relabelled AMD leaf. This test guards that post-O13 behavior
-        // at the `feral` symbolic boundary.
+        // at the `rslab` symbolic boundary.
         //
         // Preprocess is pinned to None so SCOTCH sees the raw KKT
         // pattern (LdltCompress would shrink it past the point the

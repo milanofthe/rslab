@@ -34,7 +34,7 @@
 //! applies a Duff-Pralet correction (scaling.f90:688-800). The
 //! research note `dev/research/mc64-scaling.md` §"Structurally
 //! singular matrices" specifies identity fallback for unmatched
-//! rows/columns as the correct behavior for feral, because KKT
+//! rows/columns as the correct behavior for rslab, because KKT
 //! matrices from IPOPT are occasionally structurally rank-deficient
 //! and a hard failure would regress the current `ForceAccept`
 //! pathway.
@@ -43,7 +43,7 @@ use super::hungarian::{
     hungarian_match, hungarian_match_instrumented, CostGraph, HungarianStats, Matching,
 };
 use super::ScalingInfo;
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
 
 /// Upper bound on the argument to `exp` before overflow.
@@ -66,7 +66,7 @@ const LOG_HUGE: f64 = 709.0;
 /// Compute only the MC64 matching, returning `(perm, n_matched)`.
 /// Diagnostic helper for Phase 2.6.5; skips the scaling-vector
 /// post-processing that `compute_symmetric` does.
-pub(crate) fn matching_perm(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralError> {
+pub(crate) fn matching_perm(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), RslabError> {
     let cache = compute_matching(matrix)?;
     Ok((cache.perm, cache.n_matched))
 }
@@ -94,8 +94,8 @@ pub(crate) struct Mc64Cache {
 /// Hungarian pipeline. Process-global; readable from any thread.
 /// Used by the value-bounded-cache investigation (see
 /// `dev/research/mc64-value-bounded-cache-2026-05-17.md`) to confirm
-/// whether MC64 dominates warm IPM wall in the live ipopt-feral path,
-/// not just on the pounce-dumped corpus. Set `FERAL_MC64_TRACE=1` in
+/// whether MC64 dominates warm IPM wall in the live ipopt-rslab path,
+/// not just on the pounce-dumped corpus. Set `RSLAB_MC64_TRACE=1` in
 /// the environment to also stream per-call wall time to stderr.
 pub static MC64_RECOMPUTE_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -103,7 +103,7 @@ pub static MC64_RECOMPUTE_COUNT: std::sync::atomic::AtomicUsize =
 /// Run the expensive MC64 pipeline — build the cost graph and run
 /// the Hungarian kernel — and return the full output. The cheap
 /// scaling-vector post-processing is in [`scaling_from_cache`].
-pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, FeralError> {
+pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabError> {
     let n = matrix.n;
     if n == 0 {
         return Ok(Mc64Cache {
@@ -116,7 +116,7 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, FeralErr
     }
     MC64_RECOMPUTE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let trace = matches!(
-        std::env::var("FERAL_MC64_TRACE").as_deref(),
+        std::env::var("RSLAB_MC64_TRACE").as_deref(),
         Ok("1") | Ok("on")
     );
     let t0 = if trace {
@@ -137,7 +137,7 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, FeralErr
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         let count = MC64_RECOMPUTE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
         eprintln!(
-            "[feral mc64] call #{} n={} nnz={} matching {:.1} ms",
+            "[rslab mc64] call #{} n={} nnz={} matching {:.1} ms",
             count,
             n,
             matrix.row_idx.len(),
@@ -154,7 +154,7 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, FeralErr
     })
 }
 
-pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     let cache = compute_matching(matrix)?;
     Ok(scaling_from_cache(&cache))
 }
@@ -166,7 +166,7 @@ pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, Scaling
 /// path — no caching, no scaling-vector post-processing.
 pub(crate) fn compute_matching_stats(
     matrix: &CscMatrix,
-) -> Result<(HungarianStats, usize), FeralError> {
+) -> Result<(HungarianStats, usize), RslabError> {
     if matrix.n == 0 {
         return Ok((HungarianStats::default(), 0));
     }
@@ -291,7 +291,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
 /// "fall back to identity" signal.
 ///
 /// Algorithmic mirror: `ref/spral/src/scaling.f90:636-657`.
-fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), FeralError> {
+fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), RslabError> {
     let n = matrix.n;
 
     // Two-pass expansion: first count the non-zero entries per

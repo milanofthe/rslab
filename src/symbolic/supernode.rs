@@ -166,7 +166,7 @@ pub struct Supernode {
     /// Issue #55 Phase B1: column-count budget for *incoming* delayed
     /// pivots from descendants at numeric time. The numeric phase
     /// enforces `n_delayed_in <= delayed_capacity` per supernode; on
-    /// overflow it can return `FeralError::DelayBudgetExceeded` (B3)
+    /// overflow it can return `RslabError::DelayBudgetExceeded` (B3)
     /// or — under the rewired CB trigger (B5) — fall back to
     /// MUMPS-style static perturbation as a last-resort recovery.
     ///

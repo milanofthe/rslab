@@ -6,13 +6,13 @@
 //!
 //! This measures the *correctness-first* generic path (unblocked fronts, no
 //! SIMD, within-block pivoting); it is a baseline to track, not an optimized
-//! number. Compare against PARDISO / feral's f64 driver separately.
+//! number. Compare against PARDISO / rslab's f64 driver separately.
 
 use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::sparse::csc::CscMatrix;
-use rslab::FeralError;
+use rslab::RslabError;
 use rslab::LdltSolver;
 
 /// Build a 2D 5-point grid (m×m, n=m²) with the given diagonal and neighbor
@@ -95,7 +95,7 @@ where
     );
 }
 
-fn main() -> Result<(), FeralError> {
+fn main() -> Result<(), RslabError> {
     println!("RLA generic sparse solver — baseline (release)\n");
     let sizes = [20usize, 40, 60, 80, 100];
 

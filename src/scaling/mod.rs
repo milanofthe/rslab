@@ -34,7 +34,7 @@
 //!      inverse — see the research note for the derivation.
 
 use crate::dense::matrix::SymmetricMatrix;
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
 
 #[allow(dead_code)] // Real uses arrive in Step 3 of the implementation plan.
@@ -52,7 +52,7 @@ mod value_bound;
 /// `ICNTL(12)=2` quotient-graph compression. Internally this is
 /// the same Hungarian call that `Mc64Symmetric` scaling uses, minus
 /// the symmetric-average post-processing.
-pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralError> {
+pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), RslabError> {
     mc64::matching_perm(matrix)
 }
 
@@ -80,7 +80,7 @@ pub(crate) use value_bound::{
 /// Used by the symbolic `LdltCompress` preprocessor so the numeric
 /// phase can reuse the matching if its scaling strategy also
 /// resolves to `Mc64Symmetric`.
-pub(crate) fn compute_mc64_cache(matrix: &CscMatrix) -> Result<Mc64Cache, FeralError> {
+pub(crate) fn compute_mc64_cache(matrix: &CscMatrix) -> Result<Mc64Cache, RslabError> {
     mc64::compute_matching(matrix)
 }
 
@@ -107,7 +107,7 @@ pub struct Mc64MatchStats {
 /// work counters (diagnostic-only: no caching, no scaling-vector
 /// post-processing). Used by the scaling audit to localize the matching
 /// cost on dense-coupling-column matrices like rocket_12800.
-pub fn diagnose_mc64_matching(matrix: &CscMatrix) -> Result<Mc64MatchStats, FeralError> {
+pub fn diagnose_mc64_matching(matrix: &CscMatrix) -> Result<Mc64MatchStats, RslabError> {
     let (s, cost_nnz) = mc64::compute_matching_stats(matrix)?;
     let mut max_col_degree = 0usize;
     for j in 0..matrix.n {
@@ -269,7 +269,7 @@ impl ScalingInfo {
 pub fn compute_scaling(
     matrix: &CscMatrix,
     strategy: &ScalingStrategy,
-) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     compute_scaling_with_cache(matrix, strategy, None)
 }
 
@@ -298,7 +298,7 @@ pub(crate) fn compute_scaling_dense_fast(
     matrix: &CscMatrix,
     sym: &SymmetricMatrix,
     strategy: &ScalingStrategy,
-) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     match strategy {
         ScalingStrategy::Auto | ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm_dense(sym)),
         _ => compute_scaling(matrix, strategy),
@@ -318,12 +318,12 @@ pub(crate) fn compute_scaling_with_cache(
     matrix: &CscMatrix,
     strategy: &ScalingStrategy,
     cache: Option<&Mc64Cache>,
-) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     match strategy {
         ScalingStrategy::Identity => Ok((vec![1.0; matrix.n], ScalingInfo::NotApplied)),
         ScalingStrategy::External(s) => {
             if s.len() != matrix.n {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "external scaling has length {} but matrix has n={}",
                     s.len(),
                     matrix.n,
@@ -379,7 +379,7 @@ pub(crate) fn compute_scaling_with_cache(
 fn compute_scaling_auto_with_cache(
     matrix: &CscMatrix,
     cache: Option<&Mc64Cache>,
-) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     const RAW_GUARD: f64 = 1e6;
     const MC_OFF_GUARD: f64 = 1e6;
     const RATIO_GUARD: f64 = 1e5;
@@ -412,7 +412,7 @@ fn compute_scaling_auto_with_cache(
         return compute_scaling(matrix, &picked);
     }
 
-    let mc64_from_cache = |matrix: &CscMatrix| -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+    let mc64_from_cache = |matrix: &CscMatrix| -> Result<(Vec<f64>, ScalingInfo), RslabError> {
         match cache {
             Some(c) => Ok(mc64::scaling_from_cache(c)),
             None => mc64::compute_symmetric(matrix),

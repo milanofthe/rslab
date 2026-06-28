@@ -28,7 +28,7 @@
 //! (Newton steps, time stepping, frequency sweep):
 //!
 //! ```
-//! # fn main() -> Result<(), rslab::FeralError> {
+//! # fn main() -> Result<(), rslab::RslabError> {
 //! use rslab::prelude::*;
 //! // Real symmetric matrix, lower triangle (i ≥ j).
 //! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
@@ -45,7 +45,7 @@
 //! dropping) used to precondition COCG:
 //!
 //! ```
-//! # fn main() -> Result<(), rslab::FeralError> {
+//! # fn main() -> Result<(), rslab::RslabError> {
 //! use rslab::prelude::*;
 //! use num_complex::Complex;
 //! let c = |re, im| Complex::new(re, im);
@@ -77,7 +77,7 @@ pub mod ordering;
 pub mod scalar;
 // MC64 max-product matching + equilibration. Currently only the symbolic MC64
 // cache is wired; the numeric consumption (and the dense f64 scaling helpers)
-// will be re-attached to the generic path during the feral feature port, so the
+// will be re-attached to the generic path during the rslab feature port, so the
 // not-yet-wired items are allowed dead for now rather than deleted.
 #[allow(dead_code)]
 pub mod scaling;
@@ -93,9 +93,7 @@ pub mod tuning;
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
-pub use error::FeralError;
-/// Ergonomic alias for the crate error type ([`FeralError`]).
-pub use error::FeralError as RslabError;
+pub use error::RslabError;
 pub use scalar::Scalar;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
@@ -146,7 +144,7 @@ pub mod prelude {
         CscMatrix,
         FactorOptions,
         Factorization,
-        FeralError,
+        RslabError,
         GeneralCsc,
         KrylovResult,
         // high-level phased solvers: `XSymbolic::analyze → .factor → XSolver`

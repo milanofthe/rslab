@@ -16,7 +16,7 @@
 //! `O(rank·m·n)`, robust, and stops adaptively at a relative Frobenius
 //! tolerance.
 
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::perturb_pivot;
 use crate::scalar::Scalar;
 
@@ -453,7 +453,7 @@ fn dense_lu_inplace<T: Scalar>(
     a: &mut [T],
     n: usize,
     perturb_floor: Option<f64>,
-) -> Result<(Vec<(usize, usize)>, usize), FeralError> {
+) -> Result<(Vec<(usize, usize)>, usize), RslabError> {
     let mut swaps = Vec::new();
     let mut n_perturbed = 0usize;
     for k in 0..n {
@@ -478,7 +478,7 @@ fn dense_lu_inplace<T: Scalar>(
                 piv = perturb_pivot(piv, floor);
                 n_perturbed += 1;
             }
-            None if piv == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+            None if piv == T::zero() => return Err(RslabError::NumericallyRankDeficient),
             _ => {}
         }
         a[k * n + k] = piv;
@@ -765,7 +765,7 @@ pub fn blr_lu_factor<T: Scalar>(
     mut a: BlrMatrix<T>,
     eps: f64,
     perturb_floor: Option<f64>,
-) -> Result<BlrLu<T>, FeralError> {
+) -> Result<BlrLu<T>, RslabError> {
     assert_eq!(a.nrow, a.ncol, "BLR LU requires a square matrix");
     let nb = a.nbr;
     debug_assert_eq!(nb, a.nbc);

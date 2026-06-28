@@ -1,6 +1,6 @@
 # Generic-driver refactor — plan
 
-**Goal:** make feral's *optimized* f64 multifrontal path generic over the
+**Goal:** make rslab's *optimized* f64 multifrontal path generic over the
 `Scalar` field so `Complex<f64>` (PARDISO mtype 6) reuses the mature driver
 (delayed pivoting, supernode amalgamation, scaling) instead of the slower
 correctness-first reimplementation in `numeric/multifrontal_generic.rs` +

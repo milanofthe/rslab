@@ -9,7 +9,7 @@
 //! This is the single, data-type-generic symmetric multifrontal driver (the
 //! former f64-dedicated driver has been removed). It is rayon-parallel with a
 //! `gemm` BLAS-3 Schur update and relaxed amalgamation; delayed pivoting and
-//! the remaining feral robustness features are being ported in.
+//! the remaining rslab robustness features are being ported in.
 //!
 //! ## Current pivoting scope
 //!
@@ -17,7 +17,7 @@
 //!   delayed pivoting). This produces a valid factorization whenever each
 //!   fully-summed block is nonsingular; pathological indefinite cases that
 //!   would require delaying a pivot to the parent are out of scope for now and
-//!   surface as [`FeralError::NumericallyRankDeficient`].
+//!   surface as [`RslabError::NumericallyRankDeficient`].
 //! * The reassembled factor is held as a dense `n×n` global `L`. This is
 //!   `O(n²)` memory and is a correctness-first choice; a sparse-CSC global `L`
 //!   with a supernodal triangular solve is a later optimization.
@@ -27,7 +27,7 @@
 //! triangular/diagonal solves and permutation directly.
 
 use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, LdltFactors};
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::inertia::Inertia;
 use crate::scalar::Scalar;
 
@@ -63,7 +63,7 @@ pub enum ZeroPivotAction {
     /// magnitude is unbounded — use only when downstream code tolerates sign
     /// loss in the perturbed positions and re-checks inertia.
     ForceAccept,
-    /// Return [`FeralError::NumericallyRankDeficient`].
+    /// Return [`RslabError::NumericallyRankDeficient`].
     Fail,
     /// Replace the tiny pivot with `sign(d) · max(|d|, abs_floor)`, keeping the
     /// column live (LAPACK / MA57-style static pivoting). The factor satisfies
@@ -79,7 +79,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// `true` (default) the deferred update `CB = A22 − L21·D·L21ᵀ` runs as a
 /// single SIMD GEMM ([`gemm`]); when `false` the identical update runs as a
 /// scalar triple loop over the same `l21`/`g`/`cb` buffers. Both paths produce
-/// the same factor — this exists only to A/B the kernel, mirroring feral's
+/// the same factor — this exists only to A/B the kernel, mirroring rslab's
 /// `FORCE_SCALAR_FRONTAL`.
 pub(crate) static USE_GEMM_SCHUR: AtomicBool = AtomicBool::new(true);
 
@@ -195,11 +195,11 @@ pub enum FactorMethod {
 /// All knobs compose via the `with_*` builders.
 #[derive(Debug, Clone)]
 pub struct FactorOptions {
-    /// Near-zero pivot policy. Reuses feral's [`ZeroPivotAction`]: `Fail`
-    /// (exact, default) returns [`FeralError::NumericallyRankDeficient`] on a
+    /// Near-zero pivot policy. Reuses rslab's [`ZeroPivotAction`]: `Fail`
+    /// (exact, default) returns [`RslabError::NumericallyRankDeficient`] on a
     /// singular pivot; `PerturbToEps { abs_floor }` is robust static pivoting —
     /// a pivot below `abs_floor` is lifted to that floor (the
-    /// complex-symmetric analogue of feral's f64 `perturb_to_floor`), so the
+    /// complex-symmetric analogue of rslab's f64 `perturb_to_floor`), so the
     /// factorization never fails and produces `L D Lᵀ = A + E` for small `E`.
     /// That is exactly the never-fail behaviour a preconditioner needs.
     pub on_zero_pivot: ZeroPivotAction,
@@ -338,7 +338,7 @@ impl FactorOptions {
     }
 }
 
-/// Static-pivot perturbation, the complex-symmetric analogue of feral's f64
+/// Static-pivot perturbation, the complex-symmetric analogue of rslab's f64
 /// `perturb_to_floor` (`dense::factor`): lift a pivot whose magnitude is below
 /// `abs_floor` up to that floor, preserving phase. For `T = f64` this reduces
 /// to `sign(d)·max(|d|, abs_floor)`, matching the real kernel.
@@ -388,7 +388,7 @@ fn factor_front<T: Scalar>(
     nrow: usize,
     ncol: usize,
     perturb_floor: Option<f64>,
-) -> Result<(FrontFactors<T>, Vec<T>), FeralError> {
+) -> Result<(FrontFactors<T>, Vec<T>), RslabError> {
     let n = nrow; // column stride
     let alpha = bk_alpha();
     let one = T::one();
@@ -443,7 +443,7 @@ fn factor_front<T: Scalar>(
                 // takes a 1×1 step and lets the perturbation below lift the zero
                 // diagonal up to the floor.
                 if perturb_floor.is_none() {
-                    return Err(FeralError::NumericallyRankDeficient);
+                    return Err(RslabError::NumericallyRankDeficient);
                 }
                 kstep = 1;
                 kp = k;
@@ -491,7 +491,7 @@ fn factor_front<T: Scalar>(
                         f[k * n + k] = d;
                         n_perturbed += 1;
                     }
-                    None if d == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                    None if d == T::zero() => return Err(RslabError::NumericallyRankDeficient),
                     _ => {}
                 }
                 d_diag[k] = d;
@@ -535,7 +535,7 @@ fn factor_front<T: Scalar>(
                 let scale = d11.magnitude().max(d22.magnitude()).max(d21.magnitude());
                 let growth_floor = GROWTH_EPS * scale * scale;
                 // Static-pivot the 2×2 when its determinant is near-singular. The
-                // real kernel (feral's `perturb_2x2_to_floor`) shifts the small
+                // real kernel (rslab's `perturb_2x2_to_floor`) shifts the small
                 // eigenvalue; for complex-symmetric blocks the eigenvalues are
                 // complex, so we shift both diagonals by the floor (lifting |det|)
                 // and, as a last resort, nudge det itself — enough to keep the
@@ -555,7 +555,7 @@ fn factor_front<T: Scalar>(
                         }
                     }
                     None if det.magnitude() <= growth_floor => {
-                        return Err(FeralError::NumericallyRankDeficient)
+                        return Err(RslabError::NumericallyRankDeficient)
                     }
                     _ => {}
                 }
@@ -784,7 +784,7 @@ fn factor_one_node<T: Scalar>(
     a_perm: &CscMatrix<T>,
     child_refs: &[&NodeFactor<T>],
     perturb_floor: Option<f64>,
-) -> Result<NodeFactor<T>, FeralError> {
+) -> Result<NodeFactor<T>, RslabError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
     let ncol = snode.ncol;
@@ -883,7 +883,7 @@ fn factor_subtree<T: Scalar>(
     sym: &SymbolicFactorization,
     a_perm: &CscMatrix<T>,
     perturb_floor: Option<f64>,
-) -> Result<SubtreeFactors<T>, FeralError> {
+) -> Result<SubtreeFactors<T>, RslabError> {
     let children = &sym.supernodes[s].children;
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
@@ -915,7 +915,7 @@ fn factor_subtree<T: Scalar>(
 ///
 /// Returns an [`LdltFactors`] in factorization order; solve with
 /// [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
-pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, FeralError> {
+pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, RslabError> {
     factor_sparse_ldlt_with(a, &FactorOptions::default())
 }
 
@@ -929,7 +929,7 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
 pub fn factor_sparse_ldlt_with<T: Scalar>(
     a: &CscMatrix<T>,
     opts: &FactorOptions,
-) -> Result<LdltFactors<T>, FeralError> {
+) -> Result<LdltFactors<T>, RslabError> {
     let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
     factor_numeric(&symb, a, opts)
 }
@@ -988,7 +988,7 @@ pub fn analyze(
     n: usize,
     col_ptr: &[usize],
     row_idx: &[usize],
-) -> Result<MultifrontalSymbolic, FeralError> {
+) -> Result<MultifrontalSymbolic, RslabError> {
     analyze_with(n, col_ptr, row_idx, &AnalyzeOptions::default())
 }
 
@@ -999,7 +999,7 @@ pub fn analyze_with(
     col_ptr: &[usize],
     row_idx: &[usize],
     opts: &AnalyzeOptions,
-) -> Result<MultifrontalSymbolic, FeralError> {
+) -> Result<MultifrontalSymbolic, RslabError> {
     let nnz = row_idx.len();
     if n == 0 {
         return Ok(MultifrontalSymbolic {
@@ -1124,11 +1124,11 @@ pub fn factor_numeric<T: Scalar>(
     symb: &MultifrontalSymbolic,
     a: &CscMatrix<T>,
     opts: &FactorOptions,
-) -> Result<LdltFactors<T>, FeralError> {
+) -> Result<LdltFactors<T>, RslabError> {
     a.validate()?;
     let n = symb.n;
     if a.n != n || a.row_idx.len() != symb.nnz {
-        return Err(FeralError::InvalidInput(
+        return Err(RslabError::InvalidInput(
             "factor_numeric: matrix does not match the analyzed pattern".to_string(),
         ));
     }
@@ -1157,8 +1157,8 @@ pub fn factor_numeric<T: Scalar>(
         return in_scoped_pool(opts.threads, || factor_left_looking(sym, a, opts));
     }
 
-    // Static-pivot floor (absolute), translated from feral's ZeroPivotAction.
-    // `PerturbToEps { abs_floor }` is taken as given (feral convention: an
+    // Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
+    // `PerturbToEps { abs_floor }` is taken as given (rslab convention: an
     // absolute floor, typically `eps_rel · ‖A‖∞`); `Fail` disables perturbation.
     let perturb_floor: Option<f64> = match opts.on_zero_pivot {
         ZeroPivotAction::Fail => None,
@@ -1223,7 +1223,7 @@ pub fn factor_numeric<T: Scalar>(
         match node_opt {
             Some(nd) => nodes.push(nd),
             None => {
-                return Err(FeralError::InvalidInput(
+                return Err(RslabError::InvalidInput(
                     "internal: unfactored supernode".to_string(),
                 ))
             }
@@ -1601,7 +1601,7 @@ fn ll_factor_node<T: Scalar>(
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
-) -> Result<(), FeralError> {
+) -> Result<(), RslabError> {
     const LL_GEMM_GATE: usize = 4096;
     const LL_GEMM_PAR: usize = 1_000_000;
     let snode = &sym.supernodes[s];
@@ -1812,7 +1812,7 @@ fn ll_factor_node<T: Scalar>(
             if absakk.max(colmax) == 0.0 {
                 if perturb_floor.is_none() {
                     restore_gloc!();
-                    return Err(FeralError::NumericallyRankDeficient);
+                    return Err(RslabError::NumericallyRankDeficient);
                 }
                 kstep = 1;
                 kp = k;
@@ -1861,7 +1861,7 @@ fn ll_factor_node<T: Scalar>(
                     }
                     None if dk == T::zero() => {
                         restore_gloc!();
-                        return Err(FeralError::NumericallyRankDeficient);
+                        return Err(RslabError::NumericallyRankDeficient);
                     }
                     _ => {}
                 }
@@ -1909,7 +1909,7 @@ fn ll_factor_node<T: Scalar>(
                     }
                     None if det.magnitude() <= growth_floor => {
                         restore_gloc!();
-                        return Err(FeralError::NumericallyRankDeficient);
+                        return Err(RslabError::NumericallyRankDeficient);
                     }
                     _ => {}
                 }
@@ -2130,7 +2130,7 @@ fn ll_factor_subtree<T: Scalar>(
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
     n_perturbed: &AtomicUsize,
-) -> Result<(), FeralError> {
+) -> Result<(), RslabError> {
     sym.supernodes[s]
         .children
         .par_iter()
@@ -2189,7 +2189,7 @@ fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     a: &CscMatrix<T>,
     opts: &FactorOptions,
-) -> Result<LdltFactors<T>, FeralError> {
+) -> Result<LdltFactors<T>, RslabError> {
     let n = sym.n;
     let perturb_floor: Option<f64> = match opts.on_zero_pivot {
         ZeroPivotAction::Fail => None,

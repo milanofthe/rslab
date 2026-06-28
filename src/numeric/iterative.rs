@@ -15,7 +15,7 @@
 //! down-/up-casts inside `apply`, while the iteration itself always runs in the
 //! working precision `T`.
 
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::FactorOptions;
 use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
@@ -116,12 +116,12 @@ impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
 /// and by [`NoPreconditioner`] (the unpreconditioned baseline).
 pub trait Preconditioner<T: Scalar> {
     /// Write `z ← M⁻¹ r`. `r` and `z` have length `n`.
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError>;
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError>;
     /// Block apply: `Z[:,c] ← M⁻¹ R[:,c]` for `c in 0..s`, with `R`,`Z` **column-
     /// major** `n×s`. The default loops [`apply`](Self::apply); a factored solver
     /// overrides it with a block triangular solve (`solve_many`) that loads each
     /// `L`/`D`/`U` value once for all `s` columns.
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
         for c in 0..s {
             self.apply(&r[c * n..c * n + n], &mut z[c * n..c * n + n])?;
         }
@@ -135,7 +135,7 @@ pub trait Preconditioner<T: Scalar> {
 pub struct NoPreconditioner;
 
 impl<T: Scalar> Preconditioner<T> for NoPreconditioner {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
         z.copy_from_slice(r);
         Ok(())
     }
@@ -144,7 +144,7 @@ impl<T: Scalar> Preconditioner<T> for NoPreconditioner {
 /// A factored RLA solver is a preconditioner: `M⁻¹ r` is one forward/back
 /// substitution against the stored `LDLᵀ` factor.
 impl<T: Scalar> Preconditioner<T> for LdltSolver<T> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
         Ok(())
@@ -153,7 +153,7 @@ impl<T: Scalar> Preconditioner<T> for LdltSolver<T> {
     /// triangular solve loads each `L`/`D` value once for all `s` columns. The
     /// Krylov block is column-major; `solve_many` is row-major, so it is
     /// transposed in/out (`O(n·s)`, cheap against the solve).
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
         let mut rowmaj = vec![T::zero(); n * s];
         for c in 0..s {
             for i in 0..n {
@@ -183,7 +183,7 @@ pub struct LowPrecisionPreconditioner {
 impl LowPrecisionPreconditioner {
     /// Down-cast `A` to `Complex<f32>` and factor it (static-pivoting honoured
     /// via `opts`, e.g. `ZeroPivotAction::PerturbToEps`).
-    pub fn factor(a: &CscMatrix<Complex<f64>>, opts: &FactorOptions) -> Result<Self, FeralError> {
+    pub fn factor(a: &CscMatrix<Complex<f64>>, opts: &FactorOptions) -> Result<Self, RslabError> {
         let a32 = CscMatrix::<Complex<f32>> {
             n: a.n,
             col_ptr: a.col_ptr.clone(),
@@ -212,7 +212,7 @@ impl LowPrecisionPreconditioner {
 }
 
 impl Preconditioner<Complex<f64>> for LowPrecisionPreconditioner {
-    fn apply(&self, r: &[Complex<f64>], z: &mut [Complex<f64>]) -> Result<(), FeralError> {
+    fn apply(&self, r: &[Complex<f64>], z: &mut [Complex<f64>]) -> Result<(), RslabError> {
         let r32: Vec<Complex<f32>> = r
             .iter()
             .map(|v| Complex::new(v.re as f32, v.im as f32))
@@ -237,7 +237,7 @@ pub struct LowPrecisionLu {
 impl LowPrecisionLu {
     /// Down-cast `A` to `Complex<f32>` and LU-factor it (options honoured —
     /// static pivoting and/or incomplete dropping for a preconditioner).
-    pub fn factor(a: &GeneralCsc<Complex<f64>>, opts: &FactorOptions) -> Result<Self, FeralError> {
+    pub fn factor(a: &GeneralCsc<Complex<f64>>, opts: &FactorOptions) -> Result<Self, RslabError> {
         let a32 = GeneralCsc::<Complex<f32>> {
             n: a.n,
             col_ptr: a.col_ptr.clone(),
@@ -265,7 +265,7 @@ impl LowPrecisionLu {
 }
 
 impl Preconditioner<Complex<f64>> for LowPrecisionLu {
-    fn apply(&self, r: &[Complex<f64>], z: &mut [Complex<f64>]) -> Result<(), FeralError> {
+    fn apply(&self, r: &[Complex<f64>], z: &mut [Complex<f64>]) -> Result<(), RslabError> {
         let r32: Vec<Complex<f32>> = r
             .iter()
             .map(|v| Complex::new(v.re as f32, v.im as f32))
@@ -325,7 +325,7 @@ pub fn cocg<T, A, M>(
     precond: &M,
     tol: f64,
     max_iter: usize,
-) -> Result<KrylovResult<T>, FeralError>
+) -> Result<KrylovResult<T>, RslabError>
 where
     T: Scalar,
     A: LinearOperator<T> + ?Sized,
@@ -333,7 +333,7 @@ where
 {
     let n = op.n();
     if b.len() != n {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n,
             got: b.len(),
         });
@@ -413,7 +413,7 @@ pub fn cocr<T, A, M>(
     precond: &M,
     tol: f64,
     max_iter: usize,
-) -> Result<KrylovResult<T>, FeralError>
+) -> Result<KrylovResult<T>, RslabError>
 where
     T: Scalar,
     A: LinearOperator<T> + ?Sized,
@@ -421,7 +421,7 @@ where
 {
     let n = op.n();
     if b.len() != n {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n,
             got: b.len(),
         });
@@ -531,7 +531,7 @@ pub fn gmres<T, A, M>(
     tol: f64,
     max_iter: usize,
     restart: usize,
-) -> Result<KrylovResult<T>, FeralError>
+) -> Result<KrylovResult<T>, RslabError>
 where
     T: Scalar,
     A: LinearOperator<T> + ?Sized,
@@ -539,7 +539,7 @@ where
 {
     let n = op.n();
     if b.len() != n {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n,
             got: b.len(),
         });
@@ -733,7 +733,7 @@ pub fn gmres_block<T, A, M>(
     tol: f64,
     max_iter: usize,
     restart: usize,
-) -> Result<BlockKrylovResult<T>, FeralError>
+) -> Result<BlockKrylovResult<T>, RslabError>
 where
     T: Scalar,
     A: LinearOperator<T> + ?Sized,
@@ -741,7 +741,7 @@ where
 {
     let n = op.n();
     if s == 0 || b.len() != n * s {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n * s,
             got: b.len(),
         });
@@ -991,11 +991,11 @@ impl<T: Scalar, F: FnMut(&[T], &mut [T], usize)> LinearOperator<T> for FnOp<F> {
 struct FnPc<G> {
     f: std::cell::RefCell<G>,
 }
-impl<T: Scalar, G: FnMut(&[T], &mut [T], usize) -> Result<(), FeralError>> Preconditioner<T> for FnPc<G> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+impl<T: Scalar, G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>> Preconditioner<T> for FnPc<G> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
         (self.f.borrow_mut())(r, z, 1)
     }
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, _n: usize) -> Result<(), FeralError> {
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, _n: usize) -> Result<(), RslabError> {
         (self.f.borrow_mut())(r, z, s)
     }
 }
@@ -1014,11 +1014,11 @@ pub fn gmres_block_fn<T, F, G>(
     tol: f64,
     max_iter: usize,
     restart: usize,
-) -> Result<BlockKrylovResult<T>, FeralError>
+) -> Result<BlockKrylovResult<T>, RslabError>
 where
     T: Scalar,
     F: FnMut(&[T], &mut [T], usize),
-    G: FnMut(&[T], &mut [T], usize) -> Result<(), FeralError>,
+    G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>,
 {
     let op = FnOp { f: std::cell::RefCell::new(op), n };
     let pc = FnPc { f: std::cell::RefCell::new(precond) };
@@ -1035,11 +1035,11 @@ pub fn gmres_fn<T, F, G>(
     tol: f64,
     max_iter: usize,
     restart: usize,
-) -> Result<KrylovResult<T>, FeralError>
+) -> Result<KrylovResult<T>, RslabError>
 where
     T: Scalar,
     F: FnMut(&[T], &mut [T], usize),
-    G: FnMut(&[T], &mut [T], usize) -> Result<(), FeralError>,
+    G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>,
 {
     let op = FnOp { f: std::cell::RefCell::new(op), n };
     let pc = FnPc { f: std::cell::RefCell::new(precond) };
@@ -1053,7 +1053,7 @@ where
 /// exact/incomplete, or `f64`/`f32` factors freely.
 pub trait Factorization<T: Scalar>: Preconditioner<T> {
     /// Solve `A x = b` directly from the stored factor.
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError>;
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError>;
     /// Stored fill (factor nonzeros) — the memory metric.
     fn factor_nnz(&self) -> usize;
     /// Number of statically perturbed pivots (0 for an exact factor).
@@ -1061,7 +1061,7 @@ pub trait Factorization<T: Scalar>: Preconditioner<T> {
 }
 
 impl<T: Scalar> Factorization<T> for LdltSolver<T> {
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
         LdltSolver::solve(self, b)
     }
     fn factor_nnz(&self) -> usize {
@@ -1073,14 +1073,14 @@ impl<T: Scalar> Factorization<T> for LdltSolver<T> {
 }
 
 impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors<T> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
         let x = crate::numeric::multifrontal_lu::solve_lu(self, r)?;
         z.copy_from_slice(&x);
         Ok(())
     }
     /// Block apply via `solve_lu_many` (one block triangular solve over all `s`
     /// columns). Column-major Krylov block ↔ row-major `solve_lu_many` transpose.
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
         let mut rowmaj = vec![T::zero(); n * s];
         for c in 0..s {
             for i in 0..n {
@@ -1098,7 +1098,7 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors
 }
 
 impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<T> {
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
         crate::numeric::multifrontal_lu::solve_lu(self, b)
     }
     fn factor_nnz(&self) -> usize {
@@ -1113,13 +1113,13 @@ impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<
 /// preconditioner / factorization too — the unsymmetric twin of the
 /// [`LdltSolver`] impls, so solver-in-the-loop code can be generic over either.
 impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<T> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
         Ok(())
     }
     /// Block apply via [`LuSolver::solve_many`](crate::numeric::multifrontal_lu::LuSolver::solve_many).
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
         let mut rowmaj = vec![T::zero(); n * s];
         for c in 0..s {
             for i in 0..n {
@@ -1137,7 +1137,7 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<
 }
 
 impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuSolver<T> {
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
         crate::numeric::multifrontal_lu::LuSolver::solve(self, b)
     }
     fn factor_nnz(&self) -> usize {

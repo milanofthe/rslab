@@ -9,8 +9,8 @@
 //! ordering algorithm on the subgraph induced by non-Schur indices,
 //! then appends the Schur tail. This is a clean-room divergence from
 //! MUMPS's HALO-SCHUR mechanism (which keeps Schur variables in the
-//! AMD graph but constrained to come last via amalgamation): feral does
-//! not own the `feral-amd` driver API, and the subgraph approach is
+//! AMD graph but constrained to come last via amalgamation): rslab does
+//! not own the `rslab-amd` driver API, and the subgraph approach is
 //! composable across all four ordering methods (AMD, AMF, MetisND,
 //! ScotchND) without any external-crate change.
 //!
@@ -22,7 +22,7 @@
 //!
 //! See `dev/plans/kkt-feature-gaps.md` §F3.
 
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::sparse::csc::{CscMatrix, CscPattern};
 
 /// Compute a Schur-aware permutation for `matrix` given a list of
@@ -46,7 +46,7 @@ use crate::sparse::csc::{CscMatrix, CscPattern};
 pub fn compute_schur_aware_perm(
     matrix: &CscMatrix,
     schur_indices: &[usize],
-) -> Result<Vec<usize>, FeralError> {
+) -> Result<Vec<usize>, RslabError> {
     let n = matrix.n;
     let n_schur = schur_indices.len();
 
@@ -57,7 +57,7 @@ pub fn compute_schur_aware_perm(
     }
 
     if n_schur == n {
-        return Err(FeralError::InvalidInput(
+        return Err(RslabError::InvalidInput(
             "schur_indices.len() == n is not allowed; elimination set would be empty".to_string(),
         ));
     }
@@ -66,13 +66,13 @@ pub fn compute_schur_aware_perm(
     let mut is_schur = vec![false; n];
     for &s in schur_indices {
         if s >= n {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "schur_indices entry {} out of range for n={}",
                 s, n
             )));
         }
         if is_schur[s] {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "schur_indices contains duplicate entry {}",
                 s
             )));
@@ -183,28 +183,28 @@ fn restrict_pattern_to_subgraph(full: &CscPattern, sub_of: &[usize], n_f: usize)
 /// need to plumb a `method` parameter — F3.2 will, when it integrates
 /// the Schur-aware ordering into `symbolic_factorize_with_schur` and
 /// dispatches over all four ordering methods.
-fn run_amd(pattern: &CscPattern) -> Result<Vec<usize>, FeralError> {
+fn run_amd(pattern: &CscPattern) -> Result<Vec<usize>, RslabError> {
     if pattern.n == 0 {
         return Ok(Vec::new());
     }
     let col_buf: Result<Vec<i32>, _> = pattern.col_ptr.iter().map(|&x| i32::try_from(x)).collect();
     let col_buf = col_buf.map_err(|_| {
-        FeralError::InvalidInput("matrix too large for i32-indexed AMD".to_string())
+        RslabError::InvalidInput("matrix too large for i32-indexed AMD".to_string())
     })?;
     let row_buf: Result<Vec<i32>, _> = pattern.row_idx.iter().map(|&x| i32::try_from(x)).collect();
     let row_buf = row_buf.map_err(|_| {
-        FeralError::InvalidInput("matrix too large for i32-indexed AMD".to_string())
+        RslabError::InvalidInput("matrix too large for i32-indexed AMD".to_string())
     })?;
-    let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
-        .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
-    let perm_i32 = feral_amd::amd_order(&pat)
-        .map_err(|e| FeralError::InvalidInput(format!("AMD failed: {}", e)))?;
+    let pat = rslab_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
+        .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
+    let perm_i32 = rslab_amd::amd_order(&pat)
+        .map_err(|e| RslabError::InvalidInput(format!("AMD failed: {}", e)))?;
     let mut out: Vec<usize> = Vec::with_capacity(perm_i32.len());
     for x in perm_i32 {
         let u = usize::try_from(x)
-            .map_err(|_| FeralError::InvalidInput("AMD returned negative index".to_string()))?;
+            .map_err(|_| RslabError::InvalidInput("AMD returned negative index".to_string()))?;
         if u >= pattern.n {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "AMD returned out-of-range index".to_string(),
             ));
         }
@@ -280,21 +280,21 @@ mod tests {
     fn duplicate_schur_indices_rejected() {
         let m = small_kkt();
         let r = compute_schur_aware_perm(&m, &[4, 4]);
-        assert!(matches!(r, Err(FeralError::InvalidInput(_))));
+        assert!(matches!(r, Err(RslabError::InvalidInput(_))));
     }
 
     #[test]
     fn out_of_range_schur_index_rejected() {
         let m = small_kkt();
         let r = compute_schur_aware_perm(&m, &[6]);
-        assert!(matches!(r, Err(FeralError::InvalidInput(_))));
+        assert!(matches!(r, Err(RslabError::InvalidInput(_))));
     }
 
     #[test]
     fn full_schur_rejected() {
         let m = small_kkt();
         let r = compute_schur_aware_perm(&m, &[0, 1, 2, 3, 4, 5]);
-        assert!(matches!(r, Err(FeralError::InvalidInput(_))));
+        assert!(matches!(r, Err(RslabError::InvalidInput(_))));
     }
 
     #[test]

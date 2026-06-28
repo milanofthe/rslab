@@ -1,6 +1,6 @@
-/// Errors returned by FERAL's public API.
+/// Errors returned by RSLAB's public API.
 #[derive(Debug)]
-pub enum FeralError {
+pub enum RslabError {
     /// The matrix is numerically rank-deficient: a pivot was exactly or
     /// near-zero and `ZeroPivotAction::Fail` was specified. The factorization
     /// is incomplete.
@@ -69,21 +69,21 @@ pub enum FeralError {
     NeedsRefactor,
 }
 
-impl std::fmt::Display for FeralError {
+impl std::fmt::Display for RslabError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FeralError::NumericallyRankDeficient => {
+            RslabError::NumericallyRankDeficient => {
                 write!(f, "matrix is numerically rank-deficient")
             }
-            FeralError::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
-            FeralError::DimensionMismatch { expected, got } => {
+            RslabError::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
+            RslabError::DimensionMismatch { expected, got } => {
                 write!(f, "dimension mismatch: expected {}, got {}", expected, got)
             }
-            FeralError::IoError(msg) => write!(f, "I/O error: {}", msg),
-            FeralError::NoFactor => {
+            RslabError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            RslabError::NoFactor => {
                 write!(f, "no factorization available; call Solver::factor() first")
             }
-            FeralError::SqdContractViolated { column, pivot } => {
+            RslabError::SqdContractViolated { column, pivot } => {
                 write!(
                     f,
                     "SQD contract violated at column {}: pivot = {:e} fails \
@@ -92,7 +92,7 @@ impl std::fmt::Display for FeralError {
                     column, pivot
                 )
             }
-            FeralError::DelayBudgetExceeded {
+            RslabError::DelayBudgetExceeded {
                 supernode,
                 required,
                 capacity,
@@ -104,10 +104,10 @@ impl std::fmt::Display for FeralError {
                     supernode, required, capacity
                 )
             }
-            FeralError::SingularBasis { column } => {
+            RslabError::SingularBasis { column } => {
                 write!(f, "LU basis is numerically singular at column {}", column)
             }
-            FeralError::NeedsRefactor => {
+            RslabError::NeedsRefactor => {
                 write!(
                     f,
                     "LU basis update budget exceeded; refactor required (issue #81)"
@@ -117,4 +117,4 @@ impl std::fmt::Display for FeralError {
     }
 }
 
-impl std::error::Error for FeralError {}
+impl std::error::Error for RslabError {}

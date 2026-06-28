@@ -5,7 +5,7 @@
 //! ([`crate::numeric::multifrontal_lu`]) needs the **full** matrix with both
 //! triangles and genuinely distinct `A_ij ≠ A_ji`; this type provides that.
 
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::scalar::Scalar;
 
 /// A general sparse matrix in compressed-sparse-column form. Every stored entry
@@ -28,15 +28,15 @@ impl<T: Scalar> GeneralCsc<T> {
         rows: &[usize],
         cols: &[usize],
         vals: &[T],
-    ) -> Result<Self, FeralError> {
+    ) -> Result<Self, RslabError> {
         if rows.len() != cols.len() || cols.len() != vals.len() {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "GeneralCsc::from_triplets: rows/cols/vals length mismatch".to_string(),
             ));
         }
         for (&r, &c) in rows.iter().zip(cols) {
             if r >= n || c >= n {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "GeneralCsc::from_triplets: index ({r}, {c}) out of bounds for {n}×{n}"
                 )));
             }
@@ -149,25 +149,25 @@ impl<T: Scalar> GeneralCsc<T> {
     }
 
     /// Validate structural invariants (lengths, bounds).
-    pub fn validate(&self) -> Result<(), FeralError> {
+    pub fn validate(&self) -> Result<(), RslabError> {
         if self.col_ptr.len() != self.n + 1 {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "GeneralCsc: bad col_ptr length".to_string(),
             ));
         }
         if self.row_idx.len() != self.values.len() {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "GeneralCsc: row_idx/values length mismatch".to_string(),
             ));
         }
         if *self.col_ptr.last().unwrap_or(&0) != self.row_idx.len() {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "GeneralCsc: col_ptr[n] != nnz".to_string(),
             ));
         }
         for &i in &self.row_idx {
             if i >= self.n {
-                return Err(FeralError::InvalidInput(
+                return Err(RslabError::InvalidInput(
                     "GeneralCsc: row index out of bounds".to_string(),
                 ));
             }

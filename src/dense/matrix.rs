@@ -1,4 +1,4 @@
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::scalar::Scalar;
 
 /// Symmetric matrix stored as full n×n column-major. Only the lower triangle
@@ -60,9 +60,9 @@ impl<T: Scalar> SymmetricMatrix<T> {
 
     /// Create a symmetric matrix from a flat column-major vector.
     /// The lower triangle is authoritative; the upper triangle is ignored.
-    pub fn from_column_major(n: usize, data: Vec<T>) -> Result<Self, FeralError> {
+    pub fn from_column_major(n: usize, data: Vec<T>) -> Result<Self, RslabError> {
         if data.len() != n * n {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "matrix data length {} != expected {} for n={}",
                 data.len(),
                 n * n,
@@ -107,14 +107,14 @@ impl<T: Scalar> SymmetricMatrix<T> {
 
     /// Validate the matrix for factorization input.
     /// Checks: n > 0, data length, no NaN/Inf in lower triangle.
-    pub fn validate(&self) -> Result<(), FeralError> {
+    pub fn validate(&self) -> Result<(), RslabError> {
         if self.n == 0 {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "matrix dimension is zero".to_string(),
             ));
         }
         if self.data.len() != self.n * self.n {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "matrix data length {} != expected {} for n={}",
                 self.data.len(),
                 self.n * self.n,
@@ -126,7 +126,7 @@ impl<T: Scalar> SymmetricMatrix<T> {
             for i in j..self.n {
                 let val = self.data[j * self.n + i];
                 if !val.is_finite() {
-                    return Err(FeralError::InvalidInput(format!(
+                    return Err(RslabError::InvalidInput(format!(
                         "matrix contains NaN or Inf at index ({},{})",
                         i, j
                     )));

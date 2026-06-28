@@ -480,50 +480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "feral-amd"
-version = "0.2.1"
-dependencies = [
- "feral-ordering-core",
-]
-
-[[package]]
-name = "feral-amf"
-version = "0.2.1"
-dependencies = [
- "feral-ordering-core",
-]
-
-[[package]]
-name = "feral-kahip"
-version = "0.2.1"
-dependencies = [
- "feral-amd",
- "feral-metis",
- "feral-ordering-core",
-]
-
-[[package]]
-name = "feral-metis"
-version = "0.2.1"
-dependencies = [
- "feral-amd",
- "feral-ordering-core",
-]
-
-[[package]]
-name = "feral-ordering-core"
-version = "0.2.1"
-
-[[package]]
-name = "feral-scotch"
-version = "0.2.1"
-dependencies = [
- "feral-amd",
- "feral-metis",
- "feral-ordering-core",
-]
-
-[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1467,23 +1423,67 @@ dependencies = [
  "approx",
  "criterion",
  "faer",
- "feral-amd",
- "feral-amf",
- "feral-kahip",
- "feral-metis",
- "feral-ordering-core",
- "feral-scotch",
  "flate2",
  "gemm",
  "libloading",
  "num-complex",
  "pulp 0.22.2",
  "rayon",
+ "rslab-amd",
+ "rslab-amf",
+ "rslab-kahip",
+ "rslab-metis",
+ "rslab-ordering-core",
+ "rslab-scotch",
  "serde",
  "serde_json",
  "sysinfo",
  "tar",
  "ureq",
+]
+
+[[package]]
+name = "rslab-amd"
+version = "0.2.1"
+dependencies = [
+ "rslab-ordering-core",
+]
+
+[[package]]
+name = "rslab-amf"
+version = "0.2.1"
+dependencies = [
+ "rslab-ordering-core",
+]
+
+[[package]]
+name = "rslab-kahip"
+version = "0.2.1"
+dependencies = [
+ "rslab-amd",
+ "rslab-metis",
+ "rslab-ordering-core",
+]
+
+[[package]]
+name = "rslab-metis"
+version = "0.2.1"
+dependencies = [
+ "rslab-amd",
+ "rslab-ordering-core",
+]
+
+[[package]]
+name = "rslab-ordering-core"
+version = "0.2.1"
+
+[[package]]
+name = "rslab-scotch"
+version = "0.2.1"
+dependencies = [
+ "rslab-amd",
+ "rslab-metis",
+ "rslab-ordering-core",
 ]
 
 [[package]]

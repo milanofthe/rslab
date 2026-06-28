@@ -19,7 +19,7 @@
 //! generic path). Further performance work happens here.
 
 use crate::dense::matrix::SymmetricMatrix;
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::scalar::Scalar;
 
 /// Result of a generic Bunch-Kaufman LDLᵀ factorization.
@@ -98,9 +98,9 @@ pub(crate) fn swap_sym_lower<T: Scalar>(a: &mut [T], n: usize, p: usize, q: usiz
 ///
 /// Works for any [`Scalar`]; for `T = Complex<f64>` this is the
 /// complex-symmetric (`A = Aᵀ`) factorization. Returns
-/// [`FeralError::NumericallyRankDeficient`] if a structurally zero pivot (1×1
+/// [`RslabError::NumericallyRankDeficient`] if a structurally zero pivot (1×1
 /// of value 0, or a 2×2 block with zero determinant) is encountered.
-pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors<T>, FeralError> {
+pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors<T>, RslabError> {
     matrix.validate()?;
     let n = matrix.n;
     let alpha = bk_alpha();
@@ -133,7 +133,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
         let kp;
         if absakk.max(colmax) == 0.0 {
             // Structurally zero column: singular.
-            return Err(FeralError::NumericallyRankDeficient);
+            return Err(RslabError::NumericallyRankDeficient);
         } else if absakk >= alpha * colmax {
             kstep = 1;
             kp = k;
@@ -173,7 +173,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
             }
             let d = a[k * n + k];
             if d == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+                return Err(RslabError::NumericallyRankDeficient);
             }
             d_diag[k] = d;
             let r = d.real();
@@ -211,7 +211,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
             let d22 = a[(k + 1) * n + (k + 1)];
             let det = d11 * d22 - d21 * d21;
             if det == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+                return Err(RslabError::NumericallyRankDeficient);
             }
             let detinv = det.recip();
             d_diag[k] = d11;
@@ -316,10 +316,10 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
 /// Solve `A · x = rhs` from a generic LDLᵀ factorization.
 ///
 /// Applies the five-step sequence `x = P L⁻ᵀ D⁻¹ L⁻¹ Pᵀ rhs`.
-pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<T>, FeralError> {
+pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<T>, RslabError> {
     let n = factors.n;
     if rhs.len() != n {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n,
             got: rhs.len(),
         });
@@ -351,7 +351,7 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
             let d22 = factors.d_diag[k + 1];
             let det = d11 * d22 - d21 * d21;
             if det == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+                return Err(RslabError::NumericallyRankDeficient);
             }
             let detinv = det.recip();
             let z0 = y[k];
@@ -362,7 +362,7 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
         } else {
             let d = factors.d_diag[k];
             if d == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+                return Err(RslabError::NumericallyRankDeficient);
             }
             y[k] = y[k] * d.recip();
             k += 1;
@@ -400,10 +400,10 @@ pub fn solve_ldlt_many<T: Scalar>(
     factors: &LdltFactors<T>,
     b: &[T],
     nrhs: usize,
-) -> Result<Vec<T>, FeralError> {
+) -> Result<Vec<T>, RslabError> {
     let n = factors.n;
     if nrhs == 0 || b.len() != n * nrhs {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n * nrhs,
             got: b.len(),
         });
@@ -447,7 +447,7 @@ pub fn solve_ldlt_many<T: Scalar>(
             let d22 = factors.d_diag[k + 1];
             let det = d11 * d22 - d21 * d21;
             if det == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+                return Err(RslabError::NumericallyRankDeficient);
             }
             let detinv = det.recip();
             let (k0, k1) = (k * nrhs, (k + 1) * nrhs);
@@ -461,7 +461,7 @@ pub fn solve_ldlt_many<T: Scalar>(
         } else {
             let d = factors.d_diag[k];
             if d == T::zero() {
-                return Err(FeralError::NumericallyRankDeficient);
+                return Err(RslabError::NumericallyRankDeficient);
             }
             let dinv = d.recip();
             let kb = k * nrhs;
@@ -662,7 +662,7 @@ mod tests {
         let a = SymmetricMatrix::<f64>::zeros(2);
         assert!(matches!(
             factor_ldlt(&a),
-            Err(FeralError::NumericallyRankDeficient)
+            Err(RslabError::NumericallyRankDeficient)
         ));
     }
 }

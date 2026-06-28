@@ -1,4 +1,4 @@
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::scalar::Scalar;
 
 /// Compressed Sparse Column (CSC) matrix storage for symmetric matrices.
@@ -43,9 +43,9 @@ impl<T: Scalar> CscMatrix<T> {
         rows: &[usize],
         cols: &[usize],
         vals: &[T],
-    ) -> Result<Self, FeralError> {
+    ) -> Result<Self, RslabError> {
         if rows.len() != cols.len() || cols.len() != vals.len() {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "triplet arrays must have equal length".to_string(),
             ));
         }
@@ -54,7 +54,7 @@ impl<T: Scalar> CscMatrix<T> {
         let mut col_counts = vec![0usize; n];
         for &c in cols {
             if c >= n {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "column index {} out of bounds for n={}",
                     c, n
                 )));
@@ -76,13 +76,13 @@ impl<T: Scalar> CscMatrix<T> {
         for k in 0..rows.len() {
             let (r, c) = (rows[k], cols[k]);
             if r >= n {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "row index {} out of bounds for n={}",
                     r, n
                 )));
             }
             if r < c {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "triplet {} ({}, {}) is upper-triangle; \
                      CscMatrix stores only the lower triangle (row >= col)",
                     k, r, c
@@ -154,16 +154,16 @@ impl<T: Scalar> CscMatrix<T> {
     }
 
     /// Validate the CSC structure.
-    pub fn validate(&self) -> Result<(), FeralError> {
+    pub fn validate(&self) -> Result<(), RslabError> {
         if self.col_ptr.len() != self.n + 1 {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "col_ptr length {} != n+1={}",
                 self.col_ptr.len(),
                 self.n + 1
             )));
         }
         if self.row_idx.len() != self.values.len() {
-            return Err(FeralError::InvalidInput(
+            return Err(RslabError::InvalidInput(
                 "row_idx and values length mismatch".to_string(),
             ));
         }
@@ -175,13 +175,13 @@ impl<T: Scalar> CscMatrix<T> {
         // silently dropped and never factored. Completes the column-pointer
         // contract the monotonicity check below began.
         if self.col_ptr[0] != 0 {
-            return Err(FeralError::InvalidInput(format!(
+            return Err(RslabError::InvalidInput(format!(
                 "col_ptr[0] must be 0, got {}",
                 self.col_ptr[0]
             )));
         }
         if self.col_ptr[self.n] != self.row_idx.len() {
-            return Err(FeralError::InvalidInput("col_ptr[n] != nnz".to_string()));
+            return Err(RslabError::InvalidInput("col_ptr[n] != nnz".to_string()));
         }
         // col_ptr must be monotonically non-decreasing (X6). Without this a
         // non-monotone `ia` whose endpoints line up (col_ptr[0] == 0,
@@ -192,7 +192,7 @@ impl<T: Scalar> CscMatrix<T> {
         // ranges used below are well-formed.
         for j in 0..self.n {
             if self.col_ptr[j + 1] < self.col_ptr[j] {
-                return Err(FeralError::InvalidInput(format!(
+                return Err(RslabError::InvalidInput(format!(
                     "col_ptr not monotonically non-decreasing at column {} ({} > {})",
                     j,
                     self.col_ptr[j],
@@ -205,13 +205,13 @@ impl<T: Scalar> CscMatrix<T> {
             let end = self.col_ptr[j + 1];
             for k in start..end {
                 if self.row_idx[k] >= self.n {
-                    return Err(FeralError::InvalidInput(format!(
+                    return Err(RslabError::InvalidInput(format!(
                         "row index {} out of bounds in column {}",
                         self.row_idx[k], j
                     )));
                 }
                 if self.row_idx[k] < j {
-                    return Err(FeralError::InvalidInput(format!(
+                    return Err(RslabError::InvalidInput(format!(
                         "row index {} in column {} is upper-triangle; \
                          CscMatrix stores only the lower triangle (row >= col)",
                         self.row_idx[k], j
@@ -221,7 +221,7 @@ impl<T: Scalar> CscMatrix<T> {
             // Check sorted
             for k in (start + 1)..end {
                 if self.row_idx[k] <= self.row_idx[k - 1] {
-                    return Err(FeralError::InvalidInput(format!(
+                    return Err(RslabError::InvalidInput(format!(
                         "row indices not sorted in column {} ({}>={})",
                         j,
                         self.row_idx[k - 1],

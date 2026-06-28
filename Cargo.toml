@@ -1,11 +1,11 @@
 [workspace]
-members = [".", "crates/feral-ordering-core", "crates/feral-amd", "crates/feral-amf", "crates/feral-metis", "crates/feral-scotch", "crates/feral-kahip"]
+members = [".", "crates/rslab-ordering-core", "crates/rslab-amd", "crates/rslab-amf", "crates/rslab-metis", "crates/rslab-scotch", "crates/rslab-kahip"]
 # Root commands (`cargo build`/`test`/`clippy` with no -p/--workspace) operate
-# on the `feral` package only. `feral-diagnostics` is a member so it shares the
-# lockfile and `cargo run -p feral-diagnostics --bin <name>` works, but it is
-# NOT a dependency of `feral`, so the default build/test set never compiles its
+# on the `rslab` package only. `rslab-diagnostics` is a member so it shares the
+# lockfile and `cargo run -p rslab-diagnostics --bin <name>` works, but it is
+# NOT a dependency of `rslab`, so the default build/test set never compiles its
 # ~144 one-off binaries (issue #71). Build them explicitly with
-# `cargo build -p feral-diagnostics`.
+# `cargo build -p rslab-diagnostics`.
 resolver = "2"
 
 [package]
@@ -15,8 +15,8 @@ edition = "2021"
 license = "MIT"
 description = "RSLAB — pure-Rust sparse complex/real direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
 authors = ["Milan Rother"]
-repository = "https://github.com/jkitchin/feral"
-homepage = "https://github.com/jkitchin/feral"
+repository = "https://github.com/milanrother/rslab"
+homepage = "https://github.com/milanrother/rslab"
 readme = "README.md"
 keywords = ["sparse", "solver", "linear-algebra", "ldlt", "kkt"]
 categories = ["mathematics", "science"]
@@ -39,7 +39,7 @@ exclude = [
     "/.github",
     "/.pre-commit-config.yaml",
     "/CLAUDE.md",
-    "/FERAL-PROJECT-SPEC.md",
+    "/RSLAB-PROJECT-SPEC.md",
     "/tasks.org",
 ]
 
@@ -84,12 +84,12 @@ gemm = "0.18"
 # via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
 # src/ordering/amd.rs is still the default (OrderingMethod::Amd)
 # pending retirement per dev/decisions.md.
-feral-ordering-core = { path = "crates/feral-ordering-core", version = "0.2" }
-feral-amd = { path = "crates/feral-amd", version = "0.2" }
-feral-amf = { path = "crates/feral-amf", version = "0.2" }
-feral-metis = { path = "crates/feral-metis", version = "0.2" }
-feral-scotch = { path = "crates/feral-scotch", version = "0.2" }
-feral-kahip = { path = "crates/feral-kahip", version = "0.2" }
+rslab-ordering-core = { path = "crates/rslab-ordering-core", version = "0.2" }
+rslab-amd = { path = "crates/rslab-amd", version = "0.2" }
+rslab-amf = { path = "crates/rslab-amf", version = "0.2" }
+rslab-metis = { path = "crates/rslab-metis", version = "0.2" }
+rslab-scotch = { path = "crates/rslab-scotch", version = "0.2" }
+rslab-kahip = { path = "crates/rslab-kahip", version = "0.2" }
 # Optional, only for the `matgen-download` feature (SuiteSparse/Matrix Market
 # fetcher). Pure Rust: ureq+rustls (no OpenSSL), flate2/miniz_oxide, tar.
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }

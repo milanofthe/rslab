@@ -15,7 +15,7 @@
 //! `A x = b` becomes: factor `Â`, then `x = D · (Â⁻¹ · (D b))`.
 
 use crate::dense::ldlt_generic::{solve_ldlt, solve_ldlt_many, LdltFactors};
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::{
     analyze as analyze_pattern, factor_numeric, FactorOptions, MultifrontalSymbolic,
 };
@@ -70,7 +70,7 @@ impl<T: Scalar> LdltSolver<T> {
     }
 
     /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P` (exact mode).
-    pub fn factor(a: &CscMatrix<T>) -> Result<Self, FeralError> {
+    pub fn factor(a: &CscMatrix<T>) -> Result<Self, RslabError> {
         Self::factor_with(a, &FactorOptions::default())
     }
 
@@ -79,15 +79,15 @@ impl<T: Scalar> LdltSolver<T> {
     /// [`FactorOptions`]. Runs analysis + numeric factorization in one
     /// call; for the *analyze once, factor many* workflow use
     /// [`LdltSymbolic`].
-    pub fn factor_with(a: &CscMatrix<T>, opts: &FactorOptions) -> Result<Self, FeralError> {
+    pub fn factor_with(a: &CscMatrix<T>, opts: &FactorOptions) -> Result<Self, RslabError> {
         LdltSymbolic::analyze(a)?.factor(a, opts)
     }
 
     /// Solve `A · x = rhs` using the stored factors.
-    pub fn solve(&self, rhs: &[T]) -> Result<Vec<T>, FeralError> {
+    pub fn solve(&self, rhs: &[T]) -> Result<Vec<T>, RslabError> {
         let n = self.factors.n;
         if rhs.len() != n {
-            return Err(FeralError::DimensionMismatch {
+            return Err(RslabError::DimensionMismatch {
                 expected: n,
                 got: rhs.len(),
             });
@@ -112,10 +112,10 @@ impl<T: Scalar> LdltSolver<T> {
     /// RHS `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve)
     /// calls — the factor structure is traversed once and each value applied to
     /// all RHS (the FEM multiple-load-case / block-Krylov use).
-    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, FeralError> {
+    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
         let n = self.factors.n;
         if nrhs == 0 || b.len() != n * nrhs {
-            return Err(FeralError::DimensionMismatch {
+            return Err(RslabError::DimensionMismatch {
                 expected: n * nrhs,
                 got: b.len(),
             });
@@ -150,10 +150,10 @@ impl<T: Scalar> LdltSolver<T> {
         a: &CscMatrix<T>,
         rhs: &[T],
         max_iter: usize,
-    ) -> Result<Vec<T>, FeralError> {
+    ) -> Result<Vec<T>, RslabError> {
         let n = self.factors.n;
         if a.n != n {
-            return Err(FeralError::DimensionMismatch {
+            return Err(RslabError::DimensionMismatch {
                 expected: n,
                 got: a.n,
             });
@@ -238,7 +238,7 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
 ///
 /// ```
 /// use rslab::{LdltSymbolic, FactorOptions, CscMatrix};
-/// # fn demo(pattern_vals: &[f64], updated_vals: &[f64]) -> Result<(), rslab::FeralError> {
+/// # fn demo(pattern_vals: &[f64], updated_vals: &[f64]) -> Result<(), rslab::RslabError> {
 /// let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0])?;
 /// let analysis = LdltSymbolic::analyze(&a)?;        // phase 1, once
 /// let f1 = analysis.factor(&a, &FactorOptions::default())?; // phase 2/3
@@ -254,7 +254,7 @@ pub struct LdltSymbolic {
 impl LdltSymbolic {
     /// Phase 1: analyze the sparsity pattern of `a`. The values are ignored, so
     /// any matrix with the target pattern (even a zero-valued template) works.
-    pub fn analyze<T: Scalar>(a: &CscMatrix<T>) -> Result<Self, FeralError> {
+    pub fn analyze<T: Scalar>(a: &CscMatrix<T>) -> Result<Self, RslabError> {
         a.validate()?;
         Ok(Self {
             symbolic: analyze_pattern(a.n, &a.col_ptr, &a.row_idx)?,
@@ -322,12 +322,12 @@ impl LdltSymbolic {
 
     /// Phases 2–3: equilibrate and factor `a`, reusing this analysis. `a` must
     /// carry the same sparsity pattern the analysis was built from (same `n`
-    /// and `nnz`), otherwise an [`FeralError::InvalidInput`] is returned.
+    /// and `nnz`), otherwise an [`RslabError::InvalidInput`] is returned.
     pub fn factor<T: Scalar>(
         &self,
         a: &CscMatrix<T>,
         opts: &FactorOptions,
-    ) -> Result<LdltSolver<T>, FeralError> {
+    ) -> Result<LdltSolver<T>, RslabError> {
         a.validate()?;
         let estimate = self.estimate_memory::<T>();
         let t = std::time::Instant::now();
@@ -607,7 +607,7 @@ mod tests {
         let solver = LdltSolver::factor(&a).unwrap();
         assert!(matches!(
             solver.solve(&[1.0, 2.0, 3.0]),
-            Err(FeralError::DimensionMismatch { .. })
+            Err(RslabError::DimensionMismatch { .. })
         ));
     }
 }

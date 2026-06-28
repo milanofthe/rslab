@@ -15,7 +15,7 @@ use crate::sparse::csc::CscPattern;
 /// pre-placed contiguous slices.
 ///
 /// Note: the fill-reducing ordering itself is produced by the standalone
-/// `feral_amd` crate (a quotient-graph AMD); this module only retains the
+/// `rslab_amd` crate (a quotient-graph AMD); this module only retains the
 /// permutation-application helper used throughout `symbolic`.
 #[allow(clippy::needless_range_loop)]
 pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {

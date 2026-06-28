@@ -1,5 +1,5 @@
 use crate::dense::matrix::SymmetricMatrix;
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use num_complex::Complex;
@@ -31,7 +31,7 @@ impl<T: Scalar> MtxMatrix<T> {
     }
 
     /// Convert to a CSC sparse matrix (lower triangle).
-    pub fn to_csc(&self) -> Result<CscMatrix<T>, FeralError> {
+    pub fn to_csc(&self) -> Result<CscMatrix<T>, RslabError> {
         let rows: Vec<usize> = self.entries.iter().map(|&(r, _, _)| r).collect();
         let cols: Vec<usize> = self.entries.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<T> = self.entries.iter().map(|&(_, _, v)| v).collect();
@@ -40,7 +40,7 @@ impl<T: Scalar> MtxMatrix<T> {
 
     /// Convert to a general (full, unsymmetric) CSC matrix, keeping every entry
     /// as given — the form the unsymmetric LU path / a `LinearOperator` uses.
-    pub fn to_general_csc(&self) -> Result<crate::sparse::general::GeneralCsc<T>, FeralError> {
+    pub fn to_general_csc(&self) -> Result<crate::sparse::general::GeneralCsc<T>, RslabError> {
         let rows: Vec<usize> = self.entries.iter().map(|&(r, _, _)| r).collect();
         let cols: Vec<usize> = self.entries.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<T> = self.entries.iter().map(|&(_, _, v)| v).collect();
@@ -53,9 +53,9 @@ impl<T: Scalar> MtxMatrix<T> {
 /// Accepts only `%%MatrixMarket matrix coordinate real symmetric`. Indices are
 /// converted from 1-based (MTX) to 0-based; upper-triangle entries are
 /// transposed to the lower triangle.
-pub fn read_mtx(path: &Path) -> Result<MtxMatrix<f64>, FeralError> {
+pub fn read_mtx(path: &Path) -> Result<MtxMatrix<f64>, RslabError> {
     let contents = std::fs::read_to_string(path)
-        .map_err(|e| FeralError::IoError(format!("{}: {}", path.display(), e)))?;
+        .map_err(|e| RslabError::IoError(format!("{}: {}", path.display(), e)))?;
     parse_mtx(&contents, path.to_string_lossy().as_ref())
 }
 
@@ -63,14 +63,14 @@ pub fn read_mtx(path: &Path) -> Result<MtxMatrix<f64>, FeralError> {
 ///
 /// Accepts `%%MatrixMarket matrix coordinate complex symmetric`. Each data line
 /// is `i j re im`. Indices 1-based → 0-based; upper triangle → lower triangle.
-pub fn read_mtx_complex(path: &Path) -> Result<MtxMatrix<Complex<f64>>, FeralError> {
+pub fn read_mtx_complex(path: &Path) -> Result<MtxMatrix<Complex<f64>>, RslabError> {
     let contents = std::fs::read_to_string(path)
-        .map_err(|e| FeralError::IoError(format!("{}: {}", path.display(), e)))?;
+        .map_err(|e| RslabError::IoError(format!("{}: {}", path.display(), e)))?;
     parse_mtx_complex(&contents, path.to_string_lossy().as_ref())
 }
 
 /// Parse a **real** symmetric Matrix Market string (`mtype 2`).
-pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix<f64>, FeralError> {
+pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix<f64>, RslabError> {
     parse_mtx_with(contents, source, "real", "symmetric", 1, |toks| {
         toks[0].parse::<f64>().ok()
     })
@@ -81,7 +81,7 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix<f64>, FeralEr
 pub fn parse_mtx_complex(
     contents: &str,
     source: &str,
-) -> Result<MtxMatrix<Complex<f64>>, FeralError> {
+) -> Result<MtxMatrix<Complex<f64>>, RslabError> {
     parse_mtx_with(contents, source, "complex", "symmetric", 2, |toks| {
         let re = toks[0].parse::<f64>().ok()?;
         let im = toks[1].parse::<f64>().ok()?;
@@ -97,7 +97,7 @@ pub fn parse_mtx_complex(
 pub fn parse_mtx_complex_general(
     contents: &str,
     source: &str,
-) -> Result<MtxMatrix<Complex<f64>>, FeralError> {
+) -> Result<MtxMatrix<Complex<f64>>, RslabError> {
     parse_mtx_with(contents, source, "complex", "general", 2, |toks| {
         let re = toks[0].parse::<f64>().ok()?;
         let im = toks[1].parse::<f64>().ok()?;
@@ -119,14 +119,14 @@ fn parse_mtx_with<T: Scalar>(
     symmetry: &str,
     n_value_tokens: usize,
     parse_val: impl Fn(&[&str]) -> Option<T>,
-) -> Result<MtxMatrix<T>, FeralError> {
+) -> Result<MtxMatrix<T>, RslabError> {
     let fold_to_lower = symmetry == "symmetric";
     let mut lines = contents.lines().enumerate();
 
     // Header line
     let (_, header) = lines
         .next()
-        .ok_or_else(|| FeralError::IoError(format!("{}: empty file", source)))?;
+        .ok_or_else(|| RslabError::IoError(format!("{}: empty file", source)))?;
     // X11: compare the banner token by token (case-insensitive) rather than
     // against one exact single-space string. The Matrix Market spec and the
     // reference NIST `mmio` reader tokenize the banner on arbitrary
@@ -140,7 +140,7 @@ fn parse_mtx_with<T: Scalar>(
             .is_some_and(|tok| tok.eq_ignore_ascii_case(expected))
     }) && header_tokens.next().is_none();
     if !banner_ok {
-        return Err(FeralError::IoError(format!(
+        return Err(RslabError::IoError(format!(
             "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate {} {})",
             source,
             header.trim(),
@@ -161,12 +161,12 @@ fn parse_mtx_with<T: Scalar>(
     }
 
     let (size_line_no, size_text) =
-        size_line.ok_or_else(|| FeralError::IoError(format!("{}: missing size line", source)))?;
+        size_line.ok_or_else(|| RslabError::IoError(format!("{}: missing size line", source)))?;
 
     // Parse "rows cols nnz"
     let parts: Vec<&str> = size_text.split_whitespace().collect();
     if parts.len() != 3 {
-        return Err(FeralError::IoError(format!(
+        return Err(RslabError::IoError(format!(
             "{}: line {}: expected 'rows cols nnz', got '{}'",
             source,
             size_line_no + 1,
@@ -174,7 +174,7 @@ fn parse_mtx_with<T: Scalar>(
         )));
     }
     let rows: usize = parts[0].parse().map_err(|_| {
-        FeralError::IoError(format!(
+        RslabError::IoError(format!(
             "{}: line {}: invalid row count '{}'",
             source,
             size_line_no + 1,
@@ -182,7 +182,7 @@ fn parse_mtx_with<T: Scalar>(
         ))
     })?;
     let cols: usize = parts[1].parse().map_err(|_| {
-        FeralError::IoError(format!(
+        RslabError::IoError(format!(
             "{}: line {}: invalid col count '{}'",
             source,
             size_line_no + 1,
@@ -190,7 +190,7 @@ fn parse_mtx_with<T: Scalar>(
         ))
     })?;
     let nnz: usize = parts[2].parse().map_err(|_| {
-        FeralError::IoError(format!(
+        RslabError::IoError(format!(
             "{}: line {}: invalid nnz '{}'",
             source,
             size_line_no + 1,
@@ -199,7 +199,7 @@ fn parse_mtx_with<T: Scalar>(
     })?;
 
     if rows != cols {
-        return Err(FeralError::IoError(format!(
+        return Err(RslabError::IoError(format!(
             "{}: symmetric matrix must be square, got {}x{}",
             source, rows, cols
         )));
@@ -226,7 +226,7 @@ fn parse_mtx_with<T: Scalar>(
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         let expected_tokens = 2 + n_value_tokens;
         if parts.len() != expected_tokens {
-            return Err(FeralError::IoError(format!(
+            return Err(RslabError::IoError(format!(
                 "{}: line {}: expected 'i j {}', got '{}'",
                 source,
                 line_no + 1,
@@ -239,7 +239,7 @@ fn parse_mtx_with<T: Scalar>(
             )));
         }
         let i: usize = parts[0].parse().map_err(|_| {
-            FeralError::IoError(format!(
+            RslabError::IoError(format!(
                 "{}: line {}: invalid row index '{}'",
                 source,
                 line_no + 1,
@@ -247,7 +247,7 @@ fn parse_mtx_with<T: Scalar>(
             ))
         })?;
         let j: usize = parts[1].parse().map_err(|_| {
-            FeralError::IoError(format!(
+            RslabError::IoError(format!(
                 "{}: line {}: invalid col index '{}'",
                 source,
                 line_no + 1,
@@ -255,7 +255,7 @@ fn parse_mtx_with<T: Scalar>(
             ))
         })?;
         let v: T = parse_val(&parts[2..]).ok_or_else(|| {
-            FeralError::IoError(format!(
+            RslabError::IoError(format!(
                 "{}: line {}: invalid value '{}'",
                 source,
                 line_no + 1,
@@ -266,7 +266,7 @@ fn parse_mtx_with<T: Scalar>(
         // would build an MtxMatrix carrying a non-finite entry that poisons any
         // downstream factorization. Reject it (for complex, either part).
         if !v.is_finite() {
-            return Err(FeralError::IoError(format!(
+            return Err(RslabError::IoError(format!(
                 "{}: line {}: non-finite value '{}'",
                 source,
                 line_no + 1,
@@ -276,7 +276,7 @@ fn parse_mtx_with<T: Scalar>(
 
         // Validate bounds (1-indexed in MTX)
         if i == 0 || j == 0 || i > n || j > n {
-            return Err(FeralError::IoError(format!(
+            return Err(RslabError::IoError(format!(
                 "{}: line {}: index ({}, {}) out of bounds for {}x{} matrix",
                 source,
                 line_no + 1,
@@ -310,7 +310,7 @@ fn parse_mtx_with<T: Scalar>(
     // property X10 protects still holds (the reservation above stays
     // clamped to the source byte length, so no multi-exabyte allocation).
     if entries.len() != nnz {
-        return Err(FeralError::IoError(format!(
+        return Err(RslabError::IoError(format!(
             "{}: declared nnz {} does not match the {} entries in the file",
             source,
             nnz,
@@ -353,7 +353,7 @@ mod tests {
     /// MTX size line. A corrupt header declaring an enormous nnz turns that
     /// into a multi-exabyte allocation request; the allocator returns null
     /// and Rust's `handle_alloc_error` ABORTS the process — a hard crash,
-    /// not a recoverable `FeralError`, on malformed input a library caller
+    /// not a recoverable `RslabError`, on malformed input a library caller
     /// cannot guard against. The reservation is clamped to the source byte
     /// length — a hard upper bound on the true entry count — so the parse
     /// runs to completion instead of aborting.
@@ -377,11 +377,11 @@ mod tests {
         let err = parse_mtx(mtx, "test")
             .expect_err("a bogus huge nnz must return a recoverable Err, not abort the process");
         match err {
-            FeralError::IoError(msg) => assert!(
+            RslabError::IoError(msg) => assert!(
                 msg.contains("declared nnz") && msg.contains("does not match"),
                 "expected an nnz-count-mismatch error, got: {msg}"
             ),
-            other => panic!("expected FeralError::IoError, got {other:?}"),
+            other => panic!("expected RslabError::IoError, got {other:?}"),
         }
     }
 
@@ -405,11 +405,11 @@ mod tests {
             "a declared nnz that disagrees with the actual entry count must be rejected (X2)",
         );
         match err {
-            FeralError::IoError(msg) => assert!(
+            RslabError::IoError(msg) => assert!(
                 msg.contains("declared nnz") && msg.contains("does not match"),
                 "expected an nnz-count-mismatch error, got: {msg}"
             ),
-            other => panic!("expected FeralError::IoError, got {other:?}"),
+            other => panic!("expected RslabError::IoError, got {other:?}"),
         }
     }
 
@@ -499,11 +499,11 @@ mod tests {
         let err = parse_mtx(mtx, "test")
             .expect_err("a NaN entry value must be rejected, not read through (X11)");
         match err {
-            FeralError::IoError(msg) => assert!(
+            RslabError::IoError(msg) => assert!(
                 msg.contains("non-finite"),
                 "expected a non-finite error, got: {msg}"
             ),
-            other => panic!("expected FeralError::IoError, got {other:?}"),
+            other => panic!("expected RslabError::IoError, got {other:?}"),
         }
     }
 
@@ -519,11 +519,11 @@ mod tests {
         let err = parse_mtx(mtx, "test")
             .expect_err("an inf entry value must be rejected, not read through (X11)");
         match err {
-            FeralError::IoError(msg) => assert!(
+            RslabError::IoError(msg) => assert!(
                 msg.contains("non-finite"),
                 "expected a non-finite error, got: {msg}"
             ),
-            other => panic!("expected FeralError::IoError, got {other:?}"),
+            other => panic!("expected RslabError::IoError, got {other:?}"),
         }
     }
 

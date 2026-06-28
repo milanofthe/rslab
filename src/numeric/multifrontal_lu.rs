@@ -25,7 +25,7 @@
 //!   default factor path is the supernodal **left-looking** kernel (low transient,
 //!   no CB stack); the multifrontal path is opt-in via [`FactorOptions::with_method`].
 
-use crate::error::FeralError;
+use crate::error::RslabError;
 use crate::numeric::blr::BlrMatrix;
 use crate::numeric::multifrontal_ldlt::{
     analyze_with, compute_supernode_row_structures, perturb_pivot, AnalyzeOptions, BlrMode,
@@ -321,7 +321,7 @@ fn lu_front<T: Scalar>(
     perturb_floor: Option<f64>,
     blr: BlrMode,
     profile: bool,
-) -> Result<(FrontLu<T>, Contribution<T>), FeralError> {
+) -> Result<(FrontLu<T>, Contribution<T>), RslabError> {
     let n = nrow;
     // BLR compressibility probe (opt-in `RLA_BLR_PROBE`): on large fronts, report
     // how low-rank the assembled off-diagonal blocks are — the empirical go/no-go
@@ -375,7 +375,7 @@ fn lu_front<T: Scalar>(
                     piv = perturb_pivot(piv, floor);
                     n_perturbed += 1;
                 }
-                None if piv == T::zero() => return Err(FeralError::NumericallyRankDeficient),
+                None if piv == T::zero() => return Err(RslabError::NumericallyRankDeficient),
                 _ => {}
             }
             f[k * n + k] = piv;
@@ -525,7 +525,7 @@ fn factor_one_node_lu<T: Scalar>(
     blr: BlrMode,
     pool: &FrontPool<T>,
     profile: bool,
-) -> Result<NodeLu<T>, FeralError> {
+) -> Result<NodeLu<T>, RslabError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
     let ncol = snode.ncol;
@@ -662,7 +662,7 @@ fn factor_subtree<T: Scalar>(
     blr: BlrMode,
     pool: &FrontPool<T>,
     profile: bool,
-) -> Result<SubtreeFactors<T>, FeralError> {
+) -> Result<SubtreeFactors<T>, RslabError> {
     let children = &sym.supernodes[s].children;
     // Factor the child subtrees concurrently.
     let mut outs: Vec<SubtreeFactors<T>> = children
@@ -719,7 +719,7 @@ impl LuSymbolic {
     /// — the unsymmetric twin of [`LdltSymbolic::analyze`].
     ///
     /// [`LdltSymbolic::analyze`]: crate::numeric::sparse_solver::LdltSymbolic::analyze
-    pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, FeralError> {
+    pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, RslabError> {
         Self::analyze_with(a, &AnalyzeOptions::default())
     }
 
@@ -728,7 +728,7 @@ impl LuSymbolic {
     pub fn analyze_with<T: Scalar>(
         a: &GeneralCsc<T>,
         opts: &AnalyzeOptions,
-    ) -> Result<LuSymbolic, FeralError> {
+    ) -> Result<LuSymbolic, RslabError> {
         a.validate()?;
         let n = a.n;
         let nnz = a.row_idx.len();
@@ -753,7 +753,7 @@ impl LuSymbolic {
         &self,
         a: &GeneralCsc<T>,
         opts: &FactorOptions,
-    ) -> Result<LuSolver<T>, FeralError> {
+    ) -> Result<LuSolver<T>, RslabError> {
         let estimate = self.estimate_memory::<T>();
         let t = std::time::Instant::now();
         let factors = factor_general_lu_numeric(self, a, opts)?;
@@ -859,7 +859,7 @@ pub struct LuSolver<T> {
 
 impl<T: Scalar> LuSolver<T> {
     /// One-shot analyze + equilibrate + factor of a general matrix `A`.
-    pub fn factor(a: &GeneralCsc<T>, opts: &FactorOptions) -> Result<Self, FeralError> {
+    pub fn factor(a: &GeneralCsc<T>, opts: &FactorOptions) -> Result<Self, RslabError> {
         Ok(Self {
             factors: factor_general_lu(a, opts)?,
             diagnostics: crate::diagnostics::Diagnostics::default(),
@@ -875,14 +875,14 @@ impl<T: Scalar> LuSolver<T> {
     }
 
     /// Solve `A x = b` using the stored factors.
-    pub fn solve(&self, b: &[T]) -> Result<Vec<T>, FeralError> {
+    pub fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
         solve_lu(&self.factors, b)
     }
 
     /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the
     /// returned `x` are **row-major** `n × nrhs` buffers (`b[i*nrhs + c]` is RHS
     /// `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve) calls.
-    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, FeralError> {
+    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
         solve_lu_many(&self.factors, b, nrhs)
     }
 
@@ -894,7 +894,7 @@ impl<T: Scalar> LuSolver<T> {
         a: &GeneralCsc<T>,
         b: &[T],
         max_iter: usize,
-    ) -> Result<Vec<T>, FeralError> {
+    ) -> Result<Vec<T>, RslabError> {
         solve_lu_refined(&self.factors, a, b, max_iter)
     }
 
@@ -928,7 +928,7 @@ impl<T: Scalar> LuSolver<T> {
 pub fn factor_general_lu<T: Scalar>(
     a: &GeneralCsc<T>,
     opts: &FactorOptions,
-) -> Result<LuFactors<T>, FeralError> {
+) -> Result<LuFactors<T>, RslabError> {
     factor_general_lu_numeric(&LuSymbolic::analyze(a)?, a, opts)
 }
 
@@ -1261,7 +1261,7 @@ fn lu_ll_factor_node<T: Scalar>(
     emit: &LlEmit<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
-) -> Result<(), FeralError> {
+) -> Result<(), RslabError> {
     const LL_GEMM_GATE: usize = 4096;
     const LL_GEMM_PAR: usize = 1_000_000;
     let snode = &sym.supernodes[s];
@@ -1511,7 +1511,7 @@ fn lu_ll_factor_node<T: Scalar>(
                         gloc[g] = usize::MAX;
                     }
                     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
-                    return Err(FeralError::NumericallyRankDeficient);
+                    return Err(RslabError::NumericallyRankDeficient);
                 }
                 _ => {}
             }
@@ -1716,7 +1716,7 @@ fn lu_ll_factor_subtree<T: Scalar>(
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
     n_perturbed: &AtomicUsize,
-) -> Result<(), FeralError> {
+) -> Result<(), RslabError> {
     sym.supernodes[s]
         .children
         .par_iter()
@@ -1766,7 +1766,7 @@ fn factor_lu_left_looking<T: Scalar>(
     d_col: &[f64],
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
-) -> Result<LuFactors<T>, FeralError> {
+) -> Result<LuFactors<T>, RslabError> {
     let n = sym.n;
     let nsuper = sym.supernodes.len();
     let rs = compute_supernode_row_structures(sym);
@@ -1948,11 +1948,11 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
     opts: &FactorOptions,
-) -> Result<LuFactors<T>, FeralError> {
+) -> Result<LuFactors<T>, RslabError> {
     a.validate()?;
     let n = lusym.n;
     if a.n != n || a.row_idx.len() != lusym.nnz {
-        return Err(FeralError::InvalidInput(
+        return Err(RslabError::InvalidInput(
             "factor_general_lu_numeric: matrix does not match the analyzed pattern".to_string(),
         ));
     }
@@ -1988,7 +1988,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let (sym, _by_level) = lusym
         .symb
         .sym_and_levels()
-        .ok_or_else(|| FeralError::InvalidInput("internal: empty symbolic".to_string()))?;
+        .ok_or_else(|| RslabError::InvalidInput("internal: empty symbolic".to_string()))?;
 
     // Two-sided equilibration Â = D_r A D_c with d_r[i] = 1/√maxⱼ|Aᵢⱼ|,
     // d_c[j] = 1/√maxᵢ|Aᵢⱼ|. Tames the dynamic range (these MoM near-field
@@ -2104,7 +2104,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         match node_opt {
             Some(nd) => nodes.push(nd),
             None => {
-                return Err(FeralError::InvalidInput(
+                return Err(RslabError::InvalidInput(
                     "internal: unfactored supernode".to_string(),
                 ))
             }
@@ -2161,7 +2161,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     for node_opt in node_results.iter_mut() {
         let node = node_opt
             .as_mut()
-            .ok_or_else(|| FeralError::InvalidInput("internal: unfactored supernode".to_string()))?;
+            .ok_or_else(|| RslabError::InvalidInput("internal: unfactored supernode".to_string()))?;
         let ff = &node.front;
         let nr = ff.nrow;
         for j in 0..ff.nelim {
@@ -2250,10 +2250,10 @@ pub fn factor_general_lu_numeric<T: Scalar>(
 
 /// Solve `A x = b` from an unsymmetric LU factorization (`Pᵀ A P = L U`).
 #[allow(clippy::needless_range_loop)] // CSC/CSR solves index col_ptr/row_ptr + scaling
-pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, FeralError> {
+pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabError> {
     let n = f.n;
     if b.len() != n {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n,
             got: b.len(),
         });
@@ -2309,10 +2309,10 @@ pub fn solve_lu_many<T: Scalar>(
     f: &LuFactors<T>,
     b: &[T],
     nrhs: usize,
-) -> Result<Vec<T>, FeralError> {
+) -> Result<Vec<T>, RslabError> {
     let n = f.n;
     if nrhs == 0 || b.len() != n * nrhs {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n * nrhs,
             got: b.len(),
         });
@@ -2398,10 +2398,10 @@ pub fn solve_lu_refined<T: Scalar>(
     a: &GeneralCsc<T>,
     b: &[T],
     max_iter: usize,
-) -> Result<Vec<T>, FeralError> {
+) -> Result<Vec<T>, RslabError> {
     let n = f.n;
     if a.n != n || b.len() != n {
-        return Err(FeralError::DimensionMismatch {
+        return Err(RslabError::DimensionMismatch {
             expected: n,
             got: b.len(),
         });
