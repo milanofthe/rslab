@@ -33,6 +33,18 @@ pub trait LinearOperator<T: Scalar> {
     fn n(&self) -> usize;
     /// Write `y ← A x`. `x` and `y` have length `n`.
     fn apply(&self, x: &[T], y: &mut [T]);
+    /// Block apply: `Y[:,c] ← A X[:,c]` for `c in 0..s`, with `X`,`Y` **column-
+    /// major** `n×s` (RHS `c` is the contiguous slice `[c·n, (c+1)·n)`). The
+    /// default loops the single-vector [`apply`](Self::apply); explicit-matrix
+    /// operators override it with an amortized block matvec (each matrix entry
+    /// loaded once for all `s` columns — the BLAS-3 arithmetic intensity that
+    /// makes a multi-RHS solve pay over `s` separate ones).
+    fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
+        let n = self.n();
+        for c in 0..s {
+            self.apply(&x[c * n..c * n + n], &mut y[c * n..c * n + n]);
+        }
+    }
 }
 
 impl<T: Scalar> LinearOperator<T> for CscMatrix<T> {
@@ -59,6 +71,16 @@ impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
 pub trait Preconditioner<T: Scalar> {
     /// Write `z ← M⁻¹ r`. `r` and `z` have length `n`.
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), FeralError>;
+    /// Block apply: `Z[:,c] ← M⁻¹ R[:,c]` for `c in 0..s`, with `R`,`Z` **column-
+    /// major** `n×s`. The default loops [`apply`](Self::apply); a factored solver
+    /// overrides it with a block triangular solve (`solve_many`) that loads each
+    /// `L`/`D`/`U` value once for all `s` columns.
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), FeralError> {
+        for c in 0..s {
+            self.apply(&r[c * n..c * n + n], &mut z[c * n..c * n + n])?;
+        }
+        Ok(())
+    }
 }
 
 /// The identity preconditioner `M = I` (`z = r`): unpreconditioned iteration,
@@ -608,6 +630,258 @@ where
     })
 }
 
+/// Outcome of a block (multi-RHS) Krylov solve.
+#[derive(Debug, Clone)]
+pub struct BlockKrylovResult<T> {
+    /// Solutions, column-major `n×s` (RHS `c` is the slice `[c·n, (c+1)·n)`).
+    pub x: Vec<T>,
+    /// Block iterations performed (the RHS advance in lockstep).
+    pub iters: usize,
+    /// `true` iff **every** RHS reached `tol`.
+    pub converged: bool,
+    /// Per-RHS final relative residual `‖b_c − A x_c‖ / ‖b_c‖`.
+    pub final_res: Vec<f64>,
+}
+
+/// Right-preconditioned restarted **block GMRES** for `s` right-hand sides `b`
+/// (column-major `n×s`). The `s` systems advance in lockstep so the two expensive
+/// operations — the operator matvec and the preconditioner solve — are issued
+/// once per step as **block** applies ([`LinearOperator::apply_block`] /
+/// [`Preconditioner::apply_block`]), reaching BLAS-3 arithmetic intensity (each
+/// factor / matrix value touched once for all `s` columns). Each RHS keeps its
+/// own Arnoldi basis / Hessenberg / Givens, so a column converges identically to
+/// the single-RHS [`gmres`]; the systems share only the batched operator and
+/// preconditioner calls. Solves `A X = B` from `X₀ = 0`.
+///
+/// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
+/// drive all right-hand sides through one block iteration.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn gmres_block<T, A, M>(
+    op: &A,
+    b: &[T],
+    s: usize,
+    precond: &M,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+) -> Result<BlockKrylovResult<T>, FeralError>
+where
+    T: Scalar,
+    A: LinearOperator<T> + ?Sized,
+    M: Preconditioner<T> + ?Sized,
+{
+    let n = op.n();
+    if s == 0 || b.len() != n * s {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * s,
+            got: b.len(),
+        });
+    }
+    const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
+    let m = restart.max(1);
+    let mut x = vec![T::zero(); n * s];
+    let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
+
+    // Flat per-block-step basis: block `j`, column `c` is the length-`n` slice at
+    // `vbas[(j*s + c)*n ..]`, so block `j` (the `n×s` input to one block apply) is
+    // the contiguous `vbas[j*s*n .. (j+1)*s*n]`.
+    let mut vbas = vec![T::zero(); n * s * (m + 1)];
+    let mut zblk = vec![T::zero(); n * s]; // M⁻¹ · (block j)
+    let mut wblk = vec![T::zero(); n * s]; // A · zblk
+    let mut axblk = vec![T::zero(); n * s];
+    let mut vyblk = vec![T::zero(); n * s];
+
+    // Per-RHS Arnoldi state.
+    let mut h: Vec<Vec<Vec<T>>> = (0..s).map(|_| vec![vec![T::zero(); m]; m + 1]).collect();
+    let mut cs: Vec<Vec<T>> = (0..s).map(|_| vec![T::zero(); m]).collect();
+    let mut sn: Vec<Vec<T>> = (0..s).map(|_| vec![T::zero(); m]).collect();
+    let mut g: Vec<Vec<T>> = (0..s).map(|_| vec![T::zero(); m + 1]).collect();
+    let mut jdim = vec![0usize; s];
+    let mut converged = vec![false; s];
+    let mut final_res = vec![0.0f64; s];
+    let mut total = 0usize;
+    for c in 0..s {
+        if bnorm[c] == 0.0 {
+            converged[c] = true;
+        }
+    }
+
+    while total < max_iter && !converged.iter().all(|&v| v) {
+        // Block residual R = B − A X, and start a fresh Arnoldi cycle per RHS whose
+        // **true** residual still exceeds `tol`.
+        op.apply_block(&x, &mut axblk, s);
+        let mut any_active = false;
+        for c in 0..s {
+            if converged[c] {
+                continue;
+            }
+            let cb = c * n;
+            let mut beta_sq = 0.0;
+            for i in 0..n {
+                beta_sq += (b[cb + i] - axblk[cb + i]).magnitude_sq();
+            }
+            let beta = beta_sq.sqrt();
+            final_res[c] = beta / bnorm[c];
+            if final_res[c] <= tol {
+                converged[c] = true;
+                continue;
+            }
+            any_active = true;
+            let inv = T::from_real(1.0 / beta);
+            for i in 0..n {
+                vbas[cb + i] = (b[cb + i] - axblk[cb + i]) * inv; // block 0, col c
+            }
+            for row in h[c].iter_mut() {
+                for e in row.iter_mut() {
+                    *e = T::zero();
+                }
+            }
+            for e in g[c].iter_mut() {
+                *e = T::zero();
+            }
+            g[c][0] = T::from_real(beta);
+            jdim[c] = 0;
+        }
+        if !any_active {
+            break;
+        }
+
+        // RHS that are already at tol take no inner steps this cycle.
+        let mut inner_done: Vec<bool> = converged.clone();
+
+        for j in 0..m {
+            if total >= max_iter {
+                break;
+            }
+            let jblock = j * s * n;
+            // Batched right preconditioning + operator apply over all RHS at once.
+            precond.apply_block(&vbas[jblock..jblock + n * s], &mut zblk, s, n)?;
+            op.apply_block(&zblk, &mut wblk, s);
+            let mut all_done = true;
+            for c in 0..s {
+                if inner_done[c] {
+                    continue;
+                }
+                all_done = false;
+                let wb = c * n;
+                // Modified Gram–Schmidt against this RHS's own basis, DGKS reorth.
+                let wnorm0 = norm2(&wblk[wb..wb + n]);
+                for i in 0..=j {
+                    let vb = (i * s + c) * n;
+                    let hij = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
+                    h[c][i][j] = hij;
+                    for k in 0..n {
+                        wblk[wb + k] = wblk[wb + k] - hij * vbas[vb + k];
+                    }
+                }
+                let mut hn = norm2(&wblk[wb..wb + n]);
+                if hn < REORTH_ETA * wnorm0 {
+                    for i in 0..=j {
+                        let vb = (i * s + c) * n;
+                        let ss = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
+                        h[c][i][j] = h[c][i][j] + ss;
+                        for k in 0..n {
+                            wblk[wb + k] = wblk[wb + k] - ss * vbas[vb + k];
+                        }
+                    }
+                    hn = norm2(&wblk[wb..wb + n]);
+                }
+                h[c][j + 1][j] = T::from_real(hn);
+                let v1 = ((j + 1) * s + c) * n;
+                if hn > 0.0 {
+                    let inv = T::from_real(1.0 / hn);
+                    for k in 0..n {
+                        vbas[v1 + k] = wblk[wb + k] * inv;
+                    }
+                } else {
+                    for k in 0..n {
+                        vbas[v1 + k] = T::zero();
+                    }
+                }
+                // Previous rotations, then a new one to zero h[j+1][j]; update g.
+                for i in 0..j {
+                    let temp = cs[c][i].conj() * h[c][i][j] + sn[c][i].conj() * h[c][i + 1][j];
+                    h[c][i + 1][j] = -sn[c][i] * h[c][i][j] + cs[c][i] * h[c][i + 1][j];
+                    h[c][i][j] = temp;
+                }
+                let (cj, sj) = givens(h[c][j][j], h[c][j + 1][j]);
+                cs[c][j] = cj;
+                sn[c][j] = sj;
+                h[c][j][j] = cj.conj() * h[c][j][j] + sj.conj() * h[c][j + 1][j];
+                h[c][j + 1][j] = T::zero();
+                let g_next = -sj * g[c][j];
+                g[c][j] = cj.conj() * g[c][j];
+                g[c][j + 1] = g_next;
+                jdim[c] = j + 1;
+                if g[c][j + 1].magnitude() / bnorm[c] <= tol {
+                    inner_done[c] = true;
+                }
+            }
+            total += 1;
+            if all_done {
+                break;
+            }
+        }
+
+        // x_c += M⁻¹ (V_c y_c): back-substitute each RHS, build the VY block, then
+        // one batched preconditioner apply for the whole update.
+        for e in vyblk.iter_mut() {
+            *e = T::zero();
+        }
+        for c in 0..s {
+            let jd = jdim[c];
+            if jd == 0 {
+                continue;
+            }
+            let mut y = vec![T::zero(); jd];
+            for i in (0..jd).rev() {
+                let mut acc = g[c][i];
+                for k in (i + 1)..jd {
+                    acc = acc - h[c][i][k] * y[k];
+                }
+                y[i] = acc * h[c][i][i].recip();
+            }
+            let vyb = c * n;
+            for i in 0..jd {
+                let yi = y[i];
+                let vb = (i * s + c) * n;
+                for k in 0..n {
+                    vyblk[vyb + k] = vyblk[vyb + k] + vbas[vb + k] * yi;
+                }
+            }
+        }
+        precond.apply_block(&vyblk, &mut zblk, s, n)?;
+        for idx in 0..n * s {
+            x[idx] = x[idx] + zblk[idx];
+        }
+    }
+
+    // Final true residual per RHS.
+    op.apply_block(&x, &mut axblk, s);
+    let mut all_conv = true;
+    for c in 0..s {
+        if bnorm[c] == 0.0 {
+            final_res[c] = 0.0;
+            continue;
+        }
+        let cb = c * n;
+        let mut rn = 0.0;
+        for i in 0..n {
+            rn += (b[cb + i] - axblk[cb + i]).magnitude_sq();
+        }
+        final_res[c] = rn.sqrt() / bnorm[c];
+        if final_res[c] > tol {
+            all_conv = false;
+        }
+    }
+    Ok(BlockKrylovResult {
+        x,
+        iters: total,
+        converged: all_conv,
+        final_res,
+    })
+}
+
 /// A factorization usable as both a **direct solver** and a [`Preconditioner`].
 /// Implemented by the symmetric [`LdltSolver`] and the general
 /// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors), so a caller's
@@ -806,6 +1080,104 @@ mod tests {
         a.matvec(&pre.x, &mut y);
         let res = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
         assert!(res < 1e-8, "residual {}", res);
+    }
+
+    /// Build the genuinely unsymmetric complex grid used by the GMRES tests.
+    fn unsym_grid(m: usize) -> crate::sparse::general::GeneralCsc<C> {
+        use crate::sparse::general::GeneralCsc;
+        let c = |re, im| Complex::new(re, im);
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(8.0, 1.0));
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.0, 0.2));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-2.0, 0.1));
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.5, 0.3));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-0.5, 0.4));
+                }
+            }
+        }
+        GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap()
+    }
+
+    #[test]
+    fn gmres_block_single_rhs_matches_scalar_gmres() {
+        // s = 1 block GMRES reduces to the single-RHS path (same Arnoldi, same
+        // Givens, default block apply = one single apply): same solution to the
+        // requested tolerance, same iteration count up to a ±1 boundary effect
+        // (the true residual can straddle `tol` by an FP rounding difference
+        // between the two summation orders).
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(8);
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let single = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
+        let blk = gmres_block(&a, &b, 1, &lu, 1e-10, 200, 40).unwrap();
+        assert!(blk.converged);
+        assert!(
+            (blk.iters as i64 - single.iters as i64).abs() <= 1,
+            "block(s=1) iters {} vs single {}",
+            blk.iters,
+            single.iters
+        );
+        let diff = (0..n).map(|i| (blk.x[i] - single.x[i]).norm()).fold(0.0, f64::max);
+        assert!(diff < 1e-7, "block(s=1) solution differs by {diff}");
+    }
+
+    #[test]
+    fn gmres_block_multi_rhs_solves_each_column() {
+        // Several distinct right-hand sides solved in one block iteration; every
+        // column must reach its own system's true residual.
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(10);
+        let n = a.n;
+        let s = 5;
+        // Column-major n×s block: RHS `k` is shifted/scaled so columns differ.
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..n {
+                bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            }
+        }
+        let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let res = gmres_block(&a, &bblk, s, &lu, 1e-10, 200, 40).unwrap();
+        assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
+        // True residual per column.
+        for k in 0..s {
+            let mut y = vec![C::default(); n];
+            a.matvec(&res.x[k * n..k * n + n], &mut y);
+            let r = (0..n).map(|i| (y[i] - bblk[k * n + i]).norm()).fold(0.0, f64::max);
+            assert!(r < 1e-8, "column {k} residual {r}");
+        }
+        // Each column must equal the single-RHS solve of that column.
+        for k in 0..s {
+            let single = gmres(&a, &bblk[k * n..k * n + n], &lu, 1e-10, 200, 40).unwrap();
+            let diff = (0..n)
+                .map(|i| (res.x[k * n + i] - single.x[i]).norm())
+                .fold(0.0, f64::max);
+            assert!(diff < 1e-9, "column {k} differs from single solve by {diff}");
+        }
     }
 
     #[test]
