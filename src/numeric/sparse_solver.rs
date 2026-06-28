@@ -29,12 +29,20 @@ pub struct LdltSolver<T> {
     factors: LdltFactors<T>,
     /// Real symmetric equilibration diagonal `s` (`D = diag(s)`).
     scale: Vec<f64>,
+    /// Per-call factor diagnostics (time + a-priori memory estimate).
+    diagnostics: crate::diagnostics::Diagnostics,
 }
 
 impl<T: Scalar> LdltSolver<T> {
     /// The matrix dimension.
     pub fn n(&self) -> usize {
         self.factors.n
+    }
+
+    /// Per-call diagnostics for this factorization: measured factor time, fill,
+    /// thread budget, and the a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate).
+    pub fn diagnostics(&self) -> &crate::diagnostics::Diagnostics {
+        &self.diagnostics
     }
 
     /// Number of stored nonzeros in the global lower-triangular factor `L`
@@ -240,6 +248,7 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
 /// ```
 pub struct LdltSymbolic {
     symbolic: MultifrontalSymbolic,
+    nnz: usize,
 }
 
 impl LdltSymbolic {
@@ -249,12 +258,59 @@ impl LdltSymbolic {
         a.validate()?;
         Ok(Self {
             symbolic: analyze_pattern(a.n, &a.col_ptr, &a.row_idx)?,
+            nnz: a.row_idx.len(),
         })
     }
 
     /// The analyzed matrix dimension.
     pub fn n(&self) -> usize {
         self.symbolic.n()
+    }
+
+    /// **A-priori** peak-memory estimate for factoring a matrix of scalar type `T`
+    /// (LDLᵀ path) — a pure, deterministic function of the symbolic structure, for
+    /// fail-fast / scheduling before any numeric work. See
+    /// [`LuSymbolic::estimate_memory`](crate::LuSymbolic::estimate_memory).
+    pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
+        let value_bytes = std::mem::size_of::<T>();
+        let Some((sym, _levels)) = self.symbolic.sym_and_levels() else {
+            return crate::diagnostics::estimate_left_looking(0, &|_| 0, &|_| 0, &[], value_bytes, 0);
+        };
+        let nsuper = sym.supernodes.len();
+        let rs = crate::numeric::multifrontal_ldlt::compute_supernode_row_structures(sym);
+        let mut col_to_snode = vec![0usize; sym.n];
+        for (s, snode) in sym.supernodes.iter().enumerate() {
+            col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
+        }
+        let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
+        for (k, rsk) in rs.iter().enumerate() {
+            let nck = sym.supernodes[k].ncol;
+            let mut last = usize::MAX;
+            for &r in &rsk[nck..] {
+                let s = col_to_snode[r];
+                if s != last {
+                    update_list[s].push(k);
+                    last = s;
+                }
+            }
+        }
+        // LDLᵀ: one dense panel per supernode (no separate U), and the compact
+        // factor is `L` only (no `U`); the input copy is a single lower triangle.
+        let panel_bytes = |s: usize| -> u64 { (rs[s].len() * sym.supernodes[s].ncol * value_bytes) as u64 };
+        let compact_bytes = |s: usize| -> u64 {
+            let nc = sym.supernodes[s].ncol;
+            let cnrow = rs[s].len() - nc;
+            ((nc * (nc + 1) / 2 + cnrow * nc) * (value_bytes + 8)) as u64
+        };
+        let input_bytes = (self.nnz * (value_bytes + 8)) as u64;
+        crate::diagnostics::estimate_left_looking(
+            nsuper,
+            &panel_bytes,
+            &compact_bytes,
+            &update_list,
+            value_bytes,
+            input_bytes,
+        )
     }
 
     /// Phases 2–3: equilibrate and factor `a`, reusing this analysis. `a` must
@@ -266,9 +322,19 @@ impl LdltSymbolic {
         opts: &FactorOptions,
     ) -> Result<LdltSolver<T>, FeralError> {
         a.validate()?;
+        let estimate = self.estimate_memory::<T>();
+        let t = std::time::Instant::now();
         let (scaled, scale) = equilibrate(a);
         let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
-        Ok(LdltSolver { factors, scale })
+        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let mut diagnostics = crate::diagnostics::Diagnostics {
+            threads: opts.resolved_threads(),
+            factor_nnz: factors.l_values.len() as u64,
+            estimate: Some(estimate),
+            ..Default::default()
+        };
+        diagnostics.push("factor", factor_ms, 0, factors.l_values.len() as u64 * 24);
+        Ok(LdltSolver { factors, scale, diagnostics })
     }
 }
 

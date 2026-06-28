@@ -301,6 +301,30 @@ mod integration {
     }
 
     #[test]
+    fn diagnostics_and_estimate_wired_on_both_paths() {
+        // Symmetric → LDLᵀ.
+        let a = structured::banded::<C>(500, 8, 1.0, 1);
+        let opts = FactorOptions::default().with_threads(3);
+        let f = LdltSymbolic::analyze(&a).unwrap().factor(&a, &opts).unwrap();
+        let d = f.diagnostics();
+        assert_eq!(d.threads, 3, "thread budget recorded");
+        assert!(d.stages.iter().any(|s| s.name == "factor" && s.wall_ms >= 0.0), "factor stage");
+        assert!(d.factor_nnz > 0);
+        let est = d.estimate.expect("a-priori estimate attached");
+        assert_eq!(est.value_bytes, 16);
+        assert!(est.transient_peak_bytes > est.factor_bytes, "transient > factor alone");
+
+        // Unsymmetric → LU; threads=0 resolves to all cores.
+        let g = bem::kernel(600, &bem::BemOpts::default());
+        let o2 = FactorOptions::default().with_threads(0);
+        let lf = LuSymbolic::analyze(&g).unwrap().factor(&g, &o2).unwrap();
+        let ld = lf.diagnostics();
+        assert!(ld.threads >= 1);
+        assert!(ld.estimate.is_some());
+        assert_eq!(ld.estimate.unwrap().value_bytes, 16);
+    }
+
+    #[test]
     fn catalog_is_well_formed() {
         let cat = catalog();
         assert!(cat.len() >= 15, "catalog has a useful number of entries");

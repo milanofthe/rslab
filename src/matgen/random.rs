@@ -5,6 +5,8 @@
 //! follows LAPACK `xLATMS`: build `A = Q Λ Qᵀ` with a *prescribed* spectrum, so the
 //! condition number is **exact** — the right tool for accuracy/stability tests.
 //! `QΛQᵀ` is dense, so this family is small-`n` by nature.
+// Diagonal/triplet loops use the index as a value (push `k`, read `colsum[k]`).
+#![allow(clippy::needless_range_loop)]
 
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;

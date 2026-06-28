@@ -1,6 +1,8 @@
 //! Banded and arrow/KKT generators — direct control over fill (bandwidth) and the
 //! symmetric-indefinite saddle-point structure that exercises Bunch-Kaufman 2×2
 //! pivoting.
+// Diagonal/triplet loops use the index as a value (push `k`, read `absum[k]`).
+#![allow(clippy::needless_range_loop)]
 
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;

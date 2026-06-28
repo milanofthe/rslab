@@ -88,6 +88,7 @@ pub mod symbolic;
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use dense::matrix::SymmetricMatrix;
+pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::FeralError;
 /// Ergonomic alias for the crate error type ([`FeralError`]).
 pub use error::FeralError as RlaError;

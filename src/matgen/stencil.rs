@@ -3,6 +3,8 @@
 //! number ∼ h⁻² (steered by grid size); a complex Helmholtz shift makes it
 //! complex-symmetric and, near a resonance, ill-conditioned; anisotropy and
 //! jumping coefficients add further conditioning/structure stress.
+// Diagonal/triplet loops use the index as a value (push `i`, read `diag[i]`).
+#![allow(clippy::needless_range_loop)]
 
 use num_complex::Complex;
 

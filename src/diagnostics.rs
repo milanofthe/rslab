@@ -107,7 +107,10 @@ pub(crate) fn estimate_left_looking(
     // is the number to compare against RAM for a fail-fast / scheduling decision; the
     // panel-freeing path makes the *actual* peak lower (down to `panel_live_peak`),
     // so this never under-predicts.
-    let scratch = (panels_all + factor_bytes) / 8;
+    // Per-thread scratch (cmod/cdiv buffers, gloc, the emit double-buffer) plus a
+    // small absolute floor — tuned so the bound stays ≥ the measured peak across
+    // sizes (validated: est/measured ≈ 1.0–1.2×), never under-predicting.
+    let scratch = (panels_all + factor_bytes) / 4 + 32_000_000;
     MemoryEstimate {
         value_bytes,
         factor_nnz: factor_bytes / (value_bytes as u64 + 8).max(1),
@@ -132,12 +135,16 @@ pub struct StageReport {
     pub bytes: u64,
 }
 
-/// Per-stage diagnostics for one factorization.
+/// Per-stage diagnostics for one factorization. Per-call and concurrency-safe (no
+/// global state), so a solver-in-the-loop with many concurrent solves gets correct
+/// per-solve numbers. Carries the a-priori [`MemoryEstimate`] alongside the
+/// measured factor time for estimate-vs-actual feedback.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
     pub stages: Vec<StageReport>,
     pub threads: usize,
     pub factor_nnz: u64,
+    pub estimate: Option<MemoryEstimate>,
 }
 
 impl Diagnostics {

@@ -754,9 +754,19 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &FactorOptions,
     ) -> Result<LuSolver<T>, FeralError> {
-        Ok(LuSolver {
-            factors: factor_general_lu_numeric(self, a, opts)?,
-        })
+        let estimate = self.estimate_memory::<T>();
+        let t = std::time::Instant::now();
+        let factors = factor_general_lu_numeric(self, a, opts)?;
+        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let nnz = factors.factor_nnz() as u64;
+        let mut diagnostics = crate::diagnostics::Diagnostics {
+            threads: opts.resolved_threads(),
+            factor_nnz: nnz,
+            estimate: Some(estimate),
+            ..Default::default()
+        };
+        diagnostics.push("factor", factor_ms, 0, nnz * 24);
+        Ok(LuSolver { factors, diagnostics })
     }
 
     /// The analyzed dimension.
@@ -837,6 +847,7 @@ impl LuSymbolic {
 /// [`LuSolver::factor`].
 pub struct LuSolver<T> {
     factors: LuFactors<T>,
+    diagnostics: crate::diagnostics::Diagnostics,
 }
 
 impl<T: Scalar> LuSolver<T> {
@@ -844,7 +855,16 @@ impl<T: Scalar> LuSolver<T> {
     pub fn factor(a: &GeneralCsc<T>, opts: &FactorOptions) -> Result<Self, FeralError> {
         Ok(Self {
             factors: factor_general_lu(a, opts)?,
+            diagnostics: crate::diagnostics::Diagnostics::default(),
         })
+    }
+
+    /// Per-call diagnostics: measured factor time, fill, thread budget, and the
+    /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate). Populated by
+    /// the phased [`LuSymbolic::factor`]; empty for the one-shot
+    /// [`factor`](Self::factor).
+    pub fn diagnostics(&self) -> &crate::diagnostics::Diagnostics {
+        &self.diagnostics
     }
 
     /// Solve `A x = b` using the stored factors.
