@@ -754,9 +754,19 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &FactorOptions,
     ) -> Result<LuSolver<T>, FeralError> {
-        Ok(LuSolver {
-            factors: factor_general_lu_numeric(self, a, opts)?,
-        })
+        let estimate = self.estimate_memory::<T>();
+        let t = std::time::Instant::now();
+        let factors = factor_general_lu_numeric(self, a, opts)?;
+        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let nnz = factors.factor_nnz() as u64;
+        let mut diagnostics = crate::diagnostics::Diagnostics {
+            threads: opts.resolved_threads(),
+            factor_nnz: nnz,
+            estimate: Some(estimate),
+            ..Default::default()
+        };
+        diagnostics.push("factor", factor_ms, 0, nnz * 24);
+        Ok(LuSolver { factors, diagnostics })
     }
 
     /// The analyzed dimension.
@@ -775,6 +785,66 @@ impl LuSymbolic {
     pub fn n_levels(&self) -> usize {
         self.symb.n_levels()
     }
+
+    /// **A-priori** peak-memory estimate for factoring a matrix of scalar type `T`
+    /// with this analysis — computed purely from the symbolic structure, *before*
+    /// any numeric work, so a scheduler can fail-fast or pick an approximation when
+    /// the estimate exceeds the memory budget. Deterministic and reproducible.
+    pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
+        let value_bytes = std::mem::size_of::<T>();
+        let Some((sym, _levels)) = self.symb.sym_and_levels() else {
+            return crate::diagnostics::estimate_left_looking(0, &|_| 0, &|_| 0, &[], value_bytes, 0);
+        };
+        let nsuper = sym.supernodes.len();
+        let rs = compute_supernode_row_structures(sym);
+        let mut col_to_snode = vec![0usize; self.n];
+        for (s, snode) in sym.supernodes.iter().enumerate() {
+            col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
+        }
+        let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
+        for (k, rsk) in rs.iter().enumerate() {
+            let nck = sym.supernodes[k].ncol;
+            let mut last = usize::MAX;
+            for &r in &rsk[nck..] {
+                let s = col_to_snode[r];
+                if s != last {
+                    update_list[s].push(k);
+                    last = s;
+                }
+            }
+        }
+        let panel_bytes = |s: usize| -> u64 {
+            let nc = sym.supernodes[s].ncol;
+            let nr = rs[s].len();
+            ((nr * nc + nc * (nr - nc)) * value_bytes) as u64
+        };
+        let compact_bytes = |s: usize| -> u64 {
+            let nc = sym.supernodes[s].ncol;
+            let cnrow = rs[s].len() - nc;
+            // L: diagonal lower-triangle + off-diagonal rows; U: upper-tri + U12.
+            let l = nc * (nc + 1) / 2 + cnrow * nc;
+            let u = nc * (nc + 1) / 2 + nc * cnrow;
+            ((l + u) * (value_bytes + 8)) as u64
+        };
+        // Persistent input copies: the equilibrated permuted `a_perm` and its
+        // transpose `a_perm_t` (both held through the left-looking factor).
+        let input_bytes = (2 * self.nnz * (value_bytes + 8)) as u64;
+        let mut est = crate::diagnostics::estimate_left_looking(
+            nsuper,
+            &panel_bytes,
+            &compact_bytes,
+            &update_list,
+            value_bytes,
+            input_bytes,
+        );
+        est.factor_flops = (0..nsuper)
+            .map(|s| {
+                let (nc, nr) = (sym.supernodes[s].ncol as u64, rs[s].len() as u64);
+                nr * nr * nc
+            })
+            .sum();
+        est
+    }
 }
 
 /// A factored unsymmetric LU solver, ready to solve against many right-hand
@@ -784,6 +854,7 @@ impl LuSymbolic {
 /// [`LuSolver::factor`].
 pub struct LuSolver<T> {
     factors: LuFactors<T>,
+    diagnostics: crate::diagnostics::Diagnostics,
 }
 
 impl<T: Scalar> LuSolver<T> {
@@ -791,7 +862,16 @@ impl<T: Scalar> LuSolver<T> {
     pub fn factor(a: &GeneralCsc<T>, opts: &FactorOptions) -> Result<Self, FeralError> {
         Ok(Self {
             factors: factor_general_lu(a, opts)?,
+            diagnostics: crate::diagnostics::Diagnostics::default(),
         })
+    }
+
+    /// Per-call diagnostics: measured factor time, fill, thread budget, and the
+    /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate). Populated by
+    /// the phased [`LuSymbolic::factor`]; empty for the one-shot
+    /// [`factor`](Self::factor).
+    pub fn diagnostics(&self) -> &crate::diagnostics::Diagnostics {
+        &self.diagnostics
     }
 
     /// Solve `A x = b` using the stored factors.
@@ -1957,17 +2037,20 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let a_perm = GeneralCsc::<T>::from_triplets(n, &rows, &cols, &vals)?;
     let a_perm_t = a_perm.transpose();
 
-    // Supernodal left-looking LU: same factor, low transient (no CB stack).
+    // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
+    // a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        return factor_lu_left_looking(
-            sym,
-            &a_perm,
-            &a_perm_t,
-            &d_row,
-            &d_col,
-            perturb_floor,
-            opts.drop_tol,
-        );
+        return crate::numeric::multifrontal_ldlt::in_scoped_pool(opts.threads, || {
+            factor_lu_left_looking(
+                sym,
+                &a_perm,
+                &a_perm_t,
+                &d_row,
+                &d_col,
+                perturb_floor,
+                opts.drop_tol,
+            )
+        });
     }
 
     let profile = std::env::var("RLA_PROFILE")

@@ -61,9 +61,17 @@
 //! ```
 
 pub mod dense;
+/// Deterministic resource diagnostics: a-priori peak-memory estimate + per-stage
+/// runtime/memory report for solver-in-the-loop scheduling.
+pub mod diagnostics;
 pub mod error;
 pub mod inertia;
 pub mod io;
+/// Parametrized test-matrix generators (feature `matgen`): PDE stencils, BEM/MoM
+/// kernels, banded/arrow, random + spectral, plus a tagged catalog for benchmarks.
+/// Optional `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
+#[cfg(feature = "matgen")]
+pub mod matgen;
 pub mod numeric;
 pub mod ordering;
 pub mod scalar;
@@ -75,11 +83,16 @@ pub mod scalar;
 pub mod scaling;
 pub mod sparse;
 pub mod symbolic;
+/// Hardware-aware auto-tuning + resource governor (feature `tuning`): hardware
+/// probe, calibration cache, and a budget-driven factorization planner.
+#[cfg(feature = "tuning")]
+pub mod tuning;
 
 // Flat public API re-exported at crate root — a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use dense::matrix::SymmetricMatrix;
+pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::FeralError;
 /// Ergonomic alias for the crate error type ([`FeralError`]).
 pub use error::FeralError as RlaError;
@@ -101,8 +114,9 @@ pub use io::mtx::{
     parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_complex, MtxMatrix,
 };
 pub use numeric::iterative::{
-    cocg, cocr, gmres, gmres_block, BlockKrylovResult, Factorization, KrylovResult, LinearOperator,
-    LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+    cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_fn, BlockKrylovResult, Factorization,
+    KrylovResult, LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner,
+    Preconditioner,
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
