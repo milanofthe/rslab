@@ -269,6 +269,13 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
     let b = rhs(n);
     let has = |s: &str| solvers.iter().any(|x| x == s);
 
+    // A-priori memory estimate (validate against the measured live peak).
+    if let Mat::Unsym(a) = mat {
+        if let Ok(sym) = LuSymbolic::analyze(a) {
+            eprintln!("[bench] {name} a-priori {}", sym.estimate_memory::<C>());
+        }
+    }
+
     // --- RLA left-looking / multifrontal ---
     for (tag, method) in [("ll", FactorMethod::LeftLooking), ("mf", FactorMethod::Multifrontal)] {
         if !has(tag) {

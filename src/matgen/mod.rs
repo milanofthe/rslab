@@ -252,6 +252,55 @@ mod integration {
     }
 
     #[test]
+    fn solver_is_type_agnostic_all_four_scalars() {
+        // Prove end-to-end that factor+solve works for **every** Scalar type — not
+        // just the f64/Complex<f64> the other tests use. A latent f32/Complex<f32>
+        // monomorphization gap (e.g. a GEMM only specialized for f64/c64) would fail
+        // to compile or solve here.
+        use crate::Scalar;
+        fn sym_ok<T: Scalar>(tol: f64) {
+            let a = structured::banded::<T>(200, 6, 1.0, 1);
+            let b: Vec<T> = (0..a.n).map(|i| T::from_real((i % 7) as f64 - 3.0)).collect();
+            let f = LdltSymbolic::analyze(&a).unwrap().factor(&a, &FactorOptions::default()).unwrap();
+            let x = f.solve(&b).unwrap();
+            let mut ax = vec![T::zero(); a.n];
+            a.symv(&x, &mut ax);
+            let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).magnitude().powi(2)).sum::<f64>().sqrt();
+            let den: f64 = b.iter().map(|v| v.magnitude().powi(2)).sum::<f64>().sqrt();
+            assert!(num / den.max(1e-30) < tol, "sym {} residual {:.2e}", std::any::type_name::<T>(), num / den);
+        }
+        fn unsym_ok<T: Scalar>(tol: f64) {
+            let a = random::random_unsym::<T>(200, 12, 3.0, 1);
+            let b: Vec<T> = (0..a.n).map(|i| T::from_real((i % 5) as f64 - 2.0)).collect();
+            let f = LuSymbolic::analyze(&a).unwrap().factor(&a, &FactorOptions::default()).unwrap();
+            let x = f.solve(&b).unwrap();
+            let mut ax = vec![T::zero(); a.n];
+            a.matvec(&x, &mut ax);
+            let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).magnitude().powi(2)).sum::<f64>().sqrt();
+            let den: f64 = b.iter().map(|v| v.magnitude().powi(2)).sum::<f64>().sqrt();
+            assert!(num / den.max(1e-30) < tol, "unsym {} residual {:.2e}", std::any::type_name::<T>(), num / den);
+        }
+        // f64 / f32 / Complex<f64> / Complex<f32> — the four Scalar impls.
+        sym_ok::<f64>(1e-10);
+        sym_ok::<f32>(1e-2);
+        sym_ok::<C>(1e-10);
+        sym_ok::<Complex<f32>>(1e-2);
+        unsym_ok::<f64>(1e-10);
+        unsym_ok::<f32>(1e-2);
+        unsym_ok::<C>(1e-10);
+        unsym_ok::<Complex<f32>>(1e-2);
+
+        // The memory estimator scales with the scalar size — agnostic too.
+        let a32 = random::random_unsym::<f32>(150, 8, 2.0, 1);
+        let e32 = LuSymbolic::analyze(&a32).unwrap().estimate_memory::<f32>();
+        let ac64 = random::random_unsym::<Complex<f64>>(150, 8, 2.0, 1);
+        let ec64 = LuSymbolic::analyze(&ac64).unwrap().estimate_memory::<Complex<f64>>();
+        assert_eq!(e32.value_bytes, 4);
+        assert_eq!(ec64.value_bytes, 16);
+        assert!(ec64.transient_peak_bytes > e32.transient_peak_bytes, "16B estimate > 4B");
+    }
+
+    #[test]
     fn catalog_is_well_formed() {
         let cat = catalog();
         assert!(cat.len() >= 15, "catalog has a useful number of entries");

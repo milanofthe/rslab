@@ -775,6 +775,59 @@ impl LuSymbolic {
     pub fn n_levels(&self) -> usize {
         self.symb.n_levels()
     }
+
+    /// **A-priori** peak-memory estimate for factoring a matrix of scalar type `T`
+    /// with this analysis — computed purely from the symbolic structure, *before*
+    /// any numeric work, so a scheduler can fail-fast or pick an approximation when
+    /// the estimate exceeds the memory budget. Deterministic and reproducible.
+    pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
+        let value_bytes = std::mem::size_of::<T>();
+        let Some((sym, _levels)) = self.symb.sym_and_levels() else {
+            return crate::diagnostics::estimate_left_looking(0, &|_| 0, &|_| 0, &[], value_bytes, 0);
+        };
+        let nsuper = sym.supernodes.len();
+        let rs = compute_supernode_row_structures(sym);
+        let mut col_to_snode = vec![0usize; self.n];
+        for (s, snode) in sym.supernodes.iter().enumerate() {
+            col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
+        }
+        let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
+        for (k, rsk) in rs.iter().enumerate() {
+            let nck = sym.supernodes[k].ncol;
+            let mut last = usize::MAX;
+            for &r in &rsk[nck..] {
+                let s = col_to_snode[r];
+                if s != last {
+                    update_list[s].push(k);
+                    last = s;
+                }
+            }
+        }
+        let panel_bytes = |s: usize| -> u64 {
+            let nc = sym.supernodes[s].ncol;
+            let nr = rs[s].len();
+            ((nr * nc + nc * (nr - nc)) * value_bytes) as u64
+        };
+        let compact_bytes = |s: usize| -> u64 {
+            let nc = sym.supernodes[s].ncol;
+            let cnrow = rs[s].len() - nc;
+            // L: diagonal lower-triangle + off-diagonal rows; U: upper-tri + U12.
+            let l = nc * (nc + 1) / 2 + cnrow * nc;
+            let u = nc * (nc + 1) / 2 + nc * cnrow;
+            ((l + u) * (value_bytes + 8)) as u64
+        };
+        // Persistent input copies: the equilibrated permuted `a_perm` and its
+        // transpose `a_perm_t` (both held through the left-looking factor).
+        let input_bytes = (2 * self.nnz * (value_bytes + 8)) as u64;
+        crate::diagnostics::estimate_left_looking(
+            nsuper,
+            &panel_bytes,
+            &compact_bytes,
+            &update_list,
+            value_bytes,
+            input_bytes,
+        )
+    }
 }
 
 /// A factored unsymmetric LU solver, ready to solve against many right-hand

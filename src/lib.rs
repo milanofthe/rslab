@@ -61,6 +61,9 @@
 //! ```
 
 pub mod dense;
+/// Deterministic resource diagnostics: a-priori peak-memory estimate + per-stage
+/// runtime/memory report for solver-in-the-loop scheduling.
+pub mod diagnostics;
 pub mod error;
 pub mod inertia;
 pub mod io;
