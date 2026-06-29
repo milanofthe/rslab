@@ -412,7 +412,7 @@ fn lu_front<T: Scalar>(
         let mt = n - ke; // trailing rows = cols
         if mt > 0 && pw > 0 {
             let flops = (mt as u128) * (mt as u128) * (pw as u128);
-            let par = if flops >= 8_000_000 {
+            let par = if flops >= crate::numeric::gemm_tuning::par_cdiv() as u128 {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1268,8 +1268,8 @@ fn lu_ll_factor_node<T: Scalar>(
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
 ) -> Result<(), RslabError> {
-    const LL_GEMM_GATE: usize = 4096;
-    const LL_GEMM_PAR: usize = 1_000_000;
+    let ll_gemm_gate = crate::numeric::gemm_tuning::scalar_gate();
+    let ll_gemm_par = crate::numeric::gemm_tuning::par_gemm();
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
     let nrow = rs[s].len();
@@ -1331,10 +1331,10 @@ fn lu_ll_factor_node<T: Scalar>(
         let ntrail = nok - p1;
         if cmod_prof_on() {
             let flop = (mrows * npk * nck) as u64;
-            if mrows * npk * nck < LL_GEMM_GATE {
+            if mrows * npk * nck < ll_gemm_gate {
                 PROF_CMOD_SCAL_N.fetch_add(1, Ordering::Relaxed);
                 PROF_CMOD_SCAL_F.fetch_add(flop, Ordering::Relaxed);
-            } else if mrows * npk * nck >= LL_GEMM_PAR {
+            } else if mrows * npk * nck >= ll_gemm_par {
                 PROF_CMOD_GPAR_N.fetch_add(1, Ordering::Relaxed);
                 PROF_CMOD_GPAR_F.fetch_add(flop, Ordering::Relaxed);
             } else {
@@ -1342,7 +1342,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 PROF_CMOD_GSER_F.fetch_add(flop, Ordering::Relaxed);
             }
         }
-        if mrows * npk * nck < LL_GEMM_GATE {
+        if mrows * npk * nck < ll_gemm_gate {
             // Scalar path.
             for jj in 0..npk {
                 let tcol = ok[p0 + jj] - first;
@@ -1369,7 +1369,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 }
             }
         } else {
-            let par = if !ll_gemm_serial() && mrows * npk * nck >= LL_GEMM_PAR {
+            let par = if !ll_gemm_serial() && mrows * npk * nck >= ll_gemm_par {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1462,7 +1462,7 @@ fn lu_ll_factor_node<T: Scalar>(
     // rows now factored in a parallel apply): 32 stays optimal - wider panels add
     // serial fully-summed getf2 without a matching trailing-GEMM efficiency gain.
     const NB_CDIV: usize = 32;
-    const LL_CDIV_PAR: usize = 8_000_000;
+    let ll_cdiv_par = crate::numeric::gemm_tuning::par_cdiv();
     let mut local_perturbed = 0usize;
     // Restricted partial pivoting: row interchanges within the fully-summed block
     // `[0, ncol)` only (the standard sparse-direct choice). `rperm[i]` is the
@@ -1543,7 +1543,7 @@ fn lu_ll_factor_node<T: Scalar>(
         // full-height getf2 - same per-row op sequence - but the dominant `cnrow`
         // work now runs on all idle workers instead of the serial panel path.
         if cnrow > 0 {
-            let par = !ll_gemm_serial() && cnrow * pw * pw >= LL_CDIV_PAR;
+            let par = !ll_gemm_serial() && cnrow * pw * pw >= ll_cdiv_par;
             if par {
                 let pp = PanelPtr(lbuf.as_mut_ptr());
                 let nthreads = rayon::current_num_threads().max(1);
@@ -1594,7 +1594,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 col[r] = acc;
             }
         };
-        if !ll_gemm_serial() && cnrow * pw * pw >= LL_CDIV_PAR {
+        if !ll_gemm_serial() && cnrow * pw * pw >= ll_cdiv_par {
             let lref: &[T] = &lbuf;
             ubuf.par_chunks_mut(ncol).for_each(|col| trsm_u(col, lref));
         } else {
@@ -1610,7 +1610,7 @@ fn lu_ll_factor_node<T: Scalar>(
         let mt = nrow - ke;
         let nt = ncol - ke;
         if mt > 0 && nt > 0 {
-            let par = if !ll_gemm_serial() && (mt * nt * pw) >= LL_CDIV_PAR {
+            let par = if !ll_gemm_serial() && (mt * nt * pw) >= ll_cdiv_par {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1643,7 +1643,7 @@ fn lu_ll_factor_node<T: Scalar>(
         }
         // GEMM: ubuf[ke..ncol, :] −= L[ke..ncol, kb..ke] · U12[kb..ke, :].
         if cnrow > 0 && nt > 0 {
-            let par = if !ll_gemm_serial() && (nt * cnrow * pw) >= LL_CDIV_PAR {
+            let par = if !ll_gemm_serial() && (nt * cnrow * pw) >= ll_cdiv_par {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None

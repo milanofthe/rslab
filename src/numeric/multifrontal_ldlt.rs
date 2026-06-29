@@ -700,7 +700,9 @@ fn factor_front<T: Scalar>(
             }
             tmp.clear();
             tmp.resize(mt * mt, T::zero());
-            let par = if (mt as u128) * (mt as u128) * (pw as u128) >= 8_000_000 {
+            let par = if (mt as u128) * (mt as u128) * (pw as u128)
+                >= crate::numeric::gemm_tuning::par_cdiv() as u128
+            {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1671,8 +1673,8 @@ fn ll_factor_node<T: Scalar>(
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
 ) -> Result<(), RslabError> {
-    const LL_GEMM_GATE: usize = 4096;
-    const LL_GEMM_PAR: usize = 1_000_000;
+    let ll_gemm_gate = crate::numeric::gemm_tuning::scalar_gate();
+    let ll_gemm_par = crate::numeric::gemm_tuning::par_gemm();
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
     let nrow = rs[s].len();
@@ -1719,7 +1721,7 @@ fn ll_factor_node<T: Scalar>(
         if npk == 0 {
             continue;
         }
-        if nok * npk * nck < LL_GEMM_GATE {
+        if nok * npk * nck < ll_gemm_gate {
             vc.clear();
             vc.resize(nck, T::zero());
             for c_idx in p0..p1 {
@@ -1776,7 +1778,7 @@ fn ll_factor_node<T: Scalar>(
             }
             u_buf.clear();
             u_buf.resize(nok * npk, T::zero());
-            let par = if nok * npk * nck >= LL_GEMM_PAR {
+            let par = if nok * npk * nck >= ll_gemm_par {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -1829,7 +1831,7 @@ fn ll_factor_node<T: Scalar>(
     // `0..ncol`, so the off-diagonal rows `[ncol, nrow)` keep their identity and
     // `s`'s contribution to ancestors is unaffected by this internal permutation.
     const NB: usize = 64;
-    const LL_CDIV_PAR: usize = 8_000_000;
+    let ll_cdiv_par = crate::numeric::gemm_tuning::par_cdiv();
     let alpha = bk_alpha();
     let mut d = vec![T::zero(); ncol];
     let mut d_subdiag = vec![T::zero(); ncol];
@@ -2055,7 +2057,7 @@ fn ll_factor_node<T: Scalar>(
             }
             tmp.clear();
             tmp.resize(mt * cw, T::zero());
-            let par = if (mt as u128) * (cw as u128) * (pw as u128) >= LL_CDIV_PAR as u128 {
+            let par = if (mt as u128) * (cw as u128) * (pw as u128) >= ll_cdiv_par as u128 {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
