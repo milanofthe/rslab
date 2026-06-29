@@ -60,6 +60,10 @@
 //! # Ok(()) }
 //! ```
 
+/// Structural feature extraction (the "structure analyzer"): distils a matrix +
+/// its symbolic analysis into a compact [`analysis::StructuralFeatures`] vector
+/// for diagnostics and auto-tuning input.
+pub mod analysis;
 pub mod dense;
 /// Deterministic resource diagnostics: a-priori peak-memory estimate + per-stage
 /// runtime/memory report for solver-in-the-loop scheduling.
@@ -91,6 +95,7 @@ pub mod tuning;
 // Flat public API re-exported at crate root - a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
+pub use analysis::{StructuralFeatures, SymbolicShape};
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::RslabError;

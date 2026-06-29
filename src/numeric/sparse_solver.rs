@@ -267,6 +267,23 @@ impl LdltSymbolic {
         self.symbolic.n()
     }
 
+    /// Per-supernode frontal dimensions `(ncol, nrow)` of the analyzed pattern.
+    /// See [`MultifrontalSymbolic::front_dims`](crate::MultifrontalSymbolic::front_dims).
+    pub fn front_dims(&self) -> Vec<(usize, usize)> {
+        self.symbolic.front_dims()
+    }
+
+    /// Number of assembly-tree levels (level-parallel factorization depth).
+    pub fn n_levels(&self) -> usize {
+        self.symbolic.n_levels()
+    }
+
+    /// Supernode count per assembly-tree level (available tree-parallelism by
+    /// depth). See [`MultifrontalSymbolic::level_widths`](crate::MultifrontalSymbolic::level_widths).
+    pub fn level_widths(&self) -> Vec<usize> {
+        self.symbolic.level_widths()
+    }
+
     /// **A-priori** peak-memory estimate for factoring a matrix of scalar type `T`
     /// (LDLᵀ path) - a pure, deterministic function of the symbolic structure, for
     /// fail-fast / scheduling before any numeric work. See

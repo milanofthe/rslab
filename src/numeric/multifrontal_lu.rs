@@ -786,6 +786,12 @@ impl LuSymbolic {
         self.symb.n_levels()
     }
 
+    /// Supernode count per assembly-tree level (available tree-parallelism by
+    /// depth). See [`MultifrontalSymbolic::level_widths`].
+    pub fn level_widths(&self) -> Vec<usize> {
+        self.symb.level_widths()
+    }
+
     /// **A-priori** peak-memory estimate for factoring a matrix of scalar type `T`
     /// with this analysis - computed purely from the symbolic structure, *before*
     /// any numeric work, so a scheduler can fail-fast or pick an approximation when

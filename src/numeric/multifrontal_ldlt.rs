@@ -979,6 +979,17 @@ impl MultifrontalSymbolic {
     pub fn n_levels(&self) -> usize {
         self.inner.as_ref().map_or(0, |i| i.by_level.len())
     }
+
+    /// Supernode count per assembly-tree level, leaves first. `level_widths()[l]`
+    /// is the number of mutually independent fronts at level `l` - the available
+    /// tree-parallelism at that depth. Wide near the leaves, narrowing to (often)
+    /// a single chain at the root; the shape that decides whether tree-parallelism
+    /// alone saturates the cores or the top fronts need node-parallelism.
+    pub fn level_widths(&self) -> Vec<usize> {
+        self.inner
+            .as_ref()
+            .map_or_else(Vec::new, |i| i.by_level.iter().map(|lv| lv.len()).collect())
+    }
 }
 
 /// PARDISO phase 1: analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`,
