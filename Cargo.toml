@@ -1,5 +1,10 @@
 [workspace]
 members = [".", "crates/rslab-ordering-core", "crates/rslab-amd", "crates/rslab-amf", "crates/rslab-metis", "crates/rslab-scotch", "crates/rslab-kahip"]
+# The PyO3 bindings live in `python/` and are built by maturin, not cargo. They
+# depend on `rslab` via path and carry a `cdylib` linking libpython, so they are
+# explicitly excluded from the pure-Rust workspace (FFI lives only in tooling /
+# bindings, never the solver core). Build them with `maturin` from `python/`.
+exclude = ["python"]
 # Root commands (`cargo build`/`test`/`clippy` with no -p/--workspace) operate
 # on the `rslab` package only. `rslab-diagnostics` is a member so it shares the
 # lockfile and `cargo run -p rslab-diagnostics --bin <name>` works, but it is

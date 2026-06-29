@@ -110,6 +110,23 @@ residual `||Ax-b||/||b||` as the accuracy check (`python benches/run_bench.py --
 rslab = "0.11"
 ```
 
+### Python (NumPy / SciPy)
+
+```bash
+pip install rslab
+```
+
+```python
+import numpy as np, scipy.sparse as sp, rslab
+x = rslab.spsolve(A, b)              # one-shot (auto symmetric/unsymmetric)
+f = rslab.ldlt(A); x = f.solve(b)    # factor once, solve many; also rslab.lu(A)
+```
+
+A thin wrapper over the Rust core; the matrix dtype selects the field
+(`float64`/`float32` real, `complex128`/`complex64` complex). All factor knobs
+are keyword arguments (`threads`, `preconditioner`, `drop_tol`, `method`,
+`memory`). See [`python/README.md`](python/README.md).
+
 ## Usage
 
 ### Symmetric direct solve (LDLᵀ)

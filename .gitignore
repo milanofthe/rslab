@@ -10,6 +10,15 @@
 # Python
 __pycache__/
 *.pyc
+# PyO3 binding build artifacts (maturin builds in python/, separate target dir)
+/python/target
+/python/dist
+*.so
+*.pyd
+*.pdb
+.venv/
+build/
+*.egg-info/
 
 # Benchmark run artifacts (regeneratable). The figures (*.png) are committed so the
 # README renders; the raw JSONL data and run logs are not.
