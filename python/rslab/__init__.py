@@ -86,7 +86,7 @@ def _opts(threads, preconditioner, drop_tol, method, memory, force_accept):
 def ldlt(
     A,
     *,
-    threads: int = 0,
+    threads: int = 2,
     preconditioner: float | None = None,
     drop_tol: float | None = None,
     method: str = "left_looking",
@@ -104,9 +104,11 @@ def ldlt(
     ----------
     A : scipy.sparse matrix or array-like
         The symmetric system matrix.
-    threads : int, default 0
-        Worker-thread budget; ``0`` uses all logical cores. The numeric result
-        is bit-identical regardless of this value.
+    threads : int, default 2
+        Worker-thread budget (``0`` uses all logical cores). The default of 2
+        matches the solver core: the factorization sees no gains beyond ~2
+        threads, and a small budget lets concurrent solves coexist. The numeric
+        result is bit-identical regardless of this value.
     preconditioner : float, optional
         If set, never-fail **static-pivoting** mode: any pivot below this
         absolute floor (typically ``eps_rel * ‖A‖``) is lifted, so the factor
@@ -146,7 +148,7 @@ def ldlt(
 def lu(
     A,
     *,
-    threads: int = 0,
+    threads: int = 2,
     preconditioner: float | None = None,
     drop_tol: float | None = None,
     method: str = "left_looking",
