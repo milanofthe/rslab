@@ -141,6 +141,11 @@ harness = false
 required-features = ["matgen"]
 
 [[bench]]
+name = "sweep"
+harness = false
+required-features = ["matgen"]
+
+[[bench]]
 name = "leftlook_mem"
 harness = false
 
