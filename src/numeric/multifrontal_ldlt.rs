@@ -38,7 +38,10 @@ use crate::scalar::Scalar;
 /// inject into the trailing update.
 const GROWTH_EPS: f64 = 1e-14;
 use crate::sparse::csc::CscMatrix;
-use crate::symbolic::{symbolic_factorize, SupernodeParams, SymbolicFactorization};
+use crate::symbolic::{
+    symbolic_factorize_with_method, OrderingMethod, RelaxAmalgamation, SupernodeParams,
+    SymbolicFactorization,
+};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -107,16 +110,68 @@ pub enum ReorderMode {
 /// Analysis-time options (composable, value-independent). Selects the choices
 /// fixed at [`analyze_with`] time. The factor-time knobs live in
 /// [`FactorOptions`]; together they form the per-call feature selection.
-#[derive(Debug, Clone, Default)]
+///
+/// The defaults reproduce the historically-tuned analysis exactly
+/// ([`OrderingMethod::Auto`], `nemin = 16`, relaxed amalgamation `≤256` wide /
+/// `≤64` extra rows); override only to explore the parameter space (the
+/// auto-tuning sweep) or when a workload is known to prefer a specific ordering.
+#[derive(Debug, Clone)]
 pub struct AnalyzeOptions {
     /// Child-reordering strategy (CB-stack peak vs leaf parallelism).
     pub reorder: ReorderMode,
+    /// Fill-reducing ordering (the cuDSS `REORDERING_ALG` analogue). Default
+    /// [`OrderingMethod::Auto`] (adaptive per-matrix choice).
+    pub ordering: OrderingMethod,
+    /// Minimum eliminated columns for a supernode before it is a merge
+    /// candidate (amalgamation aggressiveness). Default `16`. Smaller =
+    /// finer supernodes (less fill, more per-front overhead); larger = coarser.
+    pub nemin: usize,
+    /// Relaxed (fill-tolerant) amalgamation thresholds, the multifrontal
+    /// throughput lever. `Some` (default `≤256` wide, `≤64` extra rows) trades a
+    /// little explicit-zero fill for wider, higher-rank dense fronts; `None`
+    /// restricts to structural/size merges. Applied only above
+    /// [`RELAX_MIN_N`](crate::symbolic::supernode::RELAX_MIN_N) unknowns.
+    pub relax: Option<RelaxAmalgamation>,
+}
+
+impl Default for AnalyzeOptions {
+    fn default() -> Self {
+        Self {
+            reorder: ReorderMode::default(),
+            ordering: OrderingMethod::default(),
+            nemin: 16,
+            relax: Some(RelaxAmalgamation {
+                max_width: 256,
+                max_extra_rows: 64,
+            }),
+        }
+    }
 }
 
 impl AnalyzeOptions {
     /// Builder: set the child-reordering strategy.
     pub fn with_reorder(mut self, reorder: ReorderMode) -> Self {
         self.reorder = reorder;
+        self
+    }
+
+    /// Builder: set the fill-reducing ordering method.
+    pub fn with_ordering(mut self, ordering: OrderingMethod) -> Self {
+        self.ordering = ordering;
+        self
+    }
+
+    /// Builder: set the supernode amalgamation `nemin` (merge-candidate column
+    /// threshold).
+    pub fn with_nemin(mut self, nemin: usize) -> Self {
+        self.nemin = nemin;
+        self
+    }
+
+    /// Builder: set the relaxed-amalgamation thresholds (`None` to restrict to
+    /// structural/size merges).
+    pub fn with_relax(mut self, relax: Option<RelaxAmalgamation>) -> Self {
+        self.relax = relax;
         self
     }
 }
@@ -1040,14 +1095,17 @@ pub fn analyze_with(
     // workload-agnostic; it rides the general `SupernodeParams.relax` knob and is
     // gated to `n >= RELAX_MIN_N` inside `find_supernodes`.
     let snode_params = SupernodeParams {
+        // `preprocess: None` is a correctness requirement, not a tuning knob:
+        // LdltCompress rewrites the pattern beyond a permutation, breaking the
+        // `sym.perm` ↔ `A_perm` consistency `factor_numeric` relies on. The
+        // tunable amalgamation knobs (`nemin`, `relax`) ride the composable
+        // `AnalyzeOptions`; everything else stays at the tuned default.
         preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
-        relax: Some(crate::symbolic::supernode::RelaxAmalgamation {
-            max_width: 256,
-            max_extra_rows: 64,
-        }),
+        nemin: opts.nemin,
+        relax: opts.relax,
         ..SupernodeParams::default()
     };
-    let mut sym = symbolic_factorize(&pattern, &snode_params)?;
+    let mut sym = symbolic_factorize_with_method(&pattern, &snode_params, opts.ordering)?;
 
     // Liu (1986) contribution-stack minimization. Reorder each supernode's
     // children so the live contribution-block stack peak is minimized during

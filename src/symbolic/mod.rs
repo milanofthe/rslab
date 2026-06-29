@@ -16,7 +16,7 @@ pub use profiler::{record_stage, StagePct, StageTiming, SymbolicProfileReport, S
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
 pub use supernode::{
     find_supernodes, pick_amalgamation_strategy, AmalgamationStrategy, OrderingPreprocess,
-    Supernode, SupernodeParams, AUTO_MULTI_CHILD_FRAC_THRESHOLD,
+    RelaxAmalgamation, Supernode, SupernodeParams, AUTO_MULTI_CHILD_FRAC_THRESHOLD,
 };
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].

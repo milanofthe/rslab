@@ -17,7 +17,8 @@
 use crate::dense::ldlt_generic::{solve_ldlt, solve_ldlt_many, LdltFactors};
 use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::{
-    analyze as analyze_pattern, factor_numeric, FactorOptions, MultifrontalSymbolic,
+    analyze as analyze_pattern, analyze_with as analyze_pattern_with, factor_numeric,
+    AnalyzeOptions, FactorOptions, MultifrontalSymbolic,
 };
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -258,6 +259,20 @@ impl LdltSymbolic {
         a.validate()?;
         Ok(Self {
             symbolic: analyze_pattern(a.n, &a.col_ptr, &a.row_idx)?,
+            nnz: a.row_idx.len(),
+        })
+    }
+
+    /// [`analyze`](Self::analyze) with explicit composable [`AnalyzeOptions`] -
+    /// fill-reducing ordering, supernode amalgamation, child-reordering. The
+    /// tunable analysis knobs for the auto-tuning sweep.
+    pub fn analyze_with<T: Scalar>(
+        a: &CscMatrix<T>,
+        opts: &AnalyzeOptions,
+    ) -> Result<Self, RslabError> {
+        a.validate()?;
+        Ok(Self {
+            symbolic: analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?,
             nnz: a.row_idx.len(),
         })
     }
@@ -517,6 +532,73 @@ mod tests {
                 assert!((p - o).norm() < 1e-12);
             }
             assert!(residual_inf(&a, &x_phased, &b) < 1e-9);
+        }
+    }
+
+    #[test]
+    fn analyze_options_default_matches_bare_analyze() {
+        // The composable default must reproduce the bare analyze exactly: same
+        // symbolic shape (fill), so existing callers are unaffected.
+        let n = 200;
+        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            r.push(j);
+            c.push(j);
+            v.push(4.0_f64);
+            if j + 1 < n {
+                r.push(j + 1);
+                c.push(j);
+                v.push(-1.0);
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &c, &v).unwrap();
+        let bare = LdltSymbolic::analyze(&a).unwrap();
+        let with_default =
+            LdltSymbolic::analyze_with(&a, &crate::AnalyzeOptions::default()).unwrap();
+        assert_eq!(bare.front_dims(), with_default.front_dims());
+        assert_eq!(bare.level_widths(), with_default.level_widths());
+    }
+
+    #[test]
+    fn analyze_with_alternative_knobs_still_solves() {
+        // Changing ordering / nemin / relax changes the symbolic shape but must
+        // still produce a correct factorization.
+        let c = |re, im| Complex::new(re, im);
+        let m = 8;
+        let n = m * m;
+        let idx = |r: usize, cc: usize| r * m + cc;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for r in 0..m {
+            for cc in 0..m {
+                let p = idx(r, cc);
+                rows.push(p);
+                cols.push(p);
+                vals.push(c(4.0, 0.5));
+                for (dr, dc) in [(1usize, 0usize), (0, 1)] {
+                    if r + dr < m && cc + dc < m {
+                        let q = idx(r + dr, cc + dc);
+                        let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                        rows.push(hi);
+                        cols.push(lo);
+                        vals.push(c(-1.0, 0.1));
+                    }
+                }
+            }
+        }
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 30.0, 1.0)).collect();
+        for opts in [
+            crate::AnalyzeOptions::default().with_ordering(crate::OrderingMethod::Amd),
+            crate::AnalyzeOptions::default().with_ordering(crate::OrderingMethod::MetisND),
+            crate::AnalyzeOptions::default().with_nemin(1),
+            crate::AnalyzeOptions::default().with_relax(None),
+        ] {
+            let f = LdltSymbolic::analyze_with(&a, &opts)
+                .unwrap()
+                .factor(&a, &FactorOptions::default())
+                .unwrap();
+            let x = f.solve(&b).unwrap();
+            assert!(residual_inf(&a, &x, &b) < 1e-9, "opts {opts:?} residual too large");
         }
     }
 

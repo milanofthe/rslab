@@ -128,7 +128,7 @@ pub use numeric::multifrontal_lu::{
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
-pub use symbolic::SymbolicProfileReport;
+pub use symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicProfileReport};
 
 /// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /
 /// preconditioner. `use rslab::prelude::*;` brings in the matrix type, the
