@@ -49,7 +49,8 @@ def main():
     # matrices (1,4,8,12 only) biases the intermediate points downward.
     threads = sorted(t for t in per_t if len(per_t[t]) >= 0.9 * n_curves)
     mean = np.array([np.mean(per_t[t]) for t in threads])
-    std = np.array([np.std(per_t[t]) for t in threads])
+    lo = np.array([np.min(per_t[t]) for t in threads])
+    hi = np.array([np.max(per_t[t]) for t in threads])
     counts = [len(per_t[t]) for t in threads]
 
     plt.rcParams.update({
@@ -61,13 +62,15 @@ def main():
     fig, ax = plt.subplots(figsize=(7.5, 6))
     tmax = max(threads)
     ax.plot([1, tmax], [1, tmax], ls="--", color=GRAY, lw=1.3, alpha=0.7, label="ideal (linear)")
-    ax.fill_between(threads, mean - std, mean + std, color=BLUE, alpha=0.2, lw=0,
-                    label="$\\pm$1 std over corpus")
+    ax.fill_between(threads, lo, hi, color=BLUE, alpha=0.18, lw=0,
+                    label="min-max over corpus")
+    ax.plot(threads, lo, color=BLUE, lw=1, alpha=0.5, ls=":")
+    ax.plot(threads, hi, color=BLUE, lw=1, alpha=0.5, ls=":")
     ax.plot(threads, mean, color=BLUE, lw=2.4, marker="o", zorder=3,
             label=f"mean speedup (n={n_curves} matrices)")
     ax.set_xlabel("worker threads")
     ax.set_ylabel("speedup vs 1 thread")
-    ax.set_title("Aggregated thread scaling over the corpus (mean $\\pm$ std)")
+    ax.set_title("Aggregated thread scaling over the corpus (mean, min-max band)")
     ax.set_xticks(threads)
     ax.grid(True, ls=":", alpha=0.4)
     ax.legend(frameon=False, loc="upper left")
@@ -75,9 +78,9 @@ def main():
     fig.tight_layout()
     fig.savefig(out, dpi=150, transparent=True)
     print(f"wrote {out}")
-    print(f"{'threads':>8}{'mean_sp':>9}{'std':>7}{'n':>5}")
-    for t, m, s, c in zip(threads, mean, std, counts):
-        print(f"{t:>8}{m:>9.2f}{s:>7.2f}{c:>5}")
+    print(f"{'threads':>8}{'mean':>8}{'min':>7}{'max':>7}{'n':>5}")
+    for t, m, l, h, c in zip(threads, mean, lo, hi, counts):
+        print(f"{t:>8}{m:>8.2f}{l:>7.2f}{h:>7.2f}{c:>5}")
 
 
 if __name__ == "__main__":
