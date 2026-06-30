@@ -38,7 +38,7 @@ fn map_err(e: RslabError) -> PyErr {
 /// Translate the Python-side keyword arguments into a core [`FactorOptions`].
 #[allow(clippy::too_many_arguments)]
 fn build_opts(
-    threads: usize,
+    threads: Option<usize>,
     preconditioner: Option<f64>,
     drop_tol: Option<f64>,
     method: &str,
@@ -49,7 +49,11 @@ fn build_opts(
         Some(floor) => FactorOptions::preconditioner(floor),
         None => FactorOptions::default(),
     };
-    o = o.with_threads(threads);
+    // `threads=None` keeps the core default (Threads::Auto - the per-matrix
+    // predictor, up to all cores); an explicit value fixes the worker count.
+    if let Some(n) = threads {
+        o = o.with_threads(n);
+    }
     if let Some(tau) = drop_tol {
         o = o.with_drop_tol(tau);
     }
@@ -266,7 +270,7 @@ fn ldlt_factor(
     indptr: PyReadonlyArray1<i64>,
     indices: PyReadonlyArray1<i64>,
     data: &Bound<'_, PyAny>,
-    threads: usize,
+    threads: Option<usize>,
     preconditioner: Option<f64>,
     drop_tol: Option<f64>,
     method: &str,
@@ -417,7 +421,7 @@ fn lu_factor(
     indptr: PyReadonlyArray1<i64>,
     indices: PyReadonlyArray1<i64>,
     data: &Bound<'_, PyAny>,
-    threads: usize,
+    threads: Option<usize>,
     preconditioner: Option<f64>,
     drop_tol: Option<f64>,
     method: &str,

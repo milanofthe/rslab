@@ -64,7 +64,7 @@ x = f.solve(b, refine=20)        # refine against the original A
 
 | kwarg            | default          | meaning                                                        |
 |------------------|------------------|----------------------------------------------------------------|
-| `threads`        | `2`              | worker-thread budget (`0` = all cores); result is bit-identical |
+| `threads`        | `None` (auto)    | `None` = per-matrix auto predictor (up to all cores); int = fixed (`0` = all) |
 | `preconditioner` | `None`           | static-pivot floor (e.g. `1e-4`); never-fail, refine to solve  |
 | `drop_tol`       | `None`           | incomplete-factor threshold (preconditioner)                   |
 | `method`         | `"left_looking"` | `"left_looking"` or `"multifrontal"`                           |
