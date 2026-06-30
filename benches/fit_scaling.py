@@ -39,16 +39,12 @@ def setup_style():
     })
 
 
-def main():
-    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/corpus.jsonl")
-    recs = [json.loads(l) for l in open(path) if l.strip()]
-    recs = [r for r in recs if r.get("metric") == "time" and r.get("fac_ms", 0) > 0]
-
-    setup_style()
+def plot_metric(recs, metric, value_key, ylabel, title, out):
+    rows = [r for r in recs if r.get("metric") == metric and r.get(value_key, 0) > 0]
     fig, ax = plt.subplots(figsize=(8.5, 6))
     summary = []
     for s in ORDER:
-        pts = [(r["nnz"], r["fac_ms"]) for r in recs
+        pts = [(r["nnz"], r[value_key]) for r in rows
                if r["solver"] == s and r["nnz"] > 0 and r.get("res", 1.0) < 0.1]
         if len(pts) < 2:
             continue
@@ -62,21 +58,32 @@ def main():
         ax.plot(xs, np.exp(logc) * xs ** alpha, color=color, lw=2, alpha=0.9, zorder=2,
                 label=f"{label}  (n={len(pts)}, $\\alpha$={alpha:.2f})")
         summary.append((label, alpha, len(pts)))
-
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("nonzeros (nnz)")
-    ax.set_ylabel("factor time [ms]")
-    ax.set_title("Corpus scaling: factor time vs problem size (power-law fits)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
     ax.grid(True, which="both", ls=":", alpha=0.4)
     ax.legend(frameon=False, fontsize=9, loc="upper left")
-    out = path.parent / "corpus_scaling_fit.png"
     fig.tight_layout()
     fig.savefig(out, dpi=150, transparent=True)
     print(f"wrote {out}")
-    print("fitted scaling exponents (fac ~ nnz^alpha):")
     for label, alpha, n in summary:
         print(f"  {label:<22} alpha={alpha:.2f}  ({n} points)")
+
+
+def main():
+    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/corpus.jsonl")
+    recs = [json.loads(l) for l in open(path) if l.strip()]
+    setup_style()
+    print("factor time ~ nnz^alpha:")
+    plot_metric(recs, "time", "fac_ms", "factor time [ms]",
+                "Corpus scaling: factor time vs problem size (power-law fits)",
+                path.parent / "corpus_scaling_fit.png")
+    print("peak memory ~ nnz^alpha:")
+    plot_metric(recs, "mem", "mem_mb", "peak memory [MB]",
+                "Corpus scaling: peak factor memory vs problem size (power-law fits)",
+                path.parent / "corpus_memory_fit.png")
 
 
 if __name__ == "__main__":

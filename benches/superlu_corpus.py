@@ -14,6 +14,7 @@ Env:  RLA_BENCH_OUT (default benches/bench_out/corpus.jsonl), RLA_MATGEN_CACHE.
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -21,6 +22,39 @@ import numpy as np
 import scipy.io as sio
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu
+
+try:
+    import psutil
+    _PROC = psutil.Process()
+except Exception:  # noqa: BLE001
+    _PROC = None
+
+
+def _rss_mb() -> float:
+    return _PROC.memory_info().rss / 1048576.0 if _PROC else 0.0
+
+
+def factor_with_peak(A):
+    """Run splu while sampling process RSS in a background thread; return
+    (lu, factor_ms, peak_rss_delta_mb). The peak is the resident growth over the
+    pre-factor baseline - the comparable 'peak memory used to factor'."""
+    base = _rss_mb()
+    peak = [base]
+    stop = threading.Event()
+
+    def sample():
+        while not stop.is_set():
+            peak[0] = max(peak[0], _rss_mb())
+            time.sleep(0.002)
+
+    th = threading.Thread(target=sample, daemon=True)
+    th.start()
+    t = time.perf_counter()
+    lu = splu(A)
+    fac = (time.perf_counter() - t) * 1e3
+    stop.set()
+    th.join()
+    return lu, fac, max(0.0, peak[0] - base)
 
 # The same default list as benches/bench_suite.rs `build_corpus`.
 DEFAULT = (
@@ -70,9 +104,7 @@ def main() -> None:
             n, nnz = A.shape[0], A.nnz
             b = rhs(n)
             try:
-                t = time.perf_counter()
-                lu = splu(A)
-                fac = (time.perf_counter() - t) * 1e3
+                lu, fac, peak_mb = factor_with_peak(A)
                 t = time.perf_counter()
                 x = lu.solve(b)
                 slv = (time.perf_counter() - t) * 1e3
@@ -81,15 +113,17 @@ def main() -> None:
             except Exception as e:  # noqa: BLE001
                 print(f"[superlu] {name}: FACTOR/SOLVE FAILED {type(e).__name__} {str(e)[:60]}")
                 continue
-            rec = {
+            base = {
                 "solver": "superlu", "family": "corpus", "name": name,
-                "n": int(n), "nnz": int(nnz), "threads": 1, "metric": "time",
-                "ana_ms": 0.0, "fac_ms": fac, "slv_ms": slv, "mem_mb": 0.0,
-                "fill": fill, "res": res,
+                "n": int(n), "nnz": int(nnz), "threads": 1, "ana_ms": 0.0,
+                "fac_ms": fac, "slv_ms": slv, "fill": fill, "res": res,
             }
-            out.write(json.dumps(rec) + "\n")
+            # Two records, matching the Rust bench's separate time / memory passes.
+            out.write(json.dumps({**base, "metric": "time", "mem_mb": 0.0}) + "\n")
+            out.write(json.dumps({**base, "metric": "mem", "mem_mb": peak_mb}) + "\n")
             done += 1
-            print(f"[superlu] {name:<14} n={n:>7} nnz={nnz:>9}  fac {fac:>9.1f}ms  res {res:.1e}")
+            print(f"[superlu] {name:<14} n={n:>7} nnz={nnz:>9}  fac {fac:>9.1f}ms  "
+                  f"peak {peak_mb:>7.1f}MB  res {res:.1e}")
     print(f"[superlu] done: {done} matrices appended")
 
 
