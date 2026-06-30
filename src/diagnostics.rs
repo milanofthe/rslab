@@ -26,8 +26,8 @@ pub struct MemoryEstimate {
     /// the left-looking path actually holds at once.
     pub panel_live_peak_bytes: u64,
     /// Estimated overall transient peak for the **left-looking** path: live panels
-    /// + accumulated compact factor + the equilibrated input copy/copies. The
-    /// number to compare against RAM for [`FactorMethod::LeftLooking`](crate::FactorMethod::LeftLooking).
+    /// plus the accumulated compact factor plus the equilibrated input copy/copies.
+    /// The number to compare against RAM for [`FactorMethod::LeftLooking`](crate::FactorMethod::LeftLooking).
     pub transient_peak_bytes: u64,
     /// Estimated transient peak for the **multifrontal** path: the
     /// contribution-block-stack model (the active front plus the live CBs of
