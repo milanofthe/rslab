@@ -114,6 +114,19 @@ corpus. The factor dominates; the triangular solve is cheap for all; faer has no
 separate analyze phase. RSLAB's analyze (fill-reducing ordering + symbolic) is
 reusable across many value sets that share a pattern (frequency sweep / Newton).
 
+### Phased reuse (analyze once, factor many)
+
+![Phased reuse](benches/bench_out/phased_reuse.png)
+
+A frequency sweep or Newton iteration factors many value sets that share one
+sparsity pattern. `LdltSymbolic::analyze` runs the fill-reducing ordering and
+symbolic analysis once (the value-independent part); each step then re-runs only
+the numeric factor. Cumulative cost over K factorizations: analyze-once
+(`analyze + K·factor`) vs analyze-each. Amortizing the analysis saves ~5-25%
+depending on the fill profile - more for low-fill 2D/banded (analysis ~20% of a
+solve), less for factor-dominated 3D (~5%) - and is the natural workflow for
+value sweeps.
+
 ### A-priori memory estimate
 
 ![Memory breakdown](benches/bench_out/memory_breakdown.png)

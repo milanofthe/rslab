@@ -139,6 +139,11 @@ harness = false
 required-features = ["matgen"]
 
 [[bench]]
+name = "phased_reuse"
+harness = false
+required-features = ["matgen"]
+
+[[bench]]
 name = "leftlook_mem"
 harness = false
 
