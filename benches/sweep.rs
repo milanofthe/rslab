@@ -111,66 +111,81 @@ fn corpus() -> Vec<Entry> {
         return e;
     }
 
-    // 2D Poisson (well-conditioned, banded, diagonally dominant).
-    for s in [50usize, 100, 180, 280] {
+    // 2D Poisson (well-conditioned, banded, diagonally dominant) - fine ladder.
+    for s in [50usize, 90, 140, 200, 280, 360] {
         let m = g(s);
         sym(
             format!("poisson2d_{}", m * m),
             stencil::laplacian::<C>(&[m, m], &stencil::StencilOpts::default()),
         );
     }
-    // Anisotropic 2D (long thin fronts).
-    for s in [80usize, 160, 240] {
-        let m = g(s);
-        let opts = stencil::StencilOpts { aniso: [1.0, 100.0, 1.0], ..Default::default() };
-        sym(format!("aniso2d_{}", m * m), stencil::laplacian::<C>(&[m, m], &opts));
+    // Anisotropic 2D (long thin fronts), two contrast levels.
+    for &aniso in &[100.0, 1000.0] {
+        for s in [100usize, 180, 260] {
+            let m = g(s);
+            let opts = stencil::StencilOpts { aniso: [1.0, aniso, 1.0], ..Default::default() };
+            sym(
+                format!("aniso2d_{}_{:.0}", m * m, aniso),
+                stencil::laplacian::<C>(&[m, m], &opts),
+            );
+        }
     }
     // Jumping-coefficient 2D (ill-conditioned heterogeneous media).
-    for s in [80usize, 160, 240] {
+    for s in [100usize, 180, 260] {
         let m = g(s);
         let opts =
             stencil::StencilOpts { jump_contrast: 1e4, shift: 1e-2, ..Default::default() };
         sym(format!("jump2d_{}", m * m), stencil::laplacian::<C>(&[m, m], &opts));
     }
     // 3D Poisson (dense fronts near the root - the top-of-tree regime).
-    for k in [12usize, 20, 30, 40] {
+    for k in [12usize, 18, 24, 32, 42] {
         let kk = g(k);
         sym(
             format!("poisson3d_{}", kk * kk * kk),
             stencil::laplacian::<C>(&[kk, kk, kk], &stencil::StencilOpts::default()),
         );
     }
-    // 3D complex Helmholtz (EM-FEM, complex-symmetric, indefinite-ish).
-    for k in [12usize, 20, 28] {
-        let kk = g(k);
-        sym(
-            format!("helmholtz3d_{}", kk * kk * kk),
-            stencil::helmholtz(&[kk, kk, kk], c(2.0, 0.1), &stencil::StencilOpts::default()),
-        );
+    // 3D complex Helmholtz (EM-FEM, complex-symmetric, indefinite-ish), two k.
+    for &(kr, ki) in &[(2.0, 0.1), (5.0, 0.3)] {
+        for k in [12usize, 18, 26] {
+            let kk = g(k);
+            sym(
+                format!("helmholtz3d_{}_{:.0}", kk * kk * kk, kr),
+                stencil::helmholtz(&[kk, kk, kk], c(kr, ki), &stencil::StencilOpts::default()),
+            );
+        }
     }
-    // Banded (narrow vs wide).
-    for (n, bw) in [(8000usize, 8usize), (20000, 16), (40000, 40)] {
+    // Banded (narrow vs wide) - locality ladder.
+    for (n, bw) in [(8000usize, 8usize), (20000, 16), (40000, 40), (80000, 24)] {
         sym(format!("banded_{}_{}", g(n), bw), structured::banded::<C>(g(n), bw, 1.0, 1));
     }
     // Arrow / bordered (dense border block - high degree-CV).
-    for (n, b) in [(8000usize, 24usize), (20000, 48)] {
+    for (n, b) in [(8000usize, 24usize), (20000, 48), (40000, 32)] {
         sym(format!("arrow_{}_{}", g(n), b), structured::arrow::<C>(g(n), b, 1e-2, 1));
     }
-    // Random SPD (irregular pattern).
-    for (n, d) in [(5000usize, 14usize), (15000, 20)] {
-        sym(format!("rand_spd_{}", g(n)), random::random_spd::<C>(g(n), d, 1.0, 1));
+    // Random SPD (irregular pattern) - density ladder.
+    for (n, d) in [(5000usize, 10usize), (10000, 16), (20000, 22)] {
+        sym(format!("rand_spd_{}_{}", g(n), d), random::random_spd::<C>(g(n), d, 1.0, 1));
+    }
+    // Spectral (exactly-conditioned), SPD and indefinite.
+    for &(kappa, indef) in &[(1e6, false), (1e8, false), (1e6, true)] {
+        let n = g(4000);
+        sym(
+            format!("spectral_{}_{:.0e}_{}", n, kappa, indef as u8),
+            random::spectral::<C>(n, kappa, indef, 1),
+        );
     }
 
-    // Unsymmetric: BEM/MoM-like (dense-ish) and random.
-    for n in [1500usize, 3000, 6000] {
+    // Unsymmetric: BEM/MoM-like (dense-ish) and random (density ladder).
+    for n in [1500usize, 3000, 6000, 10000] {
         e.push(Entry {
             name: format!("bem_{}", g(n)),
             mat: Mat::Unsym(rslab::matgen::bem::kernel(g(n), &rslab::matgen::bem::BemOpts::default())),
         });
     }
-    for (n, d) in [(5000usize, 14usize), (15000, 18)] {
+    for (n, d) in [(5000usize, 10usize), (10000, 14), (20000, 18)] {
         e.push(Entry {
-            name: format!("rand_unsym_{}", g(n)),
+            name: format!("rand_unsym_{}_{}", g(n), d),
             mat: Mat::Unsym(random::random_unsym::<C>(g(n), d, 2.0, 1)),
         });
     }
@@ -207,6 +222,45 @@ fn suitesparse_list() -> &'static [(&'static str, &'static str)] {
         ("Um", "2cubes_sphere"),
         ("Schmid", "thermal1"),
         ("Botonakis", "thermomech_dM"),
+        // --- structural FEM ---
+        ("HB", "bcsstk16"),
+        ("HB", "bcsstk17"),
+        ("HB", "bcsstk25"),
+        ("HB", "bcsstk38"),
+        ("Boeing", "ct20stif"),
+        ("Boeing", "msc23052"),
+        ("Boeing", "pwtk"),
+        ("Cylshell", "s3rmt3m3"),
+        ("Cylshell", "s3rmq4m1"),
+        ("Cylshell", "s3dkt3m2"),
+        ("DNVS", "shipsec1"),
+        ("DNVS", "ship_003"),
+        ("Nasa", "nasa1824"),
+        ("Nasa", "nasa4704"),
+        ("Simon", "raefsky4"),
+        // --- CFD / fluid (unsymmetric) ---
+        ("Simon", "raefsky3"),
+        ("Simon", "raefsky2"),
+        ("Simon", "venkat01"),
+        ("FIDAP", "ex19"),
+        ("FIDAP", "ex35"),
+        // --- circuit / semiconductor (unsymmetric) ---
+        ("Hamm", "scircuit"),
+        ("Hamm", "memplus"),
+        ("Bomhof", "circuit_3"),
+        // --- thermal / PDE ---
+        ("Botonakis", "FEM_3D_thermal1"),
+        ("Wissgott", "parabolic_fem"),
+        // --- optimization / KKT (symmetric indefinite) ---
+        ("GHS_indef", "cont-201"),
+        ("GHS_indef", "stokes64"),
+        ("GHS_indef", "dixmaanl"),
+        ("GHS_indef", "boyd1"),
+        // --- acoustics / model reduction ---
+        ("Cunningham", "qa8fm"),
+        ("Oberwolfach", "gyro"),
+        ("Oberwolfach", "t2dah_e"),
+        ("PARSEC", "Si5H12"),
     ]
 }
 
@@ -251,6 +305,26 @@ const BASELINE: Param = Param {
     par_cdiv: 8_000_000,
     threads: 0,
 };
+
+fn threads_mode() -> bool {
+    std::env::var("RLA_SWEEP_THREADS_ONLY").is_ok()
+}
+
+/// Thread-scaling ladder at production-default knobs (Auto ordering, nemin 16,
+/// par_cdiv 8M): vary only the worker count to trace the per-matrix speedup
+/// curve. Reduced for the heaviest matrices to bound wall-clock. The machine has
+/// 12 physical / 24 logical cores.
+fn thread_ladder(flops: u64) -> Vec<Param> {
+    let ladder: &[usize] = if flops as f64 > 5e10 {
+        &[1, 4, 12, 24]
+    } else {
+        &[1, 2, 4, 8, 12, 16, 24]
+    };
+    ladder
+        .iter()
+        .map(|&threads| Param { ordering: OrderingMethod::Auto, nemin: 16, par_cdiv: 8_000_000, threads })
+        .collect()
+}
 
 fn grid() -> Vec<Param> {
     let smoke = std::env::var("RLA_SWEEP_SMOKE").is_ok();
@@ -386,11 +460,14 @@ fn main() {
             n_skipped_mem += 1;
             continue;
         }
-        // Bound compute: the full 16x grid only for matrices below the flop cap.
-        let combos: &[Param] = if flops as f64 > grid_flop_cap {
-            std::slice::from_ref(&BASELINE)
-        } else {
-            &full_grid
+        // Thread-scaling mode runs the ladder (bypassing the flop-gate, since
+        // scaling matters most on the large matrices); otherwise the full grid is
+        // bounded to small matrices and giants fall back to the baseline combo.
+        let ladder = if threads_mode() { Some(thread_ladder(flops)) } else { None };
+        let combos: &[Param] = match &ladder {
+            Some(l) => l.as_slice(),
+            None if flops as f64 > grid_flop_cap => std::slice::from_ref(&BASELINE),
+            None => &full_grid,
         };
         let feat_json = serde_json::to_value(&feat).expect("feat json");
         eprintln!(
