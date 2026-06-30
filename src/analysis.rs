@@ -64,6 +64,30 @@ impl SymbolicShape for LuSymbolic {
     }
 }
 
+/// The data-driven single-solve thread-count policy, as a free function over the
+/// three predictive features (so the factor path can apply it straight from the
+/// symbolic analysis without building a full [`StructuralFeatures`]). Returns a
+/// worker count in `1..=max_cores`. See [`StructuralFeatures::recommend_threads`]
+/// for the derivation and validation.
+pub fn recommend_threads_from(
+    factor_flops: u64,
+    front_nrow_max: usize,
+    tree_width_max: usize,
+    max_cores: usize,
+) -> usize {
+    let cores = max_cores.max(1);
+    // Thin fronts + narrow tree: no node-parallelism (tiny fronts) and no
+    // tree-parallelism (path-like) to exploit - oversubscription only hurts.
+    if front_nrow_max < 512 && tree_width_max < 128 {
+        return cores.min(2);
+    }
+    // Tiny total work: parallel scheduling overhead dominates the factorization.
+    if factor_flops < 300_000_000 {
+        return cores.min(4);
+    }
+    cores
+}
+
 /// A compact structural fingerprint of a sparse system: cheap pattern statistics
 /// plus the symbolic-analysis shape. Serializable, so a sweep harness can emit
 /// one record per matrix and a predictor can consume the same vector.
@@ -304,17 +328,12 @@ impl StructuralFeatures {
     /// they coexist - that is why [`FactorOptions`](crate::FactorOptions)
     /// defaults to 2 rather than this.
     pub fn recommend_threads(&self, max_cores: usize) -> usize {
-        let cores = max_cores.max(1);
-        // Thin fronts + narrow tree: no node-parallelism (tiny fronts) and no
-        // tree-parallelism (path-like) to exploit - oversubscription only hurts.
-        if self.front_nrow_max < 512 && self.tree_width_max < 128 {
-            return cores.min(2);
-        }
-        // Tiny total work: parallel scheduling overhead dominates the factorization.
-        if self.factor_flops < 300_000_000 {
-            return cores.min(4);
-        }
-        cores
+        recommend_threads_from(
+            self.factor_flops,
+            self.front_nrow_max,
+            self.tree_width_max,
+            max_cores,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

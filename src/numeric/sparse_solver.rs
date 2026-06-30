@@ -362,12 +362,16 @@ impl LdltSymbolic {
     ) -> Result<LdltSolver<T>, RslabError> {
         a.validate()?;
         let estimate = self.estimate_memory::<T>();
+        // The concrete worker count actually used (realizes Threads::Auto).
+        let resolved_threads = opts.threads.resolve(|cap| {
+            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symbolic, cap)
+        });
         let t = std::time::Instant::now();
         let (scaled, scale) = equilibrate(a);
         let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let mut diagnostics = crate::diagnostics::Diagnostics {
-            threads: opts.resolved_threads(),
+            threads: resolved_threads,
             factor_nnz: factors.l_values.len() as u64,
             estimate: Some(estimate),
             ..Default::default()
@@ -534,6 +538,38 @@ mod tests {
             }
             assert!(residual_inf(&a, &x_phased, &b) < 1e-9);
         }
+    }
+
+    #[test]
+    fn auto_threads_wiring() {
+        // A thin tridiagonal: the predictor caps it low (no parallelism source),
+        // a fixed budget overrides exactly, and the cap clamps.
+        let n = 3000;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            r.push(j);
+            cc.push(j);
+            v.push(4.0_f64);
+            if j + 1 < n {
+                r.push(j + 1);
+                cc.push(j);
+                v.push(-1.0);
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let sym = LdltSymbolic::analyze(&a).unwrap();
+        // Auto capped at 8: a tridiagonal is thin/narrow -> policy returns 2.
+        let auto = sym.factor(&a, &FactorOptions::default().with_auto_threads(8)).unwrap();
+        assert_eq!(auto.diagnostics().threads, 2, "thin matrix auto-capped to 2");
+        // Fixed overrides the predictor exactly.
+        let fixed = sym.factor(&a, &FactorOptions::default().with_threads(5)).unwrap();
+        assert_eq!(fixed.diagnostics().threads, 5);
+        // The auto cap clamps the prediction.
+        let cap1 = sym.factor(&a, &FactorOptions::default().with_auto_threads(1)).unwrap();
+        assert_eq!(cap1.diagnostics().threads, 1);
+        // All still solve correctly.
+        let b = vec![1.0_f64; n];
+        assert!(auto.solve(&b).is_ok() && fixed.solve(&b).is_ok());
     }
 
     #[test]

@@ -270,7 +270,10 @@ mod tests {
         let plan_ok = plan(&est, &Budget::default(), &hw, &calib);
         assert!(plan_ok.fits && !plan_ok.use_mixed_precision);
         assert!(plan_ok.est_runtime_ms > 0.0);
-        assert_eq!(plan_ok.opts.threads, hw.physical_cores.max(1));
+        assert_eq!(
+            plan_ok.opts.threads,
+            crate::numeric::multifrontal_ldlt::Threads::Fixed(hw.physical_cores.max(1))
+        );
 
         // Tight budget with all approximations allowed → planner applies them.
         let tight = Budget {

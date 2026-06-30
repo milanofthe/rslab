@@ -755,12 +755,15 @@ impl LuSymbolic {
         opts: &FactorOptions,
     ) -> Result<LuSolver<T>, RslabError> {
         let estimate = self.estimate_memory::<T>();
+        let resolved_threads = opts.threads.resolve(|cap| {
+            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symb, cap)
+        });
         let t = std::time::Instant::now();
         let factors = factor_general_lu_numeric(self, a, opts)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let nnz = factors.factor_nnz() as u64;
         let mut diagnostics = crate::diagnostics::Diagnostics {
-            threads: opts.resolved_threads(),
+            threads: resolved_threads,
             factor_nnz: nnz,
             estimate: Some(estimate),
             ..Default::default()
@@ -2046,7 +2049,10 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
     // a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        return crate::numeric::multifrontal_ldlt::in_scoped_pool(opts.threads, || {
+        let nthreads = opts.threads.resolve(|cap| {
+            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
+        });
+        return crate::numeric::multifrontal_ldlt::in_scoped_pool(nthreads, || {
             factor_lu_left_looking(
                 sym,
                 &a_perm,

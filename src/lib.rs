@@ -95,7 +95,7 @@ pub mod tuning;
 // Flat public API re-exported at crate root - a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
-pub use analysis::{StructuralFeatures, SymbolicShape};
+pub use analysis::{recommend_threads_from, StructuralFeatures, SymbolicShape};
 pub use numeric::gemm_tuning::{
     gemm_thresholds, get_panel_nb, set_gemm_thresholds, set_panel_nb, GemmThresholds,
 };
@@ -109,7 +109,7 @@ pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFact
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
     set_use_gemm_schur, AnalyzeOptions, BlrMode, FactorMethod, FactorOptions, MemoryMode,
-    MultifrontalSymbolic, ReorderMode, ZeroPivotAction,
+    MultifrontalSymbolic, ReorderMode, Threads, ZeroPivotAction,
 };
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};

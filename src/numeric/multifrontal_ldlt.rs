@@ -279,17 +279,61 @@ pub struct FactorOptions {
     /// [`LeftLooking`]: FactorMethod::LeftLooking
     /// [`Multifrontal`]: FactorMethod::Multifrontal
     pub method: FactorMethod,
-    /// Worker-thread budget for this factorization, run in a **scoped** rayon pool
-    /// (not the global pool) - so multiple concurrent solves (solver-in-the-loop)
-    /// share the machine instead of each grabbing every core. `0` = all logical
-    /// cores. **Default `2`** (the in-the-loop default). The numeric result is
-    /// bit-identical regardless of this value.
-    pub threads: usize,
+    /// Worker-thread policy for this factorization, run in a **scoped** rayon pool
+    /// (not the global pool). Either a [`Fixed`](Threads::Fixed) count or
+    /// [`Auto`](Threads::Auto) - the data-driven per-matrix predictor, capped at a
+    /// user-defined maximum. **Default [`Auto`](Threads::Auto)** (predict, up to
+    /// all cores). The numeric result is bit-identical regardless of this value.
+    pub threads: Threads,
 }
 
-/// The default worker-thread budget: small, so concurrent solves coexist. Override
-/// with [`FactorOptions::with_threads`] (or `0` for all cores) for max single-solve
-/// throughput.
+/// Worker-thread policy for a factorization. The numeric result is bit-identical
+/// regardless of which is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Threads {
+    /// Exactly this many workers. `0` = all logical cores. Use a small fixed
+    /// budget for **solver-in-the-loop** (many concurrent solves coexisting on
+    /// the machine without oversubscription).
+    Fixed(usize),
+    /// Predict the worker count per-matrix from the structural fingerprint (the
+    /// validated [`recommend_threads`](crate::StructuralFeatures::recommend_threads)
+    /// policy: thin / tiny systems stay low where they would only regress, big
+    /// BLAS-3-rich systems use the cores), **capped at `max`** (`0` = all logical
+    /// cores). The single-solve default: best throughput without oversubscribing
+    /// the matrices that do not scale.
+    Auto {
+        /// Upper bound on the predicted worker count (`0` = all logical cores).
+        max: usize,
+    },
+}
+
+impl Default for Threads {
+    fn default() -> Self {
+        Threads::Auto { max: 0 }
+    }
+}
+
+/// All logical cores (the `0` sentinel resolution).
+fn all_cores() -> usize {
+    std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
+}
+
+impl Threads {
+    /// Resolve to a concrete worker count. `recommend(cap)` is the structural
+    /// predictor (already clamped to `cap`); it is only invoked in [`Auto`] mode.
+    ///
+    /// [`Auto`]: Threads::Auto
+    pub(crate) fn resolve(self, recommend: impl FnOnce(usize) -> usize) -> usize {
+        match self {
+            Threads::Fixed(0) => all_cores(),
+            Threads::Fixed(n) => n,
+            Threads::Auto { max } => recommend(if max == 0 { all_cores() } else { max }),
+        }
+    }
+}
+
+/// Legacy fixed default kept for reference; the live default is
+/// [`Threads::Auto`].
 pub const DEFAULT_THREADS: usize = 2;
 
 /// Run `f` inside a **scoped** rayon thread pool of `threads` workers, so this
@@ -316,7 +360,7 @@ impl Default for FactorOptions {
             memory: MemoryMode::LowMemory,
             blr: BlrMode::Off,
             method: FactorMethod::LeftLooking,
-            threads: DEFAULT_THREADS,
+            threads: Threads::default(),
         }
     }
 }
@@ -376,19 +420,37 @@ impl FactorOptions {
         self
     }
 
-    /// Builder: set the worker-thread budget (`0` = all logical cores). The factor
-    /// runs in a scoped pool of this size so concurrent solves don't oversubscribe.
+    /// Builder: set a **fixed** worker-thread budget (`0` = all logical cores).
+    /// The factor runs in a scoped pool of this size so concurrent solves don't
+    /// oversubscribe. Overrides the default [`Auto`](Threads::Auto) prediction.
     pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = Threads::Fixed(threads);
+        self
+    }
+
+    /// Builder: use the **auto** per-matrix thread predictor, capped at `max`
+    /// (`0` = all logical cores). This is the default policy; use it to bound the
+    /// predictor below the full core count.
+    pub fn with_auto_threads(mut self, max: usize) -> Self {
+        self.threads = Threads::Auto { max };
+        self
+    }
+
+    /// Builder: set the worker-thread policy directly.
+    pub fn with_thread_policy(mut self, threads: Threads) -> Self {
         self.threads = threads;
         self
     }
 
-    /// The resolved worker count: `threads`, or all logical cores when `0`.
+    /// A static upper bound on the worker count for *reporting*, without the
+    /// structural predictor: a fixed count resolves exactly; an
+    /// [`Auto`](Threads::Auto) policy reports its cap (all cores for `0`). The
+    /// concrete count actually used is resolved at factor time and recorded in
+    /// the [`Diagnostics`](crate::Diagnostics).
     pub fn resolved_threads(&self) -> usize {
-        if self.threads == 0 {
-            std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
-        } else {
-            self.threads
+        match self.threads {
+            Threads::Fixed(0) | Threads::Auto { max: 0 } => all_cores(),
+            Threads::Fixed(n) | Threads::Auto { max: n } => n,
         }
     }
 }
@@ -1191,6 +1253,18 @@ pub fn analyze_with(
 /// PARDISO phases 2-3: numeric factorization reusing a [`MultifrontalSymbolic`].
 /// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
 /// from. Honours static pivoting and incomplete-factor dropping via `opts`.
+/// Realize a [`Threads::Auto`] policy from a symbolic analysis: compute the three
+/// predictive features (factor-flops, max front height, max tree width) and apply
+/// the [`recommend_threads_from`](crate::analysis::recommend_threads_from) policy,
+/// capped at `max_cores`. Value-independent, so it is the same for every scalar.
+pub(crate) fn recommend_threads_for_sym(symb: &MultifrontalSymbolic, max_cores: usize) -> usize {
+    let fd = symb.front_dims();
+    let flops: u64 = fd.iter().map(|&(nc, nr)| (nr as u64) * (nr as u64) * (nc as u64)).sum();
+    let front_nrow_max = fd.iter().map(|&(_, nr)| nr).max().unwrap_or(0);
+    let tree_width_max = symb.level_widths().into_iter().max().unwrap_or(0);
+    crate::analysis::recommend_threads_from(flops, front_nrow_max, tree_width_max, max_cores)
+}
+
 pub fn factor_numeric<T: Scalar>(
     symb: &MultifrontalSymbolic,
     a: &CscMatrix<T>,
@@ -1225,7 +1299,8 @@ pub fn factor_numeric<T: Scalar>(
     // Supernodal left-looking path: same factor, low transient (no CB stack). Run
     // in a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        return in_scoped_pool(opts.threads, || factor_left_looking(sym, a, opts));
+        let nthreads = opts.threads.resolve(|cap| recommend_threads_for_sym(symb, cap));
+        return in_scoped_pool(nthreads, || factor_left_looking(sym, a, opts));
     }
 
     // Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
