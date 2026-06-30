@@ -127,14 +127,17 @@ depending on the fill profile - more for low-fill 2D/banded (analysis ~20% of a
 solve), less for factor-dominated 3D (~5%) - and is the natural workflow for
 value sweeps.
 
-### A-priori memory estimate
+### A-priori memory estimate vs measured
 
-![Memory breakdown](benches/bench_out/memory_breakdown.png)
+![Memory estimate vs measured](benches/bench_out/memory_breakdown.png)
 
-RSLAB's a-priori factor-memory estimate over the corpus (no factoring required):
-dense panels + compact factor + input/scratch, with the panel-freed live floor
-marked. The estimate is within 1.0x to 1.2x of measured peak and does not
-under-predict - usable for fail-fast scheduling before any numeric work.
+RSLAB computes a factor-memory estimate from the symbolic analysis alone, before
+any numeric work. Per matrix, three grouped bars: the conservative upper bound
+(all dense panels resident at once + factor + input/scratch), the panel-freed
+estimate (what the low-memory schedule should hold), and the **measured**
+left-looking peak. The measured peak sits between the two estimates, and the
+upper bound stays above it (geomean ~1.5x, never under-predicting) - so it is
+safe to compare against available RAM for fail-fast scheduling before factoring.
 
 ### Real MoM matrices
 

@@ -73,34 +73,54 @@ def wct_breakdown(corpus_path, outdir):
     print(f"wrote {outdir / 'wct_breakdown.png'}")
 
 
-def memory_breakdown(est_path, outdir):
+def memory_breakdown(est_path, corpus_path, outdir):
+    """Grouped (not stacked - this is a log axis) factor-memory comparison per
+    matrix: the conservative a-priori upper bound (all panels resident), the
+    a-priori panel-freed estimate (what the low-memory path should hold), and the
+    measured RSLAB left-looking peak. The measured bar should sit between the two
+    estimates - validating that the estimate brackets reality and never
+    under-predicts."""
     if not Path(est_path).exists():
         print(f"[memory] {est_path} missing - run bench_suite with RLA_BENCH_ESTIMATE=1 family=corpus")
         return
-    recs = [json.loads(l) for l in open(est_path) if l.strip()]
-    recs = sorted(recs, key=lambda r: r["n"])
-    names = [r["name"] for r in recs]
+    est = {r["name"]: r for r in (json.loads(l) for l in open(est_path) if l.strip())}
+    # Measured RSLAB left-looking peak from the memory pass.
+    measured = {}
+    if Path(corpus_path).exists():
+        for r in (json.loads(l) for l in open(corpus_path) if l.strip()):
+            if r.get("solver") == "ll" and r.get("metric") == "mem" and r.get("mem_mb", 0) > 0:
+                measured[r["name"]] = r["mem_mb"]
+    # Keep matrices with all three numbers, sorted by size.
+    rows = [est[n] for n in est if n in measured]
+    rows.sort(key=lambda r: r["n"])
+    if not rows:
+        print("[memory] no matrices with estimate + measured peak")
+        return
+    names = [r["name"] for r in rows]
     x = np.arange(len(names))
-    panels = [r["panels_mb"] for r in recs]
-    factor = [r["factor_mb"] for r in recs]
-    scratch = [r["scratch_mb"] for r in recs]
-    floor = [r["freed_floor_mb"] for r in recs]
-    fig, ax = plt.subplots(figsize=(11, 5))
-    ax.bar(x, panels, 0.7, label="dense panels", color="#3b82f6")
-    ax.bar(x, factor, 0.7, bottom=panels, label="compact factor (CSC)", color="#06b6d4")
-    ax.bar(x, scratch, 0.7, bottom=[p + f for p, f in zip(panels, factor)],
-           label="input + scratch", color=GRAY, alpha=0.55)
-    ax.plot(x, floor, "o--", color="#f59e0b", label="panel-freed live floor", lw=1.4, ms=4)
-    ax.set_title("RSLAB a-priori factor-memory estimate over the corpus (by size)")
-    ax.set_ylabel("estimated memory (MB)")
+    worst = [r["transient_mb"] for r in rows]
+    floor = [r["freed_floor_mb"] for r in rows]
+    meas = [measured[r["name"]] for r in rows]
+    w = 0.27
+    fig, ax = plt.subplots(figsize=(12, 5.5))
+    ax.bar(x - w, worst, w, label="worst-case estimate (all panels)", color=GRAY, alpha=0.65)
+    ax.bar(x, floor, w, label="panel-freed estimate", color="#3b82f6")
+    ax.bar(x + w, meas, w, label="measured peak (RSLAB left-looking)", color="#22c55e")
+    ax.set_title("RSLAB factor memory: a-priori estimate vs measured (per matrix, by size)")
+    ax.set_ylabel("memory (MB)")
     ax.set_yscale("log")
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{n}" for n in names], rotation=60, ha="right", fontsize=7)
+    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
     ax.grid(True, axis="y", ls=":", alpha=0.5)
-    ax.legend(fontsize=9, frameon=False)
+    ax.legend(fontsize=9, frameon=False, loc="upper left")
     fig.tight_layout()
     fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True)
     print(f"wrote {outdir / 'memory_breakdown.png'}")
+    # Console: measured vs the two estimates (the bracketing check).
+    import math
+    over = [w_ / m for w_, m in zip(worst, meas) if m > 0]
+    print(f"  worst-case / measured: geomean {math.exp(sum(map(math.log, over))/len(over)):.2f}x "
+          f"(should be >= 1; conservative upper bound, {len(rows)} matrices)")
 
 
 def main():
@@ -108,7 +128,7 @@ def main():
     est = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("benches/bench_out/corpus_estimate.jsonl")
     setup()
     wct_breakdown(corpus, corpus.parent)
-    memory_breakdown(est, corpus.parent)
+    memory_breakdown(est, corpus, corpus.parent)
 
 
 if __name__ == "__main__":
