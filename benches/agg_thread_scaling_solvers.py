@@ -19,15 +19,13 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
-STYLE = {
-    "ll": ("RSLAB left-looking", "#3b82f6"),
-    "mf": ("RSLAB multifrontal", "#06b6d4"),
-    "faer": ("faer LU", "#f59e0b"),
-    "pardiso": ("MKL PARDISO", "#22c55e"),
-}
+import bench_style
+from bench_style import GRAY, SOLVERS
+
 ORDER = ["ll", "mf", "faer", "pardiso"]
-GRAY = "#808080"
 
 
 def main():
@@ -41,16 +39,11 @@ def main():
     for r in recs:
         cur[(r["solver"], r["name"])][int(r["threads"])] = r["fac_ms"]
 
-    plt.rcParams.update({
-        "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
-        "text.color": GRAY, "axes.labelcolor": GRAY, "axes.edgecolor": GRAY,
-        "xtick.color": GRAY, "ytick.color": GRAY, "grid.color": GRAY,
-        "axes.titlecolor": GRAY, "font.size": 10,
-    })
-    fig, axes = plt.subplots(2, 2, figsize=(11, 9), sharex=True, sharey=True)
+    bench_style.setup()
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9.5), sharex=True, sharey=True)
     print(f"{'solver':<20}{'thr':>5}{'mean':>8}{'min':>7}{'max':>7}{'n':>5}")
     for ax, s in zip(axes.flat, ORDER):
-        label, color = STYLE[s]
+        label, color = SOLVERS[s][0], SOLVERS[s][1]
         per_t = defaultdict(list)
         n_curves = 0
         for (sv, _name), d in cur.items():
@@ -81,9 +74,14 @@ def main():
     for ax in axes[:, 0]:
         ax.set_ylabel("speedup vs 1 thread")
     fig.suptitle("Thread scaling per solver over the corpus (mean, min-max band)", color=GRAY)
+    handles = [
+        Line2D([], [], color=GRAY, lw=2.2, marker="o", label="mean speedup"),
+        Patch(facecolor=GRAY, alpha=0.3, label="min-max over corpus"),
+        Line2D([], [], ls="--", color=GRAY, lw=1.2, label="ideal (linear)"),
+    ]
     out = path.parent / "thread_scaling_solvers.png"
-    fig.tight_layout()
-    fig.savefig(out, dpi=150, transparent=True)
+    bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles], bottom=0.08)
+    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
     print(f"wrote {out}")
 
 

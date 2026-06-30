@@ -22,16 +22,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-GRAY = "#808080"
-
-
-def setup():
-    plt.rcParams.update({
-        "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
-        "text.color": GRAY, "axes.labelcolor": GRAY, "axes.edgecolor": GRAY,
-        "xtick.color": GRAY, "ytick.color": GRAY, "grid.color": GRAY,
-        "axes.titlecolor": GRAY, "font.size": 10,
-    })
+import bench_style
+from bench_style import GRAY, BLUE, CYAN, AMBER, PURPLE
 
 
 def load(p):
@@ -58,20 +50,19 @@ def memory_breakdown(est, corpus, outdir):
     m_ll = [ll.get(r["name"], np.nan) for r in rows]
     m_mf = [mf.get(r["name"], np.nan) for r in rows]
     w = 0.21
-    fig, ax = plt.subplots(figsize=(13, 5.5))
+    fig, ax = plt.subplots(figsize=(13, 6.5))
     ax.bar(x - 1.5 * w, worst, w, label="worst-case estimate (all panels)", color=GRAY, alpha=0.6)
-    ax.bar(x - 0.5 * w, floor, w, label="panel-freed estimate", color="#a855f7", alpha=0.8)
-    ax.bar(x + 0.5 * w, m_ll, w, label="measured peak - LL (left-looking)", color="#3b82f6")
-    ax.bar(x + 1.5 * w, m_mf, w, label="measured peak - MF (multifrontal)", color="#06b6d4")
+    ax.bar(x - 0.5 * w, floor, w, label="panel-freed estimate", color=PURPLE, alpha=0.8)
+    ax.bar(x + 0.5 * w, m_ll, w, label="measured peak - LL (left-looking)", color=BLUE)
+    ax.bar(x + 1.5 * w, m_mf, w, label="measured peak - MF (multifrontal)", color=CYAN)
     ax.set_title("RSLAB factor memory: a-priori estimate vs measured (LL & MF)")
     ax.set_ylabel("memory (MB)")
     ax.set_yscale("log")
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
     ax.grid(True, axis="y", ls=":", alpha=0.5)
-    ax.legend(fontsize=9, frameon=False, loc="upper left")
-    fig.tight_layout()
-    fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True)
+    bench_style.legend_below(fig, ax=ax, bottom=0.22)
+    fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
     print(f"wrote {outdir / 'memory_breakdown.png'}")
     g = lambda xs: math.exp(sum(math.log(v) for v in xs) / len(xs))
     ov_ll = [w_ / ll[r["name"]] for w_, r in zip(worst, rows) if r["name"] in ll]
@@ -87,9 +78,9 @@ def memory_composition(est, outdir):
     panels = [r["panels_mb"] / t for r, t in zip(rows, tot)]
     factor = [r["factor_mb"] / t for r, t in zip(rows, tot)]
     scratch = [r["scratch_mb"] / t for r, t in zip(rows, tot)]
-    fig, ax = plt.subplots(figsize=(13, 5))
-    ax.bar(x, panels, 0.8, label="dense panels", color="#3b82f6")
-    ax.bar(x, factor, 0.8, bottom=panels, label="compact factor (CSC)", color="#06b6d4")
+    fig, ax = plt.subplots(figsize=(13, 6))
+    ax.bar(x, panels, 0.8, label="dense panels", color=BLUE)
+    ax.bar(x, factor, 0.8, bottom=panels, label="compact factor (CSC)", color=CYAN)
     ax.bar(x, scratch, 0.8, bottom=[p + f for p, f in zip(panels, factor)],
            label="input + scratch", color=GRAY, alpha=0.6)
     ax.set_title("RSLAB a-priori factor-memory estimate: composition (normalized)")
@@ -98,9 +89,8 @@ def memory_composition(est, outdir):
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
     ax.grid(True, axis="y", ls=":", alpha=0.4)
-    ax.legend(fontsize=9, frameon=False, loc="lower right")
-    fig.tight_layout()
-    fig.savefig(outdir / "memory_composition.png", dpi=140, transparent=True)
+    bench_style.legend_below(fig, ax=ax, bottom=0.22)
+    fig.savefig(outdir / "memory_composition.png", dpi=140, transparent=True, bbox_inches="tight")
     print(f"wrote {outdir / 'memory_composition.png'}")
 
 
@@ -117,7 +107,7 @@ def runtime_stage_breakdown(corpus, outdir):
                 out.append((r["name"], r["ana_ms"] / tot, r["fac_ms"] / tot, r["slv_ms"] / tot))
         return out
 
-    fig, axes = plt.subplots(2, 1, figsize=(13, 9), sharex=False)
+    fig, axes = plt.subplots(2, 1, figsize=(13, 10), sharex=False)
     for ax, (solver, title) in zip(axes, [("ll", "left-looking"), ("mf", "multifrontal")]):
         rows = split(solver)
         names = [r[0] for r in rows]
@@ -126,24 +116,23 @@ def runtime_stage_breakdown(corpus, outdir):
         fac = [r[2] for r in rows]
         slv = [r[3] for r in rows]
         ax.bar(x, ana, 0.8, label="analyze", color=GRAY, alpha=0.6)
-        ax.bar(x, fac, 0.8, bottom=ana, label="factor", color="#3b82f6")
-        ax.bar(x, slv, 0.8, bottom=[a + f for a, f in zip(ana, fac)], label="solve", color="#f59e0b")
+        ax.bar(x, fac, 0.8, bottom=ana, label="factor", color=BLUE)
+        ax.bar(x, slv, 0.8, bottom=[a + f for a, f in zip(ana, fac)], label="solve", color=AMBER)
         ax.set_title(f"RSLAB {title}: analyze / factor / solve (normalized)")
         ax.set_ylabel("fraction of wall-clock")
         ax.set_ylim(0, 1)
         ax.set_xticks(x)
         ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
         ax.grid(True, axis="y", ls=":", alpha=0.4)
-        ax.legend(fontsize=9, frameon=False, loc="lower right")
-    fig.tight_layout()
-    fig.savefig(outdir / "runtime_stage_breakdown.png", dpi=140, transparent=True)
+    bench_style.legend_below(fig, ax=axes[0], bottom=0.1)
+    fig.savefig(outdir / "runtime_stage_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
     print(f"wrote {outdir / 'runtime_stage_breakdown.png'}")
 
 
 def main():
     corpus_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/corpus.jsonl")
     est_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("benches/bench_out/corpus_estimate.jsonl")
-    setup()
+    bench_style.setup()
     corpus = load(corpus_path)
     est = load(est_path)
     if est:

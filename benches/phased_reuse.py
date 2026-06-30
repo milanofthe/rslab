@@ -21,39 +21,38 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-GRAY = "#808080"
-COLORS = ["#3b82f6", "#06b6d4", "#a855f7"]
+import bench_style
+from bench_style import GRAY, BLUE, CYAN, PURPLE
+
+COLORS = [BLUE, CYAN, PURPLE]
 
 
 def main():
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/phased_reuse.jsonl")
-    recs = sorted((json.loads(l) for l in open(path) if l.strip()), key=lambda r: r["n"])
-    plt.rcParams.update({
-        "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
-        "text.color": GRAY, "axes.labelcolor": GRAY, "axes.edgecolor": GRAY,
-        "xtick.color": GRAY, "ytick.color": GRAY, "grid.color": GRAY,
-        "axes.titlecolor": GRAY, "font.size": 11,
-    })
+    recs = [json.loads(l) for l in open(path) if l.strip()]
+    # Three representative matrices spanning the analyze fraction (low/mid/high).
+    recs.sort(key=lambda r: r["analyze_ms"] / (r["analyze_ms"] + r["factor_ms"]))
+    sel = [recs[0], recs[len(recs) // 2], recs[-1]] if len(recs) >= 3 else recs
+
+    bench_style.setup()
     ks = np.arange(1, 21)
-    fig, ax = plt.subplots(figsize=(8.5, 6))
-    for r, c in zip(recs, COLORS):
+    fig, ax = plt.subplots(figsize=(10.5, 6.8))
+    for r, c in zip(sel, COLORS):
         a, f = r["analyze_ms"], r["factor_ms"]
         once = a + ks * f
         each = ks * (a + f)
-        label = f"n={r['n']} (analyze {100*a/(a+f):.0f}% of one solve)"
+        label = f"{r['name']} ({100*a/(a+f):.0f}% analyze)"
         ax.plot(ks, each / 1000, ls="--", color=c, lw=1.6, alpha=0.7)
         ax.plot(ks, once / 1000, ls="-", color=c, lw=2.4, label=label)
-    # Legend for the two line styles.
-    ax.plot([], [], ls="-", color=GRAY, lw=2.4, label="analyze once (RSLAB phased)")
+    ax.plot([], [], ls="-", color=GRAY, lw=2.4, label="analyze once (phased)")
     ax.plot([], [], ls="--", color=GRAY, lw=1.6, label="analyze each (naive)")
     ax.set_xlabel("factorizations sharing the pattern (e.g. frequency points)")
     ax.set_ylabel("cumulative wall-clock [s]")
-    ax.set_title("Phased reuse: analyze once, factor many (Helmholtz 3D sweep)")
+    ax.set_title("Phased reuse: analyze once, factor many")
     ax.grid(True, ls=":", alpha=0.4)
-    ax.legend(frameon=False, fontsize=9, loc="upper left")
     out = path.parent / "phased_reuse.png"
-    fig.tight_layout()
-    fig.savefig(out, dpi=150, transparent=True)
+    bench_style.legend_below(fig, ax=ax)
+    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
     print(f"wrote {out}")
     for r in recs:
         a, f = r["analyze_ms"], r["factor_ms"]

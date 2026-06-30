@@ -18,8 +18,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-GRAY = "#808080"
-BLUE = "#3b82f6"
+import bench_style
+from bench_style import GRAY, BLUE
 
 
 def main():
@@ -53,13 +53,8 @@ def main():
     hi = np.array([np.max(per_t[t]) for t in threads])
     counts = [len(per_t[t]) for t in threads]
 
-    plt.rcParams.update({
-        "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
-        "text.color": GRAY, "axes.labelcolor": GRAY, "axes.edgecolor": GRAY,
-        "xtick.color": GRAY, "ytick.color": GRAY, "grid.color": GRAY,
-        "axes.titlecolor": GRAY, "font.size": 11,
-    })
-    fig, ax = plt.subplots(figsize=(7.5, 6))
+    bench_style.setup()
+    fig, ax = plt.subplots(figsize=(7.5, 6.8))
     tmax = max(threads)
     ax.plot([1, tmax], [1, tmax], ls="--", color=GRAY, lw=1.3, alpha=0.7, label="ideal (linear)")
     ax.fill_between(threads, lo, hi, color=BLUE, alpha=0.18, lw=0,
@@ -73,10 +68,9 @@ def main():
     ax.set_title("Aggregated thread scaling over the corpus (mean, min-max band)")
     ax.set_xticks(threads)
     ax.grid(True, ls=":", alpha=0.4)
-    ax.legend(frameon=False, loc="upper left")
     out = path.parent / "thread_scaling_agg.png"
-    fig.tight_layout()
-    fig.savefig(out, dpi=150, transparent=True)
+    bench_style.legend_below(fig, ax=ax)
+    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
     print(f"wrote {out}")
     print(f"{'threads':>8}{'mean':>8}{'min':>7}{'max':>7}{'n':>5}")
     for t, m, l, h, c in zip(threads, mean, lo, hi, counts):

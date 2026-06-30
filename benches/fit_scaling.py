@@ -19,36 +19,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-STYLE = {  # solver -> (label, color, marker)
-    "ll": ("RSLAB left-looking", "#3b82f6", "o"),
-    "mf": ("RSLAB multifrontal", "#06b6d4", "s"),
-    "faer": ("faer LU", "#f59e0b", "^"),
-    "pardiso": ("MKL PARDISO", "#22c55e", "D"),
-    "superlu": ("SuperLU (scipy)", "#ef4444", "P"),
-}
+import bench_style
+from bench_style import GRAY, SOLVERS
+
 ORDER = ["ll", "mf", "faer", "pardiso", "superlu"]
-GRAY = "#808080"
-
-
-def setup_style():
-    plt.rcParams.update({
-        "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
-        "text.color": GRAY, "axes.labelcolor": GRAY, "axes.edgecolor": GRAY,
-        "xtick.color": GRAY, "ytick.color": GRAY, "grid.color": GRAY,
-        "axes.titlecolor": GRAY, "font.size": 11,
-    })
 
 
 def plot_metric(recs, metric, value_key, ylabel, title, out):
     rows = [r for r in recs if r.get("metric") == metric and r.get(value_key, 0) > 0]
-    fig, ax = plt.subplots(figsize=(8.5, 6))
+    fig, ax = plt.subplots(figsize=(8.5, 6.8))
     summary = []
     for s in ORDER:
         pts = [(r["nnz"], r[value_key]) for r in rows
                if r["solver"] == s and r["nnz"] > 0 and r.get("res", 1.0) < 0.1]
         if len(pts) < 2:
             continue
-        label, color, marker = STYLE[s]
+        label, color, marker = SOLVERS[s]
         x = np.array([p[0] for p in pts], float)
         y = np.array([p[1] for p in pts], float)
         ax.scatter(x, y, s=42, c=color, marker=marker, alpha=0.8, edgecolors="none", zorder=3)
@@ -64,9 +50,8 @@ def plot_metric(recs, metric, value_key, ylabel, title, out):
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.grid(True, which="both", ls=":", alpha=0.4)
-    ax.legend(frameon=False, fontsize=9, loc="upper left")
-    fig.tight_layout()
-    fig.savefig(out, dpi=150, transparent=True)
+    bench_style.legend_below(fig, ax=ax)
+    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
     print(f"wrote {out}")
     for label, alpha, n in summary:
         print(f"  {label:<22} alpha={alpha:.2f}  ({n} points)")
@@ -75,13 +60,13 @@ def plot_metric(recs, metric, value_key, ylabel, title, out):
 def plot_residual(recs, out):
     """Per-solver accuracy: relative residual vs problem size over the corpus."""
     rows = [r for r in recs if r.get("metric") == "time"]
-    fig, ax = plt.subplots(figsize=(8.5, 6))
+    fig, ax = plt.subplots(figsize=(8.5, 6.8))
     for s in ORDER:
         pts = [(r["nnz"], max(r.get("res", 0.0), 1e-18)) for r in rows
                if r["solver"] == s and r["nnz"] > 0]
         if not pts:
             continue
-        label, color, marker = STYLE[s]
+        label, color, marker = SOLVERS[s]
         x = [p[0] for p in pts]
         y = [p[1] for p in pts]
         ax.scatter(x, y, s=42, c=color, marker=marker, alpha=0.8, edgecolors="none",
@@ -94,16 +79,15 @@ def plot_residual(recs, out):
     ax.set_ylabel("relative residual ‖Ax-b‖/‖b‖")
     ax.set_title("Corpus accuracy: relative residual per solver")
     ax.grid(True, which="both", ls=":", alpha=0.4)
-    ax.legend(frameon=False, fontsize=9, loc="upper left")
-    fig.tight_layout()
-    fig.savefig(out, dpi=150, transparent=True)
+    bench_style.legend_below(fig, ax=ax)
+    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
     print(f"wrote {out}")
 
 
 def main():
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/corpus.jsonl")
     recs = [json.loads(l) for l in open(path) if l.strip()]
-    setup_style()
+    bench_style.setup()
     print("factor time ~ nnz^alpha:")
     plot_metric(recs, "time", "fac_ms", "factor time [ms]",
                 "Corpus scaling: factor time vs problem size (power-law fits)",
