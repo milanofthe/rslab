@@ -1,8 +1,8 @@
 """Corpus scaling study: factor time vs problem size for all five solvers, with
 a power-law fit through each solver's corpus points.
 
-Reads the merged corpus JSONL (RSLAB left-looking / multifrontal, faer, MKL
-PARDISO, SuperLU) and plots `fac_ms` against `nnz` on log-log axes - one scatter
+Reads the corpus JSONL (RSLAB auto-tuned default, faer, MKL PARDISO, SuperLU -
+all measured in one run) and plots `fac_ms` against `nnz` on log-log axes - one scatter
 of corpus points per solver plus a least-squares power-law fit
 `fac = C * nnz^alpha` (the fitted exponent is the empirical scaling order,
 printed in the legend). Garbage points (relative residual > 0.1) are excluded
@@ -22,7 +22,11 @@ import matplotlib.pyplot as plt
 import bench_style
 from bench_style import GRAY, SOLVERS
 
-ORDER = ["ll", "mf", "faer", "pardiso", "superlu"]
+# The auto-tuned default (`LdltSolver::factor` / `LuSolver::factor`) is the product
+# RSLAB ships: per matrix it picks left-looking or multifrontal under the memory /
+# OOD guards. We plot that single curve against the external solvers rather than the
+# two raw kernels (those are compared internally in corpus_breakdown.py).
+ORDER = ["auto", "faer", "pardiso", "superlu"]
 
 
 def plot_metric(recs, metric, value_key, ylabel, title, out):

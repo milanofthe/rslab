@@ -50,19 +50,23 @@ Each point is one corpus matrix; the line is a least-squares power-law fit
 `~ nnz^α` (the empirical scaling order), garbage solves (`‖Ax-b‖/‖b‖ > 0.1`)
 excluded from the fit.
 
+The RSLAB curve is the **auto-tuned default** (`LdltSolver::factor` /
+`LuSolver::factor`) - the solver as shipped, picking left-looking or multifrontal
+per matrix under the memory / OOD guards (the two raw kernels are compared
+separately in the memory-breakdown figure below). All four solvers were measured
+in **one run** on the same machine, so the exponents are directly comparable.
+
 | solver | factor time `α` | peak memory `α` |
 |--------|:---------------:|:---------------:|
-| MKL PARDISO        | **0.89** | 0.96 |
-| faer LU            | 1.00 | 1.21 |
-| RSLAB left-looking | 1.01 | **0.87** |
-| RSLAB multifrontal | 1.05 | 0.98 |
-| SuperLU (SciPy)    | 1.48 | 1.04 |
+| MKL PARDISO         | **0.95** | **0.96** |
+| RSLAB (auto-tuned)  | 1.14 | 1.11 |
+| faer LU             | 1.27 | 1.21 |
+| SuperLU (SciPy)     | 1.45 | 1.19 |
 
-RSLAB matches faer on factor-time order and trails PARDISO's decades-tuned
-sublinear `0.89`. On **peak memory RSLAB left-looking has the lowest growth of
-all (`0.87`)** - ahead of PARDISO and well ahead of faer - the memory efficiency
-the design targets. SuperLU does not exploit symmetry, so its fill (and factor
-time) grows steeply (`1.48`).
+RSLAB's auto-tuned default sits between PARDISO and faer on both axes: it beats
+faer and SuperLU on factor-time *and* peak-memory growth, and trails only
+PARDISO's decades-tuned sublinear order. SuperLU does not exploit symmetry, so its
+fill (and factor time) grows steeply (`1.45`).
 
 ### Thread scaling
 
@@ -134,7 +138,7 @@ along the time/memory trade-off.
 
 Relative residual `‖Ax-b‖/‖b‖` as the accuracy check across the corpus.
 
-- Where RSLAB factors, it is accurate: 24/30 matrices below `1e-8` residual, matching
+- Where RSLAB factors, it is accurate: 24/31 matrices below `1e-8` residual, matching
   PARDISO and ahead of faer, which returns a degraded or garbage solution on several
   (pdb1HYS, bcsstk18, msc10848, wang3).
 - Exact-mode limit: RSLAB's exact LDLᵀ (pivoting bounded to each supernode) cannot
