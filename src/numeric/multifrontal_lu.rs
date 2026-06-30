@@ -2649,6 +2649,10 @@ mod tests {
 
     #[test]
     fn low_memory_emit_is_bit_identical() {
+        // Serialize against the process-global knob-mutating tests: a concurrent
+        // `set_gemm_thresholds`/`set_panel_nb` would flip the kernel path between
+        // the two factorizations compared here.
+        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // MemoryMode::LowMemory frees each front's dense factor during emit; it
         // must produce exactly the same global L/U (it only changes when the
         // dense per-front buffers are dropped, never the emitted values).
@@ -2805,6 +2809,7 @@ mod tests {
 
     #[test]
     fn phased_general_lu_analyze_once_factor_many() {
+        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // PARDISO workflow for the unsymmetric path: analyze the pattern once,
         // factor several value sets that share it - each must match the
         // one-shot factor's solve. The frequency-sweep / Newton use case.

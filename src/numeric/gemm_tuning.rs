@@ -117,6 +117,18 @@ pub fn gemm_thresholds() -> GemmThresholds {
     }
 }
 
+/// Serializes tests that **mutate** the process-global kernel knobs
+/// (`set_gemm_thresholds` / `set_panel_nb`) against tests that **compare two
+/// factorizations** and therefore need a stable, default config for the whole
+/// comparison. Without it, a knob-mutating test racing a bit-identity / tight
+/// solution-compare test flips the kernel path or pivot sequence mid-comparison.
+/// Poison-tolerant (a panicking holder must not wedge the rest of the suite).
+#[cfg(test)]
+pub(crate) fn knob_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +141,7 @@ mod tests {
     /// solutions agree to working precision.
     #[test]
     fn thresholds_do_not_change_the_result() {
+        let _g = super::knob_test_guard();
         let c = |re, im| Complex::new(re, im);
         let m = 10;
         let n = m * m;
@@ -189,6 +202,7 @@ mod tests {
     /// produce a correct solve.
     #[test]
     fn panel_nb_preserves_correctness() {
+        let _g = super::knob_test_guard();
         let c = |re, im| Complex::new(re, im);
         let m = 9;
         let n = m * m;

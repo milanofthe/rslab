@@ -2470,6 +2470,7 @@ mod tests {
 
     #[test]
     fn left_looking_matches_multifrontal_f64() {
+        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // Chain assembly tree (tridiagonal): exercises the basic left-looking
         // cmod/cdiv. Same fill and same solution as the multifrontal path.
         let a = tridiag_spd_f64(50);
@@ -2490,6 +2491,7 @@ mod tests {
 
     #[test]
     fn left_looking_2d_grid_matches_multifrontal() {
+        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // Branching assembly tree → multi-child cmod and deeper update lists.
         let a = grid2d_lower::<f64>(12, 8.0, -1.0);
         let n = a.n;

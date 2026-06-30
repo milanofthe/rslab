@@ -481,6 +481,7 @@ mod tests {
 
     #[test]
     fn phased_analyze_then_factor_many_matches_one_shot() {
+        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // PARDISO workflow: analyze the pattern once, factor two different
         // value sets that share it. Each must match the one-shot factor and
         // solve its own system - the FEM Newton / frequency-sweep use case.
