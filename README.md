@@ -86,6 +86,39 @@ against ~50% for a fixed budget of 2 - thin / tiny systems stay low (where extra
 threads only regress), big BLAS-3-rich systems use the cores. Override with a
 fixed budget for solver-in-the-loop (many concurrent solves).
 
+### Auto-tuned solver settings
+
+Beyond the thread count, RSLAB can pick the whole knob vector - fill-reducing
+ordering, supernode amalgamation, left-looking vs multifrontal, and the kernel
+GEMM thresholds - from the matrix's structural features. A small MLP performance
+model `(features, knobs) -> (factor time, peak memory)`, trained offline on the
+corpus knob sweep and embedded for **pure-Rust inference**, scores a candidate
+grid and returns the config minimizing a weighted score
+`w·log(time) + (1-w)·log(mem)`. One weight `w` slides between speed and memory.
+
+![Auto-tuner vs default by size](benches/bench_out/autotune_vs_size.png)
+
+Measured end-to-end (`SolverSettings::default()` vs the tuner's pick) over the
+corpus, geomean:
+
+| mode | factor speedup | peak memory | small → large (speedup) |
+|---|---|---|---|
+| balanced (`w=0.7`) | **1.33x** | 0.97x | 1.37x → 1.29x |
+| speed (`w=1`) | **1.37x** | 0.96x | 1.49x → 1.26x |
+| memory (`w=0`) | 1.29x | **0.88x** | 1.35x → 1.24x |
+
+The speedup is **roughly size-independent** (it holds at the large end of the
+corpus, not just on small matrices), and the memory mode trades a little speed
+for ~12% lower peak. The model held out **~10% time / ~8% memory regret vs the
+per-matrix oracle** on unseen matrices; it is a strong default, not infallible -
+on a few matrices it still picks a worse-than-default config (the spread below
+1x). The worker count stays with the `Threads::Auto` predictor.
+
+![Auto-tuner Pareto modes](benches/bench_out/autotune_modes.png)
+
+Each point is one matrix, relative to the default; the weight moves the cloud
+along the time/memory trade-off.
+
 ### Accuracy (SuiteSparse)
 
 ![SuiteSparse residual](benches/bench_out/corpus_residual.png)
