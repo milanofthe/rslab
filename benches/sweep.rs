@@ -370,6 +370,43 @@ fn thread_ladder(flops: u64) -> Vec<Param> {
     ladder.iter().map(|&threads| Param { threads, ..BASELINE }).collect()
 }
 
+/// Analyze + factor `mat` under `s`, metering the peak; returns
+/// `(factor_ms, factor_nnz, peak_mb, residual)` or `None` if analyze/factor fails.
+fn measure_one(mat: &Mat, s: &SolverSettings) -> Option<(f64, usize, f64, f64)> {
+    match mat {
+        Mat::Sym(a) => {
+            let sym = LdltSymbolic::analyze_with(a, s).ok()?;
+            let b: Vec<C> = (0..a.n).map(|i| c(i as f64 % 7.0 - 3.0, 1.0)).collect();
+            meter_reset();
+            let t = Instant::now();
+            let Ok(f) = sym.factor(a, s) else {
+                meter_peak_mb();
+                return None;
+            };
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            let peak = meter_peak_mb();
+            let x = f.solve(&b).unwrap_or_default();
+            let res = if x.len() == a.n { residual_sym(a, &x, &b) } else { f64::NAN };
+            Some((ms, f.factor_nnz(), peak, res))
+        }
+        Mat::Unsym(a) => {
+            let sym = LuSymbolic::analyze_with(a, s).ok()?;
+            let b: Vec<C> = (0..a.n).map(|i| c(i as f64 % 7.0 - 3.0, 1.0)).collect();
+            meter_reset();
+            let t = Instant::now();
+            let Ok(f) = sym.factor(a, s) else {
+                meter_peak_mb();
+                return None;
+            };
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            let peak = meter_peak_mb();
+            let x = f.solve(&b).unwrap_or_default();
+            let res = if x.len() == a.n { residual_unsym(a, &x, &b) } else { f64::NAN };
+            Some((ms, f.factor_nnz(), peak, res))
+        }
+    }
+}
+
 /// Knob grid: one-factor-at-a-time over every knob's menu (main effects) plus
 /// `RLA_SWEEP_RANDOM` seeded random joint samples (interactions), deduplicated.
 /// Threads stay at the baseline here - the worker count is its own sweep
@@ -515,10 +552,13 @@ fn main() {
         corpus.retain(|e| e.name.contains(&only));
     }
     let full_grid = grid();
+    // Autotune mode: instead of the knob grid, measure `default` vs the auto-tuner's
+    // pick at three Pareto weights per matrix - the end-to-end tuned-vs-default bench.
+    let autotune = std::env::var("RLA_SWEEP_AUTOTUNE").is_ok();
     eprintln!(
-        "[sweep] {} matrices, up to {} combos, mem_cap={:.0} MB, grid_flop_cap={:.0e} -> {}",
+        "[sweep] {} matrices, mode={}, mem_cap={:.0} MB, grid_flop_cap={:.0e} -> {}",
         corpus.len(),
-        full_grid.len(),
+        if autotune { "autotune" } else { "grid" },
         mem_cap_mb,
         grid_flop_cap,
         out_path
@@ -554,9 +594,46 @@ fn main() {
         };
         let feat_json = serde_json::to_value(&feat).expect("feat json");
         eprintln!(
-            "[sweep] {} n={} nnz={} est_ll={:.0}MB est_mf={:.0}MB flops={:.1e} combos={}",
-            entry.name, n, nnz, ll_mb, mf_mb, flops as f64, combos.len()
+            "[sweep] {} n={} nnz={} est_ll={:.0}MB est_mf={:.0}MB flops={:.1e}",
+            entry.name, n, nnz, ll_mb, mf_mb, flops as f64
         );
+
+        // Autotune mode: default vs the tuner's pick at balanced/speed/memory weights.
+        if autotune {
+            if flops as f64 > grid_flop_cap {
+                continue; // skip the heaviest matrices (bounded wall-clock)
+            }
+            let configs = [
+                ("default", SolverSettings::default()),
+                ("tuned_balanced", feat.recommend_settings(0.7)),
+                ("tuned_speed", feat.recommend_settings(1.0)),
+                ("tuned_memory", feat.recommend_settings(0.0)),
+            ];
+            for (label, s) in &configs {
+                let est = if s.method == FactorMethod::Multifrontal { mf_mb } else { ll_mb };
+                if est > mem_cap_mb {
+                    continue;
+                }
+                let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, s) else { continue };
+                let relax_w = s.relax.map_or(0, |r| r.max_width);
+                let rec = serde_json::json!({
+                    "matrix": entry.name, "n": n, "nnz": nnz, "flops": flops, "dtype": "complex128",
+                    "config": label, "features": feat_json,
+                    "params": {
+                        "ordering": ordering_name(s.ordering), "nemin": s.nemin,
+                        "relax_width": relax_w, "panel_nb": s.panel_nb,
+                        "scalar_gate": s.scalar_gate, "par_gemm": s.par_gemm, "par_cdiv": s.par_cdiv,
+                        "use_gemm_schur": s.use_gemm_schur, "method": method_name(s.method),
+                    },
+                    "metrics": {
+                        "factor_ms": fac_ms, "factor_nnz": fill, "peak_mb": peak_mb, "residual": res,
+                    },
+                });
+                writeln!(out, "{}", rec).expect("write rec");
+                n_records += 1;
+            }
+            continue;
+        }
 
         for p in combos {
             // Per-combo memory gate: drop a combo whose path's a-priori peak is
@@ -584,32 +661,7 @@ fn main() {
                 .with_method(p.method)
                 .with_threads(p.threads);
 
-            let (fac_ms, fill, peak_mb, res) = match &entry.mat {
-                Mat::Sym(a) => {
-                    let Ok(sym) = LdltSymbolic::analyze_with(a, &s) else { continue };
-                    let b: Vec<C> = (0..a.n).map(|i| c(i as f64 % 7.0 - 3.0, 1.0)).collect();
-                    meter_reset();
-                    let t = Instant::now();
-                    let Ok(f) = sym.factor(a, &s) else { meter_peak_mb(); continue };
-                    let ms = t.elapsed().as_secs_f64() * 1e3;
-                    let peak = meter_peak_mb();
-                    let x = f.solve(&b).unwrap_or_default();
-                    let res = if x.len() == a.n { residual_sym(a, &x, &b) } else { f64::NAN };
-                    (ms, f.factor_nnz(), peak, res)
-                }
-                Mat::Unsym(a) => {
-                    let Ok(sym) = LuSymbolic::analyze_with(a, &s) else { continue };
-                    let b: Vec<C> = (0..a.n).map(|i| c(i as f64 % 7.0 - 3.0, 1.0)).collect();
-                    meter_reset();
-                    let t = Instant::now();
-                    let Ok(f) = sym.factor(a, &s) else { meter_peak_mb(); continue };
-                    let ms = t.elapsed().as_secs_f64() * 1e3;
-                    let peak = meter_peak_mb();
-                    let x = f.solve(&b).unwrap_or_default();
-                    let res = if x.len() == a.n { residual_unsym(a, &x, &b) } else { f64::NAN };
-                    (ms, f.factor_nnz(), peak, res)
-                }
-            };
+            let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, &s) else { continue };
 
             let rec = serde_json::json!({
                 "matrix": entry.name, "n": n, "nnz": nnz, "dtype": "complex128",

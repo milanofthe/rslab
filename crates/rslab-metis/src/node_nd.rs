@@ -36,108 +36,101 @@ pub(crate) fn nd_order(
     let mut iperm: Vec<i32> = vec![-1; n];
     let mut rng = SplitMix::new(opts.seed);
 
-    // Top-level: walk connected components.
+    // Iterative dissection over an explicit work stack of `(subgraph, vtx_map,
+    // offset)` items - **not** native recursion, so the depth of the dissection
+    // tree (O(log n) for good separators, but O(n) for graphs without them, e.g.
+    // dense/random patterns) never overflows the call stack. Each item owns a
+    // disjoint output range `[offset, offset + nvtxs)`, so siblings are order
+    // independent.
+    let mut work: Vec<(Graph, Vec<i32>, usize)> = Vec::new();
     let (cc_label, ncc) = connected_components(&graph);
     stats.n_components = ncc as u32;
-
     let mut offset: usize = 0;
     for c in 0..ncc {
         let (sub, vtx_map) = extract_by_label(&graph, &cc_label, c as i32);
         let count = sub.nvtxs as usize;
         if count > 0 {
-            recurse(&sub, &vtx_map, offset, &mut iperm, opts, &mut rng, stats)?;
+            work.push((sub, vtx_map, offset));
         }
         offset += count;
     }
-    debug_assert_eq!(offset, n);
 
-    // Invert iperm → perm.
+    while let Some((subgraph, vtx_map, offset)) = work.pop() {
+        let n = subgraph.nvtxs as usize;
+        if n == 0 {
+            continue;
+        }
+        if n == 1 {
+            iperm[vtx_map[0] as usize] = offset as i32;
+            continue;
+        }
+
+        // Connected-component split (sub-problem may be disconnected).
+        let (cc_label, ncc) = connected_components(&subgraph);
+        if ncc > 1 {
+            let mut off = offset;
+            for c in 0..ncc {
+                let (sub, map) = extract_by_label(&subgraph, &cc_label, c as i32);
+                let map_to_orig: Vec<i32> =
+                    map.iter().map(|&local| vtx_map[local as usize]).collect();
+                let count = sub.nvtxs as usize;
+                if count > 0 {
+                    work.push((sub, map_to_orig, off));
+                }
+                off += count;
+            }
+            continue;
+        }
+
+        // AMD leaf.
+        if n <= opts.nd_to_amd_switch as usize {
+            amd_leaf(&subgraph, &vtx_map, offset, &mut iperm, stats)?;
+            continue;
+        }
+
+        // Multilevel node bisection.
+        let labels = multilevel_node_bisection(&subgraph, opts, &mut rng, stats);
+        let mut a_verts: Vec<i32> = Vec::new();
+        let mut b_verts: Vec<i32> = Vec::new();
+        let mut s_verts: Vec<i32> = Vec::new();
+        for (v, &l) in labels.iter().enumerate() {
+            match l {
+                PART_A => a_verts.push(v as i32),
+                PART_B => b_verts.push(v as i32),
+                _ => s_verts.push(v as i32),
+            }
+        }
+
+        // Safety: a degenerate split - one side empty, or so unbalanced that the
+        // larger side is >=90% of the subgraph - dissects ~O(n) deep for no gain
+        // (each level barely shrinks) on graphs without good separators. Order the
+        // whole subgraph with the (non-recursive) AMD leaf instead; this also keeps
+        // the work-stack shallow.
+        let big = a_verts.len().max(b_verts.len());
+        if a_verts.is_empty() || b_verts.is_empty() || big as f64 >= 0.9 * n as f64 {
+            amd_leaf(&subgraph, &vtx_map, offset, &mut iperm, stats)?;
+            continue;
+        }
+
+        stats.n_separator_vertices += s_verts.len() as u32;
+        let na = a_verts.len();
+        let nb = b_verts.len();
+
+        // Number separator last: positions [offset + na + nb, offset + n).
+        for (i, &v) in s_verts.iter().enumerate() {
+            let orig = vtx_map[v as usize];
+            iperm[orig as usize] = (offset + na + nb + i) as i32;
+        }
+
+        let (sub_a, map_a_local) = extract_by_list(&subgraph, &a_verts);
+        let map_a: Vec<i32> = map_a_local.iter().map(|&local| vtx_map[local as usize]).collect();
+        let (sub_b, map_b_local) = extract_by_list(&subgraph, &b_verts);
+        let map_b: Vec<i32> = map_b_local.iter().map(|&local| vtx_map[local as usize]).collect();
+        work.push((sub_a, map_a, offset));
+        work.push((sub_b, map_b, offset + na));
+    }
+
     invert_iperm(&iperm, n)
-}
-
-fn recurse(
-    subgraph: &Graph,
-    vtx_map: &[i32],
-    offset: usize,
-    iperm: &mut [i32],
-    opts: &MetisOptions,
-    rng: &mut SplitMix,
-    stats: &mut MetisStats,
-) -> Result<(), OrderingError> {
-    let n = subgraph.nvtxs as usize;
-    if n == 0 {
-        return Ok(());
-    }
-    if n == 1 {
-        iperm[vtx_map[0] as usize] = offset as i32;
-        return Ok(());
-    }
-
-    // Connected-component split (sub-problem may be disconnected).
-    let (cc_label, ncc) = connected_components(subgraph);
-    if ncc > 1 {
-        let mut off = offset;
-        for c in 0..ncc {
-            let (sub, map) = extract_by_label(subgraph, &cc_label, c as i32);
-            let map_to_orig: Vec<i32> = map.iter().map(|&local| vtx_map[local as usize]).collect();
-            let count = sub.nvtxs as usize;
-            recurse(&sub, &map_to_orig, off, iperm, opts, rng, stats)?;
-            off += count;
-        }
-        return Ok(());
-    }
-
-    // AMD leaf.
-    if n <= opts.nd_to_amd_switch as usize {
-        amd_leaf(subgraph, vtx_map, offset, iperm, stats)?;
-        return Ok(());
-    }
-
-    // Multilevel node bisection.
-    let labels = multilevel_node_bisection(subgraph, opts, rng, stats);
-
-    let mut a_verts: Vec<i32> = Vec::new();
-    let mut b_verts: Vec<i32> = Vec::new();
-    let mut s_verts: Vec<i32> = Vec::new();
-    for (v, &l) in labels.iter().enumerate() {
-        match l {
-            PART_A => a_verts.push(v as i32),
-            PART_B => b_verts.push(v as i32),
-            _ => s_verts.push(v as i32),
-        }
-    }
-
-    // Safety: if one side is empty (degenerate), fall back to AMD.
-    if a_verts.is_empty() || b_verts.is_empty() {
-        amd_leaf(subgraph, vtx_map, offset, iperm, stats)?;
-        return Ok(());
-    }
-
-    stats.n_separator_vertices += s_verts.len() as u32;
-    let na = a_verts.len();
-    let nb = b_verts.len();
-
-    // Number separator last: positions [offset + na + nb, offset + n).
-    for (i, &v) in s_verts.iter().enumerate() {
-        let orig = vtx_map[v as usize];
-        iperm[orig as usize] = (offset + na + nb + i) as i32;
-    }
-
-    // Recurse on A-side then B-side.
-    let (sub_a, map_a_local) = extract_by_list(subgraph, &a_verts);
-    let map_a: Vec<i32> = map_a_local
-        .iter()
-        .map(|&local| vtx_map[local as usize])
-        .collect();
-    let (sub_b, map_b_local) = extract_by_list(subgraph, &b_verts);
-    let map_b: Vec<i32> = map_b_local
-        .iter()
-        .map(|&local| vtx_map[local as usize])
-        .collect();
-
-    recurse(&sub_a, &map_a, offset, iperm, opts, rng, stats)?;
-    recurse(&sub_b, &map_b, offset + na, iperm, opts, rng, stats)?;
-    Ok(())
 }
 
 /// Multilevel node bisection: coarsen → initial bisection with niparts

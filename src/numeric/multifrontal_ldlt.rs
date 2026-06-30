@@ -1235,6 +1235,21 @@ pub fn analyze_with(
     row_idx: &[usize],
     opts: &SolverSettings,
 ) -> Result<MultifrontalSymbolic, RslabError> {
+    // The symbolic build (ordering, elimination tree, supernode amalgamation,
+    // postorder) can recurse to O(n) on pathological patterns - dense/random
+    // graphs where nested dissection finds no good separators - and would overflow
+    // the caller's stack. Run it in a scoped pool whose workers have a stack sized
+    // to the problem (committed on demand), the same robustness mechanism the
+    // factorization uses. Shallow analyses get the floor stack at negligible cost.
+    in_scoped_pool(0, stack_for_depth(n), || analyze_with_inner(n, col_ptr, row_idx, opts))
+}
+
+fn analyze_with_inner(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    opts: &SolverSettings,
+) -> Result<MultifrontalSymbolic, RslabError> {
     let nnz = row_idx.len();
     if n == 0 {
         return Ok(MultifrontalSymbolic {
