@@ -63,7 +63,13 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         if ON.load(Ordering::Relaxed) {
-            LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+            // Saturating: an allocation made *before* `meter_reset` (uncounted) but
+            // freed inside the metered window must not underflow `LIVE` (which would
+            // wrap to ~2^64 and poison `PEAK`). Clamp at 0 - the peak then reflects
+            // the net factor transient.
+            let _ = LIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(l.size()))
+            });
         }
         System.dealloc(p, l);
     }
