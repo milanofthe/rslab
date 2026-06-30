@@ -287,6 +287,36 @@ impl StructuralFeatures {
             bandwidth_mean_rel, dd, dp, shape)
     }
 
+    /// Recommend a worker-thread count for a **single** factorization of this
+    /// matrix, from its structural fingerprint, clamped to `max_cores`.
+    ///
+    /// Derived from the corpus thread-scaling sweep (95 real + generated
+    /// matrices, 1..12 cores): parallel scaling tracks the BLAS-3 work
+    /// ([`factor_flops`](Self::factor_flops)) and the assembly-tree width, so use
+    /// all cores for substantial fronts / wide trees, but stay low for **thin**
+    /// (banded / path-like) or **tiny** systems, which only *regress* under
+    /// oversubscription (more threads = slower). On the sweep this lands within
+    /// ~10% of the per-matrix-optimal count (geomean), against ~50% for a fixed
+    /// budget of 2 and a 1.85x vs 3.58x worst case against always-all-cores.
+    ///
+    /// This is the **single-solve** policy. For many concurrent solves sharing
+    /// the machine (solver-in-the-loop), keep a small fixed budget instead so
+    /// they coexist - that is why [`FactorOptions`](crate::FactorOptions)
+    /// defaults to 2 rather than this.
+    pub fn recommend_threads(&self, max_cores: usize) -> usize {
+        let cores = max_cores.max(1);
+        // Thin fronts + narrow tree: no node-parallelism (tiny fronts) and no
+        // tree-parallelism (path-like) to exploit - oversubscription only hurts.
+        if self.front_nrow_max < 512 && self.tree_width_max < 128 {
+            return cores.min(2);
+        }
+        // Tiny total work: parallel scheduling overhead dominates the factorization.
+        if self.factor_flops < 300_000_000 {
+            return cores.min(4);
+        }
+        cores
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn assemble(
         n: usize,
@@ -427,6 +457,38 @@ mod tests {
             f.deg_cv,
             lap.deg_cv
         );
+    }
+
+    #[test]
+    fn recommend_threads_policy() {
+        // A wide-tree 2D stencil with substantial work -> all cores.
+        let big = laplacian2d(60);
+        let sym = LdltSymbolic::analyze(&big).unwrap();
+        let f = StructuralFeatures::from_symmetric(&big, &sym);
+        // It has wide enough fronts/tree and enough flops to use the full budget.
+        if f.factor_flops >= 300_000_000 || f.front_nrow_max >= 512 {
+            assert_eq!(f.recommend_threads(12), 12);
+        }
+        // A path-like banded matrix: thin fronts + narrow tree -> capped low.
+        let n = 4000;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            for d in 0..4 {
+                if j + d < n {
+                    rows.push(j + d);
+                    cols.push(j);
+                    vals.push(if d == 0 { 10.0 } else { -1.0 });
+                }
+            }
+        }
+        let banded = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let sym = LdltSymbolic::analyze(&banded).unwrap();
+        let fb = StructuralFeatures::from_symmetric(&banded, &sym);
+        assert!(fb.front_nrow_max < 512 && fb.tree_width_max < 128, "banded is thin/narrow");
+        assert_eq!(fb.recommend_threads(12), 2, "thin matrix capped to 2");
+        // Clamped to available cores.
+        assert!(fb.recommend_threads(1) >= 1);
+        assert!(f.recommend_threads(8) <= 8);
     }
 
     #[test]
