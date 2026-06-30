@@ -146,6 +146,11 @@ harness = false
 required-features = ["matgen"]
 
 [[bench]]
+name = "front_profile"
+harness = false
+required-features = ["matgen"]
+
+[[bench]]
 name = "leftlook_mem"
 harness = false
 
