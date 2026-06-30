@@ -401,7 +401,7 @@ fn grid() -> Vec<Param> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(16);
-    let mut rng = Lcg(0xC0FFEE_1234_5678);
+    let mut rng = Lcg(0x00C0_FFEE_1234_5678);
     for _ in 0..n_random {
         v.push(Param {
             ordering: rng.pick(&M_ORDERING),
@@ -565,7 +565,7 @@ fn main() {
             // ordering/nemin/relax subset, factor reads method/threads + the kernel
             // knobs (panel_nb, GEMM thresholds, Schur) - per-call, no global state.
             let relax = (p.relax_width > 0)
-                .then(|| RelaxAmalgamation { max_width: p.relax_width, max_extra_rows: 64 });
+                .then_some(RelaxAmalgamation { max_width: p.relax_width, max_extra_rows: 64 });
             let s = SolverSettings::default()
                 .with_ordering(p.ordering)
                 .with_nemin(p.nemin)
