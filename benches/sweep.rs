@@ -257,6 +257,19 @@ fn grid() -> Vec<Param> {
     if smoke {
         return vec![BASELINE, Param { nemin: 48, ..BASELINE }];
     }
+    // Focused ordering comparison at the *production-default* factor knobs
+    // (nemin 16, par_cdiv 8M, threads 2): does per-matrix ordering beat `Auto`?
+    if std::env::var("RLA_SWEEP_ORDERINGS_ONLY").is_ok() {
+        return [
+            OrderingMethod::Auto,
+            OrderingMethod::Amd,
+            OrderingMethod::Amf,
+            OrderingMethod::MetisND,
+        ]
+        .iter()
+        .map(|&ordering| Param { ordering, nemin: 16, par_cdiv: 8_000_000, threads: 2 })
+        .collect();
+    }
     let orderings = [OrderingMethod::Amd, OrderingMethod::MetisND];
     let nemins = [16usize, 48];
     let cdivs = [8_000_000usize, 2_000_000];
