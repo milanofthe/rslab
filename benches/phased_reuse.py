@@ -36,19 +36,21 @@ def main():
 
     bench_style.setup()
     ks = np.arange(1, 21)
-    fig, ax = plt.subplots(figsize=(10.5, 6.8))
+    fig, ax = plt.subplots(figsize=(8.5, 6.4))
     for r, c in zip(sel, COLORS):
         a, f = r["analyze_ms"], r["factor_ms"]
-        once = a + ks * f
-        each = ks * (a + f)
-        label = f"{r['name']} ({100*a/(a+f):.0f}% analyze)"
-        ax.plot(ks, each / 1000, ls="--", color=c, lw=1.6, alpha=0.7)
-        ax.plot(ks, once / 1000, ls="-", color=c, lw=2.4, label=label)
-    ax.plot([], [], ls="-", color=GRAY, lw=2.4, label="analyze once (phased)")
-    ax.plot([], [], ls="--", color=GRAY, lw=1.6, label="analyze each (naive)")
-    ax.set_xlabel("factorizations sharing the pattern (e.g. frequency points)")
-    ax.set_ylabel("cumulative wall-clock [s]")
-    ax.set_title("Phased reuse: analyze once, factor many")
+        # Speedup of reusing the analysis vs re-analyzing each of K factorizations:
+        # K*(a+f) / (a + K*f), rising from 1 to the asymptote 1 + a/f.
+        speedup = ks * (a + f) / (a + ks * f)
+        asymp = (a + f) / f
+        ax.plot(ks, speedup, color=c, lw=2.4, marker="o", ms=4,
+                label=f"{r['name']}  (analyze {100*a/(a+f):.0f}%  →  max {asymp:.2f}x)")
+        ax.axhline(asymp, color=c, ls=":", lw=1.2, alpha=0.5)
+    ax.axhline(1.0, color=GRAY, lw=1, alpha=0.5)
+    ax.set_xlabel("factorizations sharing the pattern  (K, e.g. frequency points)")
+    ax.set_ylabel("speedup: re-analyze each  /  analyze once")
+    ax.set_title("Phased reuse: speedup from reusing the analysis over K factorizations")
+    ax.set_xlim(1, ks[-1])
     ax.grid(True, ls=":", alpha=0.4)
     out = path.parent / "phased_reuse.png"
     bench_style.legend_below(fig, ax=ax)

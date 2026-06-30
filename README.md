@@ -122,11 +122,10 @@ small slice (larger on sparse circuit-like matrices such as `memplus`) - and is
 A frequency sweep or Newton iteration factors many value sets that share one
 sparsity pattern. `LdltSymbolic::analyze` runs the fill-reducing ordering and
 symbolic analysis once (the value-independent part); each step then re-runs only
-the numeric factor. Cumulative cost over K factorizations: analyze-once
-(`analyze + K·factor`) vs analyze-each. Amortizing the analysis saves ~5-25%
-depending on the fill profile - more for low-fill 2D/banded (analysis ~20% of a
-solve), less for factor-dominated 3D (~5%) - and is the natural workflow for
-value sweeps.
+the numeric factor. The speedup of reusing that analysis over K factorizations
+(vs re-analyzing each) rises from 1x at K=1 to its asymptote `1 + analyze/factor`:
+up to ~1.25x for low-fill banded/2D (analysis ~20% of a solve), ~1.04x for
+factor-dominated 3D - and it is the natural workflow for value sweeps.
 
 ### A-priori memory estimate vs measured
 
