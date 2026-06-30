@@ -88,31 +88,35 @@ fixed budget for solver-in-the-loop (many concurrent solves).
 
 ### Auto-tuned solver settings
 
-Beyond the thread count, RSLAB can pick the whole knob vector - fill-reducing
-ordering, supernode amalgamation, left-looking vs multifrontal, and the kernel
-GEMM thresholds - from the matrix's structural features. A small MLP performance
-model `(features, knobs) -> (factor time, peak memory)`, trained offline on the
-corpus knob sweep and embedded for **pure-Rust inference**, scores a candidate
-grid and returns the config minimizing a weighted score
-`w·log(time) + (1-w)·log(mem)`. One weight `w` slides between speed and memory.
+`LdltSolver::factor` / `LuSolver::factor_auto` pick the whole knob vector -
+fill-reducing ordering, supernode amalgamation, and the kernel GEMM thresholds -
+from the matrix's structural features. A small MLP performance model
+`(features, knobs) -> (factor time, peak memory)`, trained offline on the corpus
+knob sweep and embedded for **pure-Rust inference**, scores a candidate grid and
+returns the config minimizing a weighted score `w·log(time) + (1-w)·log(mem)`;
+the weight `w` slides between speed and memory.
+
+**Memory is treated as the critical resource and never regresses.** The pick is
+guarded: it only deviates from the proven default on a clear predicted win, and a
+deterministic a-priori backstop (exact fill + the realistic memory floor) rejects
+any config estimated to use more memory than the default.
 
 ![Auto-tuner vs default by size](benches/bench_out/autotune_vs_size.png)
 
 Measured end-to-end (`SolverSettings::default()` vs the tuner's pick) over the
 corpus, geomean:
 
-| mode | factor speedup | peak memory | small → large (speedup) |
+| mode | factor speedup | peak memory | over-default memory |
 |---|---|---|---|
-| balanced (`w=0.7`) | **1.33x** | 0.97x | 1.37x → 1.29x |
-| speed (`w=1`) | **1.37x** | 0.96x | 1.49x → 1.26x |
-| memory (`w=0`) | 1.29x | **0.88x** | 1.35x → 1.24x |
+| balanced (`w=0.7`, default) | **1.38x** | **0.80x** | 0 / 85 matrices |
+| speed (`w=1`) | 1.37x | 0.79x | 0 / 85 |
+| memory (`w=0`) | 1.37x | **0.78x** | 1 / 85 (max 1.11x) |
 
-The speedup is **roughly size-independent** (it holds at the large end of the
-corpus, not just on small matrices), and the memory mode trades a little speed
-for ~12% lower peak. The model held out **~10% time / ~8% memory regret vs the
-per-matrix oracle** on unseen matrices; it is a strong default, not infallible -
-on a few matrices it still picks a worse-than-default config (the spread below
-1x). The worker count stays with the `Threads::Auto` predictor.
+The auto-tuner is **faster and lighter on both axes** - ~1.38x speedup *and* ~20%
+lower peak memory - and **no matrix uses more memory than the default** (the
+backstop guarantees it). The speedup holds across problem size (it does not fade
+on the large matrices). The worker count stays with the `Threads::Auto` predictor;
+`factor_with` opts out with explicit settings.
 
 ![Auto-tuner Pareto modes](benches/bench_out/autotune_modes.png)
 

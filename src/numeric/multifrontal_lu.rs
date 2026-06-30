@@ -880,6 +880,50 @@ impl<T: Scalar> LuSolver<T> {
         })
     }
 
+    /// Auto-tuned factorization at Pareto `weight` (`1` = fastest, `0` = smallest
+    /// peak memory). Picks the settings from the matrix's structural features via
+    /// the embedded performance model, **guarded** (only deviates from the default
+    /// on a clear, memory-vetoed predicted win). The unsymmetric counterpart of
+    /// [`LdltSolver::factor_auto`](crate::LdltSolver::factor_auto); pass explicit
+    /// settings to [`factor`](Self::factor) to opt out.
+    pub fn factor_auto(a: &GeneralCsc<T>, weight: f64) -> Result<Self, RslabError> {
+        let sym = LuSymbolic::analyze(a)?;
+        let est = sym.estimate_memory::<T>();
+        let feat = crate::StructuralFeatures::from_general(a, &sym);
+        let mf_ll = if est.panel_live_peak_bytes > 0 {
+            est.mf_transient_peak_bytes as f64 / est.panel_live_peak_bytes as f64
+        } else {
+            1.0
+        };
+        let s = crate::auto_tune::recommend_settings_vetoed(&feat, weight, mf_ll);
+        let d = SolverSettings::default();
+        // Hard a-priori memory backstop (never more memory than the default): LL pick
+        // vs the default's transient estimate; MF pick vs the default's LL floor.
+        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: FactorMethod| {
+            let fill_ok = e.factor_nnz as f64 <= est.factor_nnz as f64 * 1.02;
+            if m == FactorMethod::Multifrontal {
+                fill_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
+            } else {
+                fill_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
+            }
+        };
+        if (s.reorder, s.ordering, s.nemin, s.relax) == (d.reorder, d.ordering, d.nemin, d.relax) {
+            if mem_ok(&est, s.method) {
+                sym.factor(a, &s)
+            } else {
+                sym.factor(a, &d)
+            }
+        } else {
+            let sym2 = LuSymbolic::analyze_with(a, &s)?;
+            let est2 = sym2.estimate_memory::<T>();
+            if mem_ok(&est2, s.method) {
+                sym2.factor(a, &s)
+            } else {
+                sym.factor(a, &d)
+            }
+        }
+    }
+
     /// Per-call diagnostics: measured factor time, fill, thread budget, and the
     /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate). Populated by
     /// the phased [`LuSymbolic::factor`]; empty for the one-shot

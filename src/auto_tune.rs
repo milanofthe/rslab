@@ -178,7 +178,11 @@ fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
 /// amalgamation, method, panel width, top-of-tree GEMM gate), the rest at the
 /// tuned baseline. ~1k configs - microseconds through the tiny model.
 fn candidates() -> Vec<Candidate> {
-    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
+    // `Auto` already selects nested dissection adaptively where it pays (2D/3D FEM)
+    // and avoids it on banded/1D patterns; an *explicit* MetisND candidate only adds
+    // the metis-on-banded memory pathology the estimates cannot flag, so it is left
+    // out of the inference grid.
+    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd];
     let nemins = [1usize, 16, 48, 128];
     let relaxes = [0usize, 128, 256, 512];
     let panels = [32usize, 64, 96, 128];
@@ -228,29 +232,87 @@ fn apply(c: &Candidate) -> SolverSettings {
         .with_method(c.method)
 }
 
+/// Minimum predicted score gain (in `w·log(time)+(1-w)·log(mem)` units, i.e. ~ a
+/// log-ratio) required to deviate from the default config at all - below this the
+/// model's edge is within its own error, so keep the proven default. `0.08 ≈ 8%`.
+const MIN_GAIN: f64 = 0.08;
+/// Larger gain required to *flip the factorization method* (left-looking <-> mult
+/// frontal): the highest-variance knob, where the model over-favours multifrontal
+/// and the strong regressions live. `0.20 ≈ 22%`.
+const METHOD_FLIP_GAIN: f64 = 0.20;
+/// A-priori veto: reject a multifrontal pick when its exact transient-memory
+/// estimate exceeds the left-looking **realistic floor** (`panel_live_peak`) by
+/// more than this factor. The floor (not the loose all-panels `transient`) is the
+/// reliable left-looking memory reference - the all-panels estimate is wildly
+/// conservative on banded / structural patterns, so `mf_transient / ll_transient`
+/// misleads there; `mf_transient / ll_floor > 1` is the memory-safe bar that cuts
+/// the multifrontal CB-stack regressions.
+const VETO_MF_MEM_RATIO: f64 = 1.0;
+/// Hard memory constraint: a candidate's **predicted** peak memory must not exceed
+/// the default's by more than this (log-space) tolerance. Memory is the critical
+/// resource - it must not regress - so this is a constraint, not a soft weight: the
+/// tuner only ever considers configs that do not use more memory than the default,
+/// and picks the fastest among them. `ln(1.02)` ≈ 2% slack for model noise.
+const MEM_TOL_LN: f64 = 0.0198;
+
 /// Recommend a [`SolverSettings`] for a matrix with the given structural features,
 /// minimizing `weight·log(time) + (1-weight)·log(mem)` over the candidate grid via
 /// the embedded performance model. `weight` is clamped to `[0, 1]`
-/// ([`DEFAULT_TUNE_WEIGHT`] = speed-leaning). Falls back to the default settings if
-/// the model is unavailable. The worker-thread count is left to the
-/// [`Auto`](crate::Threads::Auto) predictor.
+/// ([`DEFAULT_TUNE_WEIGHT`] = speed-leaning). Applies the safety + method-flip
+/// guards (only deviates from the default when the predicted gain is clear); the
+/// worker-thread count is left to the [`Auto`](crate::Threads::Auto) predictor.
+/// Use [`recommend_settings_vetoed`] when the per-path memory estimate is known to
+/// also veto memory-pathological multifrontal picks.
 pub fn recommend_settings(features: &StructuralFeatures, weight: f64) -> SolverSettings {
+    recommend_settings_vetoed(features, weight, 1.0)
+}
+
+/// [`recommend_settings`] plus the **a-priori memory veto**: `mf_ll_mem_ratio` is
+/// the exact `multifrontal / left-looking` transient-memory estimate
+/// ([`MemoryEstimate`](crate::diagnostics::MemoryEstimate)); multifrontal
+/// candidates are rejected when it exceeds [`VETO_MF_MEM_RATIO`], deterministically
+/// cutting the multifrontal blow-up regressions. Pass `1.0` to disable the veto.
+pub fn recommend_settings_vetoed(
+    features: &StructuralFeatures,
+    weight: f64,
+    mf_ll_mem_ratio: f64,
+) -> SolverSettings {
     let w = weight.clamp(0.0, 1.0);
     let Some(m) = model() else {
         return SolverSettings::default();
     };
-    let mut best: Option<(f64, Candidate)> = None;
+    let base = predict(m, &build_input(m, features, &BASE)); // [log time, log mem]
+    let base_score = w * base[0] + (1.0 - w) * base[1];
+    let mem_cap = base[1] + MEM_TOL_LN; // hard: never exceed the default's peak memory
+    let mut best = BASE;
+    let mut best_score = base_score;
     for c in candidates() {
+        // A-priori veto: skip multifrontal picks whose exact transient estimate is
+        // much worse than left-looking (catches the CB-stack memory blow-up).
+        if c.method == FactorMethod::Multifrontal && mf_ll_mem_ratio > VETO_MF_MEM_RATIO {
+            continue;
+        }
         let p = predict(m, &build_input(m, features, &c));
-        let score = w * p[0] + (1.0 - w) * p[1];
-        if best.is_none() || score < best.as_ref().map_or(f64::INFINITY, |b| b.0) {
-            best = Some((score, c));
+        // Hard memory constraint: never pick a config predicted to use more memory
+        // than the default (memory is the critical resource). Note this is on the
+        // *full* config (ordering + method), so multifrontal is allowed when a
+        // better ordering keeps its peak within the default's.
+        if p[1] > mem_cap {
+            continue;
+        }
+        let s = w * p[0] + (1.0 - w) * p[1];
+        if s < best_score {
+            best = c;
+            best_score = s;
         }
     }
-    match best {
-        Some((_, c)) => apply(&c),
-        None => SolverSettings::default(),
+    // Safety + method-flip guard: only deviate from the default when the predicted
+    // gain clears the margin (a larger one for a method flip - the risky knob).
+    let needed = if best.method != BASE.method { METHOD_FLIP_GAIN } else { MIN_GAIN };
+    if base_score - best_score < needed {
+        return apply(&BASE);
     }
+    apply(&best)
 }
 
 #[cfg(test)]

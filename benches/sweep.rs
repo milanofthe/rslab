@@ -506,7 +506,7 @@ fn method_name(m: FactorMethod) -> &'static str {
 /// Canonical analysis summary: structural features + the a-priori per-path
 /// memory estimates (left-looking, multifrontal) + flops, used for the resource
 /// gates. `None` if the matrix fails to analyze.
-fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, u64)> {
+fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, f64, f64, u64)> {
     let mb = |b: u64| b as f64 / 1048576.0;
     match mat {
         Mat::Sym(a) => {
@@ -516,6 +516,8 @@ fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, u64)> {
                 StructuralFeatures::from_symmetric(a, &sym),
                 mb(est.transient_peak_bytes),
                 mb(est.mf_transient_peak_bytes),
+                mb(est.panel_live_peak_bytes),
+                est.factor_nnz as f64,
                 est.factor_flops,
             ))
         }
@@ -526,6 +528,8 @@ fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, u64)> {
                 StructuralFeatures::from_general(a, &sym),
                 mb(est.transient_peak_bytes),
                 mb(est.mf_transient_peak_bytes),
+                mb(est.panel_live_peak_bytes),
+                est.factor_nnz as f64,
                 est.factor_flops,
             ))
         }
@@ -573,7 +577,7 @@ fn main() {
     let mut n_records = 0usize;
     let mut n_skipped_mem = 0usize;
     for entry in &corpus {
-        let Some((feat, ll_mb, mf_mb, flops)) = canonical(&entry.mat) else {
+        let Some((feat, ll_mb, mf_mb, floor_mb, def_fill, flops)) = canonical(&entry.mat) else {
             eprintln!("[sweep] skip {}: analyze failed", entry.name);
             continue;
         };
@@ -609,11 +613,47 @@ fn main() {
             if flops as f64 > grid_flop_cap {
                 continue; // skip the heaviest matrices (bounded wall-clock)
             }
+            // Guarded + a-priori-vetoed recommendation (the real default-path logic):
+            // pass the MF / LL-floor ratio (the floor is the reliable LL reference)
+            // so memory-pathological multifrontal picks are vetoed deterministically.
+            let mf_ll = if floor_mb > 0.0 { mf_mb / floor_mb } else { 1.0 };
+            let d = SolverSettings::default();
+            let mb = |b: u64| b as f64 / 1048576.0;
+            // Full default-path logic: guarded+vetoed recommendation, then the exact
+            // a-priori memory backstop - re-analyze the pick and fall back to the
+            // default if its estimated peak exceeds the default's (never more memory).
+            let pick = |w: f64| {
+                let s = rslab::recommend_settings_vetoed(&feat, w, mf_ll);
+                let same = (s.reorder, s.ordering, s.nemin, s.relax)
+                    == (d.reorder, d.ordering, d.nemin, d.relax);
+                let est_of = |e: rslab::MemoryEstimate| {
+                    (mb(e.mf_transient_peak_bytes), mb(e.panel_live_peak_bytes), e.factor_nnz as f64)
+                };
+                let (mf, flr, fill) = if same {
+                    (mf_mb, floor_mb, def_fill)
+                } else {
+                    match &entry.mat {
+                        Mat::Sym(a) => LdltSymbolic::analyze_with(a, &s)
+                            .map(|sy| est_of(sy.estimate_memory::<C>()))
+                            .unwrap_or((mf_mb, floor_mb, def_fill)),
+                        Mat::Unsym(a) => LuSymbolic::analyze_with(a, &s)
+                            .map(|sy| est_of(sy.estimate_memory::<C>()))
+                            .unwrap_or((mf_mb, floor_mb, def_fill)),
+                    }
+                };
+                // Backstop (never more memory): exact fill must not grow, and the
+                // realistic floor stays under the default's - MF vs the LL floor, LL
+                // floor-vs-floor (consistent bias). Else fall back to the default.
+                let fill_ok = fill <= def_fill * 1.02;
+                let ok = fill_ok
+                    && if s.method == FactorMethod::Multifrontal { mf <= floor_mb } else { flr <= floor_mb };
+                if ok { s } else { d.clone() }
+            };
             let configs = [
                 ("default", SolverSettings::default()),
-                ("tuned_balanced", feat.recommend_settings(0.7)),
-                ("tuned_speed", feat.recommend_settings(1.0)),
-                ("tuned_memory", feat.recommend_settings(0.0)),
+                ("tuned_balanced", pick(0.7)),
+                ("tuned_speed", pick(1.0)),
+                ("tuned_memory", pick(0.0)),
             ];
             for (label, s) in &configs {
                 let est = if s.method == FactorMethod::Multifrontal { mf_mb } else { ll_mb };

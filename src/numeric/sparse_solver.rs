@@ -72,7 +72,61 @@ impl<T: Scalar> LdltSolver<T> {
 
     /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P` (exact mode).
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, RslabError> {
-        Self::factor_with(a, &SolverSettings::default())
+        Self::factor_auto(a, crate::auto_tune::DEFAULT_TUNE_WEIGHT)
+    }
+
+    /// Auto-tuned factorization at an explicit Pareto `weight` (`1` = fastest,
+    /// `0` = smallest peak memory; [`DEFAULT_TUNE_WEIGHT`](crate::auto_tune::DEFAULT_TUNE_WEIGHT)
+    /// leans toward speed). Picks the solver settings from the matrix's structural
+    /// features via the embedded performance model, **guarded**: it only deviates
+    /// from the proven default when a clear, memory-vetoed win is predicted, so it
+    /// is never far worse than the default. [`factor`](Self::factor) is this at the
+    /// default weight; [`factor_with`](Self::factor_with) opts out (explicit settings).
+    pub fn factor_auto(a: &CscMatrix<T>, weight: f64) -> Result<Self, RslabError> {
+        let sym = LdltSymbolic::analyze(a)?;
+        let est = sym.estimate_memory::<T>();
+        let feat = crate::StructuralFeatures::from_symmetric(a, &sym);
+        // MF/LL-floor ratio for the veto (the floor is the reliable LL reference).
+        let mf_ll = if est.panel_live_peak_bytes > 0 {
+            est.mf_transient_peak_bytes as f64 / est.panel_live_peak_bytes as f64
+        } else {
+            1.0
+        };
+        let s = crate::auto_tune::recommend_settings_vetoed(&feat, weight, mf_ll);
+        let d = SolverSettings::default();
+        // Hard a-priori memory backstop (never more memory than the default): an LL
+        // pick must not exceed the default's transient estimate (consistent bias);
+        // an MF pick must not exceed the default's realistic LL floor.
+        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: crate::FactorMethod| {
+            // Exact fill (factor_nnz, from the symbolic - no estimator bias) must not
+            // grow: it is the deterministic memory driver and catches ordering picks
+            // whose loose transient estimate hides a fill increase.
+            let fill_ok = e.factor_nnz as f64 <= est.factor_nnz as f64 * 1.02;
+            // Compare against the *realistic floor* (`panel_live_peak`), not the loose
+            // all-panels `transient` (inconsistent bias hides regressions, e.g. metis
+            // on a banded matrix). Floor-vs-floor shares the bias -> reliable.
+            if m == crate::FactorMethod::Multifrontal {
+                fill_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
+            } else {
+                fill_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
+            }
+        };
+        // Reuse the default analysis unless the tuner changed an analyze-time knob.
+        if (s.reorder, s.ordering, s.nemin, s.relax) == (d.reorder, d.ordering, d.nemin, d.relax) {
+            if mem_ok(&est, s.method) {
+                sym.factor(a, &s)
+            } else {
+                sym.factor(a, &d)
+            }
+        } else {
+            let sym2 = LdltSymbolic::analyze_with(a, &s)?;
+            let est2 = sym2.estimate_memory::<T>();
+            if mem_ok(&est2, s.method) {
+                sym2.factor(a, &s)
+            } else {
+                sym.factor(a, &d) // memory regression by the estimate -> safe default
+            }
+        }
     }
 
     /// Equilibrate and factor `A` with explicit options - notably
