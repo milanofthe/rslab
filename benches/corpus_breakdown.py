@@ -21,9 +21,10 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 import bench_style
-from bench_style import GRAY, BLUE, CYAN, AMBER, DARKGRAY
+from bench_style import GRAY, BLUE, CYAN, AMBER
 
 
 def load(p):
@@ -36,9 +37,9 @@ def measured_peak(corpus, solver):
 
 
 def memory_breakdown(est, corpus, outdir):
-    """Per-path total-peak estimate vs measured (grouped, log axis): for each of
-    the left-looking and multifrontal paths, its own a-priori transient-peak
-    estimate next to its measured peak. The estimate should stay >= measured."""
+    """A-priori total-peak estimate vs measured peak, one panel per path (LL and
+    MF, each with its own estimator). The estimate (gray) should stay >= measured
+    (the path's solver color)."""
     ll, mf = measured_peak(corpus, "ll"), measured_peak(corpus, "mf")
     rows = sorted((r for r in est if r["name"] in ll or r["name"] in mf), key=lambda r: r["n"])
     if not rows:
@@ -46,31 +47,32 @@ def memory_breakdown(est, corpus, outdir):
         return
     names = [r["name"] for r in rows]
     x = np.arange(len(names))
-    ll_est = [r["transient_mb"] for r in rows]
-    mf_est = [r["mf_transient_mb"] for r in rows]
-    m_ll = [ll.get(r["name"], np.nan) for r in rows]
-    m_mf = [mf.get(r["name"], np.nan) for r in rows]
-    LL_LIGHT, MF_LIGHT = "#93c5fd", "#a5f3fc"  # lighter = estimate, solid = measured
-    w = 0.21
-    fig, ax = plt.subplots(figsize=(13, 6.5))
-    ax.bar(x - 1.5 * w, ll_est, w, label="LL estimate", color=LL_LIGHT)
-    ax.bar(x - 0.5 * w, m_ll, w, label="LL measured", color=BLUE)
-    ax.bar(x + 0.5 * w, mf_est, w, label="MF estimate", color=MF_LIGHT)
-    ax.bar(x + 1.5 * w, m_mf, w, label="MF measured", color=CYAN)
-    ax.set_title("RSLAB factor memory: per-path a-priori estimate vs measured peak")
-    ax.set_ylabel("memory (MB)")
-    ax.set_yscale("log")
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
-    ax.grid(True, axis="y", ls=":", alpha=0.5)
-    bench_style.legend_below(fig, ax=ax)
-    fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
-    print(f"wrote {outdir / 'memory_breakdown.png'}")
+    w = 0.4
     g = lambda xs: math.exp(sum(math.log(v) for v in xs) / len(xs))
-    for path, est_v, meas in (("LL", ll_est, ll), ("MF", mf_est, mf)):
+    fig, axes = plt.subplots(2, 1, figsize=(13, 9))
+    panels = [("left-looking", "transient_mb", ll, BLUE), ("multifrontal", "mf_transient_mb", mf, CYAN)]
+    for ax, (title, key, meas, color) in zip(axes, panels):
+        est_v = [r[key] for r in rows]
+        meas_v = [meas.get(r["name"], np.nan) for r in rows]
+        ax.bar(x - w / 2, est_v, w, color=GRAY, alpha=0.6)
+        ax.bar(x + w / 2, meas_v, w, color=color)
+        ax.set_title(f"RSLAB {title}: a-priori estimate vs measured peak")
+        ax.set_ylabel("memory (MB)")
+        ax.set_yscale("log")
+        ax.set_xticks(x)
+        ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
+        ax.grid(True, axis="y", ls=":", alpha=0.5)
         ov = [e / meas[r["name"]] for e, r in zip(est_v, rows) if r["name"] in meas]
         under = sum(1 for v in ov if v < 1.0)
-        print(f"  {path} estimate / measured: geomean {g(ov):.2f}x  ({under}/{len(ov)} under-predict)")
+        print(f"  {title:<13} estimate / measured: geomean {g(ov):.2f}x  ({under}/{len(ov)} under-predict)")
+    handles = [
+        Patch(facecolor=GRAY, alpha=0.6, label="a-priori estimate"),
+        Patch(facecolor=BLUE, label="measured - left-looking"),
+        Patch(facecolor=CYAN, label="measured - multifrontal"),
+    ]
+    bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
+    fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
+    print(f"wrote {outdir / 'memory_breakdown.png'}")
 
 
 def memory_composition(est, outdir):

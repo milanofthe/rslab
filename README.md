@@ -135,9 +135,10 @@ RSLAB estimates the factor-memory peak from the symbolic analysis alone, before
 any numeric work, with a **separate model per path**: the left-looking estimate
 (live panels + factor + input/scratch) and the multifrontal estimate (the
 contribution-block-stack model - an assembly-tree level's fronts plus the live
-CBs feeding its assembly, which the left-looking model does not capture). Grouped
-bars per matrix, log axis: each path's estimate next to its measured peak. Both
-estimates stay above the measured peak (geomean ~1.5x LL, ~1.7x MF, never
+CBs feeding its assembly, which the left-looking model does not capture). One
+panel per path (log axis): each matrix's estimate (gray) next to its measured
+peak. Both estimates stay above the measured peak (geomean ~1.5x LL, ~1.7x MF,
+never
 under-predicting across the corpus), so either is safe to compare against RAM for
 fail-fast scheduling. Multifrontal genuinely holds more transiently (the CB
 stack), which its own estimate now reflects.
