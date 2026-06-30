@@ -19,14 +19,20 @@ SOLVERS = {
     "pc": ("RSLAB precond+GMRES", "#a855f7", "v"),
 }
 
-# Named data colors for breakdown stages / estimate parts (drawn from the same
-# saturated set as the solver palette so nothing drifts).
+# Named data colors for breakdown stages / estimate parts. The two grays are for
+# *neutral / reference* series (estimates, the analyze stage); the saturated
+# blue/cyan stay tied to the two RSLAB paths (LL / MF) so meaning is consistent
+# across figures. PURPLE is reserved for the `pc` solver only - never reused.
 BLUE = "#3b82f6"
 CYAN = "#06b6d4"
 AMBER = "#f59e0b"
 GREEN = "#22c55e"
 RED = "#ef4444"
 PURPLE = "#a855f7"
+DARKGRAY = "#4b5563"
+# Sequential blue shades for several series of the *same* kind (e.g. example
+# matrices in one RSLAB plot) - reads as "all RSLAB", not as different solvers.
+BLUE_SHADES = ["#93c5fd", "#3b82f6", "#1d4ed8"]
 
 
 def setup():
@@ -39,17 +45,18 @@ def setup():
     })
 
 
-def legend_below(fig, handles=None, labels=None, ax=None, ncol=None,
-                 fontsize=9, bottom=0.14):
-    """Lay the figure's legend out as one horizontal row centered **below** the
-    plot, reserving `bottom` of the figure height for it (so it never overlaps
-    the axes - bump the figure height to keep the plot area). Pass explicit
+def legend_below(fig, handles=None, labels=None, ax=None, ncol=None, fontsize=9):
+    """Place the figure legend in a compact block just **below** the plot: a
+    single horizontal row, wrapping to two rows only when there are many entries.
+    `bbox_inches="tight"` at save time then crops to include it. Pass explicit
     `handles`/`labels`, or an `ax` to pull them from."""
     if handles is None:
         src = ax if ax is not None else fig.axes[0]
         handles, labels = src.get_legend_handles_labels()
-    ncol = ncol or max(1, len(labels))
-    fig.tight_layout(rect=[0, bottom, 1, 1])
-    fig.legend(handles, labels, loc="lower center", ncol=ncol, frameon=False,
-               fontsize=fontsize, bbox_to_anchor=(0.5, 0.0), columnspacing=1.6,
+    n = len(labels)
+    if ncol is None:
+        ncol = n if n <= 4 else (n + 1) // 2  # 2 rows past 4 entries
+    fig.tight_layout()
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.01),
+               ncol=ncol, frameon=False, fontsize=fontsize, columnspacing=1.6,
                handletextpad=0.5)

@@ -23,7 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import bench_style
-from bench_style import GRAY, BLUE, CYAN, AMBER, PURPLE
+from bench_style import GRAY, BLUE, CYAN, AMBER, DARKGRAY
 
 
 def load(p):
@@ -52,7 +52,7 @@ def memory_breakdown(est, corpus, outdir):
     w = 0.21
     fig, ax = plt.subplots(figsize=(13, 6.5))
     ax.bar(x - 1.5 * w, worst, w, label="worst-case estimate (all panels)", color=GRAY, alpha=0.6)
-    ax.bar(x - 0.5 * w, floor, w, label="panel-freed estimate", color=PURPLE, alpha=0.8)
+    ax.bar(x - 0.5 * w, floor, w, label="panel-freed estimate", color=DARKGRAY, alpha=0.85)
     ax.bar(x + 0.5 * w, m_ll, w, label="measured peak - LL (left-looking)", color=BLUE)
     ax.bar(x + 1.5 * w, m_mf, w, label="measured peak - MF (multifrontal)", color=CYAN)
     ax.set_title("RSLAB factor memory: a-priori estimate vs measured (LL & MF)")
@@ -61,7 +61,7 @@ def memory_breakdown(est, corpus, outdir):
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
     ax.grid(True, axis="y", ls=":", alpha=0.5)
-    bench_style.legend_below(fig, ax=ax, bottom=0.22)
+    bench_style.legend_below(fig, ax=ax)
     fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
     print(f"wrote {outdir / 'memory_breakdown.png'}")
     g = lambda xs: math.exp(sum(math.log(v) for v in xs) / len(xs))
@@ -89,7 +89,7 @@ def memory_composition(est, outdir):
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
     ax.grid(True, axis="y", ls=":", alpha=0.4)
-    bench_style.legend_below(fig, ax=ax, bottom=0.22)
+    bench_style.legend_below(fig, ax=ax)
     fig.savefig(outdir / "memory_composition.png", dpi=140, transparent=True, bbox_inches="tight")
     print(f"wrote {outdir / 'memory_composition.png'}")
 
@@ -124,7 +124,7 @@ def runtime_stage_breakdown(corpus, outdir):
         ax.set_xticks(x)
         ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
         ax.grid(True, axis="y", ls=":", alpha=0.4)
-    bench_style.legend_below(fig, ax=axes[0], bottom=0.1)
+    bench_style.legend_below(fig, ax=axes[0])
     fig.savefig(outdir / "runtime_stage_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
     print(f"wrote {outdir / 'runtime_stage_breakdown.png'}")
 

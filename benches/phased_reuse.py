@@ -22,9 +22,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import bench_style
-from bench_style import GRAY, BLUE, CYAN, PURPLE
+from bench_style import GRAY, BLUE_SHADES
 
-COLORS = [BLUE, CYAN, PURPLE]
+COLORS = BLUE_SHADES
 
 
 def main():
