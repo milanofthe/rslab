@@ -471,10 +471,10 @@ fn factor_front<T: Scalar>(
     // scalar BLAS-2 column sweeps that dominated large fronts). The last column
     // of a panel has no in-panel candidate below it, so it is always a 1×1 step
     // - a 2×2 block can never straddle a panel boundary.
-    const NB: usize = 64;
+    let nb = crate::numeric::gemm_tuning::panel_nb();
     let mut kb = 0;
     while kb < ncol {
-        let ke = (kb + NB).min(ncol);
+        let ke = (kb + nb).min(ncol);
         let mut k = kb;
         while k < ke {
             let absakk = f[k * n + k].magnitude();
@@ -1830,7 +1830,7 @@ fn ll_factor_node<T: Scalar>(
     // is the rectangular `(nrow-ke) × (ncol-ke)` lower part. Pivoting stays inside
     // `0..ncol`, so the off-diagonal rows `[ncol, nrow)` keep their identity and
     // `s`'s contribution to ancestors is unaffected by this internal permutation.
-    const NB: usize = 64;
+    let nb = crate::numeric::gemm_tuning::panel_nb();
     let ll_cdiv_par = crate::numeric::gemm_tuning::par_cdiv();
     let alpha = bk_alpha();
     let mut d = vec![T::zero(); ncol];
@@ -1857,7 +1857,7 @@ fn ll_factor_node<T: Scalar>(
     let prof = ldlt_prof_on();
     let mut kb = 0;
     while kb < ncol {
-        let ke = (kb + NB).min(ncol);
+        let ke = (kb + nb).min(ncol);
         let t_g = if prof { Some(std::time::Instant::now()) } else { None };
         // getf2: unblocked Bunch-Kaufman over the panel columns [kb, ke), with the
         // pivot candidate and rank-1/rank-2 trailing updates bounded to `ke` (the

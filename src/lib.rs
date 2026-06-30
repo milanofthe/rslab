@@ -96,7 +96,9 @@ pub mod tuning;
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use analysis::{StructuralFeatures, SymbolicShape};
-pub use numeric::gemm_tuning::{gemm_thresholds, set_gemm_thresholds, GemmThresholds};
+pub use numeric::gemm_tuning::{
+    gemm_thresholds, get_panel_nb, set_gemm_thresholds, set_panel_nb, GemmThresholds,
+};
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::RslabError;

@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::matgen::{stencil, structured};
-use rslab::{CscMatrix, FactorMethod, FactorOptions, LdltSymbolic};
+use rslab::{set_panel_nb, CscMatrix, FactorMethod, FactorOptions, LdltSymbolic};
 
 type C = Complex<f64>;
 
@@ -30,18 +30,19 @@ fn run(name: &str, a: CscMatrix<C>) {
     let sym = LdltSymbolic::analyze(&a).expect("analyze");
     let nrow_max = sym.front_dims().iter().map(|&(_, r)| r).max().unwrap_or(0);
     eprintln!("\n=== {name}  n={}  nnz={}  front_nrow_max={}", a.n, a.values.len(), nrow_max);
-    let _ = factor_ms(&sym, &a, 1); // warm up
-    let mut t1 = 0.0;
-    for &t in &[1usize, 2, 4, 8, 12] {
-        // best of two to reduce noise
-        let ms = factor_ms(&sym, &a, t).min(factor_ms(&sym, &a, t));
-        if t == 1 {
-            t1 = ms;
-            eprintln!("  threads={:>2}  {:>9.1} ms", t, ms);
-        } else {
-            eprintln!("  threads={:>2}  {:>9.1} ms  speedup {:.2}x", t, ms, t1 / ms);
-        }
+    // NB sensitivity: for each panel width report the t1 work split (via
+    // RLA_PROFILE) and the 1->12 thread scaling.
+    for &nb in &[32usize, 64, 96, 128] {
+        set_panel_nb(nb);
+        let _ = factor_ms(&sym, &a, 1); // warm up + emit the t1 getf2/schur split
+        let t1 = factor_ms(&sym, &a, 1).min(factor_ms(&sym, &a, 1));
+        let t12 = factor_ms(&sym, &a, 12).min(factor_ms(&sym, &a, 12));
+        eprintln!(
+            "  NB={:>3}  t1={:>9.1}ms  t12={:>9.1}ms  speedup {:.2}x",
+            nb, t1, t12, t1 / t12
+        );
     }
+    set_panel_nb(64);
 }
 
 fn main() {

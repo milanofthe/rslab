@@ -24,9 +24,15 @@ pub const DEFAULT_PAR_GEMM: usize = 1_000_000;
 /// rayon-parallel.
 pub const DEFAULT_PAR_CDIV: usize = 8_000_000;
 
+/// Default Bunch-Kaufman / LU panel width (the blocking factor). Wider panels
+/// push more work into the deferred trailing GEMM but enlarge the serial
+/// within-panel factorization; narrower panels do the reverse at more GEMM calls.
+pub const DEFAULT_PANEL_NB: usize = 64;
+
 static SCALAR_GATE: AtomicUsize = AtomicUsize::new(DEFAULT_SCALAR_GATE);
 static PAR_GEMM: AtomicUsize = AtomicUsize::new(DEFAULT_PAR_GEMM);
 static PAR_CDIV: AtomicUsize = AtomicUsize::new(DEFAULT_PAR_CDIV);
+static PANEL_NB: AtomicUsize = AtomicUsize::new(DEFAULT_PANEL_NB);
 
 /// Scalar-vs-GEMM cutoff (flops) for contribution updates.
 #[inline]
@@ -44,6 +50,28 @@ pub(crate) fn par_gemm() -> usize {
 #[inline]
 pub(crate) fn par_cdiv() -> usize {
     PAR_CDIV.load(Ordering::Relaxed)
+}
+
+/// Panel width (blocking factor) for the Bunch-Kaufman / LU panel factorization.
+/// Clamped to at least 8.
+#[inline]
+pub(crate) fn panel_nb() -> usize {
+    PANEL_NB.load(Ordering::Relaxed).max(8)
+}
+
+/// Set the process-wide panel width (auto-tuning / benchmarks). Unlike the GEMM
+/// thresholds, this **changes the factorization**: Bunch-Kaufman pivoting is
+/// bounded to the panel, so a different width searches a different candidate set
+/// and may pick different pivots - a different but equally valid factor (the
+/// solve stays correct; it is not bit-identical). Independent of thread count,
+/// so cross-thread determinism is preserved. The default is `64`.
+pub fn set_panel_nb(nb: usize) {
+    PANEL_NB.store(nb.max(8), Ordering::Relaxed);
+}
+
+/// The current process-wide panel width.
+pub fn get_panel_nb() -> usize {
+    PANEL_NB.load(Ordering::Relaxed)
 }
 
 /// The three GEMM scheduling thresholds (flop counts), the kernel-level
@@ -154,5 +182,47 @@ mod tests {
             assert!((x_def[i] - x_scalar[i]).norm() < 1e-9, "scalar path diverged at {i}");
             assert!((x_def[i] - x_par[i]).norm() < 1e-9, "parallel path diverged at {i}");
         }
+    }
+
+    /// The panel width changes the pivot sequence (a different but valid factor),
+    /// so the factor is not bit-identical across NB - but every width must still
+    /// produce a correct solve.
+    #[test]
+    fn panel_nb_preserves_correctness() {
+        let c = |re, im| Complex::new(re, im);
+        let m = 9;
+        let n = m * m;
+        let idx = |r: usize, cc: usize| r * m + cc;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for r in 0..m {
+            for cc in 0..m {
+                let p = idx(r, cc);
+                rows.push(p);
+                cols.push(p);
+                vals.push(c(4.0, 0.5));
+                for (dr, dc) in [(1usize, 0usize), (0, 1)] {
+                    if r + dr < m && cc + dc < m {
+                        let q = idx(r + dr, cc + dc);
+                        let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
+                        rows.push(hi);
+                        cols.push(lo);
+                        vals.push(c(-1.0, 0.1));
+                    }
+                }
+            }
+        }
+        let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 40.0, 1.0)).collect();
+        for nb in [16usize, 32, 64, 100, 200] {
+            set_panel_nb(nb);
+            let f = LdltSolver::factor_with(&a, &FactorOptions::default()).unwrap();
+            let x = f.solve(&b).unwrap();
+            let mut ax = vec![Complex::new(0.0, 0.0); n];
+            a.symv(&x, &mut ax);
+            let res: f64 = (0..n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt()
+                / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+            assert!(res < 1e-9, "NB={nb} residual {res:.2e}");
+        }
+        set_panel_nb(DEFAULT_PANEL_NB);
     }
 }
