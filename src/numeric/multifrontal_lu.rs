@@ -887,6 +887,13 @@ impl<T: Scalar> LuSolver<T> {
     /// [`LdltSolver::factor_auto`](crate::LdltSolver::factor_auto); pass explicit
     /// settings to [`factor`](Self::factor) to opt out.
     pub fn factor_auto(a: &GeneralCsc<T>, weight: f64) -> Result<Self, RslabError> {
+        let (sym, s) = Self::tuned(a, weight)?;
+        sym.factor(a, &s)
+    }
+
+    /// The auto-tuner's choice for `a`: the symbolic + guarded, memory-backstopped
+    /// settings (shared by [`factor_auto`](Self::factor_auto) and the benchmark).
+    pub fn tuned(a: &GeneralCsc<T>, weight: f64) -> Result<(LuSymbolic, SolverSettings), RslabError> {
         let sym = LuSymbolic::analyze(a)?;
         let est = sym.estimate_memory::<T>();
         let feat = crate::StructuralFeatures::from_general(a, &sym);
@@ -897,29 +904,28 @@ impl<T: Scalar> LuSolver<T> {
         };
         let s = crate::auto_tune::recommend_settings_vetoed(&feat, weight, mf_ll);
         let d = SolverSettings::default();
-        // Hard a-priori memory backstop (never more memory than the default): LL pick
-        // vs the default's transient estimate; MF pick vs the default's LL floor.
         let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: FactorMethod| {
             let fill_ok = e.factor_nnz as f64 <= est.factor_nnz as f64 * 1.02;
+            let flops_ok = e.factor_flops as f64 <= est.factor_flops as f64 * 1.05;
             if m == FactorMethod::Multifrontal {
-                fill_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
+                fill_ok && flops_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
             } else {
-                fill_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
+                fill_ok && flops_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
             }
         };
         if (s.reorder, s.ordering, s.nemin, s.relax) == (d.reorder, d.ordering, d.nemin, d.relax) {
             if mem_ok(&est, s.method) {
-                sym.factor(a, &s)
+                Ok((sym, s))
             } else {
-                sym.factor(a, &d)
+                Ok((sym, d))
             }
         } else {
             let sym2 = LuSymbolic::analyze_with(a, &s)?;
             let est2 = sym2.estimate_memory::<T>();
             if mem_ok(&est2, s.method) {
-                sym2.factor(a, &s)
+                Ok((sym2, s))
             } else {
-                sym.factor(a, &d)
+                Ok((sym, d))
             }
         }
     }

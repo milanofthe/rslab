@@ -333,6 +333,51 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
         }
     }
 
+    // --- RLA auto-tuned (the default path: `LdltSolver::factor` / `factor_auto`) ---
+    // The tuner picks the settings from the matrix's features (guarded, never more
+    // memory than the default); `ana` includes the tuning + analysis, `fac` is the
+    // factor-only time with the chosen settings - comparable to ll/mf/pardiso.
+    if has("auto") {
+        let res: Result<(), rslab::RslabError> = (|| {
+            match mat {
+                Mat::Sym(a) => {
+                    let t = Instant::now();
+                    let (sym, s) = rslab::LdltSolver::<C>::tuned(a, rslab::DEFAULT_TUNE_WEIGHT)?;
+                    let ana = t.elapsed().as_secs_f64() * 1e3;
+                    let t = Instant::now();
+                    let (fr, mm) = live_peak(|| sym.factor(a, &s));
+                    let f = fr?;
+                    let fac = t.elapsed().as_secs_f64() * 1e3;
+                    let t = Instant::now();
+                    let x = f.solve(&b)?;
+                    let slv = t.elapsed().as_secs_f64() * 1e3;
+                    let mut ax = vec![Complex::new(0.0, 0.0); n];
+                    a.symv(&x, &mut ax);
+                    emit(out, "auto", family, name, n, nnz, threads, mem, ana, fac, slv, mm, f.factor_nnz(), rel(&ax, &b));
+                }
+                Mat::Unsym(a) => {
+                    let t = Instant::now();
+                    let (sym, s) = rslab::LuSolver::<C>::tuned(a, rslab::DEFAULT_TUNE_WEIGHT)?;
+                    let ana = t.elapsed().as_secs_f64() * 1e3;
+                    let t = Instant::now();
+                    let (fr, mm) = live_peak(|| sym.factor(a, &s));
+                    let f = fr?;
+                    let fac = t.elapsed().as_secs_f64() * 1e3;
+                    let t = Instant::now();
+                    let x = f.solve(&b)?;
+                    let slv = t.elapsed().as_secs_f64() * 1e3;
+                    let mut ax = vec![Complex::new(0.0, 0.0); n];
+                    a.matvec(&x, &mut ax);
+                    emit(out, "auto", family, name, n, nnz, threads, mem, ana, fac, slv, mm, f.factor_nnz(), rel(&ax, &b));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = res {
+            eprintln!("[auto] {name}: failed: {e:?}");
+        }
+    }
+
     // --- faer (full LU) --- memory-gated: faer factors the FULL matrix as a complex
     // LU (several x the memory of RSLAB's structure-exploiting factor), so skip it
     // when RSLAB's *a-priori* transient estimate already implies faer would blow the

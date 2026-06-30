@@ -156,12 +156,21 @@ def export(recs, out_path, parity_path=None, n_parity=8):
         print(f"  wrote {parity_path}  ({len(samples)} parity samples)")
     layers = [{"w": c.T.tolist(), "b": b.tolist()}  # w: (out,in) row-major for Rust
               for c, b in zip(model.coefs_, model.intercepts_)]
+    # Out-of-distribution guard: above the largest *well-sampled* matrix (one that
+    # got the full knob grid, not just the flop-gated baseline) the model has no
+    # knob-variation signal and extrapolates badly, so the caller falls back to the
+    # default there. Use the max factor_flops among matrices with many configs.
+    from collections import Counter
+    cfg_count = Counter(r["matrix"] for r in recs)
+    well = [r["features"]["factor_flops"] for r in recs if cfg_count[r["matrix"]] >= 10]
+    flops_ood_cap = max(well) if well else 0.0
     out = {
         "input_spec": spec,
         "orderings": ORDERINGS,
         "layers": layers,             # relu between, identity on the last
         "target_mean": ymean.tolist(),  # [log ms, log mb]
         "target_std": ystd.tolist(),
+        "flops_ood_cap": float(flops_ood_cap),
         "n_records": len(recs),
     }
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)

@@ -46,6 +46,11 @@ struct Model {
     layers: Vec<Layer>,
     target_mean: Vec<f64>,
     target_std: Vec<f64>,
+    /// Out-of-distribution flop ceiling: above the largest well-sampled training
+    /// matrix the model extrapolates on the knobs, so the recommendation falls back
+    /// to the default. `0` disables the guard.
+    #[serde(default)]
+    flops_ood_cap: f64,
 }
 
 const MODEL_JSON: &str = include_str!("auto_tune_model.json");
@@ -174,14 +179,13 @@ fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
     ]
 }
 
-/// Candidate grid: a Cartesian product over the high-impact knobs (ordering,
-/// amalgamation, method, panel width, top-of-tree GEMM gate), the rest at the
-/// tuned baseline. ~1k configs - microseconds through the tiny model.
+/// Candidate grid over ordering, amalgamation (`nemin`/`relax`), method, and the
+/// kernel scheduling knobs (panel width, top-of-tree GEMM gate). `Auto` already
+/// selects nested dissection adaptively, so an explicit MetisND candidate (which
+/// only adds the metis-on-banded memory pathology the estimates cannot flag) is
+/// left out. Memory is held safe by the deterministic backstop regardless of which
+/// knob is picked.
 fn candidates() -> Vec<Candidate> {
-    // `Auto` already selects nested dissection adaptively where it pays (2D/3D FEM)
-    // and avoids it on banded/1D patterns; an *explicit* MetisND candidate only adds
-    // the metis-on-banded memory pathology the estimates cannot flag, so it is left
-    // out of the inference grid.
     let orderings = [OrderingMethod::Auto, OrderingMethod::Amd];
     let nemins = [1usize, 16, 48, 128];
     let relaxes = [0usize, 128, 256, 512];
@@ -281,6 +285,11 @@ pub fn recommend_settings_vetoed(
     let Some(m) = model() else {
         return SolverSettings::default();
     };
+    // Out-of-distribution: a matrix larger than the training grid's well-sampled
+    // range gets the safe default, not an extrapolated (and often regressing) pick.
+    if m.flops_ood_cap > 0.0 && features.factor_flops as f64 > m.flops_ood_cap {
+        return SolverSettings::default();
+    }
     let base = predict(m, &build_input(m, features, &BASE)); // [log time, log mem]
     let base_score = w * base[0] + (1.0 - w) * base[1];
     let mem_cap = base[1] + MEM_TOL_LN; // hard: never exceed the default's peak memory

@@ -627,25 +627,31 @@ fn main() {
                 let same = (s.reorder, s.ordering, s.nemin, s.relax)
                     == (d.reorder, d.ordering, d.nemin, d.relax);
                 let est_of = |e: rslab::MemoryEstimate| {
-                    (mb(e.mf_transient_peak_bytes), mb(e.panel_live_peak_bytes), e.factor_nnz as f64)
+                    (
+                        mb(e.mf_transient_peak_bytes),
+                        mb(e.panel_live_peak_bytes),
+                        e.factor_nnz as f64,
+                        e.factor_flops as f64,
+                    )
                 };
-                let (mf, flr, fill) = if same {
-                    (mf_mb, floor_mb, def_fill)
+                let def = (mf_mb, floor_mb, def_fill, flops as f64);
+                let (mf, flr, fill, fl) = if same {
+                    def
                 } else {
                     match &entry.mat {
                         Mat::Sym(a) => LdltSymbolic::analyze_with(a, &s)
                             .map(|sy| est_of(sy.estimate_memory::<C>()))
-                            .unwrap_or((mf_mb, floor_mb, def_fill)),
+                            .unwrap_or(def),
                         Mat::Unsym(a) => LuSymbolic::analyze_with(a, &s)
                             .map(|sy| est_of(sy.estimate_memory::<C>()))
-                            .unwrap_or((mf_mb, floor_mb, def_fill)),
+                            .unwrap_or(def),
                     }
                 };
-                // Backstop (never more memory): exact fill must not grow, and the
-                // realistic floor stays under the default's - MF vs the LL floor, LL
-                // floor-vs-floor (consistent bias). Else fall back to the default.
-                let fill_ok = fill <= def_fill * 1.02;
-                let ok = fill_ok
+                // Backstop: exact fill + flops (never more memory / time proxy) must
+                // not grow, and the realistic floor stays under the default's - MF vs
+                // the LL floor, LL floor-vs-floor. Else fall back to the default.
+                let ok = fill <= def_fill * 1.02
+                    && fl <= flops as f64 * 1.05
                     && if s.method == FactorMethod::Multifrontal { mf <= floor_mb } else { flr <= floor_mb };
                 if ok { s } else { d.clone() }
             };

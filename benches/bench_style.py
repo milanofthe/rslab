@@ -11,7 +11,8 @@ GRAY = "#808080"
 
 # Canonical solver palette: key -> (label, color, marker).
 SOLVERS = {
-    "ll": ("RSLAB left-looking", "#3b82f6", "o"),
+    "auto": ("RSLAB (auto-tuned)", "#3b82f6", "o"),
+    "ll": ("RSLAB left-looking", "#60a5fa", "o"),
     "mf": ("RSLAB multifrontal", "#06b6d4", "s"),
     "faer": ("faer LU", "#f59e0b", "^"),
     "pardiso": ("MKL PARDISO", "#22c55e", "D"),

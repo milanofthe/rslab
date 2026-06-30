@@ -97,9 +97,11 @@ returns the config minimizing a weighted score `w·log(time) + (1-w)·log(mem)`;
 the weight `w` slides between speed and memory.
 
 **Memory is treated as the critical resource and never regresses.** The pick is
-guarded: it only deviates from the proven default on a clear predicted win, and a
-deterministic a-priori backstop (exact fill + the realistic memory floor) rejects
-any config estimated to use more memory than the default.
+guarded on three levels: it only deviates from the default on a clear predicted
+win; a deterministic a-priori backstop (exact fill + flops + the realistic memory
+floor) rejects any config estimated to use more memory *or* more flops than the
+default; and an out-of-distribution guard falls back to the default on matrices
+larger than the model's training range (where it would otherwise extrapolate).
 
 ![Auto-tuner vs default by size](benches/bench_out/autotune_vs_size.png)
 
@@ -108,14 +110,17 @@ corpus, geomean:
 
 | mode | factor speedup | peak memory | over-default memory |
 |---|---|---|---|
-| balanced (`w=0.7`, default) | **1.38x** | **0.80x** | 0 / 85 matrices |
-| speed (`w=1`) | 1.37x | 0.79x | 0 / 85 |
-| memory (`w=0`) | 1.37x | **0.78x** | 1 / 85 (max 1.11x) |
+| balanced (`w=0.7`, default) | **1.38x** | **0.81x** | 0 / 89 matrices |
+| speed (`w=1`) | 1.33x | 0.81x | 0 / 89 |
+| memory (`w=0`) | 1.28x | **0.80x** | 0 / 89 |
 
-The auto-tuner is **faster and lighter on both axes** - ~1.38x speedup *and* ~20%
+The auto-tuner is **faster and lighter on both axes** - ~1.38x speedup *and* ~19%
 lower peak memory - and **no matrix uses more memory than the default** (the
-backstop guarantees it). The speedup holds across problem size (it does not fade
-on the large matrices). The worker count stays with the `Threads::Auto` predictor;
+backstop guarantees it deterministically). The benefit holds across problem size
+(small 1.6x, large 1.2x). Peak memory is deterministically estimable (fill/floor)
+so it is hard-guaranteed; factor time depends on BLAS-3 efficiency the model
+predicts only approximately, so a few matrices see a small time regression while
+still saving memory. The worker count stays with the `Threads::Auto` predictor;
 `factor_with` opts out with explicit settings.
 
 ![Auto-tuner Pareto modes](benches/bench_out/autotune_modes.png)
