@@ -32,33 +32,79 @@ right-hand sides. It is a fork of [feral](https://github.com/jkitchin/feral); se
 
 ## Benchmarks
 
-Hardware: 12 cores / 24 threads. Compared against [faer](https://github.com/sarah-quinones/faer-rs)
-(Rust sparse LU) and Intel MKL PARDISO. Test matrices: 3D complex-symmetric
-Helmholtz (LDLᵀ path) and MoM near-field kernels (LU path); plus the real MoM
-`precond_matrices`. faer factors the symmetric matrix as a full LU, so it is run
-only up to where that is tractable; RSLAB and PARDISO continue to larger sizes.
-Figures use transparent backgrounds. Reproduce with `python benches/run_bench.py`.
+Hardware: 12 cores / 24 threads. Compared against
+[faer](https://github.com/sarah-quinones/faer-rs) (Rust sparse LU), Intel MKL
+PARDISO, and SuperLU (via SciPy) over the SuiteSparse collection (1k-100k DOFs;
+SPD, indefinite, unsymmetric, complex). Figures use transparent backgrounds.
+Reproduce with the scripts in `benches/` (`bench_suite` + `superlu_corpus.py` +
+`fit_scaling.py` for the scaling study, `agg_thread_scaling_solvers.py` for the
+thread study).
 
-### Factor / solve time and memory vs DOFs
+### Scaling: factor time and peak memory vs problem size
 
-![Factor time vs DOFs](benches/bench_out/scaling_factor.png)
-![Factor memory vs DOFs](benches/bench_out/scaling_memory.png)
-![Solve time vs DOFs](benches/bench_out/scaling_solve.png)
+![Factor time scaling](benches/bench_out/corpus_scaling_fit.png)
+![Peak memory scaling](benches/bench_out/corpus_memory_fit.png)
 
-On these matrices RSLAB left-looking factors faster than faer and uses less
-memory. PARDISO factors faster than both, with the same asymptotic slope as RSLAB.
-The solve (triangular back-substitution) is cheap for all three.
+Each point is one corpus matrix; the line is a least-squares power-law fit
+`~ nnz^α` (the empirical scaling order), garbage solves (`‖Ax-b‖/‖b‖ > 0.1`)
+excluded from the fit.
+
+| solver | factor time `α` | peak memory `α` |
+|--------|:---------------:|:---------------:|
+| MKL PARDISO        | **0.89** | 0.96 |
+| faer LU            | 1.00 | 1.21 |
+| RSLAB left-looking | 1.01 | **0.87** |
+| RSLAB multifrontal | 1.05 | 0.98 |
+| SuperLU (SciPy)    | 1.48 | 1.04 |
+
+RSLAB matches faer on factor-time order and trails PARDISO's decades-tuned
+sublinear `0.89`. On **peak memory RSLAB left-looking has the lowest growth of
+all (`0.87`)** - ahead of PARDISO and well ahead of faer - the memory efficiency
+the design targets. SuperLU does not exploit symmetry, so its fill (and factor
+time) grows steeply (`1.48`).
 
 ### Thread scaling
 
-![Thread scaling](benches/bench_out/thread_scaling.png)
+![Thread scaling per solver](benches/bench_out/thread_scaling_solvers.png)
 
-PARDISO reaches about 5x, RSLAB about 2x before saturating. Sparse-direct
-factorization concentrates work in a few large supernodes, which bounds the
-achievable speedup (a standalone complex GEMM on the same machine scales about
-10x). See [Architecture](#architecture).
+Mean speedup over the corpus with a min-max band, per solver, 1 to 12 workers.
+PARDISO scales best (~3.5x, saturating around 6-10 threads); RSLAB reaches ~1.9x
+(multifrontal) / ~1.8x (left-looking, peak near 5-6 threads); faer barely scales
+and often regresses. Sparse-direct factorization concentrates work in a few large
+supernodes and is largely memory-bandwidth bound, so the speedup caps well below
+linear for every solver. The wide min-max band - some matrices get *slower* past
+a few threads - is why RSLAB sets the worker count per matrix:
 
-### Wall-clock and memory breakdown
+### Auto-tuned thread count
+
+RSLAB defaults to `Threads::Auto`: it predicts the worker count from the matrix
+structure (factor flops, front height, assembly-tree width) measured during the
+symbolic analysis, capped at a user maximum. Fit from the corpus thread-scaling
+sweep, this lands within **~10% of the per-matrix-optimal count** (geomean),
+against ~50% for a fixed budget of 2 - thin / tiny systems stay low (where extra
+threads only regress), big BLAS-3-rich systems use the cores. Override with a
+fixed budget for solver-in-the-loop (many concurrent solves).
+
+### Accuracy (SuiteSparse)
+
+![SuiteSparse residual](benches/bench_out/corpus_residual.png)
+
+Relative residual `‖Ax-b‖/‖b‖` as the accuracy check across the corpus.
+
+- Where RSLAB factors, it is accurate: 24/30 matrices below `1e-8` residual, matching
+  PARDISO and ahead of faer, which returns a degraded or garbage solution on several
+  (pdb1HYS, bcsstk18, msc10848, wang3).
+- Exact-mode limit: RSLAB's exact LDLᵀ (pivoting bounded to each supernode) cannot
+  factor some indefinite saddle-point / KKT matrices (stokes64, bratu3d, cont-201) that
+  PARDISO factors directly.
+- Preconditioner mode covers most of that gap: a never-fail static-pivot factor used as
+  a GMRES preconditioner reaches 28/33 below `1e-8` (matching PARDISO) and rescues the
+  exact-mode failures bratu3d and cont-201; it also refines RSLAB's one inaccurate exact
+  solve (qc2534, `3.6e-4` to `1.8e-13`). The hardest saddle-point/CFD cases (stokes64,
+  ex11) stay out of reach. RSLAB targets the complex-symmetric EM/FEM regime, not
+  general indefinite KKT.
+
+### A-priori memory estimate
 
 ![Wall-clock breakdown](benches/bench_out/wct_breakdown.png)
 ![Memory breakdown](benches/bench_out/memory_breakdown.png)
@@ -66,42 +112,14 @@ achievable speedup (a standalone complex GEMM on the same machine scales about
 The memory breakdown is the a-priori estimate (no factoring required): dense panels
 + compact factor + input/scratch, with the panel-freed live floor marked. The
 estimate is within 1.0x to 1.2x of measured peak across the sizes tested and does
-not under-predict.
+not under-predict - usable for fail-fast scheduling before any numeric work.
 
 ### Real MoM matrices
 
 ![Real MoM matrices](benches/bench_out/real_matrices.png)
 
-On the real matrices RSLAB left-looking uses less time and memory than faer, and
+On the real MoM matrices RSLAB left-looking uses less time and memory than faer, and
 about half the memory of its own multifrontal path.
-
-### Validation (SuiteSparse)
-
-33 solvable matrices from the SuiteSparse collection (1k-100k DOFs; SPD, indefinite,
-unsymmetric, complex), factored and solved against faer and PARDISO with the relative
-residual `||Ax-b||/||b||` as the accuracy check (`python benches/run_bench.py --corpus-only`).
-
-![SuiteSparse residual](benches/bench_out/corpus_residual.png)
-![SuiteSparse factor time](benches/bench_out/corpus_time.png)
-![SuiteSparse solve time](benches/bench_out/corpus_solve.png)
-![SuiteSparse factor memory](benches/bench_out/corpus_memory.png)
-
-- Where RSLAB factors, it is accurate: 24/30 matrices below `1e-8` residual, matching
-  PARDISO and ahead of faer, which returns a degraded or garbage solution on several
-  (pdb1HYS, bcsstk18, msc10848, wang3).
-- RSLAB factors faster and lighter than faer (geomean 1.9x time, 1.8x memory). PARDISO
-  is faster and lighter than both on this mostly-structural corpus (about 7x time, 2.8x
-  memory); the gap narrows on the larger complex EM/MoM matrices (see the scaling
-  figures).
-- Exact-mode limit: RSLAB's exact LDLᵀ (pivoting bounded to each supernode) cannot
-  factor some indefinite saddle-point / KKT matrices (stokes64, bratu3d, cont-201) that
-  PARDISO factors directly.
-- Preconditioner mode covers most of that gap: a never-fail static-pivot factor used as
-  a GMRES preconditioner reaches 28/33 below `1e-8` (matching PARDISO) and rescues the
-  exact-mode failures bratu3d and cont-201; it also refines RSLAB's one inaccurate exact
-  solve (qc2534, `3.6e-4` to `1.8e-13`). Its cost moves from the factor to the iteration
-  (the solve-time figure). The hardest saddle-point/CFD cases (stokes64, ex11) stay out
-  of reach. RSLAB targets the complex-symmetric EM/FEM regime, not general indefinite KKT.
 
 ## Install
 
