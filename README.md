@@ -107,12 +107,13 @@ Relative residual `‖Ax-b‖/‖b‖` as the accuracy check across the corpus.
 
 ### Where the time goes
 
-![Wall-clock breakdown](benches/bench_out/wct_breakdown.png)
+![Stage breakdown](benches/bench_out/runtime_stage_breakdown.png)
 
-Mean fraction of wall-clock in analyze / factor / solve per solver over the
-corpus. The factor dominates; the triangular solve is cheap for all; faer has no
-separate analyze phase. RSLAB's analyze (fill-reducing ordering + symbolic) is
-reusable across many value sets that share a pattern (frequency sweep / Newton).
+Normalized analyze / factor / solve split per matrix, for both RSLAB paths
+(left-looking and multifrontal). The numeric factor dominates (~80-95%); the
+triangular solve is cheap; the analyze (fill-reducing ordering + symbolic) is a
+small slice (larger on sparse circuit-like matrices such as `memplus`) - and is
+**reusable** across value sets that share a pattern (next section).
 
 ### Phased reuse (analyze once, factor many)
 
@@ -132,12 +133,20 @@ value sweeps.
 ![Memory estimate vs measured](benches/bench_out/memory_breakdown.png)
 
 RSLAB computes a factor-memory estimate from the symbolic analysis alone, before
-any numeric work. Per matrix, three grouped bars: the conservative upper bound
-(all dense panels resident at once + factor + input/scratch), the panel-freed
-estimate (what the low-memory schedule should hold), and the **measured**
-left-looking peak. The measured peak sits between the two estimates, and the
-upper bound stays above it (geomean ~1.5x, never under-predicting) - so it is
-safe to compare against available RAM for fail-fast scheduling before factoring.
+any numeric work. Grouped bars per matrix (log axis, never stacked): the
+conservative upper bound (all dense panels resident + factor + input/scratch),
+the panel-freed estimate, and the **measured** peak of both paths. The upper
+bound stays above the left-looking peak (geomean ~1.5x, never under-predicting),
+so it is safe to compare against RAM before factoring; the multifrontal path
+carries a contribution-block stack the left-looking estimate does not model, so
+its measured peak can exceed the bound on a few matrices.
+
+![Memory composition](benches/bench_out/memory_composition.png)
+
+The estimate's composition, normalized per matrix: the transient dense panels
+dominate, the compact CSC factor (the kept output) is the next slice, and the
+input + per-thread scratch a small remainder (relatively larger for small
+matrices, where a fixed scratch floor shows).
 
 ### Real MoM matrices
 

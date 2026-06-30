@@ -1,18 +1,20 @@
-"""Corpus-based breakdown figures: where each solver spends its wall-clock, and
-the a-priori factor-memory composition of RSLAB.
+"""RSLAB-only breakdown figures over the corpus (LL = left-looking, MF =
+multifrontal; the cross-solver comparison lives in the scaling/thread figures).
 
-* `wct_breakdown.png` - per solver, the mean fraction of time in analyze / factor
-  / solve over the corpus (so the composition is comparable across solvers; faer
-  has no separate analyze phase).
-* `memory_breakdown.png` - RSLAB's a-priori memory estimate (dense panels +
-  compact factor + input/scratch, with the panel-freed live floor) per corpus
-  matrix, sorted by size; read from a `RLA_BENCH_ESTIMATE=1` corpus run.
+1. `memory_breakdown.png`   - factor memory: a-priori estimate (conservative
+   upper bound + panel-freed estimate) vs the measured peak of *both* RSLAB
+   paths. Grouped bars (log axis - never stacked on a log scale).
+2. `memory_composition.png` - the a-priori estimate's composition (dense panels /
+   compact factor / input+scratch) as a **normalized, linear** stacked bar per
+   matrix - what fraction of the estimate each part is.
+3. `runtime_stage_breakdown.png` - the analyze / factor / solve split per matrix,
+   **normalized, linear**, for LL and MF - where each path spends its time.
 
 Run:  python benches/corpus_breakdown.py [corpus.jsonl] [corpus_estimate.jsonl]
 """
 import json
+import math
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -20,13 +22,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-STYLE = {
-    "ll": ("RSLAB left-looking", "#3b82f6"),
-    "mf": ("RSLAB multifrontal", "#06b6d4"),
-    "faer": ("faer LU", "#f59e0b"),
-    "pardiso": ("MKL PARDISO", "#22c55e"),
-}
-ORDER = ["ll", "mf", "faer", "pardiso"]
 GRAY = "#808080"
 
 
@@ -39,60 +34,20 @@ def setup():
     })
 
 
-def wct_breakdown(corpus_path, outdir):
-    recs = [json.loads(l) for l in open(corpus_path) if l.strip()]
-    recs = [r for r in recs if r.get("metric") == "time" and r.get("res", 1.0) < 0.1]
-    # Mean analyze/factor/solve fraction of total wall-clock, per solver.
-    frac = {}
-    for s in ORDER:
-        rows = [r for r in recs if r["solver"] == s]
-        parts = []
-        for r in rows:
-            tot = r["ana_ms"] + r["fac_ms"] + r["slv_ms"]
-            if tot > 0:
-                parts.append((r["ana_ms"] / tot, r["fac_ms"] / tot, r["slv_ms"] / tot))
-        if parts:
-            frac[s] = (np.mean(parts, axis=0), len(parts))
-    present = [s for s in ORDER if s in frac]
-    x = np.arange(len(present))
-    ana = [frac[s][0][0] for s in present]
-    fac = [frac[s][0][1] for s in present]
-    slv = [frac[s][0][2] for s in present]
-    fig, ax = plt.subplots(figsize=(7.5, 5))
-    ax.bar(x, ana, 0.6, label="analyze", color=GRAY, alpha=0.55)
-    ax.bar(x, fac, 0.6, bottom=ana, label="factor", color="#3b82f6")
-    ax.bar(x, slv, 0.6, bottom=[a + f for a, f in zip(ana, fac)], label="solve", color="#f59e0b")
-    ax.set_ylabel("mean fraction of wall-clock")
-    ax.set_title("Where each solver spends its time (corpus mean)")
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"{STYLE[s][0]}\n(n={frac[s][1]})" for s in present], fontsize=8)
-    ax.grid(True, axis="y", ls=":", alpha=0.5)
-    ax.legend(fontsize=9, frameon=False)
-    fig.tight_layout()
-    fig.savefig(outdir / "wct_breakdown.png", dpi=140, transparent=True)
-    print(f"wrote {outdir / 'wct_breakdown.png'}")
+def load(p):
+    return [json.loads(l) for l in open(p) if l.strip()] if Path(p).exists() else []
 
 
-def memory_breakdown(est_path, corpus_path, outdir):
-    """Grouped (not stacked - this is a log axis) factor-memory comparison per
-    matrix: the conservative a-priori upper bound (all panels resident), the
-    a-priori panel-freed estimate (what the low-memory path should hold), and the
-    measured RSLAB left-looking peak. The measured bar should sit between the two
-    estimates - validating that the estimate brackets reality and never
-    under-predicts."""
-    if not Path(est_path).exists():
-        print(f"[memory] {est_path} missing - run bench_suite with RLA_BENCH_ESTIMATE=1 family=corpus")
-        return
-    est = {r["name"]: r for r in (json.loads(l) for l in open(est_path) if l.strip())}
-    # Measured RSLAB left-looking peak from the memory pass.
-    measured = {}
-    if Path(corpus_path).exists():
-        for r in (json.loads(l) for l in open(corpus_path) if l.strip()):
-            if r.get("solver") == "ll" and r.get("metric") == "mem" and r.get("mem_mb", 0) > 0:
-                measured[r["name"]] = r["mem_mb"]
-    # Keep matrices with all three numbers, sorted by size.
-    rows = [est[n] for n in est if n in measured]
-    rows.sort(key=lambda r: r["n"])
+def measured_peak(corpus, solver):
+    return {r["name"]: r["mem_mb"] for r in corpus
+            if r.get("solver") == solver and r.get("metric") == "mem" and r.get("mem_mb", 0) > 0}
+
+
+def memory_breakdown(est, corpus, outdir):
+    """Grouped (log axis): conservative upper bound + panel-freed estimate vs the
+    measured peak of both RSLAB paths."""
+    ll, mf = measured_peak(corpus, "ll"), measured_peak(corpus, "mf")
+    rows = sorted((r for r in est if r["name"] in ll or r["name"] in mf), key=lambda r: r["n"])
     if not rows:
         print("[memory] no matrices with estimate + measured peak")
         return
@@ -100,13 +55,15 @@ def memory_breakdown(est_path, corpus_path, outdir):
     x = np.arange(len(names))
     worst = [r["transient_mb"] for r in rows]
     floor = [r["freed_floor_mb"] for r in rows]
-    meas = [measured[r["name"]] for r in rows]
-    w = 0.27
-    fig, ax = plt.subplots(figsize=(12, 5.5))
-    ax.bar(x - w, worst, w, label="worst-case estimate (all panels)", color=GRAY, alpha=0.65)
-    ax.bar(x, floor, w, label="panel-freed estimate", color="#3b82f6")
-    ax.bar(x + w, meas, w, label="measured peak (RSLAB left-looking)", color="#22c55e")
-    ax.set_title("RSLAB factor memory: a-priori estimate vs measured (per matrix, by size)")
+    m_ll = [ll.get(r["name"], np.nan) for r in rows]
+    m_mf = [mf.get(r["name"], np.nan) for r in rows]
+    w = 0.21
+    fig, ax = plt.subplots(figsize=(13, 5.5))
+    ax.bar(x - 1.5 * w, worst, w, label="worst-case estimate (all panels)", color=GRAY, alpha=0.6)
+    ax.bar(x - 0.5 * w, floor, w, label="panel-freed estimate", color="#a855f7", alpha=0.8)
+    ax.bar(x + 0.5 * w, m_ll, w, label="measured peak - LL (left-looking)", color="#3b82f6")
+    ax.bar(x + 1.5 * w, m_mf, w, label="measured peak - MF (multifrontal)", color="#06b6d4")
+    ax.set_title("RSLAB factor memory: a-priori estimate vs measured (LL & MF)")
     ax.set_ylabel("memory (MB)")
     ax.set_yscale("log")
     ax.set_xticks(x)
@@ -116,19 +73,85 @@ def memory_breakdown(est_path, corpus_path, outdir):
     fig.tight_layout()
     fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True)
     print(f"wrote {outdir / 'memory_breakdown.png'}")
-    # Console: measured vs the two estimates (the bracketing check).
-    import math
-    over = [w_ / m for w_, m in zip(worst, meas) if m > 0]
-    print(f"  worst-case / measured: geomean {math.exp(sum(map(math.log, over))/len(over)):.2f}x "
-          f"(should be >= 1; conservative upper bound, {len(rows)} matrices)")
+    g = lambda xs: math.exp(sum(math.log(v) for v in xs) / len(xs))
+    ov_ll = [w_ / ll[r["name"]] for w_, r in zip(worst, rows) if r["name"] in ll]
+    print(f"  worst-case / measured-LL: geomean {g(ov_ll):.2f}x ({len(ov_ll)} matrices, >=1 = conservative)")
+
+
+def memory_composition(est, outdir):
+    """Normalized, linear: each part's fraction of the a-priori estimate."""
+    rows = sorted(est, key=lambda r: r["n"])
+    names = [r["name"] for r in rows]
+    x = np.arange(len(names))
+    tot = [max(r["panels_mb"] + r["factor_mb"] + r["scratch_mb"], 1e-9) for r in rows]
+    panels = [r["panels_mb"] / t for r, t in zip(rows, tot)]
+    factor = [r["factor_mb"] / t for r, t in zip(rows, tot)]
+    scratch = [r["scratch_mb"] / t for r, t in zip(rows, tot)]
+    fig, ax = plt.subplots(figsize=(13, 5))
+    ax.bar(x, panels, 0.8, label="dense panels", color="#3b82f6")
+    ax.bar(x, factor, 0.8, bottom=panels, label="compact factor (CSC)", color="#06b6d4")
+    ax.bar(x, scratch, 0.8, bottom=[p + f for p, f in zip(panels, factor)],
+           label="input + scratch", color=GRAY, alpha=0.6)
+    ax.set_title("RSLAB a-priori factor-memory estimate: composition (normalized)")
+    ax.set_ylabel("fraction of estimate")
+    ax.set_ylim(0, 1)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
+    ax.grid(True, axis="y", ls=":", alpha=0.4)
+    ax.legend(fontsize=9, frameon=False, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(outdir / "memory_composition.png", dpi=140, transparent=True)
+    print(f"wrote {outdir / 'memory_composition.png'}")
+
+
+def runtime_stage_breakdown(corpus, outdir):
+    """Normalized, linear analyze/factor/solve split per matrix, for LL and MF."""
+    def split(solver):
+        rows = [r for r in corpus if r.get("solver") == solver and r.get("metric") == "time"
+                and r.get("res", 1.0) < 0.1]
+        rows.sort(key=lambda r: r["n"])
+        out = []
+        for r in rows:
+            tot = r["ana_ms"] + r["fac_ms"] + r["slv_ms"]
+            if tot > 0:
+                out.append((r["name"], r["ana_ms"] / tot, r["fac_ms"] / tot, r["slv_ms"] / tot))
+        return out
+
+    fig, axes = plt.subplots(2, 1, figsize=(13, 9), sharex=False)
+    for ax, (solver, title) in zip(axes, [("ll", "left-looking"), ("mf", "multifrontal")]):
+        rows = split(solver)
+        names = [r[0] for r in rows]
+        x = np.arange(len(names))
+        ana = [r[1] for r in rows]
+        fac = [r[2] for r in rows]
+        slv = [r[3] for r in rows]
+        ax.bar(x, ana, 0.8, label="analyze", color=GRAY, alpha=0.6)
+        ax.bar(x, fac, 0.8, bottom=ana, label="factor", color="#3b82f6")
+        ax.bar(x, slv, 0.8, bottom=[a + f for a, f in zip(ana, fac)], label="solve", color="#f59e0b")
+        ax.set_title(f"RSLAB {title}: analyze / factor / solve (normalized)")
+        ax.set_ylabel("fraction of wall-clock")
+        ax.set_ylim(0, 1)
+        ax.set_xticks(x)
+        ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
+        ax.grid(True, axis="y", ls=":", alpha=0.4)
+        ax.legend(fontsize=9, frameon=False, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(outdir / "runtime_stage_breakdown.png", dpi=140, transparent=True)
+    print(f"wrote {outdir / 'runtime_stage_breakdown.png'}")
 
 
 def main():
-    corpus = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/corpus.jsonl")
-    est = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("benches/bench_out/corpus_estimate.jsonl")
+    corpus_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/corpus.jsonl")
+    est_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("benches/bench_out/corpus_estimate.jsonl")
     setup()
-    wct_breakdown(corpus, corpus.parent)
-    memory_breakdown(est, corpus, corpus.parent)
+    corpus = load(corpus_path)
+    est = load(est_path)
+    if est:
+        memory_breakdown(est, corpus, corpus_path.parent)
+        memory_composition(est, corpus_path.parent)
+    else:
+        print(f"[breakdown] {est_path} missing - run bench_suite RLA_BENCH_ESTIMATE=1 family=corpus")
+    runtime_stage_breakdown(corpus, corpus_path.parent)
 
 
 if __name__ == "__main__":
