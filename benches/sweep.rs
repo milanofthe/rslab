@@ -1,10 +1,14 @@
 //! Auto-tuning sweep harness: build a diverse matrix corpus, and for each matrix
-//! measure factor time / fill / memory / residual across a grid of solver knobs
-//! (fill-ordering, amalgamation `nemin`, the GEMM parallelism thresholds, thread
-//! count). Emits one JSONL record per `(matrix, param-combo)` -
+//! measure the two performance metrics - **peak memory** and **factor speed** (+
+//! residual for validity) - across a grid spanning *every* tunable
+//! [`SolverSettings`] knob: fill-ordering, amalgamation `nemin` + relaxed
+//! `max_width`, factor `method` (left-looking vs multifrontal), the kernel panel
+//! width + GEMM thresholds (`scalar_gate`/`par_gemm`/`par_cdiv`) + Schur kernel,
+//! and the worker count. The grid is one-factor-at-a-time over each knob's menu
+//! (main effects) plus seeded random joint samples (interactions). Emits one JSONL
+//! record per `(matrix, param-combo)` -
 //! `{matrix, n, nnz, dtype, features{...}, params{...}, metrics{...}}` - the
-//! dataset that drives the data-driven scheduling fixes and the parameter
-//! predictor.
+//! dataset that trains the parameter predictor (features -> best knobs).
 //!
 //! `features` is the matrix's canonical structural fingerprint (under the default
 //! analysis), so the ML framing is clean: features fixed per matrix, knobs varied,
@@ -21,6 +25,8 @@
 //! * `RLA_SWEEP_SCALE=f`        multiply generated dimensions by `f` (default 1.0)
 //! * `RLA_SWEEP_MEM_CAP_MB=n`   skip matrices whose est. transient peak exceeds this (default 40000)
 //! * `RLA_SWEEP_GRID_FLOP_CAP=x` above this est. factor-flops, run only the baseline combo (default 2e10)
+//! * `RLA_SWEEP_RANDOM=k`        random joint knob samples per matrix, on top of OFAT (default 16)
+//! * `RLA_SWEEP_THREADS_ONLY=1`  sweep only the worker-count ladder (the thread-scaling dataset)
 //! * `RLA_SWEEP_SUITESPARSE=1`  also fetch the SuiteSparse list (needs `--features matgen-download`)
 //!
 //! Run (generated only):  `cargo bench --bench sweep --features matgen`
@@ -36,7 +42,7 @@ use num_complex::Complex;
 use rslab::matgen::{random, stencil, structured};
 use rslab::{
     CscMatrix, FactorMethod, GemmThresholds, GeneralCsc, LdltSymbolic, LuSymbolic, OrderingMethod,
-    SolverSettings, StructuralFeatures,
+    RelaxAmalgamation, SolverSettings, StructuralFeatures,
 };
 
 type C = Complex<f64>;
@@ -290,76 +296,134 @@ fn suitesparse_entries() -> Vec<Entry> {
     Vec::new()
 }
 
-/// One point in the knob grid.
-#[derive(Clone, Copy)]
+/// One point in the knob grid - every tunable [`SolverSettings`] knob the sweep
+/// varies (analysis ordering/nemin/relax, factor method/threads, and the kernel
+/// GEMM thresholds + panel width + Schur kernel). `relax_width = 0` means
+/// relaxed amalgamation off. The recorded outcomes are peak memory + factor speed
+/// (the two performance metrics) plus the residual for validity filtering.
+#[derive(Clone, Copy, PartialEq)]
 struct Param {
     ordering: OrderingMethod,
     nemin: usize,
+    relax_width: usize,
+    panel_nb: usize,
+    scalar_gate: usize,
+    par_gemm: usize,
     par_cdiv: usize,
+    use_gemm_schur: bool,
+    method: FactorMethod,
     threads: usize,
 }
 
+/// Production defaults (the historically-tuned config) - the OFAT centre point.
 const BASELINE: Param = Param {
-    ordering: OrderingMethod::Amd,
+    ordering: OrderingMethod::Auto,
     nemin: 16,
+    relax_width: 256,
+    panel_nb: 64,
+    scalar_gate: 4096,
+    par_gemm: 1_000_000,
     par_cdiv: 8_000_000,
+    use_gemm_schur: true,
+    method: FactorMethod::LeftLooking,
     threads: 0,
 };
+
+// Per-knob value menus, swept one-factor-at-a-time around `BASELINE`.
+const M_ORDERING: [OrderingMethod; 3] =
+    [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
+const M_NEMIN: [usize; 4] = [1, 16, 48, 128];
+const M_RELAX: [usize; 4] = [0, 128, 256, 512];
+const M_PANEL_NB: [usize; 4] = [32, 64, 96, 128];
+const M_SCALAR_GATE: [usize; 3] = [1024, 4096, 16384];
+const M_PAR_GEMM: [usize; 3] = [250_000, 1_000_000, 4_000_000];
+const M_PAR_CDIV: [usize; 3] = [2_000_000, 8_000_000, 32_000_000];
+const M_SCHUR: [bool; 2] = [true, false];
+const M_METHOD: [FactorMethod; 2] = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
+
+/// Tiny reproducible PRNG (splitmix-style LCG) for the random joint samples, so
+/// the sweep dataset is deterministic without pulling a `rand` dependency.
+struct Lcg(u64);
+impl Lcg {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+    fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+        xs[(self.next_u64() >> 33) as usize % xs.len()]
+    }
+}
 
 fn threads_mode() -> bool {
     std::env::var("RLA_SWEEP_THREADS_ONLY").is_ok()
 }
 
-/// Thread-scaling ladder at production-default knobs (Auto ordering, nemin 16,
-/// par_cdiv 8M): vary only the worker count to trace the per-matrix speedup
-/// curve. Capped at the 12 physical cores - beyond them hyperthreading gives
-/// compute-bound BLAS-3 little and only adds noise. Reduced for the heaviest
-/// matrices to bound wall-clock.
+/// Thread-scaling ladder at production-default knobs: vary only the worker count
+/// to trace the per-matrix speedup curve. Capped at the 12 physical cores -
+/// beyond them hyperthreading gives compute-bound BLAS-3 little and only adds
+/// noise. Reduced for the heaviest matrices to bound wall-clock.
 fn thread_ladder(flops: u64) -> Vec<Param> {
-    let ladder: &[usize] = if flops as f64 > 5e10 {
-        &[1, 4, 8, 12]
-    } else {
-        &[1, 2, 4, 6, 8, 12]
-    };
-    ladder
-        .iter()
-        .map(|&threads| Param { ordering: OrderingMethod::Auto, nemin: 16, par_cdiv: 8_000_000, threads })
-        .collect()
+    let ladder: &[usize] = if flops as f64 > 5e10 { &[1, 4, 8, 12] } else { &[1, 2, 4, 6, 8, 12] };
+    ladder.iter().map(|&threads| Param { threads, ..BASELINE }).collect()
 }
 
+/// Knob grid: one-factor-at-a-time over every knob's menu (main effects) plus
+/// `RLA_SWEEP_RANDOM` seeded random joint samples (interactions), deduplicated.
+/// Threads stay at the baseline here - the worker count is its own sweep
+/// (`RLA_SWEEP_THREADS_ONLY`), so the algorithmic knobs are isolated.
 fn grid() -> Vec<Param> {
     let smoke = std::env::var("RLA_SWEEP_SMOKE").is_ok();
     if smoke {
-        return vec![BASELINE, Param { nemin: 48, ..BASELINE }];
+        return vec![BASELINE, Param { nemin: 48, ..BASELINE }, Param { method: FactorMethod::Multifrontal, ..BASELINE }];
     }
-    // Focused ordering comparison at the *production-default* factor knobs
-    // (nemin 16, par_cdiv 8M, threads 2): does per-matrix ordering beat `Auto`?
     if std::env::var("RLA_SWEEP_ORDERINGS_ONLY").is_ok() {
-        return [
-            OrderingMethod::Auto,
-            OrderingMethod::Amd,
-            OrderingMethod::Amf,
-            OrderingMethod::MetisND,
-        ]
-        .iter()
-        .map(|&ordering| Param { ordering, nemin: 16, par_cdiv: 8_000_000, threads: 2 })
-        .collect();
+        return [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::Amf, OrderingMethod::MetisND]
+            .iter()
+            .map(|&ordering| Param { ordering, ..BASELINE })
+            .collect();
     }
-    let orderings = [OrderingMethod::Amd, OrderingMethod::MetisND];
-    let nemins = [16usize, 48];
-    let cdivs = [8_000_000usize, 2_000_000];
-    let threads = [2usize, 0];
-    let mut v = Vec::new();
-    for &ordering in &orderings {
-        for &nemin in &nemins {
-            for &par_cdiv in &cdivs {
-                for &t in &threads {
-                    v.push(Param { ordering, nemin, par_cdiv, threads: t });
-                }
-            }
+    let mut v: Vec<Param> = vec![BASELINE];
+    // OFAT: vary each knob over its menu with the rest at baseline (main effects).
+    for &x in &M_ORDERING { v.push(Param { ordering: x, ..BASELINE }); }
+    for &x in &M_NEMIN { v.push(Param { nemin: x, ..BASELINE }); }
+    for &x in &M_RELAX { v.push(Param { relax_width: x, ..BASELINE }); }
+    for &x in &M_PANEL_NB { v.push(Param { panel_nb: x, ..BASELINE }); }
+    for &x in &M_SCALAR_GATE { v.push(Param { scalar_gate: x, ..BASELINE }); }
+    for &x in &M_PAR_GEMM { v.push(Param { par_gemm: x, ..BASELINE }); }
+    for &x in &M_PAR_CDIV { v.push(Param { par_cdiv: x, ..BASELINE }); }
+    for &x in &M_SCHUR { v.push(Param { use_gemm_schur: x, ..BASELINE }); }
+    for &x in &M_METHOD { v.push(Param { method: x, ..BASELINE }); }
+    // Random joint samples (seeded) for knob interactions the OFAT axes miss.
+    let n_random: usize = std::env::var("RLA_SWEEP_RANDOM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
+    let mut rng = Lcg(0xC0FFEE_1234_5678);
+    for _ in 0..n_random {
+        v.push(Param {
+            ordering: rng.pick(&M_ORDERING),
+            nemin: rng.pick(&M_NEMIN),
+            relax_width: rng.pick(&M_RELAX),
+            panel_nb: rng.pick(&M_PANEL_NB),
+            scalar_gate: rng.pick(&M_SCALAR_GATE),
+            par_gemm: rng.pick(&M_PAR_GEMM),
+            par_cdiv: rng.pick(&M_PAR_CDIV),
+            use_gemm_schur: rng.pick(&M_SCHUR),
+            method: rng.pick(&M_METHOD),
+            threads: 0,
+        });
+    }
+    // Dedup (OFAT re-emits the baseline value of each knob).
+    let mut uniq: Vec<Param> = Vec::new();
+    for p in v {
+        if !uniq.contains(&p) {
+            uniq.push(p);
         }
     }
-    v
+    uniq
 }
 
 fn residual_sym(a: &CscMatrix<C>, x: &[C], b: &[C]) -> f64 {
@@ -389,16 +453,26 @@ fn ordering_name(o: OrderingMethod) -> &'static str {
     }
 }
 
-/// Canonical analysis summary: structural features + the a-priori memory/flops
-/// used for the resource gates. `None` if the matrix fails to analyze.
-fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, u64)> {
+fn method_name(m: FactorMethod) -> &'static str {
+    match m {
+        FactorMethod::LeftLooking => "left_looking",
+        FactorMethod::Multifrontal => "multifrontal",
+    }
+}
+
+/// Canonical analysis summary: structural features + the a-priori per-path
+/// memory estimates (left-looking, multifrontal) + flops, used for the resource
+/// gates. `None` if the matrix fails to analyze.
+fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, u64)> {
+    let mb = |b: u64| b as f64 / 1048576.0;
     match mat {
         Mat::Sym(a) => {
             let sym = LdltSymbolic::analyze(a).ok()?;
             let est = sym.estimate_memory::<C>();
             Some((
                 StructuralFeatures::from_symmetric(a, &sym),
-                est.transient_peak_bytes as f64 / 1048576.0,
+                mb(est.transient_peak_bytes),
+                mb(est.mf_transient_peak_bytes),
                 est.factor_flops,
             ))
         }
@@ -407,7 +481,8 @@ fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, u64)> {
             let est = sym.estimate_memory::<C>();
             Some((
                 StructuralFeatures::from_general(a, &sym),
-                est.transient_peak_bytes as f64 / 1048576.0,
+                mb(est.transient_peak_bytes),
+                mb(est.mf_transient_peak_bytes),
                 est.factor_flops,
             ))
         }
@@ -448,7 +523,7 @@ fn main() {
     let mut n_records = 0usize;
     let mut n_skipped_mem = 0usize;
     for entry in &corpus {
-        let Some((feat, est_mb, flops)) = canonical(&entry.mat) else {
+        let Some((feat, ll_mb, mf_mb, flops)) = canonical(&entry.mat) else {
             eprintln!("[sweep] skip {}: analyze failed", entry.name);
             continue;
         };
@@ -456,8 +531,11 @@ fn main() {
             Mat::Sym(a) => (a.n, a.values.len()),
             Mat::Unsym(a) => (a.n, a.values.len()),
         };
-        if est_mb > mem_cap_mb {
-            eprintln!("[sweep] skip {} n={}: est {:.0} MB > cap {:.0} MB", entry.name, n, est_mb, mem_cap_mb);
+        // Matrix-level gate: skip only if even the cheaper path exceeds the cap
+        // (the per-combo gate below then drops just the MF combos when MF alone is
+        // over budget).
+        if ll_mb.min(mf_mb) > mem_cap_mb {
+            eprintln!("[sweep] skip {} n={}: est {:.0} MB > cap {:.0} MB", entry.name, n, ll_mb.min(mf_mb), mem_cap_mb);
             n_skipped_mem += 1;
             continue;
         }
@@ -472,19 +550,34 @@ fn main() {
         };
         let feat_json = serde_json::to_value(&feat).expect("feat json");
         eprintln!(
-            "[sweep] {} n={} nnz={} est={:.0}MB flops={:.1e} combos={}",
-            entry.name, n, nnz, est_mb, flops as f64, combos.len()
+            "[sweep] {} n={} nnz={} est_ll={:.0}MB est_mf={:.0}MB flops={:.1e} combos={}",
+            entry.name, n, nnz, ll_mb, mf_mb, flops as f64, combos.len()
         );
 
         for p in combos {
+            // Per-combo memory gate: drop a combo whose path's a-priori peak is
+            // over the cap (so a passing matrix never OOMs on its MF combos).
+            let combo_est = if p.method == FactorMethod::Multifrontal { mf_mb } else { ll_mb };
+            if combo_est > mem_cap_mb {
+                continue;
+            }
             // One unified settings object drives both phases: analyze reads the
-            // ordering/nemin subset, factor reads method/threads + the kernel knobs
-            // (par_cdiv) - per-call, no process-wide state.
+            // ordering/nemin/relax subset, factor reads method/threads + the kernel
+            // knobs (panel_nb, GEMM thresholds, Schur) - per-call, no global state.
+            let relax = (p.relax_width > 0)
+                .then(|| RelaxAmalgamation { max_width: p.relax_width, max_extra_rows: 64 });
             let s = SolverSettings::default()
                 .with_ordering(p.ordering)
                 .with_nemin(p.nemin)
-                .with_gemm_thresholds(GemmThresholds { par_cdiv: p.par_cdiv, ..GemmThresholds::default() })
-                .with_method(FactorMethod::LeftLooking)
+                .with_relax(relax)
+                .with_panel_nb(p.panel_nb)
+                .with_gemm_thresholds(GemmThresholds {
+                    scalar_gate: p.scalar_gate,
+                    par_gemm: p.par_gemm,
+                    par_cdiv: p.par_cdiv,
+                })
+                .with_use_gemm_schur(p.use_gemm_schur)
+                .with_method(p.method)
                 .with_threads(p.threads);
 
             let (fac_ms, fill, peak_mb, res) = match &entry.mat {
@@ -519,11 +612,14 @@ fn main() {
                 "features": feat_json,
                 "params": {
                     "ordering": ordering_name(p.ordering), "nemin": p.nemin,
-                    "par_cdiv": p.par_cdiv, "threads": p.threads, "method": "left_looking",
+                    "relax_width": p.relax_width, "panel_nb": p.panel_nb,
+                    "scalar_gate": p.scalar_gate, "par_gemm": p.par_gemm, "par_cdiv": p.par_cdiv,
+                    "use_gemm_schur": p.use_gemm_schur, "method": method_name(p.method),
+                    "threads": p.threads,
                 },
                 "metrics": {
                     "factor_ms": fac_ms, "factor_nnz": fill, "peak_mb": peak_mb,
-                    "est_transient_mb": est_mb, "residual": res,
+                    "est_transient_mb": combo_est, "residual": res,
                 },
             });
             writeln!(out, "{}", rec).expect("write rec");
