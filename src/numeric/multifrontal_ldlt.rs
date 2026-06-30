@@ -325,22 +325,43 @@ pub(crate) fn in_scoped_pool<R: Send>(
     }
 }
 
-/// Maximum supernode-tree depth (root-to-leaf), the recursion depth of the tree
-/// factorization. A postorder DP over the supernodes (children precede their
-/// parent in the numbering); O(#supernodes).
+/// Maximum supernode-tree height (root-to-leaf), the recursion depth of the tree
+/// factorization. Computed by an **iterative** post-order DFS (its own heap stack,
+/// so it never recurses) and so is correct for any supernode numbering - not
+/// assuming children precede their parent. O(#supernodes).
 pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
     let nsuper = sym.supernodes.len();
-    let mut depth = vec![0usize; nsuper];
-    let mut max_d = 0;
+    let mut height = vec![0usize; nsuper];
+    let mut is_child = vec![false; nsuper];
     for s in 0..nsuper {
-        let mut d = 1;
         for &c in &sym.supernodes[s].children {
-            d = d.max(depth[c] + 1);
+            is_child[c] = true;
         }
-        depth[s] = d;
-        max_d = max_d.max(d);
     }
-    max_d
+    let mut max_h = 0;
+    let mut stack: Vec<(usize, usize)> = Vec::new(); // (node, next child index)
+    for r in 0..nsuper {
+        if is_child[r] {
+            continue;
+        }
+        stack.push((r, 0));
+        while let Some(&(node, ci)) = stack.last() {
+            let children = &sym.supernodes[node].children;
+            if ci < children.len() {
+                stack.last_mut().unwrap().1 += 1;
+                stack.push((children[ci], 0));
+            } else {
+                let mut h = 1;
+                for &c in children {
+                    h = h.max(height[c] + 1);
+                }
+                height[node] = h;
+                max_h = max_h.max(h);
+                stack.pop();
+            }
+        }
+    }
+    max_h
 }
 
 /// Worker-thread stack size for a tree of the given depth. The recursive tree
@@ -352,14 +373,13 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
 /// committed only as the recursion descends), instead of a fixed guess that a
 /// deep enough chain overflows. `0` (shallow trees) keeps the rayon default.
 pub(crate) fn stack_for_depth(depth: usize) -> usize {
-    const FRAME: usize = 16 * 1024; // per-frame budget (measured ~6.7 KB, ~2.4x margin)
-    const SHALLOW: usize = 4096; // below this the default stack is plenty
-    const MAX: usize = 4 * 1024 * 1024 * 1024; // 4 GB cap (depth ~256k)
-    if depth <= SHALLOW {
-        0
-    } else {
-        depth.saturating_mul(FRAME).min(MAX)
-    }
+    const FRAME: usize = 32 * 1024; // per-frame budget (LL ~6.7 KB measured; MF larger)
+    const MIN: usize = 16 * 1024 * 1024; // floor (>= the rayon default; covers ~depth 500)
+    const MAX: usize = 8 * 1024 * 1024 * 1024; // 8 GB cap (depth ~256k)
+    // Always set an explicit, depth-proportional stack - never fall back to the
+    // small rayon default, which a moderate depth (a few hundred supernodes, as a
+    // banded matrix amalgamates to) already overflows.
+    depth.saturating_mul(FRAME).clamp(MIN, MAX)
 }
 
 impl Default for SolverSettings {

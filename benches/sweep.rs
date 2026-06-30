@@ -510,6 +510,10 @@ fn main() {
     if std::env::var("RLA_SWEEP_SUITESPARSE").is_ok() {
         corpus.extend(suitesparse_entries());
     }
+    // Optional name filter (substring) to sweep a subset, e.g. `RLA_SWEEP_ONLY=banded`.
+    if let Ok(only) = std::env::var("RLA_SWEEP_ONLY") {
+        corpus.retain(|e| e.name.contains(&only));
+    }
     let full_grid = grid();
     eprintln!(
         "[sweep] {} matrices, up to {} combos, mem_cap={:.0} MB, grid_flop_cap={:.0e} -> {}",
