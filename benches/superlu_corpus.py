@@ -1,18 +1,25 @@
-"""SuperLU (scipy.sparse.linalg.splu) over the SuiteSparse corpus.
+"""SuperLU (scipy.sparse.linalg.splu) over the SuiteSparse corpus, with a
+per-matrix wall-clock cap.
 
 Adds a 5th solver to the corpus scaling study: loads the same cached `.mtx`
 files the Rust `bench_suite` corpus uses (populate them by running the Rust
-corpus bench first, which downloads via `matgen::download::fetch`), runs an
-exact SuperLU factor + solve per matrix, and appends JSONL records in the same
-schema as `bench_suite` (`solver="superlu"`), so `fit_scaling.py` can plot all
-solvers together.
+corpus bench first), runs an exact SuperLU factor + solve per matrix, and
+appends JSONL records in the `bench_suite` schema (`solver="superlu"`, a `time`
+and a `mem` record per matrix), so `fit_scaling.py` plots all solvers together.
 
-Run:  python benches/superlu_corpus.py            # default corpus list
-      RLA_BENCH_CORPUS=HB/bcsstk16,... python benches/superlu_corpus.py
-Env:  RLA_BENCH_OUT (default benches/bench_out/corpus.jsonl), RLA_MATGEN_CACHE.
+SuperLU does not exploit symmetry, so on 3D FEM matrices its fill (and factor
+time) can blow up to minutes. Each matrix is therefore factored in a **child
+process with a timeout** (`RLA_SUPERLU_TIMEOUT`, default 60 s); a matrix that
+exceeds it is killed and skipped (logged), so the run stays bounded.
+
+Run:  python benches/superlu_corpus.py            # orchestrator
+Env:  RLA_BENCH_OUT (default benches/bench_out/corpus.jsonl), RLA_MATGEN_CACHE,
+      RLA_BENCH_CORPUS, RLA_SUPERLU_TIMEOUT (seconds).
 """
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -23,40 +30,6 @@ import scipy.io as sio
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu
 
-try:
-    import psutil
-    _PROC = psutil.Process()
-except Exception:  # noqa: BLE001
-    _PROC = None
-
-
-def _rss_mb() -> float:
-    return _PROC.memory_info().rss / 1048576.0 if _PROC else 0.0
-
-
-def factor_with_peak(A):
-    """Run splu while sampling process RSS in a background thread; return
-    (lu, factor_ms, peak_rss_delta_mb). The peak is the resident growth over the
-    pre-factor baseline - the comparable 'peak memory used to factor'."""
-    base = _rss_mb()
-    peak = [base]
-    stop = threading.Event()
-
-    def sample():
-        while not stop.is_set():
-            peak[0] = max(peak[0], _rss_mb())
-            time.sleep(0.002)
-
-    th = threading.Thread(target=sample, daemon=True)
-    th.start()
-    t = time.perf_counter()
-    lu = splu(A)
-    fac = (time.perf_counter() - t) * 1e3
-    stop.set()
-    th.join()
-    return lu, fac, max(0.0, peak[0] - base)
-
-# The same default list as benches/bench_suite.rs `build_corpus`.
 DEFAULT = (
     "HB/bcsstk27,HB/bcsstk14,HB/bcsstk16,HB/bcsstk17,HB/bcsstk18,HB/bcsstk25,"
     "Cylshell/s3rmt3m3,Boeing/msc10848,Boeing/crystk03,Boeing/bcsstk39,"
@@ -70,6 +43,12 @@ DEFAULT = (
     "Bai/qc2534,Bai/mhd4800b"
 )
 
+try:
+    import psutil
+    _PROC = psutil.Process()
+except Exception:  # noqa: BLE001
+    _PROC = None
+
 
 def cache_dir() -> Path:
     d = os.environ.get("RLA_MATGEN_CACHE")
@@ -77,55 +56,87 @@ def cache_dir() -> Path:
 
 
 def rhs(n: int) -> np.ndarray:
-    # Matches the Rust corpus RHS so residuals are comparable.
     i = np.arange(n)
     return (i % 7 - 3).astype(np.complex128) + 1j * ((i % 5 - 2) * 0.5)
 
 
+def _rss_mb() -> float:
+    return _PROC.memory_info().rss / 1048576.0 if _PROC else 0.0
+
+
+def factor_one(name: str) -> None:
+    """Child-process worker: factor one matrix, print its two JSONL records to
+    stdout (sampling RSS for the peak), or print nothing on failure."""
+    mtx = cache_dir() / f"{name}.mtx"
+    A = sio.mmread(str(mtx)).tocsc().astype(np.complex128)
+    n, nnz = A.shape[0], A.nnz
+    b = rhs(n)
+    base, peak, stop = _rss_mb(), [_rss_mb()], threading.Event()
+
+    def sample():
+        while not stop.is_set():
+            peak[0] = max(peak[0], _rss_mb())
+            time.sleep(0.002)
+
+    th = threading.Thread(target=sample, daemon=True)
+    th.start()
+    t = time.perf_counter()
+    lu = splu(A)
+    fac = (time.perf_counter() - t) * 1e3
+    stop.set()
+    th.join()
+    peak_mb = max(0.0, peak[0] - base)
+    t = time.perf_counter()
+    x = lu.solve(b)
+    slv = (time.perf_counter() - t) * 1e3
+    res = float(np.linalg.norm(A @ x - b) / max(np.linalg.norm(b), 1e-300))
+    rec = {
+        "solver": "superlu", "family": "corpus", "name": name,
+        "n": int(n), "nnz": int(nnz), "threads": 1, "ana_ms": 0.0,
+        "fac_ms": fac, "slv_ms": slv, "fill": int(lu.L.nnz + lu.U.nnz), "res": res,
+    }
+    print(json.dumps({**rec, "metric": "time", "mem_mb": 0.0}))
+    print(json.dumps({**rec, "metric": "mem", "mem_mb": peak_mb}))
+
+
 def main() -> None:
+    timeout = float(os.environ.get("RLA_SUPERLU_TIMEOUT", "60"))
     out_path = os.environ.get("RLA_BENCH_OUT", "benches/bench_out/corpus.jsonl")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     names = [gn.split("/")[-1] for gn in os.environ.get("RLA_BENCH_CORPUS", DEFAULT).split(",")]
     cache = cache_dir()
-    print(f"[superlu] corpus from {cache}  ->  {out_path}")
+    print(f"[superlu] corpus from {cache}  timeout {timeout:.0f}s  ->  {out_path}")
 
-    done = 0
+    done = skipped = 0
     with open(out_path, "a") as out:
         for name in names:
-            mtx = cache / f"{name}.mtx"
-            if not mtx.exists():
-                print(f"[superlu] skip {name}: {mtx} not cached (run the Rust corpus bench first)")
+            if not (cache / f"{name}.mtx").exists():
+                print(f"[superlu] skip {name}: not cached (run the Rust corpus bench first)")
                 continue
             try:
-                A = sio.mmread(str(mtx)).tocsc().astype(np.complex128)
-            except Exception as e:  # noqa: BLE001
-                print(f"[superlu] skip {name}: read {type(e).__name__} {str(e)[:60]}")
-                continue
-            n, nnz = A.shape[0], A.nnz
-            b = rhs(n)
-            try:
-                lu, fac, peak_mb = factor_with_peak(A)
                 t = time.perf_counter()
-                x = lu.solve(b)
-                slv = (time.perf_counter() - t) * 1e3
-                res = float(np.linalg.norm(A @ x - b) / max(np.linalg.norm(b), 1e-300))
-                fill = int(lu.L.nnz + lu.U.nnz)
-            except Exception as e:  # noqa: BLE001
-                print(f"[superlu] {name}: FACTOR/SOLVE FAILED {type(e).__name__} {str(e)[:60]}")
+                r = subprocess.run([sys.executable, __file__, "--one", name],
+                                   capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                print(f"[superlu] CAP {name}: exceeded {timeout:.0f}s, skipped")
+                skipped += 1
                 continue
-            base = {
-                "solver": "superlu", "family": "corpus", "name": name,
-                "n": int(n), "nnz": int(nnz), "threads": 1, "ana_ms": 0.0,
-                "fac_ms": fac, "slv_ms": slv, "fill": fill, "res": res,
-            }
-            # Two records, matching the Rust bench's separate time / memory passes.
-            out.write(json.dumps({**base, "metric": "time", "mem_mb": 0.0}) + "\n")
-            out.write(json.dumps({**base, "metric": "mem", "mem_mb": peak_mb}) + "\n")
+            lines = [l for l in r.stdout.splitlines() if l.startswith("{")]
+            if len(lines) != 2:
+                print(f"[superlu] skip {name}: failed ({r.stderr.strip()[:80]})")
+                continue
+            for l in lines:
+                out.write(l + "\n")
+            rec = json.loads(lines[0])
             done += 1
-            print(f"[superlu] {name:<14} n={n:>7} nnz={nnz:>9}  fac {fac:>9.1f}ms  "
-                  f"peak {peak_mb:>7.1f}MB  res {res:.1e}")
-    print(f"[superlu] done: {done} matrices appended")
+            wall = (time.perf_counter() - t)
+            print(f"[superlu] {name:<14} n={rec['n']:>7} nnz={rec['nnz']:>9}  "
+                  f"fac {rec['fac_ms']:>9.1f}ms  res {rec['res']:.1e}  ({wall:.1f}s)")
+    print(f"[superlu] done: {done} appended, {skipped} capped")
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--one":
+        factor_one(sys.argv[2])
+    else:
+        main()
