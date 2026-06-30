@@ -25,9 +25,18 @@ pub struct MemoryEstimate {
     /// Peak of the **live** dense panels under the refcount free-schedule - what
     /// the left-looking path actually holds at once.
     pub panel_live_peak_bytes: u64,
-    /// Estimated overall transient peak: live panels + accumulated compact factor +
-    /// the equilibrated input copy/copies. The number to compare against RAM.
+    /// Estimated overall transient peak for the **left-looking** path: live panels
+    /// + accumulated compact factor + the equilibrated input copy/copies. The
+    /// number to compare against RAM for [`FactorMethod::LeftLooking`](crate::FactorMethod::LeftLooking).
     pub transient_peak_bytes: u64,
+    /// Estimated transient peak for the **multifrontal** path: the
+    /// contribution-block-stack model (the active front plus the live CBs of
+    /// completed subtrees not yet consumed by their parent) + factor + input.
+    /// Multifrontal holds more transiently than left-looking, so this is the
+    /// number to compare against RAM for [`FactorMethod::Multifrontal`](crate::FactorMethod::Multifrontal).
+    /// Defaults to [`transient_peak_bytes`](Self::transient_peak_bytes) until the
+    /// path-specific model fills it.
+    pub mf_transient_peak_bytes: u64,
     /// Geometric factorization work proxy `Σ nrow²·ncol` over supernodes (type-
     /// independent). Divide by a calibrated geometric-flops/s rate for a runtime
     /// estimate - see [`est_runtime_ms`](Self::est_runtime_ms).
@@ -124,15 +133,51 @@ pub(crate) fn estimate_left_looking(
     // small absolute floor - tuned so the bound stays ≥ the measured peak across
     // sizes (validated: est/measured ≈ 1.0-1.2×), never under-predicting.
     let scratch = (panels_all + factor_bytes) / 4 + 32_000_000;
+    let transient = panels_all + factor_bytes + input_bytes + scratch;
     MemoryEstimate {
         value_bytes,
         factor_nnz: factor_bytes / (value_bytes as u64 + 8).max(1),
         factor_bytes,
         panels_all_bytes: panels_all,
         panel_live_peak_bytes: panel_live_peak,
-        transient_peak_bytes: panels_all + factor_bytes + input_bytes + scratch,
+        transient_peak_bytes: transient,
+        // Default to the left-looking peak; the multifrontal model overrides this
+        // in the path-aware caller (it needs the assembly-tree child structure).
+        mf_transient_peak_bytes: transient,
         factor_flops: 0, // set by the caller (needs supernode dimensions)
     }
+}
+
+/// Multifrontal transient-peak model: the **contribution-block stack** under the
+/// rayon work-stealing schedule. Unlike left-looking, multifrontal holds dense
+/// fronts plus the contribution blocks (`cnrow²` each) of completed subtrees not
+/// yet consumed by their parent. The driver factors a whole assembly-tree level
+/// concurrently, so the conservative peak is, over the levels, the level's total
+/// front memory (`Σ nrow²`) plus the contribution blocks of its children feeding
+/// the assembly. Assuming a full level live at once never under-predicts at any
+/// thread count - the transient the left-looking estimate does not capture.
+pub(crate) fn estimate_multifrontal_active_peak(
+    by_level: &[Vec<usize>],
+    nrow: &dyn Fn(usize) -> u64,
+    ncol: &dyn Fn(usize) -> u64,
+    children: &[Vec<usize>],
+    value_bytes: u64,
+) -> u64 {
+    let cb = |s: usize| -> u64 {
+        let cn = nrow(s).saturating_sub(ncol(s));
+        cn * cn * value_bytes
+    };
+    let mut peak: u64 = 0;
+    for level in by_level {
+        let fronts: u64 = level.iter().map(|&s| nrow(s) * nrow(s) * value_bytes).sum();
+        let child_cb: u64 = level
+            .iter()
+            .flat_map(|&s| children[s].iter())
+            .map(|&c| cb(c))
+            .sum();
+        peak = peak.max(fronts + child_cb);
+    }
+    peak
 }
 
 // ---------------------------------------------------------------------------

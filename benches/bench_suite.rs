@@ -626,9 +626,9 @@ fn main() {
                 let scratch = mb(e.transient_peak_bytes) - mb(e.panels_all_bytes) - mb(e.factor_bytes);
                 let _ = writeln!(
                     out,
-                    "{{\"name\":\"{name}\",\"n\":{},\"panels_mb\":{:.1},\"factor_mb\":{:.1},\"scratch_mb\":{:.1},\"transient_mb\":{:.1},\"freed_floor_mb\":{:.1}}}",
+                    "{{\"name\":\"{name}\",\"n\":{},\"panels_mb\":{:.1},\"factor_mb\":{:.1},\"scratch_mb\":{:.1},\"transient_mb\":{:.1},\"mf_transient_mb\":{:.1},\"freed_floor_mb\":{:.1}}}",
                     mat.n(), mb(e.panels_all_bytes), mb(e.factor_bytes), scratch.max(0.0),
-                    mb(e.transient_peak_bytes), mb(e.panel_live_peak_bytes),
+                    mb(e.transient_peak_bytes), mb(e.mf_transient_peak_bytes), mb(e.panel_live_peak_bytes),
                 );
             }
             continue;

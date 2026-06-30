@@ -36,8 +36,9 @@ def measured_peak(corpus, solver):
 
 
 def memory_breakdown(est, corpus, outdir):
-    """Grouped (log axis): conservative upper bound + panel-freed estimate vs the
-    measured peak of both RSLAB paths."""
+    """Per-path total-peak estimate vs measured (grouped, log axis): for each of
+    the left-looking and multifrontal paths, its own a-priori transient-peak
+    estimate next to its measured peak. The estimate should stay >= measured."""
     ll, mf = measured_peak(corpus, "ll"), measured_peak(corpus, "mf")
     rows = sorted((r for r in est if r["name"] in ll or r["name"] in mf), key=lambda r: r["n"])
     if not rows:
@@ -45,17 +46,18 @@ def memory_breakdown(est, corpus, outdir):
         return
     names = [r["name"] for r in rows]
     x = np.arange(len(names))
-    worst = [r["transient_mb"] for r in rows]
-    floor = [r["freed_floor_mb"] for r in rows]
+    ll_est = [r["transient_mb"] for r in rows]
+    mf_est = [r["mf_transient_mb"] for r in rows]
     m_ll = [ll.get(r["name"], np.nan) for r in rows]
     m_mf = [mf.get(r["name"], np.nan) for r in rows]
+    LL_LIGHT, MF_LIGHT = "#93c5fd", "#a5f3fc"  # lighter = estimate, solid = measured
     w = 0.21
     fig, ax = plt.subplots(figsize=(13, 6.5))
-    ax.bar(x - 1.5 * w, worst, w, label="worst-case estimate (all panels)", color=GRAY, alpha=0.6)
-    ax.bar(x - 0.5 * w, floor, w, label="panel-freed estimate", color=DARKGRAY, alpha=0.85)
-    ax.bar(x + 0.5 * w, m_ll, w, label="measured peak - LL (left-looking)", color=BLUE)
-    ax.bar(x + 1.5 * w, m_mf, w, label="measured peak - MF (multifrontal)", color=CYAN)
-    ax.set_title("RSLAB factor memory: a-priori estimate vs measured (LL & MF)")
+    ax.bar(x - 1.5 * w, ll_est, w, label="LL estimate", color=LL_LIGHT)
+    ax.bar(x - 0.5 * w, m_ll, w, label="LL measured", color=BLUE)
+    ax.bar(x + 0.5 * w, mf_est, w, label="MF estimate", color=MF_LIGHT)
+    ax.bar(x + 1.5 * w, m_mf, w, label="MF measured", color=CYAN)
+    ax.set_title("RSLAB factor memory: per-path a-priori estimate vs measured peak")
     ax.set_ylabel("memory (MB)")
     ax.set_yscale("log")
     ax.set_xticks(x)
@@ -65,8 +67,10 @@ def memory_breakdown(est, corpus, outdir):
     fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
     print(f"wrote {outdir / 'memory_breakdown.png'}")
     g = lambda xs: math.exp(sum(math.log(v) for v in xs) / len(xs))
-    ov_ll = [w_ / ll[r["name"]] for w_, r in zip(worst, rows) if r["name"] in ll]
-    print(f"  worst-case / measured-LL: geomean {g(ov_ll):.2f}x ({len(ov_ll)} matrices, >=1 = conservative)")
+    for path, est_v, meas in (("LL", ll_est, ll), ("MF", mf_est, mf)):
+        ov = [e / meas[r["name"]] for e, r in zip(est_v, rows) if r["name"] in meas]
+        under = sum(1 for v in ov if v < 1.0)
+        print(f"  {path} estimate / measured: geomean {g(ov):.2f}x  ({under}/{len(ov)} under-predict)")
 
 
 def memory_composition(est, outdir):

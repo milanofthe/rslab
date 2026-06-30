@@ -131,14 +131,16 @@ factor-dominated 3D - and it is the natural workflow for value sweeps.
 
 ![Memory estimate vs measured](benches/bench_out/memory_breakdown.png)
 
-RSLAB computes a factor-memory estimate from the symbolic analysis alone, before
-any numeric work. Grouped bars per matrix (log axis, never stacked): the
-conservative upper bound (all dense panels resident + factor + input/scratch),
-the panel-freed estimate, and the **measured** peak of both paths. The upper
-bound stays above the left-looking peak (geomean ~1.5x, never under-predicting),
-so it is safe to compare against RAM before factoring; the multifrontal path
-carries a contribution-block stack the left-looking estimate does not model, so
-its measured peak can exceed the bound on a few matrices.
+RSLAB estimates the factor-memory peak from the symbolic analysis alone, before
+any numeric work, with a **separate model per path**: the left-looking estimate
+(live panels + factor + input/scratch) and the multifrontal estimate (the
+contribution-block-stack model - an assembly-tree level's fronts plus the live
+CBs feeding its assembly, which the left-looking model does not capture). Grouped
+bars per matrix, log axis: each path's estimate next to its measured peak. Both
+estimates stay above the measured peak (geomean ~1.5x LL, ~1.7x MF, never
+under-predicting across the corpus), so either is safe to compare against RAM for
+fail-fast scheduling. Multifrontal genuinely holds more transiently (the CB
+stack), which its own estimate now reflects.
 
 ![Memory composition](benches/bench_out/memory_composition.png)
 

@@ -305,7 +305,7 @@ impl LdltSymbolic {
     /// [`LuSymbolic::estimate_memory`](crate::LuSymbolic::estimate_memory).
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
-        let Some((sym, _levels)) = self.symbolic.sym_and_levels() else {
+        let Some((sym, levels)) = self.symbolic.sym_and_levels() else {
             return crate::diagnostics::estimate_left_looking(0, &|_| 0, &|_| 0, &[], value_bytes, 0);
         };
         let nsuper = sym.supernodes.len();
@@ -349,6 +349,27 @@ impl LdltSymbolic {
                 nr * nr * nc
             })
             .sum();
+        // Multifrontal transient: the contribution-block-stack model (the
+        // left-looking `transient_peak_bytes` does not capture the CB stack).
+        let children: Vec<Vec<usize>> =
+            sym.supernodes.iter().map(|s| s.children.clone()).collect();
+        let mf_active = crate::diagnostics::estimate_multifrontal_active_peak(
+            levels,
+            &|s| rs[s].len() as u64,
+            &|s| sym.supernodes[s].ncol as u64,
+            &children,
+            value_bytes as u64,
+        );
+        let mf_scratch = (mf_active + est.factor_bytes) / 4 + 32_000_000;
+        let mf_base = mf_active + est.factor_bytes + input_bytes + mf_scratch;
+        // Work-stealing overlap margin: the rayon scheduler does not run one tree
+        // level cleanly at a time - a deep subtree's leaves can be live while
+        // another subtree's mid-level fronts factor, so fronts of more than one
+        // level coexist, plus the per-front extract buffer. A fixed 1.4x margin
+        // keeps the bound above the measured 24-thread peak across the corpus
+        // (the structural / 3D matrices a single-level model under-predicted by up
+        // to ~25%), matching the left-looking estimate's conservatism.
+        est.mf_transient_peak_bytes = mf_base * 7 / 5;
         est
     }
 
