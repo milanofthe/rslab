@@ -12,16 +12,16 @@ use std::time::Instant;
 use num_complex::Complex;
 use rslab::matgen::{stencil, structured};
 use rslab::{
-    set_panel_nb, AnalyzeOptions, CscMatrix, FactorMethod, FactorOptions, LdltSymbolic,
-    RelaxAmalgamation,
+    CscMatrix, FactorMethod, LdltSymbolic, RelaxAmalgamation, SolverSettings,
 };
 
 type C = Complex<f64>;
 
-fn factor_ms(sym: &LdltSymbolic, a: &CscMatrix<C>, threads: usize) -> f64 {
-    let opts = FactorOptions::default()
+fn factor_ms(sym: &LdltSymbolic, a: &CscMatrix<C>, threads: usize, nb: usize) -> f64 {
+    let opts = SolverSettings::default()
         .with_method(FactorMethod::LeftLooking)
-        .with_threads(threads);
+        .with_threads(threads)
+        .with_panel_nb(nb);
     let t = Instant::now();
     let f = sym.factor(a, &opts).expect("factor");
     let ms = t.elapsed().as_secs_f64() * 1e3;
@@ -34,28 +34,24 @@ fn run(name: &str, a: CscMatrix<C>) {
     let nrow_max = sym.front_dims().iter().map(|&(_, r)| r).max().unwrap_or(0);
     eprintln!("\n=== {name}  n={}  nnz={}  front_nrow_max={}", a.n, a.values.len(), nrow_max);
     // NB sensitivity: for each panel width report the t1 work split (via
-    // RLA_PROFILE) and the 1->12 thread scaling.
+    // RLA_PROFILE) and the 1->12 thread scaling. The panel width is now a per-call
+    // `SolverSettings` knob, not a process-wide toggle.
     for &nb in &[32usize, 64, 96, 128] {
-        set_panel_nb(nb);
-        let _ = factor_ms(&sym, &a, 1); // warm up + emit the t1 getf2/schur split
-        let t1 = factor_ms(&sym, &a, 1).min(factor_ms(&sym, &a, 1));
-        let t12 = factor_ms(&sym, &a, 12).min(factor_ms(&sym, &a, 12));
+        let _ = factor_ms(&sym, &a, 1, nb); // warm up + emit the t1 getf2/schur split
+        let t1 = factor_ms(&sym, &a, 1, nb).min(factor_ms(&sym, &a, 1, nb));
+        let t12 = factor_ms(&sym, &a, 12, nb).min(factor_ms(&sym, &a, 12, nb));
         eprintln!(
             "  NB={:>3}  t1={:>9.1}ms  t12={:>9.1}ms  speedup {:.2}x",
             nb, t1, t12, t1 / t12
         );
     }
-    set_panel_nb(64);
 }
 
-fn factor_ms_opts(a: &CscMatrix<C>, aopts: &AnalyzeOptions, threads: usize) -> (f64, usize, usize) {
-    let sym = LdltSymbolic::analyze_with(a, aopts).expect("analyze");
+fn factor_ms_opts(a: &CscMatrix<C>, opts: &SolverSettings) -> (f64, usize, usize) {
+    let sym = LdltSymbolic::analyze_with(a, opts).expect("analyze");
     let fmax = sym.front_dims().iter().map(|&(_, r)| r).max().unwrap_or(0);
-    let opts = FactorOptions::default()
-        .with_method(FactorMethod::LeftLooking)
-        .with_threads(threads);
     let t = Instant::now();
-    let f = sym.factor(a, &opts).expect("factor");
+    let f = sym.factor(a, opts).expect("factor");
     let ms = t.elapsed().as_secs_f64() * 1e3;
     (ms, f.factor_nnz(), fmax)
 }
@@ -65,11 +61,12 @@ fn factor_ms_opts(a: &CscMatrix<C>, aopts: &AnalyzeOptions, threads: usize) -> (
 fn run_width(name: &str, a: CscMatrix<C>) {
     eprintln!("\n=== width {name}  n={}  nnz={}", a.n, a.values.len());
     for mw in [128usize, 256, 512, 1024] {
-        let aopts = AnalyzeOptions::default()
+        let base = SolverSettings::default()
+            .with_method(FactorMethod::LeftLooking)
             .with_relax(Some(RelaxAmalgamation { max_width: mw, max_extra_rows: 64 }));
-        let _ = factor_ms_opts(&a, &aopts, 1); // warm + emit split
-        let (t1, fill, fmax) = factor_ms_opts(&a, &aopts, 1);
-        let (t12, _, _) = factor_ms_opts(&a, &aopts, 12);
+        let _ = factor_ms_opts(&a, &base.clone().with_threads(1)); // warm + emit split
+        let (t1, fill, fmax) = factor_ms_opts(&a, &base.clone().with_threads(1));
+        let (t12, _, _) = factor_ms_opts(&a, &base.clone().with_threads(12));
         eprintln!(
             "  max_width={:>4}  front_nrow_max={:>5}  fill={:>9}  t1={:>8.1}ms  t12={:>8.1}ms  speedup {:.2}x",
             mw, fmax, fill, t1, t12, t1 / t12

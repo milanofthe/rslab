@@ -35,8 +35,8 @@ use std::time::Instant;
 use num_complex::Complex;
 use rslab::matgen::{random, stencil, structured};
 use rslab::{
-    set_gemm_thresholds, AnalyzeOptions, CscMatrix, FactorMethod, FactorOptions, GemmThresholds,
-    GeneralCsc, LdltSymbolic, LuSymbolic, OrderingMethod, StructuralFeatures,
+    CscMatrix, FactorMethod, GemmThresholds, GeneralCsc, LdltSymbolic, LuSymbolic, OrderingMethod,
+    SolverSettings, StructuralFeatures,
 };
 
 type C = Complex<f64>;
@@ -477,19 +477,23 @@ fn main() {
         );
 
         for p in combos {
-            set_gemm_thresholds(GemmThresholds { par_cdiv: p.par_cdiv, ..GemmThresholds::default() });
-            let aopts = AnalyzeOptions::default().with_ordering(p.ordering).with_nemin(p.nemin);
-            let fopts = FactorOptions::default()
+            // One unified settings object drives both phases: analyze reads the
+            // ordering/nemin subset, factor reads method/threads + the kernel knobs
+            // (par_cdiv) - per-call, no process-wide state.
+            let s = SolverSettings::default()
+                .with_ordering(p.ordering)
+                .with_nemin(p.nemin)
+                .with_gemm_thresholds(GemmThresholds { par_cdiv: p.par_cdiv, ..GemmThresholds::default() })
                 .with_method(FactorMethod::LeftLooking)
                 .with_threads(p.threads);
 
             let (fac_ms, fill, peak_mb, res) = match &entry.mat {
                 Mat::Sym(a) => {
-                    let Ok(sym) = LdltSymbolic::analyze_with(a, &aopts) else { continue };
+                    let Ok(sym) = LdltSymbolic::analyze_with(a, &s) else { continue };
                     let b: Vec<C> = (0..a.n).map(|i| c(i as f64 % 7.0 - 3.0, 1.0)).collect();
                     meter_reset();
                     let t = Instant::now();
-                    let Ok(f) = sym.factor(a, &fopts) else { meter_peak_mb(); continue };
+                    let Ok(f) = sym.factor(a, &s) else { meter_peak_mb(); continue };
                     let ms = t.elapsed().as_secs_f64() * 1e3;
                     let peak = meter_peak_mb();
                     let x = f.solve(&b).unwrap_or_default();
@@ -497,11 +501,11 @@ fn main() {
                     (ms, f.factor_nnz(), peak, res)
                 }
                 Mat::Unsym(a) => {
-                    let Ok(sym) = LuSymbolic::analyze_with(a, &aopts) else { continue };
+                    let Ok(sym) = LuSymbolic::analyze_with(a, &s) else { continue };
                     let b: Vec<C> = (0..a.n).map(|i| c(i as f64 % 7.0 - 3.0, 1.0)).collect();
                     meter_reset();
                     let t = Instant::now();
-                    let Ok(f) = sym.factor(a, &fopts) else { meter_peak_mb(); continue };
+                    let Ok(f) = sym.factor(a, &s) else { meter_peak_mb(); continue };
                     let ms = t.elapsed().as_secs_f64() * 1e3;
                     let peak = meter_peak_mb();
                     let x = f.solve(&b).unwrap_or_default();
@@ -526,7 +530,6 @@ fn main() {
             n_records += 1;
         }
     }
-    set_gemm_thresholds(GemmThresholds::default());
     eprintln!(
         "[sweep] done: {} records, {} skipped (mem cap) -> {}",
         n_records, n_skipped_mem, out_path

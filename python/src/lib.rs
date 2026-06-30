@@ -26,7 +26,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use rslab::{
-    CscMatrix, FactorMethod, FactorOptions, GeneralCsc, LdltSolver, LuSolver, MemoryMode,
+    CscMatrix, FactorMethod, SolverSettings, GeneralCsc, LdltSolver, LuSolver, MemoryMode,
     RslabError, Scalar, ZeroPivotAction,
 };
 
@@ -35,7 +35,7 @@ fn map_err(e: RslabError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-/// Translate the Python-side keyword arguments into a core [`FactorOptions`].
+/// Translate the Python-side keyword arguments into a core [`SolverSettings`].
 #[allow(clippy::too_many_arguments)]
 fn build_opts(
     threads: Option<usize>,
@@ -44,10 +44,10 @@ fn build_opts(
     method: &str,
     memory: &str,
     force_accept: bool,
-) -> PyResult<FactorOptions> {
+) -> PyResult<SolverSettings> {
     let mut o = match preconditioner {
-        Some(floor) => FactorOptions::preconditioner(floor),
-        None => FactorOptions::default(),
+        Some(floor) => SolverSettings::preconditioner(floor),
+        None => SolverSettings::default(),
     };
     // `threads=None` keeps the core default (Threads::Auto - the per-matrix
     // predictor, up to all cores); an explicit value fixes the worker count.

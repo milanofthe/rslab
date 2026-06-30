@@ -34,7 +34,7 @@
 //! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!                                         &[2.0, 2.0, 2.0, -1.0])?;
 //! let analysis = LdltSymbolic::analyze(&a)?;                 // phase 1
-//! let factor = analysis.factor(&a, &FactorOptions::default())?; // 2/3
+//! let factor = analysis.factor(&a, &SolverSettings::default())?; // 2/3
 //! let x = factor.solve(&[1.0, 2.0, 3.0])?;
 //! # let _ = x; Ok(()) }
 //! ```
@@ -52,7 +52,7 @@
 //! let a = CscMatrix::<Complex<f64>>::from_triplets(
 //!     3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!     &[c(4.0, 1.0), c(4.0, 1.0), c(4.0, 1.0), c(-1.0, 0.2)])?;
-//! let opts = FactorOptions::preconditioner(1e-8).with_drop_tol(1e-2); // composable
+//! let opts = SolverSettings::preconditioner(1e-8).with_drop_tol(1e-2); // composable
 //! let m = LdltSolver::factor_with(&a, &opts)?;          // preconditioner
 //! let b = vec![c(1.0, 0.0); 3];
 //! let res = cocg(&a, &b, &m, 1e-10, 100)?;
@@ -97,7 +97,7 @@ pub mod tuning;
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use analysis::{recommend_threads_from, StructuralFeatures, SymbolicShape};
 pub use numeric::gemm_tuning::{
-    gemm_thresholds, get_panel_nb, set_gemm_thresholds, set_panel_nb, GemmThresholds,
+    GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
 };
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
@@ -107,10 +107,13 @@ pub use scalar::Scalar;
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
-    analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
-    set_use_gemm_schur, AnalyzeOptions, BlrMode, FactorMethod, FactorOptions, MemoryMode,
-    MultifrontalSymbolic, ReorderMode, Threads, ZeroPivotAction,
+    analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, BlrMode,
+    FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode, SolverSettings, Threads,
+    ZeroPivotAction,
 };
+// Deprecated pre-unification option aliases (now all `SolverSettings`).
+#[allow(deprecated)]
+pub use numeric::multifrontal_ldlt::{AnalyzeOptions, FactorOptions};
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,
@@ -151,7 +154,7 @@ pub mod prelude {
         read_mtx_complex,
         // matrices, options, scalar field
         CscMatrix,
-        FactorOptions,
+        SolverSettings,
         Factorization,
         RslabError,
         GeneralCsc,

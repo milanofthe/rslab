@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::prelude::*;
-use rslab::{factor_sparse_ldlt_with, FactorMethod, FactorOptions};
+use rslab::{factor_sparse_ldlt_with, FactorMethod, SolverSettings};
 
 type C = Complex<f64>;
 
@@ -159,7 +159,7 @@ fn run(k: usize) {
         ("multifrontal ", FactorMethod::Multifrontal),
         ("left-looking ", FactorMethod::LeftLooking),
     ] {
-        let opts = FactorOptions::default().with_method(method);
+        let opts = SolverSettings::default().with_method(method);
         let sampler = Sampler::start();
         let t = Instant::now();
         let (f, live) = live_peak(|| factor_sparse_ldlt_with(&a, &opts).unwrap());

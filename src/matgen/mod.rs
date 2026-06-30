@@ -195,7 +195,7 @@ mod integration {
     //! Every family must produce matrices the solver actually factors and solves -
     //! the whole point. Small instances, exact factorization, true residual.
     use super::*;
-    use crate::{FactorOptions, LdltSymbolic, LuSymbolic};
+    use crate::{SolverSettings, LdltSymbolic, LuSymbolic};
 
     type C = Complex<f64>;
 
@@ -205,7 +205,7 @@ mod integration {
 
     fn ldlt_resid(a: &CscMatrix<C>) -> f64 {
         let b = rhs(a.n);
-        let f = LdltSymbolic::analyze(a).unwrap().factor(a, &FactorOptions::default()).unwrap();
+        let f = LdltSymbolic::analyze(a).unwrap().factor(a, &SolverSettings::default()).unwrap();
         let x = f.solve(&b).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); a.n];
         a.symv(&x, &mut ax);
@@ -216,7 +216,7 @@ mod integration {
 
     fn lu_resid(a: &GeneralCsc<C>) -> f64 {
         let b = rhs(a.n);
-        let f = LuSymbolic::analyze(a).unwrap().factor(a, &FactorOptions::default()).unwrap();
+        let f = LuSymbolic::analyze(a).unwrap().factor(a, &SolverSettings::default()).unwrap();
         let x = f.solve(&b).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); a.n];
         a.matvec(&x, &mut ax);
@@ -261,7 +261,7 @@ mod integration {
         fn sym_ok<T: Scalar>(tol: f64) {
             let a = structured::banded::<T>(200, 6, 1.0, 1);
             let b: Vec<T> = (0..a.n).map(|i| T::from_real((i % 7) as f64 - 3.0)).collect();
-            let f = LdltSymbolic::analyze(&a).unwrap().factor(&a, &FactorOptions::default()).unwrap();
+            let f = LdltSymbolic::analyze(&a).unwrap().factor(&a, &SolverSettings::default()).unwrap();
             let x = f.solve(&b).unwrap();
             let mut ax = vec![T::zero(); a.n];
             a.symv(&x, &mut ax);
@@ -272,7 +272,7 @@ mod integration {
         fn unsym_ok<T: Scalar>(tol: f64) {
             let a = random::random_unsym::<T>(200, 12, 3.0, 1);
             let b: Vec<T> = (0..a.n).map(|i| T::from_real((i % 5) as f64 - 2.0)).collect();
-            let f = LuSymbolic::analyze(&a).unwrap().factor(&a, &FactorOptions::default()).unwrap();
+            let f = LuSymbolic::analyze(&a).unwrap().factor(&a, &SolverSettings::default()).unwrap();
             let x = f.solve(&b).unwrap();
             let mut ax = vec![T::zero(); a.n];
             a.matvec(&x, &mut ax);
@@ -304,7 +304,7 @@ mod integration {
     fn diagnostics_and_estimate_wired_on_both_paths() {
         // Symmetric → LDLᵀ.
         let a = structured::banded::<C>(500, 8, 1.0, 1);
-        let opts = FactorOptions::default().with_threads(3);
+        let opts = SolverSettings::default().with_threads(3);
         let f = LdltSymbolic::analyze(&a).unwrap().factor(&a, &opts).unwrap();
         let d = f.diagnostics();
         assert_eq!(d.threads, 3, "thread budget recorded");
@@ -316,7 +316,7 @@ mod integration {
 
         // Unsymmetric → LU; threads=0 resolves to all cores.
         let g = bem::kernel(600, &bem::BemOpts::default());
-        let o2 = FactorOptions::default().with_threads(0);
+        let o2 = SolverSettings::default().with_threads(0);
         let lf = LuSymbolic::analyze(&g).unwrap().factor(&g, &o2).unwrap();
         let ld = lf.diagnostics();
         assert!(ld.threads >= 1);

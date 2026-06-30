@@ -43,6 +43,8 @@ use crate::symbolic::{
     SymbolicFactorization,
 };
 use rayon::prelude::*;
+
+use crate::numeric::gemm_tuning::KernelTuning;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 // Opt-in cdiv sub-phase profiler (set `RLA_PROFILE=1`): serial BK panel (getf2)
@@ -58,7 +60,7 @@ fn ldlt_prof_on() -> bool {
 /// Action to take when a near-zero pivot is encountered during factorization.
 ///
 /// This is the static-pivoting policy knob shared by the symmetric LDLᵀ and the
-/// unsymmetric LU paths (via [`FactorOptions`] and the LU options).
+/// unsymmetric LU paths (via [`SolverSettings`] and the LU options).
 #[derive(Debug, Clone)]
 pub enum ZeroPivotAction {
     /// Accept the tiny pivot at face value (zero the column, count as a zero in
@@ -76,23 +78,9 @@ pub enum ZeroPivotAction {
     /// `abs_floor = eps_rel · ‖A‖∞` with `eps_rel ∈ [1e-12, 1e-8]`.
     PerturbToEps { abs_floor: f64 },
 }
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Diagnostic toggle for the contribution-block Schur update kernel. When
-/// `true` (default) the deferred update `CB = A22 − L21·D·L21ᵀ` runs as a
-/// single SIMD GEMM ([`gemm`]); when `false` the identical update runs as a
-/// scalar triple loop over the same `l21`/`g`/`cb` buffers. Both paths produce
-/// the same factor - this exists only to A/B the kernel, mirroring rslab's
-/// `FORCE_SCALAR_FRONTAL`.
-pub(crate) static USE_GEMM_SCHUR: AtomicBool = AtomicBool::new(true);
-
-/// Set the contribution-block kernel: `true` = SIMD GEMM, `false` = scalar.
-/// Process-wide; intended for benchmarks and tests, not the solve path.
-pub fn set_use_gemm_schur(on: bool) {
-    USE_GEMM_SCHUR.store(on, Ordering::Relaxed);
-}
-
-/// Child-reordering strategy, selected per analysis via [`AnalyzeOptions`] - the
+/// Child-reordering strategy, selected per analysis via [`SolverSettings`] - the
 /// composable replacement for the old process-wide Liu toggle. A pure scheduling
 /// hint: it changes neither the factor, the fill, nor the e-numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -107,76 +95,19 @@ pub enum ReorderMode {
     Off,
 }
 
-/// Analysis-time options (composable, value-independent). Selects the choices
-/// fixed at [`analyze_with`] time. The factor-time knobs live in
-/// [`FactorOptions`]; together they form the per-call feature selection.
-///
-/// The defaults reproduce the historically-tuned analysis exactly
-/// ([`OrderingMethod::Auto`], `nemin = 16`, relaxed amalgamation `≤256` wide /
-/// `≤64` extra rows); override only to explore the parameter space (the
-/// auto-tuning sweep) or when a workload is known to prefer a specific ordering.
-#[derive(Debug, Clone)]
-pub struct AnalyzeOptions {
-    /// Child-reordering strategy (CB-stack peak vs leaf parallelism).
-    pub reorder: ReorderMode,
-    /// Fill-reducing ordering (the cuDSS `REORDERING_ALG` analogue). Default
-    /// [`OrderingMethod::Auto`] (adaptive per-matrix choice).
-    pub ordering: OrderingMethod,
-    /// Minimum eliminated columns for a supernode before it is a merge
-    /// candidate (amalgamation aggressiveness). Default `16`. Smaller =
-    /// finer supernodes (less fill, more per-front overhead); larger = coarser.
-    pub nemin: usize,
-    /// Relaxed (fill-tolerant) amalgamation thresholds, the multifrontal
-    /// throughput lever. `Some` (default `≤256` wide, `≤64` extra rows) trades a
-    /// little explicit-zero fill for wider, higher-rank dense fronts; `None`
-    /// restricts to structural/size merges. Applied only above
-    /// [`RELAX_MIN_N`](crate::symbolic::supernode::RELAX_MIN_N) unknowns.
-    pub relax: Option<RelaxAmalgamation>,
-}
+/// Deprecated alias for [`SolverSettings`], the single unified solver-settings
+/// interface. Analysis-time knobs (`reorder`/`ordering`/`nemin`/`relax`) now live
+/// on `SolverSettings` alongside the factor and kernel knobs; `analyze_with` reads
+/// only that subset.
+#[deprecated(since = "0.12.0", note = "merged into the unified `SolverSettings`")]
+pub type AnalyzeOptions = SolverSettings;
 
-impl Default for AnalyzeOptions {
-    fn default() -> Self {
-        Self {
-            reorder: ReorderMode::default(),
-            ordering: OrderingMethod::default(),
-            nemin: 16,
-            relax: Some(RelaxAmalgamation {
-                max_width: 256,
-                max_extra_rows: 64,
-            }),
-        }
-    }
-}
+/// Deprecated alias for [`SolverSettings`], the single unified solver-settings
+/// interface (factor, analysis, and kernel knobs in one struct).
+#[deprecated(since = "0.12.0", note = "renamed to the unified `SolverSettings`")]
+pub type FactorOptions = SolverSettings;
 
-impl AnalyzeOptions {
-    /// Builder: set the child-reordering strategy.
-    pub fn with_reorder(mut self, reorder: ReorderMode) -> Self {
-        self.reorder = reorder;
-        self
-    }
-
-    /// Builder: set the fill-reducing ordering method.
-    pub fn with_ordering(mut self, ordering: OrderingMethod) -> Self {
-        self.ordering = ordering;
-        self
-    }
-
-    /// Builder: set the supernode amalgamation `nemin` (merge-candidate column
-    /// threshold).
-    pub fn with_nemin(mut self, nemin: usize) -> Self {
-        self.nemin = nemin;
-        self
-    }
-
-    /// Builder: set the relaxed-amalgamation thresholds (`None` to restrict to
-    /// structural/size merges).
-    pub fn with_relax(mut self, relax: Option<RelaxAmalgamation>) -> Self {
-        self.relax = relax;
-        self
-    }
-}
-
-/// Factor emit/memory strategy - composable via [`FactorOptions::with_memory`].
+/// Factor emit/memory strategy - composable via [`SolverSettings::with_memory`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryMode {
     /// Collect every front's factor, then emit the global `L`/`U`.
@@ -188,7 +119,7 @@ pub enum MemoryMode {
     LowMemory,
 }
 
-/// Block-Low-Rank strategy - composable via [`FactorOptions::with_blr`]. BLR
+/// Block-Low-Rank strategy - composable via [`SolverSettings::with_blr`]. BLR
 /// makes the factor **approximate** (a preconditioner); drive iterative
 /// refinement against the original matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -214,7 +145,7 @@ impl BlrMode {
     }
 }
 
-/// Numeric factorization algorithm - composable via [`FactorOptions::with_method`].
+/// Numeric factorization algorithm - composable via [`SolverSettings::with_method`].
 /// Both produce the same factor (numerically equivalent); they differ in the
 /// transient-memory and scheduling profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -226,7 +157,7 @@ pub enum FactorMethod {
     /// where the per-front extract layout is preferable; the default is
     /// [`LeftLooking`](Self::LeftLooking).
     ///
-    /// [`with_method`]: FactorOptions::with_method
+    /// [`with_method`]: SolverSettings::with_method
     Multifrontal,
     /// Supernodal left-looking (**the default**, and the [`preconditioner`]
     /// choice): each panel pulls BLAS-3 updates from its factored descendants -
@@ -239,7 +170,7 @@ pub enum FactorMethod {
     /// memory/throughput-optimal path for both exact direct solves and the
     /// equilibrated preconditioner.
     ///
-    /// [`preconditioner`]: FactorOptions::preconditioner
+    /// [`preconditioner`]: SolverSettings::preconditioner
     #[default]
     LeftLooking,
 }
@@ -249,7 +180,7 @@ pub enum FactorMethod {
 /// them turns the factorization into a robust, memory-light **preconditioner**.
 /// All knobs compose via the `with_*` builders.
 #[derive(Debug, Clone)]
-pub struct FactorOptions {
+pub struct SolverSettings {
     /// Near-zero pivot policy. Reuses rslab's [`ZeroPivotAction`]: `Fail`
     /// (exact, default) returns [`RslabError::NumericallyRankDeficient`] on a
     /// singular pivot; `PerturbToEps { abs_floor }` is robust static pivoting -
@@ -285,6 +216,40 @@ pub struct FactorOptions {
     /// user-defined maximum. **Default [`Auto`](Threads::Auto)** (predict, up to
     /// all cores). The numeric result is bit-identical regardless of this value.
     pub threads: Threads,
+
+    // ---- Analysis-phase knobs (read by `analyze_with`; ignored by `factor`) ----
+    /// Child-reordering strategy (CB-stack peak vs leaf parallelism). Analyze-time.
+    pub reorder: ReorderMode,
+    /// Fill-reducing ordering (the cuDSS `REORDERING_ALG` analogue). Analyze-time.
+    /// Default [`OrderingMethod::Auto`] (adaptive per-matrix choice).
+    pub ordering: OrderingMethod,
+    /// Supernode amalgamation `nemin` (merge-candidate column threshold). Default
+    /// `16`. Smaller = finer supernodes (less fill, more per-front overhead).
+    /// Analyze-time.
+    pub nemin: usize,
+    /// Relaxed (fill-tolerant) amalgamation thresholds, the multifrontal throughput
+    /// lever. `Some` (default `≤256` wide, `≤64` extra rows) trades a little
+    /// explicit-zero fill for wider, higher-rank dense fronts. Analyze-time.
+    pub relax: Option<RelaxAmalgamation>,
+
+    // ---- Kernel scheduling knobs (formerly process-wide atomics) ----
+    /// Bunch-Kaufman / LU panel width (blocking factor). Default `64`. Changes the
+    /// pivot search window (a different but equally valid factor), not the answer.
+    /// Clamped to at least 8 on use.
+    pub panel_nb: usize,
+    /// Below this flop count a contribution update runs as a scalar triple loop
+    /// instead of a SIMD GEMM. Default [`DEFAULT_SCALAR_GATE`](crate::gemm_tuning::DEFAULT_SCALAR_GATE).
+    pub scalar_gate: usize,
+    /// At/above this flop count a cmod-class GEMM runs rayon-parallel. Default
+    /// [`DEFAULT_PAR_GEMM`](crate::gemm_tuning::DEFAULT_PAR_GEMM).
+    pub par_gemm: usize,
+    /// At/above this flop count the panel-trailing / Schur / LU-front GEMM runs
+    /// rayon-parallel (the top-of-tree node-parallelism lever). Default
+    /// [`DEFAULT_PAR_CDIV`](crate::gemm_tuning::DEFAULT_PAR_CDIV).
+    pub par_cdiv: usize,
+    /// Use the SIMD GEMM (vs the scalar triple loop) for the front Schur update.
+    /// Default `true`. A kernel A/B knob for benchmarking.
+    pub use_gemm_schur: bool,
 }
 
 /// Worker-thread policy for a factorization. The numeric result is bit-identical
@@ -352,8 +317,11 @@ pub(crate) fn in_scoped_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Se
     }
 }
 
-impl Default for FactorOptions {
+impl Default for SolverSettings {
     fn default() -> Self {
+        use crate::numeric::gemm_tuning::{
+            DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
+        };
         Self {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: None,
@@ -361,11 +329,22 @@ impl Default for FactorOptions {
             blr: BlrMode::Off,
             method: FactorMethod::LeftLooking,
             threads: Threads::default(),
+            // Analysis-phase defaults (reproduce the historically-tuned analysis).
+            reorder: ReorderMode::default(),
+            ordering: OrderingMethod::default(),
+            nemin: 16,
+            relax: Some(RelaxAmalgamation { max_width: 256, max_extra_rows: 64 }),
+            // Kernel defaults (reproduce the former process-wide atomic defaults).
+            panel_nb: DEFAULT_PANEL_NB,
+            scalar_gate: DEFAULT_SCALAR_GATE,
+            par_gemm: DEFAULT_PAR_GEMM,
+            par_cdiv: DEFAULT_PAR_CDIV,
+            use_gemm_schur: true,
         }
     }
 }
 
-impl FactorOptions {
+impl SolverSettings {
     /// Exact, complete factorization (the default): fail on a singular pivot,
     /// no fill dropping. Use for a direct solve where accuracy is required.
     pub fn exact() -> Self {
@@ -442,6 +421,64 @@ impl FactorOptions {
         self
     }
 
+    /// Builder: set the child-reordering strategy (analyze-time).
+    pub fn with_reorder(mut self, reorder: ReorderMode) -> Self {
+        self.reorder = reorder;
+        self
+    }
+
+    /// Builder: set the fill-reducing ordering method (analyze-time).
+    pub fn with_ordering(mut self, ordering: OrderingMethod) -> Self {
+        self.ordering = ordering;
+        self
+    }
+
+    /// Builder: set the supernode amalgamation `nemin` (analyze-time).
+    pub fn with_nemin(mut self, nemin: usize) -> Self {
+        self.nemin = nemin;
+        self
+    }
+
+    /// Builder: set the relaxed-amalgamation thresholds (`None` restricts to
+    /// structural/size merges). Analyze-time.
+    pub fn with_relax(mut self, relax: Option<RelaxAmalgamation>) -> Self {
+        self.relax = relax;
+        self
+    }
+
+    /// Builder: set the Bunch-Kaufman / LU panel width (kernel blocking factor).
+    pub fn with_panel_nb(mut self, nb: usize) -> Self {
+        self.panel_nb = nb;
+        self
+    }
+
+    /// Builder: set the GEMM scheduling thresholds (scalar/SIMD and serial/parallel
+    /// cutoffs) in one shot.
+    pub fn with_gemm_thresholds(mut self, t: crate::numeric::gemm_tuning::GemmThresholds) -> Self {
+        self.scalar_gate = t.scalar_gate;
+        self.par_gemm = t.par_gemm;
+        self.par_cdiv = t.par_cdiv;
+        self
+    }
+
+    /// Builder: toggle the SIMD GEMM Schur update (vs the scalar triple loop).
+    pub fn with_use_gemm_schur(mut self, on: bool) -> Self {
+        self.use_gemm_schur = on;
+        self
+    }
+
+    /// The kernel scheduling knobs as a cheap `Copy` bundle, threaded into the
+    /// dense-front / left-looking kernels (replaces the former atomic loads).
+    pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning {
+        crate::numeric::gemm_tuning::KernelTuning {
+            scalar_gate: self.scalar_gate,
+            par_gemm: self.par_gemm,
+            par_cdiv: self.par_cdiv,
+            panel_nb: self.panel_nb.max(8),
+            use_gemm_schur: self.use_gemm_schur,
+        }
+    }
+
     /// A static upper bound on the worker count for *reporting*, without the
     /// structural predictor: a fixed count resolves exactly; an
     /// [`Auto`](Threads::Auto) policy reports its cap (all cores for `0`). The
@@ -505,6 +542,7 @@ fn factor_front<T: Scalar>(
     nrow: usize,
     ncol: usize,
     perturb_floor: Option<f64>,
+    kt: KernelTuning,
 ) -> Result<(FrontFactors<T>, Vec<T>), RslabError> {
     let n = nrow; // column stride
     let alpha = bk_alpha();
@@ -533,7 +571,7 @@ fn factor_front<T: Scalar>(
     // scalar BLAS-2 column sweeps that dominated large fronts). The last column
     // of a panel has no in-panel candidate below it, so it is always a 1×1 step
     // - a 2×2 block can never straddle a panel boundary.
-    let nb = crate::numeric::gemm_tuning::panel_nb();
+    let nb = kt.panel_nb;
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + nb).min(ncol);
@@ -762,14 +800,12 @@ fn factor_front<T: Scalar>(
             }
             tmp.clear();
             tmp.resize(mt * mt, T::zero());
-            let par = if (mt as u128) * (mt as u128) * (pw as u128)
-                >= crate::numeric::gemm_tuning::par_cdiv() as u128
-            {
+            let par = if (mt as u128) * (mt as u128) * (pw as u128) >= kt.par_cdiv as u128 {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
             };
-            if USE_GEMM_SCHUR.load(Ordering::Relaxed) {
+            if kt.use_gemm_schur {
                 // SAFETY: `tmp`, `gbuf`, `l21buf` are three distinct,
                 // non-overlapping allocations sized for (m,n,k)=(mt,mt,pw) under
                 // the strides passed; `T` is `f64`/`Complex<f64>` (gemm-supported).
@@ -903,6 +939,7 @@ fn factor_one_node<T: Scalar>(
     a_perm: &CscMatrix<T>,
     child_refs: &[&NodeFactor<T>],
     perturb_floor: Option<f64>,
+    kt: KernelTuning,
 ) -> Result<NodeFactor<T>, RslabError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
@@ -984,7 +1021,7 @@ fn factor_one_node<T: Scalar>(
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
 
-    let (front, contrib) = factor_front(f, nrow, ncol, perturb_floor)?;
+    let (front, contrib) = factor_front(f, nrow, ncol, perturb_floor, kt)?;
     Ok(NodeFactor {
         front,
         row_indices: ri,
@@ -1002,15 +1039,16 @@ fn factor_subtree<T: Scalar>(
     sym: &SymbolicFactorization,
     a_perm: &CscMatrix<T>,
     perturb_floor: Option<f64>,
+    kt: KernelTuning,
 ) -> Result<SubtreeFactors<T>, RslabError> {
     let children = &sym.supernodes[s].children;
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, perturb_floor))
+        .map(|&ch| factor_subtree(ch, sym, a_perm, perturb_floor, kt))
         .collect::<Result<Vec<_>, _>>()?;
     let nf = {
         let child_refs: Vec<&NodeFactor<T>> = outs.iter().map(|(own, _)| own).collect();
-        factor_one_node(s, sym, a_perm, &child_refs, perturb_floor)?
+        factor_one_node(s, sym, a_perm, &child_refs, perturb_floor, kt)?
     };
     // Free the children's contribution blocks NOW: they have been extend-added
     // into this front and are never read again (the global emit uses only the
@@ -1035,10 +1073,10 @@ fn factor_subtree<T: Scalar>(
 /// Returns an [`LdltFactors`] in factorization order; solve with
 /// [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
 pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, RslabError> {
-    factor_sparse_ldlt_with(a, &FactorOptions::default())
+    factor_sparse_ldlt_with(a, &SolverSettings::default())
 }
 
-/// Like [`factor_sparse_ldlt`] but with explicit [`FactorOptions`] -
+/// Like [`factor_sparse_ldlt`] but with explicit [`SolverSettings`] -
 /// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
 ///
 /// Convenience wrapper: runs [`analyze`] then [`factor_numeric`]. For the
@@ -1047,7 +1085,7 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
 /// keep the [`MultifrontalSymbolic`] across factorizations.
 pub fn factor_sparse_ldlt_with<T: Scalar>(
     a: &CscMatrix<T>,
-    opts: &FactorOptions,
+    opts: &SolverSettings,
 ) -> Result<LdltFactors<T>, RslabError> {
     let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
     factor_numeric(&symb, a, opts)
@@ -1119,16 +1157,16 @@ pub fn analyze(
     col_ptr: &[usize],
     row_idx: &[usize],
 ) -> Result<MultifrontalSymbolic, RslabError> {
-    analyze_with(n, col_ptr, row_idx, &AnalyzeOptions::default())
+    analyze_with(n, col_ptr, row_idx, &SolverSettings::default())
 }
 
-/// [`analyze`] with explicit composable [`AnalyzeOptions`] (child-reordering
+/// [`analyze`] with explicit composable [`SolverSettings`] (child-reordering
 /// strategy). Reuse the result across many `factor` calls that share the pattern.
 pub fn analyze_with(
     n: usize,
     col_ptr: &[usize],
     row_idx: &[usize],
-    opts: &AnalyzeOptions,
+    opts: &SolverSettings,
 ) -> Result<MultifrontalSymbolic, RslabError> {
     let nnz = row_idx.len();
     if n == 0 {
@@ -1163,7 +1201,7 @@ pub fn analyze_with(
         // LdltCompress rewrites the pattern beyond a permutation, breaking the
         // `sym.perm` ↔ `A_perm` consistency `factor_numeric` relies on. The
         // tunable amalgamation knobs (`nemin`, `relax`) ride the composable
-        // `AnalyzeOptions`; everything else stays at the tuned default.
+        // `SolverSettings`; everything else stays at the tuned default.
         preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
         nemin: opts.nemin,
         relax: opts.relax,
@@ -1268,7 +1306,7 @@ pub(crate) fn recommend_threads_for_sym(symb: &MultifrontalSymbolic, max_cores: 
 pub fn factor_numeric<T: Scalar>(
     symb: &MultifrontalSymbolic,
     a: &CscMatrix<T>,
-    opts: &FactorOptions,
+    opts: &SolverSettings,
 ) -> Result<LdltFactors<T>, RslabError> {
     a.validate()?;
     let n = symb.n;
@@ -1349,9 +1387,10 @@ pub fn factor_numeric<T: Scalar>(
         }
     }
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    let kt = opts.kernel();
     let root_outs: Vec<SubtreeFactors<T>> = roots
         .par_iter()
-        .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor))
+        .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
         .collect::<Result<Vec<_>, _>>()?;
     // Scatter the subtree factors into `node_results` (by supernode id) for the
     // global emit pass, which still walks supernodes in postorder.
@@ -1747,9 +1786,10 @@ fn ll_factor_node<T: Scalar>(
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
+    kt: KernelTuning,
 ) -> Result<(), RslabError> {
-    let ll_gemm_gate = crate::numeric::gemm_tuning::scalar_gate();
-    let ll_gemm_par = crate::numeric::gemm_tuning::par_gemm();
+    let ll_gemm_gate = kt.scalar_gate;
+    let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
     let nrow = rs[s].len();
@@ -1905,8 +1945,8 @@ fn ll_factor_node<T: Scalar>(
     // is the rectangular `(nrow-ke) × (ncol-ke)` lower part. Pivoting stays inside
     // `0..ncol`, so the off-diagonal rows `[ncol, nrow)` keep their identity and
     // `s`'s contribution to ancestors is unaffected by this internal permutation.
-    let nb = crate::numeric::gemm_tuning::panel_nb();
-    let ll_cdiv_par = crate::numeric::gemm_tuning::par_cdiv();
+    let nb = kt.panel_nb;
+    let ll_cdiv_par = kt.par_cdiv;
     let alpha = bk_alpha();
     let mut d = vec![T::zero(); ncol];
     let mut d_subdiag = vec![T::zero(); ncol];
@@ -2137,7 +2177,7 @@ fn ll_factor_node<T: Scalar>(
             } else {
                 gemm::Parallelism::None
             };
-            if USE_GEMM_SCHUR.load(Ordering::Relaxed) {
+            if kt.use_gemm_schur {
                 // SAFETY: `tmp`, `gbuf`, `l21buf` are three distinct, non-overlapping
                 // allocations sized for (m,n,k)=(mt,cw,pw); `R` is the top `cw` rows
                 // of `l21buf` (cw ≤ mt), addressed via the rhs strides. `T` is
@@ -2276,6 +2316,7 @@ fn ll_factor_subtree<T: Scalar>(
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
     n_perturbed: &AtomicUsize,
+    kt: KernelTuning,
 ) -> Result<(), RslabError> {
     sym.supernodes[s]
         .children
@@ -2292,10 +2333,11 @@ fn ll_factor_subtree<T: Scalar>(
                 perturb_floor,
                 drop_tol,
                 n_perturbed,
+                kt,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
-    ll_factor_node(s, sym, a_perm, rs, update_list, store, emit, perturb_floor, n_perturbed)?;
+    ll_factor_node(s, sym, a_perm, rs, update_list, store, emit, perturb_floor, n_perturbed, kt)?;
     // Free each descendant whose last consumer this node was (refcount→0), and `s`
     // itself if it has no consumers - compacting before releasing the dense panel.
     // Disjoint `k`, so the wide top-of-tree free runs in parallel.
@@ -2334,7 +2376,7 @@ fn ll_factor_subtree<T: Scalar>(
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     a: &CscMatrix<T>,
-    opts: &FactorOptions,
+    opts: &SolverSettings,
 ) -> Result<LdltFactors<T>, RslabError> {
     let n = sym.n;
     let perturb_floor: Option<f64> = match opts.on_zero_pivot {
@@ -2402,6 +2444,7 @@ fn factor_left_looking<T: Scalar>(
         }
     }
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    let kt = opts.kernel();
     roots
         .par_iter()
         .map(|&r| {
@@ -2416,6 +2459,7 @@ fn factor_left_looking<T: Scalar>(
                 perturb_floor,
                 opts.drop_tol,
                 &n_perturbed_atomic,
+                kt,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
@@ -2545,15 +2589,14 @@ mod tests {
 
     #[test]
     fn left_looking_matches_multifrontal_f64() {
-        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // Chain assembly tree (tridiagonal): exercises the basic left-looking
         // cmod/cdiv. Same fill and same solution as the multifrontal path.
         let a = tridiag_spd_f64(50);
         let b: Vec<f64> = (0..50).map(|i| (i % 7) as f64 - 3.0).collect();
-        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let mf = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
         let ll = factor_sparse_ldlt_with(
             &a,
-            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
         )
         .unwrap();
         assert_eq!(mf.l_values.len(), ll.l_values.len(), "fill must match");
@@ -2566,15 +2609,14 @@ mod tests {
 
     #[test]
     fn left_looking_2d_grid_matches_multifrontal() {
-        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // Branching assembly tree → multi-child cmod and deeper update lists.
         let a = grid2d_lower::<f64>(12, 8.0, -1.0);
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
-        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let mf = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
         let ll = factor_sparse_ldlt_with(
             &a,
-            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
         )
         .unwrap();
         assert_eq!(mf.l_values.len(), ll.l_values.len(), "fill must match");
@@ -2591,7 +2633,7 @@ mod tests {
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
         let ll = factor_sparse_ldlt_with(
             &a,
-            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
         )
         .unwrap();
         let xl = solve_ldlt(&ll, &b).unwrap();
@@ -2609,7 +2651,7 @@ mod tests {
         let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 0], &[0.0, 1.0]).unwrap();
         let ll = factor_sparse_ldlt_with(
             &a,
-            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
         )
         .unwrap();
         assert!(ll.two_by_two.iter().any(|&t| t), "expected a 2×2 block");
@@ -2632,10 +2674,10 @@ mod tests {
         let a = grid2d_lower::<f64>(10, 0.5, -1.0);
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
-        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let mf = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
         let ll = factor_sparse_ldlt_with(
             &a,
-            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
         )
         .unwrap();
         assert!(
@@ -2664,10 +2706,10 @@ mod tests {
         let a = grid2d_lower::<Complex<f64>>(9, c(0.4, 0.3), c(-1.0, 0.1));
         let n = a.n;
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
-        let mf = factor_sparse_ldlt_with(&a, &FactorOptions::default()).unwrap();
+        let mf = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
         let ll = factor_sparse_ldlt_with(
             &a,
-            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
         )
         .unwrap();
         assert!(
@@ -2875,7 +2917,7 @@ mod tests {
             "exact mode should reject the singular pivot"
         );
 
-        let opts = FactorOptions {
+        let opts = SolverSettings {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
             drop_tol: None,
             ..Default::default()
@@ -2914,7 +2956,7 @@ mod tests {
             }
             CscMatrix::<Complex<f64>>::from_triplets(n, &r, &cc, &v).unwrap()
         };
-        let opts = FactorOptions {
+        let opts = SolverSettings {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
             drop_tol: None,
             ..Default::default()

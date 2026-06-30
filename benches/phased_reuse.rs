@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::matgen::stencil;
-use rslab::{CscMatrix, FactorOptions, LdltSymbolic};
+use rslab::{CscMatrix, SolverSettings, LdltSymbolic};
 
 type C = Complex<f64>;
 
@@ -32,7 +32,7 @@ fn main() {
         let _ = std::fs::create_dir_all(d);
     }
     let mut out = std::fs::File::create(&out_path).expect("open out");
-    let opts = FactorOptions::default();
+    let opts = SolverSettings::default();
     let so = stencil::StencilOpts::default();
 
     // A spread of fill profiles: the analyze/factor ratio (hence the reuse win)

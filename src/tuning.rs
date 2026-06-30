@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use crate::diagnostics::MemoryEstimate;
 use crate::sparse::csc::CscMatrix;
-use crate::{BlrMode, FactorOptions, LdltSymbolic};
+use crate::{BlrMode, SolverSettings, LdltSymbolic};
 
 /// Detected machine capabilities - for budgeting and the calibration key.
 #[derive(Debug, Clone)]
@@ -115,7 +115,7 @@ impl Calibration {
         };
         let flops = sym.estimate_memory::<f64>().factor_flops as f64;
         let time_at = |t: usize| -> Option<f64> {
-            let opts = FactorOptions::default().with_threads(t);
+            let opts = SolverSettings::default().with_threads(t);
             let start = std::time::Instant::now();
             sym.factor(&a, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
@@ -166,7 +166,7 @@ pub struct Budget {
 #[derive(Debug, Clone)]
 pub struct FactorPlan {
     /// Tuned options (thread count, plus drop_tol / BLR if chosen to fit budget).
-    pub opts: FactorOptions,
+    pub opts: SolverSettings,
     /// Recommendation to factor in single precision (the caller casts the matrix);
     /// not expressible in `opts` since it is a matrix-type choice.
     pub use_mixed_precision: bool,
@@ -193,7 +193,7 @@ pub fn plan(
     let threads = if budget.max_threads == 0 { hw.physical_cores.max(1) } else { budget.max_threads };
     let speedup = calib.speedup_for(threads);
     let runtime = estimate.est_runtime_ms(calib.geom_gflops, speedup);
-    let mut opts = FactorOptions::default().with_threads(threads);
+    let mut opts = SolverSettings::default().with_threads(threads);
     let mut peak = estimate.transient_peak_bytes;
     let mut use_f32 = false;
     let mut notes: Vec<String> = Vec::new();

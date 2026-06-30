@@ -23,14 +23,15 @@
 //! * The reassembled factors are global sparse `L` (CSC, unit lower) and `U`
 //!   (CSR, upper with the pivots on the diagonal), in factorization order. The
 //!   default factor path is the supernodal **left-looking** kernel (low transient,
-//!   no CB stack); the multifrontal path is opt-in via [`FactorOptions::with_method`].
+//!   no CB stack); the multifrontal path is opt-in via [`SolverSettings::with_method`].
 
 use crate::error::RslabError;
 use crate::numeric::blr::BlrMatrix;
 use crate::numeric::multifrontal_ldlt::{
-    analyze_with, compute_supernode_row_structures, perturb_pivot, AnalyzeOptions, BlrMode,
-    FactorMethod, FactorOptions, MemoryMode, ZeroPivotAction,
+    analyze_with, compute_supernode_row_structures, perturb_pivot, BlrMode, FactorMethod,
+    MemoryMode, SolverSettings, ZeroPivotAction,
 };
+use crate::numeric::gemm_tuning::KernelTuning;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -321,6 +322,7 @@ fn lu_front<T: Scalar>(
     perturb_floor: Option<f64>,
     blr: BlrMode,
     profile: bool,
+    kt: KernelTuning,
 ) -> Result<(FrontLu<T>, Contribution<T>), RslabError> {
     let n = nrow;
     // BLR compressibility probe (opt-in `RLA_BLR_PROBE`): on large fronts, report
@@ -412,7 +414,7 @@ fn lu_front<T: Scalar>(
         let mt = n - ke; // trailing rows = cols
         if mt > 0 && pw > 0 {
             let flops = (mt as u128) * (mt as u128) * (pw as u128);
-            let par = if flops >= crate::numeric::gemm_tuning::par_cdiv() as u128 {
+            let par = if flops >= kt.par_cdiv as u128 {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -525,6 +527,7 @@ fn factor_one_node_lu<T: Scalar>(
     blr: BlrMode,
     pool: &FrontPool<T>,
     profile: bool,
+    kt: KernelTuning,
 ) -> Result<NodeLu<T>, RslabError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
@@ -624,7 +627,7 @@ fn factor_one_node_lu<T: Scalar>(
         PROF_ASM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     let t_front = profile.then(std::time::Instant::now);
-    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, blr, profile)?;
+    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, blr, profile, kt)?;
     if let Some(t) = t_front {
         PROF_FRONT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -662,12 +665,13 @@ fn factor_subtree<T: Scalar>(
     blr: BlrMode,
     pool: &FrontPool<T>,
     profile: bool,
+    kt: KernelTuning,
 ) -> Result<SubtreeFactors<T>, RslabError> {
     let children = &sym.supernodes[s].children;
     // Factor the child subtrees concurrently.
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, blr, pool, profile))
+        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, blr, pool, profile, kt))
         .collect::<Result<Vec<_>, _>>()?;
     // Factor this node from the children's own (subtree-root) factors.
     let nf = {
@@ -682,6 +686,7 @@ fn factor_subtree<T: Scalar>(
             blr,
             pool,
             profile,
+            kt,
         )?
     };
     // Free the children's contribution blocks NOW: they have just been
@@ -720,14 +725,14 @@ impl LuSymbolic {
     ///
     /// [`LdltSymbolic::analyze`]: crate::numeric::sparse_solver::LdltSymbolic::analyze
     pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, RslabError> {
-        Self::analyze_with(a, &AnalyzeOptions::default())
+        Self::analyze_with(a, &SolverSettings::default())
     }
 
-    /// [`analyze`](Self::analyze) with explicit composable [`AnalyzeOptions`]
+    /// [`analyze`](Self::analyze) with explicit composable [`SolverSettings`]
     /// (child-reordering strategy).
     pub fn analyze_with<T: Scalar>(
         a: &GeneralCsc<T>,
-        opts: &AnalyzeOptions,
+        opts: &SolverSettings,
     ) -> Result<LuSymbolic, RslabError> {
         a.validate()?;
         let n = a.n;
@@ -752,7 +757,7 @@ impl LuSymbolic {
     pub fn factor<T: Scalar>(
         &self,
         a: &GeneralCsc<T>,
-        opts: &FactorOptions,
+        opts: &SolverSettings,
     ) -> Result<LuSolver<T>, RslabError> {
         let estimate = self.estimate_memory::<T>();
         let resolved_threads = opts.threads.resolve(|cap| {
@@ -868,7 +873,7 @@ pub struct LuSolver<T> {
 
 impl<T: Scalar> LuSolver<T> {
     /// One-shot analyze + equilibrate + factor of a general matrix `A`.
-    pub fn factor(a: &GeneralCsc<T>, opts: &FactorOptions) -> Result<Self, RslabError> {
+    pub fn factor(a: &GeneralCsc<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
         Ok(Self {
             factors: factor_general_lu(a, opts)?,
             diagnostics: crate::diagnostics::Diagnostics::default(),
@@ -936,7 +941,7 @@ impl<T: Scalar> LuSolver<T> {
 /// [`LuSymbolic`] across calls. Solve with [`solve_lu`] / [`solve_lu_refined`].
 pub fn factor_general_lu<T: Scalar>(
     a: &GeneralCsc<T>,
-    opts: &FactorOptions,
+    opts: &SolverSettings,
 ) -> Result<LuFactors<T>, RslabError> {
     factor_general_lu_numeric(&LuSymbolic::analyze(a)?, a, opts)
 }
@@ -1270,9 +1275,10 @@ fn lu_ll_factor_node<T: Scalar>(
     emit: &LlEmit<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
+    kt: KernelTuning,
 ) -> Result<(), RslabError> {
-    let ll_gemm_gate = crate::numeric::gemm_tuning::scalar_gate();
-    let ll_gemm_par = crate::numeric::gemm_tuning::par_gemm();
+    let ll_gemm_gate = kt.scalar_gate;
+    let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
     let nrow = rs[s].len();
@@ -1465,7 +1471,7 @@ fn lu_ll_factor_node<T: Scalar>(
     // rows now factored in a parallel apply): 32 stays optimal - wider panels add
     // serial fully-summed getf2 without a matching trailing-GEMM efficiency gain.
     const NB_CDIV: usize = 32;
-    let ll_cdiv_par = crate::numeric::gemm_tuning::par_cdiv();
+    let ll_cdiv_par = kt.par_cdiv;
     let mut local_perturbed = 0usize;
     // Restricted partial pivoting: row interchanges within the fully-summed block
     // `[0, ncol)` only (the standard sparse-direct choice). `rperm[i]` is the
@@ -1725,6 +1731,7 @@ fn lu_ll_factor_subtree<T: Scalar>(
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
     n_perturbed: &AtomicUsize,
+    kt: KernelTuning,
 ) -> Result<(), RslabError> {
     sym.supernodes[s]
         .children
@@ -1732,12 +1739,12 @@ fn lu_ll_factor_subtree<T: Scalar>(
         .map(|&ch| {
             lu_ll_factor_subtree(
                 ch, sym, a_perm, a_perm_t, rs, update_list, store, emit, perturb_floor, drop_tol,
-                n_perturbed,
+                n_perturbed, kt,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
     lu_ll_factor_node(
-        s, sym, a_perm, a_perm_t, rs, update_list, store, emit, perturb_floor, n_perturbed,
+        s, sym, a_perm, a_perm_t, rs, update_list, store, emit, perturb_floor, n_perturbed, kt,
     )?;
     // `s` has now pulled from every descendant in its update list - for each whose
     // last consumer this was (refcount→0), compact it and free its dense panel.
@@ -1767,6 +1774,7 @@ fn lu_ll_factor_subtree<T: Scalar>(
 /// Supernodal left-looking LU producing the same [`LuFactors`] as the
 /// multifrontal path. `a_perm`/`a_perm_t` are the equilibrated permuted matrix
 /// and its transpose; `d_row`/`d_col` the equilibration carried into the result.
+#[allow(clippy::too_many_arguments)]
 fn factor_lu_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     a_perm: &GeneralCsc<T>,
@@ -1775,6 +1783,7 @@ fn factor_lu_left_looking<T: Scalar>(
     d_col: &[f64],
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
+    kt: KernelTuning,
 ) -> Result<LuFactors<T>, RslabError> {
     let n = sym.n;
     let nsuper = sym.supernodes.len();
@@ -1862,6 +1871,7 @@ fn factor_lu_left_looking<T: Scalar>(
                 perturb_floor,
                 drop_tol,
                 &n_perturbed_atomic,
+                kt,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
@@ -1956,7 +1966,7 @@ fn factor_lu_left_looking<T: Scalar>(
 pub fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
-    opts: &FactorOptions,
+    opts: &SolverSettings,
 ) -> Result<LuFactors<T>, RslabError> {
     a.validate()?;
     let n = lusym.n;
@@ -2061,6 +2071,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
                 &d_col,
                 perturb_floor,
                 opts.drop_tol,
+                opts.kernel(),
             )
         });
     }
@@ -2085,9 +2096,10 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // Factor every root subtree with the work-stealing tree schedule; the
     // children-before-parent dependency is the recursion structure itself.
     let pool = FrontPool::<T>::new();
+    let kt = opts.kernel();
     let root_outs: Vec<SubtreeFactors<T>> = roots
         .par_iter()
-        .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, profile))
+        .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, profile, kt))
         .collect::<Result<Vec<_>, _>>()?;
     // Scatter the subtree factors into `node_results` (indexed by supernode id)
     // for the global emit pass, which still walks supernodes in postorder.
@@ -2474,7 +2486,7 @@ mod tests {
         }
         let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
         let b: Vec<f64> = (0..n).map(|i| i as f64 - 9.5).collect();
-        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-10, "residual {}", resid(&a, &x, &b));
     }
@@ -2497,7 +2509,7 @@ mod tests {
             }
         }
         let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
-        let solver = LuSolver::factor(&a, &FactorOptions::default()).unwrap();
+        let solver = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
         let nrhs = 5;
         let b: Vec<f64> = (0..n * nrhs).map(|k| (k % 7) as f64 - 3.0).collect();
         let x = solver.solve_many(&b, nrhs).unwrap();
@@ -2552,7 +2564,7 @@ mod tests {
         }
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
     }
@@ -2598,10 +2610,10 @@ mod tests {
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
         let ll = factor_general_lu(
             &a,
-            &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
         )
         .unwrap();
-        let mf = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let mf = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let xl = solve_lu(&ll, &b).unwrap();
         let xm = solve_lu(&mf, &b).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); n];
@@ -2648,17 +2660,13 @@ mod tests {
         }
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
     }
 
     #[test]
     fn low_memory_emit_is_bit_identical() {
-        // Serialize against the process-global knob-mutating tests: a concurrent
-        // `set_gemm_thresholds`/`set_panel_nb` would flip the kernel path between
-        // the two factorizations compared here.
-        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // MemoryMode::LowMemory frees each front's dense factor during emit; it
         // must produce exactly the same global L/U (it only changes when the
         // dense per-front buffers are dropped, never the emitted values).
@@ -2697,13 +2705,13 @@ mod tests {
         let eager = factor_general_lu_numeric(
             &sym,
             &a,
-            &FactorOptions::default().with_memory(MemoryMode::Eager),
+            &SolverSettings::default().with_memory(MemoryMode::Eager),
         )
         .unwrap();
         let low = factor_general_lu_numeric(
             &sym,
             &a,
-            &FactorOptions::default().with_memory(MemoryMode::LowMemory),
+            &SolverSettings::default().with_memory(MemoryMode::LowMemory),
         )
         .unwrap();
         assert_eq!(eager.l_values, low.l_values, "L differs under LowMemory");
@@ -2751,11 +2759,11 @@ mod tests {
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
         let sym = LuSymbolic::analyze(&a).unwrap();
-        let mf = sym.factor(&a, &FactorOptions::default()).unwrap();
+        let mf = sym.factor(&a, &SolverSettings::default()).unwrap();
         let ll = sym
             .factor(
                 &a,
-                &FactorOptions::default().with_method(FactorMethod::LeftLooking),
+                &SolverSettings::default().with_method(FactorMethod::LeftLooking),
             )
             .unwrap();
         let xm = mf.solve(&b).unwrap();
@@ -2807,7 +2815,7 @@ mod tests {
         let a = GeneralCsc::<num_complex::Complex<f32>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<num_complex::Complex<f32>> =
             (0..n).map(|i| c((i % 5) as f32 - 2.0, 1.0)).collect();
-        let f = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let x = solve_lu(&f, &b).unwrap();
         let r = resid(&a, &x, &b);
         assert!(r < 1e-3, "f32 LU residual {}", r);
@@ -2815,7 +2823,6 @@ mod tests {
 
     #[test]
     fn phased_general_lu_analyze_once_factor_many() {
-        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // PARDISO workflow for the unsymmetric path: analyze the pattern once,
         // factor several value sets that share it - each must match the
         // one-shot factor's solve. The frequency-sweep / Newton use case.
@@ -2865,8 +2872,8 @@ mod tests {
                 .collect();
             let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
             let phased =
-                factor_general_lu_numeric(&analysis, &a, &FactorOptions::default()).unwrap();
-            let one_shot = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+                factor_general_lu_numeric(&analysis, &a, &SolverSettings::default()).unwrap();
+            let one_shot = factor_general_lu(&a, &SolverSettings::default()).unwrap();
             let xp = solve_lu(&phased, &b).unwrap();
             let xo = solve_lu(&one_shot, &b).unwrap();
             for (p, o) in xp.iter().zip(&xo) {
@@ -2916,8 +2923,8 @@ mod tests {
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
 
-        let full = factor_general_lu(&a, &FactorOptions::default()).unwrap();
-        let opts = FactorOptions {
+        let full = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let opts = SolverSettings {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: Some(5e-2),
             ..Default::default()

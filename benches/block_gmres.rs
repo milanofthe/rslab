@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::prelude::*;
-use rslab::{factor_general_lu, gmres, gmres_block, FactorOptions};
+use rslab::{factor_general_lu, gmres, gmres_block, SolverSettings};
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 type C = Complex<f64>;
@@ -41,7 +41,7 @@ fn run(path: &std::path::Path, s: usize) {
     // *iterative* regime (e.g. ~30 GMRES iters at ~50k DOFs) where the triangular
     // solve per iteration dominates - the multi-RHS payoff regime.
     let droptol: f64 = std::env::var("RLA_DROPTOL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let mut opts = FactorOptions::preconditioner(1e-10);
+    let mut opts = SolverSettings::preconditioner(1e-10);
     if droptol > 0.0 {
         opts = opts.with_drop_tol(droptol);
     }

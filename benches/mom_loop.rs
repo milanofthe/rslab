@@ -84,18 +84,18 @@ fn bench_file(path: &std::path::Path) {
     );
 
     // Exact LU near-field preconditioner (static-pivoted, equilibrated).
-    let exact = LuSolver::factor(&a, &FactorOptions::preconditioner(1e-10)).unwrap();
+    let exact = LuSolver::factor(&a, &SolverSettings::preconditioner(1e-10)).unwrap();
     run_precond("f64 LU (no drop)", &a, &b, exact.factor_nnz(), 16, &exact);
 
     // f32 LU - half the factor memory.
-    let f32lu = LowPrecisionLu::factor(&a, &FactorOptions::preconditioner(1e-10)).unwrap();
+    let f32lu = LowPrecisionLu::factor(&a, &SolverSettings::preconditioner(1e-10)).unwrap();
     run_precond("f32 LU (no drop)", &a, &b, f32lu.factor_nnz(), 8, &f32lu);
 
     // Light incomplete LU (memory ↓). Aggressive dropping is unstable on these
     // indefinite saddle matrices (post-hoc truncation, not propagated ILU).
     let ilu = LuSolver::factor(
         &a,
-        &FactorOptions::preconditioner(1e-10).with_drop_tol(1e-2),
+        &SolverSettings::preconditioner(1e-10).with_drop_tol(1e-2),
     )
     .unwrap();
     run_precond("f64 ILU τ=1e-2", &a, &b, ilu.factor_nnz(), 16, &ilu);

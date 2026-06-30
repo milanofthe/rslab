@@ -17,7 +17,7 @@
 use std::time::Instant;
 
 use rslab::prelude::*;
-use rslab::{AnalyzeOptions, BlrMode, LuSymbolic, MemoryMode, ReorderMode};
+use rslab::{SolverSettings, BlrMode, LuSymbolic, MemoryMode, ReorderMode};
 
 /// Peak working-set (RSS high-water) of this process, in MB. Windows-only,
 /// queried via the OS - benches may use FFI; the solver library stays pure Rust.
@@ -182,7 +182,7 @@ fn diag_file(path: &std::path::Path, reorder: ReorderMode) {
 
     // Phase split: analyze (symbolic) vs numeric factor.
     let t = Instant::now();
-    let sym = match LuSymbolic::analyze_with(&a, &AnalyzeOptions::default().with_reorder(reorder)) {
+    let sym = match LuSymbolic::analyze_with(&a, &SolverSettings::default().with_reorder(reorder)) {
         Ok(s) => s,
         Err(e) => {
             println!("{name}: analyze error {e:?}");
@@ -193,7 +193,7 @@ fn diag_file(path: &std::path::Path, reorder: ReorderMode) {
 
     // Compose the preconditioner with opt-in BLR contribution-block compression
     // (RLA_BLR_CB) and low-memory emit (RLA_LOW_MEM) - selected via the API.
-    let mut opts = FactorOptions::preconditioner(1e-10);
+    let mut opts = SolverSettings::preconditioner(1e-10);
     if std::env::var("RLA_BLR_CB").is_ok() {
         opts = opts.with_blr(BlrMode::contribution_blocks(1e-4));
     }

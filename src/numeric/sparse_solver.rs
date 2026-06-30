@@ -18,7 +18,7 @@ use crate::dense::ldlt_generic::{solve_ldlt, solve_ldlt_many, LdltFactors};
 use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::{
     analyze as analyze_pattern, analyze_with as analyze_pattern_with, factor_numeric,
-    AnalyzeOptions, FactorOptions, MultifrontalSymbolic,
+    MultifrontalSymbolic, SolverSettings,
 };
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -72,15 +72,15 @@ impl<T: Scalar> LdltSolver<T> {
 
     /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P` (exact mode).
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, RslabError> {
-        Self::factor_with(a, &FactorOptions::default())
+        Self::factor_with(a, &SolverSettings::default())
     }
 
     /// Equilibrate and factor `A` with explicit options - notably
     /// static-pivoting (never-fail preconditioner) mode. See
-    /// [`FactorOptions`]. Runs analysis + numeric factorization in one
+    /// [`SolverSettings`]. Runs analysis + numeric factorization in one
     /// call; for the *analyze once, factor many* workflow use
     /// [`LdltSymbolic`].
-    pub fn factor_with(a: &CscMatrix<T>, opts: &FactorOptions) -> Result<Self, RslabError> {
+    pub fn factor_with(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
         LdltSymbolic::analyze(a)?.factor(a, opts)
     }
 
@@ -238,11 +238,11 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
 /// share the pattern.
 ///
 /// ```
-/// use rslab::{LdltSymbolic, FactorOptions, CscMatrix};
+/// use rslab::{LdltSymbolic, SolverSettings, CscMatrix};
 /// # fn demo(pattern_vals: &[f64], updated_vals: &[f64]) -> Result<(), rslab::RslabError> {
 /// let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0])?;
 /// let analysis = LdltSymbolic::analyze(&a)?;        // phase 1, once
-/// let f1 = analysis.factor(&a, &FactorOptions::default())?; // phase 2/3
+/// let f1 = analysis.factor(&a, &SolverSettings::default())?; // phase 2/3
 /// let _x = f1.solve(&[1.0, 1.0])?;
 /// // ... later, same pattern, new values: analysis.factor(&a2, &opts)? ...
 /// # Ok(()) }
@@ -263,12 +263,12 @@ impl LdltSymbolic {
         })
     }
 
-    /// [`analyze`](Self::analyze) with explicit composable [`AnalyzeOptions`] -
+    /// [`analyze`](Self::analyze) with explicit composable [`SolverSettings`] -
     /// fill-reducing ordering, supernode amalgamation, child-reordering. The
     /// tunable analysis knobs for the auto-tuning sweep.
     pub fn analyze_with<T: Scalar>(
         a: &CscMatrix<T>,
-        opts: &AnalyzeOptions,
+        opts: &SolverSettings,
     ) -> Result<Self, RslabError> {
         a.validate()?;
         Ok(Self {
@@ -379,7 +379,7 @@ impl LdltSymbolic {
     pub fn factor<T: Scalar>(
         &self,
         a: &CscMatrix<T>,
-        opts: &FactorOptions,
+        opts: &SolverSettings,
     ) -> Result<LdltSolver<T>, RslabError> {
         a.validate()?;
         let estimate = self.estimate_memory::<T>();
@@ -506,7 +506,6 @@ mod tests {
 
     #[test]
     fn phased_analyze_then_factor_many_matches_one_shot() {
-        let _g = crate::numeric::gemm_tuning::knob_test_guard();
         // PARDISO workflow: analyze the pattern once, factor two different
         // value sets that share it. Each must match the one-shot factor and
         // solve its own system - the FEM Newton / frequency-sweep use case.
@@ -548,7 +547,7 @@ mod tests {
             let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
             let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 1.0)).collect();
 
-            let phased = analysis.factor(&a, &FactorOptions::default()).unwrap();
+            let phased = analysis.factor(&a, &SolverSettings::default()).unwrap();
             let one_shot = LdltSolver::factor(&a).unwrap();
             let x_phased = phased.solve(&b).unwrap();
             let x_one = one_shot.solve(&b).unwrap();
@@ -580,13 +579,13 @@ mod tests {
         let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
         let sym = LdltSymbolic::analyze(&a).unwrap();
         // Auto capped at 8: a tridiagonal is thin/narrow -> policy returns 2.
-        let auto = sym.factor(&a, &FactorOptions::default().with_auto_threads(8)).unwrap();
+        let auto = sym.factor(&a, &SolverSettings::default().with_auto_threads(8)).unwrap();
         assert_eq!(auto.diagnostics().threads, 2, "thin matrix auto-capped to 2");
         // Fixed overrides the predictor exactly.
-        let fixed = sym.factor(&a, &FactorOptions::default().with_threads(5)).unwrap();
+        let fixed = sym.factor(&a, &SolverSettings::default().with_threads(5)).unwrap();
         assert_eq!(fixed.diagnostics().threads, 5);
         // The auto cap clamps the prediction.
-        let cap1 = sym.factor(&a, &FactorOptions::default().with_auto_threads(1)).unwrap();
+        let cap1 = sym.factor(&a, &SolverSettings::default().with_auto_threads(1)).unwrap();
         assert_eq!(cap1.diagnostics().threads, 1);
         // All still solve correctly.
         let b = vec![1.0_f64; n];
@@ -612,7 +611,7 @@ mod tests {
         let a = CscMatrix::<f64>::from_triplets(n, &r, &c, &v).unwrap();
         let bare = LdltSymbolic::analyze(&a).unwrap();
         let with_default =
-            LdltSymbolic::analyze_with(&a, &crate::AnalyzeOptions::default()).unwrap();
+            LdltSymbolic::analyze_with(&a, &crate::SolverSettings::default()).unwrap();
         assert_eq!(bare.front_dims(), with_default.front_dims());
         assert_eq!(bare.level_widths(), with_default.level_widths());
     }
@@ -646,14 +645,14 @@ mod tests {
         let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 30.0, 1.0)).collect();
         for opts in [
-            crate::AnalyzeOptions::default().with_ordering(crate::OrderingMethod::Amd),
-            crate::AnalyzeOptions::default().with_ordering(crate::OrderingMethod::MetisND),
-            crate::AnalyzeOptions::default().with_nemin(1),
-            crate::AnalyzeOptions::default().with_relax(None),
+            crate::SolverSettings::default().with_ordering(crate::OrderingMethod::Amd),
+            crate::SolverSettings::default().with_ordering(crate::OrderingMethod::MetisND),
+            crate::SolverSettings::default().with_nemin(1),
+            crate::SolverSettings::default().with_relax(None),
         ] {
             let f = LdltSymbolic::analyze_with(&a, &opts)
                 .unwrap()
-                .factor(&a, &FactorOptions::default())
+                .factor(&a, &SolverSettings::default())
                 .unwrap();
             let x = f.solve(&b).unwrap();
             assert!(residual_inf(&a, &x, &b) < 1e-9, "opts {opts:?} residual too large");
@@ -673,7 +672,7 @@ mod tests {
             &[2.0, -1.0, 2.0, 2.0],
         )
         .unwrap();
-        assert!(analysis.factor(&a2, &FactorOptions::default()).is_err());
+        assert!(analysis.factor(&a2, &SolverSettings::default()).is_err());
     }
 
     #[test]

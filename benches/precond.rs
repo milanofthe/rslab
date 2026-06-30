@@ -17,7 +17,7 @@ use std::time::Instant;
 use num_complex::Complex;
 use rslab::sparse::csc::CscMatrix;
 use rslab::{
-    cocg, FactorOptions, LdltSolver, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+    cocg, SolverSettings, LdltSolver, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
     ZeroPivotAction,
 };
 
@@ -112,10 +112,10 @@ fn main() {
     );
 
     let fail = ZeroPivotAction::Fail;
-    let configs: [(&str, FactorOptions); 3] = [
+    let configs: [(&str, SolverSettings); 3] = [
         (
             "f64 complete",
-            FactorOptions {
+            SolverSettings {
                 on_zero_pivot: fail.clone(),
                 drop_tol: None,
                 ..Default::default()
@@ -123,7 +123,7 @@ fn main() {
         ),
         (
             "f64 incomplete τ=1e-2",
-            FactorOptions {
+            SolverSettings {
                 on_zero_pivot: fail.clone(),
                 drop_tol: Some(1e-2),
                 ..Default::default()
@@ -131,7 +131,7 @@ fn main() {
         ),
         (
             "f64 incomplete τ=5e-2",
-            FactorOptions {
+            SolverSettings {
                 on_zero_pivot: fail.clone(),
                 drop_tol: Some(5e-2),
                 ..Default::default()
@@ -146,10 +146,10 @@ fn main() {
     }
 
     // Mixed precision: Complex<f32> factor (8 bytes/entry).
-    let f32_configs: [(&str, FactorOptions); 2] = [
+    let f32_configs: [(&str, SolverSettings); 2] = [
         (
             "f32 complete",
-            FactorOptions {
+            SolverSettings {
                 on_zero_pivot: fail.clone(),
                 drop_tol: None,
                 ..Default::default()
@@ -157,7 +157,7 @@ fn main() {
         ),
         (
             "f32 incomplete τ=5e-2",
-            FactorOptions {
+            SolverSettings {
                 on_zero_pivot: fail.clone(),
                 drop_tol: Some(5e-2),
                 ..Default::default()

@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::prelude::*;
-use rslab::{factor_general_lu, solve_lu, solve_lu_many, FactorOptions};
+use rslab::{factor_general_lu, solve_lu, solve_lu_many, SolverSettings};
 
 const DIR: &str = r"C:\Repositories\rapidmom\precond_matrices";
 type C = Complex<f64>;
@@ -29,7 +29,7 @@ fn run(path: &std::path::Path, s: usize, niter: usize) {
         return;
     };
     let n = a.n;
-    let lu = factor_general_lu(&a, &FactorOptions::preconditioner(1e-10)).unwrap();
+    let lu = factor_general_lu(&a, &SolverSettings::preconditioner(1e-10)).unwrap();
     let fill = lu.factor_nnz();
 
     // Row-major n×s block of right-hand sides.

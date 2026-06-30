@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::matgen::{catalog, Generated};
-use rslab::{FactorOptions, LdltSymbolic, LuSymbolic};
+use rslab::{SolverSettings, LdltSymbolic, LuSymbolic};
 
 type C = Complex<f64>;
 
@@ -24,7 +24,7 @@ fn main() {
     let filter = std::env::var("RLA_CAT_FILTER").unwrap_or_default();
     let max_n: usize =
         std::env::var("RLA_CAT_MAXN").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000);
-    let opts = FactorOptions::default();
+    let opts = SolverSettings::default();
 
     println!(
         "matgen catalog sweep  (max_n={max_n})\n{:<22} {:>8} {:>10} {:>7} {:>8} {:>8} {:>8}",
@@ -81,7 +81,7 @@ fn main() {
 fn a_factor_sym(
     sym: &LdltSymbolic,
     a: &rslab::CscMatrix<C>,
-    opts: &FactorOptions,
+    opts: &SolverSettings,
 ) -> rslab::LdltSolver<C> {
     sym.factor(a, opts).unwrap()
 }

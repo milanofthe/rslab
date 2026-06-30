@@ -16,7 +16,7 @@
 //! working precision `T`.
 
 use crate::error::RslabError;
-use crate::numeric::multifrontal_ldlt::FactorOptions;
+use crate::numeric::multifrontal_ldlt::SolverSettings;
 use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -183,7 +183,7 @@ pub struct LowPrecisionPreconditioner {
 impl LowPrecisionPreconditioner {
     /// Down-cast `A` to `Complex<f32>` and factor it (static-pivoting honoured
     /// via `opts`, e.g. `ZeroPivotAction::PerturbToEps`).
-    pub fn factor(a: &CscMatrix<Complex<f64>>, opts: &FactorOptions) -> Result<Self, RslabError> {
+    pub fn factor(a: &CscMatrix<Complex<f64>>, opts: &SolverSettings) -> Result<Self, RslabError> {
         let a32 = CscMatrix::<Complex<f32>> {
             n: a.n,
             col_ptr: a.col_ptr.clone(),
@@ -237,7 +237,7 @@ pub struct LowPrecisionLu {
 impl LowPrecisionLu {
     /// Down-cast `A` to `Complex<f32>` and LU-factor it (options honoured -
     /// static pivoting and/or incomplete dropping for a preconditioner).
-    pub fn factor(a: &GeneralCsc<Complex<f64>>, opts: &FactorOptions) -> Result<Self, RslabError> {
+    pub fn factor(a: &GeneralCsc<Complex<f64>>, opts: &SolverSettings) -> Result<Self, RslabError> {
         let a32 = GeneralCsc::<Complex<f32>> {
             n: a.n,
             col_ptr: a.col_ptr.clone(),
@@ -1151,7 +1151,7 @@ impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuSolver<T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric::multifrontal_ldlt::{FactorOptions, ZeroPivotAction};
+    use crate::numeric::multifrontal_ldlt::{SolverSettings, ZeroPivotAction};
     use num_complex::Complex;
 
     type C = Complex<f64>;
@@ -1264,7 +1264,7 @@ mod tests {
         assert!(un.converged, "GMRES res={}", un.final_res);
 
         // LU factor as preconditioner → 1-2 iterations.
-        let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let pre = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
         assert!(pre.converged, "preconditioned GMRES res={}", pre.final_res);
         assert!(
@@ -1327,7 +1327,7 @@ mod tests {
         let a = unsym_grid(8);
         let n = a.n;
         let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-        let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let single = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
         let blk = gmres_block(&a, &b, 1, &lu, 1e-10, 200, 40).unwrap();
         assert!(blk.converged);
@@ -1357,7 +1357,7 @@ mod tests {
                 bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
             }
         }
-        let lu = factor_general_lu(&a, &FactorOptions::default()).unwrap();
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let res = gmres_block(&a, &bblk, s, &lu, 1e-10, 200, 40).unwrap();
         assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
         // True residual per column.
@@ -1416,7 +1416,7 @@ mod tests {
         // iterations - ample for a MoM/FEM Krylov tolerance, at half the factor
         // memory. (A residual below ~1e-6 is not attainable with an f32 apply;
         // use the f64 factor for tighter tolerances.)
-        let pc = LowPrecisionLu::factor(&a, &FactorOptions::default()).unwrap();
+        let pc = LowPrecisionLu::factor(&a, &SolverSettings::default()).unwrap();
         assert!(pc.factor_nnz() > 0);
         let res = gmres(&a, &b, &pc, 1e-6, 200, 50).unwrap();
         assert!(res.converged, "mixed-precision GMRES res={}", res.final_res);
@@ -1436,7 +1436,7 @@ mod tests {
         let a = grid(10, c(-1.0, 0.3), c(1.0, 0.05));
         let n = a.n;
         let b: Vec<C> = (0..n).map(|i| c(1.0, (i % 3) as f64 - 1.0)).collect();
-        let opts = FactorOptions {
+        let opts = SolverSettings {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 },
             drop_tol: None,
             ..Default::default()
@@ -1465,7 +1465,7 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
         let full = LdltSolver::factor(&a).unwrap();
-        let opts = FactorOptions {
+        let opts = SolverSettings {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: Some(5e-2),
             ..Default::default()
@@ -1502,7 +1502,7 @@ mod tests {
         let n = a.n;
         let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
-        let m = LowPrecisionPreconditioner::factor(&a, &FactorOptions::default()).unwrap();
+        let m = LowPrecisionPreconditioner::factor(&a, &SolverSettings::default()).unwrap();
         let res = cocg(&a, &b, &m, 1e-10, 500).unwrap();
         assert!(res.converged, "mixed-precision COCG res={}", res.final_res);
         // A few iterations suffice; the f32 factor is a strong preconditioner.

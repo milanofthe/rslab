@@ -29,7 +29,7 @@ use faer::{c64, Mat as FaerMat};
 use num_complex::Complex;
 use rslab::matgen::{bem, stencil};
 use rslab::{
-    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, FactorOptions, GeneralCsc,
+    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, SolverSettings, GeneralCsc,
     LdltSymbolic, LuSymbolic,
 };
 #[cfg(feature = "matgen-download")]
@@ -268,7 +268,7 @@ fn build_faer(a: &GeneralCsc<C>) -> Option<SparseColMat<usize, c64>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads: i32, mem: bool, solvers: &[String], opts: &FactorOptions) {
+fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads: i32, mem: bool, solvers: &[String], opts: &SolverSettings) {
     let (n, nnz) = (mat.n(), mat.nnz());
     let b = rhs(n);
     let has = |s: &str| solvers.iter().any(|x| x == s);
@@ -436,7 +436,7 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
         let floor = envf("RLA_BENCH_PC_FLOOR", 1e-4);
         let maxit = envf("RLA_BENCH_PC_MAXIT", 200.0) as usize;
         let restart = envf("RLA_BENCH_PC_RESTART", 100.0) as usize;
-        let pc_opts = FactorOptions::preconditioner(floor).with_threads(threads.max(1) as usize);
+        let pc_opts = SolverSettings::preconditioner(floor).with_threads(threads.max(1) as usize);
         let outcome = match mat {
             Mat::Sym(a) => LdltSymbolic::analyze(a).and_then(|sym| {
                 let t = Instant::now();
@@ -609,7 +609,7 @@ fn main() {
         .open(&out_path)
         .expect("open RLA_BENCH_OUT");
     // RLA now runs in a scoped pool of `opts.threads`; drive it from the sweep var.
-    let opts = FactorOptions::default().with_threads(threads.max(1) as usize);
+    let opts = SolverSettings::default().with_threads(threads.max(1) as usize);
 
     // Estimate-only mode (`RLA_BENCH_ESTIMATE=1`): emit the a-priori memory-estimate
     // breakdown per matrix and skip all factoring (instant - no numeric work).
