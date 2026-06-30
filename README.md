@@ -36,9 +36,10 @@ Hardware: 12 cores / 24 threads. Compared against
 [faer](https://github.com/sarah-quinones/faer-rs) (Rust sparse LU), Intel MKL
 PARDISO, and SuperLU (via SciPy) over the SuiteSparse collection (1k-100k DOFs;
 SPD, indefinite, unsymmetric, complex). Figures use transparent backgrounds.
-Reproduce with the scripts in `benches/` (`bench_suite` + `superlu_corpus.py` +
-`fit_scaling.py` for the scaling study, `agg_thread_scaling_solvers.py` for the
-thread study).
+Reproduce with the scripts in `benches/`: the `bench_suite` corpus engine +
+`superlu_corpus.py` produce the data, then `fit_scaling.py` (scaling + accuracy),
+`agg_thread_scaling_solvers.py` (thread scaling), and `corpus_breakdown.py`
+(wall-clock + memory-estimate breakdown) render the figures.
 
 ### Scaling: factor time and peak memory vs problem size
 
@@ -104,22 +105,31 @@ Relative residual `‖Ax-b‖/‖b‖` as the accuracy check across the corpus.
   ex11) stay out of reach. RSLAB targets the complex-symmetric EM/FEM regime, not
   general indefinite KKT.
 
-### A-priori memory estimate
+### Where the time goes
 
 ![Wall-clock breakdown](benches/bench_out/wct_breakdown.png)
+
+Mean fraction of wall-clock in analyze / factor / solve per solver over the
+corpus. The factor dominates; the triangular solve is cheap for all; faer has no
+separate analyze phase. RSLAB's analyze (fill-reducing ordering + symbolic) is
+reusable across many value sets that share a pattern (frequency sweep / Newton).
+
+### A-priori memory estimate
+
 ![Memory breakdown](benches/bench_out/memory_breakdown.png)
 
-The memory breakdown is the a-priori estimate (no factoring required): dense panels
-+ compact factor + input/scratch, with the panel-freed live floor marked. The
-estimate is within 1.0x to 1.2x of measured peak across the sizes tested and does
-not under-predict - usable for fail-fast scheduling before any numeric work.
+RSLAB's a-priori factor-memory estimate over the corpus (no factoring required):
+dense panels + compact factor + input/scratch, with the panel-freed live floor
+marked. The estimate is within 1.0x to 1.2x of measured peak and does not
+under-predict - usable for fail-fast scheduling before any numeric work.
 
 ### Real MoM matrices
 
 ![Real MoM matrices](benches/bench_out/real_matrices.png)
 
-On the real MoM matrices RSLAB left-looking uses less time and memory than faer, and
-about half the memory of its own multifrontal path.
+On a private complex-MoM near-field dataset (RSLAB's target regime, which the
+mostly-structural SuiteSparse corpus underrepresents) RSLAB left-looking uses less
+time and memory than faer, and about half the memory of its own multifrontal path.
 
 ## Install
 
