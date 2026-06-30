@@ -311,7 +311,14 @@ pub(crate) fn in_scoped_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Se
     } else {
         threads
     };
-    match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+    // The tree factorization recurses (`factor_subtree` / `ll_factor_subtree`) to
+    // the assembly-tree depth, which is shallow for nested-dissection orderings but
+    // O(#supernodes) for deep chain trees - banded / 1D-like patterns, especially
+    // with low `nemin` (little amalgamation). The default ~2 MB rayon worker stack
+    // overflows there, so give the workers a large stack (reserved address space,
+    // committed on demand) to keep the factorization robust for every knob setting.
+    const WORKER_STACK: usize = 512 * 1024 * 1024;
+    match rayon::ThreadPoolBuilder::new().num_threads(n).stack_size(WORKER_STACK).build() {
         Ok(pool) => pool.install(f),
         Err(_) => f(),
     }
@@ -2524,6 +2531,32 @@ mod tests {
     use super::*;
     use crate::dense::ldlt_generic::solve_ldlt;
     use num_complex::Complex;
+
+    /// A tridiagonal (chain) matrix with no amalgamation (`nemin = 1`) builds an
+    /// assembly tree as deep as the matrix; the recursive tree factorization must
+    /// not overflow the worker stack on either path. Regression for the
+    /// `STATUS_STACK_OVERFLOW` the auto-tuning sweep hit on banded + `nemin = 1`.
+    #[test]
+    fn deep_chain_tree_does_not_overflow_stack() {
+        let n = 20_000usize;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(4.0f64);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
+        for method in [FactorMethod::LeftLooking, FactorMethod::Multifrontal] {
+            let s = SolverSettings::default().with_method(method).with_nemin(1).with_threads(0);
+            let f = factor_sparse_ldlt_with(&a, &s).expect("deep chain factors without overflow");
+            assert_eq!(f.n, n);
+        }
+    }
 
     fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
         let mut ax = vec![T::zero(); a.n];
