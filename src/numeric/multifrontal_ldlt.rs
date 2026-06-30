@@ -340,15 +340,17 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
     }
     let mut max_h = 0;
     let mut stack: Vec<(usize, usize)> = Vec::new(); // (node, next child index)
-    for r in 0..nsuper {
-        if is_child[r] {
+    for (r, &child) in is_child.iter().enumerate() {
+        if child {
             continue;
         }
         stack.push((r, 0));
         while let Some(&(node, ci)) = stack.last() {
             let children = &sym.supernodes[node].children;
             if ci < children.len() {
-                stack.last_mut().unwrap().1 += 1;
+                if let Some(top) = stack.last_mut() {
+                    top.1 += 1;
+                }
                 stack.push((children[ci], 0));
             } else {
                 let mut h = 1;
