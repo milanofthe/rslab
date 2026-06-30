@@ -11,7 +11,10 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::matgen::{stencil, structured};
-use rslab::{set_panel_nb, CscMatrix, FactorMethod, FactorOptions, LdltSymbolic};
+use rslab::{
+    set_panel_nb, AnalyzeOptions, CscMatrix, FactorMethod, FactorOptions, LdltSymbolic,
+    RelaxAmalgamation,
+};
 
 type C = Complex<f64>;
 
@@ -45,6 +48,35 @@ fn run(name: &str, a: CscMatrix<C>) {
     set_panel_nb(64);
 }
 
+fn factor_ms_opts(a: &CscMatrix<C>, aopts: &AnalyzeOptions, threads: usize) -> (f64, usize, usize) {
+    let sym = LdltSymbolic::analyze_with(a, aopts).expect("analyze");
+    let fmax = sym.front_dims().iter().map(|&(_, r)| r).max().unwrap_or(0);
+    let opts = FactorOptions::default()
+        .with_method(FactorMethod::LeftLooking)
+        .with_threads(threads);
+    let t = Instant::now();
+    let f = sym.factor(a, &opts).expect("factor");
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    (ms, f.factor_nnz(), fmax)
+}
+
+/// Front-width lever: wider supernodes push work into the parallel trailing GEMM
+/// (shrinking the serial getf2 fraction), at the cost of explicit-zero fill.
+fn run_width(name: &str, a: CscMatrix<C>) {
+    eprintln!("\n=== width {name}  n={}  nnz={}", a.n, a.values.len());
+    for mw in [128usize, 256, 512, 1024] {
+        let aopts = AnalyzeOptions::default()
+            .with_relax(Some(RelaxAmalgamation { max_width: mw, max_extra_rows: 64 }));
+        let _ = factor_ms_opts(&a, &aopts, 1); // warm + emit split
+        let (t1, fill, fmax) = factor_ms_opts(&a, &aopts, 1);
+        let (t12, _, _) = factor_ms_opts(&a, &aopts, 12);
+        eprintln!(
+            "  max_width={:>4}  front_nrow_max={:>5}  fill={:>9}  t1={:>8.1}ms  t12={:>8.1}ms  speedup {:.2}x",
+            mw, fmax, fill, t1, t12, t1 / t12
+        );
+    }
+}
+
 fn main() {
     let c = |re, im| Complex::new(re, im);
     // Big-front, high flop-concentration (3D): the node-parallelism regime.
@@ -54,4 +86,8 @@ fn main() {
     run("poisson2d_360", stencil::laplacian::<C>(&[360, 360], &stencil::StencilOpts::default()));
     // Thin (banded): should not scale at all.
     run("banded_40000", structured::banded::<C>(40000, 40, 1.0, 1));
+
+    // Lever 2a: front-width sweep on the big-front matrices.
+    run_width("poisson3d_40", stencil::laplacian::<C>(&[40, 40, 40], &stencil::StencilOpts::default()));
+    run_width("helmholtz3d_30", stencil::helmholtz(&[30, 30, 30], c(2.0, 0.1), &stencil::StencilOpts::default()));
 }
