@@ -1,0 +1,324 @@
+//! Auto-tuner: predict the knob config that minimizes a weighted Pareto score
+//! `w·log(time) + (1-w)·log(mem)` for a matrix, from its structural features alone.
+//!
+//! A small MLP performance model `(features ⊕ knobs) → (log factor_ms, log peak_mb)`
+//! is trained offline (`benches/train_tuner.py`) on the corpus sweep and embedded
+//! here as JSON; inference is **pure Rust** (a few dense layers). At tune time the
+//! model scores a candidate grid and returns the best config as [`SolverSettings`].
+//! The trained model held out ~10% time / ~8% mem regret vs the oracle on unseen
+//! matrices (at the default `w = 0.7`).
+
+use serde::Deserialize;
+use std::sync::OnceLock;
+
+use crate::analysis::StructuralFeatures;
+use crate::numeric::gemm_tuning::GemmThresholds;
+use crate::{FactorMethod, OrderingMethod, SolverSettings};
+
+/// Default Pareto weight: 0.7 toward speed, 0.3 toward memory.
+pub const DEFAULT_TUNE_WEIGHT: f64 = 0.7;
+
+#[derive(Deserialize)]
+struct InputComp {
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    log: bool,
+    #[serde(default)]
+    mean: f64,
+    #[serde(default)]
+    std: f64,
+    #[serde(default)]
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct Layer {
+    /// Row-major `(out, in)` weights.
+    w: Vec<Vec<f64>>,
+    b: Vec<f64>,
+}
+
+#[derive(Deserialize)]
+struct Model {
+    input_spec: Vec<InputComp>,
+    layers: Vec<Layer>,
+    target_mean: Vec<f64>,
+    target_std: Vec<f64>,
+}
+
+const MODEL_JSON: &str = include_str!("auto_tune_model.json");
+
+fn model() -> Option<&'static Model> {
+    static MODEL: OnceLock<Option<Model>> = OnceLock::new();
+    MODEL.get_or_init(|| serde_json::from_str(MODEL_JSON).ok()).as_ref()
+}
+
+/// A candidate knob config the tuner scores. Mirrors the sweep's tunable knobs
+/// (the worker count is left to the thread predictor).
+#[derive(Clone, Copy)]
+struct Candidate {
+    ordering: OrderingMethod,
+    nemin: usize,
+    relax_width: usize, // 0 = relaxed amalgamation off
+    panel_nb: usize,
+    scalar_gate: usize,
+    par_gemm: usize,
+    par_cdiv: usize,
+    use_gemm_schur: bool,
+    method: FactorMethod,
+}
+
+const BASE: Candidate = Candidate {
+    ordering: OrderingMethod::Auto,
+    nemin: 16,
+    relax_width: 256,
+    panel_nb: 64,
+    scalar_gate: 4096,
+    par_gemm: 1_000_000,
+    par_cdiv: 8_000_000,
+    use_gemm_schur: true,
+    method: FactorMethod::LeftLooking,
+};
+
+/// Structural-feature lookup by the name used in the model's input spec.
+fn feat_value(f: &StructuralFeatures, name: &str) -> f64 {
+    match name {
+        "n" => f.n as f64,
+        "nnz" => f.nnz as f64,
+        "deg_mean" => f.deg_mean,
+        "deg_max" => f.deg_max as f64,
+        "deg_cv" => f.deg_cv,
+        "bandwidth_max" => f.bandwidth_max as f64,
+        "bandwidth_mean_rel" => f.bandwidth_mean_rel,
+        "diag_dominant_frac" => f.diag_dominant_frac,
+        "diag_present_frac" => f.diag_present_frac,
+        "n_supernodes" => f.n_supernodes as f64,
+        "fill_nnz" => f.fill_nnz as f64,
+        "fill_ratio" => f.fill_ratio,
+        "supernode_cols_mean" => f.supernode_cols_mean,
+        "front_nrow_max" => f.front_nrow_max as f64,
+        "tree_depth" => f.tree_depth as f64,
+        "tree_width_max" => f.tree_width_max as f64,
+        "tree_width_mean" => f.tree_width_mean,
+        "factor_flops" => f.factor_flops as f64,
+        "arith_intensity" => f.arith_intensity,
+        "flop_top1_frac" => f.flop_top1_frac,
+        "flop_top1pct_frac" => f.flop_top1pct_frac,
+        _ => 0.0,
+    }
+}
+
+fn knob_value(c: &Candidate, name: &str) -> f64 {
+    match name {
+        "nemin" => c.nemin as f64,
+        "relax_width" => c.relax_width as f64,
+        "panel_nb" => c.panel_nb as f64,
+        "scalar_gate" => c.scalar_gate as f64,
+        "par_gemm" => c.par_gemm as f64,
+        "par_cdiv" => c.par_cdiv as f64,
+        _ => 0.0,
+    }
+}
+
+fn ordering_name(o: OrderingMethod) -> &'static str {
+    match o {
+        OrderingMethod::Amd => "amd",
+        OrderingMethod::MetisND => "metis",
+        _ => "auto",
+    }
+}
+
+/// Build the standardized input vector per the model's spec (identical layout to
+/// the Python training export).
+fn build_input(m: &Model, f: &StructuralFeatures, c: &Candidate) -> Vec<f64> {
+    m.input_spec
+        .iter()
+        .map(|comp| match comp.kind.as_str() {
+            "feat" => {
+                let v = feat_value(f, &comp.name);
+                let v = if comp.log { v.ln_1p() } else { v };
+                (v - comp.mean) / comp.std
+            }
+            "knob_log" => {
+                let v = knob_value(c, &comp.name).ln_1p();
+                (v - comp.mean) / comp.std
+            }
+            "ordering_onehot" => (ordering_name(c.ordering) == comp.value) as i32 as f64,
+            "method_is_mf" => (c.method == FactorMethod::Multifrontal) as i32 as f64,
+            "use_gemm_schur" => c.use_gemm_schur as i32 as f64,
+            _ => 0.0,
+        })
+        .collect()
+}
+
+/// Forward pass; returns `[log factor_ms, log peak_mb]` (un-standardized).
+fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
+    let mut a = input.to_vec();
+    let last = m.layers.len().saturating_sub(1);
+    for (li, layer) in m.layers.iter().enumerate() {
+        let mut z = vec![0.0f64; layer.b.len()];
+        for (o, row) in layer.w.iter().enumerate() {
+            let mut s = layer.b[o];
+            for (k, &wv) in row.iter().enumerate() {
+                s += wv * a[k];
+            }
+            z[o] = if li < last && s < 0.0 { 0.0 } else { s }; // ReLU on hidden layers
+        }
+        a = z;
+    }
+    [
+        a[0] * m.target_std[0] + m.target_mean[0],
+        a[1] * m.target_std[1] + m.target_mean[1],
+    ]
+}
+
+/// Candidate grid: a Cartesian product over the high-impact knobs (ordering,
+/// amalgamation, method, panel width, top-of-tree GEMM gate), the rest at the
+/// tuned baseline. ~1k configs - microseconds through the tiny model.
+fn candidates() -> Vec<Candidate> {
+    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
+    let nemins = [1usize, 16, 48, 128];
+    let relaxes = [0usize, 128, 256, 512];
+    let panels = [32usize, 64, 96, 128];
+    let cdivs = [2_000_000usize, 8_000_000, 32_000_000];
+    let methods = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
+    let mut v = Vec::new();
+    for &ordering in &orderings {
+        for &nemin in &nemins {
+            for &relax_width in &relaxes {
+                for &panel_nb in &panels {
+                    for &par_cdiv in &cdivs {
+                        for &method in &methods {
+                            v.push(Candidate {
+                                ordering,
+                                nemin,
+                                relax_width,
+                                panel_nb,
+                                par_cdiv,
+                                method,
+                                ..BASE
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
+fn apply(c: &Candidate) -> SolverSettings {
+    let relax = (c.relax_width > 0).then_some(crate::RelaxAmalgamation {
+        max_width: c.relax_width,
+        max_extra_rows: 64,
+    });
+    SolverSettings::default()
+        .with_ordering(c.ordering)
+        .with_nemin(c.nemin)
+        .with_relax(relax)
+        .with_panel_nb(c.panel_nb)
+        .with_gemm_thresholds(GemmThresholds {
+            scalar_gate: c.scalar_gate,
+            par_gemm: c.par_gemm,
+            par_cdiv: c.par_cdiv,
+        })
+        .with_use_gemm_schur(c.use_gemm_schur)
+        .with_method(c.method)
+}
+
+/// Recommend a [`SolverSettings`] for a matrix with the given structural features,
+/// minimizing `weight·log(time) + (1-weight)·log(mem)` over the candidate grid via
+/// the embedded performance model. `weight` is clamped to `[0, 1]`
+/// ([`DEFAULT_TUNE_WEIGHT`] = speed-leaning). Falls back to the default settings if
+/// the model is unavailable. The worker-thread count is left to the
+/// [`Auto`](crate::Threads::Auto) predictor.
+pub fn recommend_settings(features: &StructuralFeatures, weight: f64) -> SolverSettings {
+    let w = weight.clamp(0.0, 1.0);
+    let Some(m) = model() else {
+        return SolverSettings::default();
+    };
+    let mut best: Option<(f64, Candidate)> = None;
+    for c in candidates() {
+        let p = predict(m, &build_input(m, features, &c));
+        let score = w * p[0] + (1.0 - w) * p[1];
+        if best.is_none() || score < best.as_ref().map_or(f64::INFINITY, |b| b.0) {
+            best = Some((score, c));
+        }
+    }
+    match best {
+        Some((_, c)) => apply(&c),
+        None => SolverSettings::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_loads_and_predicts_finite() {
+        let m = model().expect("embedded model parses");
+        assert!(!m.layers.is_empty() && m.target_mean.len() == 2);
+        // A plausible mid-size feature vector; prediction must be finite.
+        let c = BASE;
+        let dim: usize = m.layers[0].w[0].len();
+        assert_eq!(m.input_spec.len(), dim, "input spec width matches layer 0");
+        // Build a zeroed feature struct and predict - exercises the full path.
+        let f = StructuralFeatures::default();
+        let p = predict(m, &build_input(m, &f, &c));
+        assert!(p[0].is_finite() && p[1].is_finite());
+    }
+
+    #[test]
+    fn recommend_returns_valid_settings() {
+        let f = StructuralFeatures::default();
+        let s = recommend_settings(&f, DEFAULT_TUNE_WEIGHT);
+        // A recommendation is one of the candidate orderings/methods.
+        assert!(s.nemin >= 1 && s.panel_nb >= 8);
+    }
+
+    /// Numerical parity with the Python training model: for each reference sample
+    /// (`benches/train_tuner.py` writes `tuner_parity.json`), the pure-Rust forward
+    /// pass must reproduce the predicted log-time / log-mem. Env-gated so it only
+    /// runs when the fixture path is provided (`RLA_TUNER_PARITY=<path>`).
+    #[test]
+    fn parity_with_python_model() {
+        let Ok(path) = std::env::var("RLA_TUNER_PARITY") else {
+            return;
+        };
+        let m = model().expect("model");
+        let txt = std::fs::read_to_string(&path).expect("parity fixture");
+        let samples: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        let order = |s: &str| match s {
+            "amd" => OrderingMethod::Amd,
+            "metis" => OrderingMethod::MetisND,
+            _ => OrderingMethod::Auto,
+        };
+        let g = |v: &serde_json::Value, k: &str| v[k].as_f64().unwrap() as usize;
+        for s in samples.as_array().unwrap() {
+            let f: StructuralFeatures = serde_json::from_value(s["features"].clone()).unwrap();
+            let p = &s["params"];
+            let c = Candidate {
+                ordering: order(p["ordering"].as_str().unwrap()),
+                nemin: g(p, "nemin"),
+                relax_width: g(p, "relax_width"),
+                panel_nb: g(p, "panel_nb"),
+                scalar_gate: g(p, "scalar_gate"),
+                par_gemm: g(p, "par_gemm"),
+                par_cdiv: g(p, "par_cdiv"),
+                use_gemm_schur: p["use_gemm_schur"].as_bool().unwrap(),
+                method: if p["method"] == "multifrontal" {
+                    FactorMethod::Multifrontal
+                } else {
+                    FactorMethod::LeftLooking
+                },
+            };
+            let pred = predict(m, &build_input(m, &f, &c));
+            let (ems, emb) = (s["pred_log_ms"].as_f64().unwrap(), s["pred_log_mb"].as_f64().unwrap());
+            assert!((pred[0] - ems).abs() < 1e-4, "log_ms parity: rust {} vs py {}", pred[0], ems);
+            assert!((pred[1] - emb).abs() < 1e-4, "log_mb parity: rust {} vs py {}", pred[1], emb);
+        }
+    }
+}

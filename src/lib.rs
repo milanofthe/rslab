@@ -64,6 +64,10 @@
 /// its symbolic analysis into a compact [`analysis::StructuralFeatures`] vector
 /// for diagnostics and auto-tuning input.
 pub mod analysis;
+/// Auto-tuner: predict the knob config minimizing a weighted time/memory score
+/// for a matrix from its [`analysis::StructuralFeatures`], via an embedded MLP
+/// performance model (trained offline on the corpus sweep; pure-Rust inference).
+pub mod auto_tune;
 pub mod dense;
 /// Deterministic resource diagnostics: a-priori peak-memory estimate + per-stage
 /// runtime/memory report for solver-in-the-loop scheduling.
@@ -96,6 +100,7 @@ pub mod tuning;
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use analysis::{recommend_threads_from, StructuralFeatures, SymbolicShape};
+pub use auto_tune::{recommend_settings, DEFAULT_TUNE_WEIGHT};
 pub use numeric::gemm_tuning::{
     GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
 };

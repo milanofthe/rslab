@@ -91,7 +91,7 @@ pub fn recommend_threads_from(
 /// A compact structural fingerprint of a sparse system: cheap pattern statistics
 /// plus the symbolic-analysis shape. Serializable, so a sweep harness can emit
 /// one record per matrix and a predictor can consume the same vector.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StructuralFeatures {
     // --- pattern features (O(nnz), pre-analysis) ---
     /// Matrix dimension `n`.
@@ -334,6 +334,17 @@ impl StructuralFeatures {
             self.tree_width_max,
             max_cores,
         )
+    }
+
+    /// Auto-tuned [`SolverSettings`](crate::SolverSettings) for a matrix with these
+    /// features: the knob config minimizing `weight·log(time) + (1-weight)·log(mem)`
+    /// over a candidate grid, via the embedded MLP performance model. `weight = 1`
+    /// is fastest, `0` is smallest peak memory;
+    /// [`DEFAULT_TUNE_WEIGHT`](crate::auto_tune::DEFAULT_TUNE_WEIGHT) leans toward
+    /// speed. The worker count is left to the [`Auto`](crate::Threads::Auto)
+    /// thread predictor. See [`crate::auto_tune`].
+    pub fn recommend_settings(&self, weight: f64) -> crate::SolverSettings {
+        crate::auto_tune::recommend_settings(self, weight)
     }
 
     #[allow(clippy::too_many_arguments)]
