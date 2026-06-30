@@ -2055,6 +2055,11 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     }
     let a_perm = GeneralCsc::<T>::from_triplets(n, &rows, &cols, &vals)?;
     let a_perm_t = a_perm.transpose();
+    // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
+    // trees), shared by both LU paths.
+    let stack = crate::numeric::multifrontal_ldlt::stack_for_depth(
+        crate::numeric::multifrontal_ldlt::supernode_tree_depth(sym),
+    );
 
     // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
     // a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
@@ -2062,7 +2067,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         let nthreads = opts.threads.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
         });
-        return crate::numeric::multifrontal_ldlt::in_scoped_pool(nthreads, || {
+        return crate::numeric::multifrontal_ldlt::in_scoped_pool(nthreads, stack, || {
             factor_lu_left_looking(
                 sym,
                 &a_perm,
@@ -2097,10 +2102,20 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // children-before-parent dependency is the recursion structure itself.
     let pool = FrontPool::<T>::new();
     let kt = opts.kernel();
-    let root_outs: Vec<SubtreeFactors<T>> = roots
-        .par_iter()
-        .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, profile, kt))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Scoped pool of `opts.threads` with the depth-sized stack (honours the thread
+    // budget and is overflow-safe on deep trees, like the left-looking path).
+    let nthreads = opts.threads.resolve(|cap| {
+        crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
+    });
+    let root_outs: Vec<SubtreeFactors<T>> =
+        crate::numeric::multifrontal_ldlt::in_scoped_pool(nthreads, stack, || {
+            roots
+                .par_iter()
+                .map(|&r| {
+                    factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, profile, kt)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?;
     // Scatter the subtree factors into `node_results` (indexed by supernode id)
     // for the global emit pass, which still walks supernodes in postorder.
     let mut node_results: Vec<Option<NodeLu<T>>> = (0..nsuper).map(|_| None).collect();

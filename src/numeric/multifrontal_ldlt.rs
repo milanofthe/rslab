@@ -305,22 +305,60 @@ pub const DEFAULT_THREADS: usize = 2;
 /// factorization's parallelism is bounded and concurrent solves coexist instead of
 /// each grabbing the global pool. Falls back to running on the current pool if the
 /// build fails. `threads == 0` means all logical cores.
-pub(crate) fn in_scoped_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+pub(crate) fn in_scoped_pool<R: Send>(
+    threads: usize,
+    stack_bytes: usize,
+    f: impl FnOnce() -> R + Send,
+) -> R {
     let n = if threads == 0 {
         std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
     } else {
         threads
     };
-    // The tree factorization recurses (`factor_subtree` / `ll_factor_subtree`) to
-    // the assembly-tree depth, which is shallow for nested-dissection orderings but
-    // O(#supernodes) for deep chain trees - banded / 1D-like patterns, especially
-    // with low `nemin` (little amalgamation). The default ~2 MB rayon worker stack
-    // overflows there, so give the workers a large stack (reserved address space,
-    // committed on demand) to keep the factorization robust for every knob setting.
-    const WORKER_STACK: usize = 512 * 1024 * 1024;
-    match rayon::ThreadPoolBuilder::new().num_threads(n).stack_size(WORKER_STACK).build() {
+    let mut builder = rayon::ThreadPoolBuilder::new().num_threads(n);
+    if stack_bytes > 0 {
+        builder = builder.stack_size(stack_bytes);
+    }
+    match builder.build() {
         Ok(pool) => pool.install(f),
         Err(_) => f(),
+    }
+}
+
+/// Maximum supernode-tree depth (root-to-leaf), the recursion depth of the tree
+/// factorization. A postorder DP over the supernodes (children precede their
+/// parent in the numbering); O(#supernodes).
+pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
+    let nsuper = sym.supernodes.len();
+    let mut depth = vec![0usize; nsuper];
+    let mut max_d = 0;
+    for s in 0..nsuper {
+        let mut d = 1;
+        for &c in &sym.supernodes[s].children {
+            d = d.max(depth[c] + 1);
+        }
+        depth[s] = d;
+        max_d = max_d.max(d);
+    }
+    max_d
+}
+
+/// Worker-thread stack size for a tree of the given depth. The recursive tree
+/// factorization (`factor_subtree` / `ll_factor_subtree` and the LU twins) uses
+/// O(depth) native stack; depth is O(log n) for nested-dissection orderings but
+/// O(#supernodes) for deep chain trees - banded / 1D-like patterns, especially
+/// with low `nemin`. Sizing the worker stack to the analyzed depth keeps the
+/// factorization robust for every knob setting (the address space is reserved,
+/// committed only as the recursion descends), instead of a fixed guess that a
+/// deep enough chain overflows. `0` (shallow trees) keeps the rayon default.
+pub(crate) fn stack_for_depth(depth: usize) -> usize {
+    const FRAME: usize = 16 * 1024; // per-frame budget (measured ~6.7 KB, ~2.4x margin)
+    const SHALLOW: usize = 4096; // below this the default stack is plenty
+    const MAX: usize = 4 * 1024 * 1024 * 1024; // 4 GB cap (depth ~256k)
+    if depth <= SHALLOW {
+        0
+    } else {
+        depth.saturating_mul(FRAME).min(MAX)
     }
 }
 
@@ -1340,12 +1378,15 @@ pub fn factor_numeric<T: Scalar>(
         Some(i) => i,
     };
     let sym = &inner.sym;
+    // Worker stack sized to the assembly-tree depth so the recursive tree
+    // factorization never overflows on deep chain trees (banded / 1D + low nemin).
+    let stack = stack_for_depth(supernode_tree_depth(sym));
 
     // Supernodal left-looking path: same factor, low transient (no CB stack). Run
     // in a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
         let nthreads = opts.threads.resolve(|cap| recommend_threads_for_sym(symb, cap));
-        return in_scoped_pool(nthreads, || factor_left_looking(sym, a, opts));
+        return in_scoped_pool(nthreads, stack, || factor_left_looking(sym, a, opts));
     }
 
     // Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
@@ -1395,10 +1436,16 @@ pub fn factor_numeric<T: Scalar>(
     }
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
     let kt = opts.kernel();
-    let root_outs: Vec<SubtreeFactors<T>> = roots
-        .par_iter()
-        .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Run the work-stealing tree recursion in a scoped pool of `opts.threads` with
+    // the depth-sized stack (honours the thread budget and is overflow-safe on
+    // deep trees, like the left-looking path above).
+    let nthreads = opts.threads.resolve(|cap| recommend_threads_for_sym(symb, cap));
+    let root_outs: Vec<SubtreeFactors<T>> = in_scoped_pool(nthreads, stack, || {
+        roots
+            .par_iter()
+            .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
     // Scatter the subtree factors into `node_results` (by supernode id) for the
     // global emit pass, which still walks supernodes in postorder.
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
