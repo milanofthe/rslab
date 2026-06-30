@@ -68,6 +68,21 @@ faer and SuperLU on factor-time *and* peak-memory growth, and trails only
 PARDISO's decades-tuned sublinear order. SuperLU does not exploit symmetry, so its
 fill (and factor time) grows steeply (`1.45`).
 
+Head-to-head over the same run (geomean across the matrices both solvers factor
+to `< 0.1` residual):
+
+| RSLAB (auto) vs | factor time | peak memory |
+|-----------------|:-----------:|:-----------:|
+| MKL PARDISO | **7.1x slower** | 2.3x more |
+| faer LU     | **7.0x faster** | **2.3x less** |
+| SuperLU     | **8.9x faster** | n/a¹ |
+
+¹ SuperLU's memory is sampled process RSS (SciPy), not the live-bytes peak the
+in-process solvers report, so the two are not directly comparable. PARDISO is the
+commercial reference (decades of hand-tuned kernels); RSLAB is a pure-Rust solver
+that is several times faster and lighter than the other open-source options while
+staying within a single-digit factor of MKL.
+
 ### Thread scaling
 
 ![Thread scaling per solver](benches/bench_out/thread_scaling_solvers.png)
