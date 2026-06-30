@@ -312,13 +312,14 @@ fn threads_mode() -> bool {
 
 /// Thread-scaling ladder at production-default knobs (Auto ordering, nemin 16,
 /// par_cdiv 8M): vary only the worker count to trace the per-matrix speedup
-/// curve. Reduced for the heaviest matrices to bound wall-clock. The machine has
-/// 12 physical / 24 logical cores.
+/// curve. Capped at the 12 physical cores - beyond them hyperthreading gives
+/// compute-bound BLAS-3 little and only adds noise. Reduced for the heaviest
+/// matrices to bound wall-clock.
 fn thread_ladder(flops: u64) -> Vec<Param> {
     let ladder: &[usize] = if flops as f64 > 5e10 {
-        &[1, 4, 12, 24]
+        &[1, 4, 8, 12]
     } else {
-        &[1, 2, 4, 8, 12, 16, 24]
+        &[1, 2, 4, 6, 8, 12]
     };
     ladder
         .iter()
