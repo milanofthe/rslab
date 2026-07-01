@@ -276,13 +276,15 @@ fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
 }
 
 /// Candidate grid over ordering, amalgamation (`nemin`/`relax`), method, and the
-/// kernel scheduling knobs (panel width, top-of-tree GEMM gate). `Auto` already
-/// selects nested dissection adaptively, so an explicit MetisND candidate (which
-/// only adds the metis-on-banded memory pathology the estimates cannot flag) is
-/// left out. Memory is held safe by the deterministic backstop regardless of which
-/// knob is picked.
+/// kernel scheduling knobs (panel width, top-of-tree GEMM gate). Includes an
+/// explicit `MetisND` candidate: on 3D / complex-indefinite classes (curl-curl EM)
+/// the adaptive `Auto` heuristic mispicks and MetisND cuts fill ~3x, and the
+/// deterministic fill backstop (a pick must not exceed the default's fill) rejects
+/// MetisND on the banded classes where it over-separates -- so it wins where it
+/// helps and is vetoed where it hurts. Memory stays safe by the backstop
+/// regardless of which knob is picked.
 fn candidates(path: SolverPath, active: &ActiveKnobs) -> Vec<Candidate> {
-    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd];
+    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
     let nemins = [1usize, 16, 48, 128];
     let relaxes = [0usize, 128, 256, 512];
     let panels = [32usize, 64, 96, 128];
@@ -564,11 +566,12 @@ mod tests {
         let lu = active_knobs(model_for(SolverPath::Lu).expect("lu model loads"));
         assert!(ldlt.scaling && ldlt.memory && !ldlt.pivot_u, "LDLᵀ tunes scaling+memory, not pivot_u");
         assert!(lu.scaling && lu.memory && lu.pivot_u, "LU tunes scaling+memory+pivot_u");
-        assert_eq!(candidates(SolverPath::Ldlt, &ldlt).len(), 768 * 8, "LDLᵀ: scaling×4·memory×2");
-        assert_eq!(candidates(SolverPath::Lu, &lu).len(), 768 * 32, "LU: +pivot_u×4");
+        // Base grid: 3 orderings·4 nemin·4 relax·4 panel·3 cdiv·2 method = 1152.
+        assert_eq!(candidates(SolverPath::Ldlt, &ldlt).len(), 1152 * 8, "LDLᵀ: scaling×4·memory×2");
+        assert_eq!(candidates(SolverPath::Lu, &lu).len(), 1152 * 32, "LU: +pivot_u×4");
         // Data-driven gate: a model referencing no axis leaves the grid unchanged.
         let none = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
-        assert_eq!(candidates(SolverPath::Ldlt, &none).len(), 768);
-        assert_eq!(candidates(SolverPath::Lu, &none).len(), 768);
+        assert_eq!(candidates(SolverPath::Ldlt, &none).len(), 1152);
+        assert_eq!(candidates(SolverPath::Lu, &none).len(), 1152);
     }
 }
