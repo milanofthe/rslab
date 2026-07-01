@@ -21,6 +21,7 @@
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::RslabError;
 use crate::scalar::Scalar;
+use rayon::prelude::*;
 
 /// Result of a generic Bunch-Kaufman LDLᵀ factorization.
 ///
@@ -390,12 +391,143 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     Ok(x)
 }
 
+/// A memory-compact form of [`LdltFactors`] with the CSC index arrays and the
+/// pivot permutation stored as `u32` instead of `usize`, halving the index
+/// footprint on 64-bit targets when `n < 2^31` (and `nnz(L) < 2^32`). Indices
+/// are the non-value half of a sparse factor, so this shrinks the stored factor
+/// by up to `4·(nnz(L) + 2n)` bytes at **no accuracy cost**: the values are moved
+/// in unchanged and [`solve`](Self::solve) is bit-identical to [`solve_ldlt`]
+/// (only the index *type* differs, cast back to `usize` on read). A pure memory
+/// axis for the exact factor - build it from a full factor and drop the original.
+pub struct CompressedLdltFactors<T> {
+    /// Matrix dimension.
+    pub n: usize,
+    l_col_ptr: Vec<u32>,
+    l_row_idx: Vec<u32>,
+    l_values: Vec<T>,
+    d_diag: Vec<T>,
+    d_subdiag: Vec<T>,
+    two_by_two: Vec<bool>,
+    perm: Vec<u32>,
+}
+
+impl<T: Scalar> CompressedLdltFactors<T> {
+    /// Build from full [`LdltFactors`], **consuming** them and moving the values
+    /// (no duplication - the compact factor replaces the original). Returns
+    /// `None` when the indices do not fit `u32` (`n >= 2^31` or `nnz(L) >= 2^32`),
+    /// where 32-bit compression does not apply; the input is dropped in that case.
+    pub fn from_factors(f: LdltFactors<T>) -> Option<Self> {
+        let nnz = *f.l_col_ptr.last().unwrap_or(&0);
+        if f.n as u64 > u32::MAX as u64 || nnz as u64 > u32::MAX as u64 {
+            return None;
+        }
+        Some(Self {
+            n: f.n,
+            l_col_ptr: f.l_col_ptr.iter().map(|&x| x as u32).collect(),
+            l_row_idx: f.l_row_idx.iter().map(|&x| x as u32).collect(),
+            l_values: f.l_values,
+            d_diag: f.d_diag,
+            d_subdiag: f.d_subdiag,
+            two_by_two: f.two_by_two,
+            perm: f.perm.iter().map(|&x| x as u32).collect(),
+        })
+    }
+
+    /// Number of stored `L` nonzeros (the fill).
+    pub fn factor_nnz(&self) -> usize {
+        self.l_values.len()
+    }
+
+    /// Stored index footprint in bytes (the `u32` `l_col_ptr` + `l_row_idx` +
+    /// `perm` arrays). Half of the `usize` original on a 64-bit target.
+    pub fn index_bytes(&self) -> usize {
+        4 * (self.l_col_ptr.len() + self.l_row_idx.len() + self.perm.len())
+    }
+
+    /// Solve `A x = b`, bit-identical to [`solve_ldlt`] on the source factors.
+    pub fn solve(&self, rhs: &[T]) -> Result<Vec<T>, RslabError> {
+        let n = self.n;
+        if rhs.len() != n {
+            return Err(RslabError::DimensionMismatch {
+                expected: n,
+                got: rhs.len(),
+            });
+        }
+        let mut y = vec![T::zero(); n];
+        for (i, yi) in y.iter_mut().enumerate() {
+            *yi = rhs[self.perm[i] as usize];
+        }
+        // Forward solve L z = y.
+        for j in 0..n {
+            let zj = y[j];
+            for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
+                let i = self.l_row_idx[k] as usize;
+                if i != j {
+                    y[i] = y[i] - self.l_values[k] * zj;
+                }
+            }
+        }
+        // D-block solve.
+        let mut k = 0;
+        while k < n {
+            if self.two_by_two[k] {
+                let d11 = self.d_diag[k];
+                let d21 = self.d_subdiag[k];
+                let d22 = self.d_diag[k + 1];
+                let det = d11 * d22 - d21 * d21;
+                if det == T::zero() {
+                    return Err(RslabError::NumericallyRankDeficient);
+                }
+                let detinv = det.recip();
+                let (z0, z1) = (y[k], y[k + 1]);
+                y[k] = (d22 * z0 - d21 * z1) * detinv;
+                y[k + 1] = (d11 * z1 - d21 * z0) * detinv;
+                k += 2;
+            } else {
+                let d = self.d_diag[k];
+                if d == T::zero() {
+                    return Err(RslabError::NumericallyRankDeficient);
+                }
+                y[k] = y[k] * d.recip();
+                k += 1;
+            }
+        }
+        // Backward solve Lᵀ v = w.
+        for j in (0..n).rev() {
+            let mut acc = y[j];
+            for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
+                let i = self.l_row_idx[k] as usize;
+                if i != j {
+                    acc = acc - self.l_values[k] * y[i];
+                }
+            }
+            y[j] = acc;
+        }
+        let mut x = vec![T::zero(); n];
+        for (i, &vi) in y.iter().enumerate() {
+            x[self.perm[i] as usize] = vi;
+        }
+        Ok(x)
+    }
+}
+
+/// Below this RHS count (and work size) the block solve runs serially - the
+/// gather/scatter + thread-spawn overhead of the parallel path only amortizes for
+/// genuinely wide multi-RHS solves.
+const PAR_SOLVE_MIN_RHS: usize = 8;
+const PAR_SOLVE_MIN_WORK: usize = 1 << 18;
+
 /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the returned
 /// `x` are **row-major** `n × nrhs` buffers (row `i`'s `nrhs` values contiguous,
 /// i.e. `b[i*nrhs + c]` is RHS `c` at row `i`). Processing the RHS as a block
 /// loads each `L`/`D` value once and applies it to all `nrhs` columns - the
 /// memory-bound amortization that makes one block solve beat `nrhs` separate
 /// [`solve_ldlt`] calls.
+///
+/// For a genuinely wide RHS the columns are split into per-thread chunks and
+/// solved concurrently (each RHS is independent). The result is **bit-identical**
+/// to the serial block solve: every column undergoes the exact same operations in
+/// the same order regardless of chunking, so the determinism guarantee holds.
 pub fn solve_ldlt_many<T: Scalar>(
     factors: &LdltFactors<T>,
     b: &[T],
@@ -408,6 +540,54 @@ pub fn solve_ldlt_many<T: Scalar>(
             got: b.len(),
         });
     }
+    let nthreads = rayon::current_num_threads().max(1);
+    if nrhs < PAR_SOLVE_MIN_RHS || n * nrhs < PAR_SOLVE_MIN_WORK || nthreads < 2 {
+        return solve_ldlt_block(factors, b, nrhs);
+    }
+    // Split the RHS columns into `nchunks` independent contiguous ranges and solve
+    // each on its own worker. Each chunk is gathered into a compact row-major
+    // `n × w` sub-block, solved with the serial block kernel, then scattered back.
+    let nchunks = nthreads.min(nrhs);
+    let chunk = nrhs.div_ceil(nchunks);
+    let ranges: Vec<(usize, usize)> = (0..nchunks)
+        .map(|t| (t * chunk, ((t + 1) * chunk).min(nrhs)))
+        .filter(|&(a, e)| a < e)
+        .collect();
+    let parts: Result<Vec<(usize, usize, Vec<T>)>, RslabError> = ranges
+        .par_iter()
+        .map(|&(c0, c1)| {
+            let w = c1 - c0;
+            let mut sub = vec![T::zero(); n * w];
+            for i in 0..n {
+                let ib = i * nrhs;
+                let sb = i * w;
+                sub[sb..sb + w].copy_from_slice(&b[ib + c0..ib + c1]);
+            }
+            let xs = solve_ldlt_block(factors, &sub, w)?;
+            Ok((c0, c1, xs))
+        })
+        .collect();
+    let parts = parts?;
+    let mut x = vec![T::zero(); n * nrhs];
+    for (c0, c1, xs) in parts {
+        let w = c1 - c0;
+        for i in 0..n {
+            let ib = i * nrhs;
+            let sb = i * w;
+            x[ib + c0..ib + c1].copy_from_slice(&xs[sb..sb + w]);
+        }
+    }
+    Ok(x)
+}
+
+/// Serial block solve over `nrhs` right-hand sides (the memory-bound AXPY kernel).
+/// The parallel [`solve_ldlt_many`] fans this over column chunks.
+fn solve_ldlt_block<T: Scalar>(
+    factors: &LdltFactors<T>,
+    b: &[T],
+    nrhs: usize,
+) -> Result<Vec<T>, RslabError> {
+    let n = factors.n;
     // Y = Pᵀ B (gather rows; each row's `nrhs` block moves as a unit).
     let mut y = vec![T::zero(); n * nrhs];
     for i in 0..n {
@@ -513,6 +693,105 @@ mod tests {
         (0..a.n)
             .map(|i| (ax[i] - b[i]).magnitude())
             .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn compressed_ldlt_is_bit_identical_and_smaller() {
+        // 32-bit index compression: the compact factor solves bit-identically to
+        // the full-index factor (only the index type differs) and stores its
+        // indices in half the bytes.
+        let m = 16;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = crate::CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+
+        let reference = crate::factor_sparse_ldlt(&a).unwrap();
+        let x_ref = solve_ldlt(&reference, &b).unwrap();
+        let full_index_bytes = 8 * (reference.l_col_ptr.len() + reference.l_row_idx.len() + reference.perm.len());
+
+        let compact = CompressedLdltFactors::from_factors(crate::factor_sparse_ldlt(&a).unwrap())
+            .expect("n < 2^31 compresses");
+        let x_cmp = compact.solve(&b).unwrap();
+
+        assert_eq!(x_ref.len(), x_cmp.len());
+        for i in 0..n {
+            assert_eq!(
+                x_ref[i].to_bits(),
+                x_cmp[i].to_bits(),
+                "compressed solve differs from full at row {i}"
+            );
+        }
+        assert_eq!(compact.index_bytes() * 2, full_index_bytes, "u32 indices halve the footprint");
+        assert_eq!(compact.factor_nnz(), reference.l_values.len());
+    }
+
+    #[test]
+    fn parallel_wide_multi_rhs_is_bit_identical_to_serial() {
+        // A large-enough sparse SPD system so solve_ldlt_many takes the parallel
+        // column-chunk path (n*nrhs over the threshold). Each RHS column must be
+        // bit-identical to the serial single-RHS solve, and the block residual
+        // small - the determinism guarantee under RHS-parallelism.
+        let m = 50;
+        let n = m * m; // 2500
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = crate::CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let factors = crate::factor_sparse_ldlt(&a).unwrap();
+
+        let nrhs = 128; // n*nrhs = 320_000 > PAR_SOLVE_MIN_WORK, nrhs > PAR_SOLVE_MIN_RHS
+        let b: Vec<f64> = (0..n * nrhs).map(|k| ((k % 13) as f64) - 6.0).collect();
+        let x_par = solve_ldlt_many(&factors, &b, nrhs).unwrap();
+
+        // Reference: solve each column on its own (nrhs = 1 → serial block, w = 1).
+        for c in 0..nrhs {
+            let bc: Vec<f64> = (0..n).map(|i| b[i * nrhs + c]).collect();
+            let xc = solve_ldlt_many(&factors, &bc, 1).unwrap();
+            for i in 0..n {
+                assert_eq!(
+                    x_par[i * nrhs + c].to_bits(),
+                    xc[i].to_bits(),
+                    "parallel column {c} row {i} differs from serial"
+                );
+            }
+        }
     }
 
     // ---- f64 ----------------------------------------------------------------

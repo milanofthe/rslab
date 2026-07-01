@@ -41,8 +41,8 @@ use std::time::Instant;
 use num_complex::Complex;
 use rslab::matgen::{random, stencil, structured};
 use rslab::{
-    CscMatrix, FactorMethod, GemmThresholds, GeneralCsc, LdltSymbolic, LuSymbolic, OrderingMethod,
-    RelaxAmalgamation, SolverSettings, StructuralFeatures,
+    CscMatrix, FactorMethod, GemmThresholds, GeneralCsc, LdltSymbolic, LuSymbolic, MemoryMode,
+    OrderingMethod, RelaxAmalgamation, ScalingStrategy, SolverSettings, StructuralFeatures,
 };
 
 type C = Complex<f64>;
@@ -188,6 +188,31 @@ fn corpus() -> Vec<Entry> {
         );
     }
 
+    // Curl-curl time-harmonic Maxwell (complex symmetric indefinite, gradient
+    // near-null-space) - the FEM edge-element / EM workload; 3 components per node.
+    for &(k, om, sg) in &[(12usize, 2.0, 0.1), (18, 4.0, 0.3), (24, 3.0, 0.05)] {
+        let kk = g(k);
+        sym(
+            format!("curlcurl3d_{}_{:.0}", 3 * kk * kk * kk, om),
+            rslab::matgen::fem::curl_curl(&[kk, kk, kk], om, sg),
+        );
+    }
+    // Saddle-point Stokes/KKT (symmetric indefinite), 2D and 3D.
+    for &s in &[60usize, 110, 170] {
+        let m = g(s);
+        sym(
+            format!("saddle2d_{}", 3 * m * m),
+            rslab::matgen::fem::saddle_point::<C>(&[m, m], 0.1),
+        );
+    }
+    for &s in &[16usize, 24] {
+        let m = g(s);
+        sym(
+            format!("saddle3d_{}", 4 * m * m * m),
+            rslab::matgen::fem::saddle_point::<C>(&[m, m, m], 0.1),
+        );
+    }
+
     // Unsymmetric: BEM/MoM-like (dense-ish) and random (density ladder).
     for n in [1500usize, 3000, 6000, 10000] {
         e.push(Entry {
@@ -209,70 +234,83 @@ fn corpus() -> Vec<Entry> {
 /// generated ones.
 #[cfg(feature = "matgen-download")]
 fn suitesparse_list() -> &'static [(&'static str, &'static str)] {
+    // Merged corpus: the original curated set + the issue-#2 validation corpus
+    // (union, deduped). Unavailable names / oversized matrices are skipped at
+    // fetch / memory-gate time, so a generous list only widens coverage.
     &[
-        ("HB", "bcsstk14"),
-        ("HB", "bcsstk18"),
-        ("HB", "bcsstk24"),
-        ("HB", "bcsstk28"),
-        ("Boeing", "bcsstk39"),
-        ("Boeing", "msc10848"),
-        ("Boeing", "crystk03"),
-        ("Williams", "cant"),
-        ("GHS_psdef", "wathen100"),
-        ("GHS_psdef", "wathen120"),
-        ("Nasa", "nasa2910"),
-        ("Nasa", "nasasrb"),
-        ("Rothberg", "cfd1"),
-        ("Rothberg", "cfd2"),
-        ("DNVS", "ship_001"),
-        ("FIDAP", "ex11"),
-        ("FIDAP", "ex40"),
-        ("Bai", "qc2534"),
-        ("GHS_indef", "cont-300"),
-        ("GHS_indef", "bratu3d"),
-        ("Schenk_ISEI", "barrier2-1"),
-        ("Um", "2cubes_sphere"),
-        ("Schmid", "thermal1"),
-        ("Botonakis", "thermomech_dM"),
-        // --- structural FEM ---
-        ("HB", "bcsstk16"),
-        ("HB", "bcsstk17"),
-        ("HB", "bcsstk25"),
-        ("HB", "bcsstk38"),
-        ("Boeing", "ct20stif"),
-        ("Boeing", "msc23052"),
-        ("Boeing", "pwtk"),
-        ("Cylshell", "s3rmt3m3"),
-        ("Cylshell", "s3rmq4m1"),
-        ("Cylshell", "s3dkt3m2"),
-        ("DNVS", "shipsec1"),
-        ("DNVS", "ship_003"),
-        ("Nasa", "nasa1824"),
-        ("Nasa", "nasa4704"),
-        ("Simon", "raefsky4"),
-        // --- CFD / fluid (unsymmetric) ---
-        ("Simon", "raefsky3"),
-        ("Simon", "raefsky2"),
-        ("Simon", "venkat01"),
-        ("FIDAP", "ex19"),
-        ("FIDAP", "ex35"),
-        // --- circuit / semiconductor (unsymmetric) ---
-        ("Hamm", "scircuit"),
-        ("Hamm", "memplus"),
-        ("Bomhof", "circuit_3"),
-        // --- thermal / PDE ---
-        ("Botonakis", "FEM_3D_thermal1"),
-        ("Wissgott", "parabolic_fem"),
-        // --- optimization / KKT (symmetric indefinite) ---
-        ("GHS_indef", "cont-201"),
-        ("GHS_indef", "stokes64"),
-        ("GHS_indef", "dixmaanl"),
-        ("GHS_indef", "boyd1"),
-        // --- acoustics / model reduction ---
-        ("Cunningham", "qa8fm"),
-        ("Oberwolfach", "gyro"),
-        ("Oberwolfach", "t2dah_e"),
-        ("PARSEC", "Si5H12"),
+        ("HB", "bcsstk14"), ("HB", "bcsstk18"), ("HB", "bcsstk24"), ("HB", "bcsstk28"),
+        ("Boeing", "bcsstk39"), ("Boeing", "msc10848"), ("Boeing", "crystk03"), ("Williams", "cant"),
+        ("GHS_psdef", "wathen100"), ("GHS_psdef", "wathen120"), ("Nasa", "nasa2910"), ("Nasa", "nasasrb"),
+        ("Rothberg", "cfd1"), ("Rothberg", "cfd2"), ("DNVS", "ship_001"), ("FIDAP", "ex11"),
+        ("FIDAP", "ex40"), ("Bai", "qc2534"), ("GHS_indef", "cont-300"), ("GHS_indef", "bratu3d"),
+        ("Schenk_ISEI", "barrier2-1"), ("Um", "2cubes_sphere"), ("Schmid", "thermal1"), ("Botonakis", "thermomech_dM"),
+        ("HB", "bcsstk16"), ("HB", "bcsstk17"), ("HB", "bcsstk25"), ("HB", "bcsstk38"),
+        ("Boeing", "ct20stif"), ("Boeing", "msc23052"), ("Boeing", "pwtk"), ("Cylshell", "s3rmt3m3"),
+        ("Cylshell", "s3rmq4m1"), ("Cylshell", "s3dkt3m2"), ("DNVS", "shipsec1"), ("DNVS", "ship_003"),
+        ("Nasa", "nasa1824"), ("Nasa", "nasa4704"), ("Simon", "raefsky4"), ("Simon", "raefsky3"),
+        ("Simon", "raefsky2"), ("Simon", "venkat01"), ("FIDAP", "ex19"), ("FIDAP", "ex35"),
+        ("Hamm", "scircuit"), ("Hamm", "memplus"), ("Bomhof", "circuit_3"), ("Botonakis", "FEM_3D_thermal1"),
+        ("Wissgott", "parabolic_fem"), ("GHS_indef", "cont-201"), ("GHS_indef", "stokes64"), ("GHS_indef", "dixmaanl"),
+        ("GHS_indef", "boyd1"), ("Cunningham", "qa8fm"), ("Oberwolfach", "gyro"), ("Oberwolfach", "t2dah_e"),
+        ("PARSEC", "Si5H12"), ("HB", "bcsstk01"), ("HB", "bcsstk02"), ("HB", "bcsstk03"),
+        ("HB", "bcsstk04"), ("HB", "bcsstk05"), ("HB", "bcsstk06"), ("HB", "bcsstk07"),
+        ("HB", "bcsstk08"), ("HB", "bcsstk09"), ("HB", "bcsstk10"), ("HB", "bcsstk11"),
+        ("HB", "bcsstk12"), ("HB", "bcsstk13"), ("HB", "bcsstk15"), ("HB", "bcsstk19"),
+        ("HB", "bcsstk20"), ("HB", "bcsstk21"), ("HB", "bcsstk22"), ("HB", "bcsstk23"),
+        ("HB", "bcsstk26"), ("HB", "bcsstk27"), ("HB", "bcsstm07"), ("HB", "bcsstm09"),
+        ("HB", "bcsstm11"), ("HB", "bcsstm12"), ("HB", "bcsstm19"), ("HB", "bcsstm21"),
+        ("HB", "bcsstm23"), ("HB", "bcsstm24"), ("HB", "bcsstm25"), ("HB", "bcsstm26"),
+        ("HB", "nos1"), ("HB", "nos2"), ("HB", "nos3"), ("HB", "nos4"),
+        ("HB", "nos5"), ("HB", "nos6"), ("HB", "nos7"), ("HB", "plat362"),
+        ("HB", "plat1919"), ("HB", "lund_a"), ("HB", "lund_b"), ("HB", "gr_30_30"),
+        ("HB", "494_bus"), ("HB", "662_bus"), ("HB", "685_bus"), ("HB", "1138_bus"),
+        ("HB", "sherman1"), ("HB", "sts4098"), ("HB", "dwt_2680"), ("HB", "can_1054"),
+        ("HB", "can_1072"), ("HB", "lshp3466"), ("HB", "zenios"), ("Boeing", "bcsstk34"),
+        ("Boeing", "bcsstk38"), ("Boeing", "msc00726"), ("Boeing", "msc01050"), ("Boeing", "msc01440"),
+        ("Boeing", "msc04515"), ("Boeing", "crystk01"), ("Boeing", "crystk02"), ("Boeing", "crystm01"),
+        ("Boeing", "crystm02"), ("Boeing", "crystm03"), ("Boeing", "pct20stif"), ("Boeing", "bcsstk36"),
+        ("Boeing", "bcsstk37"), ("Cylshell", "s1rmq4m1"), ("Cylshell", "s1rmt3m1"), ("Cylshell", "s2rmq4m1"),
+        ("Cylshell", "s2rmt3m1"), ("Cylshell", "s3rmt3m1"), ("Cylshell", "s3dkq4m2"), ("Nasa", "nasa2146"),
+        ("Nasa", "shuttle_eddy"), ("Nasa", "skirt"), ("Nasa", "pwt"), ("GHS_psdef", "apache1"),
+        ("GHS_psdef", "jnlbrng1"), ("GHS_psdef", "torsion1"), ("GHS_psdef", "minsurfo"), ("GHS_psdef", "obstclae"),
+        ("GHS_psdef", "gridgena"), ("GHS_psdef", "finan512"), ("GHS_psdef", "cvxbqp1"), ("GHS_psdef", "bloweybq"),
+        ("GHS_psdef", "oilpan"), ("GHS_psdef", "vanbody"), ("GHS_psdef", "s3dkq4m2"), ("GHS_psdef", "s3dkt3m2"),
+        ("GHS_psdef", "ford1"), ("GHS_psdef", "crankseg_1"), ("GHS_psdef", "crankseg_2"), ("GHS_psdef", "hood"),
+        ("GHS_psdef", "bmw7st_1"), ("GHS_psdef", "bmwcra_1"), ("GHS_psdef", "olafu"), ("GHS_psdef", "gyro_k"),
+        ("GHS_psdef", "gyro_m"), ("GHS_psdef", "bundle1"), ("GHS_psdef", "cfd1"), ("GHS_psdef", "cfd2"),
+        ("GHS_psdef", "thread"), ("GHS_psdef", "m_t1"), ("GHS_psdef", "x104"), ("GHS_psdef", "shipsec1"),
+        ("GHS_psdef", "shipsec5"), ("GHS_psdef", "shipsec8"), ("GHS_psdef", "copter2"), ("GHS_psdef", "ford2"),
+        ("GHS_indef", "aug2d"), ("GHS_indef", "aug2dc"), ("GHS_indef", "aug3d"), ("GHS_indef", "aug3dcqp"),
+        ("GHS_indef", "bloweya"), ("GHS_indef", "dtoc"), ("GHS_indef", "helm2d03"), ("GHS_indef", "helm3d01"),
+        ("GHS_indef", "k1_san"), ("GHS_indef", "linverse"), ("GHS_indef", "mario001"), ("GHS_indef", "ncvxbqp1"),
+        ("GHS_indef", "sit100"), ("GHS_indef", "spmsrtls"), ("GHS_indef", "stokes128"), ("GHS_indef", "tuma1"),
+        ("GHS_indef", "tuma2"), ("GHS_indef", "brainpc2"), ("GHS_indef", "darcy003"), ("GHS_indef", "dawson5"),
+        ("GHS_indef", "exdata_1"), ("Oberwolfach", "bodyy4"), ("Oberwolfach", "bodyy5"), ("Oberwolfach", "bodyy6"),
+        ("Oberwolfach", "gyro_k"), ("Oberwolfach", "gyro_m"), ("Oberwolfach", "LF10"), ("Oberwolfach", "LFAT5"),
+        ("Oberwolfach", "t2dah"), ("Oberwolfach", "t2dal"), ("Oberwolfach", "t3dl"), ("Oberwolfach", "filter3D"),
+        ("Oberwolfach", "flowmeter5"), ("Simon", "olafu"), ("Rothberg", "gearbox"), ("DNVS", "shipsec5"),
+        ("DNVS", "shipsec8"), ("DNVS", "fcondp2"), ("DNVS", "fullb"), ("DNVS", "halfb"),
+        ("DNVS", "m_t1"), ("DNVS", "thread"), ("DNVS", "troll"), ("DNVS", "x104"),
+        ("DNVS", "tsyl201"), ("FIDAP", "ex3"), ("FIDAP", "ex9"), ("FIDAP", "ex10"),
+        ("FIDAP", "ex13"), ("FIDAP", "ex15"), ("FIDAP", "ex33"), ("Cunningham", "qa8fk"),
+        ("Cunningham", "m3plates"), ("Um", "offshore"), ("Schmid", "thermal2"), ("Botonakis", "thermomech_dK"),
+        ("Botonakis", "thermomech_TC"), ("Pothen", "barth"), ("Pothen", "barth4"), ("Pothen", "barth5"),
+        ("Pothen", "bodyy4"), ("Pothen", "bodyy5"), ("Pothen", "bodyy6"), ("Pothen", "mesh1e1"),
+        ("Pothen", "mesh2e1"), ("Pothen", "mesh3e1"), ("Pothen", "shuttle_eddy"), ("Pothen", "sphere2"),
+        ("Pothen", "sphere3"), ("Pothen", "skirt"), ("Pothen", "onera_dual"), ("Pothen", "commanche_dual"),
+        ("PARSEC", "Si2"), ("PARSEC", "SiH4"), ("PARSEC", "benzene"), ("Williams", "consph"),
+        ("Williams", "pdb1HYS"),
+        // Genuinely complex + unsymmetric SuiteSparse (both paths): EM/QCD/waveguide
+        // (complex), MHD/QCD (general/LU), quantum-chemistry + cardiac (real, both paths).
+        ("Bai", "qc324"), ("Bai", "qc2534"), ("Bai", "dwg961a"), ("Bai", "dwg961b"),
+        ("QCD", "conf5_0-4x4-10"), ("QCD", "conf5_0-4x4-14"), ("QCD", "conf6_0-4x4-20"),
+        ("QCD", "conf6_0-8x8-20"), ("QCD", "conf6_0-8x8-30"),
+        ("FEMLAB", "waveguide3D"), ("Dziekonski", "dielFilterV2clx"),
+        ("Bai", "mhd1280a"), ("Bai", "mhd3200a"), ("Bai", "mhd3200b"), ("Bai", "mhd4800a"), ("Bai", "mhd4800b"),
+        ("Nemeth", "nemeth01"), ("Nemeth", "nemeth11"), ("Nemeth", "nemeth21"), ("Nemeth", "nemeth26"),
+        ("Norris", "heart1"), ("Norris", "heart2"), ("Norris", "heart3"),
+        ("TSOPF", "TSOPF_FS_b39_c7"), ("Bai", "cryg10000"),
+
     ]
 }
 
@@ -307,6 +345,34 @@ fn suitesparse_entries() -> Vec<Entry> {
 /// GEMM thresholds + panel width + Schur kernel). `relax_width = 0` means
 /// relaxed amalgamation off. The recorded outcomes are peak memory + factor speed
 /// (the two performance metrics) plus the residual for validity filtering.
+/// Copy proxy for the (non-`Copy`) `ScalingStrategy` so `Param` stays `Copy`. Only
+/// the value-independent strategies are swept (never `External`).
+#[derive(Clone, Copy, PartialEq)]
+enum ScalingKnob {
+    OnePass,
+    Identity,
+    InfNorm,
+    Auto,
+}
+impl ScalingKnob {
+    fn to_strategy(self) -> ScalingStrategy {
+        match self {
+            ScalingKnob::OnePass => ScalingStrategy::OnePassInfNorm,
+            ScalingKnob::Identity => ScalingStrategy::Identity,
+            ScalingKnob::InfNorm => ScalingStrategy::InfNorm,
+            ScalingKnob::Auto => ScalingStrategy::Auto,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            ScalingKnob::OnePass => "onepass",
+            ScalingKnob::Identity => "identity",
+            ScalingKnob::InfNorm => "infnorm",
+            ScalingKnob::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct Param {
     ordering: OrderingMethod,
@@ -319,6 +385,11 @@ struct Param {
     use_gemm_schur: bool,
     method: FactorMethod,
     threads: usize,
+    // Exact-path tuning axes (issue #2): threshold pivot `u` (LU), symmetric
+    // equilibration strategy, and the factor emit/memory mode.
+    pivot_u: f64,
+    scaling: ScalingKnob,
+    memory_eager: bool,
 }
 
 /// Production defaults (the historically-tuned config) - the OFAT centre point.
@@ -333,11 +404,14 @@ const BASELINE: Param = Param {
     use_gemm_schur: true,
     method: FactorMethod::LeftLooking,
     threads: 0,
+    pivot_u: 0.1,
+    scaling: ScalingKnob::OnePass,
+    memory_eager: false,
 };
 
 // Per-knob value menus, swept one-factor-at-a-time around `BASELINE`.
-const M_ORDERING: [OrderingMethod; 3] =
-    [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
+const M_ORDERING: [OrderingMethod; 4] =
+    [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND, OrderingMethod::Rcm];
 const M_NEMIN: [usize; 4] = [1, 16, 48, 128];
 const M_RELAX: [usize; 4] = [0, 128, 256, 512];
 const M_PANEL_NB: [usize; 4] = [32, 64, 96, 128];
@@ -346,6 +420,10 @@ const M_PAR_GEMM: [usize; 3] = [250_000, 1_000_000, 4_000_000];
 const M_PAR_CDIV: [usize; 3] = [2_000_000, 8_000_000, 32_000_000];
 const M_SCHUR: [bool; 2] = [true, false];
 const M_METHOD: [FactorMethod; 2] = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
+const M_PIVOT_U: [f64; 4] = [0.0, 0.1, 0.5, 1.0];
+const M_SCALING: [ScalingKnob; 4] =
+    [ScalingKnob::OnePass, ScalingKnob::Identity, ScalingKnob::InfNorm, ScalingKnob::Auto];
+const M_MEMORY: [bool; 2] = [false, true];
 
 /// Tiny reproducible PRNG (splitmix-style LCG) for the random joint samples, so
 /// the sweep dataset is deterministic without pulling a `rand` dependency.
@@ -439,6 +517,9 @@ fn grid() -> Vec<Param> {
     for &x in &M_PAR_CDIV { v.push(Param { par_cdiv: x, ..BASELINE }); }
     for &x in &M_SCHUR { v.push(Param { use_gemm_schur: x, ..BASELINE }); }
     for &x in &M_METHOD { v.push(Param { method: x, ..BASELINE }); }
+    for &x in &M_PIVOT_U { v.push(Param { pivot_u: x, ..BASELINE }); }
+    for &x in &M_SCALING { v.push(Param { scaling: x, ..BASELINE }); }
+    for &x in &M_MEMORY { v.push(Param { memory_eager: x, ..BASELINE }); }
     // Random joint samples (seeded) for knob interactions the OFAT axes miss.
     let n_random: usize = std::env::var("RLA_SWEEP_RANDOM")
         .ok()
@@ -457,6 +538,9 @@ fn grid() -> Vec<Param> {
             use_gemm_schur: rng.pick(&M_SCHUR),
             method: rng.pick(&M_METHOD),
             threads: 0,
+            pivot_u: rng.pick(&M_PIVOT_U),
+            scaling: rng.pick(&M_SCALING),
+            memory_eager: rng.pick(&M_MEMORY),
         });
     }
     // Dedup (OFAT re-emits the baseline value of each knob).
@@ -491,6 +575,7 @@ fn ordering_name(o: OrderingMethod) -> &'static str {
         OrderingMethod::MetisND => "metis",
         OrderingMethod::ScotchND => "scotch",
         OrderingMethod::KahipND => "kahip",
+        OrderingMethod::Rcm => "rcm",
         OrderingMethod::Auto => "auto",
         OrderingMethod::AutoRace => "auto_race",
     }
@@ -500,6 +585,7 @@ fn method_name(m: FactorMethod) -> &'static str {
     match m {
         FactorMethod::LeftLooking => "left_looking",
         FactorMethod::Multifrontal => "multifrontal",
+        FactorMethod::RightLooking => "right_looking",
     }
 }
 
@@ -585,6 +671,13 @@ fn main() {
             Mat::Sym(a) => (a.n, a.values.len()),
             Mat::Unsym(a) => (a.n, a.values.len()),
         };
+        // Solver path this matrix exercises: symmetric LDLᵀ vs unsymmetric LU. The
+        // trainer splits on this to fit one model per path (the paths have
+        // different relevant axes, e.g. `pivot_u` only on LU).
+        let path = match &entry.mat {
+            Mat::Sym(_) => "ldlt",
+            Mat::Unsym(_) => "lu",
+        };
         // Matrix-level gate: skip only if even the cheaper path exceeds the cap
         // (the per-combo gate below then drops just the MF combos when MF alone is
         // over budget).
@@ -622,8 +715,13 @@ fn main() {
             // Full default-path logic: guarded+vetoed recommendation, then the exact
             // a-priori memory backstop - re-analyze the pick and fall back to the
             // default if its estimated peak exceeds the default's (never more memory).
+            // Route each matrix to its path's tuner model (symmetric LDLᵀ vs LU).
+            let tuner_path = match &entry.mat {
+                Mat::Sym(_) => rslab::SolverPath::Ldlt,
+                Mat::Unsym(_) => rslab::SolverPath::Lu,
+            };
             let pick = |w: f64| {
-                let s = rslab::recommend_settings_vetoed(&feat, w, mf_ll);
+                let s = rslab::recommend_settings_pathed(&feat, w, mf_ll, tuner_path);
                 let same = (s.reorder, s.ordering, s.nemin, s.relax)
                     == (d.reorder, d.ordering, d.nemin, d.relax);
                 let est_of = |e: rslab::MemoryEstimate| {
@@ -711,12 +809,16 @@ fn main() {
                 })
                 .with_use_gemm_schur(p.use_gemm_schur)
                 .with_method(p.method)
-                .with_threads(p.threads);
+                .with_threads(p.threads)
+                .with_pivot_u(p.pivot_u)
+                .with_scaling(p.scaling.to_strategy())
+                .with_memory(if p.memory_eager { MemoryMode::Eager } else { MemoryMode::LowMemory });
 
             let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, &s) else { continue };
 
             let rec = serde_json::json!({
                 "matrix": entry.name, "n": n, "nnz": nnz, "dtype": "complex128",
+                "path": path,
                 "features": feat_json,
                 "params": {
                     "ordering": ordering_name(p.ordering), "nemin": p.nemin,
@@ -724,6 +826,8 @@ fn main() {
                     "scalar_gate": p.scalar_gate, "par_gemm": p.par_gemm, "par_cdiv": p.par_cdiv,
                     "use_gemm_schur": p.use_gemm_schur, "method": method_name(p.method),
                     "threads": p.threads,
+                    "pivot_u": p.pivot_u, "scaling": p.scaling.name(),
+                    "memory_eager": p.memory_eager,
                 },
                 "metrics": {
                     "factor_ms": fac_ms, "factor_nnz": fill, "peak_mb": peak_mb,

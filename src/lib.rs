@@ -100,7 +100,10 @@ pub mod tuning;
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use analysis::{recommend_threads_from, StructuralFeatures, SymbolicShape};
-pub use auto_tune::{recommend_settings, recommend_settings_vetoed, DEFAULT_TUNE_WEIGHT};
+pub use auto_tune::{
+    recommend_settings, recommend_settings_pathed, recommend_settings_vetoed, SolverPath,
+    DEFAULT_TUNE_WEIGHT,
+};
 pub use numeric::gemm_tuning::{
     GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
 };
@@ -108,8 +111,11 @@ pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::RslabError;
 pub use scalar::Scalar;
+pub use scaling::ScalingStrategy;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
-pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
+pub use dense::ldlt_generic::{
+    factor_ldlt, solve_ldlt, solve_ldlt_many, CompressedLdltFactors, LdltFactors,
+};
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, BlrMode,

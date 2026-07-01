@@ -173,6 +173,16 @@ pub enum FactorMethod {
     /// [`preconditioner`]: SolverSettings::preconditioner
     #[default]
     LeftLooking,
+    /// Right-looking supernodal: factor the assembly-tree fronts sequentially in
+    /// postorder, holding **every** front live and pushing each factored front's
+    /// contribution into its parent (no contribution-block frontier free, no
+    /// per-front extract). The classic right-looking schedule - higher transient
+    /// memory (all fronts co-resident) traded for a simple, barrier-free push. The
+    /// numeric factor is equivalent to the other methods; this is an **opt-in**
+    /// method (not auto-selected) for the memory/schedule trade on classes where a
+    /// dense all-fronts residency is acceptable. See Davis 2006, *Direct Methods
+    /// for Sparse Linear Systems*, §4 (left-/right-looking supernodal schedules).
+    RightLooking,
 }
 
 /// Options controlling the generic multifrontal factorization. Defaults give an
@@ -250,6 +260,28 @@ pub struct SolverSettings {
     /// Use the SIMD GEMM (vs the scalar triple loop) for the front Schur update.
     /// Default `true`. A kernel A/B knob for benchmarking.
     pub use_gemm_schur: bool,
+    /// Threshold partial-pivoting tolerance `u ∈ [0, 1]` for the **left-looking LU**
+    /// path (the shipped default for unsymmetric matrices). The diagonal pivot is
+    /// kept unless it falls below `u · |colmax|` in its fully-summed block. `u = 1`
+    /// is full partial pivoting; `u → 0` keeps the diagonal unless exactly zero
+    /// (least fill, least stable). Default
+    /// [`DEFAULT_PIVOT_U`](crate::numeric::gemm_tuning::DEFAULT_PIVOT_U) `= 0.1`.
+    /// Ignored by the LDLᵀ path (Bunch-Kaufman) and the multifrontal LU front
+    /// (which uses full pivoting). Numeric-phase knob; a lower `u` trades a little
+    /// stability (backed by the near-zero pivot policy) for less fill and speed on
+    /// well-scaled / diagonally-dominant systems.
+    pub pivot_u: f64,
+    /// Symmetric equilibration strategy `Â = D A D` applied by [`LdltSolver`]
+    /// before factoring. Default [`OnePassInfNorm`](crate::ScalingStrategy::OnePassInfNorm)
+    /// (the historical one-pass ∞-norm, bit-identical to before this knob).
+    /// [`Identity`](crate::ScalingStrategy::Identity) disables scaling;
+    /// [`InfNorm`](crate::ScalingStrategy::InfNorm) is the iterative Knight-Ruiz
+    /// (Ruiz) equilibration; [`Auto`](crate::ScalingStrategy::Auto) routes to
+    /// MC64 matching on the arrow-KKT signature else ∞-norm. Scaling changes only
+    /// values (not the pattern), so the a-priori memory estimate is unaffected.
+    /// Consumed by the symmetric path; the unsymmetric LU path uses its own
+    /// two-sided row/column equilibration.
+    pub scaling: crate::scaling::ScalingStrategy,
 }
 
 /// Worker-thread policy for a factorization. The numeric result is bit-identical
@@ -387,7 +419,8 @@ pub(crate) fn stack_for_depth(depth: usize) -> usize {
 impl Default for SolverSettings {
     fn default() -> Self {
         use crate::numeric::gemm_tuning::{
-            DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
+            DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_PIVOT_U,
+            DEFAULT_SCALAR_GATE,
         };
         Self {
             on_zero_pivot: ZeroPivotAction::Fail,
@@ -407,6 +440,8 @@ impl Default for SolverSettings {
             par_gemm: DEFAULT_PAR_GEMM,
             par_cdiv: DEFAULT_PAR_CDIV,
             use_gemm_schur: true,
+            pivot_u: DEFAULT_PIVOT_U,
+            scaling: crate::scaling::ScalingStrategy::OnePassInfNorm,
         }
     }
 }
@@ -534,6 +569,21 @@ impl SolverSettings {
         self
     }
 
+    /// Builder: set the left-looking LU threshold partial-pivoting tolerance
+    /// `u ∈ [0, 1]` (clamped). Default `0.1`; `1.0` is full partial pivoting.
+    /// See [`pivot_u`](Self::pivot_u).
+    pub fn with_pivot_u(mut self, u: f64) -> Self {
+        self.pivot_u = u.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Builder: set the symmetric equilibration strategy (analyze/factor-time,
+    /// symmetric path). See [`scaling`](Self::scaling).
+    pub fn with_scaling(mut self, scaling: crate::scaling::ScalingStrategy) -> Self {
+        self.scaling = scaling;
+        self
+    }
+
     /// The kernel scheduling knobs as a cheap `Copy` bundle, threaded into the
     /// dense-front / left-looking kernels (replaces the former atomic loads).
     pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning {
@@ -543,6 +593,7 @@ impl SolverSettings {
             par_cdiv: self.par_cdiv,
             panel_nb: self.panel_nb.max(8),
             use_gemm_schur: self.use_gemm_schur,
+            pivot_u: self.pivot_u.clamp(0.0, 1.0),
         }
     }
 
@@ -910,11 +961,32 @@ fn factor_front<T: Scalar>(
                     }
                 }
             }
-            for jj in 0..mt {
-                let cj = ke + jj;
-                for ii in jj..mt {
-                    let ri = ke + ii;
-                    f[cj * n + ri] = f[cj * n + ri] - tmp[jj * mt + ii];
+            // Subtract the panel's trailing Schur block into `f`'s trailing lower
+            // triangle. On a large front (top of the assembly tree, where tree
+            // parallelism has dried up) this per-panel scatter is split across the
+            // trailing columns: `ke..ke+mt` are contiguous columns of the
+            // column-major front, so each rayon task owns a disjoint column and
+            // reads the shared read-only `tmp` - the write set is a partition, so
+            // the result is **bit-identical** regardless of worker count (the
+            // determinism guarantee holds). 2D front parallelism complementing the
+            // already-parallel Schur GEMM above; gated by the `par_cdiv` flop bar.
+            if (mt as u128) * (mt as u128) >= kt.par_cdiv as u128 {
+                let base = ke * n;
+                f[base..base + mt * n]
+                    .par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(jj, col)| {
+                        for ii in jj..mt {
+                            col[ke + ii] = col[ke + ii] - tmp[jj * mt + ii];
+                        }
+                    });
+            } else {
+                for jj in 0..mt {
+                    let cj = ke + jj;
+                    for ii in jj..mt {
+                        let ri = ke + ii;
+                        f[cj * n + ri] = f[cj * n + ri] - tmp[jj * mt + ii];
+                    }
                 }
             }
         }
@@ -1370,6 +1442,29 @@ fn analyze_with_inner(
     })
 }
 
+/// Postorder (children before parent) over the assembly forest, used by the
+/// right-looking sequential schedule so every child is factored before its parent
+/// consumes its contribution. Iterative to avoid recursion depth on deep trees.
+fn supernode_postorder(sym: &SymbolicFactorization, roots: &[usize]) -> Vec<usize> {
+    let mut order = Vec::with_capacity(sym.supernodes.len());
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for &r in roots {
+        stack.push((r, 0));
+        // Pop, then re-push with an advanced child cursor (avoids an in-place
+        // mutable peek): a node is emitted only once all its children are done.
+        while let Some((node, ci)) = stack.pop() {
+            let children = &sym.supernodes[node].children;
+            if ci < children.len() {
+                stack.push((node, ci + 1));
+                stack.push((children[ci], 0));
+            } else {
+                order.push(node);
+            }
+        }
+    }
+    order
+}
+
 /// PARDISO phases 2-3: numeric factorization reusing a [`MultifrontalSymbolic`].
 /// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
 /// from. Honours static pivoting and incomplete-factor dropping via `opts`.
@@ -1477,19 +1572,48 @@ pub fn factor_numeric<T: Scalar>(
     // the depth-sized stack (honours the thread budget and is overflow-safe on
     // deep trees, like the left-looking path above).
     let nthreads = opts.threads.resolve(|cap| recommend_threads_for_sym(symb, cap));
-    let root_outs: Vec<SubtreeFactors<T>> = in_scoped_pool(nthreads, stack, || {
-        roots
-            .par_iter()
-            .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
-            .collect::<Result<Vec<_>, _>>()
-    })?;
-    // Scatter the subtree factors into `node_results` (by supernode id) for the
-    // global emit pass, which still walks supernodes in postorder.
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
-    for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
-        node_results[roots[i]] = Some(own);
-        for (s, nf) in subtree {
-            node_results[s] = Some(nf);
+    if opts.method == FactorMethod::RightLooking {
+        // Right-looking schedule: factor supernodes sequentially in postorder,
+        // holding every front live (no contribution-block frontier free), each
+        // pushed into its parent by the shared `factor_one_node` assembly. Same
+        // factor as the other paths; the trade is all-fronts residency for a
+        // simple, barrier-free push (opt-in, not auto-selected).
+        let order = supernode_postorder(sym, &roots);
+        in_scoped_pool(nthreads, stack, || -> Result<(), RslabError> {
+            for &s in &order {
+                let nf = {
+                    let mut child_refs: Vec<&NodeFactor<T>> = Vec::new();
+                    for &ch in &sym.supernodes[s].children {
+                        match node_results[ch].as_ref() {
+                            Some(c) => child_refs.push(c),
+                            None => {
+                                return Err(RslabError::InvalidInput(
+                                    "internal: child not factored before parent".to_string(),
+                                ))
+                            }
+                        }
+                    }
+                    factor_one_node(s, sym, &a_perm, &child_refs, perturb_floor, kt)?
+                };
+                node_results[s] = Some(nf);
+            }
+            Ok(())
+        })?;
+    } else {
+        let root_outs: Vec<SubtreeFactors<T>> = in_scoped_pool(nthreads, stack, || {
+            roots
+                .par_iter()
+                .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        // Scatter the subtree factors into `node_results` (by supernode id) for the
+        // global emit pass, which still walks supernodes in postorder.
+        for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
+            node_results[roots[i]] = Some(own);
+            for (s, nf) in subtree {
+                node_results[s] = Some(nf);
+            }
         }
     }
 
@@ -1527,17 +1651,40 @@ pub fn factor_numeric<T: Scalar>(
     }
     debug_assert_eq!(e, n, "every index eliminated exactly once");
 
+    // Aggregate the additive per-front scalars before the emit, which under
+    // `LowMemory` frees each front's dense factor as it is consumed (so `nodes`,
+    // the immutable view, must be released first). `n_perturbed` and the inertia
+    // read only the small `front` scalars, not the dense `front.l`.
+    let n_perturbed: usize = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
+    // Inertia is additive over the assembly tree: sum the per-front signatures.
+    let mut inertia = Inertia::new(0, 0, 0);
+    for nd in &nodes {
+        inertia.positive += nd.front.inertia.positive;
+        inertia.negative += nd.front.inertia.negative;
+        inertia.zero += nd.front.inertia.zero;
+    }
+    drop(nodes);
+    // `LowMemory` (default): free each front's dense `L` the moment it is emitted
+    // into the global CSC, shrinking the per-front transient as the global factor
+    // grows (parity with the multifrontal LU emit). `Eager` keeps every front's
+    // dense factor until the end (a throughput A/B knob; bit-identical factor).
+    let low_mem = opts.memory == MemoryMode::LowMemory;
+
     // 4b. Emit each front's L columns into the global CSC L, in e-order. A
     //     supernode's eliminated columns form a contiguous increasing e-range,
     //     so iterating nodes then `j` yields columns in ascending CSC order;
-    //     rows within a column are sorted.
+    //     rows within a column are sorted. Iterated mutably so `LowMemory` can
+    //     drop `front.l` per front (every id is `Some`, validated above).
     let one = T::one();
     let mut l_col_ptr = Vec::with_capacity(n + 1);
     l_col_ptr.push(0);
     let mut l_row_idx: Vec<usize> = Vec::new();
     let mut l_values: Vec<T> = Vec::new();
     let mut col: Vec<(usize, T)> = Vec::new();
-    for node in &nodes {
+    for node_opt in node_results.iter_mut() {
+        let node = node_opt
+            .as_mut()
+            .ok_or_else(|| RslabError::InvalidInput("internal: unfactored supernode".to_string()))?;
         let ff = &node.front;
         let nrow = ff.nrow;
         for j in 0..ff.nelim {
@@ -1571,15 +1718,9 @@ pub fn factor_numeric<T: Scalar>(
             }
             l_col_ptr.push(l_row_idx.len());
         }
-    }
-
-    let n_perturbed: usize = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
-    // Inertia is additive over the assembly tree: sum the per-front signatures.
-    let mut inertia = Inertia::new(0, 0, 0);
-    for nd in &nodes {
-        inertia.positive += nd.front.inertia.positive;
-        inertia.negative += nd.front.inertia.negative;
-        inertia.zero += nd.front.inertia.zero;
+        if low_mem {
+            node.front.l = Vec::new();
+        }
     }
 
     Ok(LdltFactors {
@@ -2639,6 +2780,176 @@ mod tests {
             let s = SolverSettings::default().with_method(method).with_nemin(1).with_threads(0);
             let f = factor_sparse_ldlt_with(&a, &s).expect("deep chain factors without overflow");
             assert_eq!(f.n, n);
+        }
+    }
+
+    #[test]
+    fn mf_ldlt_low_memory_emit_is_bit_identical() {
+        // On the multifrontal LDLᵀ path, MemoryMode::LowMemory frees each front's
+        // dense L during the global emit; it must produce exactly the same global
+        // L (values, row indices, column pointers) as Eager - it changes only when
+        // the per-front buffers are dropped, never the emitted factor.
+        let m = 12;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let mf = |mem| {
+            SolverSettings::default()
+                .with_method(FactorMethod::Multifrontal)
+                .with_memory(mem)
+                .with_threads(0)
+        };
+        let eager = factor_sparse_ldlt_with(&a, &mf(MemoryMode::Eager)).unwrap();
+        let low = factor_sparse_ldlt_with(&a, &mf(MemoryMode::LowMemory)).unwrap();
+        assert_eq!(eager.l_values, low.l_values, "L values differ under LowMemory");
+        assert_eq!(eager.l_row_idx, low.l_row_idx, "L row indices differ");
+        assert_eq!(eager.l_col_ptr, low.l_col_ptr, "L column pointers differ");
+        assert_eq!(eager.d_diag, low.d_diag, "D differs under LowMemory");
+    }
+
+    #[test]
+    fn parallel_front_subtraction_is_bit_identical() {
+        // 2D front parallelism (the trailing-Schur subtraction split across
+        // disjoint front columns) must be bit-identical to the serial path
+        // regardless of the parallel gate - the determinism guarantee. Force the
+        // parallel path (par_cdiv = 0) vs the serial path (par_cdiv = MAX) and
+        // compare the whole factor.
+        let m = 22;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let mk = |cdiv| {
+            SolverSettings::default()
+                .with_method(FactorMethod::Multifrontal)
+                .with_threads(0)
+                .with_gemm_thresholds(crate::GemmThresholds {
+                    scalar_gate: 4096,
+                    par_gemm: 1_000_000,
+                    par_cdiv: cdiv,
+                })
+        };
+        let parallel = factor_sparse_ldlt_with(&a, &mk(0)).unwrap();
+        let serial = factor_sparse_ldlt_with(&a, &mk(usize::MAX)).unwrap();
+        assert_eq!(parallel.l_values, serial.l_values, "parallel front subtraction not bit-identical");
+        assert_eq!(parallel.d_diag, serial.d_diag);
+    }
+
+    #[test]
+    fn right_looking_matches_multifrontal_and_solves() {
+        // The right-looking schedule reuses the same per-front assembly + emit as
+        // the multifrontal path (only the traversal differs: sequential postorder,
+        // all fronts live), so its factor must be *bit-identical* to multifrontal
+        // and solve correctly (numerically equivalent to left-looking).
+        let m = 12;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        let mk = |method| SolverSettings::default().with_method(method).with_threads(0);
+        let mf = factor_sparse_ldlt_with(&a, &mk(FactorMethod::Multifrontal)).unwrap();
+        let rl = factor_sparse_ldlt_with(&a, &mk(FactorMethod::RightLooking)).unwrap();
+        assert_eq!(rl.l_values, mf.l_values, "right-looking L differs from multifrontal");
+        assert_eq!(rl.l_row_idx, mf.l_row_idx, "right-looking L pattern differs");
+        assert_eq!(rl.d_diag, mf.d_diag, "right-looking D differs");
+        let x = solve_ldlt(&rl, &b).unwrap();
+        assert!(residual_inf(&a, &x, &b) < 1e-9, "right-looking residual {}", residual_inf(&a, &x, &b));
+    }
+
+    #[test]
+    fn rcm_and_autorace_orderings_factor_and_solve() {
+        // A 2D-grid SPD system must factor and solve correctly under the new RCM
+        // ordering and under AutoRace (which now includes RCM as a candidate).
+        let m = 14;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        for ord in [OrderingMethod::Rcm, OrderingMethod::AutoRace] {
+            let opts = SolverSettings::default().with_ordering(ord);
+            let symb = analyze_with(a.n, &a.col_ptr, &a.row_idx, &opts).unwrap();
+            let f = factor_numeric(&symb, &a, &opts).unwrap();
+            let x = solve_ldlt(&f, &b).unwrap();
+            assert!(
+                residual_inf(&a, &x, &b) < 1e-9,
+                "ordering {ord:?} residual {}",
+                residual_inf(&a, &x, &b)
+            );
         }
     }
 

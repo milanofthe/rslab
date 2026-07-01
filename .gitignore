@@ -28,3 +28,7 @@ benches/bench_out/*.log
 # Local calibration cache (the `tuning` feature also writes this to the OS temp dir)
 rslab-calib/
 rla-calib/
+
+# Local backups + regenerated tuner parity fixture (opt-in test)
+*.bak
+src/tuner_parity*.json

@@ -53,11 +53,61 @@ struct Model {
     flops_ood_cap: f64,
 }
 
-const MODEL_JSON: &str = include_str!("auto_tune_model.json");
+// One model per solver path: the symmetric LDLᵀ and the unsymmetric LU paths have
+// different relevant axes (e.g. `pivot_u` only affects LU) and different
+// speed/memory profiles, so each is fit and selected independently.
+const MODEL_LDLT_JSON: &str = include_str!("auto_tune_model_ldlt.json");
+const MODEL_LU_JSON: &str = include_str!("auto_tune_model_lu.json");
 
-fn model() -> Option<&'static Model> {
-    static MODEL: OnceLock<Option<Model>> = OnceLock::new();
-    MODEL.get_or_init(|| serde_json::from_str(MODEL_JSON).ok()).as_ref()
+/// Which factorization path the tuner selects a configuration for. Each path has
+/// its own trained model and its own candidate grid.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SolverPath {
+    /// Symmetric Bunch-Kaufman LDLᵀ.
+    Ldlt,
+    /// Unsymmetric threshold-pivoted LU.
+    Lu,
+}
+
+fn model_for(path: SolverPath) -> Option<&'static Model> {
+    static LDLT: OnceLock<Option<Model>> = OnceLock::new();
+    static LU: OnceLock<Option<Model>> = OnceLock::new();
+    match path {
+        SolverPath::Ldlt => LDLT
+            .get_or_init(|| serde_json::from_str(MODEL_LDLT_JSON).ok())
+            .as_ref(),
+        SolverPath::Lu => LU
+            .get_or_init(|| serde_json::from_str(MODEL_LU_JSON).ok())
+            .as_ref(),
+    }
+}
+
+/// Copy proxy for the (non-`Copy`) [`ScalingStrategy`](crate::ScalingStrategy) so
+/// [`Candidate`] stays `Copy`; only the value-independent strategies are tuned.
+#[derive(Clone, Copy, PartialEq)]
+enum ScalingKnob {
+    OnePass,
+    Identity,
+    InfNorm,
+    Auto,
+}
+impl ScalingKnob {
+    fn to_strategy(self) -> crate::ScalingStrategy {
+        match self {
+            ScalingKnob::OnePass => crate::ScalingStrategy::OnePassInfNorm,
+            ScalingKnob::Identity => crate::ScalingStrategy::Identity,
+            ScalingKnob::InfNorm => crate::ScalingStrategy::InfNorm,
+            ScalingKnob::Auto => crate::ScalingStrategy::Auto,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            ScalingKnob::OnePass => "onepass",
+            ScalingKnob::Identity => "identity",
+            ScalingKnob::InfNorm => "infnorm",
+            ScalingKnob::Auto => "auto",
+        }
+    }
 }
 
 /// A candidate knob config the tuner scores. Mirrors the sweep's tunable knobs
@@ -73,6 +123,12 @@ struct Candidate {
     par_cdiv: usize,
     use_gemm_schur: bool,
     method: FactorMethod,
+    // Exact-path tuning axes (issue #2). Only varied when the loaded model tunes
+    // them (its input_spec references the axis); otherwise they stay at BASE, so a
+    // model that predates these axes yields a bit-identical candidate set.
+    pivot_u: f64,
+    scaling: ScalingKnob,
+    memory_eager: bool,
 }
 
 const BASE: Candidate = Candidate {
@@ -85,6 +141,9 @@ const BASE: Candidate = Candidate {
     par_cdiv: 8_000_000,
     use_gemm_schur: true,
     method: FactorMethod::LeftLooking,
+    pivot_u: 0.1,
+    scaling: ScalingKnob::OnePass,
+    memory_eager: false,
 };
 
 /// Structural-feature lookup by the name used in the model's input spec.
@@ -128,10 +187,19 @@ fn knob_value(c: &Candidate, name: &str) -> f64 {
 }
 
 fn ordering_name(o: OrderingMethod) -> &'static str {
+    // Real per-variant names so the one-hot encoding matches the trainer for any
+    // swept ordering. The model's `orderings` one-hot only lists a subset; a name
+    // outside it encodes as all-zero (matching Python), so an ordering the tuner
+    // never proposes still round-trips correctly through the parity check.
     match o {
         OrderingMethod::Amd => "amd",
+        OrderingMethod::Amf => "amf",
         OrderingMethod::MetisND => "metis",
-        _ => "auto",
+        OrderingMethod::ScotchND => "scotch",
+        OrderingMethod::KahipND => "kahip",
+        OrderingMethod::Rcm => "rcm",
+        OrderingMethod::Auto => "auto",
+        OrderingMethod::AutoRace => "auto_race",
     }
 }
 
@@ -153,9 +221,37 @@ fn build_input(m: &Model, f: &StructuralFeatures, c: &Candidate) -> Vec<f64> {
             "ordering_onehot" => (ordering_name(c.ordering) == comp.value) as i32 as f64,
             "method_is_mf" => (c.method == FactorMethod::Multifrontal) as i32 as f64,
             "use_gemm_schur" => c.use_gemm_schur as i32 as f64,
+            // Exact-path tuning axes (issue #2): threshold pivot `u` (linear in
+            // [0,1]), equilibration strategy (one-hot), and the emit/memory mode.
+            "pivot_u" => (c.pivot_u - comp.mean) / if comp.std != 0.0 { comp.std } else { 1.0 },
+            "scaling_onehot" => (c.scaling.name() == comp.value) as i32 as f64,
+            "memory_is_eager" => c.memory_eager as i32 as f64,
             _ => 0.0,
         })
         .collect()
+}
+
+/// Which issue-#2 axes the loaded model actually tunes, detected from its
+/// `input_spec`. A model trained before an axis existed does not reference it, so
+/// the axis stays pinned to [`BASE`] and the candidate grid is unchanged (auto
+/// behaviour bit-identical). A retrained model that includes the axis activates it.
+struct ActiveKnobs {
+    pivot_u: bool,
+    scaling: bool,
+    memory: bool,
+}
+
+fn active_knobs(m: &Model) -> ActiveKnobs {
+    let mut a = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
+    for comp in &m.input_spec {
+        match comp.kind.as_str() {
+            "pivot_u" => a.pivot_u = true,
+            "scaling_onehot" => a.scaling = true,
+            "memory_is_eager" => a.memory = true,
+            _ => {}
+        }
+    }
+    a
 }
 
 /// Forward pass; returns `[log factor_ms, log peak_mb]` (un-standardized).
@@ -180,18 +276,35 @@ fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
 }
 
 /// Candidate grid over ordering, amalgamation (`nemin`/`relax`), method, and the
-/// kernel scheduling knobs (panel width, top-of-tree GEMM gate). `Auto` already
-/// selects nested dissection adaptively, so an explicit MetisND candidate (which
-/// only adds the metis-on-banded memory pathology the estimates cannot flag) is
-/// left out. Memory is held safe by the deterministic backstop regardless of which
-/// knob is picked.
-fn candidates() -> Vec<Candidate> {
-    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd];
+/// kernel scheduling knobs (panel width, top-of-tree GEMM gate). Includes an
+/// explicit `MetisND` candidate: on 3D / complex-indefinite classes (curl-curl EM)
+/// the adaptive `Auto` heuristic mispicks and MetisND cuts fill ~3x, and the
+/// deterministic fill backstop (a pick must not exceed the default's fill) rejects
+/// MetisND on the banded classes where it over-separates -- so it wins where it
+/// helps and is vetoed where it hurts. Memory stays safe by the backstop
+/// regardless of which knob is picked.
+fn candidates(path: SolverPath, active: &ActiveKnobs) -> Vec<Candidate> {
+    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
     let nemins = [1usize, 16, 48, 128];
     let relaxes = [0usize, 128, 256, 512];
     let panels = [32usize, 64, 96, 128];
     let cdivs = [2_000_000usize, 8_000_000, 32_000_000];
     let methods = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
+    // Issue-#2 axes: expanded only when the model tunes them; otherwise a single
+    // baseline value keeps the grid (and thus the auto pick) bit-identical. The
+    // threshold-pivot `u` is an LU-only knob (Bunch-Kaufman ignores it), so it is
+    // pinned to the default on the LDLᵀ path regardless of the model.
+    let pivot_us: &[f64] = if active.pivot_u && path == SolverPath::Lu {
+        &[0.0, 0.1, 0.5, 1.0]
+    } else {
+        &[BASE.pivot_u]
+    };
+    let scalings: &[ScalingKnob] = if active.scaling {
+        &[ScalingKnob::OnePass, ScalingKnob::Identity, ScalingKnob::InfNorm, ScalingKnob::Auto]
+    } else {
+        &[ScalingKnob::OnePass]
+    };
+    let memories: &[bool] = if active.memory { &[false, true] } else { &[false] };
     let mut v = Vec::new();
     for &ordering in &orderings {
         for &nemin in &nemins {
@@ -199,15 +312,24 @@ fn candidates() -> Vec<Candidate> {
                 for &panel_nb in &panels {
                     for &par_cdiv in &cdivs {
                         for &method in &methods {
-                            v.push(Candidate {
-                                ordering,
-                                nemin,
-                                relax_width,
-                                panel_nb,
-                                par_cdiv,
-                                method,
-                                ..BASE
-                            });
+                            for &pivot_u in pivot_us {
+                                for &scaling in scalings {
+                                    for &memory_eager in memories {
+                                        v.push(Candidate {
+                                            ordering,
+                                            nemin,
+                                            relax_width,
+                                            panel_nb,
+                                            par_cdiv,
+                                            method,
+                                            pivot_u,
+                                            scaling,
+                                            memory_eager,
+                                            ..BASE
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -234,6 +356,13 @@ fn apply(c: &Candidate) -> SolverSettings {
         })
         .with_use_gemm_schur(c.use_gemm_schur)
         .with_method(c.method)
+        .with_pivot_u(c.pivot_u)
+        .with_scaling(c.scaling.to_strategy())
+        .with_memory(if c.memory_eager {
+            crate::MemoryMode::Eager
+        } else {
+            crate::MemoryMode::LowMemory
+        })
 }
 
 /// Minimum predicted score gain (in `w·log(time)+(1-w)·log(mem)` units, i.e. ~ a
@@ -268,7 +397,7 @@ const MEM_TOL_LN: f64 = 0.0198;
 /// Use [`recommend_settings_vetoed`] when the per-path memory estimate is known to
 /// also veto memory-pathological multifrontal picks.
 pub fn recommend_settings(features: &StructuralFeatures, weight: f64) -> SolverSettings {
-    recommend_settings_vetoed(features, weight, 1.0)
+    recommend_settings_pathed(features, weight, 1.0, SolverPath::Ldlt)
 }
 
 /// [`recommend_settings`] plus the **a-priori memory veto**: `mf_ll_mem_ratio` is
@@ -281,21 +410,42 @@ pub fn recommend_settings_vetoed(
     weight: f64,
     mf_ll_mem_ratio: f64,
 ) -> SolverSettings {
+    recommend_settings_pathed(features, weight, mf_ll_mem_ratio, SolverPath::Ldlt)
+}
+
+/// [`recommend_settings_vetoed`] for a specific solver [`SolverPath`]: the LDLᵀ and
+/// LU paths each use their own trained model and candidate grid (the LU grid
+/// searches the threshold-pivot `u`; the LDLᵀ grid pins it). [`LdltSolver`] and
+/// [`LuSolver`] call this with their path.
+pub fn recommend_settings_pathed(
+    features: &StructuralFeatures,
+    weight: f64,
+    mf_ll_mem_ratio: f64,
+    path: SolverPath,
+) -> SolverSettings {
     let w = weight.clamp(0.0, 1.0);
-    let Some(m) = model() else {
+    let Some(m) = model_for(path) else {
         return SolverSettings::default();
     };
-    // Out-of-distribution: a matrix larger than the training grid's well-sampled
-    // range gets the safe default, not an extrapolated (and often regressing) pick.
+    // Out-of-distribution: above the training grid's well-sampled range the model
+    // extrapolates on the knobs, so it must not be trusted. But the *ordering*
+    // choice is decidable from the exact a-priori fill (not extrapolated), and on
+    // large 3D / complex-indefinite classes the adaptive `Auto` heuristic mispicks
+    // badly (curl-curl EM: ~3x extra fill, an order of magnitude in factor time).
+    // So the OOD fallback is the deterministic ordering race (`AutoRace`): it picks
+    // the minimum-exact-fill ordering (with `Auto` among the candidates, so never
+    // worse than the default), a safe non-model win exactly where the model cannot
+    // help. The remaining knobs stay at the proven default.
     if m.flops_ood_cap > 0.0 && features.factor_flops as f64 > m.flops_ood_cap {
-        return SolverSettings::default();
+        return SolverSettings::default().with_ordering(OrderingMethod::AutoRace);
     }
     let base = predict(m, &build_input(m, features, &BASE)); // [log time, log mem]
     let base_score = w * base[0] + (1.0 - w) * base[1];
     let mem_cap = base[1] + MEM_TOL_LN; // hard: never exceed the default's peak memory
     let mut best = BASE;
     let mut best_score = base_score;
-    for c in candidates() {
+    let active = active_knobs(m);
+    for c in candidates(path, &active) {
         // A-priori veto: skip multifrontal picks whose exact transient estimate is
         // much worse than left-looking (catches the CB-stack memory blow-up).
         if c.method == FactorMethod::Multifrontal && mf_ll_mem_ratio > VETO_MF_MEM_RATIO {
@@ -330,7 +480,7 @@ mod tests {
 
     #[test]
     fn model_loads_and_predicts_finite() {
-        let m = model().expect("embedded model parses");
+        let m = model_for(SolverPath::Ldlt).expect("embedded model parses");
         assert!(!m.layers.is_empty() && m.target_mean.len() == 2);
         // A plausible mid-size feature vector; prediction must be finite.
         let c = BASE;
@@ -359,12 +509,23 @@ mod tests {
         let Ok(path) = std::env::var("RLA_TUNER_PARITY") else {
             return;
         };
-        let m = model().expect("model");
+        // RLA_TUNER_PARITY_PATH selects which per-path model to check against the
+        // fixture (default LDLᵀ). Run once per path with its own fixture.
+        let sp = match std::env::var("RLA_TUNER_PARITY_PATH").as_deref() {
+            Ok("lu") => SolverPath::Lu,
+            _ => SolverPath::Ldlt,
+        };
+        let m = model_for(sp).expect("model");
         let txt = std::fs::read_to_string(&path).expect("parity fixture");
         let samples: serde_json::Value = serde_json::from_str(&txt).unwrap();
         let order = |s: &str| match s {
             "amd" => OrderingMethod::Amd,
+            "amf" => OrderingMethod::Amf,
             "metis" => OrderingMethod::MetisND,
+            "scotch" => OrderingMethod::ScotchND,
+            "kahip" => OrderingMethod::KahipND,
+            "rcm" => OrderingMethod::Rcm,
+            "auto_race" => OrderingMethod::AutoRace,
             _ => OrderingMethod::Auto,
         };
         let g = |v: &serde_json::Value, k: &str| v[k].as_f64().unwrap() as usize;
@@ -385,11 +546,39 @@ mod tests {
                 } else {
                     FactorMethod::LeftLooking
                 },
+                // Issue-#2 axes carried by the sample (default to BASE if absent).
+                pivot_u: p["pivot_u"].as_f64().unwrap_or(BASE.pivot_u),
+                scaling: match p["scaling"].as_str() {
+                    Some("identity") => ScalingKnob::Identity,
+                    Some("infnorm") => ScalingKnob::InfNorm,
+                    Some("auto") => ScalingKnob::Auto,
+                    _ => ScalingKnob::OnePass,
+                },
+                memory_eager: p["memory_eager"].as_bool().unwrap_or(false),
             };
             let pred = predict(m, &build_input(m, &f, &c));
             let (ems, emb) = (s["pred_log_ms"].as_f64().unwrap(), s["pred_log_mb"].as_f64().unwrap());
             assert!((pred[0] - ems).abs() < 1e-4, "log_ms parity: rust {} vs py {}", pred[0], ems);
             assert!((pred[1] - emb).abs() < 1e-4, "log_mb parity: rust {} vs py {}", pred[1], emb);
         }
+    }
+
+    #[test]
+    fn issue2_axes_active_and_path_gated() {
+        // The shipped models carry the issue-#2 axes in their input_spec, so the
+        // tuner expands the candidate grid over them. Base grid 768 = 2·4·4·4·3·2;
+        // scaling ×4 and memory ×2 on both paths, and pivot_u ×4 only on the LU
+        // path (Bunch-Kaufman ignores it, so it is pinned on LDLᵀ).
+        let ldlt = active_knobs(model_for(SolverPath::Ldlt).expect("ldlt model loads"));
+        let lu = active_knobs(model_for(SolverPath::Lu).expect("lu model loads"));
+        assert!(ldlt.scaling && ldlt.memory && !ldlt.pivot_u, "LDLᵀ tunes scaling+memory, not pivot_u");
+        assert!(lu.scaling && lu.memory && lu.pivot_u, "LU tunes scaling+memory+pivot_u");
+        // Base grid: 3 orderings·4 nemin·4 relax·4 panel·3 cdiv·2 method = 1152.
+        assert_eq!(candidates(SolverPath::Ldlt, &ldlt).len(), 1152 * 8, "LDLᵀ: scaling×4·memory×2");
+        assert_eq!(candidates(SolverPath::Lu, &lu).len(), 1152 * 32, "LU: +pivot_u×4");
+        // Data-driven gate: a model referencing no axis leaves the grid unchanged.
+        let none = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
+        assert_eq!(candidates(SolverPath::Ldlt, &none).len(), 1152);
+        assert_eq!(candidates(SolverPath::Lu, &none).len(), 1152);
     }
 }
