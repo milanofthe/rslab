@@ -144,6 +144,11 @@ harness = false
 required-features = ["matgen-download"]
 
 [[bench]]
+name = "probe_complex"
+harness = false
+required-features = ["matgen-download"]
+
+[[bench]]
 name = "front_profile"
 harness = false
 required-features = ["matgen"]

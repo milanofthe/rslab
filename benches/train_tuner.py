@@ -68,13 +68,15 @@ def raw_input_row(r):
     return row
 
 
-def build_matrix(recs):
+def build_matrix(recs, include_pivot_u=True):
     """Return X (N x D), the component spec (names + which are standardized), and the
     standardization stats. One-hot and bool components are not standardized."""
     # Standardized numeric components: features + log knobs + linear knobs. The
     # column order here is the exact order the Rust `build_input` reproduces from
-    # `input_spec`, so X columns and `spec` entries must stay in lockstep.
-    num_names = [n for n, _ in FEATURES] + KNOBS_NUM + KNOBS_LIN
+    # `input_spec`, so X columns and `spec` entries must stay in lockstep. `pivot_u`
+    # (the only linear knob) is an LU-only axis, excluded from the LDLᵀ model.
+    lin = KNOBS_LIN if include_pivot_u else []
+    num_names = [n for n, _ in FEATURES] + KNOBS_NUM + lin
     raw = np.array([[raw_input_row(r)[n] for n in num_names] for r in recs], float)
     mean = raw.mean(axis=0)
     std = raw.std(axis=0)
@@ -99,7 +101,7 @@ def build_matrix(recs):
     for j, name in enumerate(KNOBS_NUM):
         i = len(FEATURES) + j
         spec.append({"kind": "knob_log", "name": name, "mean": mean[i], "std": std[i]})
-    for j, name in enumerate(KNOBS_LIN):
+    for j, name in enumerate(lin):
         i = len(FEATURES) + len(KNOBS_NUM) + j
         # Rust matches this axis by `kind`; `name` is advisory. `pivot_u` is the
         # only linear knob today.
@@ -126,10 +128,10 @@ def make_mlp():
                         early_stopping=True, n_iter_no_change=30, random_state=0)
 
 
-def grouped_eval(recs):
+def grouped_eval(recs, include_pivot_u=True):
     """Matrix-grouped split: train on some matrices, test on unseen ones. Reports
     R^2 per target and the end-to-end regret of the model-picked config."""
-    X, _ = build_matrix(recs)
+    X, _ = build_matrix(recs, include_pivot_u)
     y = targets(recs)
     ymean, ystd = y.mean(axis=0), y.std(axis=0)
     yn = (y - ymean) / ystd
@@ -163,8 +165,8 @@ def grouped_eval(recs):
         print(f"    w={w:.1f}: picked/oracle  time x{g(t_reg):.3f}  mem x{g(m_reg):.3f}  (geomean over {len(by_mat)} matrices)")
 
 
-def export(recs, out_path, parity_path=None, n_parity=8):
-    X, spec = build_matrix(recs)
+def export(recs, out_path, parity_path=None, n_parity=8, include_pivot_u=True):
+    X, spec = build_matrix(recs, include_pivot_u)
     y = targets(recs)
     ymean, ystd = y.mean(axis=0), y.std(axis=0)
     yn = (y - ymean) / ystd
@@ -203,14 +205,28 @@ def export(recs, out_path, parity_path=None, n_parity=8):
 
 
 def main():
+    # Two models, one per solver path. arg2 is a directory: writes
+    # auto_tune_model_{ldlt,lu}.json (+ tuner_parity_{ldlt,lu}.json) there.
     src = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/sweep.jsonl")
-    out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("benches/bench_out/tuner_model.json")
+    outdir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("src")
     recs = load(src)
     print(f"loaded {len(recs)} valid records over {len(set(r['matrix'] for r in recs))} matrices")
-    print("matrix-grouped generalization:")
-    grouped_eval(recs)
-    print("final model (all data):")
-    export(recs, out, parity_path=out.parent / "tuner_parity.json")
+    # Split by path (records without a path tag default to LDLᵀ). The LU model
+    # includes the threshold-pivot axis; the LDLᵀ model excludes it (BK ignores it).
+    by_path = {"ldlt": [], "lu": []}
+    for r in recs:
+        by_path[r.get("path", "ldlt")].append(r)
+    for path in ("ldlt", "lu"):
+        prs = by_path[path]
+        include_pivot = path == "lu"
+        print(f"\n=== path {path}: {len(prs)} records / "
+              f"{len(set(r['matrix'] for r in prs))} matrices (pivot_u={'yes' if include_pivot else 'no'}) ===")
+        if len(set(r["matrix"] for r in prs)) < 4:
+            print(f"  too few matrices for a {path} model - skipping")
+            continue
+        grouped_eval(prs, include_pivot)
+        export(prs, outdir / f"auto_tune_model_{path}.json",
+               parity_path=outdir / f"tuner_parity_{path}.json", include_pivot_u=include_pivot)
 
 
 if __name__ == "__main__":

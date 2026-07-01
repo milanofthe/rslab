@@ -53,11 +53,33 @@ struct Model {
     flops_ood_cap: f64,
 }
 
-const MODEL_JSON: &str = include_str!("auto_tune_model.json");
+// One model per solver path: the symmetric LDLᵀ and the unsymmetric LU paths have
+// different relevant axes (e.g. `pivot_u` only affects LU) and different
+// speed/memory profiles, so each is fit and selected independently.
+const MODEL_LDLT_JSON: &str = include_str!("auto_tune_model_ldlt.json");
+const MODEL_LU_JSON: &str = include_str!("auto_tune_model_lu.json");
 
-fn model() -> Option<&'static Model> {
-    static MODEL: OnceLock<Option<Model>> = OnceLock::new();
-    MODEL.get_or_init(|| serde_json::from_str(MODEL_JSON).ok()).as_ref()
+/// Which factorization path the tuner selects a configuration for. Each path has
+/// its own trained model and its own candidate grid.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SolverPath {
+    /// Symmetric Bunch-Kaufman LDLᵀ.
+    Ldlt,
+    /// Unsymmetric threshold-pivoted LU.
+    Lu,
+}
+
+fn model_for(path: SolverPath) -> Option<&'static Model> {
+    static LDLT: OnceLock<Option<Model>> = OnceLock::new();
+    static LU: OnceLock<Option<Model>> = OnceLock::new();
+    match path {
+        SolverPath::Ldlt => LDLT
+            .get_or_init(|| serde_json::from_str(MODEL_LDLT_JSON).ok())
+            .as_ref(),
+        SolverPath::Lu => LU
+            .get_or_init(|| serde_json::from_str(MODEL_LU_JSON).ok())
+            .as_ref(),
+    }
 }
 
 /// Copy proxy for the (non-`Copy`) [`ScalingStrategy`](crate::ScalingStrategy) so
@@ -250,7 +272,7 @@ fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
 /// only adds the metis-on-banded memory pathology the estimates cannot flag) is
 /// left out. Memory is held safe by the deterministic backstop regardless of which
 /// knob is picked.
-fn candidates(active: &ActiveKnobs) -> Vec<Candidate> {
+fn candidates(path: SolverPath, active: &ActiveKnobs) -> Vec<Candidate> {
     let orderings = [OrderingMethod::Auto, OrderingMethod::Amd];
     let nemins = [1usize, 16, 48, 128];
     let relaxes = [0usize, 128, 256, 512];
@@ -258,8 +280,14 @@ fn candidates(active: &ActiveKnobs) -> Vec<Candidate> {
     let cdivs = [2_000_000usize, 8_000_000, 32_000_000];
     let methods = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
     // Issue-#2 axes: expanded only when the model tunes them; otherwise a single
-    // baseline value keeps the grid (and thus the auto pick) bit-identical.
-    let pivot_us: &[f64] = if active.pivot_u { &[0.0, 0.1, 0.5, 1.0] } else { &[BASE.pivot_u] };
+    // baseline value keeps the grid (and thus the auto pick) bit-identical. The
+    // threshold-pivot `u` is an LU-only knob (Bunch-Kaufman ignores it), so it is
+    // pinned to the default on the LDLᵀ path regardless of the model.
+    let pivot_us: &[f64] = if active.pivot_u && path == SolverPath::Lu {
+        &[0.0, 0.1, 0.5, 1.0]
+    } else {
+        &[BASE.pivot_u]
+    };
     let scalings: &[ScalingKnob] = if active.scaling {
         &[ScalingKnob::OnePass, ScalingKnob::Identity, ScalingKnob::InfNorm, ScalingKnob::Auto]
     } else {
@@ -358,7 +386,7 @@ const MEM_TOL_LN: f64 = 0.0198;
 /// Use [`recommend_settings_vetoed`] when the per-path memory estimate is known to
 /// also veto memory-pathological multifrontal picks.
 pub fn recommend_settings(features: &StructuralFeatures, weight: f64) -> SolverSettings {
-    recommend_settings_vetoed(features, weight, 1.0)
+    recommend_settings_pathed(features, weight, 1.0, SolverPath::Ldlt)
 }
 
 /// [`recommend_settings`] plus the **a-priori memory veto**: `mf_ll_mem_ratio` is
@@ -371,8 +399,21 @@ pub fn recommend_settings_vetoed(
     weight: f64,
     mf_ll_mem_ratio: f64,
 ) -> SolverSettings {
+    recommend_settings_pathed(features, weight, mf_ll_mem_ratio, SolverPath::Ldlt)
+}
+
+/// [`recommend_settings_vetoed`] for a specific solver [`SolverPath`]: the LDLᵀ and
+/// LU paths each use their own trained model and candidate grid (the LU grid
+/// searches the threshold-pivot `u`; the LDLᵀ grid pins it). [`LdltSolver`] and
+/// [`LuSolver`] call this with their path.
+pub fn recommend_settings_pathed(
+    features: &StructuralFeatures,
+    weight: f64,
+    mf_ll_mem_ratio: f64,
+    path: SolverPath,
+) -> SolverSettings {
     let w = weight.clamp(0.0, 1.0);
-    let Some(m) = model() else {
+    let Some(m) = model_for(path) else {
         return SolverSettings::default();
     };
     // Out-of-distribution: a matrix larger than the training grid's well-sampled
@@ -386,7 +427,7 @@ pub fn recommend_settings_vetoed(
     let mut best = BASE;
     let mut best_score = base_score;
     let active = active_knobs(m);
-    for c in candidates(&active) {
+    for c in candidates(path, &active) {
         // A-priori veto: skip multifrontal picks whose exact transient estimate is
         // much worse than left-looking (catches the CB-stack memory blow-up).
         if c.method == FactorMethod::Multifrontal && mf_ll_mem_ratio > VETO_MF_MEM_RATIO {
@@ -421,7 +462,7 @@ mod tests {
 
     #[test]
     fn model_loads_and_predicts_finite() {
-        let m = model().expect("embedded model parses");
+        let m = model_for(SolverPath::Ldlt).expect("embedded model parses");
         assert!(!m.layers.is_empty() && m.target_mean.len() == 2);
         // A plausible mid-size feature vector; prediction must be finite.
         let c = BASE;
@@ -450,7 +491,7 @@ mod tests {
         let Ok(path) = std::env::var("RLA_TUNER_PARITY") else {
             return;
         };
-        let m = model().expect("model");
+        let m = model_for(SolverPath::Ldlt).expect("model");
         let txt = std::fs::read_to_string(&path).expect("parity fixture");
         let samples: serde_json::Value = serde_json::from_str(&txt).unwrap();
         let order = |s: &str| match s {
@@ -494,19 +535,19 @@ mod tests {
     }
 
     #[test]
-    fn issue2_axes_active_under_retrained_model() {
-        // The shipped model was retrained with the issue-#2 axes (its input_spec
-        // carries the `pivot_u` / `scaling_onehot` / `memory_is_eager` components),
-        // so the tuner now expands the candidate grid over them and can select them
-        // per matrix. The base grid is 768 = 2·4·4·4·3·2; each active axis multiplies
-        // it (pivot_u ×4, scaling ×4, memory ×2).
-        let m = model().expect("embedded model loads");
+    fn issue2_axes_active_and_path_gated() {
+        // The shipped models carry the issue-#2 axes in their input_spec, so the
+        // tuner expands the candidate grid over them. Base grid 768 = 2·4·4·4·3·2;
+        // scaling ×4 and memory ×2 on both paths, and pivot_u ×4 only on the LU
+        // path (Bunch-Kaufman ignores it, so it is pinned on LDLᵀ).
+        let m = model_for(SolverPath::Ldlt).expect("ldlt model loads");
         let a = active_knobs(m);
-        assert!(a.pivot_u && a.scaling && a.memory, "retrained model tunes all issue-#2 axes");
-        assert_eq!(candidates(&a).len(), 768 * 32, "grid expanded over the active axes");
-        // The gate is data-driven: a model that references no axis leaves the grid
-        // bit-identical (the invariant that kept `auto` unchanged pre-retrain).
+        assert!(a.scaling && a.memory, "retrained model tunes scaling + memory");
+        assert_eq!(candidates(SolverPath::Ldlt, &a).len(), 768 * 8, "LDLᵀ: scaling×4·memory×2");
+        assert_eq!(candidates(SolverPath::Lu, &a).len(), 768 * 32, "LU: +pivot_u×4");
+        // Data-driven gate: a model referencing no axis leaves the grid unchanged.
         let none = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
-        assert_eq!(candidates(&none).len(), 768);
+        assert_eq!(candidates(SolverPath::Ldlt, &none).len(), 768);
+        assert_eq!(candidates(SolverPath::Lu, &none).len(), 768);
     }
 }

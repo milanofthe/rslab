@@ -106,7 +106,12 @@ impl<T: Scalar> LdltSolver<T> {
         } else {
             1.0
         };
-        let s = crate::auto_tune::recommend_settings_vetoed(&feat, weight, mf_ll);
+        let s = crate::auto_tune::recommend_settings_pathed(
+            &feat,
+            weight,
+            mf_ll,
+            crate::auto_tune::SolverPath::Ldlt,
+        );
         let d = SolverSettings::default();
         // Hard a-priori memory backstop (never more memory than the default): exact
         // fill must not grow, and the realistic floor stays under the default's - an

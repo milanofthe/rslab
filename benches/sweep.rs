@@ -635,6 +635,13 @@ fn main() {
             Mat::Sym(a) => (a.n, a.values.len()),
             Mat::Unsym(a) => (a.n, a.values.len()),
         };
+        // Solver path this matrix exercises: symmetric LDLᵀ vs unsymmetric LU. The
+        // trainer splits on this to fit one model per path (the paths have
+        // different relevant axes, e.g. `pivot_u` only on LU).
+        let path = match &entry.mat {
+            Mat::Sym(_) => "ldlt",
+            Mat::Unsym(_) => "lu",
+        };
         // Matrix-level gate: skip only if even the cheaper path exceeds the cap
         // (the per-combo gate below then drops just the MF combos when MF alone is
         // over budget).
@@ -672,8 +679,13 @@ fn main() {
             // Full default-path logic: guarded+vetoed recommendation, then the exact
             // a-priori memory backstop - re-analyze the pick and fall back to the
             // default if its estimated peak exceeds the default's (never more memory).
+            // Route each matrix to its path's tuner model (symmetric LDLᵀ vs LU).
+            let tuner_path = match &entry.mat {
+                Mat::Sym(_) => rslab::SolverPath::Ldlt,
+                Mat::Unsym(_) => rslab::SolverPath::Lu,
+            };
             let pick = |w: f64| {
-                let s = rslab::recommend_settings_vetoed(&feat, w, mf_ll);
+                let s = rslab::recommend_settings_pathed(&feat, w, mf_ll, tuner_path);
                 let same = (s.reorder, s.ordering, s.nemin, s.relax)
                     == (d.reorder, d.ordering, d.nemin, d.relax);
                 let est_of = |e: rslab::MemoryEstimate| {
@@ -770,6 +782,7 @@ fn main() {
 
             let rec = serde_json::json!({
                 "matrix": entry.name, "n": n, "nnz": nnz, "dtype": "complex128",
+                "path": path,
                 "features": feat_json,
                 "params": {
                     "ordering": ordering_name(p.ordering), "nemin": p.nemin,

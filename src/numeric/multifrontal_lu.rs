@@ -902,7 +902,12 @@ impl<T: Scalar> LuSolver<T> {
         } else {
             1.0
         };
-        let s = crate::auto_tune::recommend_settings_vetoed(&feat, weight, mf_ll);
+        let s = crate::auto_tune::recommend_settings_pathed(
+            &feat,
+            weight,
+            mf_ll,
+            crate::auto_tune::SolverPath::Lu,
+        );
         let d = SolverSettings::default();
         let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: FactorMethod| {
             let fill_ok = e.factor_nnz as f64 <= est.factor_nnz as f64 * 1.02;
