@@ -354,14 +354,19 @@ where more only regress; a small problem ($\text{factor\_flops}<3\times10^8$) is
 four, where scheduling overhead dominates; otherwise all cores are used. On the corpus this
 lands within about $10\%$ of the per-matrix optimal in geomean, against about $50\%$ for a
 fixed budget of two workers. The need for a per-matrix policy is visible in the measured
-thread scaling (Fig.~\ref{fig:threads}): sparse-direct factorization is largely
-memory-bandwidth bound, so every solver saturates below linear, and the min--max band is
-wide because some matrices regress past a few threads.
+thread scaling (Fig.~\ref{fig:threads}): on the complex corpus RSLAB reaches a geomean
+$\sim\!3.2\times$ (left-looking) / $\sim\!3.0\times$ (multifrontal) at \numrange{12}{24}
+workers, but sparse-direct factorization is largely memory-bandwidth bound, so it saturates
+well below linear, and the min--max band is wide (some matrices regress past a few threads,
+others reach $\sim\!4.8\times$). This spread is why the worker count is picked per matrix ---
+and, in the v2 cost model, a decision variable that may choose fewer threads when scaling
+saturates.
 
 \begin{figure}[ht]
 \centering
 \includegraphics[width=\textwidth]{thread_scaling_solvers.pdf}
-\caption{Thread scaling per solver, 1--12 workers, mean with min--max band over the corpus.}
+\caption{Thread scaling of the RSLAB left-looking and multifrontal kernels, 1--24 workers,
+geomean with min--max band over the complex corpus.}
 \label{fig:threads}
 \end{figure}
 
@@ -451,18 +456,23 @@ the same hardware reproducible.
 
 \section{Learned configuration tuner}
 \label{sec:tuner}
-The tuner selects a \code{SolverSettings} from the structural feature vector. A multilayer
-perceptron predicts $(\log\text{factor\_ms},\,\log\text{peak\_mb})$ from the standardized
-features concatenated with an encoding of a candidate configuration: an ordering one-hot,
+The tuner selects a \code{SolverSettings} from the structural feature vector, with
+\textbf{one model per solver path} (symmetric $\LDLt$ and unsymmetric LU): the paths have
+different relevant axes (\code{pivot\_u} only affects LU) and different speed/memory
+profiles, so each is fit and selected independently and the LU grid searches the
+threshold-pivot tolerance the $\LDLt$ grid pins. Each model is a multilayer perceptron
+predicting $(\log\text{factor\_ms},\,\log\text{peak\_mb})$ from the standardized features
+concatenated with an encoding of a candidate configuration: an ordering one-hot,
 \code{nemin}, relaxation width, \code{panel\_nb}, \code{scalar\_gate}, \code{par\_cdiv}, the
-method, the threshold-pivot tolerance \code{pivot\_u}, an equilibration-strategy one-hot,
-and the memory mode --- a $38\!\to\!64\!\to\!32\!\to\!2$ network with ReLU hidden layers,
-trained offline on \num{8154} measured $(\text{matrix},\text{configuration})$ samples over
-\num{227} matrices with scikit-learn~\cite{sklearn} and exported as JSON weights (held-out
-$R^2$ of \num{0.97}/\num{0.96} on time/memory). The input encoding is data-driven: the Rust
-inference builds the same vector the training exported, and a candidate axis is searched
-only when the shipped model references it, so adding an axis to the grid is a retrain, not a
-code change. Inference is pure Rust and runs at analyze time over the candidate grid; the
+method, the equilibration-strategy one-hot, the memory mode, and (LU) \code{pivot\_u} --- a
+$37/38\!\to\!64\!\to\!32\!\to\!2$ network with ReLU hidden layers, trained offline with
+scikit-learn~\cite{sklearn} on a complete-distribution corpus (structured-grid generators
+across real/complex $\times$ symmetric/unsymmetric $\times$ conditioning, including
+curl-curl Maxwell and Stokes/KKT saddle-point, plus the complex SuiteSparse matrices) and
+exported as JSON weights (held-out $R^2$ \num{0.97}/\num{0.96} on the $\LDLt$ path). The input
+encoding is data-driven: the Rust inference builds the same vector the training exported,
+and a candidate axis is searched only when the shipped model references it, so adding an
+axis is a retrain, not a code change. Inference is pure Rust and runs at analyze time over the candidate grid; the
 outputs are destandardized to milliseconds and megabytes. The selected configuration minimizes
 $w\,\log(\hat t) + (1-w)\,\log(\hat m)$, with the default weight $w=\num{0.7}$; $w=1$ and
 $w=0$ give the speed and memory extremes.
@@ -470,8 +480,12 @@ $w=0$ give the speed and memory extremes.
 The prediction is constrained by a deterministic guard stack, applied in order:
 \begin{enumerate}\itemsep2pt
 \item If $\text{factor\_flops}$ exceeds the training range
-(\code{flops\_ood\_cap}${}\approx\num{1.42e10}$), the untuned default is used, so the model
-does not extrapolate.
+(\code{flops\_ood\_cap}${}\approx\num{1e10}$), the model is not trusted; the fallback is not
+the plain default but a deterministic \emph{ordering race} (\code{AutoRace}) that picks the
+minimum-exact-fill ordering (with the default among the candidates, so never worse). The
+ordering is decidable from the exact a-priori fill, not extrapolated, so this recovers the
+large-3D / complex-indefinite wins the model cannot: on curl-curl it cut the worst case from
+$19\times$ to $1.5\times$ of PARDISO.
 \item A candidate whose predicted $\log\text{peak\_mb}$ exceeds the default's by more than
 $\ln(1.02)$ is rejected.
 \item A multifrontal candidate whose estimated transient exceeds the left-looking floor is
@@ -491,13 +505,15 @@ check (4) but is not guaranteed per matrix. The same learned-prediction-with-a-d
 structure appears in hardware branch prediction~\cite{jimenez}, where a misprediction costs
 only re-execution and not correctness.
 
-Measured against the untuned default over the corpus (Sec.~\ref{sec:eval}), the balanced
-tuner ($w=0.7$) is \num{1.34}$\times$ faster at \num{0.83}$\times$ the memory over
-\num{166} matrices, and the guarded picks never regress memory; the speed extreme
-($w=1$) reaches \num{1.38}$\times$ at \num{0.82}$\times$ the memory, and the memory extreme
-($w=0$) holds \num{1.31}$\times$ speed at \num{0.73}$\times$ the memory
-(Fig.~\ref{fig:autotune}). The Pareto weight $w$ moves the operating point between the
-speed and memory extremes (Fig.~\ref{fig:autotunemodes}).
+Measured against the untuned default over the complete-distribution corpus
+(Sec.~\ref{sec:eval}), the balanced tuner ($w=0.7$) is \num{1.62}$\times$ faster at
+\num{0.76}$\times$ the memory over \num{41} matrices (larger than the \num{1.34}$\times$ on
+a real-SPD-only corpus --- the tuner helps most exactly on the complex/indefinite classes),
+and the guarded picks never regress memory; the speed extreme ($w=1$) reaches
+\num{1.56}$\times$ at \num{0.79}$\times$ the memory, and the memory extreme ($w=0$) holds
+\num{1.50}$\times$ speed at \num{0.74}$\times$ the memory (Fig.~\ref{fig:autotune}). The
+Pareto weight $w$ moves the operating point between the speed and memory extremes
+(Fig.~\ref{fig:autotunemodes}).
 
 \begin{figure}[ht]
 \centering
@@ -575,29 +591,35 @@ factor accurately.
 
 \begin{table}[h]
 \centering\tabfont
-\begin{tabular}{@{}lcccc@{}}
+\begin{tabular}{@{}lccc@{}}
 \toprule
-& \multicolumn{2}{c}{scaling order $\alpha$} & \multicolumn{2}{c}{head-to-head vs.\ RSLAB} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}
-solver & factor time & peak memory & factor time & peak memory \\
+RSLAB (auto) vs & $\LDLt$ (complex) & LU (complex) & overall \\
 \midrule
-MKL PARDISO         & \textbf{0.95} & \textbf{0.96} & \num{7.4}$\times$ slower & \num{2.3}$\times$ more \\
-RSLAB (auto-tuned)  & 1.13 & 1.14 & -- & -- \\
-faer LU\textsuperscript{$\dagger$} & 1.00 & 1.21 & \num{4.3}$\times$ faster & \num{2.3}$\times$ less \\
+MKL PARDISO --- factor time & $5.1\times$ slower & \textbf{\num{1.5}}$\times$ slower & \textbf{\num{3.8}}$\times$ slower \\
+MKL PARDISO --- peak memory & $2.6\times$ more & $2.5\times$ more & $2.6\times$ more \\
+faer LU\textsuperscript{$\dagger$} --- factor time & \textbf{\num{5.4}}$\times$ faster & \textbf{\num{4.2}}$\times$ faster & \textbf{\num{5.0}}$\times$ faster \\
+faer LU\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{3.4}}$\times$ less & $2.1\times$ less & $3.0\times$ less \\
 \bottomrule
 \end{tabular}
-\caption{Empirical scaling orders and head-to-head geomean ratios (matrices both solvers
-factor to below $0.1$ residual). \textsuperscript{$\dagger$}faer factors only \num{24} of the
-\num{36} corpus matrices within its memory budget, skipping the largest --- where RSLAB's
-advantage is greatest --- so its geomean and scaling order are over the smaller subset and
-the head-to-head is a conservative floor.}
+\caption{Head-to-head geomean ratios on the complex, both-path corpus (curl-curl,
+Helmholtz, saddle-point for $\LDLt$; BEM/MoM for LU), over the matrices both solvers factor to
+below $0.1$ residual. \textsuperscript{$\dagger$}faer factors only the smaller matrices within
+its memory budget (OOMs on the largest, where RSLAB's advantage is greatest), so its
+head-to-head is a conservative floor. The corpus mixes fill families, so a single per-solver
+scaling order $\alpha$ is not meaningful; Figs.~\ref{fig:scaling}--\ref{fig:memory} show the
+raw points.}
 \label{tab:scaling}
 \end{table}
 
-RSLAB's auto-tuned default is between PARDISO and faer on both axes: lower factor-time and
-memory growth than faer, higher than PARDISO's sublinear orders. In the head-to-head it is
-about $7.4\times$ slower and $2.3\times$ larger than PARDISO, and about $4.3\times$ faster and
-$2.3\times$ smaller than faer.
+On its actual target distribution --- complex, both paths --- RSLAB is within $\sim\!1.5\times$
+of PARDISO on the unsymmetric path and $\sim\!5\times$ on the harder symmetric-indefinite
+path, and about $5\times$ faster and $3\times$ lighter than faer. The corpus choice was
+load-bearing: benchmarking on real-SPD matrices flattered RSLAB ($7\times$) and hid two tuner
+mispicks on complex-indefinite curl-curl, where the adaptive \code{Auto} ordering produces
+$\sim\!3\times$ the fill of nested dissection. Adding \code{MetisND} to the tuner grid and
+racing orderings out-of-distribution (the \code{AutoRace} fallback, deciding on the exact
+a-priori fill rather than the extrapolating model) cut the worst curl-curl case from
+$19\times$ to $1.5\times$ of PARDISO and halved the overall PARDISO gap.
 
 \subsection{Accuracy}
 Figure~\ref{fig:residual} shows the relative residual $\lVert Ax-b\rVert/\lVert b\rVert$
@@ -622,7 +644,10 @@ bit-identically to the full-width one. Where the axes carry a measurable gain, t
 multi-RHS solve is \numrange{8}{19}$\times$ faster than solving the \num{256} right-hand
 sides column by column, and \num{32}-bit index compression halves the stored index
 footprint (for example \SI{459}{\mega\byte}$\to$\SI{230}{\mega\byte} on \code{pwtk}) at no
-accuracy cost. Retraining the tuner with the new axes is neutral on the well-scaled
+accuracy cost. The block/multi-RHS Krylov solvers (block GMRES, COCG, COCR) apply the
+factored preconditioner through exactly this parallel \code{solve\_many}, so they inherit
+the wide-RHS speedup directly, and the equilibration/pivot axes set the quality of that
+preconditioner factor; the exact-path work is otherwise orthogonal to the Krylov layer. Retraining the tuner with the new axes is neutral on the well-scaled
 structural corpus (geomean \num{1.03}$\times$ versus the pre-axis model, within the
 $\pm20\%$ single-shot variance): the threshold-pivot and equilibration axes bind on
 unsymmetric and ill-scaled classes, and the memory backstop keeps the guarded picks from
@@ -646,7 +671,7 @@ makes a misprediction cost re-execution and not correctness.
 
 \section{Limitations and future work}
 \label{sec:future}
-The tuner's gains are aggregate: the geomean speedup is \num{1.34}$\times$, and part of it
+The tuner's gains are aggregate: the geomean speedup is \num{1.62}$\times$, and part of it
 is within the per-matrix single-shot timing variance of about $\pm20\%$, so the geomean
 rather than any single matrix is the signal. The model is trained on one machine and one
 corpus and does not transfer across hardware without retraining, in the same way a branch
