@@ -24,6 +24,13 @@ pub const DEFAULT_PAR_CDIV: usize = 8_000_000;
 /// push more work into the deferred trailing GEMM but enlarge the serial
 /// within-panel factorization; narrower panels do the reverse at more GEMM calls.
 pub const DEFAULT_PANEL_NB: usize = 64;
+/// Default threshold partial-pivoting tolerance `u ∈ [0, 1]` for the left-looking
+/// LU path (UMFPACK's `THRESH`). The diagonal pivot is kept unless it falls below
+/// `u · |colmax|` in its fully-summed block. `u = 1` is full partial pivoting
+/// (always take the column max); `u → 0` keeps the diagonal unless it is exactly
+/// zero (least fill, least stable). The historical value `0.1` is the default, so
+/// leaving it untouched reproduces the shipped factor.
+pub const DEFAULT_PIVOT_U: f64 = 0.1;
 
 /// The kernel scheduling knobs as a cheap `Copy` bundle, threaded by value into
 /// the dense-front and left-looking kernels from [`SolverSettings`](crate::SolverSettings)
@@ -36,6 +43,10 @@ pub(crate) struct KernelTuning {
     pub par_cdiv: usize,
     pub panel_nb: usize,
     pub use_gemm_schur: bool,
+    /// Threshold partial-pivoting tolerance `u ∈ [0, 1]` for the left-looking LU
+    /// path (see [`DEFAULT_PIVOT_U`]). Ignored by the LDLᵀ kernels (Bunch-Kaufman
+    /// has its own fixed `α`) and by the multifrontal LU front (full pivoting).
+    pub pivot_u: f64,
 }
 
 /// The three GEMM scheduling thresholds (flop counts), the kernel-level

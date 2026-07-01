@@ -1545,7 +1545,9 @@ fn lu_ll_factor_node<T: Scalar>(
             // fully-summed block - so a well-scaled/equilibrated matrix never
             // interchanges (no fill or accuracy cost) while small/zero diagonals
             // still get a stable pivot. `THRESH²` compared on squared magnitudes.
-            const THRESH_SQ: f64 = 0.01; // THRESH = 0.1
+            // `THRESH = kt.pivot_u` (tunable, default 0.1); `u = 1` recovers full
+            // partial pivoting, `u = 0` keeps the diagonal unless it is exactly zero.
+            let thresh_sq = kt.pivot_u * kt.pivot_u;
             let mut p = k;
             let mut best = lbuf[k * nrow + k].magnitude_sq();
             for i in (k + 1)..ncol {
@@ -1556,7 +1558,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 }
             }
             let diag_sq = lbuf[k * nrow + k].magnitude_sq();
-            if p != k && diag_sq < THRESH_SQ * best {
+            if p != k && diag_sq < thresh_sq * best {
                 for c in 0..ncol {
                     lbuf.swap(c * nrow + k, c * nrow + p);
                 }
@@ -2687,6 +2689,62 @@ mod tests {
         assert!(res < 1e-9, "left-looking pivoting residual {res}");
         let diff = (0..n).map(|i| (xl[i] - xm[i]).norm()).fold(0.0, f64::max);
         assert!(diff < 1e-9, "left-looking vs multifrontal differ {diff}");
+    }
+
+    #[test]
+    fn lu_pivot_u_knob_wired_and_solves() {
+        // The tunable threshold `u` governs the left-looking LU pivot test. On a
+        // well-scaled, diagonally-dominant grid the pivot never needs to move, so
+        // every `u ∈ [0, 1]` must solve to a tiny residual (the knob changes the
+        // factor path but not correctness here). Verifies the field is threaded
+        // end-to-end (SolverSettings → KernelTuning → kernel) and clamps.
+        let c = |re, im| Complex::new(re, im);
+        let m = 7;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(12.0, 1.0)); // dominant diagonal → no interchange needed
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.0, 0.2));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-1.3, -0.1));
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(-1.1, 0.3));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(-0.9, 0.15));
+                }
+            }
+        }
+        let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        for u in [0.0f64, 0.1, 0.5, 1.0] {
+            let s = SolverSettings::default()
+                .with_method(FactorMethod::LeftLooking)
+                .with_pivot_u(u);
+            let f = factor_general_lu(&a, &s).unwrap();
+            let x = solve_lu(&f, &b).unwrap();
+            let mut ax = vec![Complex::new(0.0, 0.0); n];
+            a.matvec(&x, &mut ax);
+            let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+            assert!(res < 1e-9, "pivot_u={u} residual {res}");
+        }
+        // Out-of-range values clamp into [0, 1].
+        assert_eq!(SolverSettings::default().with_pivot_u(5.0).pivot_u, 1.0);
+        assert_eq!(SolverSettings::default().with_pivot_u(-2.0).pivot_u, 0.0);
     }
 
     #[test]

@@ -250,6 +250,17 @@ pub struct SolverSettings {
     /// Use the SIMD GEMM (vs the scalar triple loop) for the front Schur update.
     /// Default `true`. A kernel A/B knob for benchmarking.
     pub use_gemm_schur: bool,
+    /// Threshold partial-pivoting tolerance `u ∈ [0, 1]` for the **left-looking LU**
+    /// path (the shipped default for unsymmetric matrices). The diagonal pivot is
+    /// kept unless it falls below `u · |colmax|` in its fully-summed block. `u = 1`
+    /// is full partial pivoting; `u → 0` keeps the diagonal unless exactly zero
+    /// (least fill, least stable). Default
+    /// [`DEFAULT_PIVOT_U`](crate::numeric::gemm_tuning::DEFAULT_PIVOT_U) `= 0.1`.
+    /// Ignored by the LDLᵀ path (Bunch-Kaufman) and the multifrontal LU front
+    /// (which uses full pivoting). Numeric-phase knob; a lower `u` trades a little
+    /// stability (backed by the near-zero pivot policy) for less fill and speed on
+    /// well-scaled / diagonally-dominant systems.
+    pub pivot_u: f64,
 }
 
 /// Worker-thread policy for a factorization. The numeric result is bit-identical
@@ -387,7 +398,8 @@ pub(crate) fn stack_for_depth(depth: usize) -> usize {
 impl Default for SolverSettings {
     fn default() -> Self {
         use crate::numeric::gemm_tuning::{
-            DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
+            DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_PIVOT_U,
+            DEFAULT_SCALAR_GATE,
         };
         Self {
             on_zero_pivot: ZeroPivotAction::Fail,
@@ -407,6 +419,7 @@ impl Default for SolverSettings {
             par_gemm: DEFAULT_PAR_GEMM,
             par_cdiv: DEFAULT_PAR_CDIV,
             use_gemm_schur: true,
+            pivot_u: DEFAULT_PIVOT_U,
         }
     }
 }
@@ -534,6 +547,14 @@ impl SolverSettings {
         self
     }
 
+    /// Builder: set the left-looking LU threshold partial-pivoting tolerance
+    /// `u ∈ [0, 1]` (clamped). Default `0.1`; `1.0` is full partial pivoting.
+    /// See [`pivot_u`](Self::pivot_u).
+    pub fn with_pivot_u(mut self, u: f64) -> Self {
+        self.pivot_u = u.clamp(0.0, 1.0);
+        self
+    }
+
     /// The kernel scheduling knobs as a cheap `Copy` bundle, threaded into the
     /// dense-front / left-looking kernels (replaces the former atomic loads).
     pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning {
@@ -543,6 +564,7 @@ impl SolverSettings {
             par_cdiv: self.par_cdiv,
             panel_nb: self.panel_nb.max(8),
             use_gemm_schur: self.use_gemm_schur,
+            pivot_u: self.pivot_u.clamp(0.0, 1.0),
         }
     }
 
