@@ -95,31 +95,29 @@ nonzeros, log-log, one power-law fit per solver.
 Each point is one corpus matrix; garbage solves (`‖Ax-b‖/‖b‖ > 0.1`) are excluded
 from the fit.
 
-The RSLAB curve is the **auto-tuned default** (`LdltSolver::factor` /
-`LuSolver::factor`) - the solver as shipped, with a **separate learned tuner per
-path** picking the configuration per matrix under the deterministic memory
-backstop. Each point is one corpus matrix; the corpus mixes several problem
-classes with different fill families, so the per-solver power-law `α` is only a
-rough visual trend (not a single clean scaling order) — the head-to-head geomeans
-below are the load-bearing numbers.
+Each plot shows two RSLAB curves — the **untuned default** (`SolverSettings::default()`,
+gray) and the **auto-tuned** solver as shipped (`LdltSolver`/`LuSolver::factor`, blue) —
+so the gap the learned tuner closes toward PARDISO is visible. **104 matrices per path**,
+5k–1M nonzeros (the largest to 110k DOFs; faer OOMs on the biggest and factors only the
+smaller subset).
 
 Head-to-head (geomean over the matrices both solvers factor to `< 0.1` residual),
 each path on its own class:
 
-| RSLAB (auto) vs | LDLᵀ (sym) | LU (unsym) |
-|-----------------|:----------:|:----------:|
-| **MKL PARDISO** — factor time | 5.7x slower | **3.5x slower** |
-| **MKL PARDISO** — peak memory | 2.4x more | 2.6x more |
-| **faer LU** — factor time | **13.6x faster** | **11.3x faster** |
-| **faer LU** — peak memory | **3.2x less** | **1.7x less** |
+| RSLAB (auto-tuned) vs | LDLᵀ (sym) | LU (unsym) |
+|-----------------------|:----------:|:----------:|
+| **MKL PARDISO** — factor time | 5.5x slower | **3.8x slower** |
+| **MKL PARDISO** — peak memory | 2.3x more | 2.5x more |
+| **faer LU** — factor time | **11.8x faster** | **3.7x faster** |
+| **faer LU** — peak memory | **2.4x less** | 1.2x less |
+| **untuned default** — factor time | **2.06x faster** | **1.67x faster** |
 
-RSLAB sits between the two: much faster and lighter than the pure-Rust faer,
-moderately behind the hand-optimized MKL PARDISO. On the unsymmetric path RSLAB is
-within **3.5x of PARDISO** and **scales flatter than it** (factor-time exponent
-α ≈ 0.96 vs 1.32), closing the gap on large problems — the payoff of the
-convection-diffusion tuning. faer has no symmetric path (it factors sym matrices as
-LU too), which is why its LDLᵀ gap is largest; it also OOMs on the largest matrices
-(factoring only the smaller subset), so its head-to-head is a conservative floor.
+RSLAB sits between the two: faster and lighter than the pure-Rust faer, moderately behind
+the hand-optimized MKL PARDISO. The last row is the learned tuner's win over the untuned
+default on these hard classes — it closes a large part of the default→PARDISO distance
+(visible as the gray→blue gap, widening with problem size, i.e. the tuner helps most on the
+big matrices where a bad ordering costs most). faer has no symmetric path (it factors sym
+matrices as LU too), which is why its LDLᵀ gap is largest.
 
 ### Thread scaling
 
@@ -160,33 +158,39 @@ floor) rejects any config estimated to use more memory *or* more flops than the
 default; and an out-of-distribution guard falls back to the default on matrices
 larger than the model's training range (where it would otherwise extrapolate).
 
-![Auto-tuner vs default by size](benches/bench_out/autotune_vs_size.png)
+Measured end-to-end (`SolverSettings::default()` vs the tuner's pick), geomean,
+**each path on its own class** (the two are separate models a caller dispatches to
+explicitly), over **100+ matrices per path** (generated + SuiteSparse):
 
-Measured end-to-end (`SolverSettings::default()` vs the tuner's pick, balanced
-`w=0.7`), geomean — **each path on its own class** (the two are separate models a
-caller dispatches to explicitly):
+| path | balanced (w=0.7) | speed (w=1) | memory (w=0) |
+|---|:---:|:---:|:---:|
+| **LDLᵀ** (167 mat) | 1.39x / 0.81x | 1.41x / 0.83x | 1.30x / 0.77x |
+| **LU** (97 mat) | **1.92x** / 0.72x | 1.95x / 0.75x | 1.61x / 0.81x |
 
-| path | class | factor speedup | peak memory | wins |
-|---|---|---|---|---|
-| **LDLᵀ** (sym) | curl-curl / Helmholtz / saddle-point | **1.68x** | **0.74x** | 38 / 38 |
-| **LU** (unsym) | convection-diffusion / BEM / random | **2.22x** | **0.71x** | 85 / 86 |
+(factor speedup / peak-memory ratio vs default). The auto-tuner is **faster and
+lighter on both axes**, and **no matrix uses more memory than the default** (the
+backstop guarantees it deterministically). The LU number is a coverage result: with
+a handful of unsymmetric training matrices the LU tuner was neutral (1.02x);
+broadening the unsymmetric set to 90 generated convection-diffusion problems
+(grid-Péclet × flow × discretization) took its held-out R² from 0.75 to 0.98 and the
+tuner from neutral to ~1.9x (up to 2.2x on the pure convection-diffusion class).
 
-The auto-tuner is **faster and lighter on both axes**, and **no matrix uses more
-memory than the default** (the backstop guarantees it deterministically). The LU
-number is a coverage result: with a handful of unsymmetric training matrices the LU
-tuner was neutral (1.02x); broadening the unsymmetric set to 90 generated
-convection-diffusion problems (grid-Péclet × flow × discretization) took its
-held-out R² from 0.75 to 0.98 and the tuner from neutral to 2.22x. Peak memory is
-deterministically estimable (fill/floor) so it is hard-guaranteed; factor time
-depends on BLAS-3 efficiency the model predicts only approximately, so a few
-matrices see a small time regression while
-still saving memory. The worker count stays with the `Threads::Auto` predictor;
-`factor_with` opts out with explicit settings.
+**LDLᵀ path — vs default by size, and the three Pareto modes:**
 
-![Auto-tuner Pareto modes](benches/bench_out/autotune_modes.png)
+![LDLt auto-tuner vs default](benches/bench_out/autotune_vs_size_ldlt.png)
+![LDLt Pareto modes](benches/bench_out/autotune_modes_ldlt.png)
 
-Each point is one matrix, relative to the default; the weight moves the cloud
-along the time/memory trade-off.
+**LU path — vs default by size, and the three Pareto modes:**
+
+![LU auto-tuner vs default](benches/bench_out/autotune_vs_size_lu.png)
+![LU Pareto modes](benches/bench_out/autotune_modes_lu.png)
+
+Each point is one matrix relative to the default; the weight `w` moves the cloud
+along the time/memory trade-off. Peak memory is deterministically estimable
+(fill/floor) so it is hard-guaranteed; factor time depends on BLAS-3 efficiency the
+model predicts only approximately, so a few matrices see a small time regression
+while still saving memory. The worker count stays with the `Threads::Auto`
+predictor; `factor_with` opts out with explicit settings.
 
 ### Accuracy (SuiteSparse)
 
