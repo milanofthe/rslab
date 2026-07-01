@@ -300,6 +300,17 @@ fn suitesparse_list() -> &'static [(&'static str, &'static str)] {
         ("Pothen", "sphere3"), ("Pothen", "skirt"), ("Pothen", "onera_dual"), ("Pothen", "commanche_dual"),
         ("PARSEC", "Si2"), ("PARSEC", "SiH4"), ("PARSEC", "benzene"), ("Williams", "consph"),
         ("Williams", "pdb1HYS"),
+        // Genuinely complex + unsymmetric SuiteSparse (both paths): EM/QCD/waveguide
+        // (complex), MHD/QCD (general/LU), quantum-chemistry + cardiac (real, both paths).
+        ("Bai", "qc324"), ("Bai", "qc2534"), ("Bai", "dwg961a"), ("Bai", "dwg961b"),
+        ("QCD", "conf5_0-4x4-10"), ("QCD", "conf5_0-4x4-14"), ("QCD", "conf6_0-4x4-20"),
+        ("QCD", "conf6_0-8x8-20"), ("QCD", "conf6_0-8x8-30"),
+        ("FEMLAB", "waveguide3D"), ("Dziekonski", "dielFilterV2clx"),
+        ("Bai", "mhd1280a"), ("Bai", "mhd3200a"), ("Bai", "mhd3200b"), ("Bai", "mhd4800a"), ("Bai", "mhd4800b"),
+        ("Nemeth", "nemeth01"), ("Nemeth", "nemeth11"), ("Nemeth", "nemeth21"), ("Nemeth", "nemeth26"),
+        ("Norris", "heart1"), ("Norris", "heart2"), ("Norris", "heart3"),
+        ("TSOPF", "TSOPF_FS_b39_c7"), ("Bai", "cryg10000"),
+
     ]
 }
 
