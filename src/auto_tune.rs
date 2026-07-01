@@ -476,7 +476,15 @@ mod tests {
                 } else {
                     FactorMethod::LeftLooking
                 },
-                ..BASE
+                // Issue-#2 axes carried by the sample (default to BASE if absent).
+                pivot_u: p["pivot_u"].as_f64().unwrap_or(BASE.pivot_u),
+                scaling: match p["scaling"].as_str() {
+                    Some("identity") => ScalingKnob::Identity,
+                    Some("infnorm") => ScalingKnob::InfNorm,
+                    Some("auto") => ScalingKnob::Auto,
+                    _ => ScalingKnob::OnePass,
+                },
+                memory_eager: p["memory_eager"].as_bool().unwrap_or(false),
             };
             let pred = predict(m, &build_input(m, &f, &c));
             let (ems, emb) = (s["pred_log_ms"].as_f64().unwrap(), s["pred_log_mb"].as_f64().unwrap());
@@ -486,17 +494,19 @@ mod tests {
     }
 
     #[test]
-    fn issue2_axes_gated_off_under_current_model() {
-        // The shipped model predates the issue-#2 axes (pivot_u / scaling / memory),
-        // so none is active and the candidate grid is bit-identical to before this
-        // change (768 = 2·4·4·4·3·2). This is the invariant that keeps `auto`
-        // unchanged until a model retrained *with* these axes ships.
+    fn issue2_axes_active_under_retrained_model() {
+        // The shipped model was retrained with the issue-#2 axes (its input_spec
+        // carries the `pivot_u` / `scaling_onehot` / `memory_is_eager` components),
+        // so the tuner now expands the candidate grid over them and can select them
+        // per matrix. The base grid is 768 = 2·4·4·4·3·2; each active axis multiplies
+        // it (pivot_u ×4, scaling ×4, memory ×2).
         let m = model().expect("embedded model loads");
         let a = active_knobs(m);
-        assert!(!a.pivot_u && !a.scaling && !a.memory, "no issue-#2 axis is active yet");
-        assert_eq!(candidates(&a).len(), 768, "grid unchanged under the current model");
-        // When a retrained model activates all three, the grid expands by 4·4·2.
-        let all = ActiveKnobs { pivot_u: true, scaling: true, memory: true };
-        assert_eq!(candidates(&all).len(), 768 * 32);
+        assert!(a.pivot_u && a.scaling && a.memory, "retrained model tunes all issue-#2 axes");
+        assert_eq!(candidates(&a).len(), 768 * 32, "grid expanded over the active axes");
+        // The gate is data-driven: a model that references no axis leaves the grid
+        // bit-identical (the invariant that kept `auto` unchanged pre-retrain).
+        let none = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
+        assert_eq!(candidates(&none).len(), 768);
     }
 }
