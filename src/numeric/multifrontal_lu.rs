@@ -2396,6 +2396,15 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
 /// `x` are **row-major** `n × nrhs` buffers (`b[i*nrhs + c]` is RHS `c` at row
 /// `i`). The `L`/`U` structure is traversed once and each value applied to all
 /// `nrhs` columns - faster than `nrhs` separate [`solve_lu`] calls.
+/// Below this RHS count / work size the LU block solve runs serially (the
+/// parallel gather/scatter overhead only amortizes for wide multi-RHS).
+const PAR_SOLVE_MIN_RHS: usize = 8;
+const PAR_SOLVE_MIN_WORK: usize = 1 << 18;
+
+/// Solve `A X = B` for `nrhs` right-hand sides. Row-major `n × nrhs` layout, as
+/// [`solve_ldlt_many`](crate::solve_ldlt_many). For a wide RHS the columns are
+/// split into per-thread chunks (each RHS independent); the result is
+/// **bit-identical** to the serial block solve.
 pub fn solve_lu_many<T: Scalar>(
     f: &LuFactors<T>,
     b: &[T],
@@ -2408,6 +2417,51 @@ pub fn solve_lu_many<T: Scalar>(
             got: b.len(),
         });
     }
+    let nthreads = rayon::current_num_threads().max(1);
+    if nrhs < PAR_SOLVE_MIN_RHS || n * nrhs < PAR_SOLVE_MIN_WORK || nthreads < 2 {
+        return solve_lu_block(f, b, nrhs);
+    }
+    let nchunks = nthreads.min(nrhs);
+    let chunk = nrhs.div_ceil(nchunks);
+    let ranges: Vec<(usize, usize)> = (0..nchunks)
+        .map(|t| (t * chunk, ((t + 1) * chunk).min(nrhs)))
+        .filter(|&(a, e)| a < e)
+        .collect();
+    let parts: Result<Vec<(usize, usize, Vec<T>)>, RslabError> = ranges
+        .par_iter()
+        .map(|&(c0, c1)| {
+            let w = c1 - c0;
+            let mut sub = vec![T::zero(); n * w];
+            for i in 0..n {
+                let ib = i * nrhs;
+                let sb = i * w;
+                sub[sb..sb + w].copy_from_slice(&b[ib + c0..ib + c1]);
+            }
+            let xs = solve_lu_block(f, &sub, w)?;
+            Ok((c0, c1, xs))
+        })
+        .collect();
+    let parts = parts?;
+    let mut x = vec![T::zero(); n * nrhs];
+    for (c0, c1, xs) in parts {
+        let w = c1 - c0;
+        for i in 0..n {
+            let ib = i * nrhs;
+            let sb = i * w;
+            x[ib + c0..ib + c1].copy_from_slice(&xs[sb..sb + w]);
+        }
+    }
+    Ok(x)
+}
+
+/// Serial block solve over `nrhs` right-hand sides; fanned over column chunks by
+/// the parallel [`solve_lu_many`].
+fn solve_lu_block<T: Scalar>(
+    f: &LuFactors<T>,
+    b: &[T],
+    nrhs: usize,
+) -> Result<Vec<T>, RslabError> {
+    let n = f.n;
     // Ŷ = P_row · (D_r B): row-equilibrate then row-permute each RHS block.
     let mut y = vec![T::zero(); n * nrhs];
     for e in 0..n {

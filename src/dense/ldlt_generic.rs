@@ -21,6 +21,7 @@
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::RslabError;
 use crate::scalar::Scalar;
+use rayon::prelude::*;
 
 /// Result of a generic Bunch-Kaufman LDLᵀ factorization.
 ///
@@ -390,12 +391,23 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     Ok(x)
 }
 
+/// Below this RHS count (and work size) the block solve runs serially - the
+/// gather/scatter + thread-spawn overhead of the parallel path only amortizes for
+/// genuinely wide multi-RHS solves.
+const PAR_SOLVE_MIN_RHS: usize = 8;
+const PAR_SOLVE_MIN_WORK: usize = 1 << 18;
+
 /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the returned
 /// `x` are **row-major** `n × nrhs` buffers (row `i`'s `nrhs` values contiguous,
 /// i.e. `b[i*nrhs + c]` is RHS `c` at row `i`). Processing the RHS as a block
 /// loads each `L`/`D` value once and applies it to all `nrhs` columns - the
 /// memory-bound amortization that makes one block solve beat `nrhs` separate
 /// [`solve_ldlt`] calls.
+///
+/// For a genuinely wide RHS the columns are split into per-thread chunks and
+/// solved concurrently (each RHS is independent). The result is **bit-identical**
+/// to the serial block solve: every column undergoes the exact same operations in
+/// the same order regardless of chunking, so the determinism guarantee holds.
 pub fn solve_ldlt_many<T: Scalar>(
     factors: &LdltFactors<T>,
     b: &[T],
@@ -408,6 +420,54 @@ pub fn solve_ldlt_many<T: Scalar>(
             got: b.len(),
         });
     }
+    let nthreads = rayon::current_num_threads().max(1);
+    if nrhs < PAR_SOLVE_MIN_RHS || n * nrhs < PAR_SOLVE_MIN_WORK || nthreads < 2 {
+        return solve_ldlt_block(factors, b, nrhs);
+    }
+    // Split the RHS columns into `nchunks` independent contiguous ranges and solve
+    // each on its own worker. Each chunk is gathered into a compact row-major
+    // `n × w` sub-block, solved with the serial block kernel, then scattered back.
+    let nchunks = nthreads.min(nrhs);
+    let chunk = nrhs.div_ceil(nchunks);
+    let ranges: Vec<(usize, usize)> = (0..nchunks)
+        .map(|t| (t * chunk, ((t + 1) * chunk).min(nrhs)))
+        .filter(|&(a, e)| a < e)
+        .collect();
+    let parts: Result<Vec<(usize, usize, Vec<T>)>, RslabError> = ranges
+        .par_iter()
+        .map(|&(c0, c1)| {
+            let w = c1 - c0;
+            let mut sub = vec![T::zero(); n * w];
+            for i in 0..n {
+                let ib = i * nrhs;
+                let sb = i * w;
+                sub[sb..sb + w].copy_from_slice(&b[ib + c0..ib + c1]);
+            }
+            let xs = solve_ldlt_block(factors, &sub, w)?;
+            Ok((c0, c1, xs))
+        })
+        .collect();
+    let parts = parts?;
+    let mut x = vec![T::zero(); n * nrhs];
+    for (c0, c1, xs) in parts {
+        let w = c1 - c0;
+        for i in 0..n {
+            let ib = i * nrhs;
+            let sb = i * w;
+            x[ib + c0..ib + c1].copy_from_slice(&xs[sb..sb + w]);
+        }
+    }
+    Ok(x)
+}
+
+/// Serial block solve over `nrhs` right-hand sides (the memory-bound AXPY kernel).
+/// The parallel [`solve_ldlt_many`] fans this over column chunks.
+fn solve_ldlt_block<T: Scalar>(
+    factors: &LdltFactors<T>,
+    b: &[T],
+    nrhs: usize,
+) -> Result<Vec<T>, RslabError> {
+    let n = factors.n;
     // Y = Pᵀ B (gather rows; each row's `nrhs` block moves as a unit).
     let mut y = vec![T::zero(); n * nrhs];
     for i in 0..n {
@@ -513,6 +573,55 @@ mod tests {
         (0..a.n)
             .map(|i| (ax[i] - b[i]).magnitude())
             .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn parallel_wide_multi_rhs_is_bit_identical_to_serial() {
+        // A large-enough sparse SPD system so solve_ldlt_many takes the parallel
+        // column-chunk path (n*nrhs over the threshold). Each RHS column must be
+        // bit-identical to the serial single-RHS solve, and the block residual
+        // small - the determinism guarantee under RHS-parallelism.
+        let m = 50;
+        let n = m * m; // 2500
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = crate::CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let factors = crate::factor_sparse_ldlt(&a).unwrap();
+
+        let nrhs = 128; // n*nrhs = 320_000 > PAR_SOLVE_MIN_WORK, nrhs > PAR_SOLVE_MIN_RHS
+        let b: Vec<f64> = (0..n * nrhs).map(|k| ((k % 13) as f64) - 6.0).collect();
+        let x_par = solve_ldlt_many(&factors, &b, nrhs).unwrap();
+
+        // Reference: solve each column on its own (nrhs = 1 → serial block, w = 1).
+        for c in 0..nrhs {
+            let bc: Vec<f64> = (0..n).map(|i| b[i * nrhs + c]).collect();
+            let xc = solve_ldlt_many(&factors, &bc, 1).unwrap();
+            for i in 0..n {
+                assert_eq!(
+                    x_par[i * nrhs + c].to_bits(),
+                    xc[i].to_bits(),
+                    "parallel column {c} row {i} differs from serial"
+                );
+            }
+        }
     }
 
     // ---- f64 ----------------------------------------------------------------
