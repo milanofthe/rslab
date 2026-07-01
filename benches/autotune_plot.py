@@ -54,7 +54,7 @@ def load(path):
     return {k: v for k, v in by.items() if "default" in v and "tuned_balanced" in v}
 
 
-def plot_vs_size(data, outdir):
+def plot_vs_size(data, outdir, suffix="", n=None):
     """Two panels (factor speedup, peak-memory ratio) vs problem size, with the
     three tuner modes (balanced / speed / memory) overlaid - shows each mode's
     time and memory effect and how it tracks problem size."""
@@ -79,7 +79,8 @@ def plot_vs_size(data, outdir):
               f"large {geomean(speedup[lg]):.2f}x/{geomean(memratio[lg]):.2f}x  ({len(rows)} mat)")
     axes[0].axhline(1.0, color=GRAY, ls="--", lw=1.2)
     axes[0].set_ylabel("factor speedup\n(default / tuned)")
-    axes[0].set_title("Auto-tuner vs default over the corpus, by problem size (dotted = geomean)")
+    cnt = f" ({n} matrices)" if n else ""
+    axes[0].set_title(f"Auto-tuner vs default by problem size{cnt} (dotted = geomean)")
     axes[1].axhline(1.0, color=GRAY, ls="--", lw=1.2)
     axes[1].set_ylabel("peak-memory ratio\n(tuned / default)")
     axes[1].set_xlabel("nonzeros (nnz)")
@@ -87,10 +88,10 @@ def plot_vs_size(data, outdir):
     for ax in axes:
         ax.grid(True, which="both", ls=":", alpha=0.4)
     bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
-    bench_style.save(fig, outdir / "autotune_vs_size.png")
+    bench_style.save(fig, outdir / f"autotune_vs_size{suffix}.png")
 
 
-def plot_modes(data, outdir):
+def plot_modes(data, outdir, suffix="", title="Auto-tuner Pareto modes vs default"):
     fig, ax = plt.subplots(figsize=(8, 7))
     handles = []
     for cfg, label, color in MODES:
@@ -103,21 +104,28 @@ def plot_modes(data, outdir):
     ax.axhline(1.0, color=GRAY, ls="--", lw=1.0)
     ax.set_xlabel("factor time relative to default")
     ax.set_ylabel("peak memory relative to default")
-    ax.set_title("Auto-tuner Pareto modes vs default")
+    ax.set_title(title)
     ax.grid(True, ls=":", alpha=0.4)
     bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
-    bench_style.save(fig, outdir / "autotune_modes.png")
+    bench_style.save(fig, outdir / f"autotune_modes{suffix}.png")
 
 
 def main():
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("benches/bench_out/autotune.jsonl")
+    # Optional path label: `autotune_plot.py <jsonl> <slug> <title>` writes
+    # `autotune_modes_<slug>.png` / `autotune_vs_size_<slug>.png` for a per-path plot.
+    slug = sys.argv[2] if len(sys.argv) > 2 else ""
+    title = sys.argv[3] if len(sys.argv) > 3 else "Auto-tuner Pareto modes vs default"
+    suffix = f"_{slug}" if slug else ""
     bench_style.setup()
     data = load(path)
     if not data:
         print(f"[autotune] no valid records in {path}")
         return
-    plot_vs_size(data, path.parent)
-    plot_modes(data, path.parent)
+    n = len(data)
+    plot_vs_size(data, path.parent, suffix, n)
+    plot_modes(data, path.parent, suffix, title)
+    print(f"[autotune] {n} matrices -> autotune_modes{suffix}.png")
 
 
 if __name__ == "__main__":
