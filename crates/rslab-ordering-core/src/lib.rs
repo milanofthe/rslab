@@ -34,6 +34,9 @@
 #![deny(missing_docs)]
 
 pub mod quotient_graph;
+pub mod rcm;
+
+pub use rcm::rcm_order;
 
 use core::fmt;
 

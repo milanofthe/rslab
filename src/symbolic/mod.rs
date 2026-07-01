@@ -71,6 +71,15 @@ pub enum OrderingMethod {
     /// Reachable explicitly via `symbolic_factorize_with_method`
     /// for callers who want it.
     KahipND,
+    /// Reverse Cuthill-McKee band/profile-reducing ordering
+    /// (`rslab-ordering-core`: George-Liu degree-sorted BFS from a
+    /// pseudo-peripheral start, reversed; Cuthill & McKee 1969,
+    /// George & Liu 1981). Targets banded / structured matrices
+    /// (stencils, structured FEM) where nested dissection
+    /// over-separates and minimum-degree scatters fill: the band
+    /// factor has less fill and factors faster. Cheap (one BFS pass).
+    /// A [`AutoRace`] candidate; also reachable explicitly.
+    Rcm,
     /// Adaptive dispatcher: picks a concrete method per-matrix from
     /// cheap pattern features (n and average degree nnz/n).
     ///
@@ -582,6 +591,7 @@ fn run_external_ordering(
             })
         }
         OrderingMethod::KahipND => rslab_kahip::kahip_order(&pat),
+        OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
         }
@@ -620,6 +630,10 @@ const RACE_CANDIDATES: &[OrderingMethod] = &[
     OrderingMethod::MetisND,
     OrderingMethod::ScotchND,
     OrderingMethod::KahipND,
+    // Cheap band/profile reducer: wins on banded / structured patterns where the
+    // dissection candidates over-separate. Selected only if its factor_nnz is the
+    // smallest, so it never hurts the race outcome.
+    OrderingMethod::Rcm,
 ];
 
 /// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the

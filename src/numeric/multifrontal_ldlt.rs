@@ -2743,6 +2743,47 @@ mod tests {
         assert_eq!(eager.d_diag, low.d_diag, "D differs under LowMemory");
     }
 
+    #[test]
+    fn rcm_and_autorace_orderings_factor_and_solve() {
+        // A 2D-grid SPD system must factor and solve correctly under the new RCM
+        // ordering and under AutoRace (which now includes RCM as a candidate).
+        let m = 14;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        for ord in [OrderingMethod::Rcm, OrderingMethod::AutoRace] {
+            let opts = SolverSettings::default().with_ordering(ord);
+            let symb = analyze_with(a.n, &a.col_ptr, &a.row_idx, &opts).unwrap();
+            let f = factor_numeric(&symb, &a, &opts).unwrap();
+            let x = solve_ldlt(&f, &b).unwrap();
+            assert!(
+                residual_inf(&a, &x, &b) < 1e-9,
+                "ordering {ord:?} residual {}",
+                residual_inf(&a, &x, &b)
+            );
+        }
+    }
+
     fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
         let mut ax = vec![T::zero(); a.n];
         a.symv(x, &mut ax);
