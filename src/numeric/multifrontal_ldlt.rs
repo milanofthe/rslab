@@ -1568,17 +1568,40 @@ pub fn factor_numeric<T: Scalar>(
     }
     debug_assert_eq!(e, n, "every index eliminated exactly once");
 
+    // Aggregate the additive per-front scalars before the emit, which under
+    // `LowMemory` frees each front's dense factor as it is consumed (so `nodes`,
+    // the immutable view, must be released first). `n_perturbed` and the inertia
+    // read only the small `front` scalars, not the dense `front.l`.
+    let n_perturbed: usize = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
+    // Inertia is additive over the assembly tree: sum the per-front signatures.
+    let mut inertia = Inertia::new(0, 0, 0);
+    for nd in &nodes {
+        inertia.positive += nd.front.inertia.positive;
+        inertia.negative += nd.front.inertia.negative;
+        inertia.zero += nd.front.inertia.zero;
+    }
+    drop(nodes);
+    // `LowMemory` (default): free each front's dense `L` the moment it is emitted
+    // into the global CSC, shrinking the per-front transient as the global factor
+    // grows (parity with the multifrontal LU emit). `Eager` keeps every front's
+    // dense factor until the end (a throughput A/B knob; bit-identical factor).
+    let low_mem = opts.memory == MemoryMode::LowMemory;
+
     // 4b. Emit each front's L columns into the global CSC L, in e-order. A
     //     supernode's eliminated columns form a contiguous increasing e-range,
     //     so iterating nodes then `j` yields columns in ascending CSC order;
-    //     rows within a column are sorted.
+    //     rows within a column are sorted. Iterated mutably so `LowMemory` can
+    //     drop `front.l` per front (every id is `Some`, validated above).
     let one = T::one();
     let mut l_col_ptr = Vec::with_capacity(n + 1);
     l_col_ptr.push(0);
     let mut l_row_idx: Vec<usize> = Vec::new();
     let mut l_values: Vec<T> = Vec::new();
     let mut col: Vec<(usize, T)> = Vec::new();
-    for node in &nodes {
+    for node_opt in node_results.iter_mut() {
+        let node = node_opt
+            .as_mut()
+            .ok_or_else(|| RslabError::InvalidInput("internal: unfactored supernode".to_string()))?;
         let ff = &node.front;
         let nrow = ff.nrow;
         for j in 0..ff.nelim {
@@ -1612,15 +1635,9 @@ pub fn factor_numeric<T: Scalar>(
             }
             l_col_ptr.push(l_row_idx.len());
         }
-    }
-
-    let n_perturbed: usize = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
-    // Inertia is additive over the assembly tree: sum the per-front signatures.
-    let mut inertia = Inertia::new(0, 0, 0);
-    for nd in &nodes {
-        inertia.positive += nd.front.inertia.positive;
-        inertia.negative += nd.front.inertia.negative;
-        inertia.zero += nd.front.inertia.zero;
+        if low_mem {
+            node.front.l = Vec::new();
+        }
     }
 
     Ok(LdltFactors {
@@ -2681,6 +2698,49 @@ mod tests {
             let f = factor_sparse_ldlt_with(&a, &s).expect("deep chain factors without overflow");
             assert_eq!(f.n, n);
         }
+    }
+
+    #[test]
+    fn mf_ldlt_low_memory_emit_is_bit_identical() {
+        // On the multifrontal LDLᵀ path, MemoryMode::LowMemory frees each front's
+        // dense L during the global emit; it must produce exactly the same global
+        // L (values, row indices, column pointers) as Eager - it changes only when
+        // the per-front buffers are dropped, never the emitted factor.
+        let m = 12;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let mf = |mem| {
+            SolverSettings::default()
+                .with_method(FactorMethod::Multifrontal)
+                .with_memory(mem)
+                .with_threads(0)
+        };
+        let eager = factor_sparse_ldlt_with(&a, &mf(MemoryMode::Eager)).unwrap();
+        let low = factor_sparse_ldlt_with(&a, &mf(MemoryMode::LowMemory)).unwrap();
+        assert_eq!(eager.l_values, low.l_values, "L values differ under LowMemory");
+        assert_eq!(eager.l_row_idx, low.l_row_idx, "L row indices differ");
+        assert_eq!(eager.l_col_ptr, low.l_col_ptr, "L column pointers differ");
+        assert_eq!(eager.d_diag, low.d_diag, "D differs under LowMemory");
     }
 
     fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
