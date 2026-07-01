@@ -1,0 +1,20 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The meta-tuner (issue #1): orchestrates sweep -> train -> calibrate -> profile
+# -> held-out validate -> ship-gate, producing a runtime `tuner_profile.json`.
+# It drives the solver in-process (calibration + validation), so it depends on
+# rslab with the `tuning` + `matgen` features; the sweep/train steps shell out
+# to `cargo bench` / the Python trainer.
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+rslab = { path = "..", features = ["tuning", "matgen"] }
+num-complex = "0.4"
+serde_json = "1"

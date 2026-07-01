@@ -516,10 +516,45 @@ pub fn recommend_settings_pathed(
     mf_ll_mem_ratio: f64,
     path: SolverPath,
 ) -> SolverSettings {
-    let w = weight.clamp(0.0, 1.0);
     let Some(m) = model_for(path) else {
         return SolverSettings::default();
     };
+    recommend_core(m, active_guards(), features, weight, mf_ll_mem_ratio, path)
+}
+
+/// [`recommend_settings_pathed`] evaluated against an explicit [`TunerProfile`]
+/// rather than the embedded models / applied profile — used by the meta-tuner's
+/// ship-gate to score a candidate profile without mutating the process-global
+/// [`apply_profile`] state. Returns `None` if the profile's model for `path`
+/// cannot be parsed.
+pub fn recommend_with_profile(
+    profile: &TunerProfile,
+    features: &StructuralFeatures,
+    weight: f64,
+    mf_ll_mem_ratio: f64,
+    path: SolverPath,
+) -> Option<SolverSettings> {
+    let value = match path {
+        SolverPath::Ldlt => &profile.ldlt_model,
+        SolverPath::Lu => &profile.lu_model,
+    };
+    let m: Model = serde_json::from_value(value.clone()).ok()?;
+    let guards = (profile.min_gain, profile.method_flip_gain, profile.mem_tol_ln);
+    Some(recommend_core(&m, guards, features, weight, mf_ll_mem_ratio, path))
+}
+
+/// The shared recommendation search: given a model and the (min_gain,
+/// method_flip_gain, mem_tol_ln) guards, pick the candidate config minimizing the
+/// weighted time/memory score, subject to the memory cap and deviate guards.
+fn recommend_core(
+    m: &Model,
+    guards: (f64, f64, f64),
+    features: &StructuralFeatures,
+    weight: f64,
+    mf_ll_mem_ratio: f64,
+    path: SolverPath,
+) -> SolverSettings {
+    let w = weight.clamp(0.0, 1.0);
     // Out-of-distribution: above the training grid's well-sampled range the model
     // extrapolates on the knobs, so it must not be trusted. But the *ordering*
     // choice is decidable from the exact a-priori fill (not extrapolated), and on
@@ -532,7 +567,7 @@ pub fn recommend_settings_pathed(
     if m.flops_ood_cap > 0.0 && features.factor_flops as f64 > m.flops_ood_cap {
         return SolverSettings::default().with_ordering(OrderingMethod::AutoRace);
     }
-    let (min_gain, method_flip_gain, mem_tol_ln) = active_guards();
+    let (min_gain, method_flip_gain, mem_tol_ln) = guards;
     let base = predict(m, &build_input(m, features, &BASE)); // [log time, log mem]
     let base_score = w * base[0] + (1.0 - w) * base[1];
     let mem_cap = base[1] + mem_tol_ln; // hard: never exceed the default's peak memory

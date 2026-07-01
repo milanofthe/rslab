@@ -419,10 +419,16 @@ mod tests {
         let plan_ok = plan(&est, &Budget::default(), &hw, &calib);
         assert!(plan_ok.fits && !plan_ok.use_mixed_precision);
         assert!(plan_ok.est_runtime_ms > 0.0);
-        assert_eq!(
-            plan_ok.opts.threads,
-            crate::numeric::multifrontal_ldlt::Threads::Fixed(hw.physical_cores.max(1))
-        );
+        // v2 cost-model thread selection (#61) picks the fewest cores that reach
+        // near-minimum predicted time — for a small grid the critical path or
+        // saturation dominates, so it may (correctly) choose fewer than all cores.
+        // The contract is 1 ≤ threads ≤ physical_cores, not "always all cores".
+        match plan_ok.opts.threads {
+            crate::numeric::multifrontal_ldlt::Threads::Fixed(t) => {
+                assert!(t >= 1 && t <= hw.physical_cores.max(1), "threads within core budget");
+            }
+            other => panic!("expected a fixed thread count, got {other:?}"),
+        }
 
         // Tight budget with all approximations allowed → planner applies them.
         let tight = Budget {
