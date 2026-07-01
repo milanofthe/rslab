@@ -60,6 +60,34 @@ fn model() -> Option<&'static Model> {
     MODEL.get_or_init(|| serde_json::from_str(MODEL_JSON).ok()).as_ref()
 }
 
+/// Copy proxy for the (non-`Copy`) [`ScalingStrategy`](crate::ScalingStrategy) so
+/// [`Candidate`] stays `Copy`; only the value-independent strategies are tuned.
+#[derive(Clone, Copy, PartialEq)]
+enum ScalingKnob {
+    OnePass,
+    Identity,
+    InfNorm,
+    Auto,
+}
+impl ScalingKnob {
+    fn to_strategy(self) -> crate::ScalingStrategy {
+        match self {
+            ScalingKnob::OnePass => crate::ScalingStrategy::OnePassInfNorm,
+            ScalingKnob::Identity => crate::ScalingStrategy::Identity,
+            ScalingKnob::InfNorm => crate::ScalingStrategy::InfNorm,
+            ScalingKnob::Auto => crate::ScalingStrategy::Auto,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            ScalingKnob::OnePass => "onepass",
+            ScalingKnob::Identity => "identity",
+            ScalingKnob::InfNorm => "infnorm",
+            ScalingKnob::Auto => "auto",
+        }
+    }
+}
+
 /// A candidate knob config the tuner scores. Mirrors the sweep's tunable knobs
 /// (the worker count is left to the thread predictor).
 #[derive(Clone, Copy)]
@@ -73,6 +101,12 @@ struct Candidate {
     par_cdiv: usize,
     use_gemm_schur: bool,
     method: FactorMethod,
+    // Exact-path tuning axes (issue #2). Only varied when the loaded model tunes
+    // them (its input_spec references the axis); otherwise they stay at BASE, so a
+    // model that predates these axes yields a bit-identical candidate set.
+    pivot_u: f64,
+    scaling: ScalingKnob,
+    memory_eager: bool,
 }
 
 const BASE: Candidate = Candidate {
@@ -85,6 +119,9 @@ const BASE: Candidate = Candidate {
     par_cdiv: 8_000_000,
     use_gemm_schur: true,
     method: FactorMethod::LeftLooking,
+    pivot_u: 0.1,
+    scaling: ScalingKnob::OnePass,
+    memory_eager: false,
 };
 
 /// Structural-feature lookup by the name used in the model's input spec.
@@ -153,9 +190,37 @@ fn build_input(m: &Model, f: &StructuralFeatures, c: &Candidate) -> Vec<f64> {
             "ordering_onehot" => (ordering_name(c.ordering) == comp.value) as i32 as f64,
             "method_is_mf" => (c.method == FactorMethod::Multifrontal) as i32 as f64,
             "use_gemm_schur" => c.use_gemm_schur as i32 as f64,
+            // Exact-path tuning axes (issue #2): threshold pivot `u` (linear in
+            // [0,1]), equilibration strategy (one-hot), and the emit/memory mode.
+            "pivot_u" => (c.pivot_u - comp.mean) / if comp.std != 0.0 { comp.std } else { 1.0 },
+            "scaling_onehot" => (c.scaling.name() == comp.value) as i32 as f64,
+            "memory_is_eager" => c.memory_eager as i32 as f64,
             _ => 0.0,
         })
         .collect()
+}
+
+/// Which issue-#2 axes the loaded model actually tunes, detected from its
+/// `input_spec`. A model trained before an axis existed does not reference it, so
+/// the axis stays pinned to [`BASE`] and the candidate grid is unchanged (auto
+/// behaviour bit-identical). A retrained model that includes the axis activates it.
+struct ActiveKnobs {
+    pivot_u: bool,
+    scaling: bool,
+    memory: bool,
+}
+
+fn active_knobs(m: &Model) -> ActiveKnobs {
+    let mut a = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
+    for comp in &m.input_spec {
+        match comp.kind.as_str() {
+            "pivot_u" => a.pivot_u = true,
+            "scaling_onehot" => a.scaling = true,
+            "memory_is_eager" => a.memory = true,
+            _ => {}
+        }
+    }
+    a
 }
 
 /// Forward pass; returns `[log factor_ms, log peak_mb]` (un-standardized).
@@ -185,13 +250,22 @@ fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
 /// only adds the metis-on-banded memory pathology the estimates cannot flag) is
 /// left out. Memory is held safe by the deterministic backstop regardless of which
 /// knob is picked.
-fn candidates() -> Vec<Candidate> {
+fn candidates(active: &ActiveKnobs) -> Vec<Candidate> {
     let orderings = [OrderingMethod::Auto, OrderingMethod::Amd];
     let nemins = [1usize, 16, 48, 128];
     let relaxes = [0usize, 128, 256, 512];
     let panels = [32usize, 64, 96, 128];
     let cdivs = [2_000_000usize, 8_000_000, 32_000_000];
     let methods = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
+    // Issue-#2 axes: expanded only when the model tunes them; otherwise a single
+    // baseline value keeps the grid (and thus the auto pick) bit-identical.
+    let pivot_us: &[f64] = if active.pivot_u { &[0.0, 0.1, 0.5, 1.0] } else { &[BASE.pivot_u] };
+    let scalings: &[ScalingKnob] = if active.scaling {
+        &[ScalingKnob::OnePass, ScalingKnob::Identity, ScalingKnob::InfNorm, ScalingKnob::Auto]
+    } else {
+        &[ScalingKnob::OnePass]
+    };
+    let memories: &[bool] = if active.memory { &[false, true] } else { &[false] };
     let mut v = Vec::new();
     for &ordering in &orderings {
         for &nemin in &nemins {
@@ -199,15 +273,24 @@ fn candidates() -> Vec<Candidate> {
                 for &panel_nb in &panels {
                     for &par_cdiv in &cdivs {
                         for &method in &methods {
-                            v.push(Candidate {
-                                ordering,
-                                nemin,
-                                relax_width,
-                                panel_nb,
-                                par_cdiv,
-                                method,
-                                ..BASE
-                            });
+                            for &pivot_u in pivot_us {
+                                for &scaling in scalings {
+                                    for &memory_eager in memories {
+                                        v.push(Candidate {
+                                            ordering,
+                                            nemin,
+                                            relax_width,
+                                            panel_nb,
+                                            par_cdiv,
+                                            method,
+                                            pivot_u,
+                                            scaling,
+                                            memory_eager,
+                                            ..BASE
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -234,6 +317,13 @@ fn apply(c: &Candidate) -> SolverSettings {
         })
         .with_use_gemm_schur(c.use_gemm_schur)
         .with_method(c.method)
+        .with_pivot_u(c.pivot_u)
+        .with_scaling(c.scaling.to_strategy())
+        .with_memory(if c.memory_eager {
+            crate::MemoryMode::Eager
+        } else {
+            crate::MemoryMode::LowMemory
+        })
 }
 
 /// Minimum predicted score gain (in `w·log(time)+(1-w)·log(mem)` units, i.e. ~ a
@@ -295,7 +385,8 @@ pub fn recommend_settings_vetoed(
     let mem_cap = base[1] + MEM_TOL_LN; // hard: never exceed the default's peak memory
     let mut best = BASE;
     let mut best_score = base_score;
-    for c in candidates() {
+    let active = active_knobs(m);
+    for c in candidates(&active) {
         // A-priori veto: skip multifrontal picks whose exact transient estimate is
         // much worse than left-looking (catches the CB-stack memory blow-up).
         if c.method == FactorMethod::Multifrontal && mf_ll_mem_ratio > VETO_MF_MEM_RATIO {
@@ -385,11 +476,27 @@ mod tests {
                 } else {
                     FactorMethod::LeftLooking
                 },
+                ..BASE
             };
             let pred = predict(m, &build_input(m, &f, &c));
             let (ems, emb) = (s["pred_log_ms"].as_f64().unwrap(), s["pred_log_mb"].as_f64().unwrap());
             assert!((pred[0] - ems).abs() < 1e-4, "log_ms parity: rust {} vs py {}", pred[0], ems);
             assert!((pred[1] - emb).abs() < 1e-4, "log_mb parity: rust {} vs py {}", pred[1], emb);
         }
+    }
+
+    #[test]
+    fn issue2_axes_gated_off_under_current_model() {
+        // The shipped model predates the issue-#2 axes (pivot_u / scaling / memory),
+        // so none is active and the candidate grid is bit-identical to before this
+        // change (768 = 2·4·4·4·3·2). This is the invariant that keeps `auto`
+        // unchanged until a model retrained *with* these axes ships.
+        let m = model().expect("embedded model loads");
+        let a = active_knobs(m);
+        assert!(!a.pivot_u && !a.scaling && !a.memory, "no issue-#2 axis is active yet");
+        assert_eq!(candidates(&a).len(), 768, "grid unchanged under the current model");
+        // When a retrained model activates all three, the grid expands by 4·4·2.
+        let all = ActiveKnobs { pivot_u: true, scaling: true, memory: true };
+        assert_eq!(candidates(&all).len(), 768 * 32);
     }
 }

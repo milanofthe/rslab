@@ -38,6 +38,13 @@ FEATURES = [
 ORDERINGS = ["auto", "amd", "metis"]  # one-hot
 # Numeric knobs (log1p + standardize).
 KNOBS_NUM = ["nemin", "relax_width", "panel_nb", "scalar_gate", "par_gemm", "par_cdiv"]
+# Linear (not log) numeric knobs, standardized. Issue #2: threshold pivot u in [0,1].
+KNOBS_LIN = ["pivot_u"]
+# Issue #2 equilibration strategy (one-hot) + emit/memory mode (bool memory_eager).
+SCALINGS = ["onepass", "identity", "infnorm", "auto"]
+# Defaults for records predating the issue-#2 axes (so old sweeps still train; a
+# constant column standardizes to 0 and contributes nothing).
+KNOB_DEFAULTS = {"pivot_u": 0.1, "scaling": "onepass", "memory_eager": False}
 
 
 def load(path):
@@ -56,25 +63,34 @@ def raw_input_row(r):
         row[name] = math.log1p(v) if lg else v
     for name in KNOBS_NUM:
         row[name] = math.log1p(float(p[name]))
+    for name in KNOBS_LIN:
+        row[name] = float(p.get(name, KNOB_DEFAULTS[name]))
     return row
 
 
 def build_matrix(recs):
     """Return X (N x D), the component spec (names + which are standardized), and the
     standardization stats. One-hot and bool components are not standardized."""
-    # Standardized numeric components: features + numeric knobs.
-    num_names = [n for n, _ in FEATURES] + KNOBS_NUM
+    # Standardized numeric components: features + log knobs + linear knobs. The
+    # column order here is the exact order the Rust `build_input` reproduces from
+    # `input_spec`, so X columns and `spec` entries must stay in lockstep.
+    num_names = [n for n, _ in FEATURES] + KNOBS_NUM + KNOBS_LIN
     raw = np.array([[raw_input_row(r)[n] for n in num_names] for r in recs], float)
     mean = raw.mean(axis=0)
     std = raw.std(axis=0)
     std[std < 1e-12] = 1.0
     num = (raw - mean) / std
-    # One-hot ordering + bool method(MF=1)/use_gemm_schur.
+    # One-hot ordering + bool method(MF=1)/use_gemm_schur + issue-#2 scaling one-hot
+    # + memory_eager bool.
     oh = np.array([[1.0 if r["params"]["ordering"] == o else 0.0 for o in ORDERINGS]
                    for r in recs], float)
     meth = np.array([[1.0 if r["params"]["method"] == "multifrontal" else 0.0] for r in recs], float)
     schur = np.array([[1.0 if r["params"]["use_gemm_schur"] else 0.0] for r in recs], float)
-    X = np.hstack([num, oh, meth, schur])
+    scal = np.array([[1.0 if r["params"].get("scaling", KNOB_DEFAULTS["scaling"]) == s else 0.0
+                      for s in SCALINGS] for r in recs], float)
+    mem = np.array([[1.0 if r["params"].get("memory_eager", KNOB_DEFAULTS["memory_eager"]) else 0.0]
+                    for r in recs], float)
+    X = np.hstack([num, oh, meth, schur, scal, mem])
     # Component spec, in column order, for the Rust side to reproduce the vector.
     spec = []
     for i, (name, lg) in enumerate(FEATURES):
@@ -83,10 +99,18 @@ def build_matrix(recs):
     for j, name in enumerate(KNOBS_NUM):
         i = len(FEATURES) + j
         spec.append({"kind": "knob_log", "name": name, "mean": mean[i], "std": std[i]})
+    for j, name in enumerate(KNOBS_LIN):
+        i = len(FEATURES) + len(KNOBS_NUM) + j
+        # Rust matches this axis by `kind`; `name` is advisory. `pivot_u` is the
+        # only linear knob today.
+        spec.append({"kind": name, "name": name, "mean": mean[i], "std": std[i]})
     for o in ORDERINGS:
         spec.append({"kind": "ordering_onehot", "value": o})
     spec.append({"kind": "method_is_mf"})
     spec.append({"kind": "use_gemm_schur"})
+    for s in SCALINGS:
+        spec.append({"kind": "scaling_onehot", "value": s})
+    spec.append({"kind": "memory_is_eager"})
     return X, spec
 
 
