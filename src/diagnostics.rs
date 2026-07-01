@@ -41,6 +41,17 @@ pub struct MemoryEstimate {
     /// independent). Divide by a calibrated geometric-flops/s rate for a runtime
     /// estimate - see [`est_runtime_ms`](Self::est_runtime_ms).
     pub factor_flops: u64,
+    /// Critical-path geom-flops: the longest serial chain of front work from a
+    /// leaf to a root of the assembly tree (`front_flops(s) + max child`). This is
+    /// the Amdahl lower bound on parallel factor time --- even with unlimited
+    /// workers the tree cannot factor below `critical_path_flops / rate`, since a
+    /// front depends on its children. The v2 thread-aware time model uses it to
+    /// decide the worker count (a memory-bound or critical-path-bound matrix gains
+    /// nothing, and may lose, from more threads). `0` until the tree pass fills it.
+    pub critical_path_flops: u64,
+    /// Peak assembly-tree width: the most supernodes at any one level, i.e. the
+    /// maximum node-level parallelism available. Caps the useful worker count.
+    pub max_tree_width: u64,
 }
 
 impl MemoryEstimate {
@@ -62,6 +73,22 @@ impl MemoryEstimate {
     pub fn est_runtime_ms(&self, gflops: f64, parallel_speedup: f64) -> f64 {
         let rate = (gflops.max(1e-6) * parallel_speedup.max(1e-6)) * 1e9;
         (self.factor_flops as f64 / rate) * 1e3
+    }
+
+    /// Thread-aware runtime estimate (the v2 model): the parallel time cannot fall
+    /// below the **critical path** of the assembly tree (Amdahl), so it is the max
+    /// of the serial critical-path floor and the work divided by the achieved
+    /// parallel rate. `gflops` is the one-thread geom-flops/s rate and
+    /// `parallel_speedup` the achieved speedup at the chosen worker count (from the
+    /// calibration). Unlike [`est_runtime_ms`](Self::est_runtime_ms) this does not
+    /// let more threads drive the estimate below the tree's serial dependency, so
+    /// argmin over the worker count correctly stops adding threads once the
+    /// critical path (or, in the full v2 model, memory bandwidth) dominates.
+    pub fn est_runtime_ms_threaded(&self, gflops: f64, parallel_speedup: f64) -> f64 {
+        let rate1 = gflops.max(1e-6) * 1e9; // one-thread geom-flops/s
+        let serial_floor = self.critical_path_flops as f64 / rate1;
+        let parallel = self.factor_flops as f64 / (rate1 * parallel_speedup.max(1e-6));
+        serial_floor.max(parallel) * 1e3
     }
 }
 
@@ -145,6 +172,8 @@ pub(crate) fn estimate_left_looking(
         // in the path-aware caller (it needs the assembly-tree child structure).
         mf_transient_peak_bytes: transient,
         factor_flops: 0, // set by the caller (needs supernode dimensions)
+        critical_path_flops: 0, // set by the caller (needs the assembly tree)
+        max_tree_width: 0,      // set by the caller (needs the level structure)
     }
 }
 

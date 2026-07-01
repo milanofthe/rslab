@@ -460,6 +460,27 @@ impl LdltSymbolic {
                 nr * nr * nc
             })
             .sum();
+        // Critical path (Amdahl bound) + tree width for the thread-aware v2 model.
+        // Supernodes are in elimination (postorder) order, so children precede their
+        // parent and a single forward pass computes the longest leaf-to-root chain.
+        let mut crit = vec![0u64; nsuper];
+        let mut cp = 0u64;
+        for s in 0..nsuper {
+            let (nc, nr) = (sym.supernodes[s].ncol as u64, rs[s].len() as u64);
+            let ff = nr * nr * nc;
+            let cmax = sym.supernodes[s]
+                .children
+                .iter()
+                .map(|&c| crit[c])
+                .max()
+                .unwrap_or(0);
+            crit[s] = ff + cmax;
+            if crit[s] > cp {
+                cp = crit[s];
+            }
+        }
+        est.critical_path_flops = cp;
+        est.max_tree_width = levels.iter().map(|l| l.len()).max().unwrap_or(1) as u64;
         // Multifrontal transient: the contribution-block-stack model (the
         // left-looking `transient_peak_bytes` does not capture the CB stack).
         let children: Vec<Vec<usize>> =
@@ -555,6 +576,66 @@ mod tests {
             .map(|i| (ax[i] - b[i]).abs() / b[i].abs().max(1.0))
             .fold(0.0, f64::max);
         assert!(rel < 1e-10, "relative residual {}", rel);
+    }
+
+    #[test]
+    fn critical_path_and_thread_aware_runtime() {
+        // 3D grid: a deep assembly tree, so the critical path is a real fraction of
+        // the total work. The estimate must populate a positive critical path that
+        // is a subset of the total flops, a tree width >= 1, and the thread-aware
+        // runtime must never fall below the Amdahl serial-critical-path floor no
+        // matter how large the speedup argument.
+        let m = 12;
+        let n = m * m * m;
+        let idx = |a: usize, b: usize, c: usize| (a * m + b) * m + c;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                for c in 0..m {
+                    let p = idx(a, b, c);
+                    r.push(p);
+                    cc.push(p);
+                    v.push(6.0_f64);
+                    if c + 1 < m {
+                        r.push(idx(a, b, c + 1));
+                        cc.push(p);
+                        v.push(-1.0);
+                    }
+                    if b + 1 < m {
+                        r.push(idx(a, b + 1, c));
+                        cc.push(p);
+                        v.push(-1.0);
+                    }
+                    if a + 1 < m {
+                        r.push(idx(a + 1, b, c));
+                        cc.push(p);
+                        v.push(-1.0);
+                    }
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let sym = LdltSymbolic::analyze(&a).unwrap();
+        let est = sym.estimate_memory::<f64>();
+        assert!(est.critical_path_flops > 0, "critical path populated");
+        assert!(
+            est.critical_path_flops <= est.factor_flops,
+            "critical path {} is a subset of total flops {}",
+            est.critical_path_flops,
+            est.factor_flops
+        );
+        assert!(est.max_tree_width >= 1, "tree width populated");
+        // Amdahl floor: at a huge speedup the parallel term vanishes but the serial
+        // critical path remains, so the thread-aware estimate stays >= that floor.
+        let rate1 = 2.0; // gflops
+        let floor_ms = est.critical_path_flops as f64 / (rate1 * 1e9) * 1e3;
+        let t_huge = est.est_runtime_ms_threaded(rate1, 1e9);
+        assert!(
+            (t_huge - floor_ms).abs() < floor_ms * 1e-6 + 1e-9,
+            "thread-aware runtime hits the critical-path floor: {t_huge} vs {floor_ms}"
+        );
+        // The plain model would keep shrinking with speedup (no floor).
+        assert!(est.est_runtime_ms(rate1, 1e9) < floor_ms, "plain model has no Amdahl floor");
     }
 
     #[test]
