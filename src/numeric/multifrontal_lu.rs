@@ -1548,24 +1548,33 @@ fn lu_ll_factor_node<T: Scalar>(
             // `THRESH = kt.pivot_u` (tunable, default 0.1); `u = 1` recovers full
             // partial pivoting, `u = 0` keeps the diagonal unless it is exactly zero.
             let thresh_sq = kt.pivot_u * kt.pivot_u;
-            let mut p = k;
-            let mut best = lbuf[k * nrow + k].magnitude_sq();
-            for i in (k + 1)..ncol {
-                let m = lbuf[k * nrow + i].magnitude_sq();
-                if m > best {
-                    best = m;
-                    p = i;
+            // Static pivoting fast path (`u == 0`): keep the natural pivot order and
+            // skip the argmax search entirely - the "skip pivot search" speed lever
+            // for fixed-pattern value sequences (solver-in-the-loop: reuse a good
+            // order across a frequency sweep / time-stepping). The search result is
+            // never consumed when `u == 0` (the threshold test `diag_sq < 0` can
+            // never fire), so skipping it is behaviour-identical, only faster. A
+            // sub-floor / zero diagonal is still caught below by the pivot policy.
+            if thresh_sq > 0.0 {
+                let mut p = k;
+                let mut best = lbuf[k * nrow + k].magnitude_sq();
+                for i in (k + 1)..ncol {
+                    let m = lbuf[k * nrow + i].magnitude_sq();
+                    if m > best {
+                        best = m;
+                        p = i;
+                    }
                 }
-            }
-            let diag_sq = lbuf[k * nrow + k].magnitude_sq();
-            if p != k && diag_sq < thresh_sq * best {
-                for c in 0..ncol {
-                    lbuf.swap(c * nrow + k, c * nrow + p);
+                let diag_sq = lbuf[k * nrow + k].magnitude_sq();
+                if p != k && diag_sq < thresh_sq * best {
+                    for c in 0..ncol {
+                        lbuf.swap(c * nrow + k, c * nrow + p);
+                    }
+                    for t in 0..cnrow {
+                        ubuf.swap(k + t * ncol, p + t * ncol);
+                    }
+                    rperm.swap(k, p);
                 }
-                for t in 0..cnrow {
-                    ubuf.swap(k + t * ncol, p + t * ncol);
-                }
-                rperm.swap(k, p);
             }
             let mut piv = lbuf[k * nrow + k];
             match perturb_floor {
@@ -2799,6 +2808,60 @@ mod tests {
         // Out-of-range values clamp into [0, 1].
         assert_eq!(SolverSettings::default().with_pivot_u(5.0).pivot_u, 1.0);
         assert_eq!(SolverSettings::default().with_pivot_u(-2.0).pivot_u, 0.0);
+    }
+
+    #[test]
+    fn static_pivot_reuse_across_value_sweep() {
+        // Solver-in-the-loop: analyze the pattern once, then factor a *sweep* of
+        // value sets that share it with static pivoting (`pivot_u = 0`, no pivot
+        // search per column). On a diagonally-dominant family each static factor
+        // solves accurately, and iterative refinement against the original matrix
+        // recovers full accuracy - the frequency-sweep / time-stepping use case.
+        let c = |re, im| Complex::new(re, im);
+        let m = 8;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut rr, mut cc) = (Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                if b + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a, b + 1));
+                    rr.push(idx(a, b + 1));
+                    cc.push(p);
+                }
+                if a + 1 < m {
+                    rr.push(p);
+                    cc.push(idx(a + 1, b));
+                    rr.push(idx(a + 1, b));
+                    cc.push(p);
+                }
+            }
+        }
+        let template =
+            GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vec![c(1.0, 0.0); rr.len()])
+                .unwrap();
+        let analysis = LuSymbolic::analyze(&template).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 0.7)).collect();
+        let static_opts = SolverSettings::default().with_pivot_u(0.0);
+        for shift in [0.0, 1.5, -0.8, 3.0] {
+            let vv: Vec<Complex<f64>> = rr
+                .iter()
+                .zip(&cc)
+                .map(|(&i, &j)| if i == j { c(9.0 + shift, 1.0) } else { c(-1.0, 0.2) })
+                .collect();
+            let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+            // Reuse the one analysis; static factor (no pivot search).
+            let f = factor_general_lu_numeric(&analysis, &a, &static_opts).unwrap();
+            let x = solve_lu_refined(&f, &a, &b, 2).unwrap();
+            let mut ax = vec![Complex::new(0.0, 0.0); n];
+            a.matvec(&x, &mut ax);
+            let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
+            assert!(res < 1e-9, "static reuse shift={shift} residual {res}");
+        }
     }
 
     #[test]
