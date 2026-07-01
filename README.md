@@ -34,6 +34,15 @@ right-hand sides. It is a fork of [feral](https://github.com/jkitchin/feral); se
   out-of-distribution it falls back to a deterministic exact-fill ordering race.
   Trained on a complete-distribution corpus including generated curl-curl Maxwell
   (complex indefinite) and Stokes/KKT saddle-point systems.
+- **Runtime tuner profile** (no recompile): the two models plus hardware-calibrated
+  guard thresholds ship as a `tuner_profile.json` config artifact. Point
+  `RSLAB_TUNER_PROFILE` at one (or call `apply_profile`) to specialize the tuner to
+  a machine or problem class. Produced by the **meta-tuner** `cargo xtask tune`
+  (sweep → train → hardware-calibrate → assemble → held-out validate), which only
+  writes a profile that passes a **ship-gate** (must not regress the shipped default
+  on a held-out generator corpus). Calibration sets the deviate guard to the
+  machine's own timing noise floor (`z·CV`), so the tuner never chases a predicted
+  gain smaller than the measurement variance.
 - The numeric factor is bit-identical across thread counts; the parallel multi-RHS
   solve (8-19x faster than per-column) is bit-identical to the serial path.
 - 32-bit index compression (`CompressedLdltFactors`, when `n < 2^31`): half the
@@ -392,7 +401,27 @@ let p = plan(&est, &budget, &hw, &calib);
 # }
 ```
 
-`plan` is a pure function of `(estimate, budget, hw, calibration)`.
+`plan` is a pure function of `(estimate, budget, hw, calibration)`. The thread
+count it picks is cost-model-driven: the fewest cores that reach the near-minimum
+predicted time, using an Amdahl critical-path floor from the assembly tree, so it
+stops adding workers once the serial critical path (not total work) dominates.
+
+### Meta-tuner (`cargo xtask`)
+
+The offline pipeline that produces a `tuner_profile.json` (feature `tuning`):
+
+```
+cargo xtask calibrate                       # hardware microbench summary
+cargo xtask tune   <workdir>                # sweep -> train -> profile -> ship-gate
+cargo xtask profile <models_dir> <out> [class]   # assemble + ship-gate only
+cargo xtask validate <profile.json>         # held-out geomean speedup vs default
+```
+
+`tune` runs the corpus sweep, trains the two per-path models, measures this
+machine's calibration, assembles a candidate profile, and validates it on a
+held-out generator corpus (curl-curl + saddle-point). The **ship-gate** writes the
+profile only if it does not regress the shipped default. Load the result at runtime
+with `RSLAB_TUNER_PROFILE=<path>` — no recompile.
 
 ### Test-matrix generators (feature `matgen`)
 
