@@ -41,8 +41,8 @@ use std::time::Instant;
 use num_complex::Complex;
 use rslab::matgen::{random, stencil, structured};
 use rslab::{
-    CscMatrix, FactorMethod, GemmThresholds, GeneralCsc, LdltSymbolic, LuSymbolic, OrderingMethod,
-    RelaxAmalgamation, SolverSettings, StructuralFeatures,
+    CscMatrix, FactorMethod, GemmThresholds, GeneralCsc, LdltSymbolic, LuSymbolic, MemoryMode,
+    OrderingMethod, RelaxAmalgamation, ScalingStrategy, SolverSettings, StructuralFeatures,
 };
 
 type C = Complex<f64>;
@@ -307,6 +307,34 @@ fn suitesparse_entries() -> Vec<Entry> {
 /// GEMM thresholds + panel width + Schur kernel). `relax_width = 0` means
 /// relaxed amalgamation off. The recorded outcomes are peak memory + factor speed
 /// (the two performance metrics) plus the residual for validity filtering.
+/// Copy proxy for the (non-`Copy`) `ScalingStrategy` so `Param` stays `Copy`. Only
+/// the value-independent strategies are swept (never `External`).
+#[derive(Clone, Copy, PartialEq)]
+enum ScalingKnob {
+    OnePass,
+    Identity,
+    InfNorm,
+    Auto,
+}
+impl ScalingKnob {
+    fn to_strategy(self) -> ScalingStrategy {
+        match self {
+            ScalingKnob::OnePass => ScalingStrategy::OnePassInfNorm,
+            ScalingKnob::Identity => ScalingStrategy::Identity,
+            ScalingKnob::InfNorm => ScalingStrategy::InfNorm,
+            ScalingKnob::Auto => ScalingStrategy::Auto,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            ScalingKnob::OnePass => "onepass",
+            ScalingKnob::Identity => "identity",
+            ScalingKnob::InfNorm => "infnorm",
+            ScalingKnob::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct Param {
     ordering: OrderingMethod,
@@ -319,6 +347,11 @@ struct Param {
     use_gemm_schur: bool,
     method: FactorMethod,
     threads: usize,
+    // Exact-path tuning axes (issue #2): threshold pivot `u` (LU), symmetric
+    // equilibration strategy, and the factor emit/memory mode.
+    pivot_u: f64,
+    scaling: ScalingKnob,
+    memory_eager: bool,
 }
 
 /// Production defaults (the historically-tuned config) - the OFAT centre point.
@@ -333,11 +366,14 @@ const BASELINE: Param = Param {
     use_gemm_schur: true,
     method: FactorMethod::LeftLooking,
     threads: 0,
+    pivot_u: 0.1,
+    scaling: ScalingKnob::OnePass,
+    memory_eager: false,
 };
 
 // Per-knob value menus, swept one-factor-at-a-time around `BASELINE`.
-const M_ORDERING: [OrderingMethod; 3] =
-    [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
+const M_ORDERING: [OrderingMethod; 4] =
+    [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND, OrderingMethod::Rcm];
 const M_NEMIN: [usize; 4] = [1, 16, 48, 128];
 const M_RELAX: [usize; 4] = [0, 128, 256, 512];
 const M_PANEL_NB: [usize; 4] = [32, 64, 96, 128];
@@ -346,6 +382,10 @@ const M_PAR_GEMM: [usize; 3] = [250_000, 1_000_000, 4_000_000];
 const M_PAR_CDIV: [usize; 3] = [2_000_000, 8_000_000, 32_000_000];
 const M_SCHUR: [bool; 2] = [true, false];
 const M_METHOD: [FactorMethod; 2] = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
+const M_PIVOT_U: [f64; 4] = [0.0, 0.1, 0.5, 1.0];
+const M_SCALING: [ScalingKnob; 4] =
+    [ScalingKnob::OnePass, ScalingKnob::Identity, ScalingKnob::InfNorm, ScalingKnob::Auto];
+const M_MEMORY: [bool; 2] = [false, true];
 
 /// Tiny reproducible PRNG (splitmix-style LCG) for the random joint samples, so
 /// the sweep dataset is deterministic without pulling a `rand` dependency.
@@ -439,6 +479,9 @@ fn grid() -> Vec<Param> {
     for &x in &M_PAR_CDIV { v.push(Param { par_cdiv: x, ..BASELINE }); }
     for &x in &M_SCHUR { v.push(Param { use_gemm_schur: x, ..BASELINE }); }
     for &x in &M_METHOD { v.push(Param { method: x, ..BASELINE }); }
+    for &x in &M_PIVOT_U { v.push(Param { pivot_u: x, ..BASELINE }); }
+    for &x in &M_SCALING { v.push(Param { scaling: x, ..BASELINE }); }
+    for &x in &M_MEMORY { v.push(Param { memory_eager: x, ..BASELINE }); }
     // Random joint samples (seeded) for knob interactions the OFAT axes miss.
     let n_random: usize = std::env::var("RLA_SWEEP_RANDOM")
         .ok()
@@ -457,6 +500,9 @@ fn grid() -> Vec<Param> {
             use_gemm_schur: rng.pick(&M_SCHUR),
             method: rng.pick(&M_METHOD),
             threads: 0,
+            pivot_u: rng.pick(&M_PIVOT_U),
+            scaling: rng.pick(&M_SCALING),
+            memory_eager: rng.pick(&M_MEMORY),
         });
     }
     // Dedup (OFAT re-emits the baseline value of each knob).
@@ -491,6 +537,7 @@ fn ordering_name(o: OrderingMethod) -> &'static str {
         OrderingMethod::MetisND => "metis",
         OrderingMethod::ScotchND => "scotch",
         OrderingMethod::KahipND => "kahip",
+        OrderingMethod::Rcm => "rcm",
         OrderingMethod::Auto => "auto",
         OrderingMethod::AutoRace => "auto_race",
     }
@@ -711,7 +758,10 @@ fn main() {
                 })
                 .with_use_gemm_schur(p.use_gemm_schur)
                 .with_method(p.method)
-                .with_threads(p.threads);
+                .with_threads(p.threads)
+                .with_pivot_u(p.pivot_u)
+                .with_scaling(p.scaling.to_strategy())
+                .with_memory(if p.memory_eager { MemoryMode::Eager } else { MemoryMode::LowMemory });
 
             let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, &s) else { continue };
 
@@ -724,6 +774,8 @@ fn main() {
                     "scalar_gate": p.scalar_gate, "par_gemm": p.par_gemm, "par_cdiv": p.par_cdiv,
                     "use_gemm_schur": p.use_gemm_schur, "method": method_name(p.method),
                     "threads": p.threads,
+                    "pivot_u": p.pivot_u, "scaling": p.scaling.name(),
+                    "memory_eager": p.memory_eager,
                 },
                 "metrics": {
                     "factor_ms": fac_ms, "factor_nnz": fill, "peak_mb": peak_mb,
