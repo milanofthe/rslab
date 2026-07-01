@@ -493,8 +493,11 @@ rejected, using the deterministic estimate rather than the model.
 \item The selected configuration is re-analyzed, and accepted only if its exact estimates
 satisfy $\text{fill}\le\num{1.02}\times$ default, $\text{flops}\le\num{1.05}\times$ default,
 and its memory floor stays under the default's; otherwise the default is used.
-\item The survivor must improve the score by at least $\num{0.08}$, or $\num{0.20}$ if it
-changes the factorization method.
+\item The survivor must improve the score by at least a deviate threshold ($\num{0.08}$ by
+default, or $\num{0.20}$ if it changes the factorization method). Under a hardware-calibrated
+profile (Sec.~\ref{sec:metatuner}) this threshold is set to $z\cdot\mathrm{CV}$, the machine's
+own single-shot timing noise ($z=2$), so the tuner never chases a predicted gain smaller than
+the measurement variance.
 \end{enumerate}
 The asymmetry between the memory and time guarantees is a consequence of what is
 predictable. Peak memory is a deterministic function of structure, so a candidate can be
@@ -530,6 +533,29 @@ size, three Pareto weights (dotted = geomean). Memory never regresses.}
 default.}
 \label{fig:autotunemodes}
 \end{figure}
+
+\subsection{Runtime profile and the meta-tuner}
+\label{sec:metatuner}
+The two per-path models and the guard thresholds ship compiled-in, but they are also
+exposed as a runtime \emph{tuner profile}: a JSON artifact bundling both models with the
+calibrated guards. A profile is applied programmatically (\code{apply\_profile}) or by
+naming it in the \code{RSLAB\_TUNER\_PROFILE} environment variable, which the tuner loads on
+first use --- specializing the solver to a machine or problem class with no recompile. The
+default profile is a semantic no-op (the embedded models, default guards), so the pathway is
+exercised on every build.
+
+Profiles are produced by an offline meta-tuner, invoked as \code{cargo xtask tune}, that
+chains the whole pipeline deterministically: sweep the corpus, train the two models, measure
+this machine's calibration (proxy-flop rate per scalar type, parallel speedup, and the
+single-shot timing $\mathrm{CV}$ that sets the deviate guard), assemble a candidate profile,
+and \emph{validate} it on a held-out generator corpus (curl-curl and saddle-point at sizes
+disjoint from training) by factoring each matrix with the shipped default's recommendation
+and the candidate's, and taking the geometric-mean speedup. A \emph{ship-gate} then writes
+the profile only if it does not regress the default beyond the timing noise floor; a
+candidate that merely ties still ships (it is the freshly calibrated one), but a regression
+is rejected and the proven default is kept. This makes retuning safe to run unattended: the
+worst case a bad sweep or an unlucky machine can produce is the status-quo default, never a
+slower solver.
 
 \section{Solver-in-the-loop and resource governance}
 \label{sec:sil}

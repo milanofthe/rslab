@@ -69,7 +69,111 @@ pub enum SolverPath {
     Lu,
 }
 
+/// A runtime-loadable tuner profile (issue #1): a problem-class-specialized tuner
+/// as a config artifact, not a recompile. Bundles the two per-path models with the
+/// data-calibrated guard thresholds, so a class profile produced by the meta-tuner
+/// (`cargo xtask tune`) is applied with [`apply_profile`] without rebuilding. The
+/// deterministic memory backstop still holds for any profile.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct TunerProfile {
+    /// Free-form problem-class label (for provenance).
+    #[serde(default)]
+    pub class: String,
+    /// The LDLᵀ-path model weights (same schema as the embedded model JSON).
+    pub ldlt_model: serde_json::Value,
+    /// The LU-path model weights.
+    pub lu_model: serde_json::Value,
+    /// Data-calibrated deviate guard (`z·time_cv` on the target hardware).
+    pub min_gain: f64,
+    /// Data-calibrated method-flip guard.
+    pub method_flip_gain: f64,
+    /// Data-calibrated memory tolerance (log-space).
+    pub mem_tol_ln: f64,
+}
+
+impl TunerProfile {
+    /// Write the profile as JSON.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::write(path, serde_json::to_string(self).unwrap_or_default())
+    }
+    /// Read a profile from JSON.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&s).map_err(|e| e.to_string())
+    }
+}
+
+/// The compile-time-default profile: the embedded per-path models with the
+/// default guard thresholds. This is the meta-tuner's starting point and the
+/// ship-gate baseline a candidate profile must beat before it is written.
+pub fn default_profile() -> TunerProfile {
+    TunerProfile {
+        class: "default".to_string(),
+        ldlt_model: serde_json::from_str(MODEL_LDLT_JSON).unwrap_or(serde_json::Value::Null),
+        lu_model: serde_json::from_str(MODEL_LU_JSON).unwrap_or(serde_json::Value::Null),
+        min_gain: MIN_GAIN,
+        method_flip_gain: METHOD_FLIP_GAIN,
+        mem_tol_ln: MEM_TOL_LN,
+    }
+}
+
+/// A parsed, active profile: the two models plus the calibrated guards.
+struct ActiveProfile {
+    ldlt: Model,
+    lu: Model,
+    min_gain: f64,
+    method_flip_gain: f64,
+    mem_tol_ln: f64,
+}
+
+static PROFILE: OnceLock<ActiveProfile> = OnceLock::new();
+
+/// Apply a runtime tuner profile: subsequent `LdltSolver`/`LuSolver` auto-tuning
+/// uses its models and calibrated guards instead of the compile-time-embedded
+/// defaults. Set once (e.g. at program start for a fixed problem class); a second
+/// call is a no-op error. Deterministic memory backstop is unaffected.
+pub fn apply_profile(p: &TunerProfile) -> Result<(), String> {
+    let ldlt: Model = serde_json::from_value(p.ldlt_model.clone()).map_err(|e| e.to_string())?;
+    let lu: Model = serde_json::from_value(p.lu_model.clone()).map_err(|e| e.to_string())?;
+    PROFILE
+        .set(ActiveProfile {
+            ldlt,
+            lu,
+            min_gain: p.min_gain,
+            method_flip_gain: p.method_flip_gain,
+            mem_tol_ln: p.mem_tol_ln,
+        })
+        .map_err(|_| "a tuner profile is already applied".to_string())
+}
+
+/// The active runtime profile, if any: an explicitly [`apply_profile`]d one, or —
+/// on first use, tried once — a profile named by the `RSLAB_TUNER_PROFILE`
+/// environment variable. This is what makes a profile a config artifact: point the
+/// env var at a `tuner_profile.json` produced by `cargo xtask tune` and the
+/// running binary picks it up with no recompile.
+fn active_profile() -> Option<&'static ActiveProfile> {
+    if let Some(ap) = PROFILE.get() {
+        return Some(ap);
+    }
+    static ENV_TRIED: OnceLock<()> = OnceLock::new();
+    ENV_TRIED.get_or_init(|| {
+        if let Some(path) = std::env::var_os("RSLAB_TUNER_PROFILE") {
+            if let Ok(p) = TunerProfile::load(std::path::Path::new(&path)) {
+                let _ = apply_profile(&p);
+            }
+        }
+    });
+    PROFILE.get()
+}
+
 fn model_for(path: SolverPath) -> Option<&'static Model> {
+    // A runtime profile (if applied or env-named) overrides the embedded models.
+    if let Some(ap) = active_profile() {
+        return Some(match path {
+            SolverPath::Ldlt => &ap.ldlt,
+            SolverPath::Lu => &ap.lu,
+        });
+    }
     static LDLT: OnceLock<Option<Model>> = OnceLock::new();
     static LU: OnceLock<Option<Model>> = OnceLock::new();
     match path {
@@ -79,6 +183,15 @@ fn model_for(path: SolverPath) -> Option<&'static Model> {
         SolverPath::Lu => LU
             .get_or_init(|| serde_json::from_str(MODEL_LU_JSON).ok())
             .as_ref(),
+    }
+}
+
+/// The active guard thresholds: the runtime profile's calibrated values if a
+/// profile is applied, else the compile-time defaults.
+fn active_guards() -> (f64, f64, f64) {
+    match active_profile() {
+        Some(ap) => (ap.min_gain, ap.method_flip_gain, ap.mem_tol_ln),
+        None => (MIN_GAIN, METHOD_FLIP_GAIN, MEM_TOL_LN),
     }
 }
 
@@ -423,10 +536,45 @@ pub fn recommend_settings_pathed(
     mf_ll_mem_ratio: f64,
     path: SolverPath,
 ) -> SolverSettings {
-    let w = weight.clamp(0.0, 1.0);
     let Some(m) = model_for(path) else {
         return SolverSettings::default();
     };
+    recommend_core(m, active_guards(), features, weight, mf_ll_mem_ratio, path)
+}
+
+/// [`recommend_settings_pathed`] evaluated against an explicit [`TunerProfile`]
+/// rather than the embedded models / applied profile — used by the meta-tuner's
+/// ship-gate to score a candidate profile without mutating the process-global
+/// [`apply_profile`] state. Returns `None` if the profile's model for `path`
+/// cannot be parsed.
+pub fn recommend_with_profile(
+    profile: &TunerProfile,
+    features: &StructuralFeatures,
+    weight: f64,
+    mf_ll_mem_ratio: f64,
+    path: SolverPath,
+) -> Option<SolverSettings> {
+    let value = match path {
+        SolverPath::Ldlt => &profile.ldlt_model,
+        SolverPath::Lu => &profile.lu_model,
+    };
+    let m: Model = serde_json::from_value(value.clone()).ok()?;
+    let guards = (profile.min_gain, profile.method_flip_gain, profile.mem_tol_ln);
+    Some(recommend_core(&m, guards, features, weight, mf_ll_mem_ratio, path))
+}
+
+/// The shared recommendation search: given a model and the (min_gain,
+/// method_flip_gain, mem_tol_ln) guards, pick the candidate config minimizing the
+/// weighted time/memory score, subject to the memory cap and deviate guards.
+fn recommend_core(
+    m: &Model,
+    guards: (f64, f64, f64),
+    features: &StructuralFeatures,
+    weight: f64,
+    mf_ll_mem_ratio: f64,
+    path: SolverPath,
+) -> SolverSettings {
+    let w = weight.clamp(0.0, 1.0);
     // Out-of-distribution: above the training grid's well-sampled range the model
     // extrapolates on the knobs, so it must not be trusted. But the *ordering*
     // choice is decidable from the exact a-priori fill (not extrapolated), and on
@@ -439,9 +587,10 @@ pub fn recommend_settings_pathed(
     if m.flops_ood_cap > 0.0 && features.factor_flops as f64 > m.flops_ood_cap {
         return SolverSettings::default().with_ordering(OrderingMethod::AutoRace);
     }
+    let (min_gain, method_flip_gain, mem_tol_ln) = guards;
     let base = predict(m, &build_input(m, features, &BASE)); // [log time, log mem]
     let base_score = w * base[0] + (1.0 - w) * base[1];
-    let mem_cap = base[1] + MEM_TOL_LN; // hard: never exceed the default's peak memory
+    let mem_cap = base[1] + mem_tol_ln; // hard: never exceed the default's peak memory
     let mut best = BASE;
     let mut best_score = base_score;
     let active = active_knobs(m);
@@ -467,7 +616,7 @@ pub fn recommend_settings_pathed(
     }
     // Safety + method-flip guard: only deviate from the default when the predicted
     // gain clears the margin (a larger one for a method flip - the risky knob).
-    let needed = if best.method != BASE.method { METHOD_FLIP_GAIN } else { MIN_GAIN };
+    let needed = if best.method != BASE.method { method_flip_gain } else { min_gain };
     if base_score - best_score < needed {
         return apply(&BASE);
     }
@@ -580,5 +729,26 @@ mod tests {
         let none = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
         assert_eq!(candidates(SolverPath::Ldlt, &none).len(), 1152);
         assert_eq!(candidates(SolverPath::Lu, &none).len(), 1152);
+    }
+
+    #[test]
+    fn tuner_profile_round_trips() {
+        // The runtime profile (issue #1) is a self-describing config artifact:
+        // serialize the default profile, read it back, and confirm the models and
+        // calibrated guards survive intact. (No `apply_profile` here — that mutates
+        // a process-global and would perturb the other tuner tests in this binary.)
+        let p = default_profile();
+        let dir = std::env::temp_dir();
+        let path = dir.join("rslab_test_tuner_profile.json");
+        p.save(&path).expect("save profile");
+        let q = TunerProfile::load(&path).expect("load profile");
+        assert_eq!(q.class, "default");
+        assert_eq!(q.min_gain, MIN_GAIN);
+        assert_eq!(q.method_flip_gain, METHOD_FLIP_GAIN);
+        assert_eq!(q.mem_tol_ln, MEM_TOL_LN);
+        // The model JSON must round-trip well enough to parse back into a Model.
+        let _: Model = serde_json::from_value(q.ldlt_model).expect("ldlt model parses");
+        let _: Model = serde_json::from_value(q.lu_model).expect("lu model parses");
+        let _ = std::fs::remove_file(&path);
     }
 }

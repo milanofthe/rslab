@@ -11,9 +11,12 @@
 
 use std::path::PathBuf;
 
+use num_complex::Complex;
+
 use crate::diagnostics::MemoryEstimate;
+use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
-use crate::{BlrMode, SolverSettings, LdltSymbolic};
+use crate::{BlrMode, LdltSymbolic, SolverSettings};
 
 /// Detected machine capabilities - for budgeting and the calibration key.
 #[derive(Debug, Clone)]
@@ -50,11 +53,22 @@ impl HardwareInfo {
 /// Measured cost-model constants for this machine - the cached "wisdom".
 #[derive(Debug, Clone, Copy)]
 pub struct Calibration {
-    /// One-thread throughput in the `factor_flops` proxy unit, ×1e9 (giga/s).
+    /// One-thread throughput in the `factor_flops` proxy unit, ×1e9 (giga/s), for a
+    /// **real** (`f64`) factorization.
     pub geom_gflops: f64,
+    /// Same proxy-flops/s rate for a **complex** (`Complex<f64>`) factorization:
+    /// each proxy-flop is ~4 real flops plus wider memory traffic, so the rate in
+    /// the type-independent proxy unit is lower --- calibrated separately so the
+    /// runtime estimate is correct for the complex-symmetric target class.
+    pub geom_gflops_cplx: f64,
     /// Parallel speedup measured at `speedup_threads`.
     pub speedup: f64,
     pub speedup_threads: usize,
+    /// Coefficient of variation (std/mean) of the repeated single-thread factor
+    /// time on this machine --- the measurement noise floor. The tuner's deviate
+    /// guard is set from this (`min_gain = z·cv`) so it never chases a speedup
+    /// smaller than the noise it measured on this hardware.
+    pub time_cv: f64,
     pub fingerprint: u64,
 }
 
@@ -80,10 +94,19 @@ impl Calibration {
     fn load(fp: u64) -> Option<Self> {
         let s = std::fs::read_to_string(Self::cache_path(fp)).ok()?;
         let mut it = s.split_whitespace();
+        let geom_gflops: f64 = it.next()?.parse().ok()?;
+        let speedup: f64 = it.next()?.parse().ok()?;
+        let speedup_threads: usize = it.next()?.parse().ok()?;
+        // The complex rate is a later field; an older cache file lacks it, so fall
+        // back to a fraction of the real rate rather than failing the whole load.
+        let geom_gflops_cplx = it.next().and_then(|t| t.parse().ok()).unwrap_or(geom_gflops / 3.0);
+        let time_cv = it.next().and_then(|t| t.parse().ok()).unwrap_or(0.1);
         Some(Calibration {
-            geom_gflops: it.next()?.parse().ok()?,
-            speedup: it.next()?.parse().ok()?,
-            speedup_threads: it.next()?.parse().ok()?,
+            geom_gflops,
+            geom_gflops_cplx,
+            speedup,
+            speedup_threads,
+            time_cv,
             fingerprint: fp,
         })
     }
@@ -93,23 +116,41 @@ impl Calibration {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
-        std::fs::write(p, format!("{} {} {}", self.geom_gflops, self.speedup, self.speedup_threads))
+        std::fs::write(
+            p,
+            format!(
+                "{} {} {} {} {}",
+                self.geom_gflops, self.speedup, self.speedup_threads, self.geom_gflops_cplx, self.time_cv
+            ),
+        )
     }
 
     /// A reasonable default if calibration cannot run (e.g. analyze fails).
     fn fallback(hw: &HardwareInfo) -> Self {
         Calibration {
             geom_gflops: 2.0,
+            geom_gflops_cplx: 2.0 / 3.0,
             speedup: (hw.physical_cores as f64).sqrt().max(1.0),
             speedup_threads: hw.physical_cores,
+            time_cv: 0.1,
             fingerprint: hw.fingerprint(),
+        }
+    }
+
+    /// The one-thread proxy-flops/s rate for a scalar of `value_bytes` (real `f64`
+    /// = 8, `Complex<f64>` = 16): picks the complex rate for the wider type.
+    pub fn rate_for(&self, value_bytes: usize) -> f64 {
+        if value_bytes >= 16 {
+            self.geom_gflops_cplx
+        } else {
+            self.geom_gflops
         }
     }
 
     /// Measure throughput by factoring a representative 3D grid at 1 thread and at
     /// `physical_cores`, recording the proxy-flops/s rate and the parallel speedup.
     pub fn measure(hw: &HardwareInfo) -> Self {
-        let a = grid3d_spd(24); // ≈ 13 800 DOFs, a few hundred ms
+        let a = grid3d_spd::<f64>(24); // ≈ 13 800 DOFs, a few hundred ms
         let Ok(sym) = LdltSymbolic::analyze(&a) else {
             return Self::fallback(hw);
         };
@@ -120,15 +161,54 @@ impl Calibration {
             sym.factor(&a, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
         };
-        let (Some(t1), Some(tn)) = (time_at(1), time_at(hw.physical_cores.max(1))) else {
+        // Repeat the single-thread factor a few times for the timing noise floor
+        // (coefficient of variation), which sets the tuner's deviate guard.
+        let mut samples = Vec::new();
+        for _ in 0..4 {
+            match time_at(1) {
+                Some(t) => samples.push(t),
+                None => return Self::fallback(hw),
+            }
+        }
+        let Some(tn) = time_at(hw.physical_cores.max(1)) else {
             return Self::fallback(hw);
         };
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let var = samples.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let time_cv = if mean > 0.0 { var.sqrt() / mean } else { 0.0 };
+        let t1 = mean;
+        let geom_gflops = (flops / t1.max(1e-9)) / 1e9;
+        // Complex rate: same grid, complex-typed, factored once at one thread. The
+        // structure (fill, flops proxy) is identical; only the per-flop cost differs.
+        let ac = grid3d_spd::<Complex<f64>>(24);
+        let geom_gflops_cplx = match LdltSymbolic::analyze(&ac) {
+            Ok(symc) => {
+                let fc = symc.estimate_memory::<Complex<f64>>().factor_flops as f64;
+                let start = std::time::Instant::now();
+                match symc.factor(&ac, &SolverSettings::default().with_threads(1)) {
+                    Ok(_) => (fc / start.elapsed().as_secs_f64().max(1e-9)) / 1e9,
+                    Err(_) => geom_gflops / 3.0,
+                }
+            }
+            Err(_) => geom_gflops / 3.0,
+        };
         Calibration {
-            geom_gflops: (flops / t1.max(1e-9)) / 1e9,
+            geom_gflops,
+            geom_gflops_cplx,
             speedup: (t1 / tn.max(1e-9)).max(1.0),
             speedup_threads: hw.physical_cores.max(1),
+            time_cv,
             fingerprint: hw.fingerprint(),
         }
+    }
+
+    /// Data-driven deviate threshold for the tuner: a candidate must beat the
+    /// default by more than the measured timing noise (`z·time_cv`, `z=2` for ~95%
+    /// confidence) before the tuner switches to it, so it never chases a predicted
+    /// gain smaller than this machine's own single-shot variance. Clamped to a
+    /// sensible range in case calibration measured an implausible value.
+    pub fn min_gain(&self) -> f64 {
+        (2.0 * self.time_cv).clamp(0.03, 0.30)
     }
 
     /// Interpolated speedup at `threads`: linear toward the calibrated peak, flat
@@ -180,6 +260,39 @@ pub struct FactorPlan {
     pub note: String,
 }
 
+/// Cost-model worker-count selection: the fewest workers that reach (within a
+/// small margin) the minimum predicted time. Because
+/// [`est_runtime_ms_threaded`](MemoryEstimate::est_runtime_ms_threaded) floors at
+/// the critical path of the assembly tree, adding workers past the point where the
+/// parallel term hits that floor buys nothing --- so a critical-path-bound matrix
+/// (a banded chain, whose critical path is nearly its whole work) gets **fewer**
+/// workers, and a wide 3D tree gets more. Deterministic given the calibration.
+/// `max_threads == 0` means all physical cores.
+pub fn recommend_threads_cost_model(
+    estimate: &MemoryEstimate,
+    calib: &Calibration,
+    max_threads: usize,
+    all_cores: usize,
+) -> usize {
+    let cap = if max_threads == 0 { all_cores.max(1) } else { max_threads };
+    let rate = calib.rate_for(estimate.value_bytes);
+    let time = |t: usize| estimate.est_runtime_ms_threaded(rate, calib.speedup_for(t));
+    let mut best_t = 1;
+    let mut best = time(1);
+    for t in [2usize, 4, 6, 8, 12, 16, 20, 24, 32].into_iter().filter(|&t| t <= cap) {
+        let tt = time(t);
+        if tt < best * 0.97 {
+            // >3% faster: worth the extra workers.
+            best = tt;
+            best_t = t;
+        } else {
+            // Diminishing returns (critical path / saturation) -- stop adding cores.
+            break;
+        }
+    }
+    best_t
+}
+
 /// Turn an a-priori [`MemoryEstimate`] + a [`Budget`] into a concrete plan, using
 /// the machine's [`HardwareInfo`] and [`Calibration`]. Path-agnostic: pass the
 /// estimate from `LuSymbolic`/`LdltSymbolic::estimate_memory`. Pure given the
@@ -190,9 +303,11 @@ pub fn plan(
     hw: &HardwareInfo,
     calib: &Calibration,
 ) -> FactorPlan {
-    let threads = if budget.max_threads == 0 { hw.physical_cores.max(1) } else { budget.max_threads };
+    // Cost-model worker count: the fewest cores that reach near-minimum predicted
+    // time (fewer when the critical path or saturation dominates), not blindly all.
+    let threads = recommend_threads_cost_model(estimate, calib, budget.max_threads, hw.physical_cores);
     let speedup = calib.speedup_for(threads);
-    let runtime = estimate.est_runtime_ms(calib.geom_gflops, speedup);
+    let runtime = estimate.est_runtime_ms_threaded(calib.rate_for(estimate.value_bytes), speedup);
     let mut opts = SolverSettings::default().with_threads(threads);
     let mut peak = estimate.transient_peak_bytes;
     let mut use_f32 = false;
@@ -249,6 +364,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cost_model_thread_count_respects_critical_path() {
+        // Synthetic calibration: peak speedup 6 at 12 threads.
+        let calib = Calibration {
+            geom_gflops: 2.0,
+            geom_gflops_cplx: 0.7,
+            speedup: 6.0,
+            speedup_threads: 12,
+            time_cv: 0.1,
+            fingerprint: 0,
+        };
+        let mut est = crate::diagnostics::MemoryEstimate {
+            value_bytes: 8,
+            factor_nnz: 0,
+            factor_bytes: 0,
+            panels_all_bytes: 0,
+            panel_live_peak_bytes: 0,
+            transient_peak_bytes: 0,
+            mf_transient_peak_bytes: 0,
+            factor_flops: 100_000_000_000, // 1e11 total work
+            critical_path_flops: 0,
+            max_tree_width: 256,
+        };
+        // Wide tree (critical path 1% of work): more threads keep paying off.
+        est.critical_path_flops = 1_000_000_000; // 1e9
+        let wide = recommend_threads_cost_model(&est, &calib, 24, 24);
+        // Critical-path-bound (chain: critical path == total work): no parallel gain.
+        est.critical_path_flops = est.factor_flops;
+        let chain = recommend_threads_cost_model(&est, &calib, 24, 24);
+        assert!(wide > chain, "wide tree uses more workers ({wide}) than a chain ({chain})");
+        assert_eq!(chain, 1, "a critical-path-bound matrix uses a single worker");
+        assert!(wide >= 8, "a wide tree uses many workers ({wide})");
+    }
+
+    #[test]
     fn probe_calibrate_plan_governor() {
         let hw = HardwareInfo::probe();
         assert!(hw.logical_cores >= 1 && hw.physical_cores >= 1);
@@ -262,7 +411,7 @@ mod tests {
         calib.save().unwrap();
         assert!(Calibration::load(hw.fingerprint()).is_some());
 
-        let a = grid3d_spd(16);
+        let a = grid3d_spd::<f64>(16);
         let est = LdltSymbolic::analyze(&a).unwrap().estimate_memory::<f64>();
         assert!(est.factor_flops > 0);
 
@@ -270,10 +419,16 @@ mod tests {
         let plan_ok = plan(&est, &Budget::default(), &hw, &calib);
         assert!(plan_ok.fits && !plan_ok.use_mixed_precision);
         assert!(plan_ok.est_runtime_ms > 0.0);
-        assert_eq!(
-            plan_ok.opts.threads,
-            crate::numeric::multifrontal_ldlt::Threads::Fixed(hw.physical_cores.max(1))
-        );
+        // v2 cost-model thread selection (#61) picks the fewest cores that reach
+        // near-minimum predicted time — for a small grid the critical path or
+        // saturation dominates, so it may (correctly) choose fewer than all cores.
+        // The contract is 1 ≤ threads ≤ physical_cores, not "always all cores".
+        match plan_ok.opts.threads {
+            crate::numeric::multifrontal_ldlt::Threads::Fixed(t) => {
+                assert!(t >= 1 && t <= hw.physical_cores.max(1), "threads within core budget");
+            }
+            other => panic!("expected a fixed thread count, got {other:?}"),
+        }
 
         // Tight budget with all approximations allowed → planner applies them.
         let tight = Budget {
@@ -293,26 +448,28 @@ mod tests {
     }
 }
 
-/// 3D 7-point Laplacian (k³ grid, Dirichlet, SPD `f64`, lower triangle) - the
-/// calibration's representative matrix.
-fn grid3d_spd(k: usize) -> CscMatrix<f64> {
+/// 3D 7-point Laplacian (k³ grid, Dirichlet, SPD, lower triangle), generic over
+/// the scalar type - the calibration's representative matrix. Complex-typed, it is
+/// real-valued but factors through the complex kernel, so it times the complex
+/// proxy-flops/s rate.
+fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
     let mut rows = Vec::new();
     let mut cols = Vec::new();
-    let mut vals = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
     for z in 0..k {
         for y in 0..k {
             for x in 0..k {
                 let p = idx(x, y, z);
                 rows.push(p);
                 cols.push(p);
-                vals.push(6.0);
+                vals.push(T::from_real(6.0));
                 let mut nb = |q: usize| {
                     let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
                     rows.push(hi);
                     cols.push(lo);
-                    vals.push(-1.0);
+                    vals.push(T::from_real(-1.0));
                 };
                 if x + 1 < k {
                     nb(idx(x + 1, y, z));
@@ -328,11 +485,11 @@ fn grid3d_spd(k: usize) -> CscMatrix<f64> {
     }
     match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
         Ok(m) => m,
-        Err(_) => CscMatrix::from_triplets(1, &[0], &[0], &[1.0]).unwrap_or(CscMatrix {
+        Err(_) => CscMatrix {
             n: 0,
             col_ptr: vec![0],
             row_idx: vec![],
             values: vec![],
-        }),
+        },
     }
 }

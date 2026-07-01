@@ -101,7 +101,8 @@ pub mod tuning;
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use analysis::{recommend_threads_from, StructuralFeatures, SymbolicShape};
 pub use auto_tune::{
-    recommend_settings, recommend_settings_pathed, recommend_settings_vetoed, SolverPath,
+    apply_profile, default_profile, recommend_settings, recommend_settings_pathed,
+    recommend_settings_vetoed, recommend_with_profile, SolverPath, TunerProfile,
     DEFAULT_TUNE_WEIGHT,
 };
 pub use numeric::gemm_tuning::{
