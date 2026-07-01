@@ -64,6 +64,11 @@ pub struct Calibration {
     /// Parallel speedup measured at `speedup_threads`.
     pub speedup: f64,
     pub speedup_threads: usize,
+    /// Coefficient of variation (std/mean) of the repeated single-thread factor
+    /// time on this machine --- the measurement noise floor. The tuner's deviate
+    /// guard is set from this (`min_gain = z·cv`) so it never chases a speedup
+    /// smaller than the noise it measured on this hardware.
+    pub time_cv: f64,
     pub fingerprint: u64,
 }
 
@@ -95,7 +100,15 @@ impl Calibration {
         // The complex rate is a later field; an older cache file lacks it, so fall
         // back to a fraction of the real rate rather than failing the whole load.
         let geom_gflops_cplx = it.next().and_then(|t| t.parse().ok()).unwrap_or(geom_gflops / 3.0);
-        Some(Calibration { geom_gflops, geom_gflops_cplx, speedup, speedup_threads, fingerprint: fp })
+        let time_cv = it.next().and_then(|t| t.parse().ok()).unwrap_or(0.1);
+        Some(Calibration {
+            geom_gflops,
+            geom_gflops_cplx,
+            speedup,
+            speedup_threads,
+            time_cv,
+            fingerprint: fp,
+        })
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -106,8 +119,8 @@ impl Calibration {
         std::fs::write(
             p,
             format!(
-                "{} {} {} {}",
-                self.geom_gflops, self.speedup, self.speedup_threads, self.geom_gflops_cplx
+                "{} {} {} {} {}",
+                self.geom_gflops, self.speedup, self.speedup_threads, self.geom_gflops_cplx, self.time_cv
             ),
         )
     }
@@ -119,6 +132,7 @@ impl Calibration {
             geom_gflops_cplx: 2.0 / 3.0,
             speedup: (hw.physical_cores as f64).sqrt().max(1.0),
             speedup_threads: hw.physical_cores,
+            time_cv: 0.1,
             fingerprint: hw.fingerprint(),
         }
     }
@@ -147,9 +161,22 @@ impl Calibration {
             sym.factor(&a, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
         };
-        let (Some(t1), Some(tn)) = (time_at(1), time_at(hw.physical_cores.max(1))) else {
+        // Repeat the single-thread factor a few times for the timing noise floor
+        // (coefficient of variation), which sets the tuner's deviate guard.
+        let mut samples = Vec::new();
+        for _ in 0..4 {
+            match time_at(1) {
+                Some(t) => samples.push(t),
+                None => return Self::fallback(hw),
+            }
+        }
+        let Some(tn) = time_at(hw.physical_cores.max(1)) else {
             return Self::fallback(hw);
         };
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let var = samples.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let time_cv = if mean > 0.0 { var.sqrt() / mean } else { 0.0 };
+        let t1 = mean;
         let geom_gflops = (flops / t1.max(1e-9)) / 1e9;
         // Complex rate: same grid, complex-typed, factored once at one thread. The
         // structure (fill, flops proxy) is identical; only the per-flop cost differs.
@@ -170,8 +197,18 @@ impl Calibration {
             geom_gflops_cplx,
             speedup: (t1 / tn.max(1e-9)).max(1.0),
             speedup_threads: hw.physical_cores.max(1),
+            time_cv,
             fingerprint: hw.fingerprint(),
         }
+    }
+
+    /// Data-driven deviate threshold for the tuner: a candidate must beat the
+    /// default by more than the measured timing noise (`z·time_cv`, `z=2` for ~95%
+    /// confidence) before the tuner switches to it, so it never chases a predicted
+    /// gain smaller than this machine's own single-shot variance. Clamped to a
+    /// sensible range in case calibration measured an implausible value.
+    pub fn min_gain(&self) -> f64 {
+        (2.0 * self.time_cv).clamp(0.03, 0.30)
     }
 
     /// Interpolated speedup at `threads`: linear toward the calibrated peak, flat
@@ -334,6 +371,7 @@ mod tests {
             geom_gflops_cplx: 0.7,
             speedup: 6.0,
             speedup_threads: 12,
+            time_cv: 0.1,
             fingerprint: 0,
         };
         let mut est = crate::diagnostics::MemoryEstimate {
