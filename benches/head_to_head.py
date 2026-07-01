@@ -16,7 +16,11 @@ import sys
 from pathlib import Path
 
 import bench_style
-from fit_scaling import plot_metric, MEM_ORDER
+from fit_scaling import plot_metric
+
+# RSLAB's untuned default is drawn alongside the auto-tuned curve, so the gap the
+# learned tuner closes (default -> auto) is visible against the external solvers.
+ORDER = ["default", "auto", "faer", "pardiso"]
 
 
 def run(path, title, slug, mtype):
@@ -26,14 +30,14 @@ def run(path, title, slug, mtype):
     print("  factor time ~ nnz^alpha:")
     plot_metric(
         recs, "time", "fac_ms", "factor time [ms]",
-        f"{title}: factor time vs size — RSLAB vs faer vs PARDISO (mtype {mtype})",
-        out / f"h2h_{slug}_time.png",
+        f"{title}: factor time vs size — RSLAB (default & tuned) vs faer vs PARDISO (mtype {mtype})",
+        out / f"h2h_{slug}_time.png", order=ORDER,
     )
     print("  peak memory ~ nnz^alpha:")
     plot_metric(
         recs, "mem", "mem_mb", "peak memory [MB]",
-        f"{title}: peak factor memory vs size — RSLAB vs faer vs PARDISO (mtype {mtype})",
-        out / f"h2h_{slug}_mem.png", order=MEM_ORDER,
+        f"{title}: peak factor memory vs size — RSLAB (default & tuned) vs faer vs PARDISO (mtype {mtype})",
+        out / f"h2h_{slug}_mem.png", order=ORDER,
     )
 
 

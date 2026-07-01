@@ -280,12 +280,18 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
         }
     }
 
-    // --- RLA left-looking / multifrontal ---
-    for (tag, method) in [("ll", FactorMethod::LeftLooking), ("mf", FactorMethod::Multifrontal)] {
+    // --- RLA untuned default + raw left-looking / multifrontal kernels ---
+    // `default` is `SolverSettings::default()` through the high-level solver - the
+    // untuned baseline the learned tuner (`auto`) is measured against; `ll`/`mf`
+    // force a single kernel.
+    for (tag, o) in [
+        ("default", SolverSettings::default()),
+        ("ll", opts.clone().with_method(FactorMethod::LeftLooking)),
+        ("mf", opts.clone().with_method(FactorMethod::Multifrontal)),
+    ] {
         if !has(tag) {
             continue;
         }
-        let o = opts.clone().with_method(method);
         // Error-tolerant: a singular / numerically hard corpus matrix must skip
         // (with a note) rather than panic and abort the whole sweep.
         macro_rules! skip_err {
@@ -532,14 +538,23 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
             .flat_map(|&sz| {
                 let kc = ((sz as f64 / 3.0).cbrt().round() as usize).max(4);
                 let ks = ((sz as f64 / 3.0).sqrt().round() as usize).max(4);
-                let hz = stencil::helmholtz(&cube(sz), Complex::new(0.05, 0.02), &stencil::StencilOpts::default());
-                let cc = fem::curl_curl(&[kc, kc, kc], 3.0, 0.1);
-                let sp = fem::saddle_point::<C>(&[ks, ks], 0.1);
-                [
-                    (format!("helmholtz_{}", hz.n), Mat::Sym(hz)),
-                    (format!("curlcurl_{}", cc.n), Mat::Sym(cc)),
-                    (format!("saddle_{}", sp.n), Mat::Sym(sp)),
-                ]
+                let mut v: Vec<(String, Mat)> = Vec::new();
+                // Helmholtz: three complex shifts (near-resonance to well-damped).
+                for (i, (re, im)) in [(0.02, 0.01), (0.05, 0.02), (0.12, 0.06)].into_iter().enumerate() {
+                    let m = stencil::helmholtz(&cube(sz), Complex::new(re, im), &stencil::StencilOpts::default());
+                    v.push((format!("helmholtz{i}_{}", m.n), Mat::Sym(m)));
+                }
+                // Curl-curl Maxwell: three (frequency, conductivity) pairs.
+                for (i, (om, si)) in [(1.5, 0.05), (3.0, 0.1), (6.0, 0.3)].into_iter().enumerate() {
+                    let m = fem::curl_curl(&[kc, kc, kc], om, si);
+                    v.push((format!("curlcurl{i}_{}", m.n), Mat::Sym(m)));
+                }
+                // Stokes/KKT saddle-point: two stabilizations.
+                for (i, beta) in [0.1, 0.01].into_iter().enumerate() {
+                    let m = fem::saddle_point::<C>(&[ks, ks], beta);
+                    v.push((format!("saddle{i}_{}", m.n), Mat::Sym(m)));
+                }
+                v // 8 per size
             })
             .collect(),
         // Unsymmetric distribution (LU path): convection-diffusion is the canonical
@@ -551,18 +566,33 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
             .flat_map(|&sz| {
                 let kc = ((sz as f64).cbrt().round() as usize).max(4);
                 let ks = ((sz as f64).sqrt().round() as usize).max(4);
-                let cd3 = fem::convection_diffusion::<C>(&[kc, kc, kc], 0.01, fem::Flow::Rotating, true);
-                let cd2 = fem::convection_diffusion::<C>(&[ks, ks], 5e-3, fem::Flow::Diagonal, false);
-                // cutoff ∝ 1/√n keeps ≈`deg` neighbours per row independent of n -
-                // a realistic near-field (constant degree under mesh refinement).
-                let deg = 120.0;
-                let cutoff = (2.0 * (deg / sz as f64).sqrt()).min(1.2);
-                let bm = bem::kernel(sz, &bem::BemOpts { cutoff, ..Default::default() });
-                [
-                    (format!("convdiff3d_{}", cd3.n), Mat::Unsym(cd3)),
-                    (format!("convdiff2d_{}", cd2.n), Mat::Unsym(cd2)),
-                    (format!("mom_{}", bm.n), Mat::Unsym(bm)),
+                let mut v: Vec<(String, Mat)> = Vec::new();
+                // Convection-diffusion 3D: two Péclet levels (upwind, recirculating).
+                for (i, eps) in [0.05, 5e-3].into_iter().enumerate() {
+                    let m = fem::convection_diffusion::<C>(&[kc, kc, kc], eps, fem::Flow::Rotating, true);
+                    v.push((format!("convdiff3d{i}_{}", m.n), Mat::Unsym(m)));
+                }
+                // Convection-diffusion 2D: Péclet × flow field × discretization.
+                for (i, (eps, flow, up)) in [
+                    (0.05, fem::Flow::Diagonal, false),
+                    (5e-3, fem::Flow::Rotating, true),
+                    (1e-3, fem::Flow::Diagonal, true),
+                    (1e-2, fem::Flow::Rotating, false),
                 ]
+                .into_iter()
+                .enumerate()
+                {
+                    let m = fem::convection_diffusion::<C>(&[ks, ks], eps, flow, up);
+                    v.push((format!("convdiff2d{i}_{}", m.n), Mat::Unsym(m)));
+                }
+                // BEM/MoM near-field: two densities. cutoff ∝ 1/√n keeps ≈`deg`
+                // neighbours per row independent of n (constant degree under refinement).
+                for (i, deg) in [80.0_f64, 160.0].into_iter().enumerate() {
+                    let cutoff = (2.0 * (deg / sz as f64).sqrt()).min(1.2);
+                    let m = bem::kernel(sz, &bem::BemOpts { cutoff, ..Default::default() });
+                    v.push((format!("mom{i}_{}", m.n), Mat::Unsym(m)));
+                }
+                v // 8 per size
             })
             .collect(),
         "corpus" => build_corpus(),
