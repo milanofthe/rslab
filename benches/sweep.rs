@@ -547,6 +547,7 @@ fn method_name(m: FactorMethod) -> &'static str {
     match m {
         FactorMethod::LeftLooking => "left_looking",
         FactorMethod::Multifrontal => "multifrontal",
+        FactorMethod::RightLooking => "right_looking",
     }
 }
 

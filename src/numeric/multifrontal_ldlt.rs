@@ -173,6 +173,16 @@ pub enum FactorMethod {
     /// [`preconditioner`]: SolverSettings::preconditioner
     #[default]
     LeftLooking,
+    /// Right-looking supernodal: factor the assembly-tree fronts sequentially in
+    /// postorder, holding **every** front live and pushing each factored front's
+    /// contribution into its parent (no contribution-block frontier free, no
+    /// per-front extract). The classic right-looking schedule - higher transient
+    /// memory (all fronts co-resident) traded for a simple, barrier-free push. The
+    /// numeric factor is equivalent to the other methods; this is an **opt-in**
+    /// method (not auto-selected) for the memory/schedule trade on classes where a
+    /// dense all-fronts residency is acceptable. See Davis 2006, *Direct Methods
+    /// for Sparse Linear Systems*, §4 (left-/right-looking supernodal schedules).
+    RightLooking,
 }
 
 /// Options controlling the generic multifrontal factorization. Defaults give an
@@ -1411,6 +1421,29 @@ fn analyze_with_inner(
     })
 }
 
+/// Postorder (children before parent) over the assembly forest, used by the
+/// right-looking sequential schedule so every child is factored before its parent
+/// consumes its contribution. Iterative to avoid recursion depth on deep trees.
+fn supernode_postorder(sym: &SymbolicFactorization, roots: &[usize]) -> Vec<usize> {
+    let mut order = Vec::with_capacity(sym.supernodes.len());
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for &r in roots {
+        stack.push((r, 0));
+        // Pop, then re-push with an advanced child cursor (avoids an in-place
+        // mutable peek): a node is emitted only once all its children are done.
+        while let Some((node, ci)) = stack.pop() {
+            let children = &sym.supernodes[node].children;
+            if ci < children.len() {
+                stack.push((node, ci + 1));
+                stack.push((children[ci], 0));
+            } else {
+                order.push(node);
+            }
+        }
+    }
+    order
+}
+
 /// PARDISO phases 2-3: numeric factorization reusing a [`MultifrontalSymbolic`].
 /// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
 /// from. Honours static pivoting and incomplete-factor dropping via `opts`.
@@ -1518,19 +1551,48 @@ pub fn factor_numeric<T: Scalar>(
     // the depth-sized stack (honours the thread budget and is overflow-safe on
     // deep trees, like the left-looking path above).
     let nthreads = opts.threads.resolve(|cap| recommend_threads_for_sym(symb, cap));
-    let root_outs: Vec<SubtreeFactors<T>> = in_scoped_pool(nthreads, stack, || {
-        roots
-            .par_iter()
-            .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
-            .collect::<Result<Vec<_>, _>>()
-    })?;
-    // Scatter the subtree factors into `node_results` (by supernode id) for the
-    // global emit pass, which still walks supernodes in postorder.
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
-    for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
-        node_results[roots[i]] = Some(own);
-        for (s, nf) in subtree {
-            node_results[s] = Some(nf);
+    if opts.method == FactorMethod::RightLooking {
+        // Right-looking schedule: factor supernodes sequentially in postorder,
+        // holding every front live (no contribution-block frontier free), each
+        // pushed into its parent by the shared `factor_one_node` assembly. Same
+        // factor as the other paths; the trade is all-fronts residency for a
+        // simple, barrier-free push (opt-in, not auto-selected).
+        let order = supernode_postorder(sym, &roots);
+        in_scoped_pool(nthreads, stack, || -> Result<(), RslabError> {
+            for &s in &order {
+                let nf = {
+                    let mut child_refs: Vec<&NodeFactor<T>> = Vec::new();
+                    for &ch in &sym.supernodes[s].children {
+                        match node_results[ch].as_ref() {
+                            Some(c) => child_refs.push(c),
+                            None => {
+                                return Err(RslabError::InvalidInput(
+                                    "internal: child not factored before parent".to_string(),
+                                ))
+                            }
+                        }
+                    }
+                    factor_one_node(s, sym, &a_perm, &child_refs, perturb_floor, kt)?
+                };
+                node_results[s] = Some(nf);
+            }
+            Ok(())
+        })?;
+    } else {
+        let root_outs: Vec<SubtreeFactors<T>> = in_scoped_pool(nthreads, stack, || {
+            roots
+                .par_iter()
+                .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        // Scatter the subtree factors into `node_results` (by supernode id) for the
+        // global emit pass, which still walks supernodes in postorder.
+        for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
+            node_results[roots[i]] = Some(own);
+            for (s, nf) in subtree {
+                node_results[s] = Some(nf);
+            }
         }
     }
 
@@ -2741,6 +2803,46 @@ mod tests {
         assert_eq!(eager.l_row_idx, low.l_row_idx, "L row indices differ");
         assert_eq!(eager.l_col_ptr, low.l_col_ptr, "L column pointers differ");
         assert_eq!(eager.d_diag, low.d_diag, "D differs under LowMemory");
+    }
+
+    #[test]
+    fn right_looking_matches_multifrontal_and_solves() {
+        // The right-looking schedule reuses the same per-front assembly + emit as
+        // the multifrontal path (only the traversal differs: sequential postorder,
+        // all fronts live), so its factor must be *bit-identical* to multifrontal
+        // and solve correctly (numerically equivalent to left-looking).
+        let m = 12;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        let mk = |method| SolverSettings::default().with_method(method).with_threads(0);
+        let mf = factor_sparse_ldlt_with(&a, &mk(FactorMethod::Multifrontal)).unwrap();
+        let rl = factor_sparse_ldlt_with(&a, &mk(FactorMethod::RightLooking)).unwrap();
+        assert_eq!(rl.l_values, mf.l_values, "right-looking L differs from multifrontal");
+        assert_eq!(rl.l_row_idx, mf.l_row_idx, "right-looking L pattern differs");
+        assert_eq!(rl.d_diag, mf.d_diag, "right-looking D differs");
+        let x = solve_ldlt(&rl, &b).unwrap();
+        assert!(residual_inf(&a, &x, &b) < 1e-9, "right-looking residual {}", residual_inf(&a, &x, &b));
     }
 
     #[test]
