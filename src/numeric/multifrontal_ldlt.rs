@@ -961,11 +961,32 @@ fn factor_front<T: Scalar>(
                     }
                 }
             }
-            for jj in 0..mt {
-                let cj = ke + jj;
-                for ii in jj..mt {
-                    let ri = ke + ii;
-                    f[cj * n + ri] = f[cj * n + ri] - tmp[jj * mt + ii];
+            // Subtract the panel's trailing Schur block into `f`'s trailing lower
+            // triangle. On a large front (top of the assembly tree, where tree
+            // parallelism has dried up) this per-panel scatter is split across the
+            // trailing columns: `ke..ke+mt` are contiguous columns of the
+            // column-major front, so each rayon task owns a disjoint column and
+            // reads the shared read-only `tmp` - the write set is a partition, so
+            // the result is **bit-identical** regardless of worker count (the
+            // determinism guarantee holds). 2D front parallelism complementing the
+            // already-parallel Schur GEMM above; gated by the `par_cdiv` flop bar.
+            if (mt as u128) * (mt as u128) >= kt.par_cdiv as u128 {
+                let base = ke * n;
+                f[base..base + mt * n]
+                    .par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(jj, col)| {
+                        for ii in jj..mt {
+                            col[ke + ii] = col[ke + ii] - tmp[jj * mt + ii];
+                        }
+                    });
+            } else {
+                for jj in 0..mt {
+                    let cj = ke + jj;
+                    for ii in jj..mt {
+                        let ri = ke + ii;
+                        f[cj * n + ri] = f[cj * n + ri] - tmp[jj * mt + ii];
+                    }
                 }
             }
         }
@@ -2803,6 +2824,52 @@ mod tests {
         assert_eq!(eager.l_row_idx, low.l_row_idx, "L row indices differ");
         assert_eq!(eager.l_col_ptr, low.l_col_ptr, "L column pointers differ");
         assert_eq!(eager.d_diag, low.d_diag, "D differs under LowMemory");
+    }
+
+    #[test]
+    fn parallel_front_subtraction_is_bit_identical() {
+        // 2D front parallelism (the trailing-Schur subtraction split across
+        // disjoint front columns) must be bit-identical to the serial path
+        // regardless of the parallel gate - the determinism guarantee. Force the
+        // parallel path (par_cdiv = 0) vs the serial path (par_cdiv = MAX) and
+        // compare the whole factor.
+        let m = 22;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let mk = |cdiv| {
+            SolverSettings::default()
+                .with_method(FactorMethod::Multifrontal)
+                .with_threads(0)
+                .with_gemm_thresholds(crate::GemmThresholds {
+                    scalar_gate: 4096,
+                    par_gemm: 1_000_000,
+                    par_cdiv: cdiv,
+                })
+        };
+        let parallel = factor_sparse_ldlt_with(&a, &mk(0)).unwrap();
+        let serial = factor_sparse_ldlt_with(&a, &mk(usize::MAX)).unwrap();
+        assert_eq!(parallel.l_values, serial.l_values, "parallel front subtraction not bit-identical");
+        assert_eq!(parallel.d_diag, serial.d_diag);
     }
 
     #[test]
