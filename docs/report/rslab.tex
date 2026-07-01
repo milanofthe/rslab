@@ -557,11 +557,61 @@ which the current calibration does not model (it measures per-solve speedup, not
 contention), the conservatism of the memory estimate, which reduces packing density, and
 NUMA placement on multi-socket machines.
 
+\section{Iterative refinement and preconditioning}
+The default factorization is exact and the solve is a direct back-substitution. Two modes
+relax exactness: static pivoting lifts sub-floor pivots so an indefinite or near-singular
+system never fails, and threshold dropping / block-low-rank make
+the factor approximate to save memory. In both, the factor is a preconditioner $M\approx A$
+and accuracy is recovered by iteration. \rT{} ships restarted GMRES, a block / multi-RHS
+GMRES, and the short-recurrence COCG and COCR for the complex-symmetric case, plus classical
+iterative refinement against the original matrix. The block Krylov variants apply $M^{-1}$ to
+all right-hand sides through the parallel \code{solve\_many}, so a block solve inherits its
+\numrange{8}{19}$\times$ wide-RHS speedup; and the equilibration and pivot axes
+(Sec.~\ref{sec:tunable}) set the conditioning of that preconditioner factor. The exact-path
+work of this report is otherwise orthogonal to the Krylov layer --- it improves the factor
+the Krylov layer consumes.
+
+\section{Test matrix corpus}
+\label{sec:corpus}
+The tuner is fit and the solver evaluated on a corpus deliberately spanning the full problem
+distribution --- both paths ($\LDLt$ and LU), real and complex values, and the conditioning
+classes (SPD, symmetric indefinite, unsymmetric, ill-scaled, saddle-point) --- rather than a
+single family. The SuiteSparse collection holds few genuinely complex, non-Hermitian
+matrices, so the backbone is a set of structured-grid generators assembled directly with
+finite differences (no external FEM library), complemented by the complex SuiteSparse
+matrices that do exist (the \code{Bai} \code{qc}/\code{dwg}, \code{QCD} lattice, waveguide,
+and dielectric-filter EM matrices).
+
+\paragraph{Curl-curl Maxwell (complex symmetric indefinite).} The time-harmonic operator
+$\nabla\times\nabla\times E - (\omega^2 - i\omega\sigma)\,E$, discretized on a structured
+grid through the identity $\nabla\times\nabla\times = L - \operatorname{grad}\operatorname{div}$
+(the component-wise vector Laplacian $L$ minus $D^{\!\top}\!D$ from the discrete divergence
+$D$), with lumped mass $M=I$. The $-\omega^2 M$ shift makes the operator indefinite; the
+conductivity term $i\omega\sigma M$ makes it complex symmetric (not Hermitian); and
+$\nabla\times\nabla\times$ is singular on discrete gradients, giving the gradient
+near-null-space that makes edge-element electromagnetics hard --- the primary target
+class~\cite{jin,nedelec}.
+
+\paragraph{Stokes / KKT saddle-point (symmetric indefinite).} The block system
+$\bigl[\begin{smallmatrix} A & B^{\!\top} \\ B & -\beta C \end{smallmatrix}\bigr]$ with $A$
+the velocity vector Laplacian, $B$ the discrete divergence coupling velocity to pressure, and
+$-\beta C$ a Brezzi--Pitk\"aranta pressure-Laplacian stabilization ($\beta>0$) regularizing
+the singular zero $(2,2)$ block on a collocated grid --- the MAC / mixed-FEM
+form~\cite{elman,benzi}.
+
+\paragraph{Remaining classes.} Shifted Helmholtz (complex symmetric), banded / arrow /
+jumping-coefficient stencils, BEM/MoM near-field kernels (complex unsymmetric), and random
+SPD / unsymmetric / exactly-conditioned spectral matrices span the rest. Every generator is
+type-agnostic, so each class is available in \code{f64} and \code{Complex<f64>}. This
+complete-distribution corpus was load-bearing: it exposed the tuner mispicks on complex
+curl-curl that a real-SPD corpus had hidden (Sec.~\ref{sec:eval}).
+
 \section{Evaluation}
 \label{sec:eval}
-All measured figures in this report come from the \code{bench\_suite} corpus engine and
-\code{superlu\_corpus.py} over the SuiteSparse collection~\cite{suitesparse} (1k--100k
-DOFs; SPD, indefinite, unsymmetric, complex) on a 12-core / 24-thread machine; the
+All measured figures come from the \code{bench\_suite} engine over the complete-distribution
+corpus of Sec.~\ref{sec:corpus} (the structured-grid generators and the complex
+SuiteSparse~\cite{suitesparse} matrices, 8k--125k DOFs, all \code{Complex<f64>}) on a
+12-core / 24-thread machine; the
 per-stage, estimator, thread-scaling, and tuner figures appear with the concepts they
 support in the preceding sections. This section reports the cross-solver comparison. RSLAB,
 faer~\cite{faer}, and MKL PARDISO~\cite{pardiso} were measured in one run, so the
@@ -784,6 +834,18 @@ matrices. \emph{Proc. 24th ACM National Conference}, 157--172, 1969.
 
 \bibitem{ruiz} D. Ruiz. A scaling algorithm to equilibrate both rows and columns norms in
 matrices. Technical Report RAL-TR-2001-034, Rutherford Appleton Laboratory, 2001.
+
+\bibitem{nedelec} J.-C. N\'ed\'elec. Mixed finite elements in $\mathbb{R}^3$.
+\emph{Numer. Math.} 35(3):315--341, 1980.
+
+\bibitem{jin} J.-M. Jin. \emph{The Finite Element Method in Electromagnetics}, 3rd ed.
+Wiley--IEEE Press, 2014.
+
+\bibitem{elman} H.~C. Elman, A. Ramage, D.~J. Silvester. Algorithm 866: IFISS, a Matlab
+toolbox for modelling incompressible flow. \emph{ACM Trans. Math. Softw.} 33(2):14, 2007.
+
+\bibitem{benzi} M. Benzi, G.~H. Golub, J. Liesen. Numerical solution of saddle point
+problems. \emph{Acta Numerica} 14:1--137, 2005.
 
 \end{thebibliography}
 
