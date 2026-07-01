@@ -19,8 +19,9 @@
 use num_complex::Complex;
 use rslab::tuning::{Calibration, HardwareInfo};
 use rslab::{
-    default_profile, recommend_settings_pathed, recommend_with_profile, CscMatrix, LdltSolver,
-    LdltSymbolic, SolverPath, StructuralFeatures, TunerProfile, DEFAULT_TUNE_WEIGHT,
+    default_profile, recommend_settings_pathed, recommend_with_profile, CscMatrix, GeneralCsc,
+    LdltSolver, LdltSymbolic, LuSymbolic, SolverPath, StructuralFeatures, TunerProfile,
+    DEFAULT_TUNE_WEIGHT,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,13 +107,60 @@ fn time_factor(a: &CscMatrix<Complex<f64>>, opts: &rslab::SolverSettings) -> Opt
     Some(ts[ts.len() / 2])
 }
 
-/// Geomean per-matrix speedup of `profile`'s recommendation over the embedded
-/// default tuner on the held-out corpus (>1 = candidate faster). Prints a table.
-fn validate_profile(profile: &TunerProfile) -> f64 {
+/// Held-out **unsymmetric** corpus for the LU path: convection-diffusion at grid
+/// sizes and Péclet values disjoint from the training sweep, spanning diffusion-
+/// to advection-dominated. This is what makes the ship-gate judge the LU path on
+/// its own problem class rather than on a handful of incidental unsymmetric matrices.
+fn holdout_corpus_lu() -> Vec<(String, GeneralCsc<Complex<f64>>)> {
+    use rslab::matgen::fem::{convection_diffusion as cd, Flow};
+    let mut v = Vec::new();
+    for (m, eps) in [(40usize, 0.05), (56, 5e-3)] {
+        v.push((format!("convdiff2d_{m}_rot"), cd::<Complex<f64>>(&[m, m], eps, Flow::Rotating, true)));
+        v.push((format!("convdiff2d_{m}_diag"), cd::<Complex<f64>>(&[m, m], eps, Flow::Diagonal, false)));
+    }
+    for (m, eps) in [(20usize, 0.02), (26, 2e-3)] {
+        v.push((format!("convdiff3d_{m}"), cd::<Complex<f64>>(&[m, m, m], eps, Flow::Rotating, true)));
+    }
+    v
+}
+
+/// The (features, mf/ll ratio) for an unsymmetric matrix — the LU-path analogue
+/// of [`tuner_inputs`].
+fn tuner_inputs_lu(a: &GeneralCsc<Complex<f64>>) -> Option<(StructuralFeatures, f64)> {
+    let sym = LuSymbolic::analyze(a).ok()?;
+    let est = sym.estimate_memory::<Complex<f64>>();
+    let feat = StructuralFeatures::from_general(a, &sym);
+    let mf_ll = if est.panel_live_peak_bytes > 0 {
+        est.mf_transient_peak_bytes as f64 / est.panel_live_peak_bytes as f64
+    } else {
+        1.0
+    };
+    Some((feat, mf_ll))
+}
+
+/// Median wall-time (seconds) of an end-to-end unsymmetric factor, over 3 runs.
+fn time_factor_lu(a: &GeneralCsc<Complex<f64>>, opts: &rslab::SolverSettings) -> Option<f64> {
+    let mut ts = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        let sym = LuSymbolic::analyze_with(a, opts).ok()?;
+        sym.factor(a, opts).ok()?;
+        ts.push(start.elapsed().as_secs_f64());
+    }
+    ts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    Some(ts[ts.len() / 2])
+}
+
+/// Per-path geomean speedup of `profile`'s recommendation over the embedded
+/// default tuner, each path judged on **its own** held-out class (LDLᵀ on the
+/// symmetric curl-curl/saddle corpus, LU on the unsymmetric convection-diffusion
+/// corpus). Returns `(ldlt_geomean, lu_geomean)`; >1 = candidate faster. Prints a
+/// per-matrix table and per-path summary.
+fn validate_profile(profile: &TunerProfile) -> (f64, f64) {
     let w = DEFAULT_TUNE_WEIGHT;
-    let mut log_sum = 0.0;
-    let mut count = 0u32;
-    println!("{:<14} {:>10} {:>10} {:>8}", "matrix", "default_ms", "cand_ms", "speedup");
+    println!("{:<20} {:>10} {:>10} {:>8}", "matrix", "default_ms", "cand_ms", "speedup");
+    // LDLᵀ path on the symmetric held-out corpus.
+    let (mut ldlt_log, mut ldlt_n) = (0.0, 0u32);
     for (name, a) in holdout_corpus() {
         let Some((feat, mf_ll)) = tuner_inputs(&a) else { continue };
         let s_def = recommend_settings_pathed(&feat, w, mf_ll, SolverPath::Ldlt);
@@ -122,15 +170,33 @@ fn validate_profile(profile: &TunerProfile) -> f64 {
         let (Some(t_def), Some(t_cand)) = (time_factor(&a, &s_def), time_factor(&a, &s_cand)) else {
             continue;
         };
-        let speedup = t_def / t_cand.max(1e-9);
-        println!("{name:<14} {:>10.2} {:>10.2} {:>8.3}", t_def * 1e3, t_cand * 1e3, speedup);
-        log_sum += speedup.max(1e-6).ln();
-        count += 1;
+        let sp = t_def / t_cand.max(1e-9);
+        println!("{name:<20} {:>10.2} {:>10.2} {:>8.3}", t_def * 1e3, t_cand * 1e3, sp);
+        ldlt_log += sp.max(1e-6).ln();
+        ldlt_n += 1;
     }
-    if count == 0 {
-        return 1.0;
+    // LU path on the unsymmetric held-out corpus.
+    let (mut lu_log, mut lu_n) = (0.0, 0u32);
+    for (name, a) in holdout_corpus_lu() {
+        let Some((feat, mf_ll)) = tuner_inputs_lu(&a) else { continue };
+        let s_def = recommend_settings_pathed(&feat, w, mf_ll, SolverPath::Lu);
+        let Some(s_cand) = recommend_with_profile(profile, &feat, w, mf_ll, SolverPath::Lu) else {
+            continue;
+        };
+        let (Some(t_def), Some(t_cand)) =
+            (time_factor_lu(&a, &s_def), time_factor_lu(&a, &s_cand))
+        else {
+            continue;
+        };
+        let sp = t_def / t_cand.max(1e-9);
+        println!("{name:<20} {:>10.2} {:>10.2} {:>8.3}", t_def * 1e3, t_cand * 1e3, sp);
+        lu_log += sp.max(1e-6).ln();
+        lu_n += 1;
     }
-    (log_sum / count as f64).exp()
+    let ldlt = if ldlt_n > 0 { (ldlt_log / ldlt_n as f64).exp() } else { 1.0 };
+    let lu = if lu_n > 0 { (lu_log / lu_n as f64).exp() } else { 1.0 };
+    println!("  LDLt geomean {ldlt:.3}x (n={ldlt_n})   |   LU geomean {lu:.3}x (n={lu_n})");
+    (ldlt, lu)
 }
 
 fn cmd_validate(rest: &[String]) -> i32 {
@@ -147,8 +213,8 @@ fn cmd_validate(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    let geomean = validate_profile(&profile);
-    println!("=> geomean speedup vs default: {geomean:.3}x");
+    let (ldlt, lu) = validate_profile(&profile);
+    println!("=> LDLt {ldlt:.3}x  |  LU {lu:.3}x  vs default");
     0
 }
 
@@ -200,16 +266,20 @@ fn assemble_and_ship(models_dir: &Path, out: &Path, class: &str) -> i32 {
         mem_tol_ln: def.mem_tol_ln,
     };
 
-    println!("== ship-gate: candidate vs default ==");
-    let geomean = validate_profile(&candidate);
-    println!("=> candidate geomean speedup vs default: {geomean:.3}x");
-    // Ship only if the candidate does not regress the default beyond the timing
-    // noise floor (1% band). A candidate that is merely neutral still ships (it is
-    // the freshly-trained, hardware-calibrated one); a regression is rejected.
+    println!("== ship-gate: candidate vs default (per path) ==");
+    let (ldlt, lu) = validate_profile(&candidate);
+    println!("=> candidate: LDLt {ldlt:.3}x  |  LU {lu:.3}x  vs default");
+    // Ship only if **neither path** regresses beyond the timing noise floor (1%
+    // band). The paths are separate models for separate problem classes, so each
+    // is judged on its own held-out class and must stand on its own — a candidate
+    // may not trade an LU win for an LDLᵀ loss (or vice versa). A merely-neutral
+    // path still passes (the candidate is the freshly-trained, calibrated one).
     const SHIP_MIN: f64 = 0.99;
-    if geomean < SHIP_MIN {
+    let worst = ldlt.min(lu);
+    if worst < SHIP_MIN {
+        let which = if ldlt < lu { "LDLt" } else { "LU" };
         eprintln!(
-            "SHIP-GATE FAILED: {geomean:.3}x < {SHIP_MIN:.2}x — keeping default, not writing {}",
+            "SHIP-GATE FAILED: {which} {worst:.3}x < {SHIP_MIN:.2}x — keeping default, not writing {}",
             out.display()
         );
         return 1;
