@@ -17,6 +17,7 @@ use num_complex::Complex;
 
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
+use crate::sparse::general::GeneralCsc;
 
 /// Grid strides for column-major linear indexing of an `ndim`-D grid.
 fn strides(dims: &[usize]) -> Vec<usize> {
@@ -199,6 +200,118 @@ pub fn saddle_point<T: Scalar>(dims: &[usize], beta: f64) -> CscMatrix<T> {
     super::build_sym(ndof, &rows, &cols, &vals)
 }
 
+/// Advection field for [`convection_diffusion`].
+#[derive(Clone, Copy, Debug)]
+pub enum Flow {
+    /// Constant unit velocity along the grid diagonal (equal on every axis) --- a
+    /// uniform wind, unsymmetric but spatially constant.
+    Diagonal,
+    /// Recirculating vortex in the first two axes, `b = (-(y-½), (x-½))`, zero on
+    /// any third axis. The classic double-glazing / recirculating-flow benchmark:
+    /// the velocity reverses across the domain, so up-/down-wind coupling flips
+    /// sign, a richer unsymmetric structure than a constant wind.
+    Rotating,
+}
+
+/// Convection--diffusion operator `-ε∇²u + b·∇u = f` on a structured `dims` grid
+/// with interior unknowns and homogeneous Dirichlet boundaries, finite-differenced
+/// --- the canonical source of **unsymmetric** sparse matrices (the LU path's
+/// workload). The first-derivative advection term `b·∇u` breaks symmetry; the
+/// diffusion term is the usual 5/7-point Laplacian scaled by `eps`.
+///
+/// * `upwind=false` (central differences) is the sharp, oscillation-prone form
+///   that stresses pivoting at small `eps` (high grid-Péclet `|b|h/ε`);
+/// * `upwind=true` is the first-order upwind form, a diagonally dominant M-matrix.
+///
+/// Sweeping `eps` moves the operator from diffusion-dominated (nearly symmetric,
+/// small Péclet) to advection-dominated (strongly unsymmetric), and [`Flow`]
+/// varies the advection field --- together they span the unsymmetric distribution
+/// on a structured grid without an external FEM library.
+pub fn convection_diffusion<T: Scalar>(
+    dims: &[usize],
+    eps: f64,
+    flow: Flow,
+    upwind: bool,
+) -> GeneralCsc<T> {
+    let d = dims.len();
+    let s = strides(dims);
+    let n: usize = dims.iter().product();
+    let h: Vec<f64> = dims.iter().map(|&m| 1.0 / (m as f64 + 1.0)).collect();
+    let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+    for p in 0..n {
+        // Multi-index and physical coordinates in (0,1)^d of interior node p.
+        let ci: Vec<usize> = (0..d).map(|k| (p / s[k]) % dims[k]).collect();
+        let x: Vec<f64> = (0..d).map(|k| (ci[k] as f64 + 1.0) * h[k]).collect();
+        // Advection velocity b(x).
+        let b: Vec<f64> = match flow {
+            Flow::Diagonal => vec![1.0 / (d as f64).sqrt(); d],
+            Flow::Rotating => (0..d)
+                .map(|k| match k {
+                    0 => -(x[1] - 0.5),
+                    1 => x[0] - 0.5,
+                    _ => 0.0,
+                })
+                .collect(),
+        };
+        let mut diag = 0.0;
+        for k in 0..d {
+            let diff = eps / (h[k] * h[k]);
+            diag += 2.0 * diff;
+            let has_lo = ci[k] > 0;
+            let has_hi = ci[k] + 1 < dims[k];
+            let lo = p.wrapping_sub(s[k]);
+            let hi = p + s[k];
+            // Diffusion off-diagonals (Dirichlet: a boundary neighbour is u=0, so
+            // its off-diagonal entry is simply omitted; the diagonal term stays).
+            if has_lo {
+                rows.push(p);
+                cols.push(lo);
+                vals.push(T::from_real(-diff));
+            }
+            if has_hi {
+                rows.push(p);
+                cols.push(hi);
+                vals.push(T::from_real(-diff));
+            }
+            // Advection: central `b_k(u_hi - u_lo)/(2h)` or first-order upwind.
+            if upwind {
+                let a = b[k] / h[k];
+                if b[k] >= 0.0 {
+                    diag += a;
+                    if has_lo {
+                        rows.push(p);
+                        cols.push(lo);
+                        vals.push(T::from_real(-a));
+                    }
+                } else {
+                    diag -= a; // |b_k|/h
+                    if has_hi {
+                        rows.push(p);
+                        cols.push(hi);
+                        vals.push(T::from_real(a));
+                    }
+                }
+            } else {
+                let a = b[k] / (2.0 * h[k]);
+                if has_hi {
+                    rows.push(p);
+                    cols.push(hi);
+                    vals.push(T::from_real(a));
+                }
+                if has_lo {
+                    rows.push(p);
+                    cols.push(lo);
+                    vals.push(T::from_real(-a));
+                }
+            }
+        }
+        rows.push(p);
+        cols.push(p);
+        vals.push(T::from_real(diag));
+    }
+    super::build_gen(n, &rows, &cols, &vals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +360,44 @@ mod tests {
         let res = (0..n).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max)
             / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-30);
         assert!(res < 1e-6, "saddle-point refined residual {res}");
+    }
+
+    #[test]
+    fn convection_diffusion_is_unsymmetric_and_factors() {
+        use crate::LuSymbolic;
+        // Advection-dominated (small eps), recirculating flow, upwind: a well-posed
+        // unsymmetric M-matrix that must factor through the LU path.
+        let a = convection_diffusion::<f64>(&[20usize, 20], 0.01, Flow::Rotating, true);
+        // Unsymmetric by construction: find a transposed entry pair A[i,j] != A[j,i].
+        let get = |i: usize, j: usize| -> f64 {
+            let (s, e) = (a.col_ptr[j], a.col_ptr[j + 1]);
+            a.row_idx[s..e]
+                .iter()
+                .position(|&r| r == i)
+                .map(|k| a.values[s + k])
+                .unwrap_or(0.0)
+        };
+        let mut asymmetric = false;
+        for j in 0..a.n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                let i = a.row_idx[k];
+                if i != j && (a.values[k] - get(j, i)).abs() > 1e-12 {
+                    asymmetric = true;
+                }
+            }
+        }
+        assert!(asymmetric, "convection-diffusion is unsymmetric");
+        // Factors and solves through the unsymmetric LU path.
+        let sym = LuSymbolic::analyze(&a).unwrap();
+        let solver = sym.factor(&a, &SolverSettings::default()).unwrap();
+        let n = a.n;
+        let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+        let x = solver.solve(&b).unwrap();
+        let mut ax = vec![0.0; n];
+        a.matvec(&x, &mut ax);
+        let res = (0..n).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max)
+            / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-30);
+        assert!(res < 1e-8, "convection-diffusion LU residual {res}");
     }
 }
 

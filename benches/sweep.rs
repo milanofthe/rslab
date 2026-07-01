@@ -213,14 +213,49 @@ fn corpus() -> Vec<Entry> {
         );
     }
 
-    // Unsymmetric: BEM/MoM-like (dense-ish) and random (density ladder).
+    // Unsymmetric. Convection-diffusion is the canonical unsymmetric class (the LU
+    // path's core workload): the advection term `b·∇u` breaks symmetry. Sweep the
+    // grid-Péclet (via `eps`), the flow field, and the discretization (central vs
+    // upwind) to span diffusion-dominated (nearly symmetric) to advection-dominated
+    // (strongly unsymmetric) - the distribution real CFD/transport solves live on.
+    // Plus BEM/MoM (dense-ish) and random unsymmetric for structural variety.
+    use rslab::matgen::fem::{convection_diffusion as cd, Flow};
+    let flows = [(Flow::Diagonal, "diag"), (Flow::Rotating, "rot")];
+    let eps2d: [(f64, &str); 4] = [(1.0, "pe0"), (0.1, "pe1"), (0.01, "pe2"), (1e-3, "pe3")];
+    for &m in &[32usize, 48, 64, 88] {
+        let gm = g(m);
+        for &(eps, et) in &eps2d {
+            for (flow, ft) in flows {
+                for (up, st) in [(true, "up"), (false, "ctr")] {
+                    e.push(Entry {
+                        name: format!("convdiff2d_{}_{et}_{ft}_{st}", gm * gm),
+                        mat: Mat::Unsym(cd::<C>(&[gm, gm], eps, flow, up)),
+                    });
+                }
+            }
+        }
+    }
+    let eps3d: [(f64, &str); 3] = [(0.3, "pe0"), (0.03, "pe1"), (3e-3, "pe2")];
+    for &m in &[14usize, 18, 24] {
+        let gm = g(m);
+        for &(eps, et) in &eps3d {
+            for (flow, ft) in flows {
+                // 3D upwind only (central at high Péclet in 3D is needlessly ill-
+                // conditioned for a benchmark); still spans the Péclet range.
+                e.push(Entry {
+                    name: format!("convdiff3d_{}_{et}_{ft}_up", gm * gm * gm),
+                    mat: Mat::Unsym(cd::<C>(&[gm, gm, gm], eps, flow, true)),
+                });
+            }
+        }
+    }
     for n in [1500usize, 3000, 6000, 10000] {
         e.push(Entry {
             name: format!("bem_{}", g(n)),
             mat: Mat::Unsym(rslab::matgen::bem::kernel(g(n), &rslab::matgen::bem::BemOpts::default())),
         });
     }
-    for (n, d) in [(5000usize, 10usize), (10000, 14), (20000, 18)] {
+    for (n, d) in [(4000usize, 8usize), (8000, 12), (12000, 16), (20000, 20)] {
         e.push(Entry {
             name: format!("rand_unsym_{}_{}", g(n), d),
             mat: Mat::Unsym(random::random_unsym::<C>(g(n), d, 2.0, 1)),
@@ -651,6 +686,13 @@ fn main() {
     if let Ok(only) = std::env::var("RLA_SWEEP_ONLY") {
         corpus.retain(|e| e.name.contains(&only));
     }
+    // Optional path filter (`RLA_SWEEP_PATH=lu|ldlt`): evaluate one solver path in
+    // isolation. The two paths are separate models with separate dispatch, so a
+    // fair per-path benchmark restricts to that path's problem class (LU tuned and
+    // scored on unsymmetric matrices, LDLᵀ on symmetric ones).
+    if let Ok(p) = std::env::var("RLA_SWEEP_PATH") {
+        corpus.retain(|e| matches!((&e.mat, p.as_str()), (Mat::Sym(_), "ldlt") | (Mat::Unsym(_), "lu")));
+    }
     let full_grid = grid();
     // Autotune mode: instead of the knob grid, measure `default` vs the auto-tuner's
     // pick at three Pareto weights per matrix - the end-to-end tuned-vs-default bench.
@@ -774,7 +816,7 @@ fn main() {
                 let relax_w = s.relax.map_or(0, |r| r.max_width);
                 let rec = serde_json::json!({
                     "matrix": entry.name, "n": n, "nnz": nnz, "flops": flops, "dtype": "complex128",
-                    "config": label, "features": feat_json,
+                    "path": path, "config": label, "features": feat_json,
                     "params": {
                         "ordering": ordering_name(s.ordering), "nemin": s.nemin,
                         "relax_width": relax_w, "panel_nb": s.panel_nb,
