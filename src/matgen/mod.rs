@@ -50,6 +50,7 @@ pub(crate) fn build_gen<T: Scalar>(
 }
 
 pub mod bem;
+pub mod fem;
 #[cfg(feature = "matgen-download")]
 pub mod download;
 pub mod random;

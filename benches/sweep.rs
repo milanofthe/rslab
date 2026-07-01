@@ -188,6 +188,31 @@ fn corpus() -> Vec<Entry> {
         );
     }
 
+    // Curl-curl time-harmonic Maxwell (complex symmetric indefinite, gradient
+    // near-null-space) - the FEM edge-element / EM workload; 3 components per node.
+    for &(k, om, sg) in &[(12usize, 2.0, 0.1), (18, 4.0, 0.3), (24, 3.0, 0.05)] {
+        let kk = g(k);
+        sym(
+            format!("curlcurl3d_{}_{:.0}", 3 * kk * kk * kk, om),
+            rslab::matgen::fem::curl_curl(&[kk, kk, kk], om, sg),
+        );
+    }
+    // Saddle-point Stokes/KKT (symmetric indefinite), 2D and 3D.
+    for &s in &[60usize, 110, 170] {
+        let m = g(s);
+        sym(
+            format!("saddle2d_{}", 3 * m * m),
+            rslab::matgen::fem::saddle_point::<C>(&[m, m], 0.1),
+        );
+    }
+    for &s in &[16usize, 24] {
+        let m = g(s);
+        sym(
+            format!("saddle3d_{}", 4 * m * m * m),
+            rslab::matgen::fem::saddle_point::<C>(&[m, m, m], 0.1),
+        );
+    }
+
     // Unsymmetric: BEM/MoM-like (dense-ish) and random (density ladder).
     for n in [1500usize, 3000, 6000, 10000] {
         e.push(Entry {
