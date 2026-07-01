@@ -1,13 +1,30 @@
 """Shared plotting style for all RSLAB benchmark figures.
 
-One definition of the palette + rcParams so every figure looks the same
-(transparent background, neutral-gray axes for light/dark pages, saturated data
-colors), and one helper that places the legend in a single horizontal row
-**below** the plot - import this instead of re-defining colors per script.
+One definition of the palette + rcParams so every figure looks the same, and one
+helper that places the legend in a single horizontal row **below** the plot -
+import this instead of re-defining colors per script.
+
+Two render modes, selected by the ``RSLAB_REPORT`` environment variable:
+
+* default (unset)  - transparent background, neutral-gray axes/text for the
+  README (readable on light *and* dark GitHub themes); figures save as ``.png``.
+* ``RSLAB_REPORT=1`` - **paper mode**: white page, **black axes/text**, serif
+  font (Computer Modern math), in-figure titles stripped (the LaTeX caption
+  carries them); figures are redirected to ``docs/report/figures/<stem>.pdf``.
+
+Both modes share the same palette and legend placement, so the report and the
+README are the same plots in two skins. Route every save through :func:`save`.
 """
+import os
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 
 GRAY = "#808080"
+
+# Paper mode: set by the report figure driver (`RSLAB_REPORT=1`).
+REPORT = os.environ.get("RSLAB_REPORT") == "1"
+REPORT_FIG_DIR = Path(__file__).resolve().parent.parent / "docs" / "report" / "figures"
 
 # Canonical solver palette: key -> (label, color, marker).
 SOLVERS = {
@@ -37,13 +54,44 @@ BLUE_SHADES = ["#93c5fd", "#3b82f6", "#1d4ed8"]
 
 
 def setup():
-    """Apply the shared rcParams (transparent bg, gray axes/text/grid)."""
-    plt.rcParams.update({
-        "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
-        "text.color": GRAY, "axes.labelcolor": GRAY, "axes.edgecolor": GRAY,
-        "xtick.color": GRAY, "ytick.color": GRAY, "grid.color": GRAY,
-        "axes.titlecolor": GRAY, "font.size": 11, "legend.frameon": False,
-    })
+    """Apply the shared rcParams. Paper mode (``RSLAB_REPORT=1``): white page,
+    black axes/text, serif/CM font. Default: transparent bg, gray axes/text."""
+    if REPORT:
+        plt.rcParams.update({
+            "figure.facecolor": "white", "axes.facecolor": "white", "savefig.facecolor": "white",
+            "text.color": "black", "axes.labelcolor": "black", "axes.edgecolor": "black",
+            "xtick.color": "black", "ytick.color": "black", "grid.color": "#c0c0c0",
+            "axes.titlecolor": "black", "font.size": 9, "font.family": "serif",
+            "mathtext.fontset": "cm", "legend.frameon": False,
+        })
+    else:
+        plt.rcParams.update({
+            "figure.facecolor": "none", "axes.facecolor": "none", "savefig.facecolor": "none",
+            "text.color": GRAY, "axes.labelcolor": GRAY, "axes.edgecolor": GRAY,
+            "xtick.color": GRAY, "ytick.color": GRAY, "grid.color": GRAY,
+            "axes.titlecolor": GRAY, "font.size": 11, "legend.frameon": False,
+        })
+
+
+def save(fig, out_path):
+    """Save `fig` honoring the render mode. Paper mode redirects to
+    ``docs/report/figures/<stem>.pdf`` (white, opaque, in-figure titles stripped
+    so the LaTeX caption is the single source of the caption); default writes the
+    given path as a transparent PNG. Returns the path written."""
+    out_path = Path(out_path)
+    if REPORT:
+        for a in fig.axes:
+            a.set_title("")
+        if getattr(fig, "_suptitle", None) is not None:
+            fig.suptitle("")
+        REPORT_FIG_DIR.mkdir(parents=True, exist_ok=True)
+        dest = REPORT_FIG_DIR / (out_path.stem + ".pdf")
+        fig.savefig(dest, bbox_inches="tight", facecolor="white")
+        print(f"wrote {dest}")
+        return dest
+    fig.savefig(out_path, dpi=150, transparent=True, bbox_inches="tight")
+    print(f"wrote {out_path}")
+    return out_path
 
 
 def legend_below(fig, handles=None, labels=None, ax=None, ncol=None, fontsize=9):

@@ -27,13 +27,18 @@ from bench_style import GRAY, SOLVERS
 # OOD guards. We plot that single curve against the external solvers rather than the
 # two raw kernels (those are compared internally in corpus_breakdown.py).
 ORDER = ["auto", "faer", "pardiso", "superlu"]
+# SuperLU's peak memory is sampled process RSS from a SciPy child (splu exposes no peak),
+# which is not comparable to the in-process live-bytes / iparm peaks and is unreliable
+# (it records 0 MB on fast factorizations the 2 ms sampler misses). It is therefore shown
+# only on the time axis, not the memory axis.
+MEM_ORDER = ["auto", "faer", "pardiso"]
 
 
-def plot_metric(recs, metric, value_key, ylabel, title, out):
+def plot_metric(recs, metric, value_key, ylabel, title, out, order=ORDER):
     rows = [r for r in recs if r.get("metric") == metric and r.get(value_key, 0) > 0]
     fig, ax = plt.subplots(figsize=(8.5, 6.8))
     summary = []
-    for s in ORDER:
+    for s in order:
         pts = [(r["nnz"], r[value_key]) for r in rows
                if r["solver"] == s and r["nnz"] > 0 and r.get("res", 1.0) < 0.1]
         if len(pts) < 2:
@@ -55,8 +60,7 @@ def plot_metric(recs, metric, value_key, ylabel, title, out):
     ax.set_title(title)
     ax.grid(True, which="both", ls=":", alpha=0.4)
     bench_style.legend_below(fig, ax=ax)
-    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
-    print(f"wrote {out}")
+    bench_style.save(fig, out)
     for label, alpha, n in summary:
         print(f"  {label:<22} alpha={alpha:.2f}  ({n} points)")
 
@@ -76,7 +80,10 @@ def plot_residual(recs, out):
         ax.scatter(x, y, s=42, c=color, marker=marker, alpha=0.8, edgecolors="none",
                    label=f"{label} (n={len(pts)})")
     ax.axhline(1e-8, color=GRAY, ls="--", lw=1.2, alpha=0.7)
-    ax.text(ax.get_xlim()[0], 1.3e-8, "  accuracy target 1e-8", color=GRAY, fontsize=8, va="bottom")
+    # Axes-fraction x (data y) - placing the label at data-x on a log axis blows up
+    # the tight bbox (runaway figure width), so anchor it to the axes, not the data.
+    ax.text(0.01, 1.3e-8, "accuracy target 1e-8", color=GRAY, fontsize=8,
+            va="bottom", ha="left", transform=ax.get_yaxis_transform())
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("nonzeros (nnz)")
@@ -84,8 +91,7 @@ def plot_residual(recs, out):
     ax.set_title("Corpus accuracy: relative residual per solver")
     ax.grid(True, which="both", ls=":", alpha=0.4)
     bench_style.legend_below(fig, ax=ax)
-    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
-    print(f"wrote {out}")
+    bench_style.save(fig, out)
 
 
 def main():
@@ -99,7 +105,7 @@ def main():
     print("peak memory ~ nnz^alpha:")
     plot_metric(recs, "mem", "mem_mb", "peak memory [MB]",
                 "Corpus scaling: peak factor memory vs problem size (power-law fits)",
-                path.parent / "corpus_memory_fit.png")
+                path.parent / "corpus_memory_fit.png", order=MEM_ORDER)
     plot_residual(recs, path.parent / "corpus_residual.png")
 
 

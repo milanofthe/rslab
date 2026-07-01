@@ -66,9 +66,9 @@ def plot_vs_size(data, outdir):
         nnz = np.array([d["default"]["nnz"] for d in rows], float)
         speedup = np.array([d["default"]["ms"] / d[cfg]["ms"] for d in rows])
         memratio = np.array([d[cfg]["mb"] / d["default"]["mb"] for d in rows])
-        axes[0].scatter(nnz, speedup, s=34, c=color, alpha=0.7, edgecolors="none")
+        axes[0].scatter(nnz, speedup, s=34, c=color, edgecolors="none")
         axes[0].axhline(geomean(speedup), color=color, ls=":", lw=1.4)
-        axes[1].scatter(nnz, memratio, s=34, c=color, alpha=0.7, edgecolors="none")
+        axes[1].scatter(nnz, memratio, s=34, c=color, edgecolors="none")
         axes[1].axhline(geomean(memratio), color=color, ls=":", lw=1.4)
         handles.append(Line2D([], [], color=color, marker="o", ls="",
                               label=f"{label}: {geomean(speedup):.2f}x time, {geomean(memratio):.2f}x mem"))
@@ -87,8 +87,7 @@ def plot_vs_size(data, outdir):
     for ax in axes:
         ax.grid(True, which="both", ls=":", alpha=0.4)
     bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
-    fig.savefig(outdir / "autotune_vs_size.png", dpi=150, transparent=True, bbox_inches="tight")
-    print(f"wrote {outdir / 'autotune_vs_size.png'}")
+    bench_style.save(fig, outdir / "autotune_vs_size.png")
 
 
 def plot_modes(data, outdir):
@@ -97,7 +96,7 @@ def plot_modes(data, outdir):
     for cfg, label, color in MODES:
         t = np.array([d[cfg]["ms"] / d["default"]["ms"] for d in data.values() if cfg in d])
         m = np.array([d[cfg]["mb"] / d["default"]["mb"] for d in data.values() if cfg in d])
-        ax.scatter(t, m, s=26, c=color, alpha=0.45, edgecolors="none")
+        ax.scatter(t, m, s=26, c=color, edgecolors="none")
         gt, gm = geomean(t), geomean(m)
         handles.append(Line2D([], [], color=color, marker="o", ls="", label=f"{label}  (geomean {gt:.2f}x time, {gm:.2f}x mem)"))
     ax.axvline(1.0, color=GRAY, ls="--", lw=1.0)
@@ -107,8 +106,7 @@ def plot_modes(data, outdir):
     ax.set_title("Auto-tuner Pareto modes vs default")
     ax.grid(True, ls=":", alpha=0.4)
     bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
-    fig.savefig(outdir / "autotune_modes.png", dpi=150, transparent=True, bbox_inches="tight")
-    print(f"wrote {outdir / 'autotune_modes.png'}")
+    bench_style.save(fig, outdir / "autotune_modes.png")
 
 
 def main():

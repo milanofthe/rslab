@@ -1,0 +1,667 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+
+\definecolor{accent}{HTML}{2563EB}   % blue (RSLAB auto)
+\definecolor{accent2}{HTML}{0891B2}   % cyan
+\captionsetup{font=small,labelfont={bf,color=accent}}
+\hypersetup{colorlinks=true,linkcolor=accent,citecolor=accent,urlcolor=accent2}
+\sisetup{detect-all,per-mode=symbol}
+\graphicspath{{figures/}}
+
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcolumntype{R}{>{\raggedleft\arraybackslash}X}
+\newcolumntype{Z}{>{\hsize=2.4\hsize\raggedright\arraybackslash}X}
+\newcolumntype{Y}{>{\hsize=0.8\hsize\raggedleft\arraybackslash}X}
+\newcommand{\tabfont}{\small}
+
+\newcommand{\rT}{\textsf{RSLAB}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\nnz}{\mathrm{nnz}}
+\newcommand{\bigO}{\mathcal{O}}
+\newcommand{\LDLt}{\mathbf{L}\mathbf{D}\mathbf{L}^{\!\top}}
+
+\title{\textbf{\textcolor{accent}{RSLAB}}\\[2pt]
+\large A Pure-Rust Sparse Direct Solver with a Learned, Memory-Guaranteed Auto-Tuner}
+\author{Milan Rother}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent\rT{} is an embeddable, pure-Rust sparse \emph{direct} solver: a supernodal
+complex-symmetric $\LDLt$ factorization with Bunch--Kaufman pivoting and an
+unsymmetric multifrontal LU, exposed through a small Python API. It is type-agnostic
+over the scalar field (\code{f64}, \code{f32}, \code{Complex<f64>}, \code{Complex<f32>})
+and carries no BLAS/LAPACK, METIS, or Fortran dependency --- every kernel, ordering,
+and the tuner itself are Rust. Two design commitments distinguish it. First, the
+symbolic analysis produces a \emph{per-path a-priori peak-memory estimate} --- a
+separate deterministic bound for the left-looking and the multifrontal schedule ---
+that is a guaranteed upper bound on the measured peak (geomean ${\approx}\num{1.5}\times$,
+never under-predicting across the corpus).
+Second, on top of that estimate sits a \emph{learned} auto-tuner: a small multilayer
+perceptron predicts factor time and peak memory from the matrix's structural
+fingerprint and a candidate knob vector, and picks the configuration minimizing a
+weighted Pareto objective --- but every pick is filtered through a deterministic guard
+stack that makes it provably never use more memory than the untuned default, and falls
+back to that default outside the training distribution. The learned component is thus
+\emph{speculative}, like a CPU branch predictor, while a deterministic safety net keeps
+misspeculation free of cost. Over a \num{36}-matrix SuiteSparse corpus the auto-tuned
+default is \num{1.38}$\times$ faster than the untuned solver at \num{0} of \num{89}
+memory regressions, beats \textsf{faer} by \num{7.0}$\times$ (time) and
+\num{2.3}$\times$ (memory) and \textsf{SuperLU} by \num{8.9}$\times$, and lands within a
+single-digit factor of Intel MKL PARDISO. We describe the algorithms, the estimator,
+the tuner and its guard stack, and the deterministic resource governor that turns the
+a-priori estimates into full, reproducible RAM/CPU utilization for batched
+solver-in-the-loop workloads.
+\end{abstract}
+
+\section{Scope}
+\rT{} factorizes and solves sparse linear systems $A x = b$ where $A$ is either
+complex-symmetric (routed to $\LDLt$) or general unsymmetric (routed to LU). The target
+regime is the complex-symmetric systems of frequency-domain electromagnetic and FEM
+analysis --- in particular \emph{curl--curl} (N\'ed\'elec edge-element) Maxwell problems
+with lossy media or PML, which are complex-symmetric rather than Hermitian. It is
+written in stable Rust with no C/Fortran dependency and no BLAS/LAPACK/METIS linkage;
+the SIMD dense kernels, the fill-reducing orderings (AMD, AMF, nested dissection), the
+factorization, and the auto-tuner are all Rust, and the solver is exposed to Python
+through a PyO3 layer. This report states the architecture, the numerical kernels, the
+a-priori resource model, the learned auto-tuner and its safety guards, and reports the
+solver against \textsf{faer}, MKL PARDISO, and SuperLU over the SuiteSparse collection.
+
+\section{Architecture}
+The solver is a Cargo workspace (Table~\ref{tab:crates}). The pipeline is the classical
+three-phase sparse-direct flow --- \emph{analyze} (order, build the elimination tree and
+supernodes, estimate memory), \emph{factor} (numeric $\LDLt$/LU), \emph{solve}
+(triangular solves) --- with the analyze phase additionally producing the structural
+feature vector and memory estimate that drive the auto-tuner and the resource governor.
+
+\begin{table}[h]
+\centering\tabfont
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{3.0cm}L@{}}
+\toprule
+\textbf{Crate / module} & \textbf{Responsibility} \\
+\midrule
+\code{rslab-ordering-core} & Shared quotient-graph elimination engine (workspace, garbage collection, supervariables) \\
+\code{rslab-amd}   & Approximate minimum degree (Amestoy--Davis--Duff) \\
+\code{rslab-amf}   & Approximate minimum fill (HAMF4, Amestoy 1999) \\
+\code{rslab-metis} & Multilevel nested dissection (iterative driver, K\"onig separators) \\
+\code{symbolic}    & Elimination tree, supernode amalgamation, column counts, ordering dispatch \\
+\code{numeric}     & Supernodal $\LDLt$ (Bunch--Kaufman), multifrontal LU, panel-freeing, scoped pools \\
+\code{diagnostics} & A-priori per-path memory + flop estimates \\
+\code{analysis}    & Structural feature extraction, thread-count predictor \\
+\code{auto\_tune}  & Embedded MLP performance model + guard stack (pure-Rust inference) \\
+\code{tuning}      & Hardware calibration + budget-aware resource governor \\
+\code{python}      & PyO3 bindings \\
+\bottomrule
+\end{tabularx}
+\caption{Workspace layout. The \code{rslab-*} ordering crates and the \code{numeric}
+core are pure Rust with no external numeric library; \code{python} is a PyO3 crate
+depending on them.}
+\label{tab:crates}
+\end{table}
+
+\section{Symbolic analysis and ordering}
+\label{sec:symbolic}
+
+\subsection{Fill-reducing orderings}
+The ordering choice dominates fill and hence both factor time and memory. \rT{} ships
+three families behind an \code{OrderingMethod} enum and an adaptive dispatcher.
+
+\paragraph{Approximate minimum degree (AMD).} A quotient-graph elimination with
+approximate external degree, aggressive element absorption, and supervariable
+detection (Amestoy--Davis--Duff~\cite{amd}). The workspace maintains the element/variable lists in
+a single sliding index array with in-place garbage collection, degree-indexed LIFO
+bucket lists, hash-bucket supervariable detection, and mass elimination. Dense columns
+of degree exceeding $\max(16,\lfloor \alpha\sqrt{n}\rfloor)$ with $\alpha=10$ are
+deferred to the tail. It is the default for very large, very sparse patterns
+($n>\num{100000}$, average degree $<5$), where nested dissection's separator overhead
+does not pay off.
+
+\paragraph{Approximate minimum fill (AMF).} The HAMF4 variant~\cite{amf,rothberg-minfill}
+scores each supervariable by approximate \emph{fill} rather than degree,
+\begin{equation}
+\mathrm{RMF}(i)=\frac{\deg(i)\,\bigl(\deg(i)-1+2\,\mathrm{deg}_{me}\bigr)-\mathrm{WF}(i)}{nv(i)+1},
+\end{equation}
+where $\mathrm{WF}(i)$ is the accumulated working fill avoided by absorptions. Working
+fill is accumulated in 64-bit arithmetic (the product is $\bigO(n^2)$ and overflows
+32-bit for $n\gtrsim\num{46000}$). AMF is the default for $n\le\num{10000}$, where it
+stays within $1.10\times$ of MUMPS' HAMF4 fill on a \num{183277}-matrix oracle suite.
+
+\paragraph{Nested dissection (ND).} A multilevel recursive bisection~\cite{george,metis}
+with an \emph{iterative}, non-recursive driver: an explicit work stack
+of $(\text{subgraph},\text{vertex map},\text{offset})$ items, so deep dissection trees
+cannot overflow the call stack. Each level coarsens the graph, computes an initial
+bisection refined by Fiduccia--Mattheyses~\cite{fm}, uncoarsens with projection +
+refinement, and extracts a minimum vertex-cover separator by K\"onig's theorem on the
+bipartite crossing-edge graph. Two guards keep it robust: subgraphs below
+\code{nd\_to\_amd\_switch}${}=200$ vertices are ordered directly by AMD, and a
+degenerate split (one side $\ge 90\%$ of the vertices) falls back to an AMD leaf rather
+than recursing on a graph without a good separator. ND is the default for
+$n>\num{10000}$.
+
+\paragraph{Dispatch.} \code{OrderingMethod::Auto} routes by cheap structural
+predicates: very-large-and-sparse $\to$ AMD; an arrow/bordered pattern
+(few high-degree ``border'' columns carrying a large share of the nonzeros, detected by
+$\ge\num{20}\%$ of $\nnz$ concentrated in $<\num{5}\%$ of columns above a degree floor
+of $\max(64,8\,\overline{\deg})$) $\to$ AMF, which defers the dense rows to the trailing
+block where ND would smear them across separators at $7$--$9\times$ the fill; otherwise
+the size rule above. \code{OrderingMethod::AutoRace} instead \emph{measures}: it runs the
+full symbolic factorization for each concrete candidate and keeps the one with the
+smallest estimated factor $\nnz$, at ${\sim}4\times$ the single-pass analysis cost, paid
+once per problem.
+
+\subsection{Elimination tree, supernodes, amalgamation}
+From the ordered pattern \rT{} builds the elimination tree and detects fundamental
+supernodes (maximal runs of columns with identical row structure). Small supernodes are
+\emph{amalgamated} to widen the dense fronts that feed the BLAS-3 kernels: nodes with
+fewer than $\code{nemin}=16$ columns (SSIDS default~\cite{ssids}) are merged with their parent under
+a column-renumbering scheme that re-postorders the tree so desired merges become
+structurally adjacent. Beyond that, \emph{relaxed} amalgamation
+(\code{RelaxAmalgamation}, applied for $n\ge\num{1024}$) merges an adjacent child into
+its parent even when not fill-justified, as long as the merged supernode stays within a
+width and extra-row budget --- trading a little explicit-zero fill for wider,
+higher-rank Schur updates~\cite{ashcraft}. These knobs (\code{nemin}, the relaxation widths, the
+ordering) are exactly the analyze-time levers the auto-tuner searches over.
+
+\section{Numeric factorization}
+\label{sec:numeric}
+
+\subsection{Equilibration}
+Before factoring, $A$ is symmetrically equilibrated as $\hat A = D A D$ with a real
+diagonal $D=\operatorname{diag}(s)$, $s_i = 1/\sqrt{\max_j|A_{ij}|}$, computed in one
+pass over the lower triangle; an all-zero row is left unscaled. The real, symmetric,
+positive diagonal preserves complex symmetry and the pivot signs, tolerates zero
+diagonals (ubiquitous in saddle-point systems), and improves the conditioning that the
+bounded pivoting sees. The solve then unwinds
+$x = D\,(\hat A^{-1}(D b))$.
+
+\subsection{Complex-symmetric $\LDLt$ with Bunch--Kaufman pivoting}
+The default path is a supernodal \emph{left-looking} $\LDLt$. Each supernode's dense
+panel is assembled from $A$, updated by every previously factored descendant
+(\code{cmod}: pull the descendant's columns, apply its block-diagonal $D$, subtract the
+rank update), then factored in place (\code{cdiv}: a blocked Bunch--Kaufman partial
+factorization). Pivoting uses the classical Bunch--Kaufman~\cite{bunchkaufman} $1\times1$/$2\times2$ scheme
+with threshold $\alpha=(1+\sqrt{17})/8\approx\num{0.6404}$, bounded to each panel's
+fully-summed rows so the factorization stays within the supernode. For complex-symmetric
+$A$ the control flow is that of the real \code{sytf2} with magnitudes $|z|$ and
+\emph{no conjugation} (the analogue of LAPACK \code{zsytf2}); a $2\times2$ block is
+rejected as singular when
+$|d_{11}d_{22}-d_{21}^2| < \varepsilon\,\max(|d_{11}|,|d_{21}|,|d_{22}|)^2$ with
+$\varepsilon=\num{1e-14}$, bounding element growth. The panel blocking width is
+$\code{panel\_nb}=64$; each panel's trailing Schur update is deferred into a single SIMD
+GEMM.
+
+\subsection{Panel-freeing: the low-transient schedule}
+The memory advantage of the left-looking path comes from \emph{freeing each dense panel
+the instant its last consumer is done with it}. Each supernode carries a refcount of the
+ancestors that still need it; when a descendant's update decrements that count to zero,
+the panel is compacted into its final CSC factor fragment and the dense buffer is
+deallocated (coordinated by acquire/release atomics for the tree-parallel factor). The
+resident data is therefore the compact factor plus only the \emph{live} panels, not all
+panels at once --- the profile that gives \rT{} its low peak memory (Sec.~\ref{sec:mem}).
+
+\subsection{Multifrontal path}
+The alternative \code{FactorMethod::Multifrontal}~\cite{duffreid,liumf} assembles a dense
+frontal matrix per supernode from the eliminated columns and its children's contribution
+blocks (CBs), then extends the Schur complement to its parent. A work-stealing tree recursion factors
+children in parallel and frees each child's CB the moment it is assembled into the
+parent, keeping only the active contribution frontier live. Where the CB stack is large
+($\sum_{\text{children}} cb \ge 4\times10^6$ scalars) children are reordered by Liu's
+$(\text{peak}-cb)$ rule~\cite{liu86} to shrink the transient spike while preserving leaf
+parallelism. The multifrontal front is denser and more BLAS-3-rich but carries a higher
+transient peak than left-looking; the tuner chooses between them per matrix.
+
+\subsection{Unsymmetric LU}
+General matrices reuse the symmetric multifrontal machinery on the symmetrized pattern
+$A\cup A^\top$, with UMFPACK-style~\cite{umfpack} threshold partial pivoting: within each front's
+fully-summed block a diagonal candidate is accepted when
+$|a_{jj}| \ge \tau\,|a_{\text{colmax}}|$ with $\tau=\num{0.1}$, else the column maximum is
+swapped up. The panel width is narrower ($\code{NB}=32$) because the SIMD GEMM is fast
+while the serial \code{getf2} is not. $L$ is stored CSC (unit lower), $U$ CSR, with a
+two-sided equilibration.
+
+\subsection{Static pivoting for a never-fail preconditioner}
+The \code{ZeroPivotAction} policy governs near-singular pivots: \code{Fail} (the exact
+default) returns \code{NumericallyRankDeficient}; \code{PerturbToEps\{abs\_floor\}} lifts
+any pivot of magnitude below the floor to that floor while preserving its phase,
+$d\mapsto d\cdot(\text{abs\_floor}/|d|)$, yielding $\LDLt = A+\Delta$ with bounded
+$\Delta$ --- the never-fail factor a preconditioner needs. (The iterative-refinement /
+Krylov path that consumes this factor is outside the scope of this report, which
+concerns the exact direct path.)
+
+\subsection{Kernel scheduling and scoped pools}
+Four flop-count thresholds route the dense work, passed as a cheap \code{Copy}
+\code{KernelTuning} struct rather than global state: \code{scalar\_gate}
+($\approx\num{4096}$ flops) below which an update is a scalar triple loop instead of a
+SIMD GEMM; \code{par\_gemm} ($\approx\num{1e6}$) above which a \code{cmod} GEMM goes
+rayon-parallel; \code{par\_cdiv} ($\approx\num{8e6}$), the top-of-tree node-parallelism
+lever, above which the panel-trailing/front GEMM goes parallel; and \code{use\_gemm\_schur}.
+The tree recursion runs in a \emph{scoped} rayon pool of the requested width, so many
+concurrent solves coexist without oversubscribing the global pool, and the worker stack
+is sized to the (iteratively computed) assembly-tree depth,
+$\text{stack} = \operatorname{clamp}(32\,\text{KB}\cdot\text{depth},\,16\,\text{MB},\,8\,\text{GB})$,
+which is what lets deep banded chain-trees factor without a stack overflow.
+
+\section{A-priori resource model}
+\label{sec:mem}
+
+The estimator is the foundation the tuner and the governor stand on: because peak memory
+is a \emph{deterministic function of the symbolic structure}, it can be bounded before
+any numeric work, and that bound is what makes a learned tuner safe to ship as the
+default.
+
+\subsection{Per-path memory estimate}
+\code{estimate\_memory::<T>()} returns a \code{MemoryEstimate} whose fields are all exact
+functions of the pattern and scalar size $v=\code{value\_bytes}$. The factor is
+$\code{factor\_nnz}\cdot(v+8)$ (the $+8$ is the CSC index). The two paths get
+\emph{separate} transient bounds:
+
+\paragraph{Left-looking.} A refcount simulation of the panel-freeing schedule
+(Sec.~\ref{sec:numeric}) gives \code{panel\_live\_peak\_bytes} --- the tightest bound on
+live panel memory, the ``floor'' the solver actually operates at. A conservative
+whole-run bound assumes the parallel frontier holds all panels at once:
+\begin{equation}
+\text{scratch} = \tfrac14\bigl(\text{panels\_all}+\text{factor}\bigr)+\SI{32}{\mega\byte},
+\qquad
+\text{transient} = \text{panels\_all}+\text{factor}+\text{input}+\text{scratch},
+\end{equation}
+where the $\tfrac14+\SI{32}{\mega\byte}$ floor covers per-thread \code{cmod}/\code{cdiv}
+and emit buffers. It is a genuine upper bound: over the corpus the estimate/measured
+ratio is ${\approx}\num{1.5}$ in geomean and \emph{never} under-predicts
+(Fig.~\ref{fig:membreak}), which is the property the memory guarantee needs. The
+panel-freeing floor is the tighter quantity used inside the tuner's veto.
+
+\paragraph{Multifrontal.} A level-parallel CB-stack model: at each assembly-tree level
+the peak holds all fronts of that level ($\sum \text{nrow}^2 v$) plus the contribution
+blocks of their children ($cb(s)=\text{cnrow}^2 v$). A $\times\tfrac{7}{5}$
+(\num{1.4}$\times$) overlap margin accounts for the work-stealing scheduler running deep
+leaves of one subtree alongside mid-level fronts of another, keeping the bound above the
+measured 24-thread peak.
+
+The geometric work $\code{factor\_flops}=\sum_s \text{nrow}_s^2\,\text{ncol}_s$ is a
+type-independent proxy that lets a single \code{f64} calibration serve all scalar types.
+
+\subsection{Runtime estimate, calibration, thread predictor}
+Wall-clock is $\text{factor\_flops}/(\text{gflops}\cdot\text{speedup})$, where the
+per-machine \code{Calibration} measures the single-thread geometric-flop rate and the
+parallel speedup once, by factoring a $24^3$ 7-point Laplacian, and caches the result
+keyed by a hardware fingerprint (FFTW-``wisdom'' style~\cite{fftw}); \code{speedup\_for(threads)}
+interpolates linearly to the calibrated peak and holds flat beyond it, matching the
+saturating scaling of sparse-direct work. The thread-count predictor
+(\code{recommend\_threads}) maps three structural features --- factor flops, largest
+front height, peak tree width --- to a worker count: thin-and-narrow problems
+($\text{front\_nrow\_max}<512$ and $\text{tree\_width\_max}<128$) are capped at 2 workers
+where more only regress; tiny problems ($\text{factor\_flops}<3\times10^8$) at 4; the
+rest use all cores. On the corpus this lands within ${\sim}10\%$ of the per-matrix
+optimal (geomean), against ${\sim}50\%$ for a fixed budget of 2.
+
+\subsection{Structural features}
+The auto-tuner consumes a \num{20}-dimensional structural fingerprint (extended to the
+\num{32}-dimensional network input by the knob encoding, Sec.~\ref{sec:tuner}): pattern
+statistics computed in $\bigO(\nnz)$ --- $n$, $\nnz$, mean/max degree, degree coefficient
+of variation (arrow detector), max and relative-mean bandwidth, diagonal-dominance and
+diagonal-presence fractions --- and post-analysis symbolic statistics --- supernode
+count, fill $\nnz$ and fill ratio, mean supernode width, max front height, tree depth,
+max/mean tree width, factor flops, arithmetic intensity (flops per stored entry, the
+BLAS-3-richness signal), and the fraction of flops in the largest / top-1\% of fronts
+(top-of-tree heaviness). These are the quantities that decide which knob setting wins,
+so they are exactly what the model sees.
+
+\section{The learned auto-tuner}
+\label{sec:tuner}
+
+\subsection{Performance model}
+A small multilayer perceptron predicts $(\log\text{factor\_ms},\,\log\text{peak\_mb})$
+from the standardized structural features concatenated with an encoding of a candidate
+knob vector (ordering one-hot over \{auto, amd, metis\}, \code{nemin}, relaxation width,
+\code{panel\_nb}, \code{scalar\_gate}, \code{par\_cdiv}, method): a
+$32\!\to\!64\!\to\!32\!\to\!2$ network with ReLU hidden activations, trained offline
+(\num{3054} measured $(\text{matrix},\text{config})$ samples from the knob sweep) with
+scikit-learn~\cite{sklearn} and exported as JSON weights. Inference is pure Rust --- a few dense
+mat-vecs --- run at analyze time over a fixed candidate grid; the output is destandardized
+to milliseconds and megabytes. The chosen configuration minimizes a weighted Pareto
+objective
+\begin{equation}
+\text{score}(w) = w\,\log(\hat t) + (1-w)\,\log(\hat m),
+\end{equation}
+with the default weight $w=\num{0.7}$ leaning toward speed while still valuing memory;
+$w=1$ and $w=0$ give the pure speed and pure memory modes.
+
+\subsection{The guard stack: speculation with a safety net}
+The learned prediction is treated as \emph{speculative}. Analogous to a CPU branch
+predictor~\cite{jimenez} --- where a misprediction costs only a pipeline flush, never
+correctness --- the
+tuner's mistakes are made cheap by a deterministic guard stack, so the model can be an
+always-on default rather than an opt-in gamble. A candidate is only accepted if it clears,
+in order:
+\begin{enumerate}\itemsep2pt
+\item \textbf{Out-of-distribution fallback.} If $\text{factor\_flops}$ exceeds the
+training cap \code{flops\_ood\_cap} ($\approx\num{1.42e10}$, the largest flop count seen
+with enough configs in training), return the untuned default --- the model does not
+extrapolate.
+\item \textbf{Hard predicted-memory ceiling.} A candidate whose predicted
+$\log\text{peak\_mb}$ exceeds the default's by more than $\code{MEM\_TOL\_LN}=\ln(1.02)$
+is rejected.
+\item \textbf{Multifrontal floor veto.} A multifrontal candidate is rejected outright
+when the ratio of its estimated transient to the left-looking floor exceeds
+$\code{VETO\_MF\_MEM\_RATIO}=1.0$ --- the deterministic estimate, not the model, vetoes
+memory-pathological MF picks.
+\item \textbf{Deterministic a-priori backstop.} The chosen configuration is re-analyzed
+and accepted only if its \emph{exact} estimates satisfy
+$\text{fill}\le\num{1.02}\times$ default, $\text{flops}\le\num{1.05}\times$ default
+(a time proxy), and its realistic memory floor stays under the default's (multifrontal
+transient vs.\ the LL floor, or LL floor vs.\ floor); otherwise the default is used.
+\item \textbf{Gain guards.} The surviving candidate must beat the default by at least
+$\code{MIN\_GAIN}=\num{0.08}$ in score, or $\code{METHOD\_FLIP\_GAIN}=\num{0.20}$ if it
+changes the factorization method --- so noise-level ``wins'' and risky method flips do not
+displace a working default.
+\end{enumerate}
+The asymmetry is deliberate and reflects what is knowable: \emph{memory} is a
+deterministic function of structure, so it can be \emph{hard-guaranteed} never worse;
+\emph{time} depends on BLAS-3 efficiency, which the model predicts only approximately, so
+it is optimized in the geomean with an unavoidable error tail but backed by the exact-flop
+proxy. Memory is the critical resource and is treated as such.
+
+\section{Deterministic resource governance and placement}
+\label{sec:placement}
+
+Because the memory estimate is a hard a-priori \emph{bound}, not a guess, the solver can
+be scheduled to the edge of a resource budget without the safety margin every other
+solver must leave. The single-solve governor \code{tuning::plan} already turns a
+\code{MemoryEstimate} + a \code{Budget} (RAM ceiling, thread budget) + the hardware
+calibration into a \code{FactorPlan} with a predicted peak, a predicted wall-clock, and a
+\code{fits} decision --- purely as a function of its inputs, hence reproducible.
+
+The natural extension, and the payoff for batched workloads, is a \emph{deterministic
+batch scheduler}: a 2-D bin-packing of concurrent solves into a $(\text{RAM},
+\text{cores})$ budget. Each solve consumes $(\text{mem}_i, \text{threads}_i)$; the memory
+axis is bounded exactly and the thread axis is the second free variable (the thread
+predictor gives each solve a scaling-aware width, so non-scaling solves run many-abreast
+at low thread counts while a big BLAS-3-rich solve claims the cores). Since the peaks are
+guaranteed, the packing can fill RAM to the edge without the OOM risk that forces others
+to under-provision --- an OOM kill mid-batch on rented cloud hardware is wasted money ---
+and since the wall-clocks are predicted, the schedule is makespan-aware and the whole
+batch's cost is computable \emph{before} the machine is provisioned. This is the
+``full, deterministic utilization'' use case: rent a large box for a day, pack a batch of
+(e.g.\ curl--curl) simulations to saturate both RAM and cores, know the runtime and cost
+up front. Three honest caveats remain --- memory-bandwidth contention limits how far
+independent factorizations actually scale abreast (the calibration models per-solve
+speedup, not contention), the estimator's conservatism margin costs packing density (a
+per-class calibrated estimate tightens it), and NUMA pinning matters on large sockets ---
+and are the subject of the batch-scheduler work item.
+
+\section{Evaluation}
+\label{sec:eval}
+
+All figures are produced by the \code{bench\_suite} corpus engine and
+\code{superlu\_corpus.py} over the SuiteSparse collection~\cite{suitesparse} (1k--100k
+DOFs; SPD, indefinite, unsymmetric, complex) on a 12-core / 24-thread machine, in paper
+mode (black axes). RSLAB, faer~\cite{faer}, MKL PARDISO~\cite{pardiso} and
+SuperLU~\cite{superlu} were measured in \emph{one run} so the cross-solver numbers are
+drift-free.
+
+\subsection{Scaling against faer, PARDISO, SuperLU}
+Figures~\ref{fig:scaling} and~\ref{fig:memory} plot factor time and peak memory against
+$\nnz$ with a least-squares power-law fit $\sim\nnz^\alpha$ per solver (residual $>0.1$
+excluded from the fit). The RSLAB curve is the \emph{auto-tuned default} --- the product
+as shipped, picking left-looking or multifrontal per matrix under the guards --- not the
+raw kernels.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{corpus_scaling_fit.pdf}
+\caption{Corpus scaling of factor time vs.\ problem size, with power-law fits. RSLAB
+(auto-tuned, black) sits between PARDISO and faer.}
+\label{fig:scaling}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{corpus_memory_fit.pdf}
+\caption{Corpus scaling of peak factor memory vs.\ problem size, with power-law fits.}
+\label{fig:memory}
+\end{figure}
+
+\begin{table}[h]
+\centering\tabfont
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& \multicolumn{2}{c}{scaling order $\alpha$} & \multicolumn{2}{c}{head-to-head vs.\ RSLAB (geomean)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+solver & factor time & peak memory & factor time & peak memory \\
+\midrule
+MKL PARDISO         & \textbf{0.95} & \textbf{0.96} & \num{7.1}$\times$ slower & \num{2.3}$\times$ more \\
+RSLAB (auto-tuned)  & 1.14 & 1.11 & --- & --- \\
+faer LU             & 1.27 & 1.21 & \num{7.0}$\times$ faster & \num{2.3}$\times$ less \\
+SuperLU (SciPy)\textsuperscript{$\dagger$} & 1.52 & --- & \num{8.9}$\times$ faster & --- \\
+\bottomrule
+\end{tabular}
+\caption{Empirical scaling orders and head-to-head geomean ratios (matrices both solvers
+factor to $<0.1$ residual). RSLAB beats faer on both axes and trails only PARDISO's
+decades-tuned sublinear order. \textsuperscript{$\dagger$}SuperLU is included only as an
+open-source reference and only on the time axis: its peak memory is sampled process RSS
+from a SciPy child (\code{splu} exposes no peak), not comparable to the in-process peaks
+and unreliable, so it is omitted from the memory comparison; and it runs single-threaded
+with a \SI{60}{\second} per-matrix cap, so its \num{8} hardest corpus matrices are absent
+(survivor bias flatters its time), and it scatters over three orders of magnitude.}
+\label{tab:scaling}
+\end{table}
+
+\subsection{Accuracy}
+Figure~\ref{fig:residual} shows the relative residual $\lVert Ax-b\rVert/\lVert
+b\rVert$ per solver. Where RSLAB factors it is accurate --- \num{24} of \num{31} matrices
+below \num{1e-8}, matching PARDISO and ahead of faer, which returns a degraded solution
+on several. The exact $\LDLt$ (pivoting bounded per supernode) declines a handful of
+indefinite saddle-point matrices rather than returning a wrong answer.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{corpus_residual.pdf}
+\caption{Relative residual across the corpus, per solver.}
+\label{fig:residual}
+\end{figure}
+
+\subsection{The auto-tuner end to end}
+Figure~\ref{fig:autotune} measures the tuned configuration (picked from structural
+features alone, under the full guard stack) against the untuned default across the
+corpus. The balanced tuner ($w=0.7$) is \num{1.38}$\times$ faster at \num{0.81}$\times$
+the memory, at \emph{zero} of \num{89} memory regressions; the gain is larger on small
+matrices ($1.57\times$) than large ($1.22\times$), and the Pareto weight slides the
+operating point between speed and memory.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{autotune_vs_size.pdf}
+\caption{Factor speedup and peak-memory ratio of the tuned vs.\ untuned solver by problem
+size, three Pareto weights (dotted = geomean). Memory never regresses.}
+\label{fig:autotune}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{autotune_modes.pdf}
+\caption{The auto-tuner's three Pareto modes as a time--memory cloud relative to the
+untuned default; the weight $w$ slides the operating point.}
+\label{fig:autotunemodes}
+\end{figure}
+
+\subsection{Thread scaling and memory-estimate validation}
+Figure~\ref{fig:threads} shows per-solver thread scaling (mean over the corpus with a
+min--max band): sparse-direct factorization is largely memory-bandwidth bound, so every
+solver saturates well below linear, and the wide band --- some matrices \emph{regress} past
+a few threads --- is why RSLAB predicts the worker count per matrix.
+Figure~\ref{fig:membreak} validates the a-priori estimator --- the conservative bound and
+the panel-freeing floor against the measured peak of both RSLAB paths (it never
+under-predicts) --- and Figure~\ref{fig:stages} shows where each path spends its
+wall-clock.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{thread_scaling_solvers.pdf}
+\caption{Thread scaling per solver, 1--12 workers, mean $\pm$ min--max over the corpus.}
+\label{fig:threads}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{memory_breakdown.pdf}
+\caption{A-priori memory estimate (conservative bound + panel-freeing floor) vs.\ the
+measured peak, per RSLAB path (left-looking in black, multifrontal in gray). The estimate
+never under-predicts.}
+\label{fig:membreak}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{runtime_stage_breakdown.pdf}
+\caption{Analyze / factor / solve wall-clock split per matrix, per RSLAB path.}
+\label{fig:stages}
+\end{figure}
+
+\section{Related work}
+Learned and automatic solver tuning has prior art, but along different axes.
+\emph{GPTune}~\cite{gptune} (LBNL) tunes HPC libraries including SuperLU\_DIST by Bayesian
+optimization with multitask learning across problem sizes --- more sophisticated in its
+surrogate and uncertainty handling, but requiring many online trial runs per problem;
+\rT{}'s feed-forward model runs once at analyze time with negligible overhead.
+\emph{OSKI}~\cite{oski} autotunes at the sparse-\emph{kernel} level (register/cache
+blocking for SpMV), not solver configuration. \emph{Lighthouse}~\cite{lighthouse} and the
+work of Bhowmick, Raghavan et al.~\cite{bhowmick} apply machine learning to \emph{select}
+a solver or preconditioner from a portfolio (classification/recommendation), not to
+predict and tune a direct factorization's configuration. Production direct solvers ---
+MKL PARDISO~\cite{pardiso}, MUMPS, cuDSS --- ship \emph{hand-written} heuristic ``auto''
+modes (e.g.\ automatic reordering choice), not learned models. What is uncommon in combination, and to our knowledge not shipped
+elsewhere, is a learned performance \emph{regressor} used as the always-on default of a
+sparse direct solver, made safe by a deterministic memory guarantee and an OOD fallback,
+in a dependency-free, type-agnostic, pure-Rust implementation. The closest conceptual
+relative is not in numerical software at all but in hardware: the perceptron/neural
+branch predictor (J\'imenez--Lin~\cite{jimenez}, and the neural predictors shipped in
+modern CPUs), which likewise pairs a learned speculation with a mechanism that makes
+misspeculation free of cost.
+
+\section{Limitations and future work}
+The gains are aggregate: \num{1.38}$\times$ geomean, part of it within the ${\sim}\pm20\%$
+per-matrix single-shot measurement noise, so the geomean --- not any single matrix --- is
+the signal. The model is trained on one machine and one corpus and does not transfer
+across hardware without retraining; this is the same per-microarchitecture calibration a
+branch predictor needs, and motivates a \emph{meta-tuner} that runs the sweep + training +
+guard-threshold auto-calibration on a user's own matrix set to emit a problem-class
+profile. Time is optimized but not hard-guaranteed (only memory is). Planned tunable axes
+that keep the exact direct path --- RCM/band ordering~\cite{cuthillmckee}, exposed threshold-pivot tolerance,
+tunable equilibration strategy~\cite{ruiz}, static pivot-order reuse for fixed-pattern sequences,
+parallel/blocked triangular solves, 2-D front parallelism --- each add a candidate-grid
+dimension the tuner learns, with the standing constraint that every new axis ships an
+a-priori memory estimator so the deterministic backstop keeps holding.
+
+\section{Conclusion}
+\rT{} is a pure-Rust, type-agnostic sparse direct solver that reaches a single-digit
+factor of MKL PARDISO and clearly outperforms the open-source alternatives, with a
+learned auto-tuner as its default configuration path. The contribution is less the raw
+speedup than the architecture: a per-path a-priori memory estimator accurate enough to
+serve as a hard bound, a learned performance model that speculates on the best knob
+vector, and a deterministic guard stack that makes that speculation provably free of
+memory cost --- branch prediction for a sparse solver. That same estimator turns batched
+solving into a deterministic packing problem, where a rented machine's RAM and cores can
+be filled to the edge with the runtime and cost known in advance.
+
+\begin{thebibliography}{99}
+\small
+
+\bibitem{amd} P.~R. Amestoy, T.~A. Davis, I.~S. Duff. An approximate minimum degree
+ordering algorithm. \emph{SIAM J. Matrix Anal. Appl.} 17(4):886--905, 1996; and
+Algorithm 837: AMD. \emph{ACM Trans. Math. Softw.} 30(3):381--388, 2004.
+
+\bibitem{amf} P.~R. Amestoy. Recent progress in parallel multifrontal solvers and the
+approximate minimum fill (HAMF) ordering. Technical report / CERFACS, 1999.
+
+\bibitem{rothberg-minfill} E. Rothberg, S.~C. Eisenstat. Node selection strategies for
+bottom-up sparse matrix ordering. \emph{SIAM J. Matrix Anal. Appl.} 19(3):682--695, 1998.
+
+\bibitem{george} A. George. Nested dissection of a regular finite element mesh.
+\emph{SIAM J. Numer. Anal.} 10(2):345--363, 1973.
+
+\bibitem{metis} G. Karypis, V. Kumar. A fast and high quality multilevel scheme for
+partitioning irregular graphs. \emph{SIAM J. Sci. Comput.} 20(1):359--392, 1998.
+
+\bibitem{fm} C.~M. Fiduccia, R.~M. Mattheyses. A linear-time heuristic for improving
+network partitions. \emph{19th Design Automation Conference}, 175--181, 1982.
+
+\bibitem{ssids} J.~D. Hogg, E. Ovtchinnikov, J.~A. Scott. A sparse symmetric indefinite
+direct solver for GPU architectures (SSIDS). \emph{ACM Trans. Math. Softw.}
+42(1):1--25, 2016.
+
+\bibitem{ashcraft} C. Ashcraft, R. Grimes. The influence of relaxed supernode partitions
+on the multifrontal method. \emph{ACM Trans. Math. Softw.} 15(4):291--309, 1989.
+
+\bibitem{bunchkaufman} J.~R. Bunch, L. Kaufman. Some stable methods for calculating
+inertia and solving symmetric linear systems. \emph{Math. Comp.} 31(137):163--179, 1977.
+
+\bibitem{duffreid} I.~S. Duff, J.~K. Reid. The multifrontal solution of indefinite sparse
+symmetric linear equations. \emph{ACM Trans. Math. Softw.} 9(3):302--325, 1983.
+
+\bibitem{liumf} J.~W.~H. Liu. The multifrontal method for sparse matrix solution: theory
+and practice. \emph{SIAM Review} 34(1):82--109, 1992.
+
+\bibitem{liu86} J.~W.~H. Liu. On the storage requirement in the out-of-core multifrontal
+method for sparse factorization. \emph{ACM Trans. Math. Softw.} 12(3):249--264, 1986.
+
+\bibitem{umfpack} T.~A. Davis. Algorithm 832: UMFPACK, an unsymmetric-pattern
+multifrontal method. \emph{ACM Trans. Math. Softw.} 30(2):196--199, 2004.
+
+\bibitem{fftw} M. Frigo, S.~G. Johnson. The design and implementation of FFTW3.
+\emph{Proc. IEEE} 93(2):216--231, 2005.
+
+\bibitem{sklearn} F. Pedregosa et al. Scikit-learn: machine learning in Python.
+\emph{J. Mach. Learn. Res.} 12:2825--2830, 2011.
+
+\bibitem{jimenez} D.~A. Jim\'enez, C. Lin. Dynamic branch prediction with perceptrons.
+\emph{7th Int. Symp. High-Performance Computer Architecture (HPCA)}, 197--206, 2001.
+
+\bibitem{gptune} Y. Liu, W.~M. Sid-Lakhdar, O. Marques, X. Zhu, C. Meng, J.~W. Demmel,
+X.~S. Li. GPTune: multitask learning for autotuning exascale applications.
+\emph{PPoPP}, 234--246, 2021.
+
+\bibitem{oski} R. Vuduc, J.~W. Demmel, K.~A. Yelick. OSKI: a library of automatically
+tuned sparse matrix kernels. \emph{J. Phys.: Conf. Ser.} 16:521--530, 2005.
+
+\bibitem{lighthouse} E.~R. Jessup, P. Motter, B. Norris, K. Sood. Performance-based
+numerical solver selection in the Lighthouse framework. \emph{SIAM J. Sci. Comput.}
+38(5):S750--S771, 2016.
+
+\bibitem{bhowmick} S. Bhowmick, V. Eijkhout, Y. Freund, E. Fuentes, D. Keyes. Application
+of machine learning in selecting sparse linear solvers. \emph{Int. J. High Perf. Comput.
+Appl.}, 2006.
+
+\bibitem{pardiso} O. Schenk, K. G\"artner. Solving unsymmetric sparse systems of linear
+equations with PARDISO. \emph{Future Gener. Comput. Syst.} 20(3):475--487, 2004.
+
+\bibitem{faer} S. Quinones. faer-rs: a linear algebra library for the Rust programming
+language. \url{https://github.com/sarah-quinones/faer-rs}, 2024.
+
+\bibitem{superlu} X.~S. Li. An overview of SuperLU: algorithms, implementation, and user
+interface. \emph{ACM Trans. Math. Softw.} 31(3):302--325, 2005.
+
+\bibitem{suitesparse} T.~A. Davis, Y. Hu. The University of Florida sparse matrix
+collection. \emph{ACM Trans. Math. Softw.} 38(1):1--25, 2011.
+
+\bibitem{cuthillmckee} E. Cuthill, J. McKee. Reducing the bandwidth of sparse symmetric
+matrices. \emph{Proc. 24th ACM National Conference}, 157--172, 1969.
+
+\bibitem{ruiz} D. Ruiz. A scaling algorithm to equilibrate both rows and columns norms in
+matrices. Technical Report RAL-TR-2001-034, Rutherford Appleton Laboratory, 2001.
+
+\end{thebibliography}
+
+\end{document}

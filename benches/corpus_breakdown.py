@@ -71,8 +71,7 @@ def memory_breakdown(est, corpus, outdir):
         Patch(facecolor=CYAN, label="measured - multifrontal"),
     ]
     bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
-    fig.savefig(outdir / "memory_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
-    print(f"wrote {outdir / 'memory_breakdown.png'}")
+    bench_style.save(fig, outdir / "memory_breakdown.png")
 
 
 def memory_composition(est, outdir):
@@ -96,8 +95,7 @@ def memory_composition(est, outdir):
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
     ax.grid(True, axis="y", ls=":", alpha=0.4)
     bench_style.legend_below(fig, ax=ax)
-    fig.savefig(outdir / "memory_composition.png", dpi=140, transparent=True, bbox_inches="tight")
-    print(f"wrote {outdir / 'memory_composition.png'}")
+    bench_style.save(fig, outdir / "memory_composition.png")
 
 
 def runtime_stage_breakdown(corpus, outdir):
@@ -131,8 +129,7 @@ def runtime_stage_breakdown(corpus, outdir):
         ax.set_xticklabels(names, rotation=60, ha="right", fontsize=7)
         ax.grid(True, axis="y", ls=":", alpha=0.4)
     bench_style.legend_below(fig, ax=axes[0])
-    fig.savefig(outdir / "runtime_stage_breakdown.png", dpi=140, transparent=True, bbox_inches="tight")
-    print(f"wrote {outdir / 'runtime_stage_breakdown.png'}")
+    bench_style.save(fig, outdir / "runtime_stage_breakdown.png")
 
 
 def main():

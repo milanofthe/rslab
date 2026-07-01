@@ -61,12 +61,19 @@ in **one run** on the same machine, so the exponents are directly comparable.
 | MKL PARDISO         | **0.95** | **0.96** |
 | RSLAB (auto-tuned)  | 1.14 | 1.11 |
 | faer LU             | 1.27 | 1.21 |
-| SuperLU (SciPy)     | 1.45 | 1.19 |
+| SuperLU (SciPy)²    | 1.52 | — |
 
 RSLAB's auto-tuned default sits between PARDISO and faer on both axes: it beats
-faer and SuperLU on factor-time *and* peak-memory growth, and trails only
-PARDISO's decades-tuned sublinear order. SuperLU does not exploit symmetry, so its
-fill (and factor time) grows steeply (`1.45`).
+faer on both and SuperLU on factor time, and trails only PARDISO's decades-tuned
+sublinear order. SuperLU does not exploit symmetry, so its fill (and factor time)
+grows steeply (`1.52`).
+
+² SuperLU is an open-source reference on the **time axis only**. Its peak memory
+is sampled process RSS from a SciPy child (`splu` exposes no peak) — not comparable
+to the in-process peaks and unreliable (0 MB on fast factorizations) — so it is
+omitted from the memory comparison; and it runs single-threaded with a 60 s
+per-matrix cap, so its 8 hardest corpus matrices are absent (survivor bias) and it
+scatters over three orders of magnitude.
 
 Head-to-head over the same run (geomean across the matrices both solvers factor
 to `< 0.1` residual):

@@ -81,8 +81,7 @@ def main():
     ]
     out = path.parent / "thread_scaling_solvers.png"
     bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
-    fig.savefig(out, dpi=150, transparent=True, bbox_inches="tight")
-    print(f"wrote {out}")
+    bench_style.save(fig, out)
 
 
 if __name__ == "__main__":
