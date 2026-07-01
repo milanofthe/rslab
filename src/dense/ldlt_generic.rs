@@ -391,6 +391,126 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     Ok(x)
 }
 
+/// A memory-compact form of [`LdltFactors`] with the CSC index arrays and the
+/// pivot permutation stored as `u32` instead of `usize`, halving the index
+/// footprint on 64-bit targets when `n < 2^31` (and `nnz(L) < 2^32`). Indices
+/// are the non-value half of a sparse factor, so this shrinks the stored factor
+/// by up to `4·(nnz(L) + 2n)` bytes at **no accuracy cost**: the values are moved
+/// in unchanged and [`solve`](Self::solve) is bit-identical to [`solve_ldlt`]
+/// (only the index *type* differs, cast back to `usize` on read). A pure memory
+/// axis for the exact factor - build it from a full factor and drop the original.
+pub struct CompressedLdltFactors<T> {
+    /// Matrix dimension.
+    pub n: usize,
+    l_col_ptr: Vec<u32>,
+    l_row_idx: Vec<u32>,
+    l_values: Vec<T>,
+    d_diag: Vec<T>,
+    d_subdiag: Vec<T>,
+    two_by_two: Vec<bool>,
+    perm: Vec<u32>,
+}
+
+impl<T: Scalar> CompressedLdltFactors<T> {
+    /// Build from full [`LdltFactors`], **consuming** them and moving the values
+    /// (no duplication - the compact factor replaces the original). Returns
+    /// `None` when the indices do not fit `u32` (`n >= 2^31` or `nnz(L) >= 2^32`),
+    /// where 32-bit compression does not apply; the input is dropped in that case.
+    pub fn from_factors(f: LdltFactors<T>) -> Option<Self> {
+        let nnz = *f.l_col_ptr.last().unwrap_or(&0);
+        if f.n as u64 > u32::MAX as u64 || nnz as u64 > u32::MAX as u64 {
+            return None;
+        }
+        Some(Self {
+            n: f.n,
+            l_col_ptr: f.l_col_ptr.iter().map(|&x| x as u32).collect(),
+            l_row_idx: f.l_row_idx.iter().map(|&x| x as u32).collect(),
+            l_values: f.l_values,
+            d_diag: f.d_diag,
+            d_subdiag: f.d_subdiag,
+            two_by_two: f.two_by_two,
+            perm: f.perm.iter().map(|&x| x as u32).collect(),
+        })
+    }
+
+    /// Number of stored `L` nonzeros (the fill).
+    pub fn factor_nnz(&self) -> usize {
+        self.l_values.len()
+    }
+
+    /// Stored index footprint in bytes (the `u32` `l_col_ptr` + `l_row_idx` +
+    /// `perm` arrays). Half of the `usize` original on a 64-bit target.
+    pub fn index_bytes(&self) -> usize {
+        4 * (self.l_col_ptr.len() + self.l_row_idx.len() + self.perm.len())
+    }
+
+    /// Solve `A x = b`, bit-identical to [`solve_ldlt`] on the source factors.
+    pub fn solve(&self, rhs: &[T]) -> Result<Vec<T>, RslabError> {
+        let n = self.n;
+        if rhs.len() != n {
+            return Err(RslabError::DimensionMismatch {
+                expected: n,
+                got: rhs.len(),
+            });
+        }
+        let mut y = vec![T::zero(); n];
+        for (i, yi) in y.iter_mut().enumerate() {
+            *yi = rhs[self.perm[i] as usize];
+        }
+        // Forward solve L z = y.
+        for j in 0..n {
+            let zj = y[j];
+            for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
+                let i = self.l_row_idx[k] as usize;
+                if i != j {
+                    y[i] = y[i] - self.l_values[k] * zj;
+                }
+            }
+        }
+        // D-block solve.
+        let mut k = 0;
+        while k < n {
+            if self.two_by_two[k] {
+                let d11 = self.d_diag[k];
+                let d21 = self.d_subdiag[k];
+                let d22 = self.d_diag[k + 1];
+                let det = d11 * d22 - d21 * d21;
+                if det == T::zero() {
+                    return Err(RslabError::NumericallyRankDeficient);
+                }
+                let detinv = det.recip();
+                let (z0, z1) = (y[k], y[k + 1]);
+                y[k] = (d22 * z0 - d21 * z1) * detinv;
+                y[k + 1] = (d11 * z1 - d21 * z0) * detinv;
+                k += 2;
+            } else {
+                let d = self.d_diag[k];
+                if d == T::zero() {
+                    return Err(RslabError::NumericallyRankDeficient);
+                }
+                y[k] = y[k] * d.recip();
+                k += 1;
+            }
+        }
+        // Backward solve Lᵀ v = w.
+        for j in (0..n).rev() {
+            let mut acc = y[j];
+            for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
+                let i = self.l_row_idx[k] as usize;
+                if i != j {
+                    acc = acc - self.l_values[k] * y[i];
+                }
+            }
+            y[j] = acc;
+        }
+        let mut x = vec![T::zero(); n];
+        for (i, &vi) in y.iter().enumerate() {
+            x[self.perm[i] as usize] = vi;
+        }
+        Ok(x)
+    }
+}
+
 /// Below this RHS count (and work size) the block solve runs serially - the
 /// gather/scatter + thread-spawn overhead of the parallel path only amortizes for
 /// genuinely wide multi-RHS solves.
@@ -573,6 +693,56 @@ mod tests {
         (0..a.n)
             .map(|i| (ax[i] - b[i]).magnitude())
             .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn compressed_ldlt_is_bit_identical_and_smaller() {
+        // 32-bit index compression: the compact factor solves bit-identically to
+        // the full-index factor (only the index type differs) and stores its
+        // indices in half the bytes.
+        let m = 16;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = crate::CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+
+        let reference = crate::factor_sparse_ldlt(&a).unwrap();
+        let x_ref = solve_ldlt(&reference, &b).unwrap();
+        let full_index_bytes = 8 * (reference.l_col_ptr.len() + reference.l_row_idx.len() + reference.perm.len());
+
+        let compact = CompressedLdltFactors::from_factors(crate::factor_sparse_ldlt(&a).unwrap())
+            .expect("n < 2^31 compresses");
+        let x_cmp = compact.solve(&b).unwrap();
+
+        assert_eq!(x_ref.len(), x_cmp.len());
+        for i in 0..n {
+            assert_eq!(
+                x_ref[i].to_bits(),
+                x_cmp[i].to_bits(),
+                "compressed solve differs from full at row {i}"
+            );
+        }
+        assert_eq!(compact.index_bytes() * 2, full_index_bytes, "u32 indices halve the footprint");
+        assert_eq!(compact.factor_nnz(), reference.l_values.len());
     }
 
     #[test]

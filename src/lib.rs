@@ -110,7 +110,9 @@ pub use error::RslabError;
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
-pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
+pub use dense::ldlt_generic::{
+    factor_ldlt, solve_ldlt, solve_ldlt_many, CompressedLdltFactors, LdltFactors,
+};
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, BlrMode,
