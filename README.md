@@ -33,7 +33,8 @@ right-hand sides. It is a fork of [feral](https://github.com/jkitchin/feral); se
   a-priori memory backstop so it never uses more memory than the default;
   out-of-distribution it falls back to a deterministic exact-fill ordering race.
   Trained on a complete-distribution corpus including generated curl-curl Maxwell
-  (complex indefinite) and Stokes/KKT saddle-point systems.
+  (complex indefinite), Stokes/KKT saddle-point, and convection-diffusion (the
+  unsymmetric LU class, swept over the grid-Péclet range) systems.
 - **Runtime tuner profile** (no recompile): the two models plus hardware-calibrated
   guard thresholds ship as a `tuner_profile.json` config artifact. Point
   `RSLAB_TUNER_PROFILE` at one (or call `apply_profile`) to specialize the tuner to
@@ -152,21 +153,24 @@ larger than the model's training range (where it would otherwise extrapolate).
 
 ![Auto-tuner vs default by size](benches/bench_out/autotune_vs_size.png)
 
-Measured end-to-end (`SolverSettings::default()` vs the tuner's pick) over the
-corpus, geomean:
+Measured end-to-end (`SolverSettings::default()` vs the tuner's pick, balanced
+`w=0.7`), geomean — **each path on its own class** (the two are separate models a
+caller dispatches to explicitly):
 
-| mode | factor speedup | peak memory | over-default memory |
-|---|---|---|---|
-| balanced (`w=0.7`, default) | **1.38x** | **0.81x** | 0 / 89 matrices |
-| speed (`w=1`) | 1.33x | 0.81x | 0 / 89 |
-| memory (`w=0`) | 1.28x | **0.80x** | 0 / 89 |
+| path | class | factor speedup | peak memory | wins |
+|---|---|---|---|---|
+| **LDLᵀ** (sym) | curl-curl / Helmholtz / saddle-point | **1.68x** | **0.74x** | 38 / 38 |
+| **LU** (unsym) | convection-diffusion / BEM / random | **2.22x** | **0.71x** | 85 / 86 |
 
-The auto-tuner is **faster and lighter on both axes** - ~1.38x speedup *and* ~19%
-lower peak memory - and **no matrix uses more memory than the default** (the
-backstop guarantees it deterministically). The benefit holds across problem size
-(small 1.6x, large 1.2x). Peak memory is deterministically estimable (fill/floor)
-so it is hard-guaranteed; factor time depends on BLAS-3 efficiency the model
-predicts only approximately, so a few matrices see a small time regression while
+The auto-tuner is **faster and lighter on both axes**, and **no matrix uses more
+memory than the default** (the backstop guarantees it deterministically). The LU
+number is a coverage result: with a handful of unsymmetric training matrices the LU
+tuner was neutral (1.02x); broadening the unsymmetric set to 90 generated
+convection-diffusion problems (grid-Péclet × flow × discretization) took its
+held-out R² from 0.75 to 0.98 and the tuner from neutral to 2.22x. Peak memory is
+deterministically estimable (fill/floor) so it is hard-guaranteed; factor time
+depends on BLAS-3 efficiency the model predicts only approximately, so a few
+matrices see a small time regression while
 still saving memory. The worker count stays with the `Threads::Auto` predictor;
 `factor_with` opts out with explicit settings.
 

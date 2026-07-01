@@ -491,8 +491,10 @@ method, the equilibration-strategy one-hot, the memory mode, and (LU) \code{pivo
 $37/38\!\to\!64\!\to\!32\!\to\!2$ network with ReLU hidden layers, trained offline with
 scikit-learn~\cite{sklearn} on a complete-distribution corpus (structured-grid generators
 across real/complex $\times$ symmetric/unsymmetric $\times$ conditioning, including
-curl-curl Maxwell and Stokes/KKT saddle-point, plus the complex SuiteSparse matrices) and
-exported as JSON weights (held-out $R^2$ \num{0.97}/\num{0.96} on the $\LDLt$ path). The input
+curl-curl Maxwell, Stokes/KKT saddle-point, and convection--diffusion over the grid-Péclet
+range, plus the SuiteSparse matrices) and exported as JSON weights. Each path is fit on its
+own class: the LU model on \num{103} unsymmetric matrices (held-out $R^2$ \num{0.98} in both
+time and memory), the $\LDLt$ model on \num{205} symmetric ones. The input
 encoding is data-driven: the Rust inference builds the same vector the training exported,
 and a candidate axis is searched only when the shipped model references it, so adding an
 axis is a retrain, not a code change. Inference is pure Rust and runs at analyze time over the candidate grid; the
@@ -531,15 +533,22 @@ check (4) but is not guaranteed per matrix. The same learned-prediction-with-a-d
 structure appears in hardware branch prediction~\cite{jimenez}, where a misprediction costs
 only re-execution and not correctness.
 
-Measured against the untuned default over the complete-distribution corpus
-(Sec.~\ref{sec:eval}), the balanced tuner ($w=0.7$) is \num{1.62}$\times$ faster at
-\num{0.76}$\times$ the memory over \num{41} matrices (larger than the \num{1.34}$\times$ on
-a real-SPD-only corpus --- the tuner helps most exactly on the complex/indefinite classes),
-and the guarded picks never regress memory; the speed extreme ($w=1$) reaches
-\num{1.56}$\times$ at \num{0.79}$\times$ the memory, and the memory extreme ($w=0$) holds
-\num{1.50}$\times$ speed at \num{0.74}$\times$ the memory (Fig.~\ref{fig:autotune}). The
-Pareto weight $w$ moves the operating point between the speed and memory extremes
-(Fig.~\ref{fig:autotunemodes}).
+Measured against the untuned default, each path is evaluated on \emph{its own} class,
+since the two are separate models a caller dispatches to explicitly. On the symmetric class
+(curl-curl, shifted Helmholtz, saddle-point) the balanced $\LDLt$ tuner ($w=0.7$) is
+\num{1.68}$\times$ faster at \num{0.74}$\times$ the memory over \num{38} matrices, winning on
+\num{38} of \num{38}; the guarded picks never regress memory. On the unsymmetric class
+(convection--diffusion over the grid-Péclet range, plus BEM and random) the LU tuner is
+\num{2.22}$\times$ faster at \num{0.71}$\times$ the memory over \num{86} matrices, winning
+on \num{85} of \num{86} (Fig.~\ref{fig:autotune}). The LU result is a direct consequence of
+corpus coverage: with only a handful of generated unsymmetric matrices the LU tuner was
+statistically indistinguishable from the default (\num{1.02}$\times$); broadening the
+unsymmetric training set to \num{90} generated convection--diffusion problems (grid-Péclet
+$\times$ flow field $\times$ discretization) lifted the per-path held-out $R^2$ from
+\num{0.75} to \num{0.98} and the tuner from neutral to \num{2.22}$\times$. The Pareto weight
+$w$ moves the operating point between the speed and memory extremes: the memory extreme
+($w=0$) still holds \num{1.87}$\times$ speed at \num{0.80}$\times$ the memory on the
+unsymmetric class (Fig.~\ref{fig:autotunemodes}).
 
 \begin{figure}[ht]
 \centering
@@ -648,12 +657,26 @@ $-\beta C$ a Brezzi--Pitk\"aranta pressure-Laplacian stabilization ($\beta>0$) r
 the singular zero $(2,2)$ block on a collocated grid --- the MAC / mixed-FEM
 form~\cite{elman,benzi}.
 
+\paragraph{Convection--diffusion (unsymmetric).} The operator $-\varepsilon\nabla^2 u +
+\mathbf{b}\cdot\nabla u = f$ finite-differenced on a structured grid with Dirichlet
+boundaries --- the canonical unsymmetric class (the LU path's workload). The first-derivative
+advection term $\mathbf{b}\cdot\nabla u$ breaks symmetry; central differencing gives the
+sharp, oscillation-prone form that stresses pivoting at small $\varepsilon$ (high grid-Péclet
+$|\mathbf{b}|h/\varepsilon$), first-order upwinding a diagonally dominant M-matrix. Sweeping
+$\varepsilon$ moves the operator from diffusion-dominated (nearly symmetric) to
+advection-dominated (strongly unsymmetric), and the flow field $\mathbf{b}$ (a uniform wind
+or a recirculating vortex) varies the coupling structure. The parameter grid (four Péclet
+levels $\times$ two flows $\times$ two schemes $\times$ several grids, 2-D and 3-D) yields
+\num{90} generated unsymmetric matrices spanning the distribution real CFD/transport solves
+live on --- the LU tuner's training and held-out corpus.
+
 \paragraph{Remaining classes.} Shifted Helmholtz (complex symmetric), banded / arrow /
 jumping-coefficient stencils, BEM/MoM near-field kernels (complex unsymmetric), and random
 SPD / unsymmetric / exactly-conditioned spectral matrices span the rest. Every generator is
 type-agnostic, so each class is available in \code{f64} and \code{Complex<f64>}. This
 complete-distribution corpus was load-bearing: it exposed the tuner mispicks on complex
-curl-curl that a real-SPD corpus had hidden (Sec.~\ref{sec:eval}).
+curl-curl that a real-SPD corpus had hidden, and the too-thin unsymmetric coverage that had
+left the LU tuner neutral until the convection--diffusion set was added (Sec.~\ref{sec:eval}).
 
 \section{Evaluation}
 \label{sec:eval}
