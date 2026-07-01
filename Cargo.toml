@@ -134,6 +134,11 @@ harness = false
 required-features = ["matgen"]
 
 [[bench]]
+name = "validate_axes"
+harness = false
+required-features = ["matgen-download"]
+
+[[bench]]
 name = "front_profile"
 harness = false
 required-features = ["matgen"]
