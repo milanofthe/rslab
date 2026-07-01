@@ -427,10 +427,17 @@ pub fn recommend_settings_pathed(
     let Some(m) = model_for(path) else {
         return SolverSettings::default();
     };
-    // Out-of-distribution: a matrix larger than the training grid's well-sampled
-    // range gets the safe default, not an extrapolated (and often regressing) pick.
+    // Out-of-distribution: above the training grid's well-sampled range the model
+    // extrapolates on the knobs, so it must not be trusted. But the *ordering*
+    // choice is decidable from the exact a-priori fill (not extrapolated), and on
+    // large 3D / complex-indefinite classes the adaptive `Auto` heuristic mispicks
+    // badly (curl-curl EM: ~3x extra fill, an order of magnitude in factor time).
+    // So the OOD fallback is the deterministic ordering race (`AutoRace`): it picks
+    // the minimum-exact-fill ordering (with `Auto` among the candidates, so never
+    // worse than the default), a safe non-model win exactly where the model cannot
+    // help. The remaining knobs stay at the proven default.
     if m.flops_ood_cap > 0.0 && features.factor_flops as f64 > m.flops_ood_cap {
-        return SolverSettings::default();
+        return SolverSettings::default().with_ordering(OrderingMethod::AutoRace);
     }
     let base = predict(m, &build_input(m, features, &BASE)); // [log time, log mem]
     let base_score = w * base[0] + (1.0 - w) * base[1];
