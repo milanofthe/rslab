@@ -79,7 +79,17 @@ feature vector (Sec.~\ref{sec:pred}). \emph{Factor} performs the numeric $\LDLt$
 the ordered, equilibrated matrix. \emph{Solve} runs the triangular substitutions. Analyze
 is separated from factor at the API level: a symbolic object (\code{LdltSymbolic} or
 \code{LuSymbolic}) is produced once and can factor many matrices that share its sparsity
-pattern, which is the basis of the solver-in-the-loop model (Sec.~\ref{sec:sil}).
+pattern, which is the basis of the solver-in-the-loop model (Sec.~\ref{sec:sil}). Across
+the corpus the numeric factor dominates the wall-clock, with analyze and solve small by
+comparison (Fig.~\ref{fig:stages}), so the tuning and the parallelism target the factor.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{runtime_stage_breakdown.pdf}
+\caption{Analyze / factor / solve wall-clock split per matrix, for the left-looking and
+multifrontal paths. The numeric factor dominates.}
+\label{fig:stages}
+\end{figure}
 
 The code is a Cargo workspace (Table~\ref{tab:crates}). The ordering crates share a
 common quotient-graph elimination engine; the numeric core holds the two factorization
@@ -316,6 +326,14 @@ the corpus both bounds hold with an estimate/measured ratio of about $1.5$ in ge
 no under-prediction (Fig.~\ref{fig:membreak}), which is the property the memory guarantee
 requires; the panel-freeing floor is the tighter quantity used inside the tuner's veto.
 
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{memory_breakdown.pdf}
+\caption{A-priori memory estimate (conservative bound and panel-freeing floor) vs.\ the
+measured peak, per RSLAB path. The estimate does not under-predict.}
+\label{fig:membreak}
+\end{figure}
+
 \subsection{Work and runtime}
 The geometric work $\text{factor\_flops}=\sum_s \text{nrow}_s^2\,\text{ncol}_s$ is a
 type-independent proxy, so a single \code{f64} calibration serves all scalar types. The
@@ -335,7 +353,17 @@ front height, and the peak tree width, to a worker count. A thin and narrow prob
 where more only regress; a small problem ($\text{factor\_flops}<3\times10^8$) is capped at
 four, where scheduling overhead dominates; otherwise all cores are used. On the corpus this
 lands within about $10\%$ of the per-matrix optimal in geomean, against about $50\%$ for a
-fixed budget of two workers.
+fixed budget of two workers. The need for a per-matrix policy is visible in the measured
+thread scaling (Fig.~\ref{fig:threads}): sparse-direct factorization is largely
+memory-bandwidth bound, so every solver saturates below linear, and the min--max band is
+wide because some matrices regress past a few threads.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{thread_scaling_solvers.pdf}
+\caption{Thread scaling per solver, 1--12 workers, mean with min--max band over the corpus.}
+\label{fig:threads}
+\end{figure}
 
 \subsection{Structural features}
 The tuner consumes a structural fingerprint computed in the analyze phase. The pattern
@@ -444,6 +472,29 @@ check (4) but is not guaranteed per matrix. The same learned-prediction-with-a-d
 structure appears in hardware branch prediction~\cite{jimenez}, where a misprediction costs
 only re-execution and not correctness.
 
+Measured against the untuned default over the corpus (Sec.~\ref{sec:eval}), the balanced
+tuner ($w=0.7$) is \num{1.38}$\times$ faster at \num{0.81}$\times$ the memory, at zero of
+\num{89} memory regressions; the effect is larger on small matrices ($1.57\times$) than
+large ($1.22\times$), and the guarded picks never regress memory (Fig.~\ref{fig:autotune}).
+The Pareto weight $w$ moves the operating point between the speed and memory extremes
+(Fig.~\ref{fig:autotunemodes}).
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{autotune_vs_size.pdf}
+\caption{Factor speedup and peak-memory ratio of the tuned vs.\ untuned solver by problem
+size, three Pareto weights (dotted = geomean). Memory never regresses.}
+\label{fig:autotune}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{autotune_modes.pdf}
+\caption{The tuner's three Pareto modes as a time--memory cloud relative to the untuned
+default.}
+\label{fig:autotunemodes}
+\end{figure}
+
 \section{Solver-in-the-loop and resource governance}
 \label{sec:sil}
 Two features support running many solves under a fixed resource budget. First, the analyze
@@ -472,9 +523,11 @@ NUMA placement on multi-socket machines.
 
 \section{Evaluation}
 \label{sec:eval}
-The figures are produced by the \code{bench\_suite} corpus engine and
+All measured figures in this report come from the \code{bench\_suite} corpus engine and
 \code{superlu\_corpus.py} over the SuiteSparse collection~\cite{suitesparse} (1k--100k
-DOFs; SPD, indefinite, unsymmetric, complex) on a 12-core / 24-thread machine. RSLAB,
+DOFs; SPD, indefinite, unsymmetric, complex) on a 12-core / 24-thread machine; the
+per-stage, estimator, thread-scaling, and tuner figures appear with the concepts they
+support in the preceding sections. This section reports the cross-solver comparison. RSLAB,
 faer~\cite{faer}, MKL PARDISO~\cite{pardiso}, and SuperLU~\cite{superlu} were measured in
 one run, so the cross-solver numbers are not affected by run-to-run drift.
 
@@ -536,64 +589,11 @@ per solver. Where RSLAB factors, \num{24} of \num{31} matrices are below \num{1e
 matching PARDISO and ahead of faer. The exact $\LDLt$ declines a handful of indefinite
 saddle-point matrices rather than returning a degraded solution.
 
-\begin{figure}[h]
+\begin{figure}[ht]
 \centering
 \includegraphics[width=\textwidth]{corpus_residual.pdf}
 \caption{Relative residual across the corpus, per solver.}
 \label{fig:residual}
-\end{figure}
-
-\subsection{Configuration tuner}
-Figure~\ref{fig:autotune} measures the tuned configuration against the untuned default
-across the corpus. The balanced tuner ($w=0.7$) is \num{1.38}$\times$ faster at
-\num{0.81}$\times$ the memory, at zero of \num{89} memory regressions; the effect is
-larger on small matrices ($1.57\times$) than large ($1.22\times$). Figure~\ref{fig:autotunemodes}
-shows the three Pareto weights as a time--memory cloud relative to the default.
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{autotune_vs_size.pdf}
-\caption{Factor speedup and peak-memory ratio of the tuned vs.\ untuned solver by problem
-size, three Pareto weights (dotted = geomean).}
-\label{fig:autotune}
-\end{figure}
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{autotune_modes.pdf}
-\caption{The tuner's three Pareto modes as a time--memory cloud relative to the untuned
-default.}
-\label{fig:autotunemodes}
-\end{figure}
-
-\subsection{Thread scaling and estimator validation}
-Figure~\ref{fig:threads} shows per-solver thread scaling (mean over the corpus with a
-min--max band). Sparse-direct factorization is largely memory-bandwidth bound, so every
-solver saturates below linear, and the band is wide because some matrices regress past a
-few threads, which is why the worker count is predicted per matrix. Figure~\ref{fig:membreak}
-validates the memory estimator against the measured peak of both paths, and
-Figure~\ref{fig:stages} shows the analyze/factor/solve split.
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{thread_scaling_solvers.pdf}
-\caption{Thread scaling per solver, 1--12 workers, mean with min--max band over the corpus.}
-\label{fig:threads}
-\end{figure}
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{memory_breakdown.pdf}
-\caption{A-priori memory estimate (conservative bound and panel-freeing floor) vs.\ the
-measured peak, per RSLAB path. The estimate does not under-predict.}
-\label{fig:membreak}
-\end{figure}
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=\textwidth]{runtime_stage_breakdown.pdf}
-\caption{Analyze / factor / solve wall-clock split per matrix, per RSLAB path.}
-\label{fig:stages}
 \end{figure}
 
 \section{Related work}
