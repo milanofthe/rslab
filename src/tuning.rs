@@ -11,9 +11,12 @@
 
 use std::path::PathBuf;
 
+use num_complex::Complex;
+
 use crate::diagnostics::MemoryEstimate;
+use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
-use crate::{BlrMode, SolverSettings, LdltSymbolic};
+use crate::{BlrMode, LdltSymbolic, SolverSettings};
 
 /// Detected machine capabilities - for budgeting and the calibration key.
 #[derive(Debug, Clone)]
@@ -50,8 +53,14 @@ impl HardwareInfo {
 /// Measured cost-model constants for this machine - the cached "wisdom".
 #[derive(Debug, Clone, Copy)]
 pub struct Calibration {
-    /// One-thread throughput in the `factor_flops` proxy unit, ×1e9 (giga/s).
+    /// One-thread throughput in the `factor_flops` proxy unit, ×1e9 (giga/s), for a
+    /// **real** (`f64`) factorization.
     pub geom_gflops: f64,
+    /// Same proxy-flops/s rate for a **complex** (`Complex<f64>`) factorization:
+    /// each proxy-flop is ~4 real flops plus wider memory traffic, so the rate in
+    /// the type-independent proxy unit is lower --- calibrated separately so the
+    /// runtime estimate is correct for the complex-symmetric target class.
+    pub geom_gflops_cplx: f64,
     /// Parallel speedup measured at `speedup_threads`.
     pub speedup: f64,
     pub speedup_threads: usize,
@@ -80,12 +89,13 @@ impl Calibration {
     fn load(fp: u64) -> Option<Self> {
         let s = std::fs::read_to_string(Self::cache_path(fp)).ok()?;
         let mut it = s.split_whitespace();
-        Some(Calibration {
-            geom_gflops: it.next()?.parse().ok()?,
-            speedup: it.next()?.parse().ok()?,
-            speedup_threads: it.next()?.parse().ok()?,
-            fingerprint: fp,
-        })
+        let geom_gflops: f64 = it.next()?.parse().ok()?;
+        let speedup: f64 = it.next()?.parse().ok()?;
+        let speedup_threads: usize = it.next()?.parse().ok()?;
+        // The complex rate is a later field; an older cache file lacks it, so fall
+        // back to a fraction of the real rate rather than failing the whole load.
+        let geom_gflops_cplx = it.next().and_then(|t| t.parse().ok()).unwrap_or(geom_gflops / 3.0);
+        Some(Calibration { geom_gflops, geom_gflops_cplx, speedup, speedup_threads, fingerprint: fp })
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -93,23 +103,40 @@ impl Calibration {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
-        std::fs::write(p, format!("{} {} {}", self.geom_gflops, self.speedup, self.speedup_threads))
+        std::fs::write(
+            p,
+            format!(
+                "{} {} {} {}",
+                self.geom_gflops, self.speedup, self.speedup_threads, self.geom_gflops_cplx
+            ),
+        )
     }
 
     /// A reasonable default if calibration cannot run (e.g. analyze fails).
     fn fallback(hw: &HardwareInfo) -> Self {
         Calibration {
             geom_gflops: 2.0,
+            geom_gflops_cplx: 2.0 / 3.0,
             speedup: (hw.physical_cores as f64).sqrt().max(1.0),
             speedup_threads: hw.physical_cores,
             fingerprint: hw.fingerprint(),
         }
     }
 
+    /// The one-thread proxy-flops/s rate for a scalar of `value_bytes` (real `f64`
+    /// = 8, `Complex<f64>` = 16): picks the complex rate for the wider type.
+    pub fn rate_for(&self, value_bytes: usize) -> f64 {
+        if value_bytes >= 16 {
+            self.geom_gflops_cplx
+        } else {
+            self.geom_gflops
+        }
+    }
+
     /// Measure throughput by factoring a representative 3D grid at 1 thread and at
     /// `physical_cores`, recording the proxy-flops/s rate and the parallel speedup.
     pub fn measure(hw: &HardwareInfo) -> Self {
-        let a = grid3d_spd(24); // ≈ 13 800 DOFs, a few hundred ms
+        let a = grid3d_spd::<f64>(24); // ≈ 13 800 DOFs, a few hundred ms
         let Ok(sym) = LdltSymbolic::analyze(&a) else {
             return Self::fallback(hw);
         };
@@ -123,8 +150,24 @@ impl Calibration {
         let (Some(t1), Some(tn)) = (time_at(1), time_at(hw.physical_cores.max(1))) else {
             return Self::fallback(hw);
         };
+        let geom_gflops = (flops / t1.max(1e-9)) / 1e9;
+        // Complex rate: same grid, complex-typed, factored once at one thread. The
+        // structure (fill, flops proxy) is identical; only the per-flop cost differs.
+        let ac = grid3d_spd::<Complex<f64>>(24);
+        let geom_gflops_cplx = match LdltSymbolic::analyze(&ac) {
+            Ok(symc) => {
+                let fc = symc.estimate_memory::<Complex<f64>>().factor_flops as f64;
+                let start = std::time::Instant::now();
+                match symc.factor(&ac, &SolverSettings::default().with_threads(1)) {
+                    Ok(_) => (fc / start.elapsed().as_secs_f64().max(1e-9)) / 1e9,
+                    Err(_) => geom_gflops / 3.0,
+                }
+            }
+            Err(_) => geom_gflops / 3.0,
+        };
         Calibration {
-            geom_gflops: (flops / t1.max(1e-9)) / 1e9,
+            geom_gflops,
+            geom_gflops_cplx,
             speedup: (t1 / tn.max(1e-9)).max(1.0),
             speedup_threads: hw.physical_cores.max(1),
             fingerprint: hw.fingerprint(),
@@ -262,7 +305,7 @@ mod tests {
         calib.save().unwrap();
         assert!(Calibration::load(hw.fingerprint()).is_some());
 
-        let a = grid3d_spd(16);
+        let a = grid3d_spd::<f64>(16);
         let est = LdltSymbolic::analyze(&a).unwrap().estimate_memory::<f64>();
         assert!(est.factor_flops > 0);
 
@@ -293,26 +336,28 @@ mod tests {
     }
 }
 
-/// 3D 7-point Laplacian (k³ grid, Dirichlet, SPD `f64`, lower triangle) - the
-/// calibration's representative matrix.
-fn grid3d_spd(k: usize) -> CscMatrix<f64> {
+/// 3D 7-point Laplacian (k³ grid, Dirichlet, SPD, lower triangle), generic over
+/// the scalar type - the calibration's representative matrix. Complex-typed, it is
+/// real-valued but factors through the complex kernel, so it times the complex
+/// proxy-flops/s rate.
+fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
     let mut rows = Vec::new();
     let mut cols = Vec::new();
-    let mut vals = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
     for z in 0..k {
         for y in 0..k {
             for x in 0..k {
                 let p = idx(x, y, z);
                 rows.push(p);
                 cols.push(p);
-                vals.push(6.0);
+                vals.push(T::from_real(6.0));
                 let mut nb = |q: usize| {
                     let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
                     rows.push(hi);
                     cols.push(lo);
-                    vals.push(-1.0);
+                    vals.push(T::from_real(-1.0));
                 };
                 if x + 1 < k {
                     nb(idx(x + 1, y, z));
@@ -328,11 +373,11 @@ fn grid3d_spd(k: usize) -> CscMatrix<f64> {
     }
     match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
         Ok(m) => m,
-        Err(_) => CscMatrix::from_triplets(1, &[0], &[0], &[1.0]).unwrap_or(CscMatrix {
+        Err(_) => CscMatrix {
             n: 0,
             col_ptr: vec![0],
             row_idx: vec![],
             values: vec![],
-        }),
+        },
     }
 }
