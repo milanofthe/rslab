@@ -260,6 +260,13 @@ pub struct FactorPlan {
     pub note: String,
 }
 
+/// Learned additive-residual weights `[intercept, amdahl_frac, ln(threads),
+/// ln(tree_width)]` correcting `log(measured / analytical speedup)`, fit offline by
+/// `benches/fit_residual.py` on the generated thread-scaling corpus (54 matrices).
+/// It is a small, dimensionless, hardware-agnostic correction: the absolute rate
+/// comes from the calibration, this only reshapes the speedup curve by structure.
+const TIME_RESIDUAL: [f64; 4] = [-0.4621, 0.7550, -0.0791, 0.0358];
+
 /// Cost-model worker-count selection: the fewest workers that reach (within a
 /// small margin) the minimum predicted time. Because
 /// [`est_runtime_ms_threaded`](MemoryEstimate::est_runtime_ms_threaded) floors at
@@ -276,7 +283,41 @@ pub fn recommend_threads_cost_model(
 ) -> usize {
     let cap = if max_threads == 0 { all_cores.max(1) } else { max_threads };
     let rate = calib.rate_for(estimate.value_bytes);
-    let time = |t: usize| estimate.est_runtime_ms_threaded(rate, calib.speedup_for(t));
+    // Learned residual on the analytical speedup (issue #62): the bare
+    // `flops / max(crit, flops/speedup)` model mispredicts the achieved scaling
+    // systematically --- the critical-path flops overstate the true serial
+    // fraction (sibling subtrees overlap), so it is too pessimistic on
+    // serial-heavy trees and too optimistic on wide ones. A ridge fit of
+    // log(measured/predicted speedup) on the dimensionless structural features
+    // (fit offline by `benches/fit_residual.py`, 26% held-out RMSE reduction under
+    // leave-one-matrix-out CV) corrects both. `amdahl_frac` carries almost all of
+    // the signal, validating the critical-path feature. Clamped so the residual
+    // refines the calibrated base, never swings the choice wildly.
+    let residual_ln = |t: usize| -> f64 {
+        if t <= 1 {
+            return 0.0; // t=1 is the speedup reference: no correction
+        }
+        let flops = estimate.factor_flops.max(1) as f64;
+        let crit = estimate.critical_path_flops.max(1) as f64;
+        let amdahl = (crit / flops).min(1.0);
+        let width = estimate.max_tree_width.max(1) as f64;
+        let r = TIME_RESIDUAL[0]
+            + TIME_RESIDUAL[1] * amdahl
+            + TIME_RESIDUAL[2] * (t as f64).ln()
+            + TIME_RESIDUAL[3] * width.ln();
+        r.clamp(-0.7, 0.7) // exp factor in [0.50, 2.01]
+    };
+    // Corrected time: predicted speedup s -> s * exp(residual), so time /= that,
+    // but never below the hard critical-path floor. The residual is linear, so at
+    // `amdahl_frac -> 1` (a true chain) it would extrapolate to a speedup the
+    // physics forbids; clamping to the critical-path floor (the runtime with
+    // infinite workers) keeps a critical-path-bound matrix at one worker.
+    let floor_ms = estimate.est_runtime_ms_threaded(rate, f64::MAX);
+    let time = |t: usize| {
+        let corrected =
+            estimate.est_runtime_ms_threaded(rate, calib.speedup_for(t)) * (-residual_ln(t)).exp();
+        corrected.max(floor_ms)
+    };
     let mut best_t = 1;
     let mut best = time(1);
     for t in [2usize, 4, 6, 8, 12, 16, 20, 24, 32].into_iter().filter(|&t| t <= cap) {

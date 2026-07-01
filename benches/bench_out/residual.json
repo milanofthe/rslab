@@ -1,0 +1,18 @@
+{
+  "feature_names": [
+    "intercept",
+    "amdahl_frac",
+    "log_threads",
+    "log_tree_width"
+  ],
+  "weights": [
+    -0.4621399474426158,
+    0.7549849383458037,
+    -0.07911253116760435,
+    0.03581556080292406
+  ],
+  "hw_speedup_peak": 4.25,
+  "hw_speedup_threads": 12,
+  "cv_rmse": 0.3169633449399419,
+  "base_rmse": 0.43132441281105377
+}
