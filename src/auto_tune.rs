@@ -146,9 +146,29 @@ pub fn apply_profile(p: &TunerProfile) -> Result<(), String> {
         .map_err(|_| "a tuner profile is already applied".to_string())
 }
 
-fn model_for(path: SolverPath) -> Option<&'static Model> {
-    // A runtime profile (if applied) overrides the embedded models.
+/// The active runtime profile, if any: an explicitly [`apply_profile`]d one, or —
+/// on first use, tried once — a profile named by the `RSLAB_TUNER_PROFILE`
+/// environment variable. This is what makes a profile a config artifact: point the
+/// env var at a `tuner_profile.json` produced by `cargo xtask tune` and the
+/// running binary picks it up with no recompile.
+fn active_profile() -> Option<&'static ActiveProfile> {
     if let Some(ap) = PROFILE.get() {
+        return Some(ap);
+    }
+    static ENV_TRIED: OnceLock<()> = OnceLock::new();
+    ENV_TRIED.get_or_init(|| {
+        if let Some(path) = std::env::var_os("RSLAB_TUNER_PROFILE") {
+            if let Ok(p) = TunerProfile::load(std::path::Path::new(&path)) {
+                let _ = apply_profile(&p);
+            }
+        }
+    });
+    PROFILE.get()
+}
+
+fn model_for(path: SolverPath) -> Option<&'static Model> {
+    // A runtime profile (if applied or env-named) overrides the embedded models.
+    if let Some(ap) = active_profile() {
         return Some(match path {
             SolverPath::Ldlt => &ap.ldlt,
             SolverPath::Lu => &ap.lu,
@@ -169,7 +189,7 @@ fn model_for(path: SolverPath) -> Option<&'static Model> {
 /// The active guard thresholds: the runtime profile's calibrated values if a
 /// profile is applied, else the compile-time defaults.
 fn active_guards() -> (f64, f64, f64) {
-    match PROFILE.get() {
+    match active_profile() {
         Some(ap) => (ap.min_gain, ap.method_flip_gain, ap.mem_tol_ln),
         None => (MIN_GAIN, METHOD_FLIP_GAIN, MEM_TOL_LN),
     }
