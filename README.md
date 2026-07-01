@@ -19,10 +19,23 @@ right-hand sides. It is a fork of [feral](https://github.com/jkitchin/feral); se
 - Generic over scalar type: `f64`, `f32`, `Complex<f64>`, `Complex<f32>`. A test
   factors and solves all four through both paths.
 - Symmetric LDLᵀ with Bunch-Kaufman 1x1/2x2 pivoting (stores only `L`), and
-  threshold-pivoted LU for unsymmetric matrices.
-- Supernodal left-looking factorization that frees each dense panel after its last
-  consumer, plus a multifrontal path.
-- The numeric factor is bit-identical across thread counts.
+  threshold-pivoted LU (exposed, tunable tolerance `u`) for unsymmetric matrices.
+- Three factorization schedules: supernodal left-looking (default, frees each dense
+  panel after its last consumer), multifrontal, and right-looking.
+- Fill-reducing orderings: AMD, AMF, nested dissection (METIS/Scotch/KaHIP), and
+  RCM (band/profile), selectable or raced per matrix.
+- Tunable equilibration (one-pass ∞-norm, iterative Ruiz, MC64 matching, off) and
+  factor emit/memory mode, all through one flat `SolverSettings` interface.
+- Learned auto-tuner: a small MLP selects the solver configuration (ordering,
+  method, amalgamation, threshold-pivot `u`, equilibration, memory mode, kernel
+  gates) per matrix from its structural features, guarded by a deterministic
+  a-priori memory backstop so it never uses more memory than the default.
+- The numeric factor is bit-identical across thread counts; the parallel multi-RHS
+  solve (8-19x faster than per-column) is bit-identical to the serial path.
+- 32-bit index compression (`CompressedLdltFactors`, when `n < 2^31`): half the
+  index footprint at no accuracy cost.
+- Static pivot reuse for fixed-pattern value sequences (frequency sweeps, time
+  stepping): skip the pivot search across refactorizations.
 - Preconditioner mode: static pivoting (never-fail), optional incomplete drop and
   block-low-rank compression.
 - Iterative solvers: restarted GMRES, block/multi-RHS GMRES, COCG, COCR.
@@ -59,8 +72,8 @@ in **one run** on the same machine, so the exponents are directly comparable.
 | solver | factor time `α` | peak memory `α` |
 |--------|:---------------:|:---------------:|
 | MKL PARDISO         | **0.95** | **0.96** |
-| RSLAB (auto-tuned)  | 1.14 | 1.11 |
-| faer LU             | 1.27 | 1.21 |
+| RSLAB (auto-tuned)  | 1.13 | 1.14 |
+| faer LU             | 1.00³ | 1.21 |
 | SuperLU (SciPy)²    | 1.52 | — |
 
 RSLAB's auto-tuned default sits between PARDISO and faer on both axes: it beats
@@ -80,15 +93,18 @@ to `< 0.1` residual):
 
 | RSLAB (auto) vs | factor time | peak memory |
 |-----------------|:-----------:|:-----------:|
-| MKL PARDISO | **7.1x slower** | 2.3x more |
-| faer LU     | **7.0x faster** | **2.3x less** |
-| SuperLU     | **8.9x faster** | n/a¹ |
+| MKL PARDISO | **7.4x slower** | 2.3x more |
+| faer LU     | **4.3x faster** | **2.3x less** |
 
-¹ SuperLU's memory is sampled process RSS (SciPy), not the live-bytes peak the
-in-process solvers report, so the two are not directly comparable. PARDISO is the
-commercial reference (decades of hand-tuned kernels); RSLAB is a pure-Rust solver
-that is several times faster and lighter than the other open-source options while
-staying within a single-digit factor of MKL.
+The auto-tuned default is the learned tuner picking the solver configuration per
+matrix (Sec. below). PARDISO is the commercial reference (decades of hand-tuned
+kernels); RSLAB is a pure-Rust solver that stays several times faster and lighter
+than faer while within a single-digit factor of MKL.
+
+³ faer factors only 24 of the 36 corpus matrices within its memory budget (it
+skips the largest, where RSLAB's advantage is greatest), so its geomean and
+scaling order are over the smaller subset — the `4.3x faster` head-to-head is a
+conservative floor.
 
 ### Thread scaling
 

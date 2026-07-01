@@ -385,9 +385,14 @@ the parameters and the stage each affects. The analyze-stage parameters change f
 front shape; the factor-stage parameters change the transient schedule and the pivoting;
 the kernel-stage parameters change the scalar/SIMD and serial/parallel boundaries without
 changing the result. The tuner (Sec.~\ref{sec:tuner}) searches the ordering, \code{nemin},
-relaxation width, \code{panel\_nb}, the kernel thresholds, and the method; the remaining
-parameters (static pivoting, incomplete-factor drop tolerance, memory mode) are set
-directly by the caller.
+relaxation width, \code{panel\_nb}, the kernel thresholds, the method, the LU
+threshold-pivot tolerance \code{pivot\_u}, the equilibration strategy \code{scaling}, and
+the memory mode; static pivoting and the incomplete-factor drop tolerance are set directly
+by the caller. Two further options are caller- or race-selected rather than searched: the
+RCM band/profile ordering (a candidate in \code{AutoRace}) and the right-looking method (an
+opt-in schedule). Every added axis is exact-path: it changes speed or memory but leaves the
+factorization exact, and each keeps fill predictable so the a-priori memory backstop
+(Sec.~\ref{sec:tuner}) still holds.
 
 \begin{table}[h]
 \centering\tabfont
@@ -395,12 +400,14 @@ directly by the caller.
 \toprule
 \textbf{Parameter} & \textbf{Stage} & \textbf{Effect} \\
 \midrule
-\code{ordering}     & analyze & Fill-reducing ordering (Sec.~\ref{sec:ordering}) \\
+\code{ordering}     & analyze & Fill-reducing ordering: AMD, AMF, ND (METIS/Scotch/KaHIP), RCM, or a race (Sec.~\ref{sec:ordering}) \\
 \code{nemin}        & analyze & Supernode amalgamation threshold \\
 \code{relax}        & analyze & Relaxed amalgamation width / extra-row budget \\
 \code{reorder}      & analyze & Child-reorder strategy (CB-stack peak vs.\ leaf parallelism) \\
-\code{method}       & factor  & Left-looking or multifrontal \\
+\code{scaling}      & analyze & Equilibration strategy (one-pass $\infty$-norm, iterative Ruiz, MC64, off) \\
+\code{method}       & factor  & Left-looking, multifrontal, or right-looking \\
 \code{threads}      & factor  & Worker count (fixed, or the auto predictor) \\
+\code{pivot\_u}     & factor  & LU threshold partial-pivot tolerance $u\in[0,1]$ ($u{=}0$: static) \\
 \code{on\_zero\_pivot} & factor & Exact fail or static-pivot floor \\
 \code{drop\_tol}    & factor  & Incomplete-factor threshold (preconditioner) \\
 \code{memory}       & factor  & Factor emit / peak-RSS strategy \\
@@ -421,16 +428,24 @@ dense work but not the numeric result.}
 Three determinism properties hold. First, the numeric factorization is bit-identical
 regardless of the worker count: the parallel schedule changes the order in which
 independent subtrees and GEMMs execute, but not the accumulation within a pivot block, so
-a factor computed at one thread and at all cores agree to the last bit. The thread count is
-therefore a performance parameter only. Second, the analyze-phase choices (the auto
-ordering, the auto thread count, the amalgamation strategy) are deterministic functions of
-the matrix pattern. Third, the resource planner (Sec.~\ref{sec:sil}) is a pure function of
-the memory estimate, the budget, and the cached calibration, so a plan is reproducible and
-can be computed before the matrix is factored. The pivot sequence is value-dependent
-(Bunch--Kaufman and threshold partial pivoting both branch on magnitudes), so re-factoring
-the same numeric matrix reproduces the same pivots; a sequence of matrices that share a
-pattern but differ in values may pivot differently unless the pivot order is fixed and
-reused, which is a planned option (Sec.~\ref{sec:future}). The calibration is a timing
+a factor computed at one thread and at all cores agree to the last bit. This extends to the
+front-level parallelism: the trailing Schur GEMM and the trailing-block subtraction of a
+large top-of-tree front are split over disjoint output blocks, so the write set is a
+partition and the result does not depend on the worker count. The multi-RHS triangular
+solve is likewise bit-identical whether the right-hand sides are solved serially or split
+into per-thread column chunks (each column is independent), so the parallel wide-RHS solve
+is a pure speedup. The thread count is therefore a performance parameter only. Second, the
+analyze-phase choices (the auto ordering, the auto thread count, the amalgamation strategy)
+are deterministic functions of the matrix pattern. Third, the resource planner
+(Sec.~\ref{sec:sil}) is a pure function of the memory estimate, the budget, and the cached
+calibration, so a plan is reproducible and can be computed before the matrix is factored.
+The pivot sequence is value-dependent (Bunch--Kaufman and threshold partial pivoting both
+branch on magnitudes), so re-factoring the same numeric matrix reproduces the same pivots; a
+sequence of matrices that share a pattern but differ in values may pivot differently unless
+the pivot order is fixed. Setting \code{pivot\_u}${=}0$ does exactly that: it keeps the
+natural pivot order and skips the pivot search across refactorizations (static pivoting for
+frequency sweeps and time stepping), with iterative refinement recovering accuracy when the
+values drift. The calibration is a timing
 measurement and is not bit-reproducible, but once cached it makes subsequent planning on
 the same hardware reproducible.
 
@@ -438,13 +453,17 @@ the same hardware reproducible.
 \label{sec:tuner}
 The tuner selects a \code{SolverSettings} from the structural feature vector. A multilayer
 perceptron predicts $(\log\text{factor\_ms},\,\log\text{peak\_mb})$ from the standardized
-features concatenated with an encoding of a candidate configuration (an ordering one-hot,
-\code{nemin}, relaxation width, \code{panel\_nb}, \code{scalar\_gate}, \code{par\_cdiv},
-and the method): a $32\!\to\!64\!\to\!32\!\to\!2$ network with ReLU hidden layers, trained
-offline on \num{3054} measured $(\text{matrix},\text{configuration})$ samples with
-scikit-learn~\cite{sklearn} and exported as JSON weights. Inference is pure Rust and runs
-at analyze time over a fixed candidate grid; the outputs are destandardized to
-milliseconds and megabytes. The selected configuration minimizes
+features concatenated with an encoding of a candidate configuration: an ordering one-hot,
+\code{nemin}, relaxation width, \code{panel\_nb}, \code{scalar\_gate}, \code{par\_cdiv}, the
+method, the threshold-pivot tolerance \code{pivot\_u}, an equilibration-strategy one-hot,
+and the memory mode --- a $38\!\to\!64\!\to\!32\!\to\!2$ network with ReLU hidden layers,
+trained offline on \num{8154} measured $(\text{matrix},\text{configuration})$ samples over
+\num{227} matrices with scikit-learn~\cite{sklearn} and exported as JSON weights (held-out
+$R^2$ of \num{0.97}/\num{0.96} on time/memory). The input encoding is data-driven: the Rust
+inference builds the same vector the training exported, and a candidate axis is searched
+only when the shipped model references it, so adding an axis to the grid is a retrain, not a
+code change. Inference is pure Rust and runs at analyze time over the candidate grid; the
+outputs are destandardized to milliseconds and megabytes. The selected configuration minimizes
 $w\,\log(\hat t) + (1-w)\,\log(\hat m)$, with the default weight $w=\num{0.7}$; $w=1$ and
 $w=0$ give the speed and memory extremes.
 
@@ -473,11 +492,12 @@ structure appears in hardware branch prediction~\cite{jimenez}, where a mispredi
 only re-execution and not correctness.
 
 Measured against the untuned default over the corpus (Sec.~\ref{sec:eval}), the balanced
-tuner ($w=0.7$) is \num{1.38}$\times$ faster at \num{0.81}$\times$ the memory, at zero of
-\num{89} memory regressions; the effect is larger on small matrices ($1.57\times$) than
-large ($1.22\times$), and the guarded picks never regress memory (Fig.~\ref{fig:autotune}).
-The Pareto weight $w$ moves the operating point between the speed and memory extremes
-(Fig.~\ref{fig:autotunemodes}).
+tuner ($w=0.7$) is \num{1.34}$\times$ faster at \num{0.83}$\times$ the memory over
+\num{166} matrices, and the guarded picks never regress memory; the speed extreme
+($w=1$) reaches \num{1.38}$\times$ at \num{0.82}$\times$ the memory, and the memory extreme
+($w=0$) holds \num{1.31}$\times$ speed at \num{0.73}$\times$ the memory
+(Fig.~\ref{fig:autotune}). The Pareto weight $w$ moves the operating point between the
+speed and memory extremes (Fig.~\ref{fig:autotunemodes}).
 
 \begin{figure}[ht]
 \centering
@@ -528,8 +548,8 @@ All measured figures in this report come from the \code{bench\_suite} corpus eng
 DOFs; SPD, indefinite, unsymmetric, complex) on a 12-core / 24-thread machine; the
 per-stage, estimator, thread-scaling, and tuner figures appear with the concepts they
 support in the preceding sections. This section reports the cross-solver comparison. RSLAB,
-faer~\cite{faer}, MKL PARDISO~\cite{pardiso}, and SuperLU~\cite{superlu} were measured in
-one run, so the cross-solver numbers are not affected by run-to-run drift.
+faer~\cite{faer}, and MKL PARDISO~\cite{pardiso} were measured in one run, so the
+cross-solver numbers are not affected by run-to-run drift.
 
 \subsection{Scaling}
 Figures~\ref{fig:scaling} and~\ref{fig:memory} plot factor time and peak memory against
@@ -561,26 +581,22 @@ factor accurately.
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}
 solver & factor time & peak memory & factor time & peak memory \\
 \midrule
-MKL PARDISO         & \textbf{0.95} & \textbf{0.96} & \num{7.1}$\times$ slower & \num{2.3}$\times$ more \\
-RSLAB (auto-tuned)  & 1.14 & 1.11 & -- & -- \\
-faer LU             & 1.27 & 1.21 & \num{7.0}$\times$ faster & \num{2.3}$\times$ less \\
-SuperLU (SciPy)\textsuperscript{$\dagger$} & 1.52 & -- & \num{8.9}$\times$ faster & -- \\
+MKL PARDISO         & \textbf{0.95} & \textbf{0.96} & \num{7.4}$\times$ slower & \num{2.3}$\times$ more \\
+RSLAB (auto-tuned)  & 1.13 & 1.14 & -- & -- \\
+faer LU\textsuperscript{$\dagger$} & 1.00 & 1.21 & \num{4.3}$\times$ faster & \num{2.3}$\times$ less \\
 \bottomrule
 \end{tabular}
 \caption{Empirical scaling orders and head-to-head geomean ratios (matrices both solvers
-factor to below $0.1$ residual). \textsuperscript{$\dagger$}SuperLU is an open-source
-reference on the time axis only: its peak memory is sampled process RSS from a SciPy child
-(\code{splu} exposes no peak), which is not comparable to the in-process peaks and records
-$0$ MB on fast factorizations, so it is omitted from the memory comparison; it runs
-single-threaded with a \SI{60}{\second} per-matrix cap, so its \num{8} hardest corpus
-matrices are absent (a survivor bias that flatters its time), and it scatters over three
-orders of magnitude.}
+factor to below $0.1$ residual). \textsuperscript{$\dagger$}faer factors only \num{24} of the
+\num{36} corpus matrices within its memory budget, skipping the largest --- where RSLAB's
+advantage is greatest --- so its geomean and scaling order are over the smaller subset and
+the head-to-head is a conservative floor.}
 \label{tab:scaling}
 \end{table}
 
 RSLAB's auto-tuned default is between PARDISO and faer on both axes: lower factor-time and
 memory growth than faer, higher than PARDISO's sublinear orders. In the head-to-head it is
-about $7\times$ slower and $2.3\times$ larger than PARDISO, and about $7\times$ faster and
+about $7.4\times$ slower and $2.3\times$ larger than PARDISO, and about $4.3\times$ faster and
 $2.3\times$ smaller than faer.
 
 \subsection{Accuracy}
@@ -595,6 +611,22 @@ saddle-point matrices rather than returning a degraded solution.
 \caption{Relative residual across the corpus, per solver.}
 \label{fig:residual}
 \end{figure}
+
+\subsection{Exact-path axes: correctness and speedups}
+The tunable axes were validated over \num{180} SuiteSparse matrices spanning structural,
+CFD, thermal, and saddle-point classes. Every determinism and equivalence property held on
+all \num{180}: the right-looking factor is bit-identical to the multifrontal one; the
+\code{Eager} and \code{LowMemory} emit modes produce bit-identical factors; the parallel
+front subtraction is bit-identical to serial; and the \num{32}-bit compressed factor solves
+bit-identically to the full-width one. Where the axes carry a measurable gain, the parallel
+multi-RHS solve is \numrange{8}{19}$\times$ faster than solving the \num{256} right-hand
+sides column by column, and \num{32}-bit index compression halves the stored index
+footprint (for example \SI{459}{\mega\byte}$\to$\SI{230}{\mega\byte} on \code{pwtk}) at no
+accuracy cost. Retraining the tuner with the new axes is neutral on the well-scaled
+structural corpus (geomean \num{1.03}$\times$ versus the pre-axis model, within the
+$\pm20\%$ single-shot variance): the threshold-pivot and equilibration axes bind on
+unsymmetric and ill-scaled classes, and the memory backstop keeps the guarded picks from
+regressing where they do not help.
 
 \section{Related work}
 Automatic and learned tuning of sparse solvers has been studied along several axes.
@@ -614,19 +646,22 @@ makes a misprediction cost re-execution and not correctness.
 
 \section{Limitations and future work}
 \label{sec:future}
-The tuner's gains are aggregate: the geomean speedup is \num{1.38}$\times$, and part of it
+The tuner's gains are aggregate: the geomean speedup is \num{1.34}$\times$, and part of it
 is within the per-matrix single-shot timing variance of about $\pm20\%$, so the geomean
 rather than any single matrix is the signal. The model is trained on one machine and one
 corpus and does not transfer across hardware without retraining, in the same way a branch
 predictor is tuned per microarchitecture; a meta-tuner that runs the sweep, the training,
 and the guard-threshold calibration on a user's own matrix set to emit a problem-class
-profile is planned. Time is optimized but not guaranteed; only memory is. Planned tunable
-stages that keep the exact direct path are an RCM/band ordering~\cite{cuthillmckee}, an
-exposed threshold-pivot tolerance, a tunable equilibration strategy~\cite{ruiz}, static
-pivot-order reuse for fixed-pattern sequences, parallel and blocked triangular solves, and
-two-dimensional front parallelism. Each adds a candidate dimension to the tuner, under the
-constraint that every stage provides an a-priori memory estimate so the deterministic
-memory guarantee continues to hold.
+profile is planned. Time is optimized but not guaranteed; only memory is. The exact-path
+tuning stages that keep the factorization exact are now implemented (Sec.~\ref{sec:tunable}):
+an RCM/band ordering~\cite{cuthillmckee}, an exposed threshold-pivot tolerance, a tunable
+equilibration strategy~\cite{ruiz}, static pivot-order reuse for fixed-pattern sequences via
+$\code{pivot\_u}{=}0$, a parallel blocked multi-RHS solve, a right-looking schedule, and
+front-level parallelism of the trailing Schur update and subtraction. Each provides an
+a-priori memory estimate so the deterministic memory guarantee continues to hold, and each
+either enters the tuner grid or is caller-selected. What remains is a fuller two-dimensional
+(block-cyclic) factorization of the very largest top-of-tree fronts to push thread scaling
+past the current $\sim\!3\times$, and the cross-hardware meta-tuner above.
 
 \section{Conclusion}
 \rT{} is a pure-Rust, scalar-generic sparse direct solver that reaches within a
