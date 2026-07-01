@@ -592,7 +592,7 @@ fn method_name(m: FactorMethod) -> &'static str {
 /// Canonical analysis summary: structural features + the a-priori per-path
 /// memory estimates (left-looking, multifrontal) + flops, used for the resource
 /// gates. `None` if the matrix fails to analyze.
-fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, f64, f64, u64)> {
+fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, f64, f64, u64, u64, u64)> {
     let mb = |b: u64| b as f64 / 1048576.0;
     match mat {
         Mat::Sym(a) => {
@@ -605,6 +605,8 @@ fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, f64, f64, u64)>
                 mb(est.panel_live_peak_bytes),
                 est.factor_nnz as f64,
                 est.factor_flops,
+                est.critical_path_flops,
+                est.max_tree_width,
             ))
         }
         Mat::Unsym(a) => {
@@ -617,6 +619,8 @@ fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, f64, f64, u64)>
                 mb(est.panel_live_peak_bytes),
                 est.factor_nnz as f64,
                 est.factor_flops,
+                est.critical_path_flops,
+                est.max_tree_width,
             ))
         }
     }
@@ -663,7 +667,9 @@ fn main() {
     let mut n_records = 0usize;
     let mut n_skipped_mem = 0usize;
     for entry in &corpus {
-        let Some((feat, ll_mb, mf_mb, floor_mb, def_fill, flops)) = canonical(&entry.mat) else {
+        let Some((feat, ll_mb, mf_mb, floor_mb, def_fill, flops, crit_flops, tree_width)) =
+            canonical(&entry.mat)
+        else {
             eprintln!("[sweep] skip {}: analyze failed", entry.name);
             continue;
         };
@@ -832,6 +838,15 @@ fn main() {
                 "metrics": {
                     "factor_ms": fac_ms, "factor_nnz": fill, "peak_mb": peak_mb,
                     "est_transient_mb": combo_est, "residual": res,
+                },
+                // v2 analytical-cost inputs, for fitting the learned residual on
+                // log(measured / analytical-predicted) time (issue #62). The
+                // estimate is at the baseline knobs (the thread ladder varies only
+                // the worker count), so the cost triple is constant per matrix and
+                // `threads` is the varying axis that traces the scaling curve.
+                "cost": {
+                    "factor_flops": flops, "critical_path_flops": crit_flops,
+                    "max_tree_width": tree_width, "value_bytes": 16, "threads": p.threads,
                 },
             });
             writeln!(out, "{}", rec).expect("write rec");
