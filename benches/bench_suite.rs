@@ -27,7 +27,7 @@ use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{c64, Mat as FaerMat};
 use num_complex::Complex;
-use rslab::matgen::{bem, stencil};
+use rslab::matgen::{bem, fem, stencil};
 use rslab::{
     gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, SolverSettings, GeneralCsc,
     LdltSymbolic, LuSymbolic,
@@ -523,11 +523,23 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
 /// any `n`, like real MoM); `real` = the on-disk `precond_matrices` (smallest first).
 fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
     match family {
+        // Complex-symmetric distribution (LDLᵀ path): the three hard EM/FEM classes
+        // per size - Helmholtz (shifted, complex), curl-curl Maxwell (complex
+        // indefinite, gradient near-null-space), and Stokes/KKT saddle-point
+        // (symmetric indefinite). All genuinely complex-valued.
         "sym" => sizes
             .iter()
-            .map(|&sz| {
-                let a = stencil::helmholtz(&cube(sz), Complex::new(0.05, 0.02), &stencil::StencilOpts::default());
-                (format!("helmholtz_{}", a.n), Mat::Sym(a))
+            .flat_map(|&sz| {
+                let kc = ((sz as f64 / 3.0).cbrt().round() as usize).max(4);
+                let ks = ((sz as f64 / 3.0).sqrt().round() as usize).max(4);
+                let hz = stencil::helmholtz(&cube(sz), Complex::new(0.05, 0.02), &stencil::StencilOpts::default());
+                let cc = fem::curl_curl(&[kc, kc, kc], 3.0, 0.1);
+                let sp = fem::saddle_point::<C>(&[ks, ks], 0.1);
+                [
+                    (format!("helmholtz_{}", hz.n), Mat::Sym(hz)),
+                    (format!("curlcurl_{}", cc.n), Mat::Sym(cc)),
+                    (format!("saddle_{}", sp.n), Mat::Sym(sp)),
+                ]
             })
             .collect(),
         "unsym" => sizes

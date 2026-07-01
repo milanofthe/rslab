@@ -491,7 +491,13 @@ mod tests {
         let Ok(path) = std::env::var("RLA_TUNER_PARITY") else {
             return;
         };
-        let m = model_for(SolverPath::Ldlt).expect("model");
+        // RLA_TUNER_PARITY_PATH selects which per-path model to check against the
+        // fixture (default LDLᵀ). Run once per path with its own fixture.
+        let sp = match std::env::var("RLA_TUNER_PARITY_PATH").as_deref() {
+            Ok("lu") => SolverPath::Lu,
+            _ => SolverPath::Ldlt,
+        };
+        let m = model_for(sp).expect("model");
         let txt = std::fs::read_to_string(&path).expect("parity fixture");
         let samples: serde_json::Value = serde_json::from_str(&txt).unwrap();
         let order = |s: &str| match s {
