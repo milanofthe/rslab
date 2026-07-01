@@ -542,16 +542,27 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 ]
             })
             .collect(),
+        // Unsymmetric distribution (LU path): convection-diffusion is the canonical
+        // sparse-unsymmetric class (advection-dominated, high grid-Péclet), in 3D and
+        // 2D, plus a BEM/MoM near-field kernel for the dense-ish contrast. All
+        // genuinely complex-valued.
         "unsym" => sizes
             .iter()
-            .map(|&sz| {
+            .flat_map(|&sz| {
+                let kc = ((sz as f64).cbrt().round() as usize).max(4);
+                let ks = ((sz as f64).sqrt().round() as usize).max(4);
+                let cd3 = fem::convection_diffusion::<C>(&[kc, kc, kc], 0.01, fem::Flow::Rotating, true);
+                let cd2 = fem::convection_diffusion::<C>(&[ks, ks], 5e-3, fem::Flow::Diagonal, false);
                 // cutoff ∝ 1/√n keeps ≈`deg` neighbours per row independent of n -
-                // a realistic near-field (constant degree under mesh refinement),
-                // unlike a fixed cutoff whose density grows with n.
+                // a realistic near-field (constant degree under mesh refinement).
                 let deg = 120.0;
                 let cutoff = (2.0 * (deg / sz as f64).sqrt()).min(1.2);
-                let a = bem::kernel(sz, &bem::BemOpts { cutoff, ..Default::default() });
-                (format!("mom_{}", a.n), Mat::Unsym(a))
+                let bm = bem::kernel(sz, &bem::BemOpts { cutoff, ..Default::default() });
+                [
+                    (format!("convdiff3d_{}", cd3.n), Mat::Unsym(cd3)),
+                    (format!("convdiff2d_{}", cd2.n), Mat::Unsym(cd2)),
+                    (format!("mom_{}", bm.n), Mat::Unsym(bm)),
+                ]
             })
             .collect(),
         "corpus" => build_corpus(),
