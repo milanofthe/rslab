@@ -261,6 +261,17 @@ pub struct SolverSettings {
     /// stability (backed by the near-zero pivot policy) for less fill and speed on
     /// well-scaled / diagonally-dominant systems.
     pub pivot_u: f64,
+    /// Symmetric equilibration strategy `Â = D A D` applied by [`LdltSolver`]
+    /// before factoring. Default [`OnePassInfNorm`](crate::ScalingStrategy::OnePassInfNorm)
+    /// (the historical one-pass ∞-norm, bit-identical to before this knob).
+    /// [`Identity`](crate::ScalingStrategy::Identity) disables scaling;
+    /// [`InfNorm`](crate::ScalingStrategy::InfNorm) is the iterative Knight-Ruiz
+    /// (Ruiz) equilibration; [`Auto`](crate::ScalingStrategy::Auto) routes to
+    /// MC64 matching on the arrow-KKT signature else ∞-norm. Scaling changes only
+    /// values (not the pattern), so the a-priori memory estimate is unaffected.
+    /// Consumed by the symmetric path; the unsymmetric LU path uses its own
+    /// two-sided row/column equilibration.
+    pub scaling: crate::scaling::ScalingStrategy,
 }
 
 /// Worker-thread policy for a factorization. The numeric result is bit-identical
@@ -420,6 +431,7 @@ impl Default for SolverSettings {
             par_cdiv: DEFAULT_PAR_CDIV,
             use_gemm_schur: true,
             pivot_u: DEFAULT_PIVOT_U,
+            scaling: crate::scaling::ScalingStrategy::OnePassInfNorm,
         }
     }
 }
@@ -552,6 +564,13 @@ impl SolverSettings {
     /// See [`pivot_u`](Self::pivot_u).
     pub fn with_pivot_u(mut self, u: f64) -> Self {
         self.pivot_u = u.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Builder: set the symmetric equilibration strategy (analyze/factor-time,
+    /// symmetric path). See [`scaling`](Self::scaling).
+    pub fn with_scaling(mut self, scaling: crate::scaling::ScalingStrategy) -> Self {
+        self.scaling = scaling;
         self
     }
 

@@ -115,6 +115,36 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     (d, ScalingInfo::Applied)
 }
 
+/// One-pass symmetric ∞-norm equilibration `sᵢ = 1/√maxⱼ|Aᵢⱼ|` (a single
+/// Knight-Ruiz step). Cheaper than the iterative [`compute_infnorm`] and the
+/// historical [`crate::LdltSolver`] default: it tolerates a zero diagonal (the
+/// row max is taken over off-diagonals) and never iterates. An all-zero row is
+/// left unscaled (`sᵢ = 1`), surfacing as a singular pivot during factorization.
+/// The scan folds in the symmetric partner `(j, i)` of every stored `(i, j)`, so
+/// it is correct for a lower-triangular *or* a full symmetric store (`max` is
+/// idempotent).
+pub fn compute_onepass(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
+    let n = matrix.n;
+    let mut row_max = vec![0.0f64; n];
+    for j in 0..n {
+        for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+            let i = matrix.row_idx[k];
+            let m = matrix.values[k].abs();
+            if m > row_max[i] {
+                row_max[i] = m;
+            }
+            if i != j && m > row_max[j] {
+                row_max[j] = m;
+            }
+        }
+    }
+    let s = row_max
+        .iter()
+        .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
+        .collect();
+    (s, ScalingInfo::Applied)
+}
+
 /// Knight-Ruiz ∞-norm scaling computed on a `SymmetricMatrix`
 /// (column-major dense storage with the lower triangle authoritative).
 ///

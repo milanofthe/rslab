@@ -108,6 +108,7 @@ pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::RslabError;
 pub use scalar::Scalar;
+pub use scaling::ScalingStrategy;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
 pub use dense::ldlt_generic::{factor_ldlt, solve_ldlt, solve_ldlt_many, LdltFactors};
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.

@@ -161,8 +161,14 @@ pub enum ScalingStrategy {
     /// Knight-Ruiz ∞-norm iterative equilibration. Matches the
     /// scaling algorithm used by the dense BK path. Was the default
     /// from Phase 2.2.3 through the 2026-04-19 lever-C residual diff
-    /// (now opt-in).
+    /// (now opt-in). The "iterative Ruiz" arm of the equilibration knob.
     InfNorm,
+    /// One-pass symmetric ∞-norm equilibration `sᵢ = 1/√maxⱼ|Aᵢⱼ|` (a
+    /// single Knight-Ruiz step). The historical [`crate::LdltSolver`]
+    /// equilibration and the [`crate::SolverSettings`] default: cheapest,
+    /// tolerates a zero diagonal, no iteration. See
+    /// [`infnorm::compute_onepass`].
+    OnePassInfNorm,
     /// MC64-style symmetric matching-based scaling. Matches the
     /// default behavior of MUMPS (SYM=2) and SSIDS
     /// (options%scaling=1). Useful on matrices where matching
@@ -340,6 +346,7 @@ pub(crate) fn compute_scaling_with_cache(
             Ok((s.clone(), ScalingInfo::Applied))
         }
         ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),
+        ScalingStrategy::OnePassInfNorm => Ok(infnorm::compute_onepass(matrix)),
         ScalingStrategy::Mc64Symmetric => match cache {
             Some(c) => Ok(mc64::scaling_from_cache(c)),
             None => mc64::compute_symmetric(matrix),

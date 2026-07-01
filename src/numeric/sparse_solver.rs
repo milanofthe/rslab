@@ -252,11 +252,28 @@ impl<T: Scalar> LdltSolver<T> {
     }
 }
 
-/// Symmetric infinity-norm equilibration `Â = D A D`, `D = diag(s)`,
-/// `sᵢ = 1/√maxⱼ|Aᵢⱼ|`. Returns the scaled matrix (identical pattern) and the
-/// real scaling `s`. An all-zero row is left unscaled (surfaces as a singular
-/// pivot during factorization).
-fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
+/// Apply a symmetric real scaling `Â = D A D`, `D = diag(scale)` (user-order),
+/// producing the scaled matrix with the identical pattern.
+fn apply_symmetric_scaling<T: Scalar>(a: &CscMatrix<T>, scale: &[f64]) -> CscMatrix<T> {
+    let mut scaled_values = Vec::with_capacity(a.values.len());
+    for j in 0..a.n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            scaled_values.push(a.values[k] * T::from_real(scale[i] * scale[j]));
+        }
+    }
+    CscMatrix::<T> {
+        n: a.n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: scaled_values,
+    }
+}
+
+/// Fast native one-pass ∞-norm scaling on a generic (`f64`/`Complex`) matrix:
+/// `sᵢ = 1/√maxⱼ|Aᵢⱼ|`. The [`ScalingStrategy::OnePassInfNorm`] default, kept
+/// on the generic type so the shipped path never densifies to a magnitude copy.
+fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
     let n = a.n;
     let mut row_max = vec![0.0f64; n];
     for j in 0..n {
@@ -271,24 +288,47 @@ fn equilibrate<T: Scalar>(a: &CscMatrix<T>) -> (CscMatrix<T>, Vec<f64>) {
             }
         }
     }
-    let scale: Vec<f64> = row_max
+    row_max
         .iter()
         .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
-        .collect();
-    let mut scaled_values = Vec::with_capacity(a.values.len());
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
-            scaled_values.push(a.values[k] * T::from_real(scale[i] * scale[j]));
+        .collect()
+}
+
+/// Symmetric equilibration `Â = D A D` under the chosen [`ScalingStrategy`].
+/// Returns the scaled matrix (identical pattern) and the real scaling `s`.
+///
+/// The [`OnePassInfNorm`](ScalingStrategy::OnePassInfNorm) default and
+/// [`Identity`](ScalingStrategy::Identity) run natively on `T` (no magnitude
+/// copy, bit-identical to the historical one-pass); the iterative / matching
+/// strategies ([`InfNorm`](ScalingStrategy::InfNorm),
+/// [`Mc64Symmetric`](ScalingStrategy::Mc64Symmetric),
+/// [`Auto`](ScalingStrategy::Auto), [`External`](ScalingStrategy::External))
+/// route through [`crate::scaling::compute_scaling`] on the `|A|` magnitude
+/// pattern (a real `D` derived from magnitudes is the correct congruence for a
+/// complex-symmetric `A`). Scaling changes only values, so the sparsity pattern
+/// and the a-priori memory estimate are unaffected.
+fn equilibrate_with<T: Scalar>(
+    a: &CscMatrix<T>,
+    strategy: &crate::scaling::ScalingStrategy,
+) -> Result<(CscMatrix<T>, Vec<f64>), RslabError> {
+    use crate::scaling::ScalingStrategy;
+    let scale = match strategy {
+        ScalingStrategy::OnePassInfNorm => onepass_scale(a),
+        ScalingStrategy::Identity => return Ok((a.clone(), vec![1.0; a.n])),
+        other => {
+            // Real magnitude view `|A|` (same pattern) for the f64 scaling machinery.
+            let mag = CscMatrix::<f64> {
+                n: a.n,
+                col_ptr: a.col_ptr.clone(),
+                row_idx: a.row_idx.clone(),
+                values: a.values.iter().map(|v| v.magnitude()).collect(),
+            };
+            let (s, _info) = crate::scaling::compute_scaling(&mag, other)?;
+            s
         }
-    }
-    let scaled = CscMatrix::<T> {
-        n,
-        col_ptr: a.col_ptr.clone(),
-        row_idx: a.row_idx.clone(),
-        values: scaled_values,
     };
-    (scaled, scale)
+    let scaled = apply_symmetric_scaling(a, &scale);
+    Ok((scaled, scale))
 }
 
 /// Reusable PARDISO-style **phase-1 analysis** for [`LdltSolver`].
@@ -454,7 +494,7 @@ impl LdltSymbolic {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symbolic, cap)
         });
         let t = std::time::Instant::now();
-        let (scaled, scale) = equilibrate(a);
+        let (scaled, scale) = equilibrate_with(a, &opts.scaling)?;
         let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let mut diagnostics = crate::diagnostics::Diagnostics {
@@ -510,6 +550,58 @@ mod tests {
             .map(|i| (ax[i] - b[i]).abs() / b[i].abs().max(1.0))
             .fold(0.0, f64::max);
         assert!(rel < 1e-10, "relative residual {}", rel);
+    }
+
+    #[test]
+    fn scaling_strategy_knob_all_variants_solve() {
+        use crate::scaling::ScalingStrategy;
+        // Well-conditioned SPD tridiagonal-plus-grid: every equilibration strategy
+        // (and Identity/off) must factor and solve to a tiny residual, proving the
+        // knob is threaded end-to-end (SolverSettings.scaling → equilibrate_with →
+        // compute_scaling). The default OnePassInfNorm stays bit-identical.
+        let m = 6;
+        let n = m * m;
+        let idx = |a: usize, b: usize| a * m + b;
+        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                r.push(p);
+                cc.push(p);
+                v.push(6.0_f64);
+                if b + 1 < m {
+                    r.push(idx(a, b + 1));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+                if a + 1 < m {
+                    r.push(idx(a + 1, b));
+                    cc.push(p);
+                    v.push(-1.0);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+        let sym = LdltSymbolic::analyze(&a).unwrap();
+        for strat in [
+            ScalingStrategy::OnePassInfNorm,
+            ScalingStrategy::Identity,
+            ScalingStrategy::InfNorm,
+            ScalingStrategy::Mc64Symmetric,
+            ScalingStrategy::Auto,
+        ] {
+            let opts = SolverSettings::default().with_scaling(strat.clone());
+            let solver = sym.factor(&a, &opts).unwrap();
+            let x = solver.solve(&b).unwrap();
+            let res = residual_inf(&a, &x, &b);
+            assert!(res < 1e-9, "strategy {strat:?} residual {res}");
+        }
+        // Default preserves the historical one-pass scaling exactly.
+        assert_eq!(
+            SolverSettings::default().scaling,
+            ScalingStrategy::OnePassInfNorm
+        );
     }
 
     #[test]
