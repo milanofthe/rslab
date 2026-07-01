@@ -26,7 +26,7 @@ use num_complex::Complex;
 use rslab::{
     analyze_with, factor_numeric, factor_sparse_ldlt_with, solve_ldlt, CompressedLdltFactors,
     CscMatrix, FactorMethod, GemmThresholds, LdltSymbolic, MemoryMode, OrderingMethod,
-    ScalingStrategy, SolverSettings,
+    ScalingStrategy, SolverSettings, ZeroPivotAction,
 };
 
 type C = Complex<f64>;
@@ -194,15 +194,34 @@ fn main() {
             continue;
         }
         let b = rand_rhs(a.n);
-        let base = SolverSettings::default().with_threads(threads);
-
-        // (1) Auto path + solve residual.
-        let refx = match sym.factor(&a, &base) {
-            Ok(f) => match f.solve(&b) { Ok(x) => x, Err(e) => { fail.push(format!("{name}: default solve {e:?}")); continue; } },
-            Err(e) => { fail.push(format!("{name}: default factor {e:?}")); continue; }
+        // Exact mode by default; saddle-point / augmented systems (aug*, cont-*,
+        // bratu3d, KKT) legitimately hit zero pivots in an *exact* factor, so fall
+        // back to preconditioner mode (static perturbation + iterative refinement)
+        // - the axes are then validated on those matrices too, in the mode where a
+        // factor exists. This is pre-existing solver behaviour, not an axis effect.
+        let anorm = a.values.iter().map(|v| v.norm()).fold(0.0, f64::max).max(1.0);
+        let exact = SolverSettings::default().with_threads(threads);
+        let (base, precond) = match sym.factor(&a, &exact) {
+            Ok(_) => (exact, false),
+            Err(_) => (
+                SolverSettings::default()
+                    .with_threads(threads)
+                    .with_pivot(ZeroPivotAction::PerturbToEps { abs_floor: anorm * 1e-12 }),
+                true,
+            ),
         };
-        let res = rel_residual(&a, &refx, &b);
-        if res < tol { residual_ok += 1; } else { eprintln!("[val] {name}: residual {res:.1e} (indefinite/ill-conditioned)"); }
+
+        // (1) Reference factor + solve residual (refined in preconditioner mode).
+        let refsolver = match sym.factor(&a, &base) {
+            Ok(f) => f,
+            Err(e) => { fail.push(format!("{name}: factor {e:?}")); continue; }
+        };
+        let res = if precond {
+            refsolver.solve_refined(&a, &b, 30).map(|x| rel_residual(&a, &x, &b)).unwrap_or(f64::INFINITY)
+        } else {
+            refsolver.solve(&b).map(|x| rel_residual(&a, &x, &b)).unwrap_or(f64::INFINITY)
+        };
+        if res < tol { residual_ok += 1; } else { eprintln!("[val] {name}: residual {res:.1e} (indefinite/ill-conditioned{})", if precond { ", precond" } else { "" }); }
         validated += 1;
 
         let solve_with = |opts: &SolverSettings| -> Option<Vec<C>> {
