@@ -690,58 +690,64 @@ faer~\cite{faer}, and MKL PARDISO~\cite{pardiso} were measured in one run, so th
 cross-solver numbers are not affected by run-to-run drift.
 
 \subsection{Scaling}
-Figures~\ref{fig:scaling} and~\ref{fig:memory} plot factor time and peak memory against
-$\nnz$ with a least-squares power-law fit $\sim\nnz^\alpha$ per solver (solves with
-residual above $0.1$ excluded from the fit). The RSLAB curve is the auto-tuned default,
-which picks left-looking or multifrontal per matrix under the guards. Table~\ref{tab:scaling}
-gives the fitted orders and the head-to-head geomean ratios on the matrices both solvers
-factor accurately.
+The two paths are separate solvers a caller dispatches to explicitly, so each is compared on
+\emph{its own} class against its own PARDISO mtype (6 for complex-symmetric, 13 for
+unsymmetric) and faer: Figs.~\ref{fig:h2h_ldlt} and~\ref{fig:h2h_lu} plot factor time and
+peak memory against $\nnz$ with a least-squares power-law fit $\sim\nnz^\alpha$ per solver
+(solves with residual above $0.1$ excluded). The RSLAB curve is the auto-tuned default, which
+picks left-looking or multifrontal per matrix under the guards. Table~\ref{tab:scaling} gives
+the head-to-head geomean ratios.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\textwidth]{corpus_scaling_fit.pdf}
-\caption{Corpus scaling of factor time vs.\ problem size, with power-law fits.}
-\label{fig:scaling}
+\includegraphics[width=0.49\textwidth]{h2h_ldlt_time.pdf}\hfill
+\includegraphics[width=0.49\textwidth]{h2h_ldlt_mem.pdf}
+\caption{$\LDLt$ path (symmetric, PARDISO mtype 6): factor time (left) and peak memory
+(right) vs.\ problem size --- RSLAB vs.\ faer vs.\ MKL PARDISO, with power-law fits.}
+\label{fig:h2h_ldlt}
 \end{figure}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\textwidth]{corpus_memory_fit.pdf}
-\caption{Corpus scaling of peak factor memory vs.\ problem size, with power-law fits.}
-\label{fig:memory}
+\includegraphics[width=0.49\textwidth]{h2h_lu_time.pdf}\hfill
+\includegraphics[width=0.49\textwidth]{h2h_lu_mem.pdf}
+\caption{LU path (unsymmetric, PARDISO mtype 13): factor time (left) and peak memory
+(right) vs.\ problem size. On time RSLAB scales flatter than PARDISO ($\alpha\!\approx\!0.96$
+vs.\ $1.32$), closing the gap on large problems.}
+\label{fig:h2h_lu}
 \end{figure}
 
 \begin{table}[h]
 \centering\tabfont
-\begin{tabular}{@{}lccc@{}}
+\begin{tabular}{@{}lcc@{}}
 \toprule
-RSLAB (auto) vs & $\LDLt$ (complex) & LU (complex) & overall \\
+RSLAB (auto) vs & $\LDLt$ (sym) & LU (unsym) \\
 \midrule
-MKL PARDISO --- factor time & $5.1\times$ slower & \textbf{\num{1.5}}$\times$ slower & \textbf{\num{3.8}}$\times$ slower \\
-MKL PARDISO --- peak memory & $2.6\times$ more & $2.5\times$ more & $2.6\times$ more \\
-faer LU\textsuperscript{$\dagger$} --- factor time & \textbf{\num{5.4}}$\times$ faster & \textbf{\num{4.2}}$\times$ faster & \textbf{\num{5.0}}$\times$ faster \\
-faer LU\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{3.4}}$\times$ less & $2.1\times$ less & $3.0\times$ less \\
+MKL PARDISO --- factor time & $5.7\times$ slower & \textbf{\num{3.5}}$\times$ slower \\
+MKL PARDISO --- peak memory & $2.4\times$ more & $2.6\times$ more \\
+faer LU\textsuperscript{$\dagger$} --- factor time & \textbf{\num{13.6}}$\times$ faster & \textbf{\num{11.3}}$\times$ faster \\
+faer LU\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{3.2}}$\times$ less & \textbf{\num{1.7}}$\times$ less \\
 \bottomrule
 \end{tabular}
-\caption{Head-to-head geomean ratios on the complex, both-path corpus (curl-curl,
-Helmholtz, saddle-point for $\LDLt$; BEM/MoM for LU), over the matrices both solvers factor to
-below $0.1$ residual. \textsuperscript{$\dagger$}faer factors only the smaller matrices within
-its memory budget (OOMs on the largest, where RSLAB's advantage is greatest), so its
-head-to-head is a conservative floor. The corpus mixes fill families, so a single per-solver
-scaling order $\alpha$ is not meaningful; Figs.~\ref{fig:scaling}--\ref{fig:memory} show the
-raw points.}
+\caption{Head-to-head geomean ratios, each path on its own class ($\LDLt$: curl-curl,
+Helmholtz, saddle-point; LU: convection--diffusion, BEM/MoM), over the matrices both solvers
+factor to below $0.1$ residual. \textsuperscript{$\dagger$}faer has no symmetric path (it
+factors symmetric matrices as LU), so its $\LDLt$ gap is structurally largest; it also OOMs on
+the largest matrices (factoring only the smaller subset), so its head-to-head is a
+conservative floor.}
 \label{tab:scaling}
 \end{table}
 
-On its actual target distribution --- complex, both paths --- RSLAB is within $\sim\!1.5\times$
-of PARDISO on the unsymmetric path and $\sim\!5\times$ on the harder symmetric-indefinite
-path, and about $5\times$ faster and $3\times$ lighter than faer. The corpus choice was
-load-bearing: benchmarking on real-SPD matrices flattered RSLAB ($7\times$) and hid two tuner
-mispicks on complex-indefinite curl-curl, where the adaptive \code{Auto} ordering produces
-$\sim\!3\times$ the fill of nested dissection. Adding \code{MetisND} to the tuner grid and
-racing orderings out-of-distribution (the \code{AutoRace} fallback, deciding on the exact
-a-priori fill rather than the extrapolating model) cut the worst curl-curl case from
-$19\times$ to $1.5\times$ of PARDISO and halved the overall PARDISO gap.
+RSLAB sits between the two on both paths: much faster and lighter than the pure-Rust faer,
+moderately behind the hand-optimized MKL PARDISO. The unsymmetric path is the closer of the
+two ($3.5\times$ vs.\ $5.7\times$ behind PARDISO) and scales flatter than PARDISO, a direct
+result of broadening the convection--diffusion training set (Sec.~\ref{sec:tuner}). The
+corpus choice was load-bearing throughout: benchmarking on real-SPD matrices flattered RSLAB
+($7\times$) and hid two tuner mispicks on complex-indefinite curl-curl, where the adaptive
+\code{Auto} ordering produces $\sim\!3\times$ the fill of nested dissection. Adding
+\code{MetisND} to the tuner grid and racing orderings out-of-distribution (the
+\code{AutoRace} fallback, deciding on the exact a-priori fill rather than the extrapolating
+model) cut the worst curl-curl case from $19\times$ to $1.5\times$ of PARDISO.
 
 \subsection{Accuracy}
 Figure~\ref{fig:residual} shows the relative residual $\lVert Ax-b\rVert/\lVert b\rVert$

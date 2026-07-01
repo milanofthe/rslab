@@ -67,21 +67,33 @@ hard problem classes RSLAB targets (8k-125k DOFs, all `Complex<f64>`):
 - **symmetric LDLᵀ** (vs PARDISO `mtype 6`): time-harmonic **curl-curl Maxwell**
   (complex indefinite, gradient near-null-space), shifted **Helmholtz**, and
   **Stokes/KKT saddle-point** (symmetric indefinite);
-- **unsymmetric LU** (vs `mtype 13`): **BEM/MoM** near-field kernels.
+- **unsymmetric LU** (vs `mtype 13`): **convection-diffusion** (advection-dominated,
+  swept over the grid-Péclet range) and **BEM/MoM** near-field kernels.
 
 The generators are standard discretizations (curl-curl edge/Yee, MAC/mixed-FEM
-saddle-point), assembled on structured grids in `src/matgen/fem.rs`. All solvers
-measured in one run. Reproduce: `RLA_BENCH_FAMILY=sym|unsym cargo bench --bench
-bench_suite --features matgen-download`, then `fit_scaling.py`.
+saddle-point, convection-diffusion finite differences), assembled on structured
+grids in `src/matgen/fem.rs`. Each path is measured on its own class in one run.
+Reproduce: `RLA_BENCH_FAMILY=sym|unsym cargo bench --bench bench_suite --features
+matgen`, then `head_to_head.py`.
 
-### Scaling: factor time and peak memory vs problem size
+### Per-path scaling: RSLAB vs faer vs MKL PARDISO
 
-![Factor time scaling](benches/bench_out/corpus_scaling_fit.png)
-![Peak memory scaling](benches/bench_out/corpus_memory_fit.png)
+The two paths are separate solvers a caller dispatches to explicitly, so each is
+plotted against *its own* PARDISO mtype and faer — factor time and peak memory vs
+nonzeros, log-log, one power-law fit per solver.
 
-Each point is one corpus matrix; the line is a least-squares power-law fit
-`~ nnz^α` (the empirical scaling order), garbage solves (`‖Ax-b‖/‖b‖ > 0.1`)
-excluded from the fit.
+**LDLᵀ path (symmetric, PARDISO mtype 6):**
+
+![LDLt factor time](benches/bench_out/h2h_ldlt_time.png)
+![LDLt peak memory](benches/bench_out/h2h_ldlt_mem.png)
+
+**LU path (unsymmetric, PARDISO mtype 13):**
+
+![LU factor time](benches/bench_out/h2h_lu_time.png)
+![LU peak memory](benches/bench_out/h2h_lu_mem.png)
+
+Each point is one corpus matrix; garbage solves (`‖Ax-b‖/‖b‖ > 0.1`) are excluded
+from the fit.
 
 The RSLAB curve is the **auto-tuned default** (`LdltSolver::factor` /
 `LuSolver::factor`) - the solver as shipped, with a **separate learned tuner per
@@ -91,26 +103,23 @@ classes with different fill families, so the per-solver power-law `α` is only a
 rough visual trend (not a single clean scaling order) — the head-to-head geomeans
 below are the load-bearing numbers.
 
-Head-to-head (geomean over the matrices both solvers factor to `< 0.1` residual):
+Head-to-head (geomean over the matrices both solvers factor to `< 0.1` residual),
+each path on its own class:
 
-| RSLAB (auto) vs | LDLᵀ (complex) | LU (complex) | overall |
-|-----------------|:--------------:|:------------:|:-------:|
-| **MKL PARDISO** — factor time | 5.1x slower | **1.5x slower** | **3.8x slower** |
-| **MKL PARDISO** — peak memory | 2.6x more | 2.5x more | 2.6x more |
-| **faer LU** — factor time | **5.4x faster** | **4.2x faster** | **5.0x faster** |
-| **faer LU** — peak memory | **3.4x less** | **2.1x less** | **3.0x less** |
+| RSLAB (auto) vs | LDLᵀ (sym) | LU (unsym) |
+|-----------------|:----------:|:----------:|
+| **MKL PARDISO** — factor time | 5.7x slower | **3.5x slower** |
+| **MKL PARDISO** — peak memory | 2.4x more | 2.6x more |
+| **faer LU** — factor time | **13.6x faster** | **11.3x faster** |
+| **faer LU** — peak memory | **3.2x less** | **1.7x less** |
 
-On its actual target distribution (complex, both paths) RSLAB is within **~1.5x of
-PARDISO on the unsymmetric path** and ~5x on the harder symmetric-indefinite path,
-and **5x faster / 3x lighter than faer**. The right corpus was load-bearing here:
-benchmarking on real-SPD matrices had flattered RSLAB (7x) and hidden two tuner
-mispicks on complex-indefinite curl-curl — adding `MetisND` to the tuner grid and
-racing orderings out-of-distribution (`AutoRace` fallback) cut the worst curl-curl
-case from **19x to 1.5x** of PARDISO and halved the overall PARDISO gap.
-
-faer factors only the smaller matrices within its memory budget (it OOMs on the
-largest, where RSLAB's advantage is greatest), so its head-to-head is over the
-smaller subset — the `5.0x faster` figure is a conservative floor.
+RSLAB sits between the two: much faster and lighter than the pure-Rust faer,
+moderately behind the hand-optimized MKL PARDISO. On the unsymmetric path RSLAB is
+within **3.5x of PARDISO** and **scales flatter than it** (factor-time exponent
+α ≈ 0.96 vs 1.32), closing the gap on large problems — the payoff of the
+convection-diffusion tuning. faer has no symmetric path (it factors sym matrices as
+LU too), which is why its LDLᵀ gap is largest; it also OOMs on the largest matrices
+(factoring only the smaller subset), so its head-to-head is a conservative floor.
 
 ### Thread scaling
 
