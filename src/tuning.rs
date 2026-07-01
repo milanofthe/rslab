@@ -223,6 +223,39 @@ pub struct FactorPlan {
     pub note: String,
 }
 
+/// Cost-model worker-count selection: the fewest workers that reach (within a
+/// small margin) the minimum predicted time. Because
+/// [`est_runtime_ms_threaded`](MemoryEstimate::est_runtime_ms_threaded) floors at
+/// the critical path of the assembly tree, adding workers past the point where the
+/// parallel term hits that floor buys nothing --- so a critical-path-bound matrix
+/// (a banded chain, whose critical path is nearly its whole work) gets **fewer**
+/// workers, and a wide 3D tree gets more. Deterministic given the calibration.
+/// `max_threads == 0` means all physical cores.
+pub fn recommend_threads_cost_model(
+    estimate: &MemoryEstimate,
+    calib: &Calibration,
+    max_threads: usize,
+    all_cores: usize,
+) -> usize {
+    let cap = if max_threads == 0 { all_cores.max(1) } else { max_threads };
+    let rate = calib.rate_for(estimate.value_bytes);
+    let time = |t: usize| estimate.est_runtime_ms_threaded(rate, calib.speedup_for(t));
+    let mut best_t = 1;
+    let mut best = time(1);
+    for t in [2usize, 4, 6, 8, 12, 16, 20, 24, 32].into_iter().filter(|&t| t <= cap) {
+        let tt = time(t);
+        if tt < best * 0.97 {
+            // >3% faster: worth the extra workers.
+            best = tt;
+            best_t = t;
+        } else {
+            // Diminishing returns (critical path / saturation) -- stop adding cores.
+            break;
+        }
+    }
+    best_t
+}
+
 /// Turn an a-priori [`MemoryEstimate`] + a [`Budget`] into a concrete plan, using
 /// the machine's [`HardwareInfo`] and [`Calibration`]. Path-agnostic: pass the
 /// estimate from `LuSymbolic`/`LdltSymbolic::estimate_memory`. Pure given the
@@ -233,9 +266,11 @@ pub fn plan(
     hw: &HardwareInfo,
     calib: &Calibration,
 ) -> FactorPlan {
-    let threads = if budget.max_threads == 0 { hw.physical_cores.max(1) } else { budget.max_threads };
+    // Cost-model worker count: the fewest cores that reach near-minimum predicted
+    // time (fewer when the critical path or saturation dominates), not blindly all.
+    let threads = recommend_threads_cost_model(estimate, calib, budget.max_threads, hw.physical_cores);
     let speedup = calib.speedup_for(threads);
-    let runtime = estimate.est_runtime_ms(calib.geom_gflops, speedup);
+    let runtime = estimate.est_runtime_ms_threaded(calib.rate_for(estimate.value_bytes), speedup);
     let mut opts = SolverSettings::default().with_threads(threads);
     let mut peak = estimate.transient_peak_bytes;
     let mut use_f32 = false;
@@ -290,6 +325,39 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_model_thread_count_respects_critical_path() {
+        // Synthetic calibration: peak speedup 6 at 12 threads.
+        let calib = Calibration {
+            geom_gflops: 2.0,
+            geom_gflops_cplx: 0.7,
+            speedup: 6.0,
+            speedup_threads: 12,
+            fingerprint: 0,
+        };
+        let mut est = crate::diagnostics::MemoryEstimate {
+            value_bytes: 8,
+            factor_nnz: 0,
+            factor_bytes: 0,
+            panels_all_bytes: 0,
+            panel_live_peak_bytes: 0,
+            transient_peak_bytes: 0,
+            mf_transient_peak_bytes: 0,
+            factor_flops: 100_000_000_000, // 1e11 total work
+            critical_path_flops: 0,
+            max_tree_width: 256,
+        };
+        // Wide tree (critical path 1% of work): more threads keep paying off.
+        est.critical_path_flops = 1_000_000_000; // 1e9
+        let wide = recommend_threads_cost_model(&est, &calib, 24, 24);
+        // Critical-path-bound (chain: critical path == total work): no parallel gain.
+        est.critical_path_flops = est.factor_flops;
+        let chain = recommend_threads_cost_model(&est, &calib, 24, 24);
+        assert!(wide > chain, "wide tree uses more workers ({wide}) than a chain ({chain})");
+        assert_eq!(chain, 1, "a critical-path-bound matrix uses a single worker");
+        assert!(wide >= 8, "a wide tree uses many workers ({wide})");
+    }
 
     #[test]
     fn probe_calibrate_plan_governor() {
