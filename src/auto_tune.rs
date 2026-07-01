@@ -187,10 +187,19 @@ fn knob_value(c: &Candidate, name: &str) -> f64 {
 }
 
 fn ordering_name(o: OrderingMethod) -> &'static str {
+    // Real per-variant names so the one-hot encoding matches the trainer for any
+    // swept ordering. The model's `orderings` one-hot only lists a subset; a name
+    // outside it encodes as all-zero (matching Python), so an ordering the tuner
+    // never proposes still round-trips correctly through the parity check.
     match o {
         OrderingMethod::Amd => "amd",
+        OrderingMethod::Amf => "amf",
         OrderingMethod::MetisND => "metis",
-        _ => "auto",
+        OrderingMethod::ScotchND => "scotch",
+        OrderingMethod::KahipND => "kahip",
+        OrderingMethod::Rcm => "rcm",
+        OrderingMethod::Auto => "auto",
+        OrderingMethod::AutoRace => "auto_race",
     }
 }
 
@@ -502,7 +511,12 @@ mod tests {
         let samples: serde_json::Value = serde_json::from_str(&txt).unwrap();
         let order = |s: &str| match s {
             "amd" => OrderingMethod::Amd,
+            "amf" => OrderingMethod::Amf,
             "metis" => OrderingMethod::MetisND,
+            "scotch" => OrderingMethod::ScotchND,
+            "kahip" => OrderingMethod::KahipND,
+            "rcm" => OrderingMethod::Rcm,
+            "auto_race" => OrderingMethod::AutoRace,
             _ => OrderingMethod::Auto,
         };
         let g = |v: &serde_json::Value, k: &str| v[k].as_f64().unwrap() as usize;
@@ -546,11 +560,12 @@ mod tests {
         // tuner expands the candidate grid over them. Base grid 768 = 2·4·4·4·3·2;
         // scaling ×4 and memory ×2 on both paths, and pivot_u ×4 only on the LU
         // path (Bunch-Kaufman ignores it, so it is pinned on LDLᵀ).
-        let m = model_for(SolverPath::Ldlt).expect("ldlt model loads");
-        let a = active_knobs(m);
-        assert!(a.scaling && a.memory, "retrained model tunes scaling + memory");
-        assert_eq!(candidates(SolverPath::Ldlt, &a).len(), 768 * 8, "LDLᵀ: scaling×4·memory×2");
-        assert_eq!(candidates(SolverPath::Lu, &a).len(), 768 * 32, "LU: +pivot_u×4");
+        let ldlt = active_knobs(model_for(SolverPath::Ldlt).expect("ldlt model loads"));
+        let lu = active_knobs(model_for(SolverPath::Lu).expect("lu model loads"));
+        assert!(ldlt.scaling && ldlt.memory && !ldlt.pivot_u, "LDLᵀ tunes scaling+memory, not pivot_u");
+        assert!(lu.scaling && lu.memory && lu.pivot_u, "LU tunes scaling+memory+pivot_u");
+        assert_eq!(candidates(SolverPath::Ldlt, &ldlt).len(), 768 * 8, "LDLᵀ: scaling×4·memory×2");
+        assert_eq!(candidates(SolverPath::Lu, &lu).len(), 768 * 32, "LU: +pivot_u×4");
         // Data-driven gate: a model referencing no axis leaves the grid unchanged.
         let none = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
         assert_eq!(candidates(SolverPath::Ldlt, &none).len(), 768);

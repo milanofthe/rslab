@@ -31,4 +31,4 @@ rla-calib/
 
 # Local backups + regenerated tuner parity fixture (opt-in test)
 *.bak
-src/tuner_parity.json
+src/tuner_parity*.json
