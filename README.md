@@ -404,7 +404,11 @@ let p = plan(&est, &budget, &hw, &calib);
 `plan` is a pure function of `(estimate, budget, hw, calibration)`. The thread
 count it picks is cost-model-driven: the fewest cores that reach the near-minimum
 predicted time, using an Amdahl critical-path floor from the assembly tree, so it
-stops adding workers once the serial critical path (not total work) dominates.
+stops adding workers once the serial critical path (not total work) dominates. A
+small learned residual (`benches/fit_residual.py`, `amdahl_frac`-driven, ~26%
+held-out error reduction) refines the analytical speedup curve; it is additive on
+the calibrated base and floored at the critical path, so it never extrapolates a
+true chain into an impossible speedup.
 
 ### Meta-tuner (`cargo xtask`)
 

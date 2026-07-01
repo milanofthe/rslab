@@ -337,14 +337,37 @@ measured peak, per RSLAB path. The estimate does not under-predict.}
 \subsection{Work and runtime}
 The geometric work $\text{factor\_flops}=\sum_s \text{nrow}_s^2\,\text{ncol}_s$ is a
 type-independent proxy, so a single \code{f64} calibration serves all scalar types. The
-runtime estimate is $\text{factor\_flops}/(\text{gflops}\cdot\text{speedup})$. The
-\code{Calibration} measures the single-thread geometric-flop rate and the parallel speedup
+thread-aware runtime estimate is
+$\max\!\big(\text{critical\_path\_flops}/r,\ \text{factor\_flops}/(r\cdot\text{speedup})\big)$
+with $r=\text{gflops}\cdot10^{9}$: the second term is the parallel work, the first is an
+Amdahl floor from the assembly tree's longest leaf-to-root chain (computed in one postorder
+pass over the supernodes), so a critical-path-bound matrix does not benefit from workers
+past the point where the parallel term drops to the floor. The
+\code{Calibration} measures the single-thread geometric-flop rate (separately for real and
+complex, since the per-flop cost differs) and the parallel speedup
 once, by factoring a $24^3$ seven-point Laplacian at one thread and at all physical cores,
 and caches the result keyed by a hardware fingerprint (core counts and a RAM-size bucket)
 in the manner of FFTW wisdom~\cite{fftw}. The speedup is interpolated linearly from one
 thread to the calibrated thread count and held flat beyond it, matching the saturating
 scaling of sparse-direct work; a fallback of $\num{2}$ Gflop/s and $\sqrt{\text{cores}}$
 speedup is used if the measurement fails.
+
+\paragraph{Learned residual.}
+The bare analytical speedup $s_{\text{pred}}(t)=\text{factor\_flops}/\max(\text{critical\_path\_flops},\,
+\text{factor\_flops}/\text{speedup}(t))$ mispredicts the achieved scaling systematically: the
+critical-path flops overstate the true serial fraction (sibling subtrees overlap in time), so
+the model is too pessimistic on serial-heavy trees and too optimistic on wide ones. A ridge
+regression of $\log(s_{\text{meas}}/s_{\text{pred}})$ on dimensionless structural features
+$[\,1,\ \text{amdahl\_frac},\ \ln t,\ \ln\text{tree\_width}\,]$, where
+$\text{amdahl\_frac}=\text{critical\_path\_flops}/\text{factor\_flops}$, is fit offline over a
+generated thread-scaling corpus of \num{54} matrices and reduces the held-out speedup error
+by $\sim\!26\%$ under leave-one-matrix-out cross-validation. Almost all of the signal is in
+\code{amdahl\_frac} (dropping it leaves a $2\%$ gain), which validates the critical-path
+feature. The residual is kept additive on the calibrated base rather than a standalone model,
+so the absolute rate still comes from the hardware calibration and only the shape of the
+speedup curve is relearned --- a machine-transferable correction. It is clamped, and the
+corrected time is floored at the critical path, so the linear fit can never extrapolate a
+true chain ($\text{amdahl\_frac}\!\to\!1$) into a physically impossible speedup.
 
 \subsection{Thread count}
 The thread-count predictor maps three structural quantities, the factor flops, the largest
