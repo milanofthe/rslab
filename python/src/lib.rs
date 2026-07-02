@@ -26,8 +26,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use rslab::{
-    CscMatrix, FactorMethod, SolverSettings, GeneralCsc, LdltSolver, LuSolver, MemoryMode,
-    RslabError, Scalar, ZeroPivotAction,
+    gmres_block as gmres_block_core, CscMatrix, FactorMethod, GeneralCsc, LdltSolver, LuSolver,
+    MemoryMode, RslabError, Scalar, SolverSettings, ZeroPivotAction,
 };
 
 /// Map a core solver error onto a Python `RuntimeError` carrying its message.
@@ -192,6 +192,36 @@ macro_rules! ldlt_solve_many_arm {
     }};
 }
 
+/// Right-preconditioned **block GMRES** for one scalar type. `B` is a
+/// C-contiguous (row-major) `n x nrhs` array; the core wants column-major
+/// (each RHS contiguous), so transpose in, run the block solve with the stored
+/// matrix as operator and this factor as the preconditioner, transpose out.
+macro_rules! gmres_block_arm {
+    ($py:expr, $b:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
+        let bb: PyReadonlyArray2<$T> = $b
+            .extract()
+            .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
+        let shape = bb.shape();
+        let (n, nrhs) = (shape[0], shape[1]);
+        let rm = bb.as_slice()?; // row-major n x nrhs
+        let mut cm = vec![<$T>::default(); n * nrhs];
+        for i in 0..n {
+            for c in 0..nrhs {
+                cm[c * n + i] = rm[i * nrhs + c];
+            }
+        }
+        let res = gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, $restart).map_err(map_err)?;
+        let mut out = vec![<$T>::default(); n * nrhs];
+        for c in 0..nrhs {
+            for i in 0..n {
+                out[i * nrhs + c] = res.x[c * n + i];
+            }
+        }
+        let arr = out.into_pyarray_bound($py);
+        Ok(arr.reshape([n, nrhs])?.into_any().unbind())
+    }};
+}
+
 #[pymethods]
 impl Ldlt {
     /// Matrix dimension `n`.
@@ -311,6 +341,57 @@ impl Ldlt {
             LdltAny::F32(s, _) => ldlt_solve_many_arm!(py, b, s, f32),
             LdltAny::C64(s, _) => ldlt_solve_many_arm!(py, b, s, Complex64),
             LdltAny::C32(s, _) => ldlt_solve_many_arm!(py, b, s, Complex32),
+        }
+    }
+
+    /// Solve ``A X = B`` iteratively by **block GMRES**, preconditioned by this
+    /// factor.
+    ///
+    /// Drives all ``nrhs`` right-hand sides in lockstep, this factor acting as the
+    /// preconditioner :math:`M^{-1}` and the factored matrix as the operator. The
+    /// payoff over :meth:`solve_many` is when the factor is *inexact* - built with
+    /// ``preconditioner=...`` (static pivoting) or ``drop_tol=...`` (incomplete) -
+    /// so a few preconditioned iterations recover the true solution while the
+    /// factor stays cheap / memory-light. The multi-RHS orthogonalization is
+    /// block-CGS2, which parallelizes across the worker pool (cap it with
+    /// :func:`rslab.with_threads` in Rust, or via the ambient pool).
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     An ``n x nrhs`` block; its dtype must match :attr:`dtype`.
+    /// tol : float, default 1e-8
+    ///     Target relative residual :math:`\\lVert B - A X\\rVert / \\lVert B\\rVert`,
+    ///     per column.
+    /// maxit : int, default 400
+    ///     Maximum total inner iterations.
+    /// restart : int, default 80
+    ///     GMRES restart length (the Krylov basis depth per cycle).
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solutions ``X`` as an ``n x nrhs`` array of the factor's dtype (the
+    ///     best iterate; check the residual if convergence is not guaranteed).
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``B``'s dtype does not match the factor's dtype.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    fn gmres_block(
+        &self,
+        py: Python<'_>,
+        b: &Bound<'_, PyAny>,
+        tol: f64,
+        maxit: usize,
+        restart: usize,
+    ) -> PyResult<PyObject> {
+        match &self.inner {
+            LdltAny::F64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f64),
+            LdltAny::F32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f32),
+            LdltAny::C64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex64),
+            LdltAny::C32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex32),
         }
     }
 }
@@ -522,6 +603,58 @@ impl Lu {
             LuAny::F32(s, _) => lu_solve_many_arm!(py, b, s, f32),
             LuAny::C64(s, _) => lu_solve_many_arm!(py, b, s, Complex64),
             LuAny::C32(s, _) => lu_solve_many_arm!(py, b, s, Complex32),
+        }
+    }
+
+    /// Solve ``A X = B`` iteratively by **block GMRES**, preconditioned by this
+    /// factor.
+    ///
+    /// Drives all ``nrhs`` right-hand sides in lockstep, this factor acting as the
+    /// preconditioner :math:`M^{-1}` and the factored matrix as the operator. The
+    /// payoff over :meth:`solve_many` is when the factor is *inexact* - built with
+    /// ``preconditioner=...`` (static pivoting) or ``drop_tol=...`` (incomplete) -
+    /// so a few preconditioned iterations recover the true solution while the
+    /// factor stays cheap / memory-light. This is the many-excitations MoM / FEM
+    /// path (factor the near-field once, drive all right-hand sides in one block
+    /// iteration). The multi-RHS orthogonalization is block-CGS2, which
+    /// parallelizes across the worker pool.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     An ``n x nrhs`` block; its dtype must match :attr:`dtype`.
+    /// tol : float, default 1e-8
+    ///     Target relative residual :math:`\\lVert B - A X\\rVert / \\lVert B\\rVert`,
+    ///     per column.
+    /// maxit : int, default 400
+    ///     Maximum total inner iterations.
+    /// restart : int, default 80
+    ///     GMRES restart length (the Krylov basis depth per cycle).
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solutions ``X`` as an ``n x nrhs`` array of the factor's dtype (the
+    ///     best iterate; check the residual if convergence is not guaranteed).
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``B``'s dtype does not match the factor's dtype.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    fn gmres_block(
+        &self,
+        py: Python<'_>,
+        b: &Bound<'_, PyAny>,
+        tol: f64,
+        maxit: usize,
+        restart: usize,
+    ) -> PyResult<PyObject> {
+        match &self.inner {
+            LuAny::F64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f64),
+            LuAny::F32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f32),
+            LuAny::C64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex64),
+            LuAny::C32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex32),
         }
     }
 }
