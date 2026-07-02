@@ -49,8 +49,8 @@ fn build_opts(
         Some(floor) => SolverSettings::preconditioner(floor),
         None => SolverSettings::default(),
     };
-    // `threads=None` keeps the core default (Threads::Auto - the per-matrix
-    // predictor, up to all cores); an explicit value fixes the worker count.
+    // `threads=None` keeps the core default (Threads::Auto { max: 4 } - the
+    // per-matrix predictor capped at 4 workers); an explicit value pins the count.
     if let Some(n) = threads {
         o = o.with_threads(n);
     }
@@ -136,6 +136,25 @@ enum LdltAny {
 
 /// A factored symmetric (real or complex-symmetric) matrix, ready to solve
 /// against many right-hand sides. Created by `rslab.ldlt(...)`.
+/// A reusable symmetric factor handle, ``Pᵀ A P = L D Lᵀ``.
+///
+/// Returned by :func:`rslab.ldlt` (or :func:`rslab.spsolve` internally). Holds the
+/// Bunch-Kaufman factor and the fill-reducing permutation, so the expensive
+/// factorization is paid once and amortized over many :meth:`solve` /
+/// :meth:`solve_many` calls. Immutable and cheap to keep around.
+///
+/// Attributes
+/// ----------
+/// n : int
+///     Matrix dimension.
+/// factor_nnz : int
+///     Stored nonzeros in ``L`` (the fill).
+/// n_perturbed : int
+///     Count of statically perturbed pivots (nonzero only in preconditioner mode).
+/// inertia : tuple of int
+///     ``(positive, negative, zero)`` eigenvalue counts.
+/// dtype : str
+///     The factor's NumPy dtype name.
 #[pyclass]
 struct Ldlt {
     inner: LdltAny,
@@ -235,9 +254,27 @@ impl Ldlt {
         }
     }
 
-    /// Solve `A x = b`. With `refine > 0`, run that many steps of iterative
-    /// refinement against the original matrix (recovers accuracy in
-    /// preconditioner / static-pivot mode).
+    /// Solve ``A x = b`` for a single right-hand side.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     Right-hand side of length ``n``. Its dtype must match :attr:`dtype`
+    ///     (the underlying solve is strict; :func:`rslab.spsolve` casts for you).
+    /// refine : int, default 0
+    ///     Steps of iterative refinement against the original matrix. Use with a
+    ///     preconditioner / static-pivot factor to recover full accuracy from the
+    ///     inexact factor; ``0`` is a plain triangular solve.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solution ``x``, a fresh array of the same dtype and shape as ``b``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``b``'s dtype does not match the factor's dtype.
     #[pyo3(signature = (b, refine = 0))]
     fn solve(&self, py: Python<'_>, b: &Bound<'_, PyAny>, refine: usize) -> PyResult<PyObject> {
         match &self.inner {
@@ -248,8 +285,26 @@ impl Ldlt {
         }
     }
 
-    /// Solve `A X = B` for several right-hand sides at once. `B` is an
-    /// `n x nrhs` array; the result has the same shape.
+    /// Solve ``A X = B`` for several right-hand sides at once.
+    ///
+    /// Batches the triangular solves across the columns of ``B`` (one pass over the
+    /// factor for all right-hand sides), which is markedly faster than looping
+    /// :meth:`solve` when ``nrhs`` is large.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     A C-contiguous ``n x nrhs`` block; its dtype must match :attr:`dtype`.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solutions ``X``, an ``n x nrhs`` array of the same dtype as ``B``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``B``'s dtype does not match the factor's dtype.
     fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         match &self.inner {
             LdltAny::F64(s, _) => ldlt_solve_many_arm!(py, b, s, f64),
@@ -313,8 +368,23 @@ enum LuAny {
     C32(LuSolver<Complex<f32>>, GeneralCsc<Complex<f32>>),
 }
 
-/// A factored unsymmetric matrix, ready to solve against many right-hand sides.
-/// Created by `rslab.lu(...)`.
+/// A reusable general (unsymmetric) factor handle, ``Pᵀ A P = L U``.
+///
+/// Returned by :func:`rslab.lu` (or :func:`rslab.spsolve` internally). Holds the
+/// multifrontal ``L U`` factor, the fill-reducing permutation, and a copy of the
+/// original matrix (for iterative refinement), so the factorization is paid once
+/// and amortized over many :meth:`solve` / :meth:`solve_many` calls.
+///
+/// Attributes
+/// ----------
+/// n : int
+///     Matrix dimension.
+/// factor_nnz : int
+///     Stored fill, ``nnz(L) + nnz(U)``.
+/// n_perturbed : int
+///     Count of statically perturbed pivots (nonzero only in preconditioner mode).
+/// dtype : str
+///     The factor's NumPy dtype name.
 #[pyclass]
 struct Lu {
     inner: LuAny,
@@ -350,6 +420,7 @@ macro_rules! lu_solve_many_arm {
 
 #[pymethods]
 impl Lu {
+    /// Matrix dimension `n`.
     #[getter]
     fn n(&self) -> usize {
         match &self.inner {
@@ -371,6 +442,9 @@ impl Lu {
         }
     }
 
+    /// Number of statically perturbed pivots (nonzero only in preconditioner
+    /// mode; the stored factor is then of a perturbed `A + E`, solve with
+    /// `refine`).
     #[getter]
     fn n_perturbed(&self) -> usize {
         match &self.inner {
@@ -381,6 +455,8 @@ impl Lu {
         }
     }
 
+    /// The factor's NumPy dtype name (`'float64'`, `'float32'`, `'complex128'`,
+    /// `'complex64'`).
     #[getter]
     fn dtype(&self) -> &'static str {
         match &self.inner {
@@ -391,6 +467,26 @@ impl Lu {
         }
     }
 
+    /// Solve ``A x = b`` for a single right-hand side.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     Right-hand side of length ``n``; its dtype must match :attr:`dtype`.
+    /// refine : int, default 0
+    ///     Steps of iterative refinement against the original matrix (recovers
+    ///     accuracy from a preconditioner / static-pivot factor); ``0`` is a plain
+    ///     triangular solve.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solution ``x``, a fresh array of the same dtype and shape as ``b``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``b``'s dtype does not match the factor's dtype.
     #[pyo3(signature = (b, refine = 0))]
     fn solve(&self, py: Python<'_>, b: &Bound<'_, PyAny>, refine: usize) -> PyResult<PyObject> {
         match &self.inner {
@@ -401,6 +497,25 @@ impl Lu {
         }
     }
 
+    /// Solve ``A X = B`` for several right-hand sides at once.
+    ///
+    /// Batches the triangular solves across the columns of ``B`` (one pass over the
+    /// factor for all right-hand sides) - faster than looping :meth:`solve`.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     A C-contiguous ``n x nrhs`` block; its dtype must match :attr:`dtype`.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solutions ``X``, an ``n x nrhs`` array of the same dtype as ``B``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``B``'s dtype does not match the factor's dtype.
     fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         match &self.inner {
             LuAny::F64(s, _) => lu_solve_many_arm!(py, b, s, f64),

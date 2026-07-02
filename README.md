@@ -136,13 +136,15 @@ count per matrix:
 
 ### Auto-tuned thread count
 
-RSLAB defaults to `Threads::Auto`: it predicts the worker count from the matrix
-structure (factor flops, front height, assembly-tree width) measured during the
-symbolic analysis, capped at a user maximum. Fit from the corpus thread-scaling
-sweep, this lands within **~10% of the per-matrix-optimal count** (geomean),
-against ~50% for a fixed budget of 2 - thin / tiny systems stay low (where extra
-threads only regress), big BLAS-3-rich systems use the cores. Override with a
-fixed budget for solver-in-the-loop (many concurrent solves).
+RSLAB defaults to `Threads::Auto { max: 4 }`: it predicts the worker count from the
+matrix structure (factor flops, front height, assembly-tree width) measured during
+the symbolic analysis, **capped at 4** by default. Fit from the corpus
+thread-scaling sweep, the predictor lands within **~10% of the per-matrix-optimal
+count** (geomean), against ~50% for a fixed budget of 2 - thin / tiny systems stay
+low (where extra threads only regress), bigger systems use up to the cap. The
+default cap of 4 is the pareto-optimal throughput-per-core point; raise it
+(`Threads::Auto { max: 0 }` = all cores) for a single big solve, or pin a
+`Fixed(n)` budget for solver-in-the-loop (many concurrent solves).
 
 ### Auto-tuned solver settings
 
@@ -360,11 +362,14 @@ One-shot: `LdltSolver::factor(&a)` / `LuSolver::factor(&a, &opts)`.
 | `with_drop_tol(τ)` | drop fill below relative `τ` (incomplete factor) |
 | `with_blr(BlrMode::…)` | block-low-rank compression of large fronts |
 | `with_method(FactorMethod::…)` | `LeftLooking` (default) or `Multifrontal` |
-| `with_threads(n)` | scoped pool of `n` workers (`0` = all cores, default 2) |
+| `with_threads(n)` | scoped pool of exactly `n` workers (`0` = all cores) |
+| `with_thread_policy(Threads::…)` | `Auto{max}` (predict per matrix, capped; **default `max:4`**), `Fixed(n)`, or `Ambient` (use the current pool — no new spawn) |
 | `with_memory(MemoryMode::…)` | transient-memory strategy |
 
 The factor is bit-identical regardless of `threads`; the thread count affects time
-and transient working set, not the result.
+and transient working set, not the result. The default caps at **4 workers** — the
+pareto-optimal throughput-per-core point (the efficiency knee is ~4–6 threads) and
+the safe default for concurrent / embedded use.
 
 ### Solver handles
 
@@ -404,6 +409,31 @@ if !est.fits_in(8 << 30) { /* over 8 GiB */ }
 `gmres`, `gmres_block`, `cocg`, `cocr` over any `LinearOperator` + `Preconditioner`.
 A factor implements `Preconditioner`. A `Complex<f32>` factor can precondition an
 `f64` GMRES via `LowPrecisionPreconditioner`.
+
+`gmres_block` drives `s` right-hand sides in lockstep and orthogonalizes the whole
+panel with **block-CGS2** — a parallel, panel-wide sweep instead of per-RHS
+Gram-Schmidt — so the multi-RHS solve now scales across threads (~2.5x at 12 cores
+on a deep-Krylov solve, where the old per-RHS path was flat) while staying
+bit-identical across thread counts.
+
+**Solver-in-the-loop thread capping.** The block orthogonalization runs on the
+ambient rayon pool, so cap the whole solve with one pool: factor once (its own
+bounded, `Auto{max:4}` pool), then run the RHS loop inside `with_threads(4, …)`:
+
+```rust
+# use rslab::{factor_general_lu, gmres_block, with_threads, SolverSettings, RslabError};
+# use rslab::sparse::general::GeneralCsc;
+# fn demo(a: &GeneralCsc<f64>, batches: &[Vec<f64>], s: usize) -> Result<(), RslabError> {
+let lu = factor_general_lu(a, &SolverSettings::default())?;   // Auto{max:4}
+with_threads(4, || {
+    for rhs in batches { let _ = gmres_block(a, rhs, s, &lu, 1e-8, 400, 80)?; }
+    Ok::<_, RslabError>(())
+})?;
+# Ok(()) }
+```
+
+Both phases stay on 4 cores with no per-call thread spawn. To also re-factor on the
+shared pool (e.g. every Newton step), pass `Threads::Ambient` in the settings.
 
 ### Tuning (feature `tuning`)
 
