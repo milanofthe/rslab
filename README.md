@@ -197,6 +197,30 @@ model predicts only approximately, so a few matrices see a small time regression
 while still saving memory. The worker count stays with the `Threads::Auto`
 predictor; `factor_with` opts out with explicit settings.
 
+### Multi-RHS block GMRES scaling
+
+`gmres_block` drives `s` right-hand sides in lockstep and orthogonalizes the whole
+panel with **block-CGS2** (a parallel, panel-wide sweep) instead of per-RHS
+Gram-Schmidt. Measured on a preconditioned convection-diffusion solve (n=40000, 78
+GMRES iterations, `Complex<f64>`), the block solve now scales with threads where
+the old per-RHS path was flat.
+
+![Block GMRES strong scaling](benches/bench_out/block_gmres_scaling.png)
+
+Strong scaling per block width: BCGS2 (v0.12, solid) reaches ~2.5x at 12 cores;
+the pre-BCGS2 MGS path (v0.11, dashed) is flat-to-negative — its serial
+orthogonalization does not scale at any thread count.
+
+![Block GMRES parallel efficiency](benches/bench_out/block_gmres_efficiency.png)
+![Block GMRES per-RHS cost](benches/bench_out/block_gmres_per_rhs.png)
+
+Efficiency knees at ~4–6 threads (the remaining serial fraction is the sparse
+triangular preconditioner solve, not the orthogonalization). Per-RHS cost at 12
+threads stays ~1.4–2.5x below the MGS reference across block widths, and near-flat
+in `s` — adding right-hand sides stays cheap (BLAS-3 reuse). BCGS2 is memory-neutral
+and bit-identical across thread counts. Cap the whole solve for embedded use with
+`with_threads(n, …)`.
+
 ### Accuracy (SuiteSparse)
 
 ![SuiteSparse residual](benches/bench_out/corpus_residual.png)

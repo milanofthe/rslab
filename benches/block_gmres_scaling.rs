@@ -38,10 +38,22 @@ fn build_rhs(n: usize, s: usize) -> Vec<C> {
     bblk
 }
 
+/// Append one JSONL record to the file named by `RLA_JSON`, tagged with the
+/// `RLA_VARIANT` label (e.g. `bcgs2` / `mgs`), so the plot script can overlay the
+/// current build against the committed reference. No-op if `RLA_JSON` is unset.
+fn emit(mode: &str, variant: &str, fields: &str) {
+    let Ok(path) = std::env::var("RLA_JSON") else { return };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{{\"mode\":\"{mode}\",\"variant\":\"{variant}\",{fields}}}");
+    }
+}
+
 fn main() {
     let dim: usize = std::env::var("RLA_DIM").ok().and_then(|v| v.parse().ok()).unwrap_or(180);
     let s: usize = std::env::var("RLA_BLOCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
     let droptol: f64 = std::env::var("RLA_DROPTOL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.01);
+    let variant = std::env::var("RLA_VARIANT").unwrap_or_else(|_| "bcgs2".into());
 
     let a = convection_diffusion::<C>(&[dim, dim], 0.01, Flow::Rotating, true);
     let n = a.n;
@@ -91,6 +103,11 @@ fn main() {
                 }
                 let sp = base[si] / tpr;
                 print!("  {tpr:7.1} ({sp:4.2}x)");
+                emit(
+                    "grid",
+                    &variant,
+                    &format!("\"n\":{n},\"s\":{s},\"threads\":{p},\"per_rhs_ms\":{tpr:.3},\"speedup\":{sp:.4}"),
+                );
             }
             println!();
         }
@@ -116,7 +133,13 @@ fn main() {
                 ms = ms.min(t.elapsed().as_secs_f64() * 1e3);
             }
             let maxres = res.final_res.iter().copied().fold(0.0, f64::max);
-            println!("{s:3}   {ms:9.1}    {:9.1}     {:5}   {:.1e}", ms / s as f64, res.iters, maxres);
+            let tpr = ms / s as f64;
+            println!("{s:3}   {ms:9.1}    {tpr:9.1}     {:5}   {:.1e}", res.iters, maxres);
+            emit(
+                "rhs",
+                &variant,
+                &format!("\"n\":{n},\"s\":{s},\"threads\":{p},\"total_ms\":{ms:.3},\"per_rhs_ms\":{tpr:.3},\"iters\":{}", res.iters),
+            );
         }
         return;
     }

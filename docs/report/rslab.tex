@@ -631,6 +631,39 @@ all right-hand sides through the parallel \code{solve\_many}, so a block solve i
 work of this report is otherwise orthogonal to the Krylov layer --- it improves the factor
 the Krylov layer consumes.
 
+\subsection{Block orthogonalization}
+The block matvec and block preconditioner apply are BLAS-3 and parallel; the remaining serial,
+latency-bound piece of the multi-RHS GMRES was the orthogonalization, done per right-hand side
+by modified Gram--Schmidt with DGKS reorthogonalization --- $O(m\cdot s)$ sequential BLAS-1
+reductions per Arnoldi step. \rT{} replaces it with \emph{block classical Gram--Schmidt with
+one reorthogonalization} (BCGS2): the whole $s$-column panel is projected against the basis in
+two panel-wide sweeps parallelized over the vector dimension in fixed row chunks. The result is
+memory-neutral (the same block Krylov basis $n\cdot s\cdot(m{+}1)$ dominates; the projection
+scratch is $\sim\!0.05\%$ of it) and \emph{bit-identical across thread counts} --- the chunked
+reduction sums in a fixed order independent of the worker count.
+
+Figure~\ref{fig:blockgmres} measures a right-preconditioned convection--diffusion solve
+($n=\num{40000}$, $78$ GMRES iterations, complex \code{f64}). BCGS2 scales to $\sim\!2.5\times$
+at 12 cores, where the per-RHS MGS path is flat-to-negative --- its serial orthogonalization
+does not scale at any thread count, so more threads (fighting the parallel matvec/solve for
+memory bandwidth) can even regress it. The efficiency knee is at \numrange{4}{6} threads: the
+orthogonalization is no longer the bottleneck, and the residual serial fraction is the sparse
+triangular preconditioner solve. Per-RHS cost stays near-flat in the block width $s$ (adding
+right-hand sides is cheap, BLAS-3 reuse) and \numrange{1.4}{2.5}$\times$ below the MGS
+reference at 12 threads.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.49\textwidth]{block_gmres_scaling.pdf}\hfill
+\includegraphics[width=0.49\textwidth]{block_gmres_efficiency.pdf}\\[2pt]
+\includegraphics[width=0.62\textwidth]{block_gmres_per_rhs.pdf}
+\caption{Multi-RHS block GMRES, BCGS2 (v0.12, solid) vs.\ the pre-BCGS2 per-RHS MGS
+(v0.11, dashed). Left: strong-scaling speedup vs.\ threads per block width. Right: parallel
+efficiency. Bottom: per-RHS cost vs.\ block width at 12 threads. Preconditioned
+convection--diffusion, $n=\num{40000}$, complex \code{f64}.}
+\label{fig:blockgmres}
+\end{figure}
+
 \section{Test matrix corpus}
 \label{sec:corpus}
 The tuner is fit and the solver evaluated on a corpus deliberately spanning the full problem

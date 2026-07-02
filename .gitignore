@@ -25,6 +25,11 @@ build/
 benches/bench_out/*.jsonl
 benches/bench_out/*.log
 
+# Exception: the pre-BCGS2 (v0.11 MGS) block-GMRES reference is *not* regeneratable
+# from HEAD (it needs the old binary), so it is committed as a frozen baseline the
+# block_gmres_plot overlays against the current build.
+!benches/bench_out/block_gmres_mgs_ref.jsonl
+
 # Local calibration cache (the `tuning` feature also writes this to the OS temp dir)
 rslab-calib/
 rla-calib/
