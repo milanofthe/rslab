@@ -46,11 +46,24 @@ fn main() {
     let (tol, maxit, restart) = (1e-6, 400, 80);
 
     let max_p = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
-    let plan: Vec<usize> = [1usize, 2, 4, 6, 8, 12].iter().copied().filter(|&p| p <= max_p).collect();
+    let plan: Vec<usize> = [1usize, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24]
+        .iter()
+        .copied()
+        .filter(|&p| p <= max_p)
+        .collect();
 
+    // Peak memory is dominated by the block Krylov basis `n·s·(m+1)`; the BCGS2
+    // scratch (`proj1/proj2` = m·s, reduction scratch = ⌈n/ORTHO_CHUNK⌉·m·s) is a
+    // rounding error next to it. Report both so the split is explicit.
+    let bytes = std::mem::size_of::<C>();
+    let basis_mb = (n * s * (restart + 1) * bytes) as f64 / (1024.0 * 1024.0);
+    let scratch_mb = ((restart * s * 2) + n.div_ceil(2048) * restart * s) * bytes;
     println!(
         "Block GMRES strong scaling  [n={n}  s={s}  drop_tol={droptol}  cores<= {max_p}]\n\
-         threads    time(ms)   speedup   efficiency   iters   res"
+         basis {basis_mb:.0} MB   BCGS2 scratch {:.0} KB   (scratch/basis = {:.3}%)\n\
+         threads    time(ms)   speedup   efficiency   iters   res",
+        scratch_mb as f64 / 1024.0,
+        scratch_mb as f64 / (basis_mb * 1024.0 * 1024.0) * 100.0
     );
     let mut t1 = 0.0f64;
     for (idx, &p) in plan.iter().enumerate() {
