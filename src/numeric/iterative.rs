@@ -538,8 +538,20 @@ const ORTHO_CHUNK: usize = 2048;
 /// latency-bound BLAS-1 reductions of modified Gram-Schmidt. The reduction is a
 /// fixed row-chunk sum folded in chunk order → deterministic regardless of the
 /// thread count.
+/// `scratch` is a caller-owned reduction buffer of length `≥ nchunks · width`
+/// (`nchunks = ⌈n/ORTHO_CHUNK⌉`, `width = blocks·sa`), reused across steps so the
+/// hot loop allocates nothing. Each chunk writes its `width` partial sums into its
+/// own slice; the slices are then folded in chunk order.
 #[inline]
-fn block_project<T: Scalar>(vbas: &[T], w: &[T], blocks: usize, sa: usize, n: usize, proj: &mut [T]) {
+fn block_project<T: Scalar>(
+    vbas: &[T],
+    w: &[T],
+    blocks: usize,
+    sa: usize,
+    n: usize,
+    proj: &mut [T],
+    scratch: &mut [T],
+) {
     let width = blocks * sa;
     for p in proj[..width].iter_mut() {
         *p = T::zero();
@@ -548,31 +560,28 @@ fn block_project<T: Scalar>(vbas: &[T], w: &[T], blocks: usize, sa: usize, n: us
         return;
     }
     let nchunks = n.div_ceil(ORTHO_CHUNK);
-    let partials: Vec<Vec<T>> = (0..nchunks)
-        .into_par_iter()
-        .map(|ci| {
-            let r0 = ci * ORTHO_CHUNK;
-            let r1 = (r0 + ORTHO_CHUNK).min(n);
-            let mut acc = vec![T::zero(); width];
-            for i in 0..blocks {
-                for ap in 0..sa {
-                    let vb = (i * sa + ap) * n;
-                    let wb = ap * n;
-                    let mut sdot = T::zero();
-                    for k in r0..r1 {
-                        sdot = sdot + vbas[vb + k].conj() * w[wb + k];
-                    }
-                    acc[i * sa + ap] = sdot;
+    let part = &mut scratch[..nchunks * width];
+    part.par_chunks_mut(width).enumerate().for_each(|(ci, out)| {
+        let r0 = ci * ORTHO_CHUNK;
+        let r1 = (r0 + ORTHO_CHUNK).min(n);
+        for i in 0..blocks {
+            for ap in 0..sa {
+                let vb = (i * sa + ap) * n;
+                let wb = ap * n;
+                let mut sdot = T::zero();
+                for k in r0..r1 {
+                    sdot = sdot + vbas[vb + k].conj() * w[wb + k];
                 }
+                out[i * sa + ap] = sdot;
             }
-            acc
-        })
-        .collect();
+        }
+    });
     // Fold partials in chunk order: the summation order is fixed by the chunk
     // layout, so the result does not depend on how many threads ran.
-    for part in &partials {
+    for ci in 0..nchunks {
+        let base = ci * width;
         for t in 0..width {
-            proj[t] = proj[t] + part[t];
+            proj[t] = proj[t] + part[base + t];
         }
     }
 }
@@ -828,6 +837,7 @@ where
             got: b.len(),
         });
     }
+    const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
     let mut x = vec![T::zero(); n * s];
     let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
@@ -843,11 +853,17 @@ where
     let mut axblk = vec![T::zero(); n * s];
     let mut vyblk = vec![T::zero(); n * s];
     let mut xc = vec![T::zero(); n * s]; // compact live-RHS solutions for the residual matvec
-    // Block-CGS2 projection panels: `proj[i*sa + ap]` for blocks `0..=j`, columns
-    // `0..sa`. Two passes (project → subtract → project → subtract) give classical
-    // Gram-Schmidt with one reorthogonalization (CGS2, backward stable).
+    // Block Gram-Schmidt projection panels: `proj[i*sa + ap]` for blocks `0..=j`,
+    // columns `0..sa`. One classical (block) projection pass, plus a **conditional**
+    // reorthogonalization pass (block DGKS) taken only when a column loses
+    // orthogonality - the backward-stable, single-thread-cheap analogue of the
+    // old per-RHS MGS+DGKS, now batched over the whole panel.
     let mut proj1 = vec![T::zero(); m * s];
     let mut proj2 = vec![T::zero(); m * s];
+    let mut wnorm0 = vec![0.0f64; s]; // panel column norms before ortho (DGKS reorth test)
+    // Reduction scratch for `block_project`: `nchunks · (m·s)`, reused every step
+    // so the orthogonalization allocates nothing in the hot loop.
+    let mut proj_scratch = vec![T::zero(); n.div_ceil(ORTHO_CHUNK) * m * s];
 
     // Per-active-position Arnoldi state (indexed `0..sa`, reset each cycle).
     let mut h: Vec<Vec<Vec<T>>> = (0..s).map(|_| vec![vec![T::zero(); m]; m + 1]).collect();
@@ -925,19 +941,29 @@ where
             // Batched right preconditioning + operator apply over the active block.
             precond.apply_block(&vbas[jblock..jblock + sa * n], &mut zblk[..sa * n], sa, n)?;
             op.apply_block(&zblk[..sa * n], &mut wblk[..sa * n], sa);
-            // **Block CGS2** orthogonalization of the whole `sa`-column panel `W`
-            // against each column's own basis `V_0..V_j`: two classical
-            // Gram-Schmidt passes (project → subtract, twice). Both passes are
-            // panel-wide, high-arithmetic-intensity sweeps parallelized over the
-            // vector dimension, replacing the `O(j·sa)` sequential MGS+DGKS inner
-            // products. CGS2 is backward stable (numerically equivalent to
-            // MGS+DGKS). Converged columns are still swept (kept in the panel for
-            // batching) but their Hessenberg/Givens state is frozen below.
+            // **Block Gram-Schmidt** of the whole `sa`-column panel `W` against each
+            // column's own basis `V_0..V_j`: one classical projection pass
+            // (project → subtract), then a **conditional** reorthogonalization pass
+            // (block DGKS) taken only when a column's norm collapses - the
+            // backward-stable, single-thread-cheap analogue of the old per-RHS
+            // MGS+DGKS. Both passes are panel-wide, high-arithmetic-intensity sweeps
+            // parallelized over the vector dimension, replacing the `O(j·sa)`
+            // sequential BLAS-1 inner products. The reorth decision is taken from
+            // serial column norms, so it is identical across thread counts (the
+            // whole solve stays bit-identical regardless of parallelism). Converged
+            // columns are still swept (kept in the panel for batching) but their
+            // Hessenberg/Givens state is frozen below.
             let blocks = j + 1;
-            block_project(&vbas, &wblk, blocks, sa, n, &mut proj1);
+            for ap in 0..sa {
+                wnorm0[ap] = norm2(&wblk[ap * n..ap * n + n]);
+            }
+            block_project(&vbas, &wblk, blocks, sa, n, &mut proj1, &mut proj_scratch);
             block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1);
-            block_project(&vbas, &wblk, blocks, sa, n, &mut proj2);
-            block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2);
+            let reorth = (0..sa).any(|ap| norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap]);
+            if reorth {
+                block_project(&vbas, &wblk, blocks, sa, n, &mut proj2, &mut proj_scratch);
+                block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2);
+            }
             let mut all_done = true;
             for ap in 0..sa {
                 if inner_done[ap] {
@@ -945,9 +971,10 @@ where
                 }
                 all_done = false;
                 let wb = ap * n;
-                // Hessenberg column: the two CGS passes accumulate the projection.
+                // Hessenberg column: projection pass, plus the reorth pass if taken.
                 for i in 0..=j {
-                    h[ap][i][j] = proj1[i * sa + ap] + proj2[i * sa + ap];
+                    let hij = if reorth { proj1[i * sa + ap] + proj2[i * sa + ap] } else { proj1[i * sa + ap] };
+                    h[ap][i][j] = hij;
                 }
                 let hn = norm2(&wblk[wb..wb + n]);
                 h[ap][j + 1][j] = T::from_real(hn);

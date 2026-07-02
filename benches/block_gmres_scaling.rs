@@ -1,0 +1,76 @@
+//! **Strong-scaling** of block GMRES orthogonalization (issue #3, item 1).
+//!
+//! The block operator matvec and the block preconditioner solve were already
+//! BLAS-3 and parallel; the orthogonalization was the serial, latency-bound piece
+//! left behind (per-RHS MGS + DGKS). Block-CGS2 turns it into panel-wide sweeps
+//! parallelized over the vector dimension. This bench isolates that: one factor,
+//! then the **same** block GMRES solve timed in rayon pools of 1..P threads, so
+//! the reported speedup/efficiency is the orthogonalization + matvec scaling.
+//!
+//! Self-contained (no external matrices): a complex convection--diffusion grid
+//! (rotating flow, upwind) gives an unsymmetric operator; a drop-tolerance
+//! incomplete LU keeps it in the iterative regime where per-iteration cost - and
+//! thus orthogonalization - dominates.
+//!
+//! Run: `cargo bench --bench block_gmres_scaling`
+//!   env: `RLA_DIM=180` grid side (n = DIM²), `RLA_BLOCK_S=5` RHS count,
+//!        `RLA_DROPTOL=0.01` preconditioner drop tolerance.
+
+use std::time::Instant;
+
+use num_complex::Complex;
+use rslab::matgen::fem::{convection_diffusion, Flow};
+use rslab::{factor_general_lu, gmres_block, SolverSettings};
+
+type C = Complex<f64>;
+
+fn main() {
+    let dim: usize = std::env::var("RLA_DIM").ok().and_then(|v| v.parse().ok()).unwrap_or(180);
+    let s: usize = std::env::var("RLA_BLOCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+    let droptol: f64 = std::env::var("RLA_DROPTOL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.01);
+
+    let a = convection_diffusion::<C>(&[dim, dim], 0.01, Flow::Rotating, true);
+    let n = a.n;
+    let mut bblk = vec![C::default(); n * s];
+    for k in 0..s {
+        for i in 0..n {
+            bblk[k * n + i] = Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+        }
+    }
+
+    let mut opts = SolverSettings::preconditioner(1e-10);
+    if droptol > 0.0 {
+        opts = opts.with_drop_tol(droptol);
+    }
+    let lu = factor_general_lu(&a, &opts).unwrap();
+    let (tol, maxit, restart) = (1e-6, 400, 80);
+
+    let max_p = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+    let plan: Vec<usize> = [1usize, 2, 4, 6, 8, 12].iter().copied().filter(|&p| p <= max_p).collect();
+
+    println!(
+        "Block GMRES strong scaling  [n={n}  s={s}  drop_tol={droptol}  cores<= {max_p}]\n\
+         threads    time(ms)   speedup   efficiency   iters   res"
+    );
+    let mut t1 = 0.0f64;
+    for (idx, &p) in plan.iter().enumerate() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap();
+        let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart).unwrap();
+        let _ = pool.install(solve); // warm up (page-in, branch predictors)
+        let t = Instant::now();
+        let res = pool.install(solve);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        if idx == 0 {
+            t1 = ms;
+        }
+        let speedup = t1 / ms;
+        let eff = speedup / p as f64;
+        let maxres = res.final_res.iter().copied().fold(0.0, f64::max);
+        println!(
+            "{p:5}    {ms:9.1}   {speedup:6.2}x   {:8.0}%   {:5}   {:.1e}",
+            eff * 100.0,
+            res.iters,
+            maxres
+        );
+    }
+}
