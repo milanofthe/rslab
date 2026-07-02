@@ -709,7 +709,7 @@ fn main() {
     let mut n_records = 0usize;
     let mut n_skipped_mem = 0usize;
     for entry in &corpus {
-        let Some((feat, ll_mb, mf_mb, floor_mb, def_fill, flops, crit_flops, tree_width)) =
+        let Some((feat, ll_mb, mf_mb, _floor_mb, _def_fill, flops, crit_flops, tree_width)) =
             canonical(&entry.mat)
         else {
             eprintln!("[sweep] skip {}: analyze failed", entry.name);
@@ -754,52 +754,18 @@ fn main() {
             if flops as f64 > grid_flop_cap {
                 continue; // skip the heaviest matrices (bounded wall-clock)
             }
-            // Guarded + a-priori-vetoed recommendation (the real default-path logic):
-            // pass the MF / LL-floor ratio (the floor is the reliable LL reference)
-            // so memory-pathological multifrontal picks are vetoed deterministically.
-            let mf_ll = if floor_mb > 0.0 { mf_mb / floor_mb } else { 1.0 };
-            let d = SolverSettings::default();
-            let mb = |b: u64| b as f64 / 1048576.0;
-            // Full default-path logic: guarded+vetoed recommendation, then the exact
-            // a-priori memory backstop - re-analyze the pick and fall back to the
-            // default if its estimated peak exceeds the default's (never more memory).
-            // Route each matrix to its path's tuner model (symmetric LDLᵀ vs LU).
-            let tuner_path = match &entry.mat {
-                Mat::Sym(_) => rslab::SolverPath::Ldlt,
-                Mat::Unsym(_) => rslab::SolverPath::Lu,
-            };
-            let pick = |w: f64| {
-                let s = rslab::recommend_settings_pathed(&feat, w, mf_ll, tuner_path);
-                let same = (s.reorder, s.ordering, s.nemin, s.relax)
-                    == (d.reorder, d.ordering, d.nemin, d.relax);
-                let est_of = |e: rslab::MemoryEstimate| {
-                    (
-                        mb(e.mf_transient_peak_bytes),
-                        mb(e.panel_live_peak_bytes),
-                        e.factor_nnz as f64,
-                        e.factor_flops as f64,
-                    )
-                };
-                let def = (mf_mb, floor_mb, def_fill, flops as f64);
-                let (mf, flr, fill, fl) = if same {
-                    def
-                } else {
-                    match &entry.mat {
-                        Mat::Sym(a) => LdltSymbolic::analyze_with(a, &s)
-                            .map(|sy| est_of(sy.estimate_memory::<C>()))
-                            .unwrap_or(def),
-                        Mat::Unsym(a) => LuSymbolic::analyze_with(a, &s)
-                            .map(|sy| est_of(sy.estimate_memory::<C>()))
-                            .unwrap_or(def),
-                    }
-                };
-                // Backstop: exact fill + flops (never more memory / time proxy) must
-                // not grow, and the realistic floor stays under the default's - MF vs
-                // the LL floor, LL floor-vs-floor. Else fall back to the default.
-                let ok = fill <= def_fill * 1.02
-                    && fl <= flops as f64 * 1.05
-                    && if s.method == FactorMethod::Multifrontal { mf <= floor_mb } else { flr <= floor_mb };
-                if ok { s } else { d.clone() }
+            // The tuner's pick at weight `w`, taken straight from the shipped solver
+            // (`LdltSolver`/`LuSolver::tuned`) so the sweep exercises the *real*
+            // guarded + memory-backstopped logic. Previously this replicated the
+            // backstop by hand and diverged from the solver (it compared the
+            // dense-panel `factor_nnz` estimate, which overshoots the true fill
+            // non-uniformly, and let banded+MetisND picks through at 2x fill).
+            let pick = |w: f64| -> SolverSettings {
+                match &entry.mat {
+                    Mat::Sym(a) => rslab::LdltSolver::<C>::tuned(a, w).map(|(_, s)| s),
+                    Mat::Unsym(a) => rslab::LuSolver::<C>::tuned(a, w).map(|(_, s)| s),
+                }
+                .unwrap_or_else(|_| SolverSettings::default())
             };
             let configs = [
                 ("default", SolverSettings::default()),

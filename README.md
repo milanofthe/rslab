@@ -106,17 +106,20 @@ each path on its own class:
 
 | RSLAB (auto-tuned) vs | LDLᵀ (sym) | LU (unsym) |
 |-----------------------|:----------:|:----------:|
-| **MKL PARDISO** — factor time | 5.5x slower | **3.8x slower** |
-| **MKL PARDISO** — peak memory | 2.3x more | 2.5x more |
-| **faer LU** — factor time | **11.8x faster** | **3.7x faster** |
-| **faer LU** — peak memory | **2.4x less** | 1.2x less |
-| **untuned default** — factor time | **2.06x faster** | **1.67x faster** |
+| **MKL PARDISO** — factor time | 5.8x slower | **3.9x slower** |
+| **MKL PARDISO** — peak memory | 2.3x more | 2.4x more |
+| **faer LU** — factor time | **6.9x faster** | **3.7x faster** |
+| **faer LU** — peak memory | **2.3x less** | 1.1x less |
+| **untuned default** — factor time | **1.82x faster** | **1.65x faster** |
+| **untuned default** — peak memory | **0.68x** (less) | **0.71x** (less) |
 
 RSLAB sits between the two: faster and lighter than the pure-Rust faer, moderately behind
-the hand-optimized MKL PARDISO. The last row is the learned tuner's win over the untuned
+the hand-optimized MKL PARDISO. The tuner rows are the learned tuner's win over the untuned
 default on these hard classes — it closes a large part of the default→PARDISO distance
 (visible as the gray→blue gap, widening with problem size, i.e. the tuner helps most on the
-big matrices where a bad ordering costs most). faer has no symmetric path (it factors sym
+big matrices where a bad ordering costs most) **while using less memory than the default**
+(0.68x/0.71x): the deterministic backstop compares the *exact* symbolic fill, so a pick can
+never grow the factor beyond the default's. faer has no symmetric path (it factors sym
 matrices as LU too), which is why its LDLᵀ gap is largest.
 
 ### Thread scaling
@@ -164,7 +167,7 @@ explicitly), over **100+ matrices per path** (generated + SuiteSparse):
 
 | path | balanced (w=0.7) | speed (w=1) | memory (w=0) |
 |---|:---:|:---:|:---:|
-| **LDLᵀ** (167 mat) | 1.39x / 0.81x | 1.41x / 0.83x | 1.30x / 0.77x |
+| **LDLᵀ** (167 mat) | 1.33x / 0.83x | 1.35x / 0.85x | 1.24x / 0.79x |
 | **LU** (97 mat) | **1.92x** / 0.72x | 1.95x / 0.75x | 1.61x / 0.81x |
 
 (factor speedup / peak-memory ratio vs default). The auto-tuner is **faster and
