@@ -22,6 +22,7 @@ use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
 use num_complex::Complex;
+use rayon::prelude::*;
 
 /// A linear operator `A`: applies `y = A x`. The Krylov solvers depend only on
 /// this trait, so the operator may be an explicit sparse matrix
@@ -519,6 +520,87 @@ fn givens<T: Scalar>(f: T, g: T) -> (T, T) {
     (f * inv, g * inv)
 }
 
+/// Fixed row-block size for the block-orthogonalization reductions below. A
+/// compile-time constant (never thread-count dependent), so the chunked sums are
+/// **bit-identical across thread counts** - preserving the block solve's
+/// determinism guarantee while spreading the reduction over all cores.
+const ORTHO_CHUNK: usize = 2048;
+
+/// Column-wise projection of a panel `W` (`n×sa`) onto each column's **own**
+/// Arnoldi basis: `proj[i*sa + ap] = ⟨V_i[:,ap], W[:,ap]⟩` for block `i` in
+/// `0..blocks` and active column `ap` in `0..sa`. The basis is blocks-major -
+/// block `i` is the contiguous slice `vbas[i*sa*n .. (i+1)*sa*n]`, its column `ap`
+/// at offset `+ap*n`; `W` column `ap` is `w[ap*n .. ap*n+n]`.
+///
+/// This is the classical (block) Gram-Schmidt projection: **all** projections are
+/// taken against the same `W`, so the `blocks·sa` inner products are independent
+/// and computed as one panel sweep instead of the `O(blocks·sa)` sequential,
+/// latency-bound BLAS-1 reductions of modified Gram-Schmidt. The reduction is a
+/// fixed row-chunk sum folded in chunk order → deterministic regardless of the
+/// thread count.
+#[inline]
+fn block_project<T: Scalar>(vbas: &[T], w: &[T], blocks: usize, sa: usize, n: usize, proj: &mut [T]) {
+    let width = blocks * sa;
+    for p in proj[..width].iter_mut() {
+        *p = T::zero();
+    }
+    if width == 0 || n == 0 {
+        return;
+    }
+    let nchunks = n.div_ceil(ORTHO_CHUNK);
+    let partials: Vec<Vec<T>> = (0..nchunks)
+        .into_par_iter()
+        .map(|ci| {
+            let r0 = ci * ORTHO_CHUNK;
+            let r1 = (r0 + ORTHO_CHUNK).min(n);
+            let mut acc = vec![T::zero(); width];
+            for i in 0..blocks {
+                for ap in 0..sa {
+                    let vb = (i * sa + ap) * n;
+                    let wb = ap * n;
+                    let mut sdot = T::zero();
+                    for k in r0..r1 {
+                        sdot = sdot + vbas[vb + k].conj() * w[wb + k];
+                    }
+                    acc[i * sa + ap] = sdot;
+                }
+            }
+            acc
+        })
+        .collect();
+    // Fold partials in chunk order: the summation order is fixed by the chunk
+    // layout, so the result does not depend on how many threads ran.
+    for part in &partials {
+        for t in 0..width {
+            proj[t] = proj[t] + part[t];
+        }
+    }
+}
+
+/// Subtract the projected components from the panel in place, per column:
+/// `W[:,ap] -= Σ_i proj[i*sa+ap] · V_i[:,ap]`, accumulated in block order (`i`
+/// ascending) at every element. Parallel over fixed row-chunks within each column
+/// → the element-wise order is fixed, so the update is deterministic.
+#[inline]
+fn block_subtract<T: Scalar>(vbas: &[T], w: &mut [T], blocks: usize, sa: usize, n: usize, proj: &[T]) {
+    for ap in 0..sa {
+        let wcol = &mut w[ap * n..ap * n + n];
+        wcol.par_chunks_mut(ORTHO_CHUNK).enumerate().for_each(|(ci, wc)| {
+            let r0 = ci * ORTHO_CHUNK;
+            for i in 0..blocks {
+                let hij = proj[i * sa + ap];
+                if hij == T::zero() {
+                    continue;
+                }
+                let vb = (i * sa + ap) * n + r0;
+                for k in 0..wc.len() {
+                    wc[k] = wc[k] - hij * vbas[vb + k];
+                }
+            }
+        });
+    }
+}
+
 /// Right-preconditioned restarted **GMRES(`restart`)** for a general
 /// (unsymmetric) operator - the natural Krylov method for unsymmetric MoM/FEM
 /// systems where COCG/COCR do not apply. `op` may be matrix-free; `precond`
@@ -746,7 +828,6 @@ where
             got: b.len(),
         });
     }
-    const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
     let mut x = vec![T::zero(); n * s];
     let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
@@ -762,6 +843,11 @@ where
     let mut axblk = vec![T::zero(); n * s];
     let mut vyblk = vec![T::zero(); n * s];
     let mut xc = vec![T::zero(); n * s]; // compact live-RHS solutions for the residual matvec
+    // Block-CGS2 projection panels: `proj[i*sa + ap]` for blocks `0..=j`, columns
+    // `0..sa`. Two passes (project → subtract → project → subtract) give classical
+    // Gram-Schmidt with one reorthogonalization (CGS2, backward stable).
+    let mut proj1 = vec![T::zero(); m * s];
+    let mut proj2 = vec![T::zero(); m * s];
 
     // Per-active-position Arnoldi state (indexed `0..sa`, reset each cycle).
     let mut h: Vec<Vec<Vec<T>>> = (0..s).map(|_| vec![vec![T::zero(); m]; m + 1]).collect();
@@ -839,6 +925,19 @@ where
             // Batched right preconditioning + operator apply over the active block.
             precond.apply_block(&vbas[jblock..jblock + sa * n], &mut zblk[..sa * n], sa, n)?;
             op.apply_block(&zblk[..sa * n], &mut wblk[..sa * n], sa);
+            // **Block CGS2** orthogonalization of the whole `sa`-column panel `W`
+            // against each column's own basis `V_0..V_j`: two classical
+            // Gram-Schmidt passes (project → subtract, twice). Both passes are
+            // panel-wide, high-arithmetic-intensity sweeps parallelized over the
+            // vector dimension, replacing the `O(j·sa)` sequential MGS+DGKS inner
+            // products. CGS2 is backward stable (numerically equivalent to
+            // MGS+DGKS). Converged columns are still swept (kept in the panel for
+            // batching) but their Hessenberg/Givens state is frozen below.
+            let blocks = j + 1;
+            block_project(&vbas, &wblk, blocks, sa, n, &mut proj1);
+            block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1);
+            block_project(&vbas, &wblk, blocks, sa, n, &mut proj2);
+            block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2);
             let mut all_done = true;
             for ap in 0..sa {
                 if inner_done[ap] {
@@ -846,28 +945,11 @@ where
                 }
                 all_done = false;
                 let wb = ap * n;
-                // Modified Gram-Schmidt against this RHS's own basis, DGKS reorth.
-                let wnorm0 = norm2(&wblk[wb..wb + n]);
+                // Hessenberg column: the two CGS passes accumulate the projection.
                 for i in 0..=j {
-                    let vb = (i * sa + ap) * n;
-                    let hij = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
-                    h[ap][i][j] = hij;
-                    for k in 0..n {
-                        wblk[wb + k] = wblk[wb + k] - hij * vbas[vb + k];
-                    }
+                    h[ap][i][j] = proj1[i * sa + ap] + proj2[i * sa + ap];
                 }
-                let mut hn = norm2(&wblk[wb..wb + n]);
-                if hn < REORTH_ETA * wnorm0 {
-                    for i in 0..=j {
-                        let vb = (i * sa + ap) * n;
-                        let ss = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
-                        h[ap][i][j] = h[ap][i][j] + ss;
-                        for k in 0..n {
-                            wblk[wb + k] = wblk[wb + k] - ss * vbas[vb + k];
-                        }
-                    }
-                    hn = norm2(&wblk[wb..wb + n]);
-                }
+                let hn = norm2(&wblk[wb..wb + n]);
                 h[ap][j + 1][j] = T::from_real(hn);
                 let v1 = ((j + 1) * sa + ap) * n;
                 if hn > 0.0 {
@@ -1375,6 +1457,32 @@ mod tests {
                 .fold(0.0, f64::max);
             assert!(diff < 1e-9, "column {k} differs from single solve by {diff}");
         }
+    }
+
+    #[test]
+    fn gmres_block_bcgs2_bit_identical_across_thread_counts() {
+        // The block-CGS2 orthogonalization reduces over fixed row-chunks folded in
+        // chunk order, so the whole block solve is **bit-identical regardless of
+        // the thread count** - the determinism guarantee. Solve the same block in
+        // a 1-thread and an 8-thread rayon pool and require exact equality.
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        // Wide enough that a chunked reduction actually spans several chunks.
+        let a = unsym_grid(60);
+        let n = a.n;
+        let s = 5;
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..n {
+                bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            }
+        }
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let solve = || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap();
+        let x1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(solve);
+        let x8 = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap().install(solve);
+        assert_eq!(x1.iters, x8.iters, "iteration count must not depend on threads");
+        assert!(x1.x == x8.x, "block solve must be bit-identical across thread counts");
     }
 
     #[test]
