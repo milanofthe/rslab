@@ -120,8 +120,8 @@ pub use dense::ldlt_generic::{
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, BlrMode,
-    FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode, SolverSettings, Threads,
-    ZeroPivotAction,
+    with_threads, FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode, SolverSettings,
+    Threads, ZeroPivotAction,
 };
 // Deprecated pre-unification option aliases (now all `SolverSettings`).
 #[allow(deprecated)]

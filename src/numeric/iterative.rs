@@ -1513,6 +1513,62 @@ mod tests {
     }
 
     #[test]
+    fn with_threads_caps_block_gmres_pool_and_keeps_result() {
+        // `with_threads(p)` runs the block solve in a scoped pool of exactly `p`
+        // workers (the embedded / solver-in-the-loop cap) and produces the same
+        // result as the unbounded solve.
+        use crate::numeric::multifrontal_ldlt::with_threads;
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(30);
+        let n = a.n;
+        let s = 4;
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..n {
+                bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            }
+        }
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let seen = with_threads(3, || rayon::current_num_threads());
+        assert_eq!(seen, 3, "with_threads must cap the pool to the requested width");
+        let capped = with_threads(3, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap());
+        let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap();
+        assert!(capped.converged);
+        assert!(capped.x == plain.x, "capped-pool solve must match the unbounded solve bit-for-bit");
+    }
+
+    #[test]
+    fn ambient_threads_factor_matches_default_and_runs_on_shared_pool() {
+        // `Threads::Ambient` factors on the current pool (no new spawn) - the
+        // re-factor-in-loop path. Inside a `with_threads(2)` pool the factor must be
+        // bit-identical to the normal (scoped-pool) factor: the numeric result is
+        // independent of the thread policy.
+        use crate::numeric::multifrontal_ldlt::{with_threads, Threads};
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(24);
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        let lu_default = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let opts_amb = SolverSettings::default().with_thread_policy(Threads::Ambient);
+        let lu_amb = with_threads(2, || {
+            assert_eq!(rayon::current_num_threads(), 2);
+            factor_general_lu(&a, &opts_amb).unwrap()
+        });
+        let x_def = gmres_block(&a, &b, 1, &lu_default, 1e-10, 200, 40).unwrap();
+        let x_amb = gmres_block(&a, &b, 1, &lu_amb, 1e-10, 200, 40).unwrap();
+        assert!(x_def.x == x_amb.x, "ambient-pool factor must be bit-identical to the default factor");
+    }
+
+    #[test]
+    fn default_thread_policy_caps_at_four() {
+        // The pareto-optimal embedded default: predict per matrix, never exceed 4.
+        use crate::numeric::multifrontal_ldlt::Threads;
+        assert_eq!(SolverSettings::default().threads, Threads::Auto { max: 4 });
+    }
+
+    #[test]
     fn f32_lu_preconditioner_keeps_f64_accuracy_in_gmres() {
         use crate::sparse::general::GeneralCsc;
         let c = |re, im| Complex::new(re, im);

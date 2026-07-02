@@ -302,11 +302,21 @@ pub enum Threads {
         /// Upper bound on the predicted worker count (`0` = all logical cores).
         max: usize,
     },
+    /// Use the **current** rayon pool as-is, without building a scoped pool. The
+    /// solver-in-the-loop path: build **one** bounded pool (e.g. 4 workers) with
+    /// [`with_threads`](crate::with_threads) and run the factorization *and* every
+    /// iterative solve inside it, so both phases share the same capped pool with no
+    /// per-call thread spawn. The numeric factor is unchanged.
+    Ambient,
 }
 
 impl Default for Threads {
     fn default() -> Self {
-        Threads::Auto { max: 0 }
+        // Cap at 4 workers by default: our strong-scaling data puts the efficiency
+        // knee at ~4-6 threads, so 4 is the pareto-optimal throughput-per-core point
+        // and the safe default for concurrent / embedded (solver-in-the-loop) use.
+        // `Auto` still predicts a smaller count per matrix where more would regress.
+        Threads::Auto { max: 4 }
     }
 }
 
@@ -325,6 +335,24 @@ impl Threads {
             Threads::Fixed(0) => all_cores(),
             Threads::Fixed(n) => n,
             Threads::Auto { max } => recommend(if max == 0 { all_cores() } else { max }),
+            Threads::Ambient => rayon::current_num_threads().max(1),
+        }
+    }
+
+    /// Run `f` under this thread policy. [`Ambient`](Threads::Ambient) runs on the
+    /// current rayon pool with **no new pool spawned** (solver-in-the-loop); every
+    /// other policy resolves a worker count and runs `f` in a scoped pool of that
+    /// width with a `stack_bytes` worker stack. Centralizes the dispatch so all
+    /// factorization paths honour `Ambient` identically.
+    pub(crate) fn run<R: Send>(
+        self,
+        stack_bytes: usize,
+        recommend: impl FnOnce(usize) -> usize,
+        f: impl FnOnce() -> R + Send,
+    ) -> R {
+        match self {
+            Threads::Ambient => f(),
+            policy => in_scoped_pool(policy.resolve(recommend), stack_bytes, f),
         }
     }
 }
@@ -355,6 +383,33 @@ pub(crate) fn in_scoped_pool<R: Send>(
         Ok(pool) => pool.install(f),
         Err(_) => f(),
     }
+}
+
+/// Run `f` in a scoped rayon pool of `threads` workers (`0` = all logical cores),
+/// then tear the pool down. The **solver-in-the-loop / embedded** entry point:
+/// build **one** capped pool and drive many solves through it without a per-call
+/// thread spawn.
+///
+/// Typical pattern - factor once (its own bounded, depth-stacked pool via the
+/// default [`Threads::Auto`]`{max:4}`), then run the multi-RHS GMRES loop capped
+/// at the same width:
+/// ```ignore
+/// let lu = factor_general_lu(&a, &SolverSettings::default())?;   // Auto{max:4}
+/// with_threads(4, || {
+///     for rhs in batches { let _ = gmres_block(&a, rhs, s, &lu, tol, it, m)?; }
+///     Ok::<_, RslabError>(())
+/// })?;
+/// ```
+/// The block GMRES orthogonalization picks up this pool automatically (it uses the
+/// ambient rayon pool). To also run the *factorization* on this shared pool (e.g.
+/// re-factoring every Newton step), pass [`Threads::Ambient`] in the settings.
+///
+/// The pool gets a 16 MB worker stack (the factorization stack floor), so an
+/// `Ambient` factorization inside is safe for typical assembly-tree depths; the
+/// iterative solvers do not deep-recurse. For pathologically deep trees (banded /
+/// 1D at low `nemin`) build the pool yourself with a larger `stack_size`.
+pub fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+    in_scoped_pool(threads, 16 * 1024 * 1024, f)
 }
 
 /// Maximum supernode-tree height (root-to-leaf), the recursion depth of the tree
@@ -606,6 +661,7 @@ impl SolverSettings {
         match self.threads {
             Threads::Fixed(0) | Threads::Auto { max: 0 } => all_cores(),
             Threads::Fixed(n) | Threads::Auto { max: n } => n,
+            Threads::Ambient => rayon::current_num_threads().max(1),
         }
     }
 }
@@ -1517,8 +1573,9 @@ pub fn factor_numeric<T: Scalar>(
     // Supernodal left-looking path: same factor, low transient (no CB stack). Run
     // in a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        let nthreads = opts.threads.resolve(|cap| recommend_threads_for_sym(symb, cap));
-        return in_scoped_pool(nthreads, stack, || factor_left_looking(sym, a, opts));
+        return opts
+            .threads
+            .run(stack, |cap| recommend_threads_for_sym(symb, cap), || factor_left_looking(sym, a, opts));
     }
 
     // Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
@@ -1571,7 +1628,7 @@ pub fn factor_numeric<T: Scalar>(
     // Run the work-stealing tree recursion in a scoped pool of `opts.threads` with
     // the depth-sized stack (honours the thread budget and is overflow-safe on
     // deep trees, like the left-looking path above).
-    let nthreads = opts.threads.resolve(|cap| recommend_threads_for_sym(symb, cap));
+    let recommend = |cap: usize| recommend_threads_for_sym(symb, cap);
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
     if opts.method == FactorMethod::RightLooking {
         // Right-looking schedule: factor supernodes sequentially in postorder,
@@ -1580,7 +1637,7 @@ pub fn factor_numeric<T: Scalar>(
         // factor as the other paths; the trade is all-fronts residency for a
         // simple, barrier-free push (opt-in, not auto-selected).
         let order = supernode_postorder(sym, &roots);
-        in_scoped_pool(nthreads, stack, || -> Result<(), RslabError> {
+        opts.threads.run(stack, recommend, || -> Result<(), RslabError> {
             for &s in &order {
                 let nf = {
                     let mut child_refs: Vec<&NodeFactor<T>> = Vec::new();
@@ -1601,7 +1658,7 @@ pub fn factor_numeric<T: Scalar>(
             Ok(())
         })?;
     } else {
-        let root_outs: Vec<SubtreeFactors<T>> = in_scoped_pool(nthreads, stack, || {
+        let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(stack, recommend, || {
             roots
                 .par_iter()
                 .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
