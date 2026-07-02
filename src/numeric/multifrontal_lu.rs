@@ -2156,21 +2156,22 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
     // a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        let nthreads = opts.threads.resolve(|cap| {
-            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
-        });
-        return crate::numeric::multifrontal_ldlt::in_scoped_pool(nthreads, stack, || {
-            factor_lu_left_looking(
-                sym,
-                &a_perm,
-                &a_perm_t,
-                &d_row,
-                &d_col,
-                perturb_floor,
-                opts.drop_tol,
-                opts.kernel(),
-            )
-        });
+        return opts.threads.run(
+            stack,
+            |cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap),
+            || {
+                factor_lu_left_looking(
+                    sym,
+                    &a_perm,
+                    &a_perm_t,
+                    &d_row,
+                    &d_col,
+                    perturb_floor,
+                    opts.drop_tol,
+                    opts.kernel(),
+                )
+            },
+        );
     }
 
     let profile = std::env::var("RLA_PROFILE")
@@ -2196,11 +2197,10 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let kt = opts.kernel();
     // Scoped pool of `opts.threads` with the depth-sized stack (honours the thread
     // budget and is overflow-safe on deep trees, like the left-looking path).
-    let nthreads = opts.threads.resolve(|cap| {
-        crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
-    });
-    let root_outs: Vec<SubtreeFactors<T>> =
-        crate::numeric::multifrontal_ldlt::in_scoped_pool(nthreads, stack, || {
+    let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(
+        stack,
+        |cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap),
+        || {
             roots
                 .par_iter()
                 .map(|&r| {

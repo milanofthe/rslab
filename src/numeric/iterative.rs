@@ -22,6 +22,7 @@ use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
 use num_complex::Complex;
+use rayon::prelude::*;
 
 /// A linear operator `A`: applies `y = A x`. The Krylov solvers depend only on
 /// this trait, so the operator may be an explicit sparse matrix
@@ -519,6 +520,96 @@ fn givens<T: Scalar>(f: T, g: T) -> (T, T) {
     (f * inv, g * inv)
 }
 
+/// Fixed row-block size for the block-orthogonalization reductions below. A
+/// compile-time constant (never thread-count dependent), so the chunked sums are
+/// **bit-identical across thread counts** - preserving the block solve's
+/// determinism guarantee while spreading the reduction over all cores.
+const ORTHO_CHUNK: usize = 2048;
+
+/// Column-wise projection of a panel `W` (`n×sa`) onto each column's **own**
+/// Arnoldi basis: `proj[i*sa + ap] = ⟨V_i[:,ap], W[:,ap]⟩` for block `i` in
+/// `0..blocks` and active column `ap` in `0..sa`. The basis is blocks-major -
+/// block `i` is the contiguous slice `vbas[i*sa*n .. (i+1)*sa*n]`, its column `ap`
+/// at offset `+ap*n`; `W` column `ap` is `w[ap*n .. ap*n+n]`.
+///
+/// This is the classical (block) Gram-Schmidt projection: **all** projections are
+/// taken against the same `W`, so the `blocks·sa` inner products are independent
+/// and computed as one panel sweep instead of the `O(blocks·sa)` sequential,
+/// latency-bound BLAS-1 reductions of modified Gram-Schmidt. The reduction is a
+/// fixed row-chunk sum folded in chunk order → deterministic regardless of the
+/// thread count.
+/// `scratch` is a caller-owned reduction buffer of length `≥ nchunks · width`
+/// (`nchunks = ⌈n/ORTHO_CHUNK⌉`, `width = blocks·sa`), reused across steps so the
+/// hot loop allocates nothing. Each chunk writes its `width` partial sums into its
+/// own slice; the slices are then folded in chunk order.
+#[inline]
+fn block_project<T: Scalar>(
+    vbas: &[T],
+    w: &[T],
+    blocks: usize,
+    sa: usize,
+    n: usize,
+    proj: &mut [T],
+    scratch: &mut [T],
+) {
+    let width = blocks * sa;
+    for p in proj[..width].iter_mut() {
+        *p = T::zero();
+    }
+    if width == 0 || n == 0 {
+        return;
+    }
+    let nchunks = n.div_ceil(ORTHO_CHUNK);
+    let part = &mut scratch[..nchunks * width];
+    part.par_chunks_mut(width).enumerate().for_each(|(ci, out)| {
+        let r0 = ci * ORTHO_CHUNK;
+        let r1 = (r0 + ORTHO_CHUNK).min(n);
+        for i in 0..blocks {
+            for ap in 0..sa {
+                let vb = (i * sa + ap) * n;
+                let wb = ap * n;
+                let mut sdot = T::zero();
+                for k in r0..r1 {
+                    sdot = sdot + vbas[vb + k].conj() * w[wb + k];
+                }
+                out[i * sa + ap] = sdot;
+            }
+        }
+    });
+    // Fold partials in chunk order: the summation order is fixed by the chunk
+    // layout, so the result does not depend on how many threads ran.
+    for ci in 0..nchunks {
+        let base = ci * width;
+        for t in 0..width {
+            proj[t] = proj[t] + part[base + t];
+        }
+    }
+}
+
+/// Subtract the projected components from the panel in place, per column:
+/// `W[:,ap] -= Σ_i proj[i*sa+ap] · V_i[:,ap]`, accumulated in block order (`i`
+/// ascending) at every element. Parallel over fixed row-chunks within each column
+/// → the element-wise order is fixed, so the update is deterministic.
+#[inline]
+fn block_subtract<T: Scalar>(vbas: &[T], w: &mut [T], blocks: usize, sa: usize, n: usize, proj: &[T]) {
+    for ap in 0..sa {
+        let wcol = &mut w[ap * n..ap * n + n];
+        wcol.par_chunks_mut(ORTHO_CHUNK).enumerate().for_each(|(ci, wc)| {
+            let r0 = ci * ORTHO_CHUNK;
+            for i in 0..blocks {
+                let hij = proj[i * sa + ap];
+                if hij == T::zero() {
+                    continue;
+                }
+                let vb = (i * sa + ap) * n + r0;
+                for k in 0..wc.len() {
+                    wc[k] = wc[k] - hij * vbas[vb + k];
+                }
+            }
+        });
+    }
+}
+
 /// Right-preconditioned restarted **GMRES(`restart`)** for a general
 /// (unsymmetric) operator - the natural Krylov method for unsymmetric MoM/FEM
 /// systems where COCG/COCR do not apply. `op` may be matrix-free; `precond`
@@ -762,6 +853,17 @@ where
     let mut axblk = vec![T::zero(); n * s];
     let mut vyblk = vec![T::zero(); n * s];
     let mut xc = vec![T::zero(); n * s]; // compact live-RHS solutions for the residual matvec
+    // Block Gram-Schmidt projection panels: `proj[i*sa + ap]` for blocks `0..=j`,
+    // columns `0..sa`. One classical (block) projection pass, plus a **conditional**
+    // reorthogonalization pass (block DGKS) taken only when a column loses
+    // orthogonality - the backward-stable, single-thread-cheap analogue of the
+    // old per-RHS MGS+DGKS, now batched over the whole panel.
+    let mut proj1 = vec![T::zero(); m * s];
+    let mut proj2 = vec![T::zero(); m * s];
+    let mut wnorm0 = vec![0.0f64; s]; // panel column norms before ortho (DGKS reorth test)
+    // Reduction scratch for `block_project`: `nchunks · (m·s)`, reused every step
+    // so the orthogonalization allocates nothing in the hot loop.
+    let mut proj_scratch = vec![T::zero(); n.div_ceil(ORTHO_CHUNK) * m * s];
 
     // Per-active-position Arnoldi state (indexed `0..sa`, reset each cycle).
     let mut h: Vec<Vec<Vec<T>>> = (0..s).map(|_| vec![vec![T::zero(); m]; m + 1]).collect();
@@ -839,6 +941,29 @@ where
             // Batched right preconditioning + operator apply over the active block.
             precond.apply_block(&vbas[jblock..jblock + sa * n], &mut zblk[..sa * n], sa, n)?;
             op.apply_block(&zblk[..sa * n], &mut wblk[..sa * n], sa);
+            // **Block Gram-Schmidt** of the whole `sa`-column panel `W` against each
+            // column's own basis `V_0..V_j`: one classical projection pass
+            // (project → subtract), then a **conditional** reorthogonalization pass
+            // (block DGKS) taken only when a column's norm collapses - the
+            // backward-stable, single-thread-cheap analogue of the old per-RHS
+            // MGS+DGKS. Both passes are panel-wide, high-arithmetic-intensity sweeps
+            // parallelized over the vector dimension, replacing the `O(j·sa)`
+            // sequential BLAS-1 inner products. The reorth decision is taken from
+            // serial column norms, so it is identical across thread counts (the
+            // whole solve stays bit-identical regardless of parallelism). Converged
+            // columns are still swept (kept in the panel for batching) but their
+            // Hessenberg/Givens state is frozen below.
+            let blocks = j + 1;
+            for ap in 0..sa {
+                wnorm0[ap] = norm2(&wblk[ap * n..ap * n + n]);
+            }
+            block_project(&vbas, &wblk, blocks, sa, n, &mut proj1, &mut proj_scratch);
+            block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1);
+            let reorth = (0..sa).any(|ap| norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap]);
+            if reorth {
+                block_project(&vbas, &wblk, blocks, sa, n, &mut proj2, &mut proj_scratch);
+                block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2);
+            }
             let mut all_done = true;
             for ap in 0..sa {
                 if inner_done[ap] {
@@ -846,28 +971,12 @@ where
                 }
                 all_done = false;
                 let wb = ap * n;
-                // Modified Gram-Schmidt against this RHS's own basis, DGKS reorth.
-                let wnorm0 = norm2(&wblk[wb..wb + n]);
+                // Hessenberg column: projection pass, plus the reorth pass if taken.
                 for i in 0..=j {
-                    let vb = (i * sa + ap) * n;
-                    let hij = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
+                    let hij = if reorth { proj1[i * sa + ap] + proj2[i * sa + ap] } else { proj1[i * sa + ap] };
                     h[ap][i][j] = hij;
-                    for k in 0..n {
-                        wblk[wb + k] = wblk[wb + k] - hij * vbas[vb + k];
-                    }
                 }
-                let mut hn = norm2(&wblk[wb..wb + n]);
-                if hn < REORTH_ETA * wnorm0 {
-                    for i in 0..=j {
-                        let vb = (i * sa + ap) * n;
-                        let ss = dotc(&vbas[vb..vb + n], &wblk[wb..wb + n]);
-                        h[ap][i][j] = h[ap][i][j] + ss;
-                        for k in 0..n {
-                            wblk[wb + k] = wblk[wb + k] - ss * vbas[vb + k];
-                        }
-                    }
-                    hn = norm2(&wblk[wb..wb + n]);
-                }
+                let hn = norm2(&wblk[wb..wb + n]);
                 h[ap][j + 1][j] = T::from_real(hn);
                 let v1 = ((j + 1) * sa + ap) * n;
                 if hn > 0.0 {
@@ -1375,6 +1484,88 @@ mod tests {
                 .fold(0.0, f64::max);
             assert!(diff < 1e-9, "column {k} differs from single solve by {diff}");
         }
+    }
+
+    #[test]
+    fn gmres_block_bcgs2_bit_identical_across_thread_counts() {
+        // The block-CGS2 orthogonalization reduces over fixed row-chunks folded in
+        // chunk order, so the whole block solve is **bit-identical regardless of
+        // the thread count** - the determinism guarantee. Solve the same block in
+        // a 1-thread and an 8-thread rayon pool and require exact equality.
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        // Wide enough that a chunked reduction actually spans several chunks.
+        let a = unsym_grid(60);
+        let n = a.n;
+        let s = 5;
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..n {
+                bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            }
+        }
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let solve = || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap();
+        let x1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(solve);
+        let x8 = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap().install(solve);
+        assert_eq!(x1.iters, x8.iters, "iteration count must not depend on threads");
+        assert!(x1.x == x8.x, "block solve must be bit-identical across thread counts");
+    }
+
+    #[test]
+    fn with_threads_caps_block_gmres_pool_and_keeps_result() {
+        // `with_threads(p)` runs the block solve in a scoped pool of exactly `p`
+        // workers (the embedded / solver-in-the-loop cap) and produces the same
+        // result as the unbounded solve.
+        use crate::numeric::multifrontal_ldlt::with_threads;
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(30);
+        let n = a.n;
+        let s = 4;
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..n {
+                bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            }
+        }
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let seen = with_threads(3, || rayon::current_num_threads());
+        assert_eq!(seen, 3, "with_threads must cap the pool to the requested width");
+        let capped = with_threads(3, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap());
+        let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap();
+        assert!(capped.converged);
+        assert!(capped.x == plain.x, "capped-pool solve must match the unbounded solve bit-for-bit");
+    }
+
+    #[test]
+    fn ambient_threads_factor_matches_default_and_runs_on_shared_pool() {
+        // `Threads::Ambient` factors on the current pool (no new spawn) - the
+        // re-factor-in-loop path. Inside a `with_threads(2)` pool the factor must be
+        // bit-identical to the normal (scoped-pool) factor: the numeric result is
+        // independent of the thread policy.
+        use crate::numeric::multifrontal_ldlt::{with_threads, Threads};
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(24);
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        let lu_default = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let opts_amb = SolverSettings::default().with_thread_policy(Threads::Ambient);
+        let lu_amb = with_threads(2, || {
+            assert_eq!(rayon::current_num_threads(), 2);
+            factor_general_lu(&a, &opts_amb).unwrap()
+        });
+        let x_def = gmres_block(&a, &b, 1, &lu_default, 1e-10, 200, 40).unwrap();
+        let x_amb = gmres_block(&a, &b, 1, &lu_amb, 1e-10, 200, 40).unwrap();
+        assert!(x_def.x == x_amb.x, "ambient-pool factor must be bit-identical to the default factor");
+    }
+
+    #[test]
+    fn default_thread_policy_caps_at_four() {
+        // The pareto-optimal embedded default: predict per matrix, never exceed 4.
+        use crate::numeric::multifrontal_ldlt::Threads;
+        assert_eq!(SolverSettings::default().threads, Threads::Auto { max: 4 });
     }
 
     #[test]

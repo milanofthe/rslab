@@ -167,6 +167,11 @@ name = "block_gmres"
 harness = false
 
 [[bench]]
+name = "block_gmres_scaling"
+harness = false
+required-features = ["matgen"]
+
+[[bench]]
 name = "solve_many"
 harness = false
 
