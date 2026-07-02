@@ -56,10 +56,16 @@ fn main() {
     for (idx, &p) in plan.iter().enumerate() {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap();
         let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart).unwrap();
-        let _ = pool.install(solve); // warm up (page-in, branch predictors)
-        let t = Instant::now();
-        let res = pool.install(solve);
-        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let mut res = pool.install(solve); // warm up (page-in, branch predictors)
+        // Best of several timed runs: single wall-clock samples are noisy on a
+        // loaded machine, and the minimum is the least-contended estimate.
+        let reps = 3;
+        let mut ms = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            res = pool.install(solve);
+            ms = ms.min(t.elapsed().as_secs_f64() * 1e3);
+        }
         if idx == 0 {
             t1 = ms;
         }
