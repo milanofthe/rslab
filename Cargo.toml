@@ -172,6 +172,11 @@ harness = false
 required-features = ["matgen"]
 
 [[bench]]
+name = "precond_gmres"
+harness = false
+required-features = ["matgen"]
+
+[[bench]]
 name = "solve_many"
 harness = false
 

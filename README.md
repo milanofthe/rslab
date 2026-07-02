@@ -221,6 +221,20 @@ in `s` — adding right-hand sides stays cheap (BLAS-3 reuse). BCGS2 is memory-n
 and bit-identical across thread counts. Cap the whole solve for embedded use with
 `with_threads(n, …)`.
 
+### Preconditioner + GMRES trade-off
+
+Dropping fill below a relative `drop_tol` turns the exact factor into a
+memory-light ILU-style preconditioner; GMRES then corrects it back to the true
+solution. Bigger `drop_tol` → less fill but more iterations.
+
+![Preconditioner + GMRES trade-off](benches/bench_out/precond_gmres.png)
+
+On a convection-diffusion system (n=32400) the factor fill drops ~2× (26 → 11 MB)
+at `drop_tol=1e-2` while GMRES needs only ~15 iterations and the **total** wall
+time stays within a few percent of the exact direct solve — a factor-memory
+halving for free. Past ~3e-2 the iteration count climbs steeply and dominates, so
+the useful range is bounded; the figure makes the sweet spot explicit.
+
 ### Accuracy (SuiteSparse)
 
 ![SuiteSparse residual](benches/bench_out/corpus_residual.png)

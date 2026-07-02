@@ -664,6 +664,28 @@ convection--diffusion, $n=\num{40000}$, complex \code{f64}.}
 \label{fig:blockgmres}
 \end{figure}
 
+\subsection{Incomplete-factor trade-off}
+Threshold dropping trades factor fill for GMRES iterations: entries of the factor below a
+relative \code{drop\_tol} are discarded, shrinking the preconditioner, and GMRES makes up the
+lost accuracy. Figure~\ref{fig:precondgmres} sweeps \code{drop\_tol} on one
+convection--diffusion system ($n=\num{32400}$). Fill falls monotonically while the iteration
+count rises --- slowly at first, then steeply once the factor is too sparse to precondition
+well. Because the factor is the memory driver, the useful regime is the flat-iteration knee: at
+\code{drop\_tol}${=}\num{1e-2}$ the fill halves ($26\to\SI{11}{MB}$) for $\sim\!15$ iterations
+and a \emph{total} wall time within a few percent of the exact direct solve --- a factor-memory
+halving essentially for free. Past $\sim\!\num{3e-2}$ the iteration cost dominates and total
+time climbs, bounding the useful range.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{precond_gmres.pdf}
+\caption{Incomplete-factor preconditioner + GMRES. Left: factor fill (memory) and GMRES
+iterations vs.\ \code{drop\_tol}, with the exact factor as reference. Right: factor / GMRES /
+total wall time, exposing the sweet spot. Convection--diffusion, $n=\num{32400}$, complex
+\code{f64}.}
+\label{fig:precondgmres}
+\end{figure}
+
 \section{Test matrix corpus}
 \label{sec:corpus}
 The tuner is fit and the solver evaluated on a corpus deliberately spanning the full problem
