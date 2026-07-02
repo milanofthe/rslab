@@ -533,66 +533,75 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
         // per size - Helmholtz (shifted, complex), curl-curl Maxwell (complex
         // indefinite, gradient near-null-space), and Stokes/KKT saddle-point
         // (symmetric indefinite). All genuinely complex-valued.
+        // One matrix per size, rotating through the classes/parameters, so every
+        // matrix lands at its own size (a continuous log-spaced `sizes` list then
+        // spreads points evenly over nnz rather than clustering them in equal-size
+        // batches). Eight class/parameter variants cycle across the sizes.
         "sym" => sizes
             .iter()
-            .flat_map(|&sz| {
+            .enumerate()
+            .map(|(i, &sz)| {
                 let kc = ((sz as f64 / 3.0).cbrt().round() as usize).max(4);
                 let ks = ((sz as f64 / 3.0).sqrt().round() as usize).max(4);
-                let mut v: Vec<(String, Mat)> = Vec::new();
-                // Helmholtz: three complex shifts (near-resonance to well-damped).
-                for (i, (re, im)) in [(0.02, 0.01), (0.05, 0.02), (0.12, 0.06)].into_iter().enumerate() {
+                let helm = |re, im| {
                     let m = stencil::helmholtz(&cube(sz), Complex::new(re, im), &stencil::StencilOpts::default());
-                    v.push((format!("helmholtz{i}_{}", m.n), Mat::Sym(m)));
-                }
-                // Curl-curl Maxwell: three (frequency, conductivity) pairs.
-                for (i, (om, si)) in [(1.5, 0.05), (3.0, 0.1), (6.0, 0.3)].into_iter().enumerate() {
+                    (format!("helmholtz_{}", m.n), Mat::Sym(m))
+                };
+                let cc = |om, si| {
                     let m = fem::curl_curl(&[kc, kc, kc], om, si);
-                    v.push((format!("curlcurl{i}_{}", m.n), Mat::Sym(m)));
-                }
-                // Stokes/KKT saddle-point: two stabilizations.
-                for (i, beta) in [0.1, 0.01].into_iter().enumerate() {
+                    (format!("curlcurl_{}", m.n), Mat::Sym(m))
+                };
+                let sp = |beta| {
                     let m = fem::saddle_point::<C>(&[ks, ks], beta);
-                    v.push((format!("saddle{i}_{}", m.n), Mat::Sym(m)));
+                    (format!("saddle_{}", m.n), Mat::Sym(m))
+                };
+                match i % 8 {
+                    0 => helm(0.02, 0.01),
+                    1 => helm(0.05, 0.02),
+                    2 => helm(0.12, 0.06),
+                    3 => cc(1.5, 0.05),
+                    4 => cc(3.0, 0.1),
+                    5 => cc(6.0, 0.3),
+                    6 => sp(0.1),
+                    _ => sp(0.01),
                 }
-                v // 8 per size
             })
             .collect(),
         // Unsymmetric distribution (LU path): convection-diffusion is the canonical
         // sparse-unsymmetric class (advection-dominated, high grid-Péclet), in 3D and
         // 2D, plus a BEM/MoM near-field kernel for the dense-ish contrast. All
         // genuinely complex-valued.
+        // One matrix per size, rotating through the classes/parameters (see the
+        // symmetric family above) so points spread continuously over nnz.
         "unsym" => sizes
             .iter()
-            .flat_map(|&sz| {
+            .enumerate()
+            .map(|(i, &sz)| {
                 let kc = ((sz as f64).cbrt().round() as usize).max(4);
                 let ks = ((sz as f64).sqrt().round() as usize).max(4);
-                let mut v: Vec<(String, Mat)> = Vec::new();
-                // Convection-diffusion 3D: two Péclet levels (upwind, recirculating).
-                for (i, eps) in [0.05, 5e-3].into_iter().enumerate() {
+                let cd3 = |eps| {
                     let m = fem::convection_diffusion::<C>(&[kc, kc, kc], eps, fem::Flow::Rotating, true);
-                    v.push((format!("convdiff3d{i}_{}", m.n), Mat::Unsym(m)));
-                }
-                // Convection-diffusion 2D: Péclet × flow field × discretization.
-                for (i, (eps, flow, up)) in [
-                    (0.05, fem::Flow::Diagonal, false),
-                    (5e-3, fem::Flow::Rotating, true),
-                    (1e-3, fem::Flow::Diagonal, true),
-                    (1e-2, fem::Flow::Rotating, false),
-                ]
-                .into_iter()
-                .enumerate()
-                {
+                    (format!("convdiff3d_{}", m.n), Mat::Unsym(m))
+                };
+                let cd2 = |eps, flow, up| {
                     let m = fem::convection_diffusion::<C>(&[ks, ks], eps, flow, up);
-                    v.push((format!("convdiff2d{i}_{}", m.n), Mat::Unsym(m)));
-                }
-                // BEM/MoM near-field: two densities. cutoff ∝ 1/√n keeps ≈`deg`
-                // neighbours per row independent of n (constant degree under refinement).
-                for (i, deg) in [80.0_f64, 160.0].into_iter().enumerate() {
+                    (format!("convdiff2d_{}", m.n), Mat::Unsym(m))
+                };
+                let mom = |deg: f64| {
                     let cutoff = (2.0 * (deg / sz as f64).sqrt()).min(1.2);
                     let m = bem::kernel(sz, &bem::BemOpts { cutoff, ..Default::default() });
-                    v.push((format!("mom{i}_{}", m.n), Mat::Unsym(m)));
+                    (format!("mom_{}", m.n), Mat::Unsym(m))
+                };
+                match i % 8 {
+                    0 => cd3(0.05),
+                    1 => cd3(5e-3),
+                    2 => cd2(0.05, fem::Flow::Diagonal, false),
+                    3 => cd2(5e-3, fem::Flow::Rotating, true),
+                    4 => cd2(1e-3, fem::Flow::Diagonal, true),
+                    5 => cd2(1e-2, fem::Flow::Rotating, false),
+                    6 => mom(80.0),
+                    _ => mom(160.0),
                 }
-                v // 8 per size
             })
             .collect(),
         "corpus" => build_corpus(),
