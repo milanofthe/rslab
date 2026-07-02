@@ -804,6 +804,28 @@ impl LuSymbolic {
     /// with this analysis - computed purely from the symbolic structure, *before*
     /// any numeric work, so a scheduler can fail-fast or pick an approximation when
     /// the estimate exceeds the memory budget. Deterministic and reproducible.
+    /// Exact symbolic factor fill (the compact L+U value count summed over
+    /// supernodes) — the reliable memory-backstop metric. Unlike
+    /// [`MemoryEstimate::factor_nnz`](crate::diagnostics::MemoryEstimate::factor_nnz),
+    /// a dense-panel upper bound that overshoots the real fill ~6-7x
+    /// non-uniformly across orderings, this tracks the actually-stored fill.
+    pub fn symbolic_factor_nnz(&self) -> usize {
+        let Some((sym, _)) = self.symb.sym_and_levels() else {
+            return 0;
+        };
+        let rs = compute_supernode_row_structures(sym);
+        (0..sym.supernodes.len())
+            .map(|s| {
+                let nc = sym.supernodes[s].ncol;
+                let cnrow = rs[s].len().saturating_sub(nc);
+                // L: diagonal lower-triangle + off-diagonal rows; U: upper-tri + U12.
+                let l = nc * (nc + 1) / 2 + cnrow * nc;
+                let u = nc * (nc + 1) / 2 + nc * cnrow;
+                l + u
+            })
+            .sum()
+    }
+
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
         let Some((sym, _levels)) = self.symb.sym_and_levels() else {
@@ -909,8 +931,12 @@ impl<T: Scalar> LuSolver<T> {
             crate::auto_tune::SolverPath::Lu,
         );
         let d = SolverSettings::default();
-        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: FactorMethod| {
-            let fill_ok = e.factor_nnz as f64 <= est.factor_nnz as f64 * 1.02;
+        // Fill compared via the *exact* symbolic fill, not the dense-panel
+        // `MemoryEstimate::factor_nnz` (which overshoots ~6-7x non-uniformly across
+        // orderings, so comparing two once could pass a pick with far more real fill).
+        let default_fill = sym.symbolic_factor_nnz();
+        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: FactorMethod, pick_fill: usize| {
+            let fill_ok = pick_fill as f64 <= default_fill as f64 * 1.02;
             let flops_ok = e.factor_flops as f64 <= est.factor_flops as f64 * 1.05;
             if m == FactorMethod::Multifrontal {
                 fill_ok && flops_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
@@ -919,7 +945,7 @@ impl<T: Scalar> LuSolver<T> {
             }
         };
         if (s.reorder, s.ordering, s.nemin, s.relax) == (d.reorder, d.ordering, d.nemin, d.relax) {
-            if mem_ok(&est, s.method) {
+            if mem_ok(&est, s.method, default_fill) {
                 Ok((sym, s))
             } else {
                 Ok((sym, d))
@@ -927,7 +953,7 @@ impl<T: Scalar> LuSolver<T> {
         } else {
             let sym2 = LuSymbolic::analyze_with(a, &s)?;
             let est2 = sym2.estimate_memory::<T>();
-            if mem_ok(&est2, s.method) {
+            if mem_ok(&est2, s.method, sym2.symbolic_factor_nnz()) {
                 Ok((sym2, s))
             } else {
                 Ok((sym, d))

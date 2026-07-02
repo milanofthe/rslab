@@ -113,14 +113,16 @@ impl<T: Scalar> LdltSolver<T> {
             crate::auto_tune::SolverPath::Ldlt,
         );
         let d = SolverSettings::default();
-        // Hard a-priori memory backstop (never more memory than the default): exact
-        // fill must not grow, and the realistic floor stays under the default's - an
-        // MF pick vs the LL floor, an LL pick floor-vs-floor (consistent bias).
-        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: crate::FactorMethod| {
-            // Exact fill (memory) and flops (time proxy) must not grow vs the default
-            // - both are deterministic from the symbolic and catch ordering/nemin
-            // picks the model mispredicts.
-            let fill_ok = e.factor_nnz as f64 <= est.factor_nnz as f64 * 1.02;
+        // Hard a-priori memory backstop (never more memory than the default). Fill is
+        // compared via the *exact* symbolic fill (`symbolic_factor_nnz`), not
+        // `MemoryEstimate::factor_nnz`: the latter is a dense-supernode upper bound
+        // that overshoots the real fill non-uniformly across orderings, so comparing
+        // two of them once let a MetisND+high-nemin pick with 2x the real fill slip
+        // through on banded matrices. The realistic transient floor stays under the
+        // default's (MF pick vs LL floor, LL pick floor-vs-floor).
+        let default_fill = sym.symbolic_factor_nnz();
+        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: crate::FactorMethod, pick_fill: usize| {
+            let fill_ok = pick_fill as f64 <= default_fill as f64 * 1.02;
             let flops_ok = e.factor_flops as f64 <= est.factor_flops as f64 * 1.05;
             if m == crate::FactorMethod::Multifrontal {
                 fill_ok && flops_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
@@ -130,7 +132,7 @@ impl<T: Scalar> LdltSolver<T> {
         };
         // Reuse the default analysis unless the tuner changed an analyze-time knob.
         if (s.reorder, s.ordering, s.nemin, s.relax) == (d.reorder, d.ordering, d.nemin, d.relax) {
-            if mem_ok(&est, s.method) {
+            if mem_ok(&est, s.method, default_fill) {
                 Ok((sym, s))
             } else {
                 Ok((sym, d))
@@ -138,7 +140,7 @@ impl<T: Scalar> LdltSolver<T> {
         } else {
             let sym2 = LdltSymbolic::analyze_with(a, &s)?;
             let est2 = sym2.estimate_memory::<T>();
-            if mem_ok(&est2, s.method) {
+            if mem_ok(&est2, s.method, sym2.symbolic_factor_nnz()) {
                 Ok((sym2, s))
             } else {
                 Ok((sym, d)) // memory regression by the estimate -> safe default
@@ -414,6 +416,19 @@ impl LdltSymbolic {
     /// (LDLᵀ path) - a pure, deterministic function of the symbolic structure, for
     /// fail-fast / scheduling before any numeric work. See
     /// [`LuSymbolic::estimate_memory`](crate::LuSymbolic::estimate_memory).
+    /// Exact symbolic factor fill (nonzeros, from the column counts, ×1.2 slack) —
+    /// the reliable memory-backstop metric. Unlike
+    /// [`MemoryEstimate::factor_nnz`](crate::diagnostics::MemoryEstimate::factor_nnz),
+    /// which is a dense-supernode *upper bound* that overshoots the real fill
+    /// non-uniformly across orderings (so comparing two of them can pick the worse
+    /// one), this tracks the actual stored fill and is comparable across orderings.
+    pub fn symbolic_factor_nnz(&self) -> usize {
+        self.symbolic
+            .sym_and_levels()
+            .map(|(s, _)| s.factor_nnz_estimate)
+            .unwrap_or(0)
+    }
+
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
         let Some((sym, levels)) = self.symbolic.sym_and_levels() else {
