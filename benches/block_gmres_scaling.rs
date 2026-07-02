@@ -15,6 +15,10 @@
 //! Run: `cargo bench --bench block_gmres_scaling`
 //!   env: `RLA_DIM=180` grid side (n = DIM²), `RLA_BLOCK_S=5` RHS count,
 //!        `RLA_DROPTOL=0.01` preconditioner drop tolerance.
+//!   mode: `RLA_RHS_SWEEP=1` fixes the thread count (`RLA_THREADS`, default = all
+//!         cores) and sweeps the RHS count `s` instead, reporting **time per RHS** -
+//!         the "I already have the factor, drive many RHS" question: does adding
+//!         RHS stay cheap (BLAS-3 reuse + parallel ortho) or grow linearly.
 
 use std::time::Instant;
 
@@ -24,6 +28,16 @@ use rslab::{factor_general_lu, gmres_block, SolverSettings};
 
 type C = Complex<f64>;
 
+fn build_rhs(n: usize, s: usize) -> Vec<C> {
+    let mut bblk = vec![C::default(); n * s];
+    for k in 0..s {
+        for i in 0..n {
+            bblk[k * n + i] = Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+        }
+    }
+    bblk
+}
+
 fn main() {
     let dim: usize = std::env::var("RLA_DIM").ok().and_then(|v| v.parse().ok()).unwrap_or(180);
     let s: usize = std::env::var("RLA_BLOCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
@@ -31,12 +45,6 @@ fn main() {
 
     let a = convection_diffusion::<C>(&[dim, dim], 0.01, Flow::Rotating, true);
     let n = a.n;
-    let mut bblk = vec![C::default(); n * s];
-    for k in 0..s {
-        for i in 0..n {
-            bblk[k * n + i] = Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
-        }
-    }
 
     let mut opts = SolverSettings::preconditioner(1e-10);
     if droptol > 0.0 {
@@ -46,6 +54,32 @@ fn main() {
     let (tol, maxit, restart) = (1e-6, 400, 80);
 
     let max_p = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+
+    // --- RHS-sweep mode: fix threads, grow s, report per-RHS cost ---
+    if std::env::var("RLA_RHS_SWEEP").is_ok() {
+        let p: usize = std::env::var("RLA_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(max_p);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap();
+        println!(
+            "Block GMRES RHS scaling  [n={n}  threads={p}  drop_tol={droptol}]\n\
+              s    time(ms)   time/RHS(ms)   iters   res"
+        );
+        for s in [1usize, 2, 4, 8, 16, 32] {
+            let bblk = build_rhs(n, s);
+            let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart).unwrap();
+            let mut res = pool.install(solve); // warm up
+            let mut ms = f64::INFINITY;
+            for _ in 0..3 {
+                let t = Instant::now();
+                res = pool.install(solve);
+                ms = ms.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let maxres = res.final_res.iter().copied().fold(0.0, f64::max);
+            println!("{s:3}   {ms:9.1}    {:9.1}     {:5}   {:.1e}", ms / s as f64, res.iters, maxres);
+        }
+        return;
+    }
+
+    let bblk = build_rhs(n, s);
     let plan: Vec<usize> = [1usize, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24]
         .iter()
         .copied()
