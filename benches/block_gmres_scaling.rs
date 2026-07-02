@@ -55,6 +55,48 @@ fn main() {
 
     let max_p = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
 
+    // --- Grid mode: per-RHS cost over the FULL thread ladder × RHS count, so the
+    // thread scaling is visible at every RHS size (not just 1-vs-max). ---
+    if std::env::var("RLA_GRID").is_ok() {
+        let threads = [1usize, 2, 4, 6, 8, 12].iter().copied().filter(|&p| p <= max_p).collect::<Vec<_>>();
+        let s_list = [1usize, 4, 16];
+        // Prebuild RHS + pools once.
+        let rhs: Vec<Vec<C>> = s_list.iter().map(|&s| build_rhs(n, s)).collect();
+        let pools: Vec<_> = threads
+            .iter()
+            .map(|&p| rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap())
+            .collect();
+        print!("Block GMRES per-RHS(ms) over threads × s  [n={n}  drop_tol={droptol}]\nthreads");
+        for &s in &s_list {
+            print!("      s={s:<2}       ");
+        }
+        println!();
+        // per-RHS at 1 thread for each s, to report speedup down each column.
+        let mut base = vec![0.0f64; s_list.len()];
+        for (ti, &p) in threads.iter().enumerate() {
+            print!("{p:5}  ");
+            for (si, &s) in s_list.iter().enumerate() {
+                let bblk = &rhs[si];
+                let solve = || gmres_block(&a, bblk, s, &lu, tol, maxit, restart).unwrap();
+                let _ = pools[ti].install(solve); // warm up
+                let mut ms = f64::INFINITY;
+                for _ in 0..2 {
+                    let t = Instant::now();
+                    let _ = pools[ti].install(solve);
+                    ms = ms.min(t.elapsed().as_secs_f64() * 1e3);
+                }
+                let tpr = ms / s as f64;
+                if ti == 0 {
+                    base[si] = tpr;
+                }
+                let sp = base[si] / tpr;
+                print!("  {tpr:7.1} ({sp:4.2}x)");
+            }
+            println!();
+        }
+        return;
+    }
+
     // --- RHS-sweep mode: fix threads, grow s, report per-RHS cost ---
     if std::env::var("RLA_RHS_SWEEP").is_ok() {
         let p: usize = std::env::var("RLA_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(max_p);
