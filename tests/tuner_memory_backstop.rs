@@ -3,6 +3,11 @@
 //! than the default. This checks the real `LdltSolver::tuned` / `LuSolver::tuned`
 //! path (not the sweep's manual replica): the tuned factor's fill must not exceed
 //! the untuned default's beyond the backstop's 2% tolerance.
+//!
+//! Needs the `matgen` test-matrix generators, so the whole test is gated on that
+//! feature - under the default build set it compiles to nothing (run it with
+//! `cargo test --features matgen`).
+#![cfg(feature = "matgen")]
 
 use num_complex::Complex;
 use rslab::{

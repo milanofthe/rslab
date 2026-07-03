@@ -89,7 +89,7 @@ fn main() {
             print!("{p:5}  ");
             for (si, &s) in s_list.iter().enumerate() {
                 let bblk = &rhs[si];
-                let solve = || gmres_block(&a, bblk, s, &lu, tol, maxit, restart).unwrap();
+                let solve = || gmres_block(&a, bblk, s, &lu, tol, maxit, restart, None).unwrap();
                 let _ = pools[ti].install(solve); // warm up
                 let mut ms = f64::INFINITY;
                 for _ in 0..2 {
@@ -124,7 +124,7 @@ fn main() {
         );
         for s in [1usize, 2, 4, 8, 16, 32] {
             let bblk = build_rhs(n, s);
-            let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart).unwrap();
+            let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart, None).unwrap();
             let mut res = pool.install(solve); // warm up
             let mut ms = f64::INFINITY;
             for _ in 0..3 {
@@ -167,7 +167,7 @@ fn main() {
     let mut t1 = 0.0f64;
     for (idx, &p) in plan.iter().enumerate() {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap();
-        let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart).unwrap();
+        let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart, None).unwrap();
         let mut res = pool.install(solve); // warm up (page-in, branch predictors)
         // Best of several timed runs: single wall-clock samples are noisy on a
         // loaded machine, and the minimum is the least-contended estimate.

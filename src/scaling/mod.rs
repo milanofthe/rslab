@@ -1429,8 +1429,8 @@ mod tests {
     /// must not be over-eager. Same builder as T2 with `base = 1.1`:
     /// `probe_mc64_synth` measured the chain block at MC64 spread
     /// 9.31e6 (well under `1/EPS`) and InfNorm spread 1.05e4 (above
-    /// `IN_SPREAD_GUARD`, so the MC64 branch - and thus the new guard
-    /// - is genuinely reached rather than short-circuited). The 120
+    /// `IN_SPREAD_GUARD`, so the MC64 branch - and thus the new guard -
+    /// is genuinely reached rather than short-circuited). The 120
     /// appended unit slack columns (issue #47) are disconnected and
     /// move neither spread.
     #[test]

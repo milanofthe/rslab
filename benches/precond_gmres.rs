@@ -56,7 +56,7 @@ fn main() {
         let fac = t.elapsed().as_secs_f64() * 1e3;
         let fill = f.factor_nnz();
         let t = Instant::now();
-        let Ok(kr) = gmres(&a, &b, &f, tol, maxit, restart) else {
+        let Ok(kr) = gmres(&a, &b, &f, tol, maxit, restart, None) else {
             eprintln!("gmres failed at drop_tol={tau}");
             continue;
         };

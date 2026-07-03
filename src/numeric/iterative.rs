@@ -1862,8 +1862,7 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
         // Weak (heavily incomplete) factor so the solve needs several restart
         // cycles at a short restart length - exercising the per-cycle update path.
-        let mut opts = SolverSettings::default();
-        opts.drop_tol = Some(8e-1);
+        let opts = SolverSettings { drop_tol: Some(8e-1), ..Default::default() };
         let lu = factor_general_lu(&a, &opts).unwrap();
         let restart = 5;
         let counting = CountingPc { inner: &lu, applies: std::sync::atomic::AtomicUsize::new(0) };
@@ -2120,7 +2119,7 @@ mod tests {
             }
         }
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-        let seen = with_threads(3, || rayon::current_num_threads());
+        let seen = with_threads(3, rayon::current_num_threads);
         assert_eq!(seen, 3, "with_threads must cap the pool to the requested width");
         let capped = with_threads(3, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap());
         let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
@@ -2543,8 +2542,8 @@ mod tests {
             pv.push(c(1.0 + i as f64, 0.1));
         }
         let pmat = GeneralCsc::<C>::from_triplets(n, &pr, &pc_, &pv).unwrap();
-        let mut opts = SolverSettings::default();
-        opts.drop_tol = Some(1e-2); // drop-tol factor path (imperfect preconditioner)
+        // drop-tol factor path (imperfect preconditioner)
+        let opts = SolverSettings { drop_tol: Some(1e-2), ..Default::default() };
         let lu = factor_general_lu(&pmat, &opts).unwrap();
 
         // RHS k = sum of the first k+1 unit vectors → converges in exactly k+1 steps.

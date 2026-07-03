@@ -53,7 +53,7 @@ fn run(path: &std::path::Path, s: usize) {
     let mut xloop = vec![C::default(); n * s];
     let mut loop_iters = 0;
     for k in 0..s {
-        let r = gmres(&a, &bblk[k * n..k * n + n], &lu, tol, maxit, restart).unwrap();
+        let r = gmres(&a, &bblk[k * n..k * n + n], &lu, tol, maxit, restart, None).unwrap();
         xloop[k * n..k * n + n].copy_from_slice(&r.x);
         loop_iters = loop_iters.max(r.iters);
     }
@@ -61,7 +61,7 @@ fn run(path: &std::path::Path, s: usize) {
 
     // One block GMRES over all s RHS.
     let t = Instant::now();
-    let blk = gmres_block(&a, &bblk, s, &lu, tol, maxit, restart).unwrap();
+    let blk = gmres_block(&a, &bblk, s, &lu, tol, maxit, restart, None).unwrap();
     let blk_ms = t.elapsed().as_secs_f64() * 1e3;
 
     // Max per-column solution difference (must agree to the solve tolerance).

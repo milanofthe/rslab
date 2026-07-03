@@ -624,10 +624,15 @@ fn method_name(m: FactorMethod) -> &'static str {
     }
 }
 
+/// Structural features + a-priori per-path memory estimates (left-looking,
+/// multifrontal, panel-live peak in MB), factor nnz, and the flop triple
+/// (factor, critical-path, max tree width).
+type CanonicalSummary = (StructuralFeatures, f64, f64, f64, f64, u64, u64, u64);
+
 /// Canonical analysis summary: structural features + the a-priori per-path
 /// memory estimates (left-looking, multifrontal) + flops, used for the resource
 /// gates. `None` if the matrix fails to analyze.
-fn canonical(mat: &Mat) -> Option<(StructuralFeatures, f64, f64, f64, f64, u64, u64, u64)> {
+fn canonical(mat: &Mat) -> Option<CanonicalSummary> {
     let mb = |b: u64| b as f64 / 1048576.0;
     match mat {
         Mat::Sym(a) => {
