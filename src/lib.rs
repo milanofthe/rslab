@@ -136,9 +136,9 @@ pub use io::mtx::{
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
 pub use numeric::iterative::{
-    cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_fn, BlockKrylovResult, Factorization,
-    KrylovResult, LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner,
-    Preconditioner,
+    cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_fn, gmres_recycled, BlockKrylovResult,
+    Factorization, KrylovResult, LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner,
+    NoPreconditioner, Preconditioner, Recycle, RecycleScalar,
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
