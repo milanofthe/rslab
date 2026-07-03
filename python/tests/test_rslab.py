@@ -212,3 +212,51 @@ def test_gmres_block_warm_start_matches_and_helps():
     assert iters2 == 0, f"warm start from exact solution should take 0 iters, got {iters2}"
     for c in range(4):
         assert _residual(A, X2[:, c], B[:, c]) < 1e-8
+
+
+def test_gmres_explicit_restart_is_honored():
+    # Issue #12: `restart` is the per-cycle Krylov dimension (and the up-front
+    # n*(cols)*(restart+1) basis size). It must be used verbatim, never silently
+    # replaced by the adaptive default. Cap each solve to a single cycle (maxit =
+    # restart) on a weakly-preconditioned system that needs more than a few steps:
+    # a short restart then only explores a small Krylov space and leaves a larger
+    # residual, while a long restart drives the residual far lower. Directly
+    # observable proof the value is honored, independent of the convergence rate.
+    rng = np.random.default_rng(23)
+    n = 300
+    A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 4.0
+    A = A.tocsc()
+    b = rng.standard_normal(n)
+    fac = rslab.lu(A, drop_tol=8e-1)  # deliberately weak preconditioner
+
+    # One cycle each (maxit == restart), tol unreachable so neither exits early.
+    _, conv_short, iters_short, res_short = fac.gmres(b, tol=1e-14, maxit=4, restart=4)
+    _, _, _, res_long = fac.gmres(b, tol=1e-14, maxit=40, restart=40)
+    assert not conv_short and iters_short == 4, "restart=4 must cap the cycle at 4 steps"
+    assert res_long < res_short, (
+        f"explicit restart ignored? res(restart=4)={res_short}, res(restart=40)={res_long}"
+    )
+
+
+def test_gmres_default_restart_is_adaptive():
+    # With `restart` unspecified the binding picks an adaptive default (capped so
+    # the up-front basis stays under a memory budget, clamped to [20, 80]). For a
+    # modest problem the cap is not binding, so the default still converges - and
+    # matches an explicit restart=80 on the same system.
+    rng = np.random.default_rng(24)
+    n = 300
+    A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
+    A = A.tocsc()
+    b = rng.standard_normal(n)
+    B = rng.standard_normal((n, 4))
+    fac = rslab.lu(A, drop_tol=1e-2)
+
+    x, conv, iters, res = fac.gmres(b, tol=1e-10, maxit=400)  # restart defaulted
+    assert conv and _residual(A, x, b) < 1e-8
+    xe, conve, iterse, _ = fac.gmres(b, tol=1e-10, maxit=400, restart=80)
+    assert conve and iters == iterse  # cap not binding here -> same as explicit 80
+
+    X, convb, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400)  # block, restart defaulted
+    assert convb
+    for c in range(4):
+        assert _residual(A, X[:, c], B[:, c]) < 1e-8

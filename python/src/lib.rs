@@ -35,6 +35,38 @@ fn map_err(e: RslabError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
+// GMRES restart / basis-memory policy (issue #12).
+//
+// The Arnoldi basis is allocated **up front**, so its size is fixed by `restart`,
+// not by how few iterations actually run:
+//   * block  `gmres_block`: one basis `vbas` = `n · nrhs · (restart+1)` scalars;
+//   * single `gmres`      : the flexible `V` + `Z` pair = `2 · n · (restart+1)`.
+// With the old fixed `restart=80` a large `n·nrhs` allocates silently: e.g.
+// `n=100k, nrhs=10, complex128` ⇒ `100000·10·81·16 B ≈ 13 GB`. When the caller
+// does **not** pin `restart`, the binding instead caps it so the basis stays under
+// `GMRES_BASIS_BUDGET_BYTES`, clamped to a still-useful `[MIN, MAX]`. An explicit
+// `restart=` argument always wins (honoured exactly, even past the budget).
+const GMRES_BASIS_BUDGET_BYTES: usize = 1 << 30; // 1 GiB
+const GMRES_RESTART_MIN: usize = 20;
+const GMRES_RESTART_MAX: usize = 80;
+
+/// Restart length keeping the up-front `bases · n · columns · (restart+1)`-scalar
+/// Arnoldi basis under [`GMRES_BASIS_BUDGET_BYTES`], clamped to `[MIN, MAX]`.
+/// `bases` is `1` for `gmres_block`'s single block basis, `2` for the single-RHS
+/// FGMRES `V`+`Z` pair. Predictable and monotone in `n·columns`.
+fn adaptive_restart(n: usize, columns: usize, scalar_bytes: usize, bases: usize) -> usize {
+    let per_layer = n
+        .saturating_mul(columns)
+        .saturating_mul(scalar_bytes)
+        .saturating_mul(bases);
+    if per_layer == 0 {
+        return GMRES_RESTART_MAX;
+    }
+    // basis = per_layer · (restart+1) ≤ budget  ⇒  restart ≤ budget/per_layer − 1.
+    let cap = (GMRES_BASIS_BUDGET_BYTES / per_layer).saturating_sub(1);
+    cap.clamp(GMRES_RESTART_MIN, GMRES_RESTART_MAX)
+}
+
 /// Translate the Python-side keyword arguments into a core [`SolverSettings`].
 #[allow(clippy::too_many_arguments)]
 fn build_opts(
@@ -208,6 +240,13 @@ macro_rules! gmres_block_arm {
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let shape = bb.shape();
         let (n, nrhs) = (shape[0], shape[1]);
+        // Resolve the restart length (issue #12): an explicit value is honoured
+        // exactly; `None` caps it so the up-front `n·nrhs·(restart+1)` basis stays
+        // under the memory budget.
+        let restart: usize = match $restart {
+            Some(r) => r,
+            None => adaptive_restart(n, nrhs, std::mem::size_of::<$T>(), 1),
+        };
         let rm = bb.as_slice()?; // row-major n x nrhs
         let mut cm = vec![<$T>::default(); n * nrhs];
         for i in 0..n {
@@ -238,7 +277,7 @@ macro_rules! gmres_block_arm {
             None => None,
         };
         let res =
-            gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, $restart, x0v.as_deref()).map_err(map_err)?;
+            gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, restart, x0v.as_deref()).map_err(map_err)?;
         let mut out = vec![<$T>::default(); n * nrhs];
         for c in 0..nrhs {
             for i in 0..n {
@@ -263,6 +302,13 @@ macro_rules! gmres_arm {
             .extract()
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let rhs = bb.as_slice()?;
+        // Resolve the restart length (issue #12): explicit value honoured exactly;
+        // `None` caps it so the up-front `2·n·(restart+1)` FGMRES `V`+`Z` basis
+        // stays under the memory budget.
+        let restart: usize = match $restart {
+            Some(r) => r,
+            None => adaptive_restart(rhs.len(), 1, std::mem::size_of::<$T>(), 2),
+        };
         // Optional warm start `x0` (length-`n` vector), seeding the iteration.
         let x0v: Option<Vec<$T>> = match $x0 {
             Some(g) => {
@@ -273,7 +319,7 @@ macro_rules! gmres_arm {
             }
             None => None,
         };
-        let res = gmres_core($op, rhs, $pc, $tol, $maxit, $restart, x0v.as_deref()).map_err(map_err)?;
+        let res = gmres_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref()).map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
         Ok((x_obj, res.converged, res.iters, res.final_res).into_py($py))
     }};
@@ -422,8 +468,15 @@ impl Ldlt {
     ///     per column.
     /// maxit : int, default 400
     ///     Maximum total inner iterations.
-    /// restart : int, default 80
-    ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// restart : int, optional
+    ///     GMRES restart length (the Krylov basis depth per cycle). The Arnoldi
+    ///     basis is allocated **up front**, so memory scales with ``restart``:
+    ///     ``n * nrhs * (restart+1)`` scalars for :meth:`gmres_block` (one basis)
+    ///     and ``2 * n * (restart+1)`` for :meth:`gmres` (the flexible ``V``+``Z``
+    ///     pair). Default ``None`` caps ``restart`` within ``[20, 80]`` so the
+    ///     basis stays under ~1 GiB (``n=100k, nrhs=10, complex128`` would
+    ///     otherwise take ~13 GB at ``restart=80``). Pass an integer to pin
+    ///     ``restart`` exactly - honoured even if it exceeds that budget.
     /// x0 : numpy.ndarray, optional
     ///     Warm-start initial guess, same shape and dtype as the right-hand side.
     ///     On a sequence of related solves (slowly varying operator or RHS),
@@ -451,14 +504,14 @@ impl Ldlt {
     /// ------
     /// ValueError
     ///     If ``B``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
     fn gmres_block(
         &self,
         py: Python<'_>,
         b: &Bound<'_, PyAny>,
         tol: f64,
         maxit: usize,
-        restart: usize,
+        restart: Option<usize>,
         x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
@@ -485,8 +538,15 @@ impl Ldlt {
     ///     Target relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
     /// maxit : int, default 400
     ///     Maximum total inner iterations.
-    /// restart : int, default 80
-    ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// restart : int, optional
+    ///     GMRES restart length (the Krylov basis depth per cycle). The Arnoldi
+    ///     basis is allocated **up front**, so memory scales with ``restart``:
+    ///     ``n * nrhs * (restart+1)`` scalars for :meth:`gmres_block` (one basis)
+    ///     and ``2 * n * (restart+1)`` for :meth:`gmres` (the flexible ``V``+``Z``
+    ///     pair). Default ``None`` caps ``restart`` within ``[20, 80]`` so the
+    ///     basis stays under ~1 GiB (``n=100k, nrhs=10, complex128`` would
+    ///     otherwise take ~13 GB at ``restart=80``). Pass an integer to pin
+    ///     ``restart`` exactly - honoured even if it exceeds that budget.
     /// x0 : numpy.ndarray, optional
     ///     Warm-start initial guess, same shape and dtype as the right-hand side.
     ///     On a sequence of related solves (slowly varying operator or RHS),
@@ -510,14 +570,14 @@ impl Ldlt {
     /// ------
     /// ValueError
     ///     If ``b``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
     fn gmres(
         &self,
         py: Python<'_>,
         b: &Bound<'_, PyAny>,
         tol: f64,
         maxit: usize,
-        restart: usize,
+        restart: Option<usize>,
         x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
@@ -761,8 +821,15 @@ impl Lu {
     ///     per column.
     /// maxit : int, default 400
     ///     Maximum total inner iterations.
-    /// restart : int, default 80
-    ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// restart : int, optional
+    ///     GMRES restart length (the Krylov basis depth per cycle). The Arnoldi
+    ///     basis is allocated **up front**, so memory scales with ``restart``:
+    ///     ``n * nrhs * (restart+1)`` scalars for :meth:`gmres_block` (one basis)
+    ///     and ``2 * n * (restart+1)`` for :meth:`gmres` (the flexible ``V``+``Z``
+    ///     pair). Default ``None`` caps ``restart`` within ``[20, 80]`` so the
+    ///     basis stays under ~1 GiB (``n=100k, nrhs=10, complex128`` would
+    ///     otherwise take ~13 GB at ``restart=80``). Pass an integer to pin
+    ///     ``restart`` exactly - honoured even if it exceeds that budget.
     /// x0 : numpy.ndarray, optional
     ///     Warm-start initial guess, same shape and dtype as the right-hand side.
     ///     On a sequence of related solves (slowly varying operator or RHS),
@@ -790,14 +857,14 @@ impl Lu {
     /// ------
     /// ValueError
     ///     If ``B``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
     fn gmres_block(
         &self,
         py: Python<'_>,
         b: &Bound<'_, PyAny>,
         tol: f64,
         maxit: usize,
-        restart: usize,
+        restart: Option<usize>,
         x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
@@ -825,8 +892,15 @@ impl Lu {
     ///     Target relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
     /// maxit : int, default 400
     ///     Maximum total inner iterations.
-    /// restart : int, default 80
-    ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// restart : int, optional
+    ///     GMRES restart length (the Krylov basis depth per cycle). The Arnoldi
+    ///     basis is allocated **up front**, so memory scales with ``restart``:
+    ///     ``n * nrhs * (restart+1)`` scalars for :meth:`gmres_block` (one basis)
+    ///     and ``2 * n * (restart+1)`` for :meth:`gmres` (the flexible ``V``+``Z``
+    ///     pair). Default ``None`` caps ``restart`` within ``[20, 80]`` so the
+    ///     basis stays under ~1 GiB (``n=100k, nrhs=10, complex128`` would
+    ///     otherwise take ~13 GB at ``restart=80``). Pass an integer to pin
+    ///     ``restart`` exactly - honoured even if it exceeds that budget.
     /// x0 : numpy.ndarray, optional
     ///     Warm-start initial guess, same shape and dtype as the right-hand side.
     ///     On a sequence of related solves (slowly varying operator or RHS),
@@ -850,14 +924,14 @@ impl Lu {
     /// ------
     /// ValueError
     ///     If ``b``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
     fn gmres(
         &self,
         py: Python<'_>,
         b: &Bound<'_, PyAny>,
         tol: f64,
         maxit: usize,
-        restart: usize,
+        restart: Option<usize>,
         x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {

@@ -1048,6 +1048,13 @@ where
 /// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
 /// drive all right-hand sides through one block iteration.
 ///
+/// **Memory (issue #12):** the Arnoldi basis is a single up-front allocation of
+/// `n·s·(restart+1)` scalars (plus a handful of `n·s` work panels), *independent*
+/// of how few iterations actually run - so a large `restart` on a big `n·s` can
+/// allocate many GB (`n=100k, s=10, Complex<f64>, restart=80` ≈ 13 GB). Size
+/// `restart` to the memory budget; the Python binding caps an unspecified
+/// `restart` automatically (an explicit value is honoured exactly).
+///
 /// **Threads (issue #9):** the parallel orthogonalization reductions run in a
 /// scoped pool derived from the preconditioner's [`Threads`] policy
 /// ([`Preconditioner::solve_threads`], resolved at factor time), so factor and
