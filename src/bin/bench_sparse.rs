@@ -11,7 +11,7 @@
 use std::time::Instant;
 
 use num_complex::Complex;
-use rslab::sparse::csc::CscMatrix;
+use rslab::CscMatrix;
 use rslab::LdltSolver;
 use rslab::RslabError;
 

@@ -60,40 +60,69 @@
 //! # Ok(()) }
 //! ```
 
+// -------------------------------------------------------------------------
+// Module visibility (audit finding M4).
+//
+// The embedder contract is the curated root `pub use` set below - that is the
+// ONLY surface `cargo doc` should show. Every module is therefore `pub(crate)`;
+// the intended-public items are re-exported at the crate root and documented
+// there. The exceptions are modules that in-tree tooling (benches, integration
+// tests, the `bench_sparse` bin, xtask) reaches by their full module path for
+// internal building blocks that are deliberately NOT part of the embedder API:
+// those stay `pub` but `#[doc(hidden)]`, so they compile as external crates see
+// them yet never appear in the public docs. Each such case is commented.
+// -------------------------------------------------------------------------
+
 /// Structural feature extraction (the "structure analyzer"): distils a matrix +
 /// its symbolic analysis into a compact [`analysis::StructuralFeatures`] vector
 /// for diagnostics and auto-tuning input.
-pub mod analysis;
+pub(crate) mod analysis;
 /// Auto-tuner: predict the knob config minimizing a weighted time/memory score
 /// for a matrix from its [`analysis::StructuralFeatures`], via an embedded MLP
 /// performance model (trained offline on the corpus sweep; pure-Rust inference).
-pub mod auto_tune;
-pub mod dense;
+pub(crate) mod auto_tune;
+pub(crate) mod dense;
 /// Deterministic resource diagnostics: a-priori peak-memory estimate + per-stage
 /// runtime/memory report for solver-in-the-loop scheduling.
-pub mod diagnostics;
-pub mod error;
-pub mod inertia;
-pub mod io;
+pub(crate) mod diagnostics;
+pub(crate) mod error;
+pub(crate) mod inertia;
+pub(crate) mod io;
 /// Parametrized test-matrix generators (feature `matgen`): PDE stencils, BEM/MoM
 /// kernels, banded/arrow, random + spectral, plus a tagged catalog for benchmarks.
 /// Optional `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
+///
+/// Not part of the embedder API: `pub` only so the in-tree benches and xtask can
+/// build test matrices; hidden from the public docs.
 #[cfg(feature = "matgen")]
+#[doc(hidden)]
 pub mod matgen;
-pub mod numeric;
+pub(crate) mod numeric;
+/// Fill-reducing ordering internals. Not part of the embedder API: `pub` only
+/// because the in-tree benches/tests reach `ordering::amd::permute_pattern` and
+/// `ordering::elimination_tree::EliminationTree` by path; hidden from public docs.
+#[doc(hidden)]
 pub mod ordering;
-pub mod scalar;
-// MC64 max-product matching + equilibration. Currently only the symbolic MC64
-// cache is wired; the numeric consumption (and the dense f64 scaling helpers)
-// will be re-attached to the generic path during the rslab feature port, so the
-// not-yet-wired items are allowed dead for now rather than deleted.
-#[allow(dead_code)]
-pub mod scaling;
-pub mod sparse;
+pub(crate) mod scalar;
+// MC64 max-product matching + equilibration. The wired surface is the symbolic
+// MC64 cache (`compute_mc64_cache`/`Mc64Cache`), `ScalingStrategy`, and the
+// inf-norm / one-pass equilibration used by the factor path.
+pub(crate) mod scaling;
+pub(crate) mod sparse;
+/// Symbolic analysis internals. Not part of the embedder API beyond the root
+/// re-exports (`OrderingMethod`, `RelaxAmalgamation`, `SymbolicProfileReport`):
+/// `pub` because the in-tree tests drive `symbolic::{symbolic_factorize,
+/// column_counts_gnp, ...}` and `symbolic::supernode::OrderingPreprocess` by
+/// path; hidden from public docs.
+#[doc(hidden)]
 pub mod symbolic;
 /// Hardware-aware auto-tuning + resource governor (feature `tuning`): hardware
 /// probe, calibration cache, and a budget-driven factorization planner.
+///
+/// Not part of the embedder API: `pub` only so xtask can drive calibration
+/// (`tuning::{Calibration, HardwareInfo}`); hidden from the public docs.
 #[cfg(feature = "tuning")]
+#[doc(hidden)]
 pub mod tuning;
 
 // Flat public API re-exported at crate root - a single data-type-generic

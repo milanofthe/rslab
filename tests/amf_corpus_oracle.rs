@@ -41,8 +41,8 @@
 use rslab::ordering::amd::permute_pattern;
 use rslab::ordering::elimination_tree::EliminationTree;
 use rslab::read_mtx;
-use rslab::sparse::csc::{CscMatrix, CscPattern};
 use rslab::symbolic::{column_counts_gnp, total_factor_nnz};
+use rslab::{CscMatrix, CscPattern};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
