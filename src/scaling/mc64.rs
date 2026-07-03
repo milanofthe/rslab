@@ -39,9 +39,7 @@
 //! and a hard failure would regress the current `ForceAccept`
 //! pathway.
 
-use super::hungarian::{
-    hungarian_match, hungarian_match_instrumented, CostGraph, HungarianStats, Matching,
-};
+use super::hungarian::{hungarian_match, CostGraph, Matching};
 use super::ScalingInfo;
 use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
@@ -49,27 +47,6 @@ use crate::sparse::csc::CscMatrix;
 /// Upper bound on the argument to `exp` before overflow.
 /// `ln(f64::MAX) ≈ 709.78`. We use 709.0 as a safe ceiling.
 const LOG_HUGE: f64 = 709.0;
-
-/// Compute the MC64 symmetric scaling for a sparse symmetric matrix.
-///
-/// The input `matrix` stores only the lower triangle (including the
-/// diagonal). This function expands to a full symmetric pattern
-/// internally before running the matching.
-///
-/// Returns a length-`n` scaling vector in **user-order** indexing
-/// together with a `ScalingInfo` diagnostic. On a non-singular
-/// matrix the returned info is `ScalingInfo::Applied`; if the
-/// matching is partial the info is
-/// `ScalingInfo::PartialSingular { n_unmatched }` and the
-/// unmatched positions are filled with `1.0` as an identity
-/// fallback.
-/// Compute only the MC64 matching, returning `(perm, n_matched)`.
-/// Diagnostic helper for Phase 2.6.5; skips the scaling-vector
-/// post-processing that `compute_symmetric` does.
-pub(crate) fn matching_perm(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), RslabError> {
-    let cache = compute_matching(matrix)?;
-    Ok((cache.perm, cache.n_matched))
-}
 
 /// Cached MC64 output: the full Hungarian matching plus the
 /// column-max normalization, from which the scaling vector can be
@@ -157,23 +134,6 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabErr
 pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     let cache = compute_matching(matrix)?;
     Ok(scaling_from_cache(&cache))
-}
-
-/// Diagnostic: build the cost graph and run the instrumented Hungarian,
-/// returning its work counters plus the cost-graph nnz. Used by the
-/// scaling audit to localize where the MC64 matching time goes
-/// (dense-column edge scans vs heap reset vs phase-3). Not on any hot
-/// path - no caching, no scaling-vector post-processing.
-pub(crate) fn compute_matching_stats(
-    matrix: &CscMatrix,
-) -> Result<(HungarianStats, usize), RslabError> {
-    if matrix.n == 0 {
-        return Ok((HungarianStats::default(), 0));
-    }
-    let (cost_graph, _cmax) = build_cost_graph(matrix)?;
-    let cost_nnz = cost_graph.row_idx.len();
-    let (_m, stats) = hungarian_match_instrumented(&cost_graph);
-    Ok((stats, cost_nnz))
 }
 
 /// Cheap O(n) post-processing that turns a cached MC64 matching into

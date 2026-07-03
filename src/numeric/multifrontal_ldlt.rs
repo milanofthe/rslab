@@ -367,10 +367,6 @@ impl Threads {
     }
 }
 
-/// Legacy fixed default kept for reference; the live default is
-/// [`Threads::Auto`].
-pub const DEFAULT_THREADS: usize = 2;
-
 /// Run `f` inside a **scoped** rayon thread pool of `threads` workers, so this
 /// factorization's parallelism is bounded and concurrent solves coexist instead of
 /// each grabbing the global pool. Falls back to running on the current pool if the

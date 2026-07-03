@@ -86,6 +86,11 @@ const NONE: usize = usize::MAX;
 ///   O(degree), so on a dense-column matrix this counter - not the
 ///   heap work - is the dominant cost. Counted once per column-scan
 ///   (by column length), so the kernel overhead is O(1) per scan.
+// Work counters threaded through the live matching. Their only reader is the
+// `#80` super-linear-regression guard test (`mc64_hungarian_no_quadratic_heap_
+// realloc_regression`), so outside `cfg(test)` the fields are write-only - a
+// narrow, documented allow rather than deleting a real performance guard.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct HungarianStats {
     pub heap_init_slots: u64,

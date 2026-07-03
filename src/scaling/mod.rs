@@ -33,28 +33,12 @@
 //!      backward sweep. **Same vector on both ends**, not its
 //!      inverse - see the research note for the derivation.
 
-use crate::dense::matrix::SymmetricMatrix;
 use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
 
-#[allow(dead_code)] // Real uses arrive in Step 3 of the implementation plan.
 mod hungarian;
 mod infnorm;
 mod mc64;
-mod value_bound;
-
-/// Compute the MC64 symmetric matching on the lower-triangle CSC
-/// matrix and return the column-to-row permutation (`perm[j]` is the
-/// row matched to column `j`; `usize::MAX` marks unmatched columns).
-///
-/// Exposed for Phase 2.6.5 ordering-compression diagnostic work -
-/// the matching cycle structure drives the MUMPS-style
-/// `ICNTL(12)=2` quotient-graph compression. Internally this is
-/// the same Hungarian call that `Mc64Symmetric` scaling uses, minus
-/// the symmetric-average post-processing.
-pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), RslabError> {
-    mc64::matching_perm(matrix)
-}
 
 /// Cached MC64 output: everything needed to both drive ordering
 /// compression (`perm`) and derive the symmetric scaling vector
@@ -64,68 +48,12 @@ pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), RslabErr
 /// symbolic-speedup work.
 pub(crate) use mc64::Mc64Cache;
 
-/// Value-bounded MC64 scaling-cache validity check (Track B2). The
-/// `Solver` caches a freshly-computed MC64 scaling vector, records
-/// its baseline diagonal-dominance fingerprint via
-/// [`precompute_mc64_validity`], and on each warm `factor()` calls
-/// [`mc64_value_bound_passes`] to decide reuse-vs-recompute without
-/// rerunning the Hungarian. See
-/// `dev/plans/mc64-value-bounded-cache.md`.
-#[allow(unused_imports)] // re-attached when MC64 scaling is ported to the generic path
-pub(crate) use value_bound::{
-    mc64_value_bound_passes, precompute_mc64_validity, Mc64CacheValidity,
-};
-
 /// Run the full MC64 pipeline once and return the cached output.
 /// Used by the symbolic `LdltCompress` preprocessor so the numeric
 /// phase can reuse the matching if its scaling strategy also
 /// resolves to `Mc64Symmetric`.
 pub(crate) fn compute_mc64_cache(matrix: &CscMatrix) -> Result<Mc64Cache, RslabError> {
     mc64::compute_matching(matrix)
-}
-
-/// Diagnostic snapshot of MC64 Hungarian matching work for the
-/// super-linear scaling audit. Counters are algorithmic (not
-/// wall-clock), so they localize *where* the matching time goes
-/// independent of machine speed: `main_loop_edge_scans` dominating
-/// means dense-column edge scans, `heap_init_slots` dominating means
-/// per-search heap work, `phase3_inner_iters` means the length-2
-/// augmentation. See [`diagnose_mc64_matching`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Mc64MatchStats {
-    pub n: usize,
-    pub cost_nnz: usize,
-    pub max_col_degree: usize,
-    pub augment_searches: u64,
-    pub touched_total: u64,
-    pub heap_init_slots: u64,
-    pub phase3_inner_iters: u64,
-    pub main_loop_edge_scans: u64,
-}
-
-/// Run the MC64 Hungarian matching with instrumentation and return its
-/// work counters (diagnostic-only: no caching, no scaling-vector
-/// post-processing). Used by the scaling audit to localize the matching
-/// cost on dense-coupling-column matrices like rocket_12800.
-pub fn diagnose_mc64_matching(matrix: &CscMatrix) -> Result<Mc64MatchStats, RslabError> {
-    let (s, cost_nnz) = mc64::compute_matching_stats(matrix)?;
-    let mut max_col_degree = 0usize;
-    for j in 0..matrix.n {
-        let d = matrix.col_ptr[j + 1] - matrix.col_ptr[j];
-        if d > max_col_degree {
-            max_col_degree = d;
-        }
-    }
-    Ok(Mc64MatchStats {
-        n: matrix.n,
-        cost_nnz,
-        max_col_degree,
-        augment_searches: s.augment_searches,
-        touched_total: s.touched_total,
-        heap_init_slots: s.heap_init_slots,
-        phase3_inner_iters: s.phase3_inner_iters,
-        main_loop_edge_scans: s.main_loop_edge_scans,
-    })
 }
 
 /// User-facing scaling strategy selector.
@@ -250,16 +178,6 @@ pub enum ScalingInfo {
     NotApplied,
 }
 
-impl ScalingInfo {
-    /// `true` when the scaling vector was produced by the InfNorm
-    /// fallback after `Auto` had routed to MC64. Issue #24
-    /// downstream consumers (`Solver::mc64_fallback_count`, bench
-    /// sidecar) read this rather than matching on the variant.
-    pub fn is_mc64_fallback(&self) -> bool {
-        matches!(self, ScalingInfo::Mc64FallbackToInfnorm { .. })
-    }
-}
-
 /// Compute the symmetric scaling vector for a sparse symmetric
 /// matrix stored in CSC with only the lower triangle, following
 /// `strategy`.
@@ -277,38 +195,6 @@ pub fn compute_scaling(
     strategy: &ScalingStrategy,
 ) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     compute_scaling_with_cache(matrix, strategy, None)
-}
-
-/// Scaling for the D.3/D.4 dense fast-path.
-///
-/// The dense fast-path has already (or is about to) densify the
-/// matrix into a `SymmetricMatrix` column-major buffer. For the two
-/// most common strategies (`Auto` and `InfNorm`) this routes to a
-/// dense-native Knight-Ruiz iteration over the existing buffer,
-/// avoiding the sparse `compute_infnorm`'s `row_idx[k]` indirection.
-/// The dense KR is bit-exact with the sparse KR on every fast-path-
-/// gate matrix (see `infnorm::compute_infnorm_dense` doc comment),
-/// so the speedup is free of correctness risk.
-///
-/// `Mc64Symmetric`, `Identity`, and `External` strategies are honored
-/// as-is via [`compute_scaling`] - the user explicitly asked for them
-/// and the fast-path should not override that.
-///
-/// `Auto`'s arrow-KKT branch (`pick_scaling_strategy` returning
-/// `Mc64Symmetric`) is intentionally short-circuited here: on
-/// matrices small enough to be in the dense fast-path gate, the MC64
-/// Hungarian's conditioning win over InfNorm is marginal and its
-/// symbolic overhead dominates the dense-path wall time. See
-/// `dev/results/lever-d3/stage1-stage2-2026-04-19.md` §1.
-pub(crate) fn compute_scaling_dense_fast(
-    matrix: &CscMatrix,
-    sym: &SymmetricMatrix,
-    strategy: &ScalingStrategy,
-) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
-    match strategy {
-        ScalingStrategy::Auto | ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm_dense(sym)),
-        _ => compute_scaling(matrix, strategy),
-    }
 }
 
 /// Variant of [`compute_scaling`] that accepts a precomputed MC64
@@ -1187,8 +1073,6 @@ mod tests {
         let (in_s, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
             .expect("InfNorm on uniform diag should succeed");
         assert_eq!(auto_s, in_s, "fallback vector must be the InfNorm vector");
-        // is_mc64_fallback convenience method matches the variant.
-        assert!(info.is_mc64_fallback());
     }
 
     /// Policy 4 fallback regression test - MSS1_0009 should resolve
