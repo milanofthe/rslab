@@ -14,6 +14,26 @@
 //! precision: an `f64` factor applies directly; an `f32` factor (memory-halved)
 //! down-/up-casts inside `apply`, while the iteration itself always runs in the
 //! working precision `T`.
+//!
+//! ## Orthogonalization (GMRES paths)
+//!
+//! The two GMRES paths orthogonalize the Arnoldi basis by **different**, both
+//! backward-stable, schemes (issue #8):
+//!
+//! - **Single-RHS [`gmres`]:** *modified* Gram-Schmidt (each projection updates
+//!   `w` before the next is taken) with a conditional DGKS second pass, triggered
+//!   when one MGS sweep cancels more than `1/√2` of `‖w‖`.
+//! - **Block [`gmres_block`]:** *classical* Gram-Schmidt with a conditional second
+//!   pass = **CGS2**, batched over the whole panel for BLAS-3 arithmetic
+//!   intensity; the DGKS second pass is decided and applied **per column**.
+//!
+//! Consequently a **block solve with `s = 1` is *not* bit-identical to the single-
+//! RHS [`gmres`]**: MGS and CGS accumulate the projections in a different order, so
+//! the two can differ by a rounding ULP per step and hence by up to ±1 iteration
+//! at a residual that straddles `tol`. Both converge to the same solution within
+//! the requested tolerance. This is a deliberate design point (CGS2's panel-wide
+//! reductions are what make the multi-RHS path fast and thread-count deterministic),
+//! not a bug; see the `gmres_block_single_rhs_matches_scalar_gmres` test.
 
 use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::SolverSettings;
@@ -939,6 +959,13 @@ where
 ///
 /// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
 /// drive all right-hand sides through one block iteration.
+///
+/// **Orthogonalization (issue #8):** the panel is orthogonalized by **block CGS2**
+/// (classical Gram-Schmidt with a conditional, now *per-column*, second pass), not
+/// the MGS+DGKS of the single-RHS [`gmres`]. The two summation orders differ, so a
+/// block solve with `s = 1` is **not** bit-identical to [`gmres`] and may differ by
+/// up to ±1 iteration - both still converge to `tol`. See the module-level
+/// "Orthogonalization" note for the rationale.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn gmres_block<T, A, M>(
     op: &A,
@@ -995,6 +1022,7 @@ where
     let mut proj1 = vec![T::zero(); m * s];
     let mut proj2 = vec![T::zero(); m * s];
     let mut wnorm0 = vec![0.0f64; s]; // panel column norms before ortho (DGKS reorth test)
+    let mut reorth_col = vec![false; s]; // per-column DGKS second-pass flags (issue #8)
     // Reduction scratch for `block_project`: `nchunks · (m·s)`, reused every step
     // so the orthogonalization allocates nothing in the hot loop.
     let mut proj_scratch = vec![T::zero(); n.div_ceil(ORTHO_CHUNK) * m * s];
@@ -1095,14 +1123,32 @@ where
             }
             block_project(&vbas, &wblk, blocks, sa, n, &mut proj1, &mut proj_scratch);
             block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1);
-            // Frozen (converged-this-cycle) columns are excluded from the reorth
-            // trigger: they are compacted out at each step boundary, so a stale or
-            // collapsed frozen column can never force an unnecessary panel-wide
-            // second orthogonalization pass over the still-active columns.
-            let reorth = (0..sa)
-                .any(|ap| !inner_done[ap] && norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap]);
-            if reorth {
+            // **Per-column** DGKS second pass (issue #8): decide the reorth *per
+            // column* from its own norm collapse, not panel-globally. Frozen
+            // (converged-this-cycle) columns are excluded (they are compacted out at
+            // each step boundary, so a stale/collapsed frozen column can never
+            // trigger a reorth). Only columns that actually lost orthogonality get
+            // the second projection subtracted; the rest keep their pass-1 result
+            // bit-for-bit - a single ill-conditioned column no longer imposes the
+            // arithmetic second orthogonalization on the well-conditioned columns.
+            let mut any_reorth = false;
+            for ap in 0..sa {
+                let need = !inner_done[ap] && norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap];
+                reorth_col[ap] = need;
+                any_reorth |= need;
+            }
+            if any_reorth {
                 block_project(&vbas, &wblk, blocks, sa, n, &mut proj2, &mut proj_scratch);
+                // Zero the second-pass projection for columns that do not need it, so
+                // `block_subtract` skips them (its `hij == 0` guard) and their `w`
+                // and Hessenberg entries stay exactly at the pass-1 values.
+                for ap in 0..sa {
+                    if !reorth_col[ap] {
+                        for i in 0..blocks {
+                            proj2[i * sa + ap] = T::zero();
+                        }
+                    }
+                }
                 block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2);
             }
             for ap in 0..sa {
@@ -1110,9 +1156,10 @@ where
                     continue;
                 }
                 let wb = ap * n;
-                // Hessenberg column: projection pass, plus the reorth pass if taken.
+                // Hessenberg column: projection pass, plus the per-column reorth
+                // correction (zero for columns that did not reorth, so `hij == proj1`).
                 for i in 0..=j {
-                    let hij = if reorth { proj1[i * sa + ap] + proj2[i * sa + ap] } else { proj1[i * sa + ap] };
+                    let hij = if any_reorth { proj1[i * sa + ap] + proj2[i * sa + ap] } else { proj1[i * sa + ap] };
                     h[ap][i][j] = hij;
                 }
                 let hn = norm2(&wblk[wb..wb + n]);
@@ -1743,9 +1790,11 @@ mod tests {
     fn gmres_block_single_rhs_matches_scalar_gmres() {
         // s = 1 block GMRES reduces to the single-RHS path (same Arnoldi, same
         // Givens, default block apply = one single apply): same solution to the
-        // requested tolerance, same iteration count up to a ±1 boundary effect
-        // (the true residual can straddle `tol` by an FP rounding difference
-        // between the two summation orders).
+        // requested tolerance, same iteration count up to a ±1 boundary effect.
+        // The paths are NOT bit-identical - block uses CGS2, single uses MGS+DGKS,
+        // so the projections sum in a different order and the true residual can
+        // straddle `tol` by a rounding ULP. This is documented as a design point in
+        // the module-level "Orthogonalization" note (issue #8), not a defect.
         use crate::numeric::multifrontal_lu::factor_general_lu;
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(8);
