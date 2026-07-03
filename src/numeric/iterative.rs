@@ -2370,4 +2370,213 @@ mod tests {
             unpre.iters
         );
     }
+
+    /// Strongly **non-normal** 1D convection-diffusion operator as a general
+    /// complex matrix: tridiagonal `diag = 2 (+ tiny damping)`, super `= -1+γ`,
+    /// sub `= -1-γ`. For `γ ≠ 0` it is far from normal - the classic GMRES-hard
+    /// regime where the residual stagnates for many steps before converging - yet
+    /// remains (weakly) diagonally dominant, so unpreconditioned GMRES does
+    /// converge, only after many iterations / restart cycles.
+    fn convection_diffusion(n: usize, gamma: f64) -> crate::sparse::general::GeneralCsc<C> {
+        use crate::sparse::general::GeneralCsc;
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            rr.push(i);
+            cc.push(i);
+            vv.push(c(2.0, 0.02));
+            if i + 1 < n {
+                rr.push(i);
+                cc.push(i + 1);
+                vv.push(c(-1.0 + gamma, 0.0));
+                rr.push(i + 1);
+                cc.push(i);
+                vv.push(c(-1.0 - gamma, 0.0));
+            }
+        }
+        GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap()
+    }
+
+    /// Wraps an operator and records the width `s` of every block apply - the
+    /// deflation probe (issue #4 / #13): a shrinking width proves the batched
+    /// applies narrow as columns converge.
+    struct WidthCountingOp<'a> {
+        inner: &'a GeneralCsc<C>,
+        widths: std::sync::Mutex<Vec<usize>>,
+    }
+    impl LinearOperator<C> for WidthCountingOp<'_> {
+        fn n(&self) -> usize {
+            self.inner.n()
+        }
+        fn apply(&self, x: &[C], y: &mut [C]) {
+            self.widths.lock().unwrap().push(1);
+            self.inner.apply(x, y);
+        }
+        fn apply_block(&self, x: &[C], y: &mut [C], s: usize) {
+            self.widths.lock().unwrap().push(s);
+            self.inner.apply_block(x, y, s);
+        }
+    }
+
+    #[test]
+    fn gmres_unpreconditioned_nonnormal_needs_many_restarts() {
+        // (issue #13a) Unpreconditioned GMRES on a strongly non-normal operator:
+        // it must survive the non-normal stagnation phase and multiple restart
+        // cycles, then converge to the true solution. Exercises the restart /
+        // outer-loop machinery that the diagonally dominant tests never stress.
+        let a = convection_diffusion(120, 0.9);
+        let n = a.n;
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let b: Vec<C> = (0..n).map(|i| c(((i % 5) as f64) - 2.0, 0.5)).collect();
+        let restart = 20;
+        let res = gmres(&a, &b, &NoPreconditioner, 1e-8, 8000, restart, None).unwrap();
+        assert!(res.converged, "non-normal GMRES must converge, res={}", res.final_res);
+        assert!(
+            res.iters > restart,
+            "must span multiple restart cycles, iters={} (restart={})",
+            res.iters,
+            restart
+        );
+        let mut y = vec![C::default(); n];
+        a.matvec(&res.x, &mut y);
+        let r = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(r < 1e-6, "true residual {}", r);
+    }
+
+    #[test]
+    fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
+        // (issue #13c) A near-defective, strongly non-normal operator (bidiagonal
+        // Jordan-like block: clustered diagonal, dominant super-diagonal) drives
+        // the Arnoldi vectors toward linear dependence, so a single MGS sweep
+        // collapses the norm and the conditional DGKS second pass (`hn < η·‖w₀‖`)
+        // must fire to restore orthogonality. Asserting the trigger directly needs
+        // an intrusive probe; instead we certify the *effect*: GMRES still drives
+        // the true residual to `tol` and matches the exact (direct-LU) solution -
+        // which it could not if the ill-conditioned basis went uncorrected.
+        use crate::numeric::multifrontal_lu::{factor_general_lu, solve_lu};
+        use crate::sparse::general::GeneralCsc;
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let n = 32;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            rr.push(i);
+            cc.push(i);
+            vv.push(c(2.0, 0.0)); // clustered diagonal → non-normal, near-defective
+            if i + 1 < n {
+                rr.push(i);
+                cc.push(i + 1);
+                vv.push(c(3.0, 0.0)); // dominant super-diagonal
+            }
+        }
+        let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<C> = (0..n).map(|_| c(1.0, 0.2)).collect();
+        // Long restart (single cycle) so the ill-conditioned basis is not masked by
+        // a restart - the reorthogonalization alone keeps it usable.
+        let res = gmres(&a, &b, &NoPreconditioner, 1e-10, 4000, n, None).unwrap();
+        assert!(res.converged, "reorth must keep GMRES converging, res={}", res.final_res);
+        let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let xstar = solve_lu(&lu, &b).unwrap();
+        let diff = (0..n).map(|i| (res.x[i] - xstar[i]).norm()).fold(0.0, f64::max);
+        assert!(diff < 1e-6, "GMRES solution off the direct solve by {} (lost orthogonality?)", diff);
+    }
+
+    #[test]
+    fn gmres_happy_breakdown_on_eigenvector_rhs() {
+        // (issue #13d) Happy breakdown: `b` is an eigenvector of the operator, so
+        // the Krylov space `K_1 = span{b}` is already `A`-invariant. The Arnoldi
+        // step-1 subdiagonal `h[1][0]` is exactly `0` (the invariant-subspace
+        // branch), and GMRES must produce the exact solution in a single iteration.
+        use crate::sparse::general::GeneralCsc;
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let n = 12;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            rr.push(i);
+            cc.push(i);
+            vv.push(c(2.0 + i as f64, 0.5 - 0.05 * i as f64)); // distinct diagonal
+        }
+        let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        // `e_0` is an eigenvector (eigenvalue `a[0][0]`); its Krylov space is 1-D.
+        let mut b = vec![C::default(); n];
+        b[0] = c(1.0, 0.0);
+        let res = gmres(&a, &b, &NoPreconditioner, 1e-12, 50, 30, None).unwrap();
+        assert!(res.converged, "eigenvector RHS must converge, res={}", res.final_res);
+        assert_eq!(res.iters, 1, "happy breakdown must solve in one step, got {}", res.iters);
+        let mut y = vec![C::default(); n];
+        a.matvec(&res.x, &mut y);
+        let r = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
+        assert!(r < 1e-12, "true residual {}", r);
+    }
+
+    #[test]
+    fn gmres_block_incomplete_factor_multirate_deflation() {
+        // (issue #13b) Multi-rate within-cycle deflation under a genuine
+        // **factor-based** (drop-tol) preconditioner. The operator is diagonal with
+        // distinct entries `d_i`; the preconditioner is a `drop_tol` LU factor of a
+        // *different* diagonal matrix `diag(p_i)` - a deliberately imperfect
+        // approximate inverse, so the preconditioned operator `M⁻¹A = diag(d_i/p_i)`
+        // still has distinct eigenvalues. Right-hand side `k` is supported on the
+        // first `k+1` unit vectors, so its GMRES converges in **exactly** `k+1`
+        // steps: the columns finish at staggered steps *within one cycle*. The
+        // within-cycle deflation (#4) must finalize each fast column and shrink the
+        // batched applies to the still-active width, draining the panel to 1 - while
+        // every column still matches its single-RHS solve.
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::sparse::general::GeneralCsc;
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let n = 8;
+        let s = 4;
+        // Operator D = diag(d_i), d_i distinct.
+        let (mut dr, mut dc, mut dv) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            dr.push(i);
+            dc.push(i);
+            dv.push(c(2.0 + i as f64, 0.3));
+        }
+        let a = GeneralCsc::<C>::from_triplets(n, &dr, &dc, &dv).unwrap();
+        // Preconditioning matrix P = diag(p_i), p_i chosen so d_i/p_i stay distinct
+        // (p_i = 1+i ⇒ ratios 2, 1.5, 1.33, … all different): an imperfect factor.
+        let (mut pr, mut pc_, mut pv) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            pr.push(i);
+            pc_.push(i);
+            pv.push(c(1.0 + i as f64, 0.1));
+        }
+        let pmat = GeneralCsc::<C>::from_triplets(n, &pr, &pc_, &pv).unwrap();
+        let mut opts = SolverSettings::default();
+        opts.drop_tol = Some(1e-2); // drop-tol factor path (imperfect preconditioner)
+        let lu = factor_general_lu(&pmat, &opts).unwrap();
+
+        // RHS k = sum of the first k+1 unit vectors → converges in exactly k+1 steps.
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..=k {
+                bblk[k * n + i] = c(1.0, 0.0);
+            }
+        }
+
+        let op = WidthCountingOp { inner: &a, widths: std::sync::Mutex::new(Vec::new()) };
+        let res = gmres_block(&op, &bblk, s, &lu, 1e-10, 200, 40, None).unwrap();
+        assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
+
+        // Every column equals its single-RHS solve (deflation must not corrupt it).
+        for k in 0..s {
+            let single = gmres(&a, &bblk[k * n..k * n + n], &lu, 1e-10, 200, 40, None).unwrap();
+            let diff = (0..n)
+                .map(|i| (res.x[k * n + i] - single.x[i]).norm())
+                .fold(0.0, f64::max);
+            assert!(diff < 1e-8, "column {k} differs from single solve by {diff}");
+        }
+
+        // Within-cycle deflation fired: the panel opened at full width `s`, narrowed
+        // as fast columns deflated, and drained to a single active column.
+        let widths = op.widths.into_inner().unwrap();
+        assert!(!widths.is_empty());
+        assert_eq!(*widths.iter().max().unwrap(), s, "the first cycle must open at full width");
+        assert!(
+            *widths.iter().min().unwrap() < s,
+            "within-cycle deflation did not shrink the panel: widths={widths:?}"
+        );
+        assert!(widths.contains(&1), "the panel must drain to a single active column: {widths:?}");
+    }
 }
