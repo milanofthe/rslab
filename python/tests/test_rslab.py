@@ -90,14 +90,21 @@ def test_preconditioner_refine():
 
 def test_lu_gmres_block_preconditioned():
     # Incomplete factor as preconditioner, block GMRES drives all RHS to the true
-    # solution of the full (unsymmetric) system.
+    # solution of the full (unsymmetric) system. gmres_block now returns the full
+    # diagnostics tuple (X, converged, iters, final_res).
     rng = np.random.default_rng(5)
     n = 400
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
     A = A.tocsc()
     B = rng.standard_normal((n, 6))
-    X = rslab.lu(A, drop_tol=1e-2).gmres_block(B, tol=1e-10, maxit=400, restart=80)
+    X, converged, iters, final_res = rslab.lu(A, drop_tol=1e-2).gmres_block(
+        B, tol=1e-10, maxit=400, restart=80
+    )
     assert X.shape == (n, 6)
+    assert converged is True
+    assert isinstance(iters, int) and iters > 0
+    assert final_res.shape == (6,)
+    assert np.all(final_res <= 1e-10)
     for c in range(6):
         assert _residual(A, X[:, c], B[:, c]) < 1e-8
 
@@ -107,7 +114,45 @@ def test_ldlt_gmres_block_complex():
     A = _complex_sym(200)
     B = (np.random.default_rng(6).standard_normal((200, 4))
          + 1j * np.random.default_rng(7).standard_normal((200, 4)))
-    X = rslab.ldlt(A).gmres_block(B.astype(np.complex128), tol=1e-10)
+    X, converged, iters, final_res = rslab.ldlt(A).gmres_block(
+        B.astype(np.complex128), tol=1e-10
+    )
     assert X.shape == (200, 4)
+    assert converged is True
+    assert final_res.shape == (4,)
     for c in range(4):
         assert _residual(A, X[:, c], B[:, c]) < 1e-8
+
+
+def test_lu_gmres_single_rhs():
+    # Single-RHS gmres exposed on the Lu factor, returning (x, converged, iters,
+    # final_res). Incomplete factor as preconditioner recovers the true solution.
+    rng = np.random.default_rng(8)
+    n = 300
+    A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
+    A = A.tocsc()
+    b = rng.standard_normal(n)
+    x, converged, iters, final_res = rslab.lu(A, drop_tol=1e-2).gmres(
+        b, tol=1e-10, maxit=400, restart=80
+    )
+    assert x.shape == (n,)
+    assert converged is True
+    assert isinstance(iters, int) and iters > 0
+    assert float(final_res) <= 1e-10
+    assert _residual(A, x, b) < 1e-8
+
+
+def test_gmres_reports_non_convergence():
+    # With maxit too small to converge, the solver must return converged=False and
+    # a truthful residual rather than silently passing off a bad iterate as good.
+    rng = np.random.default_rng(9)
+    n = 300
+    A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
+    A = A.tocsc()
+    b = rng.standard_normal(n)
+    # A single iteration cannot reach 1e-12 with the identity-ish weak setup here.
+    x, converged, iters, final_res = rslab.lu(A, drop_tol=5e-1).gmres(
+        b, tol=1e-12, maxit=1, restart=1
+    )
+    assert converged is False
+    assert float(final_res) > 1e-12

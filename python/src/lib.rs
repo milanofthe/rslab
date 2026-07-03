@@ -26,8 +26,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use rslab::{
-    gmres_block as gmres_block_core, CscMatrix, FactorMethod, GeneralCsc, LdltSolver, LuSolver,
-    MemoryMode, RslabError, Scalar, SolverSettings, ZeroPivotAction,
+    gmres as gmres_core, gmres_block as gmres_block_core, CscMatrix, FactorMethod, GeneralCsc,
+    LdltSolver, LuSolver, MemoryMode, RslabError, Scalar, SolverSettings, ZeroPivotAction,
 };
 
 /// Map a core solver error onto a Python `RuntimeError` carrying its message.
@@ -196,6 +196,11 @@ macro_rules! ldlt_solve_many_arm {
 /// C-contiguous (row-major) `n x nrhs` array; the core wants column-major
 /// (each RHS contiguous), so transpose in, run the block solve with the stored
 /// matrix as operator and this factor as the preconditioner, transpose out.
+/// Returns the full diagnostics tuple `(X, converged, iters, final_res)` so a
+/// solver-in-the-loop caller can branch on convergence instead of silently
+/// accepting a stalled iterate (issue #6): `converged` is `True` only when every
+/// column reached `tol`, `iters` is the block iteration count, and `final_res`
+/// is the per-column relative residual `‖B[:,c] − A X[:,c]‖ / ‖B[:,c]‖`.
 macro_rules! gmres_block_arm {
     ($py:expr, $b:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
         let bb: PyReadonlyArray2<$T> = $b
@@ -218,7 +223,26 @@ macro_rules! gmres_block_arm {
             }
         }
         let arr = out.into_pyarray_bound($py);
-        Ok(arr.reshape([n, nrhs])?.into_any().unbind())
+        let x_obj = arr.reshape([n, nrhs])?.into_any().unbind();
+        let fr = res.final_res.into_pyarray_bound($py).into_any().unbind();
+        Ok((x_obj, res.converged, res.iters, fr).into_py($py))
+    }};
+}
+
+/// Right-preconditioned single-RHS **GMRES** for one scalar type. `b` is a 1-D
+/// array of length `n`; the stored matrix is the operator and this factor the
+/// preconditioner. Returns `(x, converged, iters, final_res)` - the scalar
+/// analogue of `gmres_block_arm!`, exposing the Rust `KrylovResult` diagnostics
+/// that were previously unavailable from Python (issue #6).
+macro_rules! gmres_arm {
+    ($py:expr, $b:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
+        let bb: PyReadonlyArray1<$T> = $b
+            .extract()
+            .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
+        let rhs = bb.as_slice()?;
+        let res = gmres_core($op, rhs, $pc, $tol, $maxit, $restart).map_err(map_err)?;
+        let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
+        Ok((x_obj, res.converged, res.iters, res.final_res).into_py($py))
     }};
 }
 
@@ -370,9 +394,19 @@ impl Ldlt {
     ///
     /// Returns
     /// -------
-    /// numpy.ndarray
-    ///     The solutions ``X`` as an ``n x nrhs`` array of the factor's dtype (the
-    ///     best iterate; check the residual if convergence is not guaranteed).
+    /// X : numpy.ndarray
+    ///     The solutions ``X`` as an ``n x nrhs`` array of the factor's dtype.
+    /// converged : bool
+    ///     ``True`` only if **every** column reached ``tol``. When ``maxit`` is hit
+    ///     the core returns the best iterate with ``converged=False`` (it does not
+    ///     raise), so an in-the-loop caller must branch on this flag rather than
+    ///     assume success.
+    /// iters : int
+    ///     Block iterations performed (all columns advance in lockstep).
+    /// final_res : numpy.ndarray
+    ///     Per-column relative residual
+    ///     :math:`\\lVert B_{:,c} - A X_{:,c}\\rVert / \\lVert B_{:,c}\\rVert`,
+    ///     a length-``nrhs`` ``float64`` array.
     ///
     /// Raises
     /// ------
@@ -392,6 +426,58 @@ impl Ldlt {
             LdltAny::F32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f32),
             LdltAny::C64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex64),
             LdltAny::C32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex32),
+        }
+    }
+
+    /// Solve ``A x = b`` for a single right-hand side by preconditioned **GMRES**.
+    ///
+    /// The single-RHS companion to :meth:`gmres_block`: the stored matrix is the
+    /// operator and this (possibly inexact) factor the preconditioner
+    /// :math:`M^{-1}`. Use it when the factor is built with ``preconditioner=...``
+    /// (static pivoting) or ``drop_tol=...`` (incomplete) so a few preconditioned
+    /// iterations recover the true solution.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     Right-hand side of length ``n``; its dtype must match :attr:`dtype`.
+    /// tol : float, default 1e-8
+    ///     Target relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
+    /// maxit : int, default 400
+    ///     Maximum total inner iterations.
+    /// restart : int, default 80
+    ///     GMRES restart length (the Krylov basis depth per cycle).
+    ///
+    /// Returns
+    /// -------
+    /// x : numpy.ndarray
+    ///     The solution ``x`` of length ``n`` and the factor's dtype.
+    /// converged : bool
+    ///     ``True`` iff the relative residual reached ``tol``; ``False`` (with the
+    ///     best iterate returned, no exception) when ``maxit`` is hit.
+    /// iters : int
+    ///     Inner iterations performed.
+    /// final_res : float
+    ///     The final relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``b``'s dtype does not match the factor's dtype.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    fn gmres(
+        &self,
+        py: Python<'_>,
+        b: &Bound<'_, PyAny>,
+        tol: f64,
+        maxit: usize,
+        restart: usize,
+    ) -> PyResult<PyObject> {
+        match &self.inner {
+            LdltAny::F64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f64),
+            LdltAny::F32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f32),
+            LdltAny::C64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex64),
+            LdltAny::C32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex32),
         }
     }
 }
@@ -633,9 +719,19 @@ impl Lu {
     ///
     /// Returns
     /// -------
-    /// numpy.ndarray
-    ///     The solutions ``X`` as an ``n x nrhs`` array of the factor's dtype (the
-    ///     best iterate; check the residual if convergence is not guaranteed).
+    /// X : numpy.ndarray
+    ///     The solutions ``X`` as an ``n x nrhs`` array of the factor's dtype.
+    /// converged : bool
+    ///     ``True`` only if **every** column reached ``tol``. When ``maxit`` is hit
+    ///     the core returns the best iterate with ``converged=False`` (it does not
+    ///     raise), so an in-the-loop caller must branch on this flag rather than
+    ///     assume success.
+    /// iters : int
+    ///     Block iterations performed (all columns advance in lockstep).
+    /// final_res : numpy.ndarray
+    ///     Per-column relative residual
+    ///     :math:`\\lVert B_{:,c} - A X_{:,c}\\rVert / \\lVert B_{:,c}\\rVert`,
+    ///     a length-``nrhs`` ``float64`` array.
     ///
     /// Raises
     /// ------
@@ -655,6 +751,59 @@ impl Lu {
             LuAny::F32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f32),
             LuAny::C64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex64),
             LuAny::C32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex32),
+        }
+    }
+
+    /// Solve ``A x = b`` for a single right-hand side by preconditioned **GMRES**.
+    ///
+    /// The single-RHS companion to :meth:`gmres_block`: the stored general matrix
+    /// is the operator and this (possibly inexact) LU factor the preconditioner
+    /// :math:`M^{-1}`. The natural Krylov method for the unsymmetric MoM / FEM
+    /// systems this factor targets; use it with an inexact factor
+    /// (``preconditioner=...`` or ``drop_tol=...``) to recover the true solution in
+    /// a few iterations.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     Right-hand side of length ``n``; its dtype must match :attr:`dtype`.
+    /// tol : float, default 1e-8
+    ///     Target relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
+    /// maxit : int, default 400
+    ///     Maximum total inner iterations.
+    /// restart : int, default 80
+    ///     GMRES restart length (the Krylov basis depth per cycle).
+    ///
+    /// Returns
+    /// -------
+    /// x : numpy.ndarray
+    ///     The solution ``x`` of length ``n`` and the factor's dtype.
+    /// converged : bool
+    ///     ``True`` iff the relative residual reached ``tol``; ``False`` (with the
+    ///     best iterate returned, no exception) when ``maxit`` is hit.
+    /// iters : int
+    ///     Inner iterations performed.
+    /// final_res : float
+    ///     The final relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``b``'s dtype does not match the factor's dtype.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    fn gmres(
+        &self,
+        py: Python<'_>,
+        b: &Bound<'_, PyAny>,
+        tol: f64,
+        maxit: usize,
+        restart: usize,
+    ) -> PyResult<PyObject> {
+        match &self.inner {
+            LuAny::F64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f64),
+            LuAny::F32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f32),
+            LuAny::C64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex64),
+            LuAny::C32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex32),
         }
     }
 }

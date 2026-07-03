@@ -184,8 +184,9 @@ def ldlt(
     -------
     Ldlt
         A reusable factor handle exposing :meth:`~Ldlt.solve`,
-        :meth:`~Ldlt.solve_many`, :meth:`~Ldlt.gmres_block` (preconditioned
-        multi-RHS iterative solve), and the read-only attributes ``n``,
+        :meth:`~Ldlt.solve_many`, :meth:`~Ldlt.gmres` (preconditioned single-RHS
+        iterative solve), :meth:`~Ldlt.gmres_block` (preconditioned multi-RHS
+        iterative solve), and the read-only attributes ``n``,
         ``factor_nnz`` (fill), ``n_perturbed``, ``inertia`` and ``dtype``.
 
     Raises
@@ -296,7 +297,8 @@ def lu(
     -------
     Lu
         A reusable factor handle exposing :meth:`~Lu.solve`,
-        :meth:`~Lu.solve_many`, :meth:`~Lu.gmres_block` (preconditioned multi-RHS
+        :meth:`~Lu.solve_many`, :meth:`~Lu.gmres` (preconditioned single-RHS
+        iterative solve), :meth:`~Lu.gmres_block` (preconditioned multi-RHS
         iterative solve), and the read-only attributes ``n``, ``factor_nnz`` (fill
         in ``L + U``), ``n_perturbed`` and ``dtype``.
 
