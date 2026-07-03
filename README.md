@@ -84,15 +84,13 @@ The two paths are separate solvers a caller dispatches to explicitly, so each is
 plotted against *its own* PARDISO mtype and faer — factor time and peak memory vs
 nonzeros, log-log, one power-law fit per solver.
 
-**LDLᵀ path (symmetric, PARDISO mtype 6):**
+**LDLᵀ path (symmetric, PARDISO mtype 6)** — factor time (left) and peak memory (right):
 
-![LDLt factor time](benches/bench_out/h2h_ldlt_time.png)
-![LDLt peak memory](benches/bench_out/h2h_ldlt_mem.png)
+![LDLt factor time (left) and peak memory (right)](benches/bench_out/h2h_ldlt.png)
 
-**LU path (unsymmetric, PARDISO mtype 13):**
+**LU path (unsymmetric, PARDISO mtype 13)** — factor time (left) and peak memory (right):
 
-![LU factor time](benches/bench_out/h2h_lu_time.png)
-![LU peak memory](benches/bench_out/h2h_lu_mem.png)
+![LU factor time (left) and peak memory (right)](benches/bench_out/h2h_lu.png)
 
 Each point is one corpus matrix; garbage solves (`‖Ax-b‖/‖b‖ > 0.1`) are excluded
 from the fit.

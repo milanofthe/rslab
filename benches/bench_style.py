@@ -95,6 +95,20 @@ def save(fig, out_path):
     return out_path
 
 
+def two_panel(figsize=(11.0, 4.6)):
+    """House-style two-panel figure for a wall-clock-time / peak-memory pair of the
+    *same* experiment: one PDF/PNG instead of two separate files. Returns
+    ``(fig, (ax_wct, ax_mem))`` with **wall-clock time in the left panel and peak
+    memory in the right**, sharing the same x-axis convention (the caller sets the
+    identical x-scale/label on both). Draw the two metrics into the two axes, place a
+    single shared legend with :func:`legend_below`, and route the save through
+    :func:`save` so both render modes and the report redirect are honored. The
+    ``(11.0, 4.6)`` default is the report's established full-text-width two-panel size
+    (matching ``precond_gmres``)."""
+    fig, (ax_wct, ax_mem) = plt.subplots(1, 2, figsize=figsize)
+    return fig, (ax_wct, ax_mem)
+
+
 def legend_below(fig, handles=None, labels=None, ax=None, ncol=None, fontsize=9):
     """Place the figure legend in a compact block just **below** the plot: a
     single horizontal row, wrapping to two rows only when there are many entries.

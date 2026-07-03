@@ -551,20 +551,22 @@ default, its full effect on curl-curl and saddle-point.
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.49\textwidth]{autotune_vs_size_ldlt.pdf}\hfill
-\includegraphics[width=0.49\textwidth]{autotune_modes_ldlt.pdf}
-\caption{$\LDLt$ tuner vs.\ untuned default over \num{167} matrices: speedup and memory ratio
-by problem size (left), and the three Pareto modes as a time--memory cloud (right).}
+\includegraphics[width=0.82\textwidth]{autotune_vs_size_ldlt.pdf}\\[4pt]
+\includegraphics[width=\textwidth]{autotune_modes_ldlt.pdf}
+\caption{$\LDLt$ tuner vs.\ untuned default over \num{167} matrices: (top) factor speedup and
+peak-memory ratio by problem size for the three tuner modes (dotted = geomean); (bottom) the
+three Pareto modes as a time--memory cloud, at full text width.}
 \label{fig:autotune_ldlt}
 \end{figure}
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.49\textwidth]{autotune_vs_size_lu.pdf}\hfill
-\includegraphics[width=0.49\textwidth]{autotune_modes_lu.pdf}
-\caption{LU tuner vs.\ untuned default over \num{97} matrices: speedup and memory ratio by
-problem size (left), and the three Pareto modes (right). Nearly every matrix lands
-below-and-left of the default (faster \emph{and} lighter).}
+\includegraphics[width=0.82\textwidth]{autotune_vs_size_lu.pdf}\\[4pt]
+\includegraphics[width=\textwidth]{autotune_modes_lu.pdf}
+\caption{LU tuner vs.\ untuned default over \num{97} matrices: (top) factor speedup and
+peak-memory ratio by problem size; (bottom) the three Pareto modes as a time--memory cloud,
+at full text width. Nearly every matrix lands below-and-left of the default (faster
+\emph{and} lighter).}
 \label{fig:autotune_lu}
 \end{figure}
 
@@ -757,21 +759,20 @@ the head-to-head geomean ratios.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.49\textwidth]{h2h_ldlt_time.pdf}\hfill
-\includegraphics[width=0.49\textwidth]{h2h_ldlt_mem.pdf}
-\caption{$\LDLt$ path (symmetric, PARDISO mtype 6): factor time (left) and peak memory
-(right) vs.\ problem size --- RSLAB vs.\ faer vs.\ MKL PARDISO, with power-law fits.}
+\includegraphics[width=\textwidth]{h2h_ldlt.pdf}
+\caption{$\LDLt$ path (symmetric, PARDISO mtype 6): (left) factor wall-clock time and
+(right) peak memory vs.\ problem size --- RSLAB vs.\ faer vs.\ MKL PARDISO, with power-law
+fits (the fitted exponent $\alpha$ is annotated on each curve).}
 \label{fig:h2h_ldlt}
 \end{figure}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.49\textwidth]{h2h_lu_time.pdf}\hfill
-\includegraphics[width=0.49\textwidth]{h2h_lu_mem.pdf}
-\caption{LU path (unsymmetric, PARDISO mtype 13): factor time (left) and peak memory
-(right) vs.\ problem size. Each plot carries the untuned-default RSLAB curve (gray) beside
-the auto-tuned one (blue); the tuner closes part of the default$\to$PARDISO distance. On
-time RSLAB scales slightly flatter than PARDISO ($\alpha\!\approx\!1.17$ vs.\ $1.26$).}
+\includegraphics[width=\textwidth]{h2h_lu.pdf}
+\caption{LU path (unsymmetric, PARDISO mtype 13): (left) factor wall-clock time and (right)
+peak memory vs.\ problem size. Each panel carries the untuned-default RSLAB curve (gray)
+beside the auto-tuned one (blue); the tuner closes part of the default$\to$PARDISO distance.
+On time RSLAB scales slightly flatter than PARDISO ($\alpha\!\approx\!1.18$ vs.\ $1.27$).}
 \label{fig:h2h_lu}
 \end{figure}
 

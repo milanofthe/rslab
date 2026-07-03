@@ -34,10 +34,20 @@ ORDER = ["auto", "faer", "pardiso", "superlu"]
 MEM_ORDER = ["auto", "faer", "pardiso"]
 
 
-def plot_metric(recs, metric, value_key, ylabel, title, out, order=ORDER):
+def plot_metric(recs, metric, value_key, ylabel, title, out=None, order=ORDER, ax=None):
+    """Log-log scatter + power-law fit of `value_key` vs nnz, one series per solver.
+
+    Standalone (``ax=None``): builds its own figure, adds a legend below, and saves
+    to `out`. Panel mode (``ax`` given, e.g. one side of :func:`bench_style.two_panel`):
+    draws into the supplied axis, annotates each fit line with its exponent, and does
+    *not* create a figure or legend. Returns the list of plotted solvers as
+    ``(key, label, color, marker)`` so a caller can build one shared legend."""
     rows = [r for r in recs if r.get("metric") == metric and r.get(value_key, 0) > 0]
-    fig, ax = plt.subplots(figsize=(8.5, 6.8))
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=(8.5, 6.8))
     summary = []
+    present = []
     for s in order:
         pts = [(r["nnz"], r[value_key]) for r in rows
                if r["solver"] == s and r["nnz"] > 0 and r.get("res", 1.0) < 0.1]
@@ -50,19 +60,31 @@ def plot_metric(recs, metric, value_key, ylabel, title, out, order=ORDER):
         # Power-law fit in log-log space: log y = alpha*log x + log C.
         alpha, logc = np.polyfit(np.log(x), np.log(y), 1)
         xs = np.array([x.min(), x.max()])
+        # Standalone: exponent in the legend. Panel mode: shared legend carries only
+        # solver identity, so annotate the exponent on the line (offset points +
+        # clipped, so the tight bbox does not blow up on the log axis).
+        fit_label = None if not own_fig else f"{label}  (n={len(pts)}, $\\alpha$={alpha:.2f})"
         ax.plot(xs, np.exp(logc) * xs ** alpha, color=color, lw=2, alpha=0.9, zorder=2,
-                label=f"{label}  (n={len(pts)}, $\\alpha$={alpha:.2f})")
+                label=fit_label)
+        if not own_fig:
+            ax.annotate(f"$\\alpha$={alpha:.2f}", xy=(x.max(), np.exp(logc) * x.max() ** alpha),
+                        xytext=(-3, 4), textcoords="offset points", fontsize=7, color=color,
+                        va="bottom", ha="right", annotation_clip=True)
         summary.append((label, alpha, len(pts)))
+        present.append((s, label, color, marker))
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("nonzeros (nnz)")
     ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    if title:
+        ax.set_title(title)
     ax.grid(True, which="both", ls=":", alpha=0.4)
-    bench_style.legend_below(fig, ax=ax)
-    bench_style.save(fig, out)
+    if own_fig:
+        bench_style.legend_below(fig, ax=ax)
+        bench_style.save(fig, out)
     for label, alpha, n in summary:
         print(f"  {label:<22} alpha={alpha:.2f}  ({n} points)")
+    return present
 
 
 def plot_residual(recs, out):

@@ -12,8 +12,12 @@ OUT=benches/bench_out
 echo "[report] scaling / memory / residual (vs faer/PARDISO/SuperLU)"
 python benches/fit_scaling.py $OUT/corpus.jsonl
 
-echo "[report] auto-tuner end-to-end"
-python benches/autotune_plot.py $OUT/autotune.jsonl
+echo "[report] per-path head-to-head (two-panel: factor time + peak memory)"
+python benches/head_to_head.py $OUT/h2h_sym.jsonl $OUT/h2h_unsym.jsonl
+
+echo "[report] auto-tuner end-to-end (per path: by-size + Pareto cloud)"
+python benches/autotune_plot.py $OUT/pareto_ldlt.jsonl ldlt "LDLt tuner Pareto modes vs default"
+python benches/autotune_plot.py $OUT/pareto_lu.jsonl lu "LU tuner Pareto modes vs default"
 
 echo "[report] thread scaling per solver"
 python benches/agg_thread_scaling_solvers.py $OUT/corpus_threads.jsonl

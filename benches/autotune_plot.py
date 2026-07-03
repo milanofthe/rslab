@@ -92,7 +92,10 @@ def plot_vs_size(data, outdir, suffix="", n=None):
 
 
 def plot_modes(data, outdir, suffix="", title="Auto-tuner Pareto modes vs default"):
-    fig, ax = plt.subplots(figsize=(8, 7))
+    # Full-text-width landscape aspect (matches the report's two-panel width): the
+    # Pareto cloud is included at \textwidth, so a wide, short figure keeps the tick
+    # and axis labels readable at the final scale rather than shrinking a square.
+    fig, ax = plt.subplots(figsize=(11.0, 4.6))
     handles = []
     for cfg, label, color in MODES:
         t = np.array([d[cfg]["ms"] / d["default"]["ms"] for d in data.values() if cfg in d])
