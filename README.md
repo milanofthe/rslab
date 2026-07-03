@@ -52,7 +52,9 @@ right-hand sides. It is a fork of [feral](https://github.com/jkitchin/feral); se
   stepping): skip the pivot search across refactorizations.
 - Preconditioner mode: static pivoting (never-fail), optional incomplete drop and
   block-low-rank compression.
-- Iterative solvers: restarted GMRES, block/multi-RHS GMRES, COCG, COCR.
+- Iterative solvers: flexible restarted GMRES (single + block/multi-RHS), COCG,
+  COCR, with warm start (`x0`) and GCRO-DR Krylov subspace recycling (a `Recycle`
+  handle carried across a sequence of related solves) for solver-in-the-loop work.
 - A-priori peak-memory and runtime estimates computed from the symbolic structure
   before any numeric work; scoped per-solve thread pools; per-call diagnostics; an
   optional hardware-aware budget planner.

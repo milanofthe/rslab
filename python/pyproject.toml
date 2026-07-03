@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rslab"
-version = "0.13.0"
+version = "0.14.0"
 description = "Pure-Rust sparse direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, with NumPy/SciPy bindings."
 readme = "README.md"
 requires-python = ">=3.9"
