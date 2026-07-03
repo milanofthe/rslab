@@ -273,7 +273,7 @@ pub struct SolverSettings {
     /// kept unless it falls below `u · |colmax|` in its fully-summed block. `u = 1`
     /// is full partial pivoting; `u → 0` keeps the diagonal unless exactly zero
     /// (least fill, least stable). Default
-    /// [`DEFAULT_PIVOT_U`](crate::numeric::gemm_tuning::DEFAULT_PIVOT_U) `= 0.1`.
+    /// `DEFAULT_PIVOT_U = 0.1` (a `gemm_tuning` internal constant).
     /// Ignored by the LDLᵀ path (Bunch-Kaufman) and the multifrontal LU front
     /// (which uses full pivoting). Numeric-phase knob; a lower `u` trades a little
     /// stability (backed by the near-zero pivot policy) for less fill and speed on

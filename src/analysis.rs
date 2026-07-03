@@ -381,9 +381,9 @@ impl StructuralFeatures {
     /// features: the knob config minimizing `weight·log(time) + (1-weight)·log(mem)`
     /// over a candidate grid, via the embedded MLP performance model. `weight = 1`
     /// is fastest, `0` is smallest peak memory;
-    /// [`DEFAULT_TUNE_WEIGHT`](crate::auto_tune::DEFAULT_TUNE_WEIGHT) leans toward
+    /// [`DEFAULT_TUNE_WEIGHT`](crate::DEFAULT_TUNE_WEIGHT) leans toward
     /// speed. The worker count is left to the [`Auto`](crate::Threads::Auto)
-    /// thread predictor. See [`crate::auto_tune`].
+    /// thread predictor. See the `auto_tune` internals.
     pub fn recommend_settings(&self, weight: f64) -> crate::SolverSettings {
         crate::auto_tune::recommend_settings(self, weight)
     }

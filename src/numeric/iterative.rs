@@ -1099,8 +1099,8 @@ mod recycle_sealed {
 }
 
 /// Scalar fields that support GCRO-DR recycling. The harmonic-Ritz small
-/// eigenproblem is always solved in `Complex<f64>` (see
-/// [`crate::numeric::dense_eig`]); this trait provides the two field-specific
+/// eigenproblem is always solved in `Complex<f64>` (see the `dense_eig`
+/// internals); this trait provides the two field-specific
 /// bridges: promoting a scalar to `Complex<f64>` for the small matrices, and
 /// reconstructing the recycle vectors from complex coefficient vectors - which
 /// for the **real** field must split a complex conjugate Ritz pair into its real
