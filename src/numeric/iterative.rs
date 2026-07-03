@@ -584,6 +584,28 @@ fn well_conditioned_dim<T: Scalar>(h: &[Vec<T>], jdim: usize) -> usize {
     jdim
 }
 
+/// [`well_conditioned_dim`] for a **flat** row-major Hessenberg buffer (issue #10):
+/// the single-RHS [`gmres`] stores `H` as one `(m+1)×m` `Vec<T>` (diagonal entry
+/// `i` at `h[i*stride + i]`) rather than a `Vec<Vec<T>>`, so this reads the same
+/// breakdown-guarded leading dimension off the flat layout. Identical logic.
+#[inline]
+fn well_conditioned_dim_flat<T: Scalar>(h: &[T], stride: usize, jdim: usize) -> usize {
+    if jdim == 0 {
+        return 0;
+    }
+    let mut hmax = 0.0f64;
+    for i in 0..jdim {
+        hmax = hmax.max(h[i * stride + i].magnitude());
+    }
+    let thresh = f64::EPSILON * hmax;
+    for i in 0..jdim {
+        if h[i * stride + i].magnitude() <= thresh {
+            return i;
+        }
+    }
+    jdim
+}
+
 /// Fixed row-block size for the block-orthogonalization reductions below. A
 /// compile-time constant (never thread-count dependent), so the chunked sums are
 /// **bit-identical across thread counts** - preserving the block solve's
@@ -788,26 +810,55 @@ where
     // #7): stored as it is computed so the restart update is `x += Z y` with no
     // second preconditioner solve, and so a *variable* `M` is honoured exactly.
     let mut zb = vec![T::zero(); n * m];
+    // Per-restart Krylov scalars hoisted out of the outer loop and cleared/reused
+    // each cycle (issue #10): the Hessenberg `h` as one **flat** `(m+1)×m` buffer
+    // (row `i`, col `j` at `h[i*m + j]` - cache-friendlier than a `Vec<Vec<T>>`),
+    // the Givens `cs`/`sn`, the LS RHS `g`, and the back-substitution `y`. A
+    // many-restart solve (the ill-conditioned regime) then does no per-cycle heap
+    // churn; the reused buffers are zeroed each cycle, so the numerics are
+    // bit-identical to the old fresh-allocation-per-cycle path.
+    let mut h = vec![T::zero(); (m + 1) * m];
+    let mut cs = vec![T::zero(); m];
+    let mut sn = vec![T::zero(); m];
+    let mut g = vec![T::zero(); m + 1];
+    let mut y = vec![T::zero(); m];
 
-    while total < max_iter {
+    // Outer restart loop. Each pass first measures the TRUE residual ‖b−Ax‖ of the
+    // current iterate (the only reliable stop test on ill-conditioned MoM near-
+    // field operators, where the Hessenberg LS estimate can dip below `tol` while
+    // the true residual is orders larger) and records it as `final_res`. On
+    // convergence *or* exhausted iterations we break with that value already in
+    // hand - no separate post-loop matvec to report the residual (issue #10).
+    // Definitely assigned before every `break` (the only exits from the loop).
+    let mut final_res;
+    loop {
         op.apply(&x, &mut ax);
         let r: Vec<T> = (0..n).map(|i| b[i] - ax[i]).collect();
         let beta = norm2(&r);
-        if beta / bnorm <= tol {
+        final_res = beta / bnorm;
+        if final_res <= tol || total >= max_iter {
             break;
         }
-        // Column 0 of the basis = r / ‖r‖. Hessenberg H, Givens, and LS RHS g.
+        // Column 0 of the basis = r / ‖r‖. Reset the reused Hessenberg / Givens /
+        // LS state to the fresh-zero semantics of the old per-cycle allocation.
         let inv_beta = T::from_real(1.0 / beta);
         for k in 0..n {
             v[k] = r[k] * inv_beta;
         }
-        let mut h = vec![vec![T::zero(); m]; m + 1];
-        let mut cs = vec![T::zero(); m];
-        let mut sn = vec![T::zero(); m];
-        let mut g = vec![T::zero(); m + 1];
+        for e in h.iter_mut() {
+            *e = T::zero();
+        }
+        for e in cs.iter_mut() {
+            *e = T::zero();
+        }
+        for e in sn.iter_mut() {
+            *e = T::zero();
+        }
+        for e in g.iter_mut() {
+            *e = T::zero();
+        }
         g[0] = T::from_real(beta);
         let mut jdim = 0usize;
-        let mut converged_inner = false;
         for j in 0..m {
             if total >= max_iter {
                 break;
@@ -826,7 +877,7 @@ where
             let wnorm0 = norm2(&w);
             for i in 0..=j {
                 let hij = dotc(&v[i * n..i * n + n], &w);
-                h[i][j] = hij;
+                h[i * m + j] = hij;
                 for k in 0..n {
                     w[k] = w[k] - hij * v[i * n + k];
                 }
@@ -835,14 +886,14 @@ where
             if hn < REORTH_ETA * wnorm0 {
                 for i in 0..=j {
                     let s = dotc(&v[i * n..i * n + n], &w);
-                    h[i][j] = h[i][j] + s;
+                    h[i * m + j] = h[i * m + j] + s;
                     for k in 0..n {
                         w[k] = w[k] - s * v[i * n + k];
                     }
                 }
                 hn = norm2(&w);
             }
-            h[j + 1][j] = T::from_real(hn);
+            h[(j + 1) * m + j] = T::from_real(hn);
             if hn > 0.0 {
                 let inv = T::from_real(1.0 / hn);
                 for k in 0..n {
@@ -857,40 +908,38 @@ where
             }
             // Apply previous rotations to the new Hessenberg column.
             for i in 0..j {
-                let temp = cs[i].conj() * h[i][j] + sn[i].conj() * h[i + 1][j];
-                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j];
-                h[i][j] = temp;
+                let temp = cs[i].conj() * h[i * m + j] + sn[i].conj() * h[(i + 1) * m + j];
+                h[(i + 1) * m + j] = -sn[i] * h[i * m + j] + cs[i] * h[(i + 1) * m + j];
+                h[i * m + j] = temp;
             }
             // New rotation zeroing h[j+1][j]; apply to H and the LS RHS g.
-            let (c, s) = givens(h[j][j], h[j + 1][j]);
+            let (c, s) = givens(h[j * m + j], h[(j + 1) * m + j]);
             cs[j] = c;
             sn[j] = s;
-            h[j][j] = c.conj() * h[j][j] + s.conj() * h[j + 1][j];
-            h[j + 1][j] = T::zero();
+            h[j * m + j] = c.conj() * h[j * m + j] + s.conj() * h[(j + 1) * m + j];
+            h[(j + 1) * m + j] = T::zero();
             let g_next = -s * g[j];
             g[j] = c.conj() * g[j];
             g[j + 1] = g_next;
             total += 1;
             jdim = j + 1;
+            // Early-exit the inner sweep on the LS estimate, but do **not** treat it
+            // as convergence: the outer loop's top-of-cycle TRUE-residual check is
+            // authoritative (the estimate can drift on ill-conditioned operators).
             if g[j + 1].magnitude() / bnorm <= tol {
-                converged_inner = true;
                 break;
             }
         }
-        // Back-substitute the upper-triangular H for y, then (FGMRES) x += Z·y
-        // directly from the stored preconditioned basis - no second `M⁻¹` solve.
-        // Guard the solve against a (near-)singular Hessenberg diagonal: on
-        // breakdown, solve only the well-conditioned leading block so a stagnated
-        // / rank-deficient cycle degrades to a truncated update instead of
-        // dividing by ~0.
-        let jd = well_conditioned_dim(&h, jdim);
-        let mut y = vec![T::zero(); jd];
+        // Back-substitute the upper-triangular H for y on the well-conditioned
+        // leading block (breakdown guard), then (FGMRES) x += Z·y directly from the
+        // stored preconditioned basis - no second `M⁻¹` solve.
+        let jd = well_conditioned_dim_flat(&h, m, jdim);
         for i in (0..jd).rev() {
             let mut s = g[i];
             for k in (i + 1)..jd {
-                s = s - h[i][k] * y[k];
+                s = s - h[i * m + k] * y[k];
             }
-            y[i] = s * h[i][i].recip();
+            y[i] = s * h[i * m + i].recip();
         }
         for i in 0..jd {
             let yi = y[i];
@@ -898,18 +947,8 @@ where
                 x[k] = x[k] + zb[i * n + k] * yi;
             }
         }
-        // NOTE: do **not** stop on the inner (Hessenberg LS) residual estimate
-        // alone. On ill-conditioned operators (MoM near-field) the estimate can
-        // dip below `tol` while the *true* residual ‖b−Ax‖ is orders larger
-        // (loss of Arnoldi orthogonality). Restart and let the outer loop's
-        // top-of-cycle TRUE-residual check decide convergence. `converged_inner`
-        // only governs early-exit of the inner Arnoldi sweep, not termination.
-        let _ = converged_inner;
     }
 
-    op.apply(&x, &mut ax);
-    let r: Vec<T> = (0..n).map(|i| b[i] - ax[i]).collect();
-    let final_res = norm2(&r) / bnorm;
     Ok(KrylovResult {
         x,
         iters: total,
@@ -1099,6 +1138,10 @@ where
     let mut jdim = vec![0usize; s];
     let mut converged = vec![false; s];
     let mut final_res = vec![0.0f64; s];
+    // Back-substitution buffer for the per-column restart update, hoisted out of
+    // the hot loop and reused (issue #10): each column's back-sub overwrites the
+    // `0..jd` prefix before reading it, so no per-column-per-cycle allocation.
+    let mut y = vec![T::zero(); m];
     let mut total = 0usize;
     for c in 0..s {
         if bnorm[c] == 0.0 {
@@ -1333,7 +1376,8 @@ where
                 if jd == 0 {
                     continue;
                 }
-                let mut y = vec![T::zero(); jd];
+                // Reuse the hoisted `y` buffer: back-sub writes `y[0..jd]` top-down
+                // (each entry before it is read), so no per-column allocation.
                 for i in (0..jd).rev() {
                     let mut acc = g[ap][i];
                     for k in (i + 1)..jd {
@@ -1360,20 +1404,37 @@ where
         }
     }
 
-    // Final true residual per RHS.
-    op.apply_block(&x, &mut axblk, s);
+    // Final true residual per RHS (issue #10). A converged column was measured at
+    // its top-of-cycle deflation checkpoint and frozen (never re-entered the active
+    // set), so its recorded `final_res` is already the final true residual - reuse
+    // it. Re-matvec **only** the columns still active at the iteration budget
+    // (`converged[c] == false`), compacted into one narrow block apply, instead of a
+    // full-width `s` matvec over columns that deflated cycles ago. For a fully
+    // converged solve this skips the final matvec entirely; the reused values are
+    // bit-identical to a full recompute (the operator is column-independent).
+    let pending: Vec<usize> = (0..s).filter(|&c| !converged[c] && bnorm[c] != 0.0).collect();
+    if !pending.is_empty() {
+        let lp = pending.len();
+        for (a, &c) in pending.iter().enumerate() {
+            xc[a * n..a * n + n].copy_from_slice(&x[c * n..c * n + n]);
+        }
+        op.apply_block(&xc[..lp * n], &mut axblk[..lp * n], lp);
+        for (a, &c) in pending.iter().enumerate() {
+            let cb = c * n;
+            let ab = a * n;
+            let mut rn = 0.0;
+            for i in 0..n {
+                rn += (b[cb + i] - axblk[ab + i]).magnitude_sq();
+            }
+            final_res[c] = rn.sqrt() / bnorm[c];
+        }
+    }
     let mut all_conv = true;
     for c in 0..s {
         if bnorm[c] == 0.0 {
             final_res[c] = 0.0;
             continue;
         }
-        let cb = c * n;
-        let mut rn = 0.0;
-        for i in 0..n {
-            rn += (b[cb + i] - axblk[cb + i]).magnitude_sq();
-        }
-        final_res[c] = rn.sqrt() / bnorm[c];
         if final_res[c] > tol {
             all_conv = false;
         }
