@@ -640,11 +640,21 @@ fn block_subtract<T: Scalar>(vbas: &[T], w: &mut [T], blocks: usize, sa: usize, 
     }
 }
 
-/// Right-preconditioned restarted **GMRES(`restart`)** for a general
-/// (unsymmetric) operator - the natural Krylov method for unsymmetric MoM/FEM
-/// systems where COCG/COCR do not apply. `op` may be matrix-free; `precond`
-/// supplies `M⁻¹` (e.g. an RLA [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors)
-/// near-field factor). Solves `A x = b` from `x₀ = 0`.
+/// **Flexible** right-preconditioned restarted **GMRES(`restart`)** (FGMRES,
+/// Saad 1993) for a general (unsymmetric) operator - the natural Krylov method
+/// for unsymmetric MoM/FEM systems where COCG/COCR do not apply. `op` may be
+/// matrix-free; `precond` supplies `M⁻¹` (e.g. an RLA
+/// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors) near-field factor).
+/// Solves `A x = b` from `x₀ = 0`.
+///
+/// **Flexible variant (issue #7):** the preconditioned Arnoldi vectors
+/// `z_j = M⁻¹ v_j` (already formed to build `w = A z_j`) are *kept* as a second
+/// basis `Z = [z_0 … z_{m-1}]`, and the restart update is `x += Z y` directly.
+/// This (a) removes the one extra `M⁻¹` solve per cycle that plain right-
+/// preconditioned GMRES spends rebuilding `M⁻¹(V y)`, and (b) makes the method
+/// flexible: `M` may **vary** between steps (an inner Krylov solve, or a
+/// preconditioner strengthened across iterations). Cost: one extra `n·(m+1)`
+/// basis of storage.
 pub fn gmres<T, A, M>(
     op: &A,
     b: &[T],
@@ -681,13 +691,16 @@ where
     }
 
     let mut total = 0usize;
-    let mut z = vec![T::zero(); n];
     let mut w = vec![T::zero(); n];
     let mut ax = vec![T::zero(); n];
     // Arnoldi basis as one **flat** `n × (m+1)` buffer (column `i` is
     // `v[i*n .. (i+1)*n]`) - contiguous, no per-iteration vector allocation, and
     // cache-friendly for the Gram-Schmidt sweeps.
     let mut v = vec![T::zero(); n * (m + 1)];
+    // FGMRES preconditioned basis `Z = [z_0 … z_{m-1}]`, `z_j = M⁻¹ v_j` (issue
+    // #7): stored as it is computed so the restart update is `x += Z y` with no
+    // second preconditioner solve, and so a *variable* `M` is honoured exactly.
+    let mut zb = vec![T::zero(); n * m];
 
     while total < max_iter {
         op.apply(&x, &mut ax);
@@ -712,9 +725,10 @@ where
             if total >= max_iter {
                 break;
             }
-            // Right preconditioning: w = A · M⁻¹ · v[j].
-            precond.apply(&v[j * n..j * n + n], &mut z)?;
-            op.apply(&z, &mut w);
+            // Flexible right preconditioning: z_j = M⁻¹ v[j] (stored into the Z
+            // basis for the restart update), then w = A z_j.
+            precond.apply(&v[j * n..j * n + n], &mut zb[j * n..j * n + n])?;
+            op.apply(&zb[j * n..j * n + n], &mut w);
             // Modified Gram-Schmidt against the existing basis, with **conditional**
             // reorthogonalization (DGKS): the second pass - essential on
             // ill-conditioned operators (MoM near-field) where a single MGS pass
@@ -776,10 +790,12 @@ where
                 break;
             }
         }
-        // Back-substitute the upper-triangular H for y, then x += M⁻¹·(V·y). Guard
-        // the solve against a (near-)singular Hessenberg diagonal: on breakdown,
-        // solve only the well-conditioned leading block so a stagnated / rank-
-        // deficient cycle degrades to a truncated update instead of dividing by ~0.
+        // Back-substitute the upper-triangular H for y, then (FGMRES) x += Z·y
+        // directly from the stored preconditioned basis - no second `M⁻¹` solve.
+        // Guard the solve against a (near-)singular Hessenberg diagonal: on
+        // breakdown, solve only the well-conditioned leading block so a stagnated
+        // / rank-deficient cycle degrades to a truncated update instead of
+        // dividing by ~0.
         let jd = well_conditioned_dim(&h, jdim);
         let mut y = vec![T::zero(); jd];
         for i in (0..jd).rev() {
@@ -789,16 +805,11 @@ where
             }
             y[i] = s * h[i][i].recip();
         }
-        let mut vy = vec![T::zero(); n];
         for i in 0..jd {
             let yi = y[i];
             for k in 0..n {
-                vy[k] = vy[k] + v[i * n + k] * yi;
+                x[k] = x[k] + zb[i * n + k] * yi;
             }
-        }
-        precond.apply(&vy, &mut z)?;
-        for k in 0..n {
-            x[k] = x[k] + z[k];
         }
         // NOTE: do **not** stop on the inner (Hessenberg LS) residual estimate
         // alone. On ill-conditioned operators (MoM near-field) the estimate can
@@ -1598,6 +1609,51 @@ mod tests {
             }
         }
         GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap()
+    }
+
+    /// Wraps a preconditioner and counts every scalar `apply` (the `M⁻¹` solves).
+    struct CountingPc<'a, M: ?Sized> {
+        inner: &'a M,
+        applies: std::sync::atomic::AtomicUsize,
+    }
+    impl<T: Scalar, M: Preconditioner<T> + ?Sized> Preconditioner<T> for CountingPc<'_, M> {
+        fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
+            self.applies.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.apply(r, z)
+        }
+    }
+
+    #[test]
+    fn fgmres_saves_one_precond_apply_per_restart_cycle() {
+        // FGMRES (issue #7): the preconditioned basis `Z` is kept, so the restart
+        // update `x += Z y` costs **no** extra `M⁻¹` solve. The loop applies `M⁻¹`
+        // exactly once per inner iteration and never at the restart, so over a
+        // multi-cycle solve the total preconditioner-apply count equals the total
+        // iteration count. Plain right-preconditioned GMRES would spend one extra
+        // `M⁻¹` per cycle (rebuilding `M⁻¹(V y)`), i.e. `iters + n_cycles`.
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(10); // n = 100
+        let n = a.n;
+        let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        // Weak (heavily incomplete) factor so the solve needs several restart
+        // cycles at a short restart length - exercising the per-cycle update path.
+        let mut opts = SolverSettings::default();
+        opts.drop_tol = Some(8e-1);
+        let lu = factor_general_lu(&a, &opts).unwrap();
+        let restart = 5;
+        let counting = CountingPc { inner: &lu, applies: std::sync::atomic::AtomicUsize::new(0) };
+        let res = gmres(&a, &b, &counting, 1e-10, 2000, restart).unwrap();
+        assert!(res.converged, "FGMRES must converge, res={}", res.final_res);
+        let applies = counting.applies.load(std::sync::atomic::Ordering::Relaxed);
+        // Multiple restart cycles actually occurred (proves the saving is nonzero).
+        assert!(res.iters > restart, "expected multiple cycles, iters={}", res.iters);
+        // FGMRES: exactly one apply per inner iteration, none at restart.
+        assert_eq!(
+            applies, res.iters,
+            "FGMRES precond applies {} must equal iters {} (no per-cycle extra solve)",
+            applies, res.iters
+        );
     }
 
     #[test]
