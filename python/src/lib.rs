@@ -26,9 +26,11 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use rslab::{
-    gmres as gmres_core, gmres_block as gmres_block_core, CscMatrix, FactorMethod, GeneralCsc,
-    LdltSolver, LuSolver, MemoryMode, RslabError, Scalar, SolverSettings, ZeroPivotAction,
+    gmres as gmres_core, gmres_block as gmres_block_core, gmres_recycled as gmres_recycled_core,
+    CscMatrix, FactorMethod, GeneralCsc, LdltSolver, LuSolver, MemoryMode, Recycle, RslabError,
+    Scalar, SolverSettings, ZeroPivotAction,
 };
+use std::cell::RefCell;
 
 /// Map a core solver error onto a Python `RuntimeError` carrying its message.
 fn map_err(e: RslabError) -> PyErr {
@@ -325,6 +327,136 @@ macro_rules! gmres_arm {
     }};
 }
 
+/// A GCRO-DR **recycle handle** over one of the four scalar fields (issue #5).
+/// Carries the harmonic-Ritz subspace across a sequence of related single-RHS
+/// solves; created by `Ldlt.recycle(k)` / `Lu.recycle(k)` and passed to
+/// :meth:`gmres` via ``recycle=``. The scalar field is fixed at creation to match
+/// the factor's dtype.
+enum RecycleAny {
+    F64(Recycle<f64>),
+    F32(Recycle<f32>),
+    C64(Recycle<Complex<f64>>),
+    C32(Recycle<Complex<f32>>),
+}
+
+/// An opaque **Krylov subspace recycling** handle for GCRO-DR (issue #5).
+///
+/// Create one from a factor with :meth:`Ldlt.recycle` / :meth:`Lu.recycle` and
+/// pass it to :meth:`Ldlt.gmres` / :meth:`Lu.gmres` via the ``recycle=`` keyword.
+/// The handle stores ``k`` harmonic-Ritz vectors approximating the smallest
+/// eigenvalues of :math:`A M^{-1}` - the subspace that dominates restarted-GMRES
+/// stagnation - and is refreshed in place at the end of each solve.
+///
+/// Reuse the **same** handle across a sequence of related solves (same or slowly
+/// varying ``A`` and preconditioner ``M``): each solve deflates the recycled
+/// subspace from the start instead of re-discovering it, typically cutting restart
+/// counts several-fold. It composes with the ``x0=`` warm start. Passing it to an
+/// unrelated system is safe (never wrong) but may not help. The recycle matvecs
+/// ``C = A M⁻¹ U`` (``k`` matvecs + ``k`` preconditioner solves) are recomputed
+/// each solve, so a changed operator is handled exactly.
+///
+/// Memory: ``U`` is ``n * k`` scalars of the factor's dtype.
+///
+/// Attributes
+/// ----------
+/// k : int
+///     Target subspace dimension (capped at ``restart // 2`` per solve).
+/// active : int
+///     Recycle vectors currently stored (``0`` until the first solve populates it).
+/// dtype : str
+///     The scalar field name, matching the factor it was created from.
+#[pyclass(name = "Recycle")]
+struct PyRecycle {
+    inner: RefCell<RecycleAny>,
+}
+
+#[pymethods]
+impl PyRecycle {
+    /// Target subspace dimension ``k``.
+    #[getter]
+    fn k(&self) -> usize {
+        match &*self.inner.borrow() {
+            RecycleAny::F64(r) => r.dim(),
+            RecycleAny::F32(r) => r.dim(),
+            RecycleAny::C64(r) => r.dim(),
+            RecycleAny::C32(r) => r.dim(),
+        }
+    }
+
+    /// Number of recycle vectors currently stored (``≤ k``).
+    #[getter]
+    fn active(&self) -> usize {
+        match &*self.inner.borrow() {
+            RecycleAny::F64(r) => r.active(),
+            RecycleAny::F32(r) => r.active(),
+            RecycleAny::C64(r) => r.active(),
+            RecycleAny::C32(r) => r.active(),
+        }
+    }
+
+    /// The scalar field name (``'float64'`` / ``'float32'`` / ``'complex128'`` /
+    /// ``'complex64'``).
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        match &*self.inner.borrow() {
+            RecycleAny::F64(_) => "float64",
+            RecycleAny::F32(_) => "float32",
+            RecycleAny::C64(_) => "complex128",
+            RecycleAny::C32(_) => "complex64",
+        }
+    }
+
+    /// Forget the accumulated subspace (e.g. before an unrelated system). The
+    /// target dimension ``k`` is retained.
+    fn clear(&self) {
+        match &mut *self.inner.borrow_mut() {
+            RecycleAny::F64(r) => r.clear(),
+            RecycleAny::F32(r) => r.clear(),
+            RecycleAny::C64(r) => r.clear(),
+            RecycleAny::C32(r) => r.clear(),
+        }
+    }
+}
+
+/// Single-RHS **GCRO-DR** solve for one scalar type: like `gmres_arm!` but drives
+/// the recycled entry point, extracting the matching-typed [`Recycle`] handle from
+/// the `PyRecycle` wrapper (a dtype mismatch is a `ValueError`).
+macro_rules! gmres_recycled_arm {
+    ($py:expr, $b:expr, $x0:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $rec:expr, $variant:ident, $T:ty) => {{
+        let bb: PyReadonlyArray1<$T> = $b
+            .extract()
+            .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
+        let rhs = bb.as_slice()?;
+        let restart: usize = match $restart {
+            Some(r) => r,
+            None => adaptive_restart(rhs.len(), 1, std::mem::size_of::<$T>(), 2),
+        };
+        let x0v: Option<Vec<$T>> = match $x0 {
+            Some(g) => {
+                let ga: PyReadonlyArray1<$T> = g.extract().map_err(|_| {
+                    PyValueError::new_err("x0 dtype does not match the factor dtype")
+                })?;
+                Some(ga.as_slice()?.to_vec())
+            }
+            None => None,
+        };
+        let recref = $rec.borrow();
+        let mut guard = recref.inner.borrow_mut();
+        let handle = match &mut *guard {
+            RecycleAny::$variant(h) => h,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "recycle dtype does not match the factor dtype",
+                ))
+            }
+        };
+        let res = gmres_recycled_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref(), handle)
+            .map_err(map_err)?;
+        let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
+        Ok((x_obj, res.converged, res.iters, res.final_res).into_py($py))
+    }};
+}
+
 #[pymethods]
 impl Ldlt {
     /// Matrix dimension `n`.
@@ -553,6 +685,13 @@ impl Ldlt {
     ///     seeding with the previous solution typically cuts the iteration count
     ///     substantially. Convergence is still measured relative to the RHS norm.
     ///     ``None`` (default) starts from zero.
+    /// recycle : rslab.Recycle, optional
+    ///     A GCRO-DR recycle handle from :meth:`recycle`. When supplied, the solve
+    ///     deflates (and, across a sequence, *recycles*) the ``k``-dimensional
+    ///     near-invariant subspace that dominates restarted-GMRES stagnation,
+    ///     typically cutting restart counts several-fold on hard / slowly varying
+    ///     systems. The handle is refreshed in place. Composes with ``x0=``. Its
+    ///     dtype must match the factor's. ``None`` (default) runs plain FGMRES.
     ///
     /// Returns
     /// -------
@@ -569,8 +708,8 @@ impl Ldlt {
     /// Raises
     /// ------
     /// ValueError
-    ///     If ``b``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
+    ///     If ``b``'s (or ``recycle``'s) dtype does not match the factor's dtype.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None, recycle = None))]
     fn gmres(
         &self,
         py: Python<'_>,
@@ -579,12 +718,50 @@ impl Ldlt {
         maxit: usize,
         restart: Option<usize>,
         x0: Option<Bound<'_, PyAny>>,
+        recycle: Option<Bound<'_, PyRecycle>>,
     ) -> PyResult<PyObject> {
-        match &self.inner {
-            LdltAny::F64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
-            LdltAny::F32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
-            LdltAny::C64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
-            LdltAny::C32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
+        match (&self.inner, recycle.as_ref()) {
+            (LdltAny::F64(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F64, f64)
+            }
+            (LdltAny::F32(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F32, f32)
+            }
+            (LdltAny::C64(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C64, Complex64)
+            }
+            (LdltAny::C32(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C32, Complex32)
+            }
+            (LdltAny::F64(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
+            }
+            (LdltAny::F32(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32)
+            }
+            (LdltAny::C64(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64)
+            }
+            (LdltAny::C32(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32)
+            }
+        }
+    }
+
+    /// Create a GCRO-DR :class:`Recycle` handle of dimension ``k`` matching this
+    /// factor's dtype, for :meth:`gmres`'s ``recycle=`` keyword. Reuse the same
+    /// handle across a sequence of related solves to recycle the stagnation
+    /// subspace; ``k`` is capped at ``restart // 2`` inside the solve. See
+    /// :class:`Recycle`.
+    fn recycle(&self, k: usize) -> PyRecycle {
+        let inner = match &self.inner {
+            LdltAny::F64(..) => RecycleAny::F64(Recycle::new(k)),
+            LdltAny::F32(..) => RecycleAny::F32(Recycle::new(k)),
+            LdltAny::C64(..) => RecycleAny::C64(Recycle::new(k)),
+            LdltAny::C32(..) => RecycleAny::C32(Recycle::new(k)),
+        };
+        PyRecycle {
+            inner: RefCell::new(inner),
         }
     }
 }
@@ -907,6 +1084,13 @@ impl Lu {
     ///     seeding with the previous solution typically cuts the iteration count
     ///     substantially. Convergence is still measured relative to the RHS norm.
     ///     ``None`` (default) starts from zero.
+    /// recycle : rslab.Recycle, optional
+    ///     A GCRO-DR recycle handle from :meth:`recycle`. When supplied, the solve
+    ///     deflates (and, across a sequence, *recycles*) the ``k``-dimensional
+    ///     near-invariant subspace that dominates restarted-GMRES stagnation,
+    ///     typically cutting restart counts several-fold on hard / slowly varying
+    ///     systems. The handle is refreshed in place. Composes with ``x0=``. Its
+    ///     dtype must match the factor's. ``None`` (default) runs plain FGMRES.
     ///
     /// Returns
     /// -------
@@ -923,8 +1107,8 @@ impl Lu {
     /// Raises
     /// ------
     /// ValueError
-    ///     If ``b``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
+    ///     If ``b``'s (or ``recycle``'s) dtype does not match the factor's dtype.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None, recycle = None))]
     fn gmres(
         &self,
         py: Python<'_>,
@@ -933,12 +1117,50 @@ impl Lu {
         maxit: usize,
         restart: Option<usize>,
         x0: Option<Bound<'_, PyAny>>,
+        recycle: Option<Bound<'_, PyRecycle>>,
     ) -> PyResult<PyObject> {
-        match &self.inner {
-            LuAny::F64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
-            LuAny::F32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
-            LuAny::C64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
-            LuAny::C32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
+        match (&self.inner, recycle.as_ref()) {
+            (LuAny::F64(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F64, f64)
+            }
+            (LuAny::F32(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F32, f32)
+            }
+            (LuAny::C64(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C64, Complex64)
+            }
+            (LuAny::C32(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C32, Complex32)
+            }
+            (LuAny::F64(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
+            }
+            (LuAny::F32(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32)
+            }
+            (LuAny::C64(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64)
+            }
+            (LuAny::C32(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32)
+            }
+        }
+    }
+
+    /// Create a GCRO-DR :class:`Recycle` handle of dimension ``k`` matching this
+    /// factor's dtype, for :meth:`gmres`'s ``recycle=`` keyword. Reuse the same
+    /// handle across a sequence of related solves to recycle the stagnation
+    /// subspace; ``k`` is capped at ``restart // 2`` inside the solve. See
+    /// :class:`Recycle`.
+    fn recycle(&self, k: usize) -> PyRecycle {
+        let inner = match &self.inner {
+            LuAny::F64(..) => RecycleAny::F64(Recycle::new(k)),
+            LuAny::F32(..) => RecycleAny::F32(Recycle::new(k)),
+            LuAny::C64(..) => RecycleAny::C64(Recycle::new(k)),
+            LuAny::C32(..) => RecycleAny::C32(Recycle::new(k)),
+        };
+        PyRecycle {
+            inner: RefCell::new(inner),
         }
     }
 }
@@ -988,6 +1210,7 @@ fn lu_factor(
 fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Ldlt>()?;
     m.add_class::<Lu>()?;
+    m.add_class::<PyRecycle>()?;
     m.add_function(wrap_pyfunction!(ldlt_factor, m)?)?;
     m.add_function(wrap_pyfunction!(lu_factor, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

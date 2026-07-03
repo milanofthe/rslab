@@ -1023,7 +1023,9 @@ where
 mod recycle_sealed {
     pub trait Sealed {}
     impl Sealed for f64 {}
+    impl Sealed for f32 {}
     impl Sealed for num_complex::Complex<f64> {}
+    impl Sealed for num_complex::Complex<f32> {}
 }
 
 /// Scalar fields that support GCRO-DR recycling. The harmonic-Ritz small
@@ -1033,8 +1035,8 @@ mod recycle_sealed {
 /// reconstructing the recycle vectors from complex coefficient vectors - which
 /// for the **real** field must split a complex conjugate Ritz pair into its real
 /// and imaginary parts (two real recycle vectors), since a real `U` cannot store
-/// a complex eigenvector directly. A sealed trait (impls for `f64` /
-/// `Complex<f64>` only); not user-implementable.
+/// a complex eigenvector directly. A sealed trait (impls for the four scalar
+/// fields `f64` / `f32` / `Complex<f64>` / `Complex<f32>`); not user-implementable.
 pub trait RecycleScalar: Scalar + recycle_sealed::Sealed {
     /// Promote to `Complex<f64>` for the small dense harmonic-Ritz problem.
     #[doc(hidden)]
@@ -1053,6 +1055,82 @@ pub trait RecycleScalar: Scalar + recycle_sealed::Sealed {
     ) -> Vec<Self>;
 }
 
+/// Real-field recycle reconstruction (`f64` / `f32`): a real `U` cannot hold a
+/// complex eigenvector, so each **complex** conjugate Ritz pair contributes its
+/// `Re g` and `Im g` (two real vectors spanning the real 2-D invariant subspace),
+/// while a real Ritz value contributes one. Multiplies columns only by the real
+/// coefficient parts via [`Scalar::from_real`], so it is generic over the real
+/// field. Emits at most `kmax` vectors.
+fn combine_ritz_real<T: Scalar>(
+    cols: &[T],
+    n: usize,
+    d: usize,
+    pairs: &[(Complex<f64>, Vec<Complex<f64>>)],
+    kmax: usize,
+) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
+    for (theta, g) in pairs {
+        if out.len() / n >= kmax {
+            break;
+        }
+        let mag = theta.norm().max(1e-300);
+        if theta.im.abs() <= 1e-8 * mag {
+            let mut v = vec![T::zero(); n];
+            for j in 0..d {
+                let re = T::from_real(g[j].re);
+                for kk in 0..n {
+                    v[kk] = v[kk] + re * cols[j * n + kk];
+                }
+            }
+            out.extend_from_slice(&v);
+        } else if theta.im > 0.0 {
+            let mut vr = vec![T::zero(); n];
+            let mut vi = vec![T::zero(); n];
+            for j in 0..d {
+                let (re, im) = (T::from_real(g[j].re), T::from_real(g[j].im));
+                for kk in 0..n {
+                    vr[kk] = vr[kk] + re * cols[j * n + kk];
+                    vi[kk] = vi[kk] + im * cols[j * n + kk];
+                }
+            }
+            out.extend_from_slice(&vr);
+            if out.len() / n < kmax {
+                out.extend_from_slice(&vi);
+            }
+        }
+    }
+    out
+}
+
+/// Complex-field recycle reconstruction (`Complex<f64>` / `Complex<f32>`): the
+/// harmonic-Ritz vectors are genuinely complex, so `U ← [U, V] gᵢ` directly, one
+/// vector per pair. `mk` casts a `Complex<f64>` coefficient into the working field
+/// (identity for `Complex<f64>`, a narrowing cast for `Complex<f32>`).
+fn combine_ritz_complex<T: Scalar>(
+    cols: &[T],
+    n: usize,
+    d: usize,
+    pairs: &[(Complex<f64>, Vec<Complex<f64>>)],
+    kmax: usize,
+    mk: impl Fn(Complex<f64>) -> T,
+) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
+    for (i, (_theta, g)) in pairs.iter().enumerate() {
+        if i >= kmax {
+            break;
+        }
+        let mut v = vec![T::zero(); n];
+        for j in 0..d {
+            let gj = mk(g[j]);
+            for kk in 0..n {
+                v[kk] = v[kk] + gj * cols[j * n + kk];
+            }
+        }
+        out.extend_from_slice(&v);
+    }
+    out
+}
+
 impl RecycleScalar for f64 {
     fn to_c(self) -> Complex<f64> {
         Complex::new(self, 0.0)
@@ -1064,43 +1142,22 @@ impl RecycleScalar for f64 {
         pairs: &[(Complex<f64>, Vec<Complex<f64>>)],
         kmax: usize,
     ) -> Vec<f64> {
-        let mut out: Vec<f64> = Vec::new();
-        for (theta, g) in pairs {
-            if out.len() / n >= kmax {
-                break;
-            }
-            let mag = theta.norm().max(1e-300);
-            if theta.im.abs() <= 1e-8 * mag {
-                // Real Ritz value: one real recycle vector Σ Re(gⱼ)·colⱼ.
-                let mut v = vec![0.0f64; n];
-                for j in 0..d {
-                    let re = g[j].re;
-                    if re != 0.0 {
-                        for kk in 0..n {
-                            v[kk] += re * cols[j * n + kk];
-                        }
-                    }
-                }
-                out.extend_from_slice(&v);
-            } else if theta.im > 0.0 {
-                // Complex conjugate pair: the real 2-D invariant subspace is
-                // spanned by Re(g) and Im(g). Emit both; skip the −im partner.
-                let mut vr = vec![0.0f64; n];
-                let mut vi = vec![0.0f64; n];
-                for j in 0..d {
-                    let (re, im) = (g[j].re, g[j].im);
-                    for kk in 0..n {
-                        vr[kk] += re * cols[j * n + kk];
-                        vi[kk] += im * cols[j * n + kk];
-                    }
-                }
-                out.extend_from_slice(&vr);
-                if out.len() / n < kmax {
-                    out.extend_from_slice(&vi);
-                }
-            }
-        }
-        out
+        combine_ritz_real(cols, n, d, pairs, kmax)
+    }
+}
+
+impl RecycleScalar for f32 {
+    fn to_c(self) -> Complex<f64> {
+        Complex::new(self as f64, 0.0)
+    }
+    fn combine_ritz(
+        cols: &[f32],
+        n: usize,
+        d: usize,
+        pairs: &[(Complex<f64>, Vec<Complex<f64>>)],
+        kmax: usize,
+    ) -> Vec<f32> {
+        combine_ritz_real(cols, n, d, pairs, kmax)
     }
 }
 
@@ -1115,21 +1172,24 @@ impl RecycleScalar for Complex<f64> {
         pairs: &[(Complex<f64>, Vec<Complex<f64>>)],
         kmax: usize,
     ) -> Vec<Complex<f64>> {
-        let mut out: Vec<Complex<f64>> = Vec::new();
-        for (i, (_theta, g)) in pairs.iter().enumerate() {
-            if i >= kmax {
-                break;
-            }
-            let mut v = vec![Complex::new(0.0, 0.0); n];
-            for j in 0..d {
-                let gj = g[j];
-                for kk in 0..n {
-                    v[kk] += gj * cols[j * n + kk];
-                }
-            }
-            out.extend_from_slice(&v);
-        }
-        out
+        combine_ritz_complex(cols, n, d, pairs, kmax, |z| z)
+    }
+}
+
+impl RecycleScalar for Complex<f32> {
+    fn to_c(self) -> Complex<f64> {
+        Complex::new(self.re as f64, self.im as f64)
+    }
+    fn combine_ritz(
+        cols: &[Complex<f32>],
+        n: usize,
+        d: usize,
+        pairs: &[(Complex<f64>, Vec<Complex<f64>>)],
+        kmax: usize,
+    ) -> Vec<Complex<f32>> {
+        combine_ritz_complex(cols, n, d, pairs, kmax, |z| {
+            Complex::new(z.re as f32, z.im as f32)
+        })
     }
 }
 

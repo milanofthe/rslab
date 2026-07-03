@@ -61,9 +61,9 @@ from __future__ import annotations
 import numpy as np
 
 from . import _rslab
-from ._rslab import Ldlt, Lu
+from ._rslab import Ldlt, Lu, Recycle
 
-__all__ = ["ldlt", "lu", "spsolve", "Ldlt", "Lu"]
+__all__ = ["ldlt", "lu", "spsolve", "Ldlt", "Lu", "Recycle"]
 __version__ = _rslab.__version__
 
 # The four scalar fields the Rust core supports, by NumPy dtype.

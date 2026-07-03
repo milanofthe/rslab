@@ -194,6 +194,108 @@ def test_gmres_warm_start_cuts_iterations():
     assert warm_total < 0.7 * cold_total, f"cold={cold_total}, warm={warm_total}"
 
 
+def _stagnating_operator(m=18, rank=3, seed=4):
+    # A convection-diffusion grid plus a global near-low-rank coupling U Uᵀ that an
+    # *incomplete* LU factor cannot capture - so the preconditioned system keeps a
+    # small near-invariant cluster and restarted GMRES genuinely stagnates. This is
+    # the regime GCRO-DR recycling targets.
+    n = m * m
+    rng = np.random.default_rng(seed)
+    I = sp.eye(m)
+    main = 2.0 * np.ones(m)
+    up = -0.9 * np.ones(m - 1)
+    lo = -0.05 * np.ones(m - 1)
+    T = sp.diags([lo, main, up], [-1, 0, 1])
+    S = sp.kron(I, T) + sp.kron(T, I)
+    U = rng.standard_normal((n, rank)) * 0.6
+    G = sp.csc_matrix(U @ U.T)
+    return (S + G).tocsc(), rng
+
+
+def test_gmres_recycle_cross_solve_beats_warm_and_cold():
+    # GCRO-DR recycling (issue #5) across a sequence of related solves (slowly
+    # rotating RHS, weak incomplete factor → stagnation). Total iterations must
+    # order recycled < warm-start < cold, with recycled a clear margin below cold.
+    A, rng = _stagnating_operator(m=18, rank=3, seed=4)
+    n = A.shape[0]
+    fac = rslab.lu(A, drop_tol=0.4)
+    b0 = rng.standard_normal(n)
+    b1 = rng.standard_normal(n)
+    steps, tol, restart, maxit = 10, 1e-9, 10, 200000
+
+    def bk(k):
+        th = 0.02 * k
+        return np.cos(th) * b0 + np.sin(th) * b1
+
+    def run(mode, kdim=10):
+        total = 0
+        prev = None
+        rec = fac.recycle(kdim) if mode == "rec" else None
+        for k in range(steps):
+            kw = {}
+            if mode in ("warm", "rec") and prev is not None:
+                kw["x0"] = prev
+            if mode == "rec":
+                kw["recycle"] = rec
+            x, converged, iters, _ = fac.gmres(
+                bk(k), tol=tol, maxit=maxit, restart=restart, **kw
+            )
+            assert converged, f"{mode} solve {k} did not converge"
+            assert _residual(A, x, bk(k)) < 1e-7
+            total += iters
+            prev = x
+        return total, rec
+
+    cold, _ = run("cold")
+    warm, _ = run("warm")
+    recycled, rec = run("rec")
+    print(f"\n[python cross-solve] cold={cold} warm={warm} recycled={recycled}")
+    assert rec.active > 0, "recycle handle was never populated"
+    assert rec.dtype == "float64"
+    assert warm < cold, f"warm ({warm}) !< cold ({cold})"
+    assert recycled < warm, f"recycled ({recycled}) !< warm ({warm})"
+    assert recycled < 0.85 * cold, f"recycled ({recycled}) not clearly below cold ({cold})"
+
+
+def test_gmres_recycle_complex_handle_and_compose():
+    # End-to-end handle exercise on a complex system: the recycle dtype tracks the
+    # factor, composes with x0, refreshes across solves, and clear() empties it.
+    A, rng = _stagnating_operator(m=14, rank=2, seed=6)
+    A = A.astype(np.complex128)
+    A.data += 1j * 0.05 * A.data.real
+    A = A.tocsc()
+    n = A.shape[0]
+    fac = rslab.lu(A, drop_tol=0.4)
+    b = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex128)
+
+    rec = fac.recycle(8)
+    assert rec.k == 8 and rec.active == 0 and rec.dtype == "complex128"
+
+    x1, c1, _, _ = fac.gmres(b, tol=1e-9, maxit=50000, restart=10, recycle=rec)
+    assert c1 and _residual(A, x1, b) < 1e-7
+    assert rec.active > 0, "handle not refreshed after first solve"
+
+    # Compose recycle with an x0 warm start on a related RHS.
+    b2 = b * (0.99 + 0.01j)
+    x2, c2, _, _ = fac.gmres(b2, tol=1e-9, maxit=50000, restart=10, x0=x1, recycle=rec)
+    assert c2 and _residual(A, x2, b2) < 1e-7
+
+    rec.clear()
+    assert rec.active == 0 and rec.k == 8
+
+
+def test_gmres_recycle_dtype_mismatch_raises():
+    # A recycle handle built from one factor's dtype cannot be used with a solve of
+    # a different dtype.
+    A, rng = _stagnating_operator(m=10, rank=1, seed=1)
+    fac_r = rslab.lu(A.tocsc(), drop_tol=0.5)  # float64
+    fac_c = rslab.lu(A.astype(np.complex128).tocsc(), drop_tol=0.5)  # complex128
+    rec_c = fac_c.recycle(6)  # complex128 handle
+    b = rng.standard_normal(A.shape[0])
+    with pytest.raises(ValueError):
+        fac_r.gmres(b, recycle=rec_c)  # float64 solve, complex128 handle
+
+
 def test_gmres_block_warm_start_matches_and_helps():
     # Warm start also works for the block (multi-RHS) path: seeding with the exact
     # solution converges immediately (0 iters), and the result still matches a
