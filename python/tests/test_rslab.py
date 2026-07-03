@@ -91,17 +91,18 @@ def test_preconditioner_refine():
 def test_lu_gmres_block_preconditioned():
     # Incomplete factor as preconditioner, block GMRES drives all RHS to the true
     # solution of the full (unsymmetric) system. gmres_block now returns the full
-    # diagnostics tuple (X, converged, iters, final_res).
+    # diagnostics tuple (X, converged, iters, final_res, stop).
     rng = np.random.default_rng(5)
     n = 400
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
     A = A.tocsc()
     B = rng.standard_normal((n, 6))
-    X, converged, iters, final_res = rslab.lu(A, drop_tol=1e-2).gmres_block(
+    X, converged, iters, final_res, stop = rslab.lu(A, drop_tol=1e-2).gmres_block(
         B, tol=1e-10, maxit=400, restart=80
     )
     assert X.shape == (n, 6)
     assert converged is True
+    assert stop == "converged"
     assert isinstance(iters, int) and iters > 0
     assert final_res.shape == (6,)
     assert np.all(final_res <= 1e-10)
@@ -114,11 +115,12 @@ def test_ldlt_gmres_block_complex():
     A = _complex_sym(200)
     B = (np.random.default_rng(6).standard_normal((200, 4))
          + 1j * np.random.default_rng(7).standard_normal((200, 4)))
-    X, converged, iters, final_res = rslab.ldlt(A).gmres_block(
+    X, converged, iters, final_res, stop = rslab.ldlt(A).gmres_block(
         B.astype(np.complex128), tol=1e-10
     )
     assert X.shape == (200, 4)
     assert converged is True
+    assert stop == "converged"
     assert final_res.shape == (4,)
     for c in range(4):
         assert _residual(A, X[:, c], B[:, c]) < 1e-8
@@ -126,17 +128,18 @@ def test_ldlt_gmres_block_complex():
 
 def test_lu_gmres_single_rhs():
     # Single-RHS gmres exposed on the Lu factor, returning (x, converged, iters,
-    # final_res). Incomplete factor as preconditioner recovers the true solution.
+    # final_res, stop). Incomplete factor as preconditioner recovers the true solution.
     rng = np.random.default_rng(8)
     n = 300
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
     A = A.tocsc()
     b = rng.standard_normal(n)
-    x, converged, iters, final_res = rslab.lu(A, drop_tol=1e-2).gmres(
+    x, converged, iters, final_res, stop = rslab.lu(A, drop_tol=1e-2).gmres(
         b, tol=1e-10, maxit=400, restart=80
     )
     assert x.shape == (n,)
     assert converged is True
+    assert stop == "converged"
     assert isinstance(iters, int) and iters > 0
     assert float(final_res) <= 1e-10
     assert _residual(A, x, b) < 1e-8
@@ -151,10 +154,11 @@ def test_gmres_reports_non_convergence():
     A = A.tocsc()
     b = rng.standard_normal(n)
     # A single iteration cannot reach 1e-12 with the identity-ish weak setup here.
-    x, converged, iters, final_res = rslab.lu(A, drop_tol=5e-1).gmres(
+    x, converged, iters, final_res, stop = rslab.lu(A, drop_tol=5e-1).gmres(
         b, tol=1e-12, maxit=1, restart=1
     )
     assert converged is False
+    assert stop == "max_iter"
     assert float(final_res) > 1e-12
 
 
@@ -179,14 +183,14 @@ def test_gmres_warm_start_cuts_iterations():
 
     cold_total = 0
     for k in range(steps):
-        x, converged, iters, _ = fac.gmres(bk(k), tol=1e-9, maxit=4000, restart=60)
+        x, converged, iters, _, _ = fac.gmres(bk(k), tol=1e-9, maxit=4000, restart=60)
         assert converged
         cold_total += iters
 
     warm_total = 0
     prev = None
     for k in range(steps):
-        x, converged, iters, _ = fac.gmres(bk(k), tol=1e-9, maxit=4000, restart=60, x0=prev)
+        x, converged, iters, _, _ = fac.gmres(bk(k), tol=1e-9, maxit=4000, restart=60, x0=prev)
         assert converged
         warm_total += iters
         prev = x
@@ -237,7 +241,7 @@ def test_gmres_recycle_cross_solve_beats_warm_and_cold():
                 kw["x0"] = prev
             if mode == "rec":
                 kw["recycle"] = rec
-            x, converged, iters, _ = fac.gmres(
+            x, converged, iters, _, _ = fac.gmres(
                 bk(k), tol=tol, maxit=maxit, restart=restart, **kw
             )
             assert converged, f"{mode} solve {k} did not converge"
@@ -271,13 +275,13 @@ def test_gmres_recycle_complex_handle_and_compose():
     rec = fac.recycle(8)
     assert rec.k == 8 and rec.active == 0 and rec.dtype == "complex128"
 
-    x1, c1, _, _ = fac.gmres(b, tol=1e-9, maxit=50000, restart=10, recycle=rec)
+    x1, c1, _, _, _ = fac.gmres(b, tol=1e-9, maxit=50000, restart=10, recycle=rec)
     assert c1 and _residual(A, x1, b) < 1e-7
     assert rec.active > 0, "handle not refreshed after first solve"
 
     # Compose recycle with an x0 warm start on a related RHS.
     b2 = b * (0.99 + 0.01j)
-    x2, c2, _, _ = fac.gmres(b2, tol=1e-9, maxit=50000, restart=10, x0=x1, recycle=rec)
+    x2, c2, _, _, _ = fac.gmres(b2, tol=1e-9, maxit=50000, restart=10, x0=x1, recycle=rec)
     assert c2 and _residual(A, x2, b2) < 1e-7
 
     rec.clear()
@@ -306,10 +310,10 @@ def test_gmres_block_warm_start_matches_and_helps():
     A = A.tocsc()
     fac = rslab.lu(A, drop_tol=1e-2)
     B = rng.standard_normal((n, 4))
-    X, converged, iters, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80)
+    X, converged, iters, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80)
     assert converged
     # Re-solve warm-started from the converged solution: must need no iterations.
-    X2, conv2, iters2, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80, x0=X)
+    X2, conv2, iters2, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80, x0=X)
     assert conv2
     assert iters2 == 0, f"warm start from exact solution should take 0 iters, got {iters2}"
     for c in range(4):
@@ -332,8 +336,8 @@ def test_gmres_explicit_restart_is_honored():
     fac = rslab.lu(A, drop_tol=8e-1)  # deliberately weak preconditioner
 
     # One cycle each (maxit == restart), tol unreachable so neither exits early.
-    _, conv_short, iters_short, res_short = fac.gmres(b, tol=1e-14, maxit=4, restart=4)
-    _, _, _, res_long = fac.gmres(b, tol=1e-14, maxit=40, restart=40)
+    _, conv_short, iters_short, res_short, _ = fac.gmres(b, tol=1e-14, maxit=4, restart=4)
+    _, _, _, res_long, _ = fac.gmres(b, tol=1e-14, maxit=40, restart=40)
     assert not conv_short and iters_short == 4, "restart=4 must cap the cycle at 4 steps"
     assert res_long < res_short, (
         f"explicit restart ignored? res(restart=4)={res_short}, res(restart=40)={res_long}"
@@ -353,12 +357,12 @@ def test_gmres_default_restart_is_adaptive():
     B = rng.standard_normal((n, 4))
     fac = rslab.lu(A, drop_tol=1e-2)
 
-    x, conv, iters, res = fac.gmres(b, tol=1e-10, maxit=400)  # restart defaulted
+    x, conv, iters, res, _ = fac.gmres(b, tol=1e-10, maxit=400)  # restart defaulted
     assert conv and _residual(A, x, b) < 1e-8
-    xe, conve, iterse, _ = fac.gmres(b, tol=1e-10, maxit=400, restart=80)
+    xe, conve, iterse, _, _ = fac.gmres(b, tol=1e-10, maxit=400, restart=80)
     assert conve and iters == iterse  # cap not binding here -> same as explicit 80
 
-    X, convb, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400)  # block, restart defaulted
+    X, convb, _, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400)  # block, restart defaulted
     assert convb
     for c in range(4):
         assert _residual(A, X[:, c], B[:, c]) < 1e-8

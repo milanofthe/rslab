@@ -230,7 +230,7 @@ macro_rules! ldlt_solve_many_arm {
 /// C-contiguous (row-major) `n x nrhs` array; the core wants column-major
 /// (each RHS contiguous), so transpose in, run the block solve with the stored
 /// matrix as operator and this factor as the preconditioner, transpose out.
-/// Returns the full diagnostics tuple `(X, converged, iters, final_res)` so a
+/// Returns the full diagnostics tuple `(X, converged, iters, final_res, stop)` so a
 /// solver-in-the-loop caller can branch on convergence instead of silently
 /// accepting a stalled iterate (issue #6): `converged` is `True` only when every
 /// column reached `tol`, `iters` is the block iteration count, and `final_res`
@@ -289,13 +289,13 @@ macro_rules! gmres_block_arm {
         let arr = out.into_pyarray_bound($py);
         let x_obj = arr.reshape([n, nrhs])?.into_any().unbind();
         let fr = res.final_res.into_pyarray_bound($py).into_any().unbind();
-        Ok((x_obj, res.converged, res.iters, fr).into_py($py))
+        Ok((x_obj, res.converged, res.iters, fr, res.stop.as_str()).into_py($py))
     }};
 }
 
 /// Right-preconditioned single-RHS **GMRES** for one scalar type. `b` is a 1-D
 /// array of length `n`; the stored matrix is the operator and this factor the
-/// preconditioner. Returns `(x, converged, iters, final_res)` - the scalar
+/// preconditioner. Returns `(x, converged, iters, final_res, stop)` - the scalar
 /// analogue of `gmres_block_arm!`, exposing the Rust `KrylovResult` diagnostics
 /// that were previously unavailable from Python (issue #6).
 macro_rules! gmres_arm {
@@ -323,7 +323,7 @@ macro_rules! gmres_arm {
         };
         let res = gmres_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref()).map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
-        Ok((x_obj, res.converged, res.iters, res.final_res).into_py($py))
+        Ok((x_obj, res.converged, res.iters, res.final_res, res.stop.as_str()).into_py($py))
     }};
 }
 
@@ -453,7 +453,7 @@ macro_rules! gmres_recycled_arm {
         let res = gmres_recycled_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref(), handle)
             .map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
-        Ok((x_obj, res.converged, res.iters, res.final_res).into_py($py))
+        Ok((x_obj, res.converged, res.iters, res.final_res, res.stop.as_str()).into_py($py))
     }};
 }
 
@@ -631,6 +631,9 @@ impl Ldlt {
     ///     Per-column relative residual
     ///     :math:`\\lVert B_{:,c} - A X_{:,c}\\rVert / \\lVert B_{:,c}\\rVert`,
     ///     a length-``nrhs`` ``float64`` array.
+    /// stop : str
+    ///     Stop reason: ``'converged'`` (every column met ``tol``) or
+    ///     ``'max_iter'`` (budget exhausted). Block GMRES has no breakdown state.
     ///
     /// Raises
     /// ------
@@ -704,6 +707,9 @@ impl Ldlt {
     ///     Inner iterations performed.
     /// final_res : float
     ///     The final relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
+    /// stop : str
+    ///     Stop reason: ``'converged'`` or ``'max_iter'`` (FGMRES / GCRO-DR have
+    ///     no non-converged breakdown state).
     ///
     /// Raises
     /// ------
@@ -1029,6 +1035,9 @@ impl Lu {
     ///     Per-column relative residual
     ///     :math:`\\lVert B_{:,c} - A X_{:,c}\\rVert / \\lVert B_{:,c}\\rVert`,
     ///     a length-``nrhs`` ``float64`` array.
+    /// stop : str
+    ///     Stop reason: ``'converged'`` (every column met ``tol``) or
+    ///     ``'max_iter'`` (budget exhausted). Block GMRES has no breakdown state.
     ///
     /// Raises
     /// ------
@@ -1103,6 +1112,9 @@ impl Lu {
     ///     Inner iterations performed.
     /// final_res : float
     ///     The final relative residual :math:`\\lVert b - A x\\rVert / \\lVert b\\rVert`.
+    /// stop : str
+    ///     Stop reason: ``'converged'`` or ``'max_iter'`` (FGMRES / GCRO-DR have
+    ///     no non-converged breakdown state).
     ///
     /// Raises
     /// ------
