@@ -1,0 +1,48 @@
+name: ci
+
+# Static + test gate for the pure-Rust workspace. The Python wheels are built
+# separately in publish.yml; this workflow only touches the cargo workspace,
+# which is 100% pure Rust (the vendored ordering crates carry no C/build.rs), so
+# it builds on a stock ubuntu runner with no system libraries.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins `stable` + rustfmt/clippy; honour it here.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: clippy (matgen feature)
+        # Covers the matgen-gated benches (catalog, sweep, ...) and the
+        # matgen-gated integration test, which the default set skips.
+        run: cargo clippy --all-targets --features matgen -- -D warnings
+
+      - name: test (default features)
+        run: cargo test
+
+      - name: test (matgen feature)
+        # Runs the matgen-gated tuner memory-backstop test in addition to the
+        # 287 lib tests, so the gated path is exercised on CI.
+        run: cargo test --features matgen

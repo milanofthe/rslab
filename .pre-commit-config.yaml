@@ -3,19 +3,13 @@
 # Install once per clone:    pre-commit install
 # Run manually on all files: pre-commit run --all-files
 #
-# The hooks here are the *exact same checks* run by .github/workflows/ci.yml.
-# CI runs `pre-commit run --all-files` so any local pre-commit pass implies
-# the CI static checks will pass too. The heavier `cargo test` still runs
-# as a separate step - it is too slow for a pre-commit hook but is
-# orchestrated alongside pre-commit in CI.
+# These hooks are the *exact same static checks* run by
+# .github/workflows/ci.yml, so a local pre-commit pass implies the CI
+# fmt + clippy gates pass too. The heavier `cargo test` is CI-only - it is
+# too slow for a pre-commit hook.
 #
-# The `cargo-clippy` hook only covers the root build set. The
-# `rslab-diagnostics` crate is outside that set (issue #71), so CI lints it
-# in a *separate* step (`cargo clippy -p rslab-diagnostics ...`). The
-# `cargo-clippy-diagnostics` hook below mirrors that step locally so a
-# diagnostics-only clippy lint cannot pass locally yet fail CI (as happened
-# on run 27070467555 - an `unnecessary_sort_by` lint present in the CI
-# toolchain but not the older local one).
+# Toolchain: the pinned `stable` channel from `rust-toolchain.toml` (with the
+# `rustfmt` + `clippy` components) so local and CI lint output match.
 
 repos:
   - repo: local
@@ -27,20 +21,12 @@ repos:
         types: [rust]
         pass_filenames: false
       - id: cargo-clippy
-        name: cargo clippy -- -D warnings
-        # Note: the no-unwrap / no-expect policy is enforced by the
-        # `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` directive
-        # at the top of src/lib.rs. Clippy catches it below.
-        entry: cargo clippy -- -D warnings
-        language: system
-        types: [rust]
-        pass_filenames: false
-      - id: cargo-clippy-diagnostics
-        name: cargo clippy -p rslab-diagnostics --all-targets
-        # rslab-diagnostics is outside the root build set (issue #71) so the
-        # hook above does not lint it. CI lints it as a separate step; this
-        # hook mirrors that step so the local/CI coverage gap is closed.
-        entry: cargo clippy -p rslab-diagnostics --all-targets -- -D warnings
+        name: cargo clippy --all-targets -- -D warnings
+        # Lints the whole default build set - lib, bins, tests, and the
+        # feature-free benches. The no-unwrap / no-expect policy is enforced by
+        # `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` at the top of
+        # src/lib.rs, which clippy catches here.
+        entry: cargo clippy --all-targets -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

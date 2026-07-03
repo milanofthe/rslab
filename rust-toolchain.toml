@@ -1,0 +1,8 @@
+# Pin the toolchain so `cargo fmt`/`clippy` are reproducible across the local
+# clone and CI. We track the `stable` channel (not a frozen version): the repo
+# targets current stable, and CI installs the same channel, so formatting and
+# lints stay in lockstep. `rustfmt` + `clippy` are pulled in so a fresh rustup
+# install has everything the pre-commit hooks and CI need.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
