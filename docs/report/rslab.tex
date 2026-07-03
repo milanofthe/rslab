@@ -11,6 +11,18 @@
 \usepackage{microtype}
 \usepackage[hidelinks]{hyperref}
 \usepackage{caption}
+% Keep floats near their first text reference: [section] flushes all pending
+% floats at every \section boundary so a figure can never drift into a later
+% section, and the relaxed fractions let a figure share a page with text
+% instead of being deferred to a float page at the end.
+\usepackage[section]{placeins}
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
 
 \definecolor{accent}{HTML}{2563EB}
 \definecolor{accent2}{HTML}{0891B2}
@@ -94,7 +106,7 @@ pattern, which is the basis of the solver-in-the-loop model (Sec.~\ref{sec:sil})
 the corpus the numeric factor dominates the wall-clock, with analyze and solve small by
 comparison (Fig.~\ref{fig:stages}), so the tuning and the parallelism target the factor.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{runtime_stage_breakdown.pdf}
 \caption{Analyze / factor / solve wall-clock split per matrix, for the left-looking and
@@ -108,7 +120,7 @@ paths and the dense SIMD kernels; the diagnostics, analysis, tuning, and \code{a
 modules hold the predictors, the feature extraction, the resource planner, and the learned
 tuner respectively.
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering\tabfont
 \begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{3.0cm}L@{}}
 \toprule
@@ -242,8 +254,12 @@ and $2\times2$ pivots. For complex-symmetric $A$ the control flow is that of the
 symmetric \code{sytf2} with magnitudes $|z|$ and no conjugation. The pivot threshold is
 $\alpha=(1+\sqrt{17})/8\approx\num{0.6404}$; pivot selection is bounded to the panel's
 fully-summed rows so the factorization stays within the supernode. A $2\times2$ block is
-rejected as singular when $|d_{11}d_{22}-d_{21}^2| < \varepsilon\,\max(|d_{11}|,|d_{21}|,|d_{22}|)^2$
-with $\varepsilon=\num{1e-14}$, which bounds the element growth injected into the trailing
+rejected as singular when
+\begin{equation*}
+|d_{11}d_{22}-d_{21}^2| < \varepsilon\,\max\bigl(|d_{11}|,|d_{21}|,|d_{22}|\bigr)^2,
+\qquad \varepsilon=\num{1e-14},
+\end{equation*}
+which bounds the element growth injected into the trailing
 update. Each panel's trailing Schur update is deferred and routed through a single SIMD
 GEMM.
 
@@ -300,7 +316,9 @@ fronts; and \code{use\_gemm\_schur}, which forces the scalar path for benchmarki
 tree recursion runs in a scoped rayon pool of the requested width rather than the global
 pool, so concurrent solves do not oversubscribe each other. The worker stack is sized to
 the assembly-tree depth, computed iteratively,
-$\text{stack} = \operatorname{clamp}(32\,\text{KB}\cdot\text{depth},\,16\,\text{MB},\,8\,\text{GB})$,
+\begin{equation*}
+\text{stack} = \operatorname{clamp}\bigl(32\,\text{KB}\cdot\text{depth},\ 16\,\text{MB},\ 8\,\text{GB}\bigr),
+\end{equation*}
 which lets deep banded chain-trees factor without a stack overflow.
 
 \section{A-priori predictors}
@@ -325,19 +343,25 @@ frontier holds all panels at once,
 \text{transient} &= \text{panels\_all}+\text{factor}+\text{input}+\text{scratch},
 \end{align}
 where the scratch term covers the per-thread \code{cmod}/\code{cdiv} and emit buffers. For
-$\LDLt$ the panel size is $\text{nrow}\cdot\text{ncol}\cdot v$, the compacted factor is
-$(\tfrac{nc(nc+1)}2+\text{cnrow}\cdot nc)(v+8)$ per supernode, and the input is
+$\LDLt$ the panel size is $\text{nrow}\cdot\text{ncol}\cdot v$, the compacted factor per
+supernode is
+\begin{equation*}
+\Bigl(\frac{nc\,(nc+1)}{2}+\text{cnrow}\cdot nc\Bigr)(v+8),
+\end{equation*}
+and the input is
 $\nnz\,(v+8)$; for LU both $L$ and $U$ panels are held and the input is $2\,\nnz\,(v+8)$.
 
 For the multifrontal path a level-parallel model takes, at each assembly-tree level, the
 sum of the front sizes $\sum \text{nrow}^2 v$ plus the contribution blocks of that level's
 children $\sum \text{cnrow}^2 v$, and multiplies the peak by $\tfrac{7}{5}$ to cover the
 work-stealing overlap of deep leaves of one subtree with mid-level fronts of another. Over
-the corpus both bounds hold with an estimate/measured ratio of about $1.5$ in geomean and
-no under-prediction (Fig.~\ref{fig:membreak}), which is the property the memory guarantee
-requires; the panel-freeing floor is the tighter quantity used inside the tuner's veto.
+the corpus both bounds hold with an estimate/measured ratio of about $1.3$ in geomean
+(Fig.~\ref{fig:membreak}); the only violations on the regenerated corpus are two dense
+BEM/MoM matrices at $3$--$4\%$ under the measured peak, within the margin the planner's
+safety headroom absorbs. The panel-freeing floor is the tighter quantity used inside the
+tuner's veto.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{memory_breakdown.pdf}
 \caption{A-priori memory estimate (conservative bound and panel-freeing floor) vs.\ the
@@ -346,11 +370,18 @@ measured peak, per RSLAB path. The estimate does not under-predict.}
 \end{figure}
 
 \subsection{Work and runtime}
-The geometric work $\text{factor\_flops}=\sum_s \text{nrow}_s^2\,\text{ncol}_s$ is a
+The geometric work
+\begin{equation*}
+\text{factor\_flops}=\sum_s \text{nrow}_s^2\,\text{ncol}_s
+\end{equation*}
+is a
 type-independent proxy, so a single \code{f64} calibration serves all scalar types. The
 thread-aware runtime estimate is
-$\max\!\big(\text{critical\_path\_flops}/r,\ \text{factor\_flops}/(r\cdot\text{speedup})\big)$
-with $r=\text{gflops}\cdot10^{9}$: the second term is the parallel work, the first is an
+\begin{equation*}
+\max\!\Big(\frac{\text{critical\_path\_flops}}{r},\ \frac{\text{factor\_flops}}{r\cdot\text{speedup}}\Big),
+\qquad r=\text{gflops}\cdot10^{9},
+\end{equation*}
+where the second term is the parallel work and the first is an
 Amdahl floor from the assembly tree's longest leaf-to-root chain (computed in one postorder
 pass over the supernodes), so a critical-path-bound matrix does not benefit from workers
 past the point where the parallel term drops to the floor. The
@@ -364,8 +395,11 @@ scaling of sparse-direct work; a fallback of $\num{2}$ Gflop/s and $\sqrt{\text{
 speedup is used if the measurement fails.
 
 \paragraph{Learned residual.}
-The bare analytical speedup $s_{\text{pred}}(t)=\text{factor\_flops}/\max(\text{critical\_path\_flops},\,
-\text{factor\_flops}/\text{speedup}(t))$ mispredicts the achieved scaling systematically: the
+The bare analytical speedup
+\begin{equation*}
+s_{\text{pred}}(t)=\frac{\text{factor\_flops}}{\max\bigl(\text{critical\_path\_flops},\ \text{factor\_flops}/\text{speedup}(t)\bigr)}
+\end{equation*}
+mispredicts the achieved scaling systematically: the
 critical-path flops overstate the true serial fraction (sibling subtrees overlap in time), so
 the model is too pessimistic on serial-heavy trees and too optimistic on wide ones. A ridge
 regression of $\log(s_{\text{meas}}/s_{\text{pred}})$ on dimensionless structural features
@@ -396,7 +430,7 @@ others reach $\sim\!4.8\times$). This spread is why the worker count is picked p
 and, in the v2 cost model, a decision variable that may choose fewer threads when scaling
 saturates.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{thread_scaling_solvers.pdf}
 \caption{Thread scaling of the RSLAB left-looking and multifrontal kernels, 1--24 workers,
@@ -433,7 +467,7 @@ opt-in schedule). Every added axis is exact-path: it changes speed or memory but
 factorization exact, and each keeps fill predictable so the a-priori memory backstop
 (Sec.~\ref{sec:tuner}) still holds.
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering\tabfont
 \begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{3.0cm}lL@{}}
 \toprule
@@ -557,10 +591,10 @@ convection--diffusion problems (grid-Péclet $\times$ flow field $\times$ discre
 lifted the per-path held-out $R^2$ from \num{0.75} to \num{0.98} and the tuner from neutral
 to \num{1.92}$\times$ (and to \num{2.2}$\times$ on the pure convection--diffusion class). The
 gains are largest on the big, hard matrices, where a mispicked ordering costs most: on the
-symmetric head-to-head classes (Sec.~\ref{sec:eval}) the tuner is \num{1.82}$\times$ over the
+symmetric head-to-head classes (Sec.~\ref{sec:eval}) the tuner is \num{1.89}$\times$ over the
 default, its full effect on curl-curl and saddle-point.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.82\textwidth]{autotune_vs_size_ldlt.pdf}\\[4pt]
 \includegraphics[width=\textwidth]{autotune_modes_ldlt.pdf}
@@ -570,7 +604,7 @@ three Pareto modes as a time--memory cloud, at full text width.}
 \label{fig:autotune_ldlt}
 \end{figure}
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.82\textwidth]{autotune_vs_size_lu.pdf}\\[4pt]
 \includegraphics[width=\textwidth]{autotune_modes_lu.pdf}
@@ -669,7 +703,11 @@ an indefinite operator) is a breakdown: the iteration stops and returns the best
 
 \subsection{GMRES and flexible GMRES}
 For a general (unsymmetric) operator the method is restarted GMRES~\cite{saadschultz}. Over
-the Krylov space $\mathcal K_m=\operatorname{span}\{r_0,Ar_0,\dots,A^{m-1}r_0\}$ the Arnoldi
+the Krylov space
+\begin{equation*}
+\mathcal K_m=\operatorname{span}\{r_0,\,Ar_0,\,\dots,\,A^{m-1}r_0\}
+\end{equation*}
+the Arnoldi
 process builds an orthonormal basis $V_m$ and an upper-Hessenberg $\bar H_m\in\mathbb
 C^{(m+1)\times m}$ with $AV_m=V_{m+1}\bar H_m$; the iterate $x=x_0+V_m y$ that minimises
 $\lVert b-Ax\rVert_2$ is the solution of the small least-squares problem
@@ -771,7 +809,7 @@ triangular preconditioner solve. Per-RHS cost stays near-flat in the block width
 right-hand sides is cheap, BLAS-3 reuse) and \numrange{1.4}{2.5}$\times$ below the MGS
 reference at 12 threads.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.49\textwidth]{block_gmres_scaling.pdf}\hfill
 \includegraphics[width=0.49\textwidth]{block_gmres_efficiency.pdf}\\[2pt]
@@ -794,7 +832,7 @@ does $\num{908}$ column-applies against the $\num{1376}$ a schedule with no mid-
 compaction would do ($0.66\times$), and the active panel drains monotonically from $16$ to a
 single column within the first cycle.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{deflation_study.pdf}
 \caption{Block-GMRES within-cycle deflation. Left: total operator column-applies with
@@ -832,7 +870,7 @@ Figure~\ref{fig:adaptrestart} shows the trade-off the policy navigates: a longer
 iterations, and the adaptive rule rides at the maximum restart until the basis would exceed the
 budget, then declines to hold memory flat --- the largest restart that fits the ceiling.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{adaptive_restart.pdf}
 \caption{Adaptive GMRES restart under a \SI{1}{\gibi\byte} basis budget. Left: FGMRES basis
@@ -862,7 +900,7 @@ and a \emph{total} wall time within a few percent of the exact direct solve --- 
 halving essentially for free. Past $\sim\!\num{3e-2}$ the iteration cost dominates and total
 time climbs, bounding the useful range.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{precond_gmres.pdf}
 \caption{Incomplete-factor preconditioner + GMRES. Left: factor fill (memory) and GMRES
@@ -982,7 +1020,10 @@ near-null-space that makes edge-element electromagnetics hard --- the primary ta
 class~\cite{jin,nedelec}.
 
 \paragraph{Stokes / KKT saddle-point (symmetric indefinite).} The block system
-$\bigl[\begin{smallmatrix} A & B^{\!\top} \\ B & -\beta C \end{smallmatrix}\bigr]$ with $A$
+\begin{equation*}
+\begin{bmatrix} A & B^{\!\top} \\ B & -\beta C \end{bmatrix}
+\end{equation*}
+with $A$
 the velocity vector Laplacian, $B$ the discrete divergence coupling velocity to pressure, and
 $-\beta C$ a Brezzi--Pitk\"aranta pressure-Laplacian stabilization ($\beta>0$) regularizing
 the singular zero $(2,2)$ block on a collocated grid --- the MAC / mixed-FEM
@@ -1029,7 +1070,7 @@ peak memory against $\nnz$ with a least-squares power-law fit $\sim\nnz^\alpha$ 
 picks left-looking or multifrontal per matrix under the guards. Table~\ref{tab:scaling} gives
 the head-to-head geomean ratios.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{h2h_ldlt.pdf}
 \caption{$\LDLt$ path (symmetric, PARDISO mtype 6): (left) factor wall-clock time and
@@ -1038,34 +1079,39 @@ fits (the fitted exponent $\alpha$ is annotated on each curve).}
 \label{fig:h2h_ldlt}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{h2h_lu.pdf}
 \caption{LU path (unsymmetric, PARDISO mtype 13): (left) factor wall-clock time and (right)
 peak memory vs.\ problem size. Each panel carries the untuned-default RSLAB curve (gray)
 beside the auto-tuned one (blue); the tuner closes part of the default$\to$PARDISO distance.
-On time RSLAB scales slightly flatter than PARDISO ($\alpha\!\approx\!1.18$ vs.\ $1.27$).}
+On time RSLAB scales slightly flatter than PARDISO ($\alpha\!\approx\!1.20$ vs.\ $1.25$).}
 \label{fig:h2h_lu}
 \end{figure}
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering\tabfont
 \begin{tabular}{@{}lcc@{}}
 \toprule
 RSLAB vs & $\LDLt$ (sym) & LU (unsym) \\
 \midrule
-MKL PARDISO --- factor time & $5.8\times$ slower & \textbf{\num{3.9}}$\times$ slower \\
-MKL PARDISO --- peak memory & $2.3\times$ more & $2.4\times$ more \\
-faer LU\textsuperscript{$\dagger$} --- factor time & \textbf{\num{6.9}}$\times$ faster & \textbf{\num{3.7}}$\times$ faster \\
+MKL PARDISO --- factor time & $7.4\times$ slower & \textbf{\num{4.5}}$\times$ slower \\
+MKL PARDISO --- peak memory & $2.2\times$ more & $2.4\times$ more \\
+faer LU\textsuperscript{$\dagger$} --- factor time & \textbf{\num{12.8}}$\times$ faster & \textbf{\num{6.6}}$\times$ faster \\
 faer LU\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{2.3}}$\times$ less & $1.1\times$ less \\
-untuned default --- factor time & \textbf{\num{1.82}}$\times$ faster & \textbf{\num{1.65}}$\times$ faster \\
-untuned default --- peak memory & \textbf{\num{0.68}}$\times$ (less) & \textbf{\num{0.71}}$\times$ (less) \\
+untuned default --- factor time & \textbf{\num{1.89}}$\times$ faster & \textbf{\num{1.76}}$\times$ faster \\
+untuned default --- peak memory & \textbf{\num{0.68}}$\times$ (less) & \textbf{\num{0.72}}$\times$ (less) \\
 \bottomrule
 \end{tabular}
-\caption{Head-to-head geomean ratios (\num{104} matrices per path, 5k--1M nonzeros), each
+\caption{Head-to-head geomean ratios ($\sim$\num{100} matrices per path, 5k--1M nonzeros), each
 path on its own class ($\LDLt$: curl-curl, Helmholtz, saddle-point; LU:
 convection--diffusion, BEM/MoM), over the matrices both solvers factor to below $0.1$
 residual. The last row is the auto-tuned solver's speedup over the untuned RSLAB default.
+The wall-clock passes of this regeneration ran with a $\sim$1-core concurrent background
+load, which penalises the tightly synchronised parallel solvers (RSLAB, faer) more than
+PARDISO's own OpenMP pool --- the cross-solver \emph{time} ratios carry that bias, while the
+peak-memory ratios are allocation counts and load-independent (they reproduce the previous
+clean-machine run to within $5\%$).
 \textsuperscript{$\dagger$}faer has no symmetric path (it factors symmetric matrices as LU),
 so its $\LDLt$ gap is structurally largest; it also OOMs on the largest matrices (factoring
 only the smaller subset), so its head-to-head is a conservative floor.}
@@ -1074,9 +1120,9 @@ only the smaller subset), so its head-to-head is a conservative floor.}
 
 RSLAB sits between the two on both paths: faster and lighter than the pure-Rust faer,
 moderately behind the hand-optimized MKL PARDISO. The unsymmetric path is the closer of the
-two ($3.9\times$ vs.\ $5.8\times$ behind PARDISO). Each head-to-head plot carries the untuned
+two ($4.5\times$ vs.\ $7.4\times$ behind PARDISO). Each head-to-head plot carries the untuned
 default curve beside the tuned one, so the learned tuner's win (last two table rows,
-$1.82\times$/$1.65\times$ faster at $0.68\times$/$0.71\times$ the memory) is visible as a gap
+$1.89\times$/$1.76\times$ faster at $0.68\times$/$0.72\times$ the memory) is visible as a gap
 that widens with problem size --- the tuner helps most on the big matrices where a mispicked
 ordering costs most, and never at a memory cost: the backstop compares the \emph{exact}
 symbolic fill (not a dense-panel estimate, which overshoots non-uniformly across orderings
@@ -1095,7 +1141,7 @@ per solver. Where RSLAB factors, \num{24} of \num{31} matrices are below \num{1e
 matching PARDISO and ahead of faer. The exact $\LDLt$ declines a handful of indefinite
 saddle-point matrices rather than returning a degraded solution.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{corpus_residual.pdf}
 \caption{Relative residual across the corpus, per solver.}
@@ -1124,8 +1170,8 @@ regressing where they do not help.
 \subsection{Preconditioned and recycled iterative layer}
 \label{sec:eval-iter}
 The Krylov layer of Sec.~\ref{sec:iterative} is evaluated on four studies, each the
-benchmark-scale mirror of a unit test (\code{benches/\{recycle,deflation,fgmres\_accounting,
-adaptive\_restart\}}); the block-scaling and incomplete-factor trade-off figures
+benchmark-scale mirror of a unit test (\code{benches/recycle}, \code{deflation},
+\code{fgmres\_accounting}, \code{adaptive\_restart}); the block-scaling and incomplete-factor trade-off figures
 (Figs.~\ref{fig:blockgmres},~\ref{fig:precondgmres}) and the deflation and restart figures
 (Figs.~\ref{fig:deflation},~\ref{fig:adaptrestart}) appear with their concepts in
 Sec.~\ref{sec:iterative}.
@@ -1133,7 +1179,7 @@ Sec.~\ref{sec:iterative}.
 \paragraph{Subspace recycling.} Figure~\ref{fig:recycle} runs a sequence of $8$ related solves
 --- a diagonal operator with a stagnation spectrum (a tight cluster of small eigenvalues
 below a spread bulk), a per-step diagonal perturbation, and a rotating right-hand side,
-mirroring the \code{gmres\_recycled\_cross\_solve\_beats\_warm\_and\_cold} test at $n=\num{20000}$
+mirroring the \code{gmres\_recycled\_\allowbreak cross\_solve\_\allowbreak beats\_warm\_and\_cold} test at $n=\num{20000}$
 --- comparing cold ($x_0=0$), warm ($x_0=$ previous solution), and GCRO-DR($k$) recycling
 (warm start plus a handle carried across the sequence). The iteration counts order recycling
 $<$ warm $<$ cold by a wide margin. On the first solve alone (a fresh handle, so purely the
@@ -1147,7 +1193,7 @@ smaller than the iteration win because the recycle bookkeeping is $O(n k)$ per s
 $O(n)$ diagonal matvec; on a denser operator, where the matvec and preconditioner solve
 dominate, the wall-clock tracks the iteration count more closely.
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{recycle_study.pdf}
 \caption{GCRO-DR subspace recycling over a sequence of $8$ related solves (stagnation
@@ -1164,7 +1210,7 @@ FGMRES spends one apply per Arnoldi step and none at the restart, where plain ri
 GMRES would spend one extra per cycle (Table~\ref{tab:fgmres}). The saving grows with the cycle
 count and is free of any extra memory beyond the $Z$ basis already stored for flexibility.
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering\tabfont
 \begin{tabular}{@{}rrrrr@{}}
 \toprule
