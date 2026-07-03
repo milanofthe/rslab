@@ -58,7 +58,10 @@ fn cmd_calibrate() -> i32 {
     println!("physical cores       : {}", hw.physical_cores);
     println!("proxy GFLOP/s (f64)  : {:.2}", c.geom_gflops);
     println!("proxy GFLOP/s (cplx) : {:.2}", c.geom_gflops_cplx);
-    println!("parallel speedup     : {:.2}x @ {} threads", c.speedup, c.speedup_threads);
+    println!(
+        "parallel speedup     : {:.2}x @ {} threads",
+        c.speedup, c.speedup_threads
+    );
     println!("timing CV            : {:.3}", c.time_cv);
     println!("=> calibrated min_gain guard : {:.3}", c.min_gain());
     0
@@ -71,19 +74,23 @@ fn cmd_calibrate() -> i32 {
 fn holdout_corpus() -> Vec<(String, CscMatrix<Complex<f64>>)> {
     let mut v = Vec::new();
     for n in [10usize, 14, 18] {
-        v.push((format!("curlcurl_{n}"), rslab::matgen::fem::curl_curl(&[n, n, n], 1.0, 0.1)));
+        v.push((
+            format!("curlcurl_{n}"),
+            rslab::matgen::fem::curl_curl(&[n, n, n], 1.0, 0.1),
+        ));
     }
     for n in [24usize, 40, 60] {
-        v.push((format!("saddle_{n}"), rslab::matgen::fem::saddle_point::<Complex<f64>>(&[n, n], 1e-3)));
+        v.push((
+            format!("saddle_{n}"),
+            rslab::matgen::fem::saddle_point::<Complex<f64>>(&[n, n], 1e-3),
+        ));
     }
     v
 }
 
 /// The (features, mf/ll ratio) a tuner needs for one matrix — mirrors
 /// `LdltSymbolic::tuned`'s a-priori inputs.
-fn tuner_inputs(
-    a: &CscMatrix<Complex<f64>>,
-) -> Option<(StructuralFeatures, f64)> {
+fn tuner_inputs(a: &CscMatrix<Complex<f64>>) -> Option<(StructuralFeatures, f64)> {
     let sym = LdltSymbolic::analyze(a).ok()?;
     let est = sym.estimate_memory::<Complex<f64>>();
     let feat = StructuralFeatures::from_symmetric(a, &sym);
@@ -115,11 +122,20 @@ fn holdout_corpus_lu() -> Vec<(String, GeneralCsc<Complex<f64>>)> {
     use rslab::matgen::fem::{convection_diffusion as cd, Flow};
     let mut v = Vec::new();
     for (m, eps) in [(40usize, 0.05), (56, 5e-3)] {
-        v.push((format!("convdiff2d_{m}_rot"), cd::<Complex<f64>>(&[m, m], eps, Flow::Rotating, true)));
-        v.push((format!("convdiff2d_{m}_diag"), cd::<Complex<f64>>(&[m, m], eps, Flow::Diagonal, false)));
+        v.push((
+            format!("convdiff2d_{m}_rot"),
+            cd::<Complex<f64>>(&[m, m], eps, Flow::Rotating, true),
+        ));
+        v.push((
+            format!("convdiff2d_{m}_diag"),
+            cd::<Complex<f64>>(&[m, m], eps, Flow::Diagonal, false),
+        ));
     }
     for (m, eps) in [(20usize, 0.02), (26, 2e-3)] {
-        v.push((format!("convdiff3d_{m}"), cd::<Complex<f64>>(&[m, m, m], eps, Flow::Rotating, true)));
+        v.push((
+            format!("convdiff3d_{m}"),
+            cd::<Complex<f64>>(&[m, m, m], eps, Flow::Rotating, true),
+        ));
     }
     v
 }
@@ -158,43 +174,69 @@ fn time_factor_lu(a: &GeneralCsc<Complex<f64>>, opts: &rslab::SolverSettings) ->
 /// per-matrix table and per-path summary.
 fn validate_profile(profile: &TunerProfile) -> (f64, f64) {
     let w = DEFAULT_TUNE_WEIGHT;
-    println!("{:<20} {:>10} {:>10} {:>8}", "matrix", "default_ms", "cand_ms", "speedup");
+    println!(
+        "{:<20} {:>10} {:>10} {:>8}",
+        "matrix", "default_ms", "cand_ms", "speedup"
+    );
     // LDLᵀ path on the symmetric held-out corpus.
     let (mut ldlt_log, mut ldlt_n) = (0.0, 0u32);
     for (name, a) in holdout_corpus() {
-        let Some((feat, mf_ll)) = tuner_inputs(&a) else { continue };
-        let s_def = recommend_settings_pathed(&feat, w, mf_ll, SolverPath::Ldlt);
-        let Some(s_cand) = recommend_with_profile(profile, &feat, w, mf_ll, SolverPath::Ldlt) else {
+        let Some((feat, mf_ll)) = tuner_inputs(&a) else {
             continue;
         };
-        let (Some(t_def), Some(t_cand)) = (time_factor(&a, &s_def), time_factor(&a, &s_cand)) else {
+        let s_def = recommend_settings_pathed(&feat, w, mf_ll, SolverPath::Ldlt);
+        let Some(s_cand) = recommend_with_profile(profile, &feat, w, mf_ll, SolverPath::Ldlt)
+        else {
+            continue;
+        };
+        let (Some(t_def), Some(t_cand)) = (time_factor(&a, &s_def), time_factor(&a, &s_cand))
+        else {
             continue;
         };
         let sp = t_def / t_cand.max(1e-9);
-        println!("{name:<20} {:>10.2} {:>10.2} {:>8.3}", t_def * 1e3, t_cand * 1e3, sp);
+        println!(
+            "{name:<20} {:>10.2} {:>10.2} {:>8.3}",
+            t_def * 1e3,
+            t_cand * 1e3,
+            sp
+        );
         ldlt_log += sp.max(1e-6).ln();
         ldlt_n += 1;
     }
     // LU path on the unsymmetric held-out corpus.
     let (mut lu_log, mut lu_n) = (0.0, 0u32);
     for (name, a) in holdout_corpus_lu() {
-        let Some((feat, mf_ll)) = tuner_inputs_lu(&a) else { continue };
+        let Some((feat, mf_ll)) = tuner_inputs_lu(&a) else {
+            continue;
+        };
         let s_def = recommend_settings_pathed(&feat, w, mf_ll, SolverPath::Lu);
         let Some(s_cand) = recommend_with_profile(profile, &feat, w, mf_ll, SolverPath::Lu) else {
             continue;
         };
-        let (Some(t_def), Some(t_cand)) =
-            (time_factor_lu(&a, &s_def), time_factor_lu(&a, &s_cand))
+        let (Some(t_def), Some(t_cand)) = (time_factor_lu(&a, &s_def), time_factor_lu(&a, &s_cand))
         else {
             continue;
         };
         let sp = t_def / t_cand.max(1e-9);
-        println!("{name:<20} {:>10.2} {:>10.2} {:>8.3}", t_def * 1e3, t_cand * 1e3, sp);
+        println!(
+            "{name:<20} {:>10.2} {:>10.2} {:>8.3}",
+            t_def * 1e3,
+            t_cand * 1e3,
+            sp
+        );
         lu_log += sp.max(1e-6).ln();
         lu_n += 1;
     }
-    let ldlt = if ldlt_n > 0 { (ldlt_log / ldlt_n as f64).exp() } else { 1.0 };
-    let lu = if lu_n > 0 { (lu_log / lu_n as f64).exp() } else { 1.0 };
+    let ldlt = if ldlt_n > 0 {
+        (ldlt_log / ldlt_n as f64).exp()
+    } else {
+        1.0
+    };
+    let lu = if lu_n > 0 {
+        (lu_log / lu_n as f64).exp()
+    } else {
+        1.0
+    };
     println!("  LDLt geomean {ldlt:.3}x (n={ldlt_n})   |   LU geomean {lu:.3}x (n={lu_n})");
     (ldlt, lu)
 }
@@ -286,7 +328,10 @@ fn assemble_and_ship(models_dir: &Path, out: &Path, class: &str) -> i32 {
     }
     match candidate.save(out) {
         Ok(()) => {
-            println!("SHIP-GATE PASSED: wrote {} (class '{class}')", out.display());
+            println!(
+                "SHIP-GATE PASSED: wrote {} (class '{class}')",
+                out.display()
+            );
             0
         }
         Err(e) => {
@@ -318,14 +363,23 @@ fn cmd_tune(rest: &[String]) -> i32 {
     if !sweep.exists() {
         println!("== sweep: cargo bench --bench sweep (this is the expensive step) ==");
         let status = Command::new("cargo")
-            .args(["bench", "--bench", "sweep", "--features", "matgen matgen-download tuning"])
+            .args([
+                "bench",
+                "--bench",
+                "sweep",
+                "--features",
+                "matgen matgen-download tuning",
+            ])
             .env("RLA_SWEEP_OUT", &sweep)
             .env("RLA_SWEEP_MODE", "sweep")
             .status();
         match status {
             Ok(s) if s.success() => {}
             _ => {
-                eprintln!("sweep failed; provide a pre-computed {} to skip it", sweep.display());
+                eprintln!(
+                    "sweep failed; provide a pre-computed {} to skip it",
+                    sweep.display()
+                );
                 return 1;
             }
         }

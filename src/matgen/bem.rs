@@ -126,7 +126,15 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         cond: Cond::Moderate,
         density: Density::Sparse,
         size: 30_000,
-        build: || un(kernel(30_000, &BemOpts { cutoff: 0.25, ..Default::default() })),
+        build: || {
+            un(kernel(
+                30_000,
+                &BemOpts {
+                    cutoff: 0.25,
+                    ..Default::default()
+                },
+            ))
+        },
     });
     // High wavenumber near a sphere resonance ⇒ ill-conditioned.
     c.push(MatrixSpec {
@@ -137,7 +145,11 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         density: Density::Medium,
         size: 8_000,
         build: || {
-            let o = BemOpts { k: 8.0, self_term: Complex::new(0.5, 1e-3), ..Default::default() };
+            let o = BemOpts {
+                k: 8.0,
+                self_term: Complex::new(0.5, 1e-3),
+                ..Default::default()
+            };
             un(kernel(8_000, &o))
         },
     });
@@ -149,7 +161,15 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         cond: Cond::Moderate,
         density: Density::Dense,
         size: 4_000,
-        build: || un(kernel(4_000, &BemOpts { cutoff: 1.0, ..Default::default() })),
+        build: || {
+            un(kernel(
+                4_000,
+                &BemOpts {
+                    cutoff: 1.0,
+                    ..Default::default()
+                },
+            ))
+        },
     });
 }
 
@@ -162,7 +182,10 @@ mod tests {
         let a = kernel(500, &BemOpts::default());
         assert_eq!(a.n, 500);
         // Near-field trim ⇒ far from dense.
-        assert!(a.values.len() < 500 * 500 / 4, "near-field trim keeps it sparse");
+        assert!(
+            a.values.len() < 500 * 500 / 4,
+            "near-field trim keeps it sparse"
+        );
         // Check A_ij ≠ A_ji for some off-diagonal pair (double-layer asymmetry).
         let mut asym = false;
         for j in 0..a.n {
@@ -185,8 +208,23 @@ mod tests {
 
     #[test]
     fn cutoff_controls_density() {
-        let sparse = kernel(800, &BemOpts { cutoff: 0.2, ..Default::default() });
-        let dense = kernel(800, &BemOpts { cutoff: 1.0, ..Default::default() });
-        assert!(dense.values.len() > 3 * sparse.values.len(), "larger cutoff ⇒ denser");
+        let sparse = kernel(
+            800,
+            &BemOpts {
+                cutoff: 0.2,
+                ..Default::default()
+            },
+        );
+        let dense = kernel(
+            800,
+            &BemOpts {
+                cutoff: 1.0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            dense.values.len() > 3 * sparse.values.len(),
+            "larger cutoff ⇒ denser"
+        );
     }
 }

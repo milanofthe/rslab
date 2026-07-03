@@ -89,7 +89,10 @@ pub fn read_mtx_any(path: &Path) -> Result<MtxLoaded, RslabError> {
         .map_err(|e| RslabError::IoError(format!("{}: {}", path.display(), e)))?;
     let source = path.to_string_lossy();
     let header = contents.lines().next().unwrap_or("");
-    let t: Vec<String> = header.split_whitespace().map(|s| s.to_ascii_lowercase()).collect();
+    let t: Vec<String> = header
+        .split_whitespace()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
     if t.len() != 5 || t[0] != "%%matrixmarket" || t[1] != "matrix" || t[2] != "coordinate" {
         return Err(RslabError::IoError(format!(
             "{source}: unsupported header '{}'",
@@ -106,7 +109,11 @@ pub fn read_mtx_any(path: &Path) -> Result<MtxLoaded, RslabError> {
     let nvt = if is_complex { 2 } else { 1 };
     let to_c = move |toks: &[&str]| -> Option<Complex<f64>> {
         let re = toks.first()?.parse::<f64>().ok()?;
-        let im = if is_complex { toks.get(1)?.parse::<f64>().ok()? } else { 0.0 };
+        let im = if is_complex {
+            toks.get(1)?.parse::<f64>().ok()?
+        } else {
+            0.0
+        };
         Some(Complex::new(re, im))
     };
     match symmetry.as_str() {

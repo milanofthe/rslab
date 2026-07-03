@@ -17,7 +17,7 @@
 use std::time::Instant;
 
 use rslab::prelude::*;
-use rslab::{SolverSettings, BlrMode, LuSymbolic, MemoryMode, ReorderMode};
+use rslab::{BlrMode, LuSymbolic, MemoryMode, ReorderMode, SolverSettings};
 
 /// Peak working-set (RSS high-water) of this process, in MB. Windows-only,
 /// queried via the OS - benches may use FFI; the solver library stays pure Rust.

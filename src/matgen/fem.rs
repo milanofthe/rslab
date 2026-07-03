@@ -49,7 +49,11 @@ fn divergence_row(k: usize, dims: &[usize], stride: &[usize], n: usize) -> Vec<(
 
 /// Component-decoupled vector Laplacian (`ndim` blocks) as `(diag, lower-tri)` over
 /// the component-major DOF vector, plus a caller-supplied Dirichlet diagonal load.
-fn vector_laplacian(dims: &[usize], stride: &[usize], n: usize) -> (Vec<f64>, Vec<(usize, usize, f64)>) {
+fn vector_laplacian(
+    dims: &[usize],
+    stride: &[usize],
+    n: usize,
+) -> (Vec<f64>, Vec<(usize, usize, f64)>) {
     let ndim = dims.len();
     let ndof = ndim * n;
     let mut diag = vec![0.0f64; ndof];
@@ -334,7 +338,9 @@ mod tests {
             .with_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
         let solver = sym.factor(&a, &opts).unwrap();
         let n = a.n;
-        let b: Vec<Complex<f64>> = (0..n).map(|i| Complex::new((i % 5) as f64 - 2.0, 0.5)).collect();
+        let b: Vec<Complex<f64>> = (0..n)
+            .map(|i| Complex::new((i % 5) as f64 - 2.0, 0.5))
+            .collect();
         let x = solver.solve_refined(&a, &b, 40).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); n];
         a.symv(&x, &mut ax);
@@ -400,7 +406,3 @@ mod tests {
         assert!(res < 1e-8, "convection-diffusion LU residual {res}");
     }
 }
-
-
-
-

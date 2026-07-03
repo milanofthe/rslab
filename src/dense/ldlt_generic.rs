@@ -727,7 +727,8 @@ mod tests {
 
         let reference = crate::factor_sparse_ldlt(&a).unwrap();
         let x_ref = solve_ldlt(&reference, &b).unwrap();
-        let full_index_bytes = 8 * (reference.l_col_ptr.len() + reference.l_row_idx.len() + reference.perm.len());
+        let full_index_bytes =
+            8 * (reference.l_col_ptr.len() + reference.l_row_idx.len() + reference.perm.len());
 
         let compact = CompressedLdltFactors::from_factors(crate::factor_sparse_ldlt(&a).unwrap())
             .expect("n < 2^31 compresses");
@@ -741,7 +742,11 @@ mod tests {
                 "compressed solve differs from full at row {i}"
             );
         }
-        assert_eq!(compact.index_bytes() * 2, full_index_bytes, "u32 indices halve the footprint");
+        assert_eq!(
+            compact.index_bytes() * 2,
+            full_index_bytes,
+            "u32 indices halve the footprint"
+        );
         assert_eq!(compact.factor_nnz(), reference.l_values.len());
     }
 

@@ -25,7 +25,9 @@ fn ldlt_tuner_never_grows_fill_over_default() {
         let a = matgen::structured::banded::<C>(n, bw, 1.0, 1);
         let default_fill = {
             let sym = LdltSymbolic::analyze(&a).expect("analyze");
-            sym.factor(&a, &SolverSettings::default()).expect("factor").factor_nnz()
+            sym.factor(&a, &SolverSettings::default())
+                .expect("factor")
+                .factor_nnz()
         };
         let (sym, s) = LdltSolver::<C>::tuned(&a, DEFAULT_TUNE_WEIGHT).expect("tuned");
         let tuned_fill = sym.factor(&a, &s).expect("tuned factor").factor_nnz();
@@ -41,10 +43,17 @@ fn ldlt_tuner_never_grows_fill_over_default() {
 #[test]
 fn lu_tuner_never_grows_fill_over_default() {
     // The LU-path analogue on a convection-diffusion matrix.
-    let a = matgen::fem::convection_diffusion::<C>(&[140, 140], 0.01, matgen::fem::Flow::Rotating, true);
+    let a = matgen::fem::convection_diffusion::<C>(
+        &[140, 140],
+        0.01,
+        matgen::fem::Flow::Rotating,
+        true,
+    );
     let default_fill = {
         let sym = LuSymbolic::analyze(&a).expect("analyze");
-        sym.factor(&a, &SolverSettings::default()).expect("factor").factor_nnz()
+        sym.factor(&a, &SolverSettings::default())
+            .expect("factor")
+            .factor_nnz()
     };
     let (sym, s) = LuSolver::<C>::tuned(&a, DEFAULT_TUNE_WEIGHT).expect("tuned");
     let tuned_fill = sym.factor(&a, &s).expect("tuned factor").factor_nnz();

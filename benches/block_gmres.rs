@@ -33,14 +33,18 @@ fn run(path: &std::path::Path, s: usize) {
     let mut bblk = vec![C::default(); n * s];
     for k in 0..s {
         for i in 0..n {
-            bblk[k * n + i] = Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            bblk[k * n + i] =
+                Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
         }
     }
 
     // Optional incomplete factor (`RLA_DROPTOL`) to land in a realistic
     // *iterative* regime (e.g. ~30 GMRES iters at ~50k DOFs) where the triangular
     // solve per iteration dominates - the multi-RHS payoff regime.
-    let droptol: f64 = std::env::var("RLA_DROPTOL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let droptol: f64 = std::env::var("RLA_DROPTOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
     let mut opts = SolverSettings::preconditioner(1e-10);
     if droptol > 0.0 {
         opts = opts.with_drop_tol(droptol);
@@ -65,7 +69,9 @@ fn run(path: &std::path::Path, s: usize) {
     let blk_ms = t.elapsed().as_secs_f64() * 1e3;
 
     // Max per-column solution difference (must agree to the solve tolerance).
-    let diff = (0..n * s).map(|i| (blk.x[i] - xloop[i]).norm()).fold(0.0, f64::max);
+    let diff = (0..n * s)
+        .map(|i| (blk.x[i] - xloop[i]).norm())
+        .fold(0.0, f64::max);
 
     println!(
         "{name:30} n={n:6} s={s:3}  loop {loop_ms:8.1} ms (iters {loop_iters})   block {blk_ms:8.1} ms (iters {})   speedup {:4.2}x   conv {}  diff {:.1e}",
@@ -77,7 +83,10 @@ fn run(path: &std::path::Path, s: usize) {
 }
 
 fn main() {
-    let s: usize = std::env::var("RLA_BLOCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    let s: usize = std::env::var("RLA_BLOCK_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
     let mut files: Vec<_> = match std::fs::read_dir(DIR) {
         Ok(rd) => rd
             .filter_map(|e| e.ok().map(|e| e.path()))

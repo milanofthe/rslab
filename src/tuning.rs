@@ -30,7 +30,9 @@ pub struct HardwareInfo {
 impl HardwareInfo {
     /// Probe the current machine (cores via std, RAM via sysinfo).
     pub fn probe() -> Self {
-        let logical = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+        let logical = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
         let physical = sys.physical_core_count().unwrap_or(logical);
@@ -44,9 +46,7 @@ impl HardwareInfo {
     /// Stable key for the calibration cache (cores + RAM size bucket).
     pub fn fingerprint(&self) -> u64 {
         let gb = self.total_ram_bytes / (1 << 30);
-        ((self.physical_cores as u64) << 40)
-            ^ ((self.logical_cores as u64) << 20)
-            ^ gb.min(0xFFFFF)
+        ((self.physical_cores as u64) << 40) ^ ((self.logical_cores as u64) << 20) ^ gb.min(0xFFFFF)
     }
 }
 
@@ -99,7 +99,10 @@ impl Calibration {
         let speedup_threads: usize = it.next()?.parse().ok()?;
         // The complex rate is a later field; an older cache file lacks it, so fall
         // back to a fraction of the real rate rather than failing the whole load.
-        let geom_gflops_cplx = it.next().and_then(|t| t.parse().ok()).unwrap_or(geom_gflops / 3.0);
+        let geom_gflops_cplx = it
+            .next()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(geom_gflops / 3.0);
         let time_cv = it.next().and_then(|t| t.parse().ok()).unwrap_or(0.1);
         Some(Calibration {
             geom_gflops,
@@ -120,7 +123,11 @@ impl Calibration {
             p,
             format!(
                 "{} {} {} {} {}",
-                self.geom_gflops, self.speedup, self.speedup_threads, self.geom_gflops_cplx, self.time_cv
+                self.geom_gflops,
+                self.speedup,
+                self.speedup_threads,
+                self.geom_gflops_cplx,
+                self.time_cv
             ),
         )
     }
@@ -281,7 +288,11 @@ pub fn recommend_threads_cost_model(
     max_threads: usize,
     all_cores: usize,
 ) -> usize {
-    let cap = if max_threads == 0 { all_cores.max(1) } else { max_threads };
+    let cap = if max_threads == 0 {
+        all_cores.max(1)
+    } else {
+        max_threads
+    };
     let rate = calib.rate_for(estimate.value_bytes);
     // Learned residual on the analytical speedup (issue #62): the bare
     // `flops / max(crit, flops/speedup)` model mispredicts the achieved scaling
@@ -320,7 +331,10 @@ pub fn recommend_threads_cost_model(
     };
     let mut best_t = 1;
     let mut best = time(1);
-    for t in [2usize, 4, 6, 8, 12, 16, 20, 24, 32].into_iter().filter(|&t| t <= cap) {
+    for t in [2usize, 4, 6, 8, 12, 16, 20, 24, 32]
+        .into_iter()
+        .filter(|&t| t <= cap)
+    {
         let tt = time(t);
         if tt < best * 0.97 {
             // >3% faster: worth the extra workers.
@@ -346,7 +360,8 @@ pub fn plan(
 ) -> FactorPlan {
     // Cost-model worker count: the fewest cores that reach near-minimum predicted
     // time (fewer when the critical path or saturation dominates), not blindly all.
-    let threads = recommend_threads_cost_model(estimate, calib, budget.max_threads, hw.physical_cores);
+    let threads =
+        recommend_threads_cost_model(estimate, calib, budget.max_threads, hw.physical_cores);
     let speedup = calib.speedup_for(threads);
     let runtime = estimate.est_runtime_ms_threaded(calib.rate_for(estimate.value_bytes), speedup);
     let mut opts = SolverSettings::default().with_threads(threads);
@@ -433,8 +448,14 @@ mod tests {
         // Critical-path-bound (chain: critical path == total work): no parallel gain.
         est.critical_path_flops = est.factor_flops;
         let chain = recommend_threads_cost_model(&est, &calib, 24, 24);
-        assert!(wide > chain, "wide tree uses more workers ({wide}) than a chain ({chain})");
-        assert_eq!(chain, 1, "a critical-path-bound matrix uses a single worker");
+        assert!(
+            wide > chain,
+            "wide tree uses more workers ({wide}) than a chain ({chain})"
+        );
+        assert_eq!(
+            chain, 1,
+            "a critical-path-bound matrix uses a single worker"
+        );
         assert!(wide >= 8, "a wide tree uses many workers ({wide})");
     }
 
@@ -466,7 +487,10 @@ mod tests {
         // The contract is 1 ≤ threads ≤ physical_cores, not "always all cores".
         match plan_ok.opts.threads {
             crate::numeric::multifrontal_ldlt::Threads::Fixed(t) => {
-                assert!(t >= 1 && t <= hw.physical_cores.max(1), "threads within core budget");
+                assert!(
+                    t >= 1 && t <= hw.physical_cores.max(1),
+                    "threads within core budget"
+                );
             }
             other => panic!("expected a fixed thread count, got {other:?}"),
         }
@@ -485,7 +509,10 @@ mod tests {
             "an approximation was selected"
         );
         assert!(!plan_tight.note.is_empty());
-        assert!(plan_tight.est_peak_bytes < est.transient_peak_bytes, "approximations shrink the peak");
+        assert!(
+            plan_tight.est_peak_bytes < est.transient_peak_bytes,
+            "approximations shrink the peak"
+        );
     }
 }
 

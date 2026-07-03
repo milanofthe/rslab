@@ -11,9 +11,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::matgen::{stencil, structured};
-use rslab::{
-    CscMatrix, FactorMethod, LdltSymbolic, RelaxAmalgamation, SolverSettings,
-};
+use rslab::{CscMatrix, FactorMethod, LdltSymbolic, RelaxAmalgamation, SolverSettings};
 
 type C = Complex<f64>;
 
@@ -32,7 +30,12 @@ fn factor_ms(sym: &LdltSymbolic, a: &CscMatrix<C>, threads: usize, nb: usize) ->
 fn run(name: &str, a: CscMatrix<C>) {
     let sym = LdltSymbolic::analyze(&a).expect("analyze");
     let nrow_max = sym.front_dims().iter().map(|&(_, r)| r).max().unwrap_or(0);
-    eprintln!("\n=== {name}  n={}  nnz={}  front_nrow_max={}", a.n, a.values.len(), nrow_max);
+    eprintln!(
+        "\n=== {name}  n={}  nnz={}  front_nrow_max={}",
+        a.n,
+        a.values.len(),
+        nrow_max
+    );
     // NB sensitivity: for each panel width report the t1 work split (via
     // RLA_PROFILE) and the 1->12 thread scaling. The panel width is now a per-call
     // `SolverSettings` knob, not a process-wide toggle.
@@ -42,7 +45,10 @@ fn run(name: &str, a: CscMatrix<C>) {
         let t12 = factor_ms(&sym, &a, 12, nb).min(factor_ms(&sym, &a, 12, nb));
         eprintln!(
             "  NB={:>3}  t1={:>9.1}ms  t12={:>9.1}ms  speedup {:.2}x",
-            nb, t1, t12, t1 / t12
+            nb,
+            t1,
+            t12,
+            t1 / t12
         );
     }
 }
@@ -63,7 +69,10 @@ fn run_width(name: &str, a: CscMatrix<C>) {
     for mw in [128usize, 256, 512, 1024] {
         let base = SolverSettings::default()
             .with_method(FactorMethod::LeftLooking)
-            .with_relax(Some(RelaxAmalgamation { max_width: mw, max_extra_rows: 64 }));
+            .with_relax(Some(RelaxAmalgamation {
+                max_width: mw,
+                max_extra_rows: 64,
+            }));
         let _ = factor_ms_opts(&a, &base.clone().with_threads(1)); // warm + emit split
         let (t1, fill, fmax) = factor_ms_opts(&a, &base.clone().with_threads(1));
         let (t12, _, _) = factor_ms_opts(&a, &base.clone().with_threads(12));
@@ -77,14 +86,29 @@ fn run_width(name: &str, a: CscMatrix<C>) {
 fn main() {
     let c = |re, im| Complex::new(re, im);
     // Big-front, high flop-concentration (3D): the node-parallelism regime.
-    run("poisson3d_40", stencil::laplacian::<C>(&[40, 40, 40], &stencil::StencilOpts::default()));
-    run("helmholtz3d_30", stencil::helmholtz(&[30, 30, 30], c(2.0, 0.1), &stencil::StencilOpts::default()));
+    run(
+        "poisson3d_40",
+        stencil::laplacian::<C>(&[40, 40, 40], &stencil::StencilOpts::default()),
+    );
+    run(
+        "helmholtz3d_30",
+        stencil::helmholtz(&[30, 30, 30], c(2.0, 0.1), &stencil::StencilOpts::default()),
+    );
     // Wide-tree, low concentration (2D): tree-parallel regime, for contrast.
-    run("poisson2d_360", stencil::laplacian::<C>(&[360, 360], &stencil::StencilOpts::default()));
+    run(
+        "poisson2d_360",
+        stencil::laplacian::<C>(&[360, 360], &stencil::StencilOpts::default()),
+    );
     // Thin (banded): should not scale at all.
     run("banded_40000", structured::banded::<C>(40000, 40, 1.0, 1));
 
     // Lever 2a: front-width sweep on the big-front matrices.
-    run_width("poisson3d_40", stencil::laplacian::<C>(&[40, 40, 40], &stencil::StencilOpts::default()));
-    run_width("helmholtz3d_30", stencil::helmholtz(&[30, 30, 30], c(2.0, 0.1), &stencil::StencilOpts::default()));
+    run_width(
+        "poisson3d_40",
+        stencil::laplacian::<C>(&[40, 40, 40], &stencil::StencilOpts::default()),
+    );
+    run_width(
+        "helmholtz3d_30",
+        stencil::helmholtz(&[30, 30, 30], c(2.0, 0.1), &stencil::StencilOpts::default()),
+    );
 }

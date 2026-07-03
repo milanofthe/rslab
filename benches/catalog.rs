@@ -12,18 +12,22 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::matgen::{catalog, Generated};
-use rslab::{SolverSettings, LdltSymbolic, LuSymbolic};
+use rslab::{LdltSymbolic, LuSymbolic, SolverSettings};
 
 type C = Complex<f64>;
 
 fn rhs(n: usize) -> Vec<C> {
-    (0..n).map(|i| Complex::new((i % 5) as f64 - 2.0, (i % 3) as f64 - 1.0)).collect()
+    (0..n)
+        .map(|i| Complex::new((i % 5) as f64 - 2.0, (i % 3) as f64 - 1.0))
+        .collect()
 }
 
 fn main() {
     let filter = std::env::var("RLA_CAT_FILTER").unwrap_or_default();
-    let max_n: usize =
-        std::env::var("RLA_CAT_MAXN").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000);
+    let max_n: usize = std::env::var("RLA_CAT_MAXN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000);
     let opts = SolverSettings::default();
 
     println!(
@@ -35,7 +39,10 @@ fn main() {
             continue;
         }
         if spec.size > max_n {
-            println!("{:<22} {:>8}  (skipped: size > max_n)", spec.name, spec.size);
+            println!(
+                "{:<22} {:>8}  (skipped: size > max_n)",
+                spec.name, spec.size
+            );
             continue;
         }
         let m = spec.build();
@@ -87,7 +94,10 @@ fn a_factor_sym(
 }
 
 fn rel_resid(ax: &[C], b: &[C]) -> f64 {
-    let num: f64 = (0..b.len()).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();
+    let num: f64 = (0..b.len())
+        .map(|i| (ax[i] - b[i]).norm_sqr())
+        .sum::<f64>()
+        .sqrt();
     let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
     num / den.max(1e-300)
 }

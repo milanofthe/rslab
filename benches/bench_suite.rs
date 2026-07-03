@@ -29,8 +29,8 @@ use faer::{c64, Mat as FaerMat};
 use num_complex::Complex;
 use rslab::matgen::{bem, fem, stencil};
 use rslab::{
-    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, SolverSettings, GeneralCsc,
-    LdltSymbolic, LuSymbolic,
+    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, GeneralCsc, LdltSymbolic,
+    LuSymbolic, SolverSettings,
 };
 #[cfg(feature = "matgen-download")]
 use rslab::{read_mtx_any, MtxLoaded};
@@ -65,13 +65,29 @@ fn live_peak<R>(f: impl FnOnce() -> R) -> (R, f64) {
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
     let r = f();
-    (r, PEAK.load(Ordering::Relaxed).saturating_sub(before) as f64 / 1e6)
+    (
+        r,
+        PEAK.load(Ordering::Relaxed).saturating_sub(before) as f64 / 1e6,
+    )
 }
 
 // ---- MKL PARDISO FFI (mtype 6 symmetric / 13 unsymmetric) --------------------
 type PardisoFn = unsafe extern "C" fn(
-    *mut i64, *const i32, *const i32, *const i32, *const i32, *const i32, *const c_void,
-    *const i32, *const i32, *mut i32, *const i32, *mut i32, *const i32, *mut c_void, *mut c_void,
+    *mut i64,
+    *const i32,
+    *const i32,
+    *const i32,
+    *const i32,
+    *const i32,
+    *const c_void,
+    *const i32,
+    *const i32,
+    *mut i32,
+    *const i32,
+    *mut i32,
+    *const i32,
+    *mut c_void,
+    *mut c_void,
     *mut i32,
 );
 
@@ -105,19 +121,46 @@ impl Pardiso {
         iparm[12] = 1;
         iparm[17] = -1;
         iparm[34] = 1;
-        Some(Pardiso { _lib: lib, f, pt: [0i64; 64], iparm, mtype })
+        Some(Pardiso {
+            _lib: lib,
+            f,
+            pt: [0i64; 64],
+            iparm,
+            mtype,
+        })
     }
     #[allow(clippy::too_many_arguments)]
-    fn call(&mut self, phase: i32, n: i32, ia: &[i32], ja: &[i32], a: &[C], b: &mut [C], x: &mut [C]) -> i32 {
+    fn call(
+        &mut self,
+        phase: i32,
+        n: i32,
+        ia: &[i32],
+        ja: &[i32],
+        a: &[C],
+        b: &mut [C],
+        x: &mut [C],
+    ) -> i32 {
         let (maxfct, mnum, nrhs, msglvl) = (1i32, 1i32, 1i32, 0i32);
         let mut perm = vec![0i32; n.max(1) as usize];
         let mut err = 0i32;
         unsafe {
             (self.f)(
-                self.pt.as_mut_ptr(), &maxfct, &mnum, &self.mtype, &phase, &n,
-                a.as_ptr() as *const c_void, ia.as_ptr(), ja.as_ptr(), perm.as_mut_ptr(), &nrhs,
-                self.iparm.as_mut_ptr(), &msglvl, b.as_mut_ptr() as *mut c_void,
-                x.as_mut_ptr() as *mut c_void, &mut err,
+                self.pt.as_mut_ptr(),
+                &maxfct,
+                &mnum,
+                &self.mtype,
+                &phase,
+                &n,
+                a.as_ptr() as *const c_void,
+                ia.as_ptr(),
+                ja.as_ptr(),
+                perm.as_mut_ptr(),
+                &nrhs,
+                self.iparm.as_mut_ptr(),
+                &msglvl,
+                b.as_mut_ptr() as *mut c_void,
+                x.as_mut_ptr() as *mut c_void,
+                &mut err,
             );
         }
         err
@@ -208,10 +251,15 @@ fn sym_to_full(a: &CscMatrix<C>) -> GeneralCsc<C> {
 }
 
 fn rhs(n: usize) -> Vec<C> {
-    (0..n).map(|i| Complex::new((i % 5) as f64 - 2.0, (i % 3) as f64 - 1.0)).collect()
+    (0..n)
+        .map(|i| Complex::new((i % 5) as f64 - 2.0, (i % 3) as f64 - 1.0))
+        .collect()
 }
 fn rel(ax: &[C], b: &[C]) -> f64 {
-    let num: f64 = (0..b.len()).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();
+    let num: f64 = (0..b.len())
+        .map(|i| (ax[i] - b[i]).norm_sqr())
+        .sum::<f64>()
+        .sqrt();
     let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
     num / den.max(1e-300)
 }
@@ -222,7 +270,22 @@ fn cube(target: usize) -> [usize; 3] {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit(out: &mut dyn Write, solver: &str, family: &str, name: &str, n: usize, nnz: usize, threads: i32, mem: bool, ana: f64, fac: f64, slv: f64, memmb: f64, fill: usize, res: f64) {
+fn emit(
+    out: &mut dyn Write,
+    solver: &str,
+    family: &str,
+    name: &str,
+    n: usize,
+    nnz: usize,
+    threads: i32,
+    mem: bool,
+    ana: f64,
+    fac: f64,
+    slv: f64,
+    memmb: f64,
+    fill: usize,
+    res: f64,
+) {
     let _ = writeln!(
         out,
         "{{\"solver\":\"{solver}\",\"family\":\"{family}\",\"name\":\"{name}\",\"n\":{n},\"nnz\":{nnz},\"threads\":{threads},\"metric\":\"{}\",\"ana_ms\":{ana:.3},\"fac_ms\":{fac:.3},\"slv_ms\":{slv:.3},\"mem_mb\":{memmb:.1},\"fill\":{fill},\"res\":{res:.3e}}}",
@@ -261,14 +324,27 @@ fn build_faer(a: &GeneralCsc<C>) -> Option<SparseColMat<usize, c64>> {
     let mut trip: Vec<Triplet<usize, usize, c64>> = Vec::with_capacity(a.values.len());
     for j in 0..a.n {
         for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            trip.push(Triplet::new(a.row_idx[k], j, c64::new(a.values[k].re, a.values[k].im)));
+            trip.push(Triplet::new(
+                a.row_idx[k],
+                j,
+                c64::new(a.values[k].re, a.values[k].im),
+            ));
         }
     }
     SparseColMat::try_new_from_triplets(a.n, a.n, &trip).ok()
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads: i32, mem: bool, solvers: &[String], opts: &SolverSettings) {
+fn run_matrix(
+    out: &mut dyn Write,
+    family: &str,
+    name: &str,
+    mat: &Mat,
+    threads: i32,
+    mem: bool,
+    solvers: &[String],
+    opts: &SolverSettings,
+) {
     let (n, nnz) = (mat.n(), mat.nnz());
     let b = rhs(n);
     let has = |s: &str| solvers.iter().any(|x| x == s);
@@ -319,7 +395,22 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.symv(&x, &mut ax);
-                emit(out, tag, family, name, n, nnz, threads, mem, ana, fac, slv, mm, f.factor_nnz(), rel(&ax, &b));
+                emit(
+                    out,
+                    tag,
+                    family,
+                    name,
+                    n,
+                    nnz,
+                    threads,
+                    mem,
+                    ana,
+                    fac,
+                    slv,
+                    mm,
+                    f.factor_nnz(),
+                    rel(&ax, &b),
+                );
             }
             Mat::Unsym(a) => {
                 let t = Instant::now();
@@ -334,7 +425,22 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.matvec(&x, &mut ax);
-                emit(out, tag, family, name, n, nnz, threads, mem, ana, fac, slv, mm, f.factor_nnz(), rel(&ax, &b));
+                emit(
+                    out,
+                    tag,
+                    family,
+                    name,
+                    n,
+                    nnz,
+                    threads,
+                    mem,
+                    ana,
+                    fac,
+                    slv,
+                    mm,
+                    f.factor_nnz(),
+                    rel(&ax, &b),
+                );
             }
         }
     }
@@ -359,7 +465,22 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                     let slv = t.elapsed().as_secs_f64() * 1e3;
                     let mut ax = vec![Complex::new(0.0, 0.0); n];
                     a.symv(&x, &mut ax);
-                    emit(out, "auto", family, name, n, nnz, threads, mem, ana, fac, slv, mm, f.factor_nnz(), rel(&ax, &b));
+                    emit(
+                        out,
+                        "auto",
+                        family,
+                        name,
+                        n,
+                        nnz,
+                        threads,
+                        mem,
+                        ana,
+                        fac,
+                        slv,
+                        mm,
+                        f.factor_nnz(),
+                        rel(&ax, &b),
+                    );
                 }
                 Mat::Unsym(a) => {
                     let t = Instant::now();
@@ -374,7 +495,22 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                     let slv = t.elapsed().as_secs_f64() * 1e3;
                     let mut ax = vec![Complex::new(0.0, 0.0); n];
                     a.matvec(&x, &mut ax);
-                    emit(out, "auto", family, name, n, nnz, threads, mem, ana, fac, slv, mm, f.factor_nnz(), rel(&ax, &b));
+                    emit(
+                        out,
+                        "auto",
+                        family,
+                        name,
+                        n,
+                        nnz,
+                        threads,
+                        mem,
+                        ana,
+                        fac,
+                        slv,
+                        mm,
+                        f.factor_nnz(),
+                        rel(&ax, &b),
+                    );
                 }
             }
             Ok(())
@@ -398,8 +534,12 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
         .and_then(|v| v.parse().ok())
         .unwrap_or(3000.0);
     let rslab_est_mb = match mat {
-        Mat::Sym(a) => LdltSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>().transient_peak_bytes),
-        Mat::Unsym(a) => LuSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>().transient_peak_bytes),
+        Mat::Sym(a) => LdltSymbolic::analyze(a)
+            .ok()
+            .map(|s| s.estimate_memory::<C>().transient_peak_bytes),
+        Mat::Unsym(a) => LuSymbolic::analyze(a)
+            .ok()
+            .map(|s| s.estimate_memory::<C>().transient_peak_bytes),
     }
     .map(|b| b as f64 / 1e6)
     .unwrap_or(0.0);
@@ -421,10 +561,27 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                 let t = Instant::now();
                 lu.solve_in_place(&mut xb);
                 let slv = t.elapsed().as_secs_f64() * 1e3;
-                let x: Vec<C> = (0..n).map(|i| Complex::new(xb[(i, 0)].re, xb[(i, 0)].im)).collect();
+                let x: Vec<C> = (0..n)
+                    .map(|i| Complex::new(xb[(i, 0)].re, xb[(i, 0)].im))
+                    .collect();
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 mat.resid(&x, &mut ax);
-                emit(out, "faer", family, name, n, nnz, threads, mem, 0.0, fac, slv, mm, 0, rel(&ax, &b));
+                emit(
+                    out,
+                    "faer",
+                    family,
+                    name,
+                    n,
+                    nnz,
+                    threads,
+                    mem,
+                    0.0,
+                    fac,
+                    slv,
+                    mm,
+                    0,
+                    rel(&ax, &b),
+                );
             }
         }
     }
@@ -443,7 +600,10 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
         };
         if let Some(mut ps) = Pardiso::try_new(mtype, threads) {
             let ni = n as i32;
-            let (mut db, mut dx) = (vec![Complex::new(0.0, 0.0); n], vec![Complex::new(0.0, 0.0); n]);
+            let (mut db, mut dx) = (
+                vec![Complex::new(0.0, 0.0); n],
+                vec![Complex::new(0.0, 0.0); n],
+            );
             let t = Instant::now();
             let e1 = ps.call(11, ni, &ia, &ja, &va, &mut db, &mut dx);
             let ana = t.elapsed().as_secs_f64() * 1e3;
@@ -464,7 +624,22 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                     let fill = ps.iparm[17].max(0) as usize;
                     let mut ax = vec![Complex::new(0.0, 0.0); n];
                     mat.resid(&x, &mut ax);
-                    emit(out, "pardiso", family, name, n, nnz, threads, mem, ana, fac, slv, mm, fill, rel(&ax, &b));
+                    emit(
+                        out,
+                        "pardiso",
+                        family,
+                        name,
+                        n,
+                        nnz,
+                        threads,
+                        mem,
+                        ana,
+                        fac,
+                        slv,
+                        mm,
+                        fill,
+                        rel(&ax, &b),
+                    );
                 }
             } else {
                 eprintln!("[bench] PARDISO error {e1}/{e2}");
@@ -483,7 +658,12 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
         // well-conditioned preconditioner (GMRES then corrects back to A); a
         // well-conditioned matrix has O(1) equilibrated pivots, so none are perturbed
         // and pc reduces to the exact factor (1 GMRES step).
-        let envf = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let envf = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
         let floor = envf("RLA_BENCH_PC_FLOOR", 1e-4);
         let maxit = envf("RLA_BENCH_PC_MAXIT", 200.0) as usize;
         let restart = envf("RLA_BENCH_PC_RESTART", 100.0) as usize;
@@ -499,7 +679,15 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.symv(&kr.x, &mut ax);
-                Ok((fac, slv, mm, f.factor_nnz(), rel(&ax, &b), kr.iters, kr.converged))
+                Ok((
+                    fac,
+                    slv,
+                    mm,
+                    f.factor_nnz(),
+                    rel(&ax, &b),
+                    kr.iters,
+                    kr.converged,
+                ))
             }),
             Mat::Unsym(a) => LuSymbolic::analyze(a).and_then(|sym| {
                 let t = Instant::now();
@@ -511,13 +699,23 @@ fn run_matrix(out: &mut dyn Write, family: &str, name: &str, mat: &Mat, threads:
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.matvec(&kr.x, &mut ax);
-                Ok((fac, slv, mm, f.factor_nnz(), rel(&ax, &b), kr.iters, kr.converged))
+                Ok((
+                    fac,
+                    slv,
+                    mm,
+                    f.factor_nnz(),
+                    rel(&ax, &b),
+                    kr.iters,
+                    kr.converged,
+                ))
             }),
         };
         match outcome {
             Ok((fac, slv, mm, fill, res, iters, conv)) => {
                 eprintln!("[pc] {name}: {iters} GMRES iters, converged={conv}, res={res:.1e}");
-                emit(out, "pc", family, name, n, nnz, threads, mem, 0.0, fac, slv, mm, fill, res);
+                emit(
+                    out, "pc", family, name, n, nnz, threads, mem, 0.0, fac, slv, mm, fill, res,
+                );
             }
             Err(e) => eprintln!("[pc] {name}: factor/refine failed: {e:?}"),
         }
@@ -544,7 +742,11 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 let kc = ((sz as f64 / 3.0).cbrt().round() as usize).max(4);
                 let ks = ((sz as f64 / 3.0).sqrt().round() as usize).max(4);
                 let helm = |re, im| {
-                    let m = stencil::helmholtz(&cube(sz), Complex::new(re, im), &stencil::StencilOpts::default());
+                    let m = stencil::helmholtz(
+                        &cube(sz),
+                        Complex::new(re, im),
+                        &stencil::StencilOpts::default(),
+                    );
                     (format!("helmholtz_{}", m.n), Mat::Sym(m))
                 };
                 let cc = |om, si| {
@@ -580,7 +782,12 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 let kc = ((sz as f64).cbrt().round() as usize).max(4);
                 let ks = ((sz as f64).sqrt().round() as usize).max(4);
                 let cd3 = |eps| {
-                    let m = fem::convection_diffusion::<C>(&[kc, kc, kc], eps, fem::Flow::Rotating, true);
+                    let m = fem::convection_diffusion::<C>(
+                        &[kc, kc, kc],
+                        eps,
+                        fem::Flow::Rotating,
+                        true,
+                    );
                     (format!("convdiff3d_{}", m.n), Mat::Unsym(m))
                 };
                 let cd2 = |eps, flow, up| {
@@ -589,7 +796,13 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 };
                 let mom = |deg: f64| {
                     let cutoff = (2.0 * (deg / sz as f64).sqrt()).min(1.2);
-                    let m = bem::kernel(sz, &bem::BemOpts { cutoff, ..Default::default() });
+                    let m = bem::kernel(
+                        sz,
+                        &bem::BemOpts {
+                            cutoff,
+                            ..Default::default()
+                        },
+                    );
                     (format!("mom_{}", m.n), Mat::Unsym(m))
                 };
                 match i % 8 {
@@ -608,8 +821,10 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
         "real" => {
             let dir = std::env::var("RLA_BENCH_REAL_DIR")
                 .unwrap_or_else(|_| r"C:\Repositories\rapidmom\precond_matrices".into());
-            let count: usize =
-                std::env::var("RLA_BENCH_REAL_N").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+            let count: usize = std::env::var("RLA_BENCH_REAL_N")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(6);
             let mut files: Vec<_> = std::fs::read_dir(&dir)
                 .map(|rd| {
                     rd.filter_map(|e| e.ok().map(|e| e.path()))
@@ -624,7 +839,10 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 .filter_map(|p| {
                     let stem = p.file_stem()?.to_string_lossy().to_string();
                     let contents = std::fs::read_to_string(&p).ok()?;
-                    let a = parse_mtx_complex_general(&contents, &stem).ok()?.to_general_csc().ok()?;
+                    let a = parse_mtx_complex_general(&contents, &stem)
+                        .ok()?
+                        .to_general_csc()
+                        .ok()?;
                     Some((stem, Mat::Unsym(a)))
                 })
                 .collect()
@@ -695,7 +913,9 @@ fn main() {
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
-    let mem = std::env::var("RLA_BENCH_MEM").map(|v| v == "1").unwrap_or(false);
+    let mem = std::env::var("RLA_BENCH_MEM")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let solvers: Vec<String> = std::env::var("RLA_BENCH_SOLVERS")
         .unwrap_or_else(|_| "ll,mf,faer,pardiso".into())
         .split(',')
@@ -704,7 +924,11 @@ fn main() {
     let threads: i32 = std::env::var("RAYON_NUM_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|p| p.get() as i32).unwrap_or(1));
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|p| p.get() as i32)
+                .unwrap_or(1)
+        });
     let out_path = std::env::var("RLA_BENCH_OUT").unwrap_or_else(|_| "bench_results.jsonl".into());
     if mem {
         COUNTING_ON.store(true, Ordering::Relaxed);
@@ -720,17 +944,24 @@ fn main() {
 
     // Estimate-only mode (`RLA_BENCH_ESTIMATE=1`): emit the a-priori memory-estimate
     // breakdown per matrix and skip all factoring (instant - no numeric work).
-    let estimate_only = std::env::var("RLA_BENCH_ESTIMATE").map(|v| v == "1").unwrap_or(false);
+    let estimate_only = std::env::var("RLA_BENCH_ESTIMATE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     for (name, mat) in build_family(&family, &sizes) {
         if estimate_only {
             let e = match &mat {
-                Mat::Sym(a) => LdltSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>()),
-                Mat::Unsym(a) => LuSymbolic::analyze(a).ok().map(|s| s.estimate_memory::<C>()),
+                Mat::Sym(a) => LdltSymbolic::analyze(a)
+                    .ok()
+                    .map(|s| s.estimate_memory::<C>()),
+                Mat::Unsym(a) => LuSymbolic::analyze(a)
+                    .ok()
+                    .map(|s| s.estimate_memory::<C>()),
             };
             if let Some(e) = e {
                 let mb = |b: u64| b as f64 / 1e6;
-                let scratch = mb(e.transient_peak_bytes) - mb(e.panels_all_bytes) - mb(e.factor_bytes);
+                let scratch =
+                    mb(e.transient_peak_bytes) - mb(e.panels_all_bytes) - mb(e.factor_bytes);
                 let _ = writeln!(
                     out,
                     "{{\"name\":\"{name}\",\"n\":{},\"panels_mb\":{:.1},\"factor_mb\":{:.1},\"scratch_mb\":{:.1},\"transient_mb\":{:.1},\"mf_transient_mb\":{:.1},\"freed_floor_mb\":{:.1}}}",
@@ -740,7 +971,13 @@ fn main() {
             }
             continue;
         }
-        eprintln!("[bench] family={family} name={name} n={} threads={threads} metric={}", mat.n(), if mem { "mem" } else { "time" });
-        run_matrix(&mut out, &family, &name, &mat, threads, mem, &solvers, &opts);
+        eprintln!(
+            "[bench] family={family} name={name} n={} threads={threads} metric={}",
+            mat.n(),
+            if mem { "mem" } else { "time" }
+        );
+        run_matrix(
+            &mut out, &family, &name, &mat, threads, mem, &solvers, &opts,
+        );
     }
 }

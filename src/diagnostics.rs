@@ -171,7 +171,7 @@ pub(crate) fn estimate_left_looking(
         // Default to the left-looking peak; the multifrontal model overrides this
         // in the path-aware caller (it needs the assembly-tree child structure).
         mf_transient_peak_bytes: transient,
-        factor_flops: 0, // set by the caller (needs supernode dimensions)
+        factor_flops: 0,        // set by the caller (needs supernode dimensions)
         critical_path_flops: 0, // set by the caller (needs the assembly tree)
         max_tree_width: 0,      // set by the caller (needs the level structure)
     }
@@ -240,13 +240,22 @@ impl Diagnostics {
         self.stages.iter().map(|s| s.wall_ms).sum()
     }
     pub fn push(&mut self, name: &'static str, wall_ms: f64, flops: u64, bytes: u64) {
-        self.stages.push(StageReport { name, wall_ms, flops, bytes });
+        self.stages.push(StageReport {
+            name,
+            wall_ms,
+            flops,
+            bytes,
+        });
     }
 }
 
 impl fmt::Display for Diagnostics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "factorization diagnostics (threads={}, factor_nnz={}):", self.threads, self.factor_nnz)?;
+        writeln!(
+            f,
+            "factorization diagnostics (threads={}, factor_nnz={}):",
+            self.threads, self.factor_nnz
+        )?;
         let tot = self.total_ms().max(1e-9);
         for s in &self.stages {
             writeln!(

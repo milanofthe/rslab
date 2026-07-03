@@ -355,7 +355,11 @@ struct ActiveKnobs {
 }
 
 fn active_knobs(m: &Model) -> ActiveKnobs {
-    let mut a = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
+    let mut a = ActiveKnobs {
+        pivot_u: false,
+        scaling: false,
+        memory: false,
+    };
     for comp in &m.input_spec {
         match comp.kind.as_str() {
             "pivot_u" => a.pivot_u = true,
@@ -397,7 +401,11 @@ fn predict(m: &Model, input: &[f64]) -> [f64; 2] {
 /// helps and is vetoed where it hurts. Memory stays safe by the backstop
 /// regardless of which knob is picked.
 fn candidates(path: SolverPath, active: &ActiveKnobs) -> Vec<Candidate> {
-    let orderings = [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND];
+    let orderings = [
+        OrderingMethod::Auto,
+        OrderingMethod::Amd,
+        OrderingMethod::MetisND,
+    ];
     let nemins = [1usize, 16, 48, 128];
     let relaxes = [0usize, 128, 256, 512];
     let panels = [32usize, 64, 96, 128];
@@ -413,11 +421,20 @@ fn candidates(path: SolverPath, active: &ActiveKnobs) -> Vec<Candidate> {
         &[BASE.pivot_u]
     };
     let scalings: &[ScalingKnob] = if active.scaling {
-        &[ScalingKnob::OnePass, ScalingKnob::Identity, ScalingKnob::InfNorm, ScalingKnob::Auto]
+        &[
+            ScalingKnob::OnePass,
+            ScalingKnob::Identity,
+            ScalingKnob::InfNorm,
+            ScalingKnob::Auto,
+        ]
     } else {
         &[ScalingKnob::OnePass]
     };
-    let memories: &[bool] = if active.memory { &[false, true] } else { &[false] };
+    let memories: &[bool] = if active.memory {
+        &[false, true]
+    } else {
+        &[false]
+    };
     let mut v = Vec::new();
     for &ordering in &orderings {
         for &nemin in &nemins {
@@ -559,8 +576,19 @@ pub fn recommend_with_profile(
         SolverPath::Lu => &profile.lu_model,
     };
     let m: Model = serde_json::from_value(value.clone()).ok()?;
-    let guards = (profile.min_gain, profile.method_flip_gain, profile.mem_tol_ln);
-    Some(recommend_core(&m, guards, features, weight, mf_ll_mem_ratio, path))
+    let guards = (
+        profile.min_gain,
+        profile.method_flip_gain,
+        profile.mem_tol_ln,
+    );
+    Some(recommend_core(
+        &m,
+        guards,
+        features,
+        weight,
+        mf_ll_mem_ratio,
+        path,
+    ))
 }
 
 /// The shared recommendation search: given a model and the (min_gain,
@@ -616,7 +644,11 @@ fn recommend_core(
     }
     // Safety + method-flip guard: only deviate from the default when the predicted
     // gain clears the margin (a larger one for a method flip - the risky knob).
-    let needed = if best.method != BASE.method { method_flip_gain } else { min_gain };
+    let needed = if best.method != BASE.method {
+        method_flip_gain
+    } else {
+        min_gain
+    };
     if base_score - best_score < needed {
         return apply(&BASE);
     }
@@ -706,9 +738,22 @@ mod tests {
                 memory_eager: p["memory_eager"].as_bool().unwrap_or(false),
             };
             let pred = predict(m, &build_input(m, &f, &c));
-            let (ems, emb) = (s["pred_log_ms"].as_f64().unwrap(), s["pred_log_mb"].as_f64().unwrap());
-            assert!((pred[0] - ems).abs() < 1e-4, "log_ms parity: rust {} vs py {}", pred[0], ems);
-            assert!((pred[1] - emb).abs() < 1e-4, "log_mb parity: rust {} vs py {}", pred[1], emb);
+            let (ems, emb) = (
+                s["pred_log_ms"].as_f64().unwrap(),
+                s["pred_log_mb"].as_f64().unwrap(),
+            );
+            assert!(
+                (pred[0] - ems).abs() < 1e-4,
+                "log_ms parity: rust {} vs py {}",
+                pred[0],
+                ems
+            );
+            assert!(
+                (pred[1] - emb).abs() < 1e-4,
+                "log_mb parity: rust {} vs py {}",
+                pred[1],
+                emb
+            );
         }
     }
 
@@ -720,13 +765,31 @@ mod tests {
         // path (Bunch-Kaufman ignores it, so it is pinned on LDLᵀ).
         let ldlt = active_knobs(model_for(SolverPath::Ldlt).expect("ldlt model loads"));
         let lu = active_knobs(model_for(SolverPath::Lu).expect("lu model loads"));
-        assert!(ldlt.scaling && ldlt.memory && !ldlt.pivot_u, "LDLᵀ tunes scaling+memory, not pivot_u");
-        assert!(lu.scaling && lu.memory && lu.pivot_u, "LU tunes scaling+memory+pivot_u");
+        assert!(
+            ldlt.scaling && ldlt.memory && !ldlt.pivot_u,
+            "LDLᵀ tunes scaling+memory, not pivot_u"
+        );
+        assert!(
+            lu.scaling && lu.memory && lu.pivot_u,
+            "LU tunes scaling+memory+pivot_u"
+        );
         // Base grid: 3 orderings·4 nemin·4 relax·4 panel·3 cdiv·2 method = 1152.
-        assert_eq!(candidates(SolverPath::Ldlt, &ldlt).len(), 1152 * 8, "LDLᵀ: scaling×4·memory×2");
-        assert_eq!(candidates(SolverPath::Lu, &lu).len(), 1152 * 32, "LU: +pivot_u×4");
+        assert_eq!(
+            candidates(SolverPath::Ldlt, &ldlt).len(),
+            1152 * 8,
+            "LDLᵀ: scaling×4·memory×2"
+        );
+        assert_eq!(
+            candidates(SolverPath::Lu, &lu).len(),
+            1152 * 32,
+            "LU: +pivot_u×4"
+        );
         // Data-driven gate: a model referencing no axis leaves the grid unchanged.
-        let none = ActiveKnobs { pivot_u: false, scaling: false, memory: false };
+        let none = ActiveKnobs {
+            pivot_u: false,
+            scaling: false,
+            memory: false,
+        };
         assert_eq!(candidates(SolverPath::Ldlt, &none).len(), 1152);
         assert_eq!(candidates(SolverPath::Lu, &none).len(), 1152);
     }

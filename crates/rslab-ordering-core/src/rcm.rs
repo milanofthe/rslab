@@ -155,7 +155,11 @@ fn level_structure(
             }
         }
     }
-    let last: Vec<usize> = touched.iter().copied().filter(|&w| dist[w] == ecc).collect();
+    let last: Vec<usize> = touched
+        .iter()
+        .copied()
+        .filter(|&w| dist[w] == ecc)
+        .collect();
     for &w in touched.iter() {
         dist[w] = -1;
     }
@@ -217,8 +221,10 @@ mod tests {
         // Scramble: relabel vertex i -> (i * 97) mod n (a bijection) so the
         // stored order is far from banded.
         let relabel: Vec<usize> = (0..n).map(|i| (i * 97) % n).collect();
-        let scrambled: Vec<(usize, usize)> =
-            edges.iter().map(|&(a, b)| (relabel[a], relabel[b])).collect();
+        let scrambled: Vec<(usize, usize)> = edges
+            .iter()
+            .map(|&(a, b)| (relabel[a], relabel[b]))
+            .collect();
         let (col_ptr, row_idx) = pattern_from_edges(n, &scrambled);
         let pat = CscPattern::new(n, &col_ptr, &row_idx).unwrap();
 
@@ -259,8 +265,10 @@ mod tests {
             }
         }
         let relabel: Vec<usize> = (0..n).map(|i| (i * 131) % n).collect();
-        let scrambled: Vec<(usize, usize)> =
-            edges.iter().map(|&(a, b)| (relabel[a], relabel[b])).collect();
+        let scrambled: Vec<(usize, usize)> = edges
+            .iter()
+            .map(|&(a, b)| (relabel[a], relabel[b]))
+            .collect();
         let (col_ptr, row_idx) = pattern_from_edges(n, &scrambled);
         let pat = CscPattern::new(n, &col_ptr, &row_idx).unwrap();
 
@@ -278,7 +286,9 @@ mod tests {
 
     #[test]
     fn rcm_handles_disconnected_and_empty() {
-        assert!(rcm_order(&CscPattern::new(0, &[0], &[]).unwrap()).unwrap().is_empty());
+        assert!(rcm_order(&CscPattern::new(0, &[0], &[]).unwrap())
+            .unwrap()
+            .is_empty());
         // Two disjoint edges: 0-1 and 2-3.
         let (col_ptr, row_idx) = pattern_from_edges(4, &[(0, 1), (2, 3)]);
         let pat = CscPattern::new(4, &col_ptr, &row_idx).unwrap();

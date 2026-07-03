@@ -31,7 +31,12 @@ pub struct StencilOpts {
 
 impl Default for StencilOpts {
     fn default() -> Self {
-        StencilOpts { aniso: [1.0, 1.0, 1.0], shift: 0.0, jump_contrast: 1.0, seed: 1 }
+        StencilOpts {
+            aniso: [1.0, 1.0, 1.0],
+            shift: 0.0,
+            jump_contrast: 1.0,
+            seed: 1,
+        }
     }
 }
 
@@ -106,11 +111,7 @@ pub fn laplacian<T: Scalar>(dims: &[usize], opts: &StencilOpts) -> CscMatrix<T> 
 /// `k2` is the (possibly complex, for lossy media) squared wavenumber: a large
 /// real `k2` makes the operator indefinite; an imaginary part models loss. This is
 /// the complex-symmetric EM-FEM analogue (`A = Aᵀ`, not Hermitian).
-pub fn helmholtz(
-    dims: &[usize],
-    k2: Complex<f64>,
-    opts: &StencilOpts,
-) -> CscMatrix<Complex<f64>> {
+pub fn helmholtz(dims: &[usize], k2: Complex<f64>, opts: &StencilOpts) -> CscMatrix<Complex<f64>> {
     let n: usize = dims.iter().product();
     let (diag, tri) = laplacian_weights(dims, opts);
     let mut rows = Vec::with_capacity(n + tri.len());
@@ -193,7 +194,10 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         density: Density::Sparse,
         size: 64_000,
         build: || {
-            let o = StencilOpts { aniso: [1.0, 1.0, 1000.0], ..Default::default() };
+            let o = StencilOpts {
+                aniso: [1.0, 1.0, 1000.0],
+                ..Default::default()
+            };
             cx(laplacian(&cube(64_000), &o))
         },
     });
@@ -206,7 +210,11 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         density: Density::Sparse,
         size: 64_000,
         build: || {
-            let o = StencilOpts { jump_contrast: 1e6, seed: 7, ..Default::default() };
+            let o = StencilOpts {
+                jump_contrast: 1e6,
+                seed: 7,
+                ..Default::default()
+            };
             cx(laplacian(&cube(64_000), &o))
         },
     });
@@ -218,7 +226,13 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         cond: Cond::Moderate,
         density: Density::Sparse,
         size: 64_000,
-        build: || cx(helmholtz(&cube(64_000), Complex::new(0.5, 0.05), &StencilOpts::default())),
+        build: || {
+            cx(helmholtz(
+                &cube(64_000),
+                Complex::new(0.5, 0.05),
+                &StencilOpts::default(),
+            ))
+        },
     });
     c.push(MatrixSpec {
         name: "helmholtz3d_indef",
@@ -227,7 +241,13 @@ pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
         cond: Cond::Ill, // large real shift ⇒ strongly indefinite
         density: Density::Sparse,
         size: 64_000,
-        build: || cx(helmholtz(&cube(64_000), Complex::new(6.0, 0.1), &StencilOpts::default())),
+        build: || {
+            cx(helmholtz(
+                &cube(64_000),
+                Complex::new(6.0, 0.1),
+                &StencilOpts::default(),
+            ))
+        },
     });
 }
 
@@ -266,7 +286,11 @@ mod tests {
 
     #[test]
     fn jump_coefficient_changes_values_deterministically() {
-        let o = StencilOpts { jump_contrast: 100.0, seed: 42, ..Default::default() };
+        let o = StencilOpts {
+            jump_contrast: 100.0,
+            seed: 42,
+            ..Default::default()
+        };
         let a = laplacian::<f64>(&[8, 8, 8], &o);
         let b = laplacian::<f64>(&[8, 8, 8], &o);
         assert_eq!(a.values, b.values, "same seed ⇒ identical matrix");

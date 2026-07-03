@@ -121,15 +121,16 @@ impl<T: Scalar> LdltSolver<T> {
         // through on banded matrices. The realistic transient floor stays under the
         // default's (MF pick vs LL floor, LL pick floor-vs-floor).
         let default_fill = sym.symbolic_factor_nnz();
-        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: crate::FactorMethod, pick_fill: usize| {
-            let fill_ok = pick_fill as f64 <= default_fill as f64 * 1.02;
-            let flops_ok = e.factor_flops as f64 <= est.factor_flops as f64 * 1.05;
-            if m == crate::FactorMethod::Multifrontal {
-                fill_ok && flops_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
-            } else {
-                fill_ok && flops_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
-            }
-        };
+        let mem_ok =
+            |e: &crate::diagnostics::MemoryEstimate, m: crate::FactorMethod, pick_fill: usize| {
+                let fill_ok = pick_fill as f64 <= default_fill as f64 * 1.02;
+                let flops_ok = e.factor_flops as f64 <= est.factor_flops as f64 * 1.05;
+                if m == crate::FactorMethod::Multifrontal {
+                    fill_ok && flops_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
+                } else {
+                    fill_ok && flops_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
+                }
+            };
         // Reuse the default analysis unless the tuner changed an analyze-time knob.
         if (s.reorder, s.ordering, s.nemin, s.relax) == (d.reorder, d.ordering, d.nemin, d.relax) {
             if mem_ok(&est, s.method, default_fill) {
@@ -432,7 +433,14 @@ impl LdltSymbolic {
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
         let Some((sym, levels)) = self.symbolic.sym_and_levels() else {
-            return crate::diagnostics::estimate_left_looking(0, &|_| 0, &|_| 0, &[], value_bytes, 0);
+            return crate::diagnostics::estimate_left_looking(
+                0,
+                &|_| 0,
+                &|_| 0,
+                &[],
+                value_bytes,
+                0,
+            );
         };
         let nsuper = sym.supernodes.len();
         let rs = crate::numeric::multifrontal_ldlt::compute_supernode_row_structures(sym);
@@ -454,7 +462,8 @@ impl LdltSymbolic {
         }
         // LDLᵀ: one dense panel per supernode (no separate U), and the compact
         // factor is `L` only (no `U`); the input copy is a single lower triangle.
-        let panel_bytes = |s: usize| -> u64 { (rs[s].len() * sym.supernodes[s].ncol * value_bytes) as u64 };
+        let panel_bytes =
+            |s: usize| -> u64 { (rs[s].len() * sym.supernodes[s].ncol * value_bytes) as u64 };
         let compact_bytes = |s: usize| -> u64 {
             let nc = sym.supernodes[s].ncol;
             let cnrow = rs[s].len() - nc;
@@ -498,8 +507,7 @@ impl LdltSymbolic {
         est.max_tree_width = levels.iter().map(|l| l.len()).max().unwrap_or(1) as u64;
         // Multifrontal transient: the contribution-block-stack model (the
         // left-looking `transient_peak_bytes` does not capture the CB stack).
-        let children: Vec<Vec<usize>> =
-            sym.supernodes.iter().map(|s| s.children.clone()).collect();
+        let children: Vec<Vec<usize>> = sym.supernodes.iter().map(|s| s.children.clone()).collect();
         let mf_active = crate::diagnostics::estimate_multifrontal_active_peak(
             levels,
             &|s| rs[s].len() as u64,
@@ -545,7 +553,11 @@ impl LdltSymbolic {
             ..Default::default()
         };
         diagnostics.push("factor", factor_ms, 0, factors.l_values.len() as u64 * 24);
-        Ok(LdltSolver { factors, scale, diagnostics })
+        Ok(LdltSolver {
+            factors,
+            scale,
+            diagnostics,
+        })
     }
 }
 
@@ -650,7 +662,10 @@ mod tests {
             "thread-aware runtime hits the critical-path floor: {t_huge} vs {floor_ms}"
         );
         // The plain model would keep shrinking with speedup (no floor).
-        assert!(est.est_runtime_ms(rate1, 1e9) < floor_ms, "plain model has no Amdahl floor");
+        assert!(
+            est.est_runtime_ms(rate1, 1e9) < floor_ms,
+            "plain model has no Amdahl floor"
+        );
     }
 
     #[test]
@@ -838,13 +853,23 @@ mod tests {
         let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
         let sym = LdltSymbolic::analyze(&a).unwrap();
         // Auto capped at 8: a tridiagonal is thin/narrow -> policy returns 2.
-        let auto = sym.factor(&a, &SolverSettings::default().with_auto_threads(8)).unwrap();
-        assert_eq!(auto.diagnostics().threads, 2, "thin matrix auto-capped to 2");
+        let auto = sym
+            .factor(&a, &SolverSettings::default().with_auto_threads(8))
+            .unwrap();
+        assert_eq!(
+            auto.diagnostics().threads,
+            2,
+            "thin matrix auto-capped to 2"
+        );
         // Fixed overrides the predictor exactly.
-        let fixed = sym.factor(&a, &SolverSettings::default().with_threads(5)).unwrap();
+        let fixed = sym
+            .factor(&a, &SolverSettings::default().with_threads(5))
+            .unwrap();
         assert_eq!(fixed.diagnostics().threads, 5);
         // The auto cap clamps the prediction.
-        let cap1 = sym.factor(&a, &SolverSettings::default().with_auto_threads(1)).unwrap();
+        let cap1 = sym
+            .factor(&a, &SolverSettings::default().with_auto_threads(1))
+            .unwrap();
         assert_eq!(cap1.diagnostics().threads, 1);
         // All still solve correctly.
         let b = vec![1.0_f64; n];
@@ -914,7 +939,10 @@ mod tests {
                 .factor(&a, &SolverSettings::default())
                 .unwrap();
             let x = f.solve(&b).unwrap();
-            assert!(residual_inf(&a, &x, &b) < 1e-9, "opts {opts:?} residual too large");
+            assert!(
+                residual_inf(&a, &x, &b) < 1e-9,
+                "opts {opts:?} residual too large"
+            );
         }
     }
 

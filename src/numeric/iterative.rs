@@ -630,7 +630,10 @@ fn solve_thread_pool(policy: Threads) -> Option<rayon::ThreadPool> {
         // front - but the `|cap| cap` fallback keeps this total.
         p => {
             let workers = p.resolve(|cap| cap);
-            rayon::ThreadPoolBuilder::new().num_threads(workers).build().ok()
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .ok()
         }
     }
 }
@@ -682,21 +685,23 @@ fn block_project<T: Scalar>(
     }
     let nchunks = n.div_ceil(ORTHO_CHUNK);
     let part = &mut scratch[..nchunks * width];
-    part.par_chunks_mut(width).enumerate().for_each(|(ci, out)| {
-        let r0 = ci * ORTHO_CHUNK;
-        let r1 = (r0 + ORTHO_CHUNK).min(n);
-        for i in 0..blocks {
-            for ap in 0..sa {
-                let vb = (i * sa + ap) * n;
-                let wb = ap * n;
-                let mut sdot = T::zero();
-                for k in r0..r1 {
-                    sdot = sdot + vbas[vb + k].conj() * w[wb + k];
+    part.par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(ci, out)| {
+            let r0 = ci * ORTHO_CHUNK;
+            let r1 = (r0 + ORTHO_CHUNK).min(n);
+            for i in 0..blocks {
+                for ap in 0..sa {
+                    let vb = (i * sa + ap) * n;
+                    let wb = ap * n;
+                    let mut sdot = T::zero();
+                    for k in r0..r1 {
+                        sdot = sdot + vbas[vb + k].conj() * w[wb + k];
+                    }
+                    out[i * sa + ap] = sdot;
                 }
-                out[i * sa + ap] = sdot;
             }
-        }
-    });
+        });
     // Fold partials in chunk order: the summation order is fixed by the chunk
     // layout, so the result does not depend on how many threads ran.
     for ci in 0..nchunks {
@@ -712,22 +717,31 @@ fn block_project<T: Scalar>(
 /// ascending) at every element. Parallel over fixed row-chunks within each column
 /// → the element-wise order is fixed, so the update is deterministic.
 #[inline]
-fn block_subtract<T: Scalar>(vbas: &[T], w: &mut [T], blocks: usize, sa: usize, n: usize, proj: &[T]) {
+fn block_subtract<T: Scalar>(
+    vbas: &[T],
+    w: &mut [T],
+    blocks: usize,
+    sa: usize,
+    n: usize,
+    proj: &[T],
+) {
     for ap in 0..sa {
         let wcol = &mut w[ap * n..ap * n + n];
-        wcol.par_chunks_mut(ORTHO_CHUNK).enumerate().for_each(|(ci, wc)| {
-            let r0 = ci * ORTHO_CHUNK;
-            for i in 0..blocks {
-                let hij = proj[i * sa + ap];
-                if hij == T::zero() {
-                    continue;
+        wcol.par_chunks_mut(ORTHO_CHUNK)
+            .enumerate()
+            .for_each(|(ci, wc)| {
+                let r0 = ci * ORTHO_CHUNK;
+                for i in 0..blocks {
+                    let hij = proj[i * sa + ap];
+                    if hij == T::zero() {
+                        continue;
+                    }
+                    let vb = (i * sa + ap) * n + r0;
+                    for k in 0..wc.len() {
+                        wc[k] = wc[k] - hij * vbas[vb + k];
+                    }
                 }
-                let vb = (i * sa + ap) * n + r0;
-                for k in 0..wc.len() {
-                    wc[k] = wc[k] - hij * vbas[vb + k];
-                }
-            }
-        });
+            });
     }
 }
 
@@ -783,7 +797,10 @@ where
     let mut x = match x0 {
         Some(g) => {
             if g.len() != n {
-                return Err(RslabError::DimensionMismatch { expected: n, got: g.len() });
+                return Err(RslabError::DimensionMismatch {
+                    expected: n,
+                    got: g.len(),
+                });
             }
             g.to_vec()
         }
@@ -1105,7 +1122,10 @@ where
     let mut x = match x0 {
         Some(g) => {
             if g.len() != n * s {
-                return Err(RslabError::DimensionMismatch { expected: n * s, got: g.len() });
+                return Err(RslabError::DimensionMismatch {
+                    expected: n * s,
+                    got: g.len(),
+                });
             }
             g.to_vec()
         }
@@ -1124,17 +1144,17 @@ where
     let mut axblk = vec![T::zero(); n * s];
     let mut vyblk = vec![T::zero(); n * s];
     let mut xc = vec![T::zero(); n * s]; // compact live-RHS solutions for the residual matvec
-    // Block Gram-Schmidt projection panels: `proj[i*sa + ap]` for blocks `0..=j`,
-    // columns `0..sa`. One classical (block) projection pass, plus a **conditional**
-    // reorthogonalization pass (block DGKS) taken only when a column loses
-    // orthogonality - the backward-stable, single-thread-cheap analogue of the
-    // old per-RHS MGS+DGKS, now batched over the whole panel.
+                                         // Block Gram-Schmidt projection panels: `proj[i*sa + ap]` for blocks `0..=j`,
+                                         // columns `0..sa`. One classical (block) projection pass, plus a **conditional**
+                                         // reorthogonalization pass (block DGKS) taken only when a column loses
+                                         // orthogonality - the backward-stable, single-thread-cheap analogue of the
+                                         // old per-RHS MGS+DGKS, now batched over the whole panel.
     let mut proj1 = vec![T::zero(); m * s];
     let mut proj2 = vec![T::zero(); m * s];
     let mut wnorm0 = vec![0.0f64; s]; // panel column norms before ortho (DGKS reorth test)
     let mut reorth_col = vec![false; s]; // per-column DGKS second-pass flags (issue #8)
-    // Reduction scratch for `block_project`: `nchunks · (m·s)`, reused every step
-    // so the orthogonalization allocates nothing in the hot loop.
+                                         // Reduction scratch for `block_project`: `nchunks · (m·s)`, reused every step
+                                         // so the orthogonalization allocates nothing in the hot loop.
     let mut proj_scratch = vec![T::zero(); n.div_ceil(ORTHO_CHUNK) * m * s];
 
     // Per-active-position Arnoldi state (indexed `0..sa`, reset each cycle).
@@ -1238,7 +1258,9 @@ where
             ortho_in_pool(&ortho_pool, || {
                 block_project(&vbas, &wblk, blocks, sa, n, &mut proj1, &mut proj_scratch)
             });
-            ortho_in_pool(&ortho_pool, || block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1));
+            ortho_in_pool(&ortho_pool, || {
+                block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1)
+            });
             // **Per-column** DGKS second pass (issue #8): decide the reorth *per
             // column* from its own norm collapse, not panel-globally. Frozen
             // (converged-this-cycle) columns are excluded (they are compacted out at
@@ -1249,7 +1271,8 @@ where
             // arithmetic second orthogonalization on the well-conditioned columns.
             let mut any_reorth = false;
             for ap in 0..sa {
-                let need = !inner_done[ap] && norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap];
+                let need =
+                    !inner_done[ap] && norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap];
                 reorth_col[ap] = need;
                 any_reorth |= need;
             }
@@ -1267,7 +1290,9 @@ where
                         }
                     }
                 }
-                ortho_in_pool(&ortho_pool, || block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2));
+                ortho_in_pool(&ortho_pool, || {
+                    block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2)
+                });
             }
             for ap in 0..sa {
                 if inner_done[ap] {
@@ -1277,7 +1302,11 @@ where
                 // Hessenberg column: projection pass, plus the per-column reorth
                 // correction (zero for columns that did not reorth, so `hij == proj1`).
                 for i in 0..=j {
-                    let hij = if any_reorth { proj1[i * sa + ap] + proj2[i * sa + ap] } else { proj1[i * sa + ap] };
+                    let hij = if any_reorth {
+                        proj1[i * sa + ap] + proj2[i * sa + ap]
+                    } else {
+                        proj1[i * sa + ap]
+                    };
                     h[ap][i][j] = hij;
                 }
                 let hn = norm2(&wblk[wb..wb + n]);
@@ -1324,7 +1353,9 @@ where
             if inner_done.iter().any(|&d| d) {
                 for ap in 0..sa {
                     if inner_done[ap] {
-                        finalize_block_column(precond, &vbas, &h, &g, jdim[ap], ap, sa, n, act[ap], &mut x)?;
+                        finalize_block_column(
+                            precond, &vbas, &h, &g, jdim[ap], ap, sa, n, act[ap], &mut x,
+                        )?;
                     }
                 }
                 let survivors: Vec<usize> = (0..sa).filter(|&ap| !inner_done[ap]).collect();
@@ -1419,7 +1450,9 @@ where
     // full-width `s` matvec over columns that deflated cycles ago. For a fully
     // converged solve this skips the final matvec entirely; the reused values are
     // bit-identical to a full recompute (the operator is column-independent).
-    let pending: Vec<usize> = (0..s).filter(|&c| !converged[c] && bnorm[c] != 0.0).collect();
+    let pending: Vec<usize> = (0..s)
+        .filter(|&c| !converged[c] && bnorm[c] != 0.0)
+        .collect();
     if !pending.is_empty() {
         let lp = pending.len();
         for (a, &c) in pending.iter().enumerate() {
@@ -1478,7 +1511,9 @@ impl<T: Scalar, F: FnMut(&[T], &mut [T], usize)> LinearOperator<T> for FnOp<F> {
 struct FnPc<G> {
     f: std::cell::RefCell<G>,
 }
-impl<T: Scalar, G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>> Preconditioner<T> for FnPc<G> {
+impl<T: Scalar, G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>> Preconditioner<T>
+    for FnPc<G>
+{
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
         (self.f.borrow_mut())(r, z, 1)
     }
@@ -1507,8 +1542,13 @@ where
     F: FnMut(&[T], &mut [T], usize),
     G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>,
 {
-    let op = FnOp { f: std::cell::RefCell::new(op), n };
-    let pc = FnPc { f: std::cell::RefCell::new(precond) };
+    let op = FnOp {
+        f: std::cell::RefCell::new(op),
+        n,
+    };
+    let pc = FnPc {
+        f: std::cell::RefCell::new(precond),
+    };
     gmres_block(&op, b, s, &pc, tol, max_iter, restart, None)
 }
 
@@ -1528,8 +1568,13 @@ where
     F: FnMut(&[T], &mut [T], usize),
     G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>,
 {
-    let op = FnOp { f: std::cell::RefCell::new(op), n };
-    let pc = FnPc { f: std::cell::RefCell::new(precond) };
+    let op = FnOp {
+        f: std::cell::RefCell::new(op),
+        n,
+    };
+    let pc = FnPc {
+        f: std::cell::RefCell::new(precond),
+    };
     gmres(&op, b, &pc, tol, max_iter, restart, None)
 }
 
@@ -1786,17 +1831,33 @@ mod tests {
         use crate::sparse::general::GeneralCsc;
         let c = |re: f64, im: f64| Complex::new(re, im);
         // Only the (0,0) and (1,1) entries; row/col 2 is all-zero → A e₂ = 0.
-        let a = GeneralCsc::<C>::from_triplets(3, &[0, 1], &[0, 1], &[c(1.0, 0.0), c(1.0, 0.0)]).unwrap();
+        let a = GeneralCsc::<C>::from_triplets(3, &[0, 1], &[0, 1], &[c(1.0, 0.0), c(1.0, 0.0)])
+            .unwrap();
         let b = vec![c(1.0, 0.0), c(1.0, 0.0), c(1.0, 0.0)];
         let res = gmres(&a, &b, &NoPreconditioner, 1e-12, 50, 10, None).unwrap();
         // No NaN/Inf reached the solution or the residual.
-        assert!(res.x.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "solution has NaN/Inf: {:?}", res.x);
-        assert!(res.final_res.is_finite(), "residual is NaN/Inf: {}", res.final_res);
+        assert!(
+            res.x.iter().all(|z| z.re.is_finite() && z.im.is_finite()),
+            "solution has NaN/Inf: {:?}",
+            res.x
+        );
+        assert!(
+            res.final_res.is_finite(),
+            "residual is NaN/Inf: {}",
+            res.final_res
+        );
         // Deterministic breakdown: reported as non-converged with a sane residual
         // (the singular direction pins the relative residual near 1/√3 ≈ 0.577 - it
         // is bounded well below the blow-up an unguarded divide would produce).
-        assert!(!res.converged, "singular system must not report convergence");
-        assert!(res.final_res > 1e-12 && res.final_res <= 1.0, "residual not in the sane breakdown range: {}", res.final_res);
+        assert!(
+            !res.converged,
+            "singular system must not report convergence"
+        );
+        assert!(
+            res.final_res > 1e-12 && res.final_res <= 1.0,
+            "residual not in the sane breakdown range: {}",
+            res.final_res
+        );
     }
 
     /// Build the genuinely unsymmetric complex grid used by the GMRES tests.
@@ -1842,7 +1903,8 @@ mod tests {
     }
     impl<T: Scalar, M: Preconditioner<T> + ?Sized> Preconditioner<T> for CountingPc<'_, M> {
         fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
-            self.applies.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.applies
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.inner.apply(r, z)
         }
     }
@@ -1862,15 +1924,25 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
         // Weak (heavily incomplete) factor so the solve needs several restart
         // cycles at a short restart length - exercising the per-cycle update path.
-        let opts = SolverSettings { drop_tol: Some(8e-1), ..Default::default() };
+        let opts = SolverSettings {
+            drop_tol: Some(8e-1),
+            ..Default::default()
+        };
         let lu = factor_general_lu(&a, &opts).unwrap();
         let restart = 5;
-        let counting = CountingPc { inner: &lu, applies: std::sync::atomic::AtomicUsize::new(0) };
+        let counting = CountingPc {
+            inner: &lu,
+            applies: std::sync::atomic::AtomicUsize::new(0),
+        };
         let res = gmres(&a, &b, &counting, 1e-10, 2000, restart, None).unwrap();
         assert!(res.converged, "FGMRES must converge, res={}", res.final_res);
         let applies = counting.applies.load(std::sync::atomic::Ordering::Relaxed);
         // Multiple restart cycles actually occurred (proves the saving is nonzero).
-        assert!(res.iters > restart, "expected multiple cycles, iters={}", res.iters);
+        assert!(
+            res.iters > restart,
+            "expected multiple cycles, iters={}",
+            res.iters
+        );
         // FGMRES: exactly one apply per inner iteration, none at restart.
         assert_eq!(
             applies, res.iters,
@@ -1891,14 +1963,18 @@ mod tests {
         let c = |re: f64, im: f64| Complex::new(re, im);
         // Two fixed directions; b_k interpolates between them by a small angle step.
         let b0: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-        let b1: Vec<C> = (0..n).map(|i| c(((i * 3) % 7) as f64 - 3.0, ((i % 3) as f64) - 1.0)).collect();
+        let b1: Vec<C> = (0..n)
+            .map(|i| c(((i * 3) % 7) as f64 - 3.0, ((i % 3) as f64) - 1.0))
+            .collect();
         let steps = 10;
         let (tol, maxit, restart) = (1e-8, 4000, 60);
 
         let bk = |k: usize| -> Vec<C> {
             let th = 5e-5 * k as f64; // slow rotation
             let (ct, st) = (th.cos(), th.sin());
-            (0..n).map(|i| b0[i] * c(ct, 0.0) + b1[i] * c(st, 0.0)).collect()
+            (0..n)
+                .map(|i| b0[i] * c(ct, 0.0) + b1[i] * c(st, 0.0))
+                .collect()
         };
 
         // Cold: every solve from x0 = 0.
@@ -1913,7 +1989,16 @@ mod tests {
         let mut warm_total = 0usize;
         let mut prev: Option<Vec<C>> = None;
         for k in 0..steps {
-            let r = gmres(&a, &bk(k), &NoPreconditioner, tol, maxit, restart, prev.as_deref()).unwrap();
+            let r = gmres(
+                &a,
+                &bk(k),
+                &NoPreconditioner,
+                tol,
+                maxit,
+                restart,
+                prev.as_deref(),
+            )
+            .unwrap();
             assert!(r.converged, "warm solve {k} did not converge");
             warm_total += r.iters;
             prev = Some(r.x);
@@ -1951,7 +2036,9 @@ mod tests {
             blk.iters,
             single.iters
         );
-        let diff = (0..n).map(|i| (blk.x[i] - single.x[i]).norm()).fold(0.0, f64::max);
+        let diff = (0..n)
+            .map(|i| (blk.x[i] - single.x[i]).norm())
+            .fold(0.0, f64::max);
         assert!(diff < 1e-7, "block(s=1) solution differs by {diff}");
     }
 
@@ -1973,12 +2060,18 @@ mod tests {
         }
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let res = gmres_block(&a, &bblk, s, &lu, 1e-10, 200, 40, None).unwrap();
-        assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
+        assert!(
+            res.converged,
+            "block GMRES must converge; res={:?}",
+            res.final_res
+        );
         // True residual per column.
         for k in 0..s {
             let mut y = vec![C::default(); n];
             a.matvec(&res.x[k * n..k * n + n], &mut y);
-            let r = (0..n).map(|i| (y[i] - bblk[k * n + i]).norm()).fold(0.0, f64::max);
+            let r = (0..n)
+                .map(|i| (y[i] - bblk[k * n + i]).norm())
+                .fold(0.0, f64::max);
             assert!(r < 1e-8, "column {k} residual {r}");
         }
         // Each column must equal the single-RHS solve of that column.
@@ -1987,7 +2080,10 @@ mod tests {
             let diff = (0..n)
                 .map(|i| (res.x[k * n + i] - single.x[i]).norm())
                 .fold(0.0, f64::max);
-            assert!(diff < 1e-9, "column {k} differs from single solve by {diff}");
+            assert!(
+                diff < 1e-9,
+                "column {k} differs from single solve by {diff}"
+            );
         }
     }
 
@@ -2046,15 +2142,31 @@ mod tests {
             widths: Mutex::new(Vec::new()),
         };
         let res = gmres_block(&op, &bblk, s, &NoPreconditioner, 1e-12, 200, 40, None).unwrap();
-        assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
+        assert!(
+            res.converged,
+            "block GMRES must converge; res={:?}",
+            res.final_res
+        );
 
         // (i) Every column matches the single-RHS GMRES solve of that column.
         for k in 0..s {
-            let single = gmres(&a, &bblk[k * n..k * n + n], &NoPreconditioner, 1e-12, 200, 40, None).unwrap();
+            let single = gmres(
+                &a,
+                &bblk[k * n..k * n + n],
+                &NoPreconditioner,
+                1e-12,
+                200,
+                40,
+                None,
+            )
+            .unwrap();
             let diff = (0..n)
                 .map(|i| (res.x[k * n + i] - single.x[i]).norm())
                 .fold(0.0, f64::max);
-            assert!(diff < 1e-9, "column {k} differs from single solve by {diff}");
+            assert!(
+                diff < 1e-9,
+                "column {k} differs from single solve by {diff}"
+            );
         }
 
         // (ii) The batched applies actually shrank mid-cycle. Without within-cycle
@@ -2065,9 +2177,19 @@ mod tests {
         let widths = op.widths.into_inner().unwrap();
         let ncalls = widths.len();
         let total_cols: usize = widths.iter().sum();
-        assert_eq!(*widths.iter().max().unwrap(), s, "the first cycle must open at full width");
-        assert!(*widths.iter().min().unwrap() < s, "no apply narrowed: deflation did not shrink the panel");
-        assert!(widths.contains(&1), "the panel must drain to a single active column");
+        assert_eq!(
+            *widths.iter().max().unwrap(),
+            s,
+            "the first cycle must open at full width"
+        );
+        assert!(
+            *widths.iter().min().unwrap() < s,
+            "no apply narrowed: deflation did not shrink the panel"
+        );
+        assert!(
+            widths.contains(&1),
+            "the panel must drain to a single active column"
+        );
         assert!(
             total_cols < s * ncalls,
             "total column-applies {total_cols} not below the full-width bound {}",
@@ -2095,10 +2217,24 @@ mod tests {
         }
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let solve = || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
-        let x1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(solve);
-        let x8 = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap().install(solve);
-        assert_eq!(x1.iters, x8.iters, "iteration count must not depend on threads");
-        assert!(x1.x == x8.x, "block solve must be bit-identical across thread counts");
+        let x1 = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(solve);
+        let x8 = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap()
+            .install(solve);
+        assert_eq!(
+            x1.iters, x8.iters,
+            "iteration count must not depend on threads"
+        );
+        assert!(
+            x1.x == x8.x,
+            "block solve must be bit-identical across thread counts"
+        );
     }
 
     #[test]
@@ -2120,11 +2256,19 @@ mod tests {
         }
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let seen = with_threads(3, rayon::current_num_threads);
-        assert_eq!(seen, 3, "with_threads must cap the pool to the requested width");
-        let capped = with_threads(3, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap());
+        assert_eq!(
+            seen, 3,
+            "with_threads must cap the pool to the requested width"
+        );
+        let capped = with_threads(3, || {
+            gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap()
+        });
         let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
         assert!(capped.converged);
-        assert!(capped.x == plain.x, "capped-pool solve must match the unbounded solve bit-for-bit");
+        assert!(
+            capped.x == plain.x,
+            "capped-pool solve must match the unbounded solve bit-for-bit"
+        );
     }
 
     #[test]
@@ -2162,12 +2306,17 @@ mod tests {
         let seen = with_threads(8, || {
             pool.as_ref().unwrap().install(rayon::current_num_threads)
         });
-        assert_eq!(seen, 2, "the ortho pool must cap to the factor's 2-worker budget");
+        assert_eq!(
+            seen, 2,
+            "the ortho pool must cap to the factor's 2-worker budget"
+        );
 
         // The full solve is identical bare vs. inside a wide ambient pool: the
         // internal cap governs concurrency only, never the result.
         let bare = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
-        let in_wide = with_threads(8, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap());
+        let in_wide = with_threads(8, || {
+            gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap()
+        });
         assert!(bare.converged);
         assert!(
             bare.x == in_wide.x && bare.iters == in_wide.iters,
@@ -2195,7 +2344,10 @@ mod tests {
         });
         let x_def = gmres_block(&a, &b, 1, &lu_default, 1e-10, 200, 40, None).unwrap();
         let x_amb = gmres_block(&a, &b, 1, &lu_amb, 1e-10, 200, 40, None).unwrap();
-        assert!(x_def.x == x_amb.x, "ambient-pool factor must be bit-identical to the default factor");
+        assert!(
+            x_def.x == x_amb.x,
+            "ambient-pool factor must be bit-identical to the default factor"
+        );
     }
 
     #[test]
@@ -2429,7 +2581,11 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c(((i % 5) as f64) - 2.0, 0.5)).collect();
         let restart = 20;
         let res = gmres(&a, &b, &NoPreconditioner, 1e-8, 8000, restart, None).unwrap();
-        assert!(res.converged, "non-normal GMRES must converge, res={}", res.final_res);
+        assert!(
+            res.converged,
+            "non-normal GMRES must converge, res={}",
+            res.final_res
+        );
         assert!(
             res.iters > restart,
             "must span multiple restart cycles, iters={} (restart={})",
@@ -2472,11 +2628,21 @@ mod tests {
         // Long restart (single cycle) so the ill-conditioned basis is not masked by
         // a restart - the reorthogonalization alone keeps it usable.
         let res = gmres(&a, &b, &NoPreconditioner, 1e-10, 4000, n, None).unwrap();
-        assert!(res.converged, "reorth must keep GMRES converging, res={}", res.final_res);
+        assert!(
+            res.converged,
+            "reorth must keep GMRES converging, res={}",
+            res.final_res
+        );
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let xstar = solve_lu(&lu, &b).unwrap();
-        let diff = (0..n).map(|i| (res.x[i] - xstar[i]).norm()).fold(0.0, f64::max);
-        assert!(diff < 1e-6, "GMRES solution off the direct solve by {} (lost orthogonality?)", diff);
+        let diff = (0..n)
+            .map(|i| (res.x[i] - xstar[i]).norm())
+            .fold(0.0, f64::max);
+        assert!(
+            diff < 1e-6,
+            "GMRES solution off the direct solve by {} (lost orthogonality?)",
+            diff
+        );
     }
 
     #[test]
@@ -2499,8 +2665,16 @@ mod tests {
         let mut b = vec![C::default(); n];
         b[0] = c(1.0, 0.0);
         let res = gmres(&a, &b, &NoPreconditioner, 1e-12, 50, 30, None).unwrap();
-        assert!(res.converged, "eigenvector RHS must converge, res={}", res.final_res);
-        assert_eq!(res.iters, 1, "happy breakdown must solve in one step, got {}", res.iters);
+        assert!(
+            res.converged,
+            "eigenvector RHS must converge, res={}",
+            res.final_res
+        );
+        assert_eq!(
+            res.iters, 1,
+            "happy breakdown must solve in one step, got {}",
+            res.iters
+        );
         let mut y = vec![C::default(); n];
         a.matvec(&res.x, &mut y);
         let r = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
@@ -2543,7 +2717,10 @@ mod tests {
         }
         let pmat = GeneralCsc::<C>::from_triplets(n, &pr, &pc_, &pv).unwrap();
         // drop-tol factor path (imperfect preconditioner)
-        let opts = SolverSettings { drop_tol: Some(1e-2), ..Default::default() };
+        let opts = SolverSettings {
+            drop_tol: Some(1e-2),
+            ..Default::default()
+        };
         let lu = factor_general_lu(&pmat, &opts).unwrap();
 
         // RHS k = sum of the first k+1 unit vectors → converges in exactly k+1 steps.
@@ -2554,9 +2731,16 @@ mod tests {
             }
         }
 
-        let op = WidthCountingOp { inner: &a, widths: std::sync::Mutex::new(Vec::new()) };
+        let op = WidthCountingOp {
+            inner: &a,
+            widths: std::sync::Mutex::new(Vec::new()),
+        };
         let res = gmres_block(&op, &bblk, s, &lu, 1e-10, 200, 40, None).unwrap();
-        assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
+        assert!(
+            res.converged,
+            "block GMRES must converge; res={:?}",
+            res.final_res
+        );
 
         // Every column equals its single-RHS solve (deflation must not corrupt it).
         for k in 0..s {
@@ -2564,18 +2748,28 @@ mod tests {
             let diff = (0..n)
                 .map(|i| (res.x[k * n + i] - single.x[i]).norm())
                 .fold(0.0, f64::max);
-            assert!(diff < 1e-8, "column {k} differs from single solve by {diff}");
+            assert!(
+                diff < 1e-8,
+                "column {k} differs from single solve by {diff}"
+            );
         }
 
         // Within-cycle deflation fired: the panel opened at full width `s`, narrowed
         // as fast columns deflated, and drained to a single active column.
         let widths = op.widths.into_inner().unwrap();
         assert!(!widths.is_empty());
-        assert_eq!(*widths.iter().max().unwrap(), s, "the first cycle must open at full width");
+        assert_eq!(
+            *widths.iter().max().unwrap(),
+            s,
+            "the first cycle must open at full width"
+        );
         assert!(
             *widths.iter().min().unwrap() < s,
             "within-cycle deflation did not shrink the panel: widths={widths:?}"
         );
-        assert!(widths.contains(&1), "the panel must drain to a single active column: {widths:?}");
+        assert!(
+            widths.contains(&1),
+            "the panel must drain to a single active column: {widths:?}"
+        );
     }
 }

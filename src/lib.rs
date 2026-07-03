@@ -105,12 +105,12 @@ pub use auto_tune::{
     recommend_settings_vetoed, recommend_with_profile, SolverPath, TunerProfile,
     DEFAULT_TUNE_WEIGHT,
 };
-pub use numeric::gemm_tuning::{
-    GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
-};
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::RslabError;
+pub use numeric::gemm_tuning::{
+    GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
+};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
 // Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
@@ -119,9 +119,9 @@ pub use dense::ldlt_generic::{
 };
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
-    analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, BlrMode,
-    with_threads, FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode, SolverSettings,
-    Threads, ZeroPivotAction,
+    analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
+    with_threads, BlrMode, FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode,
+    SolverSettings, Threads, ZeroPivotAction,
 };
 // Deprecated pre-unification option aliases (now all `SolverSettings`).
 #[allow(deprecated)]
@@ -166,9 +166,7 @@ pub mod prelude {
         read_mtx_complex,
         // matrices, options, scalar field
         CscMatrix,
-        SolverSettings,
         Factorization,
-        RslabError,
         GeneralCsc,
         KrylovResult,
         // high-level phased solvers: `XSymbolic::analyze → .factor → XSolver`
@@ -182,7 +180,9 @@ pub mod prelude {
         MtxMatrix,
         NoPreconditioner,
         Preconditioner,
+        RslabError,
         Scalar,
+        SolverSettings,
         ZeroPivotAction,
     };
 }

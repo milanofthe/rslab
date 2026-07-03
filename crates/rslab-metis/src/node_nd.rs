@@ -123,9 +123,15 @@ pub(crate) fn nd_order(
         }
 
         let (sub_a, map_a_local) = extract_by_list(&subgraph, &a_verts);
-        let map_a: Vec<i32> = map_a_local.iter().map(|&local| vtx_map[local as usize]).collect();
+        let map_a: Vec<i32> = map_a_local
+            .iter()
+            .map(|&local| vtx_map[local as usize])
+            .collect();
         let (sub_b, map_b_local) = extract_by_list(&subgraph, &b_verts);
-        let map_b: Vec<i32> = map_b_local.iter().map(|&local| vtx_map[local as usize]).collect();
+        let map_b: Vec<i32> = map_b_local
+            .iter()
+            .map(|&local| vtx_map[local as usize])
+            .collect();
         work.push((sub_a, map_a, offset));
         work.push((sub_b, map_b, offset + na));
     }

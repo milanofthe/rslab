@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::matgen::stencil;
-use rslab::{CscMatrix, SolverSettings, LdltSymbolic};
+use rslab::{CscMatrix, LdltSymbolic, SolverSettings};
 
 type C = Complex<f64>;
 
@@ -26,8 +26,8 @@ fn best_of<F: FnMut() -> f64>(reps: usize, mut f: F) -> f64 {
 }
 
 fn main() {
-    let out_path =
-        std::env::var("RLA_BENCH_OUT").unwrap_or_else(|_| "benches/bench_out/phased_reuse.jsonl".to_string());
+    let out_path = std::env::var("RLA_BENCH_OUT")
+        .unwrap_or_else(|_| "benches/bench_out/phased_reuse.jsonl".to_string());
     if let Some(d) = std::path::Path::new(&out_path).parent() {
         let _ = std::fs::create_dir_all(d);
     }
@@ -85,11 +85,16 @@ fn main() {
 
         // Reuse correctness: factor a *second* value set on the same analysis.
         let f2 = sym.factor(a2, &opts).expect("factor a2");
-        let b: Vec<C> = (0..n).map(|i| Complex::new(i as f64 % 7.0 - 3.0, 1.0)).collect();
+        let b: Vec<C> = (0..n)
+            .map(|i| Complex::new(i as f64 % 7.0 - 3.0, 1.0))
+            .collect();
         let x = f2.solve(&b).expect("solve");
         let mut ax = vec![C::new(0.0, 0.0); n];
         a2.symv(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt()
+        let res = (0..n)
+            .map(|i| (ax[i] - b[i]).norm_sqr())
+            .sum::<f64>()
+            .sqrt()
             / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
         assert!(res < 1e-8, "reuse solve residual {res:.1e}");
 

@@ -131,11 +131,21 @@ mod tests {
         let x_par = solve(
             &SolverSettings::default()
                 .with_threads(0)
-                .with_gemm_thresholds(GemmThresholds { scalar_gate: 0, par_gemm: 0, par_cdiv: 0 }),
+                .with_gemm_thresholds(GemmThresholds {
+                    scalar_gate: 0,
+                    par_gemm: 0,
+                    par_cdiv: 0,
+                }),
         );
         for i in 0..x_def.len() {
-            assert!((x_def[i] - x_scalar[i]).norm() < 1e-9, "scalar path diverged at {i}");
-            assert!((x_def[i] - x_par[i]).norm() < 1e-9, "parallel path diverged at {i}");
+            assert!(
+                (x_def[i] - x_scalar[i]).norm() < 1e-9,
+                "scalar path diverged at {i}"
+            );
+            assert!(
+                (x_def[i] - x_par[i]).norm() < 1e-9,
+                "parallel path diverged at {i}"
+            );
         }
     }
 
@@ -147,11 +157,16 @@ mod tests {
         let (a, b) = helmholtz(9);
         for method in [FactorMethod::LeftLooking, FactorMethod::Multifrontal] {
             for nb in [16usize, 32, 64, 100, 200] {
-                let s = SolverSettings::default().with_method(method).with_panel_nb(nb);
+                let s = SolverSettings::default()
+                    .with_method(method)
+                    .with_panel_nb(nb);
                 let x = LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap();
                 let mut ax = vec![Complex::new(0.0, 0.0); a.n];
                 a.symv(&x, &mut ax);
-                let res: f64 = (0..a.n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt()
+                let res: f64 = (0..a.n)
+                    .map(|i| (ax[i] - b[i]).norm_sqr())
+                    .sum::<f64>()
+                    .sqrt()
                     / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
                 assert!(res < 1e-9, "NB={nb} method={method:?} residual {res:.2e}");
             }

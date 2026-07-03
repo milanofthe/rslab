@@ -48,7 +48,10 @@ fn live_peak<R>(f: impl FnOnce() -> R) -> (R, f64) {
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
     let r = f();
-    (r, PEAK.load(Ordering::Relaxed).saturating_sub(before) as f64 / 1e6)
+    (
+        r,
+        PEAK.load(Ordering::Relaxed).saturating_sub(before) as f64 / 1e6,
+    )
 }
 
 #[cfg(windows)]
@@ -179,10 +182,15 @@ fn run(k: usize) {
 }
 
 fn main() {
-    if std::env::var("RLA_LIVE_MEM").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("RLA_LIVE_MEM")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         COUNTING_ON.store(true, Ordering::Relaxed);
     }
-    println!("LDLᵀ transient-memory: multifrontal (CB stack + extract) vs left-looking (panels only)\n");
+    println!(
+        "LDLᵀ transient-memory: multifrontal (CB stack + extract) vs left-looking (panels only)\n"
+    );
     for &k in &[18usize, 24, 30] {
         run(k);
     }

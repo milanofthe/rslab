@@ -89,7 +89,11 @@ pub fn spectral<T: Scalar>(n: usize, kappa: f64, indefinite: bool, seed: u64) ->
     let mut eig = vec![1.0f64; n];
     let lk = kappa.max(1.0).log10();
     for (i, e) in eig.iter_mut().enumerate() {
-        let t = if n > 1 { i as f64 / (n - 1) as f64 } else { 0.0 };
+        let t = if n > 1 {
+            i as f64 / (n - 1) as f64
+        } else {
+            0.0
+        };
         *e = 10f64.powf(t * lk);
     }
     if n > 1 {
@@ -244,6 +248,9 @@ mod tests {
         }
         // endpoint correction
         eigsum += kappa - 10f64.powf(lk);
-        assert!((trace - eigsum).abs() / eigsum < 1e-9, "trace = Σλ (spectrum preserved)");
+        assert!(
+            (trace - eigsum).abs() / eigsum < 1e-9,
+            "trace = Σλ (spectrum preserved)"
+        );
     }
 }

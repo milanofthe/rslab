@@ -112,7 +112,12 @@ fn corpus() -> Vec<Entry> {
     let smoke = std::env::var("RLA_SWEEP_SMOKE").is_ok();
     let g = |x: usize| ((x as f64 * scale).round() as usize).max(4);
     let mut e: Vec<Entry> = Vec::new();
-    let mut sym = |name: String, a: CscMatrix<C>| e.push(Entry { name, mat: Mat::Sym(a) });
+    let mut sym = |name: String, a: CscMatrix<C>| {
+        e.push(Entry {
+            name,
+            mat: Mat::Sym(a),
+        })
+    };
 
     if smoke {
         let m = g(40);
@@ -135,7 +140,10 @@ fn corpus() -> Vec<Entry> {
     for &aniso in &[100.0, 1000.0] {
         for s in [100usize, 180, 260] {
             let m = g(s);
-            let opts = stencil::StencilOpts { aniso: [1.0, aniso, 1.0], ..Default::default() };
+            let opts = stencil::StencilOpts {
+                aniso: [1.0, aniso, 1.0],
+                ..Default::default()
+            };
             sym(
                 format!("aniso2d_{}_{:.0}", m * m, aniso),
                 stencil::laplacian::<C>(&[m, m], &opts),
@@ -145,9 +153,15 @@ fn corpus() -> Vec<Entry> {
     // Jumping-coefficient 2D (ill-conditioned heterogeneous media).
     for s in [100usize, 180, 260] {
         let m = g(s);
-        let opts =
-            stencil::StencilOpts { jump_contrast: 1e4, shift: 1e-2, ..Default::default() };
-        sym(format!("jump2d_{}", m * m), stencil::laplacian::<C>(&[m, m], &opts));
+        let opts = stencil::StencilOpts {
+            jump_contrast: 1e4,
+            shift: 1e-2,
+            ..Default::default()
+        };
+        sym(
+            format!("jump2d_{}", m * m),
+            stencil::laplacian::<C>(&[m, m], &opts),
+        );
     }
     // 3D Poisson (dense fronts near the root - the top-of-tree regime).
     for k in [12usize, 18, 24, 32, 42] {
@@ -169,15 +183,24 @@ fn corpus() -> Vec<Entry> {
     }
     // Banded (narrow vs wide) - locality ladder.
     for (n, bw) in [(8000usize, 8usize), (20000, 16), (40000, 40), (80000, 24)] {
-        sym(format!("banded_{}_{}", g(n), bw), structured::banded::<C>(g(n), bw, 1.0, 1));
+        sym(
+            format!("banded_{}_{}", g(n), bw),
+            structured::banded::<C>(g(n), bw, 1.0, 1),
+        );
     }
     // Arrow / bordered (dense border block - high degree-CV).
     for (n, b) in [(8000usize, 24usize), (20000, 48), (40000, 32)] {
-        sym(format!("arrow_{}_{}", g(n), b), structured::arrow::<C>(g(n), b, 1e-2, 1));
+        sym(
+            format!("arrow_{}_{}", g(n), b),
+            structured::arrow::<C>(g(n), b, 1e-2, 1),
+        );
     }
     // Random SPD (irregular pattern) - density ladder.
     for (n, d) in [(5000usize, 10usize), (10000, 16), (20000, 22)] {
-        sym(format!("rand_spd_{}_{}", g(n), d), random::random_spd::<C>(g(n), d, 1.0, 1));
+        sym(
+            format!("rand_spd_{}_{}", g(n), d),
+            random::random_spd::<C>(g(n), d, 1.0, 1),
+        );
     }
     // Spectral (exactly-conditioned), SPD and indefinite.
     for &(kappa, indef) in &[(1e6, false), (1e8, false), (1e6, true)] {
@@ -252,7 +275,10 @@ fn corpus() -> Vec<Entry> {
     for n in [1500usize, 3000, 6000, 10000] {
         e.push(Entry {
             name: format!("bem_{}", g(n)),
-            mat: Mat::Unsym(rslab::matgen::bem::kernel(g(n), &rslab::matgen::bem::BemOpts::default())),
+            mat: Mat::Unsym(rslab::matgen::bem::kernel(
+                g(n),
+                &rslab::matgen::bem::BemOpts::default(),
+            )),
         });
     }
     for (n, d) in [(4000usize, 8usize), (8000, 12), (12000, 16), (20000, 20)] {
@@ -273,79 +299,278 @@ fn suitesparse_list() -> &'static [(&'static str, &'static str)] {
     // (union, deduped). Unavailable names / oversized matrices are skipped at
     // fetch / memory-gate time, so a generous list only widens coverage.
     &[
-        ("HB", "bcsstk14"), ("HB", "bcsstk18"), ("HB", "bcsstk24"), ("HB", "bcsstk28"),
-        ("Boeing", "bcsstk39"), ("Boeing", "msc10848"), ("Boeing", "crystk03"), ("Williams", "cant"),
-        ("GHS_psdef", "wathen100"), ("GHS_psdef", "wathen120"), ("Nasa", "nasa2910"), ("Nasa", "nasasrb"),
-        ("Rothberg", "cfd1"), ("Rothberg", "cfd2"), ("DNVS", "ship_001"), ("FIDAP", "ex11"),
-        ("FIDAP", "ex40"), ("Bai", "qc2534"), ("GHS_indef", "cont-300"), ("GHS_indef", "bratu3d"),
-        ("Schenk_ISEI", "barrier2-1"), ("Um", "2cubes_sphere"), ("Schmid", "thermal1"), ("Botonakis", "thermomech_dM"),
-        ("HB", "bcsstk16"), ("HB", "bcsstk17"), ("HB", "bcsstk25"), ("HB", "bcsstk38"),
-        ("Boeing", "ct20stif"), ("Boeing", "msc23052"), ("Boeing", "pwtk"), ("Cylshell", "s3rmt3m3"),
-        ("Cylshell", "s3rmq4m1"), ("Cylshell", "s3dkt3m2"), ("DNVS", "shipsec1"), ("DNVS", "ship_003"),
-        ("Nasa", "nasa1824"), ("Nasa", "nasa4704"), ("Simon", "raefsky4"), ("Simon", "raefsky3"),
-        ("Simon", "raefsky2"), ("Simon", "venkat01"), ("FIDAP", "ex19"), ("FIDAP", "ex35"),
-        ("Hamm", "scircuit"), ("Hamm", "memplus"), ("Bomhof", "circuit_3"), ("Botonakis", "FEM_3D_thermal1"),
-        ("Wissgott", "parabolic_fem"), ("GHS_indef", "cont-201"), ("GHS_indef", "stokes64"), ("GHS_indef", "dixmaanl"),
-        ("GHS_indef", "boyd1"), ("Cunningham", "qa8fm"), ("Oberwolfach", "gyro"), ("Oberwolfach", "t2dah_e"),
-        ("PARSEC", "Si5H12"), ("HB", "bcsstk01"), ("HB", "bcsstk02"), ("HB", "bcsstk03"),
-        ("HB", "bcsstk04"), ("HB", "bcsstk05"), ("HB", "bcsstk06"), ("HB", "bcsstk07"),
-        ("HB", "bcsstk08"), ("HB", "bcsstk09"), ("HB", "bcsstk10"), ("HB", "bcsstk11"),
-        ("HB", "bcsstk12"), ("HB", "bcsstk13"), ("HB", "bcsstk15"), ("HB", "bcsstk19"),
-        ("HB", "bcsstk20"), ("HB", "bcsstk21"), ("HB", "bcsstk22"), ("HB", "bcsstk23"),
-        ("HB", "bcsstk26"), ("HB", "bcsstk27"), ("HB", "bcsstm07"), ("HB", "bcsstm09"),
-        ("HB", "bcsstm11"), ("HB", "bcsstm12"), ("HB", "bcsstm19"), ("HB", "bcsstm21"),
-        ("HB", "bcsstm23"), ("HB", "bcsstm24"), ("HB", "bcsstm25"), ("HB", "bcsstm26"),
-        ("HB", "nos1"), ("HB", "nos2"), ("HB", "nos3"), ("HB", "nos4"),
-        ("HB", "nos5"), ("HB", "nos6"), ("HB", "nos7"), ("HB", "plat362"),
-        ("HB", "plat1919"), ("HB", "lund_a"), ("HB", "lund_b"), ("HB", "gr_30_30"),
-        ("HB", "494_bus"), ("HB", "662_bus"), ("HB", "685_bus"), ("HB", "1138_bus"),
-        ("HB", "sherman1"), ("HB", "sts4098"), ("HB", "dwt_2680"), ("HB", "can_1054"),
-        ("HB", "can_1072"), ("HB", "lshp3466"), ("HB", "zenios"), ("Boeing", "bcsstk34"),
-        ("Boeing", "bcsstk38"), ("Boeing", "msc00726"), ("Boeing", "msc01050"), ("Boeing", "msc01440"),
-        ("Boeing", "msc04515"), ("Boeing", "crystk01"), ("Boeing", "crystk02"), ("Boeing", "crystm01"),
-        ("Boeing", "crystm02"), ("Boeing", "crystm03"), ("Boeing", "pct20stif"), ("Boeing", "bcsstk36"),
-        ("Boeing", "bcsstk37"), ("Cylshell", "s1rmq4m1"), ("Cylshell", "s1rmt3m1"), ("Cylshell", "s2rmq4m1"),
-        ("Cylshell", "s2rmt3m1"), ("Cylshell", "s3rmt3m1"), ("Cylshell", "s3dkq4m2"), ("Nasa", "nasa2146"),
-        ("Nasa", "shuttle_eddy"), ("Nasa", "skirt"), ("Nasa", "pwt"), ("GHS_psdef", "apache1"),
-        ("GHS_psdef", "jnlbrng1"), ("GHS_psdef", "torsion1"), ("GHS_psdef", "minsurfo"), ("GHS_psdef", "obstclae"),
-        ("GHS_psdef", "gridgena"), ("GHS_psdef", "finan512"), ("GHS_psdef", "cvxbqp1"), ("GHS_psdef", "bloweybq"),
-        ("GHS_psdef", "oilpan"), ("GHS_psdef", "vanbody"), ("GHS_psdef", "s3dkq4m2"), ("GHS_psdef", "s3dkt3m2"),
-        ("GHS_psdef", "ford1"), ("GHS_psdef", "crankseg_1"), ("GHS_psdef", "crankseg_2"), ("GHS_psdef", "hood"),
-        ("GHS_psdef", "bmw7st_1"), ("GHS_psdef", "bmwcra_1"), ("GHS_psdef", "olafu"), ("GHS_psdef", "gyro_k"),
-        ("GHS_psdef", "gyro_m"), ("GHS_psdef", "bundle1"), ("GHS_psdef", "cfd1"), ("GHS_psdef", "cfd2"),
-        ("GHS_psdef", "thread"), ("GHS_psdef", "m_t1"), ("GHS_psdef", "x104"), ("GHS_psdef", "shipsec1"),
-        ("GHS_psdef", "shipsec5"), ("GHS_psdef", "shipsec8"), ("GHS_psdef", "copter2"), ("GHS_psdef", "ford2"),
-        ("GHS_indef", "aug2d"), ("GHS_indef", "aug2dc"), ("GHS_indef", "aug3d"), ("GHS_indef", "aug3dcqp"),
-        ("GHS_indef", "bloweya"), ("GHS_indef", "dtoc"), ("GHS_indef", "helm2d03"), ("GHS_indef", "helm3d01"),
-        ("GHS_indef", "k1_san"), ("GHS_indef", "linverse"), ("GHS_indef", "mario001"), ("GHS_indef", "ncvxbqp1"),
-        ("GHS_indef", "sit100"), ("GHS_indef", "spmsrtls"), ("GHS_indef", "stokes128"), ("GHS_indef", "tuma1"),
-        ("GHS_indef", "tuma2"), ("GHS_indef", "brainpc2"), ("GHS_indef", "darcy003"), ("GHS_indef", "dawson5"),
-        ("GHS_indef", "exdata_1"), ("Oberwolfach", "bodyy4"), ("Oberwolfach", "bodyy5"), ("Oberwolfach", "bodyy6"),
-        ("Oberwolfach", "gyro_k"), ("Oberwolfach", "gyro_m"), ("Oberwolfach", "LF10"), ("Oberwolfach", "LFAT5"),
-        ("Oberwolfach", "t2dah"), ("Oberwolfach", "t2dal"), ("Oberwolfach", "t3dl"), ("Oberwolfach", "filter3D"),
-        ("Oberwolfach", "flowmeter5"), ("Simon", "olafu"), ("Rothberg", "gearbox"), ("DNVS", "shipsec5"),
-        ("DNVS", "shipsec8"), ("DNVS", "fcondp2"), ("DNVS", "fullb"), ("DNVS", "halfb"),
-        ("DNVS", "m_t1"), ("DNVS", "thread"), ("DNVS", "troll"), ("DNVS", "x104"),
-        ("DNVS", "tsyl201"), ("FIDAP", "ex3"), ("FIDAP", "ex9"), ("FIDAP", "ex10"),
-        ("FIDAP", "ex13"), ("FIDAP", "ex15"), ("FIDAP", "ex33"), ("Cunningham", "qa8fk"),
-        ("Cunningham", "m3plates"), ("Um", "offshore"), ("Schmid", "thermal2"), ("Botonakis", "thermomech_dK"),
-        ("Botonakis", "thermomech_TC"), ("Pothen", "barth"), ("Pothen", "barth4"), ("Pothen", "barth5"),
-        ("Pothen", "bodyy4"), ("Pothen", "bodyy5"), ("Pothen", "bodyy6"), ("Pothen", "mesh1e1"),
-        ("Pothen", "mesh2e1"), ("Pothen", "mesh3e1"), ("Pothen", "shuttle_eddy"), ("Pothen", "sphere2"),
-        ("Pothen", "sphere3"), ("Pothen", "skirt"), ("Pothen", "onera_dual"), ("Pothen", "commanche_dual"),
-        ("PARSEC", "Si2"), ("PARSEC", "SiH4"), ("PARSEC", "benzene"), ("Williams", "consph"),
+        ("HB", "bcsstk14"),
+        ("HB", "bcsstk18"),
+        ("HB", "bcsstk24"),
+        ("HB", "bcsstk28"),
+        ("Boeing", "bcsstk39"),
+        ("Boeing", "msc10848"),
+        ("Boeing", "crystk03"),
+        ("Williams", "cant"),
+        ("GHS_psdef", "wathen100"),
+        ("GHS_psdef", "wathen120"),
+        ("Nasa", "nasa2910"),
+        ("Nasa", "nasasrb"),
+        ("Rothberg", "cfd1"),
+        ("Rothberg", "cfd2"),
+        ("DNVS", "ship_001"),
+        ("FIDAP", "ex11"),
+        ("FIDAP", "ex40"),
+        ("Bai", "qc2534"),
+        ("GHS_indef", "cont-300"),
+        ("GHS_indef", "bratu3d"),
+        ("Schenk_ISEI", "barrier2-1"),
+        ("Um", "2cubes_sphere"),
+        ("Schmid", "thermal1"),
+        ("Botonakis", "thermomech_dM"),
+        ("HB", "bcsstk16"),
+        ("HB", "bcsstk17"),
+        ("HB", "bcsstk25"),
+        ("HB", "bcsstk38"),
+        ("Boeing", "ct20stif"),
+        ("Boeing", "msc23052"),
+        ("Boeing", "pwtk"),
+        ("Cylshell", "s3rmt3m3"),
+        ("Cylshell", "s3rmq4m1"),
+        ("Cylshell", "s3dkt3m2"),
+        ("DNVS", "shipsec1"),
+        ("DNVS", "ship_003"),
+        ("Nasa", "nasa1824"),
+        ("Nasa", "nasa4704"),
+        ("Simon", "raefsky4"),
+        ("Simon", "raefsky3"),
+        ("Simon", "raefsky2"),
+        ("Simon", "venkat01"),
+        ("FIDAP", "ex19"),
+        ("FIDAP", "ex35"),
+        ("Hamm", "scircuit"),
+        ("Hamm", "memplus"),
+        ("Bomhof", "circuit_3"),
+        ("Botonakis", "FEM_3D_thermal1"),
+        ("Wissgott", "parabolic_fem"),
+        ("GHS_indef", "cont-201"),
+        ("GHS_indef", "stokes64"),
+        ("GHS_indef", "dixmaanl"),
+        ("GHS_indef", "boyd1"),
+        ("Cunningham", "qa8fm"),
+        ("Oberwolfach", "gyro"),
+        ("Oberwolfach", "t2dah_e"),
+        ("PARSEC", "Si5H12"),
+        ("HB", "bcsstk01"),
+        ("HB", "bcsstk02"),
+        ("HB", "bcsstk03"),
+        ("HB", "bcsstk04"),
+        ("HB", "bcsstk05"),
+        ("HB", "bcsstk06"),
+        ("HB", "bcsstk07"),
+        ("HB", "bcsstk08"),
+        ("HB", "bcsstk09"),
+        ("HB", "bcsstk10"),
+        ("HB", "bcsstk11"),
+        ("HB", "bcsstk12"),
+        ("HB", "bcsstk13"),
+        ("HB", "bcsstk15"),
+        ("HB", "bcsstk19"),
+        ("HB", "bcsstk20"),
+        ("HB", "bcsstk21"),
+        ("HB", "bcsstk22"),
+        ("HB", "bcsstk23"),
+        ("HB", "bcsstk26"),
+        ("HB", "bcsstk27"),
+        ("HB", "bcsstm07"),
+        ("HB", "bcsstm09"),
+        ("HB", "bcsstm11"),
+        ("HB", "bcsstm12"),
+        ("HB", "bcsstm19"),
+        ("HB", "bcsstm21"),
+        ("HB", "bcsstm23"),
+        ("HB", "bcsstm24"),
+        ("HB", "bcsstm25"),
+        ("HB", "bcsstm26"),
+        ("HB", "nos1"),
+        ("HB", "nos2"),
+        ("HB", "nos3"),
+        ("HB", "nos4"),
+        ("HB", "nos5"),
+        ("HB", "nos6"),
+        ("HB", "nos7"),
+        ("HB", "plat362"),
+        ("HB", "plat1919"),
+        ("HB", "lund_a"),
+        ("HB", "lund_b"),
+        ("HB", "gr_30_30"),
+        ("HB", "494_bus"),
+        ("HB", "662_bus"),
+        ("HB", "685_bus"),
+        ("HB", "1138_bus"),
+        ("HB", "sherman1"),
+        ("HB", "sts4098"),
+        ("HB", "dwt_2680"),
+        ("HB", "can_1054"),
+        ("HB", "can_1072"),
+        ("HB", "lshp3466"),
+        ("HB", "zenios"),
+        ("Boeing", "bcsstk34"),
+        ("Boeing", "bcsstk38"),
+        ("Boeing", "msc00726"),
+        ("Boeing", "msc01050"),
+        ("Boeing", "msc01440"),
+        ("Boeing", "msc04515"),
+        ("Boeing", "crystk01"),
+        ("Boeing", "crystk02"),
+        ("Boeing", "crystm01"),
+        ("Boeing", "crystm02"),
+        ("Boeing", "crystm03"),
+        ("Boeing", "pct20stif"),
+        ("Boeing", "bcsstk36"),
+        ("Boeing", "bcsstk37"),
+        ("Cylshell", "s1rmq4m1"),
+        ("Cylshell", "s1rmt3m1"),
+        ("Cylshell", "s2rmq4m1"),
+        ("Cylshell", "s2rmt3m1"),
+        ("Cylshell", "s3rmt3m1"),
+        ("Cylshell", "s3dkq4m2"),
+        ("Nasa", "nasa2146"),
+        ("Nasa", "shuttle_eddy"),
+        ("Nasa", "skirt"),
+        ("Nasa", "pwt"),
+        ("GHS_psdef", "apache1"),
+        ("GHS_psdef", "jnlbrng1"),
+        ("GHS_psdef", "torsion1"),
+        ("GHS_psdef", "minsurfo"),
+        ("GHS_psdef", "obstclae"),
+        ("GHS_psdef", "gridgena"),
+        ("GHS_psdef", "finan512"),
+        ("GHS_psdef", "cvxbqp1"),
+        ("GHS_psdef", "bloweybq"),
+        ("GHS_psdef", "oilpan"),
+        ("GHS_psdef", "vanbody"),
+        ("GHS_psdef", "s3dkq4m2"),
+        ("GHS_psdef", "s3dkt3m2"),
+        ("GHS_psdef", "ford1"),
+        ("GHS_psdef", "crankseg_1"),
+        ("GHS_psdef", "crankseg_2"),
+        ("GHS_psdef", "hood"),
+        ("GHS_psdef", "bmw7st_1"),
+        ("GHS_psdef", "bmwcra_1"),
+        ("GHS_psdef", "olafu"),
+        ("GHS_psdef", "gyro_k"),
+        ("GHS_psdef", "gyro_m"),
+        ("GHS_psdef", "bundle1"),
+        ("GHS_psdef", "cfd1"),
+        ("GHS_psdef", "cfd2"),
+        ("GHS_psdef", "thread"),
+        ("GHS_psdef", "m_t1"),
+        ("GHS_psdef", "x104"),
+        ("GHS_psdef", "shipsec1"),
+        ("GHS_psdef", "shipsec5"),
+        ("GHS_psdef", "shipsec8"),
+        ("GHS_psdef", "copter2"),
+        ("GHS_psdef", "ford2"),
+        ("GHS_indef", "aug2d"),
+        ("GHS_indef", "aug2dc"),
+        ("GHS_indef", "aug3d"),
+        ("GHS_indef", "aug3dcqp"),
+        ("GHS_indef", "bloweya"),
+        ("GHS_indef", "dtoc"),
+        ("GHS_indef", "helm2d03"),
+        ("GHS_indef", "helm3d01"),
+        ("GHS_indef", "k1_san"),
+        ("GHS_indef", "linverse"),
+        ("GHS_indef", "mario001"),
+        ("GHS_indef", "ncvxbqp1"),
+        ("GHS_indef", "sit100"),
+        ("GHS_indef", "spmsrtls"),
+        ("GHS_indef", "stokes128"),
+        ("GHS_indef", "tuma1"),
+        ("GHS_indef", "tuma2"),
+        ("GHS_indef", "brainpc2"),
+        ("GHS_indef", "darcy003"),
+        ("GHS_indef", "dawson5"),
+        ("GHS_indef", "exdata_1"),
+        ("Oberwolfach", "bodyy4"),
+        ("Oberwolfach", "bodyy5"),
+        ("Oberwolfach", "bodyy6"),
+        ("Oberwolfach", "gyro_k"),
+        ("Oberwolfach", "gyro_m"),
+        ("Oberwolfach", "LF10"),
+        ("Oberwolfach", "LFAT5"),
+        ("Oberwolfach", "t2dah"),
+        ("Oberwolfach", "t2dal"),
+        ("Oberwolfach", "t3dl"),
+        ("Oberwolfach", "filter3D"),
+        ("Oberwolfach", "flowmeter5"),
+        ("Simon", "olafu"),
+        ("Rothberg", "gearbox"),
+        ("DNVS", "shipsec5"),
+        ("DNVS", "shipsec8"),
+        ("DNVS", "fcondp2"),
+        ("DNVS", "fullb"),
+        ("DNVS", "halfb"),
+        ("DNVS", "m_t1"),
+        ("DNVS", "thread"),
+        ("DNVS", "troll"),
+        ("DNVS", "x104"),
+        ("DNVS", "tsyl201"),
+        ("FIDAP", "ex3"),
+        ("FIDAP", "ex9"),
+        ("FIDAP", "ex10"),
+        ("FIDAP", "ex13"),
+        ("FIDAP", "ex15"),
+        ("FIDAP", "ex33"),
+        ("Cunningham", "qa8fk"),
+        ("Cunningham", "m3plates"),
+        ("Um", "offshore"),
+        ("Schmid", "thermal2"),
+        ("Botonakis", "thermomech_dK"),
+        ("Botonakis", "thermomech_TC"),
+        ("Pothen", "barth"),
+        ("Pothen", "barth4"),
+        ("Pothen", "barth5"),
+        ("Pothen", "bodyy4"),
+        ("Pothen", "bodyy5"),
+        ("Pothen", "bodyy6"),
+        ("Pothen", "mesh1e1"),
+        ("Pothen", "mesh2e1"),
+        ("Pothen", "mesh3e1"),
+        ("Pothen", "shuttle_eddy"),
+        ("Pothen", "sphere2"),
+        ("Pothen", "sphere3"),
+        ("Pothen", "skirt"),
+        ("Pothen", "onera_dual"),
+        ("Pothen", "commanche_dual"),
+        ("PARSEC", "Si2"),
+        ("PARSEC", "SiH4"),
+        ("PARSEC", "benzene"),
+        ("Williams", "consph"),
         ("Williams", "pdb1HYS"),
         // Genuinely complex + unsymmetric SuiteSparse (both paths): EM/QCD/waveguide
         // (complex), MHD/QCD (general/LU), quantum-chemistry + cardiac (real, both paths).
-        ("Bai", "qc324"), ("Bai", "qc2534"), ("Bai", "dwg961a"), ("Bai", "dwg961b"),
-        ("QCD", "conf5_0-4x4-10"), ("QCD", "conf5_0-4x4-14"), ("QCD", "conf6_0-4x4-20"),
-        ("QCD", "conf6_0-8x8-20"), ("QCD", "conf6_0-8x8-30"),
-        ("FEMLAB", "waveguide3D"), ("Dziekonski", "dielFilterV2clx"),
-        ("Bai", "mhd1280a"), ("Bai", "mhd3200a"), ("Bai", "mhd3200b"), ("Bai", "mhd4800a"), ("Bai", "mhd4800b"),
-        ("Nemeth", "nemeth01"), ("Nemeth", "nemeth11"), ("Nemeth", "nemeth21"), ("Nemeth", "nemeth26"),
-        ("Norris", "heart1"), ("Norris", "heart2"), ("Norris", "heart3"),
-        ("TSOPF", "TSOPF_FS_b39_c7"), ("Bai", "cryg10000"),
-
+        ("Bai", "qc324"),
+        ("Bai", "qc2534"),
+        ("Bai", "dwg961a"),
+        ("Bai", "dwg961b"),
+        ("QCD", "conf5_0-4x4-10"),
+        ("QCD", "conf5_0-4x4-14"),
+        ("QCD", "conf6_0-4x4-20"),
+        ("QCD", "conf6_0-8x8-20"),
+        ("QCD", "conf6_0-8x8-30"),
+        ("FEMLAB", "waveguide3D"),
+        ("Dziekonski", "dielFilterV2clx"),
+        ("Bai", "mhd1280a"),
+        ("Bai", "mhd3200a"),
+        ("Bai", "mhd3200b"),
+        ("Bai", "mhd4800a"),
+        ("Bai", "mhd4800b"),
+        ("Nemeth", "nemeth01"),
+        ("Nemeth", "nemeth11"),
+        ("Nemeth", "nemeth21"),
+        ("Nemeth", "nemeth26"),
+        ("Norris", "heart1"),
+        ("Norris", "heart2"),
+        ("Norris", "heart3"),
+        ("TSOPF", "TSOPF_FS_b39_c7"),
+        ("Bai", "cryg10000"),
     ]
 }
 
@@ -356,12 +581,14 @@ fn suitesparse_entries() -> Vec<Entry> {
     for &(group, name) in suitesparse_list() {
         match rslab::matgen::download::fetch(group, name) {
             Ok(path) => match read_mtx_any(&path) {
-                Ok(MtxLoaded::Symmetric(a)) => {
-                    out.push(Entry { name: name.to_string(), mat: Mat::Sym(a) })
-                }
-                Ok(MtxLoaded::General(a)) => {
-                    out.push(Entry { name: name.to_string(), mat: Mat::Unsym(a) })
-                }
+                Ok(MtxLoaded::Symmetric(a)) => out.push(Entry {
+                    name: name.to_string(),
+                    mat: Mat::Sym(a),
+                }),
+                Ok(MtxLoaded::General(a)) => out.push(Entry {
+                    name: name.to_string(),
+                    mat: Mat::Unsym(a),
+                }),
                 Err(err) => eprintln!("[sweep] skip {name}: parse {err}"),
             },
             Err(err) => eprintln!("[sweep] skip {name}: fetch {err}"),
@@ -445,8 +672,12 @@ const BASELINE: Param = Param {
 };
 
 // Per-knob value menus, swept one-factor-at-a-time around `BASELINE`.
-const M_ORDERING: [OrderingMethod; 4] =
-    [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::MetisND, OrderingMethod::Rcm];
+const M_ORDERING: [OrderingMethod; 4] = [
+    OrderingMethod::Auto,
+    OrderingMethod::Amd,
+    OrderingMethod::MetisND,
+    OrderingMethod::Rcm,
+];
 const M_NEMIN: [usize; 4] = [1, 16, 48, 128];
 const M_RELAX: [usize; 4] = [0, 128, 256, 512];
 const M_PANEL_NB: [usize; 4] = [32, 64, 96, 128];
@@ -456,8 +687,12 @@ const M_PAR_CDIV: [usize; 3] = [2_000_000, 8_000_000, 32_000_000];
 const M_SCHUR: [bool; 2] = [true, false];
 const M_METHOD: [FactorMethod; 2] = [FactorMethod::LeftLooking, FactorMethod::Multifrontal];
 const M_PIVOT_U: [f64; 4] = [0.0, 0.1, 0.5, 1.0];
-const M_SCALING: [ScalingKnob; 4] =
-    [ScalingKnob::OnePass, ScalingKnob::Identity, ScalingKnob::InfNorm, ScalingKnob::Auto];
+const M_SCALING: [ScalingKnob; 4] = [
+    ScalingKnob::OnePass,
+    ScalingKnob::Identity,
+    ScalingKnob::InfNorm,
+    ScalingKnob::Auto,
+];
 const M_MEMORY: [bool; 2] = [false, true];
 
 /// Tiny reproducible PRNG (splitmix-style LCG) for the random joint samples, so
@@ -465,7 +700,10 @@ const M_MEMORY: [bool; 2] = [false, true];
 struct Lcg(u64);
 impl Lcg {
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
@@ -485,8 +723,18 @@ fn threads_mode() -> bool {
 /// beyond them hyperthreading gives compute-bound BLAS-3 little and only adds
 /// noise. Reduced for the heaviest matrices to bound wall-clock.
 fn thread_ladder(flops: u64) -> Vec<Param> {
-    let ladder: &[usize] = if flops as f64 > 5e10 { &[1, 4, 8, 12] } else { &[1, 2, 4, 6, 8, 12] };
-    ladder.iter().map(|&threads| Param { threads, ..BASELINE }).collect()
+    let ladder: &[usize] = if flops as f64 > 5e10 {
+        &[1, 4, 8, 12]
+    } else {
+        &[1, 2, 4, 6, 8, 12]
+    };
+    ladder
+        .iter()
+        .map(|&threads| Param {
+            threads,
+            ..BASELINE
+        })
+        .collect()
 }
 
 /// Analyze + factor `mat` under `s`, metering the peak; returns
@@ -505,7 +753,11 @@ fn measure_one(mat: &Mat, s: &SolverSettings) -> Option<(f64, usize, f64, f64)> 
             let ms = t.elapsed().as_secs_f64() * 1e3;
             let peak = meter_peak_mb();
             let x = f.solve(&b).unwrap_or_default();
-            let res = if x.len() == a.n { residual_sym(a, &x, &b) } else { f64::NAN };
+            let res = if x.len() == a.n {
+                residual_sym(a, &x, &b)
+            } else {
+                f64::NAN
+            };
             Some((ms, f.factor_nnz(), peak, res))
         }
         Mat::Unsym(a) => {
@@ -520,7 +772,11 @@ fn measure_one(mat: &Mat, s: &SolverSettings) -> Option<(f64, usize, f64, f64)> 
             let ms = t.elapsed().as_secs_f64() * 1e3;
             let peak = meter_peak_mb();
             let x = f.solve(&b).unwrap_or_default();
-            let res = if x.len() == a.n { residual_unsym(a, &x, &b) } else { f64::NAN };
+            let res = if x.len() == a.n {
+                residual_unsym(a, &x, &b)
+            } else {
+                f64::NAN
+            };
             Some((ms, f.factor_nnz(), peak, res))
         }
     }
@@ -533,28 +789,106 @@ fn measure_one(mat: &Mat, s: &SolverSettings) -> Option<(f64, usize, f64, f64)> 
 fn grid() -> Vec<Param> {
     let smoke = std::env::var("RLA_SWEEP_SMOKE").is_ok();
     if smoke {
-        return vec![BASELINE, Param { nemin: 48, ..BASELINE }, Param { method: FactorMethod::Multifrontal, ..BASELINE }];
+        return vec![
+            BASELINE,
+            Param {
+                nemin: 48,
+                ..BASELINE
+            },
+            Param {
+                method: FactorMethod::Multifrontal,
+                ..BASELINE
+            },
+        ];
     }
     if std::env::var("RLA_SWEEP_ORDERINGS_ONLY").is_ok() {
-        return [OrderingMethod::Auto, OrderingMethod::Amd, OrderingMethod::Amf, OrderingMethod::MetisND]
-            .iter()
-            .map(|&ordering| Param { ordering, ..BASELINE })
-            .collect();
+        return [
+            OrderingMethod::Auto,
+            OrderingMethod::Amd,
+            OrderingMethod::Amf,
+            OrderingMethod::MetisND,
+        ]
+        .iter()
+        .map(|&ordering| Param {
+            ordering,
+            ..BASELINE
+        })
+        .collect();
     }
     let mut v: Vec<Param> = vec![BASELINE];
     // OFAT: vary each knob over its menu with the rest at baseline (main effects).
-    for &x in &M_ORDERING { v.push(Param { ordering: x, ..BASELINE }); }
-    for &x in &M_NEMIN { v.push(Param { nemin: x, ..BASELINE }); }
-    for &x in &M_RELAX { v.push(Param { relax_width: x, ..BASELINE }); }
-    for &x in &M_PANEL_NB { v.push(Param { panel_nb: x, ..BASELINE }); }
-    for &x in &M_SCALAR_GATE { v.push(Param { scalar_gate: x, ..BASELINE }); }
-    for &x in &M_PAR_GEMM { v.push(Param { par_gemm: x, ..BASELINE }); }
-    for &x in &M_PAR_CDIV { v.push(Param { par_cdiv: x, ..BASELINE }); }
-    for &x in &M_SCHUR { v.push(Param { use_gemm_schur: x, ..BASELINE }); }
-    for &x in &M_METHOD { v.push(Param { method: x, ..BASELINE }); }
-    for &x in &M_PIVOT_U { v.push(Param { pivot_u: x, ..BASELINE }); }
-    for &x in &M_SCALING { v.push(Param { scaling: x, ..BASELINE }); }
-    for &x in &M_MEMORY { v.push(Param { memory_eager: x, ..BASELINE }); }
+    for &x in &M_ORDERING {
+        v.push(Param {
+            ordering: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_NEMIN {
+        v.push(Param {
+            nemin: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_RELAX {
+        v.push(Param {
+            relax_width: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_PANEL_NB {
+        v.push(Param {
+            panel_nb: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_SCALAR_GATE {
+        v.push(Param {
+            scalar_gate: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_PAR_GEMM {
+        v.push(Param {
+            par_gemm: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_PAR_CDIV {
+        v.push(Param {
+            par_cdiv: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_SCHUR {
+        v.push(Param {
+            use_gemm_schur: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_METHOD {
+        v.push(Param {
+            method: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_PIVOT_U {
+        v.push(Param {
+            pivot_u: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_SCALING {
+        v.push(Param {
+            scaling: x,
+            ..BASELINE
+        });
+    }
+    for &x in &M_MEMORY {
+        v.push(Param {
+            memory_eager: x,
+            ..BASELINE
+        });
+    }
     // Random joint samples (seeded) for knob interactions the OFAT axes miss.
     let n_random: usize = std::env::var("RLA_SWEEP_RANDOM")
         .ok()
@@ -591,14 +925,20 @@ fn grid() -> Vec<Param> {
 fn residual_sym(a: &CscMatrix<C>, x: &[C], b: &[C]) -> f64 {
     let mut ax = vec![C::new(0.0, 0.0); a.n];
     a.symv(x, &mut ax);
-    let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();
+    let num: f64 = (0..a.n)
+        .map(|i| (ax[i] - b[i]).norm_sqr())
+        .sum::<f64>()
+        .sqrt();
     let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
     num / den.max(1e-300)
 }
 fn residual_unsym(a: &GeneralCsc<C>, x: &[C], b: &[C]) -> f64 {
     let mut ax = vec![C::new(0.0, 0.0); a.n];
     a.matvec(x, &mut ax);
-    let num: f64 = (0..a.n).map(|i| (ax[i] - b[i]).norm_sqr()).sum::<f64>().sqrt();
+    let num: f64 = (0..a.n)
+        .map(|i| (ax[i] - b[i]).norm_sqr())
+        .sum::<f64>()
+        .sqrt();
     let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
     num / den.max(1e-300)
 }
@@ -696,7 +1036,12 @@ fn main() {
     // fair per-path benchmark restricts to that path's problem class (LU tuned and
     // scored on unsymmetric matrices, LDLᵀ on symmetric ones).
     if let Ok(p) = std::env::var("RLA_SWEEP_PATH") {
-        corpus.retain(|e| matches!((&e.mat, p.as_str()), (Mat::Sym(_), "ldlt") | (Mat::Unsym(_), "lu")));
+        corpus.retain(|e| {
+            matches!(
+                (&e.mat, p.as_str()),
+                (Mat::Sym(_), "ldlt") | (Mat::Unsym(_), "lu")
+            )
+        });
     }
     let full_grid = grid();
     // Autotune mode: instead of the knob grid, measure `default` vs the auto-tuner's
@@ -735,14 +1080,24 @@ fn main() {
         // (the per-combo gate below then drops just the MF combos when MF alone is
         // over budget).
         if ll_mb.min(mf_mb) > mem_cap_mb {
-            eprintln!("[sweep] skip {} n={}: est {:.0} MB > cap {:.0} MB", entry.name, n, ll_mb.min(mf_mb), mem_cap_mb);
+            eprintln!(
+                "[sweep] skip {} n={}: est {:.0} MB > cap {:.0} MB",
+                entry.name,
+                n,
+                ll_mb.min(mf_mb),
+                mem_cap_mb
+            );
             n_skipped_mem += 1;
             continue;
         }
         // Thread-scaling mode runs the ladder (bypassing the flop-gate, since
         // scaling matters most on the large matrices); otherwise the full grid is
         // bounded to small matrices and giants fall back to the baseline combo.
-        let ladder = if threads_mode() { Some(thread_ladder(flops)) } else { None };
+        let ladder = if threads_mode() {
+            Some(thread_ladder(flops))
+        } else {
+            None
+        };
         let combos: &[Param] = match &ladder {
             Some(l) => l.as_slice(),
             None if flops as f64 > grid_flop_cap => std::slice::from_ref(&BASELINE),
@@ -779,11 +1134,17 @@ fn main() {
                 ("tuned_memory", pick(0.0)),
             ];
             for (label, s) in &configs {
-                let est = if s.method == FactorMethod::Multifrontal { mf_mb } else { ll_mb };
+                let est = if s.method == FactorMethod::Multifrontal {
+                    mf_mb
+                } else {
+                    ll_mb
+                };
                 if est > mem_cap_mb {
                     continue;
                 }
-                let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, s) else { continue };
+                let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, s) else {
+                    continue;
+                };
                 let relax_w = s.relax.map_or(0, |r| r.max_width);
                 let rec = serde_json::json!({
                     "matrix": entry.name, "n": n, "nnz": nnz, "flops": flops, "dtype": "complex128",
@@ -807,15 +1168,21 @@ fn main() {
         for p in combos {
             // Per-combo memory gate: drop a combo whose path's a-priori peak is
             // over the cap (so a passing matrix never OOMs on its MF combos).
-            let combo_est = if p.method == FactorMethod::Multifrontal { mf_mb } else { ll_mb };
+            let combo_est = if p.method == FactorMethod::Multifrontal {
+                mf_mb
+            } else {
+                ll_mb
+            };
             if combo_est > mem_cap_mb {
                 continue;
             }
             // One unified settings object drives both phases: analyze reads the
             // ordering/nemin/relax subset, factor reads method/threads + the kernel
             // knobs (panel_nb, GEMM thresholds, Schur) - per-call, no global state.
-            let relax = (p.relax_width > 0)
-                .then_some(RelaxAmalgamation { max_width: p.relax_width, max_extra_rows: 64 });
+            let relax = (p.relax_width > 0).then_some(RelaxAmalgamation {
+                max_width: p.relax_width,
+                max_extra_rows: 64,
+            });
             let s = SolverSettings::default()
                 .with_ordering(p.ordering)
                 .with_nemin(p.nemin)
@@ -831,9 +1198,15 @@ fn main() {
                 .with_threads(p.threads)
                 .with_pivot_u(p.pivot_u)
                 .with_scaling(p.scaling.to_strategy())
-                .with_memory(if p.memory_eager { MemoryMode::Eager } else { MemoryMode::LowMemory });
+                .with_memory(if p.memory_eager {
+                    MemoryMode::Eager
+                } else {
+                    MemoryMode::LowMemory
+                });
 
-            let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, &s) else { continue };
+            let Some((fac_ms, fill, peak_mb, res)) = measure_one(&entry.mat, &s) else {
+                continue;
+            };
 
             let rec = serde_json::json!({
                 "matrix": entry.name, "n": n, "nnz": nnz, "dtype": "complex128",

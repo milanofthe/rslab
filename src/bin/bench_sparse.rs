@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use num_complex::Complex;
 use rslab::sparse::csc::CscMatrix;
-use rslab::RslabError;
 use rslab::LdltSolver;
+use rslab::RslabError;
 
 /// Build a 2D 5-point grid (m×m, n=m²) with the given diagonal and neighbor
 /// values. Lower triangle only.

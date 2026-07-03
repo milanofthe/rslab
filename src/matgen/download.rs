@@ -41,9 +41,14 @@ pub fn fetch(group: &str, name: &str) -> Result<PathBuf, String> {
     let entries = ar.entries().map_err(|e| format!("read archive: {e}"))?;
     for entry in entries {
         let mut e = entry.map_err(|e| format!("archive entry: {e}"))?;
-        let path = e.path().map_err(|e| format!("entry path: {e}"))?.into_owned();
+        let path = e
+            .path()
+            .map_err(|e| format!("entry path: {e}"))?
+            .into_owned();
         // The main matrix is `<name>/<name>.mtx`; skip rhs/coord/solution siblings.
-        let is_main = path.file_name().map(|f| f.to_string_lossy() == format!("{name}.mtx"))
+        let is_main = path
+            .file_name()
+            .map(|f| f.to_string_lossy() == format!("{name}.mtx"))
             .unwrap_or(false);
         if is_main {
             let mut out =
@@ -66,7 +71,10 @@ mod tests {
         let p = fetch("HB", "bcsstk14").expect("download bcsstk14");
         assert!(p.exists());
         let s = std::fs::read_to_string(&p).expect("read cached mtx");
-        assert!(s.starts_with("%%MatrixMarket"), "valid Matrix Market header");
+        assert!(
+            s.starts_with("%%MatrixMarket"),
+            "valid Matrix Market header"
+        );
     }
 }
 
@@ -80,8 +88,16 @@ pub fn suggested() -> &'static [(&'static str, &'static str, &'static str)] {
         ("Boeing", "bcsstk39", "SPD structural, larger"),
         ("FIDAP", "ex11", "unsymmetric CFD, medium"),
         ("Bai", "qc2534", "complex unsymmetric (H2+ model), QM"),
-        ("Schenk_ISEI", "barrier2-1", "unsymmetric semiconductor, large"),
-        ("GHS_indef", "cont-300", "symmetric indefinite (KKT/optimization)"),
+        (
+            "Schenk_ISEI",
+            "barrier2-1",
+            "unsymmetric semiconductor, large",
+        ),
+        (
+            "GHS_indef",
+            "cont-300",
+            "symmetric indefinite (KKT/optimization)",
+        ),
         ("Williams", "cant", "SPD FEM, large, dense-ish"),
     ]
 }

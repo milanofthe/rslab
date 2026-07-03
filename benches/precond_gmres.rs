@@ -20,20 +20,31 @@ use rslab::{gmres, LuSolver, SolverSettings};
 type C = Complex<f64>;
 
 fn emit(fields: &str) {
-    let Ok(path) = std::env::var("RLA_JSON") else { return };
+    let Ok(path) = std::env::var("RLA_JSON") else {
+        return;
+    };
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{{{fields}}}");
     }
 }
 
 fn main() {
-    let dim: usize = std::env::var("RLA_DIM").ok().and_then(|v| v.parse().ok()).unwrap_or(180);
+    let dim: usize = std::env::var("RLA_DIM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(180);
     let a = convection_diffusion::<C>(&[dim, dim], 0.02, Flow::Rotating, true);
     let n = a.n;
     let bytes = std::mem::size_of::<C>();
     // One fixed right-hand side.
-    let b: Vec<C> = (0..n).map(|i| Complex::new((i % 7) as f64 - 3.0, (i % 5) as f64 - 2.0)).collect();
+    let b: Vec<C> = (0..n)
+        .map(|i| Complex::new((i % 7) as f64 - 3.0, (i % 5) as f64 - 2.0))
+        .collect();
     let (tol, maxit, restart) = (1e-8, 500, 100);
 
     // drop_tol = 0.0 is the exact factor (one GMRES step); the rest are ILU

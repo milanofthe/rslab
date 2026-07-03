@@ -27,11 +27,11 @@
 
 use crate::error::RslabError;
 use crate::numeric::blr::BlrMatrix;
+use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::multifrontal_ldlt::{
     analyze_with, compute_supernode_row_structures, perturb_pivot, BlrMode, FactorMethod,
     MemoryMode, SolverSettings, ZeroPivotAction,
 };
-use crate::numeric::gemm_tuning::KernelTuning;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -107,15 +107,22 @@ static PROF_CDIV_GEMM_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_CMOD_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 fn cmod_prof_on() -> bool {
-    *PROF_CMOD_FLAG.get_or_init(|| std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false))
+    *PROF_CMOD_FLAG.get_or_init(|| {
+        std::env::var("RLA_PROFILE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
 }
 // Experiment gate: force all left-looking GEMMs serial (no nested rayon), so the
 // node-internal parallelism can be isolated from the tree-level `par_iter`.
 static LL_GEMM_SERIAL_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 fn ll_gemm_serial() -> bool {
-    *LL_GEMM_SERIAL_FLAG
-        .get_or_init(|| std::env::var("RLA_GEMM_SERIAL").map(|v| v == "1").unwrap_or(false))
+    *LL_GEMM_SERIAL_FLAG.get_or_init(|| {
+        std::env::var("RLA_GEMM_SERIAL")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
 }
 
 thread_local! {
@@ -680,7 +687,19 @@ fn factor_subtree<T: Scalar>(
     // Factor the child subtrees concurrently.
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, blr, pool, profile, kt))
+        .map(|&ch| {
+            factor_subtree(
+                ch,
+                sym,
+                a_perm,
+                a_perm_t,
+                perturb_floor,
+                blr,
+                pool,
+                profile,
+                kt,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     // Factor this node from the children's own (subtree-root) factors.
     let nf = {
@@ -783,7 +802,10 @@ impl LuSymbolic {
             ..Default::default()
         };
         diagnostics.push("factor", factor_ms, 0, nnz * 24);
-        Ok(LuSolver { factors, diagnostics })
+        Ok(LuSolver {
+            factors,
+            diagnostics,
+        })
     }
 
     /// The analyzed dimension.
@@ -838,7 +860,14 @@ impl LuSymbolic {
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
         let Some((sym, _levels)) = self.symb.sym_and_levels() else {
-            return crate::diagnostics::estimate_left_looking(0, &|_| 0, &|_| 0, &[], value_bytes, 0);
+            return crate::diagnostics::estimate_left_looking(
+                0,
+                &|_| 0,
+                &|_| 0,
+                &[],
+                value_bytes,
+                0,
+            );
         };
         let nsuper = sym.supernodes.len();
         let rs = compute_supernode_row_structures(sym);
@@ -932,7 +961,10 @@ impl<T: Scalar> LuSolver<T> {
 
     /// The auto-tuner's choice for `a`: the symbolic + guarded, memory-backstopped
     /// settings (shared by [`factor_auto`](Self::factor_auto) and the benchmark).
-    pub fn tuned(a: &GeneralCsc<T>, weight: f64) -> Result<(LuSymbolic, SolverSettings), RslabError> {
+    pub fn tuned(
+        a: &GeneralCsc<T>,
+        weight: f64,
+    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
         let sym = LuSymbolic::analyze(a)?;
         let est = sym.estimate_memory::<T>();
         let feat = crate::StructuralFeatures::from_general(a, &sym);
@@ -1240,9 +1272,15 @@ impl<T: Scalar> LlEmit<T> {
         LlEmit {
             refcount,
             e_offset,
-            compact: (0..nsuper).map(|_| std::cell::UnsafeCell::new(CompactNode::default())).collect(),
-            e_of_g: (0..n).map(|_| std::cell::UnsafeCell::new(usize::MAX)).collect(),
-            row_pos_of_g: (0..n).map(|_| std::cell::UnsafeCell::new(usize::MAX)).collect(),
+            compact: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(CompactNode::default()))
+                .collect(),
+            e_of_g: (0..n)
+                .map(|_| std::cell::UnsafeCell::new(usize::MAX))
+                .collect(),
+            row_pos_of_g: (0..n)
+                .map(|_| std::cell::UnsafeCell::new(usize::MAX))
+                .collect(),
             perm: (0..n).map(|_| std::cell::UnsafeCell::new(0)).collect(),
             perm_row: (0..n).map(|_| std::cell::UnsafeCell::new(0)).collect(),
         }
@@ -1358,7 +1396,11 @@ fn emit_and_free<T: Scalar>(
 static LL_NO_FREE_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 fn ll_no_free() -> bool {
-    *LL_NO_FREE_FLAG.get_or_init(|| std::env::var("RLA_NO_FREE").map(|v| v == "1").unwrap_or(false))
+    *LL_NO_FREE_FLAG.get_or_init(|| {
+        std::env::var("RLA_NO_FREE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1456,8 +1498,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 for i in 0..mrows {
                     let mut acc = T::zero();
                     for ck in 0..nck {
-                        acc = acc
-                            + lk[(nck + p0 + i) + ck * nrk] * uk[ck + (p0 + jj) * nck];
+                        acc = acc + lk[(nck + p0 + i) + ck * nrk] * uk[ck + (p0 + jj) * nck];
                     }
                     let trow = gloc[ok[p0 + i]];
                     lbuf[tcol * nrow + trow] = lbuf[tcol * nrow + trow] - acc;
@@ -1468,8 +1509,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 for i in 0..npk {
                     let mut acc = T::zero();
                     for ck in 0..nck {
-                        acc = acc
-                            + lk[(nck + p0 + i) + ck * nrk] * uk[ck + (p1 + jj) * nck];
+                        acc = acc + lk[(nck + p0 + i) + ck * nrk] * uk[ck + (p1 + jj) * nck];
                     }
                     let urow = ok[p0 + i] - first;
                     ubuf[urow + tu * ncol] = ubuf[urow + tu * ncol] - acc;
@@ -1583,7 +1623,11 @@ fn lu_ll_factor_node<T: Scalar>(
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + NB_CDIV).min(ncol);
-        let t_g = if prof { Some(std::time::Instant::now()) } else { None };
+        let t_g = if prof {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         // getf2: factor columns [kb, ke) over the **fully-summed rows [k+1, ncol)**
         // only - the deep trailing rows [ncol, nrow) (never pivot candidates) are
         // lifted off this serial path into the parallel apply below.
@@ -1689,7 +1733,11 @@ fn lu_ll_factor_node<T: Scalar>(
         if let Some(t) = t_g {
             PROF_CDIV_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
-        let t_t = if prof { Some(std::time::Instant::now()) } else { None };
+        let t_t = if prof {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         // TRSM: U = L11⁻¹ · (trailing panel columns of lbuf) and the U12 rows.
         for j in ke..ncol {
             for r in (kb + 1)..ke {
@@ -1723,7 +1771,11 @@ fn lu_ll_factor_node<T: Scalar>(
         if let Some(t) = t_t {
             PROF_CDIV_TRSM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
-        let t_m = if prof { Some(std::time::Instant::now()) } else { None };
+        let t_m = if prof {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         // GEMM: lbuf[ke.., ke..ncol] −= L21[ke.., kb..ke] · U[kb..ke, ke..ncol].
         let mt = nrow - ke;
         let nt = ncol - ke;
@@ -1847,13 +1899,33 @@ fn lu_ll_factor_subtree<T: Scalar>(
         .par_iter()
         .map(|&ch| {
             lu_ll_factor_subtree(
-                ch, sym, a_perm, a_perm_t, rs, update_list, store, emit, perturb_floor, drop_tol,
-                n_perturbed, kt,
+                ch,
+                sym,
+                a_perm,
+                a_perm_t,
+                rs,
+                update_list,
+                store,
+                emit,
+                perturb_floor,
+                drop_tol,
+                n_perturbed,
+                kt,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
     lu_ll_factor_node(
-        s, sym, a_perm, a_perm_t, rs, update_list, store, emit, perturb_floor, n_perturbed, kt,
+        s,
+        sym,
+        a_perm,
+        a_perm_t,
+        rs,
+        update_list,
+        store,
+        emit,
+        perturb_floor,
+        n_perturbed,
+        kt,
     )?;
     // `s` has now pulled from every descendant in its update list - for each whose
     // last consumer this was (refcount→0), compact it and free its dense panel.
@@ -1986,7 +2058,10 @@ fn factor_lu_left_looking<T: Scalar>(
         .collect::<Result<Vec<()>, _>>()?;
     drop(store); // all panels already freed incrementally; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
-    if std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("RLA_PROFILE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         let asm = PROF_LL_ASM_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
         let cmod = PROF_LL_CMOD_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
         let cdiv = PROF_LL_CDIV_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
@@ -2113,9 +2188,9 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         crate::numeric::multifrontal_ldlt::Threads::Ambient => {
             crate::numeric::multifrontal_ldlt::Threads::Ambient
         }
-        p => crate::numeric::multifrontal_ldlt::Threads::Fixed(
-            p.resolve(|cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)),
-        ),
+        p => crate::numeric::multifrontal_ldlt::Threads::Fixed(p.resolve(|cap| {
+            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
+        })),
     };
 
     let perturb_floor: Option<f64> = match opts.on_zero_pivot {
@@ -2240,10 +2315,21 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             roots
                 .par_iter()
                 .map(|&r| {
-                    factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, profile, kt)
+                    factor_subtree(
+                        r,
+                        sym,
+                        &a_perm,
+                        &a_perm_t,
+                        perturb_floor,
+                        blr,
+                        &pool,
+                        profile,
+                        kt,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()
-        })?;
+        },
+    )?;
     // Scatter the subtree factors into `node_results` (indexed by supernode id)
     // for the global emit pass, which still walks supernodes in postorder.
     let mut node_results: Vec<Option<NodeLu<T>>> = (0..nsuper).map(|_| None).collect();
@@ -2326,9 +2412,9 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let mut lcol: Vec<(usize, T)> = Vec::new();
     let mut urow: Vec<(usize, T)> = Vec::new();
     for node_opt in node_results.iter_mut() {
-        let node = node_opt
-            .as_mut()
-            .ok_or_else(|| RslabError::InvalidInput("internal: unfactored supernode".to_string()))?;
+        let node = node_opt.as_mut().ok_or_else(|| {
+            RslabError::InvalidInput("internal: unfactored supernode".to_string())
+        })?;
         let ff = &node.front;
         let nr = ff.nrow;
         for j in 0..ff.nelim {
@@ -2533,11 +2619,7 @@ pub fn solve_lu_many<T: Scalar>(
 
 /// Serial block solve over `nrhs` right-hand sides; fanned over column chunks by
 /// the parallel [`solve_lu_many`].
-fn solve_lu_block<T: Scalar>(
-    f: &LuFactors<T>,
-    b: &[T],
-    nrhs: usize,
-) -> Result<Vec<T>, RslabError> {
+fn solve_lu_block<T: Scalar>(f: &LuFactors<T>, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
     let n = f.n;
     // Ŷ = P_row · (D_r B): row-equilibrate then row-permute each RHS block.
     let mut y = vec![T::zero(); n * nrhs];
@@ -2919,7 +3001,13 @@ mod tests {
             let vv: Vec<Complex<f64>> = rr
                 .iter()
                 .zip(&cc)
-                .map(|(&i, &j)| if i == j { c(9.0 + shift, 1.0) } else { c(-1.0, 0.2) })
+                .map(|(&i, &j)| {
+                    if i == j {
+                        c(9.0 + shift, 1.0)
+                    } else {
+                        c(-1.0, 0.2)
+                    }
+                })
                 .collect();
             let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
             // Reuse the one analysis; static factor (no pivot search).

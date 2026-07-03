@@ -228,7 +228,20 @@ fn symbolic_stats(
     nnz: usize,
     front_dims: &[(usize, usize)],
     level_widths: &[usize],
-) -> (usize, u64, f64, f64, usize, usize, usize, f64, u64, f64, f64, f64) {
+) -> (
+    usize,
+    u64,
+    f64,
+    f64,
+    usize,
+    usize,
+    usize,
+    f64,
+    u64,
+    f64,
+    f64,
+    f64,
+) {
     let n_supernodes = front_dims.len();
     if n_supernodes == 0 {
         return (0, 0, 0.0, 0.0, 0, 0, 0, 0.0, 0, 0.0, 0.0, 0.0);
@@ -249,8 +262,16 @@ fn symbolic_stats(
         nrow_max = nrow_max.max(nrow);
     }
     let supernode_cols_mean = col_sum as f64 / n_supernodes as f64;
-    let fill_ratio = if nnz > 0 { fill as f64 / nnz as f64 } else { 0.0 };
-    let arith_intensity = if fill > 0 { flops as f64 / fill as f64 } else { 0.0 };
+    let fill_ratio = if nnz > 0 {
+        fill as f64 / nnz as f64
+    } else {
+        0.0
+    };
+    let arith_intensity = if fill > 0 {
+        flops as f64 / fill as f64
+    } else {
+        0.0
+    };
 
     per_front_flops.sort_unstable_by(|a, b| b.cmp(a));
     let flop_top1_frac = if flops > 0 {
@@ -297,8 +318,18 @@ impl StructuralFeatures {
     pub fn from_symmetric<T: Scalar>(a: &CscMatrix<T>, shape: &impl SymbolicShape) -> Self {
         let (deg_mean, deg_max, deg_cv, bandwidth_max, bandwidth_mean_rel, dd, dp) =
             pattern_stats(a.n, &a.col_ptr, &a.row_idx, |k| a.values[k].magnitude());
-        Self::assemble(a.n, a.row_idx.len(), deg_mean, deg_max, deg_cv, bandwidth_max,
-            bandwidth_mean_rel, dd, dp, shape)
+        Self::assemble(
+            a.n,
+            a.row_idx.len(),
+            deg_mean,
+            deg_max,
+            deg_cv,
+            bandwidth_max,
+            bandwidth_mean_rel,
+            dd,
+            dp,
+            shape,
+        )
     }
 
     /// Extract features for a **general** (unsymmetric) matrix and its LU
@@ -307,8 +338,18 @@ impl StructuralFeatures {
     pub fn from_general<T: Scalar>(a: &GeneralCsc<T>, shape: &impl SymbolicShape) -> Self {
         let (deg_mean, deg_max, deg_cv, bandwidth_max, bandwidth_mean_rel, dd, dp) =
             pattern_stats(a.n, &a.col_ptr, &a.row_idx, |k| a.values[k].magnitude());
-        Self::assemble(a.n, a.row_idx.len(), deg_mean, deg_max, deg_cv, bandwidth_max,
-            bandwidth_mean_rel, dd, dp, shape)
+        Self::assemble(
+            a.n,
+            a.row_idx.len(),
+            deg_mean,
+            deg_max,
+            deg_cv,
+            bandwidth_max,
+            bandwidth_mean_rel,
+            dd,
+            dp,
+            shape,
+        )
     }
 
     /// Recommend a worker-thread count for a **single** factorization of this
@@ -514,7 +555,10 @@ mod tests {
         let banded = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
         let sym = LdltSymbolic::analyze(&banded).unwrap();
         let fb = StructuralFeatures::from_symmetric(&banded, &sym);
-        assert!(fb.front_nrow_max < 512 && fb.tree_width_max < 128, "banded is thin/narrow");
+        assert!(
+            fb.front_nrow_max < 512 && fb.tree_width_max < 128,
+            "banded is thin/narrow"
+        );
         assert_eq!(fb.recommend_threads(12), 2, "thin matrix capped to 2");
         // Clamped to available cores.
         assert!(fb.recommend_threads(1) >= 1);

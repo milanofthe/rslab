@@ -714,13 +714,7 @@ fn concat_recompress<T: Scalar>(t: LowRank<T>, mut p: LowRank<T>, eps: f64) -> B
     let mut v = t.v;
     v.extend_from_slice(&p.v);
     let breakeven = (m * n / (m + n)).max(1);
-    let merged = LowRank {
-        m,
-        n,
-        rank,
-        u,
-        v,
-    };
+    let merged = LowRank { m, n, rank, u, v };
     if rank <= breakeven {
         return Block::LowRank(merged);
     }

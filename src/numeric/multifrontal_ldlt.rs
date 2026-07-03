@@ -54,7 +54,11 @@ static PROF_LDLT_SCHUR_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_LDLT_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 fn ldlt_prof_on() -> bool {
-    *PROF_LDLT_FLAG.get_or_init(|| std::env::var("RLA_PROFILE").map(|v| v == "1").unwrap_or(false))
+    *PROF_LDLT_FLAG.get_or_init(|| {
+        std::env::var("RLA_PROFILE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
 }
 
 /// Action to take when a near-zero pivot is encountered during factorization.
@@ -130,7 +134,11 @@ pub enum BlrMode {
     /// Store each large contribution block block-low-rank on the assembly stack:
     /// `eps` per-tile Frobenius tolerance, `min_cnrow` CB-size threshold, `b`
     /// tile size. Shrinks the live CB-stack transient.
-    ContributionBlocks { eps: f64, min_cnrow: usize, b: usize },
+    ContributionBlocks {
+        eps: f64,
+        min_cnrow: usize,
+        b: usize,
+    },
 }
 
 impl BlrMode {
@@ -322,7 +330,9 @@ impl Default for Threads {
 
 /// All logical cores (the `0` sentinel resolution).
 fn all_cores() -> usize {
-    std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
 }
 
 impl Threads {
@@ -371,7 +381,9 @@ pub(crate) fn in_scoped_pool<R: Send>(
     f: impl FnOnce() -> R + Send,
 ) -> R {
     let n = if threads == 0 {
-        std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1)
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
     } else {
         threads
     };
@@ -465,9 +477,9 @@ pub(crate) fn stack_for_depth(depth: usize) -> usize {
     const FRAME: usize = 32 * 1024; // per-frame budget (LL ~6.7 KB measured; MF larger)
     const MIN: usize = 16 * 1024 * 1024; // floor (>= the rayon default; covers ~depth 500)
     const MAX: usize = 8 * 1024 * 1024 * 1024; // 8 GB cap (depth ~256k)
-    // Always set an explicit, depth-proportional stack - never fall back to the
-    // small rayon default, which a moderate depth (a few hundred supernodes, as a
-    // banded matrix amalgamates to) already overflows.
+                                               // Always set an explicit, depth-proportional stack - never fall back to the
+                                               // small rayon default, which a moderate depth (a few hundred supernodes, as a
+                                               // banded matrix amalgamates to) already overflows.
     depth.saturating_mul(FRAME).clamp(MIN, MAX)
 }
 
@@ -488,7 +500,10 @@ impl Default for SolverSettings {
             reorder: ReorderMode::default(),
             ordering: OrderingMethod::default(),
             nemin: 16,
-            relax: Some(RelaxAmalgamation { max_width: 256, max_extra_rows: 64 }),
+            relax: Some(RelaxAmalgamation {
+                max_width: 256,
+                max_extra_rows: 64,
+            }),
             // Kernel defaults (reproduce the former process-wide atomic defaults).
             panel_nb: DEFAULT_PANEL_NB,
             scalar_gate: DEFAULT_SCALAR_GATE,
@@ -1369,7 +1384,9 @@ pub fn analyze_with(
     // the caller's stack. Run it in a scoped pool whose workers have a stack sized
     // to the problem (committed on demand), the same robustness mechanism the
     // factorization uses. Shallow analyses get the floor stack at negligible cost.
-    in_scoped_pool(0, stack_for_depth(n), || analyze_with_inner(n, col_ptr, row_idx, opts))
+    in_scoped_pool(0, stack_for_depth(n), || {
+        analyze_with_inner(n, col_ptr, row_idx, opts)
+    })
 }
 
 fn analyze_with_inner(
@@ -1530,7 +1547,10 @@ fn supernode_postorder(sym: &SymbolicFactorization, roots: &[usize]) -> Vec<usiz
 /// capped at `max_cores`. Value-independent, so it is the same for every scalar.
 pub(crate) fn recommend_threads_for_sym(symb: &MultifrontalSymbolic, max_cores: usize) -> usize {
     let fd = symb.front_dims();
-    let flops: u64 = fd.iter().map(|&(nc, nr)| (nr as u64) * (nr as u64) * (nc as u64)).sum();
+    let flops: u64 = fd
+        .iter()
+        .map(|&(nc, nr)| (nr as u64) * (nr as u64) * (nc as u64))
+        .sum();
     let front_nrow_max = fd.iter().map(|&(_, nr)| nr).max().unwrap_or(0);
     let tree_width_max = symb.level_widths().into_iter().max().unwrap_or(0);
     crate::analysis::recommend_threads_from(flops, front_nrow_max, tree_width_max, max_cores)
@@ -1573,9 +1593,11 @@ pub fn factor_numeric<T: Scalar>(
     // Supernodal left-looking path: same factor, low transient (no CB stack). Run
     // in a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        return opts
-            .threads
-            .run(stack, |cap| recommend_threads_for_sym(symb, cap), || factor_left_looking(sym, a, opts));
+        return opts.threads.run(
+            stack,
+            |cap| recommend_threads_for_sym(symb, cap),
+            || factor_left_looking(sym, a, opts),
+        );
     }
 
     // Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
@@ -1637,26 +1659,27 @@ pub fn factor_numeric<T: Scalar>(
         // factor as the other paths; the trade is all-fronts residency for a
         // simple, barrier-free push (opt-in, not auto-selected).
         let order = supernode_postorder(sym, &roots);
-        opts.threads.run(stack, recommend, || -> Result<(), RslabError> {
-            for &s in &order {
-                let nf = {
-                    let mut child_refs: Vec<&NodeFactor<T>> = Vec::new();
-                    for &ch in &sym.supernodes[s].children {
-                        match node_results[ch].as_ref() {
-                            Some(c) => child_refs.push(c),
-                            None => {
-                                return Err(RslabError::InvalidInput(
-                                    "internal: child not factored before parent".to_string(),
-                                ))
+        opts.threads
+            .run(stack, recommend, || -> Result<(), RslabError> {
+                for &s in &order {
+                    let nf = {
+                        let mut child_refs: Vec<&NodeFactor<T>> = Vec::new();
+                        for &ch in &sym.supernodes[s].children {
+                            match node_results[ch].as_ref() {
+                                Some(c) => child_refs.push(c),
+                                None => {
+                                    return Err(RslabError::InvalidInput(
+                                        "internal: child not factored before parent".to_string(),
+                                    ))
+                                }
                             }
                         }
-                    }
-                    factor_one_node(s, sym, &a_perm, &child_refs, perturb_floor, kt)?
-                };
-                node_results[s] = Some(nf);
-            }
-            Ok(())
-        })?;
+                        factor_one_node(s, sym, &a_perm, &child_refs, perturb_floor, kt)?
+                    };
+                    node_results[s] = Some(nf);
+                }
+                Ok(())
+            })?;
     } else {
         let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(stack, recommend, || {
             roots
@@ -1739,9 +1762,9 @@ pub fn factor_numeric<T: Scalar>(
     let mut l_values: Vec<T> = Vec::new();
     let mut col: Vec<(usize, T)> = Vec::new();
     for node_opt in node_results.iter_mut() {
-        let node = node_opt
-            .as_mut()
-            .ok_or_else(|| RslabError::InvalidInput("internal: unfactored supernode".to_string()))?;
+        let node = node_opt.as_mut().ok_or_else(|| {
+            RslabError::InvalidInput("internal: unfactored supernode".to_string())
+        })?;
         let ff = &node.front;
         let nrow = ff.nrow;
         for j in 0..ff.nelim {
@@ -1800,9 +1823,7 @@ pub fn factor_numeric<T: Scalar>(
 /// trailing rows and its children's off-diagonal rows. `rs[s][0..ncol]` are the
 /// eliminated columns `first_col..first_col+ncol`; `rs[s][ncol..]` are the
 /// (sorted) below-diagonal fill rows.
-pub(crate) fn compute_supernode_row_structures(
-    sym: &SymbolicFactorization,
-) -> Vec<Vec<usize>> {
+pub(crate) fn compute_supernode_row_structures(sym: &SymbolicFactorization) -> Vec<Vec<usize>> {
     let nsuper = sym.supernodes.len();
     let mut rs: Vec<Vec<usize>> = Vec::with_capacity(nsuper);
     for s in 0..nsuper {
@@ -1934,7 +1955,11 @@ struct CompactL<T> {
 }
 impl<T> Default for CompactL<T> {
     fn default() -> Self {
-        CompactL { ptr: Vec::new(), idx: Vec::new(), val: Vec::new() }
+        CompactL {
+            ptr: Vec::new(),
+            idx: Vec::new(),
+            val: Vec::new(),
+        }
     }
 }
 
@@ -1977,11 +2002,19 @@ impl<T: Scalar> LlEmitLdlt<T> {
         LlEmitLdlt {
             refcount,
             e_offset,
-            compact: (0..nsuper).map(|_| std::cell::UnsafeCell::new(CompactL::default())).collect(),
-            e_of_g: (0..n).map(|_| std::cell::UnsafeCell::new(usize::MAX)).collect(),
+            compact: (0..nsuper)
+                .map(|_| std::cell::UnsafeCell::new(CompactL::default()))
+                .collect(),
+            e_of_g: (0..n)
+                .map(|_| std::cell::UnsafeCell::new(usize::MAX))
+                .collect(),
             perm: (0..n).map(|_| std::cell::UnsafeCell::new(0)).collect(),
-            d_diag: (0..n).map(|_| std::cell::UnsafeCell::new(T::zero())).collect(),
-            d_subdiag: (0..n).map(|_| std::cell::UnsafeCell::new(T::zero())).collect(),
+            d_diag: (0..n)
+                .map(|_| std::cell::UnsafeCell::new(T::zero()))
+                .collect(),
+            d_subdiag: (0..n)
+                .map(|_| std::cell::UnsafeCell::new(T::zero()))
+                .collect(),
             two_by_two: (0..n).map(|_| std::cell::UnsafeCell::new(false)).collect(),
             inertia_pos: AtomicUsize::new(0),
             inertia_neg: AtomicUsize::new(0),
@@ -2057,7 +2090,11 @@ fn ldlt_emit_and_free<T: Scalar>(
 static LDLT_NO_FREE_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 fn ldlt_no_free() -> bool {
-    *LDLT_NO_FREE_FLAG.get_or_init(|| std::env::var("RLA_NO_FREE").map(|v| v == "1").unwrap_or(false))
+    *LDLT_NO_FREE_FLAG.get_or_init(|| {
+        std::env::var("RLA_NO_FREE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
 }
 
 /// Factor one supernode's panel: assemble `A`, apply every descendant's `cmod`
@@ -2262,7 +2299,11 @@ fn ll_factor_node<T: Scalar>(
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + nb).min(ncol);
-        let t_g = if prof { Some(std::time::Instant::now()) } else { None };
+        let t_g = if prof {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         // getf2: unblocked Bunch-Kaufman over the panel columns [kb, ke), with the
         // pivot candidate and rank-1/rank-2 trailing updates bounded to `ke` (the
         // columns beyond `ke` are deferred to the panel GEMM below). The L21
@@ -2419,7 +2460,11 @@ fn ll_factor_node<T: Scalar>(
         if let Some(t) = t_g {
             PROF_LDLT_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
         }
-        let t_s = if prof { Some(std::time::Instant::now()) } else { None };
+        let t_s = if prof {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         // Deferred panel trailing update: panel[ke.., ke..ncol] −= L21·D·Rᵀ, where
         // L21 = panel rows [ke,nrow) × panel cols [kb,ke) (mt×pw), G = L21·D (block-
         // diagonal D), and R = the first `cw` rows of L21 (the rows that are
@@ -2626,7 +2671,18 @@ fn ll_factor_subtree<T: Scalar>(
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
-    ll_factor_node(s, sym, a_perm, rs, update_list, store, emit, perturb_floor, n_perturbed, kt)?;
+    ll_factor_node(
+        s,
+        sym,
+        a_perm,
+        rs,
+        update_list,
+        store,
+        emit,
+        perturb_floor,
+        n_perturbed,
+        kt,
+    )?;
     // Free each descendant whose last consumer this node was (refcount→0), and `s`
     // itself if it has no consumers - compacting before releasing the dense panel.
     // Disjoint `k`, so the wide top-of-tree free runs in parallel.
@@ -2786,8 +2842,12 @@ fn factor_left_looking<T: Scalar>(
     // SAFETY: factorization complete; every position written exactly once in-node.
     let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm[e].get() }).collect();
     let d_diag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_diag[e].get() }).collect();
-    let d_subdiag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_subdiag[e].get() }).collect();
-    let two_by_two: Vec<bool> = (0..n).map(|e| unsafe { *emit.two_by_two[e].get() }).collect();
+    let d_subdiag: Vec<T> = (0..n)
+        .map(|e| unsafe { *emit.d_subdiag[e].get() })
+        .collect();
+    let two_by_two: Vec<bool> = (0..n)
+        .map(|e| unsafe { *emit.two_by_two[e].get() })
+        .collect();
     let inertia = Inertia::new(
         emit.inertia_pos.load(Ordering::Relaxed),
         emit.inertia_neg.load(Ordering::Relaxed),
@@ -2834,7 +2894,10 @@ mod tests {
         }
         let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
         for method in [FactorMethod::LeftLooking, FactorMethod::Multifrontal] {
-            let s = SolverSettings::default().with_method(method).with_nemin(1).with_threads(0);
+            let s = SolverSettings::default()
+                .with_method(method)
+                .with_nemin(1)
+                .with_threads(0);
             let f = factor_sparse_ldlt_with(&a, &s).expect("deep chain factors without overflow");
             assert_eq!(f.n, n);
         }
@@ -2877,7 +2940,10 @@ mod tests {
         };
         let eager = factor_sparse_ldlt_with(&a, &mf(MemoryMode::Eager)).unwrap();
         let low = factor_sparse_ldlt_with(&a, &mf(MemoryMode::LowMemory)).unwrap();
-        assert_eq!(eager.l_values, low.l_values, "L values differ under LowMemory");
+        assert_eq!(
+            eager.l_values, low.l_values,
+            "L values differ under LowMemory"
+        );
         assert_eq!(eager.l_row_idx, low.l_row_idx, "L row indices differ");
         assert_eq!(eager.l_col_ptr, low.l_col_ptr, "L column pointers differ");
         assert_eq!(eager.d_diag, low.d_diag, "D differs under LowMemory");
@@ -2925,7 +2991,10 @@ mod tests {
         };
         let parallel = factor_sparse_ldlt_with(&a, &mk(0)).unwrap();
         let serial = factor_sparse_ldlt_with(&a, &mk(usize::MAX)).unwrap();
-        assert_eq!(parallel.l_values, serial.l_values, "parallel front subtraction not bit-identical");
+        assert_eq!(
+            parallel.l_values, serial.l_values,
+            "parallel front subtraction not bit-identical"
+        );
         assert_eq!(parallel.d_diag, serial.d_diag);
     }
 
@@ -2959,14 +3028,28 @@ mod tests {
         }
         let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
         let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
-        let mk = |method| SolverSettings::default().with_method(method).with_threads(0);
+        let mk = |method| {
+            SolverSettings::default()
+                .with_method(method)
+                .with_threads(0)
+        };
         let mf = factor_sparse_ldlt_with(&a, &mk(FactorMethod::Multifrontal)).unwrap();
         let rl = factor_sparse_ldlt_with(&a, &mk(FactorMethod::RightLooking)).unwrap();
-        assert_eq!(rl.l_values, mf.l_values, "right-looking L differs from multifrontal");
-        assert_eq!(rl.l_row_idx, mf.l_row_idx, "right-looking L pattern differs");
+        assert_eq!(
+            rl.l_values, mf.l_values,
+            "right-looking L differs from multifrontal"
+        );
+        assert_eq!(
+            rl.l_row_idx, mf.l_row_idx,
+            "right-looking L pattern differs"
+        );
         assert_eq!(rl.d_diag, mf.d_diag, "right-looking D differs");
         let x = solve_ldlt(&rl, &b).unwrap();
-        assert!(residual_inf(&a, &x, &b) < 1e-9, "right-looking residual {}", residual_inf(&a, &x, &b));
+        assert!(
+            residual_inf(&a, &x, &b) < 1e-9,
+            "right-looking residual {}",
+            residual_inf(&a, &x, &b)
+        );
     }
 
     #[test]
@@ -3106,7 +3189,10 @@ mod tests {
         .unwrap();
         assert_eq!(mf.l_values.len(), ll.l_values.len(), "fill must match");
         let xl = solve_ldlt(&ll, &b).unwrap();
-        assert!(residual_inf(&a, &xl, &b) < 1e-9, "left-looking grid residual");
+        assert!(
+            residual_inf(&a, &xl, &b) < 1e-9,
+            "left-looking grid residual"
+        );
     }
 
     #[test]
@@ -3176,8 +3262,14 @@ mod tests {
         );
         let xm = solve_ldlt(&mf, &b).unwrap();
         let xl = solve_ldlt(&ll, &b).unwrap();
-        assert!(residual_inf(&a, &xl, &b) < 1e-9, "left-looking indefinite residual");
-        assert!(residual_inf(&a, &xm, &b) < 1e-9, "multifrontal indefinite residual");
+        assert!(
+            residual_inf(&a, &xl, &b) < 1e-9,
+            "left-looking indefinite residual"
+        );
+        assert!(
+            residual_inf(&a, &xm, &b) < 1e-9,
+            "multifrontal indefinite residual"
+        );
         let diff = (0..n).map(|i| (xm[i] - xl[i]).abs()).fold(0.0, f64::max);
         assert!(diff < 1e-7, "solutions differ by {diff}");
     }

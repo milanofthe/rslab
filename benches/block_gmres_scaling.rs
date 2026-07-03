@@ -32,7 +32,8 @@ fn build_rhs(n: usize, s: usize) -> Vec<C> {
     let mut bblk = vec![C::default(); n * s];
     for k in 0..s {
         for i in 0..n {
-            bblk[k * n + i] = Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            bblk[k * n + i] =
+                Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
         }
     }
     bblk
@@ -42,17 +43,35 @@ fn build_rhs(n: usize, s: usize) -> Vec<C> {
 /// `RLA_VARIANT` label (e.g. `bcgs2` / `mgs`), so the plot script can overlay the
 /// current build against the committed reference. No-op if `RLA_JSON` is unset.
 fn emit(mode: &str, variant: &str, fields: &str) {
-    let Ok(path) = std::env::var("RLA_JSON") else { return };
+    let Ok(path) = std::env::var("RLA_JSON") else {
+        return;
+    };
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{{\"mode\":\"{mode}\",\"variant\":\"{variant}\",{fields}}}");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(
+            f,
+            "{{\"mode\":\"{mode}\",\"variant\":\"{variant}\",{fields}}}"
+        );
     }
 }
 
 fn main() {
-    let dim: usize = std::env::var("RLA_DIM").ok().and_then(|v| v.parse().ok()).unwrap_or(180);
-    let s: usize = std::env::var("RLA_BLOCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
-    let droptol: f64 = std::env::var("RLA_DROPTOL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.01);
+    let dim: usize = std::env::var("RLA_DIM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(180);
+    let s: usize = std::env::var("RLA_BLOCK_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let droptol: f64 = std::env::var("RLA_DROPTOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.01);
     let variant = std::env::var("RLA_VARIANT").unwrap_or_else(|_| "bcgs2".into());
 
     let a = convection_diffusion::<C>(&[dim, dim], 0.01, Flow::Rotating, true);
@@ -65,18 +84,29 @@ fn main() {
     let lu = factor_general_lu(&a, &opts).unwrap();
     let (tol, maxit, restart) = (1e-6, 400, 80);
 
-    let max_p = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+    let max_p = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
 
     // --- Grid mode: per-RHS cost over the FULL thread ladder × RHS count, so the
     // thread scaling is visible at every RHS size (not just 1-vs-max). ---
     if std::env::var("RLA_GRID").is_ok() {
-        let threads = [1usize, 2, 4, 6, 8, 12].iter().copied().filter(|&p| p <= max_p).collect::<Vec<_>>();
+        let threads = [1usize, 2, 4, 6, 8, 12]
+            .iter()
+            .copied()
+            .filter(|&p| p <= max_p)
+            .collect::<Vec<_>>();
         let s_list = [1usize, 4, 16];
         // Prebuild RHS + pools once.
         let rhs: Vec<Vec<C>> = s_list.iter().map(|&s| build_rhs(n, s)).collect();
         let pools: Vec<_> = threads
             .iter()
-            .map(|&p| rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap())
+            .map(|&p| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(p)
+                    .build()
+                    .unwrap()
+            })
             .collect();
         print!("Block GMRES per-RHS(ms) over threads × s  [n={n}  drop_tol={droptol}]\nthreads");
         for &s in &s_list {
@@ -116,8 +146,14 @@ fn main() {
 
     // --- RHS-sweep mode: fix threads, grow s, report per-RHS cost ---
     if std::env::var("RLA_RHS_SWEEP").is_ok() {
-        let p: usize = std::env::var("RLA_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(max_p);
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap();
+        let p: usize = std::env::var("RLA_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(max_p);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(p)
+            .build()
+            .unwrap();
         println!(
             "Block GMRES RHS scaling  [n={n}  threads={p}  drop_tol={droptol}]\n\
               s    time(ms)   time/RHS(ms)   iters   res"
@@ -134,7 +170,10 @@ fn main() {
             }
             let maxres = res.final_res.iter().copied().fold(0.0, f64::max);
             let tpr = ms / s as f64;
-            println!("{s:3}   {ms:9.1}    {tpr:9.1}     {:5}   {:.1e}", res.iters, maxres);
+            println!(
+                "{s:3}   {ms:9.1}    {tpr:9.1}     {:5}   {:.1e}",
+                res.iters, maxres
+            );
             emit(
                 "rhs",
                 &variant,
@@ -166,11 +205,14 @@ fn main() {
     );
     let mut t1 = 0.0f64;
     for (idx, &p) in plan.iter().enumerate() {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(p).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(p)
+            .build()
+            .unwrap();
         let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart, None).unwrap();
         let mut res = pool.install(solve); // warm up (page-in, branch predictors)
-        // Best of several timed runs: single wall-clock samples are noisy on a
-        // loaded machine, and the minimum is the least-contended estimate.
+                                           // Best of several timed runs: single wall-clock samples are noisy on a
+                                           // loaded machine, and the minimum is the least-contended estimate.
         let reps = 3;
         let mut ms = f64::INFINITY;
         for _ in 0..reps {

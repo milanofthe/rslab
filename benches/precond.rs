@@ -17,7 +17,7 @@ use std::time::Instant;
 use num_complex::Complex;
 use rslab::sparse::csc::CscMatrix;
 use rslab::{
-    cocg, SolverSettings, LdltSolver, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+    cocg, LdltSolver, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner, SolverSettings,
     ZeroPivotAction,
 };
 

@@ -72,7 +72,16 @@ fn bench_file(path: &std::path::Path) {
 
     // Unpreconditioned GMRES baseline (capped).
     let t = Instant::now();
-    let r0 = gmres(&a, &b, &NoPreconditioner, GMRES_TOL, 400, GMRES_RESTART, None).unwrap();
+    let r0 = gmres(
+        &a,
+        &b,
+        &NoPreconditioner,
+        GMRES_TOL,
+        400,
+        GMRES_RESTART,
+        None,
+    )
+    .unwrap();
     println!(
         "  {:24} {:24} gmres: {:4} iters  {:8.1} ms  res={:.1e}{}",
         "unpreconditioned",

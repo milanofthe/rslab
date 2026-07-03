@@ -25,7 +25,10 @@ fn env_named_profile_is_auto_loaded() {
     // the recommendation itself is well-formed).
     let f = StructuralFeatures::default();
     let s = recommend_settings_pathed(&f, DEFAULT_TUNE_WEIGHT, 0.0, SolverPath::Ldlt);
-    assert!(s.nemin >= 1, "recommendation is well-formed under an env profile");
+    assert!(
+        s.nemin >= 1,
+        "recommendation is well-formed under an env profile"
+    );
 
     // The env profile is now the active one, so a manual re-apply is rejected
     // (set-once) — confirming the env profile was actually installed.
@@ -37,5 +40,8 @@ fn env_named_profile_is_auto_loaded() {
     let _ = std::fs::remove_file(&path);
     // Round-trip sanity on the guard value we wrote.
     let reloaded = TunerProfile::load(&std::env::temp_dir().join("does_not_exist.json"));
-    assert!(reloaded.is_err(), "loading a missing profile is a clean error");
+    assert!(
+        reloaded.is_err(),
+        "loading a missing profile is a clean error"
+    );
 }

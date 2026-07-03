@@ -68,8 +68,14 @@ fn run(path: &std::path::Path, s: usize, niter: usize) {
 }
 
 fn main() {
-    let s: usize = std::env::var("RLA_BLOCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
-    let niter: usize = std::env::var("RLA_NITER").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let s: usize = std::env::var("RLA_BLOCK_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    let niter: usize = std::env::var("RLA_NITER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
     let mut files: Vec<_> = match std::fs::read_dir(DIR) {
         Ok(rd) => rd
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -82,7 +88,9 @@ fn main() {
     };
     files.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
     let filter = std::env::var("RLA_DIAG_FILTER").unwrap_or_default();
-    println!("Multi-RHS solve throughput: s separate solves vs one block solve  [s={s} niter={niter}]\n");
+    println!(
+        "Multi-RHS solve throughput: s separate solves vs one block solve  [s={s} niter={niter}]\n"
+    );
     for f in &files {
         if filter.is_empty() || f.file_name().unwrap().to_string_lossy().contains(&filter) {
             run(f, s, niter);
