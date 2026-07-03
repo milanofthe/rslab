@@ -28,6 +28,15 @@ python benches/block_gmres_plot.py
 echo "[report] preconditioner + GMRES trade-off (needs $OUT/precond_gmres.jsonl)"
 python benches/precond_gmres_plot.py
 
+echo "[report] GCRO-DR subspace recycling (needs $OUT/recycle_study.jsonl)"
+python benches/recycle_study_plot.py
+
+echo "[report] block-GMRES within-cycle deflation (needs $OUT/deflation_study.jsonl)"
+python benches/deflation_study_plot.py
+
+echo "[report] adaptive GMRES restart under a memory budget (needs $OUT/adaptive_restart.jsonl)"
+python benches/adaptive_restart_plot.py
+
 echo "[report] memory + runtime breakdown (RSLAB LL/MF)"
 python benches/corpus_breakdown.py $OUT/corpus.jsonl $OUT/corpus_estimate.jsonl
 
