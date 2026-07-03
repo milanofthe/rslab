@@ -30,6 +30,13 @@ benches/bench_out/*.log
 # block_gmres_plot overlays against the current build.
 !benches/bench_out/block_gmres_mgs_ref.jsonl
 
+# Exception: the iterative-layer study data is committed so the report figures are
+# reproducible and the headline numbers are inspectable without re-running the benches.
+!benches/bench_out/recycle_study.jsonl
+!benches/bench_out/deflation_study.jsonl
+!benches/bench_out/fgmres_accounting.jsonl
+!benches/bench_out/adaptive_restart.jsonl
+
 # Local calibration cache (the `tuning` feature also writes this to the OS temp dir)
 rslab-calib/
 rla-calib/

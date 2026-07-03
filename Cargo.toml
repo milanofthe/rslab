@@ -177,6 +177,24 @@ harness = false
 required-features = ["matgen"]
 
 [[bench]]
+name = "recycle_study"
+harness = false
+
+[[bench]]
+name = "deflation_study"
+harness = false
+
+[[bench]]
+name = "fgmres_accounting"
+harness = false
+required-features = ["matgen"]
+
+[[bench]]
+name = "adaptive_restart"
+harness = false
+required-features = ["matgen"]
+
+[[bench]]
 name = "solve_many"
 harness = false
 

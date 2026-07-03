@@ -1,0 +1,3 @@
+{"n":3600,"drop_tol":1e-1,"restart":20,"iters":24,"cycles":3,"fgmres_applies":24,"plain_applies":27,"saved":3,"res":9.941332471449232e-9}
+{"n":10000,"drop_tol":1e-1,"restart":20,"iters":53,"cycles":4,"fgmres_applies":53,"plain_applies":57,"saved":4,"res":8.520185613230971e-9}
+{"n":19600,"drop_tol":1e-1,"restart":20,"iters":89,"cycles":6,"fgmres_applies":89,"plain_applies":95,"saved":6,"res":9.99545192887002e-9}
