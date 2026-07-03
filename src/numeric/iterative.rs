@@ -799,6 +799,59 @@ pub struct BlockKrylovResult<T> {
     pub final_res: Vec<f64>,
 }
 
+/// Form and add one converged column's solution contribution to the global `x`
+/// **mid-cycle**, so the column can be compacted out of the active panel: back-
+/// substitute `y` from that column's frozen Hessenberg/Givens state (`h`,`g`,`jd`
+/// rows), build `V_ap · y` from its Arnoldi basis at the *current* stride `sa`,
+/// apply the preconditioner once (`x_c += M⁻¹·(V_ap·y)`). This is the block
+/// analogue of the single-RHS restart update, issued for a single column the
+/// instant its Hessenberg estimate reaches `tol`, so the batched applies can then
+/// shrink to the still-active width.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn finalize_block_column<T, M>(
+    precond: &M,
+    vbas: &[T],
+    h: &[Vec<Vec<T>>],
+    g: &[Vec<T>],
+    jd: usize,
+    ap: usize,
+    sa: usize,
+    n: usize,
+    c: usize,
+    x: &mut [T],
+) -> Result<(), RslabError>
+where
+    T: Scalar,
+    M: Preconditioner<T> + ?Sized,
+{
+    if jd == 0 {
+        return Ok(());
+    }
+    let mut y = vec![T::zero(); jd];
+    for i in (0..jd).rev() {
+        let mut acc = g[ap][i];
+        for k in (i + 1)..jd {
+            acc = acc - h[ap][i][k] * y[k];
+        }
+        y[i] = acc * h[ap][i][i].recip();
+    }
+    let mut vy = vec![T::zero(); n];
+    for i in 0..jd {
+        let yi = y[i];
+        let vb = (i * sa + ap) * n;
+        for k in 0..n {
+            vy[k] = vy[k] + vbas[vb + k] * yi;
+        }
+    }
+    let mut z = vec![T::zero(); n];
+    precond.apply(&vy, &mut z)?;
+    let cb = c * n;
+    for k in 0..n {
+        x[cb + k] = x[cb + k] + z[k];
+    }
+    Ok(())
+}
+
 /// Right-preconditioned restarted **block GMRES** for `s` right-hand sides `b`
 /// (column-major `n×s`). The `s` systems advance in lockstep so the two expensive
 /// operations - the operator matvec and the preconditioner solve - are issued
@@ -927,7 +980,7 @@ where
                 act.push(c);
             }
         }
-        let sa = act.len();
+        let mut sa = act.len();
         if sa == 0 {
             break;
         }
@@ -959,17 +1012,20 @@ where
             }
             block_project(&vbas, &wblk, blocks, sa, n, &mut proj1, &mut proj_scratch);
             block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1);
-            let reorth = (0..sa).any(|ap| norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap]);
+            // Frozen (converged-this-cycle) columns are excluded from the reorth
+            // trigger: they are compacted out at each step boundary, so a stale or
+            // collapsed frozen column can never force an unnecessary panel-wide
+            // second orthogonalization pass over the still-active columns.
+            let reorth = (0..sa)
+                .any(|ap| !inner_done[ap] && norm2(&wblk[ap * n..ap * n + n]) < REORTH_ETA * wnorm0[ap]);
             if reorth {
                 block_project(&vbas, &wblk, blocks, sa, n, &mut proj2, &mut proj_scratch);
                 block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2);
             }
-            let mut all_done = true;
             for ap in 0..sa {
                 if inner_done[ap] {
                     continue;
                 }
-                all_done = false;
                 let wb = ap * n;
                 // Hessenberg column: projection pass, plus the reorth pass if taken.
                 for i in 0..=j {
@@ -1009,43 +1065,95 @@ where
                 }
             }
             total += 1;
-            if all_done {
-                break;
+            // **Within-cycle deflation.** Columns whose Hessenberg estimate reached
+            // `tol` this step are (a) finalized now - their solution contribution is
+            // formed from the basis at the *current* stride and added to `x` - and
+            // (b) compacted out of the active panel, remapping the per-column
+            // Arnoldi state and rewriting the basis at the narrower stride `sa`.
+            // The next step's batched preconditioner / operator applies therefore
+            // shrink to the still-active width, exactly as promised: a fast RHS is
+            // no longer dragged along by the slowest one until the next restart.
+            if inner_done.iter().any(|&d| d) {
+                for ap in 0..sa {
+                    if inner_done[ap] {
+                        finalize_block_column(precond, &vbas, &h, &g, jdim[ap], ap, sa, n, act[ap], &mut x)?;
+                    }
+                }
+                let survivors: Vec<usize> = (0..sa).filter(|&ap| !inner_done[ap]).collect();
+                let sa_new = survivors.len();
+                // Basis columns `0..=j+1` are populated for the survivors. Compact
+                // to the new stride blocks-outer / survivors-inner so the write
+                // offset is monotonically increasing and never clobbers an unread
+                // source (each column's new offset is `<=` its old offset).
+                let blocks_built = j + 2;
+                for i in 0..blocks_built {
+                    for (ap_new, &ap_old) in survivors.iter().enumerate() {
+                        let src = (i * sa + ap_old) * n;
+                        let dst = (i * sa_new + ap_new) * n;
+                        if src != dst {
+                            vbas.copy_within(src..src + n, dst);
+                        }
+                    }
+                }
+                // Remap the per-column Arnoldi state (Vec swaps are O(1) pointer
+                // moves; the frozen columns' now-stale slots are never read again -
+                // the next cycle re-initializes positions `0..sa`).
+                for (ap_new, &ap_old) in survivors.iter().enumerate() {
+                    if ap_new != ap_old {
+                        h.swap(ap_new, ap_old);
+                        cs.swap(ap_new, ap_old);
+                        sn.swap(ap_new, ap_old);
+                        g.swap(ap_new, ap_old);
+                        jdim[ap_new] = jdim[ap_old];
+                        act[ap_new] = act[ap_old];
+                    }
+                }
+                sa = sa_new;
+                act.truncate(sa);
+                inner_done = vec![false; sa];
+                if sa == 0 {
+                    break;
+                }
             }
         }
 
-        // x_c += M⁻¹ (V_a y_a): back-substitute each active RHS, build the compact
-        // VY block, one batched preconditioner apply, then scatter to global `x`.
-        for e in vyblk[..sa * n].iter_mut() {
-            *e = T::zero();
-        }
-        for ap in 0..sa {
-            let jd = jdim[ap];
-            if jd == 0 {
-                continue;
+        // x_c += M⁻¹ (V_a y_a): back-substitute each still-active RHS, build the
+        // compact VY block, one batched preconditioner apply, then scatter to
+        // global `x`. Columns that deflated mid-cycle were already finalized
+        // individually above, so `sa == 0` here means the whole panel converged
+        // within the cycle and there is nothing left to batch.
+        if sa > 0 {
+            for e in vyblk[..sa * n].iter_mut() {
+                *e = T::zero();
             }
-            let mut y = vec![T::zero(); jd];
-            for i in (0..jd).rev() {
-                let mut acc = g[ap][i];
-                for k in (i + 1)..jd {
-                    acc = acc - h[ap][i][k] * y[k];
+            for ap in 0..sa {
+                let jd = jdim[ap];
+                if jd == 0 {
+                    continue;
                 }
-                y[i] = acc * h[ap][i][i].recip();
-            }
-            let vyb = ap * n;
-            for i in 0..jd {
-                let yi = y[i];
-                let vb = (i * sa + ap) * n;
-                for k in 0..n {
-                    vyblk[vyb + k] = vyblk[vyb + k] + vbas[vb + k] * yi;
+                let mut y = vec![T::zero(); jd];
+                for i in (0..jd).rev() {
+                    let mut acc = g[ap][i];
+                    for k in (i + 1)..jd {
+                        acc = acc - h[ap][i][k] * y[k];
+                    }
+                    y[i] = acc * h[ap][i][i].recip();
+                }
+                let vyb = ap * n;
+                for i in 0..jd {
+                    let yi = y[i];
+                    let vb = (i * sa + ap) * n;
+                    for k in 0..n {
+                        vyblk[vyb + k] = vyblk[vyb + k] + vbas[vb + k] * yi;
+                    }
                 }
             }
-        }
-        precond.apply_block(&vyblk[..sa * n], &mut zblk[..sa * n], sa, n)?;
-        for ap in 0..sa {
-            let c = act[ap];
-            for i in 0..n {
-                x[c * n + i] = x[c * n + i] + zblk[ap * n + i];
+            precond.apply_block(&vyblk[..sa * n], &mut zblk[..sa * n], sa, n)?;
+            for ap in 0..sa {
+                let c = act[ap];
+                for i in 0..n {
+                    x[c * n + i] = x[c * n + i] + zblk[ap * n + i];
+                }
             }
         }
     }
@@ -1484,6 +1592,90 @@ mod tests {
                 .fold(0.0, f64::max);
             assert!(diff < 1e-9, "column {k} differs from single solve by {diff}");
         }
+    }
+
+    #[test]
+    fn gmres_block_within_cycle_deflation_shrinks_applies() {
+        // Different-convergence-rate regime (issue #4): a diagonal operator with
+        // distinct eigenvalues, unpreconditioned, with RHS `k` supported on `k+1`
+        // distinct eigenvalues. GMRES on such a RHS converges in exactly `k+1`
+        // steps, so the columns finish at staggered steps within a *single* cycle.
+        // The fix must (i) still solve every column exactly like single-RHS GMRES
+        // and (ii) actually shrink the batched operator applies as columns deflate
+        // mid-cycle - not only at restart. A counting operator records the width
+        // of every `apply_block`, and we assert the panel narrows.
+        use std::sync::Mutex;
+
+        struct CountingOp<'a> {
+            inner: &'a GeneralCsc<C>,
+            widths: Mutex<Vec<usize>>,
+        }
+        impl LinearOperator<C> for CountingOp<'_> {
+            fn n(&self) -> usize {
+                self.inner.n()
+            }
+            fn apply(&self, x: &[C], y: &mut [C]) {
+                self.widths.lock().unwrap().push(1);
+                self.inner.apply(x, y);
+            }
+            fn apply_block(&self, x: &[C], y: &mut [C], s: usize) {
+                self.widths.lock().unwrap().push(s);
+                self.inner.apply_block(x, y, s);
+            }
+        }
+
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let n = 8;
+        let s = 4;
+        // Diagonal operator with distinct entries → the minimal polynomial degree
+        // of a RHS equals the number of distinct diagonal entries in its support.
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            rr.push(i);
+            cc.push(i);
+            vv.push(c(2.0 + i as f64, 0.5 + 0.1 * i as f64));
+        }
+        let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        // RHS `k` = sum of the first `k+1` unit vectors → converges in `k+1` steps.
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..=k {
+                bblk[k * n + i] = c(1.0, 0.0);
+            }
+        }
+
+        let op = CountingOp {
+            inner: &a,
+            widths: Mutex::new(Vec::new()),
+        };
+        let res = gmres_block(&op, &bblk, s, &NoPreconditioner, 1e-12, 200, 40).unwrap();
+        assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
+
+        // (i) Every column matches the single-RHS GMRES solve of that column.
+        for k in 0..s {
+            let single = gmres(&a, &bblk[k * n..k * n + n], &NoPreconditioner, 1e-12, 200, 40).unwrap();
+            let diff = (0..n)
+                .map(|i| (res.x[k * n + i] - single.x[i]).norm())
+                .fold(0.0, f64::max);
+            assert!(diff < 1e-9, "column {k} differs from single solve by {diff}");
+        }
+
+        // (ii) The batched applies actually shrank mid-cycle. Without within-cycle
+        // deflation every `apply_block` would run at full width `s`; with it, later
+        // steps run narrower. Assert a full-width apply happened (the first step),
+        // that some apply narrowed below `s`, that the panel drained to width 1,
+        // and that the total column-applies fell below the full-width bound.
+        let widths = op.widths.into_inner().unwrap();
+        let ncalls = widths.len();
+        let total_cols: usize = widths.iter().sum();
+        assert_eq!(*widths.iter().max().unwrap(), s, "the first cycle must open at full width");
+        assert!(*widths.iter().min().unwrap() < s, "no apply narrowed: deflation did not shrink the panel");
+        assert!(widths.contains(&1), "the panel must drain to a single active column");
+        assert!(
+            total_cols < s * ncalls,
+            "total column-applies {total_cols} not below the full-width bound {}",
+            s * ncalls
+        );
     }
 
     #[test]
