@@ -32,7 +32,8 @@
 \newcommand{\LDLt}{\mathbf{L}\mathbf{D}\mathbf{L}^{\!\top}}
 
 \title{\textbf{\textcolor{accent}{RSLAB}}\\[2pt]
-\large A Pure-Rust Sparse Direct Solver: Algorithms, A-Priori Predictors, and a Learned Configuration Tuner}
+\large A Pure-Rust Sparse Direct Solver with Preconditioned and Recycled Krylov
+Refinement: Algorithms, A-Priori Predictors, and a Learned Configuration Tuner}
 \author{Milan Rother}
 \date{\today}
 
@@ -56,9 +57,15 @@ deterministic guard stack that keeps its predicted memory below the untuned defa
 falls back to the default outside the training range. The numeric factorization is
 bit-identical regardless of the worker count, and the resource planner is a pure function
 of its inputs, which makes batched execution reproducible and its memory and runtime cost
-computable in advance. This report documents the algorithms, the predictors, the tunable
-stages, the determinism properties, and the solver-in-the-loop execution model, and
-reports the solver against \textsf{faer}, MKL PARDISO, and SuperLU over the SuiteSparse
+computable in advance. When the factor is made approximate --- static-pivoted for an
+indefinite operator, or thresholded to save memory --- it becomes a preconditioner, and
+\rT{} closes the accuracy gap with a matching Krylov layer: complex-symmetric short
+recurrences (COCG/COCR), flexible GMRES (FGMRES) with a documented backward-stable
+orthogonalization split, a batched multi-RHS block GMRES with within-cycle deflation, and
+GCRO-DR Krylov-subspace recycling for sequences of related solves. This report documents
+the algorithms, the predictors, the tunable stages, the determinism properties, the
+solver-in-the-loop execution model, and the preconditioned and recycled iterative layer,
+and reports the solver against \textsf{faer}, MKL PARDISO, and SuperLU over the SuiteSparse
 collection.
 \end{abstract}
 
@@ -69,7 +76,11 @@ complex-symmetric systems of frequency-domain electromagnetic and FEM analysis, 
 curl--curl (N\'ed\'elec edge-element) Maxwell problems with lossy media or PML, which are
 complex-symmetric rather than Hermitian. The implementation is stable Rust with no
 C/Fortran dependency and no BLAS/LAPACK/METIS linkage, and is exposed to Python through a
-PyO3 layer.
+PyO3 layer. The default factorization is exact and the solve is a direct
+back-substitution; when the factor is deliberately made approximate it serves as a
+preconditioner for the built-in Krylov solvers (Sec.~\ref{sec:iterative}), which are the
+intended path for the large indefinite complex-symmetric systems and the matrix-free
+MoM/FEM operators the direct factor cannot hold whole.
 
 \section{Architecture}
 The solver follows the standard three-phase sparse-direct flow. \emph{Analyze} orders the
@@ -108,7 +119,7 @@ tuner respectively.
 \code{rslab-amf}   & Approximate minimum fill (HAMF4) \\
 \code{rslab-metis} & Multilevel nested dissection (iterative driver, K\"onig separators) \\
 \code{symbolic}    & Elimination tree, supernode amalgamation, column counts, ordering dispatch \\
-\code{numeric}     & Supernodal $\LDLt$, multifrontal LU, panel-freeing, dense SIMD kernels, scoped pools \\
+\code{numeric}     & Supernodal $\LDLt$, multifrontal LU, panel-freeing, dense SIMD kernels, scoped pools; the Krylov layer (COCG/COCR, FGMRES, block GMRES, GCRO-DR) and its dense harmonic-Ritz eigensolver \\
 \code{diagnostics} & Per-path a-priori memory and flop estimates \\
 \code{analysis}    & Structural feature extraction, thread-count predictor \\
 \code{tuning}      & Hardware calibration, runtime estimate, budget-aware resource planner \\
@@ -275,8 +286,8 @@ returns a rank-deficiency error on a pivot below the tolerance. \code{PerturbToE
 any pivot of magnitude below a floor to that floor while preserving its phase,
 $d\mapsto d\,(\text{floor}/|d|)$, so the factorization satisfies $\LDLt = A+\Delta$ with a
 bounded $\Delta$ and never fails; the count of perturbed pivots is tracked per front. This
-never-fail factor is intended as a preconditioner for iterative refinement; the Krylov
-path that consumes it is outside the scope of this report.
+never-fail factor is the preconditioner the Krylov layer of Sec.~\ref{sec:iterative}
+consumes.
 
 \subsection{Kernel scheduling and scoped pools}
 Four flop-count thresholds route the dense work, passed as a cheap \code{Copy}
@@ -619,30 +630,136 @@ which the current calibration does not model (it measures per-solve speedup, not
 contention), the conservatism of the memory estimate, which reduces packing density, and
 NUMA placement on multi-socket machines.
 
-\section{Iterative refinement and preconditioning}
+\section{Preconditioned and recycled iterative solution}
+\label{sec:iterative}
 The default factorization is exact and the solve is a direct back-substitution. Two modes
-relax exactness: static pivoting lifts sub-floor pivots so an indefinite or near-singular
-system never fails, and threshold dropping / block-low-rank make
-the factor approximate to save memory. In both, the factor is a preconditioner $M\approx A$
-and accuracy is recovered by iteration. \rT{} ships restarted GMRES, a block / multi-RHS
-GMRES, and the short-recurrence COCG and COCR for the complex-symmetric case, plus classical
-iterative refinement against the original matrix. The block Krylov variants apply $M^{-1}$ to
-all right-hand sides through the parallel \code{solve\_many}, so a block solve inherits its
-\numrange{8}{19}$\times$ wide-RHS speedup; and the equilibration and pivot axes
-(Sec.~\ref{sec:tunable}) set the conditioning of that preconditioner factor. The exact-path
-work of this report is otherwise orthogonal to the Krylov layer --- it improves the factor
-the Krylov layer consumes.
+relax exactness: static pivoting (Sec.~\ref{sec:numeric}) lifts sub-floor pivots so an
+indefinite or near-singular system never fails, and threshold dropping / block-low-rank make
+the factor approximate to save memory. In both the factor is a preconditioner $M\approx A$
+and accuracy is recovered by iteration. \rT{} ships a Krylov layer for exactly this: the
+short-recurrence COCG and COCR for the complex-symmetric case, restarted flexible GMRES for
+the general case, a batched multi-RHS block GMRES, and GCRO-DR Krylov-subspace recycling for
+sequences of related solves. The iteration and the preconditioner are decoupled by two
+traits. \code{LinearOperator} supplies $y\leftarrow A x$ and a block $Y\leftarrow AX$; an
+explicit \code{CscMatrix}/\code{GeneralCsc} implements it, but it may equally be
+\emph{matrix-free} --- an FMM/MLFMA MoM operator the caller writes --- with \rT{} factoring
+only the sparse near-field as the preconditioner. \code{Preconditioner} supplies
+$z\leftarrow M^{-1}r$ and a block $Z\leftarrow M^{-1}R$; a factored \code{LdltSolver} or
+\code{LuSolver} implements it through the parallel \code{solve\_many}, so a block Krylov
+solve inherits the \numrange{8}{19}$\times$ wide-RHS speedup of the triangular solve. The
+equilibration and pivot axes (Sec.~\ref{sec:tunable}) set the conditioning of that
+preconditioner factor. Everything below is \code{src/numeric/iterative.rs} (with the small
+dense harmonic-Ritz eigensolver in \code{src/numeric/dense\_eig.rs}).
 
-\subsection{Block orthogonalization}
+\subsection{Complex-symmetric short recurrences}
+For $A=A^{\top}$ (complex symmetric, PARDISO \code{mtype 6}, the frequency-domain EM/FEM
+target) the iterative method of choice is COCG~\cite{cocg}, structurally conjugate gradient
+but with every inner product taken in the \emph{unconjugated} bilinear form
+$x^{\top}y=\sum_i x_i y_i$ --- the geometry a complex-symmetric (not Hermitian) operator
+induces; for $T=\code{f64}$ it reduces to preconditioned CG. COCR~\cite{cocr} is the
+conjugate-residual analogue, minimising a residual-like quantity and smoother on the
+strongly indefinite operators (high-frequency 3D Helmholtz) where COCG's residual can
+oscillate. Each costs one matvec and one preconditioner apply per step.
+
+\paragraph{Implementation.} \code{cocg} and \code{cocr} take the unconjugated inner product
+through the \code{dotu} helper (no conjugation), and use the genuine Euclidean norm only in
+the stopping test. A zero bilinear denominator ($p^{\top}\!Ap$ or $r^{\top}z$, possible for
+an indefinite operator) is a breakdown: the iteration stops and returns the best iterate with
+\code{converged = false} rather than dividing by zero.
+
+\subsection{GMRES and flexible GMRES}
+For a general (unsymmetric) operator the method is restarted GMRES~\cite{saadschultz}. Over
+the Krylov space $\mathcal K_m=\operatorname{span}\{r_0,Ar_0,\dots,A^{m-1}r_0\}$ the Arnoldi
+process builds an orthonormal basis $V_m$ and an upper-Hessenberg $\bar H_m\in\mathbb
+C^{(m+1)\times m}$ with $AV_m=V_{m+1}\bar H_m$; the iterate $x=x_0+V_m y$ that minimises
+$\lVert b-Ax\rVert_2$ is the solution of the small least-squares problem
+$\min_y\lVert \beta e_1-\bar H_m y\rVert_2$, kept in triangular form by applying a Givens
+rotation to each new Hessenberg column so the update is a back-substitution. After $m$ steps
+the basis is discarded and the cycle restarts from the current residual: GMRES($m$).
+
+Right preconditioning builds the space on $\tilde A=AM^{-1}$. Plain right-preconditioned
+GMRES forms $w=AM^{-1}v_j$ each step and, at the restart, spends one \emph{extra} $M^{-1}$
+solve rebuilding the update $x\mathrel{+}=M^{-1}(V_m y)$. Flexible GMRES~\cite{fgmres} instead
+\emph{keeps} the preconditioned Arnoldi vectors $z_j=M^{-1}v_j$ as a second basis
+$Z_m=[z_0\dots z_{m-1}]$ and updates $x\mathrel{+}=Z_m y$ directly. This (a) removes that
+per-cycle solve and (b) makes the method flexible: $M$ may \emph{vary} between steps (an inner
+Krylov solve, or a preconditioner strengthened across iterations), at the cost of one extra
+$n\cdot(m{+}1)$ basis.
+
+\paragraph{Implementation.} \code{gmres} is FGMRES: it stores the $Z$ basis \code{zb} and
+updates $x\mathrel{+}=Zy$, so it spends exactly one $M^{-1}$ apply per Arnoldi step and none
+at the restart (Sec.~\ref{sec:eval-iter} quantifies the saving). The Arnoldi basis is one
+flat $n\times(m{+}1)$ buffer and the Hessenberg a flat $(m{+}1)\times m$ buffer; the
+per-restart Krylov scalars (Hessenberg, Givens $c/s$, LS right-hand side, back-substitution)
+are hoisted out of the outer loop and cleared each cycle, so a many-restart (ill-conditioned)
+solve does no per-cycle heap allocation. Each cycle first measures the \emph{true} residual
+$\lVert b-Ax\rVert$ --- the only reliable stop test on ill-conditioned MoM near-field
+operators, where the Hessenberg least-squares estimate can dip below \code{tol} while the true
+residual is orders larger --- and reports it as \code{final\_res} with no separate post-loop
+matvec. The inner sweep early-exits on the least-squares estimate but does \emph{not} treat it
+as convergence; the top-of-cycle true-residual check is authoritative.
+
+\subsection{Orthogonalization}
+\label{sec:ortho}
+The Arnoldi orthogonalization sets the backward stability of the whole solve, and \rT{} uses
+two schemes for the two paths, each backward stable but with a different arithmetic profile.
+Modified Gram--Schmidt (MGS) loses orthogonality in proportion to the condition number of the
+basis; a second pass restores it, and the classical DGKS criterion~\cite{dgks} takes that
+second pass only when one sweep cancels more than a fixed fraction $\eta=1/\sqrt2$ of the
+vector norm. Classical Gram--Schmidt (CGS) is a single BLAS-2/3 sweep --- higher arithmetic
+intensity, but numerically weaker; CGS with one reorthogonalization (CGS2) recovers a
+backward-stable basis to working precision~\cite{giraud}, and the block generalization and its
+naming follow~\cite{barlow}.
+
+\paragraph{Implementation.} The single-RHS \code{gmres} uses MGS with the conditional DGKS
+second pass ($\eta=1/\sqrt2$), the latency-bound but strongest scheme for one right-hand side.
+The block path (below) uses \emph{block} CGS2: the whole $s$-column panel is projected against
+the basis in two panel-wide sweeps (\code{block\_project} / \code{block\_subtract}) for
+BLAS-3 arithmetic intensity, with the conditional second pass decided \emph{per column} from
+that column's own norm collapse, so a single ill-conditioned right-hand side no longer imposes
+the second orthogonalization on the well-conditioned ones. Because MGS and CGS accumulate the
+projections in a different order, a block solve with $s=1$ is \emph{not} bit-identical to the
+single-RHS \code{gmres} and may differ by up to $\pm1$ iteration at a residual straddling
+\code{tol}; both converge to the requested tolerance. This is a deliberate design point (the
+panel-wide reductions are what make the multi-RHS path fast and thread-count deterministic),
+covered by the \code{gmres\_block\_single\_rhs\_matches\_scalar\_gmres} test.
+
+\subsection{Block GMRES: batched-independent systems with within-cycle deflation}
+\label{sec:blockgmres}
+The multi-RHS solver drives $s$ right-hand sides in lockstep so the two expensive operations
+--- the operator matvec and the preconditioner solve --- are issued once per step as
+\emph{block} applies (\code{apply\_block}), each matrix or factor value touched once for all
+$s$ columns (the BLAS-3 arithmetic intensity that makes a wide solve pay over $s$ separate
+ones). To be precise, this is \emph{not} a shared-subspace block Krylov method (a single
+Krylov space over all right-hand sides); that is future work (issue~\#3). Each right-hand side
+keeps its \emph{own} Arnoldi basis, Hessenberg, and Givens state and converges identically to
+the single-RHS \code{gmres}; the systems share only the batched operator and preconditioner
+calls. This batched-independent design is what lets a column drop out cleanly the moment it
+converges: a right-hand side whose true residual reaches \code{tol} is \emph{deflated} from the
+block, and --- the v0.13 refinement --- a column whose Hessenberg estimate reaches \code{tol}
+\emph{mid-cycle} is finalized and compacted out immediately, so the batched applies shrink to
+the still-active width \emph{within} a cycle, not only at the restart. The fast-converging
+right-hand sides are never dragged along by the slowest one.
+
 The block matvec and block preconditioner apply are BLAS-3 and parallel; the remaining serial,
-latency-bound piece of the multi-RHS GMRES was the orthogonalization, done per right-hand side
-by modified Gram--Schmidt with DGKS reorthogonalization --- $O(m\cdot s)$ sequential BLAS-1
-reductions per Arnoldi step. \rT{} replaces it with \emph{block classical Gram--Schmidt with
-one reorthogonalization} (BCGS2): the whole $s$-column panel is projected against the basis in
-two panel-wide sweeps parallelized over the vector dimension in fixed row chunks. The result is
+latency-bound piece was the orthogonalization, done per right-hand side by MGS+DGKS ---
+$O(m\cdot s)$ sequential BLAS-1 reductions per Arnoldi step. \rT{} replaces it with the block
+CGS2 of Sec.~\ref{sec:ortho}: the whole $s$-column panel is projected against the basis in two
+panel-wide sweeps parallelized over the vector dimension in fixed row chunks. The result is
 memory-neutral (the same block Krylov basis $n\cdot s\cdot(m{+}1)$ dominates; the projection
 scratch is $\sim\!0.05\%$ of it) and \emph{bit-identical across thread counts} --- the chunked
 reduction sums in a fixed order independent of the worker count.
+
+\paragraph{Implementation.} \code{gmres\_block} sizes the Arnoldi basis for the full width $s$
+but uses only the first \code{sa} columns each cycle, where \code{sa} is the count of active
+right-hand sides; the basis stride is therefore \code{sa}, recomputed per cycle. When a column
+converges mid-cycle, \code{finalize\_block\_column} back-substitutes its frozen Hessenberg
+state, forms $V\!y$ from the basis at the \emph{current} stride, applies the preconditioner
+once, and adds the contribution to $x$; the surviving columns are then compacted to the
+narrower stride (a monotone copy that never clobbers unread data) and their per-column Arnoldi
+state is remapped by $O(1)$ vector swaps. The parallel orthogonalization reductions run in a
+scoped pool derived from the preconditioner's thread policy (Sec.~\ref{sec:determinism}), so
+factor and solve share one concurrency budget.
 
 Figure~\ref{fig:blockgmres} measures a right-preconditioned convection--diffusion solve
 ($n=\num{40000}$, $78$ GMRES iterations, complex \code{f64}). BCGS2 scales to $\sim\!2.5\times$
@@ -666,6 +783,73 @@ convection--diffusion, $n=\num{40000}$, complex \code{f64}.}
 \label{fig:blockgmres}
 \end{figure}
 
+The within-cycle deflation itself is a work reduction, measured in Fig.~\ref{fig:deflation}
+on a controlled multi-rate testbed (a diagonal operator whose right-hand sides have
+staggered minimal-polynomial degrees, so the columns converge at spread rates --- the
+benchmark-scale mirror of the width-counting deflation test in
+\code{src/numeric/iterative.rs}). A counting operator records the width of every batched
+apply. As the block widens, the
+compaction removes a growing fraction of the batched column-applies: at $s=16$ the operator
+does $\num{908}$ column-applies against the $\num{1376}$ a schedule with no mid-cycle
+compaction would do ($0.66\times$), and the active panel drains monotonically from $16$ to a
+single column within the first cycle.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{deflation_study.pdf}
+\caption{Block-GMRES within-cycle deflation. Left: total operator column-applies with
+mid-cycle compaction vs.\ the full-width bound (\code{calls}$\times s$), per block width.
+Right: the active-panel width per batched apply for $s=16$ --- the panel drains as columns
+converge, then refills briefly at the once-per-cycle full-width residual check. Multi-rate
+diagonal testbed, $n=\num{20000}$.}
+\label{fig:deflation}
+\end{figure}
+
+\subsection{Breakdown guard}
+The least-squares back-substitution divides by the Hessenberg diagonal, which after the Givens
+rotation is $\sqrt{|f|^2+|g|^2}$ and normally nonzero; but under exact stagnation or a
+rank-deficient Hessenberg (hard, indefinite, or singular operators) some diagonal can be zero,
+and an unguarded reciprocal would inject $\infty/\mathrm{NaN}$ into the iterate and the
+residual. \code{well\_conditioned\_dim} returns the largest leading dimension whose Hessenberg
+diagonals all clear a relative threshold $\varepsilon\cdot\max_i|h_{ii}|$; the solve is
+truncated to that well-conditioned prefix, the degenerate tail dropped, and the outer
+true-residual check reports non-convergence --- a \emph{deterministic breakdown} rather than a
+NaN. In the well-conditioned case every diagonal clears the threshold and the normal path is
+unaffected. Both the single-RHS and the block paths carry the guard (the block on each
+column's Hessenberg before its restart update).
+
+\subsection{Restart length and the memory budget}
+\label{sec:restart}
+The restart length $m$ trades convergence against memory. A longer basis captures more of the
+Krylov space, so fewer restart cycles are needed and the iteration count falls (with
+diminishing return); but the Arnoldi basis is allocated \emph{up front}, so $m$ fixes the
+memory floor regardless of how few iterations actually run --- $2n(m{+}1)$ scalars for the
+single-RHS $V$/$Z$ pair, $n\,s\,(m{+}1)$ for the block basis, which at $n=\num{100000}$,
+$s=10$, $m=80$, complex \code{f64} is $\approx\SI{13}{\giga\byte}$. The Python default
+therefore does not pin $m$: it caps an unspecified restart so the basis stays under a
+\SI{1}{\gibi\byte} budget, clamped to $[20,80]$, with an explicit value honoured exactly.
+Figure~\ref{fig:adaptrestart} shows the trade-off the policy navigates: a longer restart cuts
+iterations, and the adaptive rule rides at the maximum restart until the basis would exceed the
+budget, then declines to hold memory flat --- the largest restart that fits the ceiling.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{adaptive_restart.pdf}
+\caption{Adaptive GMRES restart under a \SI{1}{\gibi\byte} basis budget. Left: FGMRES basis
+memory vs.\ problem size for fixed restarts and the adaptive policy (analytic); the policy
+tracks the maximum restart until the budget binds, then flattens along it. Right: measured
+GMRES iterations vs.\ restart per size --- a longer restart cuts iterations with diminishing
+return. Preconditioned convection--diffusion.}
+\label{fig:adaptrestart}
+\end{figure}
+
+\subsection{Warm start}
+On a sequence of related systems --- a frequency sweep, a time-stepping or Newton iteration ---
+the previous solution is a good initial guess. All three GMRES paths take an optional $x_0$
+(single-RHS, or column-major $n\times s$ for the block): the cycle's true residual $b-Ax$ then
+measures progress from that guess, while convergence stays relative to $\lVert b\rVert$. When
+the right-hand side barely moves the per-solve iteration count collapses.
+
 \subsection{Incomplete-factor trade-off}
 Threshold dropping trades factor fill for GMRES iterations: entries of the factor below a
 relative \code{drop\_tol} are discarded, shrinking the preconditioner, and GMRES makes up the
@@ -687,6 +871,94 @@ total wall time, exposing the sweet spot. Convection--diffusion, $n=\num{32400}$
 \code{f64}.}
 \label{fig:precondgmres}
 \end{figure}
+
+\subsection{GCRO-DR: Krylov subspace recycling}
+\label{sec:gcrodr}
+\rT{} targets solver-in-the-loop workloads: many solves of a slowly varying $A$/$M$/$b$. On a
+\emph{stagnating} system --- a cluster of small eigenvalues of $\tilde A=AM^{-1}$ that
+restarted GMRES keeps re-discovering and discarding at every restart --- plain FGMRES($m$)
+throws away exactly the near-invariant subspace that governs its convergence. GCRO-DR (Parks,
+de~Sturler, Mackey, Johnson \& Maiti~\cite{gcrodr}, combining de~Sturler's GCRO with Morgan's
+GMRES-DR deflated restarting~\cite{morgan}) retains $k$ approximate smallest eigenvectors of
+$\tilde A$ and (a) \emph{deflates} them across restarts \emph{within} a solve, and (b)
+\emph{recycles} them \emph{across} solves through an opaque handle, so the next related system
+starts already knowing where the trouble is.
+
+\paragraph{Harmonic Ritz vectors.} The retained subspace is spanned by the $k$ harmonic-Ritz
+vectors of smallest value. Over the augmented search space $[\,U\mid V_p\,]$ of the current
+cycle ($U$ the previous recycle vectors, $V_p$ the $p=m-k$ Arnoldi vectors), the harmonic-Ritz
+pairs $(\theta,g)$ solve the generalized eigenproblem $\bar G^{\mathsf H}\bar G\,g=\theta\,\bar
+G^{\mathsf H}(\hat W^{\mathsf H}[U,V])\,g$, where $\bar G=\bigl[\begin{smallmatrix} I_k & B\\
+0 & \bar H\end{smallmatrix}\bigr]$ is the $(d{+}1)\times d$ matrix ($d=k+p$) relating the space
+to its image $\hat W=[\,C\mid V_{p+1}\,]$ under $\tilde A$, $B=C^{\mathsf H}\tilde A Z$ records
+the $C$-components of the Arnoldi directions, and $\bar H$ is the Arnoldi Hessenberg. The $k$
+smallest $|\theta|$ give the new $U\leftarrow[U,V]G_k$: the directions $\tilde A$ has barely
+resolved, which is what deflating accelerates.
+
+\paragraph{Preconditioned-space formulation.} Because the Krylov space is built on
+$\tilde A=AM^{-1}$ (FGMRES stores $Z=M^{-1}V$ and updates $x\mathrel{+}=Zy$), $U$ lives in the
+\emph{preconditioned} space. Each cycle recomputes $P=M^{-1}U$ ($k$ preconditioner solves) and
+$C=AP=\tilde A U$ ($k$ matvecs), orthonormalizes $C=QR$ while applying the same $R^{-1}$ to
+$P$ and $U$ so the invariants $C=\tilde A U$ and $P=M^{-1}U$ still hold, then runs the GCRO
+split: the residual is first minimised over $\operatorname{range}(C)$ ($x\mathrel{+}=P\,C^{\mathsf H}r$,
+$r\mathrel{-}=C\,C^{\mathsf H}r$), and the rest of the Krylov space is built \emph{orthogonal
+to $C$} (each Arnoldi direction has its $C$-component removed, recorded in $B$). The restart
+least-squares then decouples: $y$ is the ordinary GMRES solution of the Hessenberg system and
+the recycle coordinate is $z_1=-By$, giving $x\mathrel{+}=P z_1+Z y$. Recomputing $C$ every
+solve (the default) is $k$ matvecs $+\,k$ $M$-solves and keeps the split exact when $A$ or $M$
+change between solves --- there is never a stale $C$ --- which is precisely what a
+slowly-varying sequence needs.
+
+\paragraph{Correctness and cost.} $U$ only \emph{shapes} the Krylov space to accelerate
+convergence; the outer true-residual stop test is authoritative, so an inaccurate or
+rank-deficient recycle subspace can only make a solve slower, never wrong. Every recycle step
+is accordingly guarded (rank-dropping in the orthonormalization, singular-projection
+fallbacks) and degrades gracefully to plain FGMRES; $k$ is capped at $m/2$ so the Arnoldi space
+is never starved. $U$, $C$, $P$ are each $n\cdot k$ scalars, of which only $U$ persists between
+solves.
+
+\paragraph{Implementation.} \code{gmres\_recycled} carries the subspace in an opaque
+\code{Recycle} handle, refreshed in place at the end of every solve; it composes with the $x_0$
+warm start (seed from the previous solution \emph{and} recycle its stagnation subspace). The
+harmonic-Ritz eigenproblem is assembled in \code{recompute\_recycle} and solved in
+\code{src/numeric/dense\_eig.rs} entirely in \code{Complex<f64>} regardless of the working
+field: the standard-form matrix $M_2^{-1}M_1$ is formed by a partial-pivot dense LU, its
+eigenvalues by Householder Hessenberg reduction and shifted Givens QR, and the coefficient
+vectors by inverse iteration --- all capped and best-effort, since an approximate spectrum only
+slows the outer solve. Recycling is implemented for the single-RHS FGMRES path only; the block
+path's within-cycle basis compaction does not compose cleanly with a shared recycle subspace
+and is left as future work. For the \emph{real} field a real $U$ cannot store a complex
+eigenvector, so \code{combine\_ritz} splits each complex conjugate Ritz pair into its real and
+imaginary parts (two real recycle vectors). Section~\ref{sec:eval-iter} and
+Fig.~\ref{fig:recycle} measure the effect on a sequence of related solves.
+
+\subsection{Mixed-precision preconditioning}
+A factor stored in \code{Complex<f32>} occupies half the bytes and its triangular solves run
+in single precision, but an $f64$ outer iteration keeps the \emph{solution} at full $f64$
+accuracy: the standard mixed-precision setup for large 3D EM. \code{LowPrecisionPreconditioner}
+(symmetric $\LDLt$) and \code{LowPrecisionLu} (unsymmetric) down-cast $A$, factor in
+single precision, and up-/down-cast inside \code{apply}, while COCG/COCR/GMRES iterate in the
+working precision; on a strongly diagonally dominant operator a couple of iterations recover the
+factor's $\sim\!10^{-6}$ apply floor at half the factor memory.
+
+\section{Python API surface}
+\label{sec:python}
+The PyO3 layer (\code{python/src/lib.rs}) exposes the analyze/factor/solve flow and the Krylov
+layer with the diagnostics a solver-in-the-loop caller needs. A factored \code{Ldlt} or
+\code{Lu} object carries \code{drop\_tol=} and static-pivot options at construction, and its
+\code{gmres} / \code{gmres\_block} methods return the full diagnostics tuple
+\code{(X, converged, iters, final\_res)} rather than a bare solution --- \code{converged} is
+\code{True} only when \emph{every} right-hand side reached the tolerance, so a caller never
+mistakes a stalled iterate for a solution. Both accept an optional \code{x0=} warm start (same
+$n\times$nrhs layout as $B$). The single-RHS \code{gmres} additionally accepts a
+\code{recycle=} handle: \code{rslab.Recycle(k)} is an opaque object (\code{dim}, \code{active},
+\code{dtype}, \code{clear}) carried across a sequence of related solves and refreshed in place,
+exposing the GCRO-DR path of Sec.~\ref{sec:gcrodr} to Python. When \code{restart} is left
+unspecified the binding applies the adaptive memory cap of Sec.~\ref{sec:restart}
+(\code{adaptive\_restart}: basis under \SI{1}{\gibi\byte}, clamped $[20,80]$), so a Python
+caller cannot silently allocate a multi-gigabyte basis; an explicit \code{restart=} is honoured
+exactly. The memory formulas ($2n(m{+}1)$ single-RHS, $n\,s\,(m{+}1)$ block) are documented on
+the methods so the cost is predictable before the call.
 
 \section{Test matrix corpus}
 \label{sec:corpus}
@@ -849,6 +1121,74 @@ $\pm20\%$ single-shot variance): the threshold-pivot and equilibration axes bind
 unsymmetric and ill-scaled classes, and the memory backstop keeps the guarded picks from
 regressing where they do not help.
 
+\subsection{Preconditioned and recycled iterative layer}
+\label{sec:eval-iter}
+The Krylov layer of Sec.~\ref{sec:iterative} is evaluated on four studies, each the
+benchmark-scale mirror of a unit test (\code{benches/\{recycle,deflation,fgmres\_accounting,
+adaptive\_restart\}}); the block-scaling and incomplete-factor trade-off figures
+(Figs.~\ref{fig:blockgmres},~\ref{fig:precondgmres}) and the deflation and restart figures
+(Figs.~\ref{fig:deflation},~\ref{fig:adaptrestart}) appear with their concepts in
+Sec.~\ref{sec:iterative}.
+
+\paragraph{Subspace recycling.} Figure~\ref{fig:recycle} runs a sequence of $8$ related solves
+--- a diagonal operator with a stagnation spectrum (a tight cluster of small eigenvalues
+below a spread bulk), a per-step diagonal perturbation, and a rotating right-hand side,
+mirroring the \code{gmres\_recycled\_cross\_solve\_beats\_warm\_and\_cold} test at $n=\num{20000}$
+--- comparing cold ($x_0=0$), warm ($x_0=$ previous solution), and GCRO-DR($k$) recycling
+(warm start plus a handle carried across the sequence). The iteration counts order recycling
+$<$ warm $<$ cold by a wide margin. On the first solve alone (a fresh handle, so purely the
+\emph{within-solve} deflated restarting) GCRO-DR($k{=}10$) cuts $\num{360}$ iterations to
+$\num{124}$ ($\num{2.9}\times$); over the whole sequence the cumulative
+\emph{cross-solve} total falls from $\num{2837}$ (cold) to $\num{444}$ ($\num{6.4}\times$
+fewer iterations), for a $\num{1.5}\times$ wall-clock reduction after the per-iteration recycle
+overhead (the dense harmonic-Ritz work and the $C$-orthogonalization). The $k{=}20$ curve
+coincides with $k{=}10$ because $k$ is capped at $m/2$ (here $m=20$). The wall-clock win is
+smaller than the iteration win because the recycle bookkeeping is $O(n k)$ per step against an
+$O(n)$ diagonal matvec; on a denser operator, where the matvec and preconditioner solve
+dominate, the wall-clock tracks the iteration count more closely.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{recycle_study.pdf}
+\caption{GCRO-DR subspace recycling over a sequence of $8$ related solves (stagnation
+spectrum, $n=\num{20000}$). Left: cumulative wall-clock; right: cumulative GMRES iterations,
+for cold, warm, and GCRO-DR($k$). Recycling cuts the cross-solve iteration total
+$\num{6.4}\times$ versus cold ($k{=}20$ overlaps $k{=}10$, the $m/2$ cap).}
+\label{fig:recycle}
+\end{figure}
+
+\paragraph{FGMRES accounting.} The flexible-basis update saves one preconditioner solve per
+restart cycle (Sec.~\ref{sec:iterative}). Counting the $M^{-1}$ applies of a weak-factor
+preconditioned convection--diffusion solve (short restart, several cycles) confirms it exactly:
+FGMRES spends one apply per Arnoldi step and none at the restart, where plain right-preconditioned
+GMRES would spend one extra per cycle (Table~\ref{tab:fgmres}). The saving grows with the cycle
+count and is free of any extra memory beyond the $Z$ basis already stored for flexibility.
+
+\begin{table}[h]
+\centering\tabfont
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$n$ & iters & cycles & FGMRES $M^{-1}$ & plain $M^{-1}$ \\
+\midrule
+\num{3600}  & 24 & 3 & 24 & 27 \\
+\num{10000} & 53 & 4 & 53 & 57 \\
+\num{19600} & 89 & 6 & 89 & 95 \\
+\bottomrule
+\end{tabular}
+\caption{Preconditioner-apply accounting for FGMRES vs.\ plain right-preconditioned GMRES
+(emulated by counting): one $M^{-1}$ solve per Arnoldi step for FGMRES, plus one per restart
+cycle for the plain variant. Convection--diffusion, \code{drop\_tol}${=}\num{0.1}$,
+restart~$20$.}
+\label{tab:fgmres}
+\end{table}
+
+The remaining two studies appear in Sec.~\ref{sec:iterative}: within-cycle deflation reduces
+the batched operator column-applies to $0.66\times$ the full-width bound at $s=16$
+(Fig.~\ref{fig:deflation}), and the adaptive restart holds the FGMRES basis under its
+\SI{1}{\gibi\byte} budget while picking the longest restart that fits
+(Fig.~\ref{fig:adaptrestart}). The total wall-clock of the four new benchmarks is under a
+minute; they are trend measurements, sized for the story rather than records.
+
 \section{Related work}
 Automatic and learned tuning of sparse solvers has been studied along several axes.
 GPTune~\cite{gptune} tunes HPC libraries including SuperLU\_DIST by Bayesian optimization
@@ -882,7 +1222,11 @@ front-level parallelism of the trailing Schur update and subtraction. Each provi
 a-priori memory estimate so the deterministic memory guarantee continues to hold, and each
 either enters the tuner grid or is caller-selected. What remains is a fuller two-dimensional
 (block-cyclic) factorization of the very largest top-of-tree fronts to push thread scaling
-past the current $\sim\!3\times$, and the cross-hardware meta-tuner above.
+past the current $\sim\!3\times$, and the cross-hardware meta-tuner above. On the iterative
+side, the block/multi-RHS path is batched-independent rather than a shared-subspace block
+Krylov method, and its within-cycle basis compaction does not yet compose with GCRO-DR
+recycling; a shared-subspace block solver and block recycling are the planned next step
+(issue~\#3).
 
 \section{Conclusion}
 \rT{} is a pure-Rust, scalar-generic sparse direct solver that reaches within a
@@ -893,7 +1237,11 @@ structure; a learned tuner selects the solver configuration from that structure 
 deterministic guard stack that keeps its memory below the untuned default. The numeric
 result is independent of the worker count and the resource planner is a pure function of
 its inputs, which makes batched, solver-in-the-loop execution reproducible and its cost
-computable in advance.
+computable in advance. When the factor is made approximate it becomes a preconditioner, and
+a matching Krylov layer --- complex-symmetric short recurrences, flexible GMRES with a
+backward-stable orthogonalization split, batched multi-RHS block GMRES with within-cycle
+deflation, and GCRO-DR subspace recycling --- closes the accuracy gap and turns the direct
+factor into the engine of a fast preconditioned and recycled iterative solver.
 
 \begin{thebibliography}{99}
 \small
@@ -992,6 +1340,37 @@ toolbox for modelling incompressible flow. \emph{ACM Trans. Math. Softw.} 33(2):
 
 \bibitem{benzi} M. Benzi, G.~H. Golub, J. Liesen. Numerical solution of saddle point
 problems. \emph{Acta Numerica} 14:1--137, 2005.
+
+\bibitem{saadschultz} Y. Saad, M.~H. Schultz. GMRES: a generalized minimal residual
+algorithm for solving nonsymmetric linear systems. \emph{SIAM J. Sci. Stat. Comput.}
+7(3):856--869, 1986.
+
+\bibitem{fgmres} Y. Saad. A flexible inner--outer preconditioned GMRES algorithm.
+\emph{SIAM J. Sci. Comput.} 14(2):461--469, 1993.
+
+\bibitem{dgks} J.~W. Daniel, W.~B. Gragg, L. Kaufman, G.~W. Stewart. Reorthogonalization
+and stable algorithms for updating the Gram--Schmidt QR factorization. \emph{Math. Comp.}
+30(136):772--795, 1976.
+
+\bibitem{giraud} L. Giraud, J. Langou, M. Rozlo\v{z}n\'ik, J. van den Eshof. Rounding error
+analysis of the classical Gram--Schmidt orthogonalization process. \emph{Numer. Math.}
+101(1):87--100, 2005.
+
+\bibitem{barlow} J.~L. Barlow, A. Smoktunowicz. Reorthogonalized block classical
+Gram--Schmidt. \emph{Numer. Math.} 123(3):395--423, 2013.
+
+\bibitem{gcrodr} M.~L. Parks, E. de~Sturler, G. Mackey, D.~D. Johnson, S. Maiti. Recycling
+Krylov subspaces for sequences of linear systems. \emph{SIAM J. Sci. Comput.}
+28(5):1651--1674, 2006.
+
+\bibitem{morgan} R.~B. Morgan. GMRES with deflated restarting. \emph{SIAM J. Sci. Comput.}
+24(1):20--37, 2002.
+
+\bibitem{cocg} H.~A. van der Vorst, J.~B.~M. Melissen. A Petrov--Galerkin type method for
+solving $Ax=b$, where $A$ is symmetric complex. \emph{IEEE Trans. Magn.} 26(2):706--708, 1990.
+
+\bibitem{cocr} T. Sogabe, S.-L. Zhang. A COCR method for solving complex symmetric linear
+systems. \emph{J. Comput. Appl. Math.} 199(2):297--303, 2007.
 
 \end{thebibliography}
 

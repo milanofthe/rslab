@@ -235,6 +235,48 @@ time stays within a few percent of the exact direct solve — a factor-memory
 halving for free. Past ~3e-2 the iteration count climbs steeply and dominates, so
 the useful range is bounded; the figure makes the sweet spot explicit.
 
+### GCRO-DR Krylov subspace recycling
+
+On a stagnating system (a cluster of small eigenvalues that restarted GMRES keeps
+re-discovering), and across a *sequence* of related solves, `factor.recycle(k)`
+carries `k` harmonic-Ritz vectors so the next solve deflates them from the start
+instead of rebuilding the same subspace. Measured on a sequence of 8 related solves
+(stagnation spectrum, n=20000): cold-start vs warm-start (`x0=`) vs GCRO-DR.
+
+![GCRO-DR subspace recycling](benches/bench_out/recycle_study.png)
+
+Recycling cuts the cross-solve iteration total **6.4×** vs cold (2837 → 444
+iterations) for a ~1.5× wall-clock win after the recycle overhead; on the first
+solve alone (within-solve deflated restarting) it is 2.9×. `k=20` overlaps `k=10`
+because `k` is capped at `restart/2`.
+
+### Block GMRES within-cycle deflation
+
+A multi-RHS block whose columns converge at spread rates compacts a converged
+column out of the batched applies **mid-cycle**, so the operator/preconditioner
+applies shrink to the still-active width instead of dragging every column along
+until the restart.
+
+![Block GMRES within-cycle deflation](benches/bench_out/deflation_study.png)
+
+On a multi-rate testbed (n=20000) the panel drains from 16 to 1 within the first
+cycle; at `s=16` the operator does 0.66× the column-applies a no-mid-cycle-deflation
+schedule would.
+
+### Adaptive GMRES restart under a memory budget
+
+The Arnoldi basis is allocated up front, so `restart` fixes the memory floor. With
+`restart=None` the Python binding caps it so the basis stays under 1 GiB
+(clamped `[20,80]`); an explicit `restart=` is honoured exactly.
+
+![Adaptive GMRES restart](benches/bench_out/adaptive_restart.png)
+
+A longer restart cuts iterations with diminishing return; the adaptive policy rides
+the maximum restart until the basis would exceed the budget, then declines to hold
+memory flat — the longest restart that fits. Flexible GMRES additionally saves one
+preconditioner solve per restart cycle by keeping the preconditioned `Z` basis
+(`x += Z y`), so its total `M⁻¹` applies equal the iteration count.
+
 ### Accuracy (SuiteSparse)
 
 ![SuiteSparse residual](benches/bench_out/corpus_residual.png)
