@@ -4,6 +4,11 @@ name: ci
 # separately in publish.yml; this workflow only touches the cargo workspace,
 # which is 100% pure Rust (the vendored ordering crates carry no C/build.rs), so
 # it builds on a stock ubuntu runner with no system libraries.
+#
+# COST POLICY: CI is a fast static + unit gate ONLY — hard 5-minute budget.
+# Benchmarks and study runs (benches/, report data) are local-only via make;
+# they never run on CI. The matgen feature is a strict superset of the default
+# build, so one clippy pass and one test pass with it cover both configurations.
 
 on:
   push:
@@ -20,6 +25,7 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       # rust-toolchain.toml pins `stable` + rustfmt/clippy; honour it here.
@@ -27,22 +33,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # A timed-out cold run must still seed the cache so the retry is warm.
+          cache-on-failure: true
 
       - name: rustfmt
         run: cargo fmt --check
 
-      - name: clippy (default features)
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: clippy (matgen feature)
-        # Covers the matgen-gated benches (catalog, sweep, ...) and the
-        # matgen-gated integration test, which the default set skips.
+      - name: clippy (all targets, matgen superset)
+        # matgen is additive: this single pass lints the default code plus the
+        # matgen-gated benches and integration test in one build.
         run: cargo clippy --all-targets --features matgen -- -D warnings
 
-      - name: test (default features)
-        run: cargo test
-
-      - name: test (matgen feature)
-        # Runs the matgen-gated tuner memory-backstop test in addition to the
-        # 287 lib tests, so the gated path is exercised on CI.
+      - name: test (matgen superset)
+        # Runs the full lib test set plus the matgen-gated tests in one pass.
         run: cargo test --features matgen
