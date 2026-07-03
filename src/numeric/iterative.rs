@@ -331,6 +331,57 @@ fn norm2<T: Scalar>(x: &[T]) -> f64 {
     x.iter().map(|v| v.magnitude_sq()).sum::<f64>().sqrt()
 }
 
+/// Why a Krylov iteration stopped (audit finding L5). Additive diagnostic
+/// alongside the boolean `converged`: `Converged` is exactly `converged == true`,
+/// and the two failure states distinguish a hit iteration budget (`MaxIter`)
+/// from an algebraic breakdown of the short-recurrence denominator (`Breakdown`).
+///
+/// Only the states the solvers genuinely distinguish are represented:
+/// * COCG / COCR report all three - a zero bilinear denominator (`pᵀAp` or `rᵀz`
+///   in COCG, the residual-norm form in COCR), reachable on an indefinite
+///   complex-symmetric operator, is a real `Breakdown` before convergence.
+/// * GMRES / FGMRES / GCRO-DR / block-GMRES never report `Breakdown`: a
+///   rank-deficient Arnoldi step is a *happy* breakdown that yields the exact
+///   solution (so it surfaces as `Converged`), and every other non-converged
+///   exit is the iteration budget, i.e. `MaxIter`. There is no stagnation
+///   detector, so `Stagnation` is intentionally absent rather than guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// The relative residual reached `tol`.
+    Converged,
+    /// The iteration budget `max_iter` was exhausted first.
+    MaxIter,
+    /// A short-recurrence denominator went to zero before convergence
+    /// (COCG / COCR only).
+    Breakdown,
+}
+
+impl StopReason {
+    /// Lowercase tag for the Python bindings and logging: `"converged"`,
+    /// `"max_iter"`, or `"breakdown"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::Converged => "converged",
+            StopReason::MaxIter => "max_iter",
+            StopReason::Breakdown => "breakdown",
+        }
+    }
+}
+
+/// Classify a COCG/COCR exit: `Converged` when the residual test passed,
+/// `Breakdown` when the loop broke early (iterations still left) on a zero
+/// short-recurrence denominator, else `MaxIter` (budget exhausted).
+#[inline]
+fn stop_reason(converged: bool, iters: usize, max_iter: usize) -> StopReason {
+    if converged {
+        StopReason::Converged
+    } else if iters < max_iter {
+        StopReason::Breakdown
+    } else {
+        StopReason::MaxIter
+    }
+}
+
 /// Outcome of a Krylov solve.
 #[derive(Debug, Clone)]
 pub struct KrylovResult<T> {
@@ -342,6 +393,8 @@ pub struct KrylovResult<T> {
     pub converged: bool,
     /// Final relative residual `‖b − Ax‖ / ‖b‖`.
     pub final_res: f64,
+    /// Why the iteration stopped (`converged` is `stop == Converged`).
+    pub stop: StopReason,
 }
 
 /// Preconditioned COCG for a complex-symmetric `A = Aᵀ` stored as a lower-
@@ -384,6 +437,7 @@ where
             iters: 0,
             converged: true,
             final_res: 0.0,
+            stop: StopReason::Converged,
         });
     }
 
@@ -425,11 +479,15 @@ where
         rho = rho_new;
     }
 
+    // Not converged with iterations left ⇒ the loop broke on a zero `pᵀAp`/`rᵀz`
+    // denominator (breakdown); otherwise the budget was exhausted.
+    let stop = stop_reason(converged, iters, max_iter);
     Ok(KrylovResult {
         x,
         iters,
         converged,
         final_res,
+        stop,
     })
 }
 
@@ -471,6 +529,7 @@ where
             iters: 0,
             converged: true,
             final_res: 0.0,
+            stop: StopReason::Converged,
         });
     }
 
@@ -519,11 +578,14 @@ where
         gamma = gamma_new;
     }
 
+    // Same three-way classification as COCG (see [`stop_reason`]).
+    let stop = stop_reason(converged, iters, max_iter);
     Ok(KrylovResult {
         x,
         iters,
         converged,
         final_res,
+        stop,
     })
 }
 
@@ -813,6 +875,7 @@ where
             iters: 0,
             converged: true,
             final_res: 0.0,
+            stop: StopReason::Converged,
         });
     }
 
@@ -971,6 +1034,13 @@ where
         iters: total,
         converged: final_res <= tol,
         final_res,
+        // GMRES-family: converged (residual met, incl. happy breakdown) or the
+        // iteration budget ran out. No non-converged breakdown state.
+        stop: if final_res <= tol {
+            StopReason::Converged
+        } else {
+            StopReason::MaxIter
+        },
     })
 }
 
@@ -1490,6 +1560,7 @@ where
             iters: 0,
             converged: true,
             final_res: 0.0,
+            stop: StopReason::Converged,
         });
     }
 
@@ -1686,6 +1757,13 @@ where
         iters: total,
         converged: final_res <= tol,
         final_res,
+        // GMRES-family: converged (residual met, incl. happy breakdown) or the
+        // iteration budget ran out. No non-converged breakdown state.
+        stop: if final_res <= tol {
+            StopReason::Converged
+        } else {
+            StopReason::MaxIter
+        },
     })
 }
 
@@ -1700,6 +1778,9 @@ pub struct BlockKrylovResult<T> {
     pub converged: bool,
     /// Per-RHS final relative residual `‖b_c − A x_c‖ / ‖b_c‖`.
     pub final_res: Vec<f64>,
+    /// Why the block iteration stopped: `Converged` when every RHS met `tol`,
+    /// else `MaxIter` (the block loop has no non-converged breakdown state).
+    pub stop: StopReason,
 }
 
 /// Form and add one converged column's solution contribution to the global `x`
@@ -2199,6 +2280,11 @@ where
         iters: total,
         converged: all_conv,
         final_res,
+        stop: if all_conv {
+            StopReason::Converged
+        } else {
+            StopReason::MaxIter
+        },
     })
 }
 
@@ -2445,11 +2531,18 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
         let res = cocg(&a, &b, &NoPreconditioner, 1e-10, 2000).unwrap();
         assert!(res.converged, "COCG should converge, res={}", res.final_res);
+        assert_eq!(res.stop, StopReason::Converged);
         // Verify against the actual residual.
         let mut ax = vec![C::default(); n];
         a.symv(&res.x, &mut ax);
         let r = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
         assert!(r < 1e-7, "residual {}", r);
+
+        // Starve the budget: the same solve capped at one iteration must report
+        // `MaxIter`, not a false `Converged`.
+        let capped = cocg(&a, &b, &NoPreconditioner, 1e-14, 1).unwrap();
+        assert!(!capped.converged);
+        assert_eq!(capped.stop, StopReason::MaxIter);
     }
 
     #[test]
