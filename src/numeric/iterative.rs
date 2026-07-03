@@ -520,6 +520,36 @@ fn givens<T: Scalar>(f: T, g: T) -> (T, T) {
     (f * inv, g * inv)
 }
 
+/// Largest leading dimension `d ≤ jdim` whose Hessenberg diagonals are all above a
+/// relative breakdown threshold `eps · max_i |h[i][i]|`. The upper-triangular
+/// solve for `y` back-substitutes with `1/h[i][i]`; after Givens the diagonal is
+/// `√(|f|²+|g|²)` and normally nonzero, but under exact stagnation or a rank-
+/// deficient Hessenberg (hard / indefinite / singular operators) some `h[i][i]`
+/// can be `0`, so an unguarded `recip()` would emit `Inf`/`NaN` into `x` and the
+/// residual. Truncating the solve to this well-conditioned prefix instead yields a
+/// **deterministic breakdown**: the leading Krylov block is solved, the degenerate
+/// tail is dropped, and the outer true-residual check reports non-convergence. In
+/// the well-conditioned case every diagonal clears the threshold and `jdim` is
+/// returned unchanged, so the normal path is unaffected.
+#[inline]
+#[allow(clippy::needless_range_loop)]
+fn well_conditioned_dim<T: Scalar>(h: &[Vec<T>], jdim: usize) -> usize {
+    if jdim == 0 {
+        return 0;
+    }
+    let mut hmax = 0.0f64;
+    for i in 0..jdim {
+        hmax = hmax.max(h[i][i].magnitude());
+    }
+    let thresh = f64::EPSILON * hmax;
+    for i in 0..jdim {
+        if h[i][i].magnitude() <= thresh {
+            return i;
+        }
+    }
+    jdim
+}
+
 /// Fixed row-block size for the block-orthogonalization reductions below. A
 /// compile-time constant (never thread-count dependent), so the chunked sums are
 /// **bit-identical across thread counts** - preserving the block solve's
@@ -746,17 +776,21 @@ where
                 break;
             }
         }
-        // Back-substitute the upper-triangular H for y, then x += M⁻¹·(V·y).
-        let mut y = vec![T::zero(); jdim];
-        for i in (0..jdim).rev() {
+        // Back-substitute the upper-triangular H for y, then x += M⁻¹·(V·y). Guard
+        // the solve against a (near-)singular Hessenberg diagonal: on breakdown,
+        // solve only the well-conditioned leading block so a stagnated / rank-
+        // deficient cycle degrades to a truncated update instead of dividing by ~0.
+        let jd = well_conditioned_dim(&h, jdim);
+        let mut y = vec![T::zero(); jd];
+        for i in (0..jd).rev() {
             let mut s = g[i];
-            for k in (i + 1)..jdim {
+            for k in (i + 1)..jd {
                 s = s - h[i][k] * y[k];
             }
             y[i] = s * h[i][i].recip();
         }
         let mut vy = vec![T::zero(); n];
-        for i in 0..jdim {
+        for i in 0..jd {
             let yi = y[i];
             for k in 0..n {
                 vy[k] = vy[k] + v[i * n + k] * yi;
@@ -824,6 +858,9 @@ where
     T: Scalar,
     M: Preconditioner<T> + ?Sized,
 {
+    // Guard against a (near-)singular Hessenberg diagonal: solve only the well-
+    // conditioned leading block (deterministic breakdown, no NaN into `x`).
+    let jd = well_conditioned_dim(&h[ap], jd);
     if jd == 0 {
         return Ok(());
     }
@@ -1127,7 +1164,11 @@ where
                 *e = T::zero();
             }
             for ap in 0..sa {
-                let jd = jdim[ap];
+                // Guard the per-column solve against a (near-)singular Hessenberg
+                // diagonal: truncate to the well-conditioned leading block so a
+                // rank-deficient column breaks down deterministically instead of
+                // dividing by ~0 and polluting the batched applies with NaN.
+                let jd = well_conditioned_dim(&h[ap], jdim[ap]);
                 if jd == 0 {
                     continue;
                 }
@@ -1494,6 +1535,33 @@ mod tests {
         a.matvec(&pre.x, &mut y);
         let res = (0..n).map(|i| (y[i] - b[i]).norm()).fold(0.0, f64::max);
         assert!(res < 1e-8, "residual {}", res);
+    }
+
+    #[test]
+    fn gmres_singular_operator_breaks_down_without_nan() {
+        // Rank-deficient operator (issue #11): A = diag(1, 1, 0) is singular and
+        // `b = (1,1,1)` has a component in the null space (e₂), so GMRES cannot
+        // drive the residual to zero - it stagnates. The Krylov subspace is
+        // A-invariant with a *singular* restriction (eigenvalue 0), so the upper-
+        // triangular Hessenberg factor acquires a ~0 diagonal. The unguarded
+        // back-substitution would divide by it and emit NaN/Inf into `x` and the
+        // reported residual; the guard must instead truncate to the well-
+        // conditioned block, giving a deterministic breakdown: a finite iterate and
+        // a truthful non-convergence report.
+        use crate::sparse::general::GeneralCsc;
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        // Only the (0,0) and (1,1) entries; row/col 2 is all-zero → A e₂ = 0.
+        let a = GeneralCsc::<C>::from_triplets(3, &[0, 1], &[0, 1], &[c(1.0, 0.0), c(1.0, 0.0)]).unwrap();
+        let b = vec![c(1.0, 0.0), c(1.0, 0.0), c(1.0, 0.0)];
+        let res = gmres(&a, &b, &NoPreconditioner, 1e-12, 50, 10).unwrap();
+        // No NaN/Inf reached the solution or the residual.
+        assert!(res.x.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "solution has NaN/Inf: {:?}", res.x);
+        assert!(res.final_res.is_finite(), "residual is NaN/Inf: {}", res.final_res);
+        // Deterministic breakdown: reported as non-converged with a sane residual
+        // (the singular direction pins the relative residual near 1/√3 ≈ 0.577 - it
+        // is bounded well below the blow-up an unguarded divide would produce).
+        assert!(!res.converged, "singular system must not report convergence");
+        assert!(res.final_res > 1e-12 && res.final_res <= 1.0, "residual not in the sane breakdown range: {}", res.final_res);
     }
 
     /// Build the genuinely unsymmetric complex grid used by the GMRES tests.
