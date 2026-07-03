@@ -253,6 +253,15 @@ pub struct LuFactors<T> {
     pub d_col: Vec<f64>,
     /// Number of statically perturbed pivots.
     pub n_perturbed: usize,
+    /// Thread policy the **solve phase** should honour (issue #9): resolved from
+    /// the factorization's [`SolverSettings::threads`] so an iterative solve using
+    /// this factor as a preconditioner runs its parallel orthogonalization in a
+    /// pool of the **same** width - factor and solve share one concurrency budget
+    /// instead of the solve silently fanning out over the global pool.
+    /// [`Threads::Ambient`](crate::Threads::Ambient) means "use the caller's
+    /// current pool" (the solver-in-the-loop path); otherwise a concrete
+    /// [`Threads::Fixed`](crate::Threads::Fixed) worker count.
+    pub solve_threads: crate::numeric::multifrontal_ldlt::Threads,
 }
 
 impl<T: Scalar> LuFactors<T> {
@@ -894,6 +903,14 @@ pub struct LuSolver<T> {
 }
 
 impl<T: Scalar> LuSolver<T> {
+    /// Thread policy the solve phase should honour (issue #9): the resolved
+    /// [`Threads`](crate::Threads) budget the factorization used, carried on the
+    /// stored [`LuFactors`]. An iterative solve using this factor as a
+    /// preconditioner runs its parallel orthogonalization in a pool of this width.
+    pub fn solve_thread_policy(&self) -> crate::numeric::multifrontal_ldlt::Threads {
+        self.factors.solve_threads
+    }
+
     /// One-shot analyze + equilibrate + factor of a general matrix `A`.
     pub fn factor(a: &GeneralCsc<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
         Ok(Self {
@@ -2049,6 +2066,9 @@ fn factor_lu_left_looking<T: Scalar>(
         d_row: d_row.to_vec(),
         d_col: d_col.to_vec(),
         n_perturbed,
+        // Placeholder; the caller (`factor_general_lu_numeric`) overwrites this
+        // with the resolved solve-phase policy once the factor is built.
+        solve_threads: crate::numeric::multifrontal_ldlt::Threads::Ambient,
     })
 }
 
@@ -2081,8 +2101,22 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             d_row: Vec::new(),
             d_col: Vec::new(),
             n_perturbed: 0,
+            solve_threads: crate::numeric::multifrontal_ldlt::Threads::Ambient,
         });
     }
+
+    // Resolve the solve-phase thread policy (issue #9): `Ambient` stays ambient
+    // (caller-installed pool); every other policy is pinned to the concrete worker
+    // count the factorization itself used, so a preconditioned iterative solve
+    // orthogonalizes in a pool of exactly that width.
+    let solve_policy = match opts.threads {
+        crate::numeric::multifrontal_ldlt::Threads::Ambient => {
+            crate::numeric::multifrontal_ldlt::Threads::Ambient
+        }
+        p => crate::numeric::multifrontal_ldlt::Threads::Fixed(
+            p.resolve(|cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)),
+        ),
+    };
 
     let perturb_floor: Option<f64> = match opts.on_zero_pivot {
         ZeroPivotAction::Fail => None,
@@ -2156,7 +2190,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
     // a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
-        return opts.threads.run(
+        let mut fac = opts.threads.run(
             stack,
             |cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap),
             || {
@@ -2171,7 +2205,9 @@ pub fn factor_general_lu_numeric<T: Scalar>(
                     opts.kernel(),
                 )
             },
-        );
+        )?;
+        fac.solve_threads = solve_policy;
+        return Ok(fac);
     }
 
     let profile = std::env::var("RLA_PROFILE")
@@ -2376,6 +2412,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         d_row,
         d_col,
         n_perturbed,
+        solve_threads: solve_policy,
     })
 }
 

@@ -36,7 +36,7 @@
 //! not a bug; see the `gmres_block_single_rhs_matches_scalar_gmres` test.
 
 use crate::error::RslabError;
-use crate::numeric::multifrontal_ldlt::SolverSettings;
+use crate::numeric::multifrontal_ldlt::{SolverSettings, Threads};
 use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -147,6 +147,17 @@ pub trait Preconditioner<T: Scalar> {
             self.apply(&r[c * n..c * n + n], &mut z[c * n..c * n + n])?;
         }
         Ok(())
+    }
+    /// Thread policy the **solve phase** should honour (issue #9). A factored
+    /// preconditioner returns the resolved [`Threads`] budget it was built with, so
+    /// [`gmres_block`]'s parallel orthogonalization runs in a pool of the **same**
+    /// width - factor and solve share one concurrency budget instead of the solve
+    /// silently fanning out over the global pool (the embedded / solver-in-the-loop
+    /// design point). The default [`Threads::Ambient`] means "use the caller's
+    /// current pool" - the behaviour for [`NoPreconditioner`] and any preconditioner
+    /// that carries no factorization budget.
+    fn solve_threads(&self) -> Threads {
+        Threads::Ambient
     }
 }
 
@@ -296,6 +307,9 @@ impl Preconditioner<Complex<f64>> for LowPrecisionLu {
             *zi = Complex::new(v.re as f64, v.im as f64);
         }
         Ok(())
+    }
+    fn solve_threads(&self) -> Threads {
+        self.inner.solve_threads
     }
 }
 
@@ -575,6 +589,41 @@ fn well_conditioned_dim<T: Scalar>(h: &[Vec<T>], jdim: usize) -> usize {
 /// **bit-identical across thread counts** - preserving the block solve's
 /// determinism guarantee while spreading the reduction over all cores.
 const ORTHO_CHUNK: usize = 2048;
+
+/// Build the scoped rayon pool the block-GMRES orthogonalization reductions should
+/// run in (issue #9), from the preconditioner's [`Threads`] policy. `Ambient`
+/// returns `None` - the reductions then run on the caller's current pool (the
+/// solver-in-the-loop path, where the caller has already installed one bounded
+/// pool via [`with_threads`](crate::with_threads)). Any concrete policy builds a
+/// pool of that width **once** per solve; the four `block_project` / `block_subtract`
+/// calls per step reuse it (cheap `install`), so factor and solve share one
+/// concurrency budget instead of the solve fanning out over the global pool. The
+/// chunk-order reduction fold is thread-count independent, so the pool never
+/// perturbs the bit-identical-across-thread-counts guarantee.
+fn solve_thread_pool(policy: Threads) -> Option<rayon::ThreadPool> {
+    match policy {
+        Threads::Ambient => None,
+        // `Fixed(k)` (the resolved factor budget): a `k`-worker pool (`0` = all
+        // cores). `Auto` never reaches here - factors resolve it to `Fixed` up
+        // front - but the `|cap| cap` fallback keeps this total.
+        p => {
+            let workers = p.resolve(|cap| cap);
+            rayon::ThreadPoolBuilder::new().num_threads(workers).build().ok()
+        }
+    }
+}
+
+/// Run an orthogonalization reduction `f` in the solve pool if one was built,
+/// else on the current pool. Confined to closures capturing only Krylov *data*
+/// (basis / panel slices) - never the operator or preconditioner - so it never
+/// imposes a `Send`/`Sync` bound on the matrix-free (`FnOp`/`FnPc`) call path.
+#[inline]
+fn ortho_in_pool<R: Send>(pool: &Option<rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
+    match pool {
+        Some(p) => p.install(f),
+        None => f(),
+    }
+}
 
 /// Column-wise projection of a panel `W` (`n×sa`) onto each column's **own**
 /// Arnoldi basis: `proj[i*sa + ap] = ⟨V_i[:,ap], W[:,ap]⟩` for block `i` in
@@ -960,6 +1009,17 @@ where
 /// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
 /// drive all right-hand sides through one block iteration.
 ///
+/// **Threads (issue #9):** the parallel orthogonalization reductions run in a
+/// scoped pool derived from the preconditioner's [`Threads`] policy
+/// ([`Preconditioner::solve_threads`], resolved at factor time), so factor and
+/// solve share **one** concurrency budget. A [`Threads::Ambient`] policy (or
+/// [`NoPreconditioner`]) leaves the reductions on the caller's current pool - the
+/// solver-in-the-loop path, where one bounded pool is installed via
+/// [`with_threads`](crate::with_threads) around the whole factor+solve loop. The
+/// pool width never changes the numeric result (the chunk-order reduction fold is
+/// thread-count independent). The single-RHS [`gmres`] orthogonalizes serially, so
+/// it has no such pool.
+///
 /// **Orthogonalization (issue #8):** the panel is orthogonalized by **block CGS2**
 /// (classical Gram-Schmidt with a conditional, now *per-column*, second pass), not
 /// the MGS+DGKS of the single-RHS [`gmres`]. The two summation orders differ, so a
@@ -991,6 +1051,10 @@ where
     }
     const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
+    // Solve-phase thread policy (issue #9): orthogonalize in a pool of the same
+    // width the preconditioner was factored with, so factor and solve share one
+    // concurrency budget. `None` (Ambient / no factor) keeps the caller's pool.
+    let ortho_pool = solve_thread_pool(precond.solve_threads());
     // Warm start (issue #5): seed every column from `x0` (column-major `n×s`).
     let mut x = match x0 {
         Some(g) => {
@@ -1121,8 +1185,10 @@ where
             for ap in 0..sa {
                 wnorm0[ap] = norm2(&wblk[ap * n..ap * n + n]);
             }
-            block_project(&vbas, &wblk, blocks, sa, n, &mut proj1, &mut proj_scratch);
-            block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1);
+            ortho_in_pool(&ortho_pool, || {
+                block_project(&vbas, &wblk, blocks, sa, n, &mut proj1, &mut proj_scratch)
+            });
+            ortho_in_pool(&ortho_pool, || block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1));
             // **Per-column** DGKS second pass (issue #8): decide the reorth *per
             // column* from its own norm collapse, not panel-globally. Frozen
             // (converged-this-cycle) columns are excluded (they are compacted out at
@@ -1138,7 +1204,9 @@ where
                 any_reorth |= need;
             }
             if any_reorth {
-                block_project(&vbas, &wblk, blocks, sa, n, &mut proj2, &mut proj_scratch);
+                ortho_in_pool(&ortho_pool, || {
+                    block_project(&vbas, &wblk, blocks, sa, n, &mut proj2, &mut proj_scratch)
+                });
                 // Zero the second-pass projection for columns that do not need it, so
                 // `block_subtract` skips them (its `hij == 0` guard) and their `w`
                 // and Hessenberg entries stay exactly at the pass-1 values.
@@ -1149,7 +1217,7 @@ where
                         }
                     }
                 }
-                block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2);
+                ortho_in_pool(&ortho_pool, || block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj2));
             }
             for ap in 0..sa {
                 if inner_done[ap] {
@@ -1429,6 +1497,9 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors
         z.copy_from_slice(&x);
         Ok(())
     }
+    fn solve_threads(&self) -> Threads {
+        self.solve_threads
+    }
     /// Block apply via `solve_lu_many` (one block triangular solve over all `s`
     /// columns). Column-major Krylov block ↔ row-major `solve_lu_many` transpose.
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
@@ -1468,6 +1539,9 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
         Ok(())
+    }
+    fn solve_threads(&self) -> Threads {
+        self.solve_thread_policy()
     }
     /// Block apply via [`LuSolver::solve_many`](crate::numeric::multifrontal_lu::LuSolver::solve_many).
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
@@ -1984,6 +2058,54 @@ mod tests {
         let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
         assert!(capped.converged);
         assert!(capped.x == plain.x, "capped-pool solve must match the unbounded solve bit-for-bit");
+    }
+
+    #[test]
+    fn block_gmres_orthogonalization_respects_factor_thread_cap() {
+        // Issue #9: the block-GMRES orthogonalization must run in a pool derived
+        // from the *factor's* Threads policy, not the ambient global pool. Factor
+        // with a hard cap of 2 workers; the factor then reports `Fixed(2)` as its
+        // solve-phase policy, and the pool built from it caps `current_num_threads`
+        // to 2 - even when the surrounding (ambient) pool is far wider. The solve
+        // stays bit-identical whether run bare or inside a wide ambient pool (the
+        // chunk-order reduction is thread-count independent), so the cap changes
+        // only the concurrency, never the numbers.
+        use crate::numeric::multifrontal_ldlt::{with_threads, Threads};
+        use crate::numeric::multifrontal_lu::factor_general_lu;
+        let c = |re, im| Complex::new(re, im);
+        let a = unsym_grid(30);
+        let n = a.n;
+        let s = 4;
+        let mut bblk = vec![C::default(); n * s];
+        for k in 0..s {
+            for i in 0..n {
+                bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+            }
+        }
+        // Factor capped to exactly 2 workers → solve policy is Fixed(2).
+        let lu = factor_general_lu(&a, &SolverSettings::default().with_threads(2)).unwrap();
+        assert_eq!(
+            Preconditioner::<C>::solve_threads(&lu),
+            Threads::Fixed(2),
+            "factor must carry its resolved solve-phase thread budget"
+        );
+        // The pool the orthogonalization installs caps the worker count to 2,
+        // regardless of a wider ambient pool around it.
+        let pool = solve_thread_pool(Preconditioner::<C>::solve_threads(&lu));
+        let seen = with_threads(8, || {
+            pool.as_ref().unwrap().install(rayon::current_num_threads)
+        });
+        assert_eq!(seen, 2, "the ortho pool must cap to the factor's 2-worker budget");
+
+        // The full solve is identical bare vs. inside a wide ambient pool: the
+        // internal cap governs concurrency only, never the result.
+        let bare = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
+        let in_wide = with_threads(8, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap());
+        assert!(bare.converged);
+        assert!(
+            bare.x == in_wide.x && bare.iters == in_wide.iters,
+            "capped ortho pool must not perturb the numeric result"
+        );
     }
 
     #[test]
