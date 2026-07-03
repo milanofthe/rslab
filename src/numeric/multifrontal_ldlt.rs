@@ -396,7 +396,7 @@ pub(crate) fn in_scoped_pool<R: Send>(
 /// ```ignore
 /// let lu = factor_general_lu(&a, &SolverSettings::default())?;   // Auto{max:4}
 /// with_threads(4, || {
-///     for rhs in batches { let _ = gmres_block(&a, rhs, s, &lu, tol, it, m)?; }
+///     for rhs in batches { let _ = gmres_block(&a, rhs, s, &lu, tol, it, m, None)?; }
 ///     Ok::<_, RslabError>(())
 /// })?;
 /// ```

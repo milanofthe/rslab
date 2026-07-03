@@ -202,7 +202,7 @@ macro_rules! ldlt_solve_many_arm {
 /// column reached `tol`, `iters` is the block iteration count, and `final_res`
 /// is the per-column relative residual `‖B[:,c] − A X[:,c]‖ / ‖B[:,c]‖`.
 macro_rules! gmres_block_arm {
-    ($py:expr, $b:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
+    ($py:expr, $b:expr, $x0:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
         let bb: PyReadonlyArray2<$T> = $b
             .extract()
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
@@ -215,7 +215,30 @@ macro_rules! gmres_block_arm {
                 cm[c * n + i] = rm[i * nrhs + c];
             }
         }
-        let res = gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, $restart).map_err(map_err)?;
+        // Optional warm start `x0` (same `n x nrhs` layout as B), transposed to the
+        // column-major block the core expects.
+        let x0v: Option<Vec<$T>> = match $x0 {
+            Some(g) => {
+                let ga: PyReadonlyArray2<$T> = g.extract().map_err(|_| {
+                    PyValueError::new_err("x0 dtype does not match the factor dtype")
+                })?;
+                let gs = ga.shape();
+                if gs[0] != n || gs[1] != nrhs {
+                    return Err(PyValueError::new_err("x0 shape must match B (n x nrhs)"));
+                }
+                let grm = ga.as_slice()?;
+                let mut gcm = vec![<$T>::default(); n * nrhs];
+                for i in 0..n {
+                    for c in 0..nrhs {
+                        gcm[c * n + i] = grm[i * nrhs + c];
+                    }
+                }
+                Some(gcm)
+            }
+            None => None,
+        };
+        let res =
+            gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, $restart, x0v.as_deref()).map_err(map_err)?;
         let mut out = vec![<$T>::default(); n * nrhs];
         for c in 0..nrhs {
             for i in 0..n {
@@ -235,12 +258,22 @@ macro_rules! gmres_block_arm {
 /// analogue of `gmres_block_arm!`, exposing the Rust `KrylovResult` diagnostics
 /// that were previously unavailable from Python (issue #6).
 macro_rules! gmres_arm {
-    ($py:expr, $b:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
+    ($py:expr, $b:expr, $x0:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
         let bb: PyReadonlyArray1<$T> = $b
             .extract()
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let rhs = bb.as_slice()?;
-        let res = gmres_core($op, rhs, $pc, $tol, $maxit, $restart).map_err(map_err)?;
+        // Optional warm start `x0` (length-`n` vector), seeding the iteration.
+        let x0v: Option<Vec<$T>> = match $x0 {
+            Some(g) => {
+                let ga: PyReadonlyArray1<$T> = g.extract().map_err(|_| {
+                    PyValueError::new_err("x0 dtype does not match the factor dtype")
+                })?;
+                Some(ga.as_slice()?.to_vec())
+            }
+            None => None,
+        };
+        let res = gmres_core($op, rhs, $pc, $tol, $maxit, $restart, x0v.as_deref()).map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
         Ok((x_obj, res.converged, res.iters, res.final_res).into_py($py))
     }};
@@ -391,6 +424,12 @@ impl Ldlt {
     ///     Maximum total inner iterations.
     /// restart : int, default 80
     ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// x0 : numpy.ndarray, optional
+    ///     Warm-start initial guess, same shape and dtype as the right-hand side.
+    ///     On a sequence of related solves (slowly varying operator or RHS),
+    ///     seeding with the previous solution typically cuts the iteration count
+    ///     substantially. Convergence is still measured relative to the RHS norm.
+    ///     ``None`` (default) starts from zero.
     ///
     /// Returns
     /// -------
@@ -412,7 +451,7 @@ impl Ldlt {
     /// ------
     /// ValueError
     ///     If ``B``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
     fn gmres_block(
         &self,
         py: Python<'_>,
@@ -420,12 +459,13 @@ impl Ldlt {
         tol: f64,
         maxit: usize,
         restart: usize,
+        x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
-            LdltAny::F64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f64),
-            LdltAny::F32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f32),
-            LdltAny::C64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex64),
-            LdltAny::C32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex32),
+            LdltAny::F64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
+            LdltAny::F32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
+            LdltAny::C64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
+            LdltAny::C32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
         }
     }
 
@@ -447,6 +487,12 @@ impl Ldlt {
     ///     Maximum total inner iterations.
     /// restart : int, default 80
     ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// x0 : numpy.ndarray, optional
+    ///     Warm-start initial guess, same shape and dtype as the right-hand side.
+    ///     On a sequence of related solves (slowly varying operator or RHS),
+    ///     seeding with the previous solution typically cuts the iteration count
+    ///     substantially. Convergence is still measured relative to the RHS norm.
+    ///     ``None`` (default) starts from zero.
     ///
     /// Returns
     /// -------
@@ -464,7 +510,7 @@ impl Ldlt {
     /// ------
     /// ValueError
     ///     If ``b``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
     fn gmres(
         &self,
         py: Python<'_>,
@@ -472,12 +518,13 @@ impl Ldlt {
         tol: f64,
         maxit: usize,
         restart: usize,
+        x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
-            LdltAny::F64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f64),
-            LdltAny::F32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f32),
-            LdltAny::C64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex64),
-            LdltAny::C32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex32),
+            LdltAny::F64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
+            LdltAny::F32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
+            LdltAny::C64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
+            LdltAny::C32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
         }
     }
 }
@@ -716,6 +763,12 @@ impl Lu {
     ///     Maximum total inner iterations.
     /// restart : int, default 80
     ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// x0 : numpy.ndarray, optional
+    ///     Warm-start initial guess, same shape and dtype as the right-hand side.
+    ///     On a sequence of related solves (slowly varying operator or RHS),
+    ///     seeding with the previous solution typically cuts the iteration count
+    ///     substantially. Convergence is still measured relative to the RHS norm.
+    ///     ``None`` (default) starts from zero.
     ///
     /// Returns
     /// -------
@@ -737,7 +790,7 @@ impl Lu {
     /// ------
     /// ValueError
     ///     If ``B``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
     fn gmres_block(
         &self,
         py: Python<'_>,
@@ -745,12 +798,13 @@ impl Lu {
         tol: f64,
         maxit: usize,
         restart: usize,
+        x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
-            LuAny::F64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f64),
-            LuAny::F32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, f32),
-            LuAny::C64(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex64),
-            LuAny::C32(s, a) => gmres_block_arm!(py, b, a, s, tol, maxit, restart, Complex32),
+            LuAny::F64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
+            LuAny::F32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
+            LuAny::C64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
+            LuAny::C32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
         }
     }
 
@@ -773,6 +827,12 @@ impl Lu {
     ///     Maximum total inner iterations.
     /// restart : int, default 80
     ///     GMRES restart length (the Krylov basis depth per cycle).
+    /// x0 : numpy.ndarray, optional
+    ///     Warm-start initial guess, same shape and dtype as the right-hand side.
+    ///     On a sequence of related solves (slowly varying operator or RHS),
+    ///     seeding with the previous solution typically cuts the iteration count
+    ///     substantially. Convergence is still measured relative to the RHS norm.
+    ///     ``None`` (default) starts from zero.
     ///
     /// Returns
     /// -------
@@ -790,7 +850,7 @@ impl Lu {
     /// ------
     /// ValueError
     ///     If ``b``'s dtype does not match the factor's dtype.
-    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80))]
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = 80, x0 = None))]
     fn gmres(
         &self,
         py: Python<'_>,
@@ -798,12 +858,13 @@ impl Lu {
         tol: f64,
         maxit: usize,
         restart: usize,
+        x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
-            LuAny::F64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f64),
-            LuAny::F32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, f32),
-            LuAny::C64(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex64),
-            LuAny::C32(s, a) => gmres_arm!(py, b, a, s, tol, maxit, restart, Complex32),
+            LuAny::F64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
+            LuAny::F32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
+            LuAny::C64(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
+            LuAny::C32(s, a) => gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
         }
     }
 }

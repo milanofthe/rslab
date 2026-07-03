@@ -156,3 +156,59 @@ def test_gmres_reports_non_convergence():
     )
     assert converged is False
     assert float(final_res) > 1e-12
+
+
+def test_gmres_warm_start_cuts_iterations():
+    # Warm start (issue #5): a sequence of related systems with a slowly rotating
+    # RHS. Seeding each solve with the previous solution must cut the total
+    # iteration count vs cold-starting from zero every time.
+    rng = np.random.default_rng(11)
+    n = 400
+    # Weakly preconditioned so each solve takes many iterations (warm start has
+    # room to help); unsymmetric operator.
+    A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 4.0
+    A = A.tocsc()
+    fac = rslab.lu(A, drop_tol=8e-1)  # deliberately weak preconditioner
+    b0 = rng.standard_normal(n)
+    b1 = rng.standard_normal(n)
+    steps = 8
+
+    def bk(k):
+        th = 3e-4 * k
+        return np.cos(th) * b0 + np.sin(th) * b1
+
+    cold_total = 0
+    for k in range(steps):
+        x, converged, iters, _ = fac.gmres(bk(k), tol=1e-9, maxit=4000, restart=60)
+        assert converged
+        cold_total += iters
+
+    warm_total = 0
+    prev = None
+    for k in range(steps):
+        x, converged, iters, _ = fac.gmres(bk(k), tol=1e-9, maxit=4000, restart=60, x0=prev)
+        assert converged
+        warm_total += iters
+        prev = x
+
+    assert warm_total < 0.7 * cold_total, f"cold={cold_total}, warm={warm_total}"
+
+
+def test_gmres_block_warm_start_matches_and_helps():
+    # Warm start also works for the block (multi-RHS) path: seeding with the exact
+    # solution converges immediately (0 iters), and the result still matches a
+    # cold solve.
+    rng = np.random.default_rng(12)
+    n = 300
+    A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
+    A = A.tocsc()
+    fac = rslab.lu(A, drop_tol=1e-2)
+    B = rng.standard_normal((n, 4))
+    X, converged, iters, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80)
+    assert converged
+    # Re-solve warm-started from the converged solution: must need no iterations.
+    X2, conv2, iters2, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80, x0=X)
+    assert conv2
+    assert iters2 == 0, f"warm start from exact solution should take 0 iters, got {iters2}"
+    for c in range(4):
+        assert _residual(A, X2[:, c], B[:, c]) < 1e-8

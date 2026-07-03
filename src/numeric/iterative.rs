@@ -645,7 +645,12 @@ fn block_subtract<T: Scalar>(vbas: &[T], w: &mut [T], blocks: usize, sa: usize, 
 /// for unsymmetric MoM/FEM systems where COCG/COCR do not apply. `op` may be
 /// matrix-free; `precond` supplies `M⁻¹` (e.g. an RLA
 /// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors) near-field factor).
-/// Solves `A x = b` from `x₀ = 0`.
+/// Solves `A x = b` from the optional initial guess `x0` (default `x₀ = 0`).
+///
+/// **Warm start (issue #5):** pass `x0 = Some(prev)` to seed the iteration from a
+/// previous, related solution - on a sequence of slowly varying systems this
+/// often cuts the iteration count substantially. Convergence is still measured
+/// relative to ‖b‖.
 ///
 /// **Flexible variant (issue #7):** the preconditioned Arnoldi vectors
 /// `z_j = M⁻¹ v_j` (already formed to build `w = A z_j`) are *kept* as a second
@@ -662,6 +667,7 @@ pub fn gmres<T, A, M>(
     tol: f64,
     max_iter: usize,
     restart: usize,
+    x0: Option<&[T]>,
 ) -> Result<KrylovResult<T>, RslabError>
 where
     T: Scalar,
@@ -680,8 +686,20 @@ where
     const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
     let bnorm = norm2(b);
-    let mut x = vec![T::zero(); n];
+    // Warm start (issue #5): seed `x` from the caller's initial guess `x0`; the
+    // per-cycle true residual `r = b − A x` then measures progress from that
+    // guess. Convergence is still relative to ‖b‖. Absent `x0`, `x₀ = 0`.
+    let mut x = match x0 {
+        Some(g) => {
+            if g.len() != n {
+                return Err(RslabError::DimensionMismatch { expected: n, got: g.len() });
+            }
+            g.to_vec()
+        }
+        None => vec![T::zero(); n],
+    };
     if bnorm == 0.0 {
+        x.iter_mut().for_each(|v| *v = T::zero());
         return Ok(KrylovResult {
             x,
             iters: 0,
@@ -908,7 +926,12 @@ where
 /// factor / matrix value touched once for all `s` columns). Each RHS keeps its
 /// own Arnoldi basis / Hessenberg / Givens, so a column converges identically to
 /// the single-RHS [`gmres`]; the systems share only the batched operator and
-/// preconditioner calls. Solves `A X = B` from `X₀ = 0`.
+/// preconditioner calls. Solves `A X = B` from the optional initial guess `x0`
+/// (column-major `n×s`, default `X₀ = 0`).
+///
+/// **Warm start (issue #5):** `x0 = Some(prev)` seeds every column from a related
+/// previous solution; on a slowly varying sequence this cuts the block iteration
+/// count. Each column's convergence is still relative to its own ‖B[:,c]‖.
 ///
 /// **Deflation:** a RHS whose true residual reaches `tol` drops out of the block,
 /// so the batched applies shrink to the active width as columns converge - the
@@ -925,6 +948,7 @@ pub fn gmres_block<T, A, M>(
     tol: f64,
     max_iter: usize,
     restart: usize,
+    x0: Option<&[T]>,
 ) -> Result<BlockKrylovResult<T>, RslabError>
 where
     T: Scalar,
@@ -940,7 +964,16 @@ where
     }
     const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
-    let mut x = vec![T::zero(); n * s];
+    // Warm start (issue #5): seed every column from `x0` (column-major `n×s`).
+    let mut x = match x0 {
+        Some(g) => {
+            if g.len() != n * s {
+                return Err(RslabError::DimensionMismatch { expected: n * s, got: g.len() });
+            }
+            g.to_vec()
+        }
+        None => vec![T::zero(); n * s],
+    };
     let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
 
     // Scratch sized for the **full** width `s` and reused; each restart cycle uses
@@ -978,6 +1011,8 @@ where
     for c in 0..s {
         if bnorm[c] == 0.0 {
             converged[c] = true;
+            // Exact solution of `A x = 0` is `0`; discard any warm-start seed here.
+            x[c * n..c * n + n].iter_mut().for_each(|v| *v = T::zero());
         }
     }
 
@@ -1291,7 +1326,7 @@ where
 {
     let op = FnOp { f: std::cell::RefCell::new(op), n };
     let pc = FnPc { f: std::cell::RefCell::new(precond) };
-    gmres_block(&op, b, s, &pc, tol, max_iter, restart)
+    gmres_block(&op, b, s, &pc, tol, max_iter, restart, None)
 }
 
 /// Closure entry point for [`gmres`] (single RHS) - see [`gmres_block_fn`].
@@ -1312,7 +1347,7 @@ where
 {
     let op = FnOp { f: std::cell::RefCell::new(op), n };
     let pc = FnPc { f: std::cell::RefCell::new(precond) };
-    gmres(&op, b, &pc, tol, max_iter, restart)
+    gmres(&op, b, &pc, tol, max_iter, restart, None)
 }
 
 /// A factorization usable as both a **direct solver** and a [`Preconditioner`].
@@ -1529,12 +1564,12 @@ mod tests {
         let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
 
         // Unpreconditioned GMRES converges (well-conditioned).
-        let un = gmres(&a, &b, &NoPreconditioner, 1e-10, 2000, 40).unwrap();
+        let un = gmres(&a, &b, &NoPreconditioner, 1e-10, 2000, 40, None).unwrap();
         assert!(un.converged, "GMRES res={}", un.final_res);
 
         // LU factor as preconditioner → 1-2 iterations.
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-        let pre = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
+        let pre = gmres(&a, &b, &lu, 1e-10, 200, 40, None).unwrap();
         assert!(pre.converged, "preconditioned GMRES res={}", pre.final_res);
         assert!(
             pre.iters <= 3,
@@ -1564,7 +1599,7 @@ mod tests {
         // Only the (0,0) and (1,1) entries; row/col 2 is all-zero → A e₂ = 0.
         let a = GeneralCsc::<C>::from_triplets(3, &[0, 1], &[0, 1], &[c(1.0, 0.0), c(1.0, 0.0)]).unwrap();
         let b = vec![c(1.0, 0.0), c(1.0, 0.0), c(1.0, 0.0)];
-        let res = gmres(&a, &b, &NoPreconditioner, 1e-12, 50, 10).unwrap();
+        let res = gmres(&a, &b, &NoPreconditioner, 1e-12, 50, 10, None).unwrap();
         // No NaN/Inf reached the solution or the residual.
         assert!(res.x.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "solution has NaN/Inf: {:?}", res.x);
         assert!(res.final_res.is_finite(), "residual is NaN/Inf: {}", res.final_res);
@@ -1643,7 +1678,7 @@ mod tests {
         let lu = factor_general_lu(&a, &opts).unwrap();
         let restart = 5;
         let counting = CountingPc { inner: &lu, applies: std::sync::atomic::AtomicUsize::new(0) };
-        let res = gmres(&a, &b, &counting, 1e-10, 2000, restart).unwrap();
+        let res = gmres(&a, &b, &counting, 1e-10, 2000, restart, None).unwrap();
         assert!(res.converged, "FGMRES must converge, res={}", res.final_res);
         let applies = counting.applies.load(std::sync::atomic::Ordering::Relaxed);
         // Multiple restart cycles actually occurred (proves the saving is nonzero).
@@ -1653,6 +1688,54 @@ mod tests {
             applies, res.iters,
             "FGMRES precond applies {} must equal iters {} (no per-cycle extra solve)",
             applies, res.iters
+        );
+    }
+
+    #[test]
+    fn gmres_warm_start_cuts_total_iterations_on_related_sequence() {
+        // Warm start (issue #5): a sequence of related systems `A x = b_k` with a
+        // slowly rotating right-hand side. Cold-starting every solve from 0 pays
+        // the full iteration count each time; seeding each solve with the previous
+        // solution (which is close, because the RHS barely moved) collapses the
+        // per-solve count. Total iterations must drop by a clear margin.
+        let a = unsym_grid(12); // n = 144
+        let n = a.n;
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        // Two fixed directions; b_k interpolates between them by a small angle step.
+        let b0: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+        let b1: Vec<C> = (0..n).map(|i| c(((i * 3) % 7) as f64 - 3.0, ((i % 3) as f64) - 1.0)).collect();
+        let steps = 10;
+        let (tol, maxit, restart) = (1e-8, 4000, 60);
+
+        let bk = |k: usize| -> Vec<C> {
+            let th = 5e-5 * k as f64; // slow rotation
+            let (ct, st) = (th.cos(), th.sin());
+            (0..n).map(|i| b0[i] * c(ct, 0.0) + b1[i] * c(st, 0.0)).collect()
+        };
+
+        // Cold: every solve from x0 = 0.
+        let mut cold_total = 0usize;
+        for k in 0..steps {
+            let r = gmres(&a, &bk(k), &NoPreconditioner, tol, maxit, restart, None).unwrap();
+            assert!(r.converged, "cold solve {k} did not converge");
+            cold_total += r.iters;
+        }
+
+        // Warm: first solve from 0, each subsequent seeded with the previous x.
+        let mut warm_total = 0usize;
+        let mut prev: Option<Vec<C>> = None;
+        for k in 0..steps {
+            let r = gmres(&a, &bk(k), &NoPreconditioner, tol, maxit, restart, prev.as_deref()).unwrap();
+            assert!(r.converged, "warm solve {k} did not converge");
+            warm_total += r.iters;
+            prev = Some(r.x);
+        }
+
+        // A meaningful reduction (well beyond noise): warm start must cut the total
+        // iteration count by at least 30% over the sequence.
+        assert!(
+            (warm_total as f64) < 0.7 * (cold_total as f64),
+            "warm start did not help enough: cold={cold_total}, warm={warm_total}"
         );
     }
 
@@ -1669,8 +1752,8 @@ mod tests {
         let n = a.n;
         let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-        let single = gmres(&a, &b, &lu, 1e-10, 200, 40).unwrap();
-        let blk = gmres_block(&a, &b, 1, &lu, 1e-10, 200, 40).unwrap();
+        let single = gmres(&a, &b, &lu, 1e-10, 200, 40, None).unwrap();
+        let blk = gmres_block(&a, &b, 1, &lu, 1e-10, 200, 40, None).unwrap();
         assert!(blk.converged);
         assert!(
             (blk.iters as i64 - single.iters as i64).abs() <= 1,
@@ -1699,7 +1782,7 @@ mod tests {
             }
         }
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-        let res = gmres_block(&a, &bblk, s, &lu, 1e-10, 200, 40).unwrap();
+        let res = gmres_block(&a, &bblk, s, &lu, 1e-10, 200, 40, None).unwrap();
         assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
         // True residual per column.
         for k in 0..s {
@@ -1710,7 +1793,7 @@ mod tests {
         }
         // Each column must equal the single-RHS solve of that column.
         for k in 0..s {
-            let single = gmres(&a, &bblk[k * n..k * n + n], &lu, 1e-10, 200, 40).unwrap();
+            let single = gmres(&a, &bblk[k * n..k * n + n], &lu, 1e-10, 200, 40, None).unwrap();
             let diff = (0..n)
                 .map(|i| (res.x[k * n + i] - single.x[i]).norm())
                 .fold(0.0, f64::max);
@@ -1772,12 +1855,12 @@ mod tests {
             inner: &a,
             widths: Mutex::new(Vec::new()),
         };
-        let res = gmres_block(&op, &bblk, s, &NoPreconditioner, 1e-12, 200, 40).unwrap();
+        let res = gmres_block(&op, &bblk, s, &NoPreconditioner, 1e-12, 200, 40, None).unwrap();
         assert!(res.converged, "block GMRES must converge; res={:?}", res.final_res);
 
         // (i) Every column matches the single-RHS GMRES solve of that column.
         for k in 0..s {
-            let single = gmres(&a, &bblk[k * n..k * n + n], &NoPreconditioner, 1e-12, 200, 40).unwrap();
+            let single = gmres(&a, &bblk[k * n..k * n + n], &NoPreconditioner, 1e-12, 200, 40, None).unwrap();
             let diff = (0..n)
                 .map(|i| (res.x[k * n + i] - single.x[i]).norm())
                 .fold(0.0, f64::max);
@@ -1821,7 +1904,7 @@ mod tests {
             }
         }
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-        let solve = || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap();
+        let solve = || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
         let x1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(solve);
         let x8 = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap().install(solve);
         assert_eq!(x1.iters, x8.iters, "iteration count must not depend on threads");
@@ -1848,8 +1931,8 @@ mod tests {
         let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let seen = with_threads(3, || rayon::current_num_threads());
         assert_eq!(seen, 3, "with_threads must cap the pool to the requested width");
-        let capped = with_threads(3, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap());
-        let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60).unwrap();
+        let capped = with_threads(3, || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap());
+        let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
         assert!(capped.converged);
         assert!(capped.x == plain.x, "capped-pool solve must match the unbounded solve bit-for-bit");
     }
@@ -1872,8 +1955,8 @@ mod tests {
             assert_eq!(rayon::current_num_threads(), 2);
             factor_general_lu(&a, &opts_amb).unwrap()
         });
-        let x_def = gmres_block(&a, &b, 1, &lu_default, 1e-10, 200, 40).unwrap();
-        let x_amb = gmres_block(&a, &b, 1, &lu_amb, 1e-10, 200, 40).unwrap();
+        let x_def = gmres_block(&a, &b, 1, &lu_default, 1e-10, 200, 40, None).unwrap();
+        let x_amb = gmres_block(&a, &b, 1, &lu_amb, 1e-10, 200, 40, None).unwrap();
         assert!(x_def.x == x_amb.x, "ambient-pool factor must be bit-identical to the default factor");
     }
 
@@ -1925,7 +2008,7 @@ mod tests {
         // use the f64 factor for tighter tolerances.)
         let pc = LowPrecisionLu::factor(&a, &SolverSettings::default()).unwrap();
         assert!(pc.factor_nnz() > 0);
-        let res = gmres(&a, &b, &pc, 1e-6, 200, 50).unwrap();
+        let res = gmres(&a, &b, &pc, 1e-6, 200, 50, None).unwrap();
         assert!(res.converged, "mixed-precision GMRES res={}", res.final_res);
         assert!(res.iters <= 6, "iters {}", res.iters);
         let mut y = vec![C::default(); n];
