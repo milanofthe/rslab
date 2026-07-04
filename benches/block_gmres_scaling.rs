@@ -3,9 +3,11 @@
 //! The block operator matvec and the block preconditioner solve were already
 //! BLAS-3 and parallel; the orthogonalization was the serial, latency-bound piece
 //! left behind (per-RHS MGS + DGKS). Block-CGS2 turns it into panel-wide sweeps
-//! parallelized over the vector dimension. This bench isolates that: one factor,
-//! then the **same** block GMRES solve timed in rayon pools of 1..P threads, so
-//! the reported speedup/efficiency is the orthogonalization + matvec scaling.
+//! parallelized over the vector dimension. This bench isolates that: the **same**
+//! block GMRES solve timed at worker widths 1..P, driven by re-factoring the
+//! preconditioner with `with_threads(p)` (the solve inherits its scoped pool from
+//! the preconditioner's thread policy), so the reported speedup/efficiency is the
+//! orthogonalization + matvec scaling.
 //!
 //! Self-contained (no external matrices): a complex convection--diffusion grid
 //! (rotating flow, upwind) gives an unsymmetric operator; a drop-tolerance
@@ -81,8 +83,16 @@ fn main() {
     if droptol > 0.0 {
         opts = opts.with_drop_tol(droptol);
     }
-    let lu = factor_general_lu(&a, &opts).unwrap();
     let (tol, maxit, restart) = (1e-6, 400, 80);
+
+    // The solve's concurrency is the *preconditioner's* thread policy:
+    // `gmres_block` runs its orthogonalization reductions and batched applies in
+    // a scoped pool derived from `Preconditioner::solve_threads`, resolved at
+    // factor time (issue #9). An ambient rayon pool alone no longer changes the
+    // solve's worker count, so every thread-ladder point below re-factors the
+    // preconditioner with `with_threads(p)` - factor and solve share one
+    // concurrency budget of exactly `p` workers.
+    let factor_at = |p: usize| factor_general_lu(&a, &opts.clone().with_threads(p)).unwrap();
 
     let max_p = std::thread::available_parallelism()
         .map(|p| p.get())
@@ -97,17 +107,9 @@ fn main() {
             .filter(|&p| p <= max_p)
             .collect::<Vec<_>>();
         let s_list = [1usize, 4, 16];
-        // Prebuild RHS + pools once.
+        // Prebuild RHS once; the preconditioner is re-factored per thread count
+        // (`with_threads(p)`), which is what actually sets the solve's pool width.
         let rhs: Vec<Vec<C>> = s_list.iter().map(|&s| build_rhs(n, s)).collect();
-        let pools: Vec<_> = threads
-            .iter()
-            .map(|&p| {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(p)
-                    .build()
-                    .unwrap()
-            })
-            .collect();
         print!("Block GMRES per-RHS(ms) over threads × s  [n={n}  drop_tol={droptol}]\nthreads");
         for &s in &s_list {
             print!("      s={s:<2}       ");
@@ -116,15 +118,16 @@ fn main() {
         // per-RHS at 1 thread for each s, to report speedup down each column.
         let mut base = vec![0.0f64; s_list.len()];
         for (ti, &p) in threads.iter().enumerate() {
+            let lu = factor_at(p);
             print!("{p:5}  ");
             for (si, &s) in s_list.iter().enumerate() {
                 let bblk = &rhs[si];
                 let solve = || gmres_block(&a, bblk, s, &lu, tol, maxit, restart, None).unwrap();
-                let _ = pools[ti].install(solve); // warm up
+                let _ = solve(); // warm up
                 let mut ms = f64::INFINITY;
                 for _ in 0..2 {
                     let t = Instant::now();
-                    let _ = pools[ti].install(solve);
+                    let _ = solve();
                     ms = ms.min(t.elapsed().as_secs_f64() * 1e3);
                 }
                 let tpr = ms / s as f64;
@@ -150,10 +153,7 @@ fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(max_p);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(p)
-            .build()
-            .unwrap();
+        let lu = factor_at(p);
         println!(
             "Block GMRES RHS scaling  [n={n}  threads={p}  drop_tol={droptol}]\n\
               s    time(ms)   time/RHS(ms)   iters   res"
@@ -161,11 +161,11 @@ fn main() {
         for s in [1usize, 2, 4, 8, 16, 32] {
             let bblk = build_rhs(n, s);
             let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart, None).unwrap();
-            let mut res = pool.install(solve); // warm up
+            let mut res = solve(); // warm up
             let mut ms = f64::INFINITY;
             for _ in 0..3 {
                 let t = Instant::now();
-                res = pool.install(solve);
+                res = solve();
                 ms = ms.min(t.elapsed().as_secs_f64() * 1e3);
             }
             let maxres = res.final_res.iter().copied().fold(0.0, f64::max);
@@ -205,19 +205,16 @@ fn main() {
     );
     let mut t1 = 0.0f64;
     for (idx, &p) in plan.iter().enumerate() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(p)
-            .build()
-            .unwrap();
+        let lu = factor_at(p);
         let solve = || gmres_block(&a, &bblk, s, &lu, tol, maxit, restart, None).unwrap();
-        let mut res = pool.install(solve); // warm up (page-in, branch predictors)
-                                           // Best of several timed runs: single wall-clock samples are noisy on a
-                                           // loaded machine, and the minimum is the least-contended estimate.
+        let mut res = solve(); // warm up (page-in, branch predictors)
+                               // Best of several timed runs: single wall-clock samples are noisy on a
+                               // loaded machine, and the minimum is the least-contended estimate.
         let reps = 3;
         let mut ms = f64::INFINITY;
         for _ in 0..reps {
             let t = Instant::now();
-            res = pool.install(solve);
+            res = solve();
             ms = ms.min(t.elapsed().as_secs_f64() * 1e3);
         }
         if idx == 0 {

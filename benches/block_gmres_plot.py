@@ -30,7 +30,7 @@ OUT = Path("benches/bench_out")
 # RHS count -> color (a blue family: darker = more RHS).
 S_COLOR = {1: "#93c5fd", 4: "#3b82f6", 16: "#1d4ed8", 2: "#bfdbfe", 8: "#2563eb", 32: "#1e3a8a"}
 VARIANT = {  # variant -> (label, linestyle, marker, alpha)
-    "bcgs2": ("BCGS2 (v0.12)", "-", "o", 1.0),
+    "bcgs2": ("BCGS2 (v0.15)", "-", "o", 1.0),
     "mgs": ("MGS (v0.11)", "--", "x", 0.6),
 }
 
