@@ -207,6 +207,10 @@ name = "mom_loop"
 harness = false
 
 [[bench]]
+name = "mom_factor_probe"
+harness = false
+
+[[bench]]
 name = "mom_diag"
 harness = false
 
