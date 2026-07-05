@@ -1901,6 +1901,32 @@ where
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
+    gmres_block_mon(op, b, s, precond, tol, max_iter, restart, x0, None)
+}
+
+/// [`gmres_block`] with an optional per-cycle progress MONITOR (rapidmom-local addition,
+/// upstream candidate): at the start of every restart cycle — right after the true
+/// residuals `‖b − A·x‖/‖b‖` of all live columns were recomputed — `mon` receives
+/// `(iters_done, worst_live_residual, n_active_columns)`. Long solves stop being a black
+/// box: the caller can stream residual trajectories to its log. `None` is the exact old
+/// behavior.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn gmres_block_mon<T, A, M>(
+    op: &A,
+    b: &[T],
+    s: usize,
+    precond: &M,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+    x0: Option<&[T]>,
+    mut mon: Option<&mut dyn FnMut(usize, f64, usize)>,
+) -> Result<BlockKrylovResult<T>, RslabError>
+where
+    T: Scalar,
+    A: LinearOperator<T> + ?Sized,
+    M: Preconditioner<T> + ?Sized,
+{
     let n = op.n();
     if s == 0 || b.len() != n * s {
         return Err(RslabError::DimensionMismatch {
@@ -2022,6 +2048,12 @@ where
             }
         }
         let mut sa = act.len();
+        // Per-cycle progress monitor (rapidmom-local addition): true residuals of all
+        // live columns are fresh at this point — the honest place to report.
+        if let Some(m) = mon.as_mut() {
+            let worst = live.iter().map(|&c| final_res[c]).fold(0.0_f64, f64::max);
+            m(total, worst, sa);
+        }
         if sa == 0 {
             break;
         }
@@ -2351,6 +2383,35 @@ where
         f: std::cell::RefCell::new(precond),
     };
     gmres_block(&op, b, s, &pc, tol, max_iter, restart, None)
+}
+
+/// Closure entry point for [`gmres_block_mon`] — [`gmres_block_fn`] plus the per-cycle
+/// progress monitor (rapidmom-local addition, upstream candidate).
+#[allow(clippy::too_many_arguments)]
+pub fn gmres_block_fn_mon<T, F, G>(
+    op: F,
+    precond: G,
+    b: &[T],
+    s: usize,
+    n: usize,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+    mon: Option<&mut dyn FnMut(usize, f64, usize)>,
+) -> Result<BlockKrylovResult<T>, RslabError>
+where
+    T: Scalar,
+    F: FnMut(&[T], &mut [T], usize),
+    G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>,
+{
+    let op = FnOp {
+        f: std::cell::RefCell::new(op),
+        n,
+    };
+    let pc = FnPc {
+        f: std::cell::RefCell::new(precond),
+    };
+    gmres_block_mon(&op, b, s, &pc, tol, max_iter, restart, None, mon)
 }
 
 /// Closure entry point for [`gmres`] (single RHS) - see [`gmres_block_fn`].
