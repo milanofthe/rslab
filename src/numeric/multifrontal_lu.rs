@@ -1077,6 +1077,43 @@ pub fn factor_general_lu<T: Scalar>(
 }
 
 // ===========================================================================
+// ===========================================================================
+// #14 front-growth introspection (opt-in: RSLAB_FRONT_STATS=1)
+//
+// Per-supernode factor extrema collected during the LU — the instrument for
+// localizing element growth that outside-in probes cannot see (a single
+// ordinary-looking row can carry the discharged error of a distant front).
+// Collected into a process-global store (cheap Mutex push, gated) and drained
+// by the caller via [`take_front_stats`]. Column/row indices are in the
+// PERMUTED (post-ordering) numbering of this factorization.
+// ===========================================================================
+
+/// One supernode's factor extrema (permuted numbering).
+#[derive(Clone, Copy, Debug)]
+pub struct FrontStat {
+    pub s: usize,
+    pub first_col: usize,
+    pub ncol: usize,
+    pub nrow: usize,
+    pub min_piv: f64,
+    pub max_l: f64,
+    pub max_u: f64,
+    pub perturbed: usize,
+}
+
+static FRONT_STATS: std::sync::Mutex<Vec<FrontStat>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn front_stats_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RSLAB_FRONT_STATS").as_deref() == Ok("1"))
+}
+
+/// Drain the front stats collected since the last call (empty unless
+/// `RSLAB_FRONT_STATS=1` was set at first factor).
+pub fn take_front_stats() -> Vec<FrontStat> {
+    std::mem::take(&mut FRONT_STATS.lock().unwrap())
+}
+
 // Supernodal left-looking LU (FactorMethod::LeftLooking)
 //
 // The unsymmetric twin of the left-looking LDLᵀ path: each supernode keeps two
@@ -1854,6 +1891,34 @@ fn lu_ll_factor_node<T: Scalar>(
     PROF_LL_CDIV_NS.fetch_add(t_cdiv.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
+    }
+    // #14 front-growth introspection: record this supernode's factor extrema.
+    if front_stats_on() {
+        let mut min_piv = f64::INFINITY;
+        for k in 0..ncol {
+            let m = lbuf[k * nrow + k].magnitude();
+            if m < min_piv {
+                min_piv = m;
+            }
+        }
+        let max_l = lbuf
+            .iter()
+            .map(|v| v.magnitude())
+            .fold(0.0f64, f64::max);
+        let max_u = ubuf
+            .iter()
+            .map(|v| v.magnitude())
+            .fold(0.0f64, f64::max);
+        FRONT_STATS.lock().unwrap().push(FrontStat {
+            s,
+            first_col: first,
+            ncol,
+            nrow,
+            min_piv,
+            max_l,
+            max_u,
+            perturbed: local_perturbed,
+        });
     }
     for &g in &rs[s] {
         gloc[g] = usize::MAX;

@@ -133,18 +133,54 @@ fn main() {
             };
             let r1 = residual(&mtx.entries, &x, &b);
             let res1 = norm2(&r1) / nb;
-            // One refinement step: does the factor at least CONTRACT the error?
-            let res2 = match solver.solve(&r1) {
-                Ok(dx) => {
-                    let x2: Vec<C> = x.iter().zip(&dx).map(|(a, d)| a + d).collect();
-                    norm2(&residual(&mtx.entries, &x2, &b)) / nb
+            // MULTI-STEP refinement trajectory (#14): the per-step contraction rate is
+            // the quantity a Krylov method actually lives on — a factor whose one-shot
+            // residual is fine but whose trajectory STAGNATES (or bounces) explains a
+            // divergent preconditioned iteration that single-step probes miss.
+            let mut traj = vec![res1];
+            let mut xk = x.clone();
+            let mut rk = r1;
+            for _ in 0..8 {
+                match solver.solve(&rk) {
+                    Ok(dx) => {
+                        for (a, d) in xk.iter_mut().zip(&dx) {
+                            *a += d;
+                        }
+                        rk = residual(&mtx.entries, &xk, &b);
+                        traj.push(norm2(&rk) / nb);
+                    }
+                    Err(_) => {
+                        traj.push(f64::NAN);
+                        break;
+                    }
                 }
-                Err(_) => f64::NAN,
-            };
+            }
+            let tstr: Vec<String> = traj.iter().map(|v| format!("{v:.1e}")).collect();
             println!(
-                "{:<26}{:>9}{:>12} | {:<18}{:>10.2}{:>12}{:>11.2e}{:>11.2e}",
-                name, n, mtx.entries.len(), label, tf, solver.factor_nnz(), res1, res2
+                "{:<26}{:>9}{:>12} | {:<18}{:>10.2}{:>12} | traj {}",
+                name,
+                n,
+                mtx.entries.len(),
+                label,
+                tf,
+                solver.factor_nnz(),
+                tstr.join(" ")
             );
+            // #14 front-growth report (RSLAB_FRONT_STATS=1): the top supernodes by
+            // factor magnitude — the growth localization instrument.
+            let stats = rslab::take_front_stats();
+            if !stats.is_empty() {
+                let mut top: Vec<_> = stats.iter().collect();
+                top.sort_by(|a, b| b.max_l.max(b.max_u).total_cmp(&a.max_l.max(a.max_u)));
+                println!("  top fronts by max|L|/|U| (permuted cols):");
+                for f in top.iter().take(10) {
+                    println!(
+                        "    s={:<6} cols {}..{} ({}x{})  min|piv|={:.1e}  max|L|={:.1e}  max|U|={:.1e}  perturbed={}",
+                        f.s, f.first_col, f.first_col + f.ncol, f.ncol, f.nrow,
+                        f.min_piv, f.max_l, f.max_u, f.perturbed
+                    );
+                }
+            }
         }
     }
 }
