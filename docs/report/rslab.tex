@@ -42,6 +42,7 @@
 \newcommand{\nnz}{\mathrm{nnz}}
 \newcommand{\bigO}{\mathcal{O}}
 \newcommand{\LDLt}{\mathbf{L}\mathbf{D}\mathbf{L}^{\!\top}}
+\newcommand{\LU}{\mathbf{L}\mathbf{U}}
 
 \title{\textbf{\textcolor{accent}{RSLAB}}\\[2pt]
 \large A Pure-Rust Sparse Direct Solver with Preconditioned and Recycled Krylov
@@ -55,7 +56,7 @@ Refinement: Algorithms, A-Priori Predictors, and a Learned Configuration Tuner}
 \begin{abstract}
 \noindent\rT{} is a pure-Rust sparse direct solver. It provides a supernodal
 complex-symmetric $\LDLt$ factorization with Bunch--Kaufman pivoting and an unsymmetric
-multifrontal LU, is generic over the scalar type (\code{f64}, \code{f32},
+multifrontal $\LU$, is generic over the scalar type (\code{f64}, \code{f32},
 \code{Complex<f64>}, \code{Complex<f32>}), and links no external numeric library (no
 BLAS, LAPACK, or METIS): the SIMD dense kernels, the fill-reducing orderings, and the
 factorization are all Rust. The analyze phase computes, in addition to the symbolic
@@ -83,7 +84,7 @@ collection.
 
 \section{Scope}
 \rT{} factorizes and solves $A x = b$ for sparse $A$ that is either complex-symmetric
-(routed to $\LDLt$) or general unsymmetric (routed to LU). The primary target is the
+(routed to $\LDLt$) or general unsymmetric (routed to $\LU$). The primary target is the
 complex-symmetric systems of frequency-domain electromagnetic and FEM analysis, including
 curl--curl (N\'ed\'elec edge-element) Maxwell problems with lossy media or PML, which are
 complex-symmetric rather than Hermitian. The implementation is stable Rust with no
@@ -98,7 +99,7 @@ MoM/FEM operators the direct factor cannot hold whole.
 The solver follows the standard three-phase sparse-direct flow. \emph{Analyze} orders the
 matrix, builds the elimination tree, detects and amalgamates supernodes, computes column
 counts, and produces the a-priori predictors (Sec.~\ref{sec:pred}) and the structural
-feature vector (Sec.~\ref{sec:pred}). \emph{Factor} performs the numeric $\LDLt$ or LU on
+feature vector (Sec.~\ref{sec:pred}). \emph{Factor} performs the numeric $\LDLt$ or $\LU$ on
 the ordered, equilibrated matrix. \emph{Solve} runs the triangular substitutions. Analyze
 is separated from factor at the API level: a symbolic object (\code{LdltSymbolic} or
 \code{LuSymbolic}) is produced once and can factor many matrices that share its sparsity
@@ -131,7 +132,7 @@ tuner respectively.
 \code{rslab-amf}   & Approximate minimum fill (HAMF4) \\
 \code{rslab-metis} & Multilevel nested dissection (iterative driver, K\"onig separators) \\
 \code{symbolic}    & Elimination tree, supernode amalgamation, column counts, ordering dispatch \\
-\code{numeric}     & Supernodal $\LDLt$, multifrontal LU, panel-freeing, dense SIMD kernels, scoped pools; the Krylov layer (COCG/COCR, FGMRES, block GMRES, GCRO-DR) and its dense harmonic-Ritz eigensolver \\
+\code{numeric}     & Supernodal $\LDLt$, multifrontal $\LU$, panel-freeing, dense SIMD kernels, scoped pools; the Krylov layer (COCG/COCR, FGMRES, block GMRES, GCRO-DR) and its dense harmonic-Ritz eigensolver \\
 \code{diagnostics} & Per-path a-priori memory and flop estimates \\
 \code{analysis}    & Structural feature extraction, thread-count predictor \\
 \code{tuning}      & Hardware calibration, runtime estimate, budget-aware resource planner \\
@@ -235,7 +236,7 @@ diagonal $D=\operatorname{diag}(s)$, $s_i = 1/\sqrt{\max_j|A_{ij}|}$, computed i
 over the lower triangle; an all-zero row is left unscaled. The real, symmetric, positive
 diagonal preserves complex symmetry and the pivot signs, tolerates zero diagonals (common
 in saddle-point systems), and improves the conditioning the bounded pivoting sees. The
-solve unwinds $x = D\,(\hat A^{-1}(D b))$. The LU path applies a two-sided equilibration
+solve unwinds $x = D\,(\hat A^{-1}(D b))$. The $\LU$ path applies a two-sided equilibration
 $\hat A = D_r A D_c$.
 
 \subsection{Supernodal left-looking $\LDLt$}
@@ -286,16 +287,16 @@ does not change the numbering, factor, or fill. The multifrontal front is denser
 BLAS-3-rich than a left-looking panel but carries a higher transient peak, which is why
 the two paths are separate and the choice is per matrix.
 
-\subsection{Unsymmetric LU}
+\subsection{Unsymmetric \texorpdfstring{$\LU$}{LU}}
 General matrices reuse the symmetric analysis machinery on the symmetrized pattern
 $A\cup A^\top$ and, like the symmetric side, ship both numeric schedules. The default
-supernodal left-looking LU (the unsymmetric twin of the left-looking $\LDLt$) uses
+supernodal left-looking $\LU$ (the unsymmetric twin of the left-looking $\LDLt$) uses
 UMFPACK-style~\cite{umfpack} threshold partial pivoting: within a supernode's fully-summed
 block the diagonal candidate is kept when
 $|a_{jj}| \ge u\,|a_{\text{colmax}}|$ with the tunable tolerance $u=\code{pivot\_u}$
 (default $\num{0.1}$), else the column maximum is swapped up; $u=1$ recovers full partial
 pivoting and $u=0$ keeps the natural order and skips the pivot search entirely (the static
-fast path for fixed-pattern sequences). The multifrontal LU instead factors each front by a
+fast path for fixed-pattern sequences). The multifrontal $\LU$ instead factors each front by a
 blocked right-looking \code{getrf} with unrestricted partial pivoting over the fully-summed
 rows (the plain column argmax; \code{pivot\_u} is ignored). Both paths factor in panels of
 width $\code{NB}=32$, narrower than the $\LDLt$ default because the serial within-panel
@@ -315,7 +316,7 @@ consumes.
 \paragraph{Front-growth introspection.} Where a static-pivoted or ill-scaled factor is
 weak, the weakness is local: a single ordinary-looking row can carry the discharged error
 of a distant front, which an outside-in probe of the assembled factor cannot localize. The
-LU path therefore carries an opt-in instrument (\code{RSLAB\_FRONT\_STATS}${}=1$): during
+$\LU$ path therefore carries an opt-in instrument (\code{RSLAB\_FRONT\_STATS}${}=1$): during
 factorization each supernode records its factor extrema --- the minimum pivot magnitude,
 the maximum $|L|$ and $|U|$ entries, and its perturbed-pivot count, with the supernode's
 column range in the permuted numbering --- into a per-process store the caller drains
@@ -367,7 +368,7 @@ supernode is
 \Bigl(\frac{nc\,(nc+1)}{2}+\text{cnrow}\cdot nc\Bigr)(v+8),
 \end{equation*}
 and the input is
-$\nnz\,(v+8)$; for LU both $L$ and $U$ panels are held and the input is $2\,\nnz\,(v+8)$.
+$\nnz\,(v+8)$; for $\LU$ both $L$ and $U$ panels are held and the input is $2\,\nnz\,(v+8)$.
 
 For the multifrontal path a level-parallel model takes, at each assembly-tree level, the
 sum of the front sizes $\sum \text{nrow}^2 v$ plus the contribution blocks of that level's
@@ -440,21 +441,13 @@ where more only regress; a small problem ($\text{factor\_flops}<3\times10^8$) is
 four, where scheduling overhead dominates; otherwise all cores are used. On the corpus this
 lands within about $10\%$ of the per-matrix optimal in geomean, against about $50\%$ for a
 fixed budget of two workers. The need for a per-matrix policy is visible in the measured
-thread scaling (Fig.~\ref{fig:threads}): on the complex corpus RSLAB reaches a geomean
+thread scaling: on the complex corpus RSLAB reaches a geomean
 $\sim\!3.2\times$ (left-looking) / $\sim\!3.0\times$ (multifrontal) at \numrange{12}{24}
 workers, but sparse-direct factorization is largely memory-bandwidth bound, so it saturates
 well below linear, and the min--max band is wide (some matrices regress past a few threads,
 others reach $\sim\!4.8\times$). This spread is why the worker count is picked per matrix ---
 and, in the v2 cost model, a decision variable that may choose fewer threads when scaling
 saturates.
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=\textwidth]{thread_scaling_solvers.pdf}
-\caption{Thread scaling of the RSLAB left-looking and multifrontal kernels, 1--24 workers,
-geomean with min--max band over the complex corpus.}
-\label{fig:threads}
-\end{figure}
 
 \subsection{Structural features}
 The tuner consumes a structural fingerprint computed in the analyze phase. The pattern
@@ -476,7 +469,7 @@ the parameters and the stage each affects. The analyze-stage parameters change f
 front shape; the factor-stage parameters change the transient schedule and the pivoting;
 the kernel-stage parameters change the scalar/SIMD and serial/parallel boundaries without
 changing the result. The tuner (Sec.~\ref{sec:tuner}) searches the ordering, \code{nemin},
-relaxation width, \code{panel\_nb}, the kernel thresholds, the method, the LU
+relaxation width, \code{panel\_nb}, the kernel thresholds, the method, the $\LU$
 threshold-pivot tolerance \code{pivot\_u}, the equilibration strategy \code{scaling}, and
 the memory mode; static pivoting and the incomplete-factor drop tolerance are set directly
 by the caller. Two further options are caller- or race-selected rather than searched: the
@@ -498,11 +491,11 @@ factorization exact, and each keeps fill predictable so the a-priori memory back
 \code{scaling}      & analyze & Equilibration strategy (one-pass $\infty$-norm, iterative Ruiz, MC64 matching, adaptive routing, user-supplied, off) \\
 \code{method}       & factor  & Left-looking, multifrontal, or right-looking \\
 \code{threads}      & factor  & Worker count (fixed, or the auto predictor) \\
-\code{pivot\_u}     & factor  & LU threshold partial-pivot tolerance $u\in[0,1]$ ($u{=}0$: static) \\
+\code{pivot\_u}     & factor  & $\LU$ threshold partial-pivot tolerance $u\in[0,1]$ ($u{=}0$: static) \\
 \code{on\_zero\_pivot} & factor & Exact fail or static-pivot floor \\
 \code{drop\_tol}    & factor  & Incomplete-factor threshold (preconditioner) \\
 \code{memory}       & factor  & Factor emit / peak-RSS strategy \\
-\code{panel\_nb}    & kernel  & Bunch--Kaufman / LU panel width \\
+\code{panel\_nb}    & kernel  & Bunch--Kaufman / $\LU$ panel width \\
 \code{scalar\_gate} & kernel  & Scalar-loop vs.\ SIMD-GEMM flop gate \\
 \code{par\_gemm}    & kernel  & \code{cmod} GEMM parallel gate \\
 \code{par\_cdiv}    & kernel  & Front / trailing GEMM parallel gate \\
@@ -543,20 +536,20 @@ the same hardware reproducible.
 \section{Learned configuration tuner}
 \label{sec:tuner}
 The tuner selects a \code{SolverSettings} from the structural feature vector, with
-\textbf{one model per solver path} (symmetric $\LDLt$ and unsymmetric LU): the paths have
-different relevant axes (\code{pivot\_u} only affects LU) and different speed/memory
-profiles, so each is fit and selected independently and the LU grid searches the
+\textbf{one model per solver path} (symmetric $\LDLt$ and unsymmetric $\LU$): the paths have
+different relevant axes (\code{pivot\_u} only affects $\LU$) and different speed/memory
+profiles, so each is fit and selected independently and the $\LU$ grid searches the
 threshold-pivot tolerance the $\LDLt$ grid pins. Each model is a multilayer perceptron
 predicting $(\log\text{factor\_ms},\,\log\text{peak\_mb})$ from the standardized features
 concatenated with an encoding of a candidate configuration: an ordering one-hot,
 \code{nemin}, relaxation width, \code{panel\_nb}, \code{scalar\_gate}, \code{par\_cdiv}, the
-method, the equilibration-strategy one-hot, the memory mode, and (LU) \code{pivot\_u} --- a
+method, the equilibration-strategy one-hot, the memory mode, and ($\LU$) \code{pivot\_u} --- a
 $37/38\!\to\!64\!\to\!32\!\to\!2$ network with ReLU hidden layers, trained offline with
 scikit-learn~\cite{sklearn} on a complete-distribution corpus (structured-grid generators
 across real/complex $\times$ symmetric/unsymmetric $\times$ conditioning, including
 curl-curl Maxwell, Stokes/KKT saddle-point, and convection--diffusion over the grid-Péclet
 range, plus the SuiteSparse matrices) and exported as JSON weights. Each path is fit on its
-own class: the LU model on \num{103} unsymmetric matrices (held-out $R^2$ \num{0.98} in both
+own class: the $\LU$ model on \num{103} unsymmetric matrices (held-out $R^2$ \num{0.98} in both
 time and memory), the $\LDLt$ model on \num{205} symmetric ones. The input
 encoding is data-driven: the Rust inference builds the same vector the training exported,
 and a candidate axis is searched only when the shipped model references it, so adding an
@@ -599,11 +592,11 @@ only re-execution and not correctness.
 Measured against the untuned default, each path is evaluated on \emph{its own} class over
 \num{100}+ matrices (generated + SuiteSparse), since the two are separate models a caller
 dispatches to explicitly. The balanced $\LDLt$ tuner ($w=0.7$) is \num{1.33}$\times$ faster
-at \num{0.83}$\times$ the memory over \num{167} matrices; the balanced LU tuner is
+at \num{0.83}$\times$ the memory over \num{167} matrices; the balanced $\LU$ tuner is
 \num{1.92}$\times$ faster at \num{0.72}$\times$ the memory over \num{97} matrices, and the
 guarded picks never regress memory (Figs.~\ref{fig:autotune_ldlt}--\ref{fig:autotune_lu}).
-The LU result is a direct consequence of corpus coverage: with only a handful of generated
-unsymmetric matrices the LU tuner was statistically indistinguishable from the default
+The $\LU$ result is a direct consequence of corpus coverage: with only a handful of generated
+unsymmetric matrices the $\LU$ tuner was statistically indistinguishable from the default
 (\num{1.02}$\times$); broadening the unsymmetric training set to \num{90} generated
 convection--diffusion problems (grid-Péclet $\times$ flow field $\times$ discretization)
 lifted the per-path held-out $R^2$ from \num{0.75} to \num{0.98} and the tuner from neutral
@@ -626,7 +619,7 @@ three Pareto modes as a time--memory cloud, at full text width.}
 \centering
 \includegraphics[width=0.82\textwidth]{autotune_vs_size_lu.pdf}\\[4pt]
 \includegraphics[width=\textwidth]{autotune_modes_lu.pdf}
-\caption{LU tuner vs.\ untuned default over \num{97} matrices: (top) factor speedup and
+\caption{$\LU$ tuner vs.\ untuned default over \num{97} matrices: (top) factor speedup and
 peak-memory ratio by problem size; (bottom) the three Pareto modes as a time--memory cloud,
 at full text width. Nearly every matrix lands below-and-left of the default (faster
 \emph{and} lighter).}
@@ -994,7 +987,7 @@ solves.
 warm start (seed from the previous solution \emph{and} recycle its stagnation subspace). The
 harmonic-Ritz eigenproblem is assembled in \code{recompute\_recycle} and solved in
 \code{src/numeric/dense\_eig.rs} entirely in \code{Complex<f64>} regardless of the working
-field: the standard-form matrix $M_2^{-1}M_1$ is formed by a partial-pivot dense LU, its
+field: the standard-form matrix $M_2^{-1}M_1$ is formed by a partial-pivot dense $\LU$, its
 eigenvalues by Householder Hessenberg reduction and shifted Givens QR, and the coefficient
 vectors by inverse iteration --- all capped and best-effort, since an approximate spectrum only
 slows the outer solve. Recycling is implemented for the single-RHS FGMRES path only; the block
@@ -1037,7 +1030,7 @@ the methods so the cost is predictable before the call.
 \section{Test matrix corpus}
 \label{sec:corpus}
 The tuner is fit and the solver evaluated on a corpus deliberately spanning the full problem
-distribution --- both paths ($\LDLt$ and LU), real and complex values, and the conditioning
+distribution --- both paths ($\LDLt$ and $\LU$), real and complex values, and the conditioning
 classes (SPD, symmetric indefinite, unsymmetric, ill-scaled, saddle-point) --- rather than a
 single family. The SuiteSparse collection holds few genuinely complex, non-Hermitian
 matrices, so the backbone is a set of structured-grid generators assembled directly with
@@ -1067,7 +1060,7 @@ form~\cite{elman,benzi}.
 
 \paragraph{Convection--diffusion (unsymmetric).} The operator $-\varepsilon\nabla^2 u +
 \mathbf{b}\cdot\nabla u = f$ finite-differenced on a structured grid with Dirichlet
-boundaries --- the canonical unsymmetric class (the LU path's workload). The first-derivative
+boundaries --- the canonical unsymmetric class (the $\LU$ path's workload). The first-derivative
 advection term $\mathbf{b}\cdot\nabla u$ breaks symmetry; central differencing gives the
 sharp, oscillation-prone form that stresses pivoting at small $\varepsilon$ (high grid-Péclet
 $|\mathbf{b}|h/\varepsilon$), first-order upwinding a diagonally dominant M-matrix. Sweeping
@@ -1076,7 +1069,7 @@ advection-dominated (strongly unsymmetric), and the flow field $\mathbf{b}$ (a u
 or a recirculating vortex) varies the coupling structure. The parameter grid (four Péclet
 levels $\times$ two flows $\times$ two schemes $\times$ several grids, 2-D and 3-D) yields
 \num{90} generated unsymmetric matrices spanning the distribution real CFD/transport solves
-live on --- the LU tuner's training and held-out corpus.
+live on --- the $\LU$ tuner's training and held-out corpus.
 
 \paragraph{Remaining classes.} Shifted Helmholtz (complex symmetric), banded / arrow /
 jumping-coefficient stencils, BEM/MoM near-field kernels (complex unsymmetric), and random
@@ -1084,7 +1077,7 @@ SPD / unsymmetric / exactly-conditioned spectral matrices span the rest. Every g
 type-agnostic, so each class is available in \code{f64} and \code{Complex<f64>}. This
 complete-distribution corpus was load-bearing: it exposed the tuner mispicks on complex
 curl-curl that a real-SPD corpus had hidden, and the too-thin unsymmetric coverage that had
-left the LU tuner neutral until the convection--diffusion set was added (Sec.~\ref{sec:eval}).
+left the $\LU$ tuner neutral until the convection--diffusion set was added (Sec.~\ref{sec:eval}).
 
 \section{Evaluation}
 \label{sec:eval}
@@ -1118,7 +1111,7 @@ fits (the fitted exponent $\alpha$ is annotated on each curve).}
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{h2h_lu.pdf}
-\caption{LU path (unsymmetric, PARDISO mtype 13): (left) factor wall-clock time and (right)
+\caption{$\LU$ path (unsymmetric, PARDISO mtype 13): (left) factor wall-clock time and (right)
 peak memory vs.\ problem size. Each panel carries the untuned-default RSLAB curve (gray)
 beside the auto-tuned one (blue); the tuner closes part of the default$\to$PARDISO distance.
 On time RSLAB scales slightly flatter than PARDISO ($\alpha\!\approx\!1.17$ vs.\ $1.22$).}
@@ -1129,24 +1122,24 @@ On time RSLAB scales slightly flatter than PARDISO ($\alpha\!\approx\!1.17$ vs.\
 \centering\tabfont
 \begin{tabular}{@{}lcc@{}}
 \toprule
-RSLAB vs & $\LDLt$ (sym) & LU (unsym) \\
+RSLAB vs & $\LDLt$ (sym) & $\LU$ (unsym) \\
 \midrule
 MKL PARDISO --- factor time & $7.0\times$ slower & \textbf{\num{4.0}}$\times$ slower \\
 MKL PARDISO --- peak memory & $2.2\times$ more & $2.4\times$ more \\
-faer LU\textsuperscript{$\dagger$} --- factor time & \textbf{\num{14.5}}$\times$ faster & \textbf{\num{6.7}}$\times$ faster \\
-faer LU\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{2.3}}$\times$ less & $1.1\times$ less \\
+faer $\LU$\textsuperscript{$\dagger$} --- factor time & \textbf{\num{14.5}}$\times$ faster & \textbf{\num{6.7}}$\times$ faster \\
+faer $\LU$\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{2.3}}$\times$ less & $1.1\times$ less \\
 untuned default --- factor time & \textbf{\num{1.94}}$\times$ faster & \textbf{\num{1.78}}$\times$ faster \\
 untuned default --- peak memory & \textbf{\num{0.68}}$\times$ (less) & \textbf{\num{0.72}}$\times$ (less) \\
 \bottomrule
 \end{tabular}
 \caption{Head-to-head geomean ratios ($\sim$\num{100} matrices per path, 5k--1M nonzeros), each
-path on its own class ($\LDLt$: curl-curl, Helmholtz, saddle-point; LU:
+path on its own class ($\LDLt$: curl-curl, Helmholtz, saddle-point; $\LU$:
 convection--diffusion, BEM/MoM), over the matrices both solvers factor to below $0.1$
 residual. The last row is the auto-tuned solver's speedup over the untuned RSLAB default.
 All passes of this regeneration were measured on a verified-quiet machine (no concurrent
 load); the peak-memory ratios are allocation counts and load-independent, and reproduce
 the previous run to within $5\%$.
-\textsuperscript{$\dagger$}faer has no symmetric path (it factors symmetric matrices as LU),
+\textsuperscript{$\dagger$}faer has no symmetric path (it factors symmetric matrices as $\LU$),
 so its $\LDLt$ gap is structurally largest; it also OOMs on the largest matrices (factoring
 only the smaller subset), so its head-to-head is a conservative floor.}
 \label{tab:scaling}
@@ -1288,7 +1281,7 @@ makes a misprediction cost re-execution and not correctness.
 \section{Limitations and future work}
 \label{sec:future}
 The tuner's gains are aggregate: the geomean speedups are \num{1.33}$\times$ ($\LDLt$) and
-\num{1.92}$\times$ (LU), and part of each
+\num{1.92}$\times$ ($\LU$), and part of each
 is within the per-matrix single-shot timing variance of about $\pm20\%$, so the geomean
 rather than any single matrix is the signal. A trained model is specific to one machine and
 one corpus and does not transfer across hardware, in the same way a branch
