@@ -287,12 +287,19 @@ BLAS-3-rich than a left-looking panel but carries a higher transient peak, which
 the two paths are separate and the choice is per matrix.
 
 \subsection{Unsymmetric LU}
-General matrices reuse the symmetric multifrontal machinery on the symmetrized pattern
-$A\cup A^\top$, with UMFPACK-style~\cite{umfpack} threshold partial pivoting: within each
-front's fully-summed block a diagonal candidate is accepted when
-$|a_{jj}| \ge \tau\,|a_{\text{colmax}}|$ with $\tau=\num{0.1}$, else the column maximum is
-swapped up. The panel width is $\code{NB}=32$, narrower than the $\LDLt$ default because
-the serial within-panel factorization is the bottleneck while the SIMD GEMM is fast. $L$
+General matrices reuse the symmetric analysis machinery on the symmetrized pattern
+$A\cup A^\top$ and, like the symmetric side, ship both numeric schedules. The default
+supernodal left-looking LU (the unsymmetric twin of the left-looking $\LDLt$) uses
+UMFPACK-style~\cite{umfpack} threshold partial pivoting: within a supernode's fully-summed
+block the diagonal candidate is kept when
+$|a_{jj}| \ge u\,|a_{\text{colmax}}|$ with the tunable tolerance $u=\code{pivot\_u}$
+(default $\num{0.1}$), else the column maximum is swapped up; $u=1$ recovers full partial
+pivoting and $u=0$ keeps the natural order and skips the pivot search entirely (the static
+fast path for fixed-pattern sequences). The multifrontal LU instead factors each front by a
+blocked right-looking \code{getrf} with unrestricted partial pivoting over the fully-summed
+rows (the plain column argmax; \code{pivot\_u} is ignored). Both paths factor in panels of
+width $\code{NB}=32$, narrower than the $\LDLt$ default because the serial within-panel
+factorization is the bottleneck while the SIMD GEMM is fast. $L$
 is stored CSC (unit lower), $U$ CSR; the column permutation is the fill-reducing ordering
 and a separate row permutation records the pivot interchanges.
 
@@ -304,6 +311,17 @@ $d\mapsto d\,(\text{floor}/|d|)$, so the factorization satisfies $\LDLt = A+\Del
 bounded $\Delta$ and never fails; the count of perturbed pivots is tracked per front. This
 never-fail factor is the preconditioner the Krylov layer of Sec.~\ref{sec:iterative}
 consumes.
+
+\paragraph{Front-growth introspection.} Where a static-pivoted or ill-scaled factor is
+weak, the weakness is local: a single ordinary-looking row can carry the discharged error
+of a distant front, which an outside-in probe of the assembled factor cannot localize. The
+LU path therefore carries an opt-in instrument (\code{RSLAB\_FRONT\_STATS}${}=1$): during
+factorization each supernode records its factor extrema --- the minimum pivot magnitude,
+the maximum $|L|$ and $|U|$ entries, and its perturbed-pivot count, with the supernode's
+column range in the permuted numbering --- into a per-process store the caller drains
+through \code{take\_front\_stats}. Off (the default) it costs nothing. The
+\code{mom\_factor\_probe} bench consumes it to trace factor quality and per-front element
+growth across multi-step contraction trajectories on the MoM preconditioner corpus.
 
 \subsection{Kernel scheduling and scoped pools}
 Four flop-count thresholds route the dense work, passed as a cheap \code{Copy}
@@ -477,7 +495,7 @@ factorization exact, and each keeps fill predictable so the a-priori memory back
 \code{nemin}        & analyze & Supernode amalgamation threshold \\
 \code{relax}        & analyze & Relaxed amalgamation width / extra-row budget \\
 \code{reorder}      & analyze & Child-reorder strategy (CB-stack peak vs.\ leaf parallelism) \\
-\code{scaling}      & analyze & Equilibration strategy (one-pass $\infty$-norm, iterative Ruiz, MC64, off) \\
+\code{scaling}      & analyze & Equilibration strategy (one-pass $\infty$-norm, iterative Ruiz, MC64 matching, adaptive routing, user-supplied, off) \\
 \code{method}       & factor  & Left-looking, multifrontal, or right-looking \\
 \code{threads}      & factor  & Worker count (fixed, or the auto predictor) \\
 \code{pivot\_u}     & factor  & LU threshold partial-pivot tolerance $u\in[0,1]$ ($u{=}0$: static) \\
@@ -797,7 +815,12 @@ once, and adds the contribution to $x$; the surviving columns are then compacted
 narrower stride (a monotone copy that never clobbers unread data) and their per-column Arnoldi
 state is remapped by $O(1)$ vector swaps. The parallel orthogonalization reductions run in a
 scoped pool derived from the preconditioner's thread policy (Sec.~\ref{sec:determinism}), so
-factor and solve share one concurrency budget.
+factor and solve share one concurrency budget. A long block solve need not be a black box:
+\code{gmres\_block\_mon} takes an optional per-cycle progress monitor that receives the
+iteration count, the worst live true residual, and the active column count at the start of
+every restart cycle --- immediately after the true residuals $\lVert b-Ax\rVert/\lVert
+b\rVert$ of all live columns were recomputed, the honest place to report --- so the caller
+can stream residual trajectories to its log; \code{None} is exactly the unmonitored path.
 
 Figure~\ref{fig:blockgmres} measures a right-preconditioned convection--diffusion solve
 ($n=\num{40000}$, \numrange{63}{77} GMRES iterations, complex \code{f64}). BCGS2 scales to
@@ -856,6 +879,16 @@ true-residual check reports non-convergence --- a \emph{deterministic breakdown}
 NaN. In the well-conditioned case every diagonal clears the threshold and the normal path is
 unaffected. Both the single-RHS and the block paths carry the guard (the block on each
 column's Hessenberg before its restart update).
+
+\paragraph{Stop diagnostics.} Every Krylov result carries a \code{stop} reason beside the
+\code{converged} flag, so a caller can distinguish \emph{why} a solve ended:
+\code{Converged} (the relative residual reached \code{tol}), \code{MaxIter} (the iteration
+budget ran out first), or \code{Breakdown}. Only COCG/COCR report \code{Breakdown} --- the
+zero bilinear denominator above, a genuine pre-convergence failure of the short recurrence.
+The GMRES family never does: a rank-deficient Arnoldi step is a \emph{happy} breakdown that
+yields the exact solution (so it surfaces as \code{Converged}), and every other
+non-converged exit is the budget, i.e.\ \code{MaxIter}. There is no stagnation detector, so
+a stagnation reason is deliberately absent rather than guessed.
 
 \subsection{Restart length and the memory budget}
 \label{sec:restart}
@@ -986,9 +1019,11 @@ The PyO3 layer (\code{python/src/lib.rs}) exposes the analyze/factor/solve flow 
 layer with the diagnostics a solver-in-the-loop caller needs. A factored \code{Ldlt} or
 \code{Lu} object carries \code{drop\_tol=} and static-pivot options at construction, and its
 \code{gmres} / \code{gmres\_block} methods return the full diagnostics tuple
-\code{(X, converged, iters, final\_res)} rather than a bare solution --- \code{converged} is
+\code{(X, converged, iters, final\_res, stop)} rather than a bare solution --- \code{converged} is
 \code{True} only when \emph{every} right-hand side reached the tolerance, so a caller never
-mistakes a stalled iterate for a solution. Both accept an optional \code{x0=} warm start (same
+mistakes a stalled iterate for a solution, and \code{stop} is the stop reason of
+Sec.~\ref{sec:iterative} as a lowercase tag (\code{"converged"}, \code{"max\_iter"},
+\code{"breakdown"}) for logging and dispatch. Both accept an optional \code{x0=} warm start (same
 $n\times$nrhs layout as $B$). The single-RHS \code{gmres} additionally accepts a
 \code{recycle=} handle: \code{rslab.Recycle(k)} is an opaque object (\code{dim}, \code{active},
 \code{dtype}, \code{clear}) carried across a sequence of related solves and refreshed in place,
@@ -1252,13 +1287,15 @@ makes a misprediction cost re-execution and not correctness.
 
 \section{Limitations and future work}
 \label{sec:future}
-The tuner's gains are aggregate: the geomean speedup is \num{1.62}$\times$, and part of it
+The tuner's gains are aggregate: the geomean speedups are \num{1.33}$\times$ ($\LDLt$) and
+\num{1.92}$\times$ (LU), and part of each
 is within the per-matrix single-shot timing variance of about $\pm20\%$, so the geomean
-rather than any single matrix is the signal. The model is trained on one machine and one
-corpus and does not transfer across hardware without retraining, in the same way a branch
-predictor is tuned per microarchitecture; a meta-tuner that runs the sweep, the training,
-and the guard-threshold calibration on a user's own matrix set to emit a problem-class
-profile is planned. Time is optimized but not guaranteed; only memory is. The exact-path
+rather than any single matrix is the signal. A trained model is specific to one machine and
+one corpus and does not transfer across hardware, in the same way a branch
+predictor is tuned per microarchitecture; retraining is automated (the \code{cargo xtask
+tune} meta-tuner of Sec.~\ref{sec:metatuner}, whose ship-gate makes unattended retuning
+safe), but it remains a per-machine, per-problem-class sweep rather than a transferable
+model. Time is optimized but not guaranteed; only memory is. The exact-path
 tuning stages that keep the factorization exact are now implemented (Sec.~\ref{sec:tunable}):
 an RCM/band ordering~\cite{cuthillmckee}, an exposed threshold-pivot tolerance, a tunable
 equilibration strategy~\cite{ruiz}, static pivot-order reuse for fixed-pattern sequences via
@@ -1267,7 +1304,7 @@ front-level parallelism of the trailing Schur update and subtraction. Each provi
 a-priori memory estimate so the deterministic memory guarantee continues to hold, and each
 either enters the tuner grid or is caller-selected. What remains is a fuller two-dimensional
 (block-cyclic) factorization of the very largest top-of-tree fronts to push thread scaling
-past the current $\sim\!3\times$, and the cross-hardware meta-tuner above. On the iterative
+past the current $\sim\!3\times$. On the iterative
 side, the block/multi-RHS path is batched-independent rather than a shared-subspace block
 Krylov method, and its within-cycle basis compaction does not yet compose with GCRO-DR
 recycling; a shared-subspace block solver and block recycling are the planned next step
