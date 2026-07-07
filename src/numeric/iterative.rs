@@ -354,16 +354,22 @@ pub enum StopReason {
     /// A short-recurrence denominator went to zero before convergence
     /// (COCG / COCR only).
     Breakdown,
+    /// The progress monitor requested an early stop (block GMRES only): the
+    /// caller's per-cycle callback returned `false` — typically a stagnation
+    /// detector cutting a solve that stopped contracting, instead of burning
+    /// the remaining iteration budget.
+    Stalled,
 }
 
 impl StopReason {
     /// Lowercase tag for the Python bindings and logging: `"converged"`,
-    /// `"max_iter"`, or `"breakdown"`.
+    /// `"max_iter"`, `"breakdown"`, or `"stalled"`.
     pub fn as_str(self) -> &'static str {
         match self {
             StopReason::Converged => "converged",
             StopReason::MaxIter => "max_iter",
             StopReason::Breakdown => "breakdown",
+            StopReason::Stalled => "stalled",
         }
     }
 }
@@ -1907,9 +1913,11 @@ where
 /// [`gmres_block`] with an optional per-cycle progress MONITOR (rapidmom-local addition,
 /// upstream candidate): at the start of every restart cycle — right after the true
 /// residuals `‖b − A·x‖/‖b‖` of all live columns were recomputed — `mon` receives
-/// `(iters_done, worst_live_residual, n_active_columns)`. Long solves stop being a black
-/// box: the caller can stream residual trajectories to its log. `None` is the exact old
-/// behavior.
+/// `(iters_done, worst_live_residual, n_active_columns)` and returns whether the solve
+/// should CONTINUE. Long solves stop being a black box: the caller can stream residual
+/// trajectories to its log, and a `false` return cancels the solve early (a stagnation
+/// detector cutting a stopped-contracting iteration) with `StopReason::Stalled` and the
+/// best solution so far. `None` is the exact old behavior.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn gmres_block_mon<T, A, M>(
     op: &A,
@@ -1920,7 +1928,7 @@ pub fn gmres_block_mon<T, A, M>(
     max_iter: usize,
     restart: usize,
     x0: Option<&[T]>,
-    mut mon: Option<&mut dyn FnMut(usize, f64, usize)>,
+    mut mon: Option<&mut dyn FnMut(usize, f64, usize) -> bool>,
 ) -> Result<BlockKrylovResult<T>, RslabError>
 where
     T: Scalar,
@@ -1954,6 +1962,8 @@ where
         None => vec![T::zero(); n * s],
     };
     let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
+    // Set when the progress monitor cancels the solve (`StopReason::Stalled`).
+    let mut stalled = false;
 
     // Scratch sized for the **full** width `s` and reused; each restart cycle uses
     // only the first `sa` columns, where `sa` is the count of still-active RHS.
@@ -2049,10 +2059,14 @@ where
         }
         let mut sa = act.len();
         // Per-cycle progress monitor (rapidmom-local addition): true residuals of all
-        // live columns are fresh at this point — the honest place to report.
+        // live columns are fresh at this point — the honest place to report, and the
+        // honest place to CANCEL (a `false` return stops a stagnated solve early).
         if let Some(m) = mon.as_mut() {
             let worst = live.iter().map(|&c| final_res[c]).fold(0.0_f64, f64::max);
-            m(total, worst, sa);
+            if !m(total, worst, sa) {
+                stalled = true;
+                break;
+            }
         }
         if sa == 0 {
             break;
@@ -2314,6 +2328,8 @@ where
         final_res,
         stop: if all_conv {
             StopReason::Converged
+        } else if stalled {
+            StopReason::Stalled
         } else {
             StopReason::MaxIter
         },
@@ -2397,7 +2413,7 @@ pub fn gmres_block_fn_mon<T, F, G>(
     tol: f64,
     max_iter: usize,
     restart: usize,
-    mon: Option<&mut dyn FnMut(usize, f64, usize)>,
+    mon: Option<&mut dyn FnMut(usize, f64, usize) -> bool>,
 ) -> Result<BlockKrylovResult<T>, RslabError>
 where
     T: Scalar,
