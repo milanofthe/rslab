@@ -26,7 +26,10 @@ type C = Complex<f64>;
 struct Lcg(u64);
 impl Lcg {
     fn next_f64(&mut self) -> f64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
     }
 }
@@ -47,8 +50,14 @@ fn residual(entries: &[(usize, usize, C)], x: &[C], b: &[C]) -> Vec<C> {
 fn main() {
     let dir = std::env::var("MOM_DIR")
         .unwrap_or_else(|_| r"C:\Repositories\rapidmom\precond_matrices".into());
-    let threads: usize = std::env::var("MOM_THREADS").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
-    let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let threads: usize = std::env::var("MOM_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(6);
+    let filters: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .expect("MOM_DIR unreadable")
@@ -56,7 +65,9 @@ fn main() {
         .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
         .filter(|p| {
             filters.is_empty()
-                || filters.iter().any(|f| p.file_name().unwrap().to_string_lossy().contains(f))
+                || filters
+                    .iter()
+                    .any(|f| p.file_name().unwrap().to_string_lossy().contains(f))
         })
         .collect();
     files.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
@@ -64,22 +75,47 @@ fn main() {
     let floor = |f: f64| ZeroPivotAction::PerturbToEps { abs_floor: f };
     let configs: Vec<(String, SolverSettings)> = vec![
         // What rapidmom runs today (both its historical modes collapse to this):
-        ("LL u=0.1 fl=1e-12".into(),
-            SolverSettings::exact().with_pivot(floor(1e-12)).with_threads(threads)),
-        ("LL u=1.0 fl=1e-12".into(),
-            SolverSettings::exact().with_pivot(floor(1e-12)).with_pivot_u(1.0).with_threads(threads)),
+        (
+            "LL u=0.1 fl=1e-12".into(),
+            SolverSettings::exact()
+                .with_pivot(floor(1e-12))
+                .with_threads(threads),
+        ),
+        (
+            "LL u=1.0 fl=1e-12".into(),
+            SolverSettings::exact()
+                .with_pivot(floor(1e-12))
+                .with_pivot_u(1.0)
+                .with_threads(threads),
+        ),
         // The never-measured multifrontal path (partial pivoting in dense fronts):
-        ("MF fl=1e-12".into(),
-            SolverSettings::exact().with_pivot(floor(1e-12))
-                .with_method(FactorMethod::Multifrontal).with_threads(threads)),
+        (
+            "MF fl=1e-12".into(),
+            SolverSettings::exact()
+                .with_pivot(floor(1e-12))
+                .with_method(FactorMethod::Multifrontal)
+                .with_threads(threads),
+        ),
         // Floor sweep: a LARGER floor bounds ||(LU)^-1|| in the perturbed directions
         // (the direct-solve error pattern above is floor-perturbation shaped).
-        ("LL u=0.1 fl=1e-8".into(),
-            SolverSettings::exact().with_pivot(floor(1e-8)).with_threads(threads)),
-        ("LL u=0.1 fl=1e-6".into(),
-            SolverSettings::exact().with_pivot(floor(1e-6)).with_threads(threads)),
-        ("LL u=0.1 fl=1e-4".into(),
-            SolverSettings::exact().with_pivot(floor(1e-4)).with_threads(threads)),
+        (
+            "LL u=0.1 fl=1e-8".into(),
+            SolverSettings::exact()
+                .with_pivot(floor(1e-8))
+                .with_threads(threads),
+        ),
+        (
+            "LL u=0.1 fl=1e-6".into(),
+            SolverSettings::exact()
+                .with_pivot(floor(1e-6))
+                .with_threads(threads),
+        ),
+        (
+            "LL u=0.1 fl=1e-4".into(),
+            SolverSettings::exact()
+                .with_pivot(floor(1e-4))
+                .with_threads(threads),
+        ),
     ];
 
     println!(
@@ -92,20 +128,31 @@ fn main() {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(e) => { println!("{name}: read failed: {e}"); continue; }
+            Err(e) => {
+                println!("{name}: read failed: {e}");
+                continue;
+            }
         };
         let mtx = match parse_mtx_complex_general(&contents, &name) {
             Ok(m) => m,
-            Err(e) => { println!("{name}: parse failed: {e:?}"); continue; }
+            Err(e) => {
+                println!("{name}: parse failed: {e:?}");
+                continue;
+            }
         };
         drop(contents);
         let n = mtx.n;
         let a = match mtx.to_general_csc() {
             Ok(a) => a,
-            Err(e) => { println!("{name}: csc failed: {e:?}"); continue; }
+            Err(e) => {
+                println!("{name}: csc failed: {e:?}");
+                continue;
+            }
         };
         let mut rng = Lcg(0x9E3779B97F4A7C15);
-        let b: Vec<C> = (0..n).map(|_| C::new(rng.next_f64(), rng.next_f64())).collect();
+        let b: Vec<C> = (0..n)
+            .map(|_| C::new(rng.next_f64(), rng.next_f64()))
+            .collect();
         let nb = norm2(&b);
 
         for (label, opts) in &configs {
@@ -115,7 +162,10 @@ fn main() {
                 Err(e) => {
                     println!(
                         "{:<26}{:>9}{:>12} | {:<18} FACTOR FAILED: {e:?}",
-                        name, n, mtx.entries.len(), label
+                        name,
+                        n,
+                        mtx.entries.len(),
+                        label
                     );
                     continue;
                 }
@@ -126,7 +176,10 @@ fn main() {
                 Err(e) => {
                     println!(
                         "{:<26}{:>9}{:>12} | {:<18} SOLVE FAILED: {e:?}",
-                        name, n, mtx.entries.len(), label
+                        name,
+                        n,
+                        mtx.entries.len(),
+                        label
                     );
                     continue;
                 }

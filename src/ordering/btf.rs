@@ -310,12 +310,7 @@ mod tests {
 
     /// Check the BTF invariant: every entry of the permuted matrix lies in or
     /// above its diagonal block.
-    fn assert_block_upper(
-        n: usize,
-        col_ptr: &[usize],
-        row_idx: &[usize],
-        f: &BtfForm,
-    ) {
+    fn assert_block_upper(n: usize, col_ptr: &[usize], row_idx: &[usize], f: &BtfForm) {
         let mut inv_row = vec![0usize; n];
         for (k, &r) in f.row_perm.iter().enumerate() {
             inv_row[r] = k;

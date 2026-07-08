@@ -57,6 +57,12 @@ pub enum RslabError {
     /// `dev/research/unsymmetric-lu.md`.
     SingularBasis { column: usize },
 
+    /// The matrix is structurally singular: no complete matching of columns
+    /// onto rows with structural nonzeros exists, so the matrix is singular
+    /// for *every* value assignment. Detected by the KLU path's maximum
+    /// transversal (issue #15) before any numeric work.
+    StructurallySingular,
+
     /// A rank-1 LU basis update (column replacement) could not be applied
     /// within the stability / update-count budget (`LuParams::max_updates`
     /// or `max_growth`), a stability monitor tripped, or the replacement
@@ -106,6 +112,12 @@ impl std::fmt::Display for RslabError {
             }
             RslabError::SingularBasis { column } => {
                 write!(f, "LU basis is numerically singular at column {}", column)
+            }
+            RslabError::StructurallySingular => {
+                write!(
+                    f,
+                    "matrix is structurally singular (incomplete column-row matching)"
+                )
             }
             RslabError::NeedsRefactor => {
                 write!(
