@@ -233,19 +233,64 @@ threshold dropping (\code{drop\_tol}: incomplete factors) and \code{f32} mixed
 precision, this never-fail factor is the preconditioner the Krylov layer consumes.
 The KLU path never perturbs: a vanishing pivot is a hard, attributed error.
 
-\section{Predictors, determinism, and the tuner}
+\section{A-priori predictors}
 \label{sec:pred}
-The analyze phase computes, as exact functions of the symbolic structure: the factor
-size $\text{factor\_nnz}\cdot(v+8)$; a per-path transient-peak bound (a reference-count
-simulation of the panel-freeing schedule for the left-looking path, a level-parallel
-front/CB model for the multifrontal --- both hold over the corpus at $\approx1.3\times$
-measured in geomean); the geometric work $\sum_s\text{nrow}_s^2\,\text{ncol}_s$ with an
-Amdahl floor from the assembly tree's critical path; a calibrated runtime estimate; and
-a thread-count recommendation that lands within $\sim10\%$ of the per-matrix optimum in
-geomean. Three determinism properties hold: the numeric factor is bit-identical
-regardless of worker count (disjoint write sets; fixed-order reductions), the
-analyze-phase choices are deterministic functions of the pattern, and the resource
-planner is a pure function of its inputs.
+The analyze phase computes a set of predictors as \emph{exact functions of the symbolic
+structure} and the scalar size $v$, before any numeric work --- the basis of the memory
+guarantee, the tuner, the thread policy, and the resource planner of
+Sec.~\ref{sec:sil}.
+
+\textbf{Per-path peak memory.} The factor size is $\text{factor\_nnz}\cdot(v+8)$, a
+structural upper bound (cancellation can only lower it). The transient peak is bounded
+separately per schedule. For the left-looking path, a reference-count simulation of the
+panel-freeing schedule walks the postorder, adds each panel as it is assembled, frees it
+when its refcount reaches zero, and records the running maximum of live panels plus
+already-compacted factor --- the floor the solver actually operates at; a conservative
+whole-run bound adds all panels, the input, and a scratch term
+$\tfrac14(\text{panels}+\text{factor})+\SI{32}{\mega\byte}$ for the per-thread
+\code{cmod}/\code{cdiv} buffers. For the multifrontal path a level-parallel model takes,
+per assembly-tree level, the front sizes $\sum\text{nrow}^2v$ plus that level's child
+contribution blocks, times $\tfrac75$ for work-stealing overlap. Over the corpus both
+bounds hold at an estimate/measured ratio of $\approx1.3$ in geomean
+(Fig.~\ref{fig:membreak}); the panel-freeing floor is the tighter quantity the tuner's
+memory veto uses. The KLU path carries the same contract: a pattern-only
+Gilbert--Peierls pass (Sec.~\ref{sec:klu}) gives its fill and flops exactly under
+diagonal pivoting.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{memory_breakdown.pdf}
+\caption{A-priori memory estimate (conservative bound and panel-freeing floor) vs.\ the
+measured peak, per RSLAB path. The estimate does not under-predict.}
+\label{fig:membreak}
+\end{figure}
+
+\textbf{Work, runtime, and threads.} The geometric work
+$\text{factor\_flops}=\sum_s\text{nrow}_s^2\,\text{ncol}_s$ is a type-independent proxy;
+the thread-aware runtime estimate is
+\begin{equation*}
+\max\!\Big(\frac{\text{critical\_path\_flops}}{r},\
+\frac{\text{factor\_flops}}{r\cdot\text{speedup}}\Big),\qquad r=\text{gflops}\cdot10^9,
+\end{equation*}
+where the first term is an Amdahl floor from the assembly tree's longest leaf-to-root
+chain, so a critical-path-bound matrix does not benefit from more workers. The
+single-thread rate and parallel speedup come from a one-time hardware calibration cached
+by machine fingerprint; a learned additive residual on the speedup curve (ridge
+regression on dimensionless structure features, dominated by
+$\text{critical\_path}/\text{factor\_flops}$) cuts the held-out speedup error by
+$\sim26\%$. A thread-count predictor caps thin/narrow problems at two workers and small
+ones at four, landing within $\sim10\%$ of the per-matrix optimum in geomean (a fixed
+two-worker budget is off by $\sim50\%$).
+
+\section{Determinism and the learned tuner}
+\label{sec:tuner}
+Three determinism properties hold. The numeric factor is bit-identical regardless of
+worker count: parallel subtrees and GEMMs write disjoint blocks and every reduction sums
+in a fixed order, so the thread count is a performance parameter only (the parallel
+multi-RHS solve is likewise bit-identical to serial). The analyze-phase choices are
+deterministic functions of the pattern. And the resource planner is a pure function of
+its inputs. The pivot sequence is value-dependent; $\code{pivot\_u}=0$ (or the KLU
+refactor) freezes it across same-pattern refactorizations.
 
 A learned tuner selects the \code{SolverSettings} from a structural fingerprint, one MLP
 per path predicting $(\log t,\log m)$ per candidate configuration, trained
@@ -259,6 +304,28 @@ $1.0\times$ of the default's, and a minimum-improvement threshold --- so peak me
 aggregate: $1.33\times$ faster at $0.83\times$ memory ($\LDLt$, 167 matrices) and
 $1.92\times$ faster at $0.72\times$ memory ($\LU$, 97 matrices) over the untuned
 default.
+
+\section{Solver-in-the-loop and resource governance}
+\label{sec:sil}
+\rT{} is built to run \emph{inside} an outer loop --- a frequency sweep, adaptive mesh
+refinement, a Newton or time-stepping iteration, many concurrent extractions --- rather
+than as a one-shot black box, and three mechanisms carry that model. First, analyze and
+factor are separate phases: a symbolic object factors any number of matrices sharing its
+pattern, so a same-pattern sequence pays the ordering and symbolic cost once (and on the
+KLU path the numeric refactor also skips the pivot search). Second, every factorization
+runs in a \emph{scoped} thread pool of caller-set width, so many concurrent solves
+coexist without oversubscribing the machine, and a factored preconditioner hands its
+thread policy to the Krylov layer so factor and solve share one concurrency budget.
+Third, the resource planner \code{tuning::plan} turns a memory estimate, a budget (a
+memory ceiling and a thread budget), and the cached calibration into a plan --- a
+predicted peak, a predicted runtime, and a fits/does-not-fit decision --- as a pure
+function of its inputs. Because the memory estimate of Sec.~\ref{sec:pred} is an upper
+bound rather than a sample, a scheduler can pack concurrent solves against a memory
+ceiling without extra safety margin, fail fast before allocating, or switch to an
+approximate factor when the exact one cannot fit; and because per-solve peaks and
+runtimes are predicted, the aggregate footprint and makespan of a batch are computable
+before the batch runs. Per-call diagnostics (stage timings, fill, the attached estimate)
+close the loop after the fact, estimate against measured.
 
 \section{Preconditioned and recycled Krylov layer}
 \label{sec:iterative}
@@ -294,18 +361,7 @@ panel orthogonalization is block CGS2~\cite{giraud,barlow}: two panel-wide sweep
 BLAS-3 intensity, parallelized in fixed row chunks and therefore bit-identical across
 thread counts. Measured on preconditioned convection--diffusion ($n=\num{40000}$,
 complex), BCGS2 scales to $\sim2.2\times$ at 12 cores where the per-RHS MGS path is
-flat-to-negative, and per-RHS cost stays near-flat in the block width
-(Fig.~\ref{fig:blockgmres}).
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.49\textwidth]{block_gmres_scaling.pdf}\hfill
-\includegraphics[width=0.49\textwidth]{block_gmres_efficiency.pdf}
-\caption{Multi-RHS block GMRES, block-CGS2 (solid) vs.\ per-RHS MGS (dashed):
-strong-scaling speedup (left) and parallel efficiency (right) vs.\ threads per block
-width. Preconditioned convection--diffusion, $n=\num{40000}$, complex \code{f64}.}
-\label{fig:blockgmres}
-\end{figure}
+flat-to-negative, and per-RHS cost stays near-flat in the block width.
 
 \textbf{GCRO-DR subspace recycling.} For sequences of related solves,
 GCRO-DR~\cite{gcrodr,morgan} retains the $k$ harmonic-Ritz vectors of smallest value ---
@@ -429,8 +485,7 @@ refactor+solve vs.\ multifrontal factor+solve. Fill counts stored factor entries
 
 \subsection{Iterative layer}
 The Krylov results appear with their concepts in Sec.~\ref{sec:iterative}: block-CGS2
-lifts multi-RHS strong scaling to $\sim2.2\times$ at 12 cores where per-RHS MGS is flat
-(Fig.~\ref{fig:blockgmres}); within-cycle deflation cuts the batched operator
+lifts multi-RHS strong scaling to $\sim2.2\times$ at 12 cores where per-RHS MGS is flat; within-cycle deflation cuts the batched operator
 column-applies to $0.66\times$ the full-width bound at $s=16$; GCRO-DR recycling cuts
 the cross-solve iteration total $6.4\times$ on a stagnating sequence; and the
 incomplete-factor sweet spot at $\code{drop\_tol}=10^{-2}$ halves the factor memory at a
@@ -449,8 +504,10 @@ approximate it becomes a preconditioner, and the matching Krylov layer --- COCG/
 flexible GMRES, deflating block GMRES, GCRO-DR recycling --- turns the direct factor into
 the engine of a fast preconditioned iterative solver.
 
+\begingroup
+\footnotesize
+\setlength{\itemsep}{1pt}
 \begin{thebibliography}{99}
-\small
 
 \bibitem{amd} P.~R. Amestoy, T.~A. Davis, I.~S. Duff. An approximate minimum degree
 ordering algorithm. \emph{SIAM J. Matrix Anal. Appl.} 17(4):886--905, 1996.
@@ -537,5 +594,6 @@ for solving $Ax=b$, where $A$ is symmetric complex. \emph{IEEE Trans. Magn.}
 linear systems. \emph{J. Comput. Appl. Math.} 199(2):297--303, 2007.
 
 \end{thebibliography}
+\endgroup
 
 \end{document}
