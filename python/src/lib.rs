@@ -27,8 +27,8 @@ use pyo3::prelude::*;
 
 use rslab::{
     gmres as gmres_core, gmres_block as gmres_block_core, gmres_recycled as gmres_recycled_core,
-    CscMatrix, FactorMethod, GeneralCsc, LdltSolver, LuSolver, MemoryMode, Recycle, RslabError,
-    Scalar, SolverSettings, ZeroPivotAction,
+    CscMatrix, FactorMethod, GeneralCsc, KluSettings, KluSolver, LdltSolver, LuSolver, MemoryMode,
+    Recycle, RslabError, Scalar, SolverSettings, ZeroPivotAction,
 };
 use std::cell::RefCell;
 
@@ -198,9 +198,9 @@ struct Ldlt {
 /// fresh NumPy 1-D array of the same dtype.
 macro_rules! ldlt_solve_arm {
     ($py:expr, $b:expr, $refine:expr, $s:expr, $a:expr, $T:ty) => {{
-        let bb: PyReadonlyArray1<$T> = $b.extract().map_err(|_| {
-            PyValueError::new_err("rhs dtype does not match the factor dtype")
-        })?;
+        let bb: PyReadonlyArray1<$T> = $b
+            .extract()
+            .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let x = if $refine > 0 {
             $s.solve_refined($a, bb.as_slice()?, $refine)
         } else {
@@ -215,9 +215,9 @@ macro_rules! ldlt_solve_arm {
 /// returned in the same shape.
 macro_rules! ldlt_solve_many_arm {
     ($py:expr, $b:expr, $s:expr, $T:ty) => {{
-        let bb: PyReadonlyArray2<$T> = $b.extract().map_err(|_| {
-            PyValueError::new_err("rhs dtype does not match the factor dtype")
-        })?;
+        let bb: PyReadonlyArray2<$T> = $b
+            .extract()
+            .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let shape = bb.shape();
         let (n, nrhs) = (shape[0], shape[1]);
         let x = $s.solve_many(bb.as_slice()?, nrhs).map_err(map_err)?;
@@ -278,8 +278,8 @@ macro_rules! gmres_block_arm {
             }
             None => None,
         };
-        let res =
-            gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, restart, x0v.as_deref()).map_err(map_err)?;
+        let res = gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, restart, x0v.as_deref())
+            .map_err(map_err)?;
         let mut out = vec![<$T>::default(); n * nrhs];
         for c in 0..nrhs {
             for i in 0..n {
@@ -321,9 +321,17 @@ macro_rules! gmres_arm {
             }
             None => None,
         };
-        let res = gmres_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref()).map_err(map_err)?;
+        let res =
+            gmres_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref()).map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
-        Ok((x_obj, res.converged, res.iters, res.final_res, res.stop.as_str()).into_py($py))
+        Ok((
+            x_obj,
+            res.converged,
+            res.iters,
+            res.final_res,
+            res.stop.as_str(),
+        )
+            .into_py($py))
     }};
 }
 
@@ -453,7 +461,14 @@ macro_rules! gmres_recycled_arm {
         let res = gmres_recycled_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref(), handle)
             .map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
-        Ok((x_obj, res.converged, res.iters, res.final_res, res.stop.as_str()).into_py($py))
+        Ok((
+            x_obj,
+            res.converged,
+            res.iters,
+            res.final_res,
+            res.stop.as_str(),
+        )
+            .into_py($py))
     }};
 }
 
@@ -650,10 +665,18 @@ impl Ldlt {
         x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
-            LdltAny::F64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
-            LdltAny::F32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
-            LdltAny::C64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
-            LdltAny::C32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
+            LdltAny::F64(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
+            }
+            LdltAny::F32(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32)
+            }
+            LdltAny::C64(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64)
+            }
+            LdltAny::C32(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32)
+            }
         }
     }
 
@@ -734,10 +757,34 @@ impl Ldlt {
                 gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F32, f32)
             }
             (LdltAny::C64(s, a), Some(rc)) => {
-                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C64, Complex64)
+                gmres_recycled_arm!(
+                    py,
+                    b,
+                    x0.as_ref(),
+                    a,
+                    s,
+                    tol,
+                    maxit,
+                    restart,
+                    rc,
+                    C64,
+                    Complex64
+                )
             }
             (LdltAny::C32(s, a), Some(rc)) => {
-                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C32, Complex32)
+                gmres_recycled_arm!(
+                    py,
+                    b,
+                    x0.as_ref(),
+                    a,
+                    s,
+                    tol,
+                    maxit,
+                    restart,
+                    rc,
+                    C32,
+                    Complex32
+                )
             }
             (LdltAny::F64(s, a), None) => {
                 gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
@@ -789,7 +836,14 @@ fn ldlt_factor(
     memory: &str,
     force_accept: bool,
 ) -> PyResult<Ldlt> {
-    let opts = build_opts(threads, preconditioner, drop_tol, method, memory, force_accept)?;
+    let opts = build_opts(
+        threads,
+        preconditioner,
+        drop_tol,
+        method,
+        memory,
+        force_accept,
+    )?;
     let ip = indptr.as_slice()?;
     let ii = indices.as_slice()?;
     macro_rules! try_build {
@@ -849,9 +903,9 @@ struct Lu {
 
 macro_rules! lu_solve_arm {
     ($py:expr, $b:expr, $refine:expr, $s:expr, $a:expr, $T:ty) => {{
-        let bb: PyReadonlyArray1<$T> = $b.extract().map_err(|_| {
-            PyValueError::new_err("rhs dtype does not match the factor dtype")
-        })?;
+        let bb: PyReadonlyArray1<$T> = $b
+            .extract()
+            .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let x = if $refine > 0 {
             $s.solve_refined($a, bb.as_slice()?, $refine)
         } else {
@@ -864,9 +918,9 @@ macro_rules! lu_solve_arm {
 
 macro_rules! lu_solve_many_arm {
     ($py:expr, $b:expr, $s:expr, $T:ty) => {{
-        let bb: PyReadonlyArray2<$T> = $b.extract().map_err(|_| {
-            PyValueError::new_err("rhs dtype does not match the factor dtype")
-        })?;
+        let bb: PyReadonlyArray2<$T> = $b
+            .extract()
+            .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let shape = bb.shape();
         let (n, nrhs) = (shape[0], shape[1]);
         let x = $s.solve_many(bb.as_slice()?, nrhs).map_err(map_err)?;
@@ -1054,10 +1108,18 @@ impl Lu {
         x0: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         match &self.inner {
-            LuAny::F64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64),
-            LuAny::F32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32),
-            LuAny::C64(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64),
-            LuAny::C32(s, a) => gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32),
+            LuAny::F64(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
+            }
+            LuAny::F32(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32)
+            }
+            LuAny::C64(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64)
+            }
+            LuAny::C32(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32)
+            }
         }
     }
 
@@ -1139,10 +1201,34 @@ impl Lu {
                 gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F32, f32)
             }
             (LuAny::C64(s, a), Some(rc)) => {
-                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C64, Complex64)
+                gmres_recycled_arm!(
+                    py,
+                    b,
+                    x0.as_ref(),
+                    a,
+                    s,
+                    tol,
+                    maxit,
+                    restart,
+                    rc,
+                    C64,
+                    Complex64
+                )
             }
             (LuAny::C32(s, a), Some(rc)) => {
-                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, C32, Complex32)
+                gmres_recycled_arm!(
+                    py,
+                    b,
+                    x0.as_ref(),
+                    a,
+                    s,
+                    tol,
+                    maxit,
+                    restart,
+                    rc,
+                    C32,
+                    Complex32
+                )
             }
             (LuAny::F64(s, a), None) => {
                 gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
@@ -1194,7 +1280,14 @@ fn lu_factor(
     memory: &str,
     force_accept: bool,
 ) -> PyResult<Lu> {
-    let opts = build_opts(threads, preconditioner, drop_tol, method, memory, force_accept)?;
+    let opts = build_opts(
+        threads,
+        preconditioner,
+        drop_tol,
+        method,
+        memory,
+        force_accept,
+    )?;
     let ip = indptr.as_slice()?;
     let ii = indices.as_slice()?;
     macro_rules! try_build {
@@ -1217,14 +1310,367 @@ fn lu_factor(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// KLU factor (BTF + per-block Gilbert-Peierls, sequential / bit-deterministic)
+// ---------------------------------------------------------------------------
+
+/// A KLU factor over one of the four scalar fields. The original matrix is
+/// kept alongside the factor for refinement / GMRES (like `LuAny`) and as the
+/// value store for the in-place `refactor(data)` fast path (the pattern is
+/// frozen at factor time, so only the values are replaced).
+enum KluAny {
+    F64(KluSolver<f64>, GeneralCsc<f64>),
+    F32(KluSolver<f32>, GeneralCsc<f32>),
+    C64(KluSolver<Complex<f64>>, GeneralCsc<Complex<f64>>),
+    C32(KluSolver<Complex<f32>>, GeneralCsc<Complex<f32>>),
+}
+
+/// A reusable KLU factor handle, ``P A Q = L U`` per BTF diagonal block.
+///
+/// Returned by :func:`rslab.klu`. The circuit-shaped counterpart of :class:`Lu`:
+/// block triangular form + per-block Gilbert-Peierls LU, strictly sequential and
+/// **bit-deterministic** across runs and thread counts. Its distinctive extra is
+/// :meth:`refactor` - a numeric-only re-factorization for a new value set on the
+/// **same** pattern (frequency sweeps, Newton steps) that skips all symbolic
+/// work and pivot searching.
+///
+/// Attributes
+/// ----------
+/// n : int
+///     Matrix dimension.
+/// factor_nnz : int
+///     Stored factor entries (``L`` + ``U`` + diagonal + off-block).
+/// n_perturbed : int
+///     Always ``0``: KLU never perturbs pivots (a vanishing pivot raises).
+/// n_blocks : int
+///     Number of BTF diagonal blocks.
+/// dtype : str
+///     The factor's NumPy dtype name.
+#[pyclass]
+struct Klu {
+    inner: KluAny,
+}
+
+macro_rules! klu_refactor_arm {
+    ($data:expr, $s:expr, $a:expr, $T:ty) => {{
+        let dd: PyReadonlyArray1<$T> = $data
+            .extract()
+            .map_err(|_| PyValueError::new_err("data dtype does not match the factor dtype"))?;
+        let d = dd.as_slice()?;
+        if d.len() != $a.values.len() {
+            return Err(PyValueError::new_err(format!(
+                "data length {} does not match the factored pattern nnz {}",
+                d.len(),
+                $a.values.len()
+            )));
+        }
+        $a.values.copy_from_slice(d);
+        $s.refactor($a).map_err(map_err)
+    }};
+}
+
+#[pymethods]
+impl Klu {
+    /// Matrix dimension `n`.
+    #[getter]
+    fn n(&self) -> usize {
+        match &self.inner {
+            KluAny::F64(s, _) => s.n(),
+            KluAny::F32(s, _) => s.n(),
+            KluAny::C64(s, _) => s.n(),
+            KluAny::C32(s, _) => s.n(),
+        }
+    }
+
+    /// Stored factor entries (`L` + `U` + diagonal + off-block).
+    #[getter]
+    fn factor_nnz(&self) -> usize {
+        match &self.inner {
+            KluAny::F64(s, _) => s.factor_nnz(),
+            KluAny::F32(s, _) => s.factor_nnz(),
+            KluAny::C64(s, _) => s.factor_nnz(),
+            KluAny::C32(s, _) => s.factor_nnz(),
+        }
+    }
+
+    /// Always ``0``: KLU never perturbs pivots - a vanishing pivot raises at
+    /// factor / refactor time instead.
+    #[getter]
+    fn n_perturbed(&self) -> usize {
+        0
+    }
+
+    /// Number of BTF diagonal blocks (the irreducible units of the
+    /// factorization; only they generate fill).
+    #[getter]
+    fn n_blocks(&self) -> usize {
+        match &self.inner {
+            KluAny::F64(s, _) => s.n_blocks(),
+            KluAny::F32(s, _) => s.n_blocks(),
+            KluAny::C64(s, _) => s.n_blocks(),
+            KluAny::C32(s, _) => s.n_blocks(),
+        }
+    }
+
+    /// The factor's NumPy dtype name (`'float64'`, `'float32'`, `'complex128'`,
+    /// `'complex64'`).
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        match &self.inner {
+            KluAny::F64(..) => "float64",
+            KluAny::F32(..) => "float32",
+            KluAny::C64(..) => "complex128",
+            KluAny::C32(..) => "complex64",
+        }
+    }
+
+    /// Solve ``A x = b`` for a single right-hand side.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     Right-hand side of length ``n``; its dtype must match :attr:`dtype`.
+    /// refine : int, default 0
+    ///     Steps of iterative refinement against the original matrix; ``0`` is a
+    ///     plain block forward/backward substitution.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solution ``x``, a fresh array of the same dtype and shape as ``b``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``b``'s dtype does not match the factor's dtype.
+    #[pyo3(signature = (b, refine = 0))]
+    fn solve(&self, py: Python<'_>, b: &Bound<'_, PyAny>, refine: usize) -> PyResult<PyObject> {
+        match &self.inner {
+            KluAny::F64(s, a) => lu_solve_arm!(py, b, refine, s, a, f64),
+            KluAny::F32(s, a) => lu_solve_arm!(py, b, refine, s, a, f32),
+            KluAny::C64(s, a) => lu_solve_arm!(py, b, refine, s, a, Complex64),
+            KluAny::C32(s, a) => lu_solve_arm!(py, b, refine, s, a, Complex32),
+        }
+    }
+
+    /// Solve ``A X = B`` for several right-hand sides at once.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     A C-contiguous ``n x nrhs`` block; its dtype must match :attr:`dtype`.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solutions ``X``, an ``n x nrhs`` array of the same dtype as ``B``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``B``'s dtype does not match the factor's dtype.
+    fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        match &self.inner {
+            KluAny::F64(s, _) => lu_solve_many_arm!(py, b, s, f64),
+            KluAny::F32(s, _) => lu_solve_many_arm!(py, b, s, f32),
+            KluAny::C64(s, _) => lu_solve_many_arm!(py, b, s, Complex64),
+            KluAny::C32(s, _) => lu_solve_many_arm!(py, b, s, Complex32),
+        }
+    }
+
+    /// Numeric-only refactorization with a new value set on the **same**
+    /// sparsity pattern - the fast path for frequency sweeps and Newton steps.
+    ///
+    /// Replays the stored pattern and pivot sequence on the new values: no
+    /// symbolic analysis, no pivot search (typically several times faster than
+    /// a fresh :func:`rslab.klu` call). The values are taken in the same CSC
+    /// order as the ``data`` array of the originally factored matrix
+    /// (``scipy.sparse.csc_matrix.data`` after the same canonicalization), so a
+    /// sweep updates ``A.data`` in place and passes it straight in.
+    ///
+    /// Parameters
+    /// ----------
+    /// data : numpy.ndarray
+    ///     The new CSC value array; length and dtype must match the factored
+    ///     matrix's ``data``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``data``'s dtype or length does not match the factored pattern.
+    /// RuntimeError
+    ///     If a frozen pivot becomes numerically zero under the new values -
+    ///     re-factor with :func:`rslab.klu` (full pivoting) in that case. The
+    ///     factor is invalid until a successful ``refactor`` or a fresh factor.
+    fn refactor(&mut self, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        match &mut self.inner {
+            KluAny::F64(s, a) => klu_refactor_arm!(data, s, a, f64),
+            KluAny::F32(s, a) => klu_refactor_arm!(data, s, a, f32),
+            KluAny::C64(s, a) => klu_refactor_arm!(data, s, a, Complex64),
+            KluAny::C32(s, a) => klu_refactor_arm!(data, s, a, Complex32),
+        }
+    }
+
+    /// Solve ``A X = B`` iteratively by **block GMRES**, preconditioned by this
+    /// factor. See :meth:`Lu.gmres_block` - identical semantics; the KLU factor
+    /// is exact, so this is mainly useful when composing the factor of a nearby
+    /// operator (e.g. the previous sweep point via :meth:`refactor`) as the
+    /// preconditioner for the current one.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
+    fn gmres_block(
+        &self,
+        py: Python<'_>,
+        b: &Bound<'_, PyAny>,
+        tol: f64,
+        maxit: usize,
+        restart: Option<usize>,
+        x0: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        match &self.inner {
+            KluAny::F64(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
+            }
+            KluAny::F32(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32)
+            }
+            KluAny::C64(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64)
+            }
+            KluAny::C32(s, a) => {
+                gmres_block_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32)
+            }
+        }
+    }
+
+    /// Solve ``A x = b`` by preconditioned **GMRES** (optionally with GCRO-DR
+    /// recycling). See :meth:`Lu.gmres` - identical semantics.
+    #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None, recycle = None))]
+    fn gmres(
+        &self,
+        py: Python<'_>,
+        b: &Bound<'_, PyAny>,
+        tol: f64,
+        maxit: usize,
+        restart: Option<usize>,
+        x0: Option<Bound<'_, PyAny>>,
+        recycle: Option<Bound<'_, PyRecycle>>,
+    ) -> PyResult<PyObject> {
+        match (&self.inner, recycle.as_ref()) {
+            (KluAny::F64(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F64, f64)
+            }
+            (KluAny::F32(s, a), Some(rc)) => {
+                gmres_recycled_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, rc, F32, f32)
+            }
+            (KluAny::C64(s, a), Some(rc)) => {
+                gmres_recycled_arm!(
+                    py,
+                    b,
+                    x0.as_ref(),
+                    a,
+                    s,
+                    tol,
+                    maxit,
+                    restart,
+                    rc,
+                    C64,
+                    Complex64
+                )
+            }
+            (KluAny::C32(s, a), Some(rc)) => {
+                gmres_recycled_arm!(
+                    py,
+                    b,
+                    x0.as_ref(),
+                    a,
+                    s,
+                    tol,
+                    maxit,
+                    restart,
+                    rc,
+                    C32,
+                    Complex32
+                )
+            }
+            (KluAny::F64(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f64)
+            }
+            (KluAny::F32(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, f32)
+            }
+            (KluAny::C64(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex64)
+            }
+            (KluAny::C32(s, a), None) => {
+                gmres_arm!(py, b, x0.as_ref(), a, s, tol, maxit, restart, Complex32)
+            }
+        }
+    }
+
+    /// Create a GCRO-DR :class:`Recycle` handle of dimension ``k`` matching this
+    /// factor's dtype, for :meth:`gmres`'s ``recycle=`` keyword. See :class:`Recycle`.
+    fn recycle(&self, k: usize) -> PyRecycle {
+        let inner = match &self.inner {
+            KluAny::F64(..) => RecycleAny::F64(Recycle::new(k)),
+            KluAny::F32(..) => RecycleAny::F32(Recycle::new(k)),
+            KluAny::C64(..) => RecycleAny::C64(Recycle::new(k)),
+            KluAny::C32(..) => RecycleAny::C32(Recycle::new(k)),
+        };
+        PyRecycle {
+            inner: RefCell::new(inner),
+        }
+    }
+}
+
+/// Factor a general matrix through the KLU path from its full SciPy CSC
+/// buffers. The `data` dtype picks the scalar field.
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, data, pivot_tol, row_scaling, btf))]
+fn klu_factor(
+    n: usize,
+    indptr: PyReadonlyArray1<i64>,
+    indices: PyReadonlyArray1<i64>,
+    data: &Bound<'_, PyAny>,
+    pivot_tol: f64,
+    row_scaling: bool,
+    btf: bool,
+) -> PyResult<Klu> {
+    let opts = KluSettings::default()
+        .with_pivot_tol(pivot_tol)
+        .with_row_scaling(row_scaling)
+        .with_btf(btf);
+    let ip = indptr.as_slice()?;
+    let ii = indices.as_slice()?;
+    macro_rules! try_build {
+        ($T:ty, $variant:ident) => {
+            if let Ok(d) = data.extract::<PyReadonlyArray1<$T>>() {
+                let a = build_general::<$T>(n, ip, ii, d.as_slice()?)?;
+                let s = KluSolver::<$T>::factor(&a, &opts).map_err(map_err)?;
+                return Ok(Klu {
+                    inner: KluAny::$variant(s, a),
+                });
+            }
+        };
+    }
+    try_build!(f64, F64);
+    try_build!(Complex64, C64);
+    try_build!(f32, F32);
+    try_build!(Complex32, C32);
+    Err(PyValueError::new_err(
+        "unsupported dtype: expected float64, float32, complex128, or complex64",
+    ))
+}
+
 /// The compiled core imported by the Python package as `rslab._rslab`.
 #[pymodule]
 fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Ldlt>()?;
     m.add_class::<Lu>()?;
+    m.add_class::<Klu>()?;
     m.add_class::<PyRecycle>()?;
     m.add_function(wrap_pyfunction!(ldlt_factor, m)?)?;
     m.add_function(wrap_pyfunction!(lu_factor, m)?)?;
+    m.add_function(wrap_pyfunction!(klu_factor, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

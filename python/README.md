@@ -48,6 +48,18 @@ f = rslab.lu(A_general)
 x = f.solve(b)
 ```
 
+Circuit-shaped matrices (MNA / SPICE-class: very sparse, unsymmetric,
+near-triangularizable) use the KLU path — bit-deterministic, with a
+numeric-only `refactor` for fixed-pattern sweeps:
+
+```python
+f = rslab.klu(A_circuit)
+x = f.solve(b)
+A_circuit.data *= 1.5            # frequency sweep: same pattern, new values
+f.refactor(A_circuit.data)       # no symbolic work, no pivot search
+x2 = f.solve(b)
+```
+
 ### Preconditioner mode
 
 Never-fail static pivoting plus iterative refinement for hard/indefinite

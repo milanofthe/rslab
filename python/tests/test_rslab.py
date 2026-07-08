@@ -366,3 +366,76 @@ def test_gmres_default_restart_is_adaptive():
     assert convb
     for c in range(4):
         assert _residual(A, X[:, c], B[:, c]) < 1e-8
+
+
+# ---------------------------------------------------------------------------
+# KLU path
+# ---------------------------------------------------------------------------
+
+
+def _circuit(n, seed=7):
+    """Sparse, unsymmetric, column-diagonally-dominant MNA-like matrix."""
+    rng = np.random.default_rng(seed)
+    A = sp.random(n, n, density=4.0 / n, format="csc", random_state=rng)
+    A = A - sp.diags(A.diagonal())
+    colsum = np.abs(A).sum(axis=0).A1
+    A = A + sp.diags(colsum + 1.0 + rng.random(n))
+    return A.tocsc()
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.complex128])
+def test_klu_factor_solve(dtype):
+    A = _circuit(300).astype(dtype)
+    b = np.arange(300).astype(dtype)
+    f = rslab.klu(A)
+    assert f.dtype == np.dtype(dtype).name
+    assert f.n == 300
+    assert f.n_blocks >= 1
+    assert f.n_perturbed == 0
+    assert f.factor_nnz > 0
+    x = f.solve(b)
+    assert _residual(A, x, b) < 1e-10
+    X = f.solve_many(np.column_stack([b, 2 * b]))
+    assert _residual(A, X[:, 1], 2 * b) < 1e-10
+
+
+def test_klu_refactor_sweep():
+    A = _circuit(300, seed=9)
+    b = np.ones(300)
+    f = rslab.klu(A)
+    x0 = f.solve(b)
+    # same pattern, new values: numeric-only refactor
+    A2 = A.copy()
+    A2.data *= 1.7
+    f.refactor(A2.data)
+    x2 = f.solve(b)
+    assert _residual(A2, x2, b) < 1e-10
+    assert np.allclose(x2, x0 / 1.7)
+    # wrong length must raise, factor must recover via full refactor
+    with pytest.raises(ValueError):
+        f.refactor(A2.data[:-1])
+
+
+def test_klu_structurally_singular_raises():
+    # empty column -> no complete matching, detected before numeric work
+    A = sp.csc_matrix((np.array([1.0, 2.0]), (np.array([0, 1]), np.array([0, 1]))), shape=(3, 3))
+    with pytest.raises(RuntimeError, match="structurally singular"):
+        rslab.klu(A)
+
+
+def test_klu_deterministic():
+    A = _circuit(250, seed=11)
+    b = np.linspace(-1, 1, 250)
+    x1 = rslab.klu(A).solve(b)
+    x2 = rslab.klu(A).solve(b)
+    assert np.array_equal(x1, x2)  # bit-identical
+
+
+def test_klu_gmres_composes():
+    A = _circuit(300, seed=13)
+    b = np.ones(300)
+    f = rslab.klu(A)
+    x, conv, iters, res, stop = f.gmres(b, tol=1e-12)
+    assert conv and stop == "converged"
+    assert iters <= 2  # exact preconditioner
+    assert _residual(A, x, b) < 1e-10

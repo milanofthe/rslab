@@ -61,9 +61,9 @@ from __future__ import annotations
 import numpy as np
 
 from . import _rslab
-from ._rslab import Ldlt, Lu, Recycle
+from ._rslab import Klu, Ldlt, Lu, Recycle
 
-__all__ = ["ldlt", "lu", "spsolve", "Ldlt", "Lu", "Recycle"]
+__all__ = ["ldlt", "lu", "klu", "spsolve", "Klu", "Ldlt", "Lu", "Recycle"]
 __version__ = _rslab.__version__
 
 # The four scalar fields the Rust core supports, by NumPy dtype.
@@ -337,6 +337,101 @@ def lu(
         M.indices.astype(np.int64),
         data,
         *_opts(threads, preconditioner, drop_tol, method, memory, force_accept),
+    )
+
+
+def klu(
+    A,
+    *,
+    pivot_tol: float = 1e-3,
+    row_scaling: bool = True,
+    btf: bool = True,
+) -> Klu:
+    """Factor a general matrix through the **KLU** path (circuit-shaped systems).
+
+    Block triangular form (maximum transversal + Tarjan SCC) plus a per-block
+    left-looking Gilbert-Peierls :math:`L U` with threshold partial pivoting -
+    the method of SuiteSparse KLU, reimplemented in pure Rust. Built for
+    circuit-shaped matrices: extremely sparse, unsymmetric, near-triangularizable
+    (MNA / SPICE-class operators), where it factors several times faster than
+    :func:`lu` with a fraction of the fill. Strictly sequential and
+    **bit-deterministic** across runs and thread counts.
+
+    The distinctive extra over :func:`lu` is :meth:`Klu.refactor`: a
+    numeric-only re-factorization for a new value set on the **same** pattern
+    (frequency sweeps, time stepping, Newton iterations) that skips all
+    symbolic work and pivot searching.
+
+    Parameters
+    ----------
+    A : scipy.sparse matrix or array-like
+        The general :math:`n \\times n` system matrix. Converted to CSC; duplicate
+        entries are summed.
+    pivot_tol : float, default 1e-3
+        Diagonal-preference threshold: the (structurally nonzero) diagonal is
+        kept as the pivot when :math:`|a_{jj}| \\ge \\mathrm{tol} \\cdot
+        \\max_i |a_{ij}|`; ``1.0`` is plain partial pivoting.
+    row_scaling : bool, default True
+        Divide each row by its max-magnitude entry before factoring (more
+        robust on badly equilibrated inputs; folded into the solve).
+    btf : bool, default True
+        Permute to block upper triangular form first. Leave on: it confines
+        fill to the irreducible diagonal blocks and detects structural
+        singularity a-priori.
+
+    Returns
+    -------
+    Klu
+        A reusable factor handle exposing :meth:`~Klu.solve`,
+        :meth:`~Klu.solve_many`, :meth:`~Klu.refactor` (numeric-only sweep
+        re-factorization), :meth:`~Klu.gmres` / :meth:`~Klu.gmres_block`, and
+        the read-only attributes ``n``, ``factor_nnz``, ``n_blocks``,
+        ``n_perturbed`` (always ``0``) and ``dtype``.
+
+    Raises
+    ------
+    RuntimeError
+        If the matrix is structurally singular (no complete column-row
+        matching; singular for every value assignment) or a pivot is
+        numerically zero.
+
+    See Also
+    --------
+    lu : the supernodal multifrontal path for general unsymmetric matrices
+        (the better choice for fill-heavy FEM/MoM-class operators).
+    spsolve : one-shot factor-and-solve with automatic symmetry detection.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        import numpy as np, scipy.sparse as sp, rslab
+
+        A = sp.random(4000, 4000, density=5e-4, format="csc") + sp.eye(4000) * 10
+        f = rslab.klu(A)                       # BTF + per-block LU
+        x = f.solve(np.random.rand(4000))
+
+        # frequency sweep: same pattern, new values -> numeric-only refactor
+        A2 = A * 1.5
+        f.refactor(A2.data)
+        x2 = f.solve(np.random.rand(4000))
+
+    References
+    ----------
+    .. [1] Davis, T. A., & Palamadai Natarajan, E. (2010). Algorithm 907: KLU,
+           a direct sparse solver for circuit simulation problems. *ACM TOMS*,
+           37(3). :doi:`10.1145/1824801.1824814`
+    """
+    M = _full_csc(A)
+    data = _normalize_dtype(M.data)
+    return _rslab.klu_factor(
+        M.shape[0],
+        M.indptr.astype(np.int64),
+        M.indices.astype(np.int64),
+        data,
+        pivot_tol,
+        row_scaling,
+        btf,
     )
 
 
