@@ -21,7 +21,8 @@ data:
 	cd $(ROOT) && bash benches/run_corpus_auto.sh && bash benches/run_corpus_llmf.sh
 
 pdf:
-	latexmk -pdf -interaction=nonstopmode rslab.tex
+	@if command -v tectonic >/dev/null; then tectonic rslab.tex; \
+	else latexmk -pdf -interaction=nonstopmode rslab.tex; fi
 
 clean:
 	rm -f rslab.pdf
