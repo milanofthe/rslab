@@ -825,6 +825,14 @@ impl<T: Scalar> KluSolver<T> {
 
     /// Solve for `nrhs` right-hand sides stored row-major (`b[i * nrhs + col]`),
     /// matching [`crate::LuSolver::solve_many`]'s layout.
+    ///
+    /// Batched: the factor is traversed **once** and every stored entry is
+    /// applied to all `nrhs` columns through contiguous per-row inner loops
+    /// (SIMD-friendly and cache-reusing) — the sparse-scalar factorization
+    /// cannot use BLAS-3, but the wide solve can still vectorize across the
+    /// right-hand sides. Each column's operation order is identical to
+    /// [`solve`](Self::solve), so the result is bit-identical to `nrhs`
+    /// single solves.
     pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
         let f = &self.factors;
         if nrhs == 0 || b.len() != f.n * nrhs {
@@ -833,16 +841,66 @@ impl<T: Scalar> KluSolver<T> {
                 got: b.len(),
             });
         }
+        // Permute + scale all columns into the row-major work block.
+        let mut w = vec![T::zero(); f.n * nrhs];
+        for (k, &orig) in f.row_perm.iter().enumerate() {
+            let sv = T::from_real(f.rs_inv[orig]);
+            let src = &b[orig * nrhs..orig * nrhs + nrhs];
+            let dst = &mut w[k * nrhs..k * nrhs + nrhs];
+            for (d, &s) in dst.iter_mut().zip(src) {
+                *d = s * sv;
+            }
+        }
+        // Row j's values, staged so the axpy targets never alias the source.
+        let mut xj = vec![T::zero(); nrhs];
+        for blk in (0..f.block_ptr.len() - 1).rev() {
+            let (bs, be) = (f.block_ptr[blk], f.block_ptr[blk + 1]);
+            // L (unit lower) forward within the block.
+            for j in bs..be {
+                xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
+                for k in f.l_colptr[j]..f.l_colptr[j + 1] {
+                    let (lr, lv) = (f.l_rowidx[k], f.l_val[k]);
+                    let row = &mut w[lr * nrhs..lr * nrhs + nrhs];
+                    for (r, &x) in row.iter_mut().zip(&xj) {
+                        *r = *r - lv * x;
+                    }
+                }
+            }
+            // U backward within the block. Per-element division (not
+            // reciprocal-multiply) keeps each column bit-identical to `solve`.
+            for j in (bs..be).rev() {
+                let d = f.udiag[j];
+                {
+                    let row = &mut w[j * nrhs..j * nrhs + nrhs];
+                    for r in row.iter_mut() {
+                        *r = *r / d;
+                    }
+                }
+                xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
+                for k in f.u_colptr[j]..f.u_colptr[j + 1] {
+                    let (ur, uv) = (f.u_rowidx[k], f.u_val[k]);
+                    let row = &mut w[ur * nrhs..ur * nrhs + nrhs];
+                    for (r, &x) in row.iter_mut().zip(&xj) {
+                        *r = *r - uv * x;
+                    }
+                }
+            }
+            // Off-block columns feed the rows of earlier blocks.
+            for j in bs..be {
+                xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
+                for k in f.f_colptr[j]..f.f_colptr[j + 1] {
+                    let (fr, fv) = (f.f_rowidx[k], f.f_val[k]);
+                    let row = &mut w[fr * nrhs..fr * nrhs + nrhs];
+                    for (r, &x) in row.iter_mut().zip(&xj) {
+                        *r = *r - fv * x;
+                    }
+                }
+            }
+        }
+        // Undo the column permutation.
         let mut xout = vec![T::zero(); f.n * nrhs];
-        let mut w = vec![T::zero(); f.n];
-        for col in 0..nrhs {
-            for (k, &orig) in f.row_perm.iter().enumerate() {
-                w[k] = b[orig * nrhs + col] * T::from_real(f.rs_inv[orig]);
-            }
-            self.solve_permuted(&mut w);
-            for (k, &c) in f.col_perm.iter().enumerate() {
-                xout[c * nrhs + col] = w[k];
-            }
+        for (k, &c) in f.col_perm.iter().enumerate() {
+            xout[c * nrhs..c * nrhs + nrhs].copy_from_slice(&w[k * nrhs..k * nrhs + nrhs]);
         }
         Ok(xout)
     }

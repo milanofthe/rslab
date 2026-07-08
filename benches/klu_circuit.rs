@@ -202,5 +202,34 @@ fn main() {
             "{:>8} residuals: klu {:.1e}  mf {:.1e}",
             "", klu_res, mf_res
         );
+
+        // --- wide-RHS solve: batched solve_many vs per-column loop ---
+        const NRHS: usize = 8;
+        let bm: Vec<f64> = (0..n * NRHS).map(|k| ((k * 3) % 17) as f64 - 8.0).collect();
+        let t = Instant::now();
+        let xm_batched = klu.solve_many(&bm, NRHS).unwrap();
+        let t_batched = t.elapsed();
+        let t = Instant::now();
+        let mut xm_loop = vec![0.0; n * NRHS];
+        for c in 0..NRHS {
+            let bc: Vec<f64> = (0..n).map(|i| bm[i * NRHS + c]).collect();
+            let xc = klu.solve(&bc).unwrap();
+            for i in 0..n {
+                xm_loop[i * NRHS + c] = xc[i];
+            }
+        }
+        let t_loop = t.elapsed();
+        assert_eq!(
+            xm_batched, xm_loop,
+            "batched solve_many must be bit-identical"
+        );
+        println!(
+            "{:>8} solve x{}: batched {:.2?} vs looped {:.2?} ({:.1}x)",
+            "",
+            NRHS,
+            t_batched,
+            t_loop,
+            t_loop.as_secs_f64() / t_batched.as_secs_f64()
+        );
     }
 }
