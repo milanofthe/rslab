@@ -16,11 +16,14 @@
 //! matrices as `Pᵀ A P = L D Lᵀ` by a rayon-parallel multifrontal
 //! Bunch-Kaufman method with a SIMD (`gemm`) Schur kernel.
 //!
-//! Two intended uses:
+//! Three intended uses:
 //! * **FEM direct solve** - factor once, solve many right-hand sides.
 //! * **MoM sparse preconditioner** - a robust, memory-light approximate factor
 //!   (static pivoting, `f32` mixed precision, incomplete-factor dropping)
 //!   driving a [`cocg`]/[`cocr`] iteration.
+//! * **Circuit-shaped unsymmetric solve** - the sequential, bit-deterministic
+//!   [`KluSolver`] (BTF + per-block Gilbert-Peierls) with a numeric-only
+//!   [`refactor`](KluSolver::refactor) for fixed-pattern sweeps.
 //!
 //! ## PARDISO-style phased workflow (FEM)
 //!
@@ -166,14 +169,17 @@ pub use io::mtx::{
 };
 pub use numeric::iterative::{
     cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_block_fn_mon, gmres_block_mon, gmres_fn,
-    gmres_recycled, BlockKrylovResult, Factorization, KrylovResult, LinearOperator,
-    LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner, Recycle,
-    RecycleScalar, StopReason,
+    gmres_recycled, BlockKrylovResult, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,
+    LowPrecisionPreconditioner, NoPreconditioner, Preconditioner, Recycle, RecycleScalar,
+    StopReason,
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
     take_blr_cb_stats, take_front_stats, FrontStat, LuFactors, LuSolver, LuSymbolic,
 };
+// KLU-style third direct path (BTF + per-block Gilbert-Peierls): sequential,
+// bit-deterministic, built for circuit-shaped matrices and sweep refactoring.
+pub use numeric::klu::{KluSettings, KluSolver, KluSymbolic};
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
 pub use symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicProfileReport};
@@ -198,8 +204,11 @@ pub mod prelude {
         CscMatrix,
         Factorization,
         GeneralCsc,
-        KrylovResult,
         // high-level phased solvers: `XSymbolic::analyze → .factor → XSolver`
+        KluSettings,
+        KluSolver,
+        KluSymbolic,
+        KrylovResult,
         LdltSolver,
         LdltSymbolic,
         LinearOperator,

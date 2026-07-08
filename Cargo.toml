@@ -119,6 +119,10 @@ libloading = "0.8"
 # rmumps = { path = "../ripopt/rmumps" }  # uncomment when needed
 
 [[bench]]
+name = "klu_circuit"
+harness = false
+
+[[bench]]
 name = "catalog"
 harness = false
 required-features = ["matgen"]

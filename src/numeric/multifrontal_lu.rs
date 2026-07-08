@@ -1111,7 +1111,9 @@ pub(crate) fn front_stats_on() -> bool {
 /// Drain the front stats collected since the last call (empty unless
 /// `RSLAB_FRONT_STATS=1` was set at first factor).
 pub fn take_front_stats() -> Vec<FrontStat> {
-    std::mem::take(&mut FRONT_STATS.lock().unwrap())
+    // Stats collection is best-effort diagnostics: recover the data even if a
+    // panicking factor thread poisoned the mutex.
+    std::mem::take(&mut FRONT_STATS.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 // Supernodal left-looking LU (FactorMethod::LeftLooking)
@@ -1901,24 +1903,21 @@ fn lu_ll_factor_node<T: Scalar>(
                 min_piv = m;
             }
         }
-        let max_l = lbuf
-            .iter()
-            .map(|v| v.magnitude())
-            .fold(0.0f64, f64::max);
-        let max_u = ubuf
-            .iter()
-            .map(|v| v.magnitude())
-            .fold(0.0f64, f64::max);
-        FRONT_STATS.lock().unwrap().push(FrontStat {
-            s,
-            first_col: first,
-            ncol,
-            nrow,
-            min_piv,
-            max_l,
-            max_u,
-            perturbed: local_perturbed,
-        });
+        let max_l = lbuf.iter().map(|v| v.magnitude()).fold(0.0f64, f64::max);
+        let max_u = ubuf.iter().map(|v| v.magnitude()).fold(0.0f64, f64::max);
+        FRONT_STATS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(FrontStat {
+                s,
+                first_col: first,
+                ncol,
+                nrow,
+                min_piv,
+                max_l,
+                max_u,
+                perturbed: local_perturbed,
+            });
     }
     for &g in &rs[s] {
         gloc[g] = usize::MAX;
