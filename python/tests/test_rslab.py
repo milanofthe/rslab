@@ -416,6 +416,25 @@ def test_klu_refactor_sweep():
         f.refactor(A2.data[:-1])
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.complex128])
+def test_klu_solve_transpose(dtype):
+    A = _circuit(300, seed=13).astype(dtype)
+    b = (np.linspace(-1, 1, 300) + (1j if np.dtype(dtype).kind == "c" else 0)).astype(dtype)
+    f = rslab.klu(A)
+    x = f.solve_transpose(b)
+    assert _residual(A.T, x, b) < 1e-10
+    # plain transpose, not conjugate: the adjoint solve is the conjugation recipe
+    if np.dtype(dtype).kind == "c":
+        xh = f.solve_transpose(b.conj()).conj()
+        assert _residual(A.conj().T, xh, b) < 1e-10
+    # transpose solve reads refactored values
+    A2 = A.copy()
+    A2.data *= 1.7
+    f.refactor(A2.data)
+    x2 = f.solve_transpose(b)
+    assert _residual(A2.T, x2, b) < 1e-10
+
+
 def test_klu_structurally_singular_raises():
     # empty column -> no complete matching, detected before numeric work
     A = sp.csc_matrix((np.array([1.0, 2.0]), (np.array([0, 1]), np.array([0, 1]))), shape=(3, 3))

@@ -58,7 +58,11 @@ x = f.solve(b)
 A_circuit.data *= 1.5            # frequency sweep: same pattern, new values
 f.refactor(A_circuit.data)       # no symbolic work, no pivot search
 x2 = f.solve(b)
+y = f.solve_transpose(b)         # A.T @ y = b on the same factors (adjoint)
 ```
+
+`solve_transpose` is the plain transpose; for the conjugate-transpose adjoint
+use `f.solve_transpose(b.conj()).conj()`.
 
 ### Preconditioner mode
 

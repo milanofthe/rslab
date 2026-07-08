@@ -823,6 +823,81 @@ impl<T: Scalar> KluSolver<T> {
         Ok(xout)
     }
 
+    /// Solve the transposed system `Aᵀ x = b` with the **same** factorization.
+    ///
+    /// This is the plain transpose, NOT the conjugate transpose: for a complex
+    /// adjoint solve `Aᴴ x = b`, conjugate `b` before and `x` after. (This
+    /// matches the convention of the usual sparse-LU transpose solves, and is
+    /// what implicit-function adjoints over holomorphic residuals need.)
+    ///
+    /// The stored form is `A = Rs · P_rᵀ · M · C` with `M` the block-upper
+    /// (BTF) permuted, row-scaled matrix and `M_bb = L_b U_b` per diagonal
+    /// block, so `Aᵀ x = b` is `Mᵀ (P_r Rs x) = C b`: gather `b` through the
+    /// column permutation, run the transposed block substitution (blocks
+    /// forward, per block `Uᵀ` forward then `Lᵀ` backward, off-block `Fᵀ`
+    /// contributions from the already-solved earlier blocks), then scatter
+    /// through the row permutation and undo the row scaling. Sequential and
+    /// bit-deterministic, like [`solve`](Self::solve).
+    pub fn solve_transpose(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
+        let f = &self.factors;
+        if b.len() != f.n {
+            return Err(RslabError::DimensionMismatch {
+                expected: f.n,
+                got: b.len(),
+            });
+        }
+        // w = C·b: position k of the permuted system reads b at its column.
+        let mut w = vec![T::zero(); f.n];
+        for (k, &c) in f.col_perm.iter().enumerate() {
+            w[k] = b[c];
+        }
+        self.solve_permuted_transpose(&mut w);
+        // x = Rs⁻¹ · P_rᵀ · w: scatter through the row permutation, then undo
+        // the row scaling (Rs is diagonal, so it transposes onto the solution).
+        let mut xout = vec![T::zero(); f.n];
+        for (k, &orig) in f.row_perm.iter().enumerate() {
+            xout[orig] = w[k] * T::from_real(f.rs_inv[orig]);
+        }
+        Ok(xout)
+    }
+
+    /// The transposed block substitution on the permuted vector: `Mᵀ` is block
+    /// **lower** triangular (the transpose of the BTF block-upper `M`), so the
+    /// blocks run forward, and within a block `M_bbᵀ = U_bᵀ L_bᵀ` solves as
+    /// `Uᵀ` (lower, diagonal `udiag`) forward then `Lᵀ` (unit upper) backward.
+    /// Column `j` of the stored `U`/`L`/`F` is row `j` of the transpose, so
+    /// every inner loop is a gather over the existing column storage.
+    fn solve_permuted_transpose(&self, w: &mut [T]) {
+        let f = &self.factors;
+        for b in 0..f.block_ptr.len() - 1 {
+            let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
+            // Fᵀ: this block's rows read the already-solved earlier blocks.
+            for j in bs..be {
+                let mut acc = w[j];
+                for k in f.f_colptr[j]..f.f_colptr[j + 1] {
+                    acc = acc - f.f_val[k] * w[f.f_rowidx[k]];
+                }
+                w[j] = acc;
+            }
+            // Uᵀ (lower triangular, diagonal `udiag`) forward within the block.
+            for j in bs..be {
+                let mut acc = w[j];
+                for k in f.u_colptr[j]..f.u_colptr[j + 1] {
+                    acc = acc - f.u_val[k] * w[f.u_rowidx[k]];
+                }
+                w[j] = acc / f.udiag[j];
+            }
+            // Lᵀ (unit upper) backward within the block.
+            for j in (bs..be).rev() {
+                let mut acc = w[j];
+                for k in f.l_colptr[j]..f.l_colptr[j + 1] {
+                    acc = acc - f.l_val[k] * w[f.l_rowidx[k]];
+                }
+                w[j] = acc;
+            }
+        }
+    }
+
     /// Solve for `nrhs` right-hand sides stored row-major (`b[i * nrhs + col]`),
     /// matching [`crate::LuSolver::solve_many`]'s layout.
     ///
@@ -1354,6 +1429,160 @@ mod tests {
             return; // duplicate collapse: not the case under test
         }
         assert!(s.refactor(&a2).is_err(), "changed pattern must be rejected");
+    }
+
+    /// Max-norm relative residual of the *transposed* system `Aᵀ x = b`.
+    fn resid_t<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
+        resid(&a.transpose(), x, b)
+    }
+
+    #[test]
+    fn klu_solve_transpose_matches_factored_transpose() {
+        // Reducible circuit-shaped matrix: solve_transpose on A's factors must
+        // agree with a fresh factorization of Aᵀ, and satisfy Aᵀ x = b.
+        let a = circuit_like(200, 42);
+        let b: Vec<f64> = (0..200).map(|i| ((i * 3) % 13) as f64 - 6.0).collect();
+        let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        assert!(s.n_blocks() >= 2, "bridge structure must be reducible");
+        let x = s.solve_transpose(&b).unwrap();
+        assert!(resid_t(&a, &x, &b) < 1e-12, "residual {}", resid_t(&a, &x, &b));
+        let st = KluSolver::factor(&a.transpose(), &KluSettings::default()).unwrap();
+        let xr = st.solve(&b).unwrap();
+        let diff = x
+            .iter()
+            .zip(&xr)
+            .map(|(&p, &q)| (p - q).abs())
+            .fold(0.0, f64::max);
+        assert!(diff < 1e-9, "transpose solve vs factored transpose differ by {diff}");
+    }
+
+    #[test]
+    fn klu_solve_transpose_complex_plain_not_conjugate() {
+        // Complex: solve_transpose must solve the PLAIN transpose Aᵀ x = b
+        // (adjoint convention: the caller conjugates for Aᴴ). Off-diagonal
+        // pivoting pressure included (small diagonal), as in the solve test.
+        let c = |re, im| Complex::new(re, im);
+        let m = 6;
+        let n = m * m;
+        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
+        let idx = |a: usize, b: usize| a * m + b;
+        for a in 0..m {
+            for b in 0..m {
+                let p = idx(a, b);
+                rr.push(p);
+                cc.push(p);
+                vv.push(c(0.3, 0.05));
+                if b + 1 < m {
+                    let q = idx(a, b + 1);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(2.0, 0.3));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(1.5, -0.2));
+                }
+                if a + 1 < m {
+                    let q = idx(a + 1, b);
+                    rr.push(p);
+                    cc.push(q);
+                    vv.push(c(1.8, 0.1));
+                    rr.push(q);
+                    cc.push(p);
+                    vv.push(c(2.2, 0.4));
+                }
+            }
+        }
+        let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
+        let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, (i % 3) as f64)).collect();
+        let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        let x = s.solve_transpose(&b).unwrap();
+        assert!(resid_t(&a, &x, &b) < 1e-12, "residual {}", resid_t(&a, &x, &b));
+        // Aᴴ x = b via the documented conjugation recipe.
+        let bc: Vec<Complex<f64>> = b.iter().map(|v| v.conj()).collect();
+        let xh: Vec<Complex<f64>> = s.solve_transpose(&bc).unwrap().iter().map(|v| v.conj()).collect();
+        let ah = {
+            let t = a.transpose();
+            GeneralCsc::<Complex<f64>> {
+                n: t.n,
+                col_ptr: t.col_ptr.clone(),
+                row_idx: t.row_idx.clone(),
+                values: t.values.iter().map(|v| v.conj()).collect(),
+            }
+        };
+        assert!(resid(&ah, &xh, &b) < 1e-12);
+    }
+
+    #[test]
+    fn klu_solve_transpose_singleton_blocks_and_options() {
+        // Lower bidiagonal (all-singleton BTF blocks, pure F off-block path),
+        // plus the no-BTF and no-scaling configurations on the circuit matrix.
+        let n = 50;
+        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            r.push(i);
+            c.push(i);
+            v.push(2.0 + (i % 3) as f64);
+            if i + 1 < n {
+                r.push(i + 1);
+                c.push(i);
+                v.push(-1.0);
+            }
+        }
+        let tri = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
+        let s = KluSolver::factor(&tri, &KluSettings::default()).unwrap();
+        assert_eq!(s.n_blocks(), n);
+        let b: Vec<f64> = (0..n).map(|i| i as f64 - 7.0).collect();
+        let x = s.solve_transpose(&b).unwrap();
+        assert!(resid_t(&tri, &x, &b) < 1e-14);
+
+        let a = circuit_like(100, 21);
+        let b: Vec<f64> = (0..a.n).map(|i| (i % 5) as f64 - 2.0).collect();
+        for settings in [
+            KluSettings::default().with_btf(false),
+            KluSettings::default().with_row_scaling(false),
+            KluSettings::default().with_btf(false).with_row_scaling(false),
+        ] {
+            let s = KluSolver::factor(&a, &settings).unwrap();
+            let x = s.solve_transpose(&b).unwrap();
+            assert!(resid_t(&a, &x, &b) < 1e-12, "settings {settings:?}");
+        }
+    }
+
+    #[test]
+    fn klu_solve_transpose_after_refactor() {
+        // The transpose solve must read the refactored values, not stale ones.
+        let a = circuit_like(150, 99);
+        let mut s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        let a2 = {
+            let (mut rows, mut cols) = (Vec::new(), Vec::new());
+            for j in 0..a.n {
+                for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                    rows.push(a.row_idx[k]);
+                    cols.push(j);
+                }
+            }
+            let vals: Vec<f64> = a
+                .values
+                .iter()
+                .enumerate()
+                .map(|(k, &v)| v * (1.0 + 0.01 * ((k % 17) as f64)))
+                .collect();
+            GeneralCsc::from_triplets(a.n, &rows, &cols, &vals).unwrap()
+        };
+        s.refactor(&a2).unwrap();
+        let b: Vec<f64> = (0..a.n).map(|i| (i % 9) as f64 - 4.0).collect();
+        let x = s.solve_transpose(&b).unwrap();
+        assert!(resid_t(&a2, &x, &b) < 1e-11, "residual {}", resid_t(&a2, &x, &b));
+    }
+
+    #[test]
+    fn klu_solve_transpose_empty_and_dimension_check() {
+        let a = GeneralCsc::<f64>::from_triplets(0, &[], &[], &[]).unwrap();
+        let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        assert_eq!(s.solve_transpose(&[]).unwrap(), Vec::<f64>::new());
+        let a = circuit_like(20, 1);
+        let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        assert!(s.solve_transpose(&[0.0; 19]).is_err());
     }
 
     #[test]

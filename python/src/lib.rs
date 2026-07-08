@@ -1505,6 +1505,47 @@ impl Klu {
         }
     }
 
+    /// Solve the transposed system ``A.T @ x = b`` on the **same** factors.
+    ///
+    /// This is the plain transpose, not the conjugate transpose: for a complex
+    /// adjoint solve ``A.conj().T @ x = b``, conjugate ``b`` before and ``x``
+    /// after (``f.solve_transpose(b.conj()).conj()``). No refactorization and
+    /// no extra memory - the stored ``L``/``U``/off-block factors are traversed
+    /// in transposed order. The workhorse for adjoint / sensitivity solves,
+    /// where the forward and adjoint systems share one factorization.
+    ///
+    /// Parameters
+    /// ----------
+    /// b : numpy.ndarray
+    ///     Right-hand side of length ``n``; its dtype must match :attr:`dtype`.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///     The solution ``x`` of ``A.T @ x = b``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``b``'s dtype does not match the factor's dtype.
+    fn solve_transpose(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        macro_rules! arm {
+            ($s:expr, $T:ty) => {{
+                let bb: PyReadonlyArray1<$T> = b.extract().map_err(|_| {
+                    PyValueError::new_err("rhs dtype does not match the factor dtype")
+                })?;
+                let x = $s.solve_transpose(bb.as_slice()?).map_err(map_err)?;
+                Ok(x.into_pyarray_bound(py).into_any().unbind())
+            }};
+        }
+        match &self.inner {
+            KluAny::F64(s, _) => arm!(s, f64),
+            KluAny::F32(s, _) => arm!(s, f32),
+            KluAny::C64(s, _) => arm!(s, Complex64),
+            KluAny::C32(s, _) => arm!(s, Complex32),
+        }
+    }
+
     /// Numeric-only refactorization with a new value set on the **same**
     /// sparsity pattern - the fast path for frequency sweeps and Newton steps.
     ///

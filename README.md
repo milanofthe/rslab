@@ -25,7 +25,8 @@ right-hand sides. It is a fork of [feral](https://github.com/jkitchin/feral); se
   singularity a-priori) + per-block AMD + left-looking Gilbert-Peierls LU with
   threshold pivoting and row scaling. Strictly sequential and bit-deterministic;
   numeric-only `refactor` (frozen pattern + pivots) for frequency sweeps and
-  Newton steps. On MNA-like matrices: ~7x faster factor and ~6x less factor
+  Newton steps, plus `solve_transpose` (`Aᵀx = b` on the same factors) for
+  adjoint / sensitivity solves. On MNA-like matrices: ~7x faster factor and ~6x less factor
   memory than the multifrontal LU, ~20x faster in a refactor sweep
   (`cargo bench --bench klu_circuit`).
 - Three factorization schedules: supernodal left-looking (default, frees each dense

@@ -23,7 +23,9 @@
 //!   driving a [`cocg`]/[`cocr`] iteration.
 //! * **Circuit-shaped unsymmetric solve** - the sequential, bit-deterministic
 //!   [`KluSolver`] (BTF + per-block Gilbert-Peierls) with a numeric-only
-//!   [`refactor`](KluSolver::refactor) for fixed-pattern sweeps.
+//!   [`refactor`](KluSolver::refactor) for fixed-pattern sweeps and a
+//!   [`solve_transpose`](KluSolver::solve_transpose) (`Aᵀx = b` on the same
+//!   factors) for adjoint / sensitivity solves.
 //!
 //! ## PARDISO-style phased workflow (FEM)
 //!
