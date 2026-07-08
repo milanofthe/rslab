@@ -15,10 +15,6 @@ pub enum RslabError {
     /// An I/O or parse error occurred (e.g. reading a Matrix Market file).
     IoError(String),
 
-    /// `Solver::solve` (or `solve_refined`) was called before any
-    /// successful factorization. Call `factor()` first.
-    NoFactor,
-
     /// A supernode received more delayed pivots from its children at
     /// numeric time than the symbolic-analysis phase budgeted for.
     /// Mirrors MUMPS's `INFO(2)` workspace-overflow path: a predictable,
@@ -57,9 +53,6 @@ impl std::fmt::Display for RslabError {
                 write!(f, "dimension mismatch: expected {}, got {}", expected, got)
             }
             RslabError::IoError(msg) => write!(f, "I/O error: {}", msg),
-            RslabError::NoFactor => {
-                write!(f, "no factorization available; call Solver::factor() first")
-            }
             RslabError::DelayBudgetExceeded {
                 supernode,
                 required,
