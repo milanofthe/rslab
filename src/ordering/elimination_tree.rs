@@ -3,14 +3,14 @@ use crate::sparse::csc::CscPattern;
 /// Elimination tree of a symmetric matrix.
 ///
 /// For a symmetric matrix A, the elimination tree has the property:
-/// parent[j] = min { i > j : L(i,j) ≠ 0 } where L is the Cholesky factor.
+/// `parent[j] = min { i > j : L(i,j) != 0 }` where L is the Cholesky factor.
 /// For indefinite matrices, the same structure applies to the fill pattern.
 ///
 /// Constructed from the symmetric sparsity pattern using union-find with
 /// path compression (George & Liu 1981, Chapter 4).
 #[derive(Debug, Clone)]
 pub struct EliminationTree {
-    /// parent[j] = Some(i) where i > j, or None if j is a root.
+    /// `parent[j] = Some(i)` where `i > j`, or `None` if `j` is a root.
     pub parent: Vec<Option<usize>>,
     pub n: usize,
 }

@@ -533,7 +533,7 @@ pub fn recommend_settings(features: &StructuralFeatures, weight: f64) -> SolverS
 /// [`recommend_settings`] plus the **a-priori memory veto**: `mf_ll_mem_ratio` is
 /// the exact `multifrontal / left-looking` transient-memory estimate
 /// ([`MemoryEstimate`](crate::diagnostics::MemoryEstimate)); multifrontal
-/// candidates are rejected when it exceeds [`VETO_MF_MEM_RATIO`], deterministically
+/// candidates are rejected when it exceeds `VETO_MF_MEM_RATIO` (`1.0`), deterministically
 /// cutting the multifrontal blow-up regressions. Pass `1.0` to disable the veto.
 pub fn recommend_settings_vetoed(
     features: &StructuralFeatures,
@@ -545,8 +545,8 @@ pub fn recommend_settings_vetoed(
 
 /// [`recommend_settings_vetoed`] for a specific solver [`SolverPath`]: the LDLᵀ and
 /// LU paths each use their own trained model and candidate grid (the LU grid
-/// searches the threshold-pivot `u`; the LDLᵀ grid pins it). [`LdltSolver`] and
-/// [`LuSolver`] call this with their path.
+/// searches the threshold-pivot `u`; the LDLᵀ grid pins it). [`LdltSolver`](crate::LdltSolver) and
+/// [`LuSolver`](crate::LuSolver) call this with their path.
 pub fn recommend_settings_pathed(
     features: &StructuralFeatures,
     weight: f64,

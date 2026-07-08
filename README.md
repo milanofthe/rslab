@@ -361,7 +361,7 @@ time and memory than faer, and about half the memory of its own multifrontal pat
 
 ```toml
 [dependencies]
-rslab = "0.11"
+rslab = "0.16"
 ```
 
 ### Python (NumPy / SciPy)

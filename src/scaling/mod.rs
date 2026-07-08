@@ -95,7 +95,7 @@ pub enum ScalingStrategy {
     /// single Knight-Ruiz step). The historical [`crate::LdltSolver`]
     /// equilibration and the [`crate::SolverSettings`] default: cheapest,
     /// tolerates a zero diagonal, no iteration. See
-    /// [`infnorm::compute_onepass`].
+    /// `infnorm::compute_onepass`.
     OnePassInfNorm,
     /// MC64-style symmetric matching-based scaling. Matches the
     /// default behavior of MUMPS (SYM=2) and SSIDS
@@ -111,7 +111,7 @@ pub enum ScalingStrategy {
     /// Adaptive shape-based routing: `Mc64Symmetric` when the matrix
     /// has the arrow-KKT signature (many degree-1 "constraint slack"
     /// columns), else `InfNorm`. The routing rule is documented at
-    /// [`pick_scaling_strategy`]; threshold is `diag_only / n >= 0.3`.
+    /// `pick_scaling_strategy`; threshold is `diag_only / n >= 0.3`.
     /// Default since 2026-04-19. See
     /// `dev/research/lever-c-residual-diff-2026-04-19.md`.
     #[default]

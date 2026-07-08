@@ -78,16 +78,16 @@ pub enum OrderingMethod {
     /// (stencils, structured FEM) where nested dissection
     /// over-separates and minimum-degree scatters fill: the band
     /// factor has less fill and factors faster. Cheap (one BFS pass).
-    /// A [`AutoRace`] candidate; also reachable explicitly.
+    /// An [`AutoRace`](OrderingMethod::AutoRace) candidate; also reachable explicitly.
     Rcm,
     /// Adaptive dispatcher: picks a concrete method per-matrix from
     /// cheap pattern features (n and average degree nnz/n).
     ///
     /// Issue #50 plus its F11 follow-up (2026-05-23) collapsed the
     /// per-shape branches to one very-large-and-sparse catch on top
-    /// of [`pick_default_method`]:
+    /// of `pick_default_method`:
     ///   - very-large-and-sparse (n > 100_000, full nnz/n < 5) → `Amd`
-    ///   - everything else delegates to [`pick_default_method`]
+    ///   - everything else delegates to `pick_default_method`
     ///     (`n <= 10_000 → Amf`, `n > 10_000 → MetisND`).
     ///
     /// **Opt-in only.** The 154k-matrix IPM bench (2026-04-18) showed
@@ -112,14 +112,14 @@ pub enum OrderingMethod {
     /// concrete candidate in {`Amd`, `MetisND`, `ScotchND`, `KahipND`}
     /// and returns the one with the smallest `factor_nnz_estimate`.
     ///
-    /// Unlike [`Auto`], which guesses the winner from cheap pattern
+    /// Unlike [`Auto`](OrderingMethod::Auto), which guesses the winner from cheap pattern
     /// features, `AutoRace` measures the actual symbolic outcome. Cost
     /// is ~4× a single symbolic pass (~50-500 ms total at n≈10⁵), paid
     /// once per problem because symbolic factorization is reused across
     /// numeric refactorizations with the same sparsity pattern.
     ///
     /// Motivated by issue #8: on `pinene_3200_0009` the
-    /// [`pick_default_method`] heuristic picks `MetisND` (88 s numeric
+    /// `pick_default_method` heuristic picks `MetisND` (88 s numeric
     /// factor), but `Amd` factors in 19.5 s on the same matrix - a 4.5×
     /// win that the cheap predicate misses. Racing eliminates the
     /// guess: whichever candidate wins on this matrix is the one we
@@ -150,7 +150,7 @@ pub enum OrderingMethod {
 ///     one matrix (nql180) where MetisND has smaller fill but AMF is still
 ///     2× faster on the real factor+solve.
 ///
-/// Anything else delegates to [`pick_default_method`]. `symbolic_factorize`
+/// Anything else delegates to `pick_default_method`. `symbolic_factorize`
 /// routes through `Auto`, so the no-arg default and `Auto` resolve to the
 /// same concrete method on every matrix (issue #64 unified the two paths;
 /// previously the no-arg default skipped the very-large-and-sparse and
@@ -487,7 +487,7 @@ fn pick_default_method(n: usize, _stored_nnz: usize) -> OrderingMethod {
 ///
 /// Otherwise returns [`OrderingPreprocess::None`].
 ///
-/// Parallels [`crate::scaling::pick_scaling_strategy`] in spirit.
+/// Parallels `crate::scaling::pick_scaling_strategy` in spirit.
 /// Both predicates are O(nnz) and allocation-free.
 ///
 /// No published compression-benefit predictor exists in the MUMPS /
@@ -521,7 +521,7 @@ pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
 /// Perform symbolic factorization of a sparse symmetric matrix.
 ///
 /// Picks the fill-reducing ordering adaptively via [`OrderingMethod::Auto`]
-/// (resolved by [`choose_adaptive`]): AMF for n ≤ 10_000 or arrow/bordered
+/// (resolved by `choose_adaptive`): AMF for n ≤ 10_000 or arrow/bordered
 /// patterns, AMD for very-large-and-sparse, MetisND otherwise. Routing
 /// through `Auto` keeps this no-arg default and the explicit `Auto` caller
 /// in exact agreement (issue #64). Callers who want a specific ordering

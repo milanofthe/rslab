@@ -155,9 +155,6 @@ pub use numeric::multifrontal_ldlt::{
     with_threads, BlrMode, FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode,
     SolverSettings, Threads, ZeroPivotAction,
 };
-// Deprecated pre-unification option aliases (now all `SolverSettings`).
-#[allow(deprecated)]
-pub use numeric::multifrontal_ldlt::{AnalyzeOptions, FactorOptions};
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,

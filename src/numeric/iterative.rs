@@ -1858,7 +1858,7 @@ where
 ///
 /// **Warm start (issue #5):** `x0 = Some(prev)` seeds every column from a related
 /// previous solution; on a slowly varying sequence this cuts the block iteration
-/// count. Each column's convergence is still relative to its own ‖B[:,c]‖.
+/// count. Each column's convergence is still relative to its own `‖B[:,c]‖`.
 ///
 /// **Deflation:** a RHS whose true residual reaches `tol` drops out of the block,
 /// so the batched applies shrink to the active width as columns converge - the

@@ -199,6 +199,7 @@ def ldlt(
     See Also
     --------
     lu : the unsymmetric counterpart, :math:`P^{\\mathsf{T}} A P = L U`.
+    klu : the circuit-shaped unsymmetric path (BTF + Gilbert-Peierls).
     spsolve : one-shot factor-and-solve with automatic symmetry detection.
 
     Notes
@@ -504,7 +505,7 @@ def spsolve(
 
     See Also
     --------
-    ldlt, lu : reusable factor handles for the factor-once, solve-many workflow.
+    ldlt, lu, klu : reusable factor handles for the factor-once, solve-many workflow.
 
     Examples
     --------

@@ -88,7 +88,7 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
 /// Effect: children whose `bias[child]` is `true` have their subtrees
 /// emitted adjacent to (immediately before) the parent's column in
 /// the resulting numbering. When the bias matches the SSIDS desired
-/// merges (per [`crate::symbolic::supernode::predict_merges`]), the
+/// merges (per `crate::symbolic::supernode::predict_merges`), the
 /// returned ordering makes every desired merge adjacent in the
 /// column numbering, so the standard adjacency check in
 /// `find_supernodes` succeeds for it.

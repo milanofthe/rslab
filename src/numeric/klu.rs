@@ -111,12 +111,17 @@ pub struct KluSymbolic {
     /// [`LuSymbolic`](crate::LuSymbolic)'s stored symbolic structure.
     pat_col_ptr: Vec<usize>,
     pat_row_idx: Vec<usize>,
+    /// Lazily computed, cached symbolic fill (the estimator pass costs about
+    /// as much as a numeric factor, so the phased `factor` must not pay it
+    /// again on every call).
+    fill: std::sync::OnceLock<KluFill>,
 }
 
 /// Exact symbolic fill of the KLU factor under the diagonal-pivoting
 /// assumption (the default expectation: BTF guarantees a structurally nonzero
 /// diagonal and `pivot_tol` strongly prefers it). Threshold pivoting at factor
 /// time can shift individual counts, not their order of magnitude.
+#[derive(Debug, Clone, Copy)]
 struct KluFill {
     l_nnz: u64,
     u_nnz: u64,
@@ -231,12 +236,19 @@ impl KluSymbolic {
             block_ptr,
             pat_col_ptr,
             pat_row_idx,
+            fill: std::sync::OnceLock::new(),
         })
     }
 
     /// Symbolic Gilbert-Peierls pass over the stored pattern assuming
     /// diagonal pivots: exact per-path fill and flop counts, no values.
+    /// Computed once and cached — the pass costs about as much as a numeric
+    /// factor, so repeated `factor`/`estimate_memory` calls must not repay it.
     fn symbolic_fill(&self) -> KluFill {
+        *self.fill.get_or_init(|| self.symbolic_fill_uncached())
+    }
+
+    fn symbolic_fill_uncached(&self) -> KluFill {
         let n = self.n;
         let mut stamp = vec![0usize; n];
         let mut node_stack = vec![0usize; n];

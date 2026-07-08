@@ -99,18 +99,6 @@ pub enum ReorderMode {
     Off,
 }
 
-/// Deprecated alias for [`SolverSettings`], the single unified solver-settings
-/// interface. Analysis-time knobs (`reorder`/`ordering`/`nemin`/`relax`) now live
-/// on `SolverSettings` alongside the factor and kernel knobs; `analyze_with` reads
-/// only that subset.
-#[deprecated(since = "0.12.0", note = "merged into the unified `SolverSettings`")]
-pub type AnalyzeOptions = SolverSettings;
-
-/// Deprecated alias for [`SolverSettings`], the single unified solver-settings
-/// interface (factor, analysis, and kernel knobs in one struct).
-#[deprecated(since = "0.12.0", note = "renamed to the unified `SolverSettings`")]
-pub type FactorOptions = SolverSettings;
-
 /// Factor emit/memory strategy - composable via [`SolverSettings::with_memory`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryMode {
@@ -256,14 +244,14 @@ pub struct SolverSettings {
     /// Clamped to at least 8 on use.
     pub panel_nb: usize,
     /// Below this flop count a contribution update runs as a scalar triple loop
-    /// instead of a SIMD GEMM. Default [`DEFAULT_SCALAR_GATE`](crate::gemm_tuning::DEFAULT_SCALAR_GATE).
+    /// instead of a SIMD GEMM. Default [`DEFAULT_SCALAR_GATE`](crate::DEFAULT_SCALAR_GATE).
     pub scalar_gate: usize,
     /// At/above this flop count a cmod-class GEMM runs rayon-parallel. Default
-    /// [`DEFAULT_PAR_GEMM`](crate::gemm_tuning::DEFAULT_PAR_GEMM).
+    /// [`DEFAULT_PAR_GEMM`](crate::DEFAULT_PAR_GEMM).
     pub par_gemm: usize,
     /// At/above this flop count the panel-trailing / Schur / LU-front GEMM runs
     /// rayon-parallel (the top-of-tree node-parallelism lever). Default
-    /// [`DEFAULT_PAR_CDIV`](crate::gemm_tuning::DEFAULT_PAR_CDIV).
+    /// [`DEFAULT_PAR_CDIV`](crate::DEFAULT_PAR_CDIV).
     pub par_cdiv: usize,
     /// Use the SIMD GEMM (vs the scalar triple loop) for the front Schur update.
     /// Default `true`. A kernel A/B knob for benchmarking.
@@ -279,7 +267,7 @@ pub struct SolverSettings {
     /// stability (backed by the near-zero pivot policy) for less fill and speed on
     /// well-scaled / diagonally-dominant systems.
     pub pivot_u: f64,
-    /// Symmetric equilibration strategy `Â = D A D` applied by [`LdltSolver`]
+    /// Symmetric equilibration strategy `Â = D A D` applied by [`LdltSolver`](crate::LdltSolver)
     /// before factoring. Default [`OnePassInfNorm`](crate::ScalingStrategy::OnePassInfNorm)
     /// (the historical one-pass ∞-norm, bit-identical to before this knob).
     /// [`Identity`](crate::ScalingStrategy::Identity) disables scaling;

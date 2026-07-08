@@ -4,7 +4,7 @@ use crate::sparse::csc::CscPattern;
 /// Compute the number of nonzeros in each column of the Cholesky factor L.
 ///
 /// Uses elimination graph simulation: process columns left to right,
-/// maintaining the fill pattern. For column j, L[:,j] contains:
+/// maintaining the fill pattern. For column j, `L[:,j]` contains:
 /// - The diagonal entry (j,j)
 /// - All original entries (i,j) with i > j
 /// - All fill entries propagated from earlier columns
@@ -79,8 +79,8 @@ pub fn total_factor_nnz(counts: &[usize]) -> usize {
 /// dense-ish patterns. Uses Liu's row-subtree characterization:
 ///
 /// - L(i, j) ≠ 0 iff j ∈ T^r_i (the row subtree for row i)
-/// - c[j] = |{i : j ∈ T^r_i}| (column count)
-/// - c[j] = sum over T^r_i of (leaves at j) − (LCAs at j), accumulated
+/// - `c[j] = |{i : j ∈ T^r_i}|` (column count)
+/// - `c[j]` = sum over T^r_i of (leaves at j) − (LCAs at j), accumulated
 ///   up the etree
 ///
 /// References:

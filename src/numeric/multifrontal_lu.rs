@@ -815,7 +815,7 @@ impl LuSymbolic {
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)` of the symmetrized
     /// pattern - for factorization-cost diagnostics (front-size distribution and
-    /// a factor-flop estimate). See [`MultifrontalSymbolic::front_dims`].
+    /// a factor-flop estimate). See [`MultifrontalSymbolic::front_dims`](crate::MultifrontalSymbolic::front_dims).
     pub fn front_dims(&self) -> Vec<(usize, usize)> {
         self.symb.front_dims()
     }
@@ -826,7 +826,7 @@ impl LuSymbolic {
     }
 
     /// Supernode count per assembly-tree level (available tree-parallelism by
-    /// depth). See [`MultifrontalSymbolic::level_widths`].
+    /// depth). See [`MultifrontalSymbolic::level_widths`](crate::MultifrontalSymbolic::level_widths).
     pub fn level_widths(&self) -> Vec<usize> {
         self.symb.level_widths()
     }
