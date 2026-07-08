@@ -2,25 +2,39 @@
 
 A thin, allocation-light wrapper over the RSLAB Rust core: a drop-in
 alternative to :func:`scipy.sparse.linalg.spsolve` / Intel MKL PARDISO for the
-factor-once, solve-many workloads that dominate FEM and method-of-moments codes.
-**Symmetric** matrices are factored by a real / complex-symmetric
-:math:`L D L^{\\mathsf{T}}` (Bunch-Kaufman) method and **general** matrices by an
-unsymmetric :math:`L U`; either factor then solves against one or many
-right-hand sides.
+factor-once, solve-many workloads that dominate FEM, method-of-moments, and
+circuit-extraction codes. Three factorization paths cover the operator
+classes:
 
-The solver is **type-agnostic** - the matrix ``dtype`` selects the arithmetic
+**Symmetric** matrices (real, or complex-symmetric :math:`A = A^{\\mathsf{T}}`)
+are factored by a supernodal Bunch-Kaufman method,
+
+.. math::
+
+    P^{\\mathsf{T}} A P = L D L^{\\mathsf{T}},
+
+**general unsymmetric** matrices by a supernodal / multifrontal LU with
+threshold partial pivoting,
+
+.. math::
+
+    P_r^{\\mathsf{T}} A P_c = L U,
+
+and **circuit-shaped** matrices (MNA / SPICE class: extremely sparse,
+unsymmetric, near-triangularizable) by a KLU-style path - block triangular
+form plus a per-block Gilbert-Peierls LU - whose numeric-only ``refactor``
+makes fixed-pattern sweeps cheap.
+
+The solver is **type-agnostic**: the matrix ``dtype`` selects the arithmetic
 field, so ``float64`` / ``float32`` run the real path and ``complex128`` /
-``complex64`` the complex path through the *same* call, at half the memory for
-the 32-bit fields.
+``complex64`` the complex path through the *same* call, at half the memory
+for the 32-bit fields.
 
-Two usage modes
----------------
-The one-shot :func:`spsolve` (auto-detects symmetry, factors, solves, discards),
-and the explicit factor handle from :func:`ldlt` / :func:`lu` when the same
-matrix is solved against many right-hand sides.
+Example
+-------
+The one-shot :func:`spsolve` auto-detects symmetry, factors, solves, and
+discards - the drop-in replacement:
 
-Examples
---------
 .. code-block:: python
 
     import numpy as np, scipy.sparse as sp, rslab
@@ -31,21 +45,28 @@ Examples
 
     x = rslab.spsolve(A, b)           # one-shot: factor + solve + discard
 
+When the same matrix is solved against many right-hand sides, factor once
+through the explicit handle and reuse it:
+
+.. code-block:: python
+
     f = rslab.ldlt(A)                 # factor once ...
     x1 = f.solve(b)                   # ... solve many
     X  = f.solve_many(np.random.rand(2000, 8))   # 8 right-hand sides at once
 
-The factor configuration is passed as keyword arguments (see :func:`ldlt` /
-:func:`lu`): ``threads``, ``preconditioner``, ``drop_tol``, ``method``,
-``memory``, ``force_accept``.
+Unsymmetric operators go through :func:`lu`, circuit-shaped ones through
+:func:`klu`; the factor configuration is passed as keyword arguments on each
+(``threads``, ``preconditioner``, ``drop_tol``, ``method``, ``memory`` on
+:func:`ldlt` / :func:`lu`; ``pivot_tol``, ``row_scaling``, ``btf`` on
+:func:`klu`).
 
-Notes
------
+Note
+----
 The numeric factor is **bit-identical regardless of the thread count**; the
 worker budget affects wall time and transient memory, not the result. By
 default the factorization uses at most 4 workers (the pareto-optimal
 throughput-per-core point on typical sparse factorizations); pass an explicit
-``threads`` to override.
+``threads`` to override. The KLU path is strictly sequential by design.
 
 References
 ----------
@@ -54,6 +75,9 @@ References
        Computation*, 31(137), 163-179. :doi:`10.1090/S0025-5718-1977-0428694-0`
 .. [2] Davis, T. A. (2006). *Direct Methods for Sparse Linear Systems*. SIAM.
        :doi:`10.1137/1.9780898718881`
+.. [3] Davis, T. A., & Palamadai Natarajan, E. (2010). "Algorithm 907: KLU, a
+       direct sparse solver for circuit simulation problems." *ACM Transactions
+       on Mathematical Software*, 37(3). :doi:`10.1145/1824801.1824814`
 """
 
 from __future__ import annotations
@@ -211,6 +235,8 @@ def ldlt(
 
     Examples
     --------
+    Build a symmetric test system and factor it exactly:
+
     .. code-block:: python
 
         import numpy as np, scipy.sparse as sp, rslab
@@ -220,11 +246,31 @@ def ldlt(
 
         f = rslab.ldlt(A)                        # exact factor
         x = f.solve(np.random.rand(5000))
-        print(f.factor_nnz, f.inertia)           # fill and (n+, n-, n0)
 
-        # Near-singular system: static pivoting + iterative refinement.
+    The handle carries the factorization diagnostics - the fill and the
+    inertia :math:`(n_+, n_-, n_0)`:
+
+    .. code-block:: python
+
+        print(f.factor_nnz, f.inertia)
+
+    On a near-singular or indefinite system, enable never-fail static
+    pivoting and recover accuracy with iterative refinement against the
+    original matrix:
+
+    .. code-block:: python
+
         g = rslab.ldlt(A, preconditioner=1e-4)
         x = g.solve(np.random.rand(5000), refine=2)
+
+    An *incomplete* factor (thresholded fill) is a memory-light
+    preconditioner; drive the built-in GMRES with it to recover the exact
+    solution:
+
+    .. code-block:: python
+
+        p = rslab.ldlt(A, drop_tol=1e-2)         # half the fill, inexact
+        x, converged, iters, res, stop = p.gmres(np.random.rand(5000))
 
     References
     ----------
@@ -316,6 +362,9 @@ def lu(
 
     Examples
     --------
+    Factor a general unsymmetric matrix and solve one or many right-hand
+    sides against it:
+
     .. code-block:: python
 
         import numpy as np, scipy.sparse as sp, rslab
@@ -323,7 +372,21 @@ def lu(
         A = sp.random(4000, 4000, density=1e-3, format="csc") + sp.eye(4000) * 10
         f = rslab.lu(A)                          # unsymmetric factor
         x = f.solve(np.random.rand(4000))
+
+    The multi-RHS solve traverses the factor once for all columns - faster
+    than looping :meth:`~Lu.solve`:
+
+    .. code-block:: python
+
         X = f.solve_many(np.random.rand(4000, 4))
+
+    A dropped (incomplete) factor plus the built-in preconditioned GMRES
+    trades factor memory against a few iterations:
+
+    .. code-block:: python
+
+        p = rslab.lu(A, drop_tol=1e-2)
+        x, converged, iters, res, stop = p.gmres(np.random.rand(4000))
 
     References
     ----------
@@ -404,6 +467,9 @@ def klu(
 
     Examples
     --------
+    Factor a circuit-shaped matrix - the analysis finds the block triangular
+    form and confines all fill to its irreducible diagonal blocks:
+
     .. code-block:: python
 
         import numpy as np, scipy.sparse as sp, rslab
@@ -411,11 +477,28 @@ def klu(
         A = sp.random(4000, 4000, density=5e-4, format="csc") + sp.eye(4000) * 10
         f = rslab.klu(A)                       # BTF + per-block LU
         x = f.solve(np.random.rand(4000))
+        print(f.n_blocks, f.factor_nnz)        # BTF blocks and fill
 
-        # frequency sweep: same pattern, new values -> numeric-only refactor
-        A2 = A * 1.5
-        f.refactor(A2.data)
-        x2 = f.solve(np.random.rand(4000))
+    In a frequency sweep the pattern is fixed and only the values change;
+    :meth:`~Klu.refactor` replays the stored pattern and pivot sequence on
+    the new values - no symbolic work, no pivot search:
+
+    .. code-block:: python
+
+        for scale in (1.0, 1.5, 2.0):
+            A2 = A * scale                     # same pattern, new values
+            f.refactor(A2.data)                # numeric-only, several x faster
+            x = f.solve(np.random.rand(4000))
+
+    A structurally singular input (some set of columns with entries in fewer
+    rows than columns) is detected in the analysis, before any numeric work:
+
+    .. code-block:: python
+
+        try:
+            rslab.klu(singular_A)
+        except RuntimeError as e:
+            print(e)                           # "structurally singular ..."
 
     References
     ----------

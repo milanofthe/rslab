@@ -83,6 +83,14 @@ x = f.solve(b, refine=20)        # refine against the original A
 | `memory`         | `"low"`          | `"low"` or `"eager"` factor emit strategy                      |
 | `force_accept`   | `False`          | accept tiny pivots in exact mode instead of failing            |
 
+`klu` accepts:
+
+| kwarg         | default | meaning                                                          |
+|---------------|---------|------------------------------------------------------------------|
+| `pivot_tol`   | `1e-3`  | diagonal-preference threshold; `1.0` = plain partial pivoting    |
+| `row_scaling` | `True`  | divide each row by its max-magnitude entry before factoring      |
+| `btf`         | `True`  | permute to block upper triangular form first (keep it on)       |
+
 Supported dtypes: `float64`, `float32`, `complex128`, `complex64`.
 
 ## License

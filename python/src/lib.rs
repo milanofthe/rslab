@@ -189,6 +189,15 @@ enum LdltAny {
 ///     ``(positive, negative, zero)`` eigenvalue counts.
 /// dtype : str
 ///     The factor's NumPy dtype name.
+///
+/// Example
+/// -------
+/// .. code-block:: python
+///
+///     f = rslab.ldlt(A)                        # factor once ...
+///     x = f.solve(b)                           # ... solve many
+///     X = f.solve_many(B)                      # batched multi-RHS solve
+///     print(f.factor_nnz, f.inertia)
 #[pyclass]
 struct Ldlt {
     inner: LdltAny,
@@ -896,6 +905,14 @@ enum LuAny {
 ///     Count of statically perturbed pivots (nonzero only in preconditioner mode).
 /// dtype : str
 ///     The factor's NumPy dtype name.
+///
+/// Example
+/// -------
+/// .. code-block:: python
+///
+///     f = rslab.lu(A)                          # general unsymmetric factor
+///     x = f.solve(b)
+///     x, ok, iters, res, stop = f.gmres(b)     # as a GMRES preconditioner
 #[pyclass]
 struct Lu {
     inner: LuAny,
@@ -1346,6 +1363,16 @@ enum KluAny {
 ///     Number of BTF diagonal blocks.
 /// dtype : str
 ///     The factor's NumPy dtype name.
+///
+/// Example
+/// -------
+/// .. code-block:: python
+///
+///     f = rslab.klu(A)                         # BTF + per-block LU
+///     x = f.solve(b)
+///     A.data *= 1.5                            # sweep: same pattern, new values
+///     f.refactor(A.data)                       # numeric-only, no pivot search
+///     x2 = f.solve(b)
 #[pyclass]
 struct Klu {
     inner: KluAny,

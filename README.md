@@ -374,12 +374,17 @@ pip install rslab
 import numpy as np, scipy.sparse as sp, rslab
 x = rslab.spsolve(A, b)              # one-shot (auto symmetric/unsymmetric)
 f = rslab.ldlt(A); x = f.solve(b)    # factor once, solve many; also rslab.lu(A)
+
+k = rslab.klu(A_circuit)             # circuit-shaped: BTF + Gilbert-Peierls
+A_circuit.data *= 1.5                # sweep: same pattern, new values
+k.refactor(A_circuit.data)           # numeric-only refactor, then solve again
 ```
 
 A thin wrapper over the Rust core; the matrix dtype selects the field
 (`float64`/`float32` real, `complex128`/`complex64` complex). All factor knobs
 are keyword arguments (`threads`, `preconditioner`, `drop_tol`, `method`,
-`memory`). See [`python/README.md`](python/README.md).
+`memory` on `ldlt`/`lu`; `pivot_tol`, `row_scaling`, `btf` on `klu`). See
+[`python/README.md`](python/README.md).
 
 ## Usage
 
