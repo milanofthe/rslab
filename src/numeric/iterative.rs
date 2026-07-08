@@ -2564,6 +2564,53 @@ impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuSolver<T
     }
 }
 
+/// The KLU path composes with the iterative stack exactly like the
+/// multifrontal solvers: an exact (or sweep-refactored) `M⁻¹ = (LU)⁻¹` for
+/// [`gmres`]/[`gmres_block`]. Sequential by design, so [`solve_threads`]
+/// pins the orthogonalization pool to one worker.
+///
+/// [`solve_threads`]: Preconditioner::solve_threads
+impl<T: Scalar> Preconditioner<T> for crate::numeric::klu::KluSolver<T> {
+    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
+        let x = self.solve(r)?;
+        z.copy_from_slice(&x);
+        Ok(())
+    }
+    fn solve_threads(&self) -> Threads {
+        self.solve_thread_policy()
+    }
+    /// Block apply via [`KluSolver::solve_many`](crate::KluSolver::solve_many).
+    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
+        let mut rowmaj = vec![T::zero(); n * s];
+        for c in 0..s {
+            for i in 0..n {
+                rowmaj[i * s + c] = r[c * n + i];
+            }
+        }
+        let x = self.solve_many(&rowmaj, s)?;
+        for c in 0..s {
+            for i in 0..n {
+                z[c * n + i] = x[i * s + c];
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T: Scalar> Factorization<T> for crate::numeric::klu::KluSolver<T> {
+    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
+        crate::numeric::klu::KluSolver::solve(self, b)
+    }
+    fn factor_nnz(&self) -> usize {
+        crate::numeric::klu::KluSolver::factor_nnz(self)
+    }
+    /// KLU never perturbs pivots: a vanishing pivot is a hard
+    /// [`RslabError::SingularBasis`] at factor time instead.
+    fn n_perturbed(&self) -> usize {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

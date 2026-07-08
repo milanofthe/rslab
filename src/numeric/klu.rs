@@ -68,6 +68,28 @@ impl Default for KluSettings {
     }
 }
 
+impl KluSettings {
+    /// Composable override of the diagonal-preference threshold
+    /// (see [`pivot_tol`](Self::pivot_tol)). `1.0` is plain partial pivoting.
+    pub fn with_pivot_tol(mut self, tol: f64) -> Self {
+        self.pivot_tol = tol;
+        self
+    }
+
+    /// Composable toggle for row-max scaling
+    /// (see [`row_scaling`](Self::row_scaling)).
+    pub fn with_row_scaling(mut self, on: bool) -> Self {
+        self.row_scaling = on;
+        self
+    }
+
+    /// Composable toggle for the BTF permutation (see [`btf`](Self::btf)).
+    pub fn with_btf(mut self, on: bool) -> Self {
+        self.btf = on;
+        self
+    }
+}
+
 /// Symbolic analysis for the KLU path: the BTF block structure plus the
 /// per-block fill-reducing ordering. Analyze once, then factor any number of
 /// matrices sharing the pattern.
@@ -83,6 +105,24 @@ pub struct KluSymbolic {
     col_perm: Vec<usize>,
     /// Diagonal-block boundaries; see [`crate::ordering::btf::BtfForm`].
     block_ptr: Vec<usize>,
+    /// The analyzed pattern in the pre-pivot permuted space (column `k` is
+    /// original column `col_perm[k]`, rows are pre-pivot positions). Kept so
+    /// the a-priori estimators run without the matrix, like
+    /// [`LuSymbolic`](crate::LuSymbolic)'s stored symbolic structure.
+    pat_col_ptr: Vec<usize>,
+    pat_row_idx: Vec<usize>,
+}
+
+/// Exact symbolic fill of the KLU factor under the diagonal-pivoting
+/// assumption (the default expectation: BTF guarantees a structurally nonzero
+/// diagonal and `pivot_tol` strongly prefers it). Threshold pivoting at factor
+/// time can shift individual counts, not their order of magnitude.
+struct KluFill {
+    l_nnz: u64,
+    u_nnz: u64,
+    f_nnz: u64,
+    /// Gilbert-Peierls flop count (multiply-subtract pairs + divisions).
+    flops: u64,
 }
 
 impl KluSymbolic {
@@ -167,13 +207,154 @@ impl KluSymbolic {
             }
         }
 
+        // Freeze the analyzed pattern in the (final) pre-pivot space for the
+        // a-priori estimators.
+        let mut pinv_pre = vec![0usize; n];
+        for (k, &r) in pre_row_perm.iter().enumerate() {
+            pinv_pre[r] = k;
+        }
+        let mut pat_col_ptr = Vec::with_capacity(n + 1);
+        let mut pat_row_idx = Vec::with_capacity(a.nnz());
+        pat_col_ptr.push(0);
+        for &c in &col_perm {
+            for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
+                pat_row_idx.push(pinv_pre[r]);
+            }
+            pat_col_ptr.push(pat_row_idx.len());
+        }
+
         Ok(Self {
             n,
             nnz: a.nnz(),
             pre_row_perm,
             col_perm,
             block_ptr,
+            pat_col_ptr,
+            pat_row_idx,
         })
+    }
+
+    /// Symbolic Gilbert-Peierls pass over the stored pattern assuming
+    /// diagonal pivots: exact per-path fill and flop counts, no values.
+    fn symbolic_fill(&self) -> KluFill {
+        let n = self.n;
+        let mut stamp = vec![0usize; n];
+        let mut node_stack = vec![0usize; n];
+        let mut cur_stack = vec![0usize; n];
+        let mut l_colptr = vec![0usize];
+        let mut l_rowidx: Vec<usize> = Vec::new();
+        let mut leaves: Vec<usize> = Vec::new();
+        let (mut u_nnz, mut f_nnz, mut flops) = (0u64, 0u64, 0u64);
+
+        for b in 0..self.block_ptr.len() - 1 {
+            let (bs, be) = (self.block_ptr[b], self.block_ptr[b + 1]);
+            for j in bs..be {
+                let sj = j + 1;
+                leaves.clear();
+                for k in self.pat_col_ptr[j]..self.pat_col_ptr[j + 1] {
+                    let pre = self.pat_row_idx[k];
+                    if pre < bs {
+                        f_nnz += 1;
+                        continue;
+                    }
+                    if stamp[pre] == sj {
+                        continue;
+                    }
+                    stamp[pre] = sj;
+                    if pre >= j {
+                        leaves.push(pre);
+                        continue;
+                    }
+                    let mut d = 0usize;
+                    node_stack[0] = pre;
+                    cur_stack[0] = l_colptr[pre];
+                    loop {
+                        let u = node_stack[d];
+                        let endp = l_colptr[u + 1];
+                        let mut descended = false;
+                        while cur_stack[d] < endp {
+                            let ch = l_rowidx[cur_stack[d]];
+                            cur_stack[d] += 1;
+                            if stamp[ch] == sj {
+                                continue;
+                            }
+                            stamp[ch] = sj;
+                            if ch >= j {
+                                leaves.push(ch);
+                                continue;
+                            }
+                            d += 1;
+                            node_stack[d] = ch;
+                            cur_stack[d] = l_colptr[ch];
+                            descended = true;
+                            break;
+                        }
+                        if descended {
+                            continue;
+                        }
+                        // u finished: one U entry, applying its L column.
+                        u_nnz += 1;
+                        flops += 2 * (l_colptr[u + 1] - l_colptr[u]) as u64;
+                        if d == 0 {
+                            break;
+                        }
+                        d -= 1;
+                    }
+                }
+                for &lv in &leaves {
+                    if lv != j {
+                        l_rowidx.push(lv);
+                    }
+                }
+                flops += (l_rowidx.len() - l_colptr[j]) as u64; // divisions
+                l_colptr.push(l_rowidx.len());
+            }
+        }
+        KluFill {
+            l_nnz: l_rowidx.len() as u64,
+            u_nnz,
+            f_nnz,
+            flops,
+        }
+    }
+
+    /// Exact symbolic factor fill (`L` + `U` + diagonal + off-block entries)
+    /// under the diagonal-pivoting assumption — the memory-backstop metric,
+    /// mirroring [`LuSymbolic::symbolic_factor_nnz`](crate::LuSymbolic::symbolic_factor_nnz).
+    pub fn symbolic_factor_nnz(&self) -> usize {
+        let fill = self.symbolic_fill();
+        (fill.l_nnz + fill.u_nnz + self.n as u64 + fill.f_nnz) as usize
+    }
+
+    /// **A-priori** memory/work estimate for factoring a matrix of scalar
+    /// type `T` with this analysis — deterministic, computed from the stored
+    /// pattern alone, mirroring [`LuSymbolic::estimate_memory`](crate::LuSymbolic::estimate_memory).
+    ///
+    /// KLU specifics: the fill is exact under diagonal pivoting (threshold
+    /// pivoting can shift it slightly); `factor_flops` is the Gilbert-Peierls
+    /// flop count (not the supernodal `nrow²·ncol` proxy); the path is
+    /// strictly sequential, so `critical_path_flops == factor_flops` and
+    /// `max_tree_width == 1`; there are no dense panels.
+    pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
+        let fill = self.symbolic_fill();
+        let value_bytes = std::mem::size_of::<T>();
+        let entry = (value_bytes + std::mem::size_of::<usize>()) as u64;
+        let factor_nnz = fill.l_nnz + fill.u_nnz + self.n as u64 + fill.f_nnz;
+        let factor_bytes = factor_nnz * entry;
+        let input_bytes = self.nnz as u64 * entry;
+        let workspace_bytes = self.n as u64 * (value_bytes as u64 + 4 * 8);
+        crate::diagnostics::MemoryEstimate {
+            value_bytes,
+            factor_nnz,
+            factor_bytes,
+            panels_all_bytes: 0,
+            panel_live_peak_bytes: 0,
+            transient_peak_bytes: factor_bytes + input_bytes + workspace_bytes,
+            mf_transient_peak_bytes: factor_bytes + input_bytes + workspace_bytes,
+            factor_flops: fill.flops,
+            critical_path_flops: fill.flops,
+            max_tree_width: 1,
+        }
     }
 
     /// Matrix dimension.
@@ -200,14 +381,45 @@ impl KluSymbolic {
     }
 
     /// Numeric factorization of `a`, which must share the analyzed pattern.
+    /// Populates the solver's [`diagnostics`](KluSolver::diagnostics) with the
+    /// a-priori estimate and the measured factor stage (like
+    /// [`LuSymbolic::factor`](crate::LuSymbolic::factor)); the one-shot
+    /// [`KluSolver::factor`] skips both for minimum latency.
     pub fn factor<T: Scalar>(
         &self,
         a: &GeneralCsc<T>,
         settings: &KluSettings,
     ) -> Result<KluSolver<T>, RslabError> {
+        let estimate = self.estimate_memory::<T>();
+        let t = std::time::Instant::now();
         let factors = factor_impl(self, a, settings)?;
-        Ok(KluSolver { factors })
+        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let nnz =
+            (factors.l_val.len() + factors.u_val.len() + factors.udiag.len() + factors.f_val.len())
+                as u64;
+        let entry = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
+        let mut diagnostics = crate::diagnostics::Diagnostics {
+            threads: 1,
+            factor_nnz: nnz,
+            estimate: Some(estimate),
+            ..Default::default()
+        };
+        diagnostics.push(
+            "klu-factor",
+            factor_ms,
+            diagnostics_flops(&diagnostics),
+            nnz * entry,
+        );
+        Ok(KluSolver {
+            factors,
+            diagnostics,
+        })
     }
+}
+
+/// The GP flop count carried on the attached estimate (0 when absent).
+fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
+    d.estimate.as_ref().map_or(0, |e| e.factor_flops)
 }
 
 /// The numeric KLU factorization: `P A Q = L U` per diagonal block plus the
@@ -248,6 +460,7 @@ struct KluFactors<T> {
 #[derive(Debug, Clone)]
 pub struct KluSolver<T> {
     factors: KluFactors<T>,
+    diagnostics: crate::diagnostics::Diagnostics,
 }
 
 fn pattern_mismatch() -> RslabError {
@@ -531,9 +744,32 @@ fn factor_impl<T: Scalar>(
 }
 
 impl<T: Scalar> KluSolver<T> {
-    /// One-shot analyze + factor with the given settings.
+    /// One-shot analyze + factor with the given settings. Skips the a-priori
+    /// estimate and stage timing (empty [`diagnostics`](Self::diagnostics)),
+    /// like [`LuSolver::factor`](crate::LuSolver::factor); use the phased
+    /// [`KluSymbolic::factor`] for populated diagnostics.
     pub fn factor(a: &GeneralCsc<T>, settings: &KluSettings) -> Result<Self, RslabError> {
-        KluSymbolic::analyze_with(a, settings)?.factor(a, settings)
+        let sym = KluSymbolic::analyze_with(a, settings)?;
+        let factors = factor_impl(&sym, a, settings)?;
+        Ok(Self {
+            factors,
+            diagnostics: crate::diagnostics::Diagnostics::default(),
+        })
+    }
+
+    /// Per-call diagnostics: measured factor/refactor stages, fill, and the
+    /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate).
+    /// Populated by the phased [`KluSymbolic::factor`]; empty for the
+    /// one-shot [`factor`](Self::factor).
+    pub fn diagnostics(&self) -> &crate::diagnostics::Diagnostics {
+        &self.diagnostics
+    }
+
+    /// Thread policy the solve phase should honour: the KLU path is strictly
+    /// sequential (that is its determinism guarantee), so this is always a
+    /// fixed single-worker budget.
+    pub fn solve_thread_policy(&self) -> crate::numeric::multifrontal_ldlt::Threads {
+        crate::numeric::multifrontal_ldlt::Threads::Fixed(1)
     }
 
     /// Matrix dimension.
@@ -684,6 +920,7 @@ impl<T: Scalar> KluSolver<T> {
     /// `refactor` or a fresh `factor` makes it valid again.
     pub fn refactor(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         a.validate()?;
+        let t = std::time::Instant::now();
         let f = &mut self.factors;
         if a.n != f.n {
             return Err(RslabError::DimensionMismatch {
@@ -762,6 +999,14 @@ impl<T: Scalar> KluSolver<T> {
             }
         }
         f.rs_inv = rs_inv;
+        let entry = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
+        let nnz = self.diagnostics.factor_nnz;
+        self.diagnostics.push(
+            "klu-refactor",
+            t.elapsed().as_secs_f64() * 1e3,
+            diagnostics_flops(&self.diagnostics),
+            nnz * entry,
+        );
         Ok(())
     }
 }
@@ -1088,5 +1333,68 @@ mod tests {
         let a = GeneralCsc::<f64>::from_triplets(0, &[], &[], &[]).unwrap();
         let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
         assert_eq!(s.solve(&[]).unwrap(), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn klu_estimate_matches_actual_fill_on_dominant_matrix() {
+        // Diagonally dominant -> threshold pivoting keeps every diagonal, so
+        // the diagonal-pivot symbolic fill must be EXACT, and the estimate's
+        // factor_nnz must equal the factored fill.
+        let a = circuit_like(150, 33);
+        let sym = KluSymbolic::analyze(&a).unwrap();
+        let est = sym.estimate_memory::<f64>();
+        let s = sym.factor(&a, &KluSettings::default()).unwrap();
+        assert_eq!(est.factor_nnz as usize, s.factor_nnz());
+        assert_eq!(sym.symbolic_factor_nnz(), s.factor_nnz());
+        assert!(est.factor_flops > 0);
+        assert_eq!(est.critical_path_flops, est.factor_flops);
+        assert!(est.transient_peak_bytes >= est.factor_bytes);
+    }
+
+    #[test]
+    fn klu_diagnostics_phased_vs_oneshot() {
+        let a = circuit_like(100, 4);
+        let sym = KluSymbolic::analyze(&a).unwrap();
+        let s = sym.factor(&a, &KluSettings::default()).unwrap();
+        let d = s.diagnostics();
+        assert_eq!(d.threads, 1);
+        assert_eq!(d.factor_nnz as usize, s.factor_nnz());
+        assert!(d.estimate.is_some());
+        assert_eq!(d.stages.len(), 1);
+        assert_eq!(d.stages[0].name, "klu-factor");
+
+        let mut s2 = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        assert!(s2.diagnostics().stages.is_empty());
+        s2.refactor(&a).unwrap();
+        assert_eq!(s2.diagnostics().stages.last().unwrap().name, "klu-refactor");
+    }
+
+    #[test]
+    fn klu_composes_as_gmres_preconditioner() {
+        use crate::numeric::iterative::gmres;
+        let a = circuit_like(120, 55);
+        let m = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        let b: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();
+        // Exact preconditioner -> GMRES converges in one iteration.
+        let res = gmres(&a, &b, &m, 1e-12, 5, 5, None).unwrap();
+        assert!(res.converged);
+        assert!(res.iters <= 2, "iterations {}", res.iters);
+        assert!(resid(&a, &res.x, &b) < 1e-10);
+    }
+
+    #[test]
+    fn klu_settings_compose() {
+        let s = KluSettings::default()
+            .with_pivot_tol(1.0)
+            .with_row_scaling(false)
+            .with_btf(false);
+        assert_eq!(s.pivot_tol, 1.0);
+        assert!(!s.row_scaling);
+        assert!(!s.btf);
+        let a = circuit_like(80, 9);
+        let solver = KluSolver::factor(&a, &s).unwrap();
+        let b: Vec<f64> = (0..a.n).map(|i| (i % 3) as f64).collect();
+        let x = solver.solve(&b).unwrap();
+        assert!(resid(&a, &x, &b) < 1e-12);
     }
 }

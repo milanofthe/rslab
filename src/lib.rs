@@ -16,11 +16,14 @@
 //! matrices as `Pᵀ A P = L D Lᵀ` by a rayon-parallel multifrontal
 //! Bunch-Kaufman method with a SIMD (`gemm`) Schur kernel.
 //!
-//! Two intended uses:
+//! Three intended uses:
 //! * **FEM direct solve** - factor once, solve many right-hand sides.
 //! * **MoM sparse preconditioner** - a robust, memory-light approximate factor
 //!   (static pivoting, `f32` mixed precision, incomplete-factor dropping)
 //!   driving a [`cocg`]/[`cocr`] iteration.
+//! * **Circuit-shaped unsymmetric solve** - the sequential, bit-deterministic
+//!   [`KluSolver`] (BTF + per-block Gilbert-Peierls) with a numeric-only
+//!   [`refactor`](KluSolver::refactor) for fixed-pattern sweeps.
 //!
 //! ## PARDISO-style phased workflow (FEM)
 //!

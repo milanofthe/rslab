@@ -20,6 +20,14 @@ right-hand sides. It is a fork of [feral](https://github.com/jkitchin/feral); se
   factors and solves all four through both paths.
 - Symmetric LDLᵀ with Bunch-Kaufman 1x1/2x2 pivoting (stores only `L`), and
   threshold-pivoted LU (exposed, tunable tolerance `u`) for unsymmetric matrices.
+- **KLU path** for circuit-shaped matrices (`KluSymbolic::analyze → factor →
+  KluSolver`): BTF (maximum transversal + Tarjan SCC, detects structural
+  singularity a-priori) + per-block AMD + left-looking Gilbert-Peierls LU with
+  threshold pivoting and row scaling. Strictly sequential and bit-deterministic;
+  numeric-only `refactor` (frozen pattern + pivots) for frequency sweeps and
+  Newton steps. On MNA-like matrices: ~7x faster factor and ~6x less factor
+  memory than the multifrontal LU, ~20x faster in a refactor sweep
+  (`cargo bench --bench klu_circuit`).
 - Three factorization schedules: supernodal left-looking (default, frees each dense
   panel after its last consumer), multifrontal, and right-looking.
 - Fill-reducing orderings: AMD, AMF, nested dissection (METIS/Scotch/KaHIP), and
