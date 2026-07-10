@@ -374,16 +374,6 @@ pub struct SymbolicFactorization {
     /// `supernodes.len()`.
     pub snode_group: Vec<Option<usize>>,
 
-    /// Cached MC64 matching produced by the `LdltCompress`
-    /// preprocessor. When `Some`, the numeric phase reuses it to
-    /// derive the `Mc64Symmetric` scaling vector in O(n) instead of
-    /// rerunning the Hungarian kernel. `None` when no MC64 matching
-    /// was computed during symbolic factorization. (Consumed by the
-    /// numeric path again once MC64 scaling is ported to the generic
-    /// solver - see the rslab feature port.)
-    #[allow(dead_code)]
-    pub(crate) cached_mc64: Option<crate::scaling::Mc64Cache>,
-
     /// Concrete ordering method actually dispatched. Records the
     /// `OrderingMethod::Auto → AMD/MetisND/ScotchND/KahipND`
     /// resolution made by `choose_adaptive`. For non-`Auto` callers
@@ -764,7 +754,6 @@ pub fn symbolic_factorize_with_method(
     // matrix directly). Issue #3.
     let method = choose_adaptive(&full_pattern, method);
 
-    let mut cached_mc64: Option<crate::scaling::Mc64Cache> = None;
     // Resolve `Auto` to `None` or `LdltCompress` before entering the
     // dispatch. Keeps the match below exhaustive on the two concrete
     // variants and keeps the dispatcher logic in one testable place.
@@ -796,19 +785,21 @@ pub fn symbolic_factorize_with_method(
         OrderingPreprocess::None => record_ordering(&full_pattern)?,
         OrderingPreprocess::Auto => unreachable!("resolved above"),
         OrderingPreprocess::LdltCompress => {
-            // Run the full MC64 pipeline once and keep the cache so the
-            // numeric phase can reuse it for `Mc64Symmetric` scaling
-            // (Phase 2.4.4: eliminates ~70% of compression symbolic
-            // overhead on matrices where scaling also runs MC64). MC64 is
-            // the expensive part - record it under its own `ldlt_compress`
-            // stage (issue #80).
+            // Run the MC64 matching once for the compression supermap. MC64
+            // is the expensive part - record it under its own
+            // `ldlt_compress` stage (issue #80). NOTE: this matching CANNOT
+            // be reused for `Mc64Symmetric` scaling — the generic solver
+            // path feeds this function a unit-valued pattern, so the
+            // matching carries no value information (see the
+            // `scaling::Mc64Cache` note); the retired `cached_mc64` field
+            // that promised that reuse was unwireable dead weight.
             let t_pre = prof.map(|_| std::time::Instant::now());
             let cache = crate::scaling::compute_mc64_cache(matrix)?;
             let map = build_supermap(&cache.perm);
             if let Some(t) = t_pre {
                 record_stage(prof, "ldlt_compress", t);
             }
-            let pair = if map.ncmp() == n {
+            if map.ncmp() == n {
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
@@ -826,9 +817,7 @@ pub fn symbolic_factorize_with_method(
                     record_stage(prof, "expand_perm", t);
                 }
                 (expanded, resolved)
-            };
-            cached_mc64 = Some(cache);
-            pair
+            }
         }
     };
 
@@ -1040,7 +1029,6 @@ pub fn symbolic_factorize_with_method(
         col_counts,
         small_leaf_groups,
         snode_group,
-        cached_mc64,
         resolved_method,
         resolved_amalgamation: snode_params.amalgamation_strategy,
         resolved_preprocess,
@@ -1234,7 +1222,6 @@ pub fn symbolic_factorize_with_schur(
         col_counts,
         small_leaf_groups,
         snode_group,
-        cached_mc64: None,
         resolved_method: OrderingMethod::Amd,
         resolved_amalgamation: effective_params.amalgamation_strategy,
         resolved_preprocess: OrderingPreprocess::None,

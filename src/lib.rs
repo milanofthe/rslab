@@ -109,9 +109,10 @@ pub(crate) mod numeric;
 #[doc(hidden)]
 pub mod ordering;
 pub(crate) mod scalar;
-// MC64 max-product matching + equilibration. The wired surface is the symbolic
-// MC64 cache (`compute_mc64_cache`/`Mc64Cache`), `ScalingStrategy`, and the
-// inf-norm / one-pass equilibration used by the factor path.
+// MC64 max-product matching + equilibration. The wired surface is the
+// `LdltCompress` matching (`compute_mc64_cache`/`Mc64Cache`, structural only),
+// `ScalingStrategy`, and the inf-norm / one-pass equilibration used by the
+// factor path.
 pub(crate) mod scaling;
 pub(crate) mod sparse;
 /// Symbolic analysis internals. Not part of the embedder API beyond the root

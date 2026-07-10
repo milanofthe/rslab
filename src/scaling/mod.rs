@@ -40,18 +40,20 @@ mod hungarian;
 mod infnorm;
 mod mc64;
 
-/// Cached MC64 output: everything needed to both drive ordering
-/// compression (`perm`) and derive the symmetric scaling vector
-/// (`u`, `v`, `cmax`) without rerunning the expensive Hungarian
-/// kernel. Produced by [`compute_mc64_cache`], consumed by
-/// [`compute_scaling_with_cache`]. See Phase 2.4.4 compression
-/// symbolic-speedup work.
+/// Cached MC64 output: the matching (`perm`) that drives the
+/// `LdltCompress` ordering preprocessor, plus the dual data a scaling
+/// derivation would need. NOTE: the once-planned "reuse the analyze-time
+/// matching for `Mc64Symmetric` scaling" optimization (Phase 2.4.4) is
+/// **impossible through the generic solver path**: `analyze_with_inner`
+/// feeds `symbolic_factorize` a unit-valued pattern (`values = 1.0`), so
+/// any matching cached there carries log-cost-0 duals and could never
+/// reproduce the value-based scaling. The cache therefore serves the
+/// (value-blind, structural) compression only.
 pub(crate) use mc64::Mc64Cache;
 
 /// Run the full MC64 pipeline once and return the cached output.
-/// Used by the symbolic `LdltCompress` preprocessor so the numeric
-/// phase can reuse the matching if its scaling strategy also
-/// resolves to `Mc64Symmetric`.
+/// Used by the symbolic `LdltCompress` preprocessor (see the
+/// [`Mc64Cache`] note on why it cannot also serve scaling).
 pub(crate) fn compute_mc64_cache(matrix: &CscMatrix) -> Result<Mc64Cache, RslabError> {
     mc64::compute_matching(matrix)
 }
@@ -194,23 +196,6 @@ pub fn compute_scaling(
     matrix: &CscMatrix,
     strategy: &ScalingStrategy,
 ) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
-    compute_scaling_with_cache(matrix, strategy, None)
-}
-
-/// Variant of [`compute_scaling`] that accepts a precomputed MC64
-/// cache. When the strategy resolves to `Mc64Symmetric` (including
-/// via `Auto` routing), the cache is consumed in O(n) - no Hungarian
-/// rerun. When the strategy does not end up running MC64 (Identity,
-/// External, InfNorm, or Auto resolving to InfNorm with Policy 4
-/// fallback), the cache is ignored and the regular path runs.
-///
-/// `cache` must be `compute_mc64_cache(matrix)` on the same matrix,
-/// else the produced scaling is wrong.
-pub(crate) fn compute_scaling_with_cache(
-    matrix: &CscMatrix,
-    strategy: &ScalingStrategy,
-    cache: Option<&Mc64Cache>,
-) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     match strategy {
         ScalingStrategy::Identity => Ok((vec![1.0; matrix.n], ScalingInfo::NotApplied)),
         ScalingStrategy::External(s) => {
@@ -233,11 +218,8 @@ pub(crate) fn compute_scaling_with_cache(
         }
         ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),
         ScalingStrategy::OnePassInfNorm => Ok(infnorm::compute_onepass(matrix)),
-        ScalingStrategy::Mc64Symmetric => match cache {
-            Some(c) => Ok(mc64::scaling_from_cache(c)),
-            None => mc64::compute_symmetric(matrix),
-        },
-        ScalingStrategy::Auto => compute_scaling_auto_with_cache(matrix, cache),
+        ScalingStrategy::Mc64Symmetric => mc64::compute_symmetric(matrix),
+        ScalingStrategy::Auto => compute_scaling_auto(matrix),
     }
 }
 
@@ -269,10 +251,7 @@ pub(crate) fn compute_scaling_with_cache(
 /// MEYER3NE all keep MC64 (preserving the 84× → 9.4× factor
 /// speedup, the 4-order HS75 residual win, and the MEYER3NE parity
 /// tests). See `dev/research/policy-4-scaling-fallback.md`.
-fn compute_scaling_auto_with_cache(
-    matrix: &CscMatrix,
-    cache: Option<&Mc64Cache>,
-) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
+fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     const RAW_GUARD: f64 = 1e6;
     const MC_OFF_GUARD: f64 = 1e6;
     const RATIO_GUARD: f64 = 1e5;
@@ -299,18 +278,9 @@ fn compute_scaling_auto_with_cache(
 
     let picked = pick_scaling_strategy(matrix);
     if !matches!(picked, ScalingStrategy::Mc64Symmetric) {
-        // Auto picked InfNorm-class - no fallback needed. Cache is
-        // unused; MC64 was speculative work for compression and has
-        // no payoff on this branch.
+        // Auto picked InfNorm-class - no fallback needed.
         return compute_scaling(matrix, &picked);
     }
-
-    let mc64_from_cache = |matrix: &CscMatrix| -> Result<(Vec<f64>, ScalingInfo), RslabError> {
-        match cache {
-            Some(c) => Ok(mc64::scaling_from_cache(c)),
-            None => mc64::compute_symmetric(matrix),
-        }
-    };
 
     // Pre-MC64 InfNorm trial: if Knight-Ruiz produces a tight
     // scaling vector, the matrix is already well-equilibrated and
@@ -336,7 +306,7 @@ fn compute_scaling_auto_with_cache(
     // Compute the MC64 scaling once. Every branch below either
     // returns this vector or inspects it; before issue #45 the
     // `raw_diag_range` fast-path recomputed it on a separate return.
-    let (mc_vec, mc_info) = mc64_from_cache(matrix)?;
+    let (mc_vec, mc_info) = mc64::compute_symmetric(matrix)?;
 
     // Issue #45: catastrophic-spread guard. An MC64 scaling whose own
     // spread exceeds `MC64_SPREAD_GUARD` is degenerate to working
