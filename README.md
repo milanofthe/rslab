@@ -124,6 +124,14 @@ LU too), so its LDLᵀ gap is structurally largest; it also OOMs on the largest
 matrices, so its head-to-head is a conservative floor. On time the LU path
 scales slightly flatter than PARDISO (`α≈1.17` vs `1.22`).
 
+All three solvers run at the **same worker count** in these measurements
+(`RAYON_NUM_THREADS` drives RSLAB, faer, and MKL alike). Note that RSLAB's
+*library default* is `Threads::Auto { max: 4 }` — a deliberate cap at the
+measured efficiency knee so concurrent solver-in-the-loop instances coexist.
+When comparing a plain `LdltSolver::factor` call against PARDISO's
+all-cores default on a many-core machine, pass `.with_threads(0)` (all
+logical cores) for a like-for-like run.
+
 ### Accuracy (SuiteSparse)
 
 ![SuiteSparse residual](benches/bench_out/corpus_residual.png)

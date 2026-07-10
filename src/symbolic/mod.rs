@@ -430,7 +430,12 @@ pub struct SymbolicFactorization {
 ///     ratio 1.003. ORBIT2_0000 alone goes from AMD's 1.4M nnz_L
 ///     down to AMF's 32_105.)
 ///   - everything else (`n > 10_000`)                  → `MetisND`
-///     (large patterns where nested dissection is the standard win.)
+///     — note this base decision is **always rerouted to AMF** by the
+///     issue #67/#73 catches in `choose_adaptive` (measured: AMF wins or
+///     ties MetisND on real factor+solve across the whole would-be-MetisND
+///     population, and MetisND's symbolic is 2-5× more expensive). It is
+///     kept here so the reroute stays a visible, separately-documented
+///     decision rather than being silently folded in.
 ///
 /// `nnz` here is the matrix's *stored* nnz (lower triangle for
 /// symmetric matrices), not the symmetric pattern's.
@@ -521,12 +526,16 @@ pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
 /// Perform symbolic factorization of a sparse symmetric matrix.
 ///
 /// Picks the fill-reducing ordering adaptively via [`OrderingMethod::Auto`]
-/// (resolved by `choose_adaptive`): AMF for n ≤ 10_000 or arrow/bordered
-/// patterns, AMD for very-large-and-sparse, MetisND otherwise. Routing
-/// through `Auto` keeps this no-arg default and the explicit `Auto` caller
-/// in exact agreement (issue #64). Callers who want a specific ordering
-/// with no dispatcher should call `symbolic_factorize_with_method` with an
-/// explicit `OrderingMethod`.
+/// (resolved by `choose_adaptive`): AMD for very-large-and-sparse
+/// (`n > 100_000`, avg degree `< 5`), **AMF for everything else** — the
+/// issue #67/#73 corpus A/Bs rerouted every would-be-MetisND decision to
+/// AMF, so `Auto` never resolves to nested dissection. MetisND is reachable
+/// only explicitly, via [`OrderingMethod::AutoRace`], or through the
+/// `LdltSolver::tuned` nested-dissection bakeoff. Routing through `Auto`
+/// keeps this no-arg default and the explicit `Auto` caller in exact
+/// agreement (issue #64). Callers who want a specific ordering with no
+/// dispatcher should call `symbolic_factorize_with_method` with an explicit
+/// `OrderingMethod`.
 ///
 /// Steps:
 /// 1. Pick fill-reducing ordering (resolved from `Auto` by `choose_adaptive`)
