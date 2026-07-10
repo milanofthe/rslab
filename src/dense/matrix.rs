@@ -21,43 +21,6 @@ impl<T: Scalar> SymmetricMatrix<T> {
         }
     }
 
-    /// Reuse a pooled buffer to construct an n×n `SymmetricMatrix`
-    /// with the lower triangle zeroed. The strict upper triangle is
-    /// left with whatever stale contents the buffer held - the
-    /// multifrontal kernel (`factor_frontal_blocked_in_place`) and
-    /// every accessor on this type read only the lower triangle, so
-    /// the upper-triangle bytes are dead memory and the memset
-    /// would be wasted bandwidth.
-    ///
-    /// Halves memset traffic on pool reuse compared to
-    /// `buf.clear(); buf.resize(n*n, 0.0)`. Diagnosed as the
-    /// bandwidth bottleneck on c-big-class matrices in the
-    /// `solver_parallel_threadcount_sweep` run on 2026-05-12
-    /// (sp@8 plateaued at 1.10× before this change).
-    ///
-    /// Safety contract: callers must not depend on the strict
-    /// upper triangle being zero. Audited readers as of 2026-05-12:
-    /// kernel only touches lower triangle (`dense/factor.rs:1138-1140`),
-    /// `extend_add` normalises to lower (`numeric/factorize.rs:2371`),
-    /// `symv` and `validate` iterate only `i >= j`.
-    pub fn from_pooled_buf(n: usize, mut buf: Vec<T>) -> Self {
-        let needed = n * n;
-        // `resize` grows the tail with zeros or truncates. It does
-        // NOT re-zero entries `[0, min(old_len, needed))`, which is
-        // where the bandwidth saving comes from in steady state
-        // (capacity already reached after the first few large
-        // supernodes; subsequent calls only re-zero the lower
-        // triangle).
-        buf.resize(needed, T::zero());
-        // Zero only the lower triangle of the n×n column-major layout:
-        // for each column j, positions `[j*n + j, j*n + n)`.
-        for j in 0..n {
-            let col_base = j * n;
-            buf[col_base + j..col_base + n].fill(T::zero());
-        }
-        Self { n, data: buf }
-    }
-
     /// Create a symmetric matrix from a flat column-major vector.
     /// The lower triangle is authoritative; the upper triangle is ignored.
     pub fn from_column_major(n: usize, data: Vec<T>) -> Result<Self, RslabError> {

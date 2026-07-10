@@ -17,6 +17,13 @@ use crate::sparse::csc::CscPattern;
 ///
 /// Returns a vector of length n where `counts[j]` is the number of nonzeros
 /// in column j of L (including the diagonal).
+///
+/// Test-only reference oracle: the production pipeline uses
+/// [`column_counts_gnp`] exclusively (bit-exact equivalence verified on the
+/// 169585-matrix corpus, Phase 2.5.1); this O(n²) simulation is kept solely so
+/// the tests here and in `supernode.rs` can cross-check GNP against a
+/// first-principles implementation.
+#[cfg(test)]
 pub fn column_counts(pattern: &CscPattern, _etree: &EliminationTree) -> Vec<usize> {
     let n = pattern.n;
     if n == 0 {

@@ -10,7 +10,7 @@ use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::{biased_postorder, postorder};
 use crate::sparse::csc::{CscMatrix, CscPattern};
 
-pub use column_counts::{column_counts, column_counts_gnp, total_factor_nnz};
+pub use column_counts::{column_counts_gnp, total_factor_nnz};
 pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
 pub use profiler::{record_stage, StagePct, StageTiming, SymbolicProfileReport, SymbolicProfiler};
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};

@@ -68,11 +68,6 @@ serde_json = "1"
 # Pure-Rust, already in the dependency tree transitively. Used by the
 # `Scalar` trait in src/scalar.rs and the generic numeric kernels.
 num-complex = "0.4"
-# SIMD backbone for the Schur-update micro-kernel (Phase 2.4.2).
-# Pinned to faer 0.22.x's exact version. Usage is confined to
-# src/dense/schur_kernel.rs; see dev/decisions.md for the
-# replacement trigger and interface boundary.
-pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
 # Data-parallelism for the multifrontal assembly tree (Phase 2.5.2).
 # Pure-Rust, fits the zero-non-Rust-dep constraint. Used only by
 # the opt-in parallel driver in src/numeric/factorize.rs; the
