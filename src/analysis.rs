@@ -160,7 +160,6 @@ fn pattern_stats(
     if n == 0 {
         return (0.0, 0, 0.0, 0, 0.0, 0.0, 0.0);
     }
-    let nnz = row_idx.len();
     let mut deg_sum = 0u64;
     let mut deg_sq = 0u64;
     let mut deg_max = 0usize;
@@ -211,7 +210,6 @@ fn pattern_stats(
     } else {
         0.0
     };
-    let _ = nnz;
     (
         deg_mean,
         deg_max,

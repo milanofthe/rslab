@@ -324,7 +324,7 @@ pub fn harmonic_ritz_smallest(m1: &[C], m2: &[C], d: usize, k: usize) -> Vec<(C,
         Some(t) => t,
         None => return Vec::new(),
     };
-    let mut eigs = eigenvalues(&t, d);
+    let eigs = eigenvalues(&t, d);
     // Sort eigenvalue indices by ascending magnitude.
     let mut order: Vec<usize> = (0..d).collect();
     order.sort_by(|&i, &j| {
@@ -343,8 +343,6 @@ pub fn harmonic_ritz_smallest(m1: &[C], m2: &[C], d: usize, k: usize) -> Vec<(C,
             }
         }
     }
-    // Silence an unused-mut style lint path.
-    eigs.clear();
     out
 }
 

@@ -494,7 +494,7 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
     }
 
     if num == n {
-        finalize_duals(cost, &iperm, &jperm, &u, &mut v);
+        finalize_duals(cost, &jperm, &u, &mut v);
         return (build_matching(cost, iperm, jperm, u, v, num), stats);
     }
 
@@ -660,7 +660,7 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
         heap.reset(&touched, &mut stats);
     }
 
-    finalize_duals(cost, &iperm, &jperm, &u, &mut v);
+    finalize_duals(cost, &jperm, &u, &mut v);
     (build_matching(cost, iperm, jperm, u, v, num), stats)
 }
 
@@ -669,8 +669,8 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
 /// `jperm[j] = k`, the complementary-slackness equality
 /// `u[row(k)] + v[j] == cost[k]` forces
 /// `v[j] = cost[k] - u[row(k)]`. Unmatched columns get `v[j] = 0`.
-/// Rows that never participated in any match get `u[i] = 0`.
-fn finalize_duals(cost: &CostGraph, iperm: &[usize], jperm: &[usize], u: &[f64], v: &mut [f64]) {
+/// (Zeroing `u` for never-matched rows happens in [`build_matching`].)
+fn finalize_duals(cost: &CostGraph, jperm: &[usize], u: &[f64], v: &mut [f64]) {
     for (j, vj) in v.iter_mut().enumerate() {
         if jperm[j] != NONE {
             let k = jperm[j];
@@ -680,11 +680,6 @@ fn finalize_duals(cost: &CostGraph, iperm: &[usize], jperm: &[usize], u: &[f64],
             *vj = 0.0;
         }
     }
-    // Caller updates `u` in place; here we only need to zero out
-    // rows that were never matched (defensive - the main loop does
-    // not touch `u[i]` for such rows, but `hungarian_init_heuristic`
-    // may have left a row-minimum value in `u[i]` from phase 1).
-    let _ = iperm; // unused beyond its role in the main loop
 }
 
 /// Convert the working `(iperm, jperm, u, v, num)` state into the

@@ -801,7 +801,9 @@ impl LuSymbolic {
             estimate: Some(estimate),
             ..Default::default()
         };
-        diagnostics.push("factor", factor_ms, 0, nnz * 24);
+        // Bytes per stored entry: the scalar value plus its usize index.
+        let entry_bytes = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
+        diagnostics.push("factor", factor_ms, 0, nnz * entry_bytes);
         Ok(LuSolver {
             factors,
             diagnostics,

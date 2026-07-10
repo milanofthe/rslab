@@ -228,7 +228,13 @@ pub(crate) fn block_triangular_form(
             if lowlink[v] == index[v] {
                 let block_start = col_perm.len();
                 loop {
-                    let w = scc_stack.pop()?; // never empty: v is on the stack
+                    // Tarjan invariant: `v` was pushed when discovered and is
+                    // still on the stack, so the pop cannot fail. A violation
+                    // is a bug in this function - it must NOT be reported as
+                    // structural singularity (the `None` return means that).
+                    let Some(w) = scc_stack.pop() else {
+                        unreachable!("Tarjan: v is on the stack");
+                    };
                     on_stack[w] = false;
                     col_perm.push(w);
                     if w == v {
