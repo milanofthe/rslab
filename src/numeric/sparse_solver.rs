@@ -300,8 +300,11 @@ impl<T: Scalar> LdltSolver<T> {
         let mut ax = vec![T::zero(); n];
         let mut best_x = x.clone();
         let mut best_res = f64::INFINITY;
-        // `max_iter` correction steps, plus the initial residual evaluation.
-        for _ in 0..=max_iter {
+        // `max_iter` correction steps, each followed by a residual evaluation
+        // (plus the initial one). Every computed correction is evaluated: the
+        // final pass only measures, so no solve is spent on an iterate that
+        // could never be returned.
+        for it in 0..=max_iter {
             a.symv(&x, &mut ax);
             let r: Vec<T> = rhs.iter().zip(&ax).map(|(&b, &axi)| b - axi).collect();
             let res = r.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
@@ -311,7 +314,7 @@ impl<T: Scalar> LdltSolver<T> {
                 best_res = res;
                 best_x.clone_from(&x);
             }
-            if res == 0.0 {
+            if res == 0.0 || it == max_iter {
                 break;
             }
             let dx = self.solve(&r)?;

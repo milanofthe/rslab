@@ -2778,7 +2778,9 @@ pub fn solve_lu_refined<T: Scalar>(
     let mut ax = vec![T::zero(); n];
     let mut best_x = x.clone();
     let mut best_res = f64::INFINITY;
-    for _ in 0..=max_iter {
+    // Every computed correction is evaluated: the final pass only measures,
+    // so no solve is spent on an iterate that could never be returned.
+    for it in 0..=max_iter {
         a.matvec(&x, &mut ax);
         let r: Vec<T> = b.iter().zip(&ax).map(|(&bi, &axi)| bi - axi).collect();
         let res = r.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
@@ -2786,7 +2788,7 @@ pub fn solve_lu_refined<T: Scalar>(
             best_res = res;
             best_x.clone_from(&x);
         }
-        if res == 0.0 {
+        if res == 0.0 || it == max_iter {
             break;
         }
         let dx = solve_lu(f, &r)?;
