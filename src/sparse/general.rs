@@ -148,7 +148,20 @@ impl<T: Scalar> GeneralCsc<T> {
         }
     }
 
-    /// Validate structural invariants (lengths, bounds).
+    /// Validate structural invariants - the full canonical-form contract the
+    /// numeric paths rely on, mirroring the X6-hardened
+    /// [`CscMatrix::validate`](crate::sparse::csc::CscMatrix::validate):
+    /// lengths, `col_ptr[0] == 0`, monotone `col_ptr`, in-bounds rows, and
+    /// **strictly increasing** row indices per column (which implies both
+    /// sortedness and duplicate-freeness).
+    ///
+    /// The strict-increase check is load-bearing for correctness, not just
+    /// hygiene: the KLU factorization scatters column values by *assignment*
+    /// (`x[pre] = v`), so a duplicate row entry would silently overwrite its
+    /// partner instead of summing — a wrong factor with no error — while
+    /// [`matvec`](Self::matvec) sums duplicates. `from_triplets` always
+    /// produces the canonical form; this guards hand-constructed matrices
+    /// (the fields are `pub`).
     pub fn validate(&self) -> Result<(), RslabError> {
         if self.col_ptr.len() != self.n + 1 {
             return Err(RslabError::InvalidInput(
@@ -160,18 +173,135 @@ impl<T: Scalar> GeneralCsc<T> {
                 "GeneralCsc: row_idx/values length mismatch".to_string(),
             ));
         }
+        // col_ptr must start at 0: a monotone col_ptr beginning at k > 0 with
+        // col_ptr[n] == nnz would silently drop positions 0..k from every
+        // column range (the X6 failure mode).
+        if *self.col_ptr.first().unwrap_or(&0) != 0 {
+            return Err(RslabError::InvalidInput(format!(
+                "GeneralCsc: col_ptr[0] must be 0, got {}",
+                self.col_ptr[0]
+            )));
+        }
         if *self.col_ptr.last().unwrap_or(&0) != self.row_idx.len() {
             return Err(RslabError::InvalidInput(
                 "GeneralCsc: col_ptr[n] != nnz".to_string(),
             ));
         }
-        for &i in &self.row_idx {
-            if i >= self.n {
-                return Err(RslabError::InvalidInput(
-                    "GeneralCsc: row index out of bounds".to_string(),
-                ));
+        // Monotone col_ptr: a non-monotone pointer whose endpoints line up
+        // makes column ranges empty/overlapping and silently drops entries.
+        for j in 0..self.n {
+            if self.col_ptr[j + 1] < self.col_ptr[j] {
+                return Err(RslabError::InvalidInput(format!(
+                    "GeneralCsc: col_ptr not monotonically non-decreasing at column {} ({} > {})",
+                    j,
+                    self.col_ptr[j],
+                    self.col_ptr[j + 1]
+                )));
+            }
+        }
+        for j in 0..self.n {
+            let (start, end) = (self.col_ptr[j], self.col_ptr[j + 1]);
+            for k in start..end {
+                if self.row_idx[k] >= self.n {
+                    return Err(RslabError::InvalidInput(format!(
+                        "GeneralCsc: row index {} out of bounds in column {}",
+                        self.row_idx[k], j
+                    )));
+                }
+                // Strictly increasing rows: sorted AND duplicate-free.
+                if k > start && self.row_idx[k] <= self.row_idx[k - 1] {
+                    return Err(RslabError::InvalidInput(format!(
+                        "GeneralCsc: row indices not strictly increasing in column {} \
+                         ({} then {}); sort and sum duplicates (see from_triplets)",
+                        j,
+                        self.row_idx[k - 1],
+                        self.row_idx[k]
+                    )));
+                }
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canonical() -> GeneralCsc<f64> {
+        GeneralCsc::from_triplets(3, &[0, 2, 1, 0, 2], &[0, 0, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0, 5.0])
+            .unwrap()
+    }
+
+    #[test]
+    fn validate_accepts_canonical() {
+        assert!(canonical().validate().is_ok());
+    }
+
+    /// X6 parity with `CscMatrix::validate`: a col_ptr that does not start at
+    /// 0 silently drops the uncovered prefix entries from every column range.
+    #[test]
+    fn validate_rejects_nonzero_col_ptr_start() {
+        let m = GeneralCsc::<f64> {
+            n: 2,
+            col_ptr: vec![1, 1, 2],
+            row_idx: vec![0, 1],
+            values: vec![1.0, 1.0],
+        };
+        let msg = format!("{}", m.validate().unwrap_err());
+        assert!(msg.contains("col_ptr[0]"), "got: {msg}");
+    }
+
+    /// X6 parity: a non-monotone col_ptr with matching endpoints makes column
+    /// ranges empty/overlapping and factors the wrong matrix.
+    #[test]
+    fn validate_rejects_non_monotone_col_ptr() {
+        let m = GeneralCsc::<f64> {
+            n: 3,
+            col_ptr: vec![0, 2, 1, 2],
+            row_idx: vec![0, 2],
+            values: vec![1.0, 1.0],
+        };
+        let msg = format!("{}", m.validate().unwrap_err());
+        assert!(msg.contains("monoton"), "got: {msg}");
+    }
+
+    /// Duplicates are the correctness-critical case: the KLU scatter assigns
+    /// (`x[pre] = v`) while `matvec` sums, so a duplicate row silently
+    /// produces a wrong factor. `validate` must reject it.
+    #[test]
+    fn validate_rejects_duplicate_rows() {
+        let m = GeneralCsc::<f64> {
+            n: 2,
+            col_ptr: vec![0, 2, 3],
+            row_idx: vec![0, 0, 1],
+            values: vec![1.0, 2.0, 3.0],
+        };
+        let msg = format!("{}", m.validate().unwrap_err());
+        assert!(msg.contains("strictly increasing"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_unsorted_rows() {
+        let m = GeneralCsc::<f64> {
+            n: 2,
+            col_ptr: vec![0, 2, 3],
+            row_idx: vec![1, 0, 1],
+            values: vec![1.0, 2.0, 3.0],
+        };
+        let msg = format!("{}", m.validate().unwrap_err());
+        assert!(msg.contains("strictly increasing"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_out_of_bounds_row() {
+        let m = GeneralCsc::<f64> {
+            n: 2,
+            col_ptr: vec![0, 1, 2],
+            row_idx: vec![0, 2],
+            values: vec![1.0, 1.0],
+        };
+        let msg = format!("{}", m.validate().unwrap_err());
+        assert!(msg.contains("out of bounds"), "got: {msg}");
     }
 }
