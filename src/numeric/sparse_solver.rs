@@ -430,6 +430,12 @@ fn equilibrate_with<T: Scalar>(
 pub struct LdltSymbolic {
     symbolic: MultifrontalSymbolic,
     nnz: usize,
+    /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
+    /// size. The estimate is a pure function of the structure and
+    /// `size_of::<T>()`, but computing it rebuilds the supernode row
+    /// structures — expensive enough that the `tuned` → `nd_bakeoff` →
+    /// `factor` pipeline used to pay it up to four times per `factor_auto`.
+    est_cache: std::sync::Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
 }
 
 impl LdltSymbolic {
@@ -440,6 +446,7 @@ impl LdltSymbolic {
         Ok(Self {
             symbolic: analyze_pattern(a.n, &a.col_ptr, &a.row_idx)?,
             nnz: a.row_idx.len(),
+            est_cache: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -454,6 +461,7 @@ impl LdltSymbolic {
         Ok(Self {
             symbolic: analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?,
             nnz: a.row_idx.len(),
+            est_cache: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -498,6 +506,26 @@ impl LdltSymbolic {
 
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
+        // The estimate depends on `T` only through `size_of::<T>()`, so cache
+        // per scalar size: the row-structure rebuild below is expensive and
+        // the auto-tune pipeline asks for the same estimate repeatedly.
+        if let Ok(cache) = self.est_cache.lock() {
+            if let Some(&(_, est)) = cache.iter().find(|&&(vb, _)| vb == value_bytes) {
+                return est;
+            }
+        }
+        let est = self.estimate_memory_for(value_bytes);
+        if let Ok(mut cache) = self.est_cache.lock() {
+            if !cache.iter().any(|&(vb, _)| vb == value_bytes) {
+                cache.push((value_bytes, est));
+            }
+        }
+        est
+    }
+
+    /// The uncached estimate body, a pure function of the symbolic structure
+    /// and the scalar size.
+    fn estimate_memory_for(&self, value_bytes: usize) -> crate::diagnostics::MemoryEstimate {
         let Some((sym, levels)) = self.symbolic.sym_and_levels() else {
             return crate::diagnostics::estimate_left_looking(
                 0,

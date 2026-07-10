@@ -743,6 +743,10 @@ pub struct LuSymbolic {
     symb: crate::numeric::multifrontal_ldlt::MultifrontalSymbolic,
     n: usize,
     nnz: usize,
+    /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
+    /// size (the estimate depends on `T` only through `size_of::<T>()`, and
+    /// rebuilding the supernode row structures per call is expensive).
+    est_cache: Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
 }
 
 impl LuSymbolic {
@@ -770,11 +774,17 @@ impl LuSymbolic {
                 symb: analyze_with(0, &[0], &[], opts)?,
                 n: 0,
                 nnz: 0,
+                est_cache: Mutex::new(Vec::new()),
             });
         }
         let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
         let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
-        Ok(LuSymbolic { symb, n, nnz })
+        Ok(LuSymbolic {
+            symb,
+            n,
+            nnz,
+            est_cache: Mutex::new(Vec::new()),
+        })
     }
 
     /// PARDISO **phases 2-3**: equilibrate and LU-factor `a`, reusing this
@@ -861,6 +871,26 @@ impl LuSymbolic {
 
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
+        // Cache per scalar size: the estimate is a pure function of the
+        // structure and `size_of::<T>()`, and `tuned` + phased `factor` ask
+        // for it repeatedly.
+        if let Ok(cache) = self.est_cache.lock() {
+            if let Some(&(_, est)) = cache.iter().find(|&&(vb, _)| vb == value_bytes) {
+                return est;
+            }
+        }
+        let est = self.estimate_memory_for(value_bytes);
+        if let Ok(mut cache) = self.est_cache.lock() {
+            if !cache.iter().any(|&(vb, _)| vb == value_bytes) {
+                cache.push((value_bytes, est));
+            }
+        }
+        est
+    }
+
+    /// The uncached estimate body, a pure function of the symbolic structure
+    /// and the scalar size.
+    fn estimate_memory_for(&self, value_bytes: usize) -> crate::diagnostics::MemoryEstimate {
         let Some((sym, _levels)) = self.symb.sym_and_levels() else {
             return crate::diagnostics::estimate_left_looking(
                 0,
