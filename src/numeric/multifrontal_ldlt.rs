@@ -681,6 +681,77 @@ pub(crate) fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
     }
 }
 
+/// Column-tile width for [`lower_tile_gemm`]. Wide enough that each tile's
+/// GEMM stays BLAS-3-efficient, narrow enough that the wasted
+/// above-diagonal strip per tile (`< TILE/2` rows) is negligible.
+const SCHUR_TILE: usize = 256;
+
+/// Symmetric trailing-update GEMM computed **only on and below the tile
+/// diagonal**: `TMP[:, j] = G · L21ᵀ[:, j]` for rows `>= tile start`. The
+/// consumers (the front Schur subtraction and the left-looking panel
+/// subtraction) read only entries with `row >= col`, so the full `m × ncols`
+/// product wastes up to half the flops (exactly half for the square front
+/// Schur, approaching half for wide root panels where `ncols ≈ m`). Tiling
+/// the columns and starting each tile's rows at its own diagonal keeps the
+/// per-element summation deterministic while cutting the waste to
+/// `< SCHUR_TILE/2` rows per tile.
+///
+/// Layouts: `tmp` is `m × ncols` column-major (column stride `m`); `g` is
+/// `m × k` column-major; `l21` is the `m × k` column-major multiplier read
+/// transposed (`rhs(kk, j) = l21[j + kk·m]`, valid for `j < ncols <= m`).
+/// Each tile's GEMM goes rayon-parallel at/above the `par_cdiv` flop bar.
+fn lower_tile_gemm<T: Scalar>(
+    tmp: &mut [T],
+    m: usize,
+    ncols: usize,
+    k: usize,
+    g: &[T],
+    l21: &[T],
+    par_cdiv: usize,
+) {
+    debug_assert!(ncols <= m);
+    debug_assert!(tmp.len() >= m * ncols && g.len() >= m * k && l21.len() >= m * k);
+    let mut c0 = 0usize;
+    while c0 < ncols {
+        let tw = SCHUR_TILE.min(ncols - c0);
+        let mrows = m - c0;
+        let par = if (mrows as u128) * (tw as u128) * (k as u128) >= par_cdiv as u128 {
+            gemm::Parallelism::Rayon(0)
+        } else {
+            gemm::Parallelism::None
+        };
+        // SAFETY: dst tile = columns [c0, c0+tw) rows [c0, m) of `tmp`
+        // (max index (c0+tw-1)·m + m-1 < ncols·m ≤ tmp.len()); lhs = rows
+        // [c0, m) of `g`; rhs = the transposed view of `l21` offset to
+        // column c0 (element (kk, j) at l21[c0+j + kk·m], in bounds for
+        // j < tw, kk < k). The three buffers are distinct allocations.
+        unsafe {
+            gemm::gemm(
+                mrows,
+                tw,
+                k,
+                tmp.as_mut_ptr().add(c0 * m + c0),
+                m as isize,
+                1,
+                false,
+                g.as_ptr().add(c0),
+                m as isize,
+                1,
+                l21.as_ptr().add(c0),
+                1,
+                m as isize,
+                T::zero(),
+                T::one(),
+                false,
+                false,
+                false,
+                par,
+            );
+        }
+        c0 += tw;
+    }
+}
+
 /// Per-front partial-factorization output, in within-front pivot order.
 struct FrontFactors<T> {
     /// Total front size (eliminated + contribution rows).
@@ -973,38 +1044,12 @@ fn factor_front<T: Scalar>(
             }
             tmp.clear();
             tmp.resize(mt * mt, T::zero());
-            let par = if (mt as u128) * (mt as u128) * (pw as u128) >= kt.par_cdiv as u128 {
-                gemm::Parallelism::Rayon(0)
-            } else {
-                gemm::Parallelism::None
-            };
             if kt.use_gemm_schur {
-                // SAFETY: `tmp`, `gbuf`, `l21buf` are three distinct,
-                // non-overlapping allocations sized for (m,n,k)=(mt,mt,pw) under
-                // the strides passed; `T` is `f64`/`Complex<f64>` (gemm-supported).
-                unsafe {
-                    gemm::gemm(
-                        mt,
-                        mt,
-                        pw,
-                        tmp.as_mut_ptr(),
-                        mt as isize,
-                        1,
-                        false,
-                        gbuf.as_ptr(),
-                        mt as isize,
-                        1,
-                        l21buf.as_ptr(),
-                        1,
-                        mt as isize,
-                        T::zero(),
-                        T::one(),
-                        false,
-                        false,
-                        false,
-                        par,
-                    );
-                }
+                // The subtraction below reads only the lower triangle of
+                // `tmp`, so compute the symmetric product tile-by-tile from
+                // each tile's diagonal downward — ~half the flops of the old
+                // full `mt × mt` GEMM on the dominant front-Schur kernel.
+                lower_tile_gemm(&mut tmp, mt, mt, pw, &gbuf, &l21buf, kt.par_cdiv);
             } else {
                 for jj in 0..mt {
                     for ii in jj..mt {
@@ -2509,39 +2554,14 @@ fn ll_factor_node<T: Scalar>(
             }
             tmp.clear();
             tmp.resize(mt * cw, T::zero());
-            let par = if (mt as u128) * (cw as u128) * (pw as u128) >= ll_cdiv_par as u128 {
-                gemm::Parallelism::Rayon(0)
-            } else {
-                gemm::Parallelism::None
-            };
             if kt.use_gemm_schur {
-                // SAFETY: `tmp`, `gbuf`, `l21buf` are three distinct, non-overlapping
-                // allocations sized for (m,n,k)=(mt,cw,pw); `R` is the top `cw` rows
-                // of `l21buf` (cw ≤ mt), addressed via the rhs strides. `T` is
-                // `f64`/`Complex<f64>` (gemm-supported).
-                unsafe {
-                    gemm::gemm(
-                        mt,
-                        cw,
-                        pw,
-                        tmp.as_mut_ptr(),
-                        mt as isize,
-                        1,
-                        false,
-                        gbuf.as_ptr(),
-                        mt as isize,
-                        1,
-                        l21buf.as_ptr(),
-                        1,
-                        mt as isize,
-                        T::zero(),
-                        T::one(),
-                        false,
-                        false,
-                        false,
-                        par,
-                    );
-                }
+                // The write-back below reads only `rr >= cc2`, so compute the
+                // rectangular product tile-by-tile from each tile's diagonal
+                // downward. Matters most at the tree root where `cw ≈ mt`
+                // (nearly-square panel) and the full product wasted ~half its
+                // flops; for tall separator panels (`mt >> cw`) the saving is
+                // small but never negative.
+                lower_tile_gemm(&mut tmp, mt, cw, pw, &gbuf, &l21buf, ll_cdiv_par);
             } else {
                 for cc2 in 0..cw {
                     for rr in 0..mt {
