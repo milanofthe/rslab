@@ -179,12 +179,16 @@ pub(crate) fn estimate_left_looking(
 
 /// Multifrontal transient-peak model: the **contribution-block stack** under the
 /// rayon work-stealing schedule. Unlike left-looking, multifrontal holds dense
-/// fronts plus the contribution blocks (`cnrow²` each) of completed subtrees not
-/// yet consumed by their parent. The driver factors a whole assembly-tree level
-/// concurrently, so the conservative peak is, over the levels, the level's total
-/// front memory (`Σ nrow²`) plus the contribution blocks of its children feeding
-/// the assembly. Assuming a full level live at once never under-predicts at any
+/// fronts plus the contribution blocks (packed lower triangles,
+/// `cnrow·(cnrow+1)/2` each — the symmetric-LDLᵀ storage the numeric path
+/// actually uses) of completed subtrees not yet consumed by their parent. The
+/// driver factors a whole assembly-tree level concurrently, so the
+/// conservative peak is, over the levels, the level's total front memory
+/// (`Σ nrow²`) plus the contribution blocks of its children feeding the
+/// assembly. Assuming a full level live at once never under-predicts at any
 /// thread count - the transient the left-looking estimate does not capture.
+/// (LDLᵀ-path model only; the unsymmetric LU path stores full-square CBs and
+/// does not consult this.)
 pub(crate) fn estimate_multifrontal_active_peak(
     by_level: &[Vec<usize>],
     nrow: &dyn Fn(usize) -> u64,
@@ -194,7 +198,7 @@ pub(crate) fn estimate_multifrontal_active_peak(
 ) -> u64 {
     let cb = |s: usize| -> u64 {
         let cn = nrow(s).saturating_sub(ncol(s));
-        cn * cn * value_bytes
+        cn * (cn + 1) / 2 * value_bytes
     };
     let mut peak: u64 = 0;
     for level in by_level {

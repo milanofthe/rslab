@@ -1071,16 +1071,16 @@ fn factor_front<T: Scalar>(
 
     // Contribution block CB = A22 − L21·D·L21ᵀ. The per-panel trailing GEMMs
     // above already applied the whole Schur update into `f`'s trailing
-    // `[ncol, nrow)²` lower triangle, so extract it directly (mirrored to both
-    // triangles for the parent's extend-add).
+    // `[ncol, nrow)²` lower triangle. The CB is symmetric and the parent's
+    // extend-add reads only `i >= j`, so store it as a **packed lower
+    // triangle** (column-major: column `j` holds rows `j..cnrow`
+    // contiguously) — half the CB-stack transient of the old mirrored
+    // full-square layout, which was the dominant factorization transient.
     let cnrow = nrow - ncol;
-    let mut cb = vec![T::zero(); cnrow * cnrow];
+    let mut cb = Vec::with_capacity(cnrow * (cnrow + 1) / 2);
     for j in 0..cnrow {
-        for i in j..cnrow {
-            let v = f[(ncol + j) * n + (ncol + i)];
-            cb[j * cnrow + i] = v;
-            cb[i * cnrow + j] = v;
-        }
+        let col = (ncol + j) * n;
+        cb.extend_from_slice(&f[col + ncol + j..col + ncol + cnrow]);
     }
 
     Ok((
@@ -1103,10 +1103,14 @@ fn factor_front<T: Scalar>(
 struct NodeFactor<T> {
     front: FrontFactors<T>,
     row_indices: Vec<usize>,
-    /// This front's contribution block (`cnrow × cnrow` column-major lower
-    /// triangle), consumed by the parent's extend-add. Kept on the node (rather
-    /// than a separate take-able slot) so independent subtrees factor in
-    /// parallel without a shared mutable contribution pool.
+    /// This front's contribution block as a **packed lower triangle**
+    /// (column-major: column `j` holds rows `j..cnrow` contiguously,
+    /// `cnrow·(cnrow+1)/2` entries), consumed by the parent's extend-add.
+    /// The CB is symmetric, so the packed half is complete — storing it
+    /// full-square would double the CB stack, the dominant factorization
+    /// transient. Kept on the node (rather than a separate take-able slot)
+    /// so independent subtrees factor in parallel without a shared mutable
+    /// contribution pool.
     contrib: Vec<T>,
 }
 
@@ -1193,17 +1197,21 @@ fn factor_one_node<T: Scalar>(
         }
     }
 
-    // Extend-add each child's contribution block.
+    // Extend-add each child's contribution block (packed lower triangle:
+    // column `j` holds rows `j..cn` contiguously — the walk below consumes
+    // it in exactly its storage order).
     for child in child_refs {
         let cn = child.front.nrow - child.front.nelim;
         let crows = &child.row_indices[child.front.nelim..];
         let cb = &child.contrib;
+        let mut p = 0usize;
         for j in 0..cn {
             let lj = gloc[crows[j]];
             for i in j..cn {
                 let li = gloc[crows[i]];
                 let (hi, lo) = if li >= lj { (li, lj) } else { (lj, li) };
-                f[lo * nrow + hi] = f[lo * nrow + hi] + cb[j * cn + i];
+                f[lo * nrow + hi] = f[lo * nrow + hi] + cb[p];
+                p += 1;
             }
         }
     }
