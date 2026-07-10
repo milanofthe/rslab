@@ -1137,6 +1137,7 @@ fn factor_one_node<T: Scalar>(
     a_perm: &CscMatrix<T>,
     child_refs: &[&NodeFactor<T>],
     perturb_floor: Option<f64>,
+    pool: &crate::numeric::multifrontal_lu::FrontPool<T>,
     kt: KernelTuning,
 ) -> Result<NodeFactor<T>, RslabError> {
     let snode = &sym.supernodes[s];
@@ -1169,9 +1170,13 @@ fn factor_one_node<T: Scalar>(
     ri.extend(trailing);
     let nrow = ri.len();
 
-    // Front buffer (transient - the unavoidable nrow² zeroing dominates, so a
-    // per-front allocation adds only negligible malloc over a pooled one).
-    let mut fbuf: Vec<T> = vec![T::zero(); nrow * nrow];
+    // Front buffer (transient `nrow²`), drawn from the shared reuse pool: a
+    // per-front allocation churns the system allocator with large, varying
+    // sizes, and on Windows the heap retains the freed blocks rather than
+    // returning them to the OS — peak RSS then balloons far above the live
+    // set (the fragmentation OOM the LU twin hit first; see
+    // [`crate::numeric::multifrontal_lu::FrontPool`]).
+    let mut fbuf: Vec<T> = pool.take(nrow * nrow);
     let f = &mut fbuf[..];
 
     // Take the thread-local global→local scratch (held at all-`usize::MAX`) for
@@ -1224,6 +1229,8 @@ fn factor_one_node<T: Scalar>(
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
 
     let (front, contrib) = factor_front(f, nrow, ncol, perturb_floor, kt)?;
+    // `factor_front` has copied L/D/CB out; recycle the front buffer.
+    pool.give(fbuf);
     Ok(NodeFactor {
         front,
         row_indices: ri,
@@ -1241,16 +1248,17 @@ fn factor_subtree<T: Scalar>(
     sym: &SymbolicFactorization,
     a_perm: &CscMatrix<T>,
     perturb_floor: Option<f64>,
+    pool: &crate::numeric::multifrontal_lu::FrontPool<T>,
     kt: KernelTuning,
 ) -> Result<SubtreeFactors<T>, RslabError> {
     let children = &sym.supernodes[s].children;
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, perturb_floor, kt))
+        .map(|&ch| factor_subtree(ch, sym, a_perm, perturb_floor, pool, kt))
         .collect::<Result<Vec<_>, _>>()?;
     let nf = {
         let child_refs: Vec<&NodeFactor<T>> = outs.iter().map(|(own, _)| own).collect();
-        factor_one_node(s, sym, a_perm, &child_refs, perturb_floor, kt)?
+        factor_one_node(s, sym, a_perm, &child_refs, perturb_floor, pool, kt)?
     };
     // Free the children's contribution blocks NOW: they have been extend-added
     // into this front and are never read again (the global emit uses only the
@@ -1644,6 +1652,9 @@ pub fn factor_numeric<T: Scalar>(
     // deep trees, like the left-looking path above).
     let recommend = |cap: usize| recommend_threads_for_sym(symb, cap);
     let mut node_results: Vec<Option<NodeFactor<T>>> = (0..nsuper).map(|_| None).collect();
+    // Shared front-buffer pool (see `FrontPool` in the LU twin): recycles the
+    // transient `nrow²` buffers instead of churning the allocator per front.
+    let pool = crate::numeric::multifrontal_lu::FrontPool::<T>::new();
     if opts.method == FactorMethod::RightLooking {
         // Right-looking schedule: factor supernodes sequentially in postorder,
         // holding every front live (no contribution-block frontier free), each
@@ -1666,7 +1677,7 @@ pub fn factor_numeric<T: Scalar>(
                                 }
                             }
                         }
-                        factor_one_node(s, sym, &a_perm, &child_refs, perturb_floor, kt)?
+                        factor_one_node(s, sym, &a_perm, &child_refs, perturb_floor, &pool, kt)?
                     };
                     node_results[s] = Some(nf);
                 }
@@ -1676,7 +1687,7 @@ pub fn factor_numeric<T: Scalar>(
         let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(stack, recommend, || {
             roots
                 .par_iter()
-                .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, kt))
+                .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, &pool, kt))
                 .collect::<Result<Vec<_>, _>>()
         })?;
         // Scatter the subtree factors into `node_results` (by supernode id) for the

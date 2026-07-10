@@ -46,7 +46,10 @@ use std::sync::Mutex;
 /// them to the OS, so peak RSS balloons far above the live set (the OOM the
 /// pure-per-front allocation caused). This pool recycles a handful of buffers
 /// (≈ the concurrency level) instead, capping the transient at the live set.
-struct FrontPool<T>(Mutex<Vec<Vec<T>>>);
+/// Shared with the symmetric multifrontal twin
+/// ([`crate::numeric::multifrontal_ldlt`]), whose per-front `nrow²` buffer has
+/// the same fragmentation exposure.
+pub(crate) struct FrontPool<T>(Mutex<Vec<Vec<T>>>);
 
 /// Only buffers up to this many entries are recycled. The churning majority of
 /// small/medium fronts (which drive fragmentation) stay pooled; the rare huge
@@ -56,11 +59,11 @@ struct FrontPool<T>(Mutex<Vec<Vec<T>>>);
 const POOL_MAX_LEN: usize = 4_000_000;
 
 impl<T: Scalar> FrontPool<T> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         FrontPool(Mutex::new(Vec::new()))
     }
     /// Take a buffer (reused if available) and zero-fill it to `len`.
-    fn take(&self, len: usize) -> Vec<T> {
+    pub(crate) fn take(&self, len: usize) -> Vec<T> {
         let mut buf = self
             .0
             .lock()
@@ -73,7 +76,7 @@ impl<T: Scalar> FrontPool<T> {
     }
     /// Return a buffer for reuse, unless it is an oversized (huge-front) buffer
     /// whose capacity we do not want to pin in the pool - those are dropped.
-    fn give(&self, buf: Vec<T>) {
+    pub(crate) fn give(&self, buf: Vec<T>) {
         if buf.capacity() <= POOL_MAX_LEN {
             self.0.lock().unwrap_or_else(|p| p.into_inner()).push(buf);
         }
