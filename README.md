@@ -89,8 +89,9 @@ shifted Helmholtz, Stokes/KKT saddle-point, convection-diffusion over the
 grid-Péclet range, BEM/MoM near-field kernels; `src/matgen/fem.rs`) plus the
 complex SuiteSparse matrices, 8k-125k DOFs, all `Complex<f64>` — measured in one
 run on a quiet 12-core machine, so the cross-solver ratios carry no run-to-run
-drift. RSLAB runs its auto-tuned default; each path is compared **on its own
-class** against its own MKL PARDISO mtype and
+drift. RSLAB runs its shipped default — the deterministic heuristic pick
+(`tuned()`: adaptive ordering, exact ND bakeoff, calibrated worker count); each
+path is compared **on its own class** against its own MKL PARDISO mtype and
 [faer](https://github.com/sarah-quinones/faer-rs).
 
 Reproduce: `RLA_BENCH_FAMILY=sym|unsym cargo bench --bench bench_suite
@@ -100,10 +101,11 @@ Reproduce: `RLA_BENCH_FAMILY=sym|unsym cargo bench --bench bench_suite
 ### Per-path scaling: RSLAB vs faer vs MKL PARDISO
 
 Factor time and peak memory vs nonzeros, log-log, one power-law fit per solver.
-Each plot carries two RSLAB curves — the **untuned default** (gray) and the
-**auto-tuned** solver as shipped (blue) — so the gap the learned tuner closes
-toward PARDISO is visible; it widens with problem size (a mispicked ordering
-costs most on the big matrices) and never comes at a memory cost.
+Each plot carries two RSLAB curves — the **fixed default config** (gray) and the
+**heuristic pick** as shipped (blue) — so the gap the pick closes toward PARDISO
+is visible; it widens with problem size (a mispicked ordering costs most on the
+big matrices) and never comes at a memory cost (the bakeoff is fill/memory
+guarded).
 
 **LDLᵀ path (symmetric, PARDISO mtype 6)** — factor time (left) and peak memory (right):
 
@@ -113,32 +115,35 @@ costs most on the big matrices) and never comes at a memory cost.
 
 ![LU factor time (left) and peak memory (right)](benches/bench_out/h2h_lu.png)
 
-Head-to-head geomean ratios (~100 matrices per path, 5k-1M nonzeros, over the
+Head-to-head geomean ratios (63 sizes per path, 1k-110k DOFs, over the
 matrices both solvers factor to `< 0.1` residual):
 
-| RSLAB (auto-tuned) vs | LDLᵀ (sym) | LU (unsym) |
-|-----------------------|:----------:|:----------:|
-| **MKL PARDISO** — factor time | 7.0x slower | **4.0x slower** |
-| **MKL PARDISO** — peak memory | 2.2x more | 2.4x more |
-| **faer LU** — factor time | **14.5x faster** | **6.7x faster** |
-| **faer LU** — peak memory | **2.3x less** | 1.1x less |
-| **untuned default** — factor time | **1.94x faster** | **1.78x faster** |
-| **untuned default** — peak memory | **0.68x** (less) | **0.72x** (less) |
+| RSLAB (heuristic pick) vs | LDLᵀ (sym) | LU (unsym) |
+|---------------------------|:----------:|:----------:|
+| **MKL PARDISO** — factor time | 5.9x slower | 5.0x slower |
+| **MKL PARDISO** — peak memory | 2.8x more | 3.6x more |
+| **faer LU** — factor time | **14.3x faster** | **2.7x faster** |
+| **faer LU** — peak memory | **1.7x less** | 1.4x more |
+| **fixed default cfg** — factor time | **1.72x faster** | **1.33x faster** |
+| **fixed default cfg** — peak memory | **0.89x** (less) | 1.10x more |
 
-RSLAB sits between the two: faster and lighter than the pure-Rust faer,
-moderately behind the hand-optimized MKL PARDISO, with the unsymmetric path the
-closer of the two. faer has no symmetric path (it factors symmetric matrices as
-LU too), so its LDLᵀ gap is structurally largest; it also OOMs on the largest
-matrices, so its head-to-head is a conservative floor. On time the LU path
-scales slightly flatter than PARDISO (`α≈1.17` vs `1.22`).
+RSLAB sits between the two: faster than the pure-Rust faer, moderately behind
+the hand-optimized MKL PARDISO. faer has no symmetric path (it factors
+symmetric matrices as LU too), so its LDLᵀ gap is structurally largest; it
+also OOMs on the largest matrices, so its head-to-head is a conservative
+floor. On time the LU pick scales flatter than PARDISO (`α≈1.01` vs `1.16`).
+The unsym memory ratios above 1 are the worker-count trade: the calibrated
+pick runs more workers than the capped fixed config, and more concurrent
+panels raise the transient peak — cap `threads` to trade it back.
 
-All three solvers run at the **same worker count** in these measurements
-(`RAYON_NUM_THREADS` drives RSLAB, faer, and MKL alike). Note that RSLAB's
-*library default* is `Threads::Auto { max: 4 }` — a deliberate cap at the
-measured efficiency knee so concurrent solver-in-the-loop instances coexist.
-When comparing a plain `LdltSolver::factor` call against PARDISO's
-all-cores default on a many-core machine, pass `.with_threads(0)` (all
-logical cores) for a like-for-like run.
+`RAYON_NUM_THREADS` drives the fixed-config RSLAB curve, faer, and MKL alike;
+the heuristic pick chooses its **own** worker count from the cached hardware
+calibration (the shipped behaviour — often fewer, critical-path-aware).
+Without an install diagnosis (`cargo xtask calibrate`) the library default is
+`Threads::Auto { max: 4 }` — a deliberate cap at the measured efficiency knee
+so concurrent solver-in-the-loop instances coexist; pass `.with_threads(0)`
+(all logical cores) for a like-for-like run against PARDISO's all-cores
+default.
 
 ### Accuracy (SuiteSparse)
 
@@ -182,29 +187,20 @@ still, so a 20-point sweep (refactor+solve vs factor+solve — the "sweep ratio"
 is 6-19x faster end to end. Both solvers reach machine-precision residuals
 (~1e-15) on every size.
 
-### The learned auto-tuner
+### The optional learned auto-tuner
 
-`LdltSolver::factor` / `LuSolver::factor_auto` select the whole `SolverSettings`
-vector (ordering incl. `MetisND`, method, amalgamation, threshold-pivot `u` on
-LU, equilibration, memory mode, kernel gates) from the matrix's structural
-fingerprint — one MLP per path, trained offline on the corpus knob sweep and
-embedded for pure-Rust inference. Its picks are constrained by a deterministic
-guard stack — an out-of-distribution fallback to the exact-fill ordering race, a
+The default `factor()` is model-free (the heuristic pick above). For tuning to
+a **specific problem class on specific hardware** there is an opt-in learned
+tuner (`factor_auto` / `tuned_model`): one MLP per path selects the whole
+`SolverSettings` vector (ordering incl. `MetisND`, method, amalgamation,
+threshold-pivot `u` on LU, equilibration, memory mode, kernel gates) from the
+matrix's structural fingerprint, constrained by a deterministic guard stack (a
 re-analysis check that the pick's exact fill/flops/memory floor stay within
-`1.02x`/`1.05x`/`1.0x` of the default's, and a minimum-improvement threshold —
-so **peak memory is guaranteed never to exceed the untuned default** while time
-is optimized in aggregate:
-
-| path | factor speedup | peak-memory ratio |
-|---|:---:|:---:|
-| **LDLᵀ** (167 matrices) | **1.33x** | 0.83x |
-| **LU** (97 matrices) | **1.92x** | 0.72x |
-
-(vs the untuned default, geomean, each path on its own class.) The runtime tuner
-profile (`tuner_profile.json`, `RSLAB_TUNER_PROFILE` / `apply_profile`) ships the
-two models plus hardware-calibrated guard thresholds; the meta-tuner
-`cargo xtask tune` reproduces it (sweep → train → calibrate → assemble →
-held-out ship-gate).
+`1.02x`/`1.05x`/`1.0x` of the default's, plus a minimum-improvement threshold)
+so **peak memory is guaranteed never to exceed the default**. Its value is the
+retrainable profile: `cargo xtask tune` (sweep → train → calibrate → assemble →
+held-out ship-gate) emits a class-specialized `tuner_profile.json` applied at
+runtime via `RSLAB_TUNER_PROFILE` / `apply_profile`, no recompile.
 
 ### A-priori predictors
 
@@ -246,7 +242,7 @@ faster than per-column. All of it stays bit-identical across thread counts.
 
 ```toml
 [dependencies]
-rslab = "0.17"
+rslab = "0.18"
 ```
 
 ### Python (NumPy / SciPy)

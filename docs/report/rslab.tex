@@ -58,9 +58,11 @@ It is generic over the scalar type (\code{f64}, \code{f32}, and their complex
 counterparts) and links no external numeric library: the SIMD dense kernels, the
 fill-reducing orderings, and the factorizations are all Rust. The analyze phase computes
 a-priori peak-memory, work, and runtime predictors as exact functions of the matrix
-structure; a learned configuration tuner selects the solver settings under a
-deterministic memory backstop; and the numeric factorization is bit-identical regardless
-of the worker count. When the factor is made approximate --- static-pivoted or
+structure; the default configuration is a deterministic, model-free heuristic pick
+(adaptive ordering, an exact nested-dissection bakeoff, and a worker count from a
+one-time cached hardware calibration), with an optional learned tuner for
+class-specific specialization under a deterministic memory backstop; and the numeric
+factorization is bit-identical regardless of the worker count. When the factor is made approximate --- static-pivoted or
 thresholded --- it becomes a preconditioner, and a matching Krylov layer (COCG/COCR,
 flexible GMRES, batched multi-RHS block GMRES with within-cycle deflation, and GCRO-DR
 subspace recycling) closes the accuracy gap. This report documents the core algorithms,
@@ -237,7 +239,7 @@ The KLU path never perturbs: a vanishing pivot is a hard, attributed error.
 \label{sec:pred}
 The analyze phase computes a set of predictors as \emph{exact functions of the symbolic
 structure} and the scalar size $v$, before any numeric work --- the basis of the memory
-guarantee, the tuner, the thread policy, and the resource planner of
+guarantee, the heuristic configuration pick, the thread policy, and the resource planner of
 Sec.~\ref{sec:sil}.
 
 \textbf{Per-path peak memory.} The factor size is $\text{factor\_nnz}\cdot(v+8)$, a
@@ -292,18 +294,24 @@ deterministic functions of the pattern. And the resource planner is a pure funct
 its inputs. The pivot sequence is value-dependent; $\code{pivot\_u}=0$ (or the KLU
 refactor) freezes it across same-pattern refactorizations.
 
-A learned tuner selects the \code{SolverSettings} from a structural fingerprint, one MLP
-per path predicting $(\log t,\log m)$ per candidate configuration, trained
-offline~\cite{sklearn} on a complete-distribution corpus (curl--curl Maxwell,
-Stokes/KKT saddle-point, convection--diffusion across the grid-P\'eclet range, plus
-SuiteSparse). Its picks are constrained by a deterministic guard stack --- an
-out-of-distribution fallback to the exact-fill ordering race, a re-analysis check that
-the pick's exact fill, flops, and memory floor stay within $1.02\times$/$1.05\times$/
-$1.0\times$ of the default's, and a minimum-improvement threshold --- so peak memory is
-\emph{guaranteed} never to exceed the untuned default while time is optimized in
-aggregate: $1.33\times$ faster at $0.83\times$ memory ($\LDLt$, 167 matrices) and
-$1.92\times$ faster at $0.72\times$ memory ($\LU$, 97 matrices) over the untuned
-default.
+The shipped default configuration is a deterministic, model-free heuristic: the
+adaptive ordering choice, the measured default kernel knobs, an exact
+nested-dissection bakeoff on large systems (re-analyze with \code{MetisND}, adopt only
+on a clear predicted-flops win with no regression in exact fill or transient peak),
+and --- after a one-time cached hardware calibration --- a critical-path-aware worker
+count from the calibrated cost model. Every input to the pick is an exact a-priori
+quantity; nothing is modeled.
+
+For specializing to a \emph{specific problem class on specific hardware} an optional
+learned tuner remains: one MLP per path predicting $(\log t,\log m)$ per candidate
+configuration, trained offline~\cite{sklearn} on a complete-distribution corpus
+(curl--curl Maxwell, Stokes/KKT saddle-point, convection--diffusion across the
+grid-P\'eclet range, plus SuiteSparse), retrainable into a runtime
+\code{tuner\_profile.json} artifact. Its picks are constrained by a deterministic
+guard stack --- a re-analysis check that the pick's exact fill, flops, and memory
+floor stay within $1.02\times$/$1.05\times$/$1.0\times$ of the default's, and a
+minimum-improvement threshold --- so peak memory is \emph{guaranteed} never to exceed
+the default's.
 
 \section{Solver-in-the-loop and resource governance}
 \label{sec:sil}
@@ -384,18 +392,20 @@ complete-distribution corpus --- structured-grid generators (curl--curl Maxwell,
 shifted Helmholtz, Stokes/KKT saddle-point, convection--diffusion over the grid-P\'eclet
 range, BEM/MoM near-field kernels) plus the complex SuiteSparse~\cite{suitesparse}
 matrices, 8k--125k DOFs, \code{Complex<f64>} --- measured in one run on a quiet 12-core
-machine, so the cross-solver ratios carry no run-to-run drift. RSLAB runs its auto-tuned
-default; each path is compared on its own class against its own PARDISO
+machine, so the cross-solver ratios carry no run-to-run drift. RSLAB runs its shipped
+default --- the deterministic heuristic pick (adaptive ordering, exact ND bakeoff,
+calibrated worker count); each path is compared on its own class against its own PARDISO
 mtype~\cite{pardiso} and faer~\cite{faer}.
 
 \subsection{Scaling and accuracy}
 Figures~\ref{fig:h2h_ldlt} and~\ref{fig:h2h_lu} plot factor time and peak memory against
 $\nnz$ with per-solver power-law fits; Table~\ref{tab:scaling} gives the head-to-head
-geomean ratios. \rT{} sits between the two on both paths: faster and lighter than the
-pure-Rust faer, moderately behind the hand-optimized MKL PARDISO, with the unsymmetric
-path the closer of the two ($4.0\times$ vs.\ $7.0\times$). The tuner's win is visible as
-a gap that widens with problem size --- largest on the big matrices where a mispicked
-ordering costs most --- and never comes at a memory cost. On accuracy
+geomean ratios. \rT{} sits between the two on both paths: faster than the
+pure-Rust faer, moderately behind the hand-optimized MKL PARDISO
+($5.9\times$ sym / $5.0\times$ unsym). The heuristic pick's win over the fixed
+default is visible as a gap that widens with problem size --- largest on the big
+matrices where a mispicked ordering costs most --- and on the symmetric path
+never comes at a memory cost. On accuracy
 (Fig.~\ref{fig:residual}), 24 of 31 corpus matrices factor to a relative residual below
 $10^{-8}$, matching PARDISO and ahead of faer; the exact $\LDLt$ declines a handful of
 indefinite saddle-point matrices rather than returning a degraded solution. The
@@ -416,9 +426,9 @@ fits.}
 \centering
 \includegraphics[width=\textwidth]{h2h_lu.pdf}
 \caption{$\LU$ path (unsymmetric, PARDISO mtype 13): factor wall-clock (left) and peak
-memory (right) vs.\ problem size. The untuned RSLAB default (gray) accompanies the
-auto-tuned curve (blue); on time RSLAB scales slightly flatter than PARDISO
-($\alpha\approx1.17$ vs.\ $1.22$).}
+memory (right) vs.\ problem size. The fixed RSLAB default configuration (gray)
+accompanies the heuristic pick (blue); on time the pick scales flatter than PARDISO
+($\alpha\approx1.01$ vs.\ $1.16$).}
 \label{fig:h2h_lu}
 \end{figure}
 
@@ -428,17 +438,20 @@ auto-tuned curve (blue); on time RSLAB scales slightly flatter than PARDISO
 \toprule
 RSLAB vs & $\LDLt$ (sym) & $\LU$ (unsym) \\
 \midrule
-MKL PARDISO --- factor time & $7.0\times$ slower & $4.0\times$ slower \\
-MKL PARDISO --- peak memory & $2.2\times$ more & $2.4\times$ more \\
-faer $\LU$\textsuperscript{$\dagger$} --- factor time & \textbf{\num{14.5}}$\times$ faster & \textbf{\num{6.7}}$\times$ faster \\
-faer $\LU$\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{2.3}}$\times$ less & $1.1\times$ less \\
-untuned default --- factor time & \textbf{\num{1.94}}$\times$ faster & \textbf{\num{1.78}}$\times$ faster \\
-untuned default --- peak memory & \textbf{\num{0.68}}$\times$ (less) & \textbf{\num{0.72}}$\times$ (less) \\
+MKL PARDISO --- factor time & $5.9\times$ slower & $5.0\times$ slower \\
+MKL PARDISO --- peak memory & $2.8\times$ more & $3.6\times$ more \\
+faer $\LU$\textsuperscript{$\dagger$} --- factor time & \textbf{\num{14.3}}$\times$ faster & \textbf{\num{2.7}}$\times$ faster \\
+faer $\LU$\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{1.7}}$\times$ less & $1.4\times$ more \\
+fixed default cfg --- factor time & \textbf{\num{1.72}}$\times$ faster & \textbf{\num{1.33}}$\times$ faster \\
+fixed default cfg --- peak memory & \textbf{\num{0.89}}$\times$ (less) & $1.10\times$ more \\
 \bottomrule
 \end{tabular}
-\caption{Head-to-head geomean ratios ($\sim$100 matrices per path, 5k--1M nonzeros),
+\caption{Head-to-head geomean ratios (63 sizes per path, 1k--110k DOFs),
 each path on its own class, over the matrices both solvers factor to below $0.1$
-residual. The last rows are the auto-tuned solver against the untuned RSLAB default.
+residual. The last rows are the shipped heuristic pick against the fixed RSLAB
+default configuration. Unsym memory ratios above $1$ are the worker-count trade:
+the calibrated pick runs more workers than the capped fixed config, raising the
+transient panel peak.
 \textsuperscript{$\dagger$}faer has no symmetric path (it factors symmetric matrices as
 $\LU$), so its $\LDLt$ gap is structurally largest; it also OOMs on the largest
 matrices, so its head-to-head is a conservative floor.}

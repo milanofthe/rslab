@@ -882,8 +882,21 @@ fn ldlt_factor(
                 // `a` and `opts` are Rust-owned copies - release the GIL for
                 // the (potentially minutes-long, rayon-parallel) factorization
                 // so other Python threads keep running.
+                //
+                // The analysis comes from the heuristic default pick
+                // (`LdltSolver::tuned`: adaptive ordering + exact ND bakeoff
+                // + calibrated worker count) - the same path the Rust
+                // `factor()` ships. Keyword arguments override on top; an
+                // explicit `threads` beats the calibrated pick.
+                let mut opts = opts.clone();
                 let s = py
-                    .allow_threads(|| LdltSolver::<$T>::factor_with(&a, &opts))
+                    .allow_threads(|| {
+                        let (sym, pick) = LdltSolver::<$T>::tuned(&a)?;
+                        if threads.is_none() {
+                            opts.threads = pick.threads;
+                        }
+                        sym.factor(&a, &opts)
+                    })
                     .map_err(map_err)?;
                 return Ok(Ldlt {
                     inner: LdltAny::$variant(s, a),
@@ -1346,8 +1359,17 @@ fn lu_factor(
             if let Ok(d) = data.extract::<PyReadonlyArray1<$T>>() {
                 let a = build_general::<$T>(n, ip, ii, d.as_slice()?)?;
                 // Rust-owned inputs - release the GIL for the heavy factor.
+                // Analysis from the heuristic default pick (`LuSolver::tuned`),
+                // keyword arguments override on top (see `ldlt_factor`).
+                let mut opts = opts.clone();
                 let s = py
-                    .allow_threads(|| LuSolver::<$T>::factor(&a, &opts))
+                    .allow_threads(|| {
+                        let (sym, pick) = LuSolver::<$T>::tuned(&a)?;
+                        if threads.is_none() {
+                            opts.threads = pick.threads;
+                        }
+                        sym.factor(&a, &opts)
+                    })
                     .map_err(map_err)?;
                 return Ok(Lu {
                     inner: LuAny::$variant(s, a),
@@ -1777,6 +1799,26 @@ fn klu_factor(
 }
 
 /// The compiled core imported by the Python package as `rslab._rslab`.
+/// One-time hardware diagnosis: measure this machine's factorization
+/// throughput and parallel-speedup curve and cache them (keyed by a hardware
+/// fingerprint). Afterwards the default factor picks its worker count from
+/// the cached calibration; without the cache the conservative structural
+/// default applies. Runs a few seconds of representative factorizations -
+/// call it once per machine (e.g. at install/setup), never per solve.
+/// Returns a dict with the measured quantities.
+#[pyfunction]
+fn install_diagnose(py: Python<'_>) -> PyResult<PyObject> {
+    let c = py.allow_threads(rslab::tuning::install_diagnose);
+    let d = pyo3::types::PyDict::new_bound(py);
+    d.set_item("gflops_f64", c.geom_gflops)?;
+    d.set_item("gflops_complex", c.geom_gflops_cplx)?;
+    d.set_item("speedup", c.speedup)?;
+    d.set_item("speedup_threads", c.speedup_threads)?;
+    d.set_item("speedup_at_4", c.speedup4)?;
+    d.set_item("timing_cv", c.time_cv)?;
+    Ok(d.into())
+}
+
 #[pymodule]
 fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Ldlt>()?;
@@ -1786,6 +1828,7 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ldlt_factor, m)?)?;
     m.add_function(wrap_pyfunction!(lu_factor, m)?)?;
     m.add_function(wrap_pyfunction!(klu_factor, m)?)?;
+    m.add_function(wrap_pyfunction!(install_diagnose, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

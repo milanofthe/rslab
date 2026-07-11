@@ -28,8 +28,8 @@ REPORT_FIG_DIR = Path(__file__).resolve().parent.parent / "docs" / "report" / "f
 
 # Canonical solver palette: key -> (label, color, marker).
 SOLVERS = {
-    "default": ("RSLAB (untuned default)", "#94a3b8", "x"),
-    "auto": ("RSLAB (auto-tuned)", "#3b82f6", "o"),
+    "default": ("RSLAB (fixed default cfg)", "#94a3b8", "x"),
+    "auto": ("RSLAB (heuristic pick)", "#3b82f6", "o"),
     "ll": ("RSLAB left-looking", "#60a5fa", "o"),
     "mf": ("RSLAB multifrontal", "#06b6d4", "s"),
     "faer": ("faer LU", "#f59e0b", "^"),

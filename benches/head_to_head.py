@@ -7,8 +7,10 @@ figure — factor wall-clock time (left) and peak memory (right) vs nonzeros on 
 axes, with a least-squares power-law fit `y = C·nnz^alpha` per solver (the exponent,
 the empirical scaling order, is annotated on each fit line) and one shared legend.
 
-The RSLAB curve is the auto-tuned default (`LdltSolver`/`LuSolver::tuned`) — the
-per-path learned tuner as shipped, the subject of this whole study.
+The RSLAB curve is the shipped default pick (`LdltSolver`/`LuSolver::tuned`) — the
+deterministic heuristic (adaptive ordering + exact ND bakeoff + calibrated
+worker count), drawn alongside the fixed default config so the gap the pick
+closes is visible.
 
 Run: python benches/head_to_head.py <sym.jsonl> <unsym.jsonl>
 """
@@ -21,8 +23,9 @@ from matplotlib.lines import Line2D
 import bench_style
 from fit_scaling import plot_metric
 
-# RSLAB's untuned default is drawn alongside the auto-tuned curve, so the gap the
-# learned tuner closes (default -> auto) is visible against the external solvers.
+# RSLAB's fixed default config is drawn alongside the heuristic pick (solver id
+# "auto" = what `factor()` ships), so the gap the pick closes (default -> auto)
+# is visible against the external solvers.
 ORDER = ["default", "auto", "faer", "pardiso"]
 
 
@@ -39,7 +42,7 @@ def run(path, title, slug, mtype):
     plot_metric(recs, "mem", "mem_mb", "peak memory [MB]", None, order=ORDER, ax=ax_mem)
     fig.suptitle(
         f"{title}: factor time (left) and peak memory (right) vs size "
-        f"— RSLAB (default & tuned) vs faer vs PARDISO (mtype {mtype})",
+        f"— RSLAB (default & heuristic pick) vs faer vs PARDISO (mtype {mtype})",
         color=bench_style.GRAY)
     # One shared legend for both panels: solver identity only (the per-panel scaling
     # exponents differ and are annotated on the fit lines).

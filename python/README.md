@@ -76,11 +76,17 @@ x = f.solve(b, refine=20)        # refine against the original A
 
 ## Configuration (keyword arguments)
 
-`ldlt`, `lu` and `spsolve` accept:
+By default `ldlt`, `lu` and `spsolve` use RSLAB's deterministic heuristic
+pick — the adaptive ordering plus an exact nested-dissection bakeoff on large
+systems (adopted only on a clear predicted win with no fill/memory
+regression). A one-time `rslab.install_diagnose()` measures this machine's
+throughput and speedup curve and caches it; afterwards the default also picks
+its worker count from the calibration (until then the conservative capped
+default applies). Keyword arguments override the pick:
 
 | kwarg            | default          | meaning                                                        |
 |------------------|------------------|----------------------------------------------------------------|
-| `threads`        | `None` (auto)    | `None` = per-matrix auto predictor, **capped at 4 workers**; int = fixed (`0` = all) |
+| `threads`        | `None` (auto)    | `None` = calibrated/structural per-matrix pick; int = fixed (`0` = all) |
 | `preconditioner` | `None`           | static-pivot floor (e.g. `1e-4`); never-fail, refine to solve  |
 | `drop_tol`       | `None`           | incomplete-factor threshold (preconditioner)                   |
 | `method`         | `"left_looking"` | `"left_looking"` or `"multifrontal"`                           |

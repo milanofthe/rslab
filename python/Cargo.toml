@@ -19,8 +19,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The solver core, by path. The bindings are a thin FFI wrapper; all numeric
-# work happens in `rslab`, which stays 100% pure Rust.
-rslab = { path = ".." }
+# work happens in `rslab`, which stays 100% pure Rust. `tuning` enables the
+# cached hardware calibration (pure-Rust sysinfo dep): after a one-time
+# `rslab.install_diagnose()` the default factor picks its worker count from
+# this machine's measured speedup curve; without the cache nothing changes.
+rslab = { path = "..", features = ["tuning"] }
 # Same complex scalar type the core uses (num-complex 0.4 == numpy's c64/c32).
 num-complex = "0.4"
 # abi3-py39: one wheel for CPython 3.9+ per platform.
