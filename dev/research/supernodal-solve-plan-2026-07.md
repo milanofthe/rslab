@@ -1,5 +1,70 @@
 # Supernodal triangular solve — design plan (audit follow-up P4)
 
+Status: **CLOSED (2026-07-11)** — both stages were built, measured, and
+rejected; the head-to-head reference measurement below shows the premise
+("the solve is the gap") was wrong. Kept as the evidence record. Original
+plan text follows the two results sections.
+
+## Stage 2 measured (2026-07-11): supernodal panel solve — also rejected
+
+Implemented on `feat/supernodal-solve`: post-hoc panel detection on the
+stored factor, dense panels, gather-form sweeps (edge runs forward,
+per-column gathers backward), level schedule on the supernodal DAG,
+**verified bit-identical** to the flat solve (incl. 2×2 pivots and the
+equilibrated wrapper) at every thread count. Three partition variants
+measured (3D 7-point grid, `LdltSolver::factor` defaults, best-of-3 × 50):
+
+```
+variant                          n=21952                       n=64000
+flat baseline                     4.7 ms                       26-37 ms (run spread)
+exact-pattern panels   @1  9.6 @8  8.5   (snodes 15263, lvl 111)
+subset-merge panels    @1  7.3 @8  7.0   (snodes  9935, lvl  20)
+TRUE factor partition  @1 10.4 @8  7.6   (snodes  1107, lvl  18, pad 2.05x)
+TRUE factor partition  @1 57   @8 37     (n=64k,  1099, lvl  19, pad 1.80x)
+```
+
+The schedule itself is now right (18-20 levels, real panels) — the killer is
+**densification padding**: emit drops the relaxed-amalgamation padding
+zeros, and rebuilding the factorization's panels re-materializes them
+(pad 1.8-2.05×). A sparse triangular solve is **memory-bandwidth-bound**, so
+2× the streamed bytes ≈ 2× the time, and the level parallelism (1.4-1.5×
+@8) cannot buy that back. Padding-free panel variants degenerate to the
+stage-1 problem (extra index traffic / tiny panels).
+
+## The reference measurement that closes P4
+
+MKL PARDISO head-to-head (bench_suite, helmholtz n=64000, complex, 8
+threads, same `RAYON_NUM_THREADS` for both):
+
+```
+solver    factor        solve     fill nnz(L)
+rslab ll  1488 ms      39.8 ms    20.6 M
+pardiso    168 ms      33.8 ms    12.9 M
+```
+
+* **The single-RHS solve gap is 1.18×** — and rslab carries **1.6× more
+  fill**. Per stored nonzero our flat sweep is already *faster* than
+  PARDISO's solve. The solve "gap" is a **fill (ordering) gap**, not a
+  kernel gap; a parallel solve kernel attacks the wrong term.
+* **The factor gap is 8.8×** on this class — that is where the PARDISO work
+  belongs.
+* Side-findings worth their own issues: (a) `tuned()`'s ND bakeoff ran and
+  **rejected our MetisND** on this matrix (fill stayed 20.6 M) while MKL's
+  ND reaches 12.9 M — our nested-dissection quality on 3D Helmholtz is the
+  fill lever; (b) the bench's `auto` solver measured *slower* than the
+  plain default here (fac 2565 ms vs 1488 ms, same fill) — a tuner
+  regression to investigate.
+
+**Verdict:** stop investing in parallel single-RHS solve kernels. The
+evidence-ranked levers toward PARDISO are (1) numeric factor throughput
+(8.8×), (2) ND ordering quality on 3D classes (1.6× fill, which also closes
+the remaining solve gap for free), (3) the `auto`-path regression.
+Multi-RHS workloads are already served by `solve_many`.
+
+---
+
+Original plan (historical):
+
 Status: **planned** (not implemented). This is the scoped design for the one
 audit finding deliberately deferred from the 2026-07 audit branch: the
 single-RHS triangular solves are element-wise sequential CSC/CSR sweeps
