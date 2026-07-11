@@ -983,20 +983,86 @@ impl<T: Scalar> LuSolver<T> {
         })
     }
 
-    /// Auto-tuned factorization at Pareto `weight` (`1` = fastest, `0` = smallest
-    /// peak memory). Picks the settings from the matrix's structural features via
-    /// the embedded performance model, **guarded** (only deviates from the default
-    /// on a clear, memory-vetoed predicted win). The unsymmetric counterpart of
-    /// [`LdltSolver::factor_auto`](crate::LdltSolver::factor_auto); pass explicit
-    /// settings to [`factor`](Self::factor) to opt out.
+    /// The **heuristic** settings pick for `a` - the model-free default, the
+    /// unsymmetric counterpart of [`LdltSolver::tuned`](crate::LdltSolver::tuned):
+    /// analysis with the adaptive ordering heuristic, the proven default kernel
+    /// configuration, and (on large systems) the exact nested-dissection bakeoff.
+    pub fn tuned(a: &GeneralCsc<T>) -> Result<(LuSymbolic, SolverSettings), RslabError> {
+        let sym = LuSymbolic::analyze(a)?;
+        let s = SolverSettings::default();
+        #[allow(unused_mut)]
+        let (sym, mut s) = if a.n >= crate::numeric::sparse_solver::ND_BAKEOFF_MIN_N
+            && sym.estimate_memory::<T>().factor_flops
+                >= crate::numeric::sparse_solver::ND_BAKEOFF_MIN_FLOPS
+        {
+            Self::nd_bakeoff(a, sym, s)?
+        } else {
+            (sym, s)
+        };
+        // Install-diagnosed worker count: only when a calibration cache exists
+        // (written once by `tuning::install_diagnose`); never measures here.
+        #[cfg(feature = "tuning")]
+        if let Some((cores, calib)) = crate::tuning::cached_calibration() {
+            let est = sym.estimate_memory::<T>();
+            let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
+            s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
+        }
+        Ok((sym, s))
+    }
+
+    /// Re-analyze with [`OrderingMethod`](crate::symbolic::OrderingMethod)`::MetisND`
+    /// and keep whichever ordering the *exact* symbolic quantities favour - the
+    /// LU mirror of the LDLᵀ bakeoff: ND is adopted only on a clear
+    /// predicted-flops win with no regression in exact fill or in the
+    /// method-relevant transient peak. Deterministic; nothing is modeled.
+    fn nd_bakeoff(
+        a: &GeneralCsc<T>,
+        sym: LuSymbolic,
+        s: SolverSettings,
+    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
+        use crate::symbolic::OrderingMethod;
+        if s.ordering == OrderingMethod::MetisND {
+            return Ok((sym, s));
+        }
+        let mut s_nd = s.clone();
+        s_nd.ordering = OrderingMethod::MetisND;
+        let sym_nd = match LuSymbolic::analyze_with(a, &s_nd) {
+            Ok(x) => x,
+            Err(_) => return Ok((sym, s)),
+        };
+        let est = sym.estimate_memory::<T>();
+        let est_nd = sym_nd.estimate_memory::<T>();
+        let peak = |e: &crate::diagnostics::MemoryEstimate| match s.method {
+            FactorMethod::Multifrontal => e.mf_transient_peak_bytes,
+            _ => e.panel_live_peak_bytes,
+        };
+        let flops_win = (est_nd.factor_flops as f64)
+            < est.factor_flops as f64 * crate::numeric::sparse_solver::ND_BAKEOFF_ADOPT_RATIO;
+        let fill_ok = sym_nd.symbolic_factor_nnz() <= sym.symbolic_factor_nnz();
+        let mem_ok = peak(&est_nd) <= peak(&est);
+        if flops_win && fill_ok && mem_ok {
+            Ok((sym_nd, s_nd))
+        } else {
+            Ok((sym, s))
+        }
+    }
+
+    /// **Optional ML-tuned** factorization at Pareto `weight` (`1` = fastest, `0` =
+    /// smallest peak memory). Picks the settings from the matrix's structural
+    /// features via the embedded performance model, **guarded** (only deviates from
+    /// the default on a clear, memory-vetoed predicted win). The unsymmetric
+    /// counterpart of [`LdltSolver::factor_auto`](crate::LdltSolver::factor_auto);
+    /// the model-free heuristic default is [`tuned`](Self::tuned), and explicit
+    /// settings go to [`factor`](Self::factor).
     pub fn factor_auto(a: &GeneralCsc<T>, weight: f64) -> Result<Self, RslabError> {
-        let (sym, s) = Self::tuned(a, weight)?;
+        let (sym, s) = Self::tuned_model(a, weight)?;
         sym.factor(a, &s)
     }
 
-    /// The auto-tuner's choice for `a`: the symbolic + guarded, memory-backstopped
+    /// The ML tuner's choice for `a`: the symbolic + guarded, memory-backstopped
     /// settings (shared by [`factor_auto`](Self::factor_auto) and the benchmark).
-    pub fn tuned(
+    /// See [`tuned`](Self::tuned) for the model-free heuristic default.
+    pub fn tuned_model(
         a: &GeneralCsc<T>,
         weight: f64,
     ) -> Result<(LuSymbolic, SolverSettings), RslabError> {

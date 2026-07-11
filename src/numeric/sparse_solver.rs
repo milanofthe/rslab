@@ -28,12 +28,12 @@ use crate::sparse::csc::CscMatrix;
 /// symbolic analysis isn't worth scheduling. Above it, a missed ND win on a
 /// 3D-mesh pattern costs 10x the analysis price (measured on 87k-DOF
 /// Nedelec-2 curl-curl: 2e11 flops AMD vs 1.8e10 MetisND).
-const ND_BAKEOFF_MIN_FLOPS: u64 = 5_000_000_000;
+pub(crate) const ND_BAKEOFF_MIN_FLOPS: u64 = 5_000_000_000;
 /// Small systems never enter the bakeoff regardless of predicted flops -
 /// dense-ish small matrices can post huge flops without an ND story.
-const ND_BAKEOFF_MIN_N: usize = 10_000;
+pub(crate) const ND_BAKEOFF_MIN_N: usize = 10_000;
 /// Adopt ND only on a clear predicted win, not a coin flip.
-const ND_BAKEOFF_ADOPT_RATIO: f64 = 0.75;
+pub(crate) const ND_BAKEOFF_ADOPT_RATIO: f64 = 0.75;
 
 /// A factored sparse symmetric matrix, ready to solve against many right-hand
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
@@ -83,29 +83,78 @@ impl<T: Scalar> LdltSolver<T> {
     }
 
     /// Equilibrate and factor `A` as `Â = D A D = Pᵀ L D_bk Lᵀ P` (exact mode).
+    ///
+    /// Settings come from the deterministic heuristic pick ([`tuned`](Self::tuned)):
+    /// the adaptive ordering heuristic, the measured-default kernel knobs, and the
+    /// exact nested-dissection bakeoff on large systems. Hardware-agnostic; if the
+    /// one-time install diagnosis has run (feature `tuning`,
+    /// [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
+    /// additionally comes from this machine's cached calibration. The optional ML
+    /// tuner is [`factor_auto`](Self::factor_auto).
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, RslabError> {
-        Self::factor_auto(a, crate::auto_tune::DEFAULT_TUNE_WEIGHT)
-    }
-
-    /// Auto-tuned factorization at an explicit Pareto `weight` (`1` = fastest,
-    /// `0` = smallest peak memory; [`DEFAULT_TUNE_WEIGHT`](crate::auto_tune::DEFAULT_TUNE_WEIGHT)
-    /// leans toward speed). Picks the solver settings from the matrix's structural
-    /// features via the embedded performance model, **guarded**: it only deviates
-    /// from the proven default when a clear, memory-vetoed win is predicted, so it
-    /// is never far worse than the default. [`factor`](Self::factor) is this at the
-    /// default weight; [`factor_with`](Self::factor_with) opts out (explicit settings).
-    pub fn factor_auto(a: &CscMatrix<T>, weight: f64) -> Result<Self, RslabError> {
-        let (sym, s) = Self::tuned(a, weight)?;
+        let (sym, s) = Self::tuned(a)?;
         sym.factor(a, &s)
     }
 
-    /// The auto-tuner's choice for `a` at Pareto `weight`: the symbolic to factor
+    /// The **heuristic** settings pick for `a` - the default path behind
+    /// [`factor`](Self::factor). Deterministic and model-free:
+    ///
+    /// 1. analysis with the adaptive ordering heuristic (`Auto`);
+    /// 2. the proven default kernel configuration (left-looking, low-memory,
+    ///    measured panel/GEMM knobs);
+    /// 3. on large systems, the exact nested-dissection bakeoff: re-analyze with
+    ///    `MetisND` and adopt it only on a clear predicted-flops win with no
+    ///    regression in exact fill or transient peak;
+    /// 4. with a cached hardware calibration (feature `tuning`, written once by
+    ///    [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
+    ///    from the calibrated cost model instead of the capped structural default.
+    pub fn tuned(a: &CscMatrix<T>) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
+        let sym = LdltSymbolic::analyze(a)?;
+        let s = SolverSettings::default();
+        #[allow(unused_mut)]
+        let (sym, mut s) = if a.n >= ND_BAKEOFF_MIN_N
+            && sym.estimate_memory::<T>().factor_flops >= ND_BAKEOFF_MIN_FLOPS
+        {
+            Self::nd_bakeoff(a, sym, s)?
+        } else {
+            (sym, s)
+        };
+        // Install-diagnosed worker count: only when a calibration cache exists
+        // (written once by `tuning::install_diagnose`); never measures here.
+        #[cfg(feature = "tuning")]
+        if let Some((cores, calib)) = crate::tuning::cached_calibration() {
+            let est = sym.estimate_memory::<T>();
+            let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
+            s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
+        }
+        Ok((sym, s))
+    }
+
+    /// **Optional ML-tuned** factorization at an explicit Pareto `weight` (`1` =
+    /// fastest, `0` = smallest peak memory;
+    /// [`DEFAULT_TUNE_WEIGHT`](crate::auto_tune::DEFAULT_TUNE_WEIGHT) leans toward
+    /// speed). Picks the solver settings from the matrix's structural features via
+    /// the embedded performance model, **guarded**: it only deviates from the
+    /// proven default when a clear, memory-vetoed win is predicted.
+    ///
+    /// This is the opt-in path for tuning to a specific problem class on specific
+    /// hardware - typically with a retrained
+    /// [`TunerProfile`](crate::TunerProfile) (`cargo xtask tune`, applied via
+    /// [`apply_profile`](crate::apply_profile) or `RSLAB_TUNER_PROFILE`). The
+    /// default [`factor`](Self::factor) uses the model-free heuristic
+    /// [`tuned`](Self::tuned) instead.
+    pub fn factor_auto(a: &CscMatrix<T>, weight: f64) -> Result<Self, RslabError> {
+        let (sym, s) = Self::tuned_model(a, weight)?;
+        sym.factor(a, &s)
+    }
+
+    /// The ML tuner's choice for `a` at Pareto `weight`: the symbolic to factor
     /// with plus the guarded, memory-backstopped [`SolverSettings`]. Runs the
     /// analysis, the model recommendation, and the deterministic memory backstop
     /// (exact fill + realistic floor, never more memory than the default). Shared by
     /// [`factor_auto`](Self::factor_auto) and the benchmark harness so both exercise
-    /// identical logic.
-    pub fn tuned(
+    /// identical logic. See [`tuned`](Self::tuned) for the model-free default.
+    pub fn tuned_model(
         a: &CscMatrix<T>,
         weight: f64,
     ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
@@ -746,11 +795,10 @@ mod tests {
         );
     }
 
-    /// End-to-end guarantee on `tuned` for a large curl-curl system: whatever
-    /// mechanism resolves it (model, OOD ordering race, or the ND bakeoff),
-    /// the returned pick must realise the nested-dissection-class win over
-    /// the AMD default - this is the regression that cost 10x factor time
-    /// in the rapidfem FEM sweep.
+    /// End-to-end guarantee on the heuristic `tuned` for a large curl-curl
+    /// system: the ND bakeoff must realise the nested-dissection-class win
+    /// over the AMD default - this is the regression that cost 10x factor
+    /// time in the rapidfem FEM sweep.
     #[cfg(feature = "matgen")]
     #[test]
     fn tuned_finds_nd_class_win_on_curl_curl() {
@@ -758,8 +806,7 @@ mod tests {
         let sym_amd = LdltSymbolic::analyze_with(&a, &SolverSettings::default()).unwrap();
         let amd_flops = sym_amd.estimate_memory::<Complex<f64>>().factor_flops;
 
-        let (sym, s) =
-            LdltSolver::<Complex<f64>>::tuned(&a, crate::auto_tune::DEFAULT_TUNE_WEIGHT).unwrap();
+        let (sym, s) = LdltSolver::<Complex<f64>>::tuned(&a).unwrap();
         eprintln!(
             "curl_curl pick {:?}: fill {} flops {}",
             s.ordering,

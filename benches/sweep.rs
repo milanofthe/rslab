@@ -1114,16 +1114,16 @@ fn main() {
             if flops as f64 > grid_flop_cap {
                 continue; // skip the heaviest matrices (bounded wall-clock)
             }
-            // The tuner's pick at weight `w`, taken straight from the shipped solver
-            // (`LdltSolver`/`LuSolver::tuned`) so the sweep exercises the *real*
+            // The ML tuner's pick at weight `w`, taken straight from the shipped
+            // solver (`LdltSolver`/`LuSolver::tuned_model`) so the sweep exercises the *real*
             // guarded + memory-backstopped logic. Previously this replicated the
             // backstop by hand and diverged from the solver (it compared the
             // dense-panel `factor_nnz` estimate, which overshoots the true fill
             // non-uniformly, and let banded+MetisND picks through at 2x fill).
             let pick = |w: f64| -> SolverSettings {
                 match &entry.mat {
-                    Mat::Sym(a) => rslab::LdltSolver::<C>::tuned(a, w).map(|(_, s)| s),
-                    Mat::Unsym(a) => rslab::LuSolver::<C>::tuned(a, w).map(|(_, s)| s),
+                    Mat::Sym(a) => rslab::LdltSolver::<C>::tuned_model(a, w).map(|(_, s)| s),
+                    Mat::Unsym(a) => rslab::LuSolver::<C>::tuned_model(a, w).map(|(_, s)| s),
                 }
                 .unwrap_or_else(|_| SolverSettings::default())
             };

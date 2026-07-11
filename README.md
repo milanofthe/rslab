@@ -40,15 +40,23 @@ headline results.
   RCM (band/profile), selectable or raced per matrix.
 - Tunable equilibration (one-pass ∞-norm, iterative Ruiz, MC64 matching, off) and
   factor emit/memory mode, all through one flat `SolverSettings` interface.
-- Learned auto-tuner, **one model per path** (symmetric LDLᵀ / unsymmetric LU):
-  a small MLP selects the solver configuration (ordering incl. `MetisND`, method,
-  amalgamation, threshold-pivot `u` on LU, equilibration, memory mode, kernel
-  gates) per matrix from its structural features, guarded by a deterministic
-  a-priori memory backstop so it never uses more memory than the default;
-  out-of-distribution it falls back to a deterministic exact-fill ordering race.
-  Trained on a complete-distribution corpus including generated curl-curl Maxwell
-  (complex indefinite), Stokes/KKT saddle-point, and convection-diffusion (the
-  unsymmetric LU class, swept over the grid-Péclet range) systems.
+- **Heuristic default settings** (hardware-agnostic, deterministic, model-free):
+  `factor()` picks its configuration from exact a-priori quantities - the adaptive
+  ordering heuristic, the proven default kernel knobs, and an exact
+  nested-dissection bakeoff on large systems (adopt `MetisND` only on a clear
+  predicted-flops win with no fill/memory regression). An optional **one-time
+  install diagnosis** (`cargo xtask calibrate` / `tuning::install_diagnose`)
+  measures this machine's throughput + parallel-speedup curve once and caches it;
+  with the cache present, the worker count comes from the calibrated cost model
+  (critical-path-aware), otherwise from the conservative structural default. The
+  solvers never measure implicitly.
+- Optional **learned auto-tuner** (`factor_auto` / `tuned_model`), **one model per
+  path** (symmetric LDLᵀ / unsymmetric LU): a small MLP selects the solver
+  configuration (ordering incl. `MetisND`, method, amalgamation, threshold-pivot
+  `u` on LU, equilibration, memory mode, kernel gates) per matrix from its
+  structural features, guarded by a deterministic a-priori memory backstop so it
+  never uses more memory than the default. For tuning to a specific problem class
+  on specific hardware; the default `factor()` does not consult it.
 - **Runtime tuner profile** (no recompile): the two models plus hardware-calibrated
   guard thresholds ship as a `tuner_profile.json` config artifact. Point
   `RSLAB_TUNER_PROFILE` at one (or call `apply_profile`) to specialize the tuner to

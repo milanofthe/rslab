@@ -64,6 +64,10 @@ pub struct Calibration {
     /// Parallel speedup measured at `speedup_threads`.
     pub speedup: f64,
     pub speedup_threads: usize,
+    /// Parallel speedup measured at 4 threads - a mid-curve support point so
+    /// [`speedup_for`](Self::speedup_for) does not overestimate small thread
+    /// counts by linear interpolation toward the peak.
+    pub speedup4: f64,
     /// Coefficient of variation (std/mean) of the repeated single-thread factor
     /// time on this machine --- the measurement noise floor. The tuner's deviate
     /// guard is set from this (`min_gain = z·cv`) so it never chases a speedup
@@ -104,11 +108,21 @@ impl Calibration {
             .and_then(|t| t.parse().ok())
             .unwrap_or(geom_gflops / 3.0);
         let time_cv = it.next().and_then(|t| t.parse().ok()).unwrap_or(0.1);
+        // Later field; an older cache lacks it - fall back to the linear
+        // interpolation the pre-speedup4 model used.
+        let speedup4 = it.next().and_then(|t| t.parse().ok()).unwrap_or_else(|| {
+            if speedup_threads > 1 {
+                1.0 + (speedup - 1.0) * 3.0 / (speedup_threads - 1) as f64
+            } else {
+                1.0
+            }
+        });
         Some(Calibration {
             geom_gflops,
             geom_gflops_cplx,
             speedup,
             speedup_threads,
+            speedup4,
             time_cv,
             fingerprint: fp,
         })
@@ -122,23 +136,26 @@ impl Calibration {
         std::fs::write(
             p,
             format!(
-                "{} {} {} {} {}",
+                "{} {} {} {} {} {}",
                 self.geom_gflops,
                 self.speedup,
                 self.speedup_threads,
                 self.geom_gflops_cplx,
-                self.time_cv
+                self.time_cv,
+                self.speedup4
             ),
         )
     }
 
     /// A reasonable default if calibration cannot run (e.g. analyze fails).
     fn fallback(hw: &HardwareInfo) -> Self {
+        let speedup = (hw.physical_cores as f64).sqrt().max(1.0);
         Calibration {
             geom_gflops: 2.0,
             geom_gflops_cplx: 2.0 / 3.0,
-            speedup: (hw.physical_cores as f64).sqrt().max(1.0),
+            speedup,
             speedup_threads: hw.physical_cores,
+            speedup4: speedup.min(2.0),
             time_cv: 0.1,
             fingerprint: hw.fingerprint(),
         }
@@ -154,8 +171,13 @@ impl Calibration {
         }
     }
 
-    /// Measure throughput by factoring a representative 3D grid at 1 thread and at
-    /// `physical_cores`, recording the proxy-flops/s rate and the parallel speedup.
+    /// Measure throughput by factoring representative 3D grids: the serial
+    /// proxy-flops/s rate + timing noise floor on a small grid (fast), and the
+    /// parallel speedup curve (at 4 threads and at `physical_cores`) on a larger
+    /// grid - the regime where parallelism actually matters. A small grid
+    /// understates the achievable speedup badly (fronts too small to keep
+    /// workers busy), which made the cost model pick far too few workers for
+    /// production-size systems.
     pub fn measure(hw: &HardwareInfo) -> Self {
         let a = grid3d_spd::<f64>(24); // ≈ 13 800 DOFs, a few hundred ms
         let Ok(sym) = LdltSymbolic::analyze(&a) else {
@@ -177,14 +199,49 @@ impl Calibration {
                 None => return Self::fallback(hw),
             }
         }
-        let Some(tn) = time_at(hw.physical_cores.max(1)) else {
-            return Self::fallback(hw);
-        };
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
         let var = samples.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / samples.len() as f64;
         let time_cv = if mean > 0.0 { var.sqrt() / mean } else { 0.0 };
         let t1 = mean;
         let geom_gflops = (flops / t1.max(1e-9)) / 1e9;
+
+        // Parallel speedup on a larger, **complex** grid (≈ 33k DOFs). Complex
+        // arithmetic is the flop-dense regime where the thread choice matters
+        // and parallel scaling is real; the small/real grid is closer to
+        // bandwidth-bound and measures a speedup (~1.3x on a 12-core desktop)
+        // that would make the cost model under-provision flop-heavy systems by
+        // 2-4x. For pure-f64 workloads this curve errs toward a few extra
+        // workers - the cheap direction (the critical-path floor still caps
+        // chain-like matrices at one worker).
+        // MetisND ordering: the speedup measurement captures what the machine
+        // *can* do on a well-parallelizable elimination tree (short critical
+        // path); per-matrix structure is the cost model's job (critical-path
+        // floor + residual), not the calibration's. A minimum-degree ordering
+        // here confounds machine capability with tree shape.
+        let ab = grid3d_spd::<Complex<f64>>(32);
+        let opts_nd =
+            SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::MetisND);
+        let Ok(symb) = LdltSymbolic::analyze_with(&ab, &opts_nd) else {
+            return Self::fallback(hw);
+        };
+        let time_b = |t: usize| -> Option<f64> {
+            let opts = opts_nd.clone().with_threads(t);
+            let start = std::time::Instant::now();
+            symb.factor(&ab, &opts).ok()?;
+            Some(start.elapsed().as_secs_f64())
+        };
+        // Warm-up factor: first-touch page faults would inflate the first
+        // timing (and with it the measured speedup).
+        if time_b(hw.physical_cores.max(1)).is_none() {
+            return Self::fallback(hw);
+        }
+        let (Some(t1b), Some(t4b), Some(tn)) = (
+            time_b(1),
+            time_b(4.min(hw.physical_cores.max(1))),
+            time_b(hw.physical_cores.max(1)),
+        ) else {
+            return Self::fallback(hw);
+        };
         // Complex rate: same grid, complex-typed, factored once at one thread. The
         // structure (fill, flops proxy) is identical; only the per-flop cost differs.
         let ac = grid3d_spd::<Complex<f64>>(24);
@@ -199,11 +256,13 @@ impl Calibration {
             }
             Err(_) => geom_gflops / 3.0,
         };
+        let speedup = (t1b / tn.max(1e-9)).max(1.0);
         Calibration {
             geom_gflops,
             geom_gflops_cplx,
-            speedup: (t1 / tn.max(1e-9)).max(1.0),
+            speedup,
             speedup_threads: hw.physical_cores.max(1),
+            speedup4: (t1b / t4b.max(1e-9)).max(1.0),
             time_cv,
             fingerprint: hw.fingerprint(),
         }
@@ -218,18 +277,49 @@ impl Calibration {
         (2.0 * self.time_cv).clamp(0.03, 0.30)
     }
 
-    /// Interpolated speedup at `threads`: linear toward the calibrated peak, flat
-    /// beyond it (sparse-direct scaling saturates).
+    /// Interpolated speedup at `threads`: piecewise linear through the measured
+    /// points `(1, 1) → (4, speedup4) → (speedup_threads, speedup)`, flat beyond
+    /// the calibrated peak (sparse-direct scaling saturates). The mid point keeps
+    /// the curve honest at small counts, where a straight line toward the peak
+    /// systematically misjudges the knee.
     pub fn speedup_for(&self, threads: usize) -> f64 {
         if threads <= 1 {
             1.0
         } else if threads >= self.speedup_threads {
             self.speedup
+        } else if threads <= 4 {
+            1.0 + (self.speedup4 - 1.0) * (threads - 1) as f64 / 3.0
         } else {
-            1.0 + (self.speedup - 1.0) * (threads - 1) as f64
-                / (self.speedup_threads - 1).max(1) as f64
+            let span = (self.speedup_threads - 4).max(1) as f64;
+            self.speedup4 + (self.speedup - self.speedup4) * (threads - 4) as f64 / span
         }
     }
+}
+
+/// One-time **install diagnosis**: probe this machine and measure (or load) its
+/// factorization calibration, caching it keyed by the hardware fingerprint.
+///
+/// Run once per machine (e.g. from an install script or `cargo xtask calibrate`);
+/// afterwards the heuristic default path ([`LdltSolver::tuned`](crate::LdltSolver::tuned),
+/// [`LuSolver::tuned`](crate::LuSolver::tuned)) picks its worker count from the
+/// cached calibration via the cost model instead of the conservative capped
+/// structural default. The solvers themselves **never** measure implicitly - no
+/// calibration cache means the hardware-agnostic default behaviour.
+pub fn install_diagnose() -> Calibration {
+    let hw = HardwareInfo::probe();
+    Calibration::load_or_measure(&hw)
+}
+
+/// Cached-only calibration lookup for the heuristic default path: returns
+/// `(physical_cores, calibration)` if [`install_diagnose`] has written a cache
+/// for this machine, else `None`. Never measures. Memoized per process so the
+/// per-factor cost is a single `OnceLock` read.
+pub(crate) fn cached_calibration() -> Option<(usize, Calibration)> {
+    static CACHE: std::sync::OnceLock<Option<(usize, Calibration)>> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let hw = HardwareInfo::probe();
+        Calibration::load(hw.fingerprint()).map(|c| (hw.physical_cores, c))
+    })
 }
 
 /// Resource budget the factorization must live within. The default (no memory
@@ -329,6 +419,10 @@ pub fn recommend_threads_cost_model(
             estimate.est_runtime_ms_threaded(rate, calib.speedup_for(t)) * (-residual_ln(t)).exp();
         corrected.max(floor_ms)
     };
+    // Evaluate the whole candidate ladder and keep the fewest workers within 3%
+    // of the best predicted time. An early break at the first non-improving
+    // step is wrong for a knee-shaped speedup curve (2 -> 4 may be flat while
+    // 8 still wins), which made the model under-provision by 2-4x.
     let mut best_t = 1;
     let mut best = time(1);
     for t in [2usize, 4, 6, 8, 12, 16, 20, 24, 32]
@@ -340,9 +434,6 @@ pub fn recommend_threads_cost_model(
             // >3% faster: worth the extra workers.
             best = tt;
             best_t = t;
-        } else {
-            // Diminishing returns (critical path / saturation) -- stop adding cores.
-            break;
         }
     }
     best_t
@@ -427,6 +518,7 @@ mod tests {
             geom_gflops_cplx: 0.7,
             speedup: 6.0,
             speedup_threads: 12,
+            speedup4: 2.8,
             time_cv: 0.1,
             fingerprint: 0,
         };
@@ -461,6 +553,13 @@ mod tests {
 
     #[test]
     fn probe_calibrate_plan_governor() {
+        // Isolate the cache: this test MEASURES while the rest of the test
+        // binary hammers all cores, so its calibration is noise - it must
+        // never land in the machine's real cache (where `cached_calibration`
+        // would feed it into every subsequent heuristic `tuned()` pick).
+        let scratch = std::env::temp_dir().join("rla-calib-test");
+        std::env::set_var("RLA_CALIB_CACHE", &scratch);
+
         let hw = HardwareInfo::probe();
         assert!(hw.logical_cores >= 1 && hw.physical_cores >= 1);
         assert!(hw.total_ram_bytes > 0, "RAM probed");

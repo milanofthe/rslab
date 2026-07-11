@@ -62,5 +62,7 @@ parameter-level headroom remains on this class.
    wall separately; candidates: pipelining assembly with updates, batching
    small same-target updates, checking `gemm` Rayon behavior under the
    work-stealing tree.
-3. `auto` tuner regression on this class (slower than default with equal
-   fill, ana 2.4 s) — file as issue.
+3. `auto` tuner regression on this class — **DONE 2026-07** (see
+   `heuristic-defaults-2026-07.md`): the default `factor()` no longer runs
+   the ML model; the heuristic pick (ND bakeoff + calibrated threads) lands
+   at 695 ms with 0.37 s analysis (was: ML auto 2565 ms, ana 2.4 s).

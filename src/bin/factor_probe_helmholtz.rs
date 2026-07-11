@@ -127,4 +127,27 @@ fn main() {
         let gf = estc.factor_flops as f64 / (best / 1e3) / 1e9;
         eprintln!("cfg {name} @{t8}  best {best:8.1} ms   {gf:7.2} geom-Gflop/s");
     }
+
+    // The heuristic default pick (`LdltSolver::tuned` = what `factor()` runs):
+    // ordering via the exact ND bakeoff, threads from the cached calibration if
+    // the install diagnosis has run.
+    let t0 = Instant::now();
+    let (sym_h, s_h) = rslab::LdltSolver::<Complex<f64>>::tuned(&a).unwrap();
+    let ana_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let est_h = sym_h.estimate_memory::<Complex<f64>>();
+    let _ = sym_h.factor(&a, &s_h).unwrap();
+    let mut best = f64::INFINITY;
+    for _ in 0..3 {
+        let t0 = Instant::now();
+        let f = sym_h.factor(&a, &s_h).unwrap();
+        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        std::hint::black_box(f.factor_nnz());
+    }
+    eprintln!(
+        "heuristic tuned(): {:?} threads {:?}  ana {ana_ms:.0} ms  fac best {best:.1} ms  fill {}  flops {:.3e}",
+        s_h.ordering,
+        s_h.threads,
+        sym_h.symbolic_factor_nnz(),
+        est_h.factor_flops as f64
+    );
 }
