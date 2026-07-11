@@ -168,7 +168,7 @@ thread_local! {
 // `lu_front` kernel is unchanged; only the CB *storage* is compressed.
 
 /// A front's contribution block: dense, or BLR-compressed for the stack.
-enum Contribution<T> {
+enum Contribution<T: crate::scalar::Scalar> {
     Dense(Vec<T>),
     Blr(BlrMatrix<T>),
 }
@@ -246,7 +246,7 @@ struct FrontLu<T> {
 
 /// Reassembled per-front result retained for the global pass and the parent's
 /// extend-add.
-struct NodeLu<T> {
+struct NodeLu<T: Scalar> {
     front: FrontLu<T>,
     row_indices: Vec<usize>,
     /// The `cnrow × cnrow` contribution block `A22 − L21·U12` - dense, or
@@ -527,8 +527,13 @@ fn lu_front<T: Scalar>(
     // them compressed shrinks the live CB-stack transient. Densified
     // tile-by-tile at the parent extend-add.
     let contribution = match blr {
-        BlrMode::ContributionBlocks { eps, min_cnrow, b } if cnrow >= min_cnrow => {
-            let blr = BlrMatrix::from_dense(&cb, cnrow, cnrow, b, eps);
+        BlrMode::ContributionBlocks {
+            eps,
+            min_cnrow,
+            b,
+            adaptive,
+        } if cnrow >= min_cnrow => {
+            let blr = BlrMatrix::from_dense_with(&cb, cnrow, cnrow, b, eps, adaptive);
             CB_DENSE_SCALARS.fetch_add((cnrow * cnrow) as u64, Ordering::Relaxed);
             CB_BLR_SCALARS.fetch_add(blr.storage() as u64, Ordering::Relaxed);
             Contribution::Blr(blr)

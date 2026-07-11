@@ -23,21 +23,35 @@ use crate::scalar::Scalar;
 /// conjugation, matching the unconjugated (complex-symmetric / general) algebra
 /// the fronts use.
 #[derive(Debug, Clone)]
-pub struct LowRank<T> {
+pub struct LowRank<T: Scalar> {
     pub m: usize,
     pub n: usize,
+    /// Total rank: full-precision crosses `[0, rank)` in `u`/`v` plus the
+    /// low-precision tail `[rank, rank + rank_lo)` in `u_lo`/`v_lo`.
     pub rank: usize,
     /// `m × rank`, column-major.
     pub u: Vec<T>,
     /// `n × rank`, column-major.
     pub v: Vec<T>,
+    /// Adaptive-precision tail (issue #19): trailing crosses whose
+    /// contribution is small enough that storing them at the `T::Lo`
+    /// roundoff stays below the compression tolerance - half the bytes
+    /// per entry when `T::LO_SHRINKS`. Empty for plain compression.
+    pub rank_lo: usize,
+    /// `m × rank_lo`, column-major, low precision.
+    pub u_lo: Vec<T::Lo>,
+    /// `n × rank_lo`, column-major, low precision.
+    pub v_lo: Vec<T::Lo>,
 }
 
 impl<T: Scalar> LowRank<T> {
-    /// Stored entries `rank·(m + n)` vs the dense `m·n` - the compression only
-    /// pays off when this is smaller.
+    /// Stored size in full-precision-entry equivalents: full crosses count
+    /// 1 each, low-precision tail entries count 1/2 (when `T::Lo` shrinks).
+    /// Comparable against the dense `m·n`.
     pub fn storage(&self) -> usize {
-        self.rank * (self.m + self.n)
+        let lo = self.rank_lo * (self.m + self.n);
+        let lo_eq = if T::LO_SHRINKS { lo.div_ceil(2) } else { lo };
+        self.rank * (self.m + self.n) + lo_eq
     }
 
     /// Reconstruct the dense approximation `U·Vᵀ` (column-major `m × n`). For
@@ -53,6 +67,19 @@ impl<T: Scalar> LowRank<T> {
                     let col = &mut d[j * self.m..j * self.m + self.m];
                     for i in 0..self.m {
                         col[i] = col[i] + uk[i] * vj;
+                    }
+                }
+            }
+        }
+        for k in 0..self.rank_lo {
+            let uk = &self.u_lo[k * self.m..k * self.m + self.m];
+            let vk = &self.v_lo[k * self.n..k * self.n + self.n];
+            for j in 0..self.n {
+                let vj = T::promote(vk[j]);
+                if vj != T::zero() {
+                    let col = &mut d[j * self.m..j * self.m + self.m];
+                    for i in 0..self.m {
+                        col[i] = col[i] + T::promote(uk[i]) * vj;
                     }
                 }
             }
@@ -84,6 +111,37 @@ pub fn compress_aca<T: Scalar>(
     eps: f64,
     max_rank: usize,
 ) -> LowRank<T> {
+    compress_aca_impl(b, m, n, eps, max_rank, false)
+}
+
+/// [`compress_aca`] with the **adaptive-precision tail** (issue #19,
+/// Amestoy/Buttari/Higham/Mary adapted to ACA crosses): after compression,
+/// the trailing crosses whose weight `w_k = ‖u_k‖₂·‖v_k‖₂` satisfies
+/// `w_k · eps_lo ≤ eps · ‖B‖_F / rank` are stored in `T::Lo` - their
+/// storage-rounding noise (`w_k · eps_lo` each, `rank` of them at most)
+/// stays below the compression tolerance already accepted, so the overall
+/// approximation quality class is unchanged at half the bytes per tail
+/// entry. The split is a prefix rule (all crosses from the first qualifying
+/// index onward), matching the roughly decreasing ACA weights.
+#[allow(dead_code)] // crate-internal API: exercised by tests; production enters via BlrMode/from_dense_with
+pub fn compress_aca_adaptive<T: Scalar>(
+    b: &[T],
+    m: usize,
+    n: usize,
+    eps: f64,
+    max_rank: usize,
+) -> LowRank<T> {
+    compress_aca_impl(b, m, n, eps, max_rank, true)
+}
+
+fn compress_aca_impl<T: Scalar>(
+    b: &[T],
+    m: usize,
+    n: usize,
+    eps: f64,
+    max_rank: usize,
+    lo_tail: bool,
+) -> LowRank<T> {
     let cap = max_rank.min(m).min(n);
     let bnorm = frob(b);
     let mut r = b.to_vec(); // residual, column-major m×n
@@ -99,6 +157,9 @@ pub fn compress_aca<T: Scalar>(
             rank: 0,
             u,
             v,
+            rank_lo: 0,
+            u_lo: Vec::new(),
+            v_lo: Vec::new(),
         };
     }
     let tol = eps * bnorm;
@@ -143,7 +204,45 @@ pub fn compress_aca<T: Scalar>(
             break;
         }
     }
-    LowRank { m, n, rank, u, v }
+    if !lo_tail || !T::LO_SHRINKS || rank == 0 {
+        return LowRank {
+            m,
+            n,
+            rank,
+            u,
+            v,
+            rank_lo: 0,
+            u_lo: Vec::new(),
+            v_lo: Vec::new(),
+        };
+    }
+    // Adaptive tail: demote the prefix-maximal trailing cross set whose
+    // per-cross storage-rounding noise stays below the accepted tolerance.
+    let cross_w = |k: usize| -> f64 {
+        let un = frob(&u[k * m..k * m + m]);
+        let vn = frob(&v[k * n..k * n + n]);
+        un * vn
+    };
+    let budget = eps.max(f64::EPSILON) * bnorm / rank as f64;
+    let mut k0 = rank;
+    while k0 > 0 && cross_w(k0 - 1) * T::EPS_LO <= budget {
+        k0 -= 1;
+    }
+    let rank_lo = rank - k0;
+    let u_lo: Vec<T::Lo> = u[k0 * m..].iter().map(|&x| x.demote()).collect();
+    let v_lo: Vec<T::Lo> = v[k0 * n..].iter().map(|&x| x.demote()).collect();
+    u.truncate(k0 * m);
+    v.truncate(k0 * n);
+    LowRank {
+        m,
+        n,
+        rank: k0,
+        u,
+        v,
+        rank_lo,
+        u_lo,
+        v_lo,
+    }
 }
 
 /// One tile of a block-partitioned matrix: stored either dense (column-major,
@@ -154,7 +253,7 @@ pub fn compress_aca<T: Scalar>(
 /// tiles take the ordinary kernels, low-rank tiles take the cheap
 /// `U(VᵀU)Vᵀ`-style block arithmetic.
 #[derive(Debug, Clone)]
-pub enum Block<T> {
+pub enum Block<T: Scalar> {
     /// Column-major `rows × cols` dense tile.
     Dense {
         rows: usize,
@@ -207,7 +306,7 @@ fn block_extent(full: usize, b: usize, k: usize) -> (usize, usize) {
 /// Stage 1 builds and reconstructs it; later stages factor it block-by-block
 /// with low-rank tile arithmetic.
 #[derive(Debug, Clone)]
-pub struct BlrMatrix<T> {
+pub struct BlrMatrix<T: Scalar> {
     pub nrow: usize,
     pub ncol: usize,
     pub b: usize,
@@ -264,7 +363,22 @@ impl<T: Scalar> BlrMatrix<T> {
     /// the dense tile): a tile that reaches that cap without converging is kept
     /// dense, which also bounds the ACA cost on incompressible near-diagonal
     /// tiles to `O(breakeven · rows·cols)`.
+    #[allow(dead_code)] // stable convenience wrapper; production enters via from_dense_with
     pub fn from_dense(a: &[T], nrow: usize, ncol: usize, b: usize, eps: f64) -> BlrMatrix<T> {
+        Self::from_dense_with(a, nrow, ncol, b, eps, false)
+    }
+
+    /// [`from_dense`](Self::from_dense) with the adaptive-precision tail
+    /// toggle: `adaptive = true` stores each compressed tile's small
+    /// trailing crosses in `T::Lo` (see [`compress_aca_adaptive`]).
+    pub fn from_dense_with(
+        a: &[T],
+        nrow: usize,
+        ncol: usize,
+        b: usize,
+        eps: f64,
+        adaptive: bool,
+    ) -> BlrMatrix<T> {
         assert!(b > 0, "block size must be positive");
         let nbr = nrow.div_ceil(b);
         let nbc = ncol.div_ceil(b);
@@ -287,8 +401,8 @@ impl<T: Scalar> BlrMatrix<T> {
                     }
                 } else {
                     let breakeven = (bm * bn / (bm + bn)).max(1);
-                    let lr = compress_aca(&tile, bm, bn, eps, breakeven);
-                    if lr.rank < breakeven && lr.storage() < bm * bn {
+                    let lr = compress_aca_impl(&tile, bm, bn, eps, breakeven, adaptive);
+                    if lr.rank + lr.rank_lo < breakeven && lr.storage() < bm * bn {
                         Block::LowRank(lr)
                     } else {
                         Block::Dense {
@@ -529,5 +643,69 @@ mod tests {
         }
         let lr = compress_aca(&b, m, n, 1e-12, m.min(n));
         assert!(lr.rank >= m - 2, "full-rank block, got rank {}", lr.rank);
+    }
+
+    /// Smooth kernel `1/(1 + |i-j|)`: fast-decaying cross weights, the
+    /// adaptive tail must (a) keep the reconstruction inside the accepted
+    /// tolerance class and (b) actually shrink the stored size.
+    #[test]
+    fn adaptive_tail_preserves_quality_and_shrinks_storage() {
+        let (m, n) = (96usize, 96usize);
+        let mut b = vec![0.0f64; m * n];
+        for j in 0..n {
+            for i in 0..m {
+                b[j * m + i] = 1.0 / (1.0 + (i as f64 - (j + 200) as f64).abs());
+            }
+        }
+        let eps = 1e-8;
+        let bnorm = frob(&b);
+        let plain = compress_aca(&b, m, n, eps, m.min(n));
+        let adap = compress_aca_adaptive(&b, m, n, eps, m.min(n));
+        assert_eq!(
+            plain.rank,
+            adap.rank + adap.rank_lo,
+            "same total rank, split into hi+lo"
+        );
+        assert!(
+            adap.rank_lo > 0,
+            "decaying weights must demote a tail (rank {}, lo {})",
+            adap.rank,
+            adap.rank_lo
+        );
+        assert!(
+            adap.storage() < plain.storage(),
+            "adaptive must store less ({} vs {})",
+            adap.storage(),
+            plain.storage()
+        );
+        // Reconstruction quality stays in the accepted class: the tail's
+        // rounding noise is budgeted below eps, allow a small constant.
+        let d = adap.to_dense();
+        let err = d
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            err <= 4.0 * eps * bnorm,
+            "adaptive reconstruction error {err:.3e} vs budget {:.3e}",
+            4.0 * eps * bnorm
+        );
+    }
+
+    /// For an f32 matrix `Lo` is the identity: the adaptive path must be a
+    /// no-op (no demotion, no storage change) rather than pretending a win.
+    #[test]
+    fn adaptive_tail_is_noop_for_single_precision() {
+        let (m, n) = (32usize, 32usize);
+        let mut b = vec![0.0f32; m * n];
+        for j in 0..n {
+            for i in 0..m {
+                b[j * m + i] = 1.0 / (1.0 + (i as f64 - (j + 80) as f64).abs()) as f32;
+            }
+        }
+        let adap = compress_aca_adaptive(&b, m, n, 1e-5, m.min(n));
+        assert_eq!(adap.rank_lo, 0, "identity Lo must not split");
     }
 }

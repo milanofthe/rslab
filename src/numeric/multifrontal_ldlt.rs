@@ -223,6 +223,11 @@ pub enum BlrMode {
         eps: f64,
         min_cnrow: usize,
         b: usize,
+        /// Adaptive-precision tail (issue #19): store the small trailing
+        /// low-rank crosses of each tile in single precision - half the
+        /// bytes per tail entry, approximation class unchanged (the tail's
+        /// storage-rounding noise stays below `eps`).
+        adaptive: bool,
     },
 }
 
@@ -234,6 +239,18 @@ impl BlrMode {
             eps,
             min_cnrow: 256,
             b: 256,
+            adaptive: false,
+        }
+    }
+
+    /// [`contribution_blocks`](Self::contribution_blocks) with the
+    /// adaptive-precision tail enabled.
+    pub fn contribution_blocks_adaptive(eps: f64) -> Self {
+        BlrMode::ContributionBlocks {
+            eps,
+            min_cnrow: 256,
+            b: 256,
+            adaptive: true,
         }
     }
 }

@@ -62,6 +62,21 @@ pub trait Scalar:
     /// Hermitian path.
     fn conj(self) -> Self;
 
+    /// Low-precision storage partner (`f64 -> f32`, `c64 -> c32`; the
+    /// identity for the already-single types). Powers adaptive-precision
+    /// low-rank storage (issue #19): tail vectors whose contribution is
+    /// below the compression tolerance are stored in `Lo` at half the
+    /// bytes and promoted on read.
+    type Lo: Copy + Send + Sync + std::fmt::Debug + 'static;
+    /// Whether `Lo` actually halves the storage (`false` for the identity).
+    const LO_SHRINKS: bool;
+    /// Unit roundoff of `Lo` (the storage-rounding noise level).
+    const EPS_LO: f64;
+    /// Cast to the low-precision partner.
+    fn demote(self) -> Self::Lo;
+    /// Cast back up.
+    fn promote(lo: Self::Lo) -> Self;
+
     /// The reciprocal `1/z`. The caller must guarantee `self != 0`.
     fn recip(self) -> Self;
 
@@ -99,6 +114,18 @@ pub(crate) fn fmadd<T: Scalar>(a: T, b: T, c: T) -> T {
 }
 
 impl Scalar for f64 {
+    type Lo = f32;
+    const LO_SHRINKS: bool = true;
+    const EPS_LO: f64 = f32::EPSILON as f64;
+    #[inline]
+    fn demote(self) -> f32 {
+        self as f32
+    }
+    #[inline]
+    fn promote(lo: f32) -> f64 {
+        lo as f64
+    }
+
     #[inline]
     fn zero() -> Self {
         0.0
@@ -151,6 +178,18 @@ impl Scalar for f64 {
 }
 
 impl Scalar for Complex<f64> {
+    type Lo = Complex<f32>;
+    const LO_SHRINKS: bool = true;
+    const EPS_LO: f64 = f32::EPSILON as f64;
+    #[inline]
+    fn demote(self) -> Complex<f32> {
+        Complex::new(self.re as f32, self.im as f32)
+    }
+    #[inline]
+    fn promote(lo: Complex<f32>) -> Complex<f64> {
+        Complex::new(lo.re as f64, lo.im as f64)
+    }
+
     #[inline]
     fn zero() -> Self {
         Complex::new(0.0, 0.0)
@@ -212,6 +251,18 @@ impl Scalar for Complex<f64> {
 }
 
 impl Scalar for f32 {
+    type Lo = f32;
+    const LO_SHRINKS: bool = false;
+    const EPS_LO: f64 = f32::EPSILON as f64;
+    #[inline]
+    fn demote(self) -> f32 {
+        self
+    }
+    #[inline]
+    fn promote(lo: f32) -> f32 {
+        lo
+    }
+
     #[inline]
     fn zero() -> Self {
         0.0
@@ -265,6 +316,18 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex<f32> {
+    type Lo = Complex<f32>;
+    const LO_SHRINKS: bool = false;
+    const EPS_LO: f64 = f32::EPSILON as f64;
+    #[inline]
+    fn demote(self) -> Complex<f32> {
+        self
+    }
+    #[inline]
+    fn promote(lo: Complex<f32>) -> Complex<f32> {
+        lo
+    }
+
     #[inline]
     fn zero() -> Self {
         Complex::new(0.0, 0.0)

@@ -39,39 +39,20 @@ use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
-/// A high-precision scalar with a designated low-precision partner.
-pub trait MixedScalar: Scalar {
-    /// The low-precision partner type (`f64 -> f32`, `c64 -> c32`).
-    type Lo: Scalar;
-    fn to_lo(self) -> Self::Lo;
-    fn from_lo(lo: Self::Lo) -> Self;
+/// A high-precision scalar whose [`Scalar::Lo`] partner is itself a full
+/// [`Scalar`] (factorizable): `f64 -> f32`, `c64 -> c32`. The cast pair
+/// lives on [`Scalar`] (`demote`/`promote`); this marker adds the
+/// factorability bound and the certificate roundoff level.
+pub trait MixedScalar: Scalar<Lo: Scalar> {
     /// Unit roundoff of the HIGH precision (the certificate level).
     const EPS_HI: f64;
 }
 
 impl MixedScalar for f64 {
-    type Lo = f32;
-    #[inline]
-    fn to_lo(self) -> f32 {
-        self as f32
-    }
-    #[inline]
-    fn from_lo(lo: f32) -> f64 {
-        lo as f64
-    }
     const EPS_HI: f64 = f64::EPSILON;
 }
 
 impl MixedScalar for Complex<f64> {
-    type Lo = Complex<f32>;
-    #[inline]
-    fn to_lo(self) -> Complex<f32> {
-        Complex::new(self.re as f32, self.im as f32)
-    }
-    #[inline]
-    fn from_lo(lo: Complex<f32>) -> Complex<f64> {
-        Complex::new(lo.re as f64, lo.im as f64)
-    }
     const EPS_HI: f64 = f64::EPSILON;
 }
 
@@ -81,7 +62,7 @@ fn cast_csc_lo<T: MixedScalar>(a: &CscMatrix<T>) -> CscMatrix<T::Lo> {
         n: a.n,
         col_ptr: a.col_ptr.clone(),
         row_idx: a.row_idx.clone(),
-        values: a.values.iter().map(|&v| v.to_lo()).collect(),
+        values: a.values.iter().map(|&v| v.demote()).collect(),
     }
 }
 
@@ -91,7 +72,7 @@ fn cast_general_lo<T: MixedScalar>(a: &GeneralCsc<T>) -> GeneralCsc<T::Lo> {
         n: a.n,
         col_ptr: a.col_ptr.clone(),
         row_idx: a.row_idx.clone(),
-        values: a.values.iter().map(|&v| v.to_lo()).collect(),
+        values: a.values.iter().map(|&v| v.demote()).collect(),
     }
 }
 
@@ -136,12 +117,12 @@ struct LoPrecond<'a, T: MixedScalar> {
 
 impl<T: MixedScalar> LoPrecond<'_, T> {
     fn solve_up(&self, r: &[T]) -> Result<Vec<T>, RslabError> {
-        let rl: Vec<T::Lo> = r.iter().map(|&v| v.to_lo()).collect();
+        let rl: Vec<T::Lo> = r.iter().map(|&v| v.demote()).collect();
         let zl = match &self.f {
             LoFactor::Ldlt(s) => s.solve(&rl)?,
             LoFactor::Lu(s) => s.solve(&rl)?,
         };
-        Ok(zl.into_iter().map(T::from_lo).collect())
+        Ok(zl.into_iter().map(T::promote).collect())
     }
 }
 
