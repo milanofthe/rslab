@@ -386,16 +386,16 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
 
     // Backward solve Lᵀ · v = w (CSC column j = row j of Lᵀ): dot column j's
     // multipliers against the already-solved tail (diagonal-first layout, so
-    // the dot starts at `col_ptr[j] + 1`).
+    // the dot starts at `col_ptr[j] + 1`). Deliberately mul+sub, NOT `fmadd`:
+    // this accumulator is a loop-carried dependency, and the FMA's higher
+    // latency on that serial chain measures ~8 % slower than the pipelined
+    // mul (off-chain) + sub. `fmadd` stays only in the scatter-form sweeps,
+    // where updates are independent and FMA is throughput-bound.
     for j in (0..n).rev() {
         let (s, e) = (factors.l_col_ptr[j], factors.l_col_ptr[j + 1]);
         let mut acc = y[j];
         for k in (s + 1)..e {
-            acc = fmadd(
-                T::zero() - factors.l_values[k],
-                y[factors.l_row_idx[k]],
-                acc,
-            );
+            acc = acc - factors.l_values[k] * y[factors.l_row_idx[k]];
         }
         y[j] = acc;
     }
@@ -510,13 +510,14 @@ impl<T: Scalar> CompressedLdltFactors<T> {
                 k += 1;
             }
         }
-        // Backward solve Lᵀ v = w.
+        // Backward solve Lᵀ v = w (mul+sub like `solve_ldlt`: the accumulator
+        // chain is latency-bound, see the note there).
         for j in (0..n).rev() {
             let (s, e) = (self.l_col_ptr[j] as usize, self.l_col_ptr[j + 1] as usize);
             let mut acc = y[j];
             for k in (s + 1)..e {
                 let i = self.l_row_idx[k] as usize;
-                acc = fmadd(T::zero() - self.l_values[k], y[i], acc);
+                acc = acc - self.l_values[k] * y[i];
             }
             y[j] = acc;
         }

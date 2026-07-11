@@ -905,6 +905,11 @@ impl<T: Scalar> KluSolver<T> {
     /// Column `j` of the stored `U`/`L`/`F` is row `j` of the transpose, so
     /// every inner loop is a gather over the existing column storage.
     fn solve_permuted_transpose(&self, w: &mut [T]) {
+        // Deliberately mul+sub, NOT `fmadd`: every inner loop here is a
+        // gather onto a single accumulator - a latency-bound serial chain
+        // where the FMA's higher latency loses to the pipelined mul + sub
+        // (see the `solve_ldlt` backward-sweep note). `fmadd` stays in the
+        // scatter-form sweeps of `solve_permuted`/`solve_many`.
         let f = &self.factors;
         for b in 0..f.block_ptr.len() - 1 {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
@@ -912,7 +917,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
-                    acc = fmadd(T::zero() - f.f_val[k], w[f.f_rowidx[k]], acc);
+                    acc = acc - f.f_val[k] * w[f.f_rowidx[k]];
                 }
                 w[j] = acc;
             }
@@ -920,7 +925,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                    acc = fmadd(T::zero() - f.u_val[k], w[f.u_rowidx[k]], acc);
+                    acc = acc - f.u_val[k] * w[f.u_rowidx[k]];
                 }
                 w[j] = acc / f.udiag[j];
             }
@@ -928,7 +933,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in (bs..be).rev() {
                 let mut acc = w[j];
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                    acc = fmadd(T::zero() - f.l_val[k], w[f.l_rowidx[k]], acc);
+                    acc = acc - f.l_val[k] * w[f.l_rowidx[k]];
                 }
                 w[j] = acc;
             }

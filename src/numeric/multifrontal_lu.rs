@@ -2635,7 +2635,9 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
     }
     // Backward solve U x = y (CSR by row). The pivot is a row's FIRST entry
     // (columns sorted, upper triangular), replacing the per-nonzero
-    // diagonal-search branch.
+    // diagonal-search branch. Deliberately mul+sub, NOT `fmadd`: the
+    // accumulator is a latency-bound serial chain (see `solve_ldlt`'s
+    // backward-sweep note).
     let mut x = vec![T::zero(); n];
     for e in (0..n).rev() {
         let (s, ee) = (f.u_row_ptr[e], f.u_row_ptr[e + 1]);
@@ -2643,7 +2645,7 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
         let diag = f.u_values[s];
         let mut acc = y[e];
         for k in (s + 1)..ee {
-            acc = fmadd(T::zero() - f.u_values[k], x[f.u_col_idx[k]], acc);
+            acc = acc - f.u_values[k] * x[f.u_col_idx[k]];
         }
         x[e] = acc * diag.recip();
     }
