@@ -90,4 +90,47 @@ fn main() {
         best_h * 1e3,
         est_h.factor_flops as f64 / best_h / 1e9
     );
+
+    // Mixed precision (issue #18): c32 factor + certified IR, production
+    // pivot policy. Numeric-factor timing excludes analysis (cast + analyze
+    // once, warm best-of-3), same protocol as above.
+    let a32 = rslab::GeneralCsc::<num_complex::Complex<f32>> {
+        n: a.n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: a
+            .values
+            .iter()
+            .map(|v| num_complex::Complex::new(v.re as f32, v.im as f32))
+            .collect(),
+    };
+    let opts32 = SolverSettings::exact()
+        .with_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 })
+        .with_threads(threads);
+    let sym32 = rslab::LuSymbolic::analyze_with(&a32, &opts32).expect("analyze32");
+    let _ = sym32.factor(&a32, &opts32).expect("warmup32");
+    let mut best32 = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        let f = sym32.factor(&a32, &opts32).expect("factor32");
+        best32 = best32.min(t.elapsed().as_secs_f64());
+        std::hint::black_box(f.factor_nnz());
+    }
+    let m = rslab::MixedLuSolver::<C>::factor_with(&a, &opts32).expect("mixed factor");
+    let b: Vec<C> = (0..a.n)
+        .map(|i| C::new(((i % 13) as f64) - 6.0, ((i % 7) as f64) - 3.0))
+        .collect();
+    let t = Instant::now();
+    let (x, info) = m.solve(&a, &b).expect("mixed solve");
+    let slv = t.elapsed().as_secs_f64() * 1e3;
+    std::hint::black_box(&x);
+    eprintln!(
+        "mixed c32+IR: fac best {:.0} ms ({:.2}x vs c64)  solve {slv:.1} ms  ir {} gmres {} be {:.1e} certified {}",
+        best32 * 1e3,
+        best / best32,
+        info.ir_iters,
+        info.gmres_iters,
+        info.backward_error,
+        info.certified
+    );
 }

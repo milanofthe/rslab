@@ -150,4 +150,45 @@ fn main() {
         sym_h.symbolic_factor_nnz(),
         est_h.factor_flops as f64
     );
+
+    // Mixed precision (issue #18): c32 factor + certified IR to c64. The
+    // numeric-factor timing excludes analysis (same protocol as the lines
+    // above): analyze the cast matrix once, warm best-of-3 on sym.factor.
+    let a32 = rslab::CscMatrix::<num_complex::Complex<f32>> {
+        n: a.n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: a
+            .values
+            .iter()
+            .map(|v| num_complex::Complex::new(v.re as f32, v.im as f32))
+            .collect(),
+    };
+    let (sym32, s32) = rslab::LdltSolver::<num_complex::Complex<f32>>::tuned(&a32).unwrap();
+    let _ = sym32.factor(&a32, &s32).unwrap();
+    let mut best_mf = f64::INFINITY;
+    for _ in 0..3 {
+        let t0 = Instant::now();
+        let f = sym32.factor(&a32, &s32).unwrap();
+        best_mf = best_mf.min(t0.elapsed().as_secs_f64() * 1e3);
+        std::hint::black_box(f.factor_nnz());
+    }
+    let m = rslab::MixedLdltSolver::<Complex<f64>>::factor(&a).unwrap();
+    let b: Vec<Complex<f64>> = (0..a.n)
+        .map(|i| Complex::new(((i % 13) as f64) - 6.0, ((i % 7) as f64) - 3.0))
+        .collect();
+    let t0 = Instant::now();
+    let (x, info) = m.solve(&a, &b).unwrap();
+    let slv_ms = t0.elapsed().as_secs_f64() * 1e3;
+    std::hint::black_box(&x);
+    // Reference c64 solve time on the heuristic factor.
+    let f_h = sym_h.factor(&a, &s_h).unwrap();
+    let t0 = Instant::now();
+    let xd = f_h.solve(&b).unwrap();
+    let slv64_ms = t0.elapsed().as_secs_f64() * 1e3;
+    std::hint::black_box(&xd);
+    eprintln!(
+        "mixed c32+IR: fac best {best_mf:.1} ms  solve {slv_ms:.1} ms (c64 solve {slv64_ms:.1} ms)  ir {} gmres {} be {:.1e} certified {}",
+        info.ir_iters, info.gmres_iters, info.backward_error, info.certified
+    );
 }
