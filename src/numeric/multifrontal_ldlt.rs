@@ -121,6 +121,7 @@ struct LlNodeCost {
     nrow: usize,
     ncol: usize,
     n_upd: usize,
+    cmod_gflop: f64,
 }
 static PROF_LDLT_NODES: std::sync::OnceLock<std::sync::Mutex<Vec<LlNodeCost>>> =
     std::sync::OnceLock::new();
@@ -2458,7 +2459,22 @@ fn ll_factor_node<T: Scalar>(
     // same kernel; the slab width is a pure function of `ncol` (never of
     // the thread count).
     let tile_w = (ncol / 16).clamp(32, 256);
-    let tiled = ncol >= 2 * tile_w && cmod_flops >= ll_gemm_par;
+    // Fork inside cmod only when the node's update work is genuinely large.
+    // A small node that forks pays rayon's join-steal latency: while its
+    // join waits for a stolen slab, the waiting thread steals OTHER work -
+    // often a whole sibling subtree - and this node (and every dependent on
+    // its chain) stalls for tens of ms doing ~zero flops (measured: 74 ms
+    // cmod at 0.03 Gflop on a 1046x170 node). Below the gate the node runs
+    // its cmod strictly serially - it never blocks on foreign work, and the
+    // tree-level parallelism covers it.
+    const LL_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
+    let fork_gate = LL_CMOD_FORK_MIN_FLOPS.max(ll_gemm_par);
+    let tiled = ncol >= 2 * tile_w && cmod_flops >= fork_gate;
+    let seq_gemm_par = if cmod_flops >= fork_gate {
+        ll_gemm_par
+    } else {
+        usize::MAX
+    };
     if tiled {
         let gloc_ref = &gloc;
         let spans_ref = &spans;
@@ -2646,7 +2662,7 @@ fn ll_factor_node<T: Scalar>(
                     nrk as isize,
                     vd_buf.as_ptr(),
                     npk as isize,
-                    ll_gemm_par,
+                    seq_gemm_par,
                 )
             };
             for c in 0..npk {
@@ -2677,7 +2693,15 @@ fn ll_factor_node<T: Scalar>(
     // `0..ncol`, so the off-diagonal rows `[ncol, nrow)` keep their identity and
     // `s`'s contribution to ancestors is unaffected by this internal permutation.
     let nb = kt.panel_nb;
-    let ll_cdiv_par = kt.par_cdiv;
+    // Same join-steal guard as cmod: a small node must not fork inside its
+    // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
+    // foreign subtree work and stalls this node's dependents. Total cdiv
+    // work ~ nrow·ncol² (panel + trailing updates).
+    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 {
+        kt.par_cdiv
+    } else {
+        usize::MAX
+    };
     let alpha = bk_alpha();
     let mut d = vec![T::zero(); ncol];
     let mut d_subdiag = vec![T::zero(); ncol];
@@ -3047,6 +3071,7 @@ fn ll_factor_node<T: Scalar>(
             nrow,
             ncol,
             n_upd: update_list[s].len(),
+            cmod_gflop: cmod_flops as f64 / 1e9,
         });
     }
     if local_perturbed > 0 {
@@ -3369,8 +3394,16 @@ fn factor_left_looking<T: Scalar>(
                 );
                 for c in v.iter().take(12) {
                     eprintln!(
-                        "  node {}x{} upd {:>4}: wall {:>6.1} ms = asm {:>5.1} + cmod {:>6.1} + cdiv {:>6.1}",
-                        c.nrow, c.ncol, c.n_upd, c.wall_ms, c.asm_ms, c.cmod_ms, c.cdiv_ms
+                        "  node {}x{} upd {:>4}: wall {:>6.1} ms = asm {:>5.1} + cmod {:>6.1} + cdiv {:>6.1}  (cmod {:>5.2} Gflop, {:>5.1} Gflop/s)",
+                        c.nrow,
+                        c.ncol,
+                        c.n_upd,
+                        c.wall_ms,
+                        c.asm_ms,
+                        c.cmod_ms,
+                        c.cdiv_ms,
+                        c.cmod_gflop,
+                        c.cmod_gflop / (c.cmod_ms / 1e3).max(1e-9),
                     );
                 }
                 v.clear();
