@@ -95,8 +95,99 @@ fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
     num / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300)
 }
 
+/// Settings sweep (`RLA_KLU_SWEEP=1`): grid over the three KLU knobs on the
+/// circuit family plus a badly row-scaled variant, warm best-of-3 per config.
+/// Evidence base for the KLU default-settings choice (heuristic defaults work,
+/// 2026-07): confirms/updates that `pivot_tol=1e-3, row_scaling=on, btf=on`
+/// is on the speed/fill/robustness Pareto front.
+fn settings_sweep() {
+    println!(
+        "{:>10} {:>8} {:>5} {:>5} | {:>9} {:>9} {:>9} {:>10} {:>7} {:>9}",
+        "matrix", "ptol", "scal", "btf", "ana-ms", "fac-ms", "refac-ms", "fill", "blocks", "resid"
+    );
+    for &(n, stages, bad_scaling) in &[
+        (10_000usize, 16usize, false),
+        (50_000, 32, false),
+        (200_000, 64, false),
+        (50_000, 32, true),
+    ] {
+        let mut a = circuit(n, stages, 0xC0FFEE ^ n as u64);
+        if bad_scaling {
+            // Row scaling over ~12 orders of magnitude: the robustness case
+            // row_scaling is for (badly equilibrated device models).
+            // CSC: row i of the matrix appears via row_idx - scale per row.
+            let scale = |i: usize| 10f64.powi(((i * 7919) % 13) as i32 - 6);
+            for (k, &i) in a.row_idx.iter().enumerate() {
+                a.values[k] *= scale(i);
+            }
+        }
+        let name = format!("{}{}", n, if bad_scaling { "-badscale" } else { "" });
+        let b: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
+        for &btf in &[true, false] {
+            for &scal in &[true, false] {
+                for &ptol in &[1e-3f64, 1e-2, 0.1, 1.0] {
+                    let s = KluSettings::default()
+                        .with_pivot_tol(ptol)
+                        .with_row_scaling(scal)
+                        .with_btf(btf);
+                    let t = Instant::now();
+                    let sym = match KluSymbolic::analyze_with(&a, &s) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            println!("{name:>10} {ptol:>8.0e} {scal:>5} {btf:>5} | analyze FAILED {e}");
+                            continue;
+                        }
+                    };
+                    let ana = t.elapsed().as_secs_f64() * 1e3;
+                    let mut fac_best = f64::INFINITY;
+                    let mut refac_best = f64::INFINITY;
+                    let mut fill = 0usize;
+                    let mut blocks = 0usize;
+                    let mut res = f64::NAN;
+                    let mut failed = false;
+                    for _ in 0..3 {
+                        let t = Instant::now();
+                        match sym.factor(&a, &s) {
+                            Ok(mut f) => {
+                                fac_best = fac_best.min(t.elapsed().as_secs_f64() * 1e3);
+                                let t = Instant::now();
+                                if f.refactor(&a).is_ok() {
+                                    refac_best =
+                                        refac_best.min(t.elapsed().as_secs_f64() * 1e3);
+                                }
+                                fill = f.factor_nnz();
+                                blocks = f.n_blocks();
+                                if let Ok(x) = f.solve(&b) {
+                                    res = resid(&a, &x, &b);
+                                }
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{name:>10} {ptol:>8.0e} {scal:>5} {btf:>5} | factor FAILED {e}"
+                                );
+                                failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if failed {
+                        continue;
+                    }
+                    println!(
+                        "{name:>10} {ptol:>8.0e} {scal:>5} {btf:>5} | {ana:>9.1} {fac_best:>9.1} {refac_best:>9.1} {fill:>10} {blocks:>7} {res:>9.1e}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     const SWEEP: usize = 20;
+    if std::env::var("RLA_KLU_SWEEP").map(|v| v == "1").unwrap_or(false) {
+        settings_sweep();
+        return;
+    }
     println!(
         "{:>8} {:>9} | {:>9} {:>9} {:>9} {:>9} {:>9} {:>7} | {:>9} {:>9} {:>9} | {:>8} {:>8}",
         "n",

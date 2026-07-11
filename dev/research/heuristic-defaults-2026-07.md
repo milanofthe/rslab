@@ -70,8 +70,10 @@ Combined with the metis node-separator work this closes the tuner
 regression (roadmap item 3 in `factor-throughput-2026-07.md`) and puts the
 default entry point on the fastest known configuration for this class.
 
-KLU has no model path: `KluSettings` defaults (BTF on, row scaling on) are
-already the heuristic choice; its per-block AMD ordering is fixed by design.
+KLU has no model path; its defaults are validated by the sweep below. There
+is deliberately **no auto-router** between LDLᵀ / LU / KLU: rslab is a
+solver-in-the-loop linear-algebra backend - the solver choice belongs to
+the caller.
 
 ## Family validation (bench_suite, cold single shot, ll = fixed default @8)
 
@@ -88,10 +90,47 @@ sym family (`auto` = the new heuristic default; ratio = auto/ll factor time):
 | saddle_89787 | 0.92 | equal |
 | saddle_120000 | 0.50 | 15.3 M → 8.9 M |
 
-Geomean 0.39 (~2.6× faster). unsym family (LU path, new bakeoff):
-convdiff3d_27000 **0.69** (11.2 M → 8.1 M), convdiff2d_64009 0.89,
-convdiff2d_44944 0.97, convdiff3d_15625 1.08 (below threshold, noise).
-No fill regression anywhere in either family.
+Geomean 0.39 (~2.6× faster).
+
+unsym family, full 8-variant rotation (LU path, new bakeoff):
+
+| matrix | ratio | fill ll → auto |
+|---|---|---|
+| convdiff3d_9261 | 0.88 | equal |
+| convdiff3d_13824 | 0.96 | equal |
+| convdiff2d_19881 | 0.91 | equal |
+| convdiff2d_26896 | 1.03 | equal (noise) |
+| convdiff2d_36100 | 0.86 | equal |
+| convdiff2d_47961 | 0.87 | equal |
+| mom_64000 | **0.38** | 75.9 M → 45.2 M |
+| mom_85000 | **0.35** | 257.6 M → 150.6 M |
+
+Geomean 0.73; residuals equal or better everywhere. No fill regression in
+either family.
+
+## KLU default settings (evidence)
+
+KLU has three knobs and no model path; the sweep
+(`RLA_KLU_SWEEP=1 cargo bench --bench klu_circuit`, MNA circuit family
+10k/50k/200k + a 10^±6 row-misscaled 50k variant, warm best-of-3,
+single-threaded by design - KLU is the determinism arbiter) confirms the
+SuiteSparse-style defaults dominate on speed, fill, and robustness:
+
+* **`btf = on`**: off costs 48× factor time at 200k (13.5-20 s vs 280 ms)
+  and 5.7× fill (52 M vs 9.2 M). On the misscaled variant off is 20×+.
+* **`row_scaling = on`**: on the misscaled variant, off explodes to
+  2.9-3.7 s / 16.1-16.3 M fill (vs 75-95 ms / 2.3 M with scaling): without
+  row equilibration the threshold pivoting rejects the (scaled-tiny)
+  BTF/AMD diagonal and off-diagonal pivots destroy the fill. Off+off:
+  274 s / 142 M fill. On well-scaled inputs, scaling is free (no
+  measurable cost).
+* **`pivot_tol = 1e-3`**: inert on diagonally dominant circuits (identical
+  fill/time/residual from 1e-3 to 1.0) - it is the robustness margin for
+  non-diagonally-dominant device models; keep the SuiteSparse default.
+
+All 16 configs at ~1e-3 relative residual on the misscaled (cond ~1e12)
+variant - a conditioning property, not a settings failure; refinement is
+the tool there.
 
 ## Follow-ups
 
