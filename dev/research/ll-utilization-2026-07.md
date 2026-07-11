@@ -72,6 +72,17 @@ counts holds. Measured (idle machine, 3 processes): 553-575 → **532-547
 ms**. Remaining low-rate nodes (4-6 Gflop/s, gather-bound) run in the busy
 phase where serial-under-tree-parallelism is the right call.
 
+## Adaptive panel width (feat/root-cdiv)
+
+Root cdiv was GEMM-*shape* bound, not getf2-bound: the fresh split shows
+getf2's 165 CPU-ms spread over the ~2700 small nodes, while the root's
+deferred Schur GEMMs ran with inner dimension k = nb = 64 - too thin at
+1600×1600. `nb = max(panel_nb, 128)` for `ncol >= 512` (pure function of
+the node): root cdiv 70 → 47 ms (−33 %), total ~532-547 → **500-546 ms**
+(best 500). A 192-tier for `ncol >= 1024` measured no further gain -
+rejected. The global-nb sweep's "128 loses" verdict was the small panels'
+share, not the wide ones'.
+
 ## Open (next candidates, evidence-ranked)
 
 Post-tiling profile: root = cmod 71-78 ms (≈73 Gflop/s, fair for
