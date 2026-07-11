@@ -229,8 +229,13 @@ mod tests {
     use super::*;
 
     fn canonical() -> GeneralCsc<f64> {
-        GeneralCsc::from_triplets(3, &[0, 2, 1, 0, 2], &[0, 0, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0, 5.0])
-            .unwrap()
+        GeneralCsc::from_triplets(
+            3,
+            &[0, 2, 1, 0, 2],
+            &[0, 0, 1, 2, 2],
+            &[1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+        .unwrap()
     }
 
     #[test]

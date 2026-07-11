@@ -346,7 +346,10 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     // `i != j` at every nonzero.
     for j in 0..n {
         let (s, e) = (factors.l_col_ptr[j], factors.l_col_ptr[j + 1]);
-        debug_assert_eq!(factors.l_row_idx[s], j, "unit diagonal must lead its column");
+        debug_assert_eq!(
+            factors.l_row_idx[s], j,
+            "unit diagonal must lead its column"
+        );
         let nzj = T::zero() - y[j];
         for k in (s + 1)..e {
             let i = factors.l_row_idx[k];
@@ -388,7 +391,11 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
         let (s, e) = (factors.l_col_ptr[j], factors.l_col_ptr[j + 1]);
         let mut acc = y[j];
         for k in (s + 1)..e {
-            acc = fmadd(T::zero() - factors.l_values[k], y[factors.l_row_idx[k]], acc);
+            acc = fmadd(
+                T::zero() - factors.l_values[k],
+                y[factors.l_row_idx[k]],
+                acc,
+            );
         }
         y[j] = acc;
     }
