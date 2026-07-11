@@ -210,12 +210,18 @@ macro_rules! ldlt_solve_arm {
         let bb: PyReadonlyArray1<$T> = $b
             .extract()
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
-        let x = if $refine > 0 {
-            $s.solve_refined($a, bb.as_slice()?, $refine)
-        } else {
-            $s.solve(bb.as_slice()?)
-        }
-        .map_err(map_err)?;
+        // Copy the RHS into a Rust-owned buffer (O(n), trivial against the
+        // solve) so the triangular solves run with the GIL released.
+        let bvec = bb.as_slice()?.to_vec();
+        let x = $py
+            .allow_threads(|| {
+                if $refine > 0 {
+                    $s.solve_refined($a, &bvec, $refine)
+                } else {
+                    $s.solve(&bvec)
+                }
+            })
+            .map_err(map_err)?;
         Ok(x.into_pyarray_bound($py).into_any().unbind())
     }};
 }
@@ -229,7 +235,10 @@ macro_rules! ldlt_solve_many_arm {
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let shape = bb.shape();
         let (n, nrhs) = (shape[0], shape[1]);
-        let x = $s.solve_many(bb.as_slice()?, nrhs).map_err(map_err)?;
+        let bvec = bb.as_slice()?.to_vec();
+        let x = $py
+            .allow_threads(|| $s.solve_many(&bvec, nrhs))
+            .map_err(map_err)?;
         let arr = x.into_pyarray_bound($py);
         Ok(arr.reshape([n, nrhs])?.into_any().unbind())
     }};
@@ -287,7 +296,11 @@ macro_rules! gmres_block_arm {
             }
             None => None,
         };
-        let res = gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, restart, x0v.as_deref())
+        // All buffers are Rust-owned copies - iterate with the GIL released.
+        let res = $py
+            .allow_threads(|| {
+                gmres_block_core($op, &cm, nrhs, $pc, $tol, $maxit, restart, x0v.as_deref())
+            })
             .map_err(map_err)?;
         let mut out = vec![<$T>::default(); n * nrhs];
         for c in 0..nrhs {
@@ -312,7 +325,7 @@ macro_rules! gmres_arm {
         let bb: PyReadonlyArray1<$T> = $b
             .extract()
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
-        let rhs = bb.as_slice()?;
+        let rhs = bb.as_slice()?.to_vec();
         // Resolve the restart length (issue #12): explicit value honoured exactly;
         // `None` caps it so the up-front `2·n·(restart+1)` FGMRES `V`+`Z` basis
         // stays under the memory budget.
@@ -330,8 +343,10 @@ macro_rules! gmres_arm {
             }
             None => None,
         };
-        let res =
-            gmres_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref()).map_err(map_err)?;
+        // Rust-owned buffers only - iterate with the GIL released.
+        let res = $py
+            .allow_threads(|| gmres_core($op, &rhs, $pc, $tol, $maxit, restart, x0v.as_deref()))
+            .map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
         Ok((
             x_obj,
@@ -443,7 +458,7 @@ macro_rules! gmres_recycled_arm {
         let bb: PyReadonlyArray1<$T> = $b
             .extract()
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
-        let rhs = bb.as_slice()?;
+        let rhs = bb.as_slice()?.to_vec();
         let restart: usize = match $restart {
             Some(r) => r,
             None => adaptive_restart(rhs.len(), 1, std::mem::size_of::<$T>(), 2),
@@ -467,7 +482,11 @@ macro_rules! gmres_recycled_arm {
                 ))
             }
         };
-        let res = gmres_recycled_core($op, rhs, $pc, $tol, $maxit, restart, x0v.as_deref(), handle)
+        // Rust-owned buffers only - iterate with the GIL released.
+        let res = $py
+            .allow_threads(|| {
+                gmres_recycled_core($op, &rhs, $pc, $tol, $maxit, restart, x0v.as_deref(), handle)
+            })
             .map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
         Ok((
@@ -834,6 +853,7 @@ impl Ldlt {
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (n, indptr, indices, data, threads, preconditioner, drop_tol, method, memory, force_accept))]
 fn ldlt_factor(
+    py: Python<'_>,
     n: usize,
     indptr: PyReadonlyArray1<i64>,
     indices: PyReadonlyArray1<i64>,
@@ -859,7 +879,12 @@ fn ldlt_factor(
         ($T:ty, $variant:ident) => {
             if let Ok(d) = data.extract::<PyReadonlyArray1<$T>>() {
                 let a = build_csc::<$T>(n, ip, ii, d.as_slice()?)?;
-                let s = LdltSolver::<$T>::factor_with(&a, &opts).map_err(map_err)?;
+                // `a` and `opts` are Rust-owned copies - release the GIL for
+                // the (potentially minutes-long, rayon-parallel) factorization
+                // so other Python threads keep running.
+                let s = py
+                    .allow_threads(|| LdltSolver::<$T>::factor_with(&a, &opts))
+                    .map_err(map_err)?;
                 return Ok(Ldlt {
                     inner: LdltAny::$variant(s, a),
                 });
@@ -923,12 +948,17 @@ macro_rules! lu_solve_arm {
         let bb: PyReadonlyArray1<$T> = $b
             .extract()
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
-        let x = if $refine > 0 {
-            $s.solve_refined($a, bb.as_slice()?, $refine)
-        } else {
-            $s.solve(bb.as_slice()?)
-        }
-        .map_err(map_err)?;
+        // Rust-owned RHS copy, then solve with the GIL released.
+        let bvec = bb.as_slice()?.to_vec();
+        let x = $py
+            .allow_threads(|| {
+                if $refine > 0 {
+                    $s.solve_refined($a, &bvec, $refine)
+                } else {
+                    $s.solve(&bvec)
+                }
+            })
+            .map_err(map_err)?;
         Ok(x.into_pyarray_bound($py).into_any().unbind())
     }};
 }
@@ -940,7 +970,10 @@ macro_rules! lu_solve_many_arm {
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let shape = bb.shape();
         let (n, nrhs) = (shape[0], shape[1]);
-        let x = $s.solve_many(bb.as_slice()?, nrhs).map_err(map_err)?;
+        let bvec = bb.as_slice()?.to_vec();
+        let x = $py
+            .allow_threads(|| $s.solve_many(&bvec, nrhs))
+            .map_err(map_err)?;
         let arr = x.into_pyarray_bound($py);
         Ok(arr.reshape([n, nrhs])?.into_any().unbind())
     }};
@@ -1286,6 +1319,7 @@ impl Lu {
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (n, indptr, indices, data, threads, preconditioner, drop_tol, method, memory, force_accept))]
 fn lu_factor(
+    py: Python<'_>,
     n: usize,
     indptr: PyReadonlyArray1<i64>,
     indices: PyReadonlyArray1<i64>,
@@ -1311,7 +1345,10 @@ fn lu_factor(
         ($T:ty, $variant:ident) => {
             if let Ok(d) = data.extract::<PyReadonlyArray1<$T>>() {
                 let a = build_general::<$T>(n, ip, ii, d.as_slice()?)?;
-                let s = LuSolver::<$T>::factor(&a, &opts).map_err(map_err)?;
+                // Rust-owned inputs - release the GIL for the heavy factor.
+                let s = py
+                    .allow_threads(|| LuSolver::<$T>::factor(&a, &opts))
+                    .map_err(map_err)?;
                 return Ok(Lu {
                     inner: LuAny::$variant(s, a),
                 });
@@ -1392,7 +1429,9 @@ macro_rules! klu_refactor_arm {
             )));
         }
         $a.values.copy_from_slice(d);
-        $s.refactor($a).map_err(map_err)
+        // The stored matrix now carries the new values; the numeric replay
+        // touches only Rust-owned state, so release the GIL for it.
+        $data.py().allow_threads(|| $s.refactor($a)).map_err(map_err)
     }};
 }
 
@@ -1534,7 +1573,10 @@ impl Klu {
                 let bb: PyReadonlyArray1<$T> = b.extract().map_err(|_| {
                     PyValueError::new_err("rhs dtype does not match the factor dtype")
                 })?;
-                let x = $s.solve_transpose(bb.as_slice()?).map_err(map_err)?;
+                let bvec = bb.as_slice()?.to_vec();
+                let x = py
+                    .allow_threads(|| $s.solve_transpose(&bvec))
+                    .map_err(map_err)?;
                 Ok(x.into_pyarray_bound(py).into_any().unbind())
             }};
         }
@@ -1693,8 +1735,10 @@ impl Klu {
 /// Factor a general matrix through the KLU path from its full SciPy CSC
 /// buffers. The `data` dtype picks the scalar field.
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (n, indptr, indices, data, pivot_tol, row_scaling, btf))]
 fn klu_factor(
+    py: Python<'_>,
     n: usize,
     indptr: PyReadonlyArray1<i64>,
     indices: PyReadonlyArray1<i64>,
@@ -1713,7 +1757,10 @@ fn klu_factor(
         ($T:ty, $variant:ident) => {
             if let Ok(d) = data.extract::<PyReadonlyArray1<$T>>() {
                 let a = build_general::<$T>(n, ip, ii, d.as_slice()?)?;
-                let s = KluSolver::<$T>::factor(&a, &opts).map_err(map_err)?;
+                // Rust-owned inputs - release the GIL for the heavy factor.
+                let s = py
+                    .allow_threads(|| KluSolver::<$T>::factor(&a, &opts))
+                    .map_err(map_err)?;
                 return Ok(Klu {
                     inner: KluAny::$variant(s, a),
                 });
