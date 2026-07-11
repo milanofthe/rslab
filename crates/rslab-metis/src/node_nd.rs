@@ -16,9 +16,10 @@
 //! invert at the end.
 
 use crate::coarsen::{coarsen, CoarsenCounters};
-use crate::fm_refine::{refine_bisection, refine_separator};
+use crate::fm_refine::refine_bisection;
 use crate::graph::Graph;
 use crate::initial_partition::{initial_bisect_bfs, initial_bisect_ggp, PART_A, PART_B};
+use crate::node_refine::{fm_node_balance, fm_node_refine_1sided};
 use crate::rng::SplitMix;
 use crate::separator::construct_separator;
 use crate::{MetisOptions, MetisStats};
@@ -139,10 +140,18 @@ pub(crate) fn nd_order(
     invert_iperm(&iperm, n)
 }
 
-/// Multilevel node bisection: coarsen → initial bisection with niparts
-/// trials → uncoarsen with FM → convert edge bisection to node
-/// separator → refine separator. Returns labels in {PART_A, PART_B,
+/// Multilevel node bisection, METIS `MlevelNodeBisectionL1` structure:
+/// coarsen → initial *edge* bisection with niparts trials (best
+/// post-FM cut) → convert to a node separator once, at the coarsest
+/// level (König min vertex cover) → refine the **node separator**
+/// itself at the coarsest level and at every uncoarsening step
+/// (balance + one-sided node FM). Returns labels in {PART_A, PART_B,
 /// PART_SEP}.
+///
+/// Refining the node separator through the hierarchy - instead of
+/// refining the edge bisection and converting at the finest level - is
+/// what closes the fill gap on 3D meshes; see
+/// `dev/research/metis-node-separator-2026-07.md`.
 fn multilevel_node_bisection(
     graph: &Graph,
     opts: &MetisOptions,
@@ -162,7 +171,7 @@ fn multilevel_node_bisection(
     let total: i64 = coarsest.vwgt.iter().map(|&w| w as i64).sum();
     let target = total / 2;
 
-    // niparts trials; keep best post-FM cut.
+    // niparts trials; keep best post-FM edge cut (METIS iptype=EDGE).
     let mut best_labels: Vec<u8> = vec![PART_A; coarsest.nvtxs as usize];
     let mut best_cut: i32 = i32::MAX;
     for trial in 0..opts.niparts {
@@ -185,7 +194,14 @@ fn multilevel_node_bisection(
     }
     let mut labels = best_labels;
 
-    // Uncoarsen: walk levels in reverse. `cmap` at level i maps
+    // Convert the edge bisection to a node separator at the coarsest
+    // level and refine it there (METIS InitSeparator tail).
+    construct_separator(coarsest, &mut labels);
+    fm_node_refine_1sided(coarsest, &mut labels, opts.max_imbalance, opts.fm_passes, rng);
+    stats.n_fm_passes += opts.fm_passes;
+
+    // Uncoarsen: project the tri-section and refine the node separator
+    // at each level (METIS Refine2WayNode). `cmap` at level i maps
     // previous-graph vertices to level-i graph vertices.
     for level_idx in (0..levels.len()).rev() {
         let cg = &levels[level_idx];
@@ -201,15 +217,10 @@ fn multilevel_node_bisection(
             *p = labels[c];
         }
         labels = proj;
-        refine_bisection(prev_graph, &mut labels, opts.max_imbalance, opts.fm_passes);
+        fm_node_balance(prev_graph, &mut labels, opts.max_imbalance, rng);
+        fm_node_refine_1sided(prev_graph, &mut labels, opts.max_imbalance, opts.fm_passes, rng);
         stats.n_fm_passes += opts.fm_passes;
     }
-
-    // Convert edge bisection to node separator.
-    construct_separator(graph, &mut labels);
-    // Refine separator (greedy).
-    refine_separator(graph, &mut labels, opts.max_imbalance, opts.fm_passes);
-    stats.n_fm_passes += opts.fm_passes;
 
     labels
 }
@@ -538,6 +549,129 @@ mod tests {
         assert_eq!(perm.len(), 72);
         assert_permutation(&perm);
         assert_eq!(stats.n_components, 2);
+    }
+
+    /// Diagnostic probe (not a regression test): top-level separator
+    /// quality on the 40^3 7-point grid. The ideal planar separator is
+    /// a 40x40 plane = 1600 vertices. Run with
+    /// `cargo test --release -p rslab-metis grid3d_separator -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn grid3d_separator_probe() {
+        let m = 40usize;
+        let idx = |x: usize, y: usize, z: usize| (z * m + y) * m + x;
+        let mut t = Vec::new();
+        for z in 0..m {
+            for y in 0..m {
+                for x in 0..m {
+                    let k = idx(x, y, z);
+                    t.push((k, k));
+                    if x + 1 < m {
+                        t.push((k, idx(x + 1, y, z)));
+                    }
+                    if y + 1 < m {
+                        t.push((k, idx(x, y + 1, z)));
+                    }
+                    if z + 1 < m {
+                        t.push((k, idx(x, y, z + 1)));
+                    }
+                }
+            }
+        }
+        let n = m * m * m;
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        let graph = Graph::from_csc_pattern(&pat).unwrap();
+        let opts = MetisOptions::default();
+        let mut stats = MetisStats::default();
+        let mut rng = crate::rng::SplitMix::new(opts.seed);
+        let labels = multilevel_node_bisection(&graph, &opts, &mut rng, &mut stats);
+        let mut na = 0usize;
+        let mut nb = 0usize;
+        let mut ns = 0usize;
+        for &l in &labels {
+            match l {
+                PART_A => na += 1,
+                PART_B => nb += 1,
+                _ => ns += 1,
+            }
+        }
+        println!(
+            "40^3 top-level bisection: |A|={} |B|={} |S|={} (ideal S=1600), levels={}",
+            na, nb, ns, stats.n_levels
+        );
+
+        // Recursive drill-down mirroring nd_order's driver: log every
+        // bisection as (depth, n, sep, balance, sep/n^(2/3)).
+        let mut work: Vec<(Graph, usize)> = vec![(graph, 0)];
+        let mut per_depth: Vec<(usize, f64, f64)> = Vec::new(); // (count, sum_ratio, sum_fill_proxy)
+        let mut fill_proxy: f64 = 0.0;
+        while let Some((g, depth)) = work.pop() {
+            let gn = g.nvtxs as usize;
+            if gn <= opts.nd_to_amd_switch as usize {
+                continue;
+            }
+            let mut st = MetisStats::default();
+            let labels = multilevel_node_bisection(&g, &opts, &mut rng, &mut st);
+            let mut a_verts: Vec<i32> = Vec::new();
+            let mut b_verts: Vec<i32> = Vec::new();
+            let mut ns = 0usize;
+            for (v, &l) in labels.iter().enumerate() {
+                match l {
+                    PART_A => a_verts.push(v as i32),
+                    PART_B => b_verts.push(v as i32),
+                    _ => ns += 1,
+                }
+            }
+            let big = a_verts.len().max(b_verts.len());
+            if a_verts.is_empty() || b_verts.is_empty() || big as f64 >= 0.9 * gn as f64 {
+                continue;
+            }
+            let ratio = ns as f64 / (gn as f64).powf(2.0 / 3.0);
+            fill_proxy += 0.5 * (ns * (ns + 1)) as f64;
+            if per_depth.len() <= depth {
+                per_depth.resize(depth + 1, (0, 0.0, 0.0));
+            }
+            per_depth[depth].0 += 1;
+            per_depth[depth].1 += ratio;
+            per_depth[depth].2 += ns as f64;
+            if depth <= 4 {
+                println!(
+                    "  d={} n={} sep={} bal={:.2} sep/n^(2/3)={:.2}",
+                    depth,
+                    gn,
+                    ns,
+                    a_verts.len().min(b_verts.len()) as f64 / big as f64,
+                    ratio
+                );
+            }
+            let (sub_a, _) = extract_by_list(&g, &a_verts);
+            let (sub_b, _) = extract_by_list(&g, &b_verts);
+            work.push((sub_a, depth + 1));
+            work.push((sub_b, depth + 1));
+        }
+        for (d, &(cnt, sr, ssep)) in per_depth.iter().enumerate() {
+            println!(
+                "depth {}: bisections={} mean sep/n^(2/3)={:.2} total sep={}",
+                d,
+                cnt,
+                sr / cnt.max(1) as f64,
+                ssep as usize
+            );
+        }
+        println!("sep-clique fill proxy: {:.3e}", fill_proxy);
+
+        // Full ND for the total separator count.
+        let mut stats2 = MetisStats::default();
+        let perm = nd_order(&pat, &opts, &mut stats2).unwrap();
+        assert_eq!(perm.len(), n);
+        println!(
+            "full nd: sep_total={} amd_leaves={} levels={} two_hop={}",
+            stats2.n_separator_vertices,
+            stats2.n_amd_leaf_calls,
+            stats2.n_levels,
+            stats2.n_two_hop_fallbacks
+        );
     }
 
     #[test]

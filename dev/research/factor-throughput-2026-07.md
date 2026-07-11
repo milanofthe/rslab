@@ -51,11 +51,13 @@ parameter-level headroom remains on this class.
 
 ## Roadmap (evidence-ranked)
 
-1. **rslab-metis separator quality on 3D meshes** — the 3-4× lever
-   (fill 25.1 M → target ~13 M class) plus the parallelism unlock
-   (crit-path 1.32e10). Compare against reference METIS output on the same
-   graphs; suspects: coarsening matching quality, refinement (FM passes),
-   separator smoothing.
+1. **rslab-metis separator quality on 3D meshes** — **DONE 2026-07**
+   (see `metis-node-separator-2026-07.md`): multilevel node-separator
+   refinement (METIS `FM_2WayNodeRefine1Sided` port) took the helmholtz
+   reference to fill 16.8 M / crit-path 9.89e9 / **774 ms** MetisND @8
+   (cumulative 1552 → 774 = 2.0×). Note: AUTO still routes to AMF
+   (1202 ms) pending a corpus bakeoff rerun (#67/#73 measured the old
+   MetisND).
 2. **cmod residual** (~62 % of kernel time): measure node-overlap and GEMM
    wall separately; candidates: pipelining assembly with updates, batching
    small same-target updates, checking `gemm` Rayon behavior under the

@@ -39,6 +39,7 @@ pub mod graph;
 #[allow(dead_code, missing_docs)]
 pub mod initial_partition;
 mod node_nd;
+mod node_refine;
 #[doc(hidden)]
 #[allow(dead_code, missing_docs)]
 pub mod rng;

@@ -1,19 +1,16 @@
-//! Fiduccia-Mattheyses refinement.
+//! Fiduccia-Mattheyses edge-bisection refinement.
 //!
-//! Two refinement kernels:
+//! `refine_bisection`: classic FM with best-balanced rollback. Picks
+//! the highest-gain boundary vertex, flips its partition, updates
+//! neighbor gains, locks it, and repeats. Tracks both "current cut"
+//! and "best cut subject to balance" separately; at the end of the
+//! pass rolls back to the best balanced state.
 //!
-//! - `refine_bisection`: classic FM with best-balanced rollback.
-//!   Picks the highest-gain boundary vertex, flips its partition,
-//!   updates neighbor gains, locks it, and repeats. Tracks both
-//!   "current cut" and "best cut subject to balance" separately; at
-//!   the end of the pass rolls back to the best balanced state.
-//! - `refine_separator`: greedy node-separator reduction. For each
-//!   separator vertex it computes the gain (weight saved by pulling
-//!   the vertex out of the separator, minus weight of neighbors on
-//!   the far side that would need to enter the separator). Accepts
-//!   only positive-gain moves that respect the balance constraint.
-//!   A full two-sided FM with negative-gain acceptance is deferred
-//!   until a concrete quality gap motivates it.
+//! Node-*separator* refinement lives in `node_refine` (the METIS
+//! `FM_2WayNodeRefine1Sided` port); the former greedy positive-gain
+//! `refine_separator` was removed when the multilevel node-separator
+//! pipeline replaced the "edge-FM everywhere, convert at the end"
+//! scheme (see `dev/research/metis-node-separator-2026-07.md`).
 //!
 //! Priority queue: a lazy `BinaryHeap<(gain, Reverse(v))>` rather
 //! than METIS's bucket array. Correct; the O(log n) overhead per
@@ -207,104 +204,6 @@ fn compute_gains(graph: &Graph, labels: &[u8], gain: &mut [i32]) {
         }
         gain[v] = ed - id;
     }
-}
-
-/// Greedy node-separator refinement. Accepts positive-gain moves that
-/// respect the balance constraint. Returns the final separator weight.
-pub fn refine_separator(
-    graph: &Graph,
-    labels: &mut [u8],
-    max_imbalance: f64,
-    max_passes: u32,
-) -> i64 {
-    let n = graph.nvtxs as usize;
-    let total: i64 = graph.vwgt.iter().map(|&w| w as i64).sum();
-    let max_side = ((1.0 + max_imbalance) * total as f64 / 2.0).ceil() as i64;
-
-    for _pass in 0..max_passes {
-        let mut changed = false;
-        let mut a_w = part_weight(graph, labels, PART_A);
-        let mut b_w = part_weight(graph, labels, PART_B);
-        for v in 0..n {
-            if labels[v] != PART_SEP {
-                continue;
-            }
-            // Compute cost of pulling v to side A or side B.
-            let (cost_to_a, cost_to_b) = separator_pull_costs(graph, labels, v);
-            let vwgt_v = graph.vwgt[v] as i64;
-            // Net separator change = cost_to_side - vwgt_v.
-            // Move is beneficial if cost_to_side < vwgt_v (gain > 0).
-            let gain_a = vwgt_v - cost_to_a;
-            let gain_b = vwgt_v - cost_to_b;
-            let (best_gain, best_side) = if gain_a >= gain_b {
-                (gain_a, PART_A)
-            } else {
-                (gain_b, PART_B)
-            };
-            if best_gain <= 0 {
-                continue;
-            }
-            // Balance check: after the move, side gains vwgt_v; the
-            // other side gains zero (only separator weight changes).
-            let new_a = if best_side == PART_A {
-                a_w + vwgt_v
-            } else {
-                a_w
-            };
-            let new_b = if best_side == PART_B {
-                b_w + vwgt_v
-            } else {
-                b_w
-            };
-            if new_a.max(new_b) > max_side {
-                continue;
-            }
-            // Apply move: v → best_side; far-side neighbors → SEP.
-            labels[v] = best_side;
-            if best_side == PART_A {
-                a_w = new_a;
-            } else {
-                b_w = new_b;
-            }
-            let lo = graph.xadj[v] as usize;
-            let hi = graph.xadj[v + 1] as usize;
-            let far = if best_side == PART_A { PART_B } else { PART_A };
-            for k in lo..hi {
-                let u = graph.adjncy[k] as usize;
-                if labels[u] == far {
-                    labels[u] = PART_SEP;
-                    if far == PART_A {
-                        a_w -= graph.vwgt[u] as i64;
-                    } else {
-                        b_w -= graph.vwgt[u] as i64;
-                    }
-                }
-            }
-            changed = true;
-        }
-        if !changed {
-            break;
-        }
-    }
-    separator_weight(graph, labels)
-}
-
-/// Sum of `vwgt[u]` over neighbors u of v whose label is the given side.
-fn separator_pull_costs(graph: &Graph, labels: &[u8], v: usize) -> (i64, i64) {
-    let lo = graph.xadj[v] as usize;
-    let hi = graph.xadj[v + 1] as usize;
-    let mut cost_far_a: i64 = 0; // cost of pulling v to A = weight of neighbors currently on B
-    let mut cost_far_b: i64 = 0;
-    for k in lo..hi {
-        let u = graph.adjncy[k] as usize;
-        let wu = graph.vwgt[u] as i64;
-        match labels[u] {
-            PART_A => cost_far_b += wu,
-            PART_B => cost_far_a += wu,
-            _ => {}
-        }
-    }
-    (cost_far_a, cost_far_b)
 }
 
 /// Total vertex weight of `PART_SEP` vertices.
@@ -758,35 +657,4 @@ mod tests {
         assert_eq!(labels, labels2, "I6: determinism (labels)");
     }
 
-    #[test]
-    fn refine_separator_reduces_weight_on_padded_case() {
-        // Construct a 3x3 grid with middle row SEP and the middle
-        // vertex "padded" - add an extra SEP vertex adjacent only to
-        // A-side. Refinement should pull it out to A.
-        let g = grid(3, 3);
-        let mut labels: Vec<u8> = (0..9u8)
-            .map(|k| {
-                let r = k / 3;
-                match r {
-                    0 => PART_A,
-                    1 => PART_SEP,
-                    _ => PART_B,
-                }
-            })
-            .collect();
-        // Make index 3 (row 1, col 0) isolated from B side by
-        // relabelling its row-2 neighbor as SEP too.
-        labels[6] = PART_SEP;
-        let before = separator_weight(&g, &labels);
-        let after = refine_separator(&g, &mut labels, 0.50, 10);
-        // I1 (bookkeeping consistency): returned separator weight
-        // matches separator_weight(labels) recomputed from scratch.
-        assert_eq!(after, separator_weight(&g, &labels), "I1: bookkeeping");
-        assert!(
-            after <= before,
-            "separator weight must not grow (before={}, after={})",
-            before,
-            after
-        );
-    }
 }
