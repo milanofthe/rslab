@@ -2620,28 +2620,30 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
         .collect();
     // Forward solve L y = ŷ (CSC, unit diagonal). Column-oriented: once y[e] is
     // final, eliminate it from the rows below. Axpys via `fmadd` (FMA on
-    // native builds; see `scalar::fmadd`).
+    // native builds; see `scalar::fmadd`). The explicit unit diagonal is a
+    // column's FIRST entry (rows sorted, lower triangular in elimination
+    // numbering), so the sweep starts at `col_ptr[e] + 1` instead of
+    // branching on `i != e` at every nonzero.
     for e in 0..n {
+        let (s, ee) = (f.l_col_ptr[e], f.l_col_ptr[e + 1]);
+        debug_assert_eq!(f.l_row_idx[s], e, "unit diagonal must lead its column");
         let nye = T::zero() - y[e];
-        for k in f.l_col_ptr[e]..f.l_col_ptr[e + 1] {
+        for k in (s + 1)..ee {
             let i = f.l_row_idx[k];
-            if i != e {
-                y[i] = fmadd(f.l_values[k], nye, y[i]);
-            }
+            y[i] = fmadd(f.l_values[k], nye, y[i]);
         }
     }
-    // Backward solve U x = y (CSR by row).
+    // Backward solve U x = y (CSR by row). The pivot is a row's FIRST entry
+    // (columns sorted, upper triangular), replacing the per-nonzero
+    // diagonal-search branch.
     let mut x = vec![T::zero(); n];
     for e in (0..n).rev() {
+        let (s, ee) = (f.u_row_ptr[e], f.u_row_ptr[e + 1]);
+        debug_assert_eq!(f.u_col_idx[s], e, "pivot must lead its row");
+        let diag = f.u_values[s];
         let mut acc = y[e];
-        let mut diag = T::one();
-        for k in f.u_row_ptr[e]..f.u_row_ptr[e + 1] {
-            let c = f.u_col_idx[k];
-            if c == e {
-                diag = f.u_values[k];
-            } else {
-                acc = fmadd(T::zero() - f.u_values[k], x[c], acc);
-            }
+        for k in (s + 1)..ee {
+            acc = fmadd(T::zero() - f.u_values[k], x[f.u_col_idx[k]], acc);
         }
         x[e] = acc * diag.recip();
     }
@@ -2742,37 +2744,34 @@ fn solve_lu_block<T: Scalar>(f: &LuFactors<T>, b: &[T], nrhs: usize) -> Result<V
     for e in 0..n {
         let eb = e * nrhs;
         row.copy_from_slice(&y[eb..eb + nrhs]);
-        for k in f.l_col_ptr[e]..f.l_col_ptr[e + 1] {
+        let (s, ee) = (f.l_col_ptr[e], f.l_col_ptr[e + 1]);
+        debug_assert_eq!(f.l_row_idx[s], e);
+        for k in (s + 1)..ee {
             let i = f.l_row_idx[k];
-            if i != e {
-                let nlval = T::zero() - f.l_values[k];
-                let ib = i * nrhs;
-                let tgt = &mut y[ib..ib + nrhs];
-                for c in 0..nrhs {
-                    tgt[c] = fmadd(nlval, row[c], tgt[c]);
-                }
+            let nlval = T::zero() - f.l_values[k];
+            let ib = i * nrhs;
+            let tgt = &mut y[ib..ib + nrhs];
+            for c in 0..nrhs {
+                tgt[c] = fmadd(nlval, row[c], tgt[c]);
             }
         }
     }
     // Backward solve U X = Y (CSR by row), in place in `y`. Accumulate row `e`'s
     // update in the local buffer (the off-diagonal sources `y[c_col]`, `c_col > e`,
     // are already solved and not touched here), then scale and write it back.
+    // The pivot leads its row (sorted columns, upper triangular).
     for e in (0..n).rev() {
         let eb = e * nrhs;
         row.copy_from_slice(&y[eb..eb + nrhs]);
-        let mut diag = T::one();
-        for k in f.u_row_ptr[e]..f.u_row_ptr[e + 1] {
-            let c_col = f.u_col_idx[k];
-            let uval = f.u_values[k];
-            if c_col == e {
-                diag = uval;
-            } else {
-                let nuval = T::zero() - uval;
-                let cb = c_col * nrhs;
-                let src = &y[cb..cb + nrhs];
-                for c in 0..nrhs {
-                    row[c] = fmadd(nuval, src[c], row[c]);
-                }
+        let (s, ee) = (f.u_row_ptr[e], f.u_row_ptr[e + 1]);
+        debug_assert_eq!(f.u_col_idx[s], e);
+        let diag = f.u_values[s];
+        for k in (s + 1)..ee {
+            let nuval = T::zero() - f.u_values[k];
+            let cb = f.u_col_idx[k] * nrhs;
+            let src = &y[cb..cb + nrhs];
+            for c in 0..nrhs {
+                row[c] = fmadd(nuval, src[c], row[c]);
             }
         }
         let dinv = diag.recip();

@@ -339,13 +339,18 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     // final, propagate it down its column. Axpys via `fmadd` (FMA on native
     // builds); `CompressedLdltFactors::solve` mirrors the exact same
     // expressions to stay bit-identical.
+    //
+    // The explicit unit diagonal is always a column's FIRST stored entry
+    // (rows are sorted and L is lower triangular in elimination numbering),
+    // so the sweeps skip index `col_ptr[j]` outright instead of branching on
+    // `i != j` at every nonzero.
     for j in 0..n {
+        let (s, e) = (factors.l_col_ptr[j], factors.l_col_ptr[j + 1]);
+        debug_assert_eq!(factors.l_row_idx[s], j, "unit diagonal must lead its column");
         let nzj = T::zero() - y[j];
-        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
+        for k in (s + 1)..e {
             let i = factors.l_row_idx[k];
-            if i != j {
-                y[i] = fmadd(factors.l_values[k], nzj, y[i]);
-            }
+            y[i] = fmadd(factors.l_values[k], nzj, y[i]);
         }
     }
 
@@ -377,14 +382,13 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     }
 
     // Backward solve Lᵀ · v = w (CSC column j = row j of Lᵀ): dot column j's
-    // multipliers against the already-solved tail.
+    // multipliers against the already-solved tail (diagonal-first layout, so
+    // the dot starts at `col_ptr[j] + 1`).
     for j in (0..n).rev() {
+        let (s, e) = (factors.l_col_ptr[j], factors.l_col_ptr[j + 1]);
         let mut acc = y[j];
-        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
-            let i = factors.l_row_idx[k];
-            if i != j {
-                acc = fmadd(T::zero() - factors.l_values[k], y[i], acc);
-            }
+        for k in (s + 1)..e {
+            acc = fmadd(T::zero() - factors.l_values[k], y[factors.l_row_idx[k]], acc);
         }
         y[j] = acc;
     }
@@ -463,15 +467,15 @@ impl<T: Scalar> CompressedLdltFactors<T> {
         for (i, yi) in y.iter_mut().enumerate() {
             *yi = rhs[self.perm[i] as usize];
         }
-        // Forward solve L z = y (same `fmadd` expressions as `solve_ldlt` -
-        // the bit-identity contract of this type).
+        // Forward solve L z = y (same `fmadd` expressions and diagonal-first
+        // skip as `solve_ldlt` - the bit-identity contract of this type).
         for j in 0..n {
+            let (s, e) = (self.l_col_ptr[j] as usize, self.l_col_ptr[j + 1] as usize);
+            debug_assert_eq!(self.l_row_idx[s] as usize, j);
             let nzj = T::zero() - y[j];
-            for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
+            for k in (s + 1)..e {
                 let i = self.l_row_idx[k] as usize;
-                if i != j {
-                    y[i] = fmadd(self.l_values[k], nzj, y[i]);
-                }
+                y[i] = fmadd(self.l_values[k], nzj, y[i]);
             }
         }
         // D-block solve.
@@ -501,12 +505,11 @@ impl<T: Scalar> CompressedLdltFactors<T> {
         }
         // Backward solve Lᵀ v = w.
         for j in (0..n).rev() {
+            let (s, e) = (self.l_col_ptr[j] as usize, self.l_col_ptr[j + 1] as usize);
             let mut acc = y[j];
-            for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
+            for k in (s + 1)..e {
                 let i = self.l_row_idx[k] as usize;
-                if i != j {
-                    acc = fmadd(T::zero() - self.l_values[k], y[i], acc);
-                }
+                acc = fmadd(T::zero() - self.l_values[k], y[i], acc);
             }
             y[j] = acc;
         }
@@ -612,15 +615,15 @@ fn solve_ldlt_block<T: Scalar>(
     for j in 0..n {
         let jb = j * nrhs;
         row.copy_from_slice(&y[jb..jb + nrhs]);
-        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
+        let (s, e) = (factors.l_col_ptr[j], factors.l_col_ptr[j + 1]);
+        debug_assert_eq!(factors.l_row_idx[s], j);
+        for k in (s + 1)..e {
             let i = factors.l_row_idx[k];
-            if i != j {
-                let nlval = T::zero() - factors.l_values[k];
-                let ib = i * nrhs;
-                let tgt = &mut y[ib..ib + nrhs];
-                for c in 0..nrhs {
-                    tgt[c] = fmadd(nlval, row[c], tgt[c]);
-                }
+            let nlval = T::zero() - factors.l_values[k];
+            let ib = i * nrhs;
+            let tgt = &mut y[ib..ib + nrhs];
+            for c in 0..nrhs {
+                tgt[c] = fmadd(nlval, row[c], tgt[c]);
             }
         }
     }
@@ -665,15 +668,14 @@ fn solve_ldlt_block<T: Scalar>(
     for j in (0..n).rev() {
         let jb = j * nrhs;
         row.copy_from_slice(&y[jb..jb + nrhs]);
-        for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
+        let (s, e) = (factors.l_col_ptr[j], factors.l_col_ptr[j + 1]);
+        for k in (s + 1)..e {
             let i = factors.l_row_idx[k];
-            if i != j {
-                let nlval = T::zero() - factors.l_values[k];
-                let ib = i * nrhs;
-                let src = &y[ib..ib + nrhs];
-                for c in 0..nrhs {
-                    row[c] = fmadd(nlval, src[c], row[c]);
-                }
+            let nlval = T::zero() - factors.l_values[k];
+            let ib = i * nrhs;
+            let src = &y[ib..ib + nrhs];
+            for c in 0..nrhs {
+                row[c] = fmadd(nlval, src[c], row[c]);
             }
         }
         y[jb..jb + nrhs].copy_from_slice(&row);
