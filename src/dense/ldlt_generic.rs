@@ -77,9 +77,24 @@ pub(crate) fn bk_alpha() -> f64 {
 /// columns to the left - so the partial factorization stays consistent. The
 /// crossing element `(q, p)` maps to itself and is left in place.
 pub(crate) fn swap_sym_lower<T: Scalar>(a: &mut [T], n: usize, p: usize, q: usize) {
-    debug_assert!(p < q && q < n);
+    swap_sym_lower_bounded(a, n, p, q, n);
+}
+
+/// [`swap_sym_lower`] with the below-`q` column-segment swap bounded to rows
+/// `< row_limit`. The blocked Bunch-Kaufman panel kernels keep their pivot
+/// interchanges inside the panel rows and replay the deep-row segments later
+/// in the parallel trailing apply (`apply_bk_panel_trailing`), so the
+/// interchange sequence reaches every row exactly once, in step order.
+pub(crate) fn swap_sym_lower_bounded<T: Scalar>(
+    a: &mut [T],
+    n: usize,
+    p: usize,
+    q: usize,
+    row_limit: usize,
+) {
+    debug_assert!(p < q && q < n && q < row_limit);
     // Column segment strictly below q: (i, p) <-> (i, q) for i > q.
-    for i in (q + 1)..n {
+    for i in (q + 1)..row_limit {
         a.swap(p * n + i, q * n + i);
     }
     // Middle cross strip: (i, p) <-> (q, i) for p < i < q.
