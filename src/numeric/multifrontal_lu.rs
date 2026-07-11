@@ -32,7 +32,7 @@ use crate::numeric::multifrontal_ldlt::{
     analyze_with, compute_supernode_row_structures, perturb_pivot, BlrMode, FactorMethod,
     MemoryMode, SolverSettings, ZeroPivotAction,
 };
-use crate::scalar::Scalar;
+use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
@@ -2619,13 +2619,14 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
         })
         .collect();
     // Forward solve L y = ŷ (CSC, unit diagonal). Column-oriented: once y[e] is
-    // final, eliminate it from the rows below.
+    // final, eliminate it from the rows below. Axpys via `fmadd` (FMA on
+    // native builds; see `scalar::fmadd`).
     for e in 0..n {
-        let ye = y[e];
+        let nye = T::zero() - y[e];
         for k in f.l_col_ptr[e]..f.l_col_ptr[e + 1] {
             let i = f.l_row_idx[k];
             if i != e {
-                y[i] = y[i] - f.l_values[k] * ye;
+                y[i] = fmadd(f.l_values[k], nye, y[i]);
             }
         }
     }
@@ -2639,7 +2640,7 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
             if c == e {
                 diag = f.u_values[k];
             } else {
-                acc = acc - f.u_values[k] * x[c];
+                acc = fmadd(T::zero() - f.u_values[k], x[c], acc);
             }
         }
         x[e] = acc * diag.recip();
@@ -2744,11 +2745,11 @@ fn solve_lu_block<T: Scalar>(f: &LuFactors<T>, b: &[T], nrhs: usize) -> Result<V
         for k in f.l_col_ptr[e]..f.l_col_ptr[e + 1] {
             let i = f.l_row_idx[k];
             if i != e {
-                let lval = f.l_values[k];
+                let nlval = T::zero() - f.l_values[k];
                 let ib = i * nrhs;
                 let tgt = &mut y[ib..ib + nrhs];
                 for c in 0..nrhs {
-                    tgt[c] = tgt[c] - lval * row[c];
+                    tgt[c] = fmadd(nlval, row[c], tgt[c]);
                 }
             }
         }
@@ -2766,10 +2767,11 @@ fn solve_lu_block<T: Scalar>(f: &LuFactors<T>, b: &[T], nrhs: usize) -> Result<V
             if c_col == e {
                 diag = uval;
             } else {
+                let nuval = T::zero() - uval;
                 let cb = c_col * nrhs;
                 let src = &y[cb..cb + nrhs];
                 for c in 0..nrhs {
-                    row[c] = row[c] - uval * src[c];
+                    row[c] = fmadd(nuval, src[c], row[c]);
                 }
             }
         }

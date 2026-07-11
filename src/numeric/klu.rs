@@ -32,7 +32,7 @@
 
 use crate::error::RslabError;
 use crate::ordering::btf;
-use crate::scalar::Scalar;
+use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
 
 const UNSET: usize = usize::MAX;
@@ -660,16 +660,19 @@ fn factor_impl<T: Scalar>(
 
             // Pass 3 — numeric update in topological order (reverse
             // post-order): each pivotal node's final value feeds its L column
-            // into the remaining work vector, and becomes a U entry.
+            // into the remaining work vector, and becomes a U entry. The axpy
+            // runs through `fmadd` (FMA on native builds); `refactor`'s
+            // replay uses the identical expression so it stays bit-identical.
             for &u in topo.iter().rev() {
                 let p = bpinv[u];
                 let xu = x[u];
                 x[u] = T::zero();
                 u_rowidx.push(p);
                 u_val.push(xu);
+                let nxu = T::zero() - xu;
                 for k in l_colptr[p]..l_colptr[p + 1] {
                     let lr = l_rowidx[k];
-                    x[lr] = x[lr] - xu * l_val[k];
+                    x[lr] = fmadd(nxu, l_val[k], x[lr]);
                 }
             }
 
@@ -875,7 +878,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
-                    acc = acc - f.f_val[k] * w[f.f_rowidx[k]];
+                    acc = fmadd(T::zero() - f.f_val[k], w[f.f_rowidx[k]], acc);
                 }
                 w[j] = acc;
             }
@@ -883,7 +886,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                    acc = acc - f.u_val[k] * w[f.u_rowidx[k]];
+                    acc = fmadd(T::zero() - f.u_val[k], w[f.u_rowidx[k]], acc);
                 }
                 w[j] = acc / f.udiag[j];
             }
@@ -891,7 +894,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in (bs..be).rev() {
                 let mut acc = w[j];
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                    acc = acc - f.l_val[k] * w[f.l_rowidx[k]];
+                    acc = fmadd(T::zero() - f.l_val[k], w[f.l_rowidx[k]], acc);
                 }
                 w[j] = acc;
             }
@@ -930,14 +933,17 @@ impl<T: Scalar> KluSolver<T> {
         let mut xj = vec![T::zero(); nrhs];
         for blk in (0..f.block_ptr.len() - 1).rev() {
             let (bs, be) = (f.block_ptr[blk], f.block_ptr[blk + 1]);
-            // L (unit lower) forward within the block.
+            // L (unit lower) forward within the block. Negating the factor
+            // value (loop-invariant here) instead of `xj` keeps each column's
+            // FMA product bitwise equal to `solve_permuted`'s
+            // (`(-a)·b == a·(-b)` exactly per real FMA).
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                    let (lr, lv) = (f.l_rowidx[k], f.l_val[k]);
+                    let (lr, nlv) = (f.l_rowidx[k], T::zero() - f.l_val[k]);
                     let row = &mut w[lr * nrhs..lr * nrhs + nrhs];
                     for (r, &x) in row.iter_mut().zip(&xj) {
-                        *r = *r - lv * x;
+                        *r = fmadd(nlv, x, *r);
                     }
                 }
             }
@@ -953,10 +959,10 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                    let (ur, uv) = (f.u_rowidx[k], f.u_val[k]);
+                    let (ur, nuv) = (f.u_rowidx[k], T::zero() - f.u_val[k]);
                     let row = &mut w[ur * nrhs..ur * nrhs + nrhs];
                     for (r, &x) in row.iter_mut().zip(&xj) {
-                        *r = *r - uv * x;
+                        *r = fmadd(nuv, x, *r);
                     }
                 }
             }
@@ -964,10 +970,10 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
-                    let (fr, fv) = (f.f_rowidx[k], f.f_val[k]);
+                    let (fr, nfv) = (f.f_rowidx[k], T::zero() - f.f_val[k]);
                     let row = &mut w[fr * nrhs..fr * nrhs + nrhs];
                     for (r, &x) in row.iter_mut().zip(&xj) {
-                        *r = *r - fv * x;
+                        *r = fmadd(nfv, x, *r);
                     }
                 }
             }
@@ -1023,6 +1029,10 @@ impl<T: Scalar> KluSolver<T> {
     }
 
     /// The block forward/backward substitution on the permuted/scaled vector.
+    /// The axpys run through `fmadd` with the loop-invariant operand negated
+    /// once per column — `solve_many` negates the per-entry factor value
+    /// instead, which is bitwise the same product (`(-a)·b == a·(-b)` holds
+    /// exactly per real FMA), so the two stay bit-identical per column.
     fn solve_permuted(&self, w: &mut [T]) {
         let f = &self.factors;
         for b in (0..f.block_ptr.len() - 1).rev() {
@@ -1031,8 +1041,9 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let xj = w[j];
                 if xj != T::zero() {
+                    let nxj = T::zero() - xj;
                     for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                        w[f.l_rowidx[k]] = w[f.l_rowidx[k]] - f.l_val[k] * xj;
+                        w[f.l_rowidx[k]] = fmadd(f.l_val[k], nxj, w[f.l_rowidx[k]]);
                     }
                 }
             }
@@ -1041,8 +1052,9 @@ impl<T: Scalar> KluSolver<T> {
                 let xj = w[j] / f.udiag[j];
                 w[j] = xj;
                 if xj != T::zero() {
+                    let nxj = T::zero() - xj;
                     for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                        w[f.u_rowidx[k]] = w[f.u_rowidx[k]] - f.u_val[k] * xj;
+                        w[f.u_rowidx[k]] = fmadd(f.u_val[k], nxj, w[f.u_rowidx[k]]);
                     }
                 }
             }
@@ -1050,8 +1062,9 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let xj = w[j];
                 if xj != T::zero() {
+                    let nxj = T::zero() - xj;
                     for k in f.f_colptr[j]..f.f_colptr[j + 1] {
-                        w[f.f_rowidx[k]] = w[f.f_rowidx[k]] - f.f_val[k] * xj;
+                        w[f.f_rowidx[k]] = fmadd(f.f_val[k], nxj, w[f.f_rowidx[k]]);
                     }
                 }
             }
@@ -1114,15 +1127,17 @@ impl<T: Scalar> KluSolver<T> {
                     return Err(pattern_mismatch());
                 }
 
-                // Replay the elimination in the stored topological order.
+                // Replay the elimination in the stored topological order
+                // (bit-identical to `factor_impl`'s pass 3: same `fmadd`).
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
                     let p = f.u_rowidx[k];
                     let xu = x[p];
                     x[p] = T::zero();
                     f.u_val[k] = xu;
+                    let nxu = T::zero() - xu;
                     for kl in f.l_colptr[p]..f.l_colptr[p + 1] {
                         let lr = f.l_rowidx[kl];
-                        x[lr] = x[lr] - xu * f.l_val[kl];
+                        x[lr] = fmadd(nxu, f.l_val[kl], x[lr]);
                     }
                 }
                 let d = x[j];

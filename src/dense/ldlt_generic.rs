@@ -20,7 +20,7 @@
 
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::RslabError;
-use crate::scalar::Scalar;
+use crate::scalar::{fmadd, Scalar};
 use rayon::prelude::*;
 
 /// Result of a generic Bunch-Kaufman LDLᵀ factorization.
@@ -332,13 +332,15 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     }
 
     // Forward solve L · z = y (unit lower, CSC column-oriented): once y[j] is
-    // final, propagate it down its column.
+    // final, propagate it down its column. Axpys via `fmadd` (FMA on native
+    // builds); `CompressedLdltFactors::solve` mirrors the exact same
+    // expressions to stay bit-identical.
     for j in 0..n {
-        let zj = y[j];
+        let nzj = T::zero() - y[j];
         for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
             let i = factors.l_row_idx[k];
             if i != j {
-                y[i] = y[i] - factors.l_values[k] * zj;
+                y[i] = fmadd(factors.l_values[k], nzj, y[i]);
             }
         }
     }
@@ -377,7 +379,7 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
         for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
             let i = factors.l_row_idx[k];
             if i != j {
-                acc = acc - factors.l_values[k] * y[i];
+                acc = fmadd(T::zero() - factors.l_values[k], y[i], acc);
             }
         }
         y[j] = acc;
@@ -457,13 +459,14 @@ impl<T: Scalar> CompressedLdltFactors<T> {
         for (i, yi) in y.iter_mut().enumerate() {
             *yi = rhs[self.perm[i] as usize];
         }
-        // Forward solve L z = y.
+        // Forward solve L z = y (same `fmadd` expressions as `solve_ldlt` -
+        // the bit-identity contract of this type).
         for j in 0..n {
-            let zj = y[j];
+            let nzj = T::zero() - y[j];
             for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
                 let i = self.l_row_idx[k] as usize;
                 if i != j {
-                    y[i] = y[i] - self.l_values[k] * zj;
+                    y[i] = fmadd(self.l_values[k], nzj, y[i]);
                 }
             }
         }
@@ -498,7 +501,7 @@ impl<T: Scalar> CompressedLdltFactors<T> {
             for k in self.l_col_ptr[j] as usize..self.l_col_ptr[j + 1] as usize {
                 let i = self.l_row_idx[k] as usize;
                 if i != j {
-                    acc = acc - self.l_values[k] * y[i];
+                    acc = fmadd(T::zero() - self.l_values[k], y[i], acc);
                 }
             }
             y[j] = acc;
@@ -608,11 +611,11 @@ fn solve_ldlt_block<T: Scalar>(
         for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
             let i = factors.l_row_idx[k];
             if i != j {
-                let lval = factors.l_values[k];
+                let nlval = T::zero() - factors.l_values[k];
                 let ib = i * nrhs;
                 let tgt = &mut y[ib..ib + nrhs];
                 for c in 0..nrhs {
-                    tgt[c] = tgt[c] - lval * row[c];
+                    tgt[c] = fmadd(nlval, row[c], tgt[c]);
                 }
             }
         }
@@ -661,11 +664,11 @@ fn solve_ldlt_block<T: Scalar>(
         for k in factors.l_col_ptr[j]..factors.l_col_ptr[j + 1] {
             let i = factors.l_row_idx[k];
             if i != j {
-                let lval = factors.l_values[k];
+                let nlval = T::zero() - factors.l_values[k];
                 let ib = i * nrhs;
                 let src = &y[ib..ib + nrhs];
                 for c in 0..nrhs {
-                    row[c] = row[c] - lval * src[c];
+                    row[c] = fmadd(nlval, src[c], row[c]);
                 }
             }
         }

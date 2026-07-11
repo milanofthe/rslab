@@ -65,12 +65,37 @@ pub trait Scalar:
     /// The reciprocal `1/z`. The caller must guarantee `self != 0`.
     fn recip(self) -> Self;
 
-    /// `self * a + b`, using a fused multiply-add where the hardware offers one.
+    /// `self * a + b`, using a fused multiply-add where the hardware offers
+    /// one. Do **not** call this directly in hot loops — without the `fma`
+    /// target feature it lowers to a slow libm software-fma call; go through
+    /// [`fmadd`] instead, which guards on the build's target features.
     fn mul_add(self, a: Self, b: Self) -> Self;
 
     /// Whether every component is finite (no `NaN`/`inf`) - used by pivot
     /// health checks.
     fn is_finite(self) -> bool;
+}
+
+/// `a·b + c` through the hardware FMA **when the build enables it**
+/// (`-C target-cpu=native` or `-C target-feature=+fma`; see
+/// `.cargo/config.toml`), else as a plain multiply-add. The guard is
+/// load-bearing: a bare [`Scalar::mul_add`] on a baseline x86-64 build lowers
+/// to a libm software-fma call — bit-exact but far slower than mul+add — so
+/// the hot scalar kernels (triangular solves, Gilbert-Peierls updates) must
+/// only ever reach `mul_add` through this switch. `cfg!` resolves at compile
+/// time; the untaken branch folds away.
+///
+/// Numerical note: with FMA the product is not rounded before the add, so
+/// results differ from the plain path in the last ulp. Determinism within a
+/// build is unaffected (every run takes the same branch); cross-build
+/// bit-identity was never guaranteed.
+#[inline(always)]
+pub(crate) fn fmadd<T: Scalar>(a: T, b: T, c: T) -> T {
+    if cfg!(target_feature = "fma") {
+        a.mul_add(b, c)
+    } else {
+        a * b + c
+    }
 }
 
 impl Scalar for f64 {

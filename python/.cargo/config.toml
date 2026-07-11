@@ -1,0 +1,7 @@
+# Neutralize the repo root's `target-cpu=native` for wheel builds: published
+# wheels must run on baseline x86-64/aarch64, not just the CI runner's CPU.
+# (Cargo config precedence: this closer file's `build.rustflags` wins over
+# the root's for any build rooted here — maturin runs with
+# working-directory: python, so wheels pick this up.)
+[build]
+rustflags = []

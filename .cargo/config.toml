@@ -1,2 +1,11 @@
 [alias]
 xtask = "run --release -p xtask --"
+
+# Build for the host CPU in this repo (dev builds, tests, benches): unlocks
+# FMA/AVX in the scalar kernels (`scalar::fmadd`) and matches how MKL PARDISO
+# runs in the head-to-head benches (runtime AVX dispatch). This config does
+# NOT leak to consumers: crates.io dependencies build in the consumer's tree
+# where this file is not read, and the Python wheels override it via
+# `python/.cargo/config.toml` (maturin runs with working-directory: python).
+[build]
+rustflags = ["-C", "target-cpu=native"]
