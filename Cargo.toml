@@ -210,6 +210,10 @@ name = "mom_factor_probe"
 harness = false
 
 [[bench]]
+name = "lu_warm_probe"
+harness = false
+
+[[bench]]
 name = "mom_diag"
 harness = false
 

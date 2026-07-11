@@ -83,6 +83,29 @@ the node): root cdiv 70 → 47 ms (−33 %), total ~532-547 → **500-546 ms**
 rejected. The global-nb sweep's "128 loses" verdict was the small panels'
 share, not the wide ones'.
 
+## LU twin port (feat/lu-throughput)
+
+The three LL levers ported to `multifrontal_lu.rs` (`lu_ll_factor_node`) -
+production-relevant: this is rapidmom's preconditioner path. Two target
+buffers make the tiled cmod two-phase (`lbuf` column slabs for the L/U11
+updates - full rectangles from `p0`, no lower-trapezoid trimming in LU -
+then `ubuf` slabs for the U12 updates); fork gates + chain-phase signal via
+an `ll_active` counter as in the LDLT twin; adaptive `nb_cdiv` (128 for
+`ncol >= 512`, else the swept-optimal 32); NEW over the LDLT set: the
+in-panel TRSM (22% of cdiv CPU serial on MoM fronts) parallelized over
+disjoint trailing-column chunks (bit-identical per-column op order). LU
+threshold pivoting searches the full fully-summed block, so the getf2
+share (19-20%) is NOT panel-deferrable without changing pivot choice -
+left alone.
+
+Measured on the real rapidmom precond corpus (warm best-of-3, production
+config `exact() + PerturbToEps(1e-12)` @12, `benches/lu_warm_probe.rs`):
+spiral_D200 (n=16.9k) 418 -> **352 ms** (-16%); opamp_c1000n (n=46k)
+2349 -> **2155 ms** (-8%). Remaining opamp profile: cmod 63% at ~1.7
+effective parallelism - the LU path lacks the concurrency histogram /
+per-node profile instrumentation; porting that is the next diagnostic
+step before more kernel work.
+
 ## Open (next candidates, evidence-ranked)
 
 Post-tiling profile: root = cmod 71-78 ms (≈73 Gflop/s, fair for
