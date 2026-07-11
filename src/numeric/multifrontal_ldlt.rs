@@ -2715,6 +2715,53 @@ fn ll_factor_node<T: Scalar>(
         node_ph_ns[1] = t.elapsed().as_nanos() as u64;
         PROF_LDLT_CMOD_NS.fetch_add(node_ph_ns[1], AtomicOrdering::Relaxed);
     }
+    ll_cdiv_emit(
+        s,
+        sym,
+        rs,
+        store,
+        emit,
+        perturb_floor,
+        n_perturbed,
+        ll_active,
+        kt,
+        panel,
+        gloc,
+        t_node,
+        node_ph_ns,
+        cmod_flops,
+        update_list[s].len(),
+    )
+}
+
+/// cdiv + store + emit for supernode `s` on an already fully cmod-updated
+/// `panel` - the tail of [`ll_factor_node`], extracted so the spine
+/// pipeline executor (issue #20) can drive assembly/cmod itself and reuse
+/// the identical factor kernel. Takes `panel` and the global→local scratch
+/// `gloc` by value (`gloc` is returned to the thread-local scratch slot on
+/// every exit path).
+#[allow(clippy::too_many_arguments)]
+fn ll_cdiv_emit<T: Scalar>(
+    s: usize,
+    sym: &SymbolicFactorization,
+    rs: &[Vec<usize>],
+    store: &LlStore<T>,
+    emit: &LlEmitLdlt<T>,
+    perturb_floor: Option<f64>,
+    n_perturbed: &AtomicUsize,
+    ll_active: &AtomicUsize,
+    kt: KernelTuning,
+    mut panel: Vec<T>,
+    mut gloc: Vec<usize>,
+    t_node: Option<std::time::Instant>,
+    mut node_ph_ns: [u64; 3],
+    cmod_flops: usize,
+    n_upd: usize,
+) -> Result<(), RslabError> {
+    let snode = &sym.supernodes[s];
+    let ncol = snode.ncol;
+    let nrow = rs[s].len();
+        let prof = ldlt_prof_on();
     let t_cdiv = prof.then(std::time::Instant::now);
     // cdiv: partial **blocked** Bunch-Kaufman LDLᵀ (1×1 and 2×2 pivots), the
     // rectangular `nrow × ncol` analogue of `factor_front`'s panel kernel. The
@@ -3120,7 +3167,7 @@ fn ll_factor_node<T: Scalar>(
             cdiv_ms: node_ph_ns[2] as f64 / 1e6,
             nrow,
             ncol,
-            n_upd: update_list[s].len(),
+            n_upd,
             cmod_gflop: cmod_flops as f64 / 1e9,
         });
     }
@@ -3194,6 +3241,8 @@ fn ll_factor_node<T: Scalar>(
     unsafe { store.set(s, panel, d, d_subdiag, two_by_two, lperm) };
     Ok(())
 }
+
+
 
 /// Factor the assembly subtree rooted at `s` with a work-stealing schedule:
 /// children subtrees concurrently, then this node (whose updaters all lie in the
