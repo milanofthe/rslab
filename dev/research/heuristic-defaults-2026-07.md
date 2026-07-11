@@ -73,6 +73,26 @@ default entry point on the fastest known configuration for this class.
 KLU has no model path: `KluSettings` defaults (BTF on, row scaling on) are
 already the heuristic choice; its per-block AMD ordering is fixed by design.
 
+## Family validation (bench_suite, cold single shot, ll = fixed default @8)
+
+sym family (`auto` = the new heuristic default; ratio = auto/ll factor time):
+
+| matrix | ratio | fill ll → auto |
+|---|---|---|
+| helmholtz_8000 | 1.03 | equal (below bakeoff threshold) |
+| helmholtz_12167 | 1.15 | equal (cold-shot noise band ±30%) |
+| helmholtz_19683 | 0.69 | 3.39 M → 2.60 M |
+| curlcurl_27783 | **0.18** | 50.1 M → 17.7 M |
+| curlcurl_41472 | **0.11** | 106.8 M → 32.2 M |
+| curlcurl_65856 | **0.07** | 268.8 M → 63.5 M |
+| saddle_89787 | 0.92 | equal |
+| saddle_120000 | 0.50 | 15.3 M → 8.9 M |
+
+Geomean 0.39 (~2.6× faster). unsym family (LU path, new bakeoff):
+convdiff3d_27000 **0.69** (11.2 M → 8.1 M), convdiff2d_64009 0.89,
+convdiff2d_44944 0.97, convdiff3d_15625 1.08 (below threshold, noise).
+No fill regression anywhere in either family.
+
 ## Follow-ups
 
 * The `bench_suite` "auto" rows now measure the heuristic default; a corpus
