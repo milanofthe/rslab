@@ -126,6 +126,68 @@ fn cmod_prof_on() -> bool {
 /// dependents). Scheduling-only: the dispatch never changes the computed bits
 /// (identical per-entry accumulation order on every path), so a racy counter
 /// read is benign and bit-identity across thread counts holds.
+// Wall-clock node-concurrency histogram (`RLA_PROFILE=1`), ported from the
+// LDLT twin: time integral of the number of `lu_ll_factor_node` calls in
+// flight; `hist_ns[k]` = wall ns with exactly k nodes active (k capped 16).
+struct LuConcProf {
+    last: std::time::Instant,
+    active: usize,
+    hist_ns: [u64; 17],
+}
+static PROF_LU_CONC: std::sync::OnceLock<std::sync::Mutex<LuConcProf>> =
+    std::sync::OnceLock::new();
+fn lu_conc_event(enter: bool) {
+    let m = PROF_LU_CONC.get_or_init(|| {
+        std::sync::Mutex::new(LuConcProf {
+            last: std::time::Instant::now(),
+            active: 0,
+            hist_ns: [0; 17],
+        })
+    });
+    let Ok(mut g) = m.lock() else { return };
+    let now = std::time::Instant::now();
+    let fresh = g.active == 0 && g.hist_ns.iter().all(|&x| x == 0);
+    if !fresh {
+        let k = g.active.min(16);
+        g.hist_ns[k] += now.duration_since(g.last).as_nanos() as u64;
+    }
+    g.last = now;
+    g.active = if enter {
+        g.active + 1
+    } else {
+        g.active.saturating_sub(1)
+    };
+}
+struct LuConcGuard;
+impl Drop for LuConcGuard {
+    fn drop(&mut self) {
+        lu_conc_event(false);
+    }
+}
+
+// Per-node wall profile: the top-K most expensive supernodes with their
+// phase split - names the nodes behind the low-concurrency wall share.
+struct LuNodeCost {
+    wall_ms: f64,
+    cmod_ms: f64,
+    cdiv_ms: f64,
+    nrow: usize,
+    ncol: usize,
+    n_upd: usize,
+    cmod_gflop: f64,
+}
+static PROF_LU_NODES: std::sync::OnceLock<std::sync::Mutex<Vec<LuNodeCost>>> =
+    std::sync::OnceLock::new();
+fn lu_node_cost(c: LuNodeCost) {
+    if c.wall_ms < 2.0 {
+        return;
+    }
+    let m = PROF_LU_NODES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut v) = m.lock() {
+        v.push(c);
+    }
+}
+
 struct LuActiveGuard<'a>(&'a AtomicUsize);
 impl Drop for LuActiveGuard<'_> {
     fn drop(&mut self) {
@@ -1581,6 +1643,12 @@ fn lu_ll_factor_node<T: Scalar>(
 ) -> Result<(), RslabError> {
     ll_active.fetch_add(1, Ordering::Relaxed);
     let _active = LuActiveGuard(ll_active);
+    let prof_node = cmod_prof_on();
+    let _conc = prof_node.then(|| {
+        lu_conc_event(true);
+        LuConcGuard
+    });
+    let t_node = prof_node.then(std::time::Instant::now);
     let ll_gemm_gate = kt.scalar_gate;
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
@@ -1926,7 +1994,8 @@ fn lu_ll_factor_node<T: Scalar>(
             }
         }
     }
-    PROF_LL_CMOD_NS.fetch_add(t_cmod.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let cmod_ns = t_cmod.elapsed().as_nanos() as u64;
+    PROF_LL_CMOD_NS.fetch_add(cmod_ns, Ordering::Relaxed);
     let t_cdiv = std::time::Instant::now();
     // cdiv: in-place **blocked** panel LU (1×1 static pivoting), no trailing/CB
     // update. Mirrors the multifrontal `lu_front` getrf - unblocked `getf2` over
@@ -2206,7 +2275,19 @@ fn lu_ll_factor_node<T: Scalar>(
         }
         kb = ke;
     }
-    PROF_LL_CDIV_NS.fetch_add(t_cdiv.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let cdiv_ns = t_cdiv.elapsed().as_nanos() as u64;
+    PROF_LL_CDIV_NS.fetch_add(cdiv_ns, Ordering::Relaxed);
+    if let Some(t) = t_node {
+        lu_node_cost(LuNodeCost {
+            wall_ms: t.elapsed().as_secs_f64() * 1e3,
+            cmod_ms: cmod_ns as f64 / 1e6,
+            cdiv_ms: cdiv_ns as f64 / 1e6,
+            nrow,
+            ncol,
+            n_upd: update_list[s].len(),
+            cmod_gflop: cmod_flops as f64 / 1e9,
+        });
+    }
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
     }
@@ -2457,6 +2538,55 @@ fn factor_lu_left_looking<T: Scalar>(
             100.0 * cmod / tot,
             100.0 * cdiv / tot,
         );
+        if let Some(m) = PROF_LU_CONC.get() {
+            if let Ok(mut cg) = m.lock() {
+                let now = std::time::Instant::now();
+                let k = cg.active.min(16);
+                cg.hist_ns[k] += now.duration_since(cg.last).as_nanos() as u64;
+                cg.last = now;
+                let tot: u64 = cg.hist_ns.iter().sum::<u64>().max(1);
+                let mean: f64 = cg
+                    .hist_ns
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &ns)| k as f64 * ns as f64)
+                    .sum::<f64>()
+                    / tot as f64;
+                let pct = |ns: u64| 100.0 * ns as f64 / tot as f64;
+                let b12 = cg.hist_ns[1] + cg.hist_ns[2];
+                let b34 = cg.hist_ns[3] + cg.hist_ns[4];
+                let b58: u64 = cg.hist_ns[5..=8].iter().sum();
+                let b9: u64 = cg.hist_ns[9..].iter().sum();
+                eprintln!(
+                    "[RLA_LU_CONC] mean active nodes {mean:.2}  wall-share: idle {:.0}%  1-2 {:.0}%  3-4 {:.0}%  5-8 {:.0}%  9+ {:.0}%",
+                    pct(cg.hist_ns[0]),
+                    pct(b12),
+                    pct(b34),
+                    pct(b58),
+                    pct(b9),
+                );
+                cg.hist_ns = [0; 17];
+            }
+        }
+        if let Some(m) = PROF_LU_NODES.get() {
+            if let Ok(mut v) = m.lock() {
+                v.sort_by(|a, b| b.wall_ms.total_cmp(&a.wall_ms));
+                for c in v.iter().take(8) {
+                    eprintln!(
+                        "  lu node {}x{} upd {:>4}: wall {:>7.1} ms = cmod {:>7.1} + cdiv {:>7.1}  (cmod {:>5.2} Gflop, {:>5.1} Gflop/s)",
+                        c.nrow,
+                        c.ncol,
+                        c.n_upd,
+                        c.wall_ms,
+                        c.cmod_ms,
+                        c.cdiv_ms,
+                        c.cmod_gflop,
+                        c.cmod_gflop / (c.cmod_ms / 1e3).max(1e-9),
+                    );
+                }
+                v.clear();
+            }
+        }
         let sn = PROF_CMOD_SCAL_N.swap(0, Ordering::Relaxed);
         let sf = PROF_CMOD_SCAL_F.swap(0, Ordering::Relaxed);
         let rn = PROF_CMOD_GSER_N.swap(0, Ordering::Relaxed);
