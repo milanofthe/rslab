@@ -317,13 +317,16 @@ fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), RslabEr
     // Sort each column's rows ascending (Hungarian kernel does not
     // strictly require this, but a predictable order makes the
     // greedy initialization deterministic and matches SPRAL's
-    // behaviour after `half_to_full`).
+    // behaviour after `half_to_full`). One reused pair buffer instead
+    // of an allocation per column.
+    let mut pairs: Vec<(usize, f64)> = Vec::new();
     for j in 0..n {
         let start = col_ptr[j];
         let end = col_ptr[j + 1];
-        let mut pairs: Vec<(usize, f64)> = (start..end).map(|k| (row_idx[k], cost[k])).collect();
+        pairs.clear();
+        pairs.extend((start..end).map(|k| (row_idx[k], cost[k])));
         pairs.sort_by_key(|&(r, _)| r);
-        for (k, (r, c)) in (start..end).zip(pairs) {
+        for (k, &(r, c)) in (start..end).zip(&pairs) {
             row_idx[k] = r;
             cost[k] = c;
         }

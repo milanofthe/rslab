@@ -182,23 +182,9 @@ impl<T: Scalar> Preconditioner<T> for LdltSolver<T> {
         Ok(())
     }
     /// Block apply via [`solve_many`](LdltSolver::solve_many): one block
-    /// triangular solve loads each `L`/`D` value once for all `s` columns. The
-    /// Krylov block is column-major; `solve_many` is row-major, so it is
-    /// transposed in/out (`O(n·s)`, cheap against the solve).
+    /// triangular solve loads each `L`/`D` value once for all `s` columns.
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        let mut rowmaj = vec![T::zero(); n * s];
-        for c in 0..s {
-            for i in 0..n {
-                rowmaj[i * s + c] = r[c * n + i];
-            }
-        }
-        let x = self.solve_many(&rowmaj, s)?;
-        for c in 0..s {
-            for i in 0..n {
-                z[c * n + i] = x[i * s + c];
-            }
-        }
-        Ok(())
+        apply_block_via_rowmajor(r, z, s, n, |b, s| self.solve_many(b, s))
     }
 }
 
@@ -2456,6 +2442,33 @@ where
     gmres(&op, b, &pc, tol, max_iter, restart, None)
 }
 
+/// Shared block-apply adapter for the factored preconditioners: the Krylov
+/// panel is column-major (`n × s`, RHS `c` contiguous) while every
+/// `solve_many` takes row-major (`b[i·s + c]`), so transpose in, run the
+/// batched solve, transpose out (`O(n·s)`, cheap against the solve). One
+/// implementation instead of four copies across the `Preconditioner` impls.
+fn apply_block_via_rowmajor<T: Scalar>(
+    r: &[T],
+    z: &mut [T],
+    s: usize,
+    n: usize,
+    solve_many: impl FnOnce(&[T], usize) -> Result<Vec<T>, RslabError>,
+) -> Result<(), RslabError> {
+    let mut rowmaj = vec![T::zero(); n * s];
+    for c in 0..s {
+        for i in 0..n {
+            rowmaj[i * s + c] = r[c * n + i];
+        }
+    }
+    let x = solve_many(&rowmaj, s)?;
+    for c in 0..s {
+        for i in 0..n {
+            z[c * n + i] = x[i * s + c];
+        }
+    }
+    Ok(())
+}
+
 /// A factorization usable as both a **direct solver** and a [`Preconditioner`].
 /// Implemented by the symmetric [`LdltSolver`] and the general
 /// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors), so a caller's
@@ -2492,21 +2505,11 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors
         self.solve_threads
     }
     /// Block apply via `solve_lu_many` (one block triangular solve over all `s`
-    /// columns). Column-major Krylov block ↔ row-major `solve_lu_many` transpose.
+    /// columns).
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        let mut rowmaj = vec![T::zero(); n * s];
-        for c in 0..s {
-            for i in 0..n {
-                rowmaj[i * s + c] = r[c * n + i];
-            }
-        }
-        let x = crate::numeric::multifrontal_lu::solve_lu_many(self, &rowmaj, s)?;
-        for c in 0..s {
-            for i in 0..n {
-                z[c * n + i] = x[i * s + c];
-            }
-        }
-        Ok(())
+        apply_block_via_rowmajor(r, z, s, n, |b, s| {
+            crate::numeric::multifrontal_lu::solve_lu_many(self, b, s)
+        })
     }
 }
 
@@ -2536,19 +2539,7 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<
     }
     /// Block apply via [`LuSolver::solve_many`](crate::numeric::multifrontal_lu::LuSolver::solve_many).
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        let mut rowmaj = vec![T::zero(); n * s];
-        for c in 0..s {
-            for i in 0..n {
-                rowmaj[i * s + c] = r[c * n + i];
-            }
-        }
-        let x = self.solve_many(&rowmaj, s)?;
-        for c in 0..s {
-            for i in 0..n {
-                z[c * n + i] = x[i * s + c];
-            }
-        }
-        Ok(())
+        apply_block_via_rowmajor(r, z, s, n, |b, s| self.solve_many(b, s))
     }
 }
 
@@ -2581,19 +2572,7 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::klu::KluSolver<T> {
     }
     /// Block apply via [`KluSolver::solve_many`](crate::KluSolver::solve_many).
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        let mut rowmaj = vec![T::zero(); n * s];
-        for c in 0..s {
-            for i in 0..n {
-                rowmaj[i * s + c] = r[c * n + i];
-            }
-        }
-        let x = self.solve_many(&rowmaj, s)?;
-        for c in 0..s {
-            for i in 0..n {
-                z[c * n + i] = x[i * s + c];
-            }
-        }
-        Ok(())
+        apply_block_via_rowmajor(r, z, s, n, |b, s| self.solve_many(b, s))
     }
 }
 

@@ -113,6 +113,12 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
     let mut d_subdiag = vec![T::zero(); n];
     let mut two_by_two = vec![false; n];
     let mut inertia = crate::inertia::Inertia::new(0, 0, 0);
+    // 2×2-pivot multiplier scratch, hoisted out of the pivot loop (an
+    // indefinite matrix with many 2×2 blocks must not allocate per pivot).
+    // Only entries `[k+2, n)` are written/read each step, so stale values
+    // left below are never observed - same invariant as `factor_front`.
+    let mut l1 = vec![T::zero(); n];
+    let mut l2 = vec![T::zero(); n];
 
     let mut k = 0;
     while k < n {
@@ -241,8 +247,6 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
 
             // Multiplier columns L_i = D⁻¹ · [A[i][k], A[i][k+1]]ᵀ for i >= k+2,
             // with D⁻¹ = (1/det)·[[d22, -d21], [-d21, d11]].
-            let mut l1 = vec![T::zero(); n];
-            let mut l2 = vec![T::zero(); n];
             for i in (k + 2)..n {
                 let wik = a[k * n + i];
                 let wik1 = a[(k + 1) * n + i];

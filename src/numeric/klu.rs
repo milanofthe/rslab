@@ -171,28 +171,62 @@ impl KluSymbolic {
             if bn <= 2 {
                 continue;
             }
-            let mut adj: Vec<Vec<i32>> = vec![Vec::new(); bn];
+            // Symmetrized block adjacency via two-pass counting scatter into
+            // one flat buffer (no per-column Vec allocations), then per-column
+            // sort + dedup - the same layout the ordering crates expect and
+            // bit-identical to the old `Vec<Vec<i32>>` build.
+            let mut counts = vec![1usize; bn]; // the zero-free diagonal
             for lj in 0..bn {
                 let c = col_perm[bs + lj];
-                adj[lj].push(lj as i32); // diagonal (zero-free after matching)
                 for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
                     let pre = pinv0[r];
                     if pre >= bs && pre < be {
                         let li = pre - bs;
                         if li != lj {
-                            adj[lj].push(li as i32);
-                            adj[li].push(lj as i32);
+                            counts[lj] += 1;
+                            counts[li] += 1;
+                        }
+                    }
+                }
+            }
+            let mut start = vec![0usize; bn + 1];
+            for j in 0..bn {
+                start[j + 1] = start[j] + counts[j];
+            }
+            let mut scattered = vec![0i32; start[bn]];
+            let mut cur = start[..bn].to_vec();
+            for (j, c) in cur.iter_mut().enumerate() {
+                scattered[*c] = j as i32; // diagonal
+                *c += 1;
+            }
+            for lj in 0..bn {
+                let c = col_perm[bs + lj];
+                for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
+                    let pre = pinv0[r];
+                    if pre >= bs && pre < be {
+                        let li = pre - bs;
+                        if li != lj {
+                            scattered[cur[lj]] = li as i32;
+                            cur[lj] += 1;
+                            scattered[cur[li]] = lj as i32;
+                            cur[li] += 1;
                         }
                     }
                 }
             }
             let mut colptr_i32 = Vec::with_capacity(bn + 1);
-            let mut rowidx_i32 = Vec::new();
+            let mut rowidx_i32 = Vec::with_capacity(start[bn]);
             colptr_i32.push(0i32);
-            for col in adj.iter_mut() {
-                col.sort_unstable();
-                col.dedup();
-                rowidx_i32.extend_from_slice(col);
+            for j in 0..bn {
+                let seg = &mut scattered[start[j]..start[j + 1]];
+                seg.sort_unstable();
+                let mut last = -1i32;
+                for &v in seg.iter() {
+                    if v != last {
+                        rowidx_i32.push(v);
+                        last = v;
+                    }
+                }
                 colptr_i32.push(rowidx_i32.len() as i32);
             }
             let pat = rslab_ordering_core::CscPattern::new(bn, &colptr_i32, &rowidx_i32)
