@@ -57,6 +57,21 @@ Verification: full workspace suite green (incl. the bit-identical
 across-thread-counts fixtures); the bit-identity argument is structural
 (see above), not just empirical.
 
+## Adaptive fork dispatch (feat/cmod-batching)
+
+"Batching" small same-target updates by concatenation was **rejected at
+design time**: merging updaters into one GEMM needs zero-padding to the
+union row/column space - exactly the flop blow-up the cmod trimming
+removed. Instead the fork *dispatch* became adaptive: an always-on relaxed
+counter of in-flight `ll_factor_node` calls; a small node forks its
+cmod/cdiv exactly when ≤ 2 nodes are active (chain phase: workers idle,
+little foreign work for a blocked join to steal). The dispatch is
+bit-neutral - both paths accumulate each panel entry in the same updater
+order - so a racy counter read is benign and bit-identity across thread
+counts holds. Measured (idle machine, 3 processes): 553-575 → **532-547
+ms**. Remaining low-rate nodes (4-6 Gflop/s, gather-bound) run in the busy
+phase where serial-under-tree-parallelism is the right call.
+
 ## Open (next candidates, evidence-ranked)
 
 Post-tiling profile: root = cmod 71-78 ms (≈73 Gflop/s, fair for

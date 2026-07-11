@@ -142,6 +142,22 @@ impl Drop for LlConcGuard {
     }
 }
 
+/// Always-on (relaxed, ~free) count of `ll_factor_node` calls in flight for
+/// THIS factorization - the fork-dispatch signal: in the separator-chain
+/// phase (few active nodes) even a small node's cmod/cdiv should fork, since
+/// workers are idle and there is little foreign work a blocked join could
+/// steal; in the busy phase small nodes stay strictly serial (join-steal
+/// guard). Scheduling-only: the dispatch never changes the computed bits
+/// (identical per-entry accumulation order on every path), so reading a racy
+/// counter is benign and bit-identity across thread counts holds.
+struct LlActiveGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+impl Drop for LlActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Action to take when a near-zero pivot is encountered during factorization.
 ///
 /// This is the static-pivoting policy knob shared by the symmetric LDLᵀ and the
@@ -2375,8 +2391,11 @@ fn ll_factor_node<T: Scalar>(
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
+    ll_active: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
+    ll_active.fetch_add(1, Ordering::Relaxed);
+    let _active = LlActiveGuard(ll_active);
     let ll_gemm_gate = kt.scalar_gate;
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
@@ -2469,12 +2488,12 @@ fn ll_factor_node<T: Scalar>(
     // tree-level parallelism covers it.
     const LL_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
     let fork_gate = LL_CMOD_FORK_MIN_FLOPS.max(ll_gemm_par);
-    let tiled = ncol >= 2 * tile_w && cmod_flops >= fork_gate;
-    let seq_gemm_par = if cmod_flops >= fork_gate {
-        ll_gemm_par
-    } else {
-        usize::MAX
-    };
+    // Chain phase (few nodes in flight): fork even below the gate - workers
+    // are idle and there is little foreign work a blocked join could steal.
+    let chain_phase = ll_active.load(Ordering::Relaxed) <= 2;
+    let forks = cmod_flops >= fork_gate || (chain_phase && cmod_flops >= ll_gemm_par);
+    let tiled = ncol >= 2 * tile_w && forks;
+    let seq_gemm_par = if forks { ll_gemm_par } else { usize::MAX };
     if tiled {
         let gloc_ref = &gloc;
         let spans_ref = &spans;
@@ -2696,8 +2715,10 @@ fn ll_factor_node<T: Scalar>(
     // Same join-steal guard as cmod: a small node must not fork inside its
     // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
     // foreign subtree work and stalls this node's dependents. Total cdiv
-    // work ~ nrow·ncol² (panel + trailing updates).
-    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 {
+    // work ~ nrow·ncol² (panel + trailing updates). In the chain phase the
+    // guard lifts (see `chain_phase` above): workers are idle, forking pays.
+    let cdiv_chain = ll_active.load(Ordering::Relaxed) <= 2;
+    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 || cdiv_chain {
         kt.par_cdiv
     } else {
         usize::MAX
@@ -3160,6 +3181,7 @@ fn ll_factor_subtree<T: Scalar>(
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
     n_perturbed: &AtomicUsize,
+    ll_active: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     sym.supernodes[s]
@@ -3177,6 +3199,7 @@ fn ll_factor_subtree<T: Scalar>(
                 perturb_floor,
                 drop_tol,
                 n_perturbed,
+                ll_active,
                 kt,
             )
         })
@@ -3191,6 +3214,7 @@ fn ll_factor_subtree<T: Scalar>(
         emit,
         perturb_floor,
         n_perturbed,
+        ll_active,
         kt,
     )?;
     // Free each descendant whose last consumer this node was (refcount→0), and `s`
@@ -3300,6 +3324,7 @@ fn factor_left_looking<T: Scalar>(
     }
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
     let kt = opts.kernel();
+    let ll_active = AtomicUsize::new(0);
     roots
         .par_iter()
         .map(|&r| {
@@ -3314,6 +3339,7 @@ fn factor_left_looking<T: Scalar>(
                 perturb_floor,
                 opts.drop_tol,
                 &n_perturbed_atomic,
+                &ll_active,
                 kt,
             )
         })
