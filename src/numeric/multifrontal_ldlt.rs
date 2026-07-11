@@ -2711,7 +2711,19 @@ fn ll_factor_node<T: Scalar>(
     // is the rectangular `(nrow-ke) × (ncol-ke)` lower part. Pivoting stays inside
     // `0..ncol`, so the off-diagonal rows `[ncol, nrow)` keep their identity and
     // `s`'s contribution to ancestors is unaffected by this internal permutation.
-    let nb = kt.panel_nb;
+    //
+    // Adaptive panel width: wide separators get double-width panels - the
+    // deferred Schur GEMM's inner dimension is `nb`, and k = 64 is too thin
+    // to reach peak on root-class panels (measured ~79 Gflop/s-eq). The
+    // extra serial getf2 work is O(nb³) per panel - negligible against the
+    // GEMM gain at this size. The global nb sweep said 128 loses overall
+    // because SMALL panels pay; widening only above `ncol >= 512` (a pure
+    // function of the node, thread-count independent) keeps them at default.
+    let nb = if ncol >= 512 {
+        kt.panel_nb.max(128)
+    } else {
+        kt.panel_nb
+    };
     // Same join-steal guard as cmod: a small node must not fork inside its
     // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
     // foreign subtree work and stalls this node's dependents. Total cdiv
