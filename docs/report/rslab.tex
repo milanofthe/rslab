@@ -62,7 +62,9 @@ structure; the default configuration is a deterministic, model-free heuristic pi
 (adaptive ordering, an exact nested-dissection bakeoff, and a worker count from a
 one-time cached hardware calibration), with an optional learned tuner for
 class-specific specialization under a deterministic memory backstop; and the numeric
-factorization is bit-identical regardless of the worker count. When the factor is made approximate --- static-pivoted or
+factorization is bit-identical regardless of the worker count. A mixed-precision mode
+factors in single precision and refines to double against the original matrix with an
+explicit backward-error certificate. When the factor is made approximate --- static-pivoted or
 thresholded --- it becomes a preconditioner, and a matching Krylov layer (COCG/COCR,
 flexible GMRES, batched multi-RHS block GMRES with within-cycle deflation, and GCRO-DR
 subspace recycling) closes the accuracy gap. This report documents the core algorithms,
@@ -302,6 +304,14 @@ and --- after a one-time cached hardware calibration --- a critical-path-aware w
 count from the calibrated cost model. Every input to the pick is an exact a-priori
 quantity; nothing is modeled.
 
+The mixed-precision solvers (\code{MixedLdltSolver}/\code{MixedLuSolver}) factor
+$\mathrm{cast}_{32}(A)$ at half the memory and solve through an explicit refinement
+ladder --- plain iterative refinement escalating to GMRES-IR with the single-precision
+factor as the preconditioner --- reporting the achieved normwise backward error and
+whether the double-precision certificate holds (Carson--Higham multi-precision IR); on
+the reference class the single-precision factor runs $1.64	imes$ and certifies at the
+roundoff level after two refinement steps.
+
 For specializing to a \emph{specific problem class on specific hardware} an optional
 learned tuner remains: one MLP per path predicting $(\log t,\log m)$ per candidate
 configuration, trained offline~\cite{sklearn} on a complete-distribution corpus
@@ -402,7 +412,7 @@ Figures~\ref{fig:h2h_ldlt} and~\ref{fig:h2h_lu} plot factor time and peak memory
 $\nnz$ with per-solver power-law fits; Table~\ref{tab:scaling} gives the head-to-head
 geomean ratios. \rT{} sits between the two on both paths: faster than the
 pure-Rust faer, moderately behind the hand-optimized MKL PARDISO
-($5.9\times$ sym / $5.0\times$ unsym). The heuristic pick's win over the fixed
+($5.6\times$ sym / $5.1\times$ unsym). The heuristic pick's win over the fixed
 default is visible as a gap that widens with problem size --- largest on the big
 matrices where a mispicked ordering costs most --- and on the symmetric path
 never comes at a memory cost. On accuracy
@@ -428,7 +438,7 @@ fits.}
 \caption{$\LU$ path (unsymmetric, PARDISO mtype 13): factor wall-clock (left) and peak
 memory (right) vs.\ problem size. The fixed RSLAB default configuration (gray)
 accompanies the heuristic pick (blue); on time the pick scales flatter than PARDISO
-($\alpha\approx1.01$ vs.\ $1.16$).}
+($\alpha\approx1.01$ vs.\ $1.25$).}
 \label{fig:h2h_lu}
 \end{figure}
 
@@ -438,12 +448,12 @@ accompanies the heuristic pick (blue); on time the pick scales flatter than PARD
 \toprule
 RSLAB vs & $\LDLt$ (sym) & $\LU$ (unsym) \\
 \midrule
-MKL PARDISO --- factor time & $5.9\times$ slower & $5.0\times$ slower \\
+MKL PARDISO --- factor time & $5.6\times$ slower & $5.1\times$ slower \\
 MKL PARDISO --- peak memory & $2.8\times$ more & $3.6\times$ more \\
-faer $\LU$\textsuperscript{$\dagger$} --- factor time & \textbf{\num{14.3}}$\times$ faster & \textbf{\num{2.7}}$\times$ faster \\
-faer $\LU$\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{1.7}}$\times$ less & $1.4\times$ more \\
-fixed default cfg --- factor time & \textbf{\num{1.72}}$\times$ faster & \textbf{\num{1.33}}$\times$ faster \\
-fixed default cfg --- peak memory & \textbf{\num{0.89}}$\times$ (less) & $1.10\times$ more \\
+faer $\LU$\textsuperscript{$\dagger$} --- factor time & \textbf{\num{6.7}}$\times$ faster & \textbf{\num{2.7}}$\times$ faster \\
+faer $\LU$\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{1.8}}$\times$ less & $1.4\times$ more \\
+fixed default cfg --- factor time & \textbf{\num{1.84}}$\times$ faster & \textbf{\num{1.49}}$\times$ faster \\
+fixed default cfg --- peak memory & \textbf{\num{0.90}}$\times$ (less) & $1.11\times$ more \\
 \bottomrule
 \end{tabular}
 \caption{Head-to-head geomean ratios (63 sizes per path, 1k--110k DOFs),

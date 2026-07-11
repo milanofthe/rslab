@@ -70,6 +70,17 @@ headline results.
   solve (8-19x faster than per-column) is bit-identical to the serial path.
 - 32-bit index compression (`CompressedLdltFactors`, when `n < 2^31`): half the
   index footprint at no accuracy cost.
+- **Mixed precision with a certificate** (`MixedLdltSolver` / `MixedLuSolver`):
+  factor in single precision (half the memory, measurably faster), solve via an
+  explicit refinement ladder - plain IR escalating to GMRES-IR against the
+  double-precision original - and get an honest normwise-backward-error
+  certificate back (`MixedInfo`; `solve_to` for preconditioner-grade targets).
+  On the reference class the c32 factor runs 1.64x at eps-level certified
+  accuracy after 2 refinement steps.
+- **Adaptive-precision low-rank storage**: BLR contribution blocks can keep
+  their small trailing crosses in single precision under an explicit rounding
+  budget (`BlrMode::contribution_blocks_adaptive`), shrinking the compressed
+  transient further at the same approximation class.
 - Static pivot reuse for fixed-pattern value sequences (frequency sweeps, time
   stepping): skip the pivot search across refactorizations.
 - Preconditioner mode: static pivoting (never-fail), optional incomplete drop and
@@ -120,18 +131,18 @@ matrices both solvers factor to `< 0.1` residual):
 
 | RSLAB (heuristic pick) vs | LDLᵀ (sym) | LU (unsym) |
 |---------------------------|:----------:|:----------:|
-| **MKL PARDISO** — factor time | 5.9x slower | 5.0x slower |
+| **MKL PARDISO** — factor time | 5.6x slower | 5.1x slower |
 | **MKL PARDISO** — peak memory | 2.8x more | 3.6x more |
-| **faer LU** — factor time | **14.3x faster** | **2.7x faster** |
-| **faer LU** — peak memory | **1.7x less** | 1.4x more |
-| **fixed default cfg** — factor time | **1.72x faster** | **1.33x faster** |
-| **fixed default cfg** — peak memory | **0.89x** (less) | 1.10x more |
+| **faer LU** — factor time | **6.7x faster** | **2.7x faster** |
+| **faer LU** — peak memory | **1.8x less** | 1.4x more |
+| **fixed default cfg** — factor time | **1.84x faster** | **1.49x faster** |
+| **fixed default cfg** — peak memory | **0.90x** (less) | 1.11x more |
 
 RSLAB sits between the two: faster than the pure-Rust faer, moderately behind
 the hand-optimized MKL PARDISO. faer has no symmetric path (it factors
 symmetric matrices as LU too), so its LDLᵀ gap is structurally largest; it
 also OOMs on the largest matrices, so its head-to-head is a conservative
-floor. On time the LU pick scales flatter than PARDISO (`α≈1.01` vs `1.16`).
+floor. On time the LU pick scales flatter than PARDISO (`α≈1.01` vs `1.25`).
 The unsym memory ratios above 1 are the worker-count trade: the calibrated
 pick runs more workers than the capped fixed config, and more concurrent
 panels raise the transient peak — cap `threads` to trade it back.

@@ -80,7 +80,7 @@ def plot_vs_size(data, outdir, suffix="", n=None):
     axes[0].axhline(1.0, color=GRAY, ls="--", lw=1.2)
     axes[0].set_ylabel("factor speedup\n(default / tuned)")
     cnt = f" ({n} matrices)" if n else ""
-    axes[0].set_title(f"Auto-tuner vs default by problem size{cnt} (dotted = geomean)")
+    axes[0].set_title(f"Tuner vs default by size{cnt}")
     axes[1].axhline(1.0, color=GRAY, ls="--", lw=1.2)
     axes[1].set_ylabel("peak-memory ratio\n(tuned / default)")
     axes[1].set_xlabel("nonzeros (nnz)")

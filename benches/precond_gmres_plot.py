@@ -75,7 +75,7 @@ def main():
     axR.set_title("Wall-time trade-off")
 
     n = recs[0]["n"]
-    fig.suptitle(f"Incomplete-factor preconditioner + GMRES  (conv-diffusion, n={n})", color=GRAY)
+    fig.suptitle(f"Incomplete factor + GMRES (n={n})", color=GRAY)
     # One combined legend below.
     handles = [
         plt.Line2D([], [], color=PURPLE, marker="v", lw=2.2, label="factor fill / time"),

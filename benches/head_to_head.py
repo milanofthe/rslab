@@ -40,10 +40,8 @@ def run(path, title, slug, mtype):
                           order=ORDER, ax=ax_wct)
     print("  peak memory ~ nnz^alpha:")
     plot_metric(recs, "mem", "mem_mb", "peak memory [MB]", None, order=ORDER, ax=ax_mem)
-    fig.suptitle(
-        f"{title}: factor time (left) and peak memory (right) vs size "
-        f"— RSLAB (default & heuristic pick) vs faer vs PARDISO (mtype {mtype})",
-        color=bench_style.GRAY)
+    fig.suptitle(f"{title} — factor time & peak memory (mtype {mtype})",
+                 color=bench_style.GRAY)
     # One shared legend for both panels: solver identity only (the per-panel scaling
     # exponents differ and are annotated on the fit lines).
     handles = [Line2D([], [], color=c, marker=mk, ls="", label=lbl)
@@ -57,8 +55,8 @@ def main():
         print(__doc__)
         sys.exit(2)
     bench_style.setup()
-    run(Path(sys.argv[1]), "LDLt path (symmetric)", "ldlt", 6)
-    run(Path(sys.argv[2]), "LU path (unsymmetric)", "lu", 13)
+    run(Path(sys.argv[1]), "LDLt (sym)", "ldlt", 6)
+    run(Path(sys.argv[2]), "LU (unsym)", "lu", 13)
 
 
 if __name__ == "__main__":

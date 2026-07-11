@@ -73,7 +73,7 @@ def main():
         ax.set_xlabel("worker threads")
     for ax in axes[:, 0]:
         ax.set_ylabel("speedup vs 1 thread")
-    fig.suptitle("Thread scaling per solver over the corpus (mean, min-max band)", color=GRAY)
+    fig.suptitle("Thread scaling per solver", color=GRAY)
     handles = [
         Line2D([], [], color=GRAY, lw=2.2, marker="o", label="mean speedup"),
         Patch(facecolor=GRAY, alpha=0.3, label="min-max over corpus"),
