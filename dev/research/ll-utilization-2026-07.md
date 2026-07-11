@@ -1,9 +1,13 @@
 # LL factor utilization: column-tiled cmod + join-steal guard (2026-07)
 
-Status: **in progress** on `feat/cmod-throughput`. Follow-up to the cmod
+Status: **LANDED** on `feat/cmod-throughput`. Follow-up to the cmod
 roadmap item in `factor-throughput-2026-07.md`; baseline is the heuristic
 default (MetisND via bakeoff, calibrated 12 threads) at ~687 ms on the
-helmholtz 40³ reference.
+helmholtz 40³ reference. Result after both changes, measured on an idle
+machine (warm best-of-3, three independent processes): **553-575 ms**
+(49-50 geom-Gflop/s), i.e. **−18 %**. Factor trajectory on this case:
+1552 ms (pre-audit) → 1216 (kernel fixes) → 774/695 (ND + heuristic
+defaults) → **~560 ms**; MKL PARDISO is 168-221 ms (gap ~2.6-3.3×).
 
 ## Diagnosis (new instrumentation, `RLA_PROFILE=1`)
 
@@ -53,15 +57,19 @@ Verification: full workspace suite green (incl. the bit-identical
 across-thread-counts fixtures); the bit-identity argument is structural
 (see above), not just empirical.
 
-## Open
+## Open (next candidates, evidence-ranked)
 
-* Definitive warm A/B series for the guard commit pending - the shared
-  machine was saturated by a concurrent zig build during the last
-  measurement window (measurements showed inflated, noisy analysis and
-  factor times; discarded).
-* Remaining post-tiling profile: root = cmod 71-78 ms (≈73 Gflop/s,
-  fair for tall-skinny slabs) + cdiv 70-73 ms; ~60 % of wall still at 1-2
-  active nodes; mid-chain nodes with many small updates run serial at
-  4-6 Gflop/s (gather-bound). Candidate next steps: batching small
-  same-target updates (shared gather), root-chain getf2 share, and only
-  then inter-node pipelining (complex).
+Post-tiling profile: root = cmod 71-78 ms (≈73 Gflop/s, fair for
+tall-skinny slabs) + cdiv 70-73 ms; ~60 % of wall still at 1-2 active
+nodes; mid-chain nodes with many small updates run serial at 4-6 Gflop/s
+(gather-bound).
+
+1. Batching small same-target updates (shared gather across updaters).
+2. Root-chain cdiv: getf2 serial share within the 70 ms root cdiv.
+3. Inter-node pipelining along the separator chain (complex; only if 1-2
+   plateau).
+
+Measurement hygiene note: one A/B window was discarded because a
+concurrent zig build saturated the machine - always check
+`Win32_Processor.LoadPercentage` before trusting a warm series on this
+shared box.
