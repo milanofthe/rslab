@@ -42,7 +42,10 @@ fn ldlt_tuner_never_grows_fill_over_default() {
         // The heuristic default path: its ND bakeoff requires fill_ok, so a
         // banded matrix (where MetisND over-separates) must keep the default.
         let (sym_h, s_h) = LdltSolver::<C>::tuned(&a).expect("heuristic tuned");
-        let heur_fill = sym_h.factor(&a, &s_h).expect("heuristic factor").factor_nnz();
+        let heur_fill = sym_h
+            .factor(&a, &s_h)
+            .expect("heuristic factor")
+            .factor_nnz();
         assert!(
             heur_fill as f64 <= default_fill as f64 * 1.02,
             "banded_{n}_{bw}: heuristic fill {heur_fill} > 1.02x default {default_fill} \
@@ -75,7 +78,10 @@ fn lu_tuner_never_grows_fill_over_default() {
         s.ordering
     );
     let (sym_h, s_h) = LuSolver::<C>::tuned(&a).expect("heuristic tuned");
-    let heur_fill = sym_h.factor(&a, &s_h).expect("heuristic factor").factor_nnz();
+    let heur_fill = sym_h
+        .factor(&a, &s_h)
+        .expect("heuristic factor")
+        .factor_nnz();
     assert!(
         heur_fill as f64 <= default_fill as f64 * 1.02,
         "convdiff: heuristic fill {heur_fill} > 1.02x default {default_fill} (ordering {:?})",

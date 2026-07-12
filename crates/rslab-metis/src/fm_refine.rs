@@ -656,5 +656,4 @@ mod tests {
         assert_eq!(returned, returned2, "I6: determinism");
         assert_eq!(labels, labels2, "I6: determinism (labels)");
     }
-
 }

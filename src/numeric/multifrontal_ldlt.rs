@@ -153,8 +153,7 @@ impl Drop for LlConcGuard {
 struct LlActiveGuard<'a>(&'a std::sync::atomic::AtomicUsize);
 impl Drop for LlActiveGuard<'_> {
     fn drop(&mut self) {
-        self.0
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -2761,7 +2760,7 @@ fn ll_cdiv_emit<T: Scalar>(
     let snode = &sym.supernodes[s];
     let ncol = snode.ncol;
     let nrow = rs[s].len();
-        let prof = ldlt_prof_on();
+    let prof = ldlt_prof_on();
     let t_cdiv = prof.then(std::time::Instant::now);
     // cdiv: partial **blocked** Bunch-Kaufman LDLᵀ (1×1 and 2×2 pivots), the
     // rectangular `nrow × ncol` analogue of `factor_front`'s panel kernel. The
@@ -3241,8 +3240,6 @@ fn ll_cdiv_emit<T: Scalar>(
     unsafe { store.set(s, panel, d, d_subdiag, two_by_two, lperm) };
     Ok(())
 }
-
-
 
 /// Factor the assembly subtree rooted at `s` with a work-stealing schedule:
 /// children subtrees concurrently, then this node (whose updaters all lie in the

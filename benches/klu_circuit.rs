@@ -134,7 +134,9 @@ fn settings_sweep() {
                     let sym = match KluSymbolic::analyze_with(&a, &s) {
                         Ok(x) => x,
                         Err(e) => {
-                            println!("{name:>10} {ptol:>8.0e} {scal:>5} {btf:>5} | analyze FAILED {e}");
+                            println!(
+                                "{name:>10} {ptol:>8.0e} {scal:>5} {btf:>5} | analyze FAILED {e}"
+                            );
                             continue;
                         }
                     };
@@ -152,8 +154,7 @@ fn settings_sweep() {
                                 fac_best = fac_best.min(t.elapsed().as_secs_f64() * 1e3);
                                 let t = Instant::now();
                                 if f.refactor(&a).is_ok() {
-                                    refac_best =
-                                        refac_best.min(t.elapsed().as_secs_f64() * 1e3);
+                                    refac_best = refac_best.min(t.elapsed().as_secs_f64() * 1e3);
                                 }
                                 fill = f.factor_nnz();
                                 blocks = f.n_blocks();
@@ -184,7 +185,10 @@ fn settings_sweep() {
 
 fn main() {
     const SWEEP: usize = 20;
-    if std::env::var("RLA_KLU_SWEEP").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("RLA_KLU_SWEEP")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         settings_sweep();
         return;
     }

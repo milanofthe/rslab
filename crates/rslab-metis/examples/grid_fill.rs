@@ -162,7 +162,11 @@ fn geometric_nd_perm(m: usize) -> Vec<i32> {
             }
         }
     }
-    Rec { perm: &mut perm, idx: &idx }.go(0, m, 0, m, 0, m);
+    Rec {
+        perm: &mut perm,
+        idx: &idx,
+    }
+    .go(0, m, 0, m, 0, m);
     perm
 }
 
@@ -256,7 +260,12 @@ fn geometric_nd_amd_perm(m: usize, leaf_max: usize) -> Vec<i32> {
             }
         }
     }
-    Rec { perm: &mut perm, idx: &idx, leaf_max }.go(0, m, 0, m, 0, m);
+    Rec {
+        perm: &mut perm,
+        idx: &idx,
+        leaf_max,
+    }
+    .go(0, m, 0, m, 0, m);
     perm
 }
 
@@ -329,15 +338,63 @@ fn main() {
 
     let d = MetisOptions::default;
     run("metis default", d());
-    run("imbalance 0.05", MetisOptions { max_imbalance: 0.05, ..d() });
-    run("imbalance 0.10", MetisOptions { max_imbalance: 0.10, ..d() });
-    run("imbalance 0.35", MetisOptions { max_imbalance: 0.35, ..d() });
-    run("fm_passes 20", MetisOptions { fm_passes: 20, ..d() });
+    run(
+        "imbalance 0.05",
+        MetisOptions {
+            max_imbalance: 0.05,
+            ..d()
+        },
+    );
+    run(
+        "imbalance 0.10",
+        MetisOptions {
+            max_imbalance: 0.10,
+            ..d()
+        },
+    );
+    run(
+        "imbalance 0.35",
+        MetisOptions {
+            max_imbalance: 0.35,
+            ..d()
+        },
+    );
+    run(
+        "fm_passes 20",
+        MetisOptions {
+            fm_passes: 20,
+            ..d()
+        },
+    );
     run("niparts 15", MetisOptions { niparts: 15, ..d() });
-    run("amd_switch 60", MetisOptions { nd_to_amd_switch: 60, ..d() });
-    run("amd_switch 400", MetisOptions { nd_to_amd_switch: 400, ..d() });
-    run("coarsen_floor 40", MetisOptions { coarsen_floor: 40, ..d() });
-    run("coarsen_floor 240", MetisOptions { coarsen_floor: 240, ..d() });
+    run(
+        "amd_switch 60",
+        MetisOptions {
+            nd_to_amd_switch: 60,
+            ..d()
+        },
+    );
+    run(
+        "amd_switch 400",
+        MetisOptions {
+            nd_to_amd_switch: 400,
+            ..d()
+        },
+    );
+    run(
+        "coarsen_floor 40",
+        MetisOptions {
+            coarsen_floor: 40,
+            ..d()
+        },
+    );
+    run(
+        "coarsen_floor 240",
+        MetisOptions {
+            coarsen_floor: 240,
+            ..d()
+        },
+    );
     for seed in [2u64, 3, 4] {
         run(&format!("seed {seed}"), MetisOptions { seed, ..d() });
     }

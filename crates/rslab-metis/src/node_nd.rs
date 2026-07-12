@@ -197,7 +197,13 @@ fn multilevel_node_bisection(
     // Convert the edge bisection to a node separator at the coarsest
     // level and refine it there (METIS InitSeparator tail).
     construct_separator(coarsest, &mut labels);
-    fm_node_refine_1sided(coarsest, &mut labels, opts.max_imbalance, opts.fm_passes, rng);
+    fm_node_refine_1sided(
+        coarsest,
+        &mut labels,
+        opts.max_imbalance,
+        opts.fm_passes,
+        rng,
+    );
     stats.n_fm_passes += opts.fm_passes;
 
     // Uncoarsen: project the tri-section and refine the node separator
@@ -218,7 +224,13 @@ fn multilevel_node_bisection(
         }
         labels = proj;
         fm_node_balance(prev_graph, &mut labels, opts.max_imbalance, rng);
-        fm_node_refine_1sided(prev_graph, &mut labels, opts.max_imbalance, opts.fm_passes, rng);
+        fm_node_refine_1sided(
+            prev_graph,
+            &mut labels,
+            opts.max_imbalance,
+            opts.fm_passes,
+            rng,
+        );
         stats.n_fm_passes += opts.fm_passes;
     }
 

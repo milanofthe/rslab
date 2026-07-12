@@ -159,8 +159,8 @@ pub use numeric::multifrontal_ldlt::{
     SolverSettings, Threads, ZeroPivotAction,
 };
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
-pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 pub use numeric::mixed::{MixedInfo, MixedLdltSolver, MixedLuSolver, MixedScalar};
+pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,
 // plus the raw factor type and free building blocks.
 pub use inertia::Inertia;

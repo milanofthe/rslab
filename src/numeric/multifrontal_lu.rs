@@ -134,8 +134,7 @@ struct LuConcProf {
     active: usize,
     hist_ns: [u64; 17],
 }
-static PROF_LU_CONC: std::sync::OnceLock<std::sync::Mutex<LuConcProf>> =
-    std::sync::OnceLock::new();
+static PROF_LU_CONC: std::sync::OnceLock<std::sync::Mutex<LuConcProf>> = std::sync::OnceLock::new();
 fn lu_conc_event(enter: bool) {
     let m = PROF_LU_CONC.get_or_init(|| {
         std::sync::Mutex::new(LuConcProf {

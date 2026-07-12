@@ -485,7 +485,16 @@ macro_rules! gmres_recycled_arm {
         // Rust-owned buffers only - iterate with the GIL released.
         let res = $py
             .allow_threads(|| {
-                gmres_recycled_core($op, &rhs, $pc, $tol, $maxit, restart, x0v.as_deref(), handle)
+                gmres_recycled_core(
+                    $op,
+                    &rhs,
+                    $pc,
+                    $tol,
+                    $maxit,
+                    restart,
+                    x0v.as_deref(),
+                    handle,
+                )
             })
             .map_err(map_err)?;
         let x_obj = res.x.into_pyarray_bound($py).into_any().unbind();
@@ -1453,7 +1462,10 @@ macro_rules! klu_refactor_arm {
         $a.values.copy_from_slice(d);
         // The stored matrix now carries the new values; the numeric replay
         // touches only Rust-owned state, so release the GIL for it.
-        $data.py().allow_threads(|| $s.refactor($a)).map_err(map_err)
+        $data
+            .py()
+            .allow_threads(|| $s.refactor($a))
+            .map_err(map_err)
     }};
 }
 

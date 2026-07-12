@@ -34,10 +34,10 @@ use crate::error::RslabError;
 use crate::numeric::iterative::{gmres, LinearOperator, Preconditioner};
 use crate::numeric::multifrontal_ldlt::SolverSettings;
 use crate::numeric::multifrontal_lu::LuSolver;
-use crate::sparse::general::GeneralCsc;
 use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
+use crate::sparse::general::GeneralCsc;
 
 /// A high-precision scalar whose [`Scalar::Lo`] partner is itself a full
 /// [`Scalar`] (factorizable): `f64 -> f32`, `c64 -> c32`. The cast pair

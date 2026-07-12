@@ -238,7 +238,10 @@ pub(crate) fn fm_node_refine_1sided(
         rng.shuffle(&mut order);
         for &v in &order {
             debug_assert_eq!(labels[v as usize], PART_SEP);
-            queue.insert(v, graph.vwgt[v as usize] as i64 - st.edeg[v as usize][other]);
+            queue.insert(
+                v,
+                graph.vwgt[v as usize] as i64 - st.edeg[v as usize][other],
+            );
         }
 
         let nbnd0 = st.bndind.len();
@@ -305,10 +308,7 @@ pub(crate) fn fm_node_refine_1sided(
                             st.edeg[w][other] -= graph.vwgt[u] as i64;
                             // One-sided moves: w is still in the queue.
                             if queue.contains(w as i32) {
-                                queue.update(
-                                    w as i32,
-                                    graph.vwgt[w] as i64 - st.edeg[w][other],
-                                );
+                                queue.update(w as i32, graph.vwgt[w] as i64 - st.edeg[w][other]);
                             }
                         }
                     }
@@ -403,7 +403,10 @@ pub(crate) fn fm_node_balance(
     let mut order: Vec<i32> = st.bndind.clone();
     rng.shuffle(&mut order);
     for &v in &order {
-        queue.insert(v, graph.vwgt[v as usize] as i64 - st.edeg[v as usize][other]);
+        queue.insert(
+            v,
+            graph.vwgt[v as usize] as i64 - st.edeg[v as usize][other],
+        );
     }
 
     while let Some(higain) = queue.pop() {
