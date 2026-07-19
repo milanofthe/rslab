@@ -3080,6 +3080,68 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
     Ok(out)
 }
 
+/// Solve `Aᵀ · x = b` against the stored factorization of `A` (feral #94
+/// enabler). The factor chain is `A⁻¹ = D_c P_c (LU)⁻¹ P_rᵀ D_r` (see
+/// [`solve_lu`]), so `A⁻ᵀ = D_r P_r L⁻ᵀ U⁻ᵀ P_cᵀ D_c`: column-equilibrate
+/// and column-permute the RHS, forward-solve `Uᵀ` (lower triangular; `U` is
+/// CSR with the pivot leading each row, so once `z[e]` is final it
+/// eliminates from the trailing columns of row `e`, scatter form),
+/// backward-solve `Lᵀ` (unit upper; dot column `e` of `L` against the
+/// already-solved tail), then row-permute and row-equilibrate the result.
+///
+/// This is the plain TRANSPOSE, not the conjugate transpose - complex
+/// callers wanting `A⁻ᴴ b` conjugate the RHS and the result around this
+/// call (`A⁻ᴴ b = conj(A⁻ᵀ conj(b))`), as the condition estimator does.
+#[allow(clippy::needless_range_loop)] // scatter-form sweeps write w[e] and w[u_col_idx[k]]
+pub fn solve_lu_transpose<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabError> {
+    let n = f.n;
+    if b.len() != n {
+        return Err(RslabError::DimensionMismatch {
+            expected: n,
+            got: b.len(),
+        });
+    }
+    // ŵ = P_cᵀ (D_c b): column-equilibrate then column-permute the RHS.
+    let mut w: Vec<T> = (0..n)
+        .map(|e| {
+            let orig = f.perm[e];
+            b[orig] * T::from_real(f.d_col[orig])
+        })
+        .collect();
+    // Forward solve Uᵀ z = ŵ, in place in `w`.
+    for e in 0..n {
+        let (s, ee) = (f.u_row_ptr[e], f.u_row_ptr[e + 1]);
+        debug_assert_eq!(f.u_col_idx[s], e, "pivot must lead its row");
+        let ze = w[e] * f.u_values[s].recip();
+        w[e] = ze;
+        if ze != T::zero() {
+            let nze = T::zero() - ze;
+            for k in (s + 1)..ee {
+                let j = f.u_col_idx[k];
+                w[j] = fmadd(f.u_values[k], nze, w[j]);
+            }
+        }
+    }
+    // Backward solve Lᵀ v = z, in place in `w` (unit diagonal leads each
+    // column, so the dot starts at `col_ptr[e] + 1`).
+    for e in (0..n).rev() {
+        let (s, ee) = (f.l_col_ptr[e], f.l_col_ptr[e + 1]);
+        debug_assert_eq!(f.l_row_idx[s], e, "unit diagonal must lead its column");
+        let mut acc = w[e];
+        for k in (s + 1)..ee {
+            acc = acc - f.l_values[k] * w[f.l_row_idx[k]];
+        }
+        w[e] = acc;
+    }
+    // x_orig[perm_row[e]] = D_r[perm_row[e]] · v[e].
+    let mut out = vec![T::zero(); n];
+    for e in 0..n {
+        let orig = f.perm_row[e];
+        out[orig] = w[e] * T::from_real(f.d_row[orig]);
+    }
+    Ok(out)
+}
+
 /// Solve `A · X = B` for `nrhs` right-hand sides at once. `b` and the returned
 /// `x` are **row-major** `n × nrhs` buffers (`b[i*nrhs + c]` is RHS `c` at row
 /// `i`). The `L`/`U` structure is traversed once and each value applied to all

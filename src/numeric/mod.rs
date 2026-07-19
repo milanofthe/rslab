@@ -1,4 +1,5 @@
 pub mod blr;
+pub mod condition;
 pub mod dense_eig;
 pub mod gemm_tuning;
 pub mod iterative;
