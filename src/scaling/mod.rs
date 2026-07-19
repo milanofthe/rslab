@@ -51,6 +51,50 @@ mod mc64;
 /// (value-blind, structural) compression only.
 pub(crate) use mc64::Mc64Cache;
 
+/// One Knight-Ruiz equilibration step `d <- d / sqrt(m)`, guarded against
+/// overflow/underflow (feral issue #119 port). Applies the update only when
+/// the result stays finite and strictly positive; otherwise `d` is held at
+/// its last good value. `m` is the row/column infinity-norm and is assumed
+/// `> 0` (the caller's existing `m > 0` guard).
+///
+/// On well-scaled matrices `d / sqrt(m)` is always finite and positive, so
+/// this is **bit-identical** to the bare division - the guard bites only on
+/// extreme or subnormal couplings, where the unguarded `d` would reach
+/// `+-Inf` (then `NaN` on the next sweep) or `0`. Such a value silently
+/// poisons every coupled row: the factorization sees a zeroed/NaN row, the
+/// static pivot perturbation "repairs" it, and the solve returns garbage
+/// with no error. Keeping `d` finite each sweep - rather than only
+/// sanitizing at the end - also stops one overflowing row from dragging its
+/// neighbours to zero.
+#[inline]
+pub(crate) fn kr_guarded_update(d: f64, m: f64) -> f64 {
+    let cand = d / m.sqrt();
+    if cand.is_finite() && cand > 0.0 {
+        cand
+    } else {
+        d
+    }
+}
+
+/// Guarded one-pass scale factor `1 / sqrt(m)` (single Knight-Ruiz step,
+/// feral issue #119 port): a zero, non-finite, or overflow-prone row max
+/// yields the neutral `1.0` instead of a `0`/`Inf`/`NaN` factor that would
+/// silently poison the equilibrated matrix. Bit-identical to the bare
+/// expression for every healthy `m` (finite, `> 0`, not extreme).
+#[inline]
+pub(crate) fn inv_sqrt_scale_guarded(m: f64) -> f64 {
+    if m > 0.0 {
+        let cand = 1.0 / m.sqrt();
+        if cand.is_finite() && cand > 0.0 {
+            cand
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    }
+}
+
 /// Run the full MC64 pipeline once and return the cached output.
 /// Used by the symbolic `LdltCompress` preprocessor (see the
 /// [`Mc64Cache`] note on why it cannot also serve scaling).

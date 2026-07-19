@@ -94,7 +94,7 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
         for i in 0..n {
             let m = row_max[i];
             if m > 0.0 {
-                d[i] /= m.sqrt();
+                d[i] = crate::scaling::kr_guarded_update(d[i], m);
                 let dev = (m - 1.0).abs();
                 if dev > max_dev {
                     max_dev = dev;
@@ -139,7 +139,7 @@ pub fn compute_onepass(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     }
     let s = row_max
         .iter()
-        .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
+        .map(|&r| crate::scaling::inv_sqrt_scale_guarded(r))
         .collect();
     (s, ScalingInfo::Applied)
 }
@@ -148,6 +148,54 @@ pub fn compute_onepass(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
 mod tests {
     use super::*;
     use crate::sparse::csc::CscMatrix;
+
+    /// Feral issue #119 port: the guarded Knight-Ruiz step applies `d/sqrt(m)`
+    /// only when it stays finite and positive, else holds `d`. Healthy inputs
+    /// are unchanged; overflow (`d/sqrt(m) -> Inf`), underflow-to-zero
+    /// (`m = Inf`), and `NaN` inputs all return the input `d`.
+    #[test]
+    fn kr_guarded_update_guards_extremes() {
+        assert_eq!(crate::scaling::kr_guarded_update(1.0, 4.0), 0.5);
+        assert_eq!(crate::scaling::kr_guarded_update(6.0, 9.0), 2.0);
+        // Overflow: 1e300/sqrt(1e-40) = 1e320 -> Inf -> held.
+        assert_eq!(crate::scaling::kr_guarded_update(1e300, 1e-40), 1e300);
+        // m = Inf => d/Inf = 0 (not > 0) -> held.
+        assert_eq!(crate::scaling::kr_guarded_update(1.0, f64::INFINITY), 1.0);
+        // m = NaN => NaN (not finite) -> held.
+        assert_eq!(crate::scaling::kr_guarded_update(1.0, f64::NAN), 1.0);
+    }
+
+    /// Feral issue #119 port: a subnormal off-diagonal coupling with no
+    /// diagonal in row 0 drives the unguarded iteration to `d = [NaN, 0.0]`
+    /// on a finite input. The guarded iteration must return all-finite,
+    /// strictly-positive factors, and the scaled entry must stay finite.
+    #[test]
+    fn kr_subnormal_coupling_stays_finite() {
+        let m = CscMatrix::from_triplets(2, &[1, 1], &[0, 1], &[1e-320, 1.0]).unwrap();
+        let (d, info) = compute_infnorm(&m);
+        assert!(matches!(info, ScalingInfo::Applied));
+        for (i, &di) in d.iter().enumerate() {
+            assert!(
+                di.is_finite() && di > 0.0,
+                "d[{i}] = {di} must be finite and strictly positive"
+            );
+        }
+        let scaled = (d[1] * 1e-320 * d[0]).abs();
+        assert!(scaled.is_finite(), "scaled entry {scaled} must be finite");
+    }
+
+    /// The one-pass scale factor must stay finite/positive for extreme row
+    /// maxima (`Inf` from an infinite entry, subnormal couplings) instead of
+    /// producing a `0`/`Inf` factor.
+    #[test]
+    fn onepass_guard_extremes() {
+        assert_eq!(crate::scaling::inv_sqrt_scale_guarded(4.0), 0.5);
+        assert_eq!(crate::scaling::inv_sqrt_scale_guarded(0.0), 1.0);
+        assert_eq!(crate::scaling::inv_sqrt_scale_guarded(f64::INFINITY), 1.0);
+        assert_eq!(crate::scaling::inv_sqrt_scale_guarded(f64::NAN), 1.0);
+        let g = crate::scaling::inv_sqrt_scale_guarded(1e-320);
+        assert!(g.is_finite() && g > 0.0);
+    }
 
     /// Diagonal matrix diag(2, 3, 5). The oracle scaling is
     /// d = [1/sqrt(2), 1/sqrt(3), 1/sqrt(5)], so that

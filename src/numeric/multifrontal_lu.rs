@@ -2751,11 +2751,11 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     }
     let d_row: Vec<f64> = rmax
         .iter()
-        .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
+        .map(|&r| crate::scaling::inv_sqrt_scale_guarded(r))
         .collect();
     let d_col: Vec<f64> = cmax
         .iter()
-        .map(|&c| if c > 0.0 { 1.0 / c.sqrt() } else { 1.0 })
+        .map(|&c| crate::scaling::inv_sqrt_scale_guarded(c))
         .collect();
 
     // Full permuted, equilibrated matrix Â_perm = Pᵀ (D_r A D_c) P and its

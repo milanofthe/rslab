@@ -413,7 +413,7 @@ fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
     }
     row_max
         .iter()
-        .map(|&r| if r > 0.0 { 1.0 / r.sqrt() } else { 1.0 })
+        .map(|&r| crate::scaling::inv_sqrt_scale_guarded(r))
         .collect()
 }
 
