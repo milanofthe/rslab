@@ -755,12 +755,85 @@ struct SymbolicPrefix {
     prefix_us: u64,
 }
 
+/// Ceiling on the fill inflation `OrderingPreprocess::Auto` accepts from
+/// `LdltCompress` before falling back to `None` (feral #91/#92 port). NOT
+/// smaller-fill-wins: the MC64-matched compression carries a numerical
+/// benefit symbolic fill does not capture (oracle-correct inertia through
+/// matched 2x2 pivots on near-singular KKTs), and its normal overhead is
+/// ~1.1-1.2x - so the guard fires only on a catastrophic misfire (feral
+/// measured 6.3x fill / 20x factor-time inflation on the qap15 conic KKT,
+/// whose IPM regularization rows fool the 30%-low-degree predicate).
+const PREPROCESS_FILL_INFLATION_LIMIT: f64 = 2.0;
+
 /// The cheap pipeline prefix - see [`SymbolicPrefix`]. `method` must be
 /// concrete (`AutoRace` is dispatched by the caller).
+///
+/// Resolves `OrderingPreprocess::Auto` by **verifying** fill rather than
+/// trusting the structural predicate (feral #91/#92 port): when
+/// [`pick_ordering_preprocess`] recommends `LdltCompress`, both prefixes
+/// run (they are cheap post-#144) and the compressed one is kept only if
+/// its exact factor nnz stays within [`PREPROCESS_FILL_INFLATION_LIMIT`]
+/// of the `None` baseline. An explicit (non-`Auto`) preprocess is honoured
+/// unconditionally, exactly as before.
 fn symbolic_prefix(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
+) -> Result<SymbolicPrefix, RslabError> {
+    let prof = snode_params.symbolic_profiler.as_ref();
+    let t_pick = prof.map(|_| std::time::Instant::now());
+    let resolved_preprocess = match snode_params.preprocess {
+        OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
+        other => other,
+    };
+    if let Some(t) = t_pick {
+        record_stage(prof, "pick_preprocess", t);
+    }
+    let verify = matches!(snode_params.preprocess, OrderingPreprocess::Auto)
+        && matches!(resolved_preprocess, OrderingPreprocess::LdltCompress);
+    if !verify {
+        return symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess);
+    }
+    // Verify the predicate's LdltCompress pick against the `None` baseline.
+    // Each variant gets its own fresh profiler (the S7 rule: never let two
+    // pipeline runs append into one stage list); the chosen prefix carries
+    // its profiler onward in `effective_params`, so the finish and any
+    // outer race copy exactly one run's stages.
+    let variant_params = |pre: OrderingPreprocess| SupernodeParams {
+        preprocess: pre,
+        symbolic_profiler: snode_params
+            .symbolic_profiler
+            .as_ref()
+            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new()))),
+        ..snode_params.clone()
+    };
+    let p_none = variant_params(OrderingPreprocess::None);
+    let none = symbolic_prefix_with(matrix, &p_none, method, OrderingPreprocess::None);
+    let p_comp = variant_params(OrderingPreprocess::LdltCompress);
+    let comp = symbolic_prefix_with(matrix, &p_comp, method, OrderingPreprocess::LdltCompress);
+    match (none, comp) {
+        (Ok(none), Ok(comp)) => {
+            let limit = (none.factor_nnz as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
+            Ok(if (comp.factor_nnz as f64) <= limit {
+                comp
+            } else {
+                none
+            })
+        }
+        // One side failed (e.g. MC64 error): the other one decides.
+        (Ok(none), Err(_)) => Ok(none),
+        (Err(_), Ok(comp)) => Ok(comp),
+        (Err(e), Err(_)) => Err(e),
+    }
+}
+
+/// The prefix pipeline at a **concrete** preprocess - the body of
+/// [`symbolic_prefix`] once the `Auto` resolution/verification is done.
+fn symbolic_prefix_with(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    method: OrderingMethod,
+    resolved_preprocess: OrderingPreprocess,
 ) -> Result<SymbolicPrefix, RslabError> {
     let n = matrix.n;
 
@@ -803,17 +876,9 @@ fn symbolic_prefix(
     // matrix directly). Issue #3.
     let method = choose_adaptive(&full_pattern, method);
 
-    // Resolve `Auto` to `None` or `LdltCompress` before entering the
-    // dispatch. Keeps the match below exhaustive on the two concrete
-    // variants and keeps the dispatcher logic in one testable place.
-    let t_pick = prof.map(|_| std::time::Instant::now());
-    let resolved_preprocess = match snode_params.preprocess {
-        OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
-        other => other,
-    };
-    if let Some(t) = t_pick {
-        record_stage(prof, "pick_preprocess", t);
-    }
+    // `resolved_preprocess` arrives concrete from the dispatcher
+    // ([`symbolic_prefix`] resolves and - for `Auto` -> `LdltCompress` -
+    // fill-verifies the pick).
     // The fill-reducing ordering and (when enabled) the LdltCompress
     // preprocessor are timed under *separate* stages. The preprocessor's
     // MC64 matching can dwarf the ordering itself - on the pf22 powerflow
