@@ -811,20 +811,35 @@ fn symbolic_prefix(
     let none = symbolic_prefix_with(matrix, &p_none, method, OrderingPreprocess::None);
     let p_comp = variant_params(OrderingPreprocess::LdltCompress);
     let comp = symbolic_prefix_with(matrix, &p_comp, method, OrderingPreprocess::LdltCompress);
-    match (none, comp) {
+    let mut winner = match (none, comp) {
         (Ok(none), Ok(comp)) => {
             let limit = (none.factor_nnz as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
-            Ok(if (comp.factor_nnz as f64) <= limit {
+            if (comp.factor_nnz as f64) <= limit {
                 comp
             } else {
                 none
-            })
+            }
         }
         // One side failed (e.g. MC64 error): the other one decides.
-        (Ok(none), Err(_)) => Ok(none),
-        (Err(_), Ok(comp)) => Ok(comp),
-        (Err(e), Err(_)) => Err(e),
+        (Ok(none), Err(_)) => none,
+        (Err(_), Ok(comp)) => comp,
+        (Err(e), Err(_)) => return Err(e),
+    };
+    // Adopt the winner's stages into the caller's profiler and point the
+    // prefix back at it, so the finish stages and `set_total` land where
+    // the caller looks. The loser's stages are dropped (S7: one run's
+    // stage list, never two concatenated).
+    if let Some(shared) = snode_params.symbolic_profiler.as_ref() {
+        if let Some(win) = winner.effective_params.symbolic_profiler.as_ref() {
+            if let (Ok(mut sp), Ok(wp)) = (shared.lock(), win.lock()) {
+                for st in wp.stages() {
+                    sp.record(st.name, st.us);
+                }
+            }
+        }
+        winner.effective_params.symbolic_profiler = snode_params.symbolic_profiler.clone();
     }
+    Ok(winner)
 }
 
 /// The prefix pipeline at a **concrete** preprocess - the body of
