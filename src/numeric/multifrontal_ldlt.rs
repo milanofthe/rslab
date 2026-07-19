@@ -2488,11 +2488,20 @@ fn ll_factor_node<T: Scalar>(
     // fan-out per node instead of one per update, the slab stays cache-hot
     // across all updaters, and - decisive at the top of the tree, where a
     // root separator runs alone with hundreds of updaters - the node's cmod
-    // parallelizes even though each per-slab GEMM is serial. Bit-identical
-    // to the sequential path: every panel entry lies in exactly one slab
-    // and receives its contributions in the same updater order with the
-    // same kernel; the slab width is a pure function of `ncol` (never of
-    // the thread count).
+    // parallelizes even though each per-slab GEMM is serial. Every panel
+    // entry lies in exactly one slab and receives its contributions in the
+    // same updater order; the slab width is a pure function of `ncol`
+    // (never of the thread count).
+    //
+    // NOT bit-identical to the sequential path, on two counts: (1) the
+    // sequential path routes sub-`scalar_gate` updates through the scalar
+    // kernel (plain mul+add) while this path runs everything through FMA
+    // GEMM micro-kernels; (2) even for GEMM-path updates, splitting an
+    // update's span at slab boundaries changes the GEMM output shape, and
+    // the gemm crate's per-element bits are shape-dependent (measured:
+    // last-ulp drift persisted with a slab-replayed scalar gate). The MODE
+    // pick below is therefore a pure function of the node - never of the
+    // racy `chain_phase`.
     let tile_w = (ncol / 16).clamp(32, 256);
     // Fork inside cmod only when the node's update work is genuinely large.
     // A small node that forks pays rayon's join-steal latency: while its
@@ -2508,7 +2517,14 @@ fn ll_factor_node<T: Scalar>(
     // are idle and there is little foreign work a blocked join could steal.
     let chain_phase = ll_active.load(Ordering::Relaxed) <= 2;
     let forks = cmod_flops >= fork_gate || (chain_phase && cmod_flops >= ll_gemm_par);
-    let tiled = ncol >= 2 * tile_w && forks;
+    // Deterministic mode pick (see the tiled-cmod note above): a
+    // `chain_phase`-dependent `tiled` broke the bit-identity guarantee
+    // (1-vs-8-thread and run-to-run last-ulp drift on a 3D grid; see
+    // tests/ll_thread_determinism.rs). `chain_phase` still decides
+    // *parallelism* (`seq_gemm_par` here, `ll_cdiv_par` below): GEMM
+    // Rayon-vs-serial splits only the output space and the deep-row apply
+    // is row-local, so those toggles never change the computed bits.
+    let tiled = ncol >= 2 * tile_w && cmod_flops >= fork_gate;
     let seq_gemm_par = if forks { ll_gemm_par } else { usize::MAX };
     if tiled {
         let gloc_ref = &gloc;

@@ -1733,17 +1733,23 @@ fn lu_ll_factor_node<T: Scalar>(
         && (cmod_flops >= fork_gate || (chain_phase && cmod_flops >= ll_gemm_par));
     let tile_w = (ncol / 16).clamp(32, 256);
     let tile_u = (cnrow.max(1) / 16).clamp(32, 256);
-    let tiled = forks && ncol >= 2 * tile_w;
+    // Deterministic mode pick (the LDLT twin's tiled-cmod note applies
+    // verbatim): tiled-vs-sequential is NOT bit-identical (scalar-gate
+    // kernel dichotomy + shape-dependent GEMM bits), so `tiled` must be a
+    // pure function of the node - never of the racy `chain_phase`, which
+    // still decides only bit-neutral parallelism (`forks` for the
+    // sequential GEMMs, `ll_cdiv_par`). A racy pick broke the bit-identity
+    // guarantee; see tests/ll_thread_determinism.rs.
+    let tiled = !ll_gemm_serial() && ncol >= 2 * tile_w && cmod_flops >= fork_gate;
 
     // Column-tiled parallel cmod: disjoint `&mut` slabs of the target
     // buffers; per slab every updater's contribution in updater order with a
     // serial GEMM. One fan-out per node instead of one per update; the slab
     // stays cache-hot across the updaters; slab widths are pure functions of
-    // the node (never of the thread count). Bit-identical to the sequential
-    // path: each entry lives in exactly one slab and receives its
-    // contributions in the same order with the same kernel. The LU node has
-    // TWO target buffers, so the tiling runs as two phases: `lbuf` slabs
-    // (L/U11 updates), then `ubuf` slabs (U12 updates).
+    // the node (never of the thread count). Every entry lives in exactly one
+    // slab and receives its contributions in the same updater order. The LU
+    // node has TWO target buffers, so the tiling runs as two phases: `lbuf`
+    // slabs (L/U11 updates), then `ubuf` slabs (U12 updates).
     if tiled {
         let gloc_ref = &gloc;
         let spans_ref = &spans;
