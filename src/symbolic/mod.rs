@@ -781,6 +781,11 @@ fn symbolic_prefix(
     method: OrderingMethod,
 ) -> Result<SymbolicPrefix, RslabError> {
     let prof = snode_params.symbolic_profiler.as_ref();
+    // Dispatch-level clock: the returned prefix's `prefix_us` must cover
+    // everything recorded into the caller's profiler up to the finish
+    // (the preprocess pick and, on the verify path, BOTH variant runs) -
+    // else the report's stage sum can exceed its total.
+    let t_dispatch = prof.map(|_| std::time::Instant::now());
     let t_pick = prof.map(|_| std::time::Instant::now());
     let resolved_preprocess = match snode_params.preprocess {
         OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
@@ -792,7 +797,11 @@ fn symbolic_prefix(
     let verify = matches!(snode_params.preprocess, OrderingPreprocess::Auto)
         && matches!(resolved_preprocess, OrderingPreprocess::LdltCompress);
     if !verify {
-        return symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess);
+        let mut px = symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess)?;
+        if let Some(t) = t_dispatch {
+            px.prefix_us = t.elapsed().as_micros() as u64;
+        }
+        return Ok(px);
     }
     // Verify the predicate's LdltCompress pick against the `None` baseline.
     // Each variant gets its own fresh profiler (the S7 rule: never let two
@@ -838,6 +847,11 @@ fn symbolic_prefix(
             }
         }
         winner.effective_params.symbolic_profiler = snode_params.symbolic_profiler.clone();
+    }
+    if let Some(t) = t_dispatch {
+        // Both variants' wall time counts: the loser's run is real dispatch
+        // cost and surfaces as report overhead, never as stages > total.
+        winner.prefix_us = t.elapsed().as_micros() as u64;
     }
     Ok(winner)
 }
