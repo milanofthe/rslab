@@ -14,8 +14,34 @@ permissions:
   contents: read
 
 jobs:
+  # Version-consistency gate: the wheel version comes from python/Cargo.toml
+  # (maturin's single source of truth), NOT from the tag or the root crate.
+  # v0.21.0 shipped 0.20.0-named wheels because python/Cargo.toml was not
+  # bumped - PyPI then rejected the whole upload ("file already exists")
+  # after all six build jobs had run. Fail here, first and fast, instead.
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag == root crate version == python crate version
+        run: |
+          root_v=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          py_v=$(grep -m1 '^version' python/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "root=$root_v python=$py_v ref=$GITHUB_REF_NAME"
+          if [ "$root_v" != "$py_v" ]; then
+            echo "::error::python/Cargo.toml ($py_v) != Cargo.toml ($root_v)"; exit 1
+          fi
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              tag_v="${GITHUB_REF_NAME#v}"
+              if [ "$tag_v" != "$root_v" ]; then
+                echo "::error::tag v$tag_v != crate version $root_v"; exit 1
+              fi ;;
+          esac
+
   linux:
     runs-on: ubuntu-latest
+    needs: version-check
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -39,6 +65,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    needs: version-check
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,6 +85,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    needs: version-check
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -80,6 +108,7 @@ jobs:
 
   sdist:
     runs-on: ubuntu-latest
+    needs: version-check
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
