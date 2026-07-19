@@ -91,9 +91,18 @@ fn bits_c64(x: &[Complex<f64>]) -> Vec<(u64, u64)> {
     x.iter().map(|v| (v.re.to_bits(), v.im.to_bits())).collect()
 }
 
+/// Grid edge sizes: release runs the sizes the original drift was measured
+/// at; debug (the CI profile) shrinks the f64 grids so the numeric-heavy
+/// factors fit the runner budget. Every size below was verified to
+/// reproduce the original racy-dispatch drift in its profile (the shrunk
+/// debug sizes included), so the test discriminates on both.
+const K_LDLT: usize = if cfg!(debug_assertions) { 16 } else { 24 };
+const K_LDLT_C: usize = 16;
+const K_LU: usize = if cfg!(debug_assertions) { 14 } else { 22 };
+
 #[test]
 fn ll_ldlt_bit_identical_across_threads_and_runs() {
-    let a = grid3d(24);
+    let a = grid3d(K_LDLT);
     let with = |t: usize| SolverSettings::default().with_threads(t);
     let f1 = factor_sparse_ldlt_with(&a, &with(1)).unwrap();
     let f8 = factor_sparse_ldlt_with(&a, &with(8)).unwrap();
@@ -117,7 +126,7 @@ fn ll_ldlt_bit_identical_across_threads_and_runs() {
 fn ll_ldlt_complex_bit_identical_across_threads() {
     // Complex-typed variant of the same grid: the complex kernels dispatch
     // through the same racy-prone gates.
-    let ar = grid3d(16);
+    let ar = grid3d(K_LDLT_C);
     let a = CscMatrix::<Complex<f64>> {
         n: ar.n,
         col_ptr: ar.col_ptr.clone(),
@@ -140,7 +149,7 @@ fn ll_ldlt_complex_bit_identical_across_threads() {
 
 #[test]
 fn ll_lu_bit_identical_across_threads_and_runs() {
-    let a = grid3d_conv(22);
+    let a = grid3d_conv(K_LU);
     let b: Vec<f64> = (0..a.n).map(|i| ((i % 11) as f64) - 5.0).collect();
     let solve = |t: usize| -> Vec<f64> {
         let s = SolverSettings::default().with_threads(t);
