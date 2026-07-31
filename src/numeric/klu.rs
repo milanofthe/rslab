@@ -37,6 +37,13 @@ use crate::sparse::general::GeneralCsc;
 
 const UNSET: usize = usize::MAX;
 
+/// Narrow index type for the numeric factor's row-index streams and the
+/// factor-time DFS state. The Gilbert-Peierls kernel is memory-bound on
+/// index chasing; 32-bit indices halve that traffic (`n < 2^32 - 1` is
+/// enforced at analyze time, far beyond this path's design point).
+type Ki = u32;
+const KI_UNSET: Ki = Ki::MAX;
+
 /// Options for the KLU path. Defaults follow SuiteSparse KLU: threshold
 /// partial pivoting with strong diagonal preference (`pivot_tol = 1e-3`),
 /// row-max scaling on, BTF on.
@@ -443,7 +450,7 @@ impl KluSymbolic {
         let nnz =
             (factors.l_val.len() + factors.u_val.len() + factors.udiag.len() + factors.f_val.len())
                 as u64;
-        let entry = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
+        let entry = (std::mem::size_of::<T>() + std::mem::size_of::<Ki>()) as u64;
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: 1,
             factor_nnz: nnz,
@@ -484,21 +491,22 @@ struct KluFactors<T> {
     rs_inv: Vec<f64>,
     scaled: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
-    /// Row indices are final positions within the column's block.
+    /// Row indices are final positions within the column's block (narrow
+    /// [`Ki`] indices: the solve/refactor loops are index-bound).
     l_colptr: Vec<usize>,
-    l_rowidx: Vec<usize>,
+    l_rowidx: Vec<Ki>,
     l_val: Vec<T>,
     /// U: strictly-above-diagonal within-block entries per column, stored in
     /// elimination (topological) order, the refactor replay order.
     u_colptr: Vec<usize>,
-    u_rowidx: Vec<usize>,
+    u_rowidx: Vec<Ki>,
     u_val: Vec<T>,
     udiag: Vec<T>,
     /// Off-block entries (rows in earlier blocks, final positions), per
     /// column in the input's storage order. Not factored; applied in the
     /// block back-substitution.
     f_colptr: Vec<usize>,
-    f_rowidx: Vec<usize>,
+    f_rowidx: Vec<Ki>,
     f_val: Vec<T>,
 }
 
@@ -555,32 +563,50 @@ fn factor_impl<T: Scalar>(
         return Err(pattern_mismatch());
     }
 
-    let rs_inv = row_scale_inv(a, settings.row_scaling);
-    let mut pinv_pre = vec![0usize; n];
-    for (k, &r) in sym.pre_row_perm.iter().enumerate() {
-        pinv_pre[r] = k;
+    if n as u64 >= Ki::MAX as u64 {
+        return Err(RslabError::InvalidInput(
+            "klu: dimension exceeds the 32-bit index range of this path".to_string(),
+        ));
     }
 
-    // bpinv[pre_position] = final position; assigned when that row is pivoted.
-    let mut bpinv = vec![UNSET; n];
+    let rs_inv = row_scale_inv(a, settings.row_scaling);
+    let mut pinv_pre = vec![0 as Ki; n];
+    for (k, &r) in sym.pre_row_perm.iter().enumerate() {
+        pinv_pre[r] = k as Ki;
+    }
+
+    // Per pre-pivot position, one packed pair `[dfs_stamp, final_position]`
+    // (final position `KI_UNSET` until that row is pivoted). The DFS touches
+    // both fields for every visited node; packing them halves its random
+    // cache-line traffic vs two separate arrays.
+    let mut mark: Vec<[Ki; 2]> = vec![[0, KI_UNSET]; n];
     // Numeric work vector and DFS state, all in pre-pivot position space.
     let mut x = vec![T::zero(); n];
-    let mut stamp = vec![0usize; n];
-    let mut node_stack = vec![0usize; n];
+    let mut node_stack = vec![0 as Ki; n];
     let mut cur_stack = vec![0usize; n];
-    let mut topo: Vec<usize> = Vec::with_capacity(n);
-    let mut nonpiv: Vec<usize> = Vec::with_capacity(n);
+    let mut topo: Vec<Ki> = Vec::with_capacity(n);
+    let mut nonpiv: Vec<Ki> = Vec::with_capacity(n);
 
-    let mut l_colptr = vec![0usize];
-    let mut l_rowidx: Vec<usize> = Vec::new();
-    let mut l_val: Vec<T> = Vec::new();
-    let mut u_colptr = vec![0usize];
-    let mut u_rowidx: Vec<usize> = Vec::new();
-    let mut u_val: Vec<T> = Vec::new();
+    // Exact preallocation when the symbolic fill has already been computed
+    // (diagonal-pivoting expectation; threshold pivoting can deviate, so
+    // these are reserves, not fixed sizes).
+    let (l_res, u_res, f_res) = match sym.fill.get() {
+        Some(f) => (f.l_nnz as usize, f.u_nnz as usize, f.f_nnz as usize),
+        None => (a.nnz(), a.nnz(), 0),
+    };
+    let mut l_colptr = Vec::with_capacity(n + 1);
+    l_colptr.push(0usize);
+    let mut l_rowidx: Vec<Ki> = Vec::with_capacity(l_res);
+    let mut l_val: Vec<T> = Vec::with_capacity(l_res);
+    let mut u_colptr = Vec::with_capacity(n + 1);
+    u_colptr.push(0usize);
+    let mut u_rowidx: Vec<Ki> = Vec::with_capacity(u_res);
+    let mut u_val: Vec<T> = Vec::with_capacity(u_res);
     let mut udiag: Vec<T> = Vec::with_capacity(n);
-    let mut f_colptr = vec![0usize];
-    let mut f_rowidx: Vec<usize> = Vec::new();
-    let mut f_val: Vec<T> = Vec::new();
+    let mut f_colptr = Vec::with_capacity(n + 1);
+    f_colptr.push(0usize);
+    let mut f_rowidx: Vec<Ki> = Vec::with_capacity(f_res);
+    let mut f_val: Vec<T> = Vec::with_capacity(f_res);
 
     for b in 0..sym.block_ptr.len() - 1 {
         let (bs, be) = (sym.block_ptr[b], sym.block_ptr[b + 1]);
@@ -592,12 +618,12 @@ fn factor_impl<T: Scalar>(
             let c = sym.col_perm[bs];
             let mut diag: Option<T> = None;
             for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-                let pre = pinv_pre[a.row_idx[k]];
+                let pre = pinv_pre[a.row_idx[k]] as usize;
                 let sv = a.values[k] * T::from_real(rs_inv[a.row_idx[k]]);
                 if pre == bs {
                     diag = Some(sv);
                 } else if pre < bs {
-                    f_rowidx.push(bpinv[pre]);
+                    f_rowidx.push(mark[pre][1]);
                     f_val.push(sv);
                 } else {
                     return Err(pattern_mismatch());
@@ -607,7 +633,7 @@ fn factor_impl<T: Scalar>(
             if d.magnitude() == 0.0 || !d.is_finite() {
                 return Err(RslabError::SingularBasis { column: c });
             }
-            bpinv[bs] = bs;
+            mark[bs][1] = bs as Ki;
             udiag.push(d);
             l_colptr.push(l_rowidx.len());
             u_colptr.push(u_rowidx.len());
@@ -618,62 +644,71 @@ fn factor_impl<T: Scalar>(
         // General irreducible block: left-looking Gilbert-Peierls.
         for j in bs..be {
             let c = sym.col_perm[j];
-            let sj = j + 1; // unique DFS stamp for this column
+            let sj = (j + 1) as Ki; // unique DFS stamp for this column
             topo.clear();
             nonpiv.clear();
 
             // Pass 1, symbolic: DFS the reach of the column's within-block
             // pattern over the L columns factored so far. Pivotal nodes come
             // out in `topo` post-order; non-pivotal nodes (pivot candidates)
-            // in `nonpiv`.
+            // in `nonpiv`. The inner loop runs unchecked: every index is a
+            // pre-pivot position `< n` (`debug_assert`ed), and `cur/end` are
+            // positions into the already-built prefix of `l_rowidx`.
             for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-                let pre = pinv_pre[a.row_idx[k]];
+                let pre = pinv_pre[a.row_idx[k]] as usize;
                 if pre < bs {
                     continue; // off-block, handled in pass 2
                 }
                 if pre >= be {
                     return Err(pattern_mismatch());
                 }
-                if stamp[pre] == sj {
+                let m = mark[pre];
+                if m[0] == sj {
                     continue;
                 }
-                stamp[pre] = sj;
-                if bpinv[pre] == UNSET {
-                    nonpiv.push(pre);
+                mark[pre][0] = sj;
+                if m[1] == KI_UNSET {
+                    nonpiv.push(pre as Ki);
                     continue;
                 }
                 let mut d = 0usize;
-                node_stack[0] = pre;
-                cur_stack[0] = l_colptr[bpinv[pre]];
+                node_stack[0] = pre as Ki;
+                cur_stack[0] = l_colptr[m[1] as usize];
+                let mut end = l_colptr[m[1] as usize + 1];
                 loop {
-                    let u = node_stack[d];
-                    let endp = l_colptr[bpinv[u] + 1];
                     let mut descended = false;
-                    while cur_stack[d] < endp {
-                        let ch = l_rowidx[cur_stack[d]];
+                    while cur_stack[d] < end {
+                        debug_assert!(cur_stack[d] < l_rowidx.len());
+                        let ch = unsafe { *l_rowidx.get_unchecked(cur_stack[d]) } as usize;
                         cur_stack[d] += 1;
-                        if stamp[ch] == sj {
+                        debug_assert!(ch < n);
+                        let mch = unsafe { *mark.get_unchecked(ch) };
+                        if mch[0] == sj {
                             continue;
                         }
-                        stamp[ch] = sj;
-                        if bpinv[ch] == UNSET {
-                            nonpiv.push(ch);
+                        unsafe { mark.get_unchecked_mut(ch)[0] = sj };
+                        if mch[1] == KI_UNSET {
+                            nonpiv.push(ch as Ki);
                             continue;
                         }
                         d += 1;
-                        node_stack[d] = ch;
-                        cur_stack[d] = l_colptr[bpinv[ch]];
+                        node_stack[d] = ch as Ki;
+                        let p = mch[1] as usize;
+                        cur_stack[d] = l_colptr[p];
+                        end = l_colptr[p + 1];
                         descended = true;
                         break;
                     }
                     if descended {
                         continue;
                     }
-                    topo.push(u);
+                    topo.push(node_stack[d]);
                     if d == 0 {
                         break;
                     }
                     d -= 1;
+                    let up = mark[node_stack[d] as usize][1] as usize;
+                    end = l_colptr[up + 1];
                 }
             }
 
@@ -682,10 +717,10 @@ fn factor_impl<T: Scalar>(
             // their final positions are known).
             for k in a.col_ptr[c]..a.col_ptr[c + 1] {
                 let r = a.row_idx[k];
-                let pre = pinv_pre[r];
+                let pre = pinv_pre[r] as usize;
                 let sv = a.values[k] * T::from_real(rs_inv[r]);
                 if pre < bs {
-                    f_rowidx.push(bpinv[pre]);
+                    f_rowidx.push(mark[pre][1]);
                     f_val.push(sv);
                 } else {
                     x[pre] = sv;
@@ -697,16 +732,24 @@ fn factor_impl<T: Scalar>(
             // into the remaining work vector, and becomes a U entry. The axpy
             // runs through `fmadd` (FMA on native builds); `refactor`'s
             // replay uses the identical expression so it stays bit-identical.
+            // Unchecked: all row indices are positions `< n` by construction.
             for &u in topo.iter().rev() {
-                let p = bpinv[u];
+                let u = u as usize;
+                let p = mark[u][1];
                 let xu = x[u];
                 x[u] = T::zero();
                 u_rowidx.push(p);
                 u_val.push(xu);
                 let nxu = T::zero() - xu;
+                let p = p as usize;
                 for k in l_colptr[p]..l_colptr[p + 1] {
-                    let lr = l_rowidx[k];
-                    x[lr] = fmadd(nxu, l_val[k], x[lr]);
+                    debug_assert!(k < l_rowidx.len());
+                    let lr = unsafe { *l_rowidx.get_unchecked(k) } as usize;
+                    debug_assert!(lr < n);
+                    unsafe {
+                        *x.get_unchecked_mut(lr) =
+                            fmadd(nxu, *l_val.get_unchecked(k), *x.get_unchecked(lr));
+                    }
                 }
             }
 
@@ -715,21 +758,21 @@ fn factor_impl<T: Scalar>(
             let mut piv = UNSET;
             let mut maxmag = 0.0f64;
             for &np in &nonpiv {
-                let m = x[np].magnitude();
+                let m = x[np as usize].magnitude();
                 if m > maxmag {
                     maxmag = m;
-                    piv = np;
+                    piv = np as usize;
                 }
             }
             if piv == UNSET || maxmag == 0.0 || !maxmag.is_finite() {
                 // Clear the candidates before failing so the work vector
                 // never leaks values into a hypothetical caller retry.
                 for &np in &nonpiv {
-                    x[np] = T::zero();
+                    x[np as usize] = T::zero();
                 }
                 return Err(RslabError::SingularBasis { column: c });
             }
-            if stamp[j] == sj && bpinv[j] == UNSET {
+            if mark[j][0] == sj && mark[j][1] == KI_UNSET {
                 let dm = x[j].magnitude();
                 if dm > 0.0 && dm >= settings.pivot_tol * maxmag {
                     piv = j;
@@ -738,15 +781,16 @@ fn factor_impl<T: Scalar>(
 
             let dval = x[piv];
             x[piv] = T::zero();
-            bpinv[piv] = j;
+            mark[piv][1] = j as Ki;
             udiag.push(dval);
             for &np in &nonpiv {
+                let np = np as usize;
                 if np == piv {
                     continue;
                 }
                 // Keep structural zeros: the pattern must be value-independent
                 // for the refactor replay.
-                l_rowidx.push(np);
+                l_rowidx.push(np as Ki);
                 l_val.push(x[np] / dval);
                 x[np] = T::zero();
             }
@@ -758,16 +802,16 @@ fn factor_impl<T: Scalar>(
         // The block is fully pivoted: fix its L row indices from pre-pivot to
         // final positions (U and F indices were final at push time).
         for k in l_colptr[bs]..l_colptr[be] {
-            l_rowidx[k] = bpinv[l_rowidx[k]];
+            l_rowidx[k] = mark[l_rowidx[k] as usize][1];
         }
     }
 
     let mut row_perm = vec![0usize; n];
     let mut pinv = vec![0usize; n];
-    for (&fin, &orig) in bpinv.iter().zip(&sym.pre_row_perm) {
-        debug_assert_ne!(fin, UNSET);
-        row_perm[fin] = orig;
-        pinv[orig] = fin;
+    for (m, &orig) in mark.iter().zip(&sym.pre_row_perm) {
+        debug_assert_ne!(m[1], KI_UNSET);
+        row_perm[m[1] as usize] = orig;
+        pinv[orig] = m[1] as usize;
     }
 
     Ok(KluFactors {
@@ -917,7 +961,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
-                    acc = acc - f.f_val[k] * w[f.f_rowidx[k]];
+                    acc = acc - f.f_val[k] * w[f.f_rowidx[k] as usize];
                 }
                 w[j] = acc;
             }
@@ -925,7 +969,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                    acc = acc - f.u_val[k] * w[f.u_rowidx[k]];
+                    acc = acc - f.u_val[k] * w[f.u_rowidx[k] as usize];
                 }
                 w[j] = acc / f.udiag[j];
             }
@@ -933,7 +977,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in (bs..be).rev() {
                 let mut acc = w[j];
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                    acc = acc - f.l_val[k] * w[f.l_rowidx[k]];
+                    acc = acc - f.l_val[k] * w[f.l_rowidx[k] as usize];
                 }
                 w[j] = acc;
             }
@@ -979,7 +1023,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                    let (lr, nlv) = (f.l_rowidx[k], T::zero() - f.l_val[k]);
+                    let (lr, nlv) = (f.l_rowidx[k] as usize, T::zero() - f.l_val[k]);
                     let row = &mut w[lr * nrhs..lr * nrhs + nrhs];
                     for (r, &x) in row.iter_mut().zip(&xj) {
                         *r = fmadd(nlv, x, *r);
@@ -998,7 +1042,7 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                    let (ur, nuv) = (f.u_rowidx[k], T::zero() - f.u_val[k]);
+                    let (ur, nuv) = (f.u_rowidx[k] as usize, T::zero() - f.u_val[k]);
                     let row = &mut w[ur * nrhs..ur * nrhs + nrhs];
                     for (r, &x) in row.iter_mut().zip(&xj) {
                         *r = fmadd(nuv, x, *r);
@@ -1009,7 +1053,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
-                    let (fr, nfv) = (f.f_rowidx[k], T::zero() - f.f_val[k]);
+                    let (fr, nfv) = (f.f_rowidx[k] as usize, T::zero() - f.f_val[k]);
                     let row = &mut w[fr * nrhs..fr * nrhs + nrhs];
                     for (r, &x) in row.iter_mut().zip(&xj) {
                         *r = fmadd(nfv, x, *r);
@@ -1076,13 +1120,18 @@ impl<T: Scalar> KluSolver<T> {
         let f = &self.factors;
         for b in (0..f.block_ptr.len() - 1).rev() {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
-            // L (unit lower) forward within the block.
+            // L (unit lower) forward within the block. Unchecked: all row
+            // indices are final positions `< n` by construction.
             for j in bs..be {
                 let xj = w[j];
                 if xj != T::zero() {
                     let nxj = T::zero() - xj;
                     for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                        w[f.l_rowidx[k]] = fmadd(f.l_val[k], nxj, w[f.l_rowidx[k]]);
+                        let lr = f.l_rowidx[k] as usize;
+                        debug_assert!(lr < w.len());
+                        unsafe {
+                            *w.get_unchecked_mut(lr) = fmadd(f.l_val[k], nxj, *w.get_unchecked(lr));
+                        }
                     }
                 }
             }
@@ -1093,7 +1142,11 @@ impl<T: Scalar> KluSolver<T> {
                 if xj != T::zero() {
                     let nxj = T::zero() - xj;
                     for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                        w[f.u_rowidx[k]] = fmadd(f.u_val[k], nxj, w[f.u_rowidx[k]]);
+                        let ur = f.u_rowidx[k] as usize;
+                        debug_assert!(ur < w.len());
+                        unsafe {
+                            *w.get_unchecked_mut(ur) = fmadd(f.u_val[k], nxj, *w.get_unchecked(ur));
+                        }
                     }
                 }
             }
@@ -1103,7 +1156,11 @@ impl<T: Scalar> KluSolver<T> {
                 if xj != T::zero() {
                     let nxj = T::zero() - xj;
                     for k in f.f_colptr[j]..f.f_colptr[j + 1] {
-                        w[f.f_rowidx[k]] = fmadd(f.f_val[k], nxj, w[f.f_rowidx[k]]);
+                        let fr = f.f_rowidx[k] as usize;
+                        debug_assert!(fr < w.len());
+                        unsafe {
+                            *w.get_unchecked_mut(fr) = fmadd(f.f_val[k], nxj, *w.get_unchecked(fr));
+                        }
                     }
                 }
             }
@@ -1150,7 +1207,7 @@ impl<T: Scalar> KluSolver<T> {
                     let fin = f.pinv[r];
                     let sv = a.values[k] * T::from_real(rs_inv[r]);
                     if fin < bs {
-                        if fcur >= f.f_colptr[j + 1] || f.f_rowidx[fcur] != fin {
+                        if fcur >= f.f_colptr[j + 1] || f.f_rowidx[fcur] as usize != fin {
                             return Err(pattern_mismatch());
                         }
                         f.f_val[fcur] = sv;
@@ -1169,14 +1226,18 @@ impl<T: Scalar> KluSolver<T> {
                 // Replay the elimination in the stored topological order
                 // (bit-identical to `factor_impl`'s pass 3: same `fmadd`).
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                    let p = f.u_rowidx[k];
+                    let p = f.u_rowidx[k] as usize;
                     let xu = x[p];
                     x[p] = T::zero();
                     f.u_val[k] = xu;
                     let nxu = T::zero() - xu;
                     for kl in f.l_colptr[p]..f.l_colptr[p + 1] {
-                        let lr = f.l_rowidx[kl];
-                        x[lr] = fmadd(nxu, f.l_val[kl], x[lr]);
+                        let lr = f.l_rowidx[kl] as usize;
+                        debug_assert!(lr < x.len());
+                        unsafe {
+                            *x.get_unchecked_mut(lr) =
+                                fmadd(nxu, *f.l_val.get_unchecked(kl), *x.get_unchecked(lr));
+                        }
                     }
                 }
                 let d = x[j];
@@ -1186,7 +1247,7 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 f.udiag[j] = d;
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                    let lr = f.l_rowidx[k];
+                    let lr = f.l_rowidx[k] as usize;
                     f.l_val[k] = x[lr] / d;
                     x[lr] = T::zero();
                 }
@@ -1201,7 +1262,7 @@ impl<T: Scalar> KluSolver<T> {
             }
         }
         f.rs_inv = rs_inv;
-        let entry = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
+        let entry = (std::mem::size_of::<T>() + std::mem::size_of::<Ki>()) as u64;
         let nnz = self.diagnostics.factor_nnz;
         self.diagnostics.push(
             "klu-refactor",
