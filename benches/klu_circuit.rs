@@ -84,6 +84,100 @@ fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
+// ---- SuiteSparse KLU reference (runtime FFI, LGPL library loaded only for
+// measurement; nothing distributed) --------------------------------------------
+// `benches/klu_shim.c` is compiled on demand against the locally installed
+// SuiteSparse (Homebrew prefix by default, RLA_KLU_SS_PREFIX to override) and
+// loaded via libloading - the same pattern as the MKL / Accelerate shims.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct SsKluResult {
+    ana_s: f64,
+    fac_s: f64,
+    refac_s: f64,
+    slv_s: f64,
+    sweep_s: f64,
+    lnz: i64,
+    unz: i64,
+    nblocks: i32,
+    ok: i32,
+}
+
+type SsKluFn = unsafe extern "C" fn(
+    i32,        // n
+    *const i32, // Ap
+    *const i32, // Ai
+    *const f64, // Ax
+    *const f64, // b
+    *mut f64,   // x
+    i32,        // sweep_len
+    *mut SsKluResult,
+) -> i32;
+
+struct SsKlu {
+    _lib: libloading::Library,
+    f: SsKluFn,
+}
+
+impl SsKlu {
+    fn try_new() -> Option<Self> {
+        let prefix = std::env::var("RLA_KLU_SS_PREFIX").unwrap_or_else(|_| "/opt/homebrew".into());
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let src = root.join("benches/klu_shim.c");
+        let dylib = root.join("target/klu_shim.dylib");
+        let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let stale = match (mtime(&src), mtime(&dylib)) {
+            (Some(s), Some(d)) => s > d,
+            _ => true,
+        };
+        if stale {
+            let st = std::process::Command::new("cc")
+                .args(["-O2", "-std=c11", "-dynamiclib"])
+                .arg(format!("-I{prefix}/include/suitesparse"))
+                .arg(format!("-L{prefix}/lib"))
+                .arg("-lklu")
+                .arg(&src)
+                .arg("-o")
+                .arg(&dylib)
+                .status();
+            if !st.map(|s| s.success()).unwrap_or(false) {
+                eprintln!("[ss-klu] shim compile failed (SuiteSparse installed at {prefix}?)");
+                return None;
+            }
+        }
+        let lib = unsafe { libloading::Library::new(&dylib).ok()? };
+        let f: SsKluFn = unsafe {
+            let s: libloading::Symbol<SsKluFn> = lib.get(b"klu_shim_run").ok()?;
+            *s
+        };
+        Some(SsKlu { _lib: lib, f })
+    }
+
+    fn run(&self, a: &GeneralCsc<f64>, b: &[f64], sweep: usize) -> Option<(SsKluResult, Vec<f64>)> {
+        let ap: Vec<i32> = a.col_ptr.iter().map(|&v| v as i32).collect();
+        let ai: Vec<i32> = a.row_idx.iter().map(|&v| v as i32).collect();
+        let mut x = vec![0.0f64; a.n];
+        let mut r = SsKluResult::default();
+        let st = unsafe {
+            (self.f)(
+                a.n as i32,
+                ap.as_ptr(),
+                ai.as_ptr(),
+                a.values.as_ptr(),
+                b.as_ptr(),
+                x.as_mut_ptr(),
+                sweep as i32,
+                &mut r,
+            )
+        };
+        if st != 0 || r.ok != 1 {
+            eprintln!("[ss-klu] failed with status {st}");
+            return None;
+        }
+        Some((r, x))
+    }
+}
+
 fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
     let mut ax = vec![0.0; a.n];
     a.matvec(x, &mut ax);
@@ -297,6 +391,26 @@ fn main() {
             "{:>8} residuals: klu {:.1e}  mf {:.1e}",
             "", klu_res, mf_res
         );
+
+        // --- SuiteSparse KLU reference (same matrix, same phases) ---
+        if let Some(ss) = SsKlu::try_new() {
+            if let Some((r, xs)) = ss.run(&a, &b, SWEEP) {
+                let ss_res = resid(&a, &xs, &b);
+                assert!(ss_res < 1e-8, "suitesparse klu residual {ss_res}");
+                println!(
+                    "{:>8} suitesparse-klu: ana {:>8.2?} fac {:>8.2?} refac {:>8.2?} solve {:>8.2?} lnz+unz {:>9} blocks {:>5} sweep {:>8.2?} res {:.1e}",
+                    "",
+                    std::time::Duration::from_secs_f64(r.ana_s),
+                    std::time::Duration::from_secs_f64(r.fac_s),
+                    std::time::Duration::from_secs_f64(r.refac_s),
+                    std::time::Duration::from_secs_f64(r.slv_s),
+                    r.lnz + r.unz,
+                    r.nblocks,
+                    std::time::Duration::from_secs_f64(r.sweep_s),
+                    ss_res
+                );
+            }
+        }
 
         // --- wide-RHS solve: batched solve_many vs per-column loop ---
         const NRHS: usize = 8;

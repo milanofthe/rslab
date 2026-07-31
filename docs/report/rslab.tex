@@ -583,6 +583,16 @@ refactor+solve vs.\ multifrontal factor+solve. Fill counts stored factor entries
 \label{tab:klu}
 \end{table}
 
+Against the reference C implementation, SuiteSparse KLU~\cite{klu} (loaded at
+runtime when installed), the analyze pipeline is at parity: identical BTF block
+counts and fill within 1.5\% (\rT{} slightly less), confirming the maximum
+transversal, Tarjan SCC, and per-block AMD match the reference. The C numeric
+kernel is \numrange{2.8}{4.3}$\times$ faster on factor (e.g.\ \SI{128}{ms}
+vs.\ \SI{357}{ms} at $n=200$k) and \numrange{1.5}{2.3}$\times$ on refactor;
+both reach $\sim10^{-15}$ residuals. The gap is kernel maturity in the
+per-column depth-first solve/scatter loop, not structure, and bounds what
+further scalar-kernel tuning can recover.
+
 \subsection{Iterative layer}
 The Krylov results appear with their concepts in Sec.~\ref{sec:iterative}: block-CGS2
 lifts multi-RHS strong scaling to $\sim2.2\times$ at 12 cores where per-RHS MGS is flat; within-cycle deflation cuts the batched operator

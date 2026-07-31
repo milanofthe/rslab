@@ -259,6 +259,24 @@ still, so a 20-point sweep (refactor+solve vs factor+solve, the "sweep ratio")
 is 6-19x faster end to end. Both solvers reach machine-precision residuals
 (~1e-15) on every size.
 
+Against the reference C implementation, **SuiteSparse KLU** (Davis & Palamadai
+Natarajan, loaded at runtime when installed; the bench auto-detects the
+Homebrew prefix):
+
+| n | RSLAB factor | SuiteSparse factor | RSLAB refactor | SuiteSparse refactor | fill RSLAB / SS |
+|--:|--:|--:|--:|--:|--:|
+| 2k | 7.2 ms | 2.5 ms | 2.2 ms | 1.5 ms | 79.3k / 80.8k |
+| 10k | 25.3 ms | 5.8 ms | 6.4 ms | 3.4 ms | 439k / 445k |
+| 50k | 118 ms | 31.6 ms | 31.1 ms | 17.9 ms | 2.32M / 2.35M |
+| 200k | 357 ms | 128 ms | 125 ms | 78.3 ms | 9.17M / 9.30M |
+
+Structure is at parity: identical BTF block counts and fill within 1.5% (RSLAB
+slightly less), so the analyze pipeline (maximum transversal, Tarjan SCC,
+per-block AMD) matches the reference. The C numeric kernel is 2.8-4.3x faster
+on factor and 1.5-2.3x on refactor; both reach ~1e-15 residuals. The gap is
+kernel maturity in the per-column depth-first solve/scatter loop, not
+structure, and bounds what further scalar-kernel tuning can recover.
+
 ### The optional learned auto-tuner
 
 The default `factor()` is model-free (the heuristic pick above). For tuning to
