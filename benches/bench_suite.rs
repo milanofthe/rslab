@@ -5,12 +5,14 @@
 //! orchestrates the size/thread sweeps and produces the matplotlib plots.
 //!
 //! Solvers: RLA left-looking (`ll`) and multifrontal (`mf`), `faer` sparse LU,
-//! and MKL `pardiso` (mtype 6 for the symmetric family, 13 for the unsymmetric).
-//! Symmetric matrices ⇒ RLA LDLᵀ; unsymmetric ⇒ RLA LU. Memory is the live-bytes
-//! peak (Rust solvers) or the working-set transient (PARDISO/MKL).
+//! MKL `pardiso` (mtype 6 for the symmetric family, 13 for the unsymmetric), and
+//! Apple `accel`erate Sparse Solvers (macOS 15.5+: LDLT for real-symmetric, the
+//! new sparse LU otherwise). Symmetric matrices ⇒ RLA LDLᵀ; unsymmetric ⇒ RLA LU.
+//! Memory is the live-bytes peak (Rust solvers and Accelerate, whose allocations
+//! run through instrumented callbacks) or the working-set transient (PARDISO/MKL).
 //!
 //! Env: `RLA_BENCH_FAMILY=sym|unsym`, `RLA_BENCH_SIZES=8000,27000,...`,
-//! `RLA_BENCH_MEM=1` (memory pass, else time), `RLA_BENCH_SOLVERS=ll,mf,faer,pardiso`,
+//! `RLA_BENCH_MEM=1` (memory pass, else time), `RLA_BENCH_SOLVERS=ll,mf,faer,pardiso,accel`,
 //! `RLA_BENCH_OUT=path.jsonl`, `RAYON_NUM_THREADS=N` (threads, also drives faer/MKL).
 //!
 //! Run via the driver; standalone: `cargo bench --bench bench_suite --features matgen`.
@@ -170,6 +172,127 @@ impl Drop for Pardiso {
     fn drop(&mut self) {
         let (mut db, mut dx) = (vec![], vec![]);
         let _ = self.call(-1, 0, &[0], &[0], &[], &mut db, &mut dx);
+    }
+}
+
+// ---- Apple Accelerate Sparse Solvers (macOS 15.5+, bench-only FFI) -----------
+// The public API is inline overloadable C, so `benches/accel_shim.c` compiles it
+// into a small dylib with a plain ABI, built on demand with the system `cc` and
+// loaded via libloading - the same runtime-FFI pattern as MKL PARDISO above.
+// Accelerate's complex sparse LDLT is Hermitian-only (verified empirically: a
+// complex-symmetric lower triangle is mirrored with conjugation), so the
+// complex-symmetric family goes through its LU on the full matrix instead;
+// real-valued symmetric matrices keep the structure-exploiting LDLT. Accelerate
+// has no thread knob - it parallelizes internally (its shipped default).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct AccelResult {
+    ana_s: f64,
+    fac_s: f64,
+    slv_s: f64,
+    peak_bytes: i64,
+    factor_bytes: i64,
+    workspace_bytes: i64,
+    sym_status: i32,
+    num_status: i32,
+}
+
+#[allow(clippy::type_complexity)]
+type AccelFn = unsafe extern "C" fn(
+    i32,                         // n
+    *const std::os::raw::c_long, // col_ptr (n+1)
+    *const i32,                  // row_idx
+    *const C,                    // values ({re,im} = double _Complex layout)
+    i32,                         // 0 ordinary / 1 symmetric / 2 hermitian (lower)
+    i32,                         // SparseFactorization_t (1 LDLT, 80 LU, 40 QR)
+    i32,                         // SparseOrder_t, -1 = default
+    f64,                         // pivot tolerance, <0 = vendor default (0.01)
+    *const C,                    // b
+    *mut C,                      // x
+    *mut AccelResult,
+) -> i32;
+
+struct Accel {
+    _lib: libloading::Library,
+    f: AccelFn,
+}
+
+impl Accel {
+    /// Compile the shim if missing/stale and load it. None (with a note) if this
+    /// is not macOS, `cc` fails, or the symbol is absent.
+    fn try_new() -> Option<Self> {
+        if !cfg!(target_os = "macos") {
+            eprintln!("[accel] skipped: Apple Accelerate is macOS-only");
+            return None;
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let src = root.join("benches/accel_shim.c");
+        let dylib = root.join("target/accel_shim.dylib");
+        let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let stale = match (mtime(&src), mtime(&dylib)) {
+            (Some(s), Some(d)) => s > d,
+            _ => true,
+        };
+        if stale {
+            let st = std::process::Command::new("cc")
+                .args([
+                    "-O2",
+                    "-std=c11",
+                    "-mmacosx-version-min=15.5",
+                    "-dynamiclib",
+                ])
+                .args(["-framework", "Accelerate"])
+                .arg(&src)
+                .arg("-o")
+                .arg(&dylib)
+                .status();
+            if !st.map(|s| s.success()).unwrap_or(false) {
+                eprintln!("[accel] shim compile failed (needs Xcode CLT + macOS 15.5 SDK)");
+                return None;
+            }
+        }
+        let lib = unsafe { libloading::Library::new(&dylib).ok()? };
+        let f: AccelFn = unsafe {
+            let s: libloading::Symbol<AccelFn> = lib.get(b"accel_sparse_solve_complex").ok()?;
+            *s
+        };
+        Some(Accel { _lib: lib, f })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve(
+        &self,
+        n: usize,
+        col_ptr: &[usize],
+        row_idx: &[usize],
+        vals: &[C],
+        kind: i32,
+        fact: i32,
+        order: i32,
+        pivot: f64,
+        b: &[C],
+        x: &mut [C],
+    ) -> (i32, AccelResult) {
+        let cp: Vec<std::os::raw::c_long> =
+            col_ptr.iter().map(|&v| v as std::os::raw::c_long).collect();
+        let ri: Vec<i32> = row_idx.iter().map(|&v| v as i32).collect();
+        let mut r = AccelResult::default();
+        let st = unsafe {
+            (self.f)(
+                n as i32,
+                cp.as_ptr(),
+                ri.as_ptr(),
+                vals.as_ptr(),
+                kind,
+                fact,
+                order,
+                pivot,
+                b.as_ptr(),
+                x.as_mut_ptr(),
+                &mut r,
+            )
+        };
+        (st, r)
     }
 }
 
@@ -647,6 +770,91 @@ fn run_matrix(
             }
         } else {
             eprintln!("[bench] PARDISO unavailable (mkl_rt not found)");
+        }
+    }
+
+    // --- Apple Accelerate (Sparse Solvers, macOS 15.5+) ---
+    // Real-symmetric matrices (all-zero imaginary parts) run the structure-
+    // exploiting LDLT on the lower triangle (kind=Hermitian - identical to
+    // symmetric for real values, and the only variant the complex API factors
+    // correctly). Genuinely complex-symmetric matrices have no Accelerate LDLT
+    // analogue, so the vendor path is its new sparse LU on the full matrix
+    // (same structural handicap faer has). Unsymmetric matrices map 1:1 to LU.
+    // All runs stay in complex double - the same scalar type every other solver
+    // in this suite is measured with.
+    if has("accel") {
+        if let Some(ac) = Accel::try_new() {
+            let order: i32 = match std::env::var("RLA_BENCH_ACCEL_ORDER").ok().as_deref() {
+                Some("amd") => 2,
+                Some("metis") => 3,
+                Some("colamd") => 4,
+                _ => -1, // SparseOrderDefault
+            };
+            let pivot: f64 = std::env::var("RLA_BENCH_ACCEL_PIVOT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(-1.0);
+            let mut x = vec![Complex::new(0.0, 0.0); n];
+            let (variant, st, r) = match mat {
+                Mat::Sym(a) if a.values.iter().all(|v| v.im == 0.0) => {
+                    let (st, r) = ac.solve(
+                        n, &a.col_ptr, &a.row_idx, &a.values, 2, 1, order, pivot, &b, &mut x,
+                    );
+                    ("ldlt", st, r)
+                }
+                Mat::Sym(a) => {
+                    let fa = sym_to_full(a);
+                    let (st, r) = ac.solve(
+                        n,
+                        &fa.col_ptr,
+                        &fa.row_idx,
+                        &fa.values,
+                        0,
+                        80,
+                        order,
+                        pivot,
+                        &b,
+                        &mut x,
+                    );
+                    ("lu-full", st, r)
+                }
+                Mat::Unsym(a) => {
+                    let (st, r) = ac.solve(
+                        n, &a.col_ptr, &a.row_idx, &a.values, 0, 80, order, pivot, &b, &mut x,
+                    );
+                    ("lu", st, r)
+                }
+            };
+            if st == 0 {
+                let mut ax = vec![Complex::new(0.0, 0.0); n];
+                mat.resid(&x, &mut ax);
+                eprintln!(
+                    "[accel] {name}: {variant}, a-priori factor {:.0} MB + workspace {:.0} MB",
+                    r.factor_bytes as f64 / 1e6,
+                    r.workspace_bytes as f64 / 1e6
+                );
+                emit(
+                    out,
+                    "accel",
+                    family,
+                    name,
+                    n,
+                    nnz,
+                    threads,
+                    mem,
+                    r.ana_s * 1e3,
+                    r.fac_s * 1e3,
+                    r.slv_s * 1e3,
+                    r.peak_bytes as f64 / 1e6,
+                    0,
+                    rel(&ax, &b),
+                );
+            } else {
+                eprintln!(
+                    "[accel] {name}: {variant} failed (status {st}, sym {}, num {})",
+                    r.sym_status, r.num_status
+                );
+            }
         }
     }
 
