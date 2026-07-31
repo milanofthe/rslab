@@ -475,6 +475,83 @@ matrices, so its head-to-head is a conservative floor.}
 \label{fig:residual}
 \end{figure}
 
+\subsection{Apple Silicon: \rT{} vs.\ Accelerate sparse solvers}
+\label{sec:apple}
+A second, independent same-run measurement of all three solver paths on an
+Apple M3 (8 cores, 16\,GB, macOS 15.6) against Apple Accelerate's sparse direct
+solvers, which gained complex support and a sparse LU in macOS 15.5. \rT{} runs
+its shipped default (heuristic pick, hardware-calibrated on this machine);
+Accelerate runs its vendor-best configuration per class: Cholesky-first with an
+$\LDLt$ fallback for real-symmetric matrices, its new sparse LU (TPP,
+\code{pivotTolerance} $0.01$) for unsymmetric and circuit-shaped ones, and ---
+because its complex $\LDLt$ is Hermitian-only (verified empirically: the lower
+triangle is mirrored conjugated) --- LU on the \emph{full} matrix for the
+complex-symmetric families, the same structural handicap faer carries. Each
+matrix gets an AMD-vs-Metis ordering bakeoff (\code{SparseOrderDefault} is
+plain AMD, up to $4.4\times$ the Metis fill on the large EM/FEM systems); the
+bakeoff cost is charged to Accelerate's analyze time, mirroring \rT's exact ND
+bakeoff. Peak memory uses the same live-bytes semantics as the Rust solvers,
+via instrumented allocation callbacks.
+
+Figures~\ref{fig:apple_ldlt}--\ref{fig:apple_klu} show the per-path scaling;
+Table~\ref{tab:apple} the geomean ratios. On its home silicon the vendor
+library wins most of the distribution --- its AMX-backed kernels take the small
+and mid sizes outright ($0.19\times$--$0.64\times$ \rT's factor time in
+geomean). The structural story survives at scale: above ${\sim}3\cdot10^{5}$
+nonzeros on the complex-symmetric systems, \rT's $A=A^{T}$ exploitation turns
+the tables (Accelerate $1.3$--$1.4\times$ slower there; its time scales at
+$\alpha\approx1.68$ vs.\ $1.42$). The circuit comparison is one-shot
+analyze+factor+solve; KLU's numeric-only refactor sweeps are not exercised. On
+accuracy, Accelerate reaches $10^{-8}$ on 25 of 36 corpus matrices, but on five
+hard indefinite/ill-scaled ones (stokes64, bratu3d, cont-201, rim, lhr34) it
+returns NaN or garbage \emph{with an OK status} --- the same silent-degradation
+mode as faer, where \rT{} declines cleanly.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{h2h_apple_ldlt.pdf}
+\caption{Apple M3: $\LDLt$ path (complex-symmetric + real-symmetric families)
+--- factor wall-clock (left) and live-bytes peak (right) vs.\ problem size,
+\rT{} shipped pick vs.\ Apple Accelerate (vendor-best configuration), with
+power-law fits.}
+\label{fig:apple_ldlt}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{h2h_apple_lu.pdf}
+\caption{Apple M3: $\LU$ path (unsymmetric families). Accelerate's macOS-15.5
+sparse LU scales at $\alpha\approx1.36$ vs.\ \rT's $1.15$ on time.}
+\label{fig:apple_lu}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{h2h_apple_klu.pdf}
+\caption{Apple M3: circuit-shaped matrices (complex MNA, $G+j\omega C$). \rT{}
+KLU vs.\ the multifrontal $\LU$ default vs.\ Accelerate LU; one-shot factor ---
+KLU's refactor-driven sweep niche is not exercised here.}
+\label{fig:apple_klu}
+\end{figure}
+
+\begin{table}[htbp]
+\centering\tabfont
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Accelerate vs.\ \rT{} shipped path & factor time & peak memory & matrices \\
+\midrule
+sym ($\LDLt$ path) & $0.64\times$ & $0.58\times$ & 49 \\
+unsym ($\LU$ path) & $0.26\times$ & $0.28\times$ & 60 \\
+circuit (vs.\ KLU) & $0.37\times$ & $0.80\times$ & 15 \\
+SuiteSparse corpus & $0.19\times$ & $0.45\times$ & 30 \\
+\bottomrule
+\end{tabular}
+\caption{Apple M3 head-to-head geomean ratios (Accelerate / \rT), over the
+matrices both solve to below $0.1$ residual; ratios below $1$ mean Accelerate
+is faster/leaner. One run, one machine, live-bytes memory on both sides.}
+\label{tab:apple}
+\end{table}
+
 \subsection{KLU path on circuit-shaped matrices}
 Table~\ref{tab:klu} benchmarks the KLU path against the multifrontal $\LU$ (defaults) on
 MNA-like matrices --- $\sim$4--5 nnz/column, unsymmetric, column-diagonally dominant,

@@ -179,6 +179,67 @@ The determinism and equivalence properties were validated over 180 SuiteSparse
 matrices: right-looking vs multifrontal, both emit modes, parallel vs serial
 front subtraction, and the 32-bit compressed factor are all bit-identical.
 
+### Apple Silicon: RSLAB vs Apple Accelerate
+
+Same engine, same corpus, different silicon: all three solver paths re-measured
+in one run on an Apple M3 (8 cores, 16 GB, macOS 15.6) against **Apple
+Accelerate's sparse direct solvers** — including the complex support and the
+sparse LU that Accelerate gained in macOS 15.5. RSLAB runs its shipped default
+(heuristic pick, `cargo xtask calibrate`d for this machine); Accelerate runs
+its vendor-recommended best configuration per class:
+
+| matrix class | Accelerate path |
+|---|---|
+| real symmetric | Cholesky first (AMX-fast on SPD), LDLᵀ fallback on the indefinite ones |
+| complex-symmetric (EM/FEM) | sparse LU on the full matrix — its complex LDLᵀ is Hermitian-only (verified: the lower triangle is mirrored *conjugated*), so like faer it cannot exploit `A = Aᵀ` |
+| unsymmetric / circuit | sparse LU (TPP, `pivotTolerance 0.01`) |
+
+plus an **AMD-vs-Metis ordering bakeoff** per matrix (the vendor docs say "try
+both"; `SparseOrderDefault` turned out to be plain AMD, which costs up to 4.4x
+the fill of Metis on the large EM/FEM systems — the bakeoff is the analogue of
+RSLAB's exact ND bakeoff and its cost is counted in Accelerate's analyze time).
+Memory uses the same live-bytes semantics as the Rust solvers: Accelerate's
+allocations run through instrumented `SparseSymbolicFactorOptions` malloc/free
+callbacks. Accelerate has no thread knob (internal parallelism); RSLAB uses its
+calibrated pick.
+
+**LDLᵀ path (sym)** | **LU path (unsym)** | **KLU path (circuit)**:
+
+![Apple LDLt](benches/bench_out/h2h_apple_ldlt.png)
+![Apple LU](benches/bench_out/h2h_apple_lu.png)
+![Apple KLU](benches/bench_out/h2h_apple_klu.png)
+
+Head-to-head geomean ratios (Accelerate / RSLAB shipped path, over the matrices
+both solve to `< 0.1` residual; one-shot analyze+factor+solve):
+
+| corpus | factor time | peak memory | matrices |
+|---|:-:|:-:|:-:|
+| sym (LDLᵀ path) | **0.64x** (accel faster) | **0.58x** | 49 |
+| unsym (LU path) | **0.26x** | **0.28x** | 60 |
+| circuit (vs RSLAB KLU) | **0.37x** | **0.80x** | 15 |
+| SuiteSparse corpus | **0.19x** | **0.45x** | 30 |
+
+On its home silicon the vendor library is the faster direct solver on most of
+the distribution — the AMX-backed kernels win the small and mid sizes outright
+(RSLAB's calibrated complex proxy throughput on the M3 is 9.4 GFLOP/s; AMX
+sustains a multiple of that). The structural story survives at scale: on the
+largest complex-symmetric systems (curl-curl/Helmholtz above ~3·10⁵ nnz)
+RSLAB's `A = Aᵀ` exploitation turns the tables (accel 1.3-1.4x slower there;
+its time scales at `α≈1.68` vs RSLAB's `1.42`), and on the circuit class the
+comparison is one-shot only — KLU's refactor-driven sweeps (its actual niche)
+are not exercised.
+
+Accuracy over the corpus: Accelerate reaches `< 1e-8` on 25/36 (including
+qc2534 at `2.5e-13` directly, where RSLAB's exact mode needs its
+preconditioner+GMRES path), but on five hard indefinite/ill-scaled matrices
+(stokes64, bratu3d, cont-201, rim, lhr34) it **returns NaN or garbage with an
+OK status** (residuals `1e1-1e9`) — the same silent-degradation failure mode as
+faer. RSLAB declines those cleanly instead of returning a wrong answer
+(24/31 attempted below `1e-8`, no garbage returns; the pc mode rescues most of
+the declined set, see above).
+
+Reproduce: `benches/run_apple_silicon.sh`, then `python benches/apple_silicon.py`.
+
 ### KLU path on circuit-shaped matrices
 
 KLU vs the multifrontal LU (defaults) on MNA-like matrices — ~4-5 nnz/column,
