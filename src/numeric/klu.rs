@@ -66,6 +66,13 @@ pub struct KluSettings {
     /// singularity surfaces as a numeric zero pivot, and the diagonal
     /// preference loses its zero-free guarantee.
     pub btf: bool,
+    /// Factor the (independent) BTF diagonal blocks in parallel on the
+    /// ambient rayon pool. **Bit-identical to the sequential default**: each
+    /// block is factored sequentially by construction and blocks share no
+    /// state, so the result does not depend on scheduling. Off by default so
+    /// the path stays strictly sequential for embedded / solver-in-the-loop
+    /// use; cap the pool with `with_threads` scoping when enabling.
+    pub parallel_factor: bool,
 }
 
 impl Default for KluSettings {
@@ -74,6 +81,7 @@ impl Default for KluSettings {
             pivot_tol: 1e-3,
             row_scaling: true,
             btf: true,
+            parallel_factor: false,
         }
     }
 }
@@ -96,6 +104,13 @@ impl KluSettings {
     /// Composable toggle for the BTF permutation (see [`btf`](Self::btf)).
     pub fn with_btf(mut self, on: bool) -> Self {
         self.btf = on;
+        self
+    }
+
+    /// Composable toggle for parallel per-block factorization
+    /// (see [`parallel_factor`](Self::parallel_factor)).
+    pub fn with_parallel_factor(mut self, on: bool) -> Self {
+        self.parallel_factor = on;
         self
     }
 }
@@ -561,6 +576,345 @@ fn row_scale_inv<T: Scalar>(a: &GeneralCsc<T>, enabled: bool) -> Vec<f64> {
         .collect()
 }
 
+/// Per-block factor output in absolute position spaces: row indices of
+/// `l/u` are absolute final positions, `f_pre` holds absolute *pre-pivot*
+/// positions (rows of earlier blocks, resolved to final positions when the
+/// blocks are spliced in order), and `prog_in`/`f_k` carry the refactor
+/// scatter program contributions (see [`KluFactors`]).
+struct BlockOut<T> {
+    /// Absolute final position for each local pre position (`len == bn`).
+    fin_abs: Vec<Ki>,
+    l_colptr: Vec<usize>,
+    l_rowidx: Vec<Ki>,
+    l_val: Vec<T>,
+    u_colptr: Vec<usize>,
+    u_rowidx: Vec<Ki>,
+    u_val: Vec<T>,
+    udiag: Vec<T>,
+    f_colptr: Vec<usize>,
+    f_pre: Vec<Ki>,
+    f_val: Vec<T>,
+    /// Input-storage index `k` per F entry (aligned with `f_pre`/`f_val`).
+    f_k: Vec<Ki>,
+    /// `(k, absolute final position)` for every within-block entry.
+    prog_in: Vec<(Ki, Ki)>,
+}
+
+/// Factor one diagonal block in block-local space. Strictly sequential and
+/// deterministic; the parallel driver runs one worker per block, which is
+/// bit-identical to the sequential order because blocks share no state.
+fn factor_block<T: Scalar>(
+    sym: &KluSymbolic,
+    a: &GeneralCsc<T>,
+    settings: &KluSettings,
+    rs_inv: &[f64],
+    pinv_pre: &[Ki],
+    bs: usize,
+    be: usize,
+) -> Result<BlockOut<T>, RslabError> {
+    let bn = be - bs;
+
+    if bn == 1 {
+        // Singleton block: the pivot is the (structurally nonzero) diagonal
+        // entry itself; everything else in the column is off-block.
+        let c = sym.col_perm[bs];
+        let mut out = BlockOut {
+            fin_abs: vec![bs as Ki],
+            l_colptr: vec![0, 0],
+            l_rowidx: Vec::new(),
+            l_val: Vec::new(),
+            u_colptr: vec![0, 0],
+            u_rowidx: Vec::new(),
+            u_val: Vec::new(),
+            udiag: Vec::with_capacity(1),
+            f_colptr: vec![0],
+            f_pre: Vec::new(),
+            f_val: Vec::new(),
+            f_k: Vec::new(),
+            prog_in: Vec::new(),
+        };
+        let mut diag: Option<T> = None;
+        for k in a.col_ptr[c]..a.col_ptr[c + 1] {
+            let pre = pinv_pre[a.row_idx[k]] as usize;
+            let sv = a.values[k] * T::from_real(rs_inv[a.row_idx[k]]);
+            if pre == bs {
+                diag = Some(sv);
+                out.prog_in.push((k as Ki, bs as Ki));
+            } else if pre < bs {
+                out.f_pre.push(pre as Ki);
+                out.f_val.push(sv);
+                out.f_k.push(k as Ki);
+            } else {
+                return Err(pattern_mismatch());
+            }
+        }
+        let d = diag.ok_or(RslabError::SingularBasis { column: c })?;
+        if d.magnitude() == 0.0 || !d.is_finite() {
+            return Err(RslabError::SingularBasis { column: c });
+        }
+        out.udiag.push(d);
+        out.f_colptr.push(out.f_pre.len());
+        return Ok(out);
+    }
+
+    // General irreducible block: left-looking Gilbert-Peierls, block-local
+    // position space (`lb = pre - bs`).
+    // `mark[lb] = [dfs_stamp, local_final_position]` packed pair; the DFS
+    // touches both fields per visited node, packing halves its random
+    // cache-line traffic.
+    let mut mark: Vec<[Ki; 2]> = vec![[0, KI_UNSET]; bn];
+    // Symmetric pruning (Eisenstat & Liu, SIMAX 1992): once column `s` has a
+    // symmetric pivot pair (`U(s,k) != 0` and `L(k,s) != 0`), the DFS only
+    // needs the prefix of `L(:,s)` holding rows already pivotal at step `k`;
+    // every pruned row is covered through column `k`'s pattern. `lpend[s]`
+    // is the exclusive prefix end (KI_UNSET = unpruned, scan to column end).
+    let mut lpend: Vec<Ki> = vec![KI_UNSET; bn];
+    let mut x = vec![T::zero(); bn];
+    let mut node_stack = vec![0 as Ki; bn];
+    let mut cur_stack = vec![0usize; bn];
+    let mut topo: Vec<Ki> = Vec::with_capacity(bn);
+    let mut nonpiv: Vec<Ki> = Vec::with_capacity(bn);
+
+    let mut out = BlockOut {
+        fin_abs: vec![KI_UNSET; bn],
+        l_colptr: Vec::with_capacity(bn + 1),
+        l_rowidx: Vec::new(),
+        l_val: Vec::new(),
+        u_colptr: Vec::with_capacity(bn + 1),
+        u_rowidx: Vec::new(),
+        u_val: Vec::new(),
+        udiag: Vec::with_capacity(bn),
+        f_colptr: Vec::with_capacity(bn + 1),
+        f_pre: Vec::new(),
+        f_val: Vec::new(),
+        f_k: Vec::new(),
+        prog_in: Vec::new(),
+    };
+    out.l_colptr.push(0);
+    out.u_colptr.push(0);
+    out.f_colptr.push(0);
+    // `fin_local[lb]` tracked inside `mark[lb][1]`; `out.fin_abs` filled at
+    // the end from it.
+
+    for lj in 0..bn {
+        let j = bs + lj;
+        let c = sym.col_perm[j];
+        let sj = (lj + 1) as Ki; // unique DFS stamp for this column
+        topo.clear();
+        nonpiv.clear();
+
+        // Pass 1, symbolic: DFS the reach of the column's within-block
+        // pattern over the L columns factored so far. Pivotal nodes come
+        // out in `topo` post-order; non-pivotal nodes (pivot candidates)
+        // in `nonpiv`. The inner loop runs unchecked: every index is a
+        // block-local position `< bn` (`debug_assert`ed), and `cur/end` are
+        // positions into the already-built prefix of `l_rowidx`.
+        let col_end = |p: usize, lpend: &[Ki], l_colptr: &[usize]| -> usize {
+            let lp = lpend[p];
+            if lp == KI_UNSET {
+                l_colptr[p + 1]
+            } else {
+                lp as usize
+            }
+        };
+        for k in a.col_ptr[c]..a.col_ptr[c + 1] {
+            let pre = pinv_pre[a.row_idx[k]] as usize;
+            if pre < bs {
+                continue; // off-block, handled in pass 2
+            }
+            if pre >= be {
+                return Err(pattern_mismatch());
+            }
+            let lb = pre - bs;
+            let m = mark[lb];
+            if m[0] == sj {
+                continue;
+            }
+            mark[lb][0] = sj;
+            if m[1] == KI_UNSET {
+                nonpiv.push(lb as Ki);
+                continue;
+            }
+            let mut d = 0usize;
+            node_stack[0] = lb as Ki;
+            cur_stack[0] = out.l_colptr[m[1] as usize];
+            let mut end = col_end(m[1] as usize, &lpend, &out.l_colptr);
+            loop {
+                let mut descended = false;
+                while cur_stack[d] < end {
+                    debug_assert!(cur_stack[d] < out.l_rowidx.len());
+                    let ch = unsafe { *out.l_rowidx.get_unchecked(cur_stack[d]) } as usize;
+                    cur_stack[d] += 1;
+                    debug_assert!(ch < bn);
+                    let mch = unsafe { *mark.get_unchecked(ch) };
+                    if mch[0] == sj {
+                        continue;
+                    }
+                    unsafe { mark.get_unchecked_mut(ch)[0] = sj };
+                    if mch[1] == KI_UNSET {
+                        nonpiv.push(ch as Ki);
+                        continue;
+                    }
+                    d += 1;
+                    node_stack[d] = ch as Ki;
+                    let p = mch[1] as usize;
+                    cur_stack[d] = out.l_colptr[p];
+                    end = col_end(p, &lpend, &out.l_colptr);
+                    descended = true;
+                    break;
+                }
+                if descended {
+                    continue;
+                }
+                topo.push(node_stack[d]);
+                if d == 0 {
+                    break;
+                }
+                d -= 1;
+                let up = mark[node_stack[d] as usize][1] as usize;
+                end = col_end(up, &lpend, &out.l_colptr);
+            }
+        }
+
+        // Pass 2, scatter the scaled column values (off-block entries go
+        // straight to F with their pre positions; final positions are
+        // resolved when the earlier blocks are spliced).
+        for k in a.col_ptr[c]..a.col_ptr[c + 1] {
+            let r = a.row_idx[k];
+            let pre = pinv_pre[r] as usize;
+            let sv = a.values[k] * T::from_real(rs_inv[r]);
+            if pre < bs {
+                out.f_pre.push(pre as Ki);
+                out.f_val.push(sv);
+                out.f_k.push(k as Ki);
+            } else {
+                x[pre - bs] = sv;
+            }
+        }
+
+        let u_start = out.u_rowidx.len();
+
+        // Pass 3, numeric update in topological order (reverse post-order):
+        // each pivotal node's final value feeds its L column into the
+        // remaining work vector, and becomes a U entry. The axpy runs
+        // through `fmadd` (FMA on native builds); `refactor`'s replay uses
+        // the identical expression so it stays bit-identical. Unchecked: all
+        // row indices are local positions `< bn` by construction.
+        for &u in topo.iter().rev() {
+            let u = u as usize;
+            let p = mark[u][1];
+            let xu = x[u];
+            x[u] = T::zero();
+            out.u_rowidx.push(p);
+            out.u_val.push(xu);
+            let nxu = T::zero() - xu;
+            let p = p as usize;
+            for k in out.l_colptr[p]..out.l_colptr[p + 1] {
+                debug_assert!(k < out.l_rowidx.len());
+                let lr = unsafe { *out.l_rowidx.get_unchecked(k) } as usize;
+                debug_assert!(lr < bn);
+                unsafe {
+                    *x.get_unchecked_mut(lr) =
+                        fmadd(nxu, *out.l_val.get_unchecked(k), *x.get_unchecked(lr));
+                }
+            }
+        }
+
+        // Pivot: max-magnitude candidate, overridden by the diagonal
+        // (local pre position `lj`) when it clears the threshold.
+        let mut piv = UNSET;
+        let mut maxmag = 0.0f64;
+        for &np in &nonpiv {
+            let m = x[np as usize].magnitude();
+            if m > maxmag {
+                maxmag = m;
+                piv = np as usize;
+            }
+        }
+        if piv == UNSET || maxmag == 0.0 || !maxmag.is_finite() {
+            return Err(RslabError::SingularBasis { column: c });
+        }
+        if mark[lj][0] == sj && mark[lj][1] == KI_UNSET {
+            let dm = x[lj].magnitude();
+            if dm > 0.0 && dm >= settings.pivot_tol * maxmag {
+                piv = lj;
+            }
+        }
+
+        let dval = x[piv];
+        x[piv] = T::zero();
+        mark[piv][1] = lj as Ki;
+        out.udiag.push(dval);
+        for &np in &nonpiv {
+            let np = np as usize;
+            if np == piv {
+                continue;
+            }
+            // Keep structural zeros: the pattern must be value-independent
+            // for the refactor replay.
+            out.l_rowidx.push(np as Ki);
+            out.l_val.push(x[np] / dval);
+            x[np] = T::zero();
+        }
+        out.l_colptr.push(out.l_rowidx.len());
+        out.u_colptr.push(out.u_rowidx.len());
+        out.f_colptr.push(out.f_pre.len());
+
+        // Symmetric pruning for this pivot: for each U-partner column `s`
+        // (an entry `U(s,j)`), if `L(:,s)` contains the pivot row, partition
+        // it so rows already pivotal come first and bound the future DFS
+        // scans to that prefix.
+        let pivk = piv as Ki;
+        for ui in u_start..out.u_rowidx.len() {
+            let s = out.u_rowidx[ui] as usize;
+            if lpend[s] != KI_UNSET {
+                continue;
+            }
+            let (cs, ce) = (out.l_colptr[s], out.l_colptr[s + 1]);
+            if !out.l_rowidx[cs..ce].contains(&pivk) {
+                continue;
+            }
+            let mut head = cs;
+            for k in cs..ce {
+                let r = out.l_rowidx[k] as usize;
+                if mark[r][1] != KI_UNSET {
+                    out.l_rowidx.swap(head, k);
+                    out.l_val.swap(head, k);
+                    head += 1;
+                }
+            }
+            lpend[s] = head as Ki;
+        }
+    }
+
+    // Block fully pivoted: resolve to absolute final positions. L row
+    // indices go local-pre -> absolute final; U row indices go local-final
+    // -> absolute final; the scatter program records absolute finals for
+    // every within-block entry.
+    for m in &mark {
+        debug_assert_ne!(m[1], KI_UNSET);
+    }
+    for (lb, m) in mark.iter().enumerate() {
+        out.fin_abs[lb] = (bs as Ki) + m[1];
+    }
+    for ri in out.l_rowidx.iter_mut() {
+        *ri = out.fin_abs[*ri as usize];
+    }
+    for ri in out.u_rowidx.iter_mut() {
+        *ri += bs as Ki;
+    }
+    for lj in 0..bn {
+        let c = sym.col_perm[bs + lj];
+        for k in a.col_ptr[c]..a.col_ptr[c + 1] {
+            let pre = pinv_pre[a.row_idx[k]] as usize;
+            if pre >= bs {
+                out.prog_in.push((k as Ki, out.fin_abs[pre - bs]));
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn factor_impl<T: Scalar>(
     sym: &KluSymbolic,
     a: &GeneralCsc<T>,
@@ -577,7 +931,6 @@ fn factor_impl<T: Scalar>(
     if a.nnz() != sym.nnz {
         return Err(pattern_mismatch());
     }
-
     if n as u64 >= KI_FBIT as u64 || sym.nnz as u64 >= KI_FBIT as u64 {
         return Err(RslabError::InvalidInput(
             "klu: dimension/nnz exceeds the 31-bit index range of this path".to_string(),
@@ -590,347 +943,100 @@ fn factor_impl<T: Scalar>(
         pinv_pre[r] = k as Ki;
     }
 
-    // Per pre-pivot position, one packed pair `[dfs_stamp, final_position]`
-    // (final position `KI_UNSET` until that row is pivoted). The DFS touches
-    // both fields for every visited node; packing them halves its random
-    // cache-line traffic vs two separate arrays.
-    let mut mark: Vec<[Ki; 2]> = vec![[0, KI_UNSET]; n];
-    // Symmetric pruning (Eisenstat & Liu, SIMAX 1992): once column `s` has a
-    // symmetric pivot pair (`U(s,k) != 0` and `L(k,s) != 0`), the DFS only
-    // needs the prefix of `L(:,s)` holding rows already pivotal at step `k`;
-    // every pruned row is covered through column `k`'s pattern. `lpend[s]`
-    // is the exclusive prefix end (KI_UNSET = unpruned, scan to column end).
-    let mut lpend: Vec<Ki> = vec![KI_UNSET; n];
-    // Numeric work vector and DFS state, all in pre-pivot position space.
-    let mut x = vec![T::zero(); n];
-    let mut node_stack = vec![0 as Ki; n];
-    let mut cur_stack = vec![0usize; n];
-    let mut topo: Vec<Ki> = Vec::with_capacity(n);
-    let mut nonpiv: Vec<Ki> = Vec::with_capacity(n);
-
-    // Exact preallocation when the symbolic fill has already been computed
-    // (diagonal-pivoting expectation; threshold pivoting can deviate, so
-    // these are reserves, not fixed sizes).
-    let (l_res, u_res, f_res) = match sym.fill.get() {
-        Some(f) => (f.l_nnz as usize, f.u_nnz as usize, f.f_nnz as usize),
-        None => (a.nnz(), a.nnz(), 0),
+    // Factor the diagonal blocks: independent by construction, so the
+    // parallel driver is bit-identical to the sequential one (each worker is
+    // sequential inside; nothing is shared across blocks). Parallelism is
+    // opt-in and runs on the ambient rayon pool, so callers cap it with
+    // `with_threads` scoping, matching the solver-in-the-loop contract.
+    let nblocks = sym.block_ptr.len() - 1;
+    let blocks: Vec<Result<BlockOut<T>, RslabError>> = if settings.parallel_factor && nblocks > 1 {
+        use rayon::prelude::*;
+        (0..nblocks)
+            .into_par_iter()
+            .map(|b| {
+                factor_block(
+                    sym,
+                    a,
+                    settings,
+                    &rs_inv,
+                    &pinv_pre,
+                    sym.block_ptr[b],
+                    sym.block_ptr[b + 1],
+                )
+            })
+            .collect()
+    } else {
+        (0..nblocks)
+            .map(|b| {
+                factor_block(
+                    sym,
+                    a,
+                    settings,
+                    &rs_inv,
+                    &pinv_pre,
+                    sym.block_ptr[b],
+                    sym.block_ptr[b + 1],
+                )
+            })
+            .collect()
     };
+
+    // Splice the per-block outputs in block order. Off-block F rows refer to
+    // earlier blocks' pre positions; `fin_of_pre` is complete for all earlier
+    // blocks by the time a block is spliced.
+    let mut fin_of_pre = vec![0 as Ki; n];
     let mut l_colptr = Vec::with_capacity(n + 1);
     l_colptr.push(0usize);
-    let mut l_rowidx: Vec<Ki> = Vec::with_capacity(l_res);
-    let mut l_val: Vec<T> = Vec::with_capacity(l_res);
+    let mut l_rowidx: Vec<Ki> = Vec::new();
+    let mut l_val: Vec<T> = Vec::new();
     let mut u_colptr = Vec::with_capacity(n + 1);
     u_colptr.push(0usize);
-    let mut u_rowidx: Vec<Ki> = Vec::with_capacity(u_res);
-    let mut u_val: Vec<T> = Vec::with_capacity(u_res);
+    let mut u_rowidx: Vec<Ki> = Vec::new();
+    let mut u_val: Vec<T> = Vec::new();
     let mut udiag: Vec<T> = Vec::with_capacity(n);
     let mut f_colptr = Vec::with_capacity(n + 1);
     f_colptr.push(0usize);
-    let mut f_rowidx: Vec<Ki> = Vec::with_capacity(f_res);
-    let mut f_val: Vec<T> = Vec::with_capacity(f_res);
-    // Refactor scatter program (see the struct docs); within-block targets
-    // are recorded as pre-pivot positions and fixed up at block end.
+    let mut f_rowidx: Vec<Ki> = Vec::new();
+    let mut f_val: Vec<T> = Vec::new();
     let mut scatter_expect = vec![0 as Ki; sym.nnz];
     let mut scatter_target = vec![0 as Ki; sym.nnz];
 
-    let prof = std::env::var("RLA_KLU_PROF")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let (mut t_dfs, mut t_num, mut t_piv) = (0.0f64, 0.0f64, 0.0f64);
-
-    for b in 0..sym.block_ptr.len() - 1 {
-        let (bs, be) = (sym.block_ptr[b], sym.block_ptr[b + 1]);
-
-        if be - bs == 1 {
-            // Singleton block: the pivot is the (structurally nonzero)
-            // diagonal entry itself; everything else in the column is
-            // off-block.
-            let c = sym.col_perm[bs];
-            let mut diag: Option<T> = None;
-            for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-                let pre = pinv_pre[a.row_idx[k]] as usize;
-                let sv = a.values[k] * T::from_real(rs_inv[a.row_idx[k]]);
-                if pre == bs {
-                    diag = Some(sv);
-                    scatter_expect[k] = bs as Ki;
-                    scatter_target[k] = bs as Ki;
-                } else if pre < bs {
-                    scatter_expect[k] = mark[pre][1];
-                    scatter_target[k] = KI_FBIT | f_rowidx.len() as Ki;
-                    f_rowidx.push(mark[pre][1]);
-                    f_val.push(sv);
-                } else {
-                    return Err(pattern_mismatch());
-                }
-            }
-            let d = diag.ok_or(RslabError::SingularBasis { column: c })?;
-            if d.magnitude() == 0.0 || !d.is_finite() {
-                return Err(RslabError::SingularBasis { column: c });
-            }
-            mark[bs][1] = bs as Ki;
-            udiag.push(d);
-            l_colptr.push(l_rowidx.len());
-            u_colptr.push(u_rowidx.len());
-            f_colptr.push(f_rowidx.len());
-            continue;
+    for (b, out) in blocks.into_iter().enumerate() {
+        let out = out?;
+        let bs = sym.block_ptr[b];
+        for (lb, &fin) in out.fin_abs.iter().enumerate() {
+            fin_of_pre[bs + lb] = fin;
         }
-
-        // General irreducible block: left-looking Gilbert-Peierls.
-        for j in bs..be {
-            let c = sym.col_perm[j];
-            let sj = (j + 1) as Ki; // unique DFS stamp for this column
-            topo.clear();
-            nonpiv.clear();
-            let tp0 = if prof {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-
-            // Pass 1, symbolic: DFS the reach of the column's within-block
-            // pattern over the L columns factored so far. Pivotal nodes come
-            // out in `topo` post-order; non-pivotal nodes (pivot candidates)
-            // in `nonpiv`. The inner loop runs unchecked: every index is a
-            // pre-pivot position `< n` (`debug_assert`ed), and `cur/end` are
-            // positions into the already-built prefix of `l_rowidx`.
-            for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-                let pre = pinv_pre[a.row_idx[k]] as usize;
-                if pre < bs {
-                    continue; // off-block, handled in pass 2
-                }
-                if pre >= be {
-                    return Err(pattern_mismatch());
-                }
-                let m = mark[pre];
-                if m[0] == sj {
-                    continue;
-                }
-                mark[pre][0] = sj;
-                if m[1] == KI_UNSET {
-                    nonpiv.push(pre as Ki);
-                    continue;
-                }
-                let col_end = |p: usize, lpend: &[Ki], l_colptr: &[usize]| -> usize {
-                    let lp = lpend[p];
-                    if lp == KI_UNSET {
-                        l_colptr[p + 1]
-                    } else {
-                        lp as usize
-                    }
-                };
-                let mut d = 0usize;
-                node_stack[0] = pre as Ki;
-                cur_stack[0] = l_colptr[m[1] as usize];
-                let mut end = col_end(m[1] as usize, &lpend, &l_colptr);
-                loop {
-                    let mut descended = false;
-                    while cur_stack[d] < end {
-                        debug_assert!(cur_stack[d] < l_rowidx.len());
-                        let ch = unsafe { *l_rowidx.get_unchecked(cur_stack[d]) } as usize;
-                        cur_stack[d] += 1;
-                        debug_assert!(ch < n);
-                        let mch = unsafe { *mark.get_unchecked(ch) };
-                        if mch[0] == sj {
-                            continue;
-                        }
-                        unsafe { mark.get_unchecked_mut(ch)[0] = sj };
-                        if mch[1] == KI_UNSET {
-                            nonpiv.push(ch as Ki);
-                            continue;
-                        }
-                        d += 1;
-                        node_stack[d] = ch as Ki;
-                        let p = mch[1] as usize;
-                        cur_stack[d] = l_colptr[p];
-                        end = col_end(p, &lpend, &l_colptr);
-                        descended = true;
-                        break;
-                    }
-                    if descended {
-                        continue;
-                    }
-                    topo.push(node_stack[d]);
-                    if d == 0 {
-                        break;
-                    }
-                    d -= 1;
-                    let up = mark[node_stack[d] as usize][1] as usize;
-                    end = col_end(up, &lpend, &l_colptr);
-                }
-            }
-
-            // Pass 2, scatter the scaled column values (off-block entries go
-            // straight to F; earlier blocks are already fully pivoted, so
-            // their final positions are known).
-            for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-                let r = a.row_idx[k];
-                let pre = pinv_pre[r] as usize;
-                let sv = a.values[k] * T::from_real(rs_inv[r]);
-                if pre < bs {
-                    scatter_expect[k] = mark[pre][1];
-                    scatter_target[k] = KI_FBIT | f_rowidx.len() as Ki;
-                    f_rowidx.push(mark[pre][1]);
-                    f_val.push(sv);
-                } else {
-                    // Final position unknown until the block is pivoted;
-                    // record the pre position, fix up at block end.
-                    scatter_target[k] = pre as Ki;
-                    x[pre] = sv;
-                }
-            }
-
-            if let Some(tp) = tp0 {
-                t_dfs += tp.elapsed().as_secs_f64();
-            }
-            let tp1 = if prof {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            let u_start = u_rowidx.len();
-
-            // Pass 3, numeric update in topological order (reverse
-            // post-order): each pivotal node's final value feeds its L column
-            // into the remaining work vector, and becomes a U entry. The axpy
-            // runs through `fmadd` (FMA on native builds); `refactor`'s
-            // replay uses the identical expression so it stays bit-identical.
-            // Unchecked: all row indices are positions `< n` by construction.
-            for &u in topo.iter().rev() {
-                let u = u as usize;
-                let p = mark[u][1];
-                let xu = x[u];
-                x[u] = T::zero();
-                u_rowidx.push(p);
-                u_val.push(xu);
-                let nxu = T::zero() - xu;
-                let p = p as usize;
-                for k in l_colptr[p]..l_colptr[p + 1] {
-                    debug_assert!(k < l_rowidx.len());
-                    let lr = unsafe { *l_rowidx.get_unchecked(k) } as usize;
-                    debug_assert!(lr < n);
-                    unsafe {
-                        *x.get_unchecked_mut(lr) =
-                            fmadd(nxu, *l_val.get_unchecked(k), *x.get_unchecked(lr));
-                    }
-                }
-            }
-
-            if let Some(tp) = tp1 {
-                t_num += tp.elapsed().as_secs_f64();
-            }
-            let tp2 = if prof {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            // Pivot: max-magnitude candidate, overridden by the diagonal
-            // (pre-position `j`) when it clears the threshold.
-            let mut piv = UNSET;
-            let mut maxmag = 0.0f64;
-            for &np in &nonpiv {
-                let m = x[np as usize].magnitude();
-                if m > maxmag {
-                    maxmag = m;
-                    piv = np as usize;
-                }
-            }
-            if piv == UNSET || maxmag == 0.0 || !maxmag.is_finite() {
-                // Clear the candidates before failing so the work vector
-                // never leaks values into a hypothetical caller retry.
-                for &np in &nonpiv {
-                    x[np as usize] = T::zero();
-                }
-                return Err(RslabError::SingularBasis { column: c });
-            }
-            if mark[j][0] == sj && mark[j][1] == KI_UNSET {
-                let dm = x[j].magnitude();
-                if dm > 0.0 && dm >= settings.pivot_tol * maxmag {
-                    piv = j;
-                }
-            }
-
-            let dval = x[piv];
-            x[piv] = T::zero();
-            mark[piv][1] = j as Ki;
-            udiag.push(dval);
-            for &np in &nonpiv {
-                let np = np as usize;
-                if np == piv {
-                    continue;
-                }
-                // Keep structural zeros: the pattern must be value-independent
-                // for the refactor replay.
-                l_rowidx.push(np as Ki);
-                l_val.push(x[np] / dval);
-                x[np] = T::zero();
-            }
-            l_colptr.push(l_rowidx.len());
-            u_colptr.push(u_rowidx.len());
-            f_colptr.push(f_rowidx.len());
-
-            // Symmetric pruning for this pivot: for each U-partner column
-            // `s` (an entry `U(s,j)`), if `L(:,s)` contains the pivot row,
-            // partition it so rows already pivotal come first and bound the
-            // future DFS scans to that prefix.
-            let pivk = piv as Ki;
-            let u_partners: Vec<usize> = u_rowidx[u_start..].iter().map(|&p| p as usize).collect();
-            for s in u_partners {
-                if lpend[s] != KI_UNSET {
-                    continue;
-                }
-                let (cs, ce) = (l_colptr[s], l_colptr[s + 1]);
-                if !l_rowidx[cs..ce].contains(&pivk) {
-                    continue;
-                }
-                let mut head = cs;
-                for k in cs..ce {
-                    let r = l_rowidx[k] as usize;
-                    if mark[r][1] != KI_UNSET {
-                        l_rowidx.swap(head, k);
-                        l_val.swap(head, k);
-                        head += 1;
-                    }
-                }
-                lpend[s] = head as Ki;
-            }
-            if let Some(tp) = tp2 {
-                t_piv += tp.elapsed().as_secs_f64();
-            }
+        let l_base = l_rowidx.len();
+        l_rowidx.extend_from_slice(&out.l_rowidx);
+        l_val.extend_from_slice(&out.l_val);
+        l_colptr.extend(out.l_colptr[1..].iter().map(|&p| l_base + p));
+        let u_base = u_rowidx.len();
+        u_rowidx.extend_from_slice(&out.u_rowidx);
+        u_val.extend_from_slice(&out.u_val);
+        u_colptr.extend(out.u_colptr[1..].iter().map(|&p| u_base + p));
+        udiag.extend_from_slice(&out.udiag);
+        let f_base = f_rowidx.len();
+        for (i, &pre) in out.f_pre.iter().enumerate() {
+            let fin = fin_of_pre[pre as usize];
+            f_rowidx.push(fin);
+            let k = out.f_k[i] as usize;
+            scatter_expect[k] = fin;
+            scatter_target[k] = KI_FBIT | (f_base + i) as Ki;
         }
-
-        // The block is fully pivoted: fix its L row indices from pre-pivot to
-        // final positions (U and F indices were final at push time), and
-        // resolve the scatter program's within-block targets the same way.
-        for k in l_colptr[bs]..l_colptr[be] {
-            l_rowidx[k] = mark[l_rowidx[k] as usize][1];
-        }
-        for j in bs..be {
-            let c = sym.col_perm[j];
-            for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-                let tv = scatter_target[k];
-                if tv & KI_FBIT == 0 {
-                    let fin = mark[tv as usize][1];
-                    scatter_target[k] = fin;
-                    scatter_expect[k] = fin;
-                }
-            }
+        f_val.extend_from_slice(&out.f_val);
+        f_colptr.extend(out.f_colptr[1..].iter().map(|&p| f_base + p));
+        for &(k, fin) in &out.prog_in {
+            scatter_expect[k as usize] = fin;
+            scatter_target[k as usize] = fin;
         }
     }
 
-    if prof {
-        eprintln!(
-            "[klu-prof] dfs {:.1}ms  scatter+num {:.1}ms  pivot+push+prune {:.1}ms",
-            t_dfs * 1e3,
-            t_num * 1e3,
-            t_piv * 1e3
-        );
-    }
     let mut row_perm = vec![0usize; n];
     let mut pinv = vec![0usize; n];
-    for (m, &orig) in mark.iter().zip(&sym.pre_row_perm) {
-        debug_assert_ne!(m[1], KI_UNSET);
-        row_perm[m[1] as usize] = orig;
-        pinv[orig] = m[1] as usize;
+    for (&fin, &orig) in fin_of_pre.iter().zip(&sym.pre_row_perm) {
+        row_perm[fin as usize] = orig;
+        pinv[orig] = fin as usize;
     }
 
     Ok(KluFactors {
@@ -1926,6 +2032,30 @@ mod tests {
         assert!(s2.diagnostics().stages.is_empty());
         s2.refactor(&a).unwrap();
         assert_eq!(s2.diagnostics().stages.last().unwrap().name, "klu-refactor");
+    }
+
+    #[test]
+    fn klu_parallel_factor_bit_identical() {
+        let a = circuit_like(600, 7);
+        let sym = KluSymbolic::analyze(&a).unwrap();
+        let s1 = sym.factor(&a, &KluSettings::default()).unwrap();
+        let s2 = sym
+            .factor(&a, &KluSettings::default().with_parallel_factor(true))
+            .unwrap();
+        assert!(s2.factors.block_ptr.len() > 2, "needs a multi-block case");
+        assert_eq!(s1.factors.l_rowidx, s2.factors.l_rowidx);
+        assert_eq!(s1.factors.u_rowidx, s2.factors.u_rowidx);
+        assert_eq!(s1.factors.row_perm, s2.factors.row_perm);
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&s1.factors.l_val), bits(&s2.factors.l_val));
+        assert_eq!(bits(&s1.factors.u_val), bits(&s2.factors.u_val));
+        assert_eq!(bits(&s1.factors.udiag), bits(&s2.factors.udiag));
+        assert_eq!(s1.factors.scatter_expect, s2.factors.scatter_expect);
+        assert_eq!(s1.factors.scatter_target, s2.factors.scatter_target);
+        let b: Vec<f64> = (0..a.n).map(|i| (i % 5) as f64 - 2.0).collect();
+        let x1 = s1.solve(&b).unwrap();
+        let x2 = s2.solve(&b).unwrap();
+        assert_eq!(bits(&x1), bits(&x2));
     }
 
     #[test]

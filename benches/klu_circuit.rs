@@ -392,6 +392,20 @@ fn main() {
             "", klu_res, mf_res
         );
 
+        // --- parallel per-block factor (opt-in, ambient pool) ---
+        let t = Instant::now();
+        let klu_par = sym
+            .factor(&a, &KluSettings::default().with_parallel_factor(true))
+            .unwrap();
+        let t_fac_par = t.elapsed();
+        assert_eq!(klu_par.factor_nnz(), klu_nnz, "parallel factor differs");
+        println!(
+            "{:>8} parallel-blocks: fac {:>8.2?} ({:.1}x vs sequential)",
+            "",
+            t_fac_par,
+            t_fac.as_secs_f64() / t_fac_par.as_secs_f64()
+        );
+
         // --- SuiteSparse KLU reference (same matrix, same phases) ---
         if let Some(ss) = SsKlu::try_new() {
             if let Some((r, xs)) = ss.run(&a, &b, SWEEP) {
