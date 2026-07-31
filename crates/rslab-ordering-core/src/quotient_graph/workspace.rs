@@ -89,7 +89,7 @@ pub struct Workspace {
     /// `i64` (not `i32`): the un-quantized surface contribution has
     /// both factors `O(n)`, so it reaches ~`n^2` and overflows `i32`
     /// for `n` ≳ 46k before being consumed as `f64` in the RMF score
-    /// (O1, `dev/research/repo-review-2026-06-09.md`). MUMPS computes
+    /// (O1, `dev/research/repo-review-2026-06-09.md`). HAMF4 computes
     /// the RMF in DBLE for the same reason. The post-quantization RMF
     /// score stored here later is bounded by `i32::MAX - 1`.
     pub wf: Vec<i64>,

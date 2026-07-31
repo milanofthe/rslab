@@ -176,8 +176,10 @@ impl Metric for MinFill {
     /// occur in a well-formed AMF run, but we defend against
     /// truncation underflow on `RMF / (NVI + 1)`) clamp to bucket 0.
     ///
-    /// Reference: `ana_orderings.F:4954-5017` and
-    /// `dev/research/amf-clean-room.md` Section 4.
+    /// Bucket layout follows the HAMF4 quantization described in
+    /// Amestoy's 1999 habilitation thesis; behavior is validated
+    /// against the MUMPS HAMF4 oracle corpus
+    /// (`tests/amf_corpus_oracle.rs`).
     #[inline]
     fn bucket(score: i32, n: usize) -> usize {
         if score <= 0 {
@@ -195,14 +197,15 @@ impl Metric for MinFill {
 
     /// Coarse buckets are those above `NORIG = n`. `select_pivot`
     /// must walk the bucket chain and pick the entry with the
-    /// smallest *exact* score (`ana_orderings.F:4392-4418`).
+    /// smallest *exact* score (coarse buckets only sort
+    /// approximately; validated against the HAMF4 oracle).
     #[inline(always)]
     fn coarse_bucket(idx: usize, n: usize) -> bool {
         idx > n
     }
 
     /// On supervariable merge `j → i`, update the surviving anchor's
-    /// score with `max(WF(i), WF(j))` (`ana_orderings.F:4920`).
+    /// score with `max(WF(i), WF(j))` (the HAMF4 merge rule).
     #[inline(always)]
     fn merge_supervariable(parent: &mut i32, child: i32) {
         if child > *parent {

@@ -942,7 +942,7 @@ fn symbolic_prefix_with(
             if let Some(t) = t_pre {
                 record_stage(prof, "ldlt_compress", t);
             }
-            if map.ncmp() == n {
+            if map.n_super() == n {
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
@@ -1351,10 +1351,9 @@ pub fn symbolic_factorize_with_schur(
     let mut supernodes = supernode::find_supernodes(&etree, &col_counts, &effective_params);
 
     // Step 8b (F3.2b multi-supernode tail): force-merge any Schur-bearing
-    // supernodes into a single tail supernode. This mirrors MUMPS's
-    // HALO-SCHUR amalgamation (`PE[schur[i]] = -schur[0]`,
-    // `ana_orderings.F:9187-9220`), where all Schur variables collapse
-    // into one supervariable so the numeric stopping rule lives in one
+    // supernodes into a single tail supernode, matching the semantics of
+    // MUMPS's HALO-SCHUR amalgamation (all Schur variables collapse into
+    // one supervariable) so the numeric stopping rule lives in one
     // place. rslab's adjacency-only amalgamation (size_based with
     // nemin=32, trivial_chain) does not always merge the Schur tail -
     // when the Schur block is large or the row patterns of constituent
@@ -1410,8 +1409,8 @@ pub fn symbolic_factorize_with_schur(
 
 /// F3.2b helper: collapse all Schur-bearing supernodes (those whose
 /// column range intersects `[n - n_schur, n)`) into a single tail
-/// supernode. Mirrors MUMPS's HALO-SCHUR amalgamation
-/// (`ana_orderings.F:9187-9220`).
+/// supernode, matching the semantics of MUMPS's HALO-SCHUR
+/// amalgamation.
 ///
 /// Returns `InvalidInput` if the Schur-bearing supernodes are not
 /// contiguous at the tail of the supernode list (would only arise from

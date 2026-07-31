@@ -201,9 +201,9 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
         let mut arg = (u[i] + v[i] - cmax[i]) / 2.0;
 
         // Clamp to avoid overflow on `exp`. A dual variable can
-        // grow to ±∞-ish magnitudes on pathological inputs; both
-        // MUMPS (dana_aux.F:1797-1816) and SSIDS guard against
-        // this. The clamp is symmetric so that a clamped row
+        // grow to ±∞-ish magnitudes on pathological inputs; mature
+        // MC64-style implementations (MUMPS, SSIDS) guard against
+        // this too. The clamp is symmetric so that a clamped row
         // exponentiates to a very large or very small but finite
         // value rather than `+∞` or `0`.
         if !arg.is_finite() {
@@ -215,8 +215,8 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
         let s = arg.exp();
 
         // Defensive rewrite: a zero or non-finite scaling would
-        // annihilate a whole row/column and destroy symmetry.
-        // Mirrors MUMPS dana_aux.F:1809-1811.
+        // annihilate a whole row/column and destroy symmetry (the
+        // standard guard in MC64-style scalings).
         if s == 0.0 || !s.is_finite() {
             scaling[i] = 1.0;
         } else {

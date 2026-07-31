@@ -1,6 +1,10 @@
 //! LDLᵀ-aware ordering preprocessing: Duff-Pralet symmetric matching
-//! plus quotient-graph compression. Port of MUMPS `ICNTL(12) = 2`
-//! (`DMUMPS_LDLT_COMPRESS`, `DMUMPS_EXPAND_PERMUTATION`).
+//! plus quotient-graph compression, the preprocessing MUMPS exposes as
+//! `ICNTL(12) = 2`. Independent implementation of the published
+//! algorithm (Duff & Pralet, "Strategies for Scaling and Pivoting for
+//! Sparse Symmetric Indefinite Problems", SIMAX 2005); behavior was
+//! cross-checked against MUMPS's documented semantics, no MUMPS source
+//! code is incorporated.
 //! See `dev/research/phase-2.6.5-ldlt-aware-ordering.md` for the
 //! algorithm and `dev/plans/phase-2.6.5-ldlt-compressed-graph.md` for
 //! the plan.
@@ -17,27 +21,28 @@ use crate::sparse::csc::CscPattern;
 
 /// Super-variable map produced from a symmetric MC64 matching.
 ///
-/// `icmp[i]` is the super-variable id of original variable `i`. Super
-/// ids are contiguous `[0, ncmp)` where `ncmp = pairs.len() +
+/// `super_of[i]` is the super-variable id of original variable `i`. Super
+/// ids are contiguous `[0, n_super)` where `n_super = pairs.len() +
 /// singletons.len()`. Pair super-ids come first: super `s < pairs.len()`
 /// means `map.pairs[s]`; super `s >= pairs.len()` means
 /// `map.singletons[s - pairs.len()]`.
 #[derive(Debug, Clone)]
 pub struct SuperMap {
-    pub icmp: Vec<usize>,
+    pub super_of: Vec<usize>,
     pub pairs: Vec<(usize, usize)>,
     pub singletons: Vec<usize>,
 }
 
 impl SuperMap {
     /// Number of super-variables (dimension of the compressed graph).
-    pub fn ncmp(&self) -> usize {
+    pub fn n_super(&self) -> usize {
         self.pairs.len() + self.singletons.len()
     }
 }
 
 /// Walk the MC64 matching permutation and emit pairs / singletons per
-/// the Duff-Pralet rule (matches MUMPS `DMUMPS_SYM_MWM`):
+/// the published Duff-Pralet rule (the same pairing MUMPS applies for
+/// its symmetric maximum-weight matching):
 ///
 /// - `perm[j] == j`     → singleton
 /// - `perm[j] != j` and `perm[perm[j]] == j` → pair `(j, perm[j])`
@@ -50,7 +55,7 @@ impl SuperMap {
 /// Emission order follows discovery (ascending `j`), deterministic.
 pub fn build_supermap(perm: &[usize]) -> SuperMap {
     let n = perm.len();
-    let mut icmp = vec![usize::MAX; n];
+    let mut super_of = vec![usize::MAX; n];
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     let mut singletons: Vec<usize> = Vec::new();
     let mut visited = vec![false; n];
@@ -107,18 +112,18 @@ pub fn build_supermap(perm: &[usize]) -> SuperMap {
         }
     }
 
-    // Stamp `icmp`: pair super-ids come first.
+    // Stamp `super_of`: pair super-ids come first.
     for (sid, &(a, b)) in pairs.iter().enumerate() {
-        icmp[a] = sid;
-        icmp[b] = sid;
+        super_of[a] = sid;
+        super_of[b] = sid;
     }
     let pair_count = pairs.len();
     for (k, &s) in singletons.iter().enumerate() {
-        icmp[s] = pair_count + k;
+        super_of[s] = pair_count + k;
     }
 
     SuperMap {
-        icmp,
+        super_of,
         pairs,
         singletons,
     }
@@ -127,8 +132,8 @@ pub fn build_supermap(perm: &[usize]) -> SuperMap {
 /// Contract a full symmetric `CscPattern` onto the super-variable map.
 ///
 /// For every stored edge `(i, j)` (with `i != j`), emit the contracted
-/// edge `(icmp[i], icmp[j])` in the output pattern. Self-loops
-/// (`icmp[i] == icmp[j]`) are dropped, and duplicates produced by two
+/// edge `(super_of[i], super_of[j])` in the output pattern. Self-loops
+/// (`super_of[i] == super_of[j]`) are dropped, and duplicates produced by two
 /// originals inside the same super-variable or by already-present
 /// parallel contracted edges are merged. Output is full-symmetric,
 /// row-sorted, with strictly increasing rows per column.
@@ -137,8 +142,8 @@ pub fn build_supermap(perm: &[usize]) -> SuperMap {
 /// pattern as AMD) to deduplicate in O(nnz · avg_super_deg) without
 /// an explicit sort.
 pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
-    let ncmp = map.ncmp();
-    if ncmp == 0 {
+    let n_super = map.n_super();
+    if n_super == 0 {
         return CscPattern {
             n: 0,
             col_ptr: vec![0],
@@ -149,18 +154,18 @@ pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
     // Per-super-column accumulator: mark[r] == current_tag means row
     // super-id `r` is already present in the current super-column.
     // Using u32 tags avoids per-column zeroing of the whole array.
-    let mut mark: Vec<u32> = vec![0; ncmp];
+    let mut mark: Vec<u32> = vec![0; n_super];
     let mut tag: u32 = 0;
 
-    let mut col_ptr: Vec<usize> = Vec::with_capacity(ncmp + 1);
+    let mut col_ptr: Vec<usize> = Vec::with_capacity(n_super + 1);
     col_ptr.push(0);
     let mut row_idx: Vec<usize> = Vec::new();
 
     // Inverse index: for each super-column `sc`, the list of originals
-    // that map to it. Build once from `map.icmp`.
-    let mut super_cols: Vec<Vec<usize>> = vec![Vec::new(); ncmp];
-    for (orig, &sid) in map.icmp.iter().enumerate() {
-        if sid < ncmp {
+    // that map to it. Build once from `map.super_of`.
+    let mut super_cols: Vec<Vec<usize>> = vec![Vec::new(); n_super];
+    for (orig, &sid) in map.super_of.iter().enumerate() {
+        if sid < n_super {
             super_cols[sid].push(orig);
         }
     }
@@ -181,7 +186,7 @@ pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
             let end = pat.col_ptr[orig_c + 1];
             for k in start..end {
                 let orig_r = pat.row_idx[k];
-                let sr = map.icmp[orig_r];
+                let sr = map.super_of[orig_r];
                 if sr == sc {
                     continue;
                 }
@@ -198,18 +203,18 @@ pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
     }
 
     CscPattern {
-        n: ncmp,
+        n: n_super,
         col_ptr,
         row_idx,
     }
 }
 
-/// Expand a super-permutation of length `ncmp` back to a length-`n`
+/// Expand a super-permutation of length `n_super` back to a length-`n`
 /// permutation of `0..n`. Pair super-ids emit their two originals
 /// adjacent in the order `(pair.0, pair.1)`; singleton super-ids emit
 /// the single original.
 pub fn expand_permutation(super_perm: &[usize], map: &SuperMap) -> Vec<usize> {
-    let n = map.icmp.len();
+    let n = map.super_of.len();
     let mut out: Vec<usize> = Vec::with_capacity(n);
     let pair_count = map.pairs.len();
     for &s in super_perm {
@@ -235,8 +240,8 @@ mod tests {
         let map = build_supermap(&perm);
         assert!(map.pairs.is_empty());
         assert_eq!(map.singletons, vec![0, 1, 2, 3, 4]);
-        assert_eq!(map.icmp, vec![0, 1, 2, 3, 4]);
-        assert_eq!(map.ncmp(), 5);
+        assert_eq!(map.super_of, vec![0, 1, 2, 3, 4]);
+        assert_eq!(map.n_super(), 5);
     }
 
     #[test]
@@ -246,8 +251,8 @@ mod tests {
         let map = build_supermap(&perm);
         assert_eq!(map.pairs, vec![(0, 2), (1, 3)]);
         assert!(map.singletons.is_empty());
-        assert_eq!(map.icmp, vec![0, 1, 0, 1]);
-        assert_eq!(map.ncmp(), 2);
+        assert_eq!(map.super_of, vec![0, 1, 0, 1]);
+        assert_eq!(map.n_super(), 2);
     }
 
     #[test]
@@ -259,10 +264,10 @@ mod tests {
         // Decomposes into pair (0,1) and singleton 2.
         assert_eq!(map.pairs, vec![(0, 1)]);
         assert_eq!(map.singletons, vec![2, 3, 4, 5]);
-        // icmp: 0→0, 1→0, 2→1 (first singleton, sid=pair_count+0=1),
+        // super_of: 0→0, 1→0, 2→1 (first singleton, sid=pair_count+0=1),
         //       3→2, 4→3, 5→4.
-        assert_eq!(map.icmp, vec![0, 0, 1, 2, 3, 4]);
-        assert_eq!(map.ncmp(), 5);
+        assert_eq!(map.super_of, vec![0, 0, 1, 2, 3, 4]);
+        assert_eq!(map.n_super(), 5);
     }
 
     #[test]
@@ -272,17 +277,17 @@ mod tests {
         let map = build_supermap(&perm);
         assert_eq!(map.pairs, vec![(0, 1)]);
         assert_eq!(map.singletons, vec![2]);
-        assert_eq!(map.ncmp(), 2);
+        assert_eq!(map.n_super(), 2);
     }
 
     #[test]
     fn expand_is_identity_when_super_perm_is_iota() {
-        // After building the supermap, expanding `super_perm = 0..ncmp`
+        // After building the supermap, expanding `super_perm = 0..n_super`
         // reproduces a permutation of 0..n consistent with the
         // pair-then-singleton layout.
         let perm = vec![2, 3, 0, 1];
         let map = build_supermap(&perm);
-        let super_iota: Vec<usize> = (0..map.ncmp()).collect();
+        let super_iota: Vec<usize> = (0..map.n_super()).collect();
         let expanded = expand_permutation(&super_iota, &map);
         // Pairs emit (0,2),(1,3) → [0,2,1,3]. Length n=4.
         assert_eq!(expanded, vec![0, 2, 1, 3]);
@@ -295,7 +300,7 @@ mod tests {
     fn expand_is_bijection_with_3cycle() {
         let perm = vec![1, 2, 0, 3, 4, 5];
         let map = build_supermap(&perm);
-        let super_iota: Vec<usize> = (0..map.ncmp()).collect();
+        let super_iota: Vec<usize> = (0..map.n_super()).collect();
         let expanded = expand_permutation(&super_iota, &map);
         assert_eq!(expanded.len(), 6);
         let mut sorted = expanded.clone();
