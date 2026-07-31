@@ -207,6 +207,7 @@ type AccelFn = unsafe extern "C" fn(
     i32,                         // SparseFactorization_t (1 LDLT, 80 LU, 40 QR)
     i32,                         // SparseOrder_t, -1 = default
     f64,                         // pivot tolerance, <0 = vendor default (0.01)
+    i64,                         // memory gate [bytes]; >0 -> -100 if a-priori over
     *const C,                    // b
     *mut C,                      // x
     *mut AccelResult,
@@ -270,6 +271,7 @@ impl Accel {
         fact: i32,
         order: i32,
         pivot: f64,
+        max_bytes: i64,
         b: &[C],
         x: &mut [C],
     ) -> (i32, AccelResult) {
@@ -287,6 +289,7 @@ impl Accel {
                 fact,
                 order,
                 pivot,
+                max_bytes,
                 b.as_ptr(),
                 x.as_mut_ptr(),
                 &mut r,
@@ -794,11 +797,21 @@ fn run_matrix(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(-1.0);
+            // Memory gate: skip the numeric phase when Accelerate's own a-priori
+            // factor+workspace estimate (from its symbolic analysis) exceeds the
+            // budget - the analogue of the faer gate above, sized for a 16 GB
+            // Apple-Silicon machine by default.
+            let gate_bytes: i64 = (std::env::var("RLA_BENCH_ACCEL_EST_MB")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(9000.0)
+                * 1e6) as i64;
             let mut x = vec![Complex::new(0.0, 0.0); n];
             let (variant, st, r) = match mat {
                 Mat::Sym(a) if a.values.iter().all(|v| v.im == 0.0) => {
                     let (st, r) = ac.solve(
-                        n, &a.col_ptr, &a.row_idx, &a.values, 2, 1, order, pivot, &b, &mut x,
+                        n, &a.col_ptr, &a.row_idx, &a.values, 2, 1, order, pivot, gate_bytes, &b,
+                        &mut x,
                     );
                     ("ldlt", st, r)
                 }
@@ -813,6 +826,7 @@ fn run_matrix(
                         80,
                         order,
                         pivot,
+                        gate_bytes,
                         &b,
                         &mut x,
                     );
@@ -820,12 +834,20 @@ fn run_matrix(
                 }
                 Mat::Unsym(a) => {
                     let (st, r) = ac.solve(
-                        n, &a.col_ptr, &a.row_idx, &a.values, 0, 80, order, pivot, &b, &mut x,
+                        n, &a.col_ptr, &a.row_idx, &a.values, 0, 80, order, pivot, gate_bytes, &b,
+                        &mut x,
                     );
                     ("lu", st, r)
                 }
             };
-            if st == 0 {
+            if st == -100 {
+                eprintln!(
+                    "[accel] skip {name}: {variant} a-priori {:.0} MB factor + {:.0} MB workspace over {:.0} MB gate",
+                    r.factor_bytes as f64 / 1e6,
+                    r.workspace_bytes as f64 / 1e6,
+                    gate_bytes as f64 / 1e6
+                );
+            } else if st == 0 {
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 mat.resid(&x, &mut ax);
                 eprintln!(

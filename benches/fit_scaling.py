@@ -87,11 +87,11 @@ def plot_metric(recs, metric, value_key, ylabel, title, out=None, order=ORDER, a
     return present
 
 
-def plot_residual(recs, out):
+def plot_residual(recs, out, order=ORDER):
     """Per-solver accuracy: relative residual vs problem size over the corpus."""
     rows = [r for r in recs if r.get("metric") == "time"]
     fig, ax = plt.subplots(figsize=(8.5, 6.8))
-    for s in ORDER:
+    for s in order:
         pts = [(r["nnz"], max(r.get("res", 0.0), 1e-18)) for r in rows
                if r["solver"] == s and r["nnz"] > 0]
         if not pts:

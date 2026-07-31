@@ -91,15 +91,19 @@ static double now_s(void) {
  * fact_type : raw SparseFactorization_t value (1 = LDLT, 80 = LU, ...)
  * order     : raw SparseOrder_t value, or -1 for SparseOrderDefault
  * pivot_tol : threshold-pivot tolerance, or < 0 for the vendor default (0.01)
+ * max_bytes : memory gate; if > 0 and the symbolic phase predicts
+ *             factor + workspace above this budget, bail out with -100
+ *             before any numeric work (keeps a 16 GB machine out of swap)
  * b, x      : right-hand side / solution, length n
  *
- * Returns 0 on success, the failing SparseStatus_t otherwise. Timings, the
- * live-bytes peak, and the a-priori factor/workspace sizes land in *out.
+ * Returns 0 on success, -100 if the memory gate fired, the failing
+ * SparseStatus_t otherwise. Timings, the live-bytes peak, and the a-priori
+ * factor/workspace sizes land in *out.
  */
 int accel_sparse_solve_complex(int32_t n, const long *col_ptr, const int32_t *row_idx,
                                const shim_cplx *vals, int32_t symmetric, int32_t fact_type,
-                               int32_t order, double pivot_tol, const shim_cplx *b,
-                               shim_cplx *x, shim_result *out) {
+                               int32_t order, double pivot_tol, int64_t max_bytes,
+                               const shim_cplx *b, shim_cplx *x, shim_result *out) {
     memset(out, 0, sizeof(*out));
     atomic_store(&live_bytes, 0);
     atomic_store(&peak_bytes, 0);
@@ -157,6 +161,11 @@ int accel_sparse_solve_complex(int32_t n, const long *col_ptr, const int32_t *ro
     if (ssym.status != SparseStatusOK) {
         out->peak_bytes = atomic_load(&peak_bytes);
         return (int)ssym.status;
+    }
+    if (max_bytes > 0 && out->factor_bytes + out->workspace_bytes > max_bytes) {
+        out->peak_bytes = atomic_load(&peak_bytes);
+        SparseCleanup(ssym);
+        return -100;
     }
 
     t0 = now_s();

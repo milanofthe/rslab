@@ -36,6 +36,7 @@ SOLVERS = {
     "pardiso": ("MKL PARDISO", "#22c55e", "D"),
     "superlu": ("SuperLU (scipy)", "#ef4444", "P"),
     "pc": ("RSLAB precond+GMRES", "#a855f7", "v"),
+    "accel": ("Apple Accelerate", "#ec4899", "h"),
 }
 
 # Named data colors for breakdown stages / estimate parts. The two grays are for
