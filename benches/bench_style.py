@@ -37,6 +37,7 @@ SOLVERS = {
     "superlu": ("SuperLU (scipy)", "#ef4444", "P"),
     "pc": ("RSLAB precond+GMRES", "#a855f7", "v"),
     "accel": ("Apple Accelerate", "#ec4899", "h"),
+    "klu": ("RSLAB KLU", "#14b8a6", "p"),
 }
 
 # Named data colors for breakdown stages / estimate parts. The two grays are for

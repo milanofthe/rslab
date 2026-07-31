@@ -46,14 +46,14 @@ def variants(log_path):
     return out
 
 
-def family_figure(recs, title, slug, out_dir):
+def family_figure(recs, title, slug, out_dir, order=ORDER):
     print(f"== {title} ==")
     fig, (ax_wct, ax_mem) = bench_style.two_panel()
     print("  factor time ~ nnz^alpha:")
     present = plot_metric(recs, "time", "fac_ms", "factor time [ms]", None,
-                          order=ORDER, ax=ax_wct)
+                          order=order, ax=ax_wct)
     print("  peak memory ~ nnz^alpha:")
-    plot_metric(recs, "mem", "mem_mb", "peak memory [MB]", None, order=ORDER, ax=ax_mem)
+    plot_metric(recs, "mem", "mem_mb", "peak memory [MB]", None, order=order, ax=ax_mem)
     fig.suptitle(f"{title} — factor time & peak memory (Apple M3)",
                  color=bench_style.GRAY)
     handles = [Line2D([], [], color=c, marker=mk, ls="", label=lbl)
@@ -67,17 +67,18 @@ def geomean(xs):
     return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else float("nan")
 
 
-def head_to_head(recs, key_metric):
-    """(accel / auto) ratios per matrix for one metric pass; only matrices where
-    both solvers produced a record with residual < 0.1."""
+def head_to_head(recs, key_metric, baseline="auto"):
+    """(accel / baseline) ratios per matrix for one metric pass; only matrices
+    where both solvers produced a record with residual < 0.1."""
     by = defaultdict(dict)
     for r in recs:
         if r.get("metric") == key_metric and r.get("res", 1.0) < 0.1:
             by[r["name"]][r["solver"]] = r
     val = "fac_ms" if key_metric == "time" else "mem_mb"
-    ratios = {name: d["accel"][val] / d["auto"][val]
+    ratios = {name: d["accel"][val] / d[baseline][val]
               for name, d in by.items()
-              if "accel" in d and "auto" in d and d["auto"][val] > 0 and d["accel"][val] > 0}
+              if "accel" in d and baseline in d
+              and d[baseline][val] > 0 and d["accel"][val] > 0}
     return ratios
 
 
@@ -100,24 +101,29 @@ def main():
     bench_style.setup()
     sym = load(out_dir / "apple_sym.jsonl")
     unsym = load(out_dir / "apple_unsym.jsonl")
+    circuit = load(out_dir / "apple_circuit.jsonl")
     corpus = load(out_dir / "apple_corpus.jsonl")
     var = variants(out_dir / "apple_run.log")
 
     family_figure(sym, "LDLt path (sym)", "ldlt", out_dir)
     family_figure(unsym, "LU path (unsym)", "lu", out_dir)
+    family_figure(circuit, "KLU path (circuit)", "klu", out_dir,
+                  order=["auto", "klu", "accel"])
     plot_residual(corpus, out_dir / "apple_corpus_residual.png", order=ORDER)
 
     summary = {}
-    print("\n== head-to-head geomean (Apple Accelerate / RSLAB heuristic pick) ==")
+    print("\n== head-to-head geomean (Apple Accelerate / RSLAB shipped path) ==")
     print("| corpus | factor time | peak memory | matrices |")
     print("|---|---|---|---|")
-    for label, recs in [("sym (LDLt path)", sym), ("unsym (LU path)", unsym),
-                        ("SuiteSparse corpus", corpus)]:
-        t = head_to_head(recs, "time")
-        m = head_to_head(recs, "mem")
+    for label, recs, base in [("sym (LDLt path)", sym, "auto"),
+                              ("unsym (LU path)", unsym, "auto"),
+                              ("circuit (KLU path)", circuit, "klu"),
+                              ("SuiteSparse corpus", corpus, "auto")]:
+        t = head_to_head(recs, "time", base)
+        m = head_to_head(recs, "mem", base)
         gt, gm = geomean(t.values()), geomean(m.values())
         summary[label] = {"time_ratio": gt, "mem_ratio": gm,
-                          "n_time": len(t), "n_mem": len(m)}
+                          "n_time": len(t), "n_mem": len(m), "baseline": base}
         print(f"| {label} | {gt:.2f}x | {gm:.2f}x | {len(t)} |")
 
     names, seen, ok = solve_counts(corpus)

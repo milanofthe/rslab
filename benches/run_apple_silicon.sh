@@ -32,6 +32,21 @@ for fam in sym unsym; do
   RLA_BENCH_FAMILY=$fam RLA_BENCH_SIZES=$SIZES RLA_BENCH_MEM=1 RLA_BENCH_OUT=$OUT "$BIN"
 done
 
+# Circuit-shaped family (KLU path): RSLAB KLU + multifrontal-LU context vs
+# Accelerate LU, on the klu_circuit size range (2k-200k).
+CSIZES=$(python3 -c "
+import math
+lo, hi, k = 2000, 200000, 15
+print(','.join(str(round(lo*(hi/lo)**(i/(k-1)))) for i in range(k)))")
+OUT=benches/bench_out/apple_circuit.jsonl
+: > "$OUT"
+echo "[apple] === circuit TIME ==="
+RLA_BENCH_FAMILY=circuit RLA_BENCH_SIZES=$CSIZES RLA_BENCH_SOLVERS=auto,klu,accel \
+  RLA_BENCH_MEM=0 RLA_BENCH_OUT=$OUT "$BIN"
+echo "[apple] === circuit MEM ==="
+RLA_BENCH_FAMILY=circuit RLA_BENCH_SIZES=$CSIZES RLA_BENCH_SOLVERS=auto,klu,accel \
+  RLA_BENCH_MEM=1 RLA_BENCH_OUT=$OUT "$BIN"
+
 OUT=benches/bench_out/apple_corpus.jsonl
 : > "$OUT"
 echo "[apple] === corpus TIME ==="
@@ -41,4 +56,5 @@ RLA_BENCH_FAMILY=corpus RLA_BENCH_MEM=1 RLA_BENCH_OUT=$OUT "$BIN"
 
 echo "[apple] records: sym=$(wc -l < benches/bench_out/apple_sym.jsonl)" \
      "unsym=$(wc -l < benches/bench_out/apple_unsym.jsonl)" \
+     "circuit=$(wc -l < benches/bench_out/apple_circuit.jsonl)" \
      "corpus=$(wc -l < benches/bench_out/apple_corpus.jsonl)"

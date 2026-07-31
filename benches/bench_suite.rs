@@ -31,8 +31,8 @@ use faer::{c64, Mat as FaerMat};
 use num_complex::Complex;
 use rslab::matgen::{bem, fem, stencil};
 use rslab::{
-    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, GeneralCsc, LdltSymbolic,
-    LuSymbolic, SolverSettings,
+    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, GeneralCsc, KluSettings,
+    KluSymbolic, LdltSymbolic, LuSymbolic, SolverSettings,
 };
 #[cfg(feature = "matgen-download")]
 use rslab::{read_mtx_any, MtxLoaded};
@@ -446,6 +446,76 @@ impl Mat {
     }
 }
 
+/// Deterministic xorshift (the klu_circuit generator's RNG).
+struct Rng(u64);
+impl Rng {
+    fn next_f64(&mut self) -> f64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    }
+}
+
+/// MNA-like circuit matrix (see `benches/klu_circuit.rs`): `n` nodes in
+/// `n_stages` cascaded stages (one-way inter-stage feed -> reducible BTF),
+/// each stage internally coupled. The conductance part follows the klu_circuit
+/// generator exactly; on top the diagonal gets the AC small-signal `+ jωC`
+/// term (grounded capacitor per node), so the matrix is genuinely complex like
+/// a frequency-domain MNA system - the KLU sweep use-case.
+fn circuit_matrix(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<C> {
+    let mut rng = Rng(seed | 1);
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    let mut colsum = vec![0.0f64; n];
+    let stage = n / n_stages;
+    for j in 0..n {
+        let s = (j / stage).min(n_stages - 1);
+        let (lo, hi) = (
+            s * stage,
+            if s == n_stages - 1 {
+                n
+            } else {
+                (s + 1) * stage
+            },
+        );
+        let span = hi - lo;
+        for &t in &[1usize, 2, 17] {
+            let i = lo + (j - lo + t) % span;
+            if i != j {
+                let g = 0.5 + rng.next_f64().abs();
+                r.push(i);
+                c.push(j);
+                v.push(Complex::new(-g, 0.0));
+                colsum[j] += g;
+                let g2 = 0.5 + rng.next_f64().abs();
+                r.push(j);
+                c.push(i);
+                v.push(Complex::new(-g2, 0.0));
+                colsum[i] += g2;
+            }
+        }
+        if s > 0 && (j - lo) % 3 == 0 {
+            let i = lo - stage + (j - lo) % stage;
+            let g = 0.2 + 0.3 * rng.next_f64().abs();
+            r.push(i);
+            c.push(j);
+            v.push(Complex::new(-g, 0.0));
+            colsum[j] += g;
+        }
+    }
+    // Diagonal: conductance sum + dominance margin, plus the AC term jωC with a
+    // per-node grounded capacitance - keeps every column strictly dominant in
+    // modulus while making the values genuinely complex.
+    for (j, &cs) in colsum.iter().enumerate() {
+        let margin = 0.1 + 0.1 * rng.next_f64().abs(); // klu_circuit's dominance margin
+        let omega_c = 0.2 + 0.4 * rng.next_f64().abs();
+        r.push(j);
+        c.push(j);
+        v.push(Complex::new(cs + margin, omega_c));
+    }
+    GeneralCsc::from_triplets(n, &r, &c, &v).expect("circuit_matrix")
+}
+
 fn build_faer(a: &GeneralCsc<C>) -> Option<SparseColMat<usize, c64>> {
     let mut trip: Vec<Triplet<usize, usize, c64>> = Vec::with_capacity(a.values.len());
     for j in 0..a.n {
@@ -776,6 +846,51 @@ fn run_matrix(
         }
     }
 
+    // --- RSLAB KLU path (circuit-shaped matrices) ---
+    // The shipped solver for the circuit class: BTF + per-block AMD + left-looking
+    // Gilbert-Peierls LU with threshold pivoting. Only meaningful on unsymmetric
+    // matrices; request it via RLA_BENCH_SOLVERS=klu for the circuit family.
+    if has("klu") {
+        if let Mat::Unsym(a) = mat {
+            let outcome = (|| -> Result<_, rslab::RslabError> {
+                let t = Instant::now();
+                let sym = KluSymbolic::analyze(a)?;
+                let ana = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                let (fr, mm) = live_peak(|| sym.factor(a, &KluSettings::default()));
+                let f = fr?;
+                let fac = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                let x = f.solve(&b)?;
+                let slv = t.elapsed().as_secs_f64() * 1e3;
+                Ok((ana, fac, slv, mm, f.factor_nnz(), x))
+            })();
+            match outcome {
+                Ok((ana, fac, slv, mm, fill, x)) => {
+                    let mut ax = vec![Complex::new(0.0, 0.0); n];
+                    a.matvec(&x, &mut ax);
+                    emit(
+                        out,
+                        "klu",
+                        family,
+                        name,
+                        n,
+                        nnz,
+                        threads,
+                        mem,
+                        ana,
+                        fac,
+                        slv,
+                        mm,
+                        fill,
+                        rel(&ax, &b),
+                    );
+                }
+                Err(e) => eprintln!("[klu] {name}: failed: {e:?}"),
+            }
+        }
+    }
+
     // --- Apple Accelerate (Sparse Solvers, macOS 15.5+) ---
     // Real-symmetric matrices (all-zero imaginary parts) run the structure-
     // exploiting LDLT on the lower triangle (kind=Hermitian - identical to
@@ -1046,6 +1161,20 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                     6 => mom(80.0),
                     _ => mom(160.0),
                 }
+            })
+            .collect(),
+        // Circuit-shaped distribution (KLU path): MNA-like AC small-signal
+        // matrices - very sparse (~4-5 nnz/col), unsymmetric, column-diagonally
+        // dominant, cascaded stages giving a reducible BTF structure (the
+        // klu_circuit generator), made genuinely complex by the frequency-domain
+        // diagonal G + jωC. Stage count grows with size as in klu_circuit
+        // (8 @ 2k ... 64 @ 200k).
+        "circuit" => sizes
+            .iter()
+            .map(|&sz| {
+                let stages = ((8.0 * (sz as f64 / 2000.0).powf(0.43)).round() as usize).max(2);
+                let m = circuit_matrix(sz, stages, 0xC0FFEE ^ sz as u64);
+                (format!("circuit_{}", m.n), Mat::Unsym(m))
             })
             .collect(),
         "corpus" => build_corpus(),
