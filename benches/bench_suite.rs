@@ -195,6 +195,8 @@ struct AccelResult {
     workspace_bytes: i64,
     sym_status: i32,
     num_status: i32,
+    chosen_order: i32,
+    _pad: i32,
 }
 
 #[allow(clippy::type_complexity)]
@@ -902,11 +904,16 @@ fn run_matrix(
     // in this suite is measured with.
     if has("accel") {
         if let Some(ac) = Accel::try_new() {
+            // Default is the AMD-vs-Metis bakeoff (-2): SparseOrderDefault turned
+            // out to be plain AMD, which costs up to 4.4x the fill of Metis on the
+            // large EM/FEM systems - the bakeoff gives Accelerate its best
+            // ordering per matrix, mirroring RSLAB's exact ND bakeoff.
             let order: i32 = match std::env::var("RLA_BENCH_ACCEL_ORDER").ok().as_deref() {
+                Some("default") => -1,
                 Some("amd") => 2,
                 Some("metis") => 3,
                 Some("colamd") => 4,
-                _ => -1, // SparseOrderDefault
+                _ => -2, // bakeoff
             };
             let pivot: f64 = std::env::var("RLA_BENCH_ACCEL_PIVOT")
                 .ok()
@@ -924,11 +931,22 @@ fn run_matrix(
             let mut x = vec![Complex::new(0.0, 0.0); n];
             let (variant, st, r) = match mat {
                 Mat::Sym(a) if a.values.iter().all(|v| v.im == 0.0) => {
+                    // Cholesky first (Accelerate's strongest path when the matrix
+                    // is SPD), LDLT fallback for the indefinite ones. Only the
+                    // succeeding attempt is reported - vendor-best-per-matrix.
                     let (st, r) = ac.solve(
-                        n, &a.col_ptr, &a.row_idx, &a.values, 2, 1, order, pivot, gate_bytes, &b,
+                        n, &a.col_ptr, &a.row_idx, &a.values, 2, 0, order, pivot, gate_bytes, &b,
                         &mut x,
                     );
-                    ("ldlt", st, r)
+                    if st == 0 || st == -100 {
+                        ("chol", st, r)
+                    } else {
+                        let (st, r) = ac.solve(
+                            n, &a.col_ptr, &a.row_idx, &a.values, 2, 1, order, pivot, gate_bytes,
+                            &b, &mut x,
+                        );
+                        ("ldlt", st, r)
+                    }
                 }
                 Mat::Sym(a) => {
                     let fa = sym_to_full(a);
@@ -955,6 +973,12 @@ fn run_matrix(
                     ("lu", st, r)
                 }
             };
+            let ord_name = |o: i32| match o {
+                2 => "amd",
+                3 => "metis",
+                4 => "colamd",
+                _ => "default",
+            };
             if st == -100 {
                 eprintln!(
                     "[accel] skip {name}: {variant} a-priori {:.0} MB factor + {:.0} MB workspace over {:.0} MB gate",
@@ -966,7 +990,8 @@ fn run_matrix(
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 mat.resid(&x, &mut ax);
                 eprintln!(
-                    "[accel] {name}: {variant}, a-priori factor {:.0} MB + workspace {:.0} MB",
+                    "[accel] {name}: {variant} ({}), a-priori factor {:.0} MB + workspace {:.0} MB",
+                    ord_name(r.chosen_order),
                     r.factor_bytes as f64 / 1e6,
                     r.workspace_bytes as f64 / 1e6
                 );

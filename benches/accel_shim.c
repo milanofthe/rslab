@@ -43,6 +43,8 @@ typedef struct {
     int64_t workspace_bytes;/* a-priori numeric workspace reported by the symbolic phase */
     int32_t sym_status;     /* SparseStatus_t of the symbolic factorization */
     int32_t num_status;     /* SparseStatus_t of the numeric factorization */
+    int32_t chosen_order;   /* SparseOrder_t actually used (bakeoff winner) */
+    int32_t _pad;
 } shim_result;
 
 /* ---- instrumented allocator (live/peak, exact, thread-safe) -------------- */
@@ -89,7 +91,11 @@ static double now_s(void) {
  *             2 -> kind = SparseHermitian, lower triangle stored;
  *             0 -> kind = SparseOrdinary (LU/QR)
  * fact_type : raw SparseFactorization_t value (1 = LDLT, 80 = LU, ...)
- * order     : raw SparseOrder_t value, or -1 for SparseOrderDefault
+ * order     : raw SparseOrder_t value, -1 for SparseOrderDefault, or -2 for
+ *             the AMD-vs-Metis bakeoff: run both symbolic analyses and keep
+ *             the one with the smaller predicted factor+workspace (the
+ *             vendor docs recommend trying both; this is the analogue of
+ *             RSLAB's exact ND bakeoff, and its cost is counted in ana_s)
  * pivot_tol : threshold-pivot tolerance, or < 0 for the vendor default (0.01)
  * max_bytes : memory gate; if > 0 and the symbolic phase predicts
  *             factor + workspace above this budget, bail out with -100
@@ -135,7 +141,7 @@ int accel_sparse_solve_complex(int32_t n, const long *col_ptr, const int32_t *ro
     /* Vendor defaults (SolveImplementation.h), plus logging + counting hooks. */
     SparseSymbolicFactorOptions sfo = {
         .control = SparseDefaultControl,
-        .orderMethod = order < 0 ? SparseOrderDefault : (SparseOrder_t)order,
+        .orderMethod = SparseOrderDefault,
         .order = NULL,
         .ignoreRowsAndColumns = NULL,
         .malloc = counted_malloc,
@@ -151,8 +157,36 @@ int accel_sparse_solve_complex(int32_t n, const long *col_ptr, const int32_t *ro
     };
 
     double t0 = now_s();
-    SparseOpaqueSymbolicFactorization ssym =
-        SparseFactor((SparseFactorization_t)fact_type, structure, sfo);
+    SparseOpaqueSymbolicFactorization ssym;
+    if (order == -2) {
+        /* AMD-vs-Metis bakeoff on the predicted factor+workspace bytes. */
+        SparseSymbolicFactorOptions oa = sfo, om = sfo;
+        oa.orderMethod = SparseOrderAMD;
+        om.orderMethod = SparseOrderMetis;
+        SparseOpaqueSymbolicFactorization sa =
+            SparseFactor((SparseFactorization_t)fact_type, structure, oa);
+        SparseOpaqueSymbolicFactorization sm =
+            SparseFactor((SparseFactorization_t)fact_type, structure, om);
+        int64_t ba = sa.status == SparseStatusOK
+                         ? (int64_t)sa.factorSize_Double + (int64_t)sa.workspaceSize_Double
+                         : INT64_MAX;
+        int64_t bm = sm.status == SparseStatusOK
+                         ? (int64_t)sm.factorSize_Double + (int64_t)sm.workspaceSize_Double
+                         : INT64_MAX;
+        if (bm < ba) {
+            ssym = sm;
+            SparseCleanup(sa);
+            out->chosen_order = (int32_t)SparseOrderMetis;
+        } else {
+            ssym = sa;
+            SparseCleanup(sm);
+            out->chosen_order = (int32_t)SparseOrderAMD;
+        }
+    } else {
+        sfo.orderMethod = order < 0 ? SparseOrderDefault : (SparseOrder_t)order;
+        ssym = SparseFactor((SparseFactorization_t)fact_type, structure, sfo);
+        out->chosen_order = (int32_t)sfo.orderMethod;
+    }
     out->ana_s = now_s() - t0;
     out->sym_status = (int32_t)ssym.status;
     /* "Double the size when used in complex double." */

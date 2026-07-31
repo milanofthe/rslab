@@ -38,10 +38,12 @@ def load(path):
 
 
 def variants(log_path):
-    """name -> accel variant (ldlt / lu-full / lu), parsed from the run log."""
+    """name -> accel variant (chol / ldlt / lu-full / lu), parsed from the run log."""
     out = {}
     if log_path.exists():
-        for m in re.finditer(r"\[accel\] (\S+): (ldlt|lu-full|lu),", log_path.read_text()):
+        for m in re.finditer(
+                r"\[accel\] (\S+): (chol|ldlt|lu-full|lu)(?: \((\w+)\))?,",
+                log_path.read_text()):
             out[m.group(1)] = m.group(2)
     return out
 
@@ -131,7 +133,7 @@ def main():
         s: {"solved_1e8": len(ok[s]), "attempted": len(seen[s])} for s in ORDER}
     summary["corpus_total"] = len(names)
     summary["accel_variants"] = {v: sorted(k for k, vv in var.items() if vv == v)
-                                 for v in ("ldlt", "lu-full", "lu")}
+                                 for v in ("chol", "ldlt", "lu-full", "lu")}
     print(f"\ncorpus accuracy (< 1e-8): " + ", ".join(
         f"{s}: {len(ok[s])}/{len(seen[s])}" for s in ORDER))
     for v, ks in summary["accel_variants"].items():
