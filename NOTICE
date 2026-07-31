@@ -29,16 +29,44 @@ A small number of numerical constants from SPRAL SSIDS (e.g. the
 are also used and are cited in source comments.
 
 --------------------------------------------------------------------------------
+Historical note: METIS-derived code in versions 0.20.0 through 0.23.0
+--------------------------------------------------------------------------------
 
-feral's source comments cite the following projects for scholarly purposes
-(algorithm references, parameter names, design rationale). No source code from
-these projects is incorporated into RSLAB or feral:
+Releases 0.20.0 through 0.23.0 contained a node-separator refinement module
+(`crates/rslab-metis/src/node_refine.rs`) ported from METIS 5.2.0
+(`libmetis/sfm.c`, `libmetis/srefine.c`), Copyright 1995-2013 Regents of the
+University of Minnesota, licensed under the Apache License 2.0. Those releases
+should be used subject to that license for the affected file; the Apache-2.0
+license text is reproduced in LICENSE-THIRD-PARTY. As of version 0.24.0 the
+module has been replaced by an independent implementation written from
+published algorithm descriptions (`crates/rslab-metis/src/sep_refine.rs`);
+no METIS-derived code remains in current releases.
 
-  - MUMPS 5.8.2 (CeCILL-C)        https://mumps-solver.org/
-  - Ipopt 3.14   (EPL-2.0)        https://github.com/coin-or/Ipopt
-  - faer-rs      (MIT)            https://github.com/sarah-quinones/faer-rs
+--------------------------------------------------------------------------------
+Scholarly references
+--------------------------------------------------------------------------------
 
-Citations of the form `ref/<project>/path/file.ext:LINE` in source comments
-refer to these upstream sources as scholarly references and do not indicate
-incorporation of code. An audit of distinctive identifiers and constants from
-each project found no matches outside the SPRAL-derived files listed above.
+Source comments cite published papers and, in places, the behavior of other
+solvers (MUMPS, SuiteSparse KLU/AMD, METIS, SCOTCH, KaHIP, MKL PARDISO, faer,
+Ipopt) for scholarly purposes: algorithm references, parameter semantics,
+design rationale, and cross-validation targets. Such citations do not indicate
+incorporation of code from those projects.
+
+Two areas deserve explicit characterization:
+
+  - The AMF ordering implements the HAMF4 variant of approximate minimum fill
+    (Amestoy, 1999 habilitation thesis). The complete HAMF4 heuristic is only
+    fully specified by the MUMPS implementation; RSLAB's code is independently
+    written idiomatic Rust whose behavior (formulas, quantization, and merge
+    semantics) matches HAMF4 and is validated against a MUMPS-derived fill
+    oracle over 183k matrices (`tests/amf_corpus_oracle.rs`). No MUMPS source
+    text is incorporated. MUMPS is CeCILL-C licensed and is not distributed
+    with, linked by, or required by RSLAB.
+
+  - The LDLᵀ-aware ordering preprocessing (`src/symbolic/ldlt_compress.rs`)
+    implements the published Duff-Pralet pairing strategy, which MUMPS exposes
+    as ICNTL(12)=2. It is an independent implementation.
+
+Benchmarks may load external reference solvers (MKL PARDISO, Apple Accelerate,
+SuiteSparse KLU) at runtime through their public C interfaces for measurement
+only; nothing from those libraries is distributed with RSLAB.
