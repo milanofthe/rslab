@@ -6,11 +6,12 @@
 //! and "best cut subject to balance" separately; at the end of the
 //! pass rolls back to the best balanced state.
 //!
-//! Node-*separator* refinement lives in `node_refine` (the METIS
-//! `FM_2WayNodeRefine1Sided` port); the former greedy positive-gain
-//! `refine_separator` was removed when the multilevel node-separator
-//! pipeline replaced the "edge-FM everywhere, convert at the end"
-//! scheme (see `dev/research/metis-node-separator-2026-07.md`).
+//! Node-*separator* refinement lives in `sep_refine` (an independent
+//! implementation from published descriptions); the former greedy
+//! positive-gain `refine_separator` was removed when the multilevel
+//! node-separator pipeline replaced the "edge-FM everywhere, convert
+//! at the end" scheme (see
+//! `dev/research/metis-node-separator-2026-07.md`).
 //!
 //! Priority queue: a lazy `BinaryHeap<(gain, Reverse(v))>` rather
 //! than METIS's bucket array. Correct; the O(log n) overhead per

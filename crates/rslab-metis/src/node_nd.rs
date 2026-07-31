@@ -19,8 +19,8 @@ use crate::coarsen::{coarsen, CoarsenCounters};
 use crate::fm_refine::refine_bisection;
 use crate::graph::Graph;
 use crate::initial_partition::{initial_bisect_bfs, initial_bisect_ggp, PART_A, PART_B};
-use crate::node_refine::{fm_node_balance, fm_node_refine_1sided};
 use crate::rng::SplitMix;
+use crate::sep_refine::{balance_node_separator, refine_node_separator};
 use crate::separator::construct_separator;
 use crate::{MetisOptions, MetisStats};
 use rslab_ordering_core::{CscPattern, OrderingError};
@@ -197,7 +197,7 @@ fn multilevel_node_bisection(
     // Convert the edge bisection to a node separator at the coarsest
     // level and refine it there (METIS InitSeparator tail).
     construct_separator(coarsest, &mut labels);
-    fm_node_refine_1sided(
+    refine_node_separator(
         coarsest,
         &mut labels,
         opts.max_imbalance,
@@ -223,8 +223,8 @@ fn multilevel_node_bisection(
             *p = labels[c];
         }
         labels = proj;
-        fm_node_balance(prev_graph, &mut labels, opts.max_imbalance, rng);
-        fm_node_refine_1sided(
+        balance_node_separator(prev_graph, &mut labels, opts.max_imbalance, rng);
+        refine_node_separator(
             prev_graph,
             &mut labels,
             opts.max_imbalance,

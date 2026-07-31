@@ -102,3 +102,34 @@ Cumulative factor trajectory on this case: 1552 ms (pre-audit)
    (60: 13.86 M, 400: 14.45 M), leave at 200.
 4. MKL-perm probe + METIS reference live in the session scratchpad
    (`mkl_nd_probe`); the durable harness is the `grid_fill` example.
+
+## 2026-07-31: clean-room replacement (`sep_refine.rs`)
+
+The refinement module was replaced by an independent implementation
+written from the published sources cited in its module docs, as part
+of the licensing cleanup (the previous `node_refine.rs` had been
+ported from METIS 5.2.0 `sfm.c`/`srefine.c`, i.e. Apache-2.0-derived;
+see LICENSE-THIRD-PARTY). Design differences: lazy `BinaryHeap` with
+per-vertex version stamps (the house `fm_refine` staleness pattern)
+instead of an indexed heap; a flat label-transition journal with
+best-prefix unwind instead of surgical state restoration; overweight
+candidates are skipped, not pass-terminating; termination knobs are
+effectively unbounded (patience 2^20, overshoot 4x) after measuring
+that small budgets cost quality.
+
+Knob study on the exact-fill harness (`grid_fill 40`, metis default
+row, scalar nnz(L)):
+
+| patience / overshoot / tie      | fill    |
+|---|---|
+| 256 / 0.25 / random rank        | 16.60 M |
+| 4096 / unbounded / random rank  | 14.75 M |
+| 4096+ / unbounded / newest-first| 11.06 M |
+
+The newest-first (LIFO) gain tie-break is the surprise lever: the
+pass drills along the moving separator front instead of scattering,
+and beats every ordering we have measured on this pattern (old port
+14.00 M, METIS 5.2.0 NodeND 14.08 M, MKL PARDISO ND 12.52 M). Checked
+m=30 (3.29 M) and m=50 (36.7 M vs AMD 61.6 M); seeds land at
+11.1-13.9 M. Ordering wall time roughly doubles (466 -> 560 ms at
+40^3), paid back many times over in factor flops (1.90e10 -> 0.95e10).
