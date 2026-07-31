@@ -1,11 +1,11 @@
-# Supernodal triangular solve — design plan (audit follow-up P4)
+# Supernodal triangular solve, design plan (audit follow-up P4)
 
-Status: **CLOSED (2026-07-11)** — both stages were built, measured, and
+Status: **CLOSED (2026-07-11)**, both stages were built, measured, and
 rejected; the head-to-head reference measurement below shows the premise
 ("the solve is the gap") was wrong. Kept as the evidence record. Original
 plan text follows the two results sections.
 
-## Stage 2 measured (2026-07-11): supernodal panel solve — also rejected
+## Stage 2 measured (2026-07-11): supernodal panel solve, also rejected
 
 Implemented on `feat/supernodal-solve`: post-hoc panel detection on the
 stored factor, dense panels, gather-form sweeps (edge runs forward,
@@ -23,7 +23,7 @@ TRUE factor partition  @1 10.4 @8  7.6   (snodes  1107, lvl  18, pad 2.05x)
 TRUE factor partition  @1 57   @8 37     (n=64k,  1099, lvl  19, pad 1.80x)
 ```
 
-The schedule itself is now right (18-20 levels, real panels) — the killer is
+The schedule itself is now right (18-20 levels, real panels), the killer is
 **densification padding**: emit drops the relaxed-amalgamation padding
 zeros, and rebuilding the factorization's panels re-materializes them
 (pad 1.8-2.05×). A sparse triangular solve is **memory-bandwidth-bound**, so
@@ -42,17 +42,17 @@ rslab ll  1488 ms      39.8 ms    20.6 M
 pardiso    168 ms      33.8 ms    12.9 M
 ```
 
-* **The single-RHS solve gap is 1.18×** — and rslab carries **1.6× more
+* **The single-RHS solve gap is 1.18×**, and rslab carries **1.6× more
   fill**. Per stored nonzero our flat sweep is already *faster* than
   PARDISO's solve. The solve "gap" is a **fill (ordering) gap**, not a
   kernel gap; a parallel solve kernel attacks the wrong term.
-* **The factor gap is 8.8×** on this class — that is where the PARDISO work
+* **The factor gap is 8.8×** on this class, that is where the PARDISO work
   belongs.
 * Side-findings worth their own issues: (a) `tuned()`'s ND bakeoff ran and
   **rejected our MetisND** on this matrix (fill stayed 20.6 M) while MKL's
-  ND reaches 12.9 M — our nested-dissection quality on 3D Helmholtz is the
+  ND reaches 12.9 M, our nested-dissection quality on 3D Helmholtz is the
   fill lever; (b) the bench's `auto` solver measured *slower* than the
-  plain default here (fac 2565 ms vs 1488 ms, same fill) — a tuner
+  plain default here (fac 2565 ms vs 1488 ms, same fill), a tuner
   regression to investigate.
 
 **Verdict:** stop investing in parallel single-RHS solve kernels. The
@@ -68,16 +68,16 @@ Original plan (historical):
 Status: **planned** (not implemented). This is the scoped design for the one
 audit finding deliberately deferred from the 2026-07 audit branch: the
 single-RHS triangular solves are element-wise sequential CSC/CSR sweeps
-(`solve_ldlt`, `solve_lu`), while PARDISO solves supernodally — dense
+(`solve_ldlt`, `solve_lu`), while PARDISO solves supernodally, dense
 triangular kernels over panels plus level-scheduled parallelism. For the
 factor-once/solve-many FEM workload this is the largest remaining structural
 gap after the factor-side audit fixes.
 
 ## Measured negative result (2026-07-11): scalar-DAG level scheduling is a dead end
 
-Stage 1 as originally sketched — level-schedule the **scalar** column/row
+Stage 1 as originally sketched, level-schedule the **scalar** column/row
 elimination DAG of the flat factor (CSR copy of strict `L`, up-looking
-forward, per-level rayon) — was implemented on `feat/parallel-solve`,
+forward, per-level rayon), was implemented on `feat/parallel-solve`,
 verified bit-identical to the flat solve, measured, and **rejected**:
 
 ```
@@ -93,13 +93,13 @@ Two structural killers, not tuning artifacts:
    pairwise, so the levels that carry most of `nnz(L)` have width 1-2.
    Amdahl caps any speedup near 1 regardless of scheduling.
 2. **The wide levels are the cheap ones.** Leaf levels are wide but their
-   rows hold a handful of nonzeros — a rayon fan-out per level costs more
+   rows hold a handful of nonzeros, a rayon fan-out per level costs more
    than the work it distributes, which is why the parallel runs get *slower*
    with more threads.
 
 Conclusion: parallel solve granularity must be the **supernode tree**
 (depth ~tens, dense panel ops per node), exactly as PARDISO does. Any
-future attempt at scalar-level scheduling should be rejected on sight —
+future attempt at scalar-level scheduling should be rejected on sight,
 the numbers above are the evidence.
 
 The one keeper from the experiment: the dot-form sweep with per-element
@@ -116,7 +116,7 @@ solve" as a testable acceptance criterion.
 
 ## Design
 
-### 1. Keep the panels — a supernodal factor view
+### 1. Keep the panels, a supernodal factor view
 
 Both emit paths already produce per-supernode compact CSC fragments
 (`CompactL` in the LDLᵀ path, `CompactNode` in the LU path) before
@@ -139,7 +139,7 @@ pub struct SupernodalView {
 ```
 
 Memory cost: the dense trapezoid stores explicit zeros the sparse columns
-drop — bounded by the same relaxed-amalgamation fill already accepted at
+drop, bounded by the same relaxed-amalgamation fill already accepted at
 factor time (the panels ARE the factor layout the numeric phase produced).
 Gate the sidecar behind `SolverSettings` (`with_supernodal_solve(bool)`,
 default off until the bakeoff below says otherwise).
@@ -153,12 +153,12 @@ level target disjoint elimination positions **only for the trsv part**; the
 gemv scatter can collide → accumulate per-panel into a thread-local sparse
 update buffer and combine per level in panel order (deterministic, same
 trick as `ORTHO_CHUNK` reductions). Determinism bar: fixed panel order per
-level, fixed chunking — bit-identical across thread counts, matching the
+level, fixed chunking, bit-identical across thread counts, matching the
 factor's guarantee.
 
 ### 3. Backward solve (Lᵀ / U): gather form
 
-Backward is already a gather (`acc -= L(i,j)·y[i]`) — panel version is a
+Backward is already a gather (`acc -= L(i,j)·y[i]`), panel version is a
 dense `gemv`(transposed) per panel walking levels root-to-leaves. No write
 collisions at all (each panel writes only its own columns), so this side is
 embarrassingly level-parallel.
@@ -169,7 +169,7 @@ Level-scheduled solves only pay when levels are wide and panels are fat;
 banded/1D factors degenerate to a serial chain where the dense kernels only
 add overhead. Reuse the existing machinery:
 
-* a-priori: `max_tree_width`, mean `ncol` from `front_dims()` — cheap gate
+* a-priori: `max_tree_width`, mean `ncol` from `front_dims()`, cheap gate
   (e.g. width ≥ 8 and mean ncol ≥ 16, calibrate on the corpus);
 * measured: extend `benches/solve_many` with a single-RHS latency column,
   RSLAB vs MKL PARDISO phase 33, across the h2h corpus;
@@ -189,7 +189,7 @@ add overhead. Reuse the existing machinery:
 ## Why deferred
 
 The change touches the factor storage contract, both emit paths, the Python
-surface, and needs a corpus benchmark loop to calibrate the gate — a
+surface, and needs a corpus benchmark loop to calibrate the gate, a
 self-contained branch with its own measurement cycle, not a tail commit on
 an audit branch. Estimated effort: the sidecar + solves are ~2-3 days, the
 calibration sweep another day on the bench corpus.

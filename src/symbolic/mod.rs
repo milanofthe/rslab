@@ -422,8 +422,8 @@ pub struct SymbolicFactorization {
 ///     on 83/782 matrices, tied on 589, AMD better on 110, geomean
 ///     ratio 1.003. ORBIT2_0000 alone goes from AMD's 1.4M nnz_L
 ///     down to AMF's 32_105.)
-///   - everything else (`n > 10_000`)                  → `MetisND`
-///     — note this base decision is **always rerouted to AMF** by the
+///   - everything else (`n > 10_000`)                  → `MetisND`,
+///     but note this base decision is **always rerouted to AMF** by the
 ///     issue #67/#73 catches in `choose_adaptive` (measured: AMF wins or
 ///     ties MetisND on real factor+solve across the whole would-be-MetisND
 ///     population, and MetisND's symbolic is 2-5× more expensive). It is
@@ -520,7 +520,7 @@ pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
 ///
 /// Picks the fill-reducing ordering adaptively via [`OrderingMethod::Auto`]
 /// (resolved by `choose_adaptive`): AMD for very-large-and-sparse
-/// (`n > 100_000`, avg degree `< 5`), **AMF for everything else** — the
+/// (`n > 100_000`, avg degree `< 5`), **AMF for everything else**, the
 /// issue #67/#73 corpus A/Bs rerouted every would-be-MetisND decision to
 /// AMF, so `Auto` never resolves to nested dissection. MetisND is reachable
 /// only explicitly, via [`OrderingMethod::AutoRace`], or through the
@@ -931,7 +931,7 @@ fn symbolic_prefix_with(
             // Run the MC64 matching once for the compression supermap. MC64
             // is the expensive part - record it under its own
             // `ldlt_compress` stage (issue #80). NOTE: this matching CANNOT
-            // be reused for `Mc64Symmetric` scaling — the generic solver
+            // be reused for `Mc64Symmetric` scaling, the generic solver
             // path feeds this function a unit-valued pattern, so the
             // matching carries no value information (see the
             // `scaling::Mc64Cache` note); the retired `cached_mc64` field

@@ -581,7 +581,7 @@ mod tests {
         assert!(plan_ok.fits && !plan_ok.use_mixed_precision);
         assert!(plan_ok.est_runtime_ms > 0.0);
         // v2 cost-model thread selection (#61) picks the fewest cores that reach
-        // near-minimum predicted time — for a small grid the critical path or
+        // near-minimum predicted time, for a small grid the critical path or
         // saturation dominates, so it may (correctly) choose fewer than all cores.
         // The contract is 1 ≤ threads ≤ physical_cores, not "always all cores".
         match plan_ok.opts.threads {

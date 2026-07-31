@@ -174,7 +174,7 @@ impl<T: Scalar> GeneralCsc<T> {
     /// The strict-increase check is load-bearing for correctness, not just
     /// hygiene: the KLU factorization scatters column values by *assignment*
     /// (`x[pre] = v`), so a duplicate row entry would silently overwrite its
-    /// partner instead of summing — a wrong factor with no error — while
+    /// partner instead of summing, a wrong factor with no error, while
     /// [`matvec`](Self::matvec) sums duplicates. `from_triplets` always
     /// produces the canonical form; this guards hand-constructed matrices
     /// (the fields are `pub`).

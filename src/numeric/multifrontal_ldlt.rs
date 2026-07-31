@@ -77,7 +77,7 @@ fn ldlt_prof_on() -> bool {
 // Wall-clock node-concurrency histogram (`RLA_PROFILE=1`): time integral of the
 // number of `ll_factor_node` calls in flight. `hist_ns[k]` = wall ns with
 // exactly k nodes active (k capped at 16). Separates "the tree does not keep
-// the workers busy" (mass at 1-2) from "per-node work is slow" — mutex on node
+// the workers busy" (mass at 1-2) from "per-node work is slow", mutex on node
 // entry/exit only, ~2 lock ops per supernode, zero cost when profiling is off.
 struct LlConcProf {
     last: std::time::Instant,
@@ -1164,7 +1164,7 @@ fn factor_front<T: Scalar>(
             if kt.use_gemm_schur {
                 // The subtraction below reads only the lower triangle of
                 // `tmp`, so compute the symmetric product tile-by-tile from
-                // each tile's diagonal downward — ~half the flops of the old
+                // each tile's diagonal downward, ~half the flops of the old
                 // full `mt × mt` GEMM on the dominant front-Schur kernel.
                 // SAFETY: `tmp`, `gbuf`, `l21buf` are distinct allocations sized
                 // for the (mt, mt, pw) strides.
@@ -1250,7 +1250,7 @@ fn factor_front<T: Scalar>(
     // `[ncol, nrow)²` lower triangle. The CB is symmetric and the parent's
     // extend-add reads only `i >= j`, so store it as a **packed lower
     // triangle** (column-major: column `j` holds rows `j..cnrow`
-    // contiguously) — half the CB-stack transient of the old mirrored
+    // contiguously), half the CB-stack transient of the old mirrored
     // full-square layout, which was the dominant factorization transient.
     let cnrow = nrow - ncol;
     let mut cb = Vec::with_capacity(cnrow * (cnrow + 1) / 2);
@@ -1282,7 +1282,7 @@ struct NodeFactor<T> {
     /// This front's contribution block as a **packed lower triangle**
     /// (column-major: column `j` holds rows `j..cnrow` contiguously,
     /// `cnrow·(cnrow+1)/2` entries), consumed by the parent's extend-add.
-    /// The CB is symmetric, so the packed half is complete — storing it
+    /// The CB is symmetric, so the packed half is complete, storing it
     /// full-square would double the CB stack, the dominant factorization
     /// transient. Kept on the node (rather than a separate take-able slot)
     /// so independent subtrees factor in parallel without a shared mutable
@@ -1465,7 +1465,7 @@ fn factor_one_node<T: Scalar>(
     // Front buffer (transient `nrow²`), drawn from the shared reuse pool: a
     // per-front allocation churns the system allocator with large, varying
     // sizes, and on Windows the heap retains the freed blocks rather than
-    // returning them to the OS — peak RSS then balloons far above the live
+    // returning them to the OS, peak RSS then balloons far above the live
     // set (the fragmentation OOM the LU twin hit first; see
     // [`crate::numeric::multifrontal_lu::FrontPool`]).
     let mut fbuf: Vec<T> = pool.take(nrow * nrow);
@@ -1495,7 +1495,7 @@ fn factor_one_node<T: Scalar>(
     }
 
     // Extend-add each child's contribution block (packed lower triangle:
-    // column `j` holds rows `j..cn` contiguously — the walk below consumes
+    // column `j` holds rows `j..cn` contiguously, the walk below consumes
     // it in exactly its storage order).
     for child in child_refs {
         let cn = child.front.nrow - child.front.nelim;

@@ -341,7 +341,7 @@ pub enum StopReason {
     /// (COCG / COCR only).
     Breakdown,
     /// The progress monitor requested an early stop (block GMRES only): the
-    /// caller's per-cycle callback returned `false` — typically a stagnation
+    /// caller's per-cycle callback returned `false`, typically a stagnation
     /// detector cutting a solve that stopped contracting, instead of burning
     /// the remaining iteration budget.
     Stalled,
@@ -1897,8 +1897,8 @@ where
 }
 
 /// [`gmres_block`] with an optional per-cycle progress MONITOR (rapidmom-local addition,
-/// upstream candidate): at the start of every restart cycle — right after the true
-/// residuals `‖b − A·x‖/‖b‖` of all live columns were recomputed — `mon` receives
+/// upstream candidate): at the start of every restart cycle, right after the true
+/// residuals `‖b − A·x‖/‖b‖` of all live columns were recomputed, `mon` receives
 /// `(iters_done, worst_live_residual, n_active_columns)` and returns whether the solve
 /// should CONTINUE. Long solves stop being a black box: the caller can stream residual
 /// trajectories to its log, and a `false` return cancels the solve early (a stagnation
@@ -2045,7 +2045,7 @@ where
         }
         let mut sa = act.len();
         // Per-cycle progress monitor (rapidmom-local addition): true residuals of all
-        // live columns are fresh at this point — the honest place to report, and the
+        // live columns are fresh at this point, the honest place to report, and the
         // honest place to CANCEL (a `false` return stops a stagnated solve early).
         if let Some(m) = mon.as_mut() {
             let worst = live.iter().map(|&c| final_res[c]).fold(0.0_f64, f64::max);
@@ -2387,7 +2387,7 @@ where
     gmres_block(&op, b, s, &pc, tol, max_iter, restart, None)
 }
 
-/// Closure entry point for [`gmres_block_mon`] — [`gmres_block_fn`] plus the per-cycle
+/// Closure entry point for [`gmres_block_mon`], [`gmres_block_fn`] plus the per-cycle
 /// progress monitor and an optional WARM START `x0` (column-major `n×s`, like `b`;
 /// `None` ⇒ `x₀ = 0`). Seeding with a nearby solution (e.g. the previous frequency
 /// of a sweep) starts from its residual; convergence stays relative to `‖b‖`.

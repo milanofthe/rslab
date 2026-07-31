@@ -22,7 +22,7 @@ type C = Complex<f64>;
 fn ldlt_tuner_never_grows_fill_over_default() {
     // Banded is exactly the class the sweep flagged: a band ordering (AMD/default)
     // is optimal, and nested dissection (METIS) blows up the fill ~2x. The tuner
-    // must not pick it — the fill backstop should veto it back to the default.
+    // must not pick it, the fill backstop should veto it back to the default.
     for &(n, bw) in &[(20000usize, 30), (40000, 40)] {
         let a = matgen::structured::banded::<C>(n, bw, 1.0, 1);
         let default_fill = {
@@ -36,7 +36,7 @@ fn ldlt_tuner_never_grows_fill_over_default() {
         assert!(
             tuned_fill as f64 <= default_fill as f64 * 1.02,
             "banded_{n}_{bw}: ML-tuned fill {tuned_fill} > 1.02x default {default_fill} \
-             (ordering {:?}) — memory backstop breached",
+             (ordering {:?}), memory backstop breached",
             s.ordering
         );
         // The heuristic default path: its ND bakeoff requires fill_ok, so a

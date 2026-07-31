@@ -49,7 +49,7 @@ x = f.solve(b)
 ```
 
 Circuit-shaped matrices (MNA / SPICE-class: very sparse, unsymmetric,
-near-triangularizable) use the KLU path — bit-deterministic, with a
+near-triangularizable) use the KLU path, bit-deterministic, with a
 numeric-only `refactor` for fixed-pattern sweeps:
 
 ```python
@@ -77,7 +77,7 @@ x = f.solve(b, refine=20)        # refine against the original A
 ## Configuration (keyword arguments)
 
 By default `ldlt`, `lu` and `spsolve` use RSLAB's deterministic heuristic
-pick — the adaptive ordering plus an exact nested-dissection bakeoff on large
+pick, the adaptive ordering plus an exact nested-dissection bakeoff on large
 systems (adopted only on a clear predicted win with no fill/memory
 regression). A one-time `rslab.install_diagnose()` measures this machine's
 throughput and speedup curve and caches it; afterwards the default also picks

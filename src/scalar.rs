@@ -81,7 +81,7 @@ pub trait Scalar:
     fn recip(self) -> Self;
 
     /// `self * a + b`, using a fused multiply-add where the hardware offers
-    /// one. Do **not** call this directly in hot loops — without the `fma`
+    /// one. Do **not** call this directly in hot loops: without the `fma`
     /// target feature it lowers to a slow libm software-fma call; go through
     /// [`fmadd`] instead, which guards on the build's target features.
     fn mul_add(self, a: Self, b: Self) -> Self;
@@ -95,7 +95,7 @@ pub trait Scalar:
 /// (`-C target-cpu=native` or `-C target-feature=+fma`; see
 /// `.cargo/config.toml`), else as a plain multiply-add. The guard is
 /// load-bearing: a bare [`Scalar::mul_add`] on a baseline x86-64 build lowers
-/// to a libm software-fma call — bit-exact but far slower than mul+add — so
+/// to a libm software-fma call, bit-exact but far slower than mul+add, so
 /// the hot scalar kernels (triangular solves, Gilbert-Peierls updates) must
 /// only ever reach `mul_add` through this switch. `cfg!` resolves at compile
 /// time; the untaken branch folds away.

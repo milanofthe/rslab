@@ -63,7 +63,7 @@ reference machine):
 | path | pick | analysis | factor |
 |---|---|---|---|
 | old default (AMF, fixed cfg @8) | AMF | ~0.5 s | 1202 ms |
-| old ML auto (bench_suite) | — | ~2.4 s | 2565 ms |
+| old ML auto (bench_suite) |, | ~2.4 s | 2565 ms |
 | **new `factor()` heuristic** | MetisND (bakeoff) + `Fixed(12)` (calibrated) | 0.37 s | **695 ms** |
 
 Combined with the metis node-separator work this closes the tuner

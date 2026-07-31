@@ -180,7 +180,7 @@ pub(crate) fn estimate_left_looking(
 /// Multifrontal transient-peak model: the **contribution-block stack** under the
 /// rayon work-stealing schedule. Unlike left-looking, multifrontal holds dense
 /// fronts plus the contribution blocks (packed lower triangles,
-/// `cnrow·(cnrow+1)/2` each — the symmetric-LDLᵀ storage the numeric path
+/// `cnrow·(cnrow+1)/2` each, the symmetric-LDLᵀ storage the numeric path
 /// actually uses) of completed subtrees not yet consumed by their parent. The
 /// driver factors a whole assembly-tree level concurrently, so the
 /// conservative peak is, over the levels, the level's total front memory

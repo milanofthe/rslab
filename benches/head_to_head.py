@@ -3,11 +3,11 @@
 LDLᵀ (symmetric) and LU (unsymmetric) are separate solvers a caller dispatches to
 explicitly, so each is benchmarked and plotted against *its own* PARDISO mtype
 (6 for complex-symmetric, 13 for unsymmetric) and faer. Each path is one **two-panel**
-figure — factor wall-clock time (left) and peak memory (right) vs nonzeros on log-log
+figure: factor wall-clock time (left) and peak memory (right) vs nonzeros on log-log
 axes, with a least-squares power-law fit `y = C·nnz^alpha` per solver (the exponent,
 the empirical scaling order, is annotated on each fit line) and one shared legend.
 
-The RSLAB curve is the shipped default pick (`LdltSolver`/`LuSolver::tuned`) — the
+The RSLAB curve is the shipped default pick (`LdltSolver`/`LuSolver::tuned`), the
 deterministic heuristic (adaptive ordering + exact ND bakeoff + calibrated
 worker count), drawn alongside the fixed default config so the gap the pick
 closes is visible.
@@ -40,7 +40,7 @@ def run(path, title, slug, mtype):
                           order=ORDER, ax=ax_wct)
     print("  peak memory ~ nnz^alpha:")
     plot_metric(recs, "mem", "mem_mb", "peak memory [MB]", None, order=ORDER, ax=ax_mem)
-    fig.suptitle(f"{title} — factor time & peak memory (mtype {mtype})",
+    fig.suptitle(f"{title}: factor time & peak memory (mtype {mtype})",
                  color=bench_style.GRAY)
     # One shared legend for both panels: solver identity only (the per-panel scaling
     # exponents differ and are annotated on the fit lines).

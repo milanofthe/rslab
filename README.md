@@ -2,7 +2,7 @@
 
 Rust Sparse Linear Algebra Backend. A sparse direct solver for real and complex
 matrices with **three paths matched to their operator classes**: symmetric LDLᵀ
-(Bunch-Kaufman), unsymmetric LU, and a KLU path for circuit-shaped matrices —
+(Bunch-Kaufman), unsymmetric LU, and a KLU path for circuit-shaped matrices,
 with the factor usable as a preconditioner. The solver core is pure Rust with no
 BLAS, LAPACK, or MKL dependency.
 
@@ -95,12 +95,12 @@ headline results.
 ## Benchmarks
 
 All cross-solver figures come from the `bench_suite` engine over a
-complete-distribution corpus — structured-grid generators (curl-curl Maxwell,
+complete-distribution corpus: structured-grid generators (curl-curl Maxwell,
 shifted Helmholtz, Stokes/KKT saddle-point, convection-diffusion over the
 grid-Péclet range, BEM/MoM near-field kernels; `src/matgen/fem.rs`) plus the
-complex SuiteSparse matrices, 8k-125k DOFs, all `Complex<f64>` — measured in one
+complex SuiteSparse matrices, 8k-125k DOFs, all `Complex<f64>`, measured in one
 run on a quiet 12-core machine, so the cross-solver ratios carry no run-to-run
-drift. RSLAB runs its shipped default — the deterministic heuristic pick
+drift. RSLAB runs its shipped default, the deterministic heuristic pick
 (`tuned()`: adaptive ordering, exact ND bakeoff, calibrated worker count); each
 path is compared **on its own class** against its own MKL PARDISO mtype and
 [faer](https://github.com/sarah-quinones/faer-rs).
@@ -112,17 +112,17 @@ Reproduce: `RLA_BENCH_FAMILY=sym|unsym cargo bench --bench bench_suite
 ### Per-path scaling: RSLAB vs faer vs MKL PARDISO
 
 Factor time and peak memory vs nonzeros, log-log, one power-law fit per solver.
-Each plot carries two RSLAB curves — the **fixed default config** (gray) and the
-**heuristic pick** as shipped (blue) — so the gap the pick closes toward PARDISO
+Each plot carries two RSLAB curves, the **fixed default config** (gray) and the
+**heuristic pick** as shipped (blue), so the gap the pick closes toward PARDISO
 is visible; it widens with problem size (a mispicked ordering costs most on the
 big matrices) and never comes at a memory cost (the bakeoff is fill/memory
 guarded).
 
-**LDLᵀ path (symmetric, PARDISO mtype 6)** — factor time (left) and peak memory (right):
+**LDLᵀ path (symmetric, PARDISO mtype 6)**: factor time (left) and peak memory (right):
 
 ![LDLt factor time (left) and peak memory (right)](benches/bench_out/h2h_ldlt.png)
 
-**LU path (unsymmetric, PARDISO mtype 13)** — factor time (left) and peak memory (right):
+**LU path (unsymmetric, PARDISO mtype 13)**: factor time (left) and peak memory (right):
 
 ![LU factor time (left) and peak memory (right)](benches/bench_out/h2h_lu.png)
 
@@ -131,12 +131,12 @@ matrices both solvers factor to `< 0.1` residual):
 
 | RSLAB (heuristic pick) vs | LDLᵀ (sym) | LU (unsym) |
 |---------------------------|:----------:|:----------:|
-| **MKL PARDISO** — factor time | 5.6x slower | 5.1x slower |
-| **MKL PARDISO** — peak memory | 2.8x more | 3.6x more |
-| **faer LU** — factor time | **6.7x faster** | **2.7x faster** |
-| **faer LU** — peak memory | **1.8x less** | 1.4x more |
-| **fixed default cfg** — factor time | **1.84x faster** | **1.49x faster** |
-| **fixed default cfg** — peak memory | **0.90x** (less) | 1.11x more |
+| **MKL PARDISO**: factor time | 5.6x slower | 5.1x slower |
+| **MKL PARDISO**: peak memory | 2.8x more | 3.6x more |
+| **faer LU**: factor time | **6.7x faster** | **2.7x faster** |
+| **faer LU**: peak memory | **1.8x less** | 1.4x more |
+| **fixed default cfg**: factor time | **1.84x faster** | **1.49x faster** |
+| **fixed default cfg**: peak memory | **0.90x** (less) | 1.11x more |
 
 RSLAB sits between the two: faster than the pure-Rust faer, moderately behind
 the hand-optimized MKL PARDISO. faer has no symmetric path (it factors
@@ -145,13 +145,13 @@ also OOMs on the largest matrices, so its head-to-head is a conservative
 floor. On time the LU pick scales flatter than PARDISO (`α≈1.01` vs `1.25`).
 The unsym memory ratios above 1 are the worker-count trade: the calibrated
 pick runs more workers than the capped fixed config, and more concurrent
-panels raise the transient peak — cap `threads` to trade it back.
+panels raise the transient peak; cap `threads` to trade it back.
 
 `RAYON_NUM_THREADS` drives the fixed-config RSLAB curve, faer, and MKL alike;
 the heuristic pick chooses its **own** worker count from the cached hardware
-calibration (the shipped behaviour — often fewer, critical-path-aware).
+calibration (the shipped behaviour: often fewer, critical-path-aware).
 Without an install diagnosis (`cargo xtask calibrate`) the library default is
-`Threads::Auto { max: 4 }` — a deliberate cap at the measured efficiency knee
+`Threads::Auto { max: 4 }`, a deliberate cap at the measured efficiency knee
 so concurrent solver-in-the-loop instances coexist; pass `.with_threads(0)`
 (all logical cores) for a like-for-like run against PARDISO's all-cores
 default.
@@ -183,7 +183,7 @@ front subtraction, and the 32-bit compressed factor are all bit-identical.
 
 Same engine, same corpus, different silicon: all three solver paths re-measured
 in one run on an Apple M3 (8 cores, 16 GB, macOS 15.6) against **Apple
-Accelerate's sparse direct solvers** — including the complex support and the
+Accelerate's sparse direct solvers**, including the complex support and the
 sparse LU that Accelerate gained in macOS 15.5. RSLAB runs its shipped default
 (heuristic pick, `cargo xtask calibrate`d for this machine); Accelerate runs
 its vendor-recommended best configuration per class:
@@ -191,12 +191,12 @@ its vendor-recommended best configuration per class:
 | matrix class | Accelerate path |
 |---|---|
 | real symmetric | Cholesky first (AMX-fast on SPD), LDLᵀ fallback on the indefinite ones |
-| complex-symmetric (EM/FEM) | sparse LU on the full matrix — its complex LDLᵀ is Hermitian-only (verified: the lower triangle is mirrored *conjugated*), so like faer it cannot exploit `A = Aᵀ` |
+| complex-symmetric (EM/FEM) | sparse LU on the full matrix (its complex LDLᵀ is Hermitian-only (verified: the lower triangle is mirrored *conjugated*), so like faer it cannot exploit `A = Aᵀ` |
 | unsymmetric / circuit | sparse LU (TPP, `pivotTolerance 0.01`) |
 
 plus an **AMD-vs-Metis ordering bakeoff** per matrix (the vendor docs say "try
 both"; `SparseOrderDefault` turned out to be plain AMD, which costs up to 4.4x
-the fill of Metis on the large EM/FEM systems — the bakeoff is the analogue of
+the fill of Metis on the large EM/FEM systems; the bakeoff is the analogue of
 RSLAB's exact ND bakeoff and its cost is counted in Accelerate's analyze time).
 Memory uses the same live-bytes semantics as the Rust solvers: Accelerate's
 allocations run through instrumented `SparseSymbolicFactorOptions` malloc/free
@@ -220,20 +220,20 @@ both solve to `< 0.1` residual; one-shot analyze+factor+solve):
 | SuiteSparse corpus | **0.19x** | **0.45x** | 30 |
 
 On its home silicon the vendor library is the faster direct solver on most of
-the distribution — the AMX-backed kernels win the small and mid sizes outright
+the distribution: the AMX-backed kernels win the small and mid sizes outright
 (RSLAB's calibrated complex proxy throughput on the M3 is 9.4 GFLOP/s; AMX
 sustains a multiple of that). The structural story survives at scale: on the
 largest complex-symmetric systems (curl-curl/Helmholtz above ~3·10⁵ nnz)
 RSLAB's `A = Aᵀ` exploitation turns the tables (accel 1.3-1.4x slower there;
 its time scales at `α≈1.68` vs RSLAB's `1.42`), and on the circuit class the
-comparison is one-shot only — KLU's refactor-driven sweeps (its actual niche)
+comparison is one-shot only; KLU's refactor-driven sweeps (its actual niche)
 are not exercised.
 
 Accuracy over the corpus: Accelerate reaches `< 1e-8` on 25/36 (including
 qc2534 at `2.5e-13` directly, where RSLAB's exact mode needs its
 preconditioner+GMRES path), but on five hard indefinite/ill-scaled matrices
 (stokes64, bratu3d, cont-201, rim, lhr34) it **returns NaN or garbage with an
-OK status** (residuals `1e1-1e9`) — the same silent-degradation failure mode as
+OK status** (residuals `1e1-1e9`), the same silent-degradation failure mode as
 faer. RSLAB declines those cleanly instead of returning a wrong answer
 (24/31 attempted below `1e-8`, no garbage returns; the pc mode rescues most of
 the declined set, see above).
@@ -242,7 +242,7 @@ Reproduce: `benches/run_apple_silicon.sh`, then `python benches/apple_silicon.py
 
 ### KLU path on circuit-shaped matrices
 
-KLU vs the multifrontal LU (defaults) on MNA-like matrices — ~4-5 nnz/column,
+KLU vs the multifrontal LU (defaults) on MNA-like matrices: ~4-5 nnz/column,
 unsymmetric, column-diagonally dominant, cascaded stages giving a genuinely
 reducible BTF structure (`cargo bench --bench klu_circuit`, Apple M3):
 
@@ -255,7 +255,7 @@ reducible BTF structure (`cargo bench --bench klu_circuit`, Apple M3):
 
 The KLU factor is 2-19x faster with 1.7-5.7x less fill, the gap widening with
 size as the multifrontal fronts grow; the numeric-only refactor runs ~3x faster
-still, so a 20-point sweep (refactor+solve vs factor+solve — the "sweep ratio")
+still, so a 20-point sweep (refactor+solve vs factor+solve, the "sweep ratio")
 is 6-19x faster end to end. Both solvers reach machine-precision residuals
 (~1e-15) on every size.
 
@@ -293,7 +293,7 @@ with an Amdahl critical-path floor from the assembly tree (a learned additive
 residual on the speedup curve cuts the held-out error ~26%). The
 `Threads::Auto` predictor lands within ~10% of the per-matrix-optimal worker
 count (geomean) against ~50% for a fixed budget of 2, which is why the default
-caps at 4 workers — the pareto-optimal throughput-per-core point.
+caps at 4 workers, the pareto-optimal throughput-per-core point.
 
 ### Iterative layer
 
@@ -429,11 +429,11 @@ One-shot: `LdltSolver::factor(&a)` / `LuSolver::factor(&a, &opts)` /
 | `with_blr(BlrMode::…)` | block-low-rank compression of large fronts |
 | `with_method(FactorMethod::…)` | `LeftLooking` (default) or `Multifrontal` |
 | `with_threads(n)` | scoped pool of exactly `n` workers (`0` = all cores) |
-| `with_thread_policy(Threads::…)` | `Auto{max}` (predict per matrix, capped; **default `max:4`**), `Fixed(n)`, or `Ambient` (use the current pool — no new spawn) |
+| `with_thread_policy(Threads::…)` | `Auto{max}` (predict per matrix, capped; **default `max:4`**), `Fixed(n)`, or `Ambient` (use the current pool, no new spawn) |
 | `with_memory(MemoryMode::…)` | transient-memory strategy |
 
 The factor is bit-identical regardless of `threads`; the thread count affects time
-and transient working set, not the result. The default caps at **4 workers** — the
+and transient working set, not the result. The default caps at **4 workers**, the
 pareto-optimal throughput-per-core point (the efficiency knee is ~4–6 threads) and
 the safe default for concurrent / embedded use.
 
@@ -477,8 +477,8 @@ A factor implements `Preconditioner`. A `Complex<f32>` factor can precondition a
 `f64` GMRES via `LowPrecisionPreconditioner`.
 
 `gmres_block` drives `s` right-hand sides in lockstep and orthogonalizes the whole
-panel with **block-CGS2** — a parallel, panel-wide sweep instead of per-RHS
-Gram-Schmidt — so the multi-RHS solve now scales across threads (~2.5x at 12 cores
+panel with **block-CGS2**, a parallel, panel-wide sweep instead of per-RHS
+Gram-Schmidt, so the multi-RHS solve now scales across threads (~2.5x at 12 cores
 on a deep-Krylov solve, where the old per-RHS path was flat) while staying
 bit-identical across thread counts.
 
@@ -541,7 +541,7 @@ cargo xtask validate <profile.json>         # held-out geomean speedup vs defaul
 machine's calibration, assembles a candidate profile, and validates it on a
 held-out generator corpus (curl-curl + saddle-point). The **ship-gate** writes the
 profile only if it does not regress the shipped default. Load the result at runtime
-with `RSLAB_TUNER_PROFILE=<path>` — no recompile.
+with `RSLAB_TUNER_PROFILE=<path>`, no recompile.
 
 ### Test-matrix generators (feature `matgen`)
 

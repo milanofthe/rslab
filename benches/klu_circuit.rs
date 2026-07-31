@@ -1,7 +1,7 @@
 //! KLU path vs multifrontal LU on circuit-shaped matrices (#15).
 //!
-//! Generates MNA-like matrices — very sparse (~4-5 nnz/col), unsymmetric,
-//! diagonally weighted, with reducible (block upper triangular) structure —
+//! Generates MNA-like matrices: very sparse (~4-5 nnz/col), unsymmetric,
+//! diagonally weighted, with reducible (block upper triangular) structure,
 //! and reports for each size:
 //!   * KLU: analyze / factor / refactor / solve wall time, factor nnz, blocks
 //!   * multifrontal LU (defaults): factor / solve wall time, factor nnz

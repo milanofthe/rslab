@@ -146,8 +146,8 @@ pub fn apply_profile(p: &TunerProfile) -> Result<(), String> {
         .map_err(|_| "a tuner profile is already applied".to_string())
 }
 
-/// The active runtime profile, if any: an explicitly [`apply_profile`]d one, or —
-/// on first use, tried once — a profile named by the `RSLAB_TUNER_PROFILE`
+/// The active runtime profile, if any: an explicitly [`apply_profile`]d one, or,
+/// on first use, tried once, a profile named by the `RSLAB_TUNER_PROFILE`
 /// environment variable. This is what makes a profile a config artifact: point the
 /// env var at a `tuner_profile.json` produced by `cargo xtask tune` and the
 /// running binary picks it up with no recompile.
@@ -560,7 +560,7 @@ pub fn recommend_settings_pathed(
 }
 
 /// [`recommend_settings_pathed`] evaluated against an explicit [`TunerProfile`]
-/// rather than the embedded models / applied profile — used by the meta-tuner's
+/// rather than the embedded models / applied profile, used by the meta-tuner's
 /// ship-gate to score a candidate profile without mutating the process-global
 /// [`apply_profile`] state. Returns `None` if the profile's model for `path`
 /// cannot be parsed.
@@ -798,7 +798,7 @@ mod tests {
     fn tuner_profile_round_trips() {
         // The runtime profile (issue #1) is a self-describing config artifact:
         // serialize the default profile, read it back, and confirm the models and
-        // calibrated guards survive intact. (No `apply_profile` here — that mutates
+        // calibrated guards survive intact. (No `apply_profile` here, that mutates
         // a process-global and would perturb the other tuner tests in this binary.)
         let p = default_profile();
         let dir = std::env::temp_dir();

@@ -933,7 +933,7 @@ impl LuSymbolic {
     /// any numeric work, so a scheduler can fail-fast or pick an approximation when
     /// the estimate exceeds the memory budget. Deterministic and reproducible.
     /// Exact symbolic factor fill (the compact L+U value count summed over
-    /// supernodes) — the reliable memory-backstop metric. Unlike
+    /// supernodes), the reliable memory-backstop metric. Unlike
     /// [`MemoryEstimate::factor_nnz`](crate::diagnostics::MemoryEstimate::factor_nnz),
     /// a dense-panel upper bound that overshoots the real fill ~6-7x
     /// non-uniformly across orderings, this tracks the actually-stored fill.
@@ -1263,7 +1263,7 @@ pub fn factor_general_lu<T: Scalar>(
 // ===========================================================================
 // #14 front-growth introspection (opt-in: RSLAB_FRONT_STATS=1)
 //
-// Per-supernode factor extrema collected during the LU — the instrument for
+// Per-supernode factor extrema collected during the LU, the instrument for
 // localizing element growth that outside-in probes cannot see (a single
 // ordinary-looking row can carry the discharged error of a distant front).
 // Collected into a process-global store (cheap Mutex push, gated) and drained

@@ -1,5 +1,5 @@
 //! Runtime tuner profile (issue #1): applying the default profile must be a
-//! semantic no-op — the recommendation before and after `apply_profile` is
+//! semantic no-op, the recommendation before and after `apply_profile` is
 //! identical, because `default_profile()` bundles the embedded models with the
 //! default guards. This lives in its own test binary because `apply_profile`
 //! mutates a process-global (set-once), which would perturb the in-crate tuner

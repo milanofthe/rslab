@@ -482,7 +482,7 @@ pub struct LdltSymbolic {
     /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
     /// size. The estimate is a pure function of the structure and
     /// `size_of::<T>()`, but computing it rebuilds the supernode row
-    /// structures — expensive enough that the `tuned` → `nd_bakeoff` →
+    /// structures, expensive enough that the `tuned` → `nd_bakeoff` →
     /// `factor` pipeline used to pay it up to four times per `factor_auto`.
     est_cache: std::sync::Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
 }
@@ -540,7 +540,7 @@ impl LdltSymbolic {
     /// (LDLᵀ path) - a pure, deterministic function of the symbolic structure, for
     /// fail-fast / scheduling before any numeric work. See
     /// [`LuSymbolic::estimate_memory`](crate::LuSymbolic::estimate_memory).
-    /// Exact symbolic factor fill (nonzeros, from the column counts, ×1.2 slack) —
+    /// Exact symbolic factor fill (nonzeros, from the column counts, ×1.2 slack),
     /// the reliable memory-backstop metric. Unlike
     /// [`MemoryEstimate::factor_nnz`](crate::diagnostics::MemoryEstimate::factor_nnz),
     /// which is a dense-supernode *upper bound* that overshoots the real fill
@@ -747,7 +747,7 @@ mod tests {
     }
 
     /// The ND bakeoff must never return a pick with worse exact symbolic
-    /// fill or worse predicted flops than the incumbent — on a plain 7-point
+    /// fill or worse predicted flops than the incumbent, on a plain 7-point
     /// Laplacian rslab's AMD is genuinely competitive (measured tied at 32³),
     /// so this pins the Pareto guarantee, not an adoption.
     #[test]

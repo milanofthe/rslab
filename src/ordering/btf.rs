@@ -14,7 +14,7 @@
 //!    triangular** form: all entries outside the diagonal blocks lie above
 //!    them, and each diagonal block is irreducible (strongly connected).
 //!
-//! Both passes are iterative (explicit stacks, no recursion — safe on
+//! Both passes are iterative (explicit stacks, no recursion, safe on
 //! arbitrarily deep graphs) and allocation-linear in `n + nnz`.
 
 /// Result of the BTF permutation of an `n×n` pattern.
@@ -174,7 +174,7 @@ pub(crate) fn block_triangular_form(
     // Iterative Tarjan. Components are emitted in reverse topological order
     // of the edge direction above; placing them in emission order makes every
     // cross-block entry land ABOVE its diagonal block (block upper
-    // triangular) — see the module docs.
+    // triangular), see the module docs.
     const UNSET: usize = usize::MAX;
     let mut index = vec![UNSET; n]; // discovery index
     let mut lowlink = vec![0usize; n];

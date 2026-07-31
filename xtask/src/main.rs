@@ -1,4 +1,4 @@
-//! `cargo xtask` — the RSLAB meta-tuner (issue #1).
+//! `cargo xtask`, the RSLAB meta-tuner (issue #1).
 //!
 //! Turns the auto-tuner from a compile-time artifact into a reproducible,
 //! hardware-calibrated pipeline that emits a runtime `tuner_profile.json`:
@@ -88,7 +88,7 @@ fn holdout_corpus() -> Vec<(String, CscMatrix<Complex<f64>>)> {
     v
 }
 
-/// The (features, mf/ll ratio) a tuner needs for one matrix — mirrors
+/// The (features, mf/ll ratio) a tuner needs for one matrix, mirrors
 /// `LdltSymbolic::tuned`'s a-priori inputs.
 fn tuner_inputs(a: &CscMatrix<Complex<f64>>) -> Option<(StructuralFeatures, f64)> {
     let sym = LdltSymbolic::analyze(a).ok()?;
@@ -140,7 +140,7 @@ fn holdout_corpus_lu() -> Vec<(String, GeneralCsc<Complex<f64>>)> {
     v
 }
 
-/// The (features, mf/ll ratio) for an unsymmetric matrix — the LU-path analogue
+/// The (features, mf/ll ratio) for an unsymmetric matrix, the LU-path analogue
 /// of [`tuner_inputs`].
 fn tuner_inputs_lu(a: &GeneralCsc<Complex<f64>>) -> Option<(StructuralFeatures, f64)> {
     let sym = LuSymbolic::analyze(a).ok()?;
@@ -296,7 +296,7 @@ fn assemble_and_ship(models_dir: &Path, out: &Path, class: &str) -> i32 {
     };
     // Guards: min_gain is data-calibrated (z·CV) to this machine's timing noise;
     // the method-flip and memory guards keep the proven defaults (memory is the
-    // hard resource — never relaxed by calibration).
+    // hard resource, never relaxed by calibration).
     let (_, calib) = calibration();
     let def = default_profile();
     let candidate = TunerProfile {
@@ -313,7 +313,7 @@ fn assemble_and_ship(models_dir: &Path, out: &Path, class: &str) -> i32 {
     println!("=> candidate: LDLt {ldlt:.3}x  |  LU {lu:.3}x  vs default");
     // Ship only if **neither path** regresses beyond the timing noise floor (1%
     // band). The paths are separate models for separate problem classes, so each
-    // is judged on its own held-out class and must stand on its own — a candidate
+    // is judged on its own held-out class and must stand on its own, a candidate
     // may not trade an LU win for an LDLᵀ loss (or vice versa). A merely-neutral
     // path still passes (the candidate is the freshly-trained, calibrated one).
     const SHIP_MIN: f64 = 0.99;
@@ -321,7 +321,7 @@ fn assemble_and_ship(models_dir: &Path, out: &Path, class: &str) -> i32 {
     if worst < SHIP_MIN {
         let which = if ldlt < lu { "LDLt" } else { "LU" };
         eprintln!(
-            "SHIP-GATE FAILED: {which} {worst:.3}x < {SHIP_MIN:.2}x — keeping default, not writing {}",
+            "SHIP-GATE FAILED: {which} {worst:.3}x < {SHIP_MIN:.2}x, keeping default, not writing {}",
             out.display()
         );
         return 1;
@@ -358,7 +358,7 @@ fn cmd_tune(rest: &[String]) -> i32 {
     }
     let sweep = workdir.join("sweep.jsonl");
 
-    // 1) Sweep — expensive; skipped if the corpus sweep is already present so the
+    // 1) Sweep, expensive; skipped if the corpus sweep is already present so the
     // pipeline is resumable. Honors RLA_SWEEP_OUT so the bench writes into workdir.
     if !sweep.exists() {
         println!("== sweep: cargo bench --bench sweep (this is the expensive step) ==");
@@ -387,7 +387,7 @@ fn cmd_tune(rest: &[String]) -> i32 {
         println!("== sweep: reusing existing {} ==", sweep.display());
     }
 
-    // 2) Train — the Python trainer writes both per-path models into workdir.
+    // 2) Train, the Python trainer writes both per-path models into workdir.
     println!("== train: benches/train_tuner.py ==");
     let py = std::env::var("PYTHON").unwrap_or_else(|_| "python".to_string());
     let status = Command::new(&py)

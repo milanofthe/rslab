@@ -64,8 +64,8 @@ one-time cached hardware calibration), with an optional learned tuner for
 class-specific specialization under a deterministic memory backstop; and the numeric
 factorization is bit-identical regardless of the worker count. A mixed-precision mode
 factors in single precision and refines to double against the original matrix with an
-explicit backward-error certificate. When the factor is made approximate --- static-pivoted or
-thresholded --- it becomes a preconditioner, and a matching Krylov layer (COCG/COCR,
+explicit backward-error certificate. When the factor is made approximate (static-pivoted or
+thresholded) it becomes a preconditioner, and a matching Krylov layer (COCG/COCR,
 flexible GMRES, batched multi-RHS block GMRES with within-cycle deflation, and GCRO-DR
 subspace recycling) closes the accuracy gap. This report documents the core algorithms,
 their implementation, and the measured performance against \textsf{faer} and MKL PARDISO
@@ -76,8 +76,8 @@ over a complete-distribution corpus.
 \rT{} factorizes and solves $Ax=b$ for sparse $A$ that is complex-symmetric (routed to
 $\LDLt$), general unsymmetric (routed to $\LU$), or circuit-shaped (routed to the KLU
 path). The primary target is the complex-symmetric systems of frequency-domain
-electromagnetic and FEM analysis --- curl--curl Maxwell problems with lossy media or PML
-are complex-symmetric rather than Hermitian --- with the KLU path serving the
+electromagnetic and FEM analysis (curl--curl Maxwell problems with lossy media or PML
+are complex-symmetric rather than Hermitian), with the KLU path serving the
 MNA/SPICE-class operators of circuit extraction. The implementation is stable Rust with
 no C/Fortran dependency and no BLAS/LAPACK/METIS linkage, and is exposed to Python
 through a thin PyO3 layer that mirrors the Rust surface
@@ -124,13 +124,13 @@ Nested dissection is the default for $n>\num{10000}$.
 \textbf{Dispatch.} \code{OrderingMethod::Auto} routes by cheap structural predicates
 (very large and sparse $\to$ AMD; arrow/bordered patterns $\to$ AMF; otherwise the size
 rule). \code{AutoRace} instead runs the full symbolic factorization for each candidate
-and keeps the smallest exact fill, at about $4\times$ the single-pass analysis cost ---
+and keeps the smallest exact fill, at about $4\times$ the single-pass analysis cost,
 the deterministic fallback the tuner uses out of distribution.
 
 \section{Symbolic analysis}
 \label{sec:symbolic}
 From the ordered pattern \rT{} builds the elimination tree and detects fundamental
-supernodes --- maximal column runs whose row structure differs only by the eliminated
+supernodes, maximal column runs whose row structure differs only by the eliminated
 column. Small supernodes are amalgamated to widen the dense fronts that feed the BLAS-3
 kernels: nodes with fewer than $\code{nemin}=16$ columns~\cite{ssids} merge with their
 parent, using a column renumbering that re-postorders the tree so a desired parent--child
@@ -152,7 +152,7 @@ iterative Ruiz and MC64 matching-based scaling are selectable alternatives.
 \subsection{Supernodal left-looking \texorpdfstring{$\LDLt$}{LDLt}}
 The default symmetric path assembles one dense panel per supernode, updates it by every
 previously factored descendant (\code{cmod}: pull the descendant's columns, apply its
-block-diagonal $D$, subtract the rank update --- a scalar triple loop below a flop
+block-diagonal $D$, subtract the rank update, a scalar triple loop below a flop
 threshold, a SIMD GEMM above), then factors the fully-summed block in place (\code{cdiv})
 by a blocked Bunch--Kaufman partial factorization~\cite{bunchkaufman} with panel width
 64. For complex-symmetric $A$ the kernel is the real \code{sytf2} control flow with
@@ -176,7 +176,7 @@ matrix per supernode from its eliminated columns and its children's contribution
 (CBs), factors the fully-summed part, and passes the Schur complement up as its CB. A
 work-stealing tree recursion factors children in parallel; each CB is freed the moment it
 is extend-added into the parent, and where the CB stack is large children are reordered
-by Liu's $(\text{peak}-cb)$ rule~\cite{liu86} --- a scheduling hint that changes neither
+by Liu's $(\text{peak}-cb)$ rule~\cite{liu86}, a scheduling hint that changes neither
 numbering nor fill. The front is denser and more BLAS-3-rich than a left-looking panel
 but carries a higher transient peak, which is why both schedules ship and the choice is
 per matrix.
@@ -196,14 +196,14 @@ separate row permutation records the interchanges.
 \subsection{KLU path for circuit-shaped matrices}
 \label{sec:klu}
 Circuit-class operators (MNA/SPICE: extremely sparse, unsymmetric,
-near-triangularizable) defeat supernodal methods --- their irreducible blocks are far too
+near-triangularizable) defeat supernodal methods: their irreducible blocks are far too
 small for BLAS-3 fronts to pay off. \rT{} therefore ships a third path following
 SuiteSparse KLU~\cite{klu}, reimplemented in pure Rust.
 
 \emph{Analyze} permutes to block \emph{upper} triangular form (BTF): an MC21-style
 maximum transversal (augmenting-path matching with per-column lookahead, iterative)
-pairs every column with a row holding a structural nonzero --- an incomplete matching
-proves the matrix \emph{structurally} singular before any numeric work --- and Tarjan's
+pairs every column with a row holding a structural nonzero (an incomplete matching
+proves the matrix \emph{structurally} singular before any numeric work) and Tarjan's
 SCC algorithm on the matched digraph, emitted in reverse topological order, yields the
 symmetric permutation under which every entry outside the irreducible diagonal blocks
 lies above them. AMD then orders each block on its symmetrized pattern. Fill is confined
@@ -216,7 +216,7 @@ pattern in topological order, so the numeric work is proportional to the flop co
 Threshold partial pivoting prefers the (structurally nonzero) diagonal unless it falls
 below $10^{-3}$ of the column maximum; row-max scaling equilibrates the rows first.
 The path is strictly sequential and allocation-deterministic, so its results are
-\textbf{bit-identical across runs and thread counts} --- it doubles as the determinism
+\textbf{bit-identical across runs and thread counts}; it doubles as the determinism
 arbiter for the parallel paths.
 
 \emph{Refactor} is the path's distinctive fast lane: for a new value set on the
@@ -240,7 +240,7 @@ The KLU path never perturbs: a vanishing pivot is a hard, attributed error.
 \section{A-priori predictors}
 \label{sec:pred}
 The analyze phase computes a set of predictors as \emph{exact functions of the symbolic
-structure} and the scalar size $v$, before any numeric work --- the basis of the memory
+structure} and the scalar size $v$, before any numeric work, the basis of the memory
 guarantee, the heuristic configuration pick, the thread policy, and the resource planner of
 Sec.~\ref{sec:sil}.
 
@@ -249,7 +249,7 @@ structural upper bound (cancellation can only lower it). The transient peak is b
 separately per schedule. For the left-looking path, a reference-count simulation of the
 panel-freeing schedule walks the postorder, adds each panel as it is assembled, frees it
 when its refcount reaches zero, and records the running maximum of live panels plus
-already-compacted factor --- the floor the solver actually operates at; a conservative
+already-compacted factor, the floor the solver actually operates at; a conservative
 whole-run bound adds all panels, the input, and a scratch term
 $\tfrac14(\text{panels}+\text{factor})+\SI{32}{\mega\byte}$ for the per-thread
 \code{cmod}/\code{cdiv} buffers. For the multifrontal path a level-parallel model takes,
@@ -300,14 +300,14 @@ The shipped default configuration is a deterministic, model-free heuristic: the
 adaptive ordering choice, the measured default kernel knobs, an exact
 nested-dissection bakeoff on large systems (re-analyze with \code{MetisND}, adopt only
 on a clear predicted-flops win with no regression in exact fill or transient peak),
-and --- after a one-time cached hardware calibration --- a critical-path-aware worker
+and, after a one-time cached hardware calibration, a critical-path-aware worker
 count from the calibrated cost model. Every input to the pick is an exact a-priori
 quantity; nothing is modeled.
 
 The mixed-precision solvers (\code{MixedLdltSolver}/\code{MixedLuSolver}) factor
 $\mathrm{cast}_{32}(A)$ at half the memory and solve through an explicit refinement
-ladder --- plain iterative refinement escalating to GMRES-IR with the single-precision
-factor as the preconditioner --- reporting the achieved normwise backward error and
+ladder (plain iterative refinement escalating to GMRES-IR with the single-precision
+factor as the preconditioner), reporting the achieved normwise backward error and
 whether the double-precision certificate holds (Carson--Higham multi-precision IR); on
 the reference class the single-precision factor runs $1.64	imes$ and certifies at the
 roundoff level after two refinement steps.
@@ -318,15 +318,15 @@ configuration, trained offline~\cite{sklearn} on a complete-distribution corpus
 (curl--curl Maxwell, Stokes/KKT saddle-point, convection--diffusion across the
 grid-P\'eclet range, plus SuiteSparse), retrainable into a runtime
 \code{tuner\_profile.json} artifact. Its picks are constrained by a deterministic
-guard stack --- a re-analysis check that the pick's exact fill, flops, and memory
+guard stack (a re-analysis check that the pick's exact fill, flops, and memory
 floor stay within $1.02\times$/$1.05\times$/$1.0\times$ of the default's, and a
-minimum-improvement threshold --- so peak memory is \emph{guaranteed} never to exceed
+minimum-improvement threshold), so peak memory is \emph{guaranteed} never to exceed
 the default's.
 
 \section{Solver-in-the-loop and resource governance}
 \label{sec:sil}
-\rT{} is built to run \emph{inside} an outer loop --- a frequency sweep, adaptive mesh
-refinement, a Newton or time-stepping iteration, many concurrent extractions --- rather
+\rT{} is built to run \emph{inside} an outer loop (a frequency sweep, adaptive mesh
+refinement, a Newton or time-stepping iteration, many concurrent extractions) rather
 than as a one-shot black box, and three mechanisms carry that model. First, analyze and
 factor are separate phases: a symbolic object factors any number of matrices sharing its
 pattern, so a same-pattern sequence pays the ordering and symbolic cost once (and on the
@@ -335,8 +335,8 @@ runs in a \emph{scoped} thread pool of caller-set width, so many concurrent solv
 coexist without oversubscribing the machine, and a factored preconditioner hands its
 thread policy to the Krylov layer so factor and solve share one concurrency budget.
 Third, the resource planner \code{tuning::plan} turns a memory estimate, a budget (a
-memory ceiling and a thread budget), and the cached calibration into a plan --- a
-predicted peak, a predicted runtime, and a fits/does-not-fit decision --- as a pure
+memory ceiling and a thread budget), and the cached calibration into a plan (a
+predicted peak, a predicted runtime, and a fits/does-not-fit decision) as a pure
 function of its inputs. Because the memory estimate of Sec.~\ref{sec:pred} is an upper
 bound rather than a sample, a scheduler can pack concurrent solves against a memory
 ceiling without extra safety margin, fail fast before allocating, or switch to an
@@ -349,7 +349,7 @@ close the loop after the fact, estimate against measured.
 \label{sec:iterative}
 When the factor is approximate, accuracy is recovered by iteration. The iteration and
 the preconditioner are decoupled by two traits: \code{LinearOperator} supplies
-$y\leftarrow Ax$ and a block $Y\leftarrow AX$ (an explicit matrix, or matrix-free ---
+$y\leftarrow Ax$ and a block $Y\leftarrow AX$ (an explicit matrix, or matrix-free;
 an FMM/MoM operator with \rT{} factoring only the sparse near-field), and
 \code{Preconditioner} supplies $z\leftarrow M^{-1}r$ and a block apply that a factored
 solver implements through the parallel \code{solve\_many} (a
@@ -365,7 +365,7 @@ the flexible variant~\cite{fgmres}: the preconditioned Arnoldi vectors $z_j=M^{-
 are kept as a second basis and $x\mathrel{+}=Zy$, which saves one $M^{-1}$ solve per
 restart cycle and admits a varying preconditioner. Orthogonalization is MGS with a
 conditional DGKS~\cite{dgks} second pass. Each cycle measures the \emph{true} residual
-$\|b-Ax\|$ --- the only reliable stop test on ill-conditioned near-field operators ---
+$\|b-Ax\|$, the only reliable stop test on ill-conditioned near-field operators,
 and a Hessenberg-diagonal guard truncates the least-squares solve to its
 well-conditioned prefix, so a rank-deficient cycle reports non-convergence instead of
 injecting NaN.
@@ -374,7 +374,7 @@ injecting NaN.
 matvec and preconditioner are issued once per step as block applies. Each right-hand
 side keeps its own Arnoldi basis (batched-independent; a shared-subspace block Krylov
 method is future work), which lets a column \emph{deflate} out the moment it converges
---- including mid-cycle, compacting the batched applies to the still-active width. The
+including mid-cycle, compacting the batched applies to the still-active width. The
 panel orthogonalization is block CGS2~\cite{giraud,barlow}: two panel-wide sweeps,
 BLAS-3 intensity, parallelized in fixed row chunks and therefore bit-identical across
 thread counts. Measured on preconditioned convection--diffusion ($n=\num{40000}$,
@@ -382,8 +382,8 @@ complex), BCGS2 scales to $\sim2.2\times$ at 12 cores where the per-RHS MGS path
 flat-to-negative, and per-RHS cost stays near-flat in the block width.
 
 \textbf{GCRO-DR subspace recycling.} For sequences of related solves,
-GCRO-DR~\cite{gcrodr,morgan} retains the $k$ harmonic-Ritz vectors of smallest value ---
-the near-invariant subspace that governs restarted-GMRES stagnation --- deflates them
+GCRO-DR~\cite{gcrodr,morgan} retains the $k$ harmonic-Ritz vectors of smallest value,
+the near-invariant subspace that governs restarted-GMRES stagnation, and deflates them
 across restarts within a solve, and recycles them across solves through an opaque
 handle refreshed in place. The subspace only \emph{shapes} the Krylov space: the outer
 true-residual test stays authoritative, every recycle step degrades gracefully to plain
@@ -398,12 +398,12 @@ adaptive restart length that keeps the up-front Arnoldi basis under a memory bud
 \section{Benchmarks}
 \label{sec:eval}
 All cross-solver figures come from the \code{bench\_suite} engine over a
-complete-distribution corpus --- structured-grid generators (curl--curl Maxwell,
+complete-distribution corpus: structured-grid generators (curl--curl Maxwell,
 shifted Helmholtz, Stokes/KKT saddle-point, convection--diffusion over the grid-P\'eclet
 range, BEM/MoM near-field kernels) plus the complex SuiteSparse~\cite{suitesparse}
-matrices, 8k--125k DOFs, \code{Complex<f64>} --- measured in one run on a quiet 12-core
+matrices, 8k--125k DOFs, \code{Complex<f64>}, measured in one run on a quiet 12-core
 machine, so the cross-solver ratios carry no run-to-run drift. RSLAB runs its shipped
-default --- the deterministic heuristic pick (adaptive ordering, exact ND bakeoff,
+default, the deterministic heuristic pick (adaptive ordering, exact ND bakeoff,
 calibrated worker count); each path is compared on its own class against its own PARDISO
 mtype~\cite{pardiso} and faer~\cite{faer}.
 
@@ -413,8 +413,8 @@ $\nnz$ with per-solver power-law fits; Table~\ref{tab:scaling} gives the head-to
 geomean ratios. \rT{} sits between the two on both paths: faster than the
 pure-Rust faer, moderately behind the hand-optimized MKL PARDISO
 ($5.6\times$ sym / $5.1\times$ unsym). The heuristic pick's win over the fixed
-default is visible as a gap that widens with problem size --- largest on the big
-matrices where a mispicked ordering costs most --- and on the symmetric path
+default is visible as a gap that widens with problem size (largest on the big
+matrices where a mispicked ordering costs most) and on the symmetric path
 never comes at a memory cost. On accuracy
 (Fig.~\ref{fig:residual}), 24 of 31 corpus matrices factor to a relative residual below
 $10^{-8}$, matching PARDISO and ahead of faer; the exact $\LDLt$ declines a handful of
@@ -427,7 +427,7 @@ subtraction, and the 32-bit compressed factor are all bit-identical.
 \centering
 \includegraphics[width=\textwidth]{h2h_ldlt.pdf}
 \caption{$\LDLt$ path (symmetric, PARDISO mtype 6): factor wall-clock (left) and peak
-memory (right) vs.\ problem size --- RSLAB vs.\ faer vs.\ MKL PARDISO, with power-law
+memory (right) vs.\ problem size: RSLAB vs.\ faer vs.\ MKL PARDISO, with power-law
 fits.}
 \label{fig:h2h_ldlt}
 \end{figure}
@@ -448,12 +448,12 @@ accompanies the heuristic pick (blue); on time the pick scales flatter than PARD
 \toprule
 RSLAB vs & $\LDLt$ (sym) & $\LU$ (unsym) \\
 \midrule
-MKL PARDISO --- factor time & $5.6\times$ slower & $5.1\times$ slower \\
-MKL PARDISO --- peak memory & $2.8\times$ more & $3.6\times$ more \\
-faer $\LU$\textsuperscript{$\dagger$} --- factor time & \textbf{\num{6.7}}$\times$ faster & \textbf{\num{2.7}}$\times$ faster \\
-faer $\LU$\textsuperscript{$\dagger$} --- peak memory & \textbf{\num{1.8}}$\times$ less & $1.4\times$ more \\
-fixed default cfg --- factor time & \textbf{\num{1.84}}$\times$ faster & \textbf{\num{1.49}}$\times$ faster \\
-fixed default cfg --- peak memory & \textbf{\num{0.90}}$\times$ (less) & $1.11\times$ more \\
+MKL PARDISO: factor time & $5.6\times$ slower & $5.1\times$ slower \\
+MKL PARDISO: peak memory & $2.8\times$ more & $3.6\times$ more \\
+faer $\LU$\textsuperscript{$\dagger$}: factor time & \textbf{\num{6.7}}$\times$ faster & \textbf{\num{2.7}}$\times$ faster \\
+faer $\LU$\textsuperscript{$\dagger$}: peak memory & \textbf{\num{1.8}}$\times$ less & $1.4\times$ more \\
+fixed default cfg: factor time & \textbf{\num{1.84}}$\times$ faster & \textbf{\num{1.49}}$\times$ faster \\
+fixed default cfg: peak memory & \textbf{\num{0.90}}$\times$ (less) & $1.11\times$ more \\
 \bottomrule
 \end{tabular}
 \caption{Head-to-head geomean ratios (63 sizes per path, 1k--110k DOFs),
@@ -483,9 +483,9 @@ solvers, which gained complex support and a sparse LU in macOS 15.5. \rT{} runs
 its shipped default (heuristic pick, hardware-calibrated on this machine);
 Accelerate runs its vendor-best configuration per class: Cholesky-first with an
 $\LDLt$ fallback for real-symmetric matrices, its new sparse LU (TPP,
-\code{pivotTolerance} $0.01$) for unsymmetric and circuit-shaped ones, and ---
+\code{pivotTolerance} $0.01$) for unsymmetric and circuit-shaped ones, and,
 because its complex $\LDLt$ is Hermitian-only (verified empirically: the lower
-triangle is mirrored conjugated) --- LU on the \emph{full} matrix for the
+triangle is mirrored conjugated), LU on the \emph{full} matrix for the
 complex-symmetric families, the same structural handicap faer carries. Each
 matrix gets an AMD-vs-Metis ordering bakeoff (\code{SparseOrderDefault} is
 plain AMD, up to $4.4\times$ the Metis fill on the large EM/FEM systems); the
@@ -495,7 +495,7 @@ via instrumented allocation callbacks.
 
 Figures~\ref{fig:apple_ldlt}--\ref{fig:apple_klu} show the per-path scaling;
 Table~\ref{tab:apple} the geomean ratios. On its home silicon the vendor
-library wins most of the distribution --- its AMX-backed kernels take the small
+library wins most of the distribution: its AMX-backed kernels take the small
 and mid sizes outright ($0.19\times$--$0.64\times$ \rT's factor time in
 geomean). The structural story survives at scale: above ${\sim}3\cdot10^{5}$
 nonzeros on the complex-symmetric systems, \rT's $A=A^{T}$ exploitation turns
@@ -504,14 +504,14 @@ $\alpha\approx1.68$ vs.\ $1.42$). The circuit comparison is one-shot
 analyze+factor+solve; KLU's numeric-only refactor sweeps are not exercised. On
 accuracy, Accelerate reaches $10^{-8}$ on 25 of 36 corpus matrices, but on five
 hard indefinite/ill-scaled ones (stokes64, bratu3d, cont-201, rim, lhr34) it
-returns NaN or garbage \emph{with an OK status} --- the same silent-degradation
+returns NaN or garbage \emph{with an OK status}, the same silent-degradation
 mode as faer, where \rT{} declines cleanly.
 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{h2h_apple_ldlt.pdf}
-\caption{Apple M3: $\LDLt$ path (complex-symmetric + real-symmetric families)
---- factor wall-clock (left) and live-bytes peak (right) vs.\ problem size,
+\caption{Apple M3: $\LDLt$ path (complex-symmetric + real-symmetric families):
+factor wall-clock (left) and live-bytes peak (right) vs.\ problem size,
 \rT{} shipped pick vs.\ Apple Accelerate (vendor-best configuration), with
 power-law fits.}
 \label{fig:apple_ldlt}
@@ -529,7 +529,7 @@ sparse LU scales at $\alpha\approx1.36$ vs.\ \rT's $1.15$ on time.}
 \centering
 \includegraphics[width=\textwidth]{h2h_apple_klu.pdf}
 \caption{Apple M3: circuit-shaped matrices (complex MNA, $G+j\omega C$). \rT{}
-KLU vs.\ the multifrontal $\LU$ default vs.\ Accelerate LU; one-shot factor ---
+KLU vs.\ the multifrontal $\LU$ default vs.\ Accelerate LU; one-shot factor, so
 KLU's refactor-driven sweep niche is not exercised here.}
 \label{fig:apple_klu}
 \end{figure}
@@ -554,7 +554,7 @@ is faster/leaner. One run, one machine, live-bytes memory on both sides.}
 
 \subsection{KLU path on circuit-shaped matrices}
 Table~\ref{tab:klu} benchmarks the KLU path against the multifrontal $\LU$ (defaults) on
-MNA-like matrices --- $\sim$4--5 nnz/column, unsymmetric, column-diagonally dominant,
+MNA-like matrices: $\sim$4--5 nnz/column, unsymmetric, column-diagonally dominant,
 cascaded stages giving a genuinely reducible BTF structure
 (\code{cargo bench --bench klu\_circuit}, Apple M3). The KLU factor is
 \numrange{2}{19}$\times$ faster with \numrange{1.7}{5.7}$\times$ less fill, the gap
@@ -600,8 +600,8 @@ refactor for fixed-pattern sweeps. It reaches within a single-digit factor of MK
 while remaining dependency-free, is faster and smaller than the open-source alternatives,
 and its analyze phase predicts memory, work, and runtime exactly enough that a learned
 tuner can optimize configuration under a hard memory guarantee. When the factor is made
-approximate it becomes a preconditioner, and the matching Krylov layer --- COCG/COCR,
-flexible GMRES, deflating block GMRES, GCRO-DR recycling --- turns the direct factor into
+approximate it becomes a preconditioner, and the matching Krylov layer (COCG/COCR,
+flexible GMRES, deflating block GMRES, GCRO-DR recycling) turns the direct factor into
 the engine of a fast preconditioned iterative solver.
 
 \begingroup

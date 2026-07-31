@@ -14,7 +14,7 @@
 //!    then AMD orders each irreducible diagonal block on its symmetrized
 //!    pattern.
 //! 2. **Factor** ([`KluSymbolic::factor`]): each diagonal block is factored by
-//!    a left-looking Gilbert-Peierls LU — per-column depth-first reach on the
+//!    a left-looking Gilbert-Peierls LU, per-column depth-first reach on the
 //!    growing L pattern, so the numeric work is proportional to the flop count,
 //!    with threshold partial pivoting that prefers the (structurally nonzero)
 //!    diagonal. Off-block entries are not factored; they only enter the block
@@ -27,7 +27,7 @@
 //!    re-[`factor`](KluSymbolic::factor) with pivoting.
 //!
 //! Every phase is strictly sequential and allocation-deterministic, so results
-//! are **bit-identical across runs and thread counts** — this path doubles as
+//! are **bit-identical across runs and thread counts**, this path doubles as
 //! the determinism arbiter for the parallel multifrontal paths.
 
 use crate::error::RslabError;
@@ -140,7 +140,7 @@ impl KluSymbolic {
     ///
     /// Fails with [`RslabError::StructurallySingular`] when no complete
     /// matching exists (some set of `k` columns has entries in fewer than `k`
-    /// rows) — such a matrix is singular for *every* value assignment.
+    /// rows), such a matrix is singular for *every* value assignment.
     pub fn analyze_with<T: Scalar>(
         a: &GeneralCsc<T>,
         settings: &KluSettings,
@@ -276,7 +276,7 @@ impl KluSymbolic {
 
     /// Symbolic Gilbert-Peierls pass over the stored pattern assuming
     /// diagonal pivots: exact per-path fill and flop counts, no values.
-    /// Computed once and cached — the pass costs about as much as a numeric
+    /// Computed once and cached, the pass costs about as much as a numeric
     /// factor, so repeated `factor`/`estimate_memory` calls must not repay it.
     fn symbolic_fill(&self) -> KluFill {
         *self.fill.get_or_init(|| self.symbolic_fill_uncached())
@@ -365,7 +365,7 @@ impl KluSymbolic {
     }
 
     /// Exact symbolic factor fill (`L` + `U` + diagonal + off-block entries)
-    /// under the diagonal-pivoting assumption — the memory-backstop metric,
+    /// under the diagonal-pivoting assumption, the memory-backstop metric,
     /// mirroring [`LuSymbolic::symbolic_factor_nnz`](crate::LuSymbolic::symbolic_factor_nnz).
     pub fn symbolic_factor_nnz(&self) -> usize {
         let fill = self.symbolic_fill();
@@ -373,7 +373,7 @@ impl KluSymbolic {
     }
 
     /// **A-priori** memory/work estimate for factoring a matrix of scalar
-    /// type `T` with this analysis — deterministic, computed from the stored
+    /// type `T` with this analysis, deterministic, computed from the stored
     /// pattern alone, mirroring [`LuSymbolic::estimate_memory`](crate::LuSymbolic::estimate_memory).
     ///
     /// KLU specifics: the fill is exact under diagonal pivoting (threshold
@@ -489,7 +489,7 @@ struct KluFactors<T> {
     l_rowidx: Vec<usize>,
     l_val: Vec<T>,
     /// U: strictly-above-diagonal within-block entries per column, stored in
-    /// elimination (topological) order — the refactor replay order.
+    /// elimination (topological) order, the refactor replay order.
     u_colptr: Vec<usize>,
     u_rowidx: Vec<usize>,
     u_val: Vec<T>,
@@ -622,7 +622,7 @@ fn factor_impl<T: Scalar>(
             topo.clear();
             nonpiv.clear();
 
-            // Pass 1 — symbolic: DFS the reach of the column's within-block
+            // Pass 1, symbolic: DFS the reach of the column's within-block
             // pattern over the L columns factored so far. Pivotal nodes come
             // out in `topo` post-order; non-pivotal nodes (pivot candidates)
             // in `nonpiv`.
@@ -677,7 +677,7 @@ fn factor_impl<T: Scalar>(
                 }
             }
 
-            // Pass 2 — scatter the scaled column values (off-block entries go
+            // Pass 2, scatter the scaled column values (off-block entries go
             // straight to F; earlier blocks are already fully pivoted, so
             // their final positions are known).
             for k in a.col_ptr[c]..a.col_ptr[c + 1] {
@@ -692,7 +692,7 @@ fn factor_impl<T: Scalar>(
                 }
             }
 
-            // Pass 3 — numeric update in topological order (reverse
+            // Pass 3, numeric update in topological order (reverse
             // post-order): each pivotal node's final value feeds its L column
             // into the remaining work vector, and becomes a U entry. The axpy
             // runs through `fmadd` (FMA on native builds); `refactor`'s
@@ -945,7 +945,7 @@ impl<T: Scalar> KluSolver<T> {
     ///
     /// Batched: the factor is traversed **once** and every stored entry is
     /// applied to all `nrhs` columns through contiguous per-row inner loops
-    /// (SIMD-friendly and cache-reusing) — the sparse-scalar factorization
+    /// (SIMD-friendly and cache-reusing), the sparse-scalar factorization
     /// cannot use BLAS-3, but the wide solve can still vectorize across the
     /// right-hand sides. Each column's operation order is identical to
     /// [`solve`](Self::solve), so the result is bit-identical to `nrhs`
@@ -1069,7 +1069,7 @@ impl<T: Scalar> KluSolver<T> {
 
     /// The block forward/backward substitution on the permuted/scaled vector.
     /// The axpys run through `fmadd` with the loop-invariant operand negated
-    /// once per column — `solve_many` negates the per-entry factor value
+    /// once per column, `solve_many` negates the per-entry factor value
     /// instead, which is bitwise the same product (`(-a)·b == a·(-b)` holds
     /// exactly per real FMA), so the two stay bit-identical per column.
     fn solve_permuted(&self, w: &mut [T]) {
@@ -1112,7 +1112,7 @@ impl<T: Scalar> KluSolver<T> {
 
     /// Numeric-only refactorization: replay the stored pattern and pivot
     /// sequence on new values with the **same** sparsity pattern. No symbolic
-    /// work, no pivot search — the fast path for frequency sweeps and Newton
+    /// work, no pivot search, the fast path for frequency sweeps and Newton
     /// steps. Fails with a pattern-mismatch error if `a`'s pattern deviates
     /// from the factored one, and with [`RslabError::SingularBasis`] if a
     /// frozen pivot becomes zero (re-`factor` with pivoting in that case).
@@ -1141,7 +1141,7 @@ impl<T: Scalar> KluSolver<T> {
             for j in bs..be {
                 let c = f.col_perm[j];
                 // Scatter (final position space). Off-block entries must hit
-                // the stored F pattern slot-for-slot — the same storage-order
+                // the stored F pattern slot-for-slot, the same storage-order
                 // walk as at factor time.
                 scattered.clear();
                 let mut fcur = f.f_colptr[j];

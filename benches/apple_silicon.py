@@ -56,7 +56,7 @@ def family_figure(recs, title, slug, out_dir, order=ORDER):
                           order=order, ax=ax_wct)
     print("  peak memory ~ nnz^alpha:")
     plot_metric(recs, "mem", "mem_mb", "peak memory [MB]", None, order=order, ax=ax_mem)
-    fig.suptitle(f"{title} — factor time & peak memory (Apple M3)",
+    fig.suptitle(f"{title}: factor time & peak memory (Apple M3)",
                  color=bench_style.GRAY)
     handles = [Line2D([], [], color=c, marker=mk, ls="", label=lbl)
                for _, lbl, c, mk in present]

@@ -9,7 +9,7 @@ was found.
 
 Reference pattern: 40³ 7-point grid (the `helmholtz_64000` pattern),
 metric = **exact scalar nnz(L)** incl. diagonal via elimination-tree
-column counts (no supernode padding — rslab's `symbolic_factor_nnz`
+column counts (no supernode padding, rslab's `symbolic_factor_nnz`
 and MKL's `iparm(18)` both include padding and read ~0.3-2 M higher).
 Harness: `cargo run --release -p rslab-metis --example grid_fill [m]`.
 The column-count computation was validated against brute-force
@@ -28,7 +28,7 @@ symbolic elimination on 3³-6³ grids with random permutations.
 | **rslab-metis after (this work)** | **14.00 M** |
 
 Knob sweeps on the old pipeline (imbalance, fm_passes, niparts,
-amd_switch, coarsen_floor, seeds) all landed within ±3 % of 20.9 M —
+amd_switch, coarsen_floor, seeds) all landed within ±3 % of 20.9 M,
 no parameter headroom existed.
 
 Findings that shaped the fix:
@@ -36,18 +36,18 @@ Findings that shaped the fix:
 1. **Separator size is NOT the lever.** The old pipeline's top-level
    separator on 40³ was exactly 1600 = the perfect 40×40 plane, and
    per-level `sep/n^(2/3)` ratios were ≤ 1 throughout. Even *perfect*
-   plane separators with any leaf treatment stay at ~21 M — worse than
+   plane separators with any leaf treatment stay at ~21 M, worse than
    METIS's 14.1 M, whose top separator is a *wavy* y≈20 surface of
    1683 vertices (bigger than the plane!).
 2. **The fill excess is distributed, not top-heavy.** Fill by
    elimination-position decile: MKL [0.5..1.0, 5.3] M vs geometric
-   [1.0..3.7, 4.4] M — the top dense block is identical (1.281 M in
+   [1.0..3.7, 4.4] M, the top dense block is identical (1.281 M in
    both), the loss is 2-4× in every band below it, i.e. in how the
    mid-level separators couple to their ancestors.
 3. What METIS does differently (`ometis.c`/`sfm.c`/`srefine.c`): the
    node separator is constructed ONCE at the coarsest level (best edge
    bisection → min vertex cover) and then **refined as a node
-   separator at every uncoarsening step** — `FM_2WayNodeBalance` +
+   separator at every uncoarsening step**, `FM_2WayNodeBalance` +
    `FM_2WayNodeRefine1Sided` (hill-climbing FM with negative-gain
    moves, breakout limit `min(3·nbnd, 300)`, best-prefix rollback,
    gain = `vwgt[v] − edegrees[v][other]`). Our old pipeline refined
@@ -94,11 +94,11 @@ Cumulative factor trajectory on this case: 1552 ms (pre-audit)
    now. Until then only explicit `with_ordering(MetisND)` and the
    `tuned()` ND bakeoff benefit.
 2. Remaining 12 % vs MKL (14.0 vs 12.5 M): candidates from the METIS
-   source we did not port — `MlevelNodeBisectionL2` (pre-coarsen 4
+   source we did not port, `MlevelNodeBisectionL2` (pre-coarsen 4
    levels, 5 independent runs, keep best separator), `nseps` multi-try
    at every bisection, 2-sided refinement at the coarsest level,
    CoarsenTo = clamp(n/8, 40, 100) vs our floor 120.
 3. `MMDSWITCH`-analog: our AMD-leaf switch at 200 measured neutral
-   (60: 13.86 M, 400: 14.45 M) — leave at 200.
+   (60: 13.86 M, 400: 14.45 M), leave at 200.
 4. MKL-perm probe + METIS reference live in the session scratchpad
    (`mkl_nd_probe`); the durable harness is the `grid_fill` example.

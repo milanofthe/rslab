@@ -2,13 +2,13 @@
 //! factor each matrix under a method x pivot configuration sweep, solve a
 //! deterministic pseudo-random b through the factor, and report the TRUE
 //! relative residual `||A x - b|| / ||b||` computed straight from the COO
-//! entries — LU quality isolated from every GMRES effect. One step of
+//! entries: LU quality isolated from every GMRES effect. One step of
 //! iterative refinement is reported as well: a factor that refines is a
 //! usable preconditioner even when its direct residual is poor.
 //!
 //! Key question this answers: rapidmom ran BOTH `preconditioner(..)` and
-//! `exact().with_pivot(PerturbToEps)` — which are the SAME LeftLooking path
-//! (exact() defaults to LeftLooking) — so the multifrontal method has never
+//! `exact().with_pivot(PerturbToEps)`, which are the SAME LeftLooking path
+//! (exact() defaults to LeftLooking), so the multifrontal method has never
 //! been measured on these matrices at all.
 //!
 //! Run: `cargo bench --bench mom_factor_probe [-- <substr> ...]`
@@ -22,7 +22,7 @@ use rslab::{parse_mtx_complex_general, FactorMethod, LuSolver, SolverSettings, Z
 
 type C = Complex<f64>;
 
-/// Deterministic LCG in [-1, 1] — reproducible RHS without a rand dependency.
+/// Deterministic LCG in [-1, 1]: reproducible RHS without a rand dependency.
 struct Lcg(u64);
 impl Lcg {
     fn next_f64(&mut self) -> f64 {
@@ -38,7 +38,7 @@ fn norm2(v: &[C]) -> f64 {
     v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()
 }
 
-/// r = b - A·x from the raw COO entries (duplicates sum — the file convention).
+/// r = b - A·x from the raw COO entries (duplicates sum, the file convention).
 fn residual(entries: &[(usize, usize, C)], x: &[C], b: &[C]) -> Vec<C> {
     let mut r = b.to_vec();
     for &(i, j, v) in entries {
@@ -187,7 +187,7 @@ fn main() {
             let r1 = residual(&mtx.entries, &x, &b);
             let res1 = norm2(&r1) / nb;
             // MULTI-STEP refinement trajectory (#14): the per-step contraction rate is
-            // the quantity a Krylov method actually lives on — a factor whose one-shot
+            // the quantity a Krylov method actually lives on: a factor whose one-shot
             // residual is fine but whose trajectory STAGNATES (or bounces) explains a
             // divergent preconditioned iteration that single-step probes miss.
             let mut traj = vec![res1];
@@ -220,7 +220,7 @@ fn main() {
                 tstr.join(" ")
             );
             // #14 front-growth report (RSLAB_FRONT_STATS=1): the top supernodes by
-            // factor magnitude — the growth localization instrument.
+            // factor magnitude, the growth localization instrument.
             let stats = rslab::take_front_stats();
             if !stats.is_empty() {
                 let mut top: Vec<_> = stats.iter().collect();

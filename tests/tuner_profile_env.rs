@@ -1,6 +1,6 @@
 //! `RSLAB_TUNER_PROFILE` env auto-load: a profile named by the environment is
 //! picked up on first tuner use with no recompile and no explicit `apply_profile`
-//! call — the config-artifact contract of the meta-tuner (issue #1). Own binary,
+//! call, the config-artifact contract of the meta-tuner (issue #1). Own binary,
 //! because the first tuner call sets a process-global.
 
 use rslab::{
@@ -31,7 +31,7 @@ fn env_named_profile_is_auto_loaded() {
     );
 
     // The env profile is now the active one, so a manual re-apply is rejected
-    // (set-once) — confirming the env profile was actually installed.
+    // (set-once), confirming the env profile was actually installed.
     assert!(
         rslab::apply_profile(&default_profile()).is_err(),
         "env profile occupies the set-once slot"
