@@ -43,6 +43,9 @@ const UNSET: usize = usize::MAX;
 /// enforced at analyze time, far beyond this path's design point).
 type Ki = u32;
 const KI_UNSET: Ki = Ki::MAX;
+/// Tag bit in the refactor scatter program: the entry lands in an F slot
+/// (off-block value) rather than the elimination work vector.
+const KI_FBIT: Ki = 1 << 31;
 
 /// Options for the KLU path. Defaults follow SuiteSparse KLU: threshold
 /// partial pivoting with strong diagonal preference (`pivot_tol = 1e-3`),
@@ -443,7 +446,12 @@ impl KluSymbolic {
         a: &GeneralCsc<T>,
         settings: &KluSettings,
     ) -> Result<KluSolver<T>, RslabError> {
-        let estimate = self.estimate_memory::<T>();
+        // Attach the a-priori estimate only when it has already been computed
+        // (an explicit `estimate_memory` call): the estimator is a pattern-only
+        // Gilbert-Peierls pass costing about as much as a numeric factor, and
+        // factor() must not silently pay it - the solvers never measure (or
+        // estimate) implicitly.
+        let estimate = self.fill.get().map(|_| self.estimate_memory::<T>());
         let t = std::time::Instant::now();
         let factors = factor_impl(self, a, settings)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -454,7 +462,7 @@ impl KluSymbolic {
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: 1,
             factor_nnz: nnz,
-            estimate: Some(estimate),
+            estimate,
             ..Default::default()
         };
         diagnostics.push(
@@ -508,6 +516,13 @@ struct KluFactors<T> {
     f_colptr: Vec<usize>,
     f_rowidx: Vec<Ki>,
     f_val: Vec<T>,
+    /// Refactor scatter program, aligned with the input's storage order.
+    /// For entry `k` of the pattern-frozen matrix: `scatter_expect[k]` is
+    /// the final row position recorded at factor time (`pinv[row]`), the
+    /// branch-free pattern check; `scatter_target[k]` encodes the value's
+    /// destination: F slot `i` as `KI_FBIT | i`, else work-vector position.
+    scatter_expect: Vec<Ki>,
+    scatter_target: Vec<Ki>,
 }
 
 /// KLU solver handle: factor (or analyze+factor), then solve / refactor.
@@ -563,9 +578,9 @@ fn factor_impl<T: Scalar>(
         return Err(pattern_mismatch());
     }
 
-    if n as u64 >= Ki::MAX as u64 {
+    if n as u64 >= KI_FBIT as u64 || sym.nnz as u64 >= KI_FBIT as u64 {
         return Err(RslabError::InvalidInput(
-            "klu: dimension exceeds the 32-bit index range of this path".to_string(),
+            "klu: dimension/nnz exceeds the 31-bit index range of this path".to_string(),
         ));
     }
 
@@ -580,6 +595,12 @@ fn factor_impl<T: Scalar>(
     // both fields for every visited node; packing them halves its random
     // cache-line traffic vs two separate arrays.
     let mut mark: Vec<[Ki; 2]> = vec![[0, KI_UNSET]; n];
+    // Symmetric pruning (Eisenstat & Liu, SIMAX 1992): once column `s` has a
+    // symmetric pivot pair (`U(s,k) != 0` and `L(k,s) != 0`), the DFS only
+    // needs the prefix of `L(:,s)` holding rows already pivotal at step `k`;
+    // every pruned row is covered through column `k`'s pattern. `lpend[s]`
+    // is the exclusive prefix end (KI_UNSET = unpruned, scan to column end).
+    let mut lpend: Vec<Ki> = vec![KI_UNSET; n];
     // Numeric work vector and DFS state, all in pre-pivot position space.
     let mut x = vec![T::zero(); n];
     let mut node_stack = vec![0 as Ki; n];
@@ -607,6 +628,15 @@ fn factor_impl<T: Scalar>(
     f_colptr.push(0usize);
     let mut f_rowidx: Vec<Ki> = Vec::with_capacity(f_res);
     let mut f_val: Vec<T> = Vec::with_capacity(f_res);
+    // Refactor scatter program (see the struct docs); within-block targets
+    // are recorded as pre-pivot positions and fixed up at block end.
+    let mut scatter_expect = vec![0 as Ki; sym.nnz];
+    let mut scatter_target = vec![0 as Ki; sym.nnz];
+
+    let prof = std::env::var("RLA_KLU_PROF")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let (mut t_dfs, mut t_num, mut t_piv) = (0.0f64, 0.0f64, 0.0f64);
 
     for b in 0..sym.block_ptr.len() - 1 {
         let (bs, be) = (sym.block_ptr[b], sym.block_ptr[b + 1]);
@@ -622,7 +652,11 @@ fn factor_impl<T: Scalar>(
                 let sv = a.values[k] * T::from_real(rs_inv[a.row_idx[k]]);
                 if pre == bs {
                     diag = Some(sv);
+                    scatter_expect[k] = bs as Ki;
+                    scatter_target[k] = bs as Ki;
                 } else if pre < bs {
+                    scatter_expect[k] = mark[pre][1];
+                    scatter_target[k] = KI_FBIT | f_rowidx.len() as Ki;
                     f_rowidx.push(mark[pre][1]);
                     f_val.push(sv);
                 } else {
@@ -647,6 +681,11 @@ fn factor_impl<T: Scalar>(
             let sj = (j + 1) as Ki; // unique DFS stamp for this column
             topo.clear();
             nonpiv.clear();
+            let tp0 = if prof {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
 
             // Pass 1, symbolic: DFS the reach of the column's within-block
             // pattern over the L columns factored so far. Pivotal nodes come
@@ -671,10 +710,18 @@ fn factor_impl<T: Scalar>(
                     nonpiv.push(pre as Ki);
                     continue;
                 }
+                let col_end = |p: usize, lpend: &[Ki], l_colptr: &[usize]| -> usize {
+                    let lp = lpend[p];
+                    if lp == KI_UNSET {
+                        l_colptr[p + 1]
+                    } else {
+                        lp as usize
+                    }
+                };
                 let mut d = 0usize;
                 node_stack[0] = pre as Ki;
                 cur_stack[0] = l_colptr[m[1] as usize];
-                let mut end = l_colptr[m[1] as usize + 1];
+                let mut end = col_end(m[1] as usize, &lpend, &l_colptr);
                 loop {
                     let mut descended = false;
                     while cur_stack[d] < end {
@@ -695,7 +742,7 @@ fn factor_impl<T: Scalar>(
                         node_stack[d] = ch as Ki;
                         let p = mch[1] as usize;
                         cur_stack[d] = l_colptr[p];
-                        end = l_colptr[p + 1];
+                        end = col_end(p, &lpend, &l_colptr);
                         descended = true;
                         break;
                     }
@@ -708,7 +755,7 @@ fn factor_impl<T: Scalar>(
                     }
                     d -= 1;
                     let up = mark[node_stack[d] as usize][1] as usize;
-                    end = l_colptr[up + 1];
+                    end = col_end(up, &lpend, &l_colptr);
                 }
             }
 
@@ -720,12 +767,27 @@ fn factor_impl<T: Scalar>(
                 let pre = pinv_pre[r] as usize;
                 let sv = a.values[k] * T::from_real(rs_inv[r]);
                 if pre < bs {
+                    scatter_expect[k] = mark[pre][1];
+                    scatter_target[k] = KI_FBIT | f_rowidx.len() as Ki;
                     f_rowidx.push(mark[pre][1]);
                     f_val.push(sv);
                 } else {
+                    // Final position unknown until the block is pivoted;
+                    // record the pre position, fix up at block end.
+                    scatter_target[k] = pre as Ki;
                     x[pre] = sv;
                 }
             }
+
+            if let Some(tp) = tp0 {
+                t_dfs += tp.elapsed().as_secs_f64();
+            }
+            let tp1 = if prof {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let u_start = u_rowidx.len();
 
             // Pass 3, numeric update in topological order (reverse
             // post-order): each pivotal node's final value feeds its L column
@@ -753,6 +815,14 @@ fn factor_impl<T: Scalar>(
                 }
             }
 
+            if let Some(tp) = tp1 {
+                t_num += tp.elapsed().as_secs_f64();
+            }
+            let tp2 = if prof {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             // Pivot: max-magnitude candidate, overridden by the diagonal
             // (pre-position `j`) when it clears the threshold.
             let mut piv = UNSET;
@@ -797,15 +867,64 @@ fn factor_impl<T: Scalar>(
             l_colptr.push(l_rowidx.len());
             u_colptr.push(u_rowidx.len());
             f_colptr.push(f_rowidx.len());
+
+            // Symmetric pruning for this pivot: for each U-partner column
+            // `s` (an entry `U(s,j)`), if `L(:,s)` contains the pivot row,
+            // partition it so rows already pivotal come first and bound the
+            // future DFS scans to that prefix.
+            let pivk = piv as Ki;
+            let u_partners: Vec<usize> = u_rowidx[u_start..].iter().map(|&p| p as usize).collect();
+            for s in u_partners {
+                if lpend[s] != KI_UNSET {
+                    continue;
+                }
+                let (cs, ce) = (l_colptr[s], l_colptr[s + 1]);
+                if !l_rowidx[cs..ce].contains(&pivk) {
+                    continue;
+                }
+                let mut head = cs;
+                for k in cs..ce {
+                    let r = l_rowidx[k] as usize;
+                    if mark[r][1] != KI_UNSET {
+                        l_rowidx.swap(head, k);
+                        l_val.swap(head, k);
+                        head += 1;
+                    }
+                }
+                lpend[s] = head as Ki;
+            }
+            if let Some(tp) = tp2 {
+                t_piv += tp.elapsed().as_secs_f64();
+            }
         }
 
         // The block is fully pivoted: fix its L row indices from pre-pivot to
-        // final positions (U and F indices were final at push time).
+        // final positions (U and F indices were final at push time), and
+        // resolve the scatter program's within-block targets the same way.
         for k in l_colptr[bs]..l_colptr[be] {
             l_rowidx[k] = mark[l_rowidx[k] as usize][1];
         }
+        for j in bs..be {
+            let c = sym.col_perm[j];
+            for k in a.col_ptr[c]..a.col_ptr[c + 1] {
+                let tv = scatter_target[k];
+                if tv & KI_FBIT == 0 {
+                    let fin = mark[tv as usize][1];
+                    scatter_target[k] = fin;
+                    scatter_expect[k] = fin;
+                }
+            }
+        }
     }
 
+    if prof {
+        eprintln!(
+            "[klu-prof] dfs {:.1}ms  scatter+num {:.1}ms  pivot+push+prune {:.1}ms",
+            t_dfs * 1e3,
+            t_num * 1e3,
+            t_piv * 1e3
+        );
+    }
     let mut row_perm = vec![0usize; n];
     let mut pinv = vec![0usize; n];
     for (m, &orig) in mark.iter().zip(&sym.pre_row_perm) {
@@ -833,6 +952,8 @@ fn factor_impl<T: Scalar>(
         f_colptr,
         f_rowidx,
         f_val,
+        scatter_expect,
+        scatter_target,
     })
 }
 
@@ -1190,37 +1311,37 @@ impl<T: Scalar> KluSolver<T> {
         }
         let rs_inv = row_scale_inv(a, f.scaled);
 
+        // Branch-free pattern verification against the recorded program: every
+        // entry must map to the exact final position it had at factor time
+        // (this subsumes the old per-column F-walk and leftover checks).
+        {
+            let mut acc: Ki = 0;
+            for (k, &r) in a.row_idx.iter().enumerate() {
+                acc |= (f.pinv[r] as Ki) ^ f.scatter_expect[k];
+            }
+            if acc != 0 {
+                return Err(pattern_mismatch());
+            }
+        }
+
         let mut x = vec![T::zero(); f.n];
-        let mut scattered: Vec<usize> = Vec::new();
 
         for b in 0..f.block_ptr.len() - 1 {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
+            let _ = bs;
             for j in bs..be {
                 let c = f.col_perm[j];
-                // Scatter (final position space). Off-block entries must hit
-                // the stored F pattern slot-for-slot, the same storage-order
-                // walk as at factor time.
-                scattered.clear();
-                let mut fcur = f.f_colptr[j];
+                // Scatter through the recorded program: no position lookups,
+                // no pattern branches (verified above).
                 for k in a.col_ptr[c]..a.col_ptr[c + 1] {
                     let r = a.row_idx[k];
-                    let fin = f.pinv[r];
                     let sv = a.values[k] * T::from_real(rs_inv[r]);
-                    if fin < bs {
-                        if fcur >= f.f_colptr[j + 1] || f.f_rowidx[fcur] as usize != fin {
-                            return Err(pattern_mismatch());
-                        }
-                        f.f_val[fcur] = sv;
-                        fcur += 1;
-                    } else if fin >= be {
-                        return Err(pattern_mismatch());
+                    let tv = f.scatter_target[k];
+                    if tv & KI_FBIT != 0 {
+                        f.f_val[(tv & !KI_FBIT) as usize] = sv;
                     } else {
-                        x[fin] = sv;
-                        scattered.push(fin);
+                        x[tv as usize] = sv;
                     }
-                }
-                if fcur != f.f_colptr[j + 1] {
-                    return Err(pattern_mismatch());
                 }
 
                 // Replay the elimination in the stored topological order
@@ -1250,14 +1371,6 @@ impl<T: Scalar> KluSolver<T> {
                     let lr = f.l_rowidx[k] as usize;
                     f.l_val[k] = x[lr] / d;
                     x[lr] = T::zero();
-                }
-                // Every scattered position must now be consumed: a leftover
-                // value is an entry outside the stored pattern (the pattern
-                // changed) and would otherwise be silently dropped.
-                for &pos in &scattered {
-                    if x[pos] != T::zero() {
-                        return Err(pattern_mismatch());
-                    }
                 }
             }
         }
@@ -1796,6 +1909,11 @@ mod tests {
     fn klu_diagnostics_phased_vs_oneshot() {
         let a = circuit_like(100, 4);
         let sym = KluSymbolic::analyze(&a).unwrap();
+        // factor() never estimates implicitly: the estimate is attached only
+        // when it was computed explicitly beforehand.
+        let s0 = sym.factor(&a, &KluSettings::default()).unwrap();
+        assert!(s0.diagnostics().estimate.is_none());
+        let _ = sym.estimate_memory::<f64>();
         let s = sym.factor(&a, &KluSettings::default()).unwrap();
         let d = s.diagnostics();
         assert_eq!(d.threads, 1);
