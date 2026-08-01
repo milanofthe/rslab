@@ -1325,7 +1325,24 @@ fn main() {
         .open(&out_path)
         .expect("open RLA_BENCH_OUT");
     // RLA now runs in a scoped pool of `opts.threads`; drive it from the sweep var.
-    let opts = SolverSettings::default().with_threads(threads.max(1) as usize);
+    let mut opts = SolverSettings::default().with_threads(threads.max(1) as usize);
+    // Kernel-knob overrides for tuning sweeps on this machine:
+    // RLA_BENCH_NB=<panel width>, RLA_BENCH_GATES=<scalar,par_gemm,par_cdiv>.
+    if let Ok(nb) = std::env::var("RLA_BENCH_NB") {
+        if let Ok(nb) = nb.parse::<usize>() {
+            opts = opts.with_panel_nb(nb);
+        }
+    }
+    if let Ok(g) = std::env::var("RLA_BENCH_GATES") {
+        let v: Vec<usize> = g.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        if v.len() == 3 {
+            opts = opts.with_gemm_thresholds(rslab::GemmThresholds {
+                scalar_gate: v[0],
+                par_gemm: v[1],
+                par_cdiv: v[2],
+            });
+        }
+    }
 
     // Estimate-only mode (`RLA_BENCH_ESTIMATE=1`): emit the a-priori memory-estimate
     // breakdown per matrix and skip all factoring (instant - no numeric work).
