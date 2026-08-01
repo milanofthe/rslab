@@ -557,11 +557,13 @@ Table~\ref{tab:klu} benchmarks the KLU path against the multifrontal $\LU$ (defa
 MNA-like matrices: $\sim$4--5 nnz/column, unsymmetric, column-diagonally dominant,
 cascaded stages giving a genuinely reducible BTF structure
 (\code{cargo bench --bench klu\_circuit}, Apple M3). The KLU factor is
-\numrange{2}{19}$\times$ faster with \numrange{1.7}{5.7}$\times$ less fill, the gap
+\numrange{5}{12}$\times$ faster with \numrange{1.7}{5.7}$\times$ less fill, the gap
 widening with size as the multifrontal fronts grow; the numeric-only refactor runs
-$\sim3\times$ faster still, so a 20-point sweep (refactor+solve vs.\ factor+solve) is
-$\sim$\numrange{6}{19}$\times$ faster end to end. Both solvers reach machine-precision
-residuals ($\sim10^{-15}$) on every size.
+$\sim2\times$ faster still, so a 20-point sweep (refactor+solve vs.\ factor+solve) is
+\numrange{10}{40}$\times$ faster end to end. Both solvers reach machine-precision
+residuals ($\sim10^{-15}$) on every size. An opt-in parallel per-block factor
+(independent BTF blocks on a scoped pool, bit-identical to the sequential result)
+adds another \numrange{2.2}{3.1}$\times$.
 
 \begin{table}[htbp]
 \centering\tabfont
@@ -571,10 +573,10 @@ residuals ($\sim10^{-15}$) on every size.
 \cmidrule(lr){3-6}\cmidrule(lr){7-8}
 $n$ & $\nnz$ & factor & refactor & fill & blocks & factor & fill & sweep ratio \\
 \midrule
-2k & 15k & \SI{6.4}{ms} & \SI{1.8}{ms} & 79k & 8 & \SI{12.6}{ms} & 132k & $6.2\times$ \\
-10k & 73k & \SI{16.7}{ms} & \SI{5.0}{ms} & 439k & 16 & \SI{53.2}{ms} & 1.03M & $10.3\times$ \\
-50k & 366k & \SI{98.1}{ms} & \SI{29.4}{ms} & 2.32M & 32 & \SI{305}{ms} & 9.21M & $11.3\times$ \\
-200k & 1.47M & \SI{361}{ms} & \SI{117}{ms} & 9.17M & 64 & \SI{1.84}{s} & 52.2M & $19.1\times$ \\
+2k & 15k & \SI{1.7}{ms} & \SI{0.8}{ms} & 79k & 8 & \SI{8.1}{ms} & 132k & $9.8\times$ \\
+10k & 73k & \SI{8.0}{ms} & \SI{4.1}{ms} & 439k & 16 & \SI{54.7}{ms} & 1.03M & $12.5\times$ \\
+50k & 366k & \SI{45.4}{ms} & \SI{24.3}{ms} & 2.32M & 32 & \SI{304}{ms} & 9.21M & $13.9\times$ \\
+200k & 1.47M & \SI{179}{ms} & \SI{96}{ms} & 9.17M & 64 & \SI{2.16}{s} & 52.2M & $40\times$ \\
 \bottomrule
 \end{tabular}
 \caption{KLU vs.\ multifrontal $\LU$ on MNA-like circuit matrices (Apple M3). ``Sweep
@@ -586,12 +588,15 @@ refactor+solve vs.\ multifrontal factor+solve. Fill counts stored factor entries
 Against the reference C implementation, SuiteSparse KLU~\cite{klu} (loaded at
 runtime when installed), the analyze pipeline is at parity: identical BTF block
 counts and fill within 1.5\% (\rT{} slightly less), confirming the maximum
-transversal, Tarjan SCC, and per-block AMD match the reference. The C numeric
-kernel is \numrange{2.8}{4.3}$\times$ faster on factor (e.g.\ \SI{128}{ms}
-vs.\ \SI{357}{ms} at $n=200$k) and \numrange{1.5}{2.3}$\times$ on refactor;
-both reach $\sim10^{-15}$ residuals. The gap is kernel maturity in the
-per-column depth-first solve/scatter loop, not structure, and bounds what
-further scalar-kernel tuning can recover.
+transversal, Tarjan SCC, and per-block AMD match the reference. On the numeric
+kernel (32-bit index streams, packed DFS marks, Eisenstat-Liu symmetric
+pruning~\cite{eisenstatliu}, and a recorded refactor scatter program), the
+sequential factor runs within \numrange{1.2}{1.6}$\times$ of the C code
+(e.g.\ \SI{179}{ms} vs.\ \SI{152}{ms} at $n=200$k) and the refactor within
+\numrange{1.15}{1.4}$\times$; the opt-in bit-identical parallel per-block
+factor is \numrange{1.5}{2.3}$\times$ \emph{faster} than SuiteSparse KLU
+across the range (\SI{81}{ms} at $n=200$k). Both reach $\sim10^{-15}$
+residuals.
 
 \subsection{Iterative layer}
 The Krylov results appear with their concepts in Sec.~\ref{sec:iterative}: block-CGS2
@@ -656,6 +661,8 @@ method for sparse factorization. \emph{ACM Trans. Math. Softw.} 12(3):249--264, 
 \bibitem{umfpack} T.~A. Davis. Algorithm 832: UMFPACK, an unsymmetric-pattern
 multifrontal method. \emph{ACM Trans. Math. Softw.} 30(2):196--199, 2004.
 
+\bibitem{eisenstatliu} S.~C. Eisenstat, J.~W.~H. Liu. Exploiting structural symmetry in
+unsymmetric sparse symbolic factorization. SIAM J. Matrix Anal. Appl., 13(1), 1992.
 \bibitem{klu} T.~A. Davis, E. Palamadai Natarajan. Algorithm 907: KLU, a direct sparse
 solver for circuit simulation problems. \emph{ACM Trans. Math. Softw.} 37(3):36, 2010.
 

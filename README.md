@@ -30,9 +30,10 @@ headline results.
   threshold pivoting and row scaling. Strictly sequential and bit-deterministic;
   numeric-only `refactor` (frozen pattern + pivots) for frequency sweeps and
   Newton steps, plus `solve_transpose` (`Aᵀx = b` on the same factors) for
-  adjoint / sensitivity solves. On MNA-like matrices: 2-19x faster factor with
-  1.7-5.7x less fill than the multifrontal LU (widening with size), and a
-  20-point same-pattern sweep 6-19x faster end to end
+  adjoint / sensitivity solves. On MNA-like matrices: 5-12x faster factor with
+  1.7-5.7x less fill than the multifrontal LU (widening with size), a 20-point
+  same-pattern sweep 10-40x faster end to end, and an opt-in bit-identical
+  parallel per-block factor that outruns SuiteSparse KLU by 1.5-2.3x
   (`cargo bench --bench klu_circuit`).
 - Three factorization schedules: supernodal left-looking (default, frees each dense
   panel after its last consumer), multifrontal, and right-looking.
@@ -248,34 +249,39 @@ reducible BTF structure (`cargo bench --bench klu_circuit`, Apple M3):
 
 | n | nnz | KLU factor | KLU refactor | KLU fill | BTF blocks | MF-LU factor | MF-LU fill | sweep ratio |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 2k | 15k | 6.4 ms | 1.8 ms | 79k | 8 | 12.6 ms | 132k | 6.2x |
-| 10k | 73k | 16.7 ms | 5.0 ms | 439k | 16 | 53.2 ms | 1.03M | 10.3x |
-| 50k | 366k | 98.1 ms | 29.4 ms | 2.32M | 32 | 305 ms | 9.21M | 11.3x |
-| 200k | 1.47M | 361 ms | 117 ms | 9.17M | 64 | 1.84 s | 52.2M | 19.1x |
+| 2k | 15k | 1.7 ms | 0.8 ms | 79k | 8 | 8.1 ms | 132k | 9.8x |
+| 10k | 73k | 8.0 ms | 4.1 ms | 439k | 16 | 54.7 ms | 1.03M | 12.5x |
+| 50k | 366k | 45.4 ms | 24.3 ms | 2.32M | 32 | 304 ms | 9.21M | 13.9x |
+| 200k | 1.47M | 179 ms | 96 ms | 9.17M | 64 | 2.16 s | 52.2M | 40x |
 
-The KLU factor is 2-19x faster with 1.7-5.7x less fill, the gap widening with
-size as the multifrontal fronts grow; the numeric-only refactor runs ~3x faster
+The KLU factor is 5-12x faster with 1.7-5.7x less fill, the gap widening with
+size as the multifrontal fronts grow; the numeric-only refactor runs ~2x faster
 still, so a 20-point sweep (refactor+solve vs factor+solve, the "sweep ratio")
-is 6-19x faster end to end. Both solvers reach machine-precision residuals
-(~1e-15) on every size.
+is 10-40x faster end to end. Both solvers reach machine-precision residuals
+(~1e-15) on every size. The numbers are the strictly sequential default;
+`KluSettings::with_parallel_factor(true)` factors the independent BTF diagonal
+blocks on the ambient rayon pool, **bit-identical** to the sequential result,
+for another 2.2-3.1x on the factor (0.7 / 2.6 / 19.8 / 81 ms).
 
 Against the reference C implementation, **SuiteSparse KLU** (Davis & Palamadai
 Natarajan, loaded at runtime when installed; the bench auto-detects the
 Homebrew prefix):
 
-| n | RSLAB factor | SuiteSparse factor | RSLAB refactor | SuiteSparse refactor | fill RSLAB / SS |
-|--:|--:|--:|--:|--:|--:|
-| 2k | 7.2 ms | 2.5 ms | 2.2 ms | 1.5 ms | 79.3k / 80.8k |
-| 10k | 25.3 ms | 5.8 ms | 6.4 ms | 3.4 ms | 439k / 445k |
-| 50k | 118 ms | 31.6 ms | 31.1 ms | 17.9 ms | 2.32M / 2.35M |
-| 200k | 357 ms | 128 ms | 125 ms | 78.3 ms | 9.17M / 9.30M |
+| n | RSLAB factor | RSLAB parallel | SuiteSparse factor | RSLAB refactor | SuiteSparse refactor | fill RSLAB / SS |
+|--:|--:|--:|--:|--:|--:|--:|
+| 2k | 1.7 ms | **0.7 ms** | 1.1 ms | 0.8 ms | 0.6 ms | 79.3k / 80.8k |
+| 10k | 8.0 ms | **2.6 ms** | 5.9 ms | 4.1 ms | 3.3 ms | 439k / 445k |
+| 50k | 45.4 ms | **19.8 ms** | 32.3 ms | 24.3 ms | 18.1 ms | 2.32M / 2.35M |
+| 200k | 179 ms | **81 ms** | 152 ms | 96 ms | 84 ms | 9.17M / 9.30M |
 
 Structure is at parity: identical BTF block counts and fill within 1.5% (RSLAB
 slightly less), so the analyze pipeline (maximum transversal, Tarjan SCC,
-per-block AMD) matches the reference. The C numeric kernel is 2.8-4.3x faster
-on factor and 1.5-2.3x on refactor; both reach ~1e-15 residuals. The gap is
-kernel maturity in the per-column depth-first solve/scatter loop, not
-structure, and bounds what further scalar-kernel tuning can recover.
+per-block AMD) matches the reference. On the numeric kernel, RSLAB's
+Gilbert-Peierls (32-bit index streams, packed DFS marks, Eisenstat-Liu
+symmetric pruning, a recorded refactor scatter program) runs the sequential
+factor within 1.2-1.6x of the C code and the refactor within 1.15-1.4x; the
+opt-in parallel per-block factor (bit-identical, see above) is **1.5-2.3x
+faster than SuiteSparse KLU** across the range. Both reach ~1e-15 residuals.
 
 ### The optional learned auto-tuner
 

@@ -1,6 +1,14 @@
 # KLU numeric-kernel parity plan (vs SuiteSparse KLU)
 
-Status: PLANNED (2026-07-31). Baseline measurement in `benches/klu_circuit.rs`
+Status: DONE (2026-08-01). Landed: packages 0, 1, 2, 3, 4, and most of 5,
+plus Eisenstat-Liu symmetric pruning and a lazy (explicit-only) a-priori
+estimate in `factor()`. Result (same-run, Apple M3, f64 MNA):
+sequential factor within 1.2-1.6x of SuiteSparse KLU (was 2.8-4.3x behind),
+refactor within 1.15-1.4x, and the opt-in bit-identical parallel per-block
+factor 1.5-2.3x FASTER than SuiteSparse (2k/10k/50k/200k: 0.7/2.6/19.8/81 ms
+vs 1.1/5.9/32.3/152 ms). Fill and block structure unchanged (parity kept).
+
+Original plan below. Baseline measurement in `benches/klu_circuit.rs`
 (`suitesparse-klu` rows, Apple M3, f64 MNA family): structure parity (identical
 BTF blocks, fill within 1.5%, RSLAB slightly less), but the C numeric kernel is
 2.8-4.3x faster on factor and 1.5-2.3x on refactor. The gap is kernel maturity
