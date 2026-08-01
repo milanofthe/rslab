@@ -1,28 +1,28 @@
 {
   "sym (LDLt path)": {
-    "time_ratio": 0.6377924885626843,
-    "mem_ratio": 0.579370687899711,
+    "time_ratio": 0.6382222772024729,
+    "mem_ratio": 0.5837580561667599,
     "n_time": 49,
     "n_mem": 49,
     "baseline": "auto"
   },
   "unsym (LU path)": {
-    "time_ratio": 0.2583331823582624,
-    "mem_ratio": 0.2816882216760807,
+    "time_ratio": 0.26979149510413614,
+    "mem_ratio": 0.28574487276724425,
     "n_time": 60,
     "n_mem": 60,
     "baseline": "auto"
   },
   "circuit (KLU path)": {
-    "time_ratio": 0.3657111320240281,
-    "mem_ratio": 0.7955905640315677,
+    "time_ratio": 0.7732163223883509,
+    "mem_ratio": 0.7488576719463886,
     "n_time": 15,
     "n_mem": 15,
     "baseline": "klu"
   },
   "SuiteSparse corpus": {
-    "time_ratio": 0.19283447999545575,
-    "mem_ratio": 0.4524158499454205,
+    "time_ratio": 0.22632916635683883,
+    "mem_ratio": 0.4536091772570414,
     "n_time": 30,
     "n_mem": 30,
     "baseline": "auto"

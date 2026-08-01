@@ -496,12 +496,14 @@ via instrumented allocation callbacks.
 Figures~\ref{fig:apple_ldlt}--\ref{fig:apple_klu} show the per-path scaling;
 Table~\ref{tab:apple} the geomean ratios. On its home silicon the vendor
 library wins most of the distribution: its AMX-backed kernels take the small
-and mid sizes outright ($0.19\times$--$0.64\times$ \rT's factor time in
+and mid sizes outright ($0.23\times$--$0.77\times$ \rT's factor time in
 geomean). The structural story survives at scale: above ${\sim}3\cdot10^{5}$
 nonzeros on the complex-symmetric systems, \rT's $A=A^{T}$ exploitation turns
-the tables (Accelerate $1.3$--$1.4\times$ slower there; its time scales at
-$\alpha\approx1.68$ vs.\ $1.42$). The circuit comparison is one-shot
-analyze+factor+solve; KLU's numeric-only refactor sweeps are not exercised. On
+the tables (Accelerate $1.3$--$1.35\times$ slower there; its time scales at
+$\alpha\approx1.67$ vs.\ $1.38$). The circuit comparison is one-shot
+analyze+factor+solve against the strictly sequential KLU default; KLU's
+numeric-only refactor sweeps and the parallel per-block factor are not
+exercised. On
 accuracy, Accelerate reaches $10^{-8}$ on 25 of 36 corpus matrices, but on five
 hard indefinite/ill-scaled ones (stokes64, bratu3d, cont-201, rim, lhr34) it
 returns NaN or garbage \emph{with an OK status}, the same silent-degradation
@@ -541,9 +543,9 @@ KLU's refactor-driven sweep niche is not exercised here.}
 Accelerate vs.\ \rT{} shipped path & factor time & peak memory & matrices \\
 \midrule
 sym ($\LDLt$ path) & $0.64\times$ & $0.58\times$ & 49 \\
-unsym ($\LU$ path) & $0.26\times$ & $0.28\times$ & 60 \\
-circuit (vs.\ KLU) & $0.37\times$ & $0.80\times$ & 15 \\
-SuiteSparse corpus & $0.19\times$ & $0.45\times$ & 30 \\
+unsym ($\LU$ path) & $0.27\times$ & $0.29\times$ & 60 \\
+circuit (vs.\ KLU) & $0.77\times$ & $0.75\times$ & 15 \\
+SuiteSparse corpus & $0.23\times$ & $0.45\times$ & 30 \\
 \bottomrule
 \end{tabular}
 \caption{Apple M3 head-to-head geomean ratios (Accelerate / \rT), over the

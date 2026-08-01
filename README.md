@@ -216,19 +216,20 @@ both solve to `< 0.1` residual; one-shot analyze+factor+solve):
 | corpus | factor time | peak memory | matrices |
 |---|:-:|:-:|:-:|
 | sym (LDLᵀ path) | **0.64x** (accel faster) | **0.58x** | 49 |
-| unsym (LU path) | **0.26x** | **0.28x** | 60 |
-| circuit (vs RSLAB KLU) | **0.37x** | **0.80x** | 15 |
-| SuiteSparse corpus | **0.19x** | **0.45x** | 30 |
+| unsym (LU path) | **0.27x** | **0.29x** | 60 |
+| circuit (vs RSLAB KLU) | **0.77x** | **0.75x** | 15 |
+| SuiteSparse corpus | **0.23x** | **0.45x** | 30 |
 
 On its home silicon the vendor library is the faster direct solver on most of
 the distribution: the AMX-backed kernels win the small and mid sizes outright
 (RSLAB's calibrated complex proxy throughput on the M3 is 9.4 GFLOP/s; AMX
 sustains a multiple of that). The structural story survives at scale: on the
 largest complex-symmetric systems (curl-curl/Helmholtz above ~3·10⁵ nnz)
-RSLAB's `A = Aᵀ` exploitation turns the tables (accel 1.3-1.4x slower there;
-its time scales at `α≈1.68` vs RSLAB's `1.42`), and on the circuit class the
-comparison is one-shot only; KLU's refactor-driven sweeps (its actual niche)
-are not exercised.
+RSLAB's `A = Aᵀ` exploitation turns the tables (accel 1.3-1.35x slower there;
+its time scales at `α≈1.67` vs RSLAB's `1.38`). On the circuit class the gap
+is down to 1.3x (sequential KLU baseline; the bit-identical parallel factor
+above closes it), and the comparison is one-shot only; KLU's refactor-driven
+sweeps (its actual niche) are not exercised.
 
 Accuracy over the corpus: Accelerate reaches `< 1e-8` on 25/36 (including
 qc2534 at `2.5e-13` directly, where RSLAB's exact mode needs its
