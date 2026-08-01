@@ -68,3 +68,25 @@ factors it is now roughly half of end-to-end. The refinement patience knobs
 saturate (grid_fill fill identical from patience 4096 up), so cutting ana
 means cutting bakeoff exactness or refinement rounds, both of which buy the
 fill that makes the factor fast. Leave as is.
+
+## Follow-up (2026-08-01): cdiv panel lookahead
+
+Issue #20's spine pipeline executor (inter-node update pipelining) was
+already built and measured SLOWER in July (638.7 vs 616.2 ms; discarded,
+see the issue's close note). The remaining lever it identified, the cdiv
+sequence itself, was attacked here with a cheaper sub-case the executor did
+not try: within-node depth-1 panel lookahead in the LL cdiv, factoring
+panel p+1 (getf2 + deep replay, columns [ke, ke2)) concurrently with the
+wide part of panel p's deferred Schur GEMM (columns [ke2, ncol)). The
+narrow/wide GEMM split boundary and the gate (mt*wide*pw >= par_cdiv) are
+pure functions of the node shape, so bits stay thread-invariant
+(`ll_thread_determinism` green).
+
+Measured (3-run means, 40^3 helmholtz, 8 threads): ll 1295 -> 1267 ms
+(-2.2%), auto 625 -> 619 ms (-1%); single-thread neutral (4689 -> 4728 ms,
+single runs, noise). Gate variations (par_cdiv 500k-8M) flat. Kept: small
+but consistent, zero-risk, and it confirms the #20 conclusion - the chain
+critical path is the pivoted cdiv sequence, and only cross-node cdiv
+pipelining through pivot value dependencies could compress it further
+(fundamentally harder, unclear headroom, not warranted at the current
+PARDISO gap).
