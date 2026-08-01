@@ -513,6 +513,9 @@ struct KluFactors<T> {
     /// Per-original-row reciprocal scale factor (all 1 when scaling is off).
     rs_inv: Vec<f64>,
     scaled: bool,
+    /// Parallel per-block execution chosen at factor time; `refactor` honors
+    /// the same opt-in (bit-identical either way, blocks are independent).
+    parallel: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
     /// Row indices are final positions within the column's block (narrow
     /// [`Ki`] indices: the solve/refactor loops are index-bound).
@@ -675,20 +678,29 @@ fn factor_block<T: Scalar>(
     let mut topo: Vec<Ki> = Vec::with_capacity(bn);
     let mut nonpiv: Vec<Ki> = Vec::with_capacity(bn);
 
+    // Reserve from the block's input nnz: the MNA reference class fills
+    // ~6x its input, so 4x reserves cap reallocation at one doubling in the
+    // common case without over-committing memory on low-fill classes.
+    let annz: usize = (bs..be)
+        .map(|j| {
+            let c = sym.col_perm[j];
+            a.col_ptr[c + 1] - a.col_ptr[c]
+        })
+        .sum();
     let mut out = BlockOut {
         fin_abs: vec![KI_UNSET; bn],
         l_colptr: Vec::with_capacity(bn + 1),
-        l_rowidx: Vec::new(),
-        l_val: Vec::new(),
+        l_rowidx: Vec::with_capacity(annz * 4),
+        l_val: Vec::with_capacity(annz * 4),
         u_colptr: Vec::with_capacity(bn + 1),
-        u_rowidx: Vec::new(),
-        u_val: Vec::new(),
+        u_rowidx: Vec::with_capacity(annz * 2),
+        u_val: Vec::with_capacity(annz * 2),
         udiag: Vec::with_capacity(bn),
         f_colptr: Vec::with_capacity(bn + 1),
         f_pre: Vec::new(),
         f_val: Vec::new(),
         f_k: Vec::new(),
-        prog_in: Vec::new(),
+        prog_in: Vec::with_capacity(annz),
     };
     out.l_colptr.push(0);
     out.u_colptr.push(0);
@@ -981,57 +993,132 @@ fn factor_impl<T: Scalar>(
             .collect()
     };
 
-    // Splice the per-block outputs in block order. Off-block F rows refer to
-    // earlier blocks' pre positions; `fin_of_pre` is complete for all earlier
-    // blocks by the time a block is spliced.
+    let prof = std::env::var("RLA_KLU_PROF")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let t_splice = std::time::Instant::now();
+    // Splice the per-block outputs. Two phases: exact-size global arrays are
+    // carved into disjoint per-block chunks (offsets by prefix sums) and the
+    // heavy value/index copies run per block, in parallel when enabled; the
+    // cheap O(n)/O(nnz) bookkeeping (column pointers, the refactor scatter
+    // program, `udiag`) stays sequential. Off-block F rows are resolved
+    // through `fin_of_pre`, which is complete before the copy phase starts.
+    let outs: Vec<BlockOut<T>> = {
+        let mut v = Vec::with_capacity(nblocks);
+        for o in blocks {
+            v.push(o?);
+        }
+        v
+    };
+    let mut l_off = vec![0usize; nblocks + 1];
+    let mut u_off = vec![0usize; nblocks + 1];
+    let mut f_off = vec![0usize; nblocks + 1];
+    for (b, out) in outs.iter().enumerate() {
+        l_off[b + 1] = l_off[b] + out.l_rowidx.len();
+        u_off[b + 1] = u_off[b] + out.u_rowidx.len();
+        f_off[b + 1] = f_off[b] + out.f_pre.len();
+    }
+
     let mut fin_of_pre = vec![0 as Ki; n];
+    for (b, out) in outs.iter().enumerate() {
+        let bs = sym.block_ptr[b];
+        fin_of_pre[bs..bs + out.fin_abs.len()].copy_from_slice(&out.fin_abs);
+    }
+
+    let mut l_rowidx: Vec<Ki> = vec![0; l_off[nblocks]];
+    let mut l_val: Vec<T> = vec![T::zero(); l_off[nblocks]];
+    let mut u_rowidx: Vec<Ki> = vec![0; u_off[nblocks]];
+    let mut u_val: Vec<T> = vec![T::zero(); u_off[nblocks]];
+    let mut f_rowidx: Vec<Ki> = vec![0; f_off[nblocks]];
+    let mut f_val: Vec<T> = vec![T::zero(); f_off[nblocks]];
+    {
+        struct Chunks<'s, T> {
+            l_ri: &'s mut [Ki],
+            l_v: &'s mut [T],
+            u_ri: &'s mut [Ki],
+            u_v: &'s mut [T],
+            f_ri: &'s mut [Ki],
+            f_v: &'s mut [T],
+        }
+        let mut jobs: Vec<(Chunks<'_, T>, &BlockOut<T>)> = Vec::with_capacity(nblocks);
+        let (mut lri, mut lv) = (l_rowidx.as_mut_slice(), l_val.as_mut_slice());
+        let (mut uri, mut uv) = (u_rowidx.as_mut_slice(), u_val.as_mut_slice());
+        let (mut fri, mut fv) = (f_rowidx.as_mut_slice(), f_val.as_mut_slice());
+        for out in &outs {
+            let (a1, r1) = std::mem::take(&mut lri).split_at_mut(out.l_rowidx.len());
+            lri = r1;
+            let (a2, r2) = std::mem::take(&mut lv).split_at_mut(out.l_val.len());
+            lv = r2;
+            let (a3, r3) = std::mem::take(&mut uri).split_at_mut(out.u_rowidx.len());
+            uri = r3;
+            let (a4, r4) = std::mem::take(&mut uv).split_at_mut(out.u_val.len());
+            uv = r4;
+            let (a5, r5) = std::mem::take(&mut fri).split_at_mut(out.f_pre.len());
+            fri = r5;
+            let (a6, r6) = std::mem::take(&mut fv).split_at_mut(out.f_val.len());
+            fv = r6;
+            jobs.push((
+                Chunks {
+                    l_ri: a1,
+                    l_v: a2,
+                    u_ri: a3,
+                    u_v: a4,
+                    f_ri: a5,
+                    f_v: a6,
+                },
+                out,
+            ));
+        }
+        let fin = &fin_of_pre;
+        let copy_one = |(c, out): (Chunks<'_, T>, &BlockOut<T>)| {
+            c.l_ri.copy_from_slice(&out.l_rowidx);
+            c.l_v.copy_from_slice(&out.l_val);
+            c.u_ri.copy_from_slice(&out.u_rowidx);
+            c.u_v.copy_from_slice(&out.u_val);
+            for (dst, &pre) in c.f_ri.iter_mut().zip(&out.f_pre) {
+                *dst = fin[pre as usize];
+            }
+            c.f_v.copy_from_slice(&out.f_val);
+        };
+        if settings.parallel_factor && nblocks > 1 {
+            use rayon::prelude::*;
+            jobs.into_par_iter().for_each(copy_one);
+        } else {
+            jobs.into_iter().for_each(copy_one);
+        }
+    }
+
     let mut l_colptr = Vec::with_capacity(n + 1);
     l_colptr.push(0usize);
-    let mut l_rowidx: Vec<Ki> = Vec::new();
-    let mut l_val: Vec<T> = Vec::new();
     let mut u_colptr = Vec::with_capacity(n + 1);
     u_colptr.push(0usize);
-    let mut u_rowidx: Vec<Ki> = Vec::new();
-    let mut u_val: Vec<T> = Vec::new();
-    let mut udiag: Vec<T> = Vec::with_capacity(n);
     let mut f_colptr = Vec::with_capacity(n + 1);
     f_colptr.push(0usize);
-    let mut f_rowidx: Vec<Ki> = Vec::new();
-    let mut f_val: Vec<T> = Vec::new();
+    let mut udiag: Vec<T> = Vec::with_capacity(n);
     let mut scatter_expect = vec![0 as Ki; sym.nnz];
     let mut scatter_target = vec![0 as Ki; sym.nnz];
-
-    for (b, out) in blocks.into_iter().enumerate() {
-        let out = out?;
-        let bs = sym.block_ptr[b];
-        for (lb, &fin) in out.fin_abs.iter().enumerate() {
-            fin_of_pre[bs + lb] = fin;
-        }
-        let l_base = l_rowidx.len();
-        l_rowidx.extend_from_slice(&out.l_rowidx);
-        l_val.extend_from_slice(&out.l_val);
-        l_colptr.extend(out.l_colptr[1..].iter().map(|&p| l_base + p));
-        let u_base = u_rowidx.len();
-        u_rowidx.extend_from_slice(&out.u_rowidx);
-        u_val.extend_from_slice(&out.u_val);
-        u_colptr.extend(out.u_colptr[1..].iter().map(|&p| u_base + p));
+    for (b, out) in outs.iter().enumerate() {
+        l_colptr.extend(out.l_colptr[1..].iter().map(|&p| l_off[b] + p));
+        u_colptr.extend(out.u_colptr[1..].iter().map(|&p| u_off[b] + p));
+        f_colptr.extend(out.f_colptr[1..].iter().map(|&p| f_off[b] + p));
         udiag.extend_from_slice(&out.udiag);
-        let f_base = f_rowidx.len();
-        for (i, &pre) in out.f_pre.iter().enumerate() {
-            let fin = fin_of_pre[pre as usize];
-            f_rowidx.push(fin);
-            let k = out.f_k[i] as usize;
-            scatter_expect[k] = fin;
-            scatter_target[k] = KI_FBIT | (f_base + i) as Ki;
+        for (i, &k) in out.f_k.iter().enumerate() {
+            let k = k as usize;
+            scatter_expect[k] = f_rowidx[f_off[b] + i];
+            scatter_target[k] = KI_FBIT | (f_off[b] + i) as Ki;
         }
-        f_val.extend_from_slice(&out.f_val);
-        f_colptr.extend(out.f_colptr[1..].iter().map(|&p| f_base + p));
         for &(k, fin) in &out.prog_in {
             scatter_expect[k as usize] = fin;
             scatter_target[k as usize] = fin;
         }
     }
 
+    if prof {
+        eprintln!(
+            "[klu-prof] splice {:.1}ms",
+            t_splice.elapsed().as_secs_f64() * 1e3
+        );
+    }
     let mut row_perm = vec![0usize; n];
     let mut pinv = vec![0usize; n];
     for (&fin, &orig) in fin_of_pre.iter().zip(&sym.pre_row_perm) {
@@ -1048,6 +1135,7 @@ fn factor_impl<T: Scalar>(
         col_perm: sym.col_perm.clone(),
         rs_inv,
         scaled: settings.row_scaling,
+        parallel: settings.parallel_factor,
         l_colptr,
         l_rowidx,
         l_val,
@@ -1402,6 +1490,9 @@ impl<T: Scalar> KluSolver<T> {
     /// frozen pivot becomes zero (re-`factor` with pivoting in that case).
     /// After an error the factorization is invalid; a subsequent successful
     /// `refactor` or a fresh `factor` makes it valid again.
+    // The replay loops index several parallel arrays at offset positions;
+    // iterator forms would obscure the offset arithmetic.
+    #[allow(clippy::needless_range_loop)]
     pub fn refactor(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         a.validate()?;
         let t = std::time::Instant::now();
@@ -1430,54 +1521,115 @@ impl<T: Scalar> KluSolver<T> {
             }
         }
 
-        let mut x = vec![T::zero(); f.n];
-
-        for b in 0..f.block_ptr.len() - 1 {
-            let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
-            let _ = bs;
+        // Per-block replay jobs over disjoint value ranges: L/U/F entries and
+        // `udiag` of a block are contiguous (`colptr[bs]..colptr[be]`), so the
+        // mutable arrays split cleanly and the blocks replay independently,
+        // in parallel when the factor-time opt-in chose it (bit-identical:
+        // per-block work is sequential and shares nothing).
+        struct RJob<'s, T> {
+            b: usize,
+            l_v: &'s mut [T],
+            u_v: &'s mut [T],
+            ud: &'s mut [T],
+            f_v: &'s mut [T],
+        }
+        let nblocks = f.block_ptr.len() - 1;
+        let mut jobs: Vec<RJob<'_, T>> = Vec::with_capacity(nblocks);
+        {
+            let (mut lv, mut uv) = (f.l_val.as_mut_slice(), f.u_val.as_mut_slice());
+            let (mut ud, mut fv) = (f.udiag.as_mut_slice(), f.f_val.as_mut_slice());
+            for b in 0..nblocks {
+                let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
+                let (a1, r1) =
+                    std::mem::take(&mut lv).split_at_mut(f.l_colptr[be] - f.l_colptr[bs]);
+                lv = r1;
+                let (a2, r2) =
+                    std::mem::take(&mut uv).split_at_mut(f.u_colptr[be] - f.u_colptr[bs]);
+                uv = r2;
+                let (a3, r3) = std::mem::take(&mut ud).split_at_mut(be - bs);
+                ud = r3;
+                let (a4, r4) =
+                    std::mem::take(&mut fv).split_at_mut(f.f_colptr[be] - f.f_colptr[bs]);
+                fv = r4;
+                jobs.push(RJob {
+                    b,
+                    l_v: a1,
+                    u_v: a2,
+                    ud: a3,
+                    f_v: a4,
+                });
+            }
+        }
+        let (block_ptr, col_perm) = (&f.block_ptr, &f.col_perm);
+        let (l_colptr, l_rowidx) = (&f.l_colptr, &f.l_rowidx);
+        let (u_colptr, u_rowidx) = (&f.u_colptr, &f.u_rowidx);
+        let f_colptr = &f.f_colptr;
+        let scatter_target = &f.scatter_target;
+        let rs_inv_ref = &rs_inv;
+        let replay_block = |job: RJob<'_, T>| -> Result<(), RslabError> {
+            let b = job.b;
+            let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
+            let (l_base, u_base, f_base) = (l_colptr[bs], u_colptr[bs], f_colptr[bs]);
+            let mut x = vec![T::zero(); be - bs];
             for j in bs..be {
-                let c = f.col_perm[j];
+                let c = col_perm[j];
                 // Scatter through the recorded program: no position lookups,
                 // no pattern branches (verified above).
                 for k in a.col_ptr[c]..a.col_ptr[c + 1] {
                     let r = a.row_idx[k];
-                    let sv = a.values[k] * T::from_real(rs_inv[r]);
-                    let tv = f.scatter_target[k];
+                    let sv = a.values[k] * T::from_real(rs_inv_ref[r]);
+                    let tv = scatter_target[k];
                     if tv & KI_FBIT != 0 {
-                        f.f_val[(tv & !KI_FBIT) as usize] = sv;
+                        job.f_v[(tv & !KI_FBIT) as usize - f_base] = sv;
                     } else {
-                        x[tv as usize] = sv;
+                        x[tv as usize - bs] = sv;
                     }
                 }
 
                 // Replay the elimination in the stored topological order
                 // (bit-identical to `factor_impl`'s pass 3: same `fmadd`).
-                for k in f.u_colptr[j]..f.u_colptr[j + 1] {
-                    let p = f.u_rowidx[k] as usize;
-                    let xu = x[p];
-                    x[p] = T::zero();
-                    f.u_val[k] = xu;
+                for k in u_colptr[j]..u_colptr[j + 1] {
+                    let p = u_rowidx[k] as usize;
+                    let xu = x[p - bs];
+                    x[p - bs] = T::zero();
+                    job.u_v[k - u_base] = xu;
                     let nxu = T::zero() - xu;
-                    for kl in f.l_colptr[p]..f.l_colptr[p + 1] {
-                        let lr = f.l_rowidx[kl] as usize;
+                    for kl in l_colptr[p]..l_colptr[p + 1] {
+                        let lr = l_rowidx[kl] as usize - bs;
                         debug_assert!(lr < x.len());
                         unsafe {
-                            *x.get_unchecked_mut(lr) =
-                                fmadd(nxu, *f.l_val.get_unchecked(kl), *x.get_unchecked(lr));
+                            *x.get_unchecked_mut(lr) = fmadd(
+                                nxu,
+                                *job.l_v.get_unchecked(kl - l_base),
+                                *x.get_unchecked(lr),
+                            );
                         }
                     }
                 }
-                let d = x[j];
-                x[j] = T::zero();
+                let d = x[j - bs];
+                x[j - bs] = T::zero();
                 if d.magnitude() == 0.0 || !d.is_finite() {
                     return Err(RslabError::SingularBasis { column: c });
                 }
-                f.udiag[j] = d;
-                for k in f.l_colptr[j]..f.l_colptr[j + 1] {
-                    let lr = f.l_rowidx[k] as usize;
-                    f.l_val[k] = x[lr] / d;
+                job.ud[j - bs] = d;
+                for k in l_colptr[j]..l_colptr[j + 1] {
+                    let lr = l_rowidx[k] as usize - bs;
+                    job.l_v[k - l_base] = x[lr] / d;
                     x[lr] = T::zero();
                 }
+            }
+            Ok(())
+        };
+        if f.parallel && nblocks > 1 {
+            use rayon::prelude::*;
+            let results: Vec<Result<(), RslabError>> =
+                jobs.into_par_iter().map(replay_block).collect();
+            for r in results {
+                r?;
+            }
+        } else {
+            for job in jobs {
+                replay_block(job)?;
             }
         }
         f.rs_inv = rs_inv;
@@ -2056,6 +2208,24 @@ mod tests {
         let x1 = s1.solve(&b).unwrap();
         let x2 = s2.solve(&b).unwrap();
         assert_eq!(bits(&x1), bits(&x2));
+
+        // Refactor honors the same opt-in and stays bit-identical too.
+        let a2 = GeneralCsc {
+            n: a.n,
+            col_ptr: a.col_ptr.clone(),
+            row_idx: a.row_idx.clone(),
+            values: a.values.iter().map(|&v| v * 1.25).collect(),
+        };
+        let mut s1 = s1;
+        let mut s2 = s2;
+        s1.refactor(&a2).unwrap();
+        s2.refactor(&a2).unwrap();
+        assert_eq!(bits(&s1.factors.l_val), bits(&s2.factors.l_val));
+        assert_eq!(bits(&s1.factors.u_val), bits(&s2.factors.u_val));
+        assert_eq!(bits(&s1.factors.udiag), bits(&s2.factors.udiag));
+        let y1 = s1.solve(&b).unwrap();
+        let y2 = s2.solve(&b).unwrap();
+        assert_eq!(bits(&y1), bits(&y2));
     }
 
     #[test]

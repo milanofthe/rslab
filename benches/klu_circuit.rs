@@ -392,18 +392,38 @@ fn main() {
             "", klu_res, mf_res
         );
 
-        // --- parallel per-block factor (opt-in, ambient pool) ---
+        // --- parallel per-block factor + refactor (opt-in, ambient pool) ---
         let t = Instant::now();
-        let klu_par = sym
+        let mut klu_par = sym
             .factor(&a, &KluSettings::default().with_parallel_factor(true))
             .unwrap();
         let t_fac_par = t.elapsed();
         assert_eq!(klu_par.factor_nnz(), klu_nnz, "parallel factor differs");
+        let t = Instant::now();
+        klu_par.refactor(&a).unwrap();
+        let t_refac_par = t.elapsed();
+        let t = Instant::now();
+        for k in 0..SWEEP {
+            let scale = 1.0 + 0.03 * k as f64;
+            let a2 = GeneralCsc {
+                n: a.n,
+                col_ptr: a.col_ptr.clone(),
+                row_idx: a.row_idx.clone(),
+                values: a.values.iter().map(|&v| v * scale).collect(),
+            };
+            klu_par.refactor(&a2).unwrap();
+            let _ = klu_par.solve(&b).unwrap();
+        }
+        let t_sweep_par = t.elapsed();
         println!(
-            "{:>8} parallel-blocks: fac {:>8.2?} ({:.1}x vs sequential)",
+            "{:>8} parallel-blocks: fac {:>8.2?} ({:.1}x) refac {:>8.2?} ({:.1}x) sweep {:>8.2?} ({:.1}x vs sequential)",
             "",
             t_fac_par,
-            t_fac.as_secs_f64() / t_fac_par.as_secs_f64()
+            t_fac.as_secs_f64() / t_fac_par.as_secs_f64(),
+            t_refac_par,
+            t_refac.as_secs_f64() / t_refac_par.as_secs_f64(),
+            t_sweep_par,
+            t_sweep_klu.as_secs_f64() / t_sweep_par.as_secs_f64()
         );
 
         // --- SuiteSparse KLU reference (same matrix, same phases) ---
