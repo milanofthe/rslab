@@ -182,7 +182,7 @@ pub use numeric::multifrontal_lu::{
 };
 // KLU-style third direct path (BTF + per-block Gilbert-Peierls): sequential,
 // bit-deterministic, built for circuit-shaped matrices and sweep refactoring.
-pub use numeric::klu::{KluSettings, KluSolver, KluSymbolic};
+pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
 pub use symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicProfileReport};

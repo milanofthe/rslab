@@ -66,13 +66,32 @@ pub struct KluSettings {
     /// singularity surfaces as a numeric zero pivot, and the diagonal
     /// preference loses its zero-free guarantee.
     pub btf: bool,
-    /// Factor the (independent) BTF diagonal blocks in parallel on the
-    /// ambient rayon pool. **Bit-identical to the sequential default**: each
-    /// block is factored sequentially by construction and blocks share no
-    /// state, so the result does not depend on scheduling. Off by default so
-    /// the path stays strictly sequential for embedded / solver-in-the-loop
-    /// use; cap the pool with `with_threads` scoping when enabling.
-    pub parallel_factor: bool,
+    /// Parallel per-block execution of factor and refactor over the
+    /// (independent) BTF diagonal blocks, on the ambient rayon pool.
+    /// **Bit-identical to sequential in every mode**: each block is factored
+    /// sequentially by construction and blocks share no state, so the result
+    /// does not depend on scheduling or thread count. The default `Auto`
+    /// enables it through a deterministic structural gate (no implicit
+    /// measuring): at least 4 diagonal blocks and 8000 input nonzeros, the
+    /// point where the pool overhead is amortized on the reference class.
+    /// Cap the pool with [`with_threads`](crate::with_threads) scoping for
+    /// solver-in-the-loop use, or force `Off` for strictly sequential
+    /// execution.
+    pub parallel: KluParallel,
+}
+
+/// Parallel per-block execution policy for the KLU path
+/// (see [`KluSettings::parallel`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KluParallel {
+    /// Structural gate: parallel when the BTF structure has at least 4
+    /// diagonal blocks and the matrix at least 8000 nonzeros.
+    #[default]
+    Auto,
+    /// Always parallel (still bit-identical; blocks are independent).
+    On,
+    /// Strictly sequential.
+    Off,
 }
 
 impl Default for KluSettings {
@@ -81,7 +100,7 @@ impl Default for KluSettings {
             pivot_tol: 1e-3,
             row_scaling: true,
             btf: true,
-            parallel_factor: false,
+            parallel: KluParallel::Auto,
         }
     }
 }
@@ -107,10 +126,21 @@ impl KluSettings {
         self
     }
 
-    /// Composable toggle for parallel per-block factorization
-    /// (see [`parallel_factor`](Self::parallel_factor)).
+    /// Composable setter for the parallel per-block policy
+    /// (see [`parallel`](Self::parallel)).
+    pub fn with_parallel(mut self, p: KluParallel) -> Self {
+        self.parallel = p;
+        self
+    }
+
+    /// Convenience toggle: `true` forces [`KluParallel::On`], `false`
+    /// [`KluParallel::Off`]. The default policy is [`KluParallel::Auto`].
     pub fn with_parallel_factor(mut self, on: bool) -> Self {
-        self.parallel_factor = on;
+        self.parallel = if on {
+            KluParallel::On
+        } else {
+            KluParallel::Off
+        };
         self
     }
 }
@@ -961,7 +991,14 @@ fn factor_impl<T: Scalar>(
     // opt-in and runs on the ambient rayon pool, so callers cap it with
     // `with_threads` scoping, matching the solver-in-the-loop contract.
     let nblocks = sym.block_ptr.len() - 1;
-    let blocks: Vec<Result<BlockOut<T>, RslabError>> = if settings.parallel_factor && nblocks > 1 {
+    // Resolve the parallel policy from a-priori structure only (`Auto` gate:
+    // enough blocks to spread and enough work to amortize the pool).
+    let parallel = match settings.parallel {
+        KluParallel::On => true,
+        KluParallel::Off => false,
+        KluParallel::Auto => nblocks >= 4 && sym.nnz >= 8_000,
+    } && nblocks > 1;
+    let blocks: Vec<Result<BlockOut<T>, RslabError>> = if parallel {
         use rayon::prelude::*;
         (0..nblocks)
             .into_par_iter()
@@ -1080,7 +1117,7 @@ fn factor_impl<T: Scalar>(
             }
             c.f_v.copy_from_slice(&out.f_val);
         };
-        if settings.parallel_factor && nblocks > 1 {
+        if parallel {
             use rayon::prelude::*;
             jobs.into_par_iter().for_each(copy_one);
         } else {
@@ -1135,7 +1172,7 @@ fn factor_impl<T: Scalar>(
         col_perm: sym.col_perm.clone(),
         rs_inv,
         scaled: settings.row_scaling,
-        parallel: settings.parallel_factor,
+        parallel,
         l_colptr,
         l_rowidx,
         l_val,
@@ -2186,11 +2223,67 @@ mod tests {
         assert_eq!(s2.diagnostics().stages.last().unwrap().name, "klu-refactor");
     }
 
+    /// Cascaded stages with one-way inter-stage feeds: `stages` irreducible
+    /// diagonal blocks in the BTF (the reducible shape the Auto gate keys on).
+    fn cascaded(n: usize, stages: usize, seed: u64) -> GeneralCsc<f64> {
+        let mut rng = Rng(seed | 1);
+        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        let stage = n / stages;
+        for j in 0..n {
+            let s = (j / stage).min(stages - 1);
+            let lo = s * stage;
+            let hi = if s == stages - 1 { n } else { lo + stage };
+            r.push(j);
+            c.push(j);
+            v.push(6.0 + rng.next_f64());
+            // ring coupling inside the stage keeps the block irreducible
+            let fwd = lo + (j - lo + 1) % (hi - lo);
+            if fwd != j {
+                r.push(fwd);
+                c.push(j);
+                v.push(-1.0 + 0.1 * rng.next_f64());
+                r.push(j);
+                c.push(fwd);
+                v.push(-1.0 + 0.1 * rng.next_f64());
+            }
+            // one-way feed from the previous stage
+            if s > 0 {
+                r.push(j - stage);
+                c.push(j);
+                v.push(0.25 * rng.next_f64());
+            }
+        }
+        GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
+    }
+
+    #[test]
+    fn klu_parallel_auto_gate_resolves_from_structure() {
+        // Small: below the nnz floor, Auto stays sequential.
+        let a = cascaded(400, 6, 3);
+        let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        assert!(!s.factors.parallel, "small case must stay sequential");
+        // Multi-block and over the floor: Auto goes parallel.
+        let a = cascaded(4000, 6, 9);
+        let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+        assert!(s.factors.block_ptr.len() > 4);
+        assert!(a.nnz() >= 8_000);
+        assert!(
+            s.factors.parallel,
+            "large multi-block case must parallelize"
+        );
+        // Off always wins.
+        let s =
+            KluSolver::factor(&a, &KluSettings::default().with_parallel(KluParallel::Off)).unwrap();
+        assert!(!s.factors.parallel);
+    }
+
     #[test]
     fn klu_parallel_factor_bit_identical() {
         let a = circuit_like(600, 7);
         let sym = KluSymbolic::analyze(&a).unwrap();
-        let s1 = sym.factor(&a, &KluSettings::default()).unwrap();
+        let s1 = sym
+            .factor(&a, &KluSettings::default().with_parallel_factor(false))
+            .unwrap();
         let s2 = sym
             .factor(&a, &KluSettings::default().with_parallel_factor(true))
             .unwrap();

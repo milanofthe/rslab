@@ -30,10 +30,13 @@ headline results.
   threshold pivoting and row scaling. Strictly sequential and bit-deterministic;
   numeric-only `refactor` (frozen pattern + pivots) for frequency sweeps and
   Newton steps, plus `solve_transpose` (`Aᵀx = b` on the same factors) for
-  adjoint / sensitivity solves. On MNA-like matrices: 5-12x faster factor with
-  1.7-5.7x less fill than the multifrontal LU (widening with size), a 20-point
-  same-pattern sweep 10-40x faster end to end, and an opt-in bit-identical
-  parallel per-block factor that outruns SuiteSparse KLU by 1.5-2.3x
+  adjoint / sensitivity solves. Factor and refactor run the independent BTF
+  blocks in parallel when a deterministic structural gate says it pays
+  (`KluParallel::Auto`, bit-identical to sequential in every mode; force
+  `Off` for strictly sequential execution). On MNA-like matrices: 5-12x
+  faster factor with 1.7-5.7x less fill than the multifrontal LU (widening
+  with size), a 20-point same-pattern sweep 10-40x faster end to end, and
+  1.6-2.7x / 2.1-3.4x ahead of SuiteSparse KLU on parallel factor / refactor
   (`cargo bench --bench klu_circuit`).
 - Three factorization schedules: supernodal left-looking (default, frees each dense
   panel after its last consumer), multifrontal, and right-looking.
@@ -259,10 +262,12 @@ The KLU factor is 5-12x faster with 1.7-5.7x less fill, the gap widening with
 size as the multifrontal fronts grow; the numeric-only refactor runs ~2x faster
 still, so a 20-point sweep (refactor+solve vs factor+solve, the "sweep ratio")
 is 10-40x faster end to end. Both solvers reach machine-precision residuals
-(~1e-15) on every size. The numbers are the strictly sequential default;
-`KluSettings::with_parallel_factor(true)` factors the independent BTF diagonal
-blocks on the ambient rayon pool, **bit-identical** to the sequential result,
-for another 2.2-3.1x on the factor (0.7 / 2.6 / 19.8 / 81 ms).
+(~1e-15) on every size. The numbers are the sequential kernel;
+`KluParallel::Auto` (the shipped default) runs the independent BTF diagonal
+blocks in parallel once a deterministic structural gate clears (at least 4
+blocks and 8k nonzeros), **bit-identical** to the sequential result, for
+another 3.1-3.9x on factor (0.7 / 2.6 / 11.9 / 51 ms) and 3.9-4.5x on
+refactor.
 
 Against the reference C implementation, **SuiteSparse KLU** (Davis & Palamadai
 Natarajan, loaded at runtime when installed; the bench auto-detects the
@@ -281,10 +286,11 @@ per-block AMD) matches the reference. On the numeric kernel, RSLAB's
 Gilbert-Peierls (32-bit index streams, packed DFS marks, Eisenstat-Liu
 symmetric pruning, a recorded refactor scatter program) runs the sequential
 factor within 1.2-1.6x of the C code and the refactor within 1.15-1.4x. The
-opt-in parallel per-block execution (bit-identical, covers factor **and**
-refactor; two-phase spliced output) is **1.6-2.7x faster than SuiteSparse KLU
-on factor and 2.1-3.4x on refactor**, which puts the 20-point sweep ~2.4x
-ahead end to end. Both reach ~1e-15 residuals.
+parallel per-block execution (the `KluParallel::Auto` shipped default on
+gated structures; bit-identical, covers factor **and** refactor; two-phase
+spliced output) is **1.6-2.7x faster than SuiteSparse KLU on factor and
+2.1-3.4x on refactor**, which puts the 20-point sweep ~2.4x ahead end to
+end. Both reach ~1e-15 residuals.
 
 ### The optional learned auto-tuner
 
