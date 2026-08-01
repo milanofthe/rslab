@@ -8,6 +8,16 @@ refactor within 1.15-1.4x, and the opt-in bit-identical parallel per-block
 factor 1.5-2.3x FASTER than SuiteSparse (2k/10k/50k/200k: 0.7/2.6/19.8/81 ms
 vs 1.1/5.9/32.3/152 ms). Fill and block structure unchanged (parity kept).
 
+Follow-up (2026-08-01, same day): worker-side exact reserves, a two-phase
+parallel splice (prefix-sum offsets, disjoint per-block chunk copies), and a
+parallel per-block refactor sharing the factor-time opt-in. Parallel factor
+speedup 3.1-3.9x, refactor 3.9-4.5x (no splice on that path); vs SuiteSparse
+KLU: factor 1.6-2.7x faster, refactor 2.1-3.4x faster, 20-point sweep ~2.4x
+faster. Negative result, kept for the record: software prefetch of the known
+future scatter targets (prfm pldl1keep, 8 entries ahead) made every phase
+measurably slower on the M3; the out-of-order window already covers the
+latency, and the per-iteration prefetch overhead dominates. Reverted.
+
 Original plan below. Baseline measurement in `benches/klu_circuit.rs`
 (`suitesparse-klu` rows, Apple M3, f64 MNA family): structure parity (identical
 BTF blocks, fill within 1.5%, RSLAB slightly less), but the C numeric kernel is

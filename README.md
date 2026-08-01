@@ -268,21 +268,23 @@ Against the reference C implementation, **SuiteSparse KLU** (Davis & Palamadai
 Natarajan, loaded at runtime when installed; the bench auto-detects the
 Homebrew prefix):
 
-| n | RSLAB factor | RSLAB parallel | SuiteSparse factor | RSLAB refactor | SuiteSparse refactor | fill RSLAB / SS |
-|--:|--:|--:|--:|--:|--:|--:|
-| 2k | 1.7 ms | **0.7 ms** | 1.1 ms | 0.8 ms | 0.6 ms | 79.3k / 80.8k |
-| 10k | 8.0 ms | **2.6 ms** | 5.9 ms | 4.1 ms | 3.3 ms | 439k / 445k |
-| 50k | 45.4 ms | **19.8 ms** | 32.3 ms | 24.3 ms | 18.1 ms | 2.32M / 2.35M |
-| 200k | 179 ms | **81 ms** | 152 ms | 96 ms | 84 ms | 9.17M / 9.30M |
+| n | factor seq / par | SuiteSparse factor | refactor seq / par | SuiteSparse refactor | fill RSLAB / SS |
+|--:|--:|--:|--:|--:|--:|
+| 2k | 2.6 / **0.7 ms** | 1.1 ms | 1.2 / **0.26 ms** | 0.56 ms | 79.3k / 80.8k |
+| 10k | 8.0 / **2.6 ms** | 5.9 ms | 4.0 / **1.0 ms** | 3.3 ms | 439k / 445k |
+| 50k | 43 / **11.9 ms** | 33 ms | 22.5 / **5.3 ms** | 18.4 ms | 2.32M / 2.35M |
+| 200k | 170 / **51 ms** | 135 ms | 94 / **24 ms** | 79 ms | 9.17M / 9.30M |
 
 Structure is at parity: identical BTF block counts and fill within 1.5% (RSLAB
 slightly less), so the analyze pipeline (maximum transversal, Tarjan SCC,
 per-block AMD) matches the reference. On the numeric kernel, RSLAB's
 Gilbert-Peierls (32-bit index streams, packed DFS marks, Eisenstat-Liu
 symmetric pruning, a recorded refactor scatter program) runs the sequential
-factor within 1.2-1.6x of the C code and the refactor within 1.15-1.4x; the
-opt-in parallel per-block factor (bit-identical, see above) is **1.5-2.3x
-faster than SuiteSparse KLU** across the range. Both reach ~1e-15 residuals.
+factor within 1.2-1.6x of the C code and the refactor within 1.15-1.4x. The
+opt-in parallel per-block execution (bit-identical, covers factor **and**
+refactor; two-phase spliced output) is **1.6-2.7x faster than SuiteSparse KLU
+on factor and 2.1-3.4x on refactor**, which puts the 20-point sweep ~2.4x
+ahead end to end. Both reach ~1e-15 residuals.
 
 ### The optional learned auto-tuner
 
