@@ -573,10 +573,12 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
 pub(crate) fn stack_for_depth(depth: usize) -> usize {
     const FRAME: usize = 32 * 1024; // per-frame budget (LL ~6.7 KB measured; MF larger)
     const MIN: usize = 16 * 1024 * 1024; // floor (>= the rayon default; covers ~depth 500)
-    const MAX: usize = 8 * 1024 * 1024 * 1024; // 8 GB cap (depth ~256k)
-                                               // Always set an explicit, depth-proportional stack - never fall back to the
-                                               // small rayon default, which a moderate depth (a few hundred supernodes, as a
-                                               // banded matrix amalgamates to) already overflows.
+                                         // 8 GB cap (depth ~256k) on 64-bit; 1 GB on 32-bit targets (wasm32), where
+                                         // the 64-bit literal would overflow usize at const evaluation.
+    const MAX: usize = if usize::BITS >= 64 { 8 << 30 } else { 1 << 30 };
+    // Always set an explicit, depth-proportional stack - never fall back to the
+    // small rayon default, which a moderate depth (a few hundred supernodes, as a
+    // banded matrix amalgamates to) already overflows.
     depth.saturating_mul(FRAME).clamp(MIN, MAX)
 }
 
