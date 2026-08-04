@@ -497,7 +497,7 @@ impl KluSymbolic {
         // factor() must not silently pay it - the solvers never measure (or
         // estimate) implicitly.
         let estimate = self.fill.get().map(|_| self.estimate_memory::<T>());
-        let t = std::time::Instant::now();
+        let t = crate::clock::Instant::now();
         let factors = factor_impl(self, a, settings)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let nnz =
@@ -1033,7 +1033,7 @@ fn factor_impl<T: Scalar>(
     let prof = std::env::var("RLA_KLU_PROF")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let t_splice = std::time::Instant::now();
+    let t_splice = crate::clock::Instant::now();
     // Splice the per-block outputs. Two phases: exact-size global arrays are
     // carved into disjoint per-block chunks (offsets by prefix sums) and the
     // heavy value/index copies run per block, in parallel when enabled; the
@@ -1532,7 +1532,7 @@ impl<T: Scalar> KluSolver<T> {
     #[allow(clippy::needless_range_loop)]
     pub fn refactor(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         a.validate()?;
-        let t = std::time::Instant::now();
+        let t = crate::clock::Instant::now();
         let f = &mut self.factors;
         if a.n != f.n {
             return Err(RslabError::DimensionMismatch {

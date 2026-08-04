@@ -785,8 +785,8 @@ fn symbolic_prefix(
     // everything recorded into the caller's profiler up to the finish
     // (the preprocess pick and, on the verify path, BOTH variant runs) -
     // else the report's stage sum can exceed its total.
-    let t_dispatch = prof.map(|_| std::time::Instant::now());
-    let t_pick = prof.map(|_| std::time::Instant::now());
+    let t_dispatch = prof.map(|_| crate::clock::Instant::now());
+    let t_pick = prof.map(|_| crate::clock::Instant::now());
     let resolved_preprocess = match snode_params.preprocess {
         OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
         other => other,
@@ -871,7 +871,7 @@ fn symbolic_prefix_with(
     // does no `Instant::now()` calls. See
     // `dev/research/phase-2.13b-symbolic-profiler.md`.
     let prof = snode_params.symbolic_profiler.as_ref();
-    let t_total = prof.map(|_| std::time::Instant::now());
+    let t_total = prof.map(|_| crate::clock::Instant::now());
 
     // β refactor: scaling is no longer computed here. It moved to
     // `factorize_multifrontal` so that `SymbolicFactorization`
@@ -891,7 +891,7 @@ fn symbolic_prefix_with(
     // length `n` before handing it to the rest of the pipeline. See
     // `src/symbolic/ldlt_compress.rs` and
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
-    let t_sym = prof.map(|_| std::time::Instant::now());
+    let t_sym = prof.map(|_| crate::clock::Instant::now());
     let full_pattern = matrix.symmetric_pattern();
     if let Some(t) = t_sym {
         record_stage(prof, "symmetric_pattern", t);
@@ -917,7 +917,7 @@ fn symbolic_prefix_with(
     // actual `run_external_ordering` call so every path records exactly one
     // `ordering` stage.
     let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), RslabError> {
-        let t_ord = prof.map(|_| std::time::Instant::now());
+        let t_ord = prof.map(|_| crate::clock::Instant::now());
         let r = run_external_ordering(pat, method)?;
         if let Some(t) = t_ord {
             record_stage(prof, "ordering", t);
@@ -936,7 +936,7 @@ fn symbolic_prefix_with(
             // matching carries no value information (see the
             // `scaling::Mc64Cache` note); the retired `cached_mc64` field
             // that promised that reuse was unwireable dead weight.
-            let t_pre = prof.map(|_| std::time::Instant::now());
+            let t_pre = prof.map(|_| crate::clock::Instant::now());
             let cache = crate::scaling::compute_mc64_cache(matrix)?;
             let map = build_supermap(&cache.perm);
             if let Some(t) = t_pre {
@@ -948,13 +948,13 @@ fn symbolic_prefix_with(
                 // an identical-size graph.
                 record_ordering(&full_pattern)?
             } else {
-                let t_cmp = prof.map(|_| std::time::Instant::now());
+                let t_cmp = prof.map(|_| crate::clock::Instant::now());
                 let cpat = compress_pattern(&full_pattern, &map);
                 if let Some(t) = t_cmp {
                     record_stage(prof, "compress_pattern", t);
                 }
                 let (super_perm, resolved) = record_ordering(&cpat)?;
-                let t_exp = prof.map(|_| std::time::Instant::now());
+                let t_exp = prof.map(|_| crate::clock::Instant::now());
                 let expanded = expand_permutation(&super_perm, &map);
                 if let Some(t) = t_exp {
                     record_stage(prof, "expand_perm", t);
@@ -969,12 +969,12 @@ fn symbolic_prefix_with(
     // The local name `amd_*` is kept from the AMD-only era to minimise the
     // diff; semantically these are now "ordering output" and "permuted
     // pattern from that ordering", regardless of method.
-    let t_perm1 = prof.map(|_| std::time::Instant::now());
+    let t_perm1 = prof.map(|_| crate::clock::Instant::now());
     let amd_pattern = permute_pattern(&full_pattern, &amd_perm);
     if let Some(t) = t_perm1 {
         record_stage(prof, "permute1", t);
     }
-    let t_etree0 = prof.map(|_| std::time::Instant::now());
+    let t_etree0 = prof.map(|_| crate::clock::Instant::now());
     let amd_etree = EliminationTree::from_pattern(&amd_pattern);
     if let Some(t) = t_etree0 {
         record_stage(prof, "etree_initial", t);
@@ -985,7 +985,7 @@ fn symbolic_prefix_with(
     // are not consecutive in the column numbering, and downstream code that
     // assumes `first_col..first_col+ncol` is the eliminated set silently
     // factors the wrong columns. See dev/research/postorder-pipeline.md.
-    let t_post = prof.map(|_| std::time::Instant::now());
+    let t_post = prof.map(|_| crate::clock::Instant::now());
     let (post, post_inv) = postorder(&amd_etree);
     if let Some(t) = t_post {
         record_stage(prof, "postorder", t);
@@ -994,7 +994,7 @@ fn symbolic_prefix_with(
     // Step 4: Compose AMD perm with the postorder.
     //   final_perm[k] = amd_perm[post[k]]
     // The composition maps postorder position k to the original column.
-    let t_compose = prof.map(|_| std::time::Instant::now());
+    let t_compose = prof.map(|_| crate::clock::Instant::now());
     let perm: Vec<usize> = post.iter().map(|&p| amd_perm[p]).collect();
     let mut perm_inv = vec![0usize; n];
     for (new, &old) in perm.iter().enumerate() {
@@ -1005,7 +1005,7 @@ fn symbolic_prefix_with(
     }
 
     // Step 5: Re-permute the matrix on the composed permutation.
-    let t_perm2 = prof.map(|_| std::time::Instant::now());
+    let t_perm2 = prof.map(|_| crate::clock::Instant::now());
     let permuted_pattern = permute_pattern(&full_pattern, &perm);
     if let Some(t) = t_perm2 {
         record_stage(prof, "permute2", t);
@@ -1019,7 +1019,7 @@ fn symbolic_prefix_with(
     // final etree in O(n) instead of re-running `from_pattern` at
     // O(nnz · α(n)). A 3-run bench shows ~3% small-frontal p90 improvement
     // over the old two-from_pattern approach.
-    let t_relabel = prof.map(|_| std::time::Instant::now());
+    let t_relabel = prof.map(|_| crate::clock::Instant::now());
     let final_parent: Vec<Option<usize>> = (0..n)
         .map(|new| {
             let old_amd = post[new];
@@ -1039,7 +1039,7 @@ fn symbolic_prefix_with(
     // (still available as `column_counts`) to Gilbert-Ng-Peyton at
     // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
     // KKT matrices - see `dev/validation/phase-2.5.1-*`.
-    let t_cc = prof.map(|_| std::time::Instant::now());
+    let t_cc = prof.map(|_| crate::clock::Instant::now());
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
     if let Some(t) = t_cc {
         record_stage(prof, "col_counts", t);
@@ -1078,7 +1078,7 @@ fn symbolic_prefix_with(
     }
     let snode_params: &SupernodeParams = &effective_params;
 
-    let t_renumber = prof.map(|_| std::time::Instant::now());
+    let t_renumber = prof.map(|_| crate::clock::Instant::now());
     if matches!(
         snode_params.amalgamation_strategy,
         supernode::AmalgamationStrategy::Renumber
@@ -1151,10 +1151,10 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     } = prefix;
     let snode_params: &SupernodeParams = &effective_params;
     let prof = snode_params.symbolic_profiler.as_ref();
-    let t_finish = prof.map(|_| std::time::Instant::now());
+    let t_finish = prof.map(|_| crate::clock::Instant::now());
 
     // Step 7: Supernode detection on the postordered etree
-    let t_find = prof.map(|_| std::time::Instant::now());
+    let t_find = prof.map(|_| crate::clock::Instant::now());
     let mut supernodes = find_supernodes(&etree, &col_counts, snode_params);
     // Issue #55 Phase B2: assign per-supernode incoming-delay budget.
     // Bounded-cost postorder pass; runs once per symbolic factor and
@@ -1170,7 +1170,7 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     // the groups are consumed at numeric time only when the
     // `small_leaf` gate is `On`. O(n_snodes), no allocations beyond
     // the groups themselves.
-    let t_slg = prof.map(|_| std::time::Instant::now());
+    let t_slg = prof.map(|_| crate::clock::Instant::now());
     let (small_leaf_groups, snode_group) =
         find_small_leaf_groups(&supernodes, &permuted_pattern, &snode_params.small_leaf);
     if let Some(t) = t_slg {
@@ -1178,7 +1178,7 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     }
 
     // Step 5: Compute contribution sizes and peak memory
-    let t_pk = prof.map(|_| std::time::Instant::now());
+    let t_pk = prof.map(|_| crate::clock::Instant::now());
     let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
 
     let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);

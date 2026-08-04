@@ -130,7 +130,7 @@ fn cmod_prof_on() -> bool {
 // LDLT twin: time integral of the number of `lu_ll_factor_node` calls in
 // flight; `hist_ns[k]` = wall ns with exactly k nodes active (k capped 16).
 struct LuConcProf {
-    last: std::time::Instant,
+    last: crate::clock::Instant,
     active: usize,
     hist_ns: [u64; 17],
 }
@@ -138,13 +138,13 @@ static PROF_LU_CONC: std::sync::OnceLock<std::sync::Mutex<LuConcProf>> = std::sy
 fn lu_conc_event(enter: bool) {
     let m = PROF_LU_CONC.get_or_init(|| {
         std::sync::Mutex::new(LuConcProf {
-            last: std::time::Instant::now(),
+            last: crate::clock::Instant::now(),
             active: 0,
             hist_ns: [0; 17],
         })
     });
     let Ok(mut g) = m.lock() else { return };
-    let now = std::time::Instant::now();
+    let now = crate::clock::Instant::now();
     let fresh = g.active == 0 && g.hist_ns.iter().all(|&x| x == 0);
     if !fresh {
         let k = g.active.min(16);
@@ -427,7 +427,7 @@ fn lu_front<T: Scalar>(
     if nrow >= 512 && std::env::var("RLA_BLR_PROBE").is_ok() {
         crate::numeric::blr::probe_front(f, nrow, ncol, 256);
     }
-    let t_panel = profile.then(std::time::Instant::now);
+    let t_panel = profile.then(crate::clock::Instant::now);
     let mut pivots = vec![T::zero(); ncol];
     let mut n_perturbed = 0usize;
     // Row permutation of the front (partial pivoting interchanges rows). Only
@@ -549,7 +549,7 @@ fn lu_front<T: Scalar>(
     if let Some(t) = t_panel {
         PROF_PANEL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
-    let t_extract = profile.then(std::time::Instant::now);
+    let t_extract = profile.then(crate::clock::Instant::now);
     // Pivots from the factored diagonal of the fully-summed block.
     for k in 0..ncol {
         pivots[k] = f[k * n + k];
@@ -634,7 +634,7 @@ fn factor_one_node_lu<T: Scalar>(
     let n = sym.n;
     let ncol = snode.ncol;
     let own_last = snode.first_col + ncol;
-    let t_asm = profile.then(std::time::Instant::now);
+    let t_asm = profile.then(crate::clock::Instant::now);
 
     // Front row structure: own columns ++ sorted trailing rows (symmetrized
     // pattern of own columns plus children contribution rows).
@@ -727,7 +727,7 @@ fn factor_one_node_lu<T: Scalar>(
     if let Some(t) = t_asm {
         PROF_ASM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
-    let t_front = profile.then(std::time::Instant::now);
+    let t_front = profile.then(crate::clock::Instant::now);
     let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, blr, profile, kt)?;
     if let Some(t) = t_front {
         PROF_FRONT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -886,7 +886,7 @@ impl LuSymbolic {
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symb, cap)
         });
-        let t = std::time::Instant::now();
+        let t = crate::clock::Instant::now();
         let factors = factor_general_lu_numeric(self, a, opts)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let nnz = factors.factor_nnz() as u64;
@@ -1647,7 +1647,7 @@ fn lu_ll_factor_node<T: Scalar>(
         lu_conc_event(true);
         LuConcGuard
     });
-    let t_node = prof_node.then(std::time::Instant::now);
+    let t_node = prof_node.then(crate::clock::Instant::now);
     let ll_gemm_gate = kt.scalar_gate;
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
@@ -1666,7 +1666,7 @@ fn lu_ll_factor_node<T: Scalar>(
     for (li, &g) in rs[s].iter().enumerate() {
         gloc[g] = li;
     }
-    let t_asm = std::time::Instant::now();
+    let t_asm = crate::clock::Instant::now();
     // Assemble columns of s (full) into lbuf, and the U12 rows into ubuf.
     for p in 0..ncol {
         let c = first + p;
@@ -1684,7 +1684,7 @@ fn lu_ll_factor_node<T: Scalar>(
         }
     }
     PROF_LL_ASM_NS.fetch_add(t_asm.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    let t_cmod = std::time::Instant::now();
+    let t_cmod = crate::clock::Instant::now();
     // cmod from every factored descendant. NOTE: cmod-aggregation (K-stacking many
     // descendant updates into one fat GEMM) was measured and rejected - across MoM
     // topologies 91-95 % of cmod flop already runs as large parallel GEMMs, and the
@@ -2001,7 +2001,7 @@ fn lu_ll_factor_node<T: Scalar>(
     }
     let cmod_ns = t_cmod.elapsed().as_nanos() as u64;
     PROF_LL_CMOD_NS.fetch_add(cmod_ns, Ordering::Relaxed);
-    let t_cdiv = std::time::Instant::now();
+    let t_cdiv = crate::clock::Instant::now();
     // cdiv: in-place **blocked** panel LU (1×1 static pivoting), no trailing/CB
     // update. Mirrors the multifrontal `lu_front` getrf - unblocked `getf2` over
     // an NB-wide panel, then the dominant trailing update as a single SIMD GEMM
@@ -2036,7 +2036,7 @@ fn lu_ll_factor_node<T: Scalar>(
     while kb < ncol {
         let ke = (kb + nb_cdiv).min(ncol);
         let t_g = if prof {
-            Some(std::time::Instant::now())
+            Some(crate::clock::Instant::now())
         } else {
             None
         };
@@ -2146,7 +2146,7 @@ fn lu_ll_factor_node<T: Scalar>(
             PROF_CDIV_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         let t_t = if prof {
-            Some(std::time::Instant::now())
+            Some(crate::clock::Instant::now())
         } else {
             None
         };
@@ -2201,7 +2201,7 @@ fn lu_ll_factor_node<T: Scalar>(
             PROF_CDIV_TRSM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         let t_m = if prof {
-            Some(std::time::Instant::now())
+            Some(crate::clock::Instant::now())
         } else {
             None
         };
@@ -2545,7 +2545,7 @@ fn factor_lu_left_looking<T: Scalar>(
         );
         if let Some(m) = PROF_LU_CONC.get() {
             if let Ok(mut cg) = m.lock() {
-                let now = std::time::Instant::now();
+                let now = crate::clock::Instant::now();
                 let k = cg.active.min(16);
                 cg.hist_ns[k] += now.duration_since(cg.last).as_nanos() as u64;
                 cg.last = now;

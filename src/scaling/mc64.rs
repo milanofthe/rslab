@@ -97,7 +97,7 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabErr
         Ok("1") | Ok("on")
     );
     let t0 = if trace {
-        Some(std::time::Instant::now())
+        Some(crate::clock::Instant::now())
     } else {
         None
     };

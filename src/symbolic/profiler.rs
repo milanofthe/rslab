@@ -126,7 +126,7 @@ pub struct SymbolicProfileReport {
 pub fn record_stage(
     profiler: Option<&Arc<Mutex<SymbolicProfiler>>>,
     name: &'static str,
-    start: std::time::Instant,
+    start: crate::clock::Instant,
 ) {
     if let Some(arc) = profiler {
         let us = start.elapsed().as_micros() as u64;

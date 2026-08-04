@@ -685,7 +685,7 @@ impl LdltSymbolic {
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symbolic, cap)
         });
-        let t = std::time::Instant::now();
+        let t = crate::clock::Instant::now();
         let (scaled, scale) = equilibrate_with(a, &opts.scaling)?;
         let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;

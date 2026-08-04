@@ -80,7 +80,7 @@ fn ldlt_prof_on() -> bool {
 // the workers busy" (mass at 1-2) from "per-node work is slow", mutex on node
 // entry/exit only, ~2 lock ops per supernode, zero cost when profiling is off.
 struct LlConcProf {
-    last: std::time::Instant,
+    last: crate::clock::Instant,
     active: usize,
     hist_ns: [u64; 17],
 }
@@ -89,13 +89,13 @@ static PROF_LDLT_CONC: std::sync::OnceLock<std::sync::Mutex<LlConcProf>> =
 fn ll_conc_event(enter: bool) {
     let m = PROF_LDLT_CONC.get_or_init(|| {
         std::sync::Mutex::new(LlConcProf {
-            last: std::time::Instant::now(),
+            last: crate::clock::Instant::now(),
             active: 0,
             hist_ns: [0; 17],
         })
     });
     let Ok(mut g) = m.lock() else { return };
-    let now = std::time::Instant::now();
+    let now = crate::clock::Instant::now();
     // First event after a reset: arm the clock without accumulating the
     // between-factorizations gap as "idle".
     let fresh = g.active == 0 && g.hist_ns.iter().all(|&x| x == 0);
@@ -2425,9 +2425,9 @@ fn ll_factor_node<T: Scalar>(
         ll_conc_event(true);
         LlConcGuard
     });
-    let t_node = prof.then(std::time::Instant::now);
+    let t_node = prof.then(crate::clock::Instant::now);
     let mut node_ph_ns = [0u64; 3]; // asm / cmod / cdiv
-    let t_asm = prof.then(std::time::Instant::now);
+    let t_asm = prof.then(crate::clock::Instant::now);
     let mut panel = vec![T::zero(); nrow * ncol];
 
     // Thread-local global→local scratch (held at all-`usize::MAX`).
@@ -2450,7 +2450,7 @@ fn ll_factor_node<T: Scalar>(
         node_ph_ns[0] = t.elapsed().as_nanos() as u64;
         PROF_LDLT_ASM_NS.fetch_add(node_ph_ns[0], AtomicOrdering::Relaxed);
     }
-    let t_cmod = prof.then(std::time::Instant::now);
+    let t_cmod = prof.then(crate::clock::Instant::now);
     // Pre-pass over the updaters: locate each one's landing range in this
     // panel once ([p0, p1) of its off-diagonal rows) and total the update
     // flops - the dispatch between the column-tiled parallel cmod and the
@@ -3019,7 +3019,7 @@ fn ll_cdiv_emit<T: Scalar>(
     kt: KernelTuning,
     mut panel: Vec<T>,
     mut gloc: Vec<usize>,
-    t_node: Option<std::time::Instant>,
+    t_node: Option<crate::clock::Instant>,
     mut node_ph_ns: [u64; 3],
     cmod_flops: usize,
     n_upd: usize,
@@ -3028,7 +3028,7 @@ fn ll_cdiv_emit<T: Scalar>(
     let ncol = snode.ncol;
     let nrow = rs[s].len();
     let prof = ldlt_prof_on();
-    let t_cdiv = prof.then(std::time::Instant::now);
+    let t_cdiv = prof.then(crate::clock::Instant::now);
     // cdiv: partial **blocked** Bunch-Kaufman LDLᵀ (1×1 and 2×2 pivots), the
     // rectangular `nrow × ncol` analogue of `factor_front`'s panel kernel. The
     // fully-summed columns are factored in panels of width `NB` with pivoting
@@ -3107,7 +3107,7 @@ fn ll_cdiv_emit<T: Scalar>(
     while kb < ncol {
         let ke = (kb + nb).min(ncol);
         let t_g = if prof && kb >= done_through {
-            Some(std::time::Instant::now())
+            Some(crate::clock::Instant::now())
         } else {
             None
         };
@@ -3142,7 +3142,7 @@ fn ll_cdiv_emit<T: Scalar>(
             PROF_LDLT_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
         }
         let t_s = if prof {
-            Some(std::time::Instant::now())
+            Some(crate::clock::Instant::now())
         } else {
             None
         };
@@ -3230,7 +3230,7 @@ fn ll_cdiv_emit<T: Scalar>(
                 let (gbuf_ref, l21_ref, tw_ref) = (&gbuf, &l21buf, &mut tmp_w);
                 let (step_res, ()) = rayon::join(
                     || {
-                        let t_g2 = prof.then(std::time::Instant::now);
+                        let t_g2 = prof.then(crate::clock::Instant::now);
                         let r = ll_bk_panel_step(
                             left,
                             nrow,
@@ -3642,7 +3642,7 @@ fn factor_left_looking<T: Scalar>(
         if let Some(m) = PROF_LDLT_CONC.get() {
             if let Ok(mut cg) = m.lock() {
                 // Close the last open interval, report, reset for the next run.
-                let now = std::time::Instant::now();
+                let now = crate::clock::Instant::now();
                 let k = cg.active.min(16);
                 cg.hist_ns[k] += now.duration_since(cg.last).as_nanos() as u64;
                 cg.last = now;

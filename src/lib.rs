@@ -86,6 +86,8 @@ pub(crate) mod analysis;
 /// for a matrix from its [`analysis::StructuralFeatures`], via an embedded MLP
 /// performance model (trained offline on the corpus sweep; pure-Rust inference).
 pub(crate) mod auto_tune;
+/// Monotonic clock shim: std Instant natively, inert on wasm32 (no OS clock).
+pub(crate) mod clock;
 pub(crate) mod dense;
 /// Deterministic resource diagnostics: a-priori peak-memory estimate + per-stage
 /// runtime/memory report for solver-in-the-loop scheduling.

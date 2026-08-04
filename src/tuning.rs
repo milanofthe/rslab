@@ -186,7 +186,7 @@ impl Calibration {
         let flops = sym.estimate_memory::<f64>().factor_flops as f64;
         let time_at = |t: usize| -> Option<f64> {
             let opts = SolverSettings::default().with_threads(t);
-            let start = std::time::Instant::now();
+            let start = crate::clock::Instant::now();
             sym.factor(&a, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
         };
@@ -226,7 +226,7 @@ impl Calibration {
         };
         let time_b = |t: usize| -> Option<f64> {
             let opts = opts_nd.clone().with_threads(t);
-            let start = std::time::Instant::now();
+            let start = crate::clock::Instant::now();
             symb.factor(&ab, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
         };
@@ -248,7 +248,7 @@ impl Calibration {
         let geom_gflops_cplx = match LdltSymbolic::analyze(&ac) {
             Ok(symc) => {
                 let fc = symc.estimate_memory::<Complex<f64>>().factor_flops as f64;
-                let start = std::time::Instant::now();
+                let start = crate::clock::Instant::now();
                 match symc.factor(&ac, &SolverSettings::default().with_threads(1)) {
                     Ok(_) => (fc / start.elapsed().as_secs_f64().max(1e-9)) / 1e9,
                     Err(_) => geom_gflops / 3.0,
