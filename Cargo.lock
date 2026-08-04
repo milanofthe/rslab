@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "rslab"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "approx",
  "criterion",

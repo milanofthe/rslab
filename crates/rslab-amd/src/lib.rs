@@ -23,10 +23,10 @@ mod stats;
 pub use rslab_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 pub use stats::AmdStats;
 
+use rslab_ordering_core::clock::Instant;
 use rslab_ordering_core::quotient_graph::{
     finalize_permutation, order, run_elimination, MinDegree, Workspace, WorkspaceOptions,
 };
-use std::time::Instant;
 
 /// Tunable parameters for AMD ordering.
 ///

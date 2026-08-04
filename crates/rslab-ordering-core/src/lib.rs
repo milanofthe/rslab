@@ -33,6 +33,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// Monotonic clock shim: std Instant natively, inert on wasm32 (no OS clock).
+pub mod clock;
 pub mod quotient_graph;
 pub mod rcm;
 

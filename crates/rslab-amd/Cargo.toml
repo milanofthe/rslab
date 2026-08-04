@@ -1,6 +1,6 @@
 [package]
 name = "rslab-amd"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 description = "Approximate Minimum Degree (AMD) fill-reducing ordering, quotient-graph algorithm (Amestoy, Davis & Duff 1996, 2004). Pure Rust, standalone."

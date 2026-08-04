@@ -208,7 +208,7 @@ pub fn metis_order_full(
     if pattern.col_ptr.len() != pattern.n + 1 {
         return Err(OrderingError::MalformedInput);
     }
-    let t0 = std::time::Instant::now();
+    let t0 = rslab_ordering_core::clock::Instant::now();
     let mut stats = MetisStats::default();
 
     // Fix A - quasi-dense column quotient.

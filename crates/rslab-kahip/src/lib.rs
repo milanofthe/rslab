@@ -178,7 +178,7 @@ pub fn kahip_order_full(
     if pattern.col_ptr.len() != pattern.n + 1 {
         return Err(OrderingError::MalformedInput);
     }
-    let t0 = std::time::Instant::now();
+    let t0 = rslab_ordering_core::clock::Instant::now();
     let mut stats = KahipStats::default();
     let perm = node_nd::kahip_nd_order(pattern, opts, &mut stats)?;
     let ordering_stats = OrderingStats {

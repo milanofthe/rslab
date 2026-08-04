@@ -33,8 +33,8 @@ mod stats;
 pub use rslab_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 pub use stats::AmfStats;
 
+use rslab_ordering_core::clock::Instant;
 use rslab_ordering_core::quotient_graph::{order, MinFill, WorkspaceOptions};
-use std::time::Instant;
 
 /// Tunable parameters for AMF ordering.
 ///
