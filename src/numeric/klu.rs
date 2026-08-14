@@ -707,6 +707,16 @@ fn factor_block<T: Scalar>(
     let mut cur_stack = vec![0usize; bn];
     let mut topo: Vec<Ki> = Vec::with_capacity(bn);
     let mut nonpiv: Vec<Ki> = Vec::with_capacity(bn);
+    // Diagonal tracking through off-diagonal pivots (SuiteSparse KLU's
+    // repair): `diag_row[lk]` is the block-local row currently assigned as
+    // column `lk`'s diagonal candidate, `diag_col[lr]` its inverse. When a
+    // pivot steals another column's diagonal row, the displaced row is
+    // reassigned to that column, so the zero-free matching survives and one
+    // off-diagonal pivot cannot cascade into unpivoted diagonals (and fill
+    // blow-up) for the rest of the block. Materialized lazily on the first
+    // off-diagonal pivot; until then both maps are the identity.
+    let mut diag_row: Vec<Ki> = Vec::new();
+    let mut diag_col: Vec<Ki> = Vec::new();
 
     // Reserve from the block's input nnz: the MNA reference class fills
     // ~6x its input, so 4x reserves cap reallocation at one doubling in the
@@ -876,11 +886,33 @@ fn factor_block<T: Scalar>(
         if piv == UNSET || maxmag == 0.0 || !maxmag.is_finite() {
             return Err(RslabError::SingularBasis { column: c });
         }
-        if mark[lj][0] == sj && mark[lj][1] == KI_UNSET {
-            let dm = x[lj].magnitude();
+        let d = if diag_row.is_empty() {
+            lj
+        } else {
+            diag_row[lj] as usize
+        };
+        if mark[d][0] == sj && mark[d][1] == KI_UNSET {
+            let dm = x[d].magnitude();
             if dm > 0.0 && dm >= settings.pivot_tol * maxmag {
-                piv = lj;
+                piv = d;
             }
+        }
+        if piv != d {
+            // Off-diagonal pivot: hand the displaced diagonal row `d` to the
+            // (necessarily unprocessed) column that had `piv` as its
+            // diagonal. Processed columns' assigned rows are always pivotal,
+            // so `d` is free and the reassigned matching stays zero-free.
+            if diag_row.is_empty() {
+                diag_row = (0..bn as Ki).collect();
+                diag_col = (0..bn as Ki).collect();
+            }
+            debug_assert!(mark[d][1] == KI_UNSET);
+            let k2 = diag_col[piv];
+            if k2 != KI_UNSET {
+                diag_row[k2 as usize] = d as Ki;
+                diag_col[d] = k2;
+            }
+            diag_col[piv] = KI_UNSET;
         }
 
         let dval = x[piv];
@@ -1743,6 +1775,67 @@ mod tests {
             v.push(0.5 + rng.next_f64().abs());
         }
         GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
+    }
+
+    /// Off-diagonal pivots must not cascade: when a tiny diagonal forces an
+    /// off-diagonal pivot, the displaced diagonal row is reassigned to the
+    /// column whose diagonal row was stolen (SuiteSparse KLU's repair), so
+    /// later columns keep their diagonal preference and the fill stays near
+    /// the symbolic diagonal-pivoting prediction instead of degenerating
+    /// toward partial-pivoting fill (the scircuit/rajat15 2x fill blow-up).
+    #[test]
+    fn klu_offdiagonal_pivot_reassigns_diagonal() {
+        // scircuit's mechanism in miniature: power-net rows (uniform
+        // conductances -> every entry is that row's max, so row-max scaling
+        // turns them into permanent large pivot candidates in every column
+        // they touch) plus a few tiny diagonals that force the first steal.
+        let n = 900;
+        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            for t in [1usize, 2] {
+                r.push((j + t) % n);
+                c.push(j);
+                v.push(1.0);
+            }
+            let tiny = j % 21 == 5; // j = 2 mod 3: never on a power-net column
+            r.push(j);
+            c.push(j);
+            v.push(if tiny { 1e-9 } else { 4.0 });
+            if tiny {
+                // the steal target: dominant candidate in the tiny column...
+                r.push(j + 1);
+                c.push(j);
+                v.push(10.0);
+                // ...whose own column keeps the displaced row available, but
+                // small enough that plain partial pivoting would not pick it
+                r.push(j);
+                c.push(j + 1);
+                v.push(0.3);
+            }
+        }
+        // power nets: rows touching every 3rd column with uniform values
+        for k in 0..6usize {
+            let p = 100 + 130 * k;
+            for j in (0..n).step_by(3) {
+                if j != p && j + 1 != p && j + 2 != p {
+                    r.push(p);
+                    c.push(j);
+                    v.push(2.0);
+                }
+            }
+        }
+        let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
+        let sym = KluSymbolic::analyze(&a).unwrap();
+        let f = sym.factor(&a, &KluSettings::default()).unwrap();
+        assert!(
+            (f.factor_nnz() as f64) < 1.5 * sym.symbolic_factor_nnz() as f64,
+            "off-diagonal pivots cascaded: fill {} vs symbolic {}",
+            f.factor_nnz(),
+            sym.symbolic_factor_nnz()
+        );
+        let b: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
+        let x = f.solve(&b).unwrap();
+        assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
     }
 
     #[test]
