@@ -33,6 +33,7 @@ pub(crate) struct BtfForm {
 
 /// Maximum transversal on a CSC pattern (default candidate: diagonal-seeded
 /// Hopcroft-Karp). See [`hk_transversal`] and [`matching_candidates`].
+#[cfg(test)]
 pub(crate) fn max_transversal(
     n: usize,
     col_ptr: &[usize],

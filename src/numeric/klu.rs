@@ -237,7 +237,13 @@ impl KluSymbolic {
                     _ => Some(of),
                 };
             }
-            let of = best.expect("candidates is non-empty");
+            let Some(of) = best else {
+                // Unreachable: `matching_candidates` returns at least one
+                // matching or `None` (handled above as StructurallySingular).
+                return Err(RslabError::InvalidInput(
+                    "klu: no matching candidate".to_string(),
+                ));
+            };
             (of.pre_row_perm, of.col_perm, of.block_ptr)
         } else {
             let ident: Vec<usize> = (0..n).collect();
