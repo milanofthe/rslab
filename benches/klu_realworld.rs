@@ -13,6 +13,8 @@
 //! Env:  `RLA_KLU_SS_PREFIX` — SuiteSparse install for the reference shim
 //!       (see `benches/ss_klu_ref.rs`); without it only RSLAB rows appear.
 //!       `RLA_KLU_RW_BIG=1` — include the multi-million-row Freescale set.
+//!       `RLA_BENCH_OUT=path.jsonl` — append one JSONL record per
+//!       (matrix, solver) for `benches/klu_realworld_plot.py`.
 
 use std::time::Instant;
 
@@ -84,6 +86,38 @@ struct Row {
     sweep_ratio: f64, // ss / rslab-seq
     par_fac_ratio: f64,
     par_sweep_ratio: f64,
+}
+
+/// Append one JSONL record to `RLA_BENCH_OUT` (no-op when unset).
+#[allow(clippy::too_many_arguments)]
+fn emit(
+    group: &str,
+    name: &str,
+    n: usize,
+    nnz: usize,
+    solver: &str,
+    times: [f64; 5], // ana, fac, refac, solve, sweep (seconds; NaN = n/a)
+    fill: i64,
+    blocks: i64,
+    res: f64,
+) {
+    let Ok(path) = std::env::var("RLA_BENCH_OUT") else {
+        return;
+    };
+    let rec = serde_json::json!({
+        "group": group, "name": name, "n": n, "nnz": nnz, "solver": solver,
+        "ana_s": times[0], "fac_s": times[1], "refac_s": times[2],
+        "slv_s": times[3], "sweep_s": times[4],
+        "fill": fill, "blocks": blocks, "res": res,
+    });
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{rec}");
+    }
 }
 
 fn main() {
@@ -159,6 +193,17 @@ fn main() {
             t_sweep * 1e3,
             res
         );
+        emit(
+            group,
+            name,
+            n,
+            a.nnz(),
+            "rslab",
+            [t_ana, t_fac, t_refac, t_slv, t_sweep],
+            klu.factor_nnz() as i64,
+            klu.n_blocks() as i64,
+            res,
+        );
 
         // --- RSLAB KLU, opt-in parallel per-block factor/refactor ---
         let par = KluSettings::default().with_parallel_factor(true);
@@ -187,6 +232,17 @@ fn main() {
             t_refac / t_refac_p,
             t_sweep_p * 1e3,
             t_sweep / t_sweep_p
+        );
+        emit(
+            group,
+            name,
+            n,
+            a.nnz(),
+            "rslab-par",
+            [f64::NAN, t_fac_p, t_refac_p, f64::NAN, t_sweep_p],
+            klu_p.factor_nnz() as i64,
+            klu_p.n_blocks() as i64,
+            res,
         );
 
         // --- SuiteSparse KLU, same matrix, same phases ---
@@ -221,6 +277,17 @@ fn main() {
                     par_fac_ratio: r.fac_s / t_fac_p,
                     par_sweep_ratio: r.sweep_s / t_sweep_p,
                 });
+                emit(
+                    group,
+                    name,
+                    n,
+                    a.nnz(),
+                    "ss-klu",
+                    [r.ana_s, r.fac_s, r.refac_s, r.slv_s, r.sweep_s],
+                    r.lnz + r.unz,
+                    r.nblocks as i64,
+                    res_ss,
+                );
             }
         }
         println!();
