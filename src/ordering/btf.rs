@@ -31,14 +31,18 @@ pub(crate) struct BtfForm {
     pub block_ptr: Vec<usize>,
 }
 
-/// MC21-style maximum transversal on a CSC pattern.
+/// Maximum transversal on a CSC pattern (Hopcroft-Karp).
 ///
 /// Returns `row_match` where `row_match[j]` is the row matched to column `j`
 /// (`usize::MAX` if unmatched), together with the number of matched columns
-/// (the structural rank). A cheap greedy pass seeds the matching; remaining
-/// columns run an iterative augmenting-path DFS with per-column lookahead.
-/// Fully deterministic: columns are processed in natural order and adjacency
-/// in stored order.
+/// (the structural rank). A cheap greedy pass seeds the matching; the rest
+/// runs Hopcroft-Karp phases: a BFS layering over alternating paths from all
+/// free columns, then one sweep of vertex-disjoint shortest augmenting DFS,
+/// `O(sqrt(n) * nnz)` worst case. (The classic MC21 one-column-at-a-time DFS
+/// degenerates on the harmonic-balance circuit class — seconds instead of
+/// tens of milliseconds on `twotone` — because late columns re-walk ever
+/// longer alternating paths; phases amortize that.) Fully deterministic:
+/// columns are processed in natural order and adjacency in stored order.
 pub(crate) fn max_transversal(
     n: usize,
     col_ptr: &[usize],
@@ -64,77 +68,103 @@ pub(crate) fn max_transversal(
         return (row_match, n_matched);
     }
 
-    // Augmenting-path DFS for the remaining columns. `visited[c] == stamp`
-    // marks column `c` as on/behind the current search; `cheap[c]` remembers
-    // how far the lookahead has scanned column `c` across all searches (each
-    // entry is looked at as a lookahead candidate at most once globally).
-    let mut visited = vec![UNMATCHED; n];
-    let mut cheap: Vec<usize> = col_ptr[..n].to_vec();
-    // DFS state: column stack, per-depth adjacency cursor, per-depth chosen row.
+    // Hopcroft-Karp phases. `level[c]` is the alternating-path BFS distance
+    // of column `c` from the free columns this phase (`UNSET` = unreached,
+    // or consumed by an earlier DFS of the same phase).
+    const UNSET: usize = usize::MAX;
+    let mut level = vec![UNSET; n];
+    let mut queue: Vec<usize> = Vec::with_capacity(n);
+    // Per-phase adjacency cursor: every edge is scanned at most once per
+    // phase across all DFS of that phase.
+    let mut ptr: Vec<usize> = vec![0; n];
     let mut col_stack = vec![0usize; n];
-    let mut cursor = vec![0usize; n];
     let mut path_row = vec![0usize; n];
 
-    for jstart in 0..n {
-        if row_match[jstart] != UNMATCHED {
-            continue;
-        }
-        let stamp = jstart;
-        let mut depth = 0usize;
-        col_stack[0] = jstart;
-        cursor[0] = col_ptr[jstart];
-        visited[jstart] = stamp;
-        let mut augment_depth = None;
-
-        'dfs: while augment_depth.is_none() {
-            let c = col_stack[depth];
-            // Lookahead: any still-unmatched row in column `c` ends the search.
-            while cheap[c] < col_ptr[c + 1] {
-                let r = row_idx[cheap[c]];
-                cheap[c] += 1;
-                if col_of_row[r] == UNMATCHED {
-                    path_row[depth] = r;
-                    augment_depth = Some(depth);
-                    continue 'dfs;
-                }
+    loop {
+        // BFS layering from all free columns, stopping at the level of the
+        // shortest augmenting path (deeper layers cannot host a shortest
+        // path and would only waste work).
+        level.iter_mut().for_each(|v| *v = UNSET);
+        queue.clear();
+        for c in 0..n {
+            if row_match[c] == UNMATCHED {
+                level[c] = 0;
+                queue.push(c);
             }
-            // Descend into the columns owning the matched rows of column `c`.
-            let mut advanced = false;
-            while cursor[depth] < col_ptr[c + 1] {
-                let r = row_idx[cursor[depth]];
-                cursor[depth] += 1;
-                let c2 = col_of_row[r];
-                debug_assert_ne!(c2, UNMATCHED, "lookahead already consumed free rows");
-                if visited[c2] == stamp {
-                    continue;
-                }
-                visited[c2] = stamp;
-                path_row[depth] = r;
-                depth += 1;
-                col_stack[depth] = c2;
-                cursor[depth] = col_ptr[c2];
-                advanced = true;
+        }
+        let mut shortest = UNSET;
+        let mut head = 0usize;
+        while head < queue.len() {
+            let c = queue[head];
+            head += 1;
+            if level[c] >= shortest {
                 break;
             }
-            if advanced {
-                continue;
+            for &r in &row_idx[col_ptr[c]..col_ptr[c + 1]] {
+                let c2 = col_of_row[r];
+                if c2 == UNMATCHED {
+                    if shortest == UNSET {
+                        shortest = level[c];
+                    }
+                } else if level[c2] == UNSET {
+                    level[c2] = level[c] + 1;
+                    queue.push(c2);
+                }
             }
-            if depth == 0 {
-                break; // no augmenting path from `jstart`
-            }
-            depth -= 1;
+        }
+        if shortest == UNSET {
+            break; // no augmenting path left: the matching is maximum
         }
 
-        if let Some(d) = augment_depth {
-            // Reassign the alternating path: column at depth k takes the row
-            // chosen at depth k (the row previously owned by depth k+1's column).
-            for k in (0..=d).rev() {
-                let c = col_stack[k];
-                let r = path_row[k];
-                col_of_row[r] = c;
-                row_match[c] = r;
+        // Vertex-disjoint shortest augmenting DFS from every free column,
+        // following strictly increasing levels. Exhausted or used columns
+        // drop out of the phase via `level = UNSET`.
+        ptr[..n].copy_from_slice(&col_ptr[..n]);
+        for jstart in 0..n {
+            if row_match[jstart] != UNMATCHED || level[jstart] != 0 {
+                continue;
             }
-            n_matched += 1;
+            let mut depth = 0usize;
+            col_stack[0] = jstart;
+            'dfs: loop {
+                let c = col_stack[depth];
+                let mut descended = false;
+                while ptr[c] < col_ptr[c + 1] {
+                    let r = row_idx[ptr[c]];
+                    ptr[c] += 1;
+                    let c2 = col_of_row[r];
+                    if c2 == UNMATCHED {
+                        // Augment along the stack; the used columns leave
+                        // the phase (vertex-disjointness).
+                        path_row[depth] = r;
+                        for k in (0..=depth).rev() {
+                            let ck = col_stack[k];
+                            let rk = path_row[k];
+                            col_of_row[rk] = ck;
+                            row_match[ck] = rk;
+                            level[ck] = UNSET;
+                        }
+                        n_matched += 1;
+                        break 'dfs;
+                    }
+                    if level[c2] == level[c] + 1 {
+                        path_row[depth] = r;
+                        depth += 1;
+                        col_stack[depth] = c2;
+                        descended = true;
+                        break;
+                    }
+                }
+                if descended {
+                    continue;
+                }
+                // Column exhausted for this phase.
+                level[c] = UNSET;
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
         }
     }
     (row_match, n_matched)
@@ -159,10 +189,21 @@ pub(crate) fn block_triangular_form(
             block_ptr: vec![0],
         });
     }
+    let prof = std::env::var("RLA_KLU_PROF")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let t0 = crate::clock::Instant::now();
     let (row_match, n_matched) = max_transversal(n, col_ptr, row_idx);
+    if prof {
+        eprintln!(
+            "[klu-prof] btf: maxtrans {:.1}ms",
+            t0.elapsed().as_secs_f64() * 1e3
+        );
+    }
     if n_matched != n {
         return None;
     }
+    let t1 = crate::clock::Instant::now();
     // col_of_row[r] = the column matched to row r: node id of row r in the
     // matched digraph (node per column; edge j -> col_of_row[i] for each
     // stored entry (i, j)).
@@ -258,6 +299,12 @@ pub(crate) fn block_triangular_form(
         }
     }
     debug_assert_eq!(col_perm.len(), n);
+    if prof {
+        eprintln!(
+            "[klu-prof] btf: tarjan {:.1}ms",
+            t1.elapsed().as_secs_f64() * 1e3
+        );
+    }
 
     let row_perm: Vec<usize> = col_perm.iter().map(|&j| row_match[j]).collect();
     Some(BtfForm {

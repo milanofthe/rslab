@@ -205,6 +205,10 @@ impl KluSymbolic {
     ) -> Result<Self, RslabError> {
         a.validate()?;
         let n = a.n;
+        let prof = std::env::var("RLA_KLU_PROF")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let t0 = crate::clock::Instant::now();
 
         let (mut pre_row_perm, mut col_perm, block_ptr) = if settings.btf {
             let form = btf::block_triangular_form(n, &a.col_ptr, &a.row_idx)
@@ -219,6 +223,10 @@ impl KluSymbolic {
         // Per-block AMD on the symmetrized block pattern (B + Báµ€, with
         // diagonal, matching what the multifrontal paths feed rslab-amd).
         // Blocks of size <= 2 have nothing to reorder.
+        let t_btf = t0.elapsed();
+        let t1 = crate::clock::Instant::now();
+        let mut sym_s = 0.0f64;
+        let mut amd_s = 0.0f64;
         let mut pinv0 = vec![0usize; n];
         for (k, &r) in pre_row_perm.iter().enumerate() {
             pinv0[r] = k;
@@ -229,6 +237,7 @@ impl KluSymbolic {
             if bn <= 2 {
                 continue;
             }
+            let ts = crate::clock::Instant::now();
             // Symmetrized block adjacency via two-pass counting scatter into
             // one flat buffer (no per-column Vec allocations), then per-column
             // sort + dedup - the same layout the ordering crates expect and
@@ -291,9 +300,12 @@ impl KluSymbolic {
                 .ok_or_else(|| {
                     RslabError::InvalidInput("klu: malformed block pattern".to_string())
                 })?;
+            sym_s += ts.elapsed().as_secs_f64();
+            let ta = crate::clock::Instant::now();
             let lperm = rslab_amd::amd_order(&pat).map_err(|e| {
                 RslabError::InvalidInput(format!("klu: AMD ordering failed: {e:?}"))
             })?;
+            amd_s += ta.elapsed().as_secs_f64();
             // Apply the local (new-to-old) perm symmetrically to the block's
             // segment of both permutations.
             let old_rows: Vec<usize> = pre_row_perm[bs..be].to_vec();
@@ -318,6 +330,15 @@ impl KluSymbolic {
                 pat_row_idx.push(pinv_pre[r]);
             }
             pat_col_ptr.push(pat_row_idx.len());
+        }
+        if prof {
+            eprintln!(
+                "[klu-prof] analyze: btf {:.1}ms  symmetrize {:.1}ms  amd {:.1}ms  freeze+rest {:.1}ms",
+                t_btf.as_secs_f64() * 1e3,
+                sym_s * 1e3,
+                amd_s * 1e3,
+                t1.elapsed().as_secs_f64() * 1e3 - sym_s * 1e3 - amd_s * 1e3
+            );
         }
 
         Ok(Self {
@@ -736,6 +757,10 @@ impl<T: Scalar> KluScratch<T> {
 /// Factor one diagonal block in block-local space. Strictly sequential and
 /// deterministic; the parallel driver runs one worker per block, which is
 /// bit-identical to the sequential order because blocks share no state.
+// The argument list mirrors the phase inputs (symbolic, matrix, settings,
+// scaling, permutation, block range, workspaces); a bundling struct would
+// only rename the same nine things.
+#[allow(clippy::too_many_arguments)]
 fn factor_block<T: Scalar>(
     sym: &KluSymbolic,
     a: &GeneralCsc<T>,
@@ -920,6 +945,10 @@ fn factor_block<T: Scalar>(
                 out.f_k.push(k as Ki);
             } else {
                 x[pre - bs] = sv;
+                // Refactor scatter program, local target for now; translated
+                // to the absolute final position once the block's pivot
+                // sequence is complete (saves a second full matrix scan).
+                out.prog_in.push((k as Ki, (pre - bs) as Ki));
             }
         }
 
@@ -1056,14 +1085,8 @@ fn factor_block<T: Scalar>(
     for ri in out.u_rowidx.iter_mut() {
         *ri += bs as Ki;
     }
-    for lj in 0..bn {
-        let c = sym.col_perm[bs + lj];
-        for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-            let pre = pinv_pre[a.row_idx[k]] as usize;
-            if pre >= bs {
-                out.prog_in.push((k as Ki, out.fin_abs[pre - bs]));
-            }
-        }
+    for e in out.prog_in.iter_mut() {
+        e.1 = out.fin_abs[e.1 as usize];
     }
     Ok(())
 }
