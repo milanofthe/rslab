@@ -118,6 +118,11 @@ name = "klu_circuit"
 harness = false
 
 [[bench]]
+name = "klu_realworld"
+harness = false
+required-features = ["matgen-download"]
+
+[[bench]]
 name = "catalog"
 harness = false
 required-features = ["matgen"]

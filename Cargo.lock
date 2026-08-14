@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "rslab"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "approx",
  "criterion",
@@ -1420,21 +1420,21 @@ dependencies = [
 
 [[package]]
 name = "rslab-amd"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rslab-ordering-core",
 ]
 
 [[package]]
 name = "rslab-amf"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rslab-ordering-core",
 ]
 
 [[package]]
 name = "rslab-kahip"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rslab-amd",
  "rslab-metis",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "rslab-metis"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rslab-amd",
  "rslab-ordering-core",
@@ -1451,11 +1451,11 @@ dependencies = [
 
 [[package]]
 name = "rslab-ordering-core"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "rslab-scotch"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rslab-amd",
  "rslab-metis",
