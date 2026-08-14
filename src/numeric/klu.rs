@@ -1,6 +1,6 @@
 //! KLU-style sparse LU: BTF + per-block left-looking Gilbert-Peierls.
 //!
-//! The third direct path next to the multifrontal LDLᵀ and LU, built for
+//! The third direct path next to the multifrontal LDLáµ€ and LU, built for
 //! circuit-shaped matrices: extremely sparse, unsymmetric, near-triangularizable,
 //! with diagonal blocks far too small for supernodal/BLAS-3 kernels to pay off.
 //! Algorithmic reference: SuiteSparse KLU (Davis & Palamadai Natarajan); this is
@@ -72,8 +72,10 @@ pub struct KluSettings {
     /// sequentially by construction and blocks share no state, so the result
     /// does not depend on scheduling or thread count. The default `Auto`
     /// enables it through a deterministic structural gate (no implicit
-    /// measuring): at least 4 diagonal blocks and 8000 input nonzeros, the
-    /// point where the pool overhead is amortized on the reference class.
+    /// measuring): at least 4 diagonal blocks, 8000 input nonzeros, and no
+    /// dominant block (largest block at most half of `n`) — real circuits
+    /// are often one giant irreducible block plus thousands of singletons,
+    /// where distributing blocks cannot help.
     /// Cap the pool with [`with_threads`](crate::with_threads) scoping for
     /// solver-in-the-loop use, or force `Off` for strictly sequential
     /// execution.
@@ -85,7 +87,8 @@ pub struct KluSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KluParallel {
     /// Structural gate: parallel when the BTF structure has at least 4
-    /// diagonal blocks and the matrix at least 8000 nonzeros.
+    /// diagonal blocks, the matrix at least 8000 nonzeros, and the largest
+    /// block holds at most half of `n` (no dominant block).
     #[default]
     Auto,
     /// Always parallel (still bit-identical; blocks are independent).
@@ -152,7 +155,7 @@ impl KluSettings {
 pub struct KluSymbolic {
     n: usize,
     nnz: usize,
-    /// Pre-pivot row permutation (new-to-old): BTF matching ∘ SCC order ∘
+    /// Pre-pivot row permutation (new-to-old): BTF matching âˆ˜ SCC order âˆ˜
     /// per-block AMD. Partial pivoting at factor time refines this within
     /// each block.
     pre_row_perm: Vec<usize>,
@@ -213,7 +216,7 @@ impl KluSymbolic {
             (ident.clone(), ident, bp)
         };
 
-        // Per-block AMD on the symmetrized block pattern (B + Bᵀ, with
+        // Per-block AMD on the symmetrized block pattern (B + Báµ€, with
         // diagonal, matching what the multifrontal paths feed rslab-amd).
         // Blocks of size <= 2 have nothing to reorder.
         let mut pinv0 = vec![0usize; n];
@@ -433,7 +436,7 @@ impl KluSymbolic {
     ///
     /// KLU specifics: the fill is exact under diagonal pivoting (threshold
     /// pivoting can shift it slightly); `factor_flops` is the Gilbert-Peierls
-    /// flop count (not the supernodal `nrow²·ncol` proxy); the path is
+    /// flop count (not the supernodal `nrowÂ²Â·ncol` proxy); the path is
     /// strictly sequential, so `critical_path_flops == factor_flops` and
     /// `max_tree_width == 1`; there are no dense panels.
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
@@ -633,6 +636,103 @@ struct BlockOut<T> {
     prog_in: Vec<(Ki, Ki)>,
 }
 
+// Manual `Default` (the derive would demand `T: Default`, which `Scalar`
+// does not imply); every field is an empty `Vec`.
+impl<T> Default for BlockOut<T> {
+    fn default() -> Self {
+        Self {
+            fin_abs: Vec::new(),
+            l_colptr: Vec::new(),
+            l_rowidx: Vec::new(),
+            l_val: Vec::new(),
+            u_colptr: Vec::new(),
+            u_rowidx: Vec::new(),
+            u_val: Vec::new(),
+            udiag: Vec::new(),
+            f_colptr: Vec::new(),
+            f_pre: Vec::new(),
+            f_val: Vec::new(),
+            f_k: Vec::new(),
+            prog_in: Vec::new(),
+        }
+    }
+}
+
+impl<T: Scalar> BlockOut<T> {
+    /// Clear for a new block of size `bn` with `annz` input nonzeros,
+    /// keeping allocations (the sequential driver reuses one buffer across
+    /// all blocks; per-block buffers made the allocator dominate on the
+    /// tens-of-thousands-of-singletons circuit class). Reserves follow the
+    /// MNA reference class (~6x input fill, 4x reserve caps reallocation at
+    /// one doubling without over-committing on low-fill classes).
+    fn reset(&mut self, bn: usize, annz: usize) {
+        self.fin_abs.clear();
+        self.fin_abs.resize(bn, KI_UNSET);
+        self.l_colptr.clear();
+        self.l_colptr.push(0);
+        self.l_rowidx.clear();
+        self.l_rowidx.reserve(annz * 4);
+        self.l_val.clear();
+        self.l_val.reserve(annz * 4);
+        self.u_colptr.clear();
+        self.u_colptr.push(0);
+        self.u_rowidx.clear();
+        self.u_rowidx.reserve(annz * 2);
+        self.u_val.clear();
+        self.u_val.reserve(annz * 2);
+        self.udiag.clear();
+        self.udiag.reserve(bn);
+        self.f_colptr.clear();
+        self.f_colptr.push(0);
+        self.f_pre.clear();
+        self.f_val.clear();
+        self.f_k.clear();
+        self.prog_in.clear();
+        self.prog_in.reserve(annz);
+    }
+}
+
+/// Reusable per-worker scratch for [`factor_block`], sized once to the
+/// largest block (SuiteSparse KLU's workspace discipline). Real circuit
+/// matrices carry tens of thousands of tiny BTF blocks; allocating the DFS
+/// state per block makes the allocator the dominant factor cost there.
+///
+/// `x` relies on the kernel invariant that every scattered value is zeroed
+/// when consumed, so it is all-zero between blocks on the success path. A
+/// block that fails mid-column leaves `x` dirty, which is safe: the error
+/// aborts the whole factor, so no later block's output survives.
+struct KluScratch<T> {
+    mark: Vec<[Ki; 2]>,
+    lpend: Vec<Ki>,
+    x: Vec<T>,
+    node_stack: Vec<Ki>,
+    cur_stack: Vec<usize>,
+    topo: Vec<Ki>,
+    nonpiv: Vec<Ki>,
+}
+
+impl<T: Scalar> KluScratch<T> {
+    fn new(max_bn: usize) -> Self {
+        Self {
+            mark: vec![[0, KI_UNSET]; max_bn],
+            lpend: vec![KI_UNSET; max_bn],
+            x: vec![T::zero(); max_bn],
+            node_stack: vec![0 as Ki; max_bn],
+            cur_stack: vec![0usize; max_bn],
+            topo: Vec::with_capacity(max_bn),
+            nonpiv: Vec::with_capacity(max_bn),
+        }
+    }
+
+    /// Reset the per-block state for a block of size `bn` (cheap memsets;
+    /// `x` is already zero by the kernel invariant, `topo`/`nonpiv` are
+    /// cleared per column).
+    fn reset(&mut self, bn: usize) {
+        self.mark[..bn].fill([0, KI_UNSET]);
+        self.lpend[..bn].fill(KI_UNSET);
+    }
+}
+
 /// Factor one diagonal block in block-local space. Strictly sequential and
 /// deterministic; the parallel driver runs one worker per block, which is
 /// bit-identical to the sequential order because blocks share no state.
@@ -644,28 +744,20 @@ fn factor_block<T: Scalar>(
     pinv_pre: &[Ki],
     bs: usize,
     be: usize,
-) -> Result<BlockOut<T>, RslabError> {
+    scratch: &mut KluScratch<T>,
+    out: &mut BlockOut<T>,
+) -> Result<(), RslabError> {
     let bn = be - bs;
 
     if bn == 1 {
         // Singleton block: the pivot is the (structurally nonzero) diagonal
-        // entry itself; everything else in the column is off-block.
+        // entry itself; everything else in the column is off-block. Cleared
+        // by hand (not `reset`) to skip its fill reserves.
         let c = sym.col_perm[bs];
-        let mut out = BlockOut {
-            fin_abs: vec![bs as Ki],
-            l_colptr: vec![0, 0],
-            l_rowidx: Vec::new(),
-            l_val: Vec::new(),
-            u_colptr: vec![0, 0],
-            u_rowidx: Vec::new(),
-            u_val: Vec::new(),
-            udiag: Vec::with_capacity(1),
-            f_colptr: vec![0],
-            f_pre: Vec::new(),
-            f_val: Vec::new(),
-            f_k: Vec::new(),
-            prog_in: Vec::new(),
-        };
+        out.reset(1, 0);
+        out.fin_abs[0] = bs as Ki;
+        out.l_colptr.push(0);
+        out.u_colptr.push(0);
         let mut diag: Option<T> = None;
         for k in a.col_ptr[c]..a.col_ptr[c + 1] {
             let pre = pinv_pre[a.row_idx[k]] as usize;
@@ -687,26 +779,30 @@ fn factor_block<T: Scalar>(
         }
         out.udiag.push(d);
         out.f_colptr.push(out.f_pre.len());
-        return Ok(out);
+        return Ok(());
     }
 
     // General irreducible block: left-looking Gilbert-Peierls, block-local
-    // position space (`lb = pre - bs`).
+    // position space (`lb = pre - bs`), DFS state borrowed from the reusable
+    // per-worker scratch.
     // `mark[lb] = [dfs_stamp, local_final_position]` packed pair; the DFS
     // touches both fields per visited node, packing halves its random
     // cache-line traffic.
-    let mut mark: Vec<[Ki; 2]> = vec![[0, KI_UNSET]; bn];
-    // Symmetric pruning (Eisenstat & Liu, SIMAX 1992): once column `s` has a
-    // symmetric pivot pair (`U(s,k) != 0` and `L(k,s) != 0`), the DFS only
-    // needs the prefix of `L(:,s)` holding rows already pivotal at step `k`;
-    // every pruned row is covered through column `k`'s pattern. `lpend[s]`
-    // is the exclusive prefix end (KI_UNSET = unpruned, scan to column end).
-    let mut lpend: Vec<Ki> = vec![KI_UNSET; bn];
-    let mut x = vec![T::zero(); bn];
-    let mut node_stack = vec![0 as Ki; bn];
-    let mut cur_stack = vec![0usize; bn];
-    let mut topo: Vec<Ki> = Vec::with_capacity(bn);
-    let mut nonpiv: Vec<Ki> = Vec::with_capacity(bn);
+    // `lpend`: symmetric pruning (Eisenstat & Liu, SIMAX 1992): once column
+    // `s` has a symmetric pivot pair (`U(s,k) != 0` and `L(k,s) != 0`), the
+    // DFS only needs the prefix of `L(:,s)` holding rows already pivotal at
+    // step `k`; every pruned row is covered through column `k`'s pattern.
+    // `lpend[s]` is the exclusive prefix end (KI_UNSET = unpruned).
+    scratch.reset(bn);
+    // Slice borrows (not `&mut Vec`) so the hot loops index through one
+    // level of indirection, exactly like the previous per-block locals.
+    let mark = scratch.mark.as_mut_slice();
+    let lpend = scratch.lpend.as_mut_slice();
+    let x = scratch.x.as_mut_slice();
+    let node_stack = scratch.node_stack.as_mut_slice();
+    let cur_stack = scratch.cur_stack.as_mut_slice();
+    let topo = &mut scratch.topo;
+    let nonpiv = &mut scratch.nonpiv;
     // Diagonal tracking through off-diagonal pivots (SuiteSparse KLU's
     // repair): `diag_row[lk]` is the block-local row currently assigned as
     // column `lk`'s diagonal candidate, `diag_col[lr]` its inverse. When a
@@ -727,24 +823,7 @@ fn factor_block<T: Scalar>(
             a.col_ptr[c + 1] - a.col_ptr[c]
         })
         .sum();
-    let mut out = BlockOut {
-        fin_abs: vec![KI_UNSET; bn],
-        l_colptr: Vec::with_capacity(bn + 1),
-        l_rowidx: Vec::with_capacity(annz * 4),
-        l_val: Vec::with_capacity(annz * 4),
-        u_colptr: Vec::with_capacity(bn + 1),
-        u_rowidx: Vec::with_capacity(annz * 2),
-        u_val: Vec::with_capacity(annz * 2),
-        udiag: Vec::with_capacity(bn),
-        f_colptr: Vec::with_capacity(bn + 1),
-        f_pre: Vec::new(),
-        f_val: Vec::new(),
-        f_k: Vec::new(),
-        prog_in: Vec::with_capacity(annz),
-    };
-    out.l_colptr.push(0);
-    out.u_colptr.push(0);
-    out.f_colptr.push(0);
+    out.reset(bn, annz);
     // `fin_local[lb]` tracked inside `mark[lb][1]`; `out.fin_abs` filled at
     // the end from it.
 
@@ -790,7 +869,7 @@ fn factor_block<T: Scalar>(
             let mut d = 0usize;
             node_stack[0] = lb as Ki;
             cur_stack[0] = out.l_colptr[m[1] as usize];
-            let mut end = col_end(m[1] as usize, &lpend, &out.l_colptr);
+            let mut end = col_end(m[1] as usize, lpend, &out.l_colptr);
             loop {
                 let mut descended = false;
                 while cur_stack[d] < end {
@@ -811,7 +890,7 @@ fn factor_block<T: Scalar>(
                     node_stack[d] = ch as Ki;
                     let p = mch[1] as usize;
                     cur_stack[d] = out.l_colptr[p];
-                    end = col_end(p, &lpend, &out.l_colptr);
+                    end = col_end(p, lpend, &out.l_colptr);
                     descended = true;
                     break;
                 }
@@ -824,7 +903,7 @@ fn factor_block<T: Scalar>(
                 }
                 d -= 1;
                 let up = mark[node_stack[d] as usize][1] as usize;
-                end = col_end(up, &lpend, &out.l_colptr);
+                end = col_end(up, lpend, &out.l_colptr);
             }
         }
 
@@ -876,7 +955,7 @@ fn factor_block<T: Scalar>(
         // (local pre position `lj`) when it clears the threshold.
         let mut piv = UNSET;
         let mut maxmag = 0.0f64;
-        for &np in &nonpiv {
+        for &np in nonpiv.iter() {
             let m = x[np as usize].magnitude();
             if m > maxmag {
                 maxmag = m;
@@ -919,7 +998,7 @@ fn factor_block<T: Scalar>(
         x[piv] = T::zero();
         mark[piv][1] = lj as Ki;
         out.udiag.push(dval);
-        for &np in &nonpiv {
+        for &np in nonpiv.iter() {
             let np = np as usize;
             if np == piv {
                 continue;
@@ -965,10 +1044,10 @@ fn factor_block<T: Scalar>(
     // indices go local-pre -> absolute final; U row indices go local-final
     // -> absolute final; the scatter program records absolute finals for
     // every within-block entry.
-    for m in &mark {
+    for m in mark[..bn].iter() {
         debug_assert_ne!(m[1], KI_UNSET);
     }
-    for (lb, m) in mark.iter().enumerate() {
+    for (lb, m) in mark[..bn].iter().enumerate() {
         out.fin_abs[lb] = (bs as Ki) + m[1];
     }
     for ri in out.l_rowidx.iter_mut() {
@@ -986,7 +1065,7 @@ fn factor_block<T: Scalar>(
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 fn factor_impl<T: Scalar>(
@@ -1024,170 +1103,239 @@ fn factor_impl<T: Scalar>(
     // `with_threads` scoping, matching the solver-in-the-loop contract.
     let nblocks = sym.block_ptr.len() - 1;
     // Resolve the parallel policy from a-priori structure only (`Auto` gate:
-    // enough blocks to spread and enough work to amortize the pool).
+    // enough blocks to spread, enough work to amortize the pool, and no
+    // dominant block. Real circuits are typically one giant irreducible
+    // block plus thousands of singletons; with most of the matrix in one
+    // block the pool cannot help and the per-worker setup only costs).
     let parallel = match settings.parallel {
         KluParallel::On => true,
         KluParallel::Off => false,
-        KluParallel::Auto => nblocks >= 4 && sym.nnz >= 8_000,
+        KluParallel::Auto => nblocks >= 4 && sym.nnz >= 8_000 && sym.max_block_size() * 2 <= sym.n,
     } && nblocks > 1;
-    let blocks: Vec<Result<BlockOut<T>, RslabError>> = if parallel {
-        use rayon::prelude::*;
-        (0..nblocks)
-            .into_par_iter()
-            .map(|b| {
-                factor_block(
-                    sym,
-                    a,
-                    settings,
-                    &rs_inv,
-                    &pinv_pre,
-                    sym.block_ptr[b],
-                    sym.block_ptr[b + 1],
-                )
-            })
-            .collect()
-    } else {
-        (0..nblocks)
-            .map(|b| {
-                factor_block(
-                    sym,
-                    a,
-                    settings,
-                    &rs_inv,
-                    &pinv_pre,
-                    sym.block_ptr[b],
-                    sym.block_ptr[b + 1],
-                )
-            })
-            .collect()
-    };
-
+    let max_bn = sym.max_block_size();
     let prof = std::env::var("RLA_KLU_PROF")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let t_splice = crate::clock::Instant::now();
-    // Splice the per-block outputs. Two phases: exact-size global arrays are
-    // carved into disjoint per-block chunks (offsets by prefix sums) and the
-    // heavy value/index copies run per block, in parallel when enabled; the
-    // cheap O(n)/O(nnz) bookkeeping (column pointers, the refactor scatter
-    // program, `udiag`) stays sequential. Off-block F rows are resolved
-    // through `fin_of_pre`, which is complete before the copy phase starts.
-    let outs: Vec<BlockOut<T>> = {
-        let mut v = Vec::with_capacity(nblocks);
-        for o in blocks {
-            v.push(o?);
-        }
-        v
-    };
-    let mut l_off = vec![0usize; nblocks + 1];
-    let mut u_off = vec![0usize; nblocks + 1];
-    let mut f_off = vec![0usize; nblocks + 1];
-    for (b, out) in outs.iter().enumerate() {
-        l_off[b + 1] = l_off[b] + out.l_rowidx.len();
-        u_off[b + 1] = u_off[b] + out.u_rowidx.len();
-        f_off[b + 1] = f_off[b] + out.f_pre.len();
-    }
+    let t_blocks = crate::clock::Instant::now();
 
-    let mut fin_of_pre = vec![0 as Ki; n];
-    for (b, out) in outs.iter().enumerate() {
-        let bs = sym.block_ptr[b];
-        fin_of_pre[bs..bs + out.fin_abs.len()].copy_from_slice(&out.fin_abs);
-    }
-
-    let mut l_rowidx: Vec<Ki> = vec![0; l_off[nblocks]];
-    let mut l_val: Vec<T> = vec![T::zero(); l_off[nblocks]];
-    let mut u_rowidx: Vec<Ki> = vec![0; u_off[nblocks]];
-    let mut u_val: Vec<T> = vec![T::zero(); u_off[nblocks]];
-    let mut f_rowidx: Vec<Ki> = vec![0; f_off[nblocks]];
-    let mut f_val: Vec<T> = vec![T::zero(); f_off[nblocks]];
-    {
-        struct Chunks<'s, T> {
-            l_ri: &'s mut [Ki],
-            l_v: &'s mut [T],
-            u_ri: &'s mut [Ki],
-            u_v: &'s mut [T],
-            f_ri: &'s mut [Ki],
-            f_v: &'s mut [T],
-        }
-        let mut jobs: Vec<(Chunks<'_, T>, &BlockOut<T>)> = Vec::with_capacity(nblocks);
-        let (mut lri, mut lv) = (l_rowidx.as_mut_slice(), l_val.as_mut_slice());
-        let (mut uri, mut uv) = (u_rowidx.as_mut_slice(), u_val.as_mut_slice());
-        let (mut fri, mut fv) = (f_rowidx.as_mut_slice(), f_val.as_mut_slice());
-        for out in &outs {
-            let (a1, r1) = std::mem::take(&mut lri).split_at_mut(out.l_rowidx.len());
-            lri = r1;
-            let (a2, r2) = std::mem::take(&mut lv).split_at_mut(out.l_val.len());
-            lv = r2;
-            let (a3, r3) = std::mem::take(&mut uri).split_at_mut(out.u_rowidx.len());
-            uri = r3;
-            let (a4, r4) = std::mem::take(&mut uv).split_at_mut(out.u_val.len());
-            uv = r4;
-            let (a5, r5) = std::mem::take(&mut fri).split_at_mut(out.f_pre.len());
-            fri = r5;
-            let (a6, r6) = std::mem::take(&mut fv).split_at_mut(out.f_val.len());
-            fv = r6;
-            jobs.push((
-                Chunks {
-                    l_ri: a1,
-                    l_v: a2,
-                    u_ri: a3,
-                    u_v: a4,
-                    f_ri: a5,
-                    f_v: a6,
-                },
-                out,
-            ));
-        }
-        let fin = &fin_of_pre;
-        let copy_one = |(c, out): (Chunks<'_, T>, &BlockOut<T>)| {
-            c.l_ri.copy_from_slice(&out.l_rowidx);
-            c.l_v.copy_from_slice(&out.l_val);
-            c.u_ri.copy_from_slice(&out.u_rowidx);
-            c.u_v.copy_from_slice(&out.u_val);
-            for (dst, &pre) in c.f_ri.iter_mut().zip(&out.f_pre) {
-                *dst = fin[pre as usize];
-            }
-            c.f_v.copy_from_slice(&out.f_val);
-        };
-        if parallel {
-            use rayon::prelude::*;
-            jobs.into_par_iter().for_each(copy_one);
-        } else {
-            jobs.into_iter().for_each(copy_one);
-        }
-    }
-
-    let mut l_colptr = Vec::with_capacity(n + 1);
-    l_colptr.push(0usize);
-    let mut u_colptr = Vec::with_capacity(n + 1);
-    u_colptr.push(0usize);
-    let mut f_colptr = Vec::with_capacity(n + 1);
-    f_colptr.push(0usize);
+    // Numeric output buffers, filled either incrementally block-by-block
+    // (sequential: one reused scratch + one reused block buffer, no
+    // per-block allocations and no separate splice pass — the allocator and
+    // the extra copy dominated on the tens-of-thousands-of-tiny-blocks
+    // circuit class) or by the two-phase parallel splice below.
+    let mut l_colptr: Vec<usize> = Vec::with_capacity(n + 1);
+    l_colptr.push(0);
+    let mut u_colptr: Vec<usize> = Vec::with_capacity(n + 1);
+    u_colptr.push(0);
+    let mut f_colptr: Vec<usize> = Vec::with_capacity(n + 1);
+    f_colptr.push(0);
     let mut udiag: Vec<T> = Vec::with_capacity(n);
+    let mut l_rowidx: Vec<Ki> = Vec::new();
+    let mut l_val: Vec<T> = Vec::new();
+    let mut u_rowidx: Vec<Ki> = Vec::new();
+    let mut u_val: Vec<T> = Vec::new();
+    let mut f_rowidx: Vec<Ki> = Vec::new();
+    let mut f_val: Vec<T> = Vec::new();
     let mut scatter_expect = vec![0 as Ki; sym.nnz];
     let mut scatter_target = vec![0 as Ki; sym.nnz];
-    for (b, out) in outs.iter().enumerate() {
-        l_colptr.extend(out.l_colptr[1..].iter().map(|&p| l_off[b] + p));
-        u_colptr.extend(out.u_colptr[1..].iter().map(|&p| u_off[b] + p));
-        f_colptr.extend(out.f_colptr[1..].iter().map(|&p| f_off[b] + p));
-        udiag.extend_from_slice(&out.udiag);
-        for (i, &k) in out.f_k.iter().enumerate() {
-            let k = k as usize;
-            scatter_expect[k] = f_rowidx[f_off[b] + i];
-            scatter_target[k] = KI_FBIT | (f_off[b] + i) as Ki;
+    let mut fin_of_pre = vec![0 as Ki; n];
+
+    if !parallel {
+        // Same fill heuristics as the per-block reserves (MNA class ~6x
+        // input): caps the doubling-growth copies of the append at one.
+        // (The parallel branch replaces these vectors with exact-size
+        // allocations instead, so the reserves live here.)
+        l_rowidx.reserve(sym.nnz * 4);
+        l_val.reserve(sym.nnz * 4);
+        u_rowidx.reserve(sym.nnz * 2);
+        u_val.reserve(sym.nnz * 2);
+        f_rowidx.reserve(sym.nnz / 4);
+        f_val.reserve(sym.nnz / 4);
+        let mut scratch = KluScratch::<T>::new(max_bn);
+        let mut out = BlockOut::<T>::default();
+        for b in 0..nblocks {
+            let bs = sym.block_ptr[b];
+            let be = sym.block_ptr[b + 1];
+            factor_block(
+                sym,
+                a,
+                settings,
+                &rs_inv,
+                &pinv_pre,
+                bs,
+                be,
+                &mut scratch,
+                &mut out,
+            )?;
+            // Incremental append: F rows reference earlier blocks only,
+            // whose final positions are already in `fin_of_pre`.
+            fin_of_pre[bs..be].copy_from_slice(&out.fin_abs);
+            let (lo, uo, fo) = (l_rowidx.len(), u_rowidx.len(), f_rowidx.len());
+            l_rowidx.extend_from_slice(&out.l_rowidx);
+            l_val.extend_from_slice(&out.l_val);
+            u_rowidx.extend_from_slice(&out.u_rowidx);
+            u_val.extend_from_slice(&out.u_val);
+            f_rowidx.extend(out.f_pre.iter().map(|&pre| fin_of_pre[pre as usize]));
+            f_val.extend_from_slice(&out.f_val);
+            l_colptr.extend(out.l_colptr[1..].iter().map(|&p| lo + p));
+            u_colptr.extend(out.u_colptr[1..].iter().map(|&p| uo + p));
+            f_colptr.extend(out.f_colptr[1..].iter().map(|&p| fo + p));
+            udiag.extend_from_slice(&out.udiag);
+            for (i, &k) in out.f_k.iter().enumerate() {
+                scatter_expect[k as usize] = f_rowidx[fo + i];
+                scatter_target[k as usize] = KI_FBIT | (fo + i) as Ki;
+            }
+            for &(k, fin) in &out.prog_in {
+                scatter_expect[k as usize] = fin;
+                scatter_target[k as usize] = fin;
+            }
         }
-        for &(k, fin) in &out.prog_in {
-            scatter_expect[k as usize] = fin;
-            scatter_target[k as usize] = fin;
+        if prof {
+            eprintln!(
+                "[klu-prof] blocks+append {:.1}ms",
+                t_blocks.elapsed().as_secs_f64() * 1e3
+            );
+        }
+    } else {
+        use rayon::prelude::*;
+        let blocks: Vec<Result<BlockOut<T>, RslabError>> = (0..nblocks)
+            .into_par_iter()
+            .map_init(
+                || KluScratch::<T>::new(max_bn),
+                |scratch, b| {
+                    let mut out = BlockOut::<T>::default();
+                    factor_block(
+                        sym,
+                        a,
+                        settings,
+                        &rs_inv,
+                        &pinv_pre,
+                        sym.block_ptr[b],
+                        sym.block_ptr[b + 1],
+                        scratch,
+                        &mut out,
+                    )?;
+                    Ok(out)
+                },
+            )
+            .collect();
+
+        if prof {
+            eprintln!(
+                "[klu-prof] blocks {:.1}ms",
+                t_blocks.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        let t_splice = crate::clock::Instant::now();
+        // Splice the per-block outputs. Two phases: exact-size global arrays are
+        // carved into disjoint per-block chunks (offsets by prefix sums) and the
+        // heavy value/index copies run per block, in parallel when enabled; the
+        // cheap O(n)/O(nnz) bookkeeping (column pointers, the refactor scatter
+        // program, `udiag`) stays sequential. Off-block F rows are resolved
+        // through `fin_of_pre`, which is complete before the copy phase starts.
+        let outs: Vec<BlockOut<T>> = {
+            let mut v = Vec::with_capacity(nblocks);
+            for o in blocks {
+                v.push(o?);
+            }
+            v
+        };
+        let mut l_off = vec![0usize; nblocks + 1];
+        let mut u_off = vec![0usize; nblocks + 1];
+        let mut f_off = vec![0usize; nblocks + 1];
+        for (b, out) in outs.iter().enumerate() {
+            l_off[b + 1] = l_off[b] + out.l_rowidx.len();
+            u_off[b + 1] = u_off[b] + out.u_rowidx.len();
+            f_off[b + 1] = f_off[b] + out.f_pre.len();
+        }
+
+        for (b, out) in outs.iter().enumerate() {
+            let bs = sym.block_ptr[b];
+            fin_of_pre[bs..bs + out.fin_abs.len()].copy_from_slice(&out.fin_abs);
+        }
+
+        l_rowidx = vec![0; l_off[nblocks]];
+        l_val = vec![T::zero(); l_off[nblocks]];
+        u_rowidx = vec![0; u_off[nblocks]];
+        u_val = vec![T::zero(); u_off[nblocks]];
+        f_rowidx = vec![0; f_off[nblocks]];
+        f_val = vec![T::zero(); f_off[nblocks]];
+        {
+            struct Chunks<'s, T> {
+                l_ri: &'s mut [Ki],
+                l_v: &'s mut [T],
+                u_ri: &'s mut [Ki],
+                u_v: &'s mut [T],
+                f_ri: &'s mut [Ki],
+                f_v: &'s mut [T],
+            }
+            let mut jobs: Vec<(Chunks<'_, T>, &BlockOut<T>)> = Vec::with_capacity(nblocks);
+            let (mut lri, mut lv) = (l_rowidx.as_mut_slice(), l_val.as_mut_slice());
+            let (mut uri, mut uv) = (u_rowidx.as_mut_slice(), u_val.as_mut_slice());
+            let (mut fri, mut fv) = (f_rowidx.as_mut_slice(), f_val.as_mut_slice());
+            for out in &outs {
+                let (a1, r1) = std::mem::take(&mut lri).split_at_mut(out.l_rowidx.len());
+                lri = r1;
+                let (a2, r2) = std::mem::take(&mut lv).split_at_mut(out.l_val.len());
+                lv = r2;
+                let (a3, r3) = std::mem::take(&mut uri).split_at_mut(out.u_rowidx.len());
+                uri = r3;
+                let (a4, r4) = std::mem::take(&mut uv).split_at_mut(out.u_val.len());
+                uv = r4;
+                let (a5, r5) = std::mem::take(&mut fri).split_at_mut(out.f_pre.len());
+                fri = r5;
+                let (a6, r6) = std::mem::take(&mut fv).split_at_mut(out.f_val.len());
+                fv = r6;
+                jobs.push((
+                    Chunks {
+                        l_ri: a1,
+                        l_v: a2,
+                        u_ri: a3,
+                        u_v: a4,
+                        f_ri: a5,
+                        f_v: a6,
+                    },
+                    out,
+                ));
+            }
+            let fin = &fin_of_pre;
+            let copy_one = |(c, out): (Chunks<'_, T>, &BlockOut<T>)| {
+                c.l_ri.copy_from_slice(&out.l_rowidx);
+                c.l_v.copy_from_slice(&out.l_val);
+                c.u_ri.copy_from_slice(&out.u_rowidx);
+                c.u_v.copy_from_slice(&out.u_val);
+                for (dst, &pre) in c.f_ri.iter_mut().zip(&out.f_pre) {
+                    *dst = fin[pre as usize];
+                }
+                c.f_v.copy_from_slice(&out.f_val);
+            };
+            jobs.into_par_iter().for_each(copy_one);
+        }
+
+        for (b, out) in outs.iter().enumerate() {
+            l_colptr.extend(out.l_colptr[1..].iter().map(|&p| l_off[b] + p));
+            u_colptr.extend(out.u_colptr[1..].iter().map(|&p| u_off[b] + p));
+            f_colptr.extend(out.f_colptr[1..].iter().map(|&p| f_off[b] + p));
+            udiag.extend_from_slice(&out.udiag);
+            for (i, &k) in out.f_k.iter().enumerate() {
+                let k = k as usize;
+                scatter_expect[k] = f_rowidx[f_off[b] + i];
+                scatter_target[k] = KI_FBIT | (f_off[b] + i) as Ki;
+            }
+            for &(k, fin) in &out.prog_in {
+                scatter_expect[k as usize] = fin;
+                scatter_target[k as usize] = fin;
+            }
+        }
+
+        if prof {
+            eprintln!(
+                "[klu-prof] splice {:.1}ms",
+                t_splice.elapsed().as_secs_f64() * 1e3
+            );
         }
     }
 
-    if prof {
-        eprintln!(
-            "[klu-prof] splice {:.1}ms",
-            t_splice.elapsed().as_secs_f64() * 1e3
-        );
-    }
     let mut row_perm = vec![0usize; n];
     let mut pinv = vec![0usize; n];
     for (&fin, &orig) in fin_of_pre.iter().zip(&sym.pre_row_perm) {
@@ -1288,18 +1436,18 @@ impl<T: Scalar> KluSolver<T> {
         Ok(xout)
     }
 
-    /// Solve the transposed system `Aᵀ x = b` with the **same** factorization.
+    /// Solve the transposed system `Aáµ€ x = b` with the **same** factorization.
     ///
     /// This is the plain transpose, NOT the conjugate transpose: for a complex
-    /// adjoint solve `Aᴴ x = b`, conjugate `b` before and `x` after. (This
+    /// adjoint solve `Aá´´ x = b`, conjugate `b` before and `x` after. (This
     /// matches the convention of the usual sparse-LU transpose solves, and is
     /// what implicit-function adjoints over holomorphic residuals need.)
     ///
-    /// The stored form is `A = Rs · P_rᵀ · M · C` with `M` the block-upper
+    /// The stored form is `A = Rs Â· P_ráµ€ Â· M Â· C` with `M` the block-upper
     /// (BTF) permuted, row-scaled matrix and `M_bb = L_b U_b` per diagonal
-    /// block, so `Aᵀ x = b` is `Mᵀ (P_r Rs x) = C b`: gather `b` through the
+    /// block, so `Aáµ€ x = b` is `Máµ€ (P_r Rs x) = C b`: gather `b` through the
     /// column permutation, run the transposed block substitution (blocks
-    /// forward, per block `Uᵀ` forward then `Lᵀ` backward, off-block `Fᵀ`
+    /// forward, per block `Uáµ€` forward then `Láµ€` backward, off-block `Fáµ€`
     /// contributions from the already-solved earlier blocks), then scatter
     /// through the row permutation and undo the row scaling. Sequential and
     /// bit-deterministic, like [`solve`](Self::solve).
@@ -1311,13 +1459,13 @@ impl<T: Scalar> KluSolver<T> {
                 got: b.len(),
             });
         }
-        // w = C·b: position k of the permuted system reads b at its column.
+        // w = CÂ·b: position k of the permuted system reads b at its column.
         let mut w = vec![T::zero(); f.n];
         for (k, &c) in f.col_perm.iter().enumerate() {
             w[k] = b[c];
         }
         self.solve_permuted_transpose(&mut w);
-        // x = Rs⁻¹ · P_rᵀ · w: scatter through the row permutation, then undo
+        // x = Rsâ»Â¹ Â· P_ráµ€ Â· w: scatter through the row permutation, then undo
         // the row scaling (Rs is diagonal, so it transposes onto the solution).
         let mut xout = vec![T::zero(); f.n];
         for (k, &orig) in f.row_perm.iter().enumerate() {
@@ -1326,10 +1474,10 @@ impl<T: Scalar> KluSolver<T> {
         Ok(xout)
     }
 
-    /// The transposed block substitution on the permuted vector: `Mᵀ` is block
+    /// The transposed block substitution on the permuted vector: `Máµ€` is block
     /// **lower** triangular (the transpose of the BTF block-upper `M`), so the
-    /// blocks run forward, and within a block `M_bbᵀ = U_bᵀ L_bᵀ` solves as
-    /// `Uᵀ` (lower, diagonal `udiag`) forward then `Lᵀ` (unit upper) backward.
+    /// blocks run forward, and within a block `M_bbáµ€ = U_báµ€ L_báµ€` solves as
+    /// `Uáµ€` (lower, diagonal `udiag`) forward then `Láµ€` (unit upper) backward.
     /// Column `j` of the stored `U`/`L`/`F` is row `j` of the transpose, so
     /// every inner loop is a gather over the existing column storage.
     fn solve_permuted_transpose(&self, w: &mut [T]) {
@@ -1341,7 +1489,7 @@ impl<T: Scalar> KluSolver<T> {
         let f = &self.factors;
         for b in 0..f.block_ptr.len() - 1 {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
-            // Fᵀ: this block's rows read the already-solved earlier blocks.
+            // Fáµ€: this block's rows read the already-solved earlier blocks.
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
@@ -1349,7 +1497,7 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 w[j] = acc;
             }
-            // Uᵀ (lower triangular, diagonal `udiag`) forward within the block.
+            // Uáµ€ (lower triangular, diagonal `udiag`) forward within the block.
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
@@ -1357,7 +1505,7 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 w[j] = acc / f.udiag[j];
             }
-            // Lᵀ (unit upper) backward within the block.
+            // Láµ€ (unit upper) backward within the block.
             for j in (bs..be).rev() {
                 let mut acc = w[j];
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
@@ -1403,7 +1551,7 @@ impl<T: Scalar> KluSolver<T> {
             // L (unit lower) forward within the block. Negating the factor
             // value (loop-invariant here) instead of `xj` keeps each column's
             // FMA product bitwise equal to `solve_permuted`'s
-            // (`(-a)·b == a·(-b)` exactly per real FMA).
+            // (`(-a)Â·b == aÂ·(-b)` exactly per real FMA).
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
@@ -1498,7 +1646,7 @@ impl<T: Scalar> KluSolver<T> {
     /// The block forward/backward substitution on the permuted/scaled vector.
     /// The axpys run through `fmadd` with the loop-invariant operand negated
     /// once per column, `solve_many` negates the per-entry factor value
-    /// instead, which is bitwise the same product (`(-a)·b == a·(-b)` holds
+    /// instead, which is bitwise the same product (`(-a)Â·b == aÂ·(-b)` holds
     /// exactly per real FMA), so the two stay bit-identical per column.
     fn solve_permuted(&self, w: &mut [T]) {
         let f = &self.factors;
@@ -2050,7 +2198,7 @@ mod tests {
         assert!(s.refactor(&a2).is_err(), "changed pattern must be rejected");
     }
 
-    /// Max-norm relative residual of the *transposed* system `Aᵀ x = b`.
+    /// Max-norm relative residual of the *transposed* system `Aáµ€ x = b`.
     fn resid_t<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
         resid(&a.transpose(), x, b)
     }
@@ -2058,7 +2206,7 @@ mod tests {
     #[test]
     fn klu_solve_transpose_matches_factored_transpose() {
         // Reducible circuit-shaped matrix: solve_transpose on A's factors must
-        // agree with a fresh factorization of Aᵀ, and satisfy Aᵀ x = b.
+        // agree with a fresh factorization of Aáµ€, and satisfy Aáµ€ x = b.
         let a = circuit_like(200, 42);
         let b: Vec<f64> = (0..200).map(|i| ((i * 3) % 13) as f64 - 6.0).collect();
         let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
@@ -2084,8 +2232,8 @@ mod tests {
 
     #[test]
     fn klu_solve_transpose_complex_plain_not_conjugate() {
-        // Complex: solve_transpose must solve the PLAIN transpose Aᵀ x = b
-        // (adjoint convention: the caller conjugates for Aᴴ). Off-diagonal
+        // Complex: solve_transpose must solve the PLAIN transpose Aáµ€ x = b
+        // (adjoint convention: the caller conjugates for Aá´´). Off-diagonal
         // pivoting pressure included (small diagonal), as in the solve test.
         let c = |re, im| Complex::new(re, im);
         let m = 6;
@@ -2129,7 +2277,7 @@ mod tests {
             "residual {}",
             resid_t(&a, &x, &b)
         );
-        // Aᴴ x = b via the documented conjugation recipe.
+        // Aá´´ x = b via the documented conjugation recipe.
         let bc: Vec<Complex<f64>> = b.iter().map(|v| v.conj()).collect();
         let xh: Vec<Complex<f64>> = s
             .solve_transpose(&bc)
