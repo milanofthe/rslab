@@ -209,112 +209,48 @@ impl KluSymbolic {
             .map(|v| v == "1")
             .unwrap_or(false);
         let t0 = crate::clock::Instant::now();
+        let mut sym_s = 0.0f64;
+        let mut amd_s = 0.0f64;
 
-        let (mut pre_row_perm, mut col_perm, block_ptr) = if settings.btf {
-            let form = btf::block_triangular_form(n, &a.col_ptr, &a.row_idx)
+        // Matching bakeoff (BTF on): deterministic maximum-matching
+        // candidates (see `btf::matching_candidates`); with more than one,
+        // each candidate's AMD-ordered blocks are scored by exact Cholesky
+        // lnz (Gilbert-Ng-Peyton column counts on the ordered symmetrized
+        // pattern) and the cheapest matching wins. Different maximum
+        // matchings differ by several-x fill on the harmonic-balance class
+        // (onetone/twotone), in matrix-dependent directions — measuring
+        // beats guessing. The common MNA case (complete structural
+        // diagonal) short-circuits to a single candidate and pays nothing.
+        let (pre_row_perm, col_perm, block_ptr) = if settings.btf {
+            let cands = btf::matching_candidates(n, &a.col_ptr, &a.row_idx)
                 .ok_or(RslabError::StructurallySingular)?;
-            (form.row_perm, form.col_perm, form.block_ptr)
+            let score_it = cands.len() > 1;
+            let mut best: Option<OrderedForm> = None;
+            for m in cands {
+                let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
+                let of = order_blocks(a, form, score_it, &mut sym_s, &mut amd_s)?;
+                if prof && score_it {
+                    eprintln!("[klu-prof] analyze: candidate lnz score {}", of.score);
+                }
+                best = match best {
+                    Some(b) if b.score <= of.score => Some(b),
+                    _ => Some(of),
+                };
+            }
+            let of = best.expect("candidates is non-empty");
+            (of.pre_row_perm, of.col_perm, of.block_ptr)
         } else {
             let ident: Vec<usize> = (0..n).collect();
             let bp = if n == 0 { vec![0] } else { vec![0, n] };
-            (ident.clone(), ident, bp)
+            let form = btf::BtfForm {
+                row_perm: ident.clone(),
+                col_perm: ident,
+                block_ptr: bp,
+            };
+            let of = order_blocks(a, form, false, &mut sym_s, &mut amd_s)?;
+            (of.pre_row_perm, of.col_perm, of.block_ptr)
         };
-
-        // Per-block AMD on the symmetrized block pattern (B + Báµ€, with
-        // diagonal, matching what the multifrontal paths feed rslab-amd).
-        // Blocks of size <= 2 have nothing to reorder.
-        let t_btf = t0.elapsed();
-        let t1 = crate::clock::Instant::now();
-        let mut sym_s = 0.0f64;
-        let mut amd_s = 0.0f64;
-        let mut pinv0 = vec![0usize; n];
-        for (k, &r) in pre_row_perm.iter().enumerate() {
-            pinv0[r] = k;
-        }
-        for b in 0..block_ptr.len() - 1 {
-            let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
-            let bn = be - bs;
-            if bn <= 2 {
-                continue;
-            }
-            let ts = crate::clock::Instant::now();
-            // Symmetrized block adjacency via two-pass counting scatter into
-            // one flat buffer (no per-column Vec allocations), then per-column
-            // sort + dedup - the same layout the ordering crates expect and
-            // bit-identical to the old `Vec<Vec<i32>>` build.
-            let mut counts = vec![1usize; bn]; // the zero-free diagonal
-            for lj in 0..bn {
-                let c = col_perm[bs + lj];
-                for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
-                    let pre = pinv0[r];
-                    if pre >= bs && pre < be {
-                        let li = pre - bs;
-                        if li != lj {
-                            counts[lj] += 1;
-                            counts[li] += 1;
-                        }
-                    }
-                }
-            }
-            let mut start = vec![0usize; bn + 1];
-            for j in 0..bn {
-                start[j + 1] = start[j] + counts[j];
-            }
-            let mut scattered = vec![0i32; start[bn]];
-            let mut cur = start[..bn].to_vec();
-            for (j, c) in cur.iter_mut().enumerate() {
-                scattered[*c] = j as i32; // diagonal
-                *c += 1;
-            }
-            for lj in 0..bn {
-                let c = col_perm[bs + lj];
-                for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
-                    let pre = pinv0[r];
-                    if pre >= bs && pre < be {
-                        let li = pre - bs;
-                        if li != lj {
-                            scattered[cur[lj]] = li as i32;
-                            cur[lj] += 1;
-                            scattered[cur[li]] = lj as i32;
-                            cur[li] += 1;
-                        }
-                    }
-                }
-            }
-            let mut colptr_i32 = Vec::with_capacity(bn + 1);
-            let mut rowidx_i32 = Vec::with_capacity(start[bn]);
-            colptr_i32.push(0i32);
-            for j in 0..bn {
-                let seg = &mut scattered[start[j]..start[j + 1]];
-                seg.sort_unstable();
-                let mut last = -1i32;
-                for &v in seg.iter() {
-                    if v != last {
-                        rowidx_i32.push(v);
-                        last = v;
-                    }
-                }
-                colptr_i32.push(rowidx_i32.len() as i32);
-            }
-            let pat = rslab_ordering_core::CscPattern::new(bn, &colptr_i32, &rowidx_i32)
-                .ok_or_else(|| {
-                    RslabError::InvalidInput("klu: malformed block pattern".to_string())
-                })?;
-            sym_s += ts.elapsed().as_secs_f64();
-            let ta = crate::clock::Instant::now();
-            let lperm = rslab_amd::amd_order(&pat).map_err(|e| {
-                RslabError::InvalidInput(format!("klu: AMD ordering failed: {e:?}"))
-            })?;
-            amd_s += ta.elapsed().as_secs_f64();
-            // Apply the local (new-to-old) perm symmetrically to the block's
-            // segment of both permutations.
-            let old_rows: Vec<usize> = pre_row_perm[bs..be].to_vec();
-            let old_cols: Vec<usize> = col_perm[bs..be].to_vec();
-            for (i, &lp) in lperm.iter().enumerate() {
-                pre_row_perm[bs + i] = old_rows[lp as usize];
-                col_perm[bs + i] = old_cols[lp as usize];
-            }
-        }
+        let t_order = t0.elapsed();
 
         // Freeze the analyzed pattern in the (final) pre-pivot space for the
         // a-priori estimators.
@@ -333,11 +269,11 @@ impl KluSymbolic {
         }
         if prof {
             eprintln!(
-                "[klu-prof] analyze: btf {:.1}ms  symmetrize {:.1}ms  amd {:.1}ms  freeze+rest {:.1}ms",
-                t_btf.as_secs_f64() * 1e3,
+                "[klu-prof] analyze: order {:.1}ms (symmetrize {:.1}ms, amd {:.1}ms, \
+                 matchings+scc+score rest)",
+                t_order.as_secs_f64() * 1e3,
                 sym_s * 1e3,
                 amd_s * 1e3,
-                t1.elapsed().as_secs_f64() * 1e3 - sym_s * 1e3 - amd_s * 1e3
             );
         }
 
@@ -631,6 +567,158 @@ fn row_scale_inv<T: Scalar>(a: &GeneralCsc<T>, enabled: bool) -> Vec<f64> {
             }
         })
         .collect()
+}
+
+/// One matching candidate after SCC + per-block AMD, with the exact
+/// Cholesky-lnz score of its ordered symmetrized blocks (only computed in a
+/// multi-candidate bakeoff).
+struct OrderedForm {
+    pre_row_perm: Vec<usize>,
+    col_perm: Vec<usize>,
+    block_ptr: Vec<usize>,
+    score: u64,
+}
+
+/// Per-block AMD on the symmetrized block pattern (B + Bᵀ, with diagonal,
+/// matching what the multifrontal paths feed rslab-amd), applied
+/// symmetrically to the form's permutations. Blocks of size <= 2 have
+/// nothing to reorder. With `score_it`, additionally accumulates the exact
+/// Cholesky lnz of each AMD-ordered block pattern (Gilbert-Ng-Peyton column
+/// counts, near-linear) as the bakeoff score — the trivial blocks are
+/// identical across candidates and are skipped consistently.
+fn order_blocks<T: Scalar>(
+    a: &GeneralCsc<T>,
+    form: btf::BtfForm,
+    score_it: bool,
+    sym_s: &mut f64,
+    amd_s: &mut f64,
+) -> Result<OrderedForm, RslabError> {
+    let n = a.n;
+    let btf::BtfForm {
+        row_perm: mut pre_row_perm,
+        mut col_perm,
+        block_ptr,
+    } = form;
+    let mut pinv0 = vec![0usize; n];
+    for (k, &r) in pre_row_perm.iter().enumerate() {
+        pinv0[r] = k;
+    }
+    let mut score = 0u64;
+    for b in 0..block_ptr.len() - 1 {
+        let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
+        let bn = be - bs;
+        if bn <= 2 {
+            continue;
+        }
+        let ts = crate::clock::Instant::now();
+        // Symmetrized block adjacency via two-pass counting scatter into
+        // one flat buffer (no per-column Vec allocations), then per-column
+        // sort + dedup - the same layout the ordering crates expect and
+        // bit-identical to the old `Vec<Vec<i32>>` build.
+        let mut counts = vec![1usize; bn]; // the zero-free diagonal
+        for lj in 0..bn {
+            let c = col_perm[bs + lj];
+            for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
+                let pre = pinv0[r];
+                if pre >= bs && pre < be {
+                    let li = pre - bs;
+                    if li != lj {
+                        counts[lj] += 1;
+                        counts[li] += 1;
+                    }
+                }
+            }
+        }
+        let mut start = vec![0usize; bn + 1];
+        for j in 0..bn {
+            start[j + 1] = start[j] + counts[j];
+        }
+        let mut scattered = vec![0i32; start[bn]];
+        let mut cur = start[..bn].to_vec();
+        for (j, c) in cur.iter_mut().enumerate() {
+            scattered[*c] = j as i32; // diagonal
+            *c += 1;
+        }
+        for lj in 0..bn {
+            let c = col_perm[bs + lj];
+            for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
+                let pre = pinv0[r];
+                if pre >= bs && pre < be {
+                    let li = pre - bs;
+                    if li != lj {
+                        scattered[cur[lj]] = li as i32;
+                        cur[lj] += 1;
+                        scattered[cur[li]] = lj as i32;
+                        cur[li] += 1;
+                    }
+                }
+            }
+        }
+        let mut colptr_i32 = Vec::with_capacity(bn + 1);
+        let mut rowidx_i32 = Vec::with_capacity(start[bn]);
+        colptr_i32.push(0i32);
+        for j in 0..bn {
+            let seg = &mut scattered[start[j]..start[j + 1]];
+            seg.sort_unstable();
+            let mut last = -1i32;
+            for &v in seg.iter() {
+                if v != last {
+                    rowidx_i32.push(v);
+                    last = v;
+                }
+            }
+            colptr_i32.push(rowidx_i32.len() as i32);
+        }
+        let pat = rslab_ordering_core::CscPattern::new(bn, &colptr_i32, &rowidx_i32)
+            .ok_or_else(|| RslabError::InvalidInput("klu: malformed block pattern".to_string()))?;
+        *sym_s += ts.elapsed().as_secs_f64();
+        let ta = crate::clock::Instant::now();
+        let lperm = rslab_amd::amd_order(&pat)
+            .map_err(|e| RslabError::InvalidInput(format!("klu: AMD ordering failed: {e:?}")))?;
+        *amd_s += ta.elapsed().as_secs_f64();
+        if score_it {
+            // Exact Cholesky lnz of the AMD-ordered block: permute the full
+            // symmetric pattern, then etree + GNP column counts. Both accept
+            // a full symmetric pattern with unsorted columns (etree uses the
+            // upper entries, GNP the lower).
+            let mut newpos = vec![0usize; bn];
+            for (k, &lp) in lperm.iter().enumerate() {
+                newpos[lp as usize] = k;
+            }
+            let mut pcp = Vec::with_capacity(bn + 1);
+            pcp.push(0usize);
+            let mut pri = Vec::with_capacity(rowidx_i32.len());
+            for &lp in lperm.iter() {
+                let lp = lp as usize;
+                for &r in &rowidx_i32[colptr_i32[lp] as usize..colptr_i32[lp + 1] as usize] {
+                    pri.push(newpos[r as usize]);
+                }
+                pcp.push(pri.len());
+            }
+            let pat_p = crate::sparse::csc::CscPattern {
+                n: bn,
+                col_ptr: pcp,
+                row_idx: pri,
+            };
+            let etree = crate::ordering::elimination_tree::EliminationTree::from_pattern(&pat_p);
+            let cc = crate::symbolic::column_counts_gnp(&pat_p, &etree);
+            score += crate::symbolic::total_factor_nnz(&cc) as u64;
+        }
+        // Apply the local (new-to-old) perm symmetrically to the block's
+        // segment of both permutations.
+        let old_rows: Vec<usize> = pre_row_perm[bs..be].to_vec();
+        let old_cols: Vec<usize> = col_perm[bs..be].to_vec();
+        for (i, &lp) in lperm.iter().enumerate() {
+            pre_row_perm[bs + i] = old_rows[lp as usize];
+            col_perm[bs + i] = old_cols[lp as usize];
+        }
+    }
+    Ok(OrderedForm {
+        pre_row_perm,
+        col_perm,
+        block_ptr,
+        score,
+    })
 }
 
 /// Per-block factor output in absolute position spaces: row indices of
