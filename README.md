@@ -622,3 +622,7 @@ and the estimates are pure functions of the symbolic structure.
 MIT, Copyright (c) 2026 Milan Rother. RSLAB is a fork of feral
 (https://github.com/jkitchin/feral), Copyright (c) 2026 John Kitchin, also MIT.
 See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Commercial support
+
+Consulting, integration and commercial support: [milanrother.com/consulting](https://milanrother.com/consulting/)
