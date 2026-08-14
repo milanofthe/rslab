@@ -1,10 +1,10 @@
-# Standalone workspace: the bindings are built by maturin, fully decoupled from
+﻿# Standalone workspace: the bindings are built by maturin, fully decoupled from
 # the pure-Rust solver workspace one level up (own target dir, own lockfile).
 [workspace]
 
 [package]
 name = "rslab-py"
-version = "0.26.1"
+version = "0.27.0"
 edition = "2021"
 license = "MIT"
 description = "PyO3/NumPy bindings for RSLAB - a pure-Rust sparse direct solver and preconditioner."
