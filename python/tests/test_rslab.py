@@ -450,6 +450,27 @@ def test_klu_deterministic():
     assert np.array_equal(x1, x2)  # bit-identical
 
 
+def test_klu_parallel_bit_identical():
+    # block-diagonal-ish: two decoupled circuits -> >=2 BTF blocks, so the
+    # parallel per-block path actually has independent work to distribute
+    A1, A2 = _circuit(200, seed=21), _circuit(200, seed=22)
+    A = sp.block_diag([A1, A2], format="csc")
+    b = np.linspace(-1, 1, 400)
+    f_off = rslab.klu(A, parallel=False)
+    f_on = rslab.klu(A, parallel=True)
+    f_auto = rslab.klu(A)  # None -> structural auto gate
+    assert f_off.factor_nnz == f_on.factor_nnz == f_auto.factor_nnz
+    x_off, x_on, x_auto = f_off.solve(b), f_on.solve(b), f_auto.solve(b)
+    assert np.array_equal(x_off, x_on)  # bit-identical in every mode
+    assert np.array_equal(x_off, x_auto)
+    # the policy is frozen into the handle and governs refactor too
+    Ax = A.copy()
+    Ax.data *= 1.3
+    f_off.refactor(Ax.data)
+    f_on.refactor(Ax.data)
+    assert np.array_equal(f_off.solve(b), f_on.solve(b))
+
+
 def test_klu_gmres_composes():
     A = _circuit(300, seed=13)
     b = np.ones(300)

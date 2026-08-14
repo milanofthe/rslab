@@ -57,8 +57,8 @@ through the explicit handle and reuse it:
 Unsymmetric operators go through :func:`lu`, circuit-shaped ones through
 :func:`klu`; the factor configuration is passed as keyword arguments on each
 (``threads``, ``preconditioner``, ``drop_tol``, ``method``, ``memory`` on
-:func:`ldlt` / :func:`lu`; ``pivot_tol``, ``row_scaling``, ``btf`` on
-:func:`klu`).
+:func:`ldlt` / :func:`lu`; ``pivot_tol``, ``row_scaling``, ``btf``,
+``parallel`` on :func:`klu`).
 
 Note
 ----
@@ -66,7 +66,9 @@ The numeric factor is **bit-identical regardless of the thread count**; the
 worker budget affects wall time and transient memory, not the result. By
 default the factorization uses at most 4 workers (the pareto-optimal
 throughput-per-core point on typical sparse factorizations); pass an explicit
-``threads`` to override. The KLU path is strictly sequential by design.
+``threads`` to override. The KLU path factors each BTF block sequentially;
+its opt-in block parallelism (``parallel`` on :func:`klu`) only distributes
+independent blocks and never changes the result.
 
 References
 ----------
@@ -420,6 +422,7 @@ def klu(
     pivot_tol: float = 1e-3,
     row_scaling: bool = True,
     btf: bool = True,
+    parallel: bool | None = None,
 ) -> Klu:
     """Factor a general matrix through the **KLU** path (circuit-shaped systems).
 
@@ -428,8 +431,10 @@ def klu(
     the method of SuiteSparse KLU, reimplemented in pure Rust. Built for
     circuit-shaped matrices: extremely sparse, unsymmetric, near-triangularizable
     (MNA / SPICE-class operators), where it factors several times faster than
-    :func:`lu` with a fraction of the fill. Strictly sequential and
-    **bit-deterministic** across runs and thread counts.
+    :func:`lu` with a fraction of the fill. **Bit-deterministic** across runs
+    and thread counts: each BTF block factors sequentially, and the opt-in
+    block parallelism (``parallel``) only distributes independent blocks, so
+    the factor is bit-identical in every mode.
 
     The distinctive extra over :func:`lu` is :meth:`Klu.refactor`: a
     numeric-only re-factorization for a new value set on the **same** pattern
@@ -452,6 +457,14 @@ def klu(
         Permute to block upper triangular form first. Leave on: it confines
         fill to the irreducible diagonal blocks and detects structural
         singularity a-priori.
+    parallel : bool or None, default None
+        Per-block parallel factor/refactor over the independent BTF diagonal
+        blocks (ambient rayon pool, capped by ``threads`` scoping on the Rust
+        side). ``None`` is the structural auto gate: parallel when the matrix
+        has at least 4 diagonal blocks and 8000 nonzeros. ``True`` forces it
+        on, ``False`` forces strictly sequential execution. The policy is
+        frozen into the handle and also governs :meth:`Klu.refactor`. The
+        result is bit-identical in every mode.
 
     Returns
     -------
@@ -526,6 +539,7 @@ def klu(
         pivot_tol,
         row_scaling,
         btf,
+        parallel,
     )
 
 

@@ -27,8 +27,8 @@ use pyo3::prelude::*;
 
 use rslab::{
     gmres as gmres_core, gmres_block as gmres_block_core, gmres_recycled as gmres_recycled_core,
-    CscMatrix, FactorMethod, GeneralCsc, KluSettings, KluSolver, LdltSolver, LuSolver, MemoryMode,
-    Recycle, RslabError, Scalar, SolverSettings, ZeroPivotAction,
+    CscMatrix, FactorMethod, GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSolver, LuSolver,
+    MemoryMode, Recycle, RslabError, Scalar, SolverSettings, ZeroPivotAction,
 };
 use std::cell::RefCell;
 
@@ -1396,7 +1396,7 @@ fn lu_factor(
 }
 
 // ---------------------------------------------------------------------------
-// KLU factor (BTF + per-block Gilbert-Peierls, sequential / bit-deterministic)
+// KLU factor (BTF + per-block Gilbert-Peierls, bit-deterministic)
 // ---------------------------------------------------------------------------
 
 /// A KLU factor over one of the four scalar fields. The original matrix is
@@ -1413,8 +1413,10 @@ enum KluAny {
 /// A reusable KLU factor handle, ``P A Q = L U`` per BTF diagonal block.
 ///
 /// Returned by :func:`rslab.klu`. The circuit-shaped counterpart of :class:`Lu`:
-/// block triangular form + per-block Gilbert-Peierls LU, strictly sequential and
-/// **bit-deterministic** across runs and thread counts. Its distinctive extra is
+/// block triangular form + per-block Gilbert-Peierls LU,
+/// **bit-deterministic** across runs and thread counts (each block factors
+/// sequentially; the opt-in block parallelism only reorders independent
+/// work). Its distinctive extra is
 /// :meth:`refactor` - a numeric-only re-factorization for a new value set on the
 /// **same** pattern (frequency sweeps, Newton steps) that skips all symbolic
 /// work and pivot searching.
@@ -1767,10 +1769,12 @@ impl Klu {
 }
 
 /// Factor a general matrix through the KLU path from its full SciPy CSC
-/// buffers. The `data` dtype picks the scalar field.
+/// buffers. The `data` dtype picks the scalar field. `parallel`: `None` is
+/// the structural `Auto` gate, `Some(true)`/`Some(false)` force On/Off; the
+/// policy also governs later `refactor` calls on the returned handle.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (n, indptr, indices, data, pivot_tol, row_scaling, btf))]
+#[pyo3(signature = (n, indptr, indices, data, pivot_tol, row_scaling, btf, parallel))]
 fn klu_factor(
     py: Python<'_>,
     n: usize,
@@ -1780,11 +1784,17 @@ fn klu_factor(
     pivot_tol: f64,
     row_scaling: bool,
     btf: bool,
+    parallel: Option<bool>,
 ) -> PyResult<Klu> {
     let opts = KluSettings::default()
         .with_pivot_tol(pivot_tol)
         .with_row_scaling(row_scaling)
-        .with_btf(btf);
+        .with_btf(btf)
+        .with_parallel(match parallel {
+            None => KluParallel::Auto,
+            Some(true) => KluParallel::On,
+            Some(false) => KluParallel::Off,
+        });
     let ip = indptr.as_slice()?;
     let ii = indices.as_slice()?;
     macro_rules! try_build {
