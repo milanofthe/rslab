@@ -424,55 +424,58 @@ pub(crate) fn btf_from_matching(
     }
     // col_of_row[r] = the column matched to row r: node id of row r in the
     // matched digraph (node per column; edge j -> col_of_row[i] for each
-    // stored entry (i, j)).
-    let mut col_of_row = vec![0usize; n];
+    // stored entry (i, j)). 32-bit working arrays throughout: the pass is
+    // bound by the random `col_of_row`/`index`/`lowlink` accesses, and the
+    // KLU caller gates `n` to the 31-bit range before calling in.
+    debug_assert!(n < u32::MAX as usize);
+    let mut col_of_row = vec![0u32; n];
     for (j, &r) in row_match.iter().enumerate() {
-        col_of_row[r] = j;
+        col_of_row[r] = j as u32;
     }
 
     // Iterative Tarjan. Components are emitted in reverse topological order
     // of the edge direction above; placing them in emission order makes every
     // cross-block entry land ABOVE its diagonal block (block upper
     // triangular), see the module docs.
-    const UNSET: usize = usize::MAX;
-    let mut index = vec![UNSET; n]; // discovery index
-    let mut lowlink = vec![0usize; n];
+    const UNSET32: u32 = u32::MAX;
+    let mut index = vec![UNSET32; n]; // discovery index
+    let mut lowlink = vec![0u32; n];
     let mut on_stack = vec![false; n];
-    let mut scc_stack: Vec<usize> = Vec::with_capacity(n);
+    let mut scc_stack: Vec<u32> = Vec::with_capacity(n);
     // DFS state: (node, adjacency cursor) frames.
-    let mut frame_node = vec![0usize; n];
+    let mut frame_node = vec![0u32; n];
     let mut frame_cursor = vec![0usize; n];
-    let mut next_index = 0usize;
+    let mut next_index = 0u32;
     let mut col_perm: Vec<usize> = Vec::with_capacity(n);
     let mut block_ptr: Vec<usize> = vec![0];
 
     for root in 0..n {
-        if index[root] != UNSET {
+        if index[root] != UNSET32 {
             continue;
         }
         let mut top = 0usize;
-        frame_node[0] = root;
+        frame_node[0] = root as u32;
         frame_cursor[0] = col_ptr[root];
         index[root] = next_index;
         lowlink[root] = next_index;
         next_index += 1;
-        scc_stack.push(root);
+        scc_stack.push(root as u32);
         on_stack[root] = true;
 
         loop {
-            let v = frame_node[top];
+            let v = frame_node[top] as usize;
             let mut descended = false;
             while frame_cursor[top] < col_ptr[v + 1] {
-                let w = col_of_row[row_idx[frame_cursor[top]]];
+                let w = col_of_row[row_idx[frame_cursor[top]]] as usize;
                 frame_cursor[top] += 1;
-                if index[w] == UNSET {
+                if index[w] == UNSET32 {
                     index[w] = next_index;
                     lowlink[w] = next_index;
                     next_index += 1;
-                    scc_stack.push(w);
+                    scc_stack.push(w as u32);
                     on_stack[w] = true;
                     top += 1;
-                    frame_node[top] = w;
+                    frame_node[top] = w as u32;
                     frame_cursor[top] = col_ptr[w];
                     descended = true;
                     break;
@@ -494,6 +497,7 @@ pub(crate) fn btf_from_matching(
                     let Some(w) = scc_stack.pop() else {
                         unreachable!("Tarjan: v is on the stack");
                     };
+                    let w = w as usize;
                     on_stack[w] = false;
                     col_perm.push(w);
                     if w == v {
@@ -510,7 +514,7 @@ pub(crate) fn btf_from_matching(
                 break;
             }
             top -= 1;
-            let parent = frame_node[top];
+            let parent = frame_node[top] as usize;
             if lowlink[v] < lowlink[parent] {
                 lowlink[parent] = lowlink[v];
             }

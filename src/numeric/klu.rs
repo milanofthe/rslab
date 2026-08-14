@@ -203,14 +203,25 @@ impl KluSymbolic {
         a: &GeneralCsc<T>,
         settings: &KluSettings,
     ) -> Result<Self, RslabError> {
-        a.validate()?;
-        let n = a.n;
         let prof = std::env::var("RLA_KLU_PROF")
             .map(|v| v == "1")
             .unwrap_or(false);
+        let tv = crate::clock::Instant::now();
+        a.validate()?;
+        let t_validate = tv.elapsed();
+        let n = a.n;
+        // Same 31-bit range gate as factor time (the whole path is Ki-based;
+        // checking here lets analyze and the BTF pass use narrow indices).
+        if n as u64 >= KI_FBIT as u64 || a.nnz() as u64 >= KI_FBIT as u64 {
+            return Err(RslabError::InvalidInput(
+                "klu: dimension/nnz exceeds the 31-bit index range of this path".to_string(),
+            ));
+        }
         let t0 = crate::clock::Instant::now();
         let mut sym_s = 0.0f64;
         let mut amd_s = 0.0f64;
+        let mut tarjan_s = 0.0f64;
+        let mut match_s = 0.0f64;
 
         // Matching bakeoff (BTF on): deterministic maximum-matching
         // candidates (see `btf::matching_candidates`); with more than one,
@@ -222,12 +233,16 @@ impl KluSymbolic {
         // beats guessing. The common MNA case (complete structural
         // diagonal) short-circuits to a single candidate and pays nothing.
         let (pre_row_perm, col_perm, block_ptr) = if settings.btf {
+            let tm = crate::clock::Instant::now();
             let cands = btf::matching_candidates(n, &a.col_ptr, &a.row_idx)
                 .ok_or(RslabError::StructurallySingular)?;
+            match_s = tm.elapsed().as_secs_f64();
             let score_it = cands.len() > 1;
             let mut best: Option<OrderedForm> = None;
             for m in cands {
+                let tt = crate::clock::Instant::now();
                 let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
+                tarjan_s += tt.elapsed().as_secs_f64();
                 let of = order_blocks(a, form, score_it, &mut sym_s, &mut amd_s)?;
                 if prof && score_it {
                     eprintln!("[klu-prof] analyze: candidate lnz score {}", of.score);
@@ -259,27 +274,31 @@ impl KluSymbolic {
         let t_order = t0.elapsed();
 
         // Freeze the analyzed pattern in the (final) pre-pivot space for the
-        // a-priori estimators.
-        let mut pinv_pre = vec![0usize; n];
+        // a-priori estimators. Narrow inverse permutation: the gather is
+        // bound by the random `pinv_pre[r]` reads.
+        let tf = crate::clock::Instant::now();
+        let mut pinv_pre = vec![0 as Ki; n];
         for (k, &r) in pre_row_perm.iter().enumerate() {
-            pinv_pre[r] = k;
+            pinv_pre[r] = k as Ki;
         }
         let mut pat_col_ptr = Vec::with_capacity(n + 1);
         let mut pat_row_idx = Vec::with_capacity(a.nnz());
         pat_col_ptr.push(0);
         for &c in &col_perm {
             for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
-                pat_row_idx.push(pinv_pre[r]);
+                pat_row_idx.push(pinv_pre[r] as usize);
             }
             pat_col_ptr.push(pat_row_idx.len());
         }
         if prof {
+            let order_ms = t_order.as_secs_f64() * 1e3;
+            let (m, t, s, d) = (match_s * 1e3, tarjan_s * 1e3, sym_s * 1e3, amd_s * 1e3);
             eprintln!(
-                "[klu-prof] analyze: order {:.1}ms (symmetrize {:.1}ms, amd {:.1}ms, \
-                 matchings+scc+score rest)",
-                t_order.as_secs_f64() * 1e3,
-                sym_s * 1e3,
-                amd_s * 1e3,
+                "[klu-prof] analyze: validate {:.1}ms  matchings {m:.1}ms  tarjan {t:.1}ms  \
+                 symmetrize {s:.1}ms  amd {d:.1}ms  order-misc {:.1}ms  freeze {:.1}ms",
+                t_validate.as_secs_f64() * 1e3,
+                order_ms - m - t - s - d,
+                tf.elapsed().as_secs_f64() * 1e3,
             );
         }
 
@@ -605,9 +624,13 @@ fn order_blocks<T: Scalar>(
         mut col_perm,
         block_ptr,
     } = form;
-    let mut pinv0 = vec![0usize; n];
+    // Narrow inverse permutation: this stage is bound by the random
+    // `pinv0[r]` lookups over the matrix entries; 32-bit halves the lookup
+    // table's cache footprint (n < 2^31 is enforced at factor time and the
+    // KLU design point is far below).
+    let mut pinv0 = vec![0 as Ki; n];
     for (k, &r) in pre_row_perm.iter().enumerate() {
-        pinv0[r] = k;
+        pinv0[r] = k as Ki;
     }
     let mut score = 0u64;
     for b in 0..block_ptr.len() - 1 {
@@ -617,57 +640,82 @@ fn order_blocks<T: Scalar>(
             continue;
         }
         let ts = crate::clock::Instant::now();
-        // Symmetrized block adjacency via two-pass counting scatter into
-        // one flat buffer (no per-column Vec allocations), then per-column
-        // sort + dedup - the same layout the ordering crates expect and
-        // bit-identical to the old `Vec<Vec<i32>>` build.
-        let mut counts = vec![1usize; bn]; // the zero-free diagonal
+        // Symmetrized block adjacency (B + Bᵀ + diagonal), canonical form
+        // (sorted, deduplicated columns). Built as: the off-diagonal
+        // in-block entries B column by column (sequential writes, one random
+        // `pinv0` read per entry), a per-column sort of B's short columns,
+        // Bᵀ by counting transpose (whose columns come out sorted for
+        // free), then a linear three-way sorted merge per column. One
+        // random counting/scatter pass over the entries instead of the two
+        // of the old both-directions scatter — the random writes, not the
+        // short-column sorts, dominate this stage.
+        // 1) B: off-diagonal in-block entries, block-local coordinates.
+        // Single pass over the matrix (the random `pinv0` reads are this
+        // stage's bottleneck — no separate counting pass), sequential
+        // pushes, then a short per-column sort.
+        let cap: usize = (bs..be)
+            .map(|j| {
+                let c = col_perm[j];
+                a.col_ptr[c + 1] - a.col_ptr[c]
+            })
+            .sum();
+        let mut bcol = Vec::with_capacity(bn + 1);
+        bcol.push(0usize);
+        let mut bri: Vec<i32> = Vec::with_capacity(cap);
         for lj in 0..bn {
             let c = col_perm[bs + lj];
+            let seg = bri.len();
             for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
-                let pre = pinv0[r];
-                if pre >= bs && pre < be {
-                    let li = pre - bs;
-                    if li != lj {
-                        counts[lj] += 1;
-                        counts[li] += 1;
-                    }
+                let pre = pinv0[r] as usize;
+                if pre >= bs && pre < be && pre - bs != lj {
+                    bri.push((pre - bs) as i32);
                 }
             }
+            bri[seg..].sort_unstable();
+            bcol.push(bri.len());
         }
-        let mut start = vec![0usize; bn + 1];
+        let m = bcol[bn];
+        // 2) Bᵀ via counting transpose; columns arrive sorted because the
+        // source columns are visited in ascending order.
+        let mut tcol = vec![0usize; bn + 1];
+        for &li in &bri {
+            tcol[li as usize + 1] += 1;
+        }
         for j in 0..bn {
-            start[j + 1] = start[j] + counts[j];
+            tcol[j + 1] += tcol[j];
         }
-        let mut scattered = vec![0i32; start[bn]];
-        let mut cur = start[..bn].to_vec();
-        for (j, c) in cur.iter_mut().enumerate() {
-            scattered[*c] = j as i32; // diagonal
-            *c += 1;
-        }
-        for lj in 0..bn {
-            let c = col_perm[bs + lj];
-            for &r in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
-                let pre = pinv0[r];
-                if pre >= bs && pre < be {
-                    let li = pre - bs;
-                    if li != lj {
-                        scattered[cur[lj]] = li as i32;
-                        cur[lj] += 1;
-                        scattered[cur[li]] = lj as i32;
-                        cur[li] += 1;
-                    }
+        let mut tri = vec![0i32; m];
+        {
+            let mut cur = tcol[..bn].to_vec();
+            for lj in 0..bn {
+                for &li in &bri[bcol[lj]..bcol[lj + 1]] {
+                    tri[cur[li as usize]] = lj as i32;
+                    cur[li as usize] += 1;
                 }
             }
         }
+        // 3) Per-column sorted merge of B, Bᵀ, and the diagonal, deduped.
         let mut colptr_i32 = Vec::with_capacity(bn + 1);
-        let mut rowidx_i32 = Vec::with_capacity(start[bn]);
+        let mut rowidx_i32 = Vec::with_capacity(2 * m + bn);
         colptr_i32.push(0i32);
-        for j in 0..bn {
-            let seg = &mut scattered[start[j]..start[j + 1]];
-            seg.sort_unstable();
+        for lj in 0..bn {
+            let (mut p, pe) = (bcol[lj], bcol[lj + 1]);
+            let (mut q, qe) = (tcol[lj], tcol[lj + 1]);
+            let d = lj as i32;
+            let mut d_pending = true;
             let mut last = -1i32;
-            for &v in seg.iter() {
+            while p < pe || q < qe || d_pending {
+                let bv = if p < pe { bri[p] } else { i32::MAX };
+                let tv = if q < qe { tri[q] } else { i32::MAX };
+                let dv = if d_pending { d } else { i32::MAX };
+                let v = bv.min(tv).min(dv);
+                if v == bv {
+                    p += 1;
+                } else if v == tv {
+                    q += 1;
+                } else {
+                    d_pending = false;
+                }
                 if v != last {
                     rowidx_i32.push(v);
                     last = v;
