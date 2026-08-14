@@ -100,7 +100,7 @@ default applies). Keyword arguments override the pick:
 | `pivot_tol`   | `1e-3`  | diagonal-preference threshold; `1.0` = plain partial pivoting    |
 | `row_scaling` | `True`  | divide each row by its max-magnitude entry before factoring      |
 | `btf`         | `True`  | permute to block upper triangular form first (keep it on)       |
-| `parallel`    | `None`  | per-block parallel factor/refactor over the BTF blocks; `None` = auto gate (≥4 blocks and ≥8000 nnz), `True`/`False` force on/off; bit-identical result in every mode |
+| `parallel`    | `None`  | per-block parallel factor/refactor over the BTF blocks; `None` = auto gate (≥4 blocks, ≥8000 nnz, no dominant block), `True`/`False` force on/off; bit-identical result in every mode |
 
 Supported dtypes: `float64`, `float32`, `complex128`, `complex64`.
 

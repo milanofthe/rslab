@@ -461,10 +461,13 @@ def klu(
         Per-block parallel factor/refactor over the independent BTF diagonal
         blocks (ambient rayon pool, capped by ``threads`` scoping on the Rust
         side). ``None`` is the structural auto gate: parallel when the matrix
-        has at least 4 diagonal blocks and 8000 nonzeros. ``True`` forces it
-        on, ``False`` forces strictly sequential execution. The policy is
-        frozen into the handle and also governs :meth:`Klu.refactor`. The
-        result is bit-identical in every mode.
+        has at least 4 diagonal blocks, 8000 nonzeros, and no dominant block
+        (largest block at most half of ``n`` - real circuits are often one
+        giant irreducible block plus thousands of singletons, where
+        distributing blocks cannot help). ``True`` forces it on, ``False``
+        forces strictly sequential execution. The policy is frozen into the
+        handle and also governs :meth:`Klu.refactor`. The result is
+        bit-identical in every mode.
 
     Returns
     -------
