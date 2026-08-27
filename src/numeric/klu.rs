@@ -484,58 +484,71 @@ fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
     d.estimate.as_ref().map_or(0, |e| e.factor_flops)
 }
 
-/// Minimum block dimension for the NICSLU-style pipelined refactor replay:
-/// below this a block's whole replay is sub-millisecond and the worker
-/// handoff cannot amortize.
-const KLU_PIPE_MIN_BN: usize = 512;
-/// Minimum mean elimination-DAG level width for the pipeline to engage: a
-/// pure chain leaves the extra workers spinning for no overlap at all.
-const KLU_PIPE_MIN_WIDTH: f64 = 2.0;
-/// Minimum replay work (fmadd count) for the pipeline to engage: below this
-/// the whole block replays in a few milliseconds and the worker spawn plus
-/// dependency spins cost more than they overlap (measured on the SuiteSparse
-/// circuit suite: scircuit at ~30 M stays sequential, ASIC_100ks at ~400 M
-/// and onetone1 gain 2.6-2.9x).
-const KLU_PIPE_MIN_FLOPS: u64 = 50_000_000;
+/// The two-parameter principle behind EVERY parallel decision on this path:
+///
+/// 1. **Work floor** ([`KLU_PAR_MIN_WORK`]): a unit of parallel execution
+///    must carry at least this much replay work (fmadd count) - below it,
+///    spawn/handoff overhead exceeds the overlap (measured on the SuiteSparse
+///    circuit suite: scircuit at ~30 M gains nothing, ASIC_100ks at ~400 M
+///    gains 2.7x). The floor is overhead physics; no setting bypasses it.
+/// 2. **Concurrency ratio** ([`KLU_PAR_MIN_RATIO`]): parallelism engages only
+///    where the structure offers at least this much simultaneous work.
+///    Across BTF blocks that is the exact Amdahl bound `Σ work / max block
+///    work`; inside a block it is the mean level width of the frozen
+///    elimination DAG - the average number of simultaneously replayable
+///    columns. (A chain-work critical-path bound would be the "exact" ratio
+///    but systematically underestimates the pipeline's just-in-time overlap:
+///    ASIC_100ks scores below 2 on it yet measures 2.7x.)
+const KLU_PAR_MIN_WORK: u64 = 50_000_000;
+const KLU_PAR_MIN_RATIO: f64 = 2.0;
 
-/// Gate for the NICSLU-style pipelined replay (Chen/Wang/Yang, TCAD 2013):
-/// per block, compute the elimination-DAG depth (`level[j] = 1 +
-/// max(level[p])` over the frozen `U(p, j)` dependencies) and admit blocks
-/// that are big enough and not chain-shaped. O(nnz(U)), run once at factor
-/// time; only the admitted block ids are kept.
-fn compute_pipelined_blocks(
+/// The replay-parallelism plan, computed once at factor time from the
+/// pivot-final pattern: per-block replay work `W_b = Σ_j Σ_{p in U(:,j)}
+/// |L(:,p)|` and elimination-DAG level structure.
+///
+/// A block is **pipelined** (NICSLU pipeline mode, Chen/Wang/Yang TCAD 2013)
+/// iff `W_b` clears the work floor and its mean level width clears the
+/// concurrency ratio; the worker count is bounded by that width (more
+/// workers than simultaneously ready columns cannot help). The refactor runs
+/// blocks **in parallel** iff the total clears the work floor (or the user
+/// forced [`KluParallel::On`]) and no single block dominates.
+fn compute_replay_plan(
     block_ptr: &[usize],
     l_colptr: &[usize],
     u_colptr: &[usize],
     u_rowidx: &[Ki],
-) -> Vec<usize> {
-    let mut out = Vec::new();
+    force: bool,
+) -> (Vec<(usize, usize)>, bool) {
+    let mut pipelined = Vec::new();
     let mut level: Vec<Ki> = Vec::new();
+    let (mut total, mut max_w): (u64, u64) = (0, 0);
     for b in 0..block_ptr.len() - 1 {
         let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
         let bn = be - bs;
-        if bn < KLU_PIPE_MIN_BN {
-            continue;
-        }
         level.clear();
         level.resize(bn, 0);
         let mut nlev: usize = 1;
-        let mut flops: u64 = 0;
+        let mut w_b: u64 = 0;
         for j in bs..be {
             let mut l: Ki = 0;
             for &pk in &u_rowidx[u_colptr[j]..u_colptr[j + 1]] {
                 let p = pk as usize;
+                w_b += (l_colptr[p + 1] - l_colptr[p]) as u64;
                 l = l.max(level[p - bs] + 1);
-                flops += (l_colptr[p + 1] - l_colptr[p]) as u64;
             }
             level[j - bs] = l;
             nlev = nlev.max(l as usize + 1);
         }
-        if flops >= KLU_PIPE_MIN_FLOPS && (bn as f64) / (nlev as f64) >= KLU_PIPE_MIN_WIDTH {
-            out.push(b);
+        total += w_b;
+        max_w = max_w.max(w_b);
+        let width = (bn as f64) / (nlev as f64);
+        if w_b >= KLU_PAR_MIN_WORK && width >= KLU_PAR_MIN_RATIO {
+            pipelined.push((b, (width as usize).max(2)));
         }
     }
-    out
+    let ratio_ok = (total as f64) >= KLU_PAR_MIN_RATIO * (max_w as f64);
+    let par_blocks = ratio_ok && (force || total >= KLU_PAR_MIN_WORK);
+    (pipelined, par_blocks)
 }
 
 /// The numeric KLU factorization: `P A Q = L U` per diagonal block plus the
@@ -553,8 +566,10 @@ struct KluFactors<T> {
     /// Per-original-row reciprocal scale factor (all 1 when scaling is off).
     rs_inv: Vec<f64>,
     scaled: bool,
-    /// Parallel per-block execution chosen at factor time; `refactor` honors
-    /// the same opt-in (bit-identical either way, blocks are independent).
+    /// Parallel per-block execution resolved for the FIRST factor (a-priori
+    /// proxies of the work/concurrency principle; the refactor uses the exact
+    /// plan in `par_refactor`/`pipelined` instead). Read by tests only.
+    #[cfg_attr(not(test), allow(dead_code))]
     parallel: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
     /// Row indices are final positions within the column's block (narrow
@@ -581,9 +596,12 @@ struct KluFactors<T> {
     /// destination: F slot `i` as `KI_FBIT | i`, else work-vector position.
     scatter_expect: Vec<Ki>,
     scatter_target: Vec<Ki>,
-    /// Blocks admitted to the pipelined parallel refactor replay (empty when
-    /// none qualifies or parallelism is off). See [`compute_pipelined_blocks`].
-    pipelined: Vec<usize>,
+    /// Blocks admitted to the pipelined parallel refactor replay, with their
+    /// Amdahl-bounded worker counts (empty when none qualifies or parallelism
+    /// is off), plus the block-parallel refactor decision. Both come from the
+    /// exact work/critical-path plan of [`compute_replay_plan`].
+    pipelined: Vec<(usize, usize)>,
+    par_refactor: bool,
 }
 
 /// KLU solver handle: factor (or analyze+factor), then solve / refactor.
@@ -1289,15 +1307,16 @@ fn factor_impl<T: Scalar>(
     // opt-in and runs on the ambient rayon pool, so callers cap it with
     // `with_threads` scoping, matching the solver-in-the-loop contract.
     let nblocks = sym.block_ptr.len() - 1;
-    // Resolve the parallel policy from a-priori structure only (`Auto` gate:
-    // enough blocks to spread, enough work to amortize the pool, and no
-    // dominant block. Real circuits are typically one giant irreducible
-    // block plus thousands of singletons; with most of the matrix in one
-    // block the pool cannot help and the per-worker setup only costs).
+    // Resolve the FIRST-factor parallel policy from a-priori structure. The
+    // exact work plan needs the pivot-final pattern, so this is the same
+    // work-floor/Amdahl principle on its a-priori proxies: `nnz` as the work
+    // floor, `no block holds half the matrix` as the block-level Amdahl
+    // ratio. The refactor decision is replaced by the exact plan
+    // ([`compute_replay_plan`]) once the pattern is frozen.
     let parallel = match settings.parallel {
         KluParallel::On => true,
         KluParallel::Off => false,
-        KluParallel::Auto => nblocks >= 4 && sym.nnz >= 8_000 && sym.max_block_size() * 2 <= sym.n,
+        KluParallel::Auto => sym.nnz >= 8_000 && sym.max_block_size() * 2 <= sym.n,
     } && nblocks > 1;
     let max_bn = sym.max_block_size();
 
@@ -1506,14 +1525,20 @@ fn factor_impl<T: Scalar>(
         pinv[orig] = fin as usize;
     }
 
-    // Pipeline admission for the parallel refactor replay: within-block
-    // column parallelism from the now-frozen U pattern. Independent of the
-    // per-block `parallel` opt-in above (that one needs MANY blocks; the
-    // pipeline pays off in the opposite regime, one dominant block).
-    let pipelined = if settings.parallel == KluParallel::Off {
-        Vec::new()
+    // Exact replay-parallelism plan from the now-frozen pattern: which blocks
+    // pipeline internally (and with how many workers), and whether the blocks
+    // themselves run in parallel. One work/Amdahl principle for both, see
+    // [`compute_replay_plan`].
+    let (pipelined, par_refactor) = if settings.parallel == KluParallel::Off {
+        (Vec::new(), false)
     } else {
-        compute_pipelined_blocks(&sym.block_ptr, &l_colptr, &u_colptr, &u_rowidx)
+        compute_replay_plan(
+            &sym.block_ptr,
+            &l_colptr,
+            &u_colptr,
+            &u_rowidx,
+            settings.parallel == KluParallel::On,
+        )
     };
 
     Ok(KluFactors {
@@ -1539,6 +1564,7 @@ fn factor_impl<T: Scalar>(
         scatter_expect,
         scatter_target,
         pipelined,
+        par_refactor,
     })
 }
 
@@ -1577,9 +1603,10 @@ impl<T: Scalar> KluSolver<T> {
     }
 
     /// Number of BTF diagonal blocks.
-    /// Diagnostic: blocks admitted to the pipelined refactor replay.
+    /// Diagnostic: blocks admitted to the pipelined refactor replay, with
+    /// their Amdahl-bounded worker counts.
     #[doc(hidden)]
-    pub fn pipelined_blocks(&self) -> &[usize] {
+    pub fn pipelined_blocks(&self) -> &[(usize, usize)] {
         &self.factors.pipelined
     }
 
@@ -2067,7 +2094,11 @@ impl<T: Scalar> KluSolver<T> {
                 f_v: PanelPtr(job.f_v.as_mut_ptr()),
             };
             let nthreads = rayon::current_num_threads().max(1);
-            if nthreads >= 2 && pipelined.contains(&b) {
+            let pipe_nw = pipelined
+                .iter()
+                .find(|&&(pb, _)| pb == b)
+                .map(|&(_, nw)| nw);
+            if nthreads >= 2 && pipe_nw.is_some() {
                 // NICSLU-style pipelined replay: worker `w` owns columns
                 // `bs+w, bs+w+nw, ...` in order and spin-waits just-in-time on
                 // each U-dependency's ready flag before consuming its L
@@ -2077,7 +2108,9 @@ impl<T: Scalar> KluSolver<T> {
                 // task pool could).
                 use std::sync::atomic::{AtomicBool, Ordering as AOrd};
                 let bn = be - bs;
-                let nw = nthreads.min(8).min(bn.div_ceil(KLU_PIPE_MIN_BN)).max(2);
+                // Worker count bounded by the DAG's admissible speedup (the
+                // plan's W/C ratio) and the thread budget.
+                let nw = pipe_nw.unwrap_or(2).clamp(2, nthreads);
                 let ready: Vec<AtomicBool> = (0..bn).map(|_| AtomicBool::new(false)).collect();
                 let abort = AtomicBool::new(false);
                 let errs: Vec<Result<(), RslabError>> = std::thread::scope(|sc| {
@@ -2162,7 +2195,7 @@ impl<T: Scalar> KluSolver<T> {
             }
             Ok(())
         };
-        if f.parallel && nblocks > 1 {
+        if f.par_refactor && nblocks > 1 {
             use rayon::prelude::*;
             let results: Vec<Result<(), RslabError>> =
                 jobs.into_par_iter().map(replay_block).collect();
@@ -2549,7 +2582,7 @@ mod tests {
         // The 1024-column test block is far below the work gate; force the
         // admission so the pipelined executor itself is exercised (the gates
         // only decide when it pays, not whether it is correct).
-        s_par.factors.pipelined = vec![0];
+        s_par.factors.pipelined = vec![(0, 4)];
 
         // Fresh values on the frozen pattern, refactor both ways.
         let mut a2 = a.clone();
