@@ -213,3 +213,43 @@ Lessons for rslab:
 Suggested sequencing: consolidate first (Tiers 1-2), then prototype the GPU
 refactor backend on the KLU path (smallest kernel, sequential semantics,
 sane as the driving consumer), then consider the supernodal GEMM offload.
+
+## Outcome (2026-08-27, branch refactor/consolidation)
+
+Executed per owner decisions: MLP tuner removed, recycled GMRES kept,
+Multifrontal kept as opt-in method. 11 commits, all tests green
+(289 lib + 309 with matgen/tuning features + integration tests).
+
+Measured: 74,087 -> 45,953 Rust LOC (-38%), 544 -> 189 tracked files,
+repo freight -8.6M (parity data, bench_out, orphaned fixtures).
+
+Landed: Tier 1 complete (benches purge, scotch+kahip, Schur path,
+condition/mixed/bins, instrumentation + 17 debug env vars, RightLooking,
+orphaned data/tests), Tier 3.1 complete (auto_tune + models + xtask
+tune/validate/profile + sweep + trainer), Tier 2 partial (matgen catalog,
+shared ll_common scaffolding: SlotStore/PanelPtr/tuned driver).
+
+Consciously NOT done, with reasons:
+
+1. gmres single-RHS as s=1 of gmres_block: the two implementations use
+   different orthogonalization schedules; folding them changes solver
+   numerics observable by every embedder. Needs convergence-parity
+   validation on the MoM corpus first.
+2. Inline-test mass reduction (-6k hoped): on inspection the big test
+   blocks (iterative, scaling, klu) pin distinct behavioral properties
+   (bit-identity across threads, corpus routing counterexamples,
+   convergence classes) - deleting them trades real coverage for a
+   number. Remaining legitimate lever: table-driven folding of the
+   per-corpus pin tests, low priority.
+3. Deep LDLT/LU kernel unification (-2.5k further): the remaining twin
+   code is the numeric kernels themselves (BK panel vs threshold-pivot
+   LU). A FrontKernel-trait redesign is a multi-day, benchmark-gated
+   project; the shared scaffolding extracted here is the preparatory
+   step and the natural seam for a future GPU backend as well.
+4. python/src macro-fold across the three solver classes: needs pyo3's
+   multiple-pymethods/inventory feature; most of the LOC is docstrings.
+   Skipped as a poor elegance trade.
+
+docs/report/rslab.tex still describes v0.27 (mixed precision, tuner,
+scotch/kahip); needs a refresh pass alongside the existing
+chore/readme-report-refresh branch.
