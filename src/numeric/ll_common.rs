@@ -5,7 +5,7 @@
 
 use crate::diagnostics::MemoryEstimate;
 use crate::error::RslabError;
-use crate::numeric::multifrontal_ldlt::{FactorMethod, SolverSettings};
+use crate::numeric::multifrontal_ldlt::SolverSettings;
 use crate::symbolic::OrderingMethod;
 
 /// One `UnsafeCell` payload per supernode, written exactly once by the
@@ -70,36 +70,24 @@ impl<T> PanelPtr<T> {
     }
 }
 
-/// Minimum predicted factor flops for the exact nested-dissection bakeoff in
-/// `tuned` (below this the analysis cost cannot amortize).
-pub(crate) const ND_BAKEOFF_MIN_FLOPS: u64 = 5_000_000_000;
-/// Small systems never enter the bakeoff regardless of predicted flops -
-/// dense-ish small matrices can post huge flops without an ND story.
-pub(crate) const ND_BAKEOFF_MIN_N: usize = 10_000;
-/// Adopt ND only on a clear predicted win, not a coin flip.
-pub(crate) const ND_BAKEOFF_ADOPT_RATIO: f64 = 0.75;
-
 /// The deterministic heuristic settings pick shared by `LdltSolver::tuned` and
 /// `LuSolver::tuned`: default settings, an exact ND bakeoff on large systems,
 /// and (feature `tuning`, when the one-time install diagnosis has run) the
 /// calibrated cost-model worker count.
 pub(crate) fn tuned<A: ?Sized, S>(
     a: &A,
-    n: usize,
-    analyze: impl Fn(&A) -> Result<S, RslabError>,
     analyze_with: impl Fn(&A, &SolverSettings) -> Result<S, RslabError>,
     estimate: impl Fn(&S) -> MemoryEstimate,
-    exact_nnz: impl Fn(&S) -> usize,
 ) -> Result<(S, SolverSettings), RslabError> {
-    let sym = analyze(a)?;
-    let s = SolverSettings::default();
+    #[cfg(not(feature = "tuning"))]
+    let _ = &estimate;
+    // Ordering by the exact prefix race (`AutoRace`): every candidate's true
+    // factor nnz, computed concurrently, smallest wins - replacing the former
+    // Amd-pinned default plus flops-gated ND bakeoff with one exact
+    // measurement (the race is what the bakeoff approximated).
     #[allow(unused_mut)]
-    let (sym, mut s) =
-        if n >= ND_BAKEOFF_MIN_N && estimate(&sym).factor_flops >= ND_BAKEOFF_MIN_FLOPS {
-            nd_bakeoff(a, sym, s, &analyze_with, &estimate, &exact_nnz)?
-        } else {
-            (sym, s)
-        };
+    let mut s = SolverSettings::default().with_ordering(OrderingMethod::AutoRace);
+    let sym = analyze_with(a, &s)?;
     // Install-diagnosed worker count: only when a calibration cache exists
     // (written once by `tuning::install_diagnose`); never measures here.
     #[cfg(feature = "tuning")]
@@ -109,44 +97,6 @@ pub(crate) fn tuned<A: ?Sized, S>(
         s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
     }
     Ok((sym, s))
-}
-
-/// Re-analyze with [`OrderingMethod::MetisND`] and keep whichever ordering the
-/// *exact* symbolic quantities favour: ND is adopted only on a clear
-/// predicted-flops win with no regression in exact fill or in the
-/// method-relevant transient peak, so the pick is Pareto-safe. Deterministic -
-/// both candidates are measured on this matrix, nothing is modeled.
-pub(crate) fn nd_bakeoff<A: ?Sized, S>(
-    a: &A,
-    sym: S,
-    s: SolverSettings,
-    analyze_with: &impl Fn(&A, &SolverSettings) -> Result<S, RslabError>,
-    estimate: &impl Fn(&S) -> MemoryEstimate,
-    exact_nnz: &impl Fn(&S) -> usize,
-) -> Result<(S, SolverSettings), RslabError> {
-    if s.ordering == OrderingMethod::MetisND {
-        return Ok((sym, s));
-    }
-    let mut s_nd = s.clone();
-    s_nd.ordering = OrderingMethod::MetisND;
-    let sym_nd = match analyze_with(a, &s_nd) {
-        Ok(x) => x,
-        Err(_) => return Ok((sym, s)), // ND analysis failed -> keep the pick
-    };
-    let est = estimate(&sym);
-    let est_nd = estimate(&sym_nd);
-    let peak = |e: &MemoryEstimate| match s.method {
-        FactorMethod::Multifrontal => e.mf_transient_peak_bytes,
-        _ => e.panel_live_peak_bytes,
-    };
-    let flops_win = (est_nd.factor_flops as f64) < est.factor_flops as f64 * ND_BAKEOFF_ADOPT_RATIO;
-    let fill_ok = exact_nnz(&sym_nd) <= exact_nnz(&sym);
-    let mem_ok = peak(&est_nd) <= peak(&est);
-    if flops_win && fill_ok && mem_ok {
-        Ok((sym_nd, s_nd))
-    } else {
-        Ok((sym, s))
-    }
 }
 
 /// A fixed-size array of independently written cells: each index is written by
