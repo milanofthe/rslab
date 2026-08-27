@@ -1196,6 +1196,7 @@ thread_local! {
 }
 
 use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells};
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -1762,23 +1763,8 @@ pub fn factor_numeric<T: Scalar>(
     };
 
     // 2. Permuted matrix A_perm = Pᵀ A P in permuted (new) numbering, lower
-    //    triangle. `perm_inv` is old→new.
-    let nnz = a.row_idx.len();
-    let mut rows = Vec::with_capacity(nnz);
-    let mut cols = Vec::with_capacity(nnz);
-    let mut vals = Vec::with_capacity(nnz);
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
-            let gi = sym.perm_inv[i];
-            let gj = sym.perm_inv[j];
-            let (r, c) = if gi >= gj { (gi, gj) } else { (gj, gi) };
-            rows.push(r);
-            cols.push(c);
-            vals.push(a.values[k]);
-        }
-    }
-    let a_perm = CscMatrix::<T>::from_triplets(n, &rows, &cols, &vals)?;
+    //    triangle. `perm_inv` is old→new; direct counting build, no triplets.
+    let a_perm = a.permute_lower(&sym.perm_inv);
 
     // 3. Multifrontal numeric factorization with a work-stealing schedule over
     //    the assembly tree: each subtree factors independently (children before
@@ -2025,53 +2011,32 @@ impl<T> Default for CompactL<T> {
 struct LlEmitLdlt<T> {
     refcount: Vec<AtomicUsize>,
     e_offset: Vec<usize>,
-    compact: Vec<std::cell::UnsafeCell<CompactL<T>>>,
-    e_of_g: Vec<std::cell::UnsafeCell<usize>>,
-    perm: Vec<std::cell::UnsafeCell<usize>>,
-    d_diag: Vec<std::cell::UnsafeCell<T>>,
-    d_subdiag: Vec<std::cell::UnsafeCell<T>>,
-    two_by_two: Vec<std::cell::UnsafeCell<bool>>,
+    compact: Cells<CompactL<T>>,
+    e_of_g: Cells<usize>,
+    perm: Cells<usize>,
+    d_diag: Cells<T>,
+    d_subdiag: Cells<T>,
+    two_by_two: Cells<bool>,
     // Inertia accumulated across supernodes (block-aware).
     inertia_pos: AtomicUsize,
     inertia_neg: AtomicUsize,
     inertia_zero: AtomicUsize,
 }
-// SAFETY: disjoint-index writes; visibility via the refcount AcqRel + subtree join.
-unsafe impl<T: Send> Sync for LlEmitLdlt<T> {}
 
 impl<T: Scalar> LlEmitLdlt<T> {
     fn new(sym: &SymbolicFactorization, update_list: &[Vec<usize>]) -> Self {
         let nsuper = sym.supernodes.len();
         let n = sym.n;
-        let mut refcount: Vec<AtomicUsize> = (0..nsuper).map(|_| AtomicUsize::new(0)).collect();
-        for ul in update_list {
-            for &k in ul {
-                *refcount[k].get_mut() += 1;
-            }
-        }
-        let mut e_offset = vec![0usize; nsuper];
-        let mut acc = 0usize;
-        for (s, snode) in sym.supernodes.iter().enumerate() {
-            e_offset[s] = acc;
-            acc += snode.ncol;
-        }
+        let (refcount, e_offset) = emit_refcount_offsets(sym, update_list);
         LlEmitLdlt {
             refcount,
             e_offset,
-            compact: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(CompactL::default()))
-                .collect(),
-            e_of_g: (0..n)
-                .map(|_| std::cell::UnsafeCell::new(usize::MAX))
-                .collect(),
-            perm: (0..n).map(|_| std::cell::UnsafeCell::new(0)).collect(),
-            d_diag: (0..n)
-                .map(|_| std::cell::UnsafeCell::new(T::zero()))
-                .collect(),
-            d_subdiag: (0..n)
-                .map(|_| std::cell::UnsafeCell::new(T::zero()))
-                .collect(),
-            two_by_two: (0..n).map(|_| std::cell::UnsafeCell::new(false)).collect(),
+            compact: Cells::new_default(nsuper),
+            e_of_g: Cells::new(n, usize::MAX),
+            perm: Cells::new(n, 0),
+            d_diag: Cells::new(n, T::zero()),
+            d_subdiag: Cells::new(n, T::zero()),
+            two_by_two: Cells::new(n, false),
             inertia_pos: AtomicUsize::new(0),
             inertia_neg: AtomicUsize::new(0),
             inertia_zero: AtomicUsize::new(0),
@@ -2079,7 +2044,7 @@ impl<T: Scalar> LlEmitLdlt<T> {
     }
     #[inline]
     unsafe fn eg(&self, g: usize) -> usize {
-        *self.e_of_g[g].get()
+        *self.e_of_g.get(g)
     }
 }
 
@@ -2133,7 +2098,7 @@ fn ldlt_emit_and_free<T: Scalar>(
         cl.ptr.push(cl.idx.len());
     }
     // SAFETY: exactly one thread emits `k`; `compact[k]` is written once.
-    unsafe { *emit.compact[k].get() = cl };
+    unsafe { emit.compact.set(k, cl) };
     // SAFETY: last consumer done - no other thread reads `k`'s cells.
     if !ldlt_no_free() {
         unsafe { store.free(k) };
@@ -3052,18 +3017,18 @@ fn ll_cdiv_emit<T: Scalar>(
         let e = eoff + pp;
         // SAFETY: each global index / position is written by exactly one supernode.
         unsafe {
-            *emit.e_of_g[g].get() = e;
-            *emit.perm[e].get() = sym.perm[g];
-            *emit.d_diag[e].get() = d[pp];
+            emit.e_of_g.set(g, e);
+            emit.perm.set(e, sym.perm[g]);
+            emit.d_diag.set(e, d[pp]);
         }
         if two_by_two[pp] {
             let g2 = rs[s][lperm[pp + 1]];
             unsafe {
-                *emit.e_of_g[g2].get() = e + 1;
-                *emit.perm[e + 1].get() = sym.perm[g2];
-                *emit.d_diag[e + 1].get() = d[pp + 1];
-                *emit.d_subdiag[e].get() = d_subdiag[pp];
-                *emit.two_by_two[e].get() = true;
+                emit.e_of_g.set(g2, e + 1);
+                emit.perm.set(e + 1, sym.perm[g2]);
+                emit.d_diag.set(e + 1, d[pp + 1]);
+                emit.d_subdiag.set(e, d_subdiag[pp]);
+                emit.two_by_two.set(e, true);
             }
             let det_r = (d[pp] * d[pp + 1] - d_subdiag[pp] * d_subdiag[pp]).real();
             let tr_r = (d[pp] + d[pp + 1]).real();
@@ -3218,23 +3183,7 @@ fn factor_left_looking<T: Scalar>(
     };
 
     // A_perm = Pᵀ A P, lower triangle (same build as the multifrontal path).
-    let nnz = a.row_idx.len();
-    let (mut rows, mut cols, mut vals) = (
-        Vec::with_capacity(nnz),
-        Vec::with_capacity(nnz),
-        Vec::with_capacity(nnz),
-    );
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
-            let (gi, gj) = (sym.perm_inv[i], sym.perm_inv[j]);
-            let (r, c) = if gi >= gj { (gi, gj) } else { (gj, gi) };
-            rows.push(r);
-            cols.push(c);
-            vals.push(a.values[k]);
-        }
-    }
-    let a_perm = CscMatrix::<T>::from_triplets(n, &rows, &cols, &vals)?;
+    let a_perm = a.permute_lower(&sym.perm_inv);
 
     let nsuper = sym.supernodes.len();
     let rs = compute_supernode_row_structures(sym);
@@ -3306,7 +3255,7 @@ fn factor_left_looking<T: Scalar>(
     let mut l_values: Vec<T> = Vec::new();
     for (s, snode) in sym.supernodes.iter().enumerate() {
         // SAFETY: factorization complete; `compact[s]` written exactly once.
-        let cl = unsafe { std::mem::take(&mut *emit.compact[s].get()) };
+        let cl = unsafe { std::mem::take(emit.compact.get_mut(s)) };
         for c in 0..snode.ncol {
             let (a, b) = (cl.ptr[c], cl.ptr[c + 1]);
             l_row_idx.extend_from_slice(&cl.idx[a..b]);
@@ -3315,14 +3264,10 @@ fn factor_left_looking<T: Scalar>(
         }
     }
     // SAFETY: factorization complete; every position written exactly once in-node.
-    let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm[e].get() }).collect();
-    let d_diag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_diag[e].get() }).collect();
-    let d_subdiag: Vec<T> = (0..n)
-        .map(|e| unsafe { *emit.d_subdiag[e].get() })
-        .collect();
-    let two_by_two: Vec<bool> = (0..n)
-        .map(|e| unsafe { *emit.two_by_two[e].get() })
-        .collect();
+    let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm.get(e) }).collect();
+    let d_diag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_diag.get(e) }).collect();
+    let d_subdiag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_subdiag.get(e) }).collect();
+    let two_by_two: Vec<bool> = (0..n).map(|e| unsafe { *emit.two_by_two.get(e) }).collect();
     let inertia = Inertia::new(
         emit.inertia_pos.load(Ordering::Relaxed),
         emit.inertia_neg.load(Ordering::Relaxed),

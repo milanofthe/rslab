@@ -1019,7 +1019,7 @@ impl<T> Default for LuSlot<T> {
 }
 type LuLlStore<T> = crate::numeric::ll_common::SlotStore<LuSlot<T>>;
 
-use crate::numeric::ll_common::PanelPtr;
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, PanelPtr};
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -1096,59 +1096,38 @@ struct LlEmit<T> {
     refcount: Vec<AtomicUsize>,
     /// First elimination position of each supernode (symbolic prefix sum of ncol).
     e_offset: Vec<usize>,
-    compact: Vec<std::cell::UnsafeCell<CompactNode<T>>>,
+    compact: Cells<CompactNode<T>>,
     /// `e_of_g[g]` = elimination position of COLUMN g; `row_pos_of_g[g]` =
     /// position whose PIVOT ROW is g. Written in-node (disjoint g), read after the
     /// join barrier (and in `emit_and_free`, where the join chain makes consumer
     /// writes visible).
-    e_of_g: Vec<std::cell::UnsafeCell<usize>>,
-    row_pos_of_g: Vec<std::cell::UnsafeCell<usize>>,
-    perm: Vec<std::cell::UnsafeCell<usize>>,
-    perm_row: Vec<std::cell::UnsafeCell<usize>>,
+    e_of_g: Cells<usize>,
+    row_pos_of_g: Cells<usize>,
+    perm: Cells<usize>,
+    perm_row: Cells<usize>,
 }
-// SAFETY: writes target disjoint indices; cross-thread visibility is established
-// by the refcount Acquire/Release and the subtree-join happens-before chain.
-unsafe impl<T: Send> Sync for LlEmit<T> {}
 
 impl<T: Scalar> LlEmit<T> {
     fn new(sym: &SymbolicFactorization, update_list: &[Vec<usize>]) -> Self {
-        let nsuper = sym.supernodes.len();
         let n = sym.n;
-        let mut refcount: Vec<AtomicUsize> = (0..nsuper).map(|_| AtomicUsize::new(0)).collect();
-        for ul in update_list {
-            for &k in ul {
-                *refcount[k].get_mut() += 1;
-            }
-        }
-        let mut e_offset = vec![0usize; nsuper];
-        let mut acc = 0usize;
-        for (s, snode) in sym.supernodes.iter().enumerate() {
-            e_offset[s] = acc;
-            acc += snode.ncol;
-        }
+        let (refcount, e_offset) = emit_refcount_offsets(sym, update_list);
         LlEmit {
             refcount,
             e_offset,
-            compact: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(CompactNode::default()))
-                .collect(),
-            e_of_g: (0..n)
-                .map(|_| std::cell::UnsafeCell::new(usize::MAX))
-                .collect(),
-            row_pos_of_g: (0..n)
-                .map(|_| std::cell::UnsafeCell::new(usize::MAX))
-                .collect(),
-            perm: (0..n).map(|_| std::cell::UnsafeCell::new(0)).collect(),
-            perm_row: (0..n).map(|_| std::cell::UnsafeCell::new(0)).collect(),
+            compact: Cells::new_default(sym.supernodes.len()),
+            e_of_g: Cells::new(n, usize::MAX),
+            row_pos_of_g: Cells::new(n, usize::MAX),
+            perm: Cells::new(n, 0),
+            perm_row: Cells::new(n, 0),
         }
     }
     #[inline]
     unsafe fn eg(&self, g: usize) -> usize {
-        *self.e_of_g[g].get()
+        *self.e_of_g.get(g)
     }
     #[inline]
     unsafe fn rg(&self, g: usize) -> usize {
-        *self.row_pos_of_g[g].get()
+        *self.row_pos_of_g.get(g)
     }
 }
 
@@ -1240,7 +1219,7 @@ fn emit_and_free<T: Scalar>(
         cn.u_ptr.push(cn.u_idx.len());
     }
     // SAFETY: exactly one thread emits `k`; `compact[k]` is written once.
-    unsafe { *emit.compact[k].get() = cn };
+    unsafe { emit.compact.set(k, cn) };
     // SAFETY: last consumer done - no other thread reads `k`'s panels.
     unsafe { store.free(k) };
 }
@@ -1866,10 +1845,10 @@ fn lu_ll_factor_node<T: Scalar>(
         let g_row = rs[s][rperm[p]];
         // SAFETY: each global index is written by exactly one supernode.
         unsafe {
-            *emit.e_of_g[g_col].get() = eoff + p;
-            *emit.row_pos_of_g[g_row].get() = eoff + p;
-            *emit.perm[eoff + p].get() = sym.perm[g_col];
-            *emit.perm_row[eoff + p].get() = sym.perm[g_row];
+            emit.e_of_g.set(g_col, eoff + p);
+            emit.row_pos_of_g.set(g_row, eoff + p);
+            emit.perm.set(eoff + p, sym.perm[g_col]);
+            emit.perm_row.set(eoff + p, sym.perm[g_row]);
         }
     }
     // SAFETY: this thread owns `s`, writes its cells exactly once.
@@ -2046,7 +2025,7 @@ fn factor_lu_left_looking<T: Scalar>(
         // is (growing final CSC) + (one supernode's fragment), not all fragments +
         // the full CSC simultaneously.
         // SAFETY: factorization complete; `compact[s]` written exactly once.
-        let cn = unsafe { std::mem::take(&mut *emit.compact[s].get()) };
+        let cn = unsafe { std::mem::take(emit.compact.get_mut(s)) };
         for c in 0..snode.ncol {
             let (la, lb) = (cn.l_ptr[c], cn.l_ptr[c + 1]);
             l_row_idx.extend_from_slice(&cn.l_idx[la..lb]);
@@ -2059,8 +2038,8 @@ fn factor_lu_left_looking<T: Scalar>(
         }
     }
     // SAFETY: factorization complete; every position written exactly once in-node.
-    let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm[e].get() }).collect();
-    let perm_row: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm_row[e].get() }).collect();
+    let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm.get(e) }).collect();
+    let perm_row: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm_row.get(e) }).collect();
 
     Ok(LuFactors {
         n,
@@ -2173,22 +2152,9 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         .collect();
 
     // Full permuted, equilibrated matrix Â_perm = Pᵀ (D_r A D_c) P and its
-    // transpose (no triangle folding - unsymmetric values kept distinct).
-    let nnz = a.row_idx.len();
-    let (mut rows, mut cols, mut vals) = (
-        Vec::with_capacity(nnz),
-        Vec::with_capacity(nnz),
-        Vec::with_capacity(nnz),
-    );
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
-            rows.push(sym.perm_inv[i]);
-            cols.push(sym.perm_inv[j]);
-            vals.push(a.values[k] * T::from_real(d_row[i] * d_col[j]));
-        }
-    }
-    let a_perm = GeneralCsc::<T>::from_triplets(n, &rows, &cols, &vals)?;
+    // transpose (no triangle folding - unsymmetric values kept distinct);
+    // direct counting build, no triplets.
+    let a_perm = a.permute_scaled(&sym.perm_inv, &d_row, &d_col);
     let a_perm_t = a_perm.transpose();
     // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
     // trees), shared by both LU paths.

@@ -97,6 +97,61 @@ impl<T: Scalar> GeneralCsc<T> {
     }
 
     /// Number of stored nonzeros.
+    /// Permuted, equilibrated copy `Pᵀ (D_r A D_c) P` (with `perm_inv[old] =
+    /// new`), built directly in CSC form. Vertically integrated replacement for
+    /// the triplet round-trip on the numeric LU factor path: two-pass counting
+    /// layout plus a per-column sort through one reused scratch - no triplet
+    /// arrays, no per-column allocation, no duplicate pass (the permutation is
+    /// a bijection over a valid CSC). Output matches `from_triplets` on the
+    /// same entries: sorted rows per column.
+    pub(crate) fn permute_scaled(
+        &self,
+        perm_inv: &[usize],
+        d_row: &[f64],
+        d_col: &[f64],
+    ) -> GeneralCsc<T> {
+        let n = self.n;
+        let nnz = self.row_idx.len();
+        let mut col_ptr = vec![0usize; n + 1];
+        for (j, &gj) in perm_inv.iter().enumerate() {
+            col_ptr[gj + 1] += self.col_ptr[j + 1] - self.col_ptr[j];
+        }
+        for c in 0..n {
+            col_ptr[c + 1] += col_ptr[c];
+        }
+        let mut cursor = col_ptr[..n].to_vec();
+        let mut row_idx = vec![0usize; nnz];
+        let mut values = vec![T::zero(); nnz];
+        for (j, &gj) in perm_inv.iter().enumerate() {
+            let p0 = cursor[gj];
+            for (off, k) in (self.col_ptr[j]..self.col_ptr[j + 1]).enumerate() {
+                let i = self.row_idx[k];
+                row_idx[p0 + off] = perm_inv[i];
+                values[p0 + off] = self.values[k] * T::from_real(d_row[i] * d_col[j]);
+            }
+            cursor[gj] = p0 + (self.col_ptr[j + 1] - self.col_ptr[j]);
+        }
+        let mut scratch: Vec<(usize, T)> = Vec::new();
+        for c in 0..n {
+            let (s, e) = (col_ptr[c], col_ptr[c + 1]);
+            if e - s > 1 {
+                scratch.clear();
+                scratch.extend((s..e).map(|k| (row_idx[k], values[k])));
+                scratch.sort_unstable_by_key(|&(r, _)| r);
+                for (k, &(r, v)) in (s..e).zip(scratch.iter()) {
+                    row_idx[k] = r;
+                    values[k] = v;
+                }
+            }
+        }
+        GeneralCsc {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
     pub fn nnz(&self) -> usize {
         self.values.len()
     }

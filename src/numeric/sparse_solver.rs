@@ -14,7 +14,7 @@
 //! diagonal (common in complex-symmetric and saddle-point systems). Solving
 //! `A x = b` becomes: factor `Â`, then `x = D · (Â⁻¹ · (D b))`.
 
-use crate::dense::ldlt_generic::{solve_ldlt, solve_ldlt_many, LdltFactors};
+use crate::dense::ldlt_generic::{solve_ldlt_many, LdltFactors};
 use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::{
     analyze as analyze_pattern, analyze_with as analyze_pattern_with, factor_numeric,
@@ -115,7 +115,10 @@ impl<T: Scalar> LdltSolver<T> {
         LdltSymbolic::analyze(a)?.factor(a, opts)
     }
 
-    /// Solve `A · x = rhs` using the stored factors.
+    /// Solve `A · x = rhs` using the stored factors. The equilibration
+    /// `x = D · (Â⁻¹ · (D b))` is fused into the permutation gather/scatter
+    /// around the triangular sweeps - one pass in, one pass out, no
+    /// intermediate scaled copy.
     pub fn solve(&self, rhs: &[T]) -> Result<Vec<T>, RslabError> {
         let n = self.factors.n;
         if rhs.len() != n {
@@ -124,17 +127,18 @@ impl<T: Scalar> LdltSolver<T> {
                 got: rhs.len(),
             });
         }
-        // b̂ = D b
-        let b_hat: Vec<T> = rhs
+        // y = Pᵀ · (D b): y[i] = s[p] · b[p] with p = perm[i].
+        let mut y: Vec<T> = self
+            .factors
+            .perm
             .iter()
-            .zip(&self.scale)
-            .map(|(&r, &s)| r * T::from_real(s))
+            .map(|&p| rhs[p] * T::from_real(self.scale[p]))
             .collect();
-        // ẑ = Â⁻¹ b̂
-        let mut x = solve_ldlt(&self.factors, &b_hat)?;
-        // x = D ẑ
-        for (xi, &s) in x.iter_mut().zip(&self.scale) {
-            *xi = *xi * T::from_real(s);
+        crate::dense::ldlt_generic::solve_ldlt_permuted(&self.factors, &mut y)?;
+        // x = D · (P v): x[p] = v[i] · s[p].
+        let mut x = vec![T::zero(); n];
+        for (i, &p) in self.factors.perm.iter().enumerate() {
+            x[p] = y[i] * T::from_real(self.scale[p]);
         }
         Ok(x)
     }

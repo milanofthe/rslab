@@ -284,7 +284,7 @@ pub fn find_supernodes(
     // Track which supernodes are merged (absorbed into parent)
     let mut merged_into = vec![None::<usize>; n_snodes];
     // Track the actual first column of each supernode (may change during merging)
-    let mut snode_first_col: Vec<usize> = snode_starts.clone();
+    let mut snode_first_col: Vec<usize> = snode_starts;
 
     // Iteration order: forward (legacy / `Adjacency` strategy) is the
     // historical behavior - children processed in increasing postorder

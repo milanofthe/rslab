@@ -349,6 +349,25 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
     for (i, yi) in y.iter_mut().enumerate() {
         *yi = rhs[factors.perm[i]];
     }
+    solve_ldlt_permuted(factors, &mut y)?;
+    // x = P · v : x[perm[i]] = v[i].
+    let mut x = vec![T::zero(); n];
+    for (i, &vi) in y.iter().enumerate() {
+        x[factors.perm[i]] = vi;
+    }
+    Ok(x)
+}
+
+/// The three sweeps of [`solve_ldlt`] on an already-permuted right-hand side,
+/// in place: forward `L z = y`, block-diagonal `D w = z`, backward `Lᵀ v = w`.
+/// Split out so callers that fold their own gather/scatter around the solve
+/// (e.g. the equilibrated [`crate::LdltSolver`], which fuses the diagonal
+/// scaling into the permutation passes) share one implementation.
+pub(crate) fn solve_ldlt_permuted<T: Scalar>(
+    factors: &LdltFactors<T>,
+    y: &mut [T],
+) -> Result<(), RslabError> {
+    let n = factors.n;
 
     // Forward solve L · z = y (unit lower, CSC column-oriented): once y[j] is
     // final, propagate it down its column. Axpys via `fmadd` (FMA on native
@@ -415,12 +434,7 @@ pub fn solve_ldlt<T: Scalar>(factors: &LdltFactors<T>, rhs: &[T]) -> Result<Vec<
         y[j] = acc;
     }
 
-    // x = P · v : x[perm[i]] = v[i].
-    let mut x = vec![T::zero(); n];
-    for (i, &vi) in y.iter().enumerate() {
-        x[factors.perm[i]] = vi;
-    }
-    Ok(x)
+    Ok(())
 }
 
 /// A memory-compact form of [`LdltFactors`] with the CSC index arrays and the
