@@ -113,17 +113,17 @@ impl fmt::Display for MemoryEstimate {
 /// elimination/postorder (supernodes are numbered in postorder) to get the live
 /// panel peak and the accumulating compact factor - the same schedule the numeric
 /// path runs, so the estimate matches what it allocates.
-pub(crate) fn estimate_left_looking(
+pub(crate) fn estimate_left_looking<'a>(
     nsuper: usize,
     panel_bytes: &dyn Fn(usize) -> u64,
     compact_bytes: &dyn Fn(usize) -> u64,
-    update_list: &[Vec<usize>],
+    updaters: &dyn Fn(usize) -> &'a [usize],
     value_bytes: usize,
     input_bytes: u64,
 ) -> MemoryEstimate {
     let mut refc = vec![0usize; nsuper];
-    for ul in update_list {
-        for &k in ul {
+    for s in 0..nsuper {
+        for &k in updaters(s) {
             refc[k] += 1;
         }
     }
@@ -135,7 +135,7 @@ pub(crate) fn estimate_left_looking(
     let mut peak: i64 = 0;
     for s in 0..nsuper {
         live_panels += panel_bytes(s) as i64;
-        for &k in &update_list[s] {
+        for &k in updaters(s) {
             refc[k] -= 1;
             if refc[k] == 0 {
                 live_panels -= panel_bytes(k) as i64;

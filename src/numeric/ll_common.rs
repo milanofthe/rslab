@@ -199,13 +199,13 @@ impl<V> Cells<V> {
 /// left-looking emit states.
 pub(crate) fn emit_refcount_offsets(
     sym: &crate::symbolic::SymbolicFactorization,
-    update_list: &[Vec<usize>],
+    sched: &LlSchedule,
 ) -> (Vec<std::sync::atomic::AtomicUsize>, Vec<usize>) {
     use std::sync::atomic::AtomicUsize;
     let nsuper = sym.supernodes.len();
     let mut refcount: Vec<AtomicUsize> = (0..nsuper).map(|_| AtomicUsize::new(0)).collect();
-    for ul in update_list {
-        for &k in ul {
+    for s in 0..nsuper {
+        for &k in sched.updaters(s) {
             *refcount[k].get_mut() += 1;
         }
     }
@@ -341,4 +341,228 @@ impl PermScatter {
         }
         out
     }
+}
+
+/// Pattern-only left-looking schedule, built once per symbolic analysis and
+/// shared by the LDLT/LU drivers and the a-priori memory estimators (it was
+/// previously rebuilt by each of them, per factorization): the per-supernode
+/// row structures and the updater lists, both in flat CSR-like storage.
+pub(crate) struct LlSchedule {
+    rs_off: Vec<usize>,
+    rs: Vec<usize>,
+    ul_off: Vec<usize>,
+    ul: Vec<usize>,
+}
+
+impl LlSchedule {
+    /// Rows of supernode `s`: `rows(s)[0..ncol]` are its eliminated columns
+    /// `first_col..first_col+ncol`; `rows(s)[ncol..]` the sorted
+    /// below-diagonal fill rows (the multifrontal assembly, value-free).
+    #[inline]
+    pub fn rows(&self, s: usize) -> &[usize] {
+        &self.rs[self.rs_off[s]..self.rs_off[s + 1]]
+    }
+
+    /// Updaters of supernode `s`: every factored `k` whose off-diagonal rows
+    /// hit `s`'s column run (each exactly once, ascending).
+    #[inline]
+    pub fn updaters(&self, s: usize) -> &[usize] {
+        &self.ul[self.ul_off[s]..self.ul_off[s + 1]]
+    }
+
+    pub fn build(sym: &crate::symbolic::SymbolicFactorization) -> Self {
+        let nsuper = sym.supernodes.len();
+        // Row structures: own columns ++ sorted union of the column patterns'
+        // trailing rows and the children's off-diagonal rows.
+        let mut rs_off = Vec::with_capacity(nsuper + 1);
+        rs_off.push(0usize);
+        let mut rs: Vec<usize> = Vec::new();
+        let mut trailing: Vec<usize> = Vec::new();
+        for s in 0..nsuper {
+            let snode = &sym.supernodes[s];
+            let own_last = snode.first_col + snode.ncol;
+            trailing.clear();
+            for j in snode.first_col..own_last {
+                for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
+                    let r = sym.permuted_pattern.row_idx[k];
+                    if r >= own_last {
+                        trailing.push(r);
+                    }
+                }
+            }
+            for &ch in &snode.children {
+                let nck = sym.supernodes[ch].ncol;
+                for &r in &rs[rs_off[ch] + nck..rs_off[ch + 1]] {
+                    if r >= own_last {
+                        trailing.push(r);
+                    }
+                }
+            }
+            trailing.sort_unstable();
+            trailing.dedup();
+            rs.extend(snode.first_col..own_last);
+            rs.extend_from_slice(&trailing);
+            rs_off.push(rs.len());
+        }
+
+        // Updater lists: `k` updates `s` iff one of `k`'s off-diagonal rows is
+        // an eliminated column of `s`. Two counting passes over the flat rows.
+        let mut col_to_snode = vec![0usize; sym.n];
+        for (s, snode) in sym.supernodes.iter().enumerate() {
+            col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
+        }
+        let mut ul_off = vec![0usize; nsuper + 1];
+        let each_hit = |mut f: Box<dyn FnMut(usize, usize) + '_>| {
+            for k in 0..nsuper {
+                let nck = sym.supernodes[k].ncol;
+                let mut last = usize::MAX;
+                for &r in &rs[rs_off[k] + nck..rs_off[k + 1]] {
+                    let s = col_to_snode[r];
+                    if s != last {
+                        f(s, k);
+                        last = s;
+                    }
+                }
+            }
+        };
+        each_hit(Box::new(|s, _k| ul_off[s + 1] += 1));
+        for s in 0..nsuper {
+            ul_off[s + 1] += ul_off[s];
+        }
+        let mut cursor = ul_off[..nsuper].to_vec();
+        let mut ul = vec![0usize; ul_off[nsuper]];
+        each_hit(Box::new(|s, k| {
+            ul[cursor[s]] = k;
+            cursor[s] += 1;
+        }));
+        LlSchedule {
+            rs_off,
+            rs,
+            ul_off,
+            ul,
+        }
+    }
+}
+
+/// The left-looking assembly-forest recursion shared by the LDLT/LU twins:
+/// factor every child subtree concurrently, then this node, then compact and
+/// free every descendant whose last consumer this node was (refcount→0), and
+/// the node itself if nothing above consumes it. `factor_node` and `emit_free`
+/// carry the path-specific kernels; everything else is the shared schedule.
+pub(crate) fn ll_subtree(
+    s: usize,
+    sym: &crate::symbolic::SymbolicFactorization,
+    sched: &LlSchedule,
+    refcount: &[std::sync::atomic::AtomicUsize],
+    factor_node: &(dyn Fn(usize) -> Result<(), RslabError> + Sync),
+    emit_free: &(dyn Fn(usize) + Sync),
+) -> Result<(), RslabError> {
+    use rayon::prelude::*;
+    use std::sync::atomic::Ordering;
+    sym.supernodes[s]
+        .children
+        .par_iter()
+        .map(|&ch| ll_subtree(ch, sym, sched, refcount, factor_node, emit_free))
+        .collect::<Result<Vec<()>, _>>()?;
+    factor_node(s)?;
+    // Disjoint `k`, so the wide top-of-tree free runs in parallel.
+    const FREE_PAR: usize = 64;
+    let free = |k: usize| {
+        if refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
+            emit_free(k);
+        }
+    };
+    if sched.updaters(s).len() >= FREE_PAR {
+        sched.updaters(s).par_iter().for_each(|&k| free(k));
+    } else {
+        for &k in sched.updaters(s) {
+            free(k);
+        }
+    }
+    if refcount[s].load(Ordering::Relaxed) == 0 {
+        emit_free(s);
+    }
+    Ok(())
+}
+
+/// The multifrontal assembly-forest recursion shared by the LDLT/LU twins:
+/// factor every child subtree concurrently, factor this node from the
+/// children's fronts, free the children's contribution blocks the moment they
+/// have been extend-added (the CB stack is the dominant transient - keeping it
+/// to the end OOMed on large fronts), and flatten the subtree's node results.
+/// Returns `(own, [(supernode, node)...])` for the parent / forest scatter.
+pub(crate) type NodeFactorFn<'a, N> = dyn Fn(usize, &[&N]) -> Result<N, RslabError> + Sync + 'a;
+
+pub(crate) fn mf_subtree<N: Send>(
+    s: usize,
+    sym: &crate::symbolic::SymbolicFactorization,
+    factor_one: &NodeFactorFn<'_, N>,
+    free_contrib: &(dyn Fn(&mut N) + Sync),
+) -> Result<(N, Vec<(usize, N)>), RslabError> {
+    use rayon::prelude::*;
+    let children = &sym.supernodes[s].children;
+    let mut outs: Vec<(N, Vec<(usize, N)>)> = children
+        .par_iter()
+        .map(|&ch| mf_subtree(ch, sym, factor_one, free_contrib))
+        .collect::<Result<Vec<_>, _>>()?;
+    let nf = {
+        let child_refs: Vec<&N> = outs.iter().map(|(own, _)| own).collect();
+        factor_one(s, &child_refs)?
+    };
+    for (own, _) in outs.iter_mut() {
+        free_contrib(own);
+    }
+    let mut subtree = Vec::new();
+    for (i, (own, rest)) in outs.into_iter().enumerate() {
+        subtree.push((children[i], own));
+        subtree.extend(rest);
+    }
+    Ok((nf, subtree))
+}
+
+/// Roots of the assembly forest: supernodes that are no node's child.
+pub(crate) fn forest_roots(sym: &crate::symbolic::SymbolicFactorization) -> Vec<usize> {
+    let nsuper = sym.supernodes.len();
+    let mut is_child = vec![false; nsuper];
+    for snode in &sym.supernodes {
+        for &ch in &snode.children {
+            is_child[ch] = true;
+        }
+    }
+    (0..nsuper).filter(|&s| !is_child[s]).collect()
+}
+
+/// cmod pre-pass shared by the LDLT/LU node kernels: locate each updater's
+/// landing range in the panel of supernode `s` (`[p0, p1)` of its off-diagonal
+/// rows) and total the update flops - the fork/tiling dispatch input. With
+/// `count_u`, the U-side rows beyond the landing range are counted too (the
+/// LU twin updates both `L` and `U12`).
+pub(crate) fn cmod_spans(
+    sym: &crate::symbolic::SymbolicFactorization,
+    sched: &LlSchedule,
+    s: usize,
+    first: usize,
+    ncol: usize,
+    count_u: bool,
+) -> (Vec<(usize, usize, usize)>, usize) {
+    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(sched.updaters(s).len());
+    let mut cmod_flops: usize = 0;
+    for &kk in sched.updaters(s) {
+        let nck = sym.supernodes[kk].ncol;
+        let ok = &sched.rows(kk)[nck..];
+        let nok = ok.len();
+        let p0 = ok.partition_point(|&g| g < first);
+        let p1 = ok.partition_point(|&g| g < first + ncol);
+        let npk = p1 - p0;
+        if npk == 0 {
+            continue;
+        }
+        let flop = (nok - p0) * npk * nck;
+        cmod_flops += flop;
+        if count_u {
+            cmod_flops += npk * (nok - p1) * nck;
+        }
+        spans.push((kk, p0, p1));
+    }
+    (spans, cmod_flops)
 }

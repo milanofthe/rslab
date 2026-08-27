@@ -29,8 +29,7 @@ use crate::error::RslabError;
 use crate::numeric::blr::BlrMatrix;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::multifrontal_ldlt::{
-    analyze_with, compute_supernode_row_structures, perturb_pivot, BlrMode, FactorMethod,
-    MemoryMode, SolverSettings, ZeroPivotAction,
+    analyze_with, perturb_pivot, BlrMode, FactorMethod, MemoryMode, SolverSettings, ZeroPivotAction,
 };
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
@@ -597,68 +596,6 @@ fn factor_one_node_lu<T: Scalar>(
 /// rest of its subtree - the return shape of [`factor_subtree`].
 type SubtreeFactors<T> = (NodeLu<T>, Vec<(usize, NodeLu<T>)>);
 
-/// Recursively factor the assembly subtree rooted at supernode `s` with a
-/// **work-stealing tree schedule**: the children's subtrees are factored
-/// concurrently (`par_iter`) and this node is factored only once they are done.
-/// Independent subtrees fill idle threads automatically, and the per-front GEMM
-/// shares the *same* rayon pool, so there is no level-barrier stall and no
-/// nested-pool contention - the parallel-efficiency win over the old
-/// level-synchronous driver.
-///
-/// Returns this node's factor plus a flat `(supernode-id, factor)` list for the
-/// whole subtree, which the caller scatters into `node_results` for the global
-/// emit pass.
-#[allow(clippy::too_many_arguments)]
-fn factor_subtree<T: Scalar>(
-    s: usize,
-    sym: &SymbolicFactorization,
-    a_perm: &GeneralCsc<T>,
-    a_perm_t: &GeneralCsc<T>,
-    perturb_floor: Option<f64>,
-    blr: BlrMode,
-    pool: &FrontPool<T>,
-    kt: KernelTuning,
-) -> Result<SubtreeFactors<T>, RslabError> {
-    let children = &sym.supernodes[s].children;
-    // Factor the child subtrees concurrently.
-    let mut outs: Vec<SubtreeFactors<T>> = children
-        .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, blr, pool, kt))
-        .collect::<Result<Vec<_>, _>>()?;
-    // Factor this node from the children's own (subtree-root) factors.
-    let nf = {
-        let child_refs: Vec<&NodeLu<T>> = outs.iter().map(|(own, _)| own).collect();
-        factor_one_node_lu(
-            s,
-            sym,
-            a_perm,
-            a_perm_t,
-            &child_refs,
-            perturb_floor,
-            blr,
-            pool,
-            kt,
-        )?
-    };
-    // Free the children's contribution blocks NOW: they have just been
-    // extend-added into this front and are never read again (the global emit
-    // pass uses only L/U). The CB stack is `Σ cnrow²` ≈ 5× the L/U volume and,
-    // when retained to the end, dominated peak memory and caused OOMs. Dropping
-    // each CB the moment its parent consumes it keeps only the active
-    // contribution frontier live - the standard multifrontal CB-stack.
-    for (own, _) in outs.iter_mut() {
-        own.contrib = Contribution::Dense(Vec::new());
-    }
-    // Flatten the subtree's factors for the global pass (child `i` is the i-th
-    // entry of `children`).
-    let mut subtree = Vec::new();
-    for (i, (own, rest)) in outs.into_iter().enumerate() {
-        subtree.push((children[i], own));
-        subtree.extend(rest);
-    }
-    Ok((nf, subtree))
-}
-
 /// Reusable symbolic analysis for the unsymmetric LU path - the symmetrized
 /// pattern `A ∪ Aᵀ` analyzed once. Pass to [`factor_general_lu_numeric`] for
 /// each value-set that shares the pattern (frequency sweep / Newton).
@@ -785,11 +722,13 @@ impl LuSymbolic {
         let Some((sym, _)) = self.symb.sym_and_levels() else {
             return 0;
         };
-        let rs = compute_supernode_row_structures(sym);
+        let Some(sched) = self.symb.ll_schedule() else {
+            return 0;
+        };
         (0..sym.supernodes.len())
             .map(|s| {
                 let nc = sym.supernodes[s].ncol;
-                let cnrow = rs[s].len().saturating_sub(nc);
+                let cnrow = sched.rows(s).len().saturating_sub(nc);
                 // L: diagonal lower-triangle + off-diagonal rows; U: upper-tri + U12.
                 let l = nc * (nc + 1) / 2 + cnrow * nc;
                 let u = nc * (nc + 1) / 2 + nc * cnrow;
@@ -825,37 +764,30 @@ impl LuSymbolic {
                 0,
                 &|_| 0,
                 &|_| 0,
-                &[],
+                &|_| &[],
                 value_bytes,
                 0,
             );
         };
         let nsuper = sym.supernodes.len();
-        let rs = compute_supernode_row_structures(sym);
-        let mut col_to_snode = vec![0usize; self.n];
-        for (s, snode) in sym.supernodes.iter().enumerate() {
-            col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
-        }
-        let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
-        for (k, rsk) in rs.iter().enumerate() {
-            let nck = sym.supernodes[k].ncol;
-            let mut last = usize::MAX;
-            for &r in &rsk[nck..] {
-                let s = col_to_snode[r];
-                if s != last {
-                    update_list[s].push(k);
-                    last = s;
-                }
-            }
-        }
+        let Some(sched) = self.symb.ll_schedule() else {
+            return crate::diagnostics::estimate_left_looking(
+                0,
+                &|_| 0,
+                &|_| 0,
+                &|_| &[],
+                value_bytes,
+                0,
+            );
+        };
         let panel_bytes = |s: usize| -> u64 {
             let nc = sym.supernodes[s].ncol;
-            let nr = rs[s].len();
+            let nr = sched.rows(s).len();
             ((nr * nc + nc * (nr - nc)) * value_bytes) as u64
         };
         let compact_bytes = |s: usize| -> u64 {
             let nc = sym.supernodes[s].ncol;
-            let cnrow = rs[s].len() - nc;
+            let cnrow = sched.rows(s).len() - nc;
             // L: diagonal lower-triangle + off-diagonal rows; U: upper-tri + U12.
             let l = nc * (nc + 1) / 2 + cnrow * nc;
             let u = nc * (nc + 1) / 2 + nc * cnrow;
@@ -868,13 +800,13 @@ impl LuSymbolic {
             nsuper,
             &panel_bytes,
             &compact_bytes,
-            &update_list,
+            &|s| sched.updaters(s),
             value_bytes,
             input_bytes,
         );
         est.factor_flops = (0..nsuper)
             .map(|s| {
-                let (nc, nr) = (sym.supernodes[s].ncol as u64, rs[s].len() as u64);
+                let (nc, nr) = (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
                 nr * nr * nc
             })
             .sum();
@@ -1025,7 +957,7 @@ impl<T> Default for LuSlot<T> {
 }
 type LuLlStore<T> = crate::numeric::ll_common::SlotStore<LuSlot<T>>;
 
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, PanelPtr, PermScatter};
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, LlSchedule, PanelPtr, PermScatter};
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -1114,9 +1046,9 @@ struct LlEmit<T> {
 }
 
 impl<T: Scalar> LlEmit<T> {
-    fn new(sym: &SymbolicFactorization, update_list: &[Vec<usize>]) -> Self {
+    fn new(sym: &SymbolicFactorization, sched: &LlSchedule) -> Self {
         let n = sym.n;
-        let (refcount, e_offset) = emit_refcount_offsets(sym, update_list);
+        let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
         LlEmit {
             refcount,
             e_offset,
@@ -1147,12 +1079,12 @@ fn emit_and_free<T: Scalar>(
     store: &LuLlStore<T>,
     emit: &LlEmit<T>,
     sym: &SymbolicFactorization,
-    rs: &[Vec<usize>],
+    sched: &LlSchedule,
     drop_tol: Option<f64>,
 ) {
     let snode = &sym.supernodes[k];
     let (first, ncol) = (snode.first_col, snode.ncol);
-    let nrow = rs[k].len();
+    let nrow = sched.rows(k).len();
     let cnrow = nrow - ncol;
     // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
     let slot = unsafe { store.get(k) };
@@ -1169,13 +1101,13 @@ fn emit_and_free<T: Scalar>(
     let mut urow: Vec<(usize, T)> = Vec::with_capacity(ncol + cnrow);
     for p in 0..ncol {
         let diag_e = unsafe { emit.eg(first + p) };
-        // L column: unit diagonal + strict-lower (row `i` came from rs[k][rperm[i]]).
+        // L column: unit diagonal + strict-lower (row `i` came from sched.rows(k)[rperm[i]]).
         lcol.clear();
         lcol.push((diag_e, one));
         for i in (p + 1)..nrow {
             let v = lbuf[p * nrow + i];
             if v != T::zero() {
-                lcol.push((unsafe { emit.rg(rs[k][rperm[i]]) }, v));
+                lcol.push((unsafe { emit.rg(sched.rows(k)[rperm[i]]) }, v));
             }
         }
         if let Some(tau) = drop_tol {
@@ -1205,7 +1137,7 @@ fn emit_and_free<T: Scalar>(
         for t in 0..cnrow {
             let v = ubuf[p + t * ncol];
             if v != T::zero() {
-                urow.push((unsafe { emit.eg(rs[k][ncol + t]) }, v));
+                urow.push((unsafe { emit.eg(sched.rows(k)[ncol + t]) }, v));
             }
         }
         if let Some(tau) = drop_tol {
@@ -1236,8 +1168,7 @@ fn lu_ll_factor_node<T: Scalar>(
     sym: &SymbolicFactorization,
     a_perm: &GeneralCsc<T>,
     a_perm_t: &GeneralCsc<T>,
-    rs: &[Vec<usize>],
-    update_list: &[Vec<usize>],
+    sched: &LlSchedule,
     store: &LuLlStore<T>,
     emit: &LlEmit<T>,
     perturb_floor: Option<f64>,
@@ -1251,7 +1182,7 @@ fn lu_ll_factor_node<T: Scalar>(
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
-    let nrow = rs[s].len();
+    let nrow = sched.rows(s).len();
     let cnrow = nrow - ncol;
     let n = sym.n;
     // `lbuf`: nrow×ncol (columns of s, full height). `ubuf`: ncol×cnrow (U12).
@@ -1262,7 +1193,7 @@ fn lu_ll_factor_node<T: Scalar>(
     if gloc.len() < n {
         gloc.resize(n, usize::MAX);
     }
-    for (li, &g) in rs[s].iter().enumerate() {
+    for (li, &g) in sched.rows(s).iter().enumerate() {
         gloc[g] = li;
     }
     // Assemble columns of s (full) into lbuf, and the U12 rows into ubuf.
@@ -1287,27 +1218,10 @@ fn lu_ll_factor_node<T: Scalar>(
     // only aggregation reaching those dominant updates carries an 11-15× zero-pad
     // blowup (each top-of-tree descendant touches a small, distinct row/col subset
     // of the large target). The `RLA_CMOD_DIST` histogram below documents this.
-    // Pre-pass over the updaters: locate each one's landing range in this
-    // panel once and total the update flops - the dispatch between the
-    // column-tiled parallel cmod and the sequential per-update path (ported
-    // from the LDLT twin, see its `spans`/fork-gate block).
-    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(update_list[s].len());
-    let mut cmod_flops: usize = 0;
-    for &kk in &update_list[s] {
-        let nck = sym.supernodes[kk].ncol;
-        let ok = &rs[kk][nck..];
-        let nok = ok.len();
-        let p0 = ok.partition_point(|&g| g < first);
-        let p1 = ok.partition_point(|&g| g < first + ncol);
-        let npk = p1 - p0;
-        if npk == 0 {
-            continue;
-        }
-        let mrows = nok - p0;
-        let flop = mrows * npk * nck;
-        cmod_flops += flop + npk * (nok - p1) * nck;
-        spans.push((kk, p0, p1));
-    }
+    // Pre-pass over the updaters: landing ranges + update flops incl. the
+    // U-side rows, the fork/tiling dispatch input (see `ll_common::cmod_spans`).
+    let (spans, cmod_flops) =
+        crate::numeric::ll_common::cmod_spans(sym, sched, s, first, ncol, true);
     // Fork only above real node-local work, or in the chain phase (<= 2 nodes
     // in flight - workers idle, nothing to steal). Below: strictly serial.
     const LU_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
@@ -1344,8 +1258,8 @@ fn lu_ll_factor_node<T: Scalar>(
                 let mut lupd: Vec<T> = Vec::new();
                 for &(kk, p0, p1) in spans_ref {
                     let nck = sym.supernodes[kk].ncol;
-                    let nrk = rs[kk].len();
-                    let ok = &rs[kk][nck..];
+                    let nrk = sched.rows(kk).len();
+                    let ok = &sched.rows(kk)[nck..];
                     let nok = ok.len();
                     let q0 = p0 + ok[p0..p1].partition_point(|&g| g < first + c0);
                     let q1 = p0 + ok[p0..p1].partition_point(|&g| g < first + c1);
@@ -1394,7 +1308,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 }
             });
         if cnrow > 0 {
-            let rs_s = &rs[s];
+            let rs_s = sched.rows(s);
             ubuf.par_chunks_mut(ncol * tile_u)
                 .enumerate()
                 .for_each(|(ti, slab)| {
@@ -1409,8 +1323,8 @@ fn lu_ll_factor_node<T: Scalar>(
                     let mut uupd: Vec<T> = Vec::new();
                     for &(kk, p0, p1) in spans_ref {
                         let nck = sym.supernodes[kk].ncol;
-                        let nrk = rs[kk].len();
-                        let ok = &rs[kk][nck..];
+                        let nrk = sched.rows(kk).len();
+                        let ok = &sched.rows(kk)[nck..];
                         let nok = ok.len();
                         let t0 = p1 + ok[p1..nok].partition_point(|&g| g < g0);
                         let t1 = p1 + ok[p1..nok].partition_point(|&g| g < g1);
@@ -1466,14 +1380,14 @@ fn lu_ll_factor_node<T: Scalar>(
     let mut uupd: Vec<T> = Vec::new();
     for &(kk, p0, p1) in spans.iter().filter(|_| !tiled) {
         let nck = sym.supernodes[kk].ncol;
-        let nrk = rs[kk].len();
-        let ok = &rs[kk][nck..];
+        let nrk = sched.rows(kk).len();
+        let ok = &sched.rows(kk)[nck..];
         let nok = ok.len();
         // SAFETY: `kk` is a factored descendant of `s`.
         let slot = unsafe { store.get(kk) };
         let (lk, uk) = (&slot.l, &slot.u);
         let npk = p1 - p0;
-        let mrows = nok - p0; // rows used by the L update (Ok ⊆ rs[s] from here)
+        let mrows = nok - p0; // rows used by the L update (Ok ⊆ sched.rows(s) from here)
         let ntrail = nok - p1;
         if mrows * npk * nck < ll_gemm_gate {
             // Scalar path.
@@ -1661,7 +1575,7 @@ fn lu_ll_factor_node<T: Scalar>(
                     local_perturbed += 1;
                 }
                 None if piv == T::zero() => {
-                    for &g in &rs[s] {
+                    for &g in sched.rows(s) {
                         gloc[g] = usize::MAX;
                     }
                     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
@@ -1838,7 +1752,7 @@ fn lu_ll_factor_node<T: Scalar>(
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
     }
-    for &g in &rs[s] {
+    for &g in sched.rows(s) {
         gloc[g] = usize::MAX;
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
@@ -1846,9 +1760,9 @@ fn lu_ll_factor_node<T: Scalar>(
     // symbolic elimination offset - consumed by `emit_and_free` and the assembly.
     // Writes target disjoint global indices; visibility via the subtree join.
     let eoff = emit.e_offset[s];
-    for p in 0..ncol {
+    for (p, &rp) in rperm[..ncol].iter().enumerate() {
         let g_col = first + p;
-        let g_row = rs[s][rperm[p]];
+        let g_row = sched.rows(s)[rp];
         // SAFETY: each global index is written by exactly one supernode.
         unsafe {
             emit.e_of_g.set(g_col, eoff + p);
@@ -1871,88 +1785,13 @@ fn lu_ll_factor_node<T: Scalar>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn lu_ll_factor_subtree<T: Scalar>(
-    s: usize,
-    sym: &SymbolicFactorization,
-    a_perm: &GeneralCsc<T>,
-    a_perm_t: &GeneralCsc<T>,
-    rs: &[Vec<usize>],
-    update_list: &[Vec<usize>],
-    store: &LuLlStore<T>,
-    emit: &LlEmit<T>,
-    perturb_floor: Option<f64>,
-    drop_tol: Option<f64>,
-    n_perturbed: &AtomicUsize,
-    ll_active: &AtomicUsize,
-    kt: KernelTuning,
-) -> Result<(), RslabError> {
-    sym.supernodes[s]
-        .children
-        .par_iter()
-        .map(|&ch| {
-            lu_ll_factor_subtree(
-                ch,
-                sym,
-                a_perm,
-                a_perm_t,
-                rs,
-                update_list,
-                store,
-                emit,
-                perturb_floor,
-                drop_tol,
-                n_perturbed,
-                ll_active,
-                kt,
-            )
-        })
-        .collect::<Result<Vec<()>, _>>()?;
-    lu_ll_factor_node(
-        s,
-        sym,
-        a_perm,
-        a_perm_t,
-        rs,
-        update_list,
-        store,
-        emit,
-        perturb_floor,
-        n_perturbed,
-        ll_active,
-        kt,
-    )?;
-    // `s` has now pulled from every descendant in its update list - for each whose
-    // last consumer this was (refcount→0), compact it and free its dense panel.
-    // `s` itself is freed here iff it has no consumers (root / no fill above).
-    // Each `emit_and_free(k)` touches a disjoint `k`, so for the wide top-of-tree
-    // nodes (where tree parallelism is exhausted) the compaction runs in parallel.
-    const FREE_PAR: usize = 64;
-    if update_list[s].len() >= FREE_PAR {
-        update_list[s].par_iter().for_each(|&k| {
-            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                emit_and_free(k, store, emit, sym, rs, drop_tol);
-            }
-        });
-    } else {
-        for &k in &update_list[s] {
-            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                emit_and_free(k, store, emit, sym, rs, drop_tol);
-            }
-        }
-    }
-    if emit.refcount[s].load(Ordering::Relaxed) == 0 {
-        emit_and_free(s, store, emit, sym, rs, drop_tol);
-    }
-    Ok(())
-}
-
 /// Supernodal left-looking LU producing the same [`LuFactors`] as the
 /// multifrontal path. `a_perm`/`a_perm_t` are the equilibrated permuted matrix
 /// and its transpose; `d_row`/`d_col` the equilibration carried into the result.
 #[allow(clippy::too_many_arguments)]
 fn factor_lu_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
+    sched: &LlSchedule,
     a_perm: &GeneralCsc<T>,
     a_perm_t: &GeneralCsc<T>,
     d_row: &[f64],
@@ -1963,53 +1802,37 @@ fn factor_lu_left_looking<T: Scalar>(
 ) -> Result<LuFactors<T>, RslabError> {
     let n = sym.n;
     let nsuper = sym.supernodes.len();
-    let rs = compute_supernode_row_structures(sym);
-
-    let mut col_to_snode = vec![0usize; n];
-    for (s, snode) in sym.supernodes.iter().enumerate() {
-        col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
-    }
-    let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
-    for (k, rsk) in rs.iter().enumerate() {
-        let nck = sym.supernodes[k].ncol;
-        let mut last = usize::MAX;
-        for &r in &rsk[nck..] {
-            let s = col_to_snode[r];
-            if s != last {
-                update_list[s].push(k);
-                last = s;
-            }
-        }
-    }
-
     let store = LuLlStore::<T>::new(nsuper);
-    let emit = LlEmit::<T>::new(sym, &update_list);
+    let emit = LlEmit::<T>::new(sym, sched);
     let n_perturbed_atomic = AtomicUsize::new(0);
-    let mut is_child = vec![false; nsuper];
-    for snode in &sym.supernodes {
-        for &ch in &snode.children {
-            is_child[ch] = true;
-        }
-    }
-    let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    let roots = crate::numeric::ll_common::forest_roots(sym);
     let ll_active = AtomicUsize::new(0);
+    let factor_node = |s: usize| {
+        lu_ll_factor_node(
+            s,
+            sym,
+            a_perm,
+            a_perm_t,
+            sched,
+            &store,
+            &emit,
+            perturb_floor,
+            &n_perturbed_atomic,
+            &ll_active,
+            kt,
+        )
+    };
+    let emit_free = |k: usize| emit_and_free(k, &store, &emit, sym, sched, drop_tol);
     roots
         .par_iter()
         .map(|&r| {
-            lu_ll_factor_subtree(
+            crate::numeric::ll_common::ll_subtree(
                 r,
                 sym,
-                a_perm,
-                a_perm_t,
-                &rs,
-                &update_list,
-                &store,
-                &emit,
-                perturb_floor,
-                drop_tol,
-                &n_perturbed_atomic,
-                &ll_active,
-                kt,
+                sched,
+                &emit.refcount,
+                &factor_node,
+                &emit_free,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
@@ -2206,6 +2029,9 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             || {
                 factor_lu_left_looking(
                     sym,
+                    lusym.symb.ll_schedule().ok_or_else(|| {
+                        RslabError::InvalidInput("internal: empty symbolic".to_string())
+                    })?,
                     &a_perm,
                     &a_perm_t,
                     &d_row,
@@ -2221,27 +2047,34 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     }
 
     let nsuper = sym.supernodes.len();
-    // Roots of the assembly forest: supernodes that are no node's child.
-    let mut is_child = vec![false; nsuper];
-    for snode in &sym.supernodes {
-        for &ch in &snode.children {
-            is_child[ch] = true;
-        }
-    }
-    let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    let roots = crate::numeric::ll_common::forest_roots(sym);
     // Factor every root subtree with the work-stealing tree schedule; the
     // children-before-parent dependency is the recursion structure itself.
     let pool = FrontPool::<T>::new();
     let kt = opts.kernel();
     // Scoped pool of `opts.threads` with the depth-sized stack (honours the thread
     // budget and is overflow-safe on deep trees, like the left-looking path).
+    let factor_one = |s: usize, child_refs: &[&NodeLu<T>]| {
+        factor_one_node_lu(
+            s,
+            sym,
+            &a_perm,
+            &a_perm_t,
+            child_refs,
+            perturb_floor,
+            blr,
+            &pool,
+            kt,
+        )
+    };
+    let free_contrib = |nf: &mut NodeLu<T>| nf.contrib = Contribution::Dense(Vec::new());
     let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(
         stack,
         |cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap),
         || {
             roots
                 .par_iter()
-                .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, kt))
+                .map(|&r| crate::numeric::ll_common::mf_subtree(r, sym, &factor_one, &free_contrib))
                 .collect::<Result<Vec<_>, _>>()
         },
     )?;
