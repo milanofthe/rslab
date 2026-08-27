@@ -143,3 +143,77 @@ pub(crate) fn nd_bakeoff<A: ?Sized, S>(
         Ok((sym, s))
     }
 }
+
+/// A fixed-size array of independently written cells: each index is written by
+/// exactly one owner (disjoint indices) and read only after a happens-before
+/// barrier (subtree join / refcount Acquire-Release). Centralizes the
+/// `Vec<UnsafeCell<V>>` pattern of the left-looking emit state.
+pub(crate) struct Cells<V>(Vec<std::cell::UnsafeCell<V>>);
+
+// SAFETY: disjoint-index writes; cross-thread visibility is the caller's
+// barrier (see the type doc).
+unsafe impl<V: Send> Sync for Cells<V> {}
+
+impl<V: Default> Cells<V> {
+    /// `n` default-initialized cells (for payloads without a cheap `Clone`).
+    pub fn new_default(n: usize) -> Self {
+        Cells(
+            (0..n)
+                .map(|_| std::cell::UnsafeCell::new(V::default()))
+                .collect(),
+        )
+    }
+}
+
+impl<V: Clone> Cells<V> {
+    pub fn new(n: usize, init: V) -> Self {
+        Cells(
+            (0..n)
+                .map(|_| std::cell::UnsafeCell::new(init.clone()))
+                .collect(),
+        )
+    }
+}
+
+impl<V> Cells<V> {
+    /// SAFETY: `i` is this caller's exclusively owned index.
+    #[inline]
+    pub unsafe fn set(&self, i: usize, v: V) {
+        *self.0[i].get() = v;
+    }
+    /// SAFETY: the write to `i` happened-before this read.
+    #[inline]
+    pub unsafe fn get(&self, i: usize) -> &V {
+        &*self.0[i].get()
+    }
+    /// SAFETY: as [`set`](Self::set) - exclusive owner, e.g. for in-place take.
+    #[allow(clippy::mut_from_ref)]
+    #[inline]
+    pub unsafe fn get_mut(&self, i: usize) -> &mut V {
+        &mut *self.0[i].get()
+    }
+}
+
+/// Consumer refcounts (free a panel when its count reaches zero) and the
+/// per-supernode first elimination position - the shared head of both
+/// left-looking emit states.
+pub(crate) fn emit_refcount_offsets(
+    sym: &crate::symbolic::SymbolicFactorization,
+    update_list: &[Vec<usize>],
+) -> (Vec<std::sync::atomic::AtomicUsize>, Vec<usize>) {
+    use std::sync::atomic::AtomicUsize;
+    let nsuper = sym.supernodes.len();
+    let mut refcount: Vec<AtomicUsize> = (0..nsuper).map(|_| AtomicUsize::new(0)).collect();
+    for ul in update_list {
+        for &k in ul {
+            *refcount[k].get_mut() += 1;
+        }
+    }
+    let mut e_offset = vec![0usize; nsuper];
+    let mut acc = 0usize;
+    for (s, snode) in sym.supernodes.iter().enumerate() {
+        e_offset[s] = acc;
+        acc += snode.ncol;
+    }
+    (refcount, e_offset)
+}

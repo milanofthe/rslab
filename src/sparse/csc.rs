@@ -105,6 +105,64 @@ impl<T: Scalar> CscMatrix<T> {
         Ok(result)
     }
 
+    /// Symmetric permutation folded to the lower triangle: build `Pᵀ A P`
+    /// (with `perm_inv[old] = new`) directly in CSC form. Vertically integrated
+    /// replacement for the triplet round-trip on the numeric factor path: a
+    /// two-pass counting layout places every entry exactly once, and each
+    /// column is then sorted in place through one reused scratch - no triplet
+    /// arrays, no per-column allocation, no duplicate pass (a valid input has
+    /// none and the permutation is a bijection). Output is identical to
+    /// `from_triplets` on the same entries: sorted rows, lower triangle.
+    pub(crate) fn permute_lower(&self, perm_inv: &[usize]) -> CscMatrix<T> {
+        let n = self.n;
+        let nnz = self.row_idx.len();
+        // Pass 1: count entries per permuted column (fold to lower triangle).
+        let mut col_ptr = vec![0usize; n + 1];
+        for (j, &gj) in perm_inv.iter().enumerate() {
+            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
+                let gi = perm_inv[self.row_idx[k]];
+                col_ptr[gi.min(gj) + 1] += 1;
+            }
+        }
+        for c in 0..n {
+            col_ptr[c + 1] += col_ptr[c];
+        }
+        // Pass 2: scatter entries to their column slots.
+        let mut cursor = col_ptr[..n].to_vec();
+        let mut row_idx = vec![0usize; nnz];
+        let mut values = vec![T::zero(); nnz];
+        for (j, &gj) in perm_inv.iter().enumerate() {
+            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
+                let gi = perm_inv[self.row_idx[k]];
+                let (r, c) = if gi >= gj { (gi, gj) } else { (gj, gi) };
+                let p = cursor[c];
+                cursor[c] += 1;
+                row_idx[p] = r;
+                values[p] = self.values[k];
+            }
+        }
+        // Pass 3: sort each column by row through one reused scratch.
+        let mut scratch: Vec<(usize, T)> = Vec::new();
+        for c in 0..n {
+            let (s, e) = (col_ptr[c], col_ptr[c + 1]);
+            if e - s > 1 {
+                scratch.clear();
+                scratch.extend((s..e).map(|k| (row_idx[k], values[k])));
+                scratch.sort_unstable_by_key(|&(r, _)| r);
+                for (k, &(r, v)) in (s..e).zip(scratch.iter()) {
+                    row_idx[k] = r;
+                    values[k] = v;
+                }
+            }
+        }
+        CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
     /// Sort row indices within each column and sum duplicate entries.
     fn sort_and_sum_duplicates(&mut self) {
         // Two-pass approach: first sort and deduplicate into a compact representation,
