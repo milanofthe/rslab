@@ -123,11 +123,6 @@ harness = false
 required-features = ["matgen-download"]
 
 [[bench]]
-name = "catalog"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
 name = "bench_suite"
 harness = false
 required-features = ["matgen"]
@@ -136,99 +131,6 @@ required-features = ["matgen"]
 name = "sweep"
 harness = false
 required-features = ["matgen"]
-
-[[bench]]
-name = "validate_axes"
-harness = false
-required-features = ["matgen-download"]
-
-[[bench]]
-name = "perf_axes"
-harness = false
-required-features = ["matgen-download"]
-
-[[bench]]
-name = "probe_complex"
-harness = false
-required-features = ["matgen-download"]
-
-[[bench]]
-name = "front_profile"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "phased_reuse"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "leftlook_mem"
-harness = false
-
-[[bench]]
-name = "block_gmres"
-harness = false
-
-[[bench]]
-name = "block_gmres_scaling"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "precond_gmres"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "recycle_study"
-harness = false
-
-[[bench]]
-name = "deflation_study"
-harness = false
-
-[[bench]]
-name = "fgmres_accounting"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "adaptive_restart"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "solve_many"
-harness = false
-
-[[bench]]
-name = "precond"
-harness = false
-
-[[bench]]
-name = "mom_loop"
-harness = false
-
-[[bench]]
-name = "mom_factor_probe"
-harness = false
-
-[[bench]]
-name = "lu_warm_probe"
-harness = false
-
-[[bench]]
-name = "mom_diag"
-harness = false
-
-[[bench]]
-name = "gemm_peak"
-harness = false
-
-[[bench]]
-name = "front_mem"
-harness = false
 
 [profile.release]
 debug = true

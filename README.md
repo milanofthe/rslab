@@ -124,11 +124,11 @@ guarded).
 
 **LDLᵀ path (symmetric, PARDISO mtype 6)**: factor time (left) and peak memory (right):
 
-![LDLt factor time (left) and peak memory (right)](benches/bench_out/h2h_ldlt.png)
+![LDLt factor time (left) and peak memory (right)](docs/figures/h2h_ldlt.png)
 
 **LU path (unsymmetric, PARDISO mtype 13)**: factor time (left) and peak memory (right):
 
-![LU factor time (left) and peak memory (right)](benches/bench_out/h2h_lu.png)
+![LU factor time (left) and peak memory (right)](docs/figures/h2h_lu.png)
 
 Head-to-head geomean ratios (63 sizes per path, 1k-110k DOFs, over the
 matrices both solvers factor to `< 0.1` residual):
@@ -162,7 +162,7 @@ default.
 
 ### Accuracy (SuiteSparse)
 
-![SuiteSparse residual](benches/bench_out/corpus_residual.png)
+![SuiteSparse residual](docs/figures/corpus_residual.png)
 
 Relative residual `‖Ax-b‖/‖b‖` as the accuracy check across the corpus.
 
@@ -209,9 +209,9 @@ calibrated pick.
 
 **LDLᵀ path (sym)** | **LU path (unsym)** | **KLU path (circuit)**:
 
-![Apple LDLt](benches/bench_out/h2h_apple_ldlt.png)
-![Apple LU](benches/bench_out/h2h_apple_lu.png)
-![Apple KLU](benches/bench_out/h2h_apple_klu.png)
+![Apple LDLt](docs/figures/h2h_apple_ldlt.png)
+![Apple LU](docs/figures/h2h_apple_lu.png)
+![Apple KLU](docs/figures/h2h_apple_klu.png)
 
 Head-to-head geomean ratios (Accelerate / RSLAB shipped path, over the matrices
 both solve to `< 0.1` residual; one-shot analyze+factor+solve):
@@ -309,7 +309,7 @@ runtime via `RSLAB_TUNER_PROFILE` / `apply_profile`, no recompile.
 
 ### A-priori predictors
 
-![Memory estimate vs measured](benches/bench_out/memory_breakdown.png)
+![Memory estimate vs measured](docs/figures/memory_breakdown.png)
 
 RSLAB predicts the factor-memory peak from the symbolic analysis alone, before
 any numeric work, with a separate model per path: the left-looking panel-freeing
