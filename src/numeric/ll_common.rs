@@ -531,3 +531,38 @@ pub(crate) fn forest_roots(sym: &crate::symbolic::SymbolicFactorization) -> Vec<
     }
     (0..nsuper).filter(|&s| !is_child[s]).collect()
 }
+
+/// cmod pre-pass shared by the LDLT/LU node kernels: locate each updater's
+/// landing range in the panel of supernode `s` (`[p0, p1)` of its off-diagonal
+/// rows) and total the update flops - the fork/tiling dispatch input. With
+/// `count_u`, the U-side rows beyond the landing range are counted too (the
+/// LU twin updates both `L` and `U12`).
+pub(crate) fn cmod_spans(
+    sym: &crate::symbolic::SymbolicFactorization,
+    sched: &LlSchedule,
+    s: usize,
+    first: usize,
+    ncol: usize,
+    count_u: bool,
+) -> (Vec<(usize, usize, usize)>, usize) {
+    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(sched.updaters(s).len());
+    let mut cmod_flops: usize = 0;
+    for &kk in sched.updaters(s) {
+        let nck = sym.supernodes[kk].ncol;
+        let ok = &sched.rows(kk)[nck..];
+        let nok = ok.len();
+        let p0 = ok.partition_point(|&g| g < first);
+        let p1 = ok.partition_point(|&g| g < first + ncol);
+        let npk = p1 - p0;
+        if npk == 0 {
+            continue;
+        }
+        let flop = (nok - p0) * npk * nck;
+        cmod_flops += flop;
+        if count_u {
+            cmod_flops += npk * (nok - p1) * nck;
+        }
+        spans.push((kk, p0, p1));
+    }
+    (spans, cmod_flops)
+}

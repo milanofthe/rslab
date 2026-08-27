@@ -2111,26 +2111,10 @@ fn ll_factor_node<T: Scalar>(
             panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
         }
     }
-    // Pre-pass over the updaters: locate each one's landing range in this
-    // panel once ([p0, p1) of its off-diagonal rows) and total the update
-    // flops - the dispatch between the column-tiled parallel cmod and the
-    // sequential per-update path below.
-    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(sched.updaters(s).len());
-    let mut cmod_flops: usize = 0;
-    for &kk in sched.updaters(s) {
-        let nck = sym.supernodes[kk].ncol;
-        let ok = &sched.rows(kk)[nck..];
-        let nok = ok.len();
-        let p0 = ok.partition_point(|&g| g < first);
-        let p1 = ok.partition_point(|&g| g < first + ncol);
-        let npk = p1 - p0;
-        if npk == 0 {
-            continue;
-        }
-        let flop = (nok - p0) * npk * nck;
-        cmod_flops += flop;
-        spans.push((kk, p0, p1));
-    }
+    // Pre-pass over the updaters: landing ranges + update flops, the
+    // fork/tiling dispatch input (see `ll_common::cmod_spans`).
+    let (spans, cmod_flops) =
+        crate::numeric::ll_common::cmod_spans(sym, sched, s, first, ncol, false);
 
     // Column-tiled parallel cmod: partition THIS panel into column slabs
     // (disjoint `&mut` chunks) and apply, per slab, every updater's

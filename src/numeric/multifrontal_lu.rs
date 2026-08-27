@@ -1218,27 +1218,10 @@ fn lu_ll_factor_node<T: Scalar>(
     // only aggregation reaching those dominant updates carries an 11-15× zero-pad
     // blowup (each top-of-tree descendant touches a small, distinct row/col subset
     // of the large target). The `RLA_CMOD_DIST` histogram below documents this.
-    // Pre-pass over the updaters: locate each one's landing range in this
-    // panel once and total the update flops - the dispatch between the
-    // column-tiled parallel cmod and the sequential per-update path (ported
-    // from the LDLT twin, see its `spans`/fork-gate block).
-    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(sched.updaters(s).len());
-    let mut cmod_flops: usize = 0;
-    for &kk in sched.updaters(s) {
-        let nck = sym.supernodes[kk].ncol;
-        let ok = &sched.rows(kk)[nck..];
-        let nok = ok.len();
-        let p0 = ok.partition_point(|&g| g < first);
-        let p1 = ok.partition_point(|&g| g < first + ncol);
-        let npk = p1 - p0;
-        if npk == 0 {
-            continue;
-        }
-        let mrows = nok - p0;
-        let flop = mrows * npk * nck;
-        cmod_flops += flop + npk * (nok - p1) * nck;
-        spans.push((kk, p0, p1));
-    }
+    // Pre-pass over the updaters: landing ranges + update flops incl. the
+    // U-side rows, the fork/tiling dispatch input (see `ll_common::cmod_spans`).
+    let (spans, cmod_flops) =
+        crate::numeric::ll_common::cmod_spans(sym, sched, s, first, ncol, true);
     // Fork only above real node-local work, or in the chain phase (<= 2 nodes
     // in flight - workers idle, nothing to steal). Below: strictly serial.
     const LU_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
