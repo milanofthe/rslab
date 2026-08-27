@@ -2251,6 +2251,11 @@ fn ll_factor_node<T: Scalar>(
     let mut vc: Vec<T> = Vec::new();
     let mut vd_buf: Vec<T> = Vec::new();
     let mut u_buf: Vec<T> = Vec::new();
+    // Panel-local positions of the updater's landing/trailing rows, resolved
+    // ONCE per updater instead of once per landing column: the repeated
+    // `gloc[ok[r]]` lookups were the dominant random-access stream of the
+    // small/medium-node cmod (2-4 GF/s vs the ~15 GF/s big-node rate).
+    let mut tpos: Vec<Li> = Vec::new();
     for &(kk, p0, p1) in spans.iter().filter(|_| !tiled) {
         let nck = sym.supernodes[kk].ncol;
         let nrk = sched.rows(kk).len();
@@ -2268,6 +2273,8 @@ fn ll_factor_node<T: Scalar>(
         // Gate on the REAL work (rows >= p0); the scalar path already
         // iterates from the target block, so small tails route there.
         if (nok - p0) * npk * nck < ll_gemm_gate {
+            tpos.clear();
+            tpos.extend(ok[p0..nok].iter().map(|&g| gloc[g as usize]));
             vc.clear();
             vc.resize(nck, T::zero());
             for c_idx in p0..p1 {
@@ -2289,7 +2296,7 @@ fn ll_factor_node<T: Scalar>(
                     }
                 }
                 for r_idx in c_idx..nok {
-                    let trow = gloc[ok[r_idx] as usize] as usize;
+                    let trow = tpos[r_idx - p0] as usize;
                     let mut acc = T::zero();
                     for ck in 0..nck {
                         acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
@@ -2353,11 +2360,13 @@ fn ll_factor_node<T: Scalar>(
                     seq_gemm_par,
                 )
             };
+            tpos.clear();
+            tpos.extend(ok[p0..nok].iter().map(|&g| gloc[g as usize]));
             for c in 0..npk {
                 let tcol = ok[p0 + c] as usize - first;
                 let ucol = &u_buf[c * mrows..c * mrows + mrows];
                 for r in (p0 + c)..nok {
-                    let dst = gloc[ok[r] as usize] as usize + tcol * nrow;
+                    let dst = tpos[r - p0] as usize + tcol * nrow;
                     panel[dst] = panel[dst] - ucol[r - p0];
                 }
             }
