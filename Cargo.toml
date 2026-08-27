@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "xtask", "crates/rslab-ordering-core", "crates/rslab-amd", "crates/rslab-amf", "crates/rslab-metis", "crates/rslab-scotch", "crates/rslab-kahip"]
+members = [".", "xtask", "crates/rslab-ordering-core", "crates/rslab-amd", "crates/rslab-amf", "crates/rslab-metis"]
 # The PyO3 bindings live in `python/` and are built by maturin, not cargo. They
 # depend on `rslab` via path and carry a `cdylib` linking libpython, so they are
 # explicitly excluded from the pure-Rust workspace (FFI lives only in tooling /
@@ -88,8 +88,6 @@ rslab-ordering-core = { path = "crates/rslab-ordering-core", version = "0.2" }
 rslab-amd = { path = "crates/rslab-amd", version = "0.2" }
 rslab-amf = { path = "crates/rslab-amf", version = "0.2" }
 rslab-metis = { path = "crates/rslab-metis", version = "0.2" }
-rslab-scotch = { path = "crates/rslab-scotch", version = "0.2" }
-rslab-kahip = { path = "crates/rslab-kahip", version = "0.2" }
 # Optional, only for the `matgen-download` feature (SuiteSparse/Matrix Market
 # fetcher). Pure Rust: ureq+rustls (no OpenSSL), flate2/miniz_oxide, tar.
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }

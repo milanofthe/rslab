@@ -55,22 +55,6 @@ pub enum OrderingMethod {
     Amf,
     /// rslab-metis multilevel nested dissection.
     MetisND,
-    /// rslab-scotch nested dissection.
-    ScotchND,
-    /// rslab-kahip flow-based nested dissection.
-    ///
-    /// Includes K1 (Ost-Schulz-Strash 2021 Rule 1, conservative
-    /// termination) preprocessing inside the KaHIP pipeline. Wired
-    /// at `crates/rslab-kahip/src/node_nd.rs`.
-    ///
-    /// **Not selected by `pick_default_method`.** The session 08
-    /// 41-matrix bake-off (`dev/research/ordering-kahip-driver-
-    /// integration.md`) showed `KahipND` ties `MetisND` on fill
-    /// geomean (1.023 vs 1.024 relative to AMD) at 4-6× the per-call
-    /// symbolic-time cost (81s vs 68s vs AMD 14s, total).
-    /// Reachable explicitly via `symbolic_factorize_with_method`
-    /// for callers who want it.
-    KahipND,
     /// Reverse Cuthill-McKee band/profile-reducing ordering
     /// (`rslab-ordering-core`: George-Liu degree-sorted BFS from a
     /// pseudo-peripheral start, reversed; Cuthill & McKee 1969,
@@ -110,7 +94,7 @@ pub enum OrderingMethod {
     Auto,
     /// Race-based dispatcher: runs the cheap symbolic *prefix*
     /// (ordering, postorder, etree, column counts) on each concrete
-    /// candidate in {`Amd`, `MetisND`, `ScotchND`, `KahipND`, `Rcm`}
+    /// candidate in {`Amd`, `MetisND`, `Rcm`}
     /// and finishes (supernode detection, memory plan) only the one
     /// with the smallest exact factor nnz (feral #144 port).
     ///
@@ -183,10 +167,8 @@ pub enum OrderingMethod {
 /// (vs KahipND's 16), aggregate AMF fill is 0.87× AMD vs KahipND's
 /// 0.98×, aggregate AMF time is 0.83× AMD vs KahipND's 0.99×. After
 /// deletion these matrices fall through to `pick_default_method`'s
-/// `n ≤ 10_000 → Amf` rule. KahipND retains 20 strict wins
-/// concentrated on high-avg-deg cases (STEENBRD, HADAMARD, TABLE8),
-/// all sub-22k nnz_L absolute and reachable explicitly via
-/// `OrderingMethod::KahipND` for callers who want them.
+/// `n ≤ 10_000 → Amf` rule. (KahipND itself was removed in the 2026-08
+/// consolidation; the bakeoff evidence stays in dev/research.)
 ///
 /// `pattern` is expected to be the matrix's full-symmetric pattern (the
 /// shape produced by `CscMatrix::symmetric_pattern`); the
@@ -378,7 +360,7 @@ pub struct SymbolicFactorization {
     pub snode_group: Vec<Option<usize>>,
 
     /// Concrete ordering method actually dispatched. Records the
-    /// `OrderingMethod::Auto → AMD/MetisND/ScotchND/KahipND`
+    /// `OrderingMethod::Auto → AMD/AMF/MetisND`
     /// resolution made by `choose_adaptive`. For non-`Auto` callers
     /// this is identical to the requested method.
     pub resolved_method: OrderingMethod,
@@ -534,7 +516,7 @@ pub fn symbolic_factorize(
 }
 
 /// Convert an owned-`usize` `CscPattern` into the contract's borrowed-`i32`
-/// shape used by `rslab-metis` / `rslab-scotch`. Returns buffers the
+/// shape used by `rslab-metis`. Returns buffers the
 /// caller must keep alive for the lifetime of the produced `CscPattern<'_>`.
 fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), RslabError> {
     let col_ptr: Result<Vec<i32>, _> = pattern.col_ptr.iter().map(|&x| i32::try_from(x)).collect();
@@ -564,25 +546,11 @@ fn run_external_ordering(
     // upstream by `symbolic_factorize_with_method` against the
     // original matrix's pattern, before any preprocessing.
     debug_assert_ne!(method, OrderingMethod::Auto);
-    // `actual` diverges from `method` only when ScotchND silently
-    // falls back to amd_leaf for every recursion (issue #3): the
-    // returned permutation is bit-identical to AMD's, so the
-    // `resolved_method` field must report Amd, not ScotchND.
-    let mut actual = method;
+    let actual = method;
     let perm_i32 = match method {
         OrderingMethod::Amd => rslab_amd::amd_order(&pat),
         OrderingMethod::Amf => rslab_amf::amf_order(&pat),
         OrderingMethod::MetisND => rslab_metis::metis_order(&pat),
-        OrderingMethod::ScotchND => {
-            let opts = rslab_scotch::ScotchOptions::default();
-            rslab_scotch::scotch_order_full(&pat, &opts).map(|(perm, _, sstats)| {
-                if sstats.n_separator_vertices == 0 {
-                    actual = OrderingMethod::Amd;
-                }
-                perm
-            })
-        }
-        OrderingMethod::KahipND => rslab_kahip::kahip_order(&pat),
         OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
@@ -620,8 +588,6 @@ fn run_external_ordering(
 const RACE_CANDIDATES: &[OrderingMethod] = &[
     OrderingMethod::Amd,
     OrderingMethod::MetisND,
-    OrderingMethod::ScotchND,
-    OrderingMethod::KahipND,
     // Cheap band/profile reducer: wins on banded / structured patterns where the
     // dissection candidates over-separate. Selected only if its factor_nnz is the
     // smallest, so it never hurts the race outcome.
@@ -1492,34 +1458,6 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_factorize_scotch_produces_valid_perm() {
-        let m = small_grid_5x5();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
-        assert_eq!(sym.n, 25);
-        let mut sorted = sym.perm.clone();
-        sorted.sort();
-        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
-        for i in 0..25 {
-            assert_eq!(sym.perm[sym.perm_inv[i]], i);
-        }
-    }
-
-    #[test]
-    fn symbolic_factorize_kahip_produces_valid_perm() {
-        let m = small_grid_5x5();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::KahipND).unwrap();
-        assert_eq!(sym.n, 25);
-        let mut sorted = sym.perm.clone();
-        sorted.sort();
-        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
-        for i in 0..25 {
-            assert_eq!(sym.perm[sym.perm_inv[i]], i);
-        }
-    }
-
-    #[test]
     fn symbolic_factorize_auto_produces_valid_perm() {
         let m = small_grid_5x5();
         let params = SupernodeParams::default();
@@ -1802,39 +1740,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pick_default_method_never_returns_kahip() {
-        // Pins the session-08 driver-integration decision: KaHIP is
-        // reachable only via explicit `with_method` or `Auto`. The
-        // dispatcher must never return it on its own. See
-        // `dev/research/ordering-kahip-driver-integration.md` for
-        // the bake-off evidence (KaHIP ties METIS on fill at 4-6×
-        // the per-call cost on 41 matrices). If a future change wants
-        // to route some pattern to KaHIP by default, the maintainer
-        // must consciously update this test and the research note.
-        let shapes: &[(usize, usize)] = &[
-            (0, 0),
-            (10, 30),
-            (500, 1500),
-            (3083, 13333), // VESUVIOU
-            (5314, 22566), // CRESC132
-            (10_000, 50_000),
-            (100_000, 500_000),
-            (345_241, 1_343_126), // c-big from the shape bake-off
-        ];
-        for &(n, nnz) in shapes {
-            let m = pick_default_method(n, nnz);
-            assert_ne!(
-                m,
-                OrderingMethod::KahipND,
-                "pick_default_method({}, {}) returned KahipND; \
-                 see dev/research/ordering-kahip-driver-integration.md",
-                n,
-                nnz
-            );
-        }
-    }
-
     /// PoissonControl KKT lower-triangle CSC, mirrors
     /// `src/bin/diag_poisson_kkt.rs`. n_kkt = 3K². K=20 → n=1200,
     /// large enough to exceed amd_switch=120 (so SCOTCH actually
@@ -1892,61 +1797,6 @@ mod tests {
             }
         }
         CscMatrix::from_triplets(n_kkt, &rows, &cols, &vals).expect("kkt csc")
-    }
-
-    #[test]
-    fn issue_3_scotchnd_on_kkt_recurses_after_o13() {
-        // History: SCOTCH bisection used to produce no separator on
-        // bordered-KKT patterns - its vertex-separator FM stopped the
-        // whole pass the first time both PQ heads were imbalance-
-        // rejected, abandoning feasible queued moves - so the recursion
-        // collapsed into amd_leaf for the entire graph and
-        // `resolved_method` reported `Amd`.
-        //
-        // Finding O13 fixed that early stop. SCOTCH now finds a real
-        // separator on this KKT pattern (verified directly in
-        // `crates/rslab-scotch/tests/issue_3_kkt_repro.rs`:
-        // `issue_3_scotch_recurses_on_kkt_after_o13`), so ScotchND no
-        // longer degenerates: `resolved_method` reports the requested
-        // ScotchND, and the ordering is genuinely SCOTCH's - not a
-        // relabelled AMD leaf. This test guards that post-O13 behavior
-        // at the `rslab` symbolic boundary.
-        //
-        // Preprocess is pinned to None so SCOTCH sees the raw KKT
-        // pattern (LdltCompress would shrink it past the point the
-        // degeneracy ever exercised).
-        let m = poisson_kkt_csc(20);
-        let params = SupernodeParams {
-            preprocess: OrderingPreprocess::None,
-            ..SupernodeParams::default()
-        };
-        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
-        assert_eq!(
-            sym.resolved_method,
-            OrderingMethod::ScotchND,
-            "post-O13 SCOTCH recurses on this KKT pattern; resolved_method \
-             must report ScotchND, not the AMD-leaf fallback"
-        );
-
-        // The permutation must be a valid bijection over 0..n.
-        let n = m.n;
-        assert_eq!(sym.perm.len(), n);
-        let mut seen = vec![false; n];
-        for &p in &sym.perm {
-            assert!(p < n, "perm entry out of range");
-            assert!(!seen[p], "perm is not a bijection");
-            seen[p] = true;
-        }
-
-        // And it must differ from AMD's ordering - proof the recursion
-        // ran SCOTCH nested dissection rather than collapsing to the
-        // AMD leaf (which would return AMD's permutation verbatim).
-        let amd = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
-        assert_ne!(
-            sym.perm, amd.perm,
-            "ScotchND ordering must not be bit-identical to AMD's; \
-             that would indicate the degenerate AMD-leaf fallback"
-        );
     }
 
     #[test]

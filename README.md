@@ -40,7 +40,7 @@ headline results.
   (`cargo bench --bench klu_circuit`).
 - Three factorization schedules: supernodal left-looking (default, frees each dense
   panel after its last consumer), multifrontal, and right-looking.
-- Fill-reducing orderings: AMD, AMF, nested dissection (METIS/Scotch/KaHIP), and
+- Fill-reducing orderings: AMD, AMF, nested dissection (METIS), and
   RCM (band/profile), selectable or raced per matrix.
 - Tunable equilibration (one-pass ∞-norm, iterative Ruiz, MC64 matching, off) and
   factor emit/memory mode, all through one flat `SolverSettings` interface.
@@ -583,7 +583,7 @@ for spec in matgen::catalog() { let _ = spec.name; }
 
 ## Architecture
 
-- Ordering: nested dissection (METIS/Scotch) with an AMD/AMF fallback selected by a
+- Ordering: nested dissection (METIS) with an AMD/AMF fallback selected by a
   size/structure heuristic.
 - Left-looking supernodal (default): each panel pulls BLAS-3 updates from its
   factored descendants, then a blocked in-place panel factorization (Bunch-Kaufman
