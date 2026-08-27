@@ -72,7 +72,7 @@
 // ONLY surface `cargo doc` should show. Every module is therefore `pub(crate)`;
 // the intended-public items are re-exported at the crate root and documented
 // there. The exceptions are modules that in-tree tooling (benches, integration
-// tests, the `bench_sparse` bin, xtask) reaches by their full module path for
+// tests, xtask) reaches by their full module path for
 // internal building blocks that are deliberately NOT part of the embedder API:
 // those stay `pub` but `#[doc(hidden)]`, so they compile as external crates see
 // them yet never appear in the public docs. Each such case is commented.
@@ -90,11 +90,11 @@ pub(crate) mod error;
 pub(crate) mod inertia;
 pub(crate) mod io;
 /// Parametrized test-matrix generators (feature `matgen`): PDE stencils, BEM/MoM
-/// kernels, banded/arrow, random + spectral, plus a tagged catalog for benchmarks.
-/// Optional `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
+/// kernels, banded/arrow, random + spectral. Optional `matgen-download` adds a
+/// SuiteSparse / Matrix Market fetcher.
 ///
-/// Not part of the embedder API: `pub` only so the in-tree benches and xtask can
-/// build test matrices; hidden from the public docs.
+/// Not part of the embedder API: `pub` only so the in-tree benches can build
+/// test matrices; hidden from the public docs.
 #[cfg(feature = "matgen")]
 #[doc(hidden)]
 pub mod matgen;

@@ -5,17 +5,11 @@ members = [".", "xtask", "crates/rslab-ordering-core", "crates/rslab-amd", "crat
 # explicitly excluded from the pure-Rust workspace (FFI lives only in tooling /
 # bindings, never the solver core). Build them with `maturin` from `python/`.
 exclude = ["python"]
-# Root commands (`cargo build`/`test`/`clippy` with no -p/--workspace) operate
-# on the `rslab` package only. `rslab-diagnostics` is a member so it shares the
-# lockfile and `cargo run -p rslab-diagnostics --bin <name>` works, but it is
-# NOT a dependency of `rslab`, so the default build/test set never compiles its
-# ~144 one-off binaries (issue #71). Build them explicitly with
-# `cargo build -p rslab-diagnostics`.
 resolver = "2"
 
 [package]
 name = "rslab"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2021"
 license = "MIT"
 description = "RSLAB - pure-Rust sparse complex/real direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
