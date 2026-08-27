@@ -50,8 +50,13 @@ impl<P: Default> SlotStore<P> {
 /// Raw base pointer of a panel buffer, smuggled across rayon workers so each
 /// task can write its own **disjoint row range** of a column-major panel. Safe
 /// only because callers partition the rows so no two tasks touch the same cell.
-#[derive(Clone, Copy)]
 pub(crate) struct PanelPtr<T>(pub *mut T);
+impl<T> Clone for PanelPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for PanelPtr<T> {}
 // SAFETY: the pointer is only dereferenced on disjoint, caller-partitioned cells.
 unsafe impl<T> Send for PanelPtr<T> {}
 unsafe impl<T> Sync for PanelPtr<T> {}

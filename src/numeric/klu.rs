@@ -31,6 +31,7 @@
 //! the determinism arbiter for the parallel multifrontal paths.
 
 use crate::error::RslabError;
+use crate::numeric::ll_common::PanelPtr;
 use crate::ordering::btf;
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
@@ -483,6 +484,60 @@ fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
     d.estimate.as_ref().map_or(0, |e| e.factor_flops)
 }
 
+/// Minimum block dimension for the NICSLU-style pipelined refactor replay:
+/// below this a block's whole replay is sub-millisecond and the worker
+/// handoff cannot amortize.
+const KLU_PIPE_MIN_BN: usize = 512;
+/// Minimum mean elimination-DAG level width for the pipeline to engage: a
+/// pure chain leaves the extra workers spinning for no overlap at all.
+const KLU_PIPE_MIN_WIDTH: f64 = 2.0;
+/// Minimum replay work (fmadd count) for the pipeline to engage: below this
+/// the whole block replays in a few milliseconds and the worker spawn plus
+/// dependency spins cost more than they overlap (measured on the SuiteSparse
+/// circuit suite: scircuit at ~30 M stays sequential, ASIC_100ks at ~400 M
+/// and onetone1 gain 2.6-2.9x).
+const KLU_PIPE_MIN_FLOPS: u64 = 50_000_000;
+
+/// Gate for the NICSLU-style pipelined replay (Chen/Wang/Yang, TCAD 2013):
+/// per block, compute the elimination-DAG depth (`level[j] = 1 +
+/// max(level[p])` over the frozen `U(p, j)` dependencies) and admit blocks
+/// that are big enough and not chain-shaped. O(nnz(U)), run once at factor
+/// time; only the admitted block ids are kept.
+fn compute_pipelined_blocks(
+    block_ptr: &[usize],
+    l_colptr: &[usize],
+    u_colptr: &[usize],
+    u_rowidx: &[Ki],
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut level: Vec<Ki> = Vec::new();
+    for b in 0..block_ptr.len() - 1 {
+        let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
+        let bn = be - bs;
+        if bn < KLU_PIPE_MIN_BN {
+            continue;
+        }
+        level.clear();
+        level.resize(bn, 0);
+        let mut nlev: usize = 1;
+        let mut flops: u64 = 0;
+        for j in bs..be {
+            let mut l: Ki = 0;
+            for &pk in &u_rowidx[u_colptr[j]..u_colptr[j + 1]] {
+                let p = pk as usize;
+                l = l.max(level[p - bs] + 1);
+                flops += (l_colptr[p + 1] - l_colptr[p]) as u64;
+            }
+            level[j - bs] = l;
+            nlev = nlev.max(l as usize + 1);
+        }
+        if flops >= KLU_PIPE_MIN_FLOPS && (bn as f64) / (nlev as f64) >= KLU_PIPE_MIN_WIDTH {
+            out.push(b);
+        }
+    }
+    out
+}
+
 /// The numeric KLU factorization: `P A Q = L U` per diagonal block plus the
 /// off-block entries, with row scaling folded in.
 #[derive(Debug, Clone)]
@@ -526,6 +581,9 @@ struct KluFactors<T> {
     /// destination: F slot `i` as `KI_FBIT | i`, else work-vector position.
     scatter_expect: Vec<Ki>,
     scatter_target: Vec<Ki>,
+    /// Blocks admitted to the pipelined parallel refactor replay (empty when
+    /// none qualifies or parallelism is off). See [`compute_pipelined_blocks`].
+    pipelined: Vec<usize>,
 }
 
 /// KLU solver handle: factor (or analyze+factor), then solve / refactor.
@@ -1448,6 +1506,16 @@ fn factor_impl<T: Scalar>(
         pinv[orig] = fin as usize;
     }
 
+    // Pipeline admission for the parallel refactor replay: within-block
+    // column parallelism from the now-frozen U pattern. Independent of the
+    // per-block `parallel` opt-in above (that one needs MANY blocks; the
+    // pipeline pays off in the opposite regime, one dominant block).
+    let pipelined = if settings.parallel == KluParallel::Off {
+        Vec::new()
+    } else {
+        compute_pipelined_blocks(&sym.block_ptr, &l_colptr, &u_colptr, &u_rowidx)
+    };
+
     Ok(KluFactors {
         n,
         nnz_a: sym.nnz,
@@ -1470,6 +1538,7 @@ fn factor_impl<T: Scalar>(
         f_val,
         scatter_expect,
         scatter_target,
+        pipelined,
     })
 }
 
@@ -1508,6 +1577,12 @@ impl<T: Scalar> KluSolver<T> {
     }
 
     /// Number of BTF diagonal blocks.
+    /// Diagnostic: blocks admitted to the pipelined refactor replay.
+    #[doc(hidden)]
+    pub fn pipelined_blocks(&self) -> &[usize] {
+        &self.factors.pipelined
+    }
+
     pub fn n_blocks(&self) -> usize {
         self.factors.block_ptr.len() - 1
     }
@@ -1888,44 +1963,81 @@ impl<T: Scalar> KluSolver<T> {
         let f_colptr = &f.f_colptr;
         let scatter_target = &f.scatter_target;
         let rs_inv_ref = &rs_inv;
-        let replay_block = |job: RJob<'_, T>| -> Result<(), RslabError> {
-            let b = job.b;
-            let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
-            let (l_base, u_base, f_base) = (l_colptr[bs], u_colptr[bs], f_colptr[bs]);
-            let mut x = vec![T::zero(); be - bs];
-            for j in bs..be {
-                let c = col_perm[j];
-                // Scatter through the recorded program: no position lookups,
-                // no pattern branches (verified above).
+        // Raw column-disjoint views of one block's value arrays for the
+        // level-parallel replay: every column writes only its own L/U/F/diag
+        // slots and reads L columns completed in earlier levels (fenced by the
+        // per-level join), so the shared-mutable access is race-free.
+        struct BlockPtrs<T> {
+            l_v: PanelPtr<T>,
+            u_v: PanelPtr<T>,
+            ud: PanelPtr<T>,
+            f_v: PanelPtr<T>,
+        }
+        impl<T> Clone for BlockPtrs<T> {
+            fn clone(&self) -> Self {
+                *self
+            }
+        }
+        impl<T> Copy for BlockPtrs<T> {}
+
+        // Replay one column through the recorded program: scatter, eliminate
+        // in the stored topological order (bit-identical to `factor_impl`'s
+        // pass 3: same `fmadd`, same per-column order), pivot, emit L.
+        // SAFETY: caller guarantees exclusive ownership of column `j`'s output
+        // slots and completed dependency columns (see `BlockPtrs`); `x` is this
+        // caller's scratch, all-zero on entry and left all-zero.
+        let replay_col = |j: usize,
+                          bs: usize,
+                          bases: (usize, usize, usize),
+                          p: BlockPtrs<T>,
+                          x: &mut [T],
+                          sync: Option<(
+            &[std::sync::atomic::AtomicBool],
+            &std::sync::atomic::AtomicBool,
+        )>|
+         -> Result<(), RslabError> {
+            let (l_base, u_base, f_base) = bases;
+            let c = col_perm[j];
+            unsafe {
                 for k in a.col_ptr[c]..a.col_ptr[c + 1] {
                     let r = a.row_idx[k];
                     let sv = a.values[k] * T::from_real(rs_inv_ref[r]);
                     let tv = scatter_target[k];
                     if tv & KI_FBIT != 0 {
-                        job.f_v[(tv & !KI_FBIT) as usize - f_base] = sv;
+                        *p.f_v.get().add((tv & !KI_FBIT) as usize - f_base) = sv;
                     } else {
                         x[tv as usize - bs] = sv;
                     }
                 }
-
-                // Replay the elimination in the stored topological order
-                // (bit-identical to `factor_impl`'s pass 3: same `fmadd`).
                 for k in u_colptr[j]..u_colptr[j + 1] {
-                    let p = u_rowidx[k] as usize;
-                    let xu = x[p - bs];
-                    x[p - bs] = T::zero();
-                    job.u_v[k - u_base] = xu;
+                    let pr = u_rowidx[k] as usize;
+                    // Pipelined mode: consume L column `pr` only once its
+                    // owner has published it (Acquire pairs with the owner's
+                    // Release store after emitting the column).
+                    if let Some((ready, abort)) = sync {
+                        use std::sync::atomic::Ordering as AOrd;
+                        let mut spins = 0u32;
+                        while !ready[pr - bs].load(AOrd::Acquire) {
+                            if abort.load(AOrd::Acquire) {
+                                return Err(pattern_mismatch());
+                            }
+                            spins += 1;
+                            if spins & 0x3FF == 0 {
+                                std::thread::yield_now();
+                            } else {
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                    let xu = x[pr - bs];
+                    x[pr - bs] = T::zero();
+                    *p.u_v.get().add(k - u_base) = xu;
                     let nxu = T::zero() - xu;
-                    for kl in l_colptr[p]..l_colptr[p + 1] {
+                    for kl in l_colptr[pr]..l_colptr[pr + 1] {
                         let lr = l_rowidx[kl] as usize - bs;
                         debug_assert!(lr < x.len());
-                        unsafe {
-                            *x.get_unchecked_mut(lr) = fmadd(
-                                nxu,
-                                *job.l_v.get_unchecked(kl - l_base),
-                                *x.get_unchecked(lr),
-                            );
-                        }
+                        *x.get_unchecked_mut(lr) =
+                            fmadd(nxu, *p.l_v.get().add(kl - l_base), *x.get_unchecked(lr));
                     }
                 }
                 let d = x[j - bs];
@@ -1933,12 +2045,120 @@ impl<T: Scalar> KluSolver<T> {
                 if d.magnitude() == 0.0 || !d.is_finite() {
                     return Err(RslabError::SingularBasis { column: c });
                 }
-                job.ud[j - bs] = d;
+                *p.ud.get().add(j - bs) = d;
                 for k in l_colptr[j]..l_colptr[j + 1] {
                     let lr = l_rowidx[k] as usize - bs;
-                    job.l_v[k - l_base] = x[lr] / d;
+                    *p.l_v.get().add(k - l_base) = x[lr] / d;
                     x[lr] = T::zero();
                 }
+            }
+            Ok(())
+        };
+
+        let pipelined = &f.pipelined;
+        let replay_block = |job: RJob<'_, T>| -> Result<(), RslabError> {
+            let b = job.b;
+            let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
+            let bases = (l_colptr[bs], u_colptr[bs], f_colptr[bs]);
+            let ptrs = BlockPtrs {
+                l_v: PanelPtr(job.l_v.as_mut_ptr()),
+                u_v: PanelPtr(job.u_v.as_mut_ptr()),
+                ud: PanelPtr(job.ud.as_mut_ptr()),
+                f_v: PanelPtr(job.f_v.as_mut_ptr()),
+            };
+            let nthreads = rayon::current_num_threads().max(1);
+            if nthreads >= 2 && pipelined.contains(&b) {
+                // NICSLU-style pipelined replay: worker `w` owns columns
+                // `bs+w, bs+w+nw, ...` in order and spin-waits just-in-time on
+                // each U-dependency's ready flag before consuming its L
+                // column. Bit-identical (per-column arithmetic and writes are
+                // untouched); dedicated OS threads, so a spinning peer can
+                // never starve the owner of the column it waits for (a rayon
+                // task pool could).
+                use std::sync::atomic::{AtomicBool, Ordering as AOrd};
+                let bn = be - bs;
+                let nw = nthreads.min(8).min(bn.div_ceil(KLU_PIPE_MIN_BN)).max(2);
+                let ready: Vec<AtomicBool> = (0..bn).map(|_| AtomicBool::new(false)).collect();
+                let abort = AtomicBool::new(false);
+                let errs: Vec<Result<(), RslabError>> = std::thread::scope(|sc| {
+                    let handles: Vec<_> = (0..nw)
+                        .map(|w| {
+                            let (ready, abort) = (&ready, &abort);
+                            sc.spawn(move || -> Result<(), RslabError> {
+                                let mut x = vec![T::zero(); bn];
+                                let mut jj = bs + w;
+                                while jj < be {
+                                    // SAFETY: worker-owned column; deps are
+                                    // fenced by the ready Acquire loads inside
+                                    // `replay_col`.
+                                    let r = replay_col(
+                                        jj,
+                                        bs,
+                                        bases,
+                                        ptrs,
+                                        &mut x,
+                                        Some((ready, abort)),
+                                    );
+                                    ready[jj - bs].store(true, AOrd::Release);
+                                    if let Err(e) = r {
+                                        // Release everything this worker still
+                                        // owns so the peers' spins terminate.
+                                        abort.store(true, AOrd::Release);
+                                        let mut k = jj + nw;
+                                        while k < be {
+                                            ready[k - bs].store(true, AOrd::Release);
+                                            k += nw;
+                                        }
+                                        return Err(e);
+                                    }
+                                    if abort.load(AOrd::Acquire) {
+                                        let mut k = jj + nw;
+                                        while k < be {
+                                            ready[k - bs].store(true, AOrd::Release);
+                                            k += nw;
+                                        }
+                                        return Ok(());
+                                    }
+                                    jj += nw;
+                                }
+                                Ok(())
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().unwrap_or(Err(pattern_mismatch())))
+                        .collect()
+                });
+                // Deterministic error selection: a real singular pivot wins
+                // over the sympathetic aborts of the other workers (their
+                // spins return `pattern_mismatch`), lowest column first.
+                let mut first: Option<RslabError> = None;
+                for r in errs {
+                    if let Err(e) = r {
+                        let better = match (&e, &first) {
+                            (_, None) => true,
+                            (
+                                RslabError::SingularBasis { column: c1 },
+                                Some(RslabError::SingularBasis { column: c0 }),
+                            ) => c1 < c0,
+                            (RslabError::SingularBasis { .. }, Some(_)) => true,
+                            _ => false,
+                        };
+                        if better {
+                            first = Some(e);
+                        }
+                    }
+                }
+                if let Some(e) = first {
+                    return Err(e);
+                }
+                return Ok(());
+            }
+            let mut x = vec![T::zero(); be - bs];
+            for j in bs..be {
+                // SAFETY: this closure exclusively owns the whole block.
+                replay_col(j, bs, bases, ptrs, &mut x, None)?;
             }
             Ok(())
         };
@@ -2272,6 +2492,80 @@ mod tests {
             resid(&a2, &x, &b) < 1e-11,
             "refactor residual {}",
             resid(&a2, &x, &b)
+        );
+    }
+
+    /// 2D convection-diffusion 5-point grid: one large irreducible block with
+    /// wide elimination-DAG wavefronts - the level-schedule target shape.
+    fn grid_cd(m: usize) -> (GeneralCsc<f64>, Vec<f64>) {
+        let n = m * m;
+        let idx = |i: usize, j: usize| i * m + j;
+        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..m {
+            for j in 0..m {
+                let p = idx(i, j);
+                r.push(p);
+                c.push(p);
+                v.push(4.0 + 0.01 * (p % 7) as f64);
+                let mut off = |q: usize, w: f64| {
+                    r.push(q);
+                    c.push(p);
+                    v.push(w);
+                };
+                if i > 0 {
+                    off(idx(i - 1, j), -1.2);
+                }
+                if i + 1 < m {
+                    off(idx(i + 1, j), -0.8);
+                }
+                if j > 0 {
+                    off(idx(i, j - 1), -1.1);
+                }
+                if j + 1 < m {
+                    off(idx(i, j + 1), -0.9);
+                }
+            }
+        }
+        let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        (a, b)
+    }
+
+    #[test]
+    fn klu_pipelined_refactor_is_bit_identical_to_sequential() {
+        // One irreducible 1024-column block: the level schedule must engage
+        // (parallel != Off) and its refactor replay must be bit-identical to
+        // the strictly sequential one - same values, not just same residual.
+        let (a, b) = grid_cd(32);
+        let seq = KluSettings::default().with_parallel(KluParallel::Off);
+        let par = KluSettings::default().with_parallel(KluParallel::On);
+
+        let mut s_seq = KluSolver::factor(&a, &seq).unwrap();
+        let mut s_par = KluSolver::factor(&a, &par).unwrap();
+        assert!(
+            s_seq.factors.pipelined.is_empty(),
+            "Off must not admit pipeline blocks"
+        );
+        // The 1024-column test block is far below the work gate; force the
+        // admission so the pipelined executor itself is exercised (the gates
+        // only decide when it pays, not whether it is correct).
+        s_par.factors.pipelined = vec![0];
+
+        // Fresh values on the frozen pattern, refactor both ways.
+        let mut a2 = a.clone();
+        for (k, v) in a2.values.iter_mut().enumerate() {
+            *v += 1e-3 * ((k % 11) as f64 - 5.0);
+        }
+        s_seq.refactor(&a2).unwrap();
+        s_par.refactor(&a2).unwrap();
+        assert_eq!(s_seq.factors.l_val, s_par.factors.l_val, "L values differ");
+        assert_eq!(s_seq.factors.u_val, s_par.factors.u_val, "U values differ");
+        assert_eq!(s_seq.factors.udiag, s_par.factors.udiag, "diag differs");
+
+        let x = s_par.solve(&b).unwrap();
+        assert!(
+            resid(&a2, &x, &b) < 1e-10,
+            "pipelined refactor solve residual"
         );
     }
 
