@@ -49,10 +49,11 @@ headline results.
 - Tunable equilibration (one-pass ∞-norm, iterative Ruiz, MC64 matching, off) and
   factor emit/memory mode, all through one flat `SolverSettings` interface.
 - **Heuristic default settings** (hardware-agnostic, deterministic, model-free):
-  `factor()` picks its configuration from exact a-priori quantities - the adaptive
-  ordering heuristic, the proven default kernel knobs, and an exact
-  nested-dissection bakeoff on large systems (adopt `MetisND` only on a clear
-  predicted-flops win with no fill/memory regression). An optional **one-time
+  `factor()` picks its configuration from exact a-priori quantities - an exact
+  two-stage **ordering race** ({AMD, AMF, RCM} prefixes concurrently, smallest
+  exact fill wins; the MetisND candidate joins only above a work floor where
+  its cost amortizes, and internally runs a best-of-seeds ensemble) plus the
+  proven default kernel knobs. An optional **one-time
   install diagnosis** (`cargo xtask calibrate` / `tuning::install_diagnose`)
   measures this machine's throughput + parallel-speedup curve once and caches it;
   with the cache present, the worker count comes from the calibrated cost model
@@ -86,7 +87,7 @@ grid-Péclet range, BEM/MoM near-field kernels; `src/matgen/fem.rs`) plus the
 complex SuiteSparse matrices, 8k-125k DOFs, all `Complex<f64>`, measured in one
 run on a quiet 12-core machine, so the cross-solver ratios carry no run-to-run
 drift. RSLAB runs its shipped default, the deterministic heuristic pick
-(`tuned()`: adaptive ordering, exact ND bakeoff, calibrated worker count); each
+(`tuned()`: exact ordering race, calibrated worker count); each
 path is compared **on its own class** against its own MKL PARDISO mtype and
 [faer](https://github.com/sarah-quinones/faer-rs).
 
@@ -100,8 +101,8 @@ Factor time and peak memory vs nonzeros, log-log, one power-law fit per solver.
 Each plot carries two RSLAB curves, the **fixed default config** (gray) and the
 **heuristic pick** as shipped (blue), so the gap the pick closes toward PARDISO
 is visible; it widens with problem size (a mispicked ordering costs most on the
-big matrices) and never comes at a memory cost (the bakeoff is fill/memory
-guarded).
+big matrices) and never comes at a memory cost (the ordering race picks by
+exact fill).
 
 **LDLᵀ path (symmetric, PARDISO mtype 6)**: factor time (left) and peak memory (right):
 
@@ -181,8 +182,8 @@ its vendor-recommended best configuration per class:
 
 plus an **AMD-vs-Metis ordering bakeoff** per matrix (the vendor docs say "try
 both"; `SparseOrderDefault` turned out to be plain AMD, which costs up to 4.4x
-the fill of Metis on the large EM/FEM systems; the bakeoff is the analogue of
-RSLAB's exact ND bakeoff and its cost is counted in Accelerate's analyze time).
+the fill of Metis on the large EM/FEM systems; that bakeoff is the analogue of
+RSLAB's exact ordering race and its cost is counted in Accelerate's analyze time).
 Memory uses the same live-bytes semantics as the Rust solvers: Accelerate's
 allocations run through instrumented `SparseSymbolicFactorOptions` malloc/free
 callbacks. Accelerate has no thread knob (internal parallelism); RSLAB uses its
@@ -214,6 +215,18 @@ its time scales at `α≈1.67` vs RSLAB's `1.38`). On the circuit class the gap
 is down to 1.3x (sequential KLU baseline; the bit-identical parallel factor
 above closes it), and the comparison is one-shot only; KLU's refactor-driven
 sweeps (its actual niche) are not exercised.
+
+**Update (v0.28, 2026-08-27, reduced 9-point 4k-110k grid, time pass):** the
+consolidation campaign moved these ratios substantially. The circuit class now
+runs **2.2-2.6x ahead of Accelerate on factor and 2.2x on solve** at every
+measured size (parallel first factor + the NICSLU-style pipelined refactor);
+the large complex-symmetric systems reach **2.2x** (Helmholtz 110k) with the
+solve 1.4x ahead in geomean; and the former unsym outlier class
+(convection-diffusion, previously 3-8x behind) tightened to ~2x after the
+ordering race replaced the pinned-AMD default (factor -40% on convdiff2d).
+The remaining known deficits are the small/mid sizes (AMX kernels), and the
+saddle/KKT family (0.65-0.83x - diagnosed as small-node overhead, see
+`dev/research/saddle-vs-accelerate-2026-08.md`).
 
 Accuracy over the corpus: Accelerate reaches `< 1e-8` on 25/36 (including
 qc2534 at `2.5e-13` directly, where RSLAB's exact mode needs its
