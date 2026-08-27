@@ -548,7 +548,7 @@ fn run_external_ordering(
     let perm_i32 = match method {
         OrderingMethod::Amd => rslab_amd::amd_order(&pat),
         OrderingMethod::Amf => rslab_amf::amf_order(&pat),
-        OrderingMethod::MetisND => rslab_metis::metis_order(&pat),
+        OrderingMethod::MetisND => metis_seed_race(pattern, &pat),
         OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
@@ -579,6 +579,54 @@ fn run_external_ordering(
         out.push(u);
     }
     Ok((out, actual))
+}
+
+/// Seeds of the deterministic nested-dissection ensemble: multilevel ND is
+/// seed-sensitive in one direction only (the 40^3 reference measures 11.24 M
+/// exact nnz(L) on seeds {1, 3, 4} but 13.16 M - +17% - on seed 2, and on
+/// another matrix the default seed can be the outlier), so `MetisND` runs
+/// every seed and keeps the best. The candidates run in parallel (the wall
+/// cost is roughly one ND plus the exact scoring), the score is the exact
+/// scalar nnz(L) via permuted-etree column counts, and the winner is the
+/// minimum fill with the LOWEST seed breaking ties - fully deterministic.
+/// The candidates run on the ambient rayon pool, which `analyze_with` scopes
+/// to the settings' thread budget - a `with_threads(1)` analysis runs the
+/// ensemble strictly sequentially.
+const ND_SEED_CANDIDATES: &[u64] = &[1, 2, 3];
+
+/// Best-of-seeds nested dissection (see [`ND_SEED_CANDIDATES`]).
+fn metis_seed_race(
+    pattern: &CscPattern,
+    pat: &rslab_ordering_core::CscPattern<'_>,
+) -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
+    use rayon::prelude::*;
+    let scored: Vec<(usize, u64, Vec<i32>)> = ND_SEED_CANDIDATES
+        .par_iter()
+        .filter_map(|&seed| {
+            let opts = rslab_metis::MetisOptions {
+                seed,
+                ..Default::default()
+            };
+            let (perm_i32, _, _) = rslab_metis::metis_order_full(pat, &opts).ok()?;
+            // Exact scalar fill of this candidate: etree of the permuted
+            // pattern (built through the permutation, no materialization)
+            // plus GNP column counts on the permuted pattern.
+            let perm: Vec<usize> = perm_i32.iter().map(|&x| x as usize).collect();
+            let mut perm_inv = vec![0usize; perm.len()];
+            for (new, &old) in perm.iter().enumerate() {
+                perm_inv[old] = new;
+            }
+            let permuted = permute_pattern(pattern, &perm);
+            let etree = EliminationTree::from_pattern(&permuted);
+            let fill = total_factor_nnz(&column_counts_gnp(&permuted, &etree));
+            Some((fill, seed, perm_i32))
+        })
+        .collect();
+    scored
+        .into_iter()
+        .min_by_key(|&(fill, seed, _)| (fill, seed))
+        .map(|(_, _, perm)| perm)
+        .ok_or(rslab_ordering_core::OrderingError::MalformedInput)
 }
 
 /// Concrete candidates raced by [`OrderingMethod::AutoRace`]. See the

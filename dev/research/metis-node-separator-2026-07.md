@@ -133,3 +133,18 @@ and beats every ordering we have measured on this pattern (old port
 m=30 (3.29 M) and m=50 (36.7 M vs AMD 61.6 M); seeds land at
 11.1-13.9 M. Ordering wall time roughly doubles (466 -> 560 ms at
 40^3), paid back many times over in factor flops (1.90e10 -> 0.95e10).
+
+
+## Update (2026-08-27): seed ensemble
+
+Current state of the same 40^3 harness: metis default reaches 11.24 M
+exact nnz(L) - past MKL PARDISO's 12.52 M. The remaining structural
+finding is one-sided seed sensitivity: seeds {1, 3, 4} land at
+11.24-11.30 M, seed 2 at 13.16 M (+17%), and on other matrices the
+default seed can be the outlier. `MetisND` therefore now runs a
+deterministic best-of-{1,2,3} ensemble (parallel candidates, exact
+scalar-nnz(L) scoring via permuted-etree column counts, minimum fill
+with lowest seed on ties). Measured: curl_curl 20^3 fill 18.13 -> 17.52 M
+(-3.4%), factor -5-8%; saddle 24^3 fill -1.0%; helmholtz unchanged
+(seed 1 already optimal there); analyze wall +5-8% (candidates run in
+parallel; CPU cost 3x, amortized by the phased workflow).

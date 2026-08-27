@@ -1535,7 +1535,12 @@ pub fn analyze_with(
     // the caller's stack. Run it in a scoped pool whose workers have a stack sized
     // to the problem (committed on demand), the same robustness mechanism the
     // factorization uses. Shallow analyses get the floor stack at negligible cost.
-    in_scoped_pool(0, stack_for_depth(n), || {
+    //
+    // The pool is sized to the settings' thread budget (the same
+    // solver-in-the-loop contract the factorization honours), so every parallel
+    // step inside the analysis - notably the ND seed ensemble - respects the
+    // configured worker count instead of grabbing all cores.
+    in_scoped_pool(opts.resolved_threads(), stack_for_depth(n), || {
         analyze_with_inner(n, col_ptr, row_idx, opts)
     })
 }
