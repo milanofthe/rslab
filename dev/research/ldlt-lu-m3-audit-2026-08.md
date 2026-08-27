@@ -64,6 +64,12 @@ No retuning of the fixed-config knobs is warranted for Apple Silicon.
    break even, which these classes do not clear. Shelved: thin upside,
    real regression risk; revisit only with a fused gather-GEMM kernel
    that avoids materializing the padded operands.
+   Also tried 2026-08-27: hoisting the per-column `gloc[ok[r]]` lookups
+   into a once-per-updater `tpos` buffer (factor npk fewer random
+   reads) - measured neutral within noise on 44^3 helmholtz and
+   curl_curl 20^3, so the random gloc stream is NOT the medium-node
+   bottleneck either; discarded. The 2-4 GF/s medium-node floor is
+   left as bandwidth/shape-bound until profiled deeper.
 3. 32-bit index streams in the LL gather/scatter maps (`gloc`, row sets):
    the KLU sprint measured real wins from halving index traffic.
    MEASURED 2026-08-27 (branch perf/ll-narrow-indices): LlSchedule rows/
