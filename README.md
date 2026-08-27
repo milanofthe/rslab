@@ -33,7 +33,11 @@ headline results.
   adjoint / sensitivity solves. Factor and refactor run the independent BTF
   blocks in parallel when a deterministic structural gate says it pays
   (`KluParallel::Auto`, bit-identical to sequential in every mode; force
-  `Off` for strictly sequential execution). On MNA-like matrices: 5-12x
+  `Off` for strictly sequential execution). Refactorization additionally
+  pipelines the columns *inside* a dominant irreducible block (NICSLU-style
+  just-in-time dependency waits on the frozen elimination DAG, work-gated):
+  2.0-2.9x on the work-heavy SuiteSparse circuit matrices (rajat15, twotone,
+  ASIC_100ks, onetone1), still bit-identical. On MNA-like matrices: 5-12x
   faster factor with 1.7-5.7x less fill than the multifrontal LU (widening
   with size), a 20-point same-pattern sweep 10-40x faster end to end, and
   1.6-2.7x / 2.1-3.4x ahead of SuiteSparse KLU on parallel factor / refactor
