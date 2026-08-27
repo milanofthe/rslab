@@ -1191,12 +1191,12 @@ thread_local! {
     /// reused across every front a thread factors and held at the all-`usize::MAX`
     /// invariant between uses. Replaces the old `map_init` workspace now that the
     /// driver is a work-stealing tree recursion rather than a level `par_iter`.
-    static GLOC_SCRATCH: std::cell::RefCell<Vec<usize>> =
+    static GLOC_SCRATCH: std::cell::RefCell<Vec<Li>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, LlSchedule, PermScatter};
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, Li, LlSchedule, PermScatter};
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -1357,10 +1357,10 @@ fn factor_one_node<T: Scalar>(
     // work-stealing tasks can never re-enter the borrow.
     let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
     if gloc.len() < n {
-        gloc.resize(n, usize::MAX);
+        gloc.resize(n, Li::MAX);
     }
     for (li, &g) in ri.iter().enumerate() {
-        gloc[g] = li;
+        gloc[g] = li as Li;
     }
 
     // Scatter original entries of the eliminated columns.
@@ -1368,8 +1368,8 @@ fn factor_one_node<T: Scalar>(
         let c = snode.first_col + p;
         for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
             let g = a_perm.row_idx[k];
-            let lr = gloc[g];
-            debug_assert!(lr != usize::MAX, "original entry outside front");
+            let lr = gloc[g] as usize;
+            debug_assert!(lr != Li::MAX as usize, "original entry outside front");
             let (hi, lo) = if lr >= p { (lr, p) } else { (p, lr) };
             f[lo * nrow + hi] = f[lo * nrow + hi] + a_perm.values[k];
         }
@@ -1384,9 +1384,9 @@ fn factor_one_node<T: Scalar>(
         let cb = &child.contrib;
         let mut p = 0usize;
         for j in 0..cn {
-            let lj = gloc[crows[j]];
+            let lj = gloc[crows[j]] as usize;
             for i in j..cn {
-                let li = gloc[crows[i]];
+                let li = gloc[crows[i]] as usize;
                 let (hi, lo) = if li >= lj { (li, lj) } else { (lj, li) };
                 f[lo * nrow + hi] = f[lo * nrow + hi] + cb[p];
                 p += 1;
@@ -1394,10 +1394,10 @@ fn factor_one_node<T: Scalar>(
         }
     }
 
-    // Restore the all-`usize::MAX` invariant and return the scratch to the
+    // Restore the all-`Li::MAX` invariant and return the scratch to the
     // thread-local before `factor_front` (which spawns work-stealing GEMM tasks).
     for &g in &ri {
-        gloc[g] = usize::MAX;
+        gloc[g] = Li::MAX;
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
 
@@ -2022,14 +2022,14 @@ fn ldlt_emit_and_free<T: Scalar>(
     let mut col: Vec<(usize, T)> = Vec::with_capacity(nrow);
     for p in 0..ncol {
         col.clear();
-        let diag_e = unsafe { emit.eg(sched.rows(k)[lperm[p]]) };
+        let diag_e = unsafe { emit.eg(sched.rows(k)[lperm[p]] as usize) };
         col.push((diag_e, one));
         // Skip the 2×2 block's `d21` coupling row (D, not an L multiplier).
         let i0 = if t2[p] { p + 2 } else { p + 1 };
         for i in i0..nrow {
             let v = panel[i + p * nrow];
             if v != T::zero() {
-                col.push((unsafe { emit.eg(sched.rows(k)[lperm[i]]) }, v));
+                col.push((unsafe { emit.eg(sched.rows(k)[lperm[i]] as usize) }, v));
             }
         }
         if let Some(tau) = drop_tol {
@@ -2095,19 +2095,20 @@ fn ll_factor_node<T: Scalar>(
     let n = sym.n;
     let mut panel = vec![T::zero(); nrow * ncol];
 
-    // Thread-local global→local scratch (held at all-`usize::MAX`).
+    // Thread-local global→local scratch (held at all-`Li::MAX`; narrow
+    // entries halve the table's random-access footprint).
     let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
     if gloc.len() < n {
-        gloc.resize(n, usize::MAX);
+        gloc.resize(n, Li::MAX);
     }
     for (li, &g) in sched.rows(s).iter().enumerate() {
-        gloc[g] = li;
+        gloc[g as usize] = li as Li;
     }
     // Assemble A's lower-triangle columns of this supernode.
     for p in 0..ncol {
         let c = first + p;
         for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
-            let li = gloc[a_perm.row_idx[k]];
+            let li = gloc[a_perm.row_idx[k]] as usize;
             panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
         }
     }
@@ -2177,8 +2178,8 @@ fn ll_factor_node<T: Scalar>(
                     let ok = &sched.rows(kk)[nck..];
                     let nok = ok.len();
                     // Updater columns landing in this slab.
-                    let q0 = p0 + ok[p0..p1].partition_point(|&g| g < first + c0);
-                    let q1 = p0 + ok[p0..p1].partition_point(|&g| g < first + c1);
+                    let q0 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c0);
+                    let q1 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c1);
                     let npk = q1 - q0;
                     if npk == 0 {
                         continue;
@@ -2229,11 +2230,11 @@ fn ll_factor_node<T: Scalar>(
                         )
                     };
                     for c in 0..npk {
-                        let tcol = ok[q0 + c] - first;
+                        let tcol = ok[q0 + c] as usize - first;
                         let ucol = &u_buf[c * mrows..c * mrows + mrows];
                         let dst_col = &mut tile[(tcol - c0) * nrow..(tcol - c0 + 1) * nrow];
                         for r in (q0 + c)..nok {
-                            let dst = gloc_ref[ok[r]];
+                            let dst = gloc_ref[ok[r] as usize] as usize;
                             dst_col[dst] = dst_col[dst] - ucol[r - q0];
                         }
                     }
@@ -2265,7 +2266,7 @@ fn ll_factor_node<T: Scalar>(
             vc.clear();
             vc.resize(nck, T::zero());
             for c_idx in p0..p1 {
-                let tcol = ok[c_idx] - first;
+                let tcol = ok[c_idx] as usize - first;
                 // vc = D · (column `c_idx` of kk's off-diagonal block), with D
                 // block-diagonal (1×1 and complex-symmetric 2×2 blocks).
                 let mut ck = 0;
@@ -2283,7 +2284,7 @@ fn ll_factor_node<T: Scalar>(
                     }
                 }
                 for r_idx in c_idx..nok {
-                    let trow = gloc[ok[r_idx]];
+                    let trow = gloc[ok[r_idx] as usize] as usize;
                     let mut acc = T::zero();
                     for ck in 0..nck {
                         acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
@@ -2348,10 +2349,10 @@ fn ll_factor_node<T: Scalar>(
                 )
             };
             for c in 0..npk {
-                let tcol = ok[p0 + c] - first;
+                let tcol = ok[p0 + c] as usize - first;
                 let ucol = &u_buf[c * mrows..c * mrows + mrows];
                 for r in (p0 + c)..nok {
-                    let dst = gloc[ok[r]] + tcol * nrow;
+                    let dst = gloc[ok[r] as usize] as usize + tcol * nrow;
                     panel[dst] = panel[dst] - ucol[r - p0];
                 }
             }
@@ -2639,7 +2640,7 @@ fn ll_cdiv_emit<T: Scalar>(
     ll_active: &AtomicUsize,
     kt: KernelTuning,
     mut panel: Vec<T>,
-    mut gloc: Vec<usize>,
+    mut gloc: Vec<Li>,
 ) -> Result<(), RslabError> {
     let snode = &sym.supernodes[s];
     let ncol = snode.ncol;
@@ -2704,7 +2705,7 @@ fn ll_cdiv_emit<T: Scalar>(
     macro_rules! restore_gloc {
         () => {{
             for &g in sched.rows(s) {
-                gloc[g] = usize::MAX;
+                gloc[g as usize] = Li::MAX;
             }
             GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
         }};
@@ -2937,7 +2938,7 @@ fn ll_cdiv_emit<T: Scalar>(
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
     }
     for &g in sched.rows(s) {
-        gloc[g] = usize::MAX;
+        gloc[g as usize] = Li::MAX;
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
     // Populate the O(n) emit maps + inertia for `s` (block-aware over its 1×1/2×2
@@ -2947,7 +2948,7 @@ fn ll_cdiv_emit<T: Scalar>(
     let (mut ipos, mut ineg, mut izero) = (0usize, 0usize, 0usize);
     let mut pp = 0;
     while pp < ncol {
-        let g = sched.rows(s)[lperm[pp]];
+        let g = sched.rows(s)[lperm[pp]] as usize;
         let e = eoff + pp;
         // SAFETY: each global index / position is written by exactly one supernode.
         unsafe {
@@ -2956,7 +2957,7 @@ fn ll_cdiv_emit<T: Scalar>(
             emit.d_diag.set(e, d[pp]);
         }
         if two_by_two[pp] {
-            let g2 = sched.rows(s)[lperm[pp + 1]];
+            let g2 = sched.rows(s)[lperm[pp + 1]] as usize;
             unsafe {
                 emit.e_of_g.set(g2, e + 1);
                 emit.perm.set(e + 1, sym.perm[g2]);

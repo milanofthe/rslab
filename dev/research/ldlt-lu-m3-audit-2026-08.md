@@ -56,6 +56,12 @@ No retuning of the fixed-config knobs is warranted for Apple Silicon.
    Gflop/s floor.
 3. 32-bit index streams in the LL gather/scatter maps (`gloc`, row sets):
    the KLU sprint measured real wins from halving index traffic.
+   MEASURED 2026-08-27 (branch perf/ll-narrow-indices): LlSchedule rows/
+   updaters + gloc narrowed to u32, bit-identical, but factor time is
+   neutral within thermal noise on 32^3/44^3 helmholtz (default AND
+   preconditioner settings) - the LL path is GEMM-bound where KLU is
+   index-bound, so the lever does not transfer. Kept anyway: it halves
+   the resident schedule + scatter-table memory (~100 MB on 44^3).
 4. Parallel BK panel inside the multifrontal `factor_front` (the LL panel
    already has `apply_bk_panel_trailing`; MF does not). MF is not the
    shipped pick, so this only pays where the tuner selects MF.

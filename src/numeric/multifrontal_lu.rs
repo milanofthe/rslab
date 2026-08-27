@@ -103,7 +103,7 @@ thread_local! {
     /// invariant between uses; the assembly takes it, sets only the live front
     /// rows, and restores it. Replaces the old `map_init` workspace now that the
     /// driver is a work-stealing tree recursion rather than a level `par_iter`.
-    static GLOC_SCRATCH: std::cell::RefCell<Vec<usize>> =
+    static GLOC_SCRATCH: std::cell::RefCell<Vec<Li>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -531,10 +531,10 @@ fn factor_one_node_lu<T: Scalar>(
     // front GEMM's work-stealing tasks can never re-enter the borrow.
     let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
     if gloc.len() < n {
-        gloc.resize(n, usize::MAX);
+        gloc.resize(n, Li::MAX);
     }
     for (li, &g) in ri.iter().enumerate() {
-        gloc[g] = li;
+        gloc[g] = li as Li;
     }
 
     // Owned columns (full): scatter a_perm column c into front column p.
@@ -543,8 +543,8 @@ fn factor_one_node_lu<T: Scalar>(
         for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
             let g = a_perm.row_idx[k];
             let lr = gloc[g];
-            if lr != usize::MAX {
-                f[p * nrow + lr] = f[p * nrow + lr] + a_perm.values[k];
+            if lr != Li::MAX {
+                f[p * nrow + lr as usize] = f[p * nrow + lr as usize] + a_perm.values[k];
             }
         }
     }
@@ -555,8 +555,8 @@ fn factor_one_node_lu<T: Scalar>(
         for k in a_perm_t.col_ptr[r]..a_perm_t.col_ptr[r + 1] {
             let g = a_perm_t.row_idx[k];
             let lc = gloc[g];
-            if lc != usize::MAX && lc >= ncol {
-                f[lc * nrow + p] = f[lc * nrow + p] + a_perm_t.values[k];
+            if lc != Li::MAX && lc as usize >= ncol {
+                f[lc as usize * nrow + p] = f[lc as usize * nrow + p] + a_perm_t.values[k];
             }
         }
     }
@@ -571,14 +571,14 @@ fn factor_one_node_lu<T: Scalar>(
         let cn = child.front.nrow - child.front.nelim;
         let crows = &child.row_indices[child.front.nelim..];
         loc.clear();
-        loc.extend(crows.iter().map(|&g| gloc[g]));
+        loc.extend(crows.iter().map(|&g| gloc[g] as usize));
         child.contrib.extend_add_into(&loc, cn, f, nrow);
     }
 
-    // Restore the all-`usize::MAX` invariant and return the scratch to the
+    // Restore the all-`Li::MAX` invariant and return the scratch to the
     // thread-local before `lu_front` (which spawns work-stealing GEMM tasks).
     for &g in &ri {
-        gloc[g] = usize::MAX;
+        gloc[g] = Li::MAX;
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
 
@@ -957,7 +957,9 @@ impl<T> Default for LuSlot<T> {
 }
 type LuLlStore<T> = crate::numeric::ll_common::SlotStore<LuSlot<T>>;
 
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, LlSchedule, PanelPtr, PermScatter};
+use crate::numeric::ll_common::{
+    emit_refcount_offsets, Cells, Li, LlSchedule, PanelPtr, PermScatter,
+};
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -1107,7 +1109,7 @@ fn emit_and_free<T: Scalar>(
         for i in (p + 1)..nrow {
             let v = lbuf[p * nrow + i];
             if v != T::zero() {
-                lcol.push((unsafe { emit.rg(sched.rows(k)[rperm[i]]) }, v));
+                lcol.push((unsafe { emit.rg(sched.rows(k)[rperm[i]] as usize) }, v));
             }
         }
         if let Some(tau) = drop_tol {
@@ -1137,7 +1139,7 @@ fn emit_and_free<T: Scalar>(
         for t in 0..cnrow {
             let v = ubuf[p + t * ncol];
             if v != T::zero() {
-                urow.push((unsafe { emit.eg(sched.rows(k)[ncol + t]) }, v));
+                urow.push((unsafe { emit.eg(sched.rows(k)[ncol + t] as usize) }, v));
             }
         }
         if let Some(tau) = drop_tol {
@@ -1191,23 +1193,25 @@ fn lu_ll_factor_node<T: Scalar>(
 
     let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
     if gloc.len() < n {
-        gloc.resize(n, usize::MAX);
+        gloc.resize(n, Li::MAX);
     }
     for (li, &g) in sched.rows(s).iter().enumerate() {
-        gloc[g] = li;
+        gloc[g as usize] = li as Li;
     }
     // Assemble columns of s (full) into lbuf, and the U12 rows into ubuf.
     for p in 0..ncol {
         let c = first + p;
         for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
             let li = gloc[a_perm.row_idx[k]];
-            if li != usize::MAX {
+            if li != Li::MAX {
+                let li = li as usize;
                 lbuf[p * nrow + li] = lbuf[p * nrow + li] + a_perm.values[k];
             }
         }
         for k in a_perm_t.col_ptr[c]..a_perm_t.col_ptr[c + 1] {
             let lc = gloc[a_perm_t.row_idx[k]];
-            if lc != usize::MAX && lc >= ncol {
+            if lc != Li::MAX && lc as usize >= ncol {
+                let lc = lc as usize;
                 ubuf[p + (lc - ncol) * ncol] = ubuf[p + (lc - ncol) * ncol] + a_perm_t.values[k];
             }
         }
@@ -1261,8 +1265,8 @@ fn lu_ll_factor_node<T: Scalar>(
                     let nrk = sched.rows(kk).len();
                     let ok = &sched.rows(kk)[nck..];
                     let nok = ok.len();
-                    let q0 = p0 + ok[p0..p1].partition_point(|&g| g < first + c0);
-                    let q1 = p0 + ok[p0..p1].partition_point(|&g| g < first + c1);
+                    let q0 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c0);
+                    let q1 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c1);
                     let npk = q1 - q0;
                     if npk == 0 {
                         continue;
@@ -1298,10 +1302,10 @@ fn lu_ll_factor_node<T: Scalar>(
                         );
                     }
                     for jj in 0..npk {
-                        let cbase = (ok[q0 + jj] - first - c0) * nrow;
+                        let cbase = (ok[q0 + jj] as usize - first - c0) * nrow;
                         let ucol = &lupd[jj * mrows..jj * mrows + mrows];
                         for i in 0..mrows {
-                            let dst = cbase + gloc_ref[ok[p0 + i]];
+                            let dst = cbase + gloc_ref[ok[p0 + i] as usize] as usize;
                             slab[dst] = slab[dst] - ucol[i];
                         }
                     }
@@ -1318,7 +1322,7 @@ fn lu_ll_factor_node<T: Scalar>(
                     let g1 = if ncol + u1 < rs_s.len() {
                         rs_s[ncol + u1]
                     } else {
-                        usize::MAX
+                        Li::MAX
                     };
                     let mut uupd: Vec<T> = Vec::new();
                     for &(kk, p0, p1) in spans_ref {
@@ -1363,10 +1367,11 @@ fn lu_ll_factor_node<T: Scalar>(
                             );
                         }
                         for jj in 0..ntr {
-                            let ubase = (gloc_ref[ok[t0 + jj]] - ncol - u0) * ncol;
+                            let ubase =
+                                (gloc_ref[ok[t0 + jj] as usize] as usize - ncol - u0) * ncol;
                             let ucol = &uupd[jj * npk..jj * npk + npk];
                             for i in 0..npk {
-                                let dst = ubase + (ok[p0 + i] - first);
+                                let dst = ubase + (ok[p0 + i] as usize - first);
                                 slab[dst] = slab[dst] - ucol[i];
                             }
                         }
@@ -1392,24 +1397,24 @@ fn lu_ll_factor_node<T: Scalar>(
         if mrows * npk * nck < ll_gemm_gate {
             // Scalar path.
             for jj in 0..npk {
-                let tcol = ok[p0 + jj] - first;
+                let tcol = ok[p0 + jj] as usize - first;
                 for i in 0..mrows {
                     let mut acc = T::zero();
                     for ck in 0..nck {
                         acc = acc + lk[(nck + p0 + i) + ck * nrk] * uk[ck + (p0 + jj) * nck];
                     }
-                    let trow = gloc[ok[p0 + i]];
+                    let trow = gloc[ok[p0 + i] as usize] as usize;
                     lbuf[tcol * nrow + trow] = lbuf[tcol * nrow + trow] - acc;
                 }
             }
             for jj in 0..ntrail {
-                let tu = gloc[ok[p1 + jj]] - ncol;
+                let tu = gloc[ok[p1 + jj] as usize] as usize - ncol;
                 for i in 0..npk {
                     let mut acc = T::zero();
                     for ck in 0..nck {
                         acc = acc + lk[(nck + p0 + i) + ck * nrk] * uk[ck + (p1 + jj) * nck];
                     }
-                    let urow = ok[p0 + i] - first;
+                    let urow = ok[p0 + i] as usize - first;
                     ubuf[urow + tu * ncol] = ubuf[urow + tu * ncol] - acc;
                 }
             }
@@ -1450,10 +1455,10 @@ fn lu_ll_factor_node<T: Scalar>(
                 );
             }
             for jj in 0..npk {
-                let cbase = (ok[p0 + jj] - first) * nrow;
+                let cbase = (ok[p0 + jj] as usize - first) * nrow;
                 let ucol = &lupd[jj * mrows..jj * mrows + mrows];
                 for i in 0..mrows {
-                    let dst = cbase + gloc[ok[p0 + i]];
+                    let dst = cbase + gloc[ok[p0 + i] as usize] as usize;
                     lbuf[dst] = lbuf[dst] - ucol[i];
                 }
             }
@@ -1486,10 +1491,10 @@ fn lu_ll_factor_node<T: Scalar>(
                     );
                 }
                 for jj in 0..ntrail {
-                    let ubase = (gloc[ok[p1 + jj]] - ncol) * ncol;
+                    let ubase = (gloc[ok[p1 + jj] as usize] as usize - ncol) * ncol;
                     let ucol = &uupd[jj * npk..jj * npk + npk];
                     for i in 0..npk {
-                        let dst = ubase + (ok[p0 + i] - first);
+                        let dst = ubase + (ok[p0 + i] as usize - first);
                         ubuf[dst] = ubuf[dst] - ucol[i];
                     }
                 }
@@ -1576,7 +1581,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 }
                 None if piv == T::zero() => {
                     for &g in sched.rows(s) {
-                        gloc[g] = usize::MAX;
+                        gloc[g as usize] = Li::MAX;
                     }
                     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
                     return Err(RslabError::NumericallyRankDeficient);
@@ -1753,7 +1758,7 @@ fn lu_ll_factor_node<T: Scalar>(
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
     }
     for &g in sched.rows(s) {
-        gloc[g] = usize::MAX;
+        gloc[g as usize] = Li::MAX;
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
     // Populate the O(n) index maps for `s` from its (final) `rperm` and the
@@ -1762,7 +1767,7 @@ fn lu_ll_factor_node<T: Scalar>(
     let eoff = emit.e_offset[s];
     for (p, &rp) in rperm[..ncol].iter().enumerate() {
         let g_col = first + p;
-        let g_row = sched.rows(s)[rp];
+        let g_row = sched.rows(s)[rp] as usize;
         // SAFETY: each global index is written by exactly one supernode.
         unsafe {
             emit.e_of_g.set(g_col, eoff + p);

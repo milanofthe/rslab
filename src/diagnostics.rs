@@ -117,14 +117,14 @@ pub(crate) fn estimate_left_looking<'a>(
     nsuper: usize,
     panel_bytes: &dyn Fn(usize) -> u64,
     compact_bytes: &dyn Fn(usize) -> u64,
-    updaters: &dyn Fn(usize) -> &'a [usize],
+    updaters: &dyn Fn(usize) -> &'a [crate::numeric::ll_common::Li],
     value_bytes: usize,
     input_bytes: u64,
 ) -> MemoryEstimate {
     let mut refc = vec![0usize; nsuper];
     for s in 0..nsuper {
         for &k in updaters(s) {
-            refc[k] += 1;
+            refc[k as usize] += 1;
         }
     }
     let panels_all: u64 = (0..nsuper).map(panel_bytes).sum();
@@ -136,6 +136,7 @@ pub(crate) fn estimate_left_looking<'a>(
     for s in 0..nsuper {
         live_panels += panel_bytes(s) as i64;
         for &k in updaters(s) {
+            let k = k as usize;
             refc[k] -= 1;
             if refc[k] == 0 {
                 live_panels -= panel_bytes(k) as i64;
