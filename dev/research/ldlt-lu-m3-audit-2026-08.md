@@ -54,6 +54,16 @@ No retuning of the fixed-config knobs is warranted for Apple Silicon.
 2. Batch small descendant updates that target the same column slab (one
    gather map + one GEMM for several updaters) to lift the small-node
    Gflop/s floor.
+   QUANTIFIED 2026-08-27 (temporary cmod probe, 44^3 helmholtz, per-node
+   cmod wall bucketed by flop class): the sub-100M-flop nodes carry
+   ~3.3 s of the ~24 s total cmod CPU (~14%) at 2.1-3.8 GF/s, so the
+   theoretical ceiling of the lever is ~10% wall. The batch-padding
+   ratio (dense gather rows / touched rows, before the landing-column
+   dilution) measures 2.7x (<1M), 3.3x (<10M), 5.9x (<100M) - a batched
+   GEMM at ~20 GF/s needs pad below ~8x TIMES the column dilution to
+   break even, which these classes do not clear. Shelved: thin upside,
+   real regression risk; revisit only with a fused gather-GEMM kernel
+   that avoids materializing the padded operands.
 3. 32-bit index streams in the LL gather/scatter maps (`gloc`, row sets):
    the KLU sprint measured real wins from halving index traffic.
    MEASURED 2026-08-27 (branch perf/ll-narrow-indices): LlSchedule rows/
