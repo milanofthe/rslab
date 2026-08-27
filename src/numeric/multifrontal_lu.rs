@@ -846,14 +846,9 @@ impl<T: Scalar> LuSolver<T> {
     /// analysis with the adaptive ordering heuristic, the proven default kernel
     /// configuration, and (on large systems) the exact nested-dissection bakeoff.
     pub fn tuned(a: &GeneralCsc<T>) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        crate::numeric::ll_common::tuned(
-            a,
-            a.n,
-            LuSymbolic::analyze,
-            LuSymbolic::analyze_with,
-            |sym| sym.estimate_memory::<T>(),
-            LuSymbolic::symbolic_factor_nnz,
-        )
+        crate::numeric::ll_common::tuned(a, LuSymbolic::analyze_with, |sym: &LuSymbolic| {
+            sym.estimate_memory::<T>()
+        })
     }
 
     /// Per-call diagnostics: measured factor time, fill, thread budget, and the

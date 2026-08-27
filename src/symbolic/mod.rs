@@ -629,18 +629,32 @@ fn metis_seed_race(
         .ok_or(rslab_ordering_core::OrderingError::MalformedInput)
 }
 
-/// Concrete candidates raced by [`OrderingMethod::AutoRace`]. See the
-/// variant docstring for rationale.
-const RACE_CANDIDATES: &[OrderingMethod] = &[
+/// The cheap candidates of the [`OrderingMethod::AutoRace`] ordering race,
+/// always run (each prefix costs a few milliseconds up to mid sizes):
+/// minimum-degree, minimum-fill, and the band/profile reducer (which wins on
+/// banded / structured patterns where the dissection candidates over-separate
+/// and never hurts - it is picked only on the smallest exact factor nnz).
+const RACE_CHEAP: &[OrderingMethod] = &[
     OrderingMethod::Amd,
-    OrderingMethod::MetisND,
-    // Cheap band/profile reducer: wins on banded / structured patterns where the
-    // dissection candidates over-separate. Selected only if its factor_nnz is the
-    // smallest, so it never hurts the race outcome.
+    OrderingMethod::Amf,
     OrderingMethod::Rcm,
 ];
 
-/// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the
+/// Amortization floor for the expensive `MetisND` race candidate: a
+/// multilevel ND ordering costs hundreds of milliseconds at mid sizes, so it
+/// only joins the race when the best cheap candidate's EXACT predicted factor
+/// work is large enough that an ND-class fill win can pay it back (below the
+/// floor the whole numeric factor is sub-second and the ordering time cannot
+/// amortize - the same work-floor principle as the KLU parallel gates), and
+/// above the [`pick_default_method`] size boundary (tiny-n/high-flop shapes
+/// are dense-ish, where dissection has nothing to separate).
+const ND_RACE_MIN_FLOPS: u64 = 5_000_000_000;
+
+fn prefix_flops(px: &SymbolicPrefix) -> u64 {
+    px.col_counts.iter().map(|&c| (c * c) as u64).sum()
+}
+
+/// Race the [`race_candidates`] orderings at symbolic time and return the
 /// `SymbolicFactorization` with the smallest exact scalar factor nnz.
 ///
 /// Implements the [`OrderingMethod::AutoRace`] dispatcher. Feral #144
@@ -661,10 +675,19 @@ fn symbolic_factorize_race(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, RslabError> {
+    use rayon::prelude::*;
+    // Stage 1: the cheap candidates run concurrently (each prefix is itself
+    // mostly sequential, so the race wall is roughly the slowest candidate);
+    // the pick is deterministic - smallest exact factor nnz, candidate order
+    // breaking ties - regardless of completion order.
+    let results: Vec<Result<SymbolicPrefix, RslabError>> = RACE_CHEAP
+        .par_iter()
+        .map(|&cand| symbolic_prefix(matrix, snode_params, cand))
+        .collect();
     let mut best: Option<SymbolicPrefix> = None;
     let mut last_err: Option<RslabError> = None;
-    for &cand in RACE_CANDIDATES {
-        match symbolic_prefix(matrix, snode_params, cand) {
+    for r in results {
+        match r {
             Ok(prefix) => {
                 let is_better = best
                     .as_ref()
@@ -676,6 +699,17 @@ fn symbolic_factorize_race(
             }
             Err(e) => {
                 last_err = Some(e);
+            }
+        }
+    }
+    // Stage 2: the expensive ND candidate, only where its cost can amortize
+    // (see [`ND_RACE_MIN_FLOPS`]).
+    if let Some(champ) = &best {
+        if matrix.n > 10_000 && prefix_flops(champ) >= ND_RACE_MIN_FLOPS {
+            if let Ok(nd) = symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND) {
+                if nd.factor_nnz < champ.factor_nnz {
+                    best = Some(nd);
+                }
             }
         }
     }

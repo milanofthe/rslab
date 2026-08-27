@@ -96,14 +96,9 @@ impl<T: Scalar> LdltSolver<T> {
     ///    [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
     ///    from the calibrated cost model instead of the capped structural default.
     pub fn tuned(a: &CscMatrix<T>) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        crate::numeric::ll_common::tuned(
-            a,
-            a.n,
-            LdltSymbolic::analyze,
-            LdltSymbolic::analyze_with,
-            |sym| sym.estimate_memory::<T>(),
-            LdltSymbolic::symbolic_factor_nnz,
-        )
+        crate::numeric::ll_common::tuned(a, LdltSymbolic::analyze_with, |sym: &LdltSymbolic| {
+            sym.estimate_memory::<T>()
+        })
     }
 
     /// Equilibrate and factor `A` with explicit options - notably
@@ -573,93 +568,56 @@ mod tests {
         CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
     }
 
-    /// The ND bakeoff must never return a pick with worse exact symbolic
-    /// fill or worse predicted flops than the incumbent, on a plain 7-point
-    /// Laplacian rslab's AMD is genuinely competitive (measured tied at 32³),
-    /// so this pins the Pareto guarantee, not an adoption.
+    /// The ordering race must never return a pick with worse exact symbolic
+    /// fill than the plain AMD default (it includes AMD as a candidate and
+    /// selects by exact fill), and the pick must factor + solve correctly.
     #[test]
-    fn nd_bakeoff_pareto_plain_grid() {
+    fn tuned_race_is_pareto_on_plain_grid() {
         let a = grid3d(24); // n = 13824
-        let s_amd = SolverSettings::default();
-        let sym_amd = LdltSymbolic::analyze_with(&a, &s_amd).unwrap();
-        let amd_fill = sym_amd.symbolic_factor_nnz();
-        let amd_flops = sym_amd.estimate_memory::<f64>().factor_flops;
-
-        let (sym_pick, s_pick) = crate::numeric::ll_common::nd_bakeoff(
+        let sym_amd = LdltSymbolic::analyze_with(
             &a,
-            sym_amd,
-            s_amd,
-            &LdltSymbolic::analyze_with,
-            &|sym: &LdltSymbolic| sym.estimate_memory::<f64>(),
-            &LdltSymbolic::symbolic_factor_nnz,
+            &SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::Amd),
         )
         .unwrap();
+        let amd_fill = sym_amd.symbolic_factor_nnz();
 
+        let (sym_pick, s_pick) = LdltSolver::<f64>::tuned(&a).unwrap();
         assert!(
             sym_pick.symbolic_factor_nnz() <= amd_fill,
             "fill regressed: {} > {amd_fill}",
             sym_pick.symbolic_factor_nnz()
         );
-        assert!(
-            sym_pick.estimate_memory::<f64>().factor_flops <= amd_flops,
-            "flops regressed"
-        );
-        // Whatever the pick, it must factor + solve correctly.
         let solver = sym_pick.factor(&a, &s_pick).unwrap();
         let b: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();
         let x = solver.solve(&b).unwrap();
         assert!(residual_inf(&a, &x, &b) < 1e-8);
     }
 
-    /// Direct bakeoff on the edge-element curl-curl pattern (the rapidfem
-    /// case that motivated it: 87k DOFs, ~2e11 AMD flops vs 1.8e10 MetisND):
-    /// nested dissection wins clearly, so the bakeoff must adopt it.
-    #[cfg(feature = "matgen")]
-    #[test]
-    fn nd_bakeoff_adopts_on_curl_curl() {
-        let a = crate::matgen::fem::curl_curl(&[16, 16, 16], 0.8, 0.1); // n = 12288
-        let s_amd = SolverSettings::default();
-        let sym_amd = LdltSymbolic::analyze_with(&a, &s_amd).unwrap();
-        let amd_flops = sym_amd.estimate_memory::<Complex<f64>>().factor_flops;
-
-        let (sym, s) = crate::numeric::ll_common::nd_bakeoff(
-            &a,
-            sym_amd,
-            s_amd,
-            &LdltSymbolic::analyze_with,
-            &|sym: &LdltSymbolic| sym.estimate_memory::<Complex<f64>>(),
-            &LdltSymbolic::symbolic_factor_nnz,
-        )
-        .unwrap();
-        assert_eq!(s.ordering, crate::symbolic::OrderingMethod::MetisND);
-        assert!(
-            (sym.estimate_memory::<Complex<f64>>().factor_flops as f64)
-                < amd_flops as f64 * crate::numeric::ll_common::ND_BAKEOFF_ADOPT_RATIO
-        );
-    }
-
     /// End-to-end guarantee on the heuristic `tuned` for a large curl-curl
-    /// system: the ND bakeoff must realise the nested-dissection-class win
+    /// system: the ordering race must realise the nested-dissection-class win
     /// over the AMD default - this is the regression that cost 10x factor
     /// time in the rapidfem FEM sweep.
     #[cfg(feature = "matgen")]
     #[test]
     fn tuned_finds_nd_class_win_on_curl_curl() {
         let a = crate::matgen::fem::curl_curl(&[22, 22, 22], 0.8, 0.1); // n = 31944
-        let sym_amd = LdltSymbolic::analyze_with(&a, &SolverSettings::default()).unwrap();
-        let amd_flops = sym_amd.estimate_memory::<Complex<f64>>().factor_flops;
+        let sym_amd = LdltSymbolic::analyze_with(
+            &a,
+            &SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::Amd),
+        )
+        .unwrap();
+        let amd_fill = sym_amd.symbolic_factor_nnz();
 
         let (sym, s) = LdltSolver::<Complex<f64>>::tuned(&a).unwrap();
         eprintln!(
-            "curl_curl pick {:?}: fill {} flops {}",
+            "curl_curl pick {:?}: fill {} (amd {})",
             s.ordering,
             sym.symbolic_factor_nnz(),
-            sym.estimate_memory::<Complex<f64>>().factor_flops
+            amd_fill
         );
-        assert_ne!(s.ordering, crate::symbolic::OrderingMethod::Amd);
         assert!(
-            (sym.estimate_memory::<Complex<f64>>().factor_flops as f64)
-                < amd_flops as f64 * crate::numeric::ll_common::ND_BAKEOFF_ADOPT_RATIO
+            (sym.symbolic_factor_nnz() as f64) < amd_fill as f64 * 0.75,
+            "race missed the ND-class fill win"
         );
     }
 
