@@ -443,3 +443,44 @@ impl LlSchedule {
         }
     }
 }
+
+/// The left-looking assembly-forest recursion shared by the LDLT/LU twins:
+/// factor every child subtree concurrently, then this node, then compact and
+/// free every descendant whose last consumer this node was (refcount→0), and
+/// the node itself if nothing above consumes it. `factor_node` and `emit_free`
+/// carry the path-specific kernels; everything else is the shared schedule.
+pub(crate) fn ll_subtree(
+    s: usize,
+    sym: &crate::symbolic::SymbolicFactorization,
+    sched: &LlSchedule,
+    refcount: &[std::sync::atomic::AtomicUsize],
+    factor_node: &(dyn Fn(usize) -> Result<(), RslabError> + Sync),
+    emit_free: &(dyn Fn(usize) + Sync),
+) -> Result<(), RslabError> {
+    use rayon::prelude::*;
+    use std::sync::atomic::Ordering;
+    sym.supernodes[s]
+        .children
+        .par_iter()
+        .map(|&ch| ll_subtree(ch, sym, sched, refcount, factor_node, emit_free))
+        .collect::<Result<Vec<()>, _>>()?;
+    factor_node(s)?;
+    // Disjoint `k`, so the wide top-of-tree free runs in parallel.
+    const FREE_PAR: usize = 64;
+    let free = |k: usize| {
+        if refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
+            emit_free(k);
+        }
+    };
+    if sched.updaters(s).len() >= FREE_PAR {
+        sched.updaters(s).par_iter().for_each(|&k| free(k));
+    } else {
+        for &k in sched.updaters(s) {
+            free(k);
+        }
+    }
+    if refcount[s].load(Ordering::Relaxed) == 0 {
+        emit_free(s);
+    }
+    Ok(())
+}

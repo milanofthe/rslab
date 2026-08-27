@@ -3072,77 +3072,6 @@ fn ll_cdiv_emit<T: Scalar>(
     Ok(())
 }
 
-/// Factor the assembly subtree rooted at `s` with a work-stealing schedule:
-/// children subtrees concurrently, then this node (whose updaters all lie in the
-/// now-factored subtree). The left-looking analogue of the multifrontal driver.
-#[allow(clippy::too_many_arguments)]
-fn ll_factor_subtree<T: Scalar>(
-    s: usize,
-    sym: &SymbolicFactorization,
-    a_perm: &CscMatrix<T>,
-    sched: &LlSchedule,
-    store: &LlStore<T>,
-    emit: &LlEmitLdlt<T>,
-    perturb_floor: Option<f64>,
-    drop_tol: Option<f64>,
-    n_perturbed: &AtomicUsize,
-    ll_active: &AtomicUsize,
-    kt: KernelTuning,
-) -> Result<(), RslabError> {
-    sym.supernodes[s]
-        .children
-        .par_iter()
-        .map(|&ch| {
-            ll_factor_subtree(
-                ch,
-                sym,
-                a_perm,
-                sched,
-                store,
-                emit,
-                perturb_floor,
-                drop_tol,
-                n_perturbed,
-                ll_active,
-                kt,
-            )
-        })
-        .collect::<Result<Vec<()>, _>>()?;
-    ll_factor_node(
-        s,
-        sym,
-        a_perm,
-        sched,
-        store,
-        emit,
-        perturb_floor,
-        n_perturbed,
-        ll_active,
-        kt,
-    )?;
-    // Free each descendant whose last consumer this node was (refcount→0), and `s`
-    // itself if it has no consumers - compacting before releasing the dense panel.
-    // Disjoint `k`, so the wide top-of-tree free runs in parallel.
-    const FREE_PAR: usize = 64;
-    if sched.updaters(s).len() >= FREE_PAR {
-        sched.updaters(s).par_iter().for_each(|&k| {
-            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                ldlt_emit_and_free(k, store, emit, sym, sched, drop_tol);
-            }
-        });
-    } else {
-        for &k in sched.updaters(s) {
-            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                ldlt_emit_and_free(k, store, emit, sym, sched, drop_tol);
-            }
-        }
-    }
-    if emit.refcount[s].load(Ordering::Relaxed) == 0 {
-        ldlt_emit_and_free(s, store, emit, sym, sched, drop_tol);
-    }
-    Ok(())
-}
-
 /// Supernodal **left-looking** LDLᵀ with **Bunch-Kaufman 1×1/2×2 pivoting**. Each
 /// supernode's dense panel is assembled from `A`, updated by every previously
 /// factored descendant (`cmod`: pull the descendant's contribution columns that
@@ -3189,21 +3118,31 @@ fn factor_left_looking<T: Scalar>(
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
     let kt = opts.kernel();
     let ll_active = AtomicUsize::new(0);
+    let factor_node = |s: usize| {
+        ll_factor_node(
+            s,
+            sym,
+            &a_perm,
+            sched,
+            &store,
+            &emit,
+            perturb_floor,
+            &n_perturbed_atomic,
+            &ll_active,
+            kt,
+        )
+    };
+    let emit_free = |k: usize| ldlt_emit_and_free(k, &store, &emit, sym, sched, opts.drop_tol);
     roots
         .par_iter()
         .map(|&r| {
-            ll_factor_subtree(
+            crate::numeric::ll_common::ll_subtree(
                 r,
                 sym,
-                &a_perm,
                 sched,
-                &store,
-                &emit,
-                perturb_floor,
-                opts.drop_tol,
-                &n_perturbed_atomic,
-                &ll_active,
-                kt,
+                &emit.refcount,
+                &factor_node,
+                &emit_free,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;

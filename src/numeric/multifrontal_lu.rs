@@ -1864,79 +1864,6 @@ fn lu_ll_factor_node<T: Scalar>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn lu_ll_factor_subtree<T: Scalar>(
-    s: usize,
-    sym: &SymbolicFactorization,
-    a_perm: &GeneralCsc<T>,
-    a_perm_t: &GeneralCsc<T>,
-    sched: &LlSchedule,
-    store: &LuLlStore<T>,
-    emit: &LlEmit<T>,
-    perturb_floor: Option<f64>,
-    drop_tol: Option<f64>,
-    n_perturbed: &AtomicUsize,
-    ll_active: &AtomicUsize,
-    kt: KernelTuning,
-) -> Result<(), RslabError> {
-    sym.supernodes[s]
-        .children
-        .par_iter()
-        .map(|&ch| {
-            lu_ll_factor_subtree(
-                ch,
-                sym,
-                a_perm,
-                a_perm_t,
-                sched,
-                store,
-                emit,
-                perturb_floor,
-                drop_tol,
-                n_perturbed,
-                ll_active,
-                kt,
-            )
-        })
-        .collect::<Result<Vec<()>, _>>()?;
-    lu_ll_factor_node(
-        s,
-        sym,
-        a_perm,
-        a_perm_t,
-        sched,
-        store,
-        emit,
-        perturb_floor,
-        n_perturbed,
-        ll_active,
-        kt,
-    )?;
-    // `s` has now pulled from every descendant in its update list - for each whose
-    // last consumer this was (refcount→0), compact it and free its dense panel.
-    // `s` itself is freed here iff it has no consumers (root / no fill above).
-    // Each `emit_and_free(k)` touches a disjoint `k`, so for the wide top-of-tree
-    // nodes (where tree parallelism is exhausted) the compaction runs in parallel.
-    const FREE_PAR: usize = 64;
-    if sched.updaters(s).len() >= FREE_PAR {
-        sched.updaters(s).par_iter().for_each(|&k| {
-            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                emit_and_free(k, store, emit, sym, sched, drop_tol);
-            }
-        });
-    } else {
-        for &k in sched.updaters(s) {
-            if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                emit_and_free(k, store, emit, sym, sched, drop_tol);
-            }
-        }
-    }
-    if emit.refcount[s].load(Ordering::Relaxed) == 0 {
-        emit_and_free(s, store, emit, sym, sched, drop_tol);
-    }
-    Ok(())
-}
-
 /// Supernodal left-looking LU producing the same [`LuFactors`] as the
 /// multifrontal path. `a_perm`/`a_perm_t` are the equilibrated permuted matrix
 /// and its transpose; `d_row`/`d_col` the equilibration carried into the result.
@@ -1965,22 +1892,32 @@ fn factor_lu_left_looking<T: Scalar>(
     }
     let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
     let ll_active = AtomicUsize::new(0);
+    let factor_node = |s: usize| {
+        lu_ll_factor_node(
+            s,
+            sym,
+            a_perm,
+            a_perm_t,
+            sched,
+            &store,
+            &emit,
+            perturb_floor,
+            &n_perturbed_atomic,
+            &ll_active,
+            kt,
+        )
+    };
+    let emit_free = |k: usize| emit_and_free(k, &store, &emit, sym, sched, drop_tol);
     roots
         .par_iter()
         .map(|&r| {
-            lu_ll_factor_subtree(
+            crate::numeric::ll_common::ll_subtree(
                 r,
                 sym,
-                a_perm,
-                a_perm_t,
                 sched,
-                &store,
-                &emit,
-                perturb_floor,
-                drop_tol,
-                &n_perturbed_atomic,
-                &ll_active,
-                kt,
+                &emit.refcount,
+                &factor_node,
+                &emit_free,
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
