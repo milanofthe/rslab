@@ -11,11 +11,7 @@
 //! style) for the small dense [`spectral`] family where exact κ is needed.
 //!
 //! The real-valued structural families are generic over [`Scalar`]; the inherently
-//! complex families (Helmholtz, BEM/MoM kernel) produce `Complex<f64>`. The
-//! [`catalog`] is `Complex<f64>` (the solver's primary EM/MoM type) and tags each
-//! entry so benchmarks can sweep e.g. "all SPD small" or "all ill-conditioned".
-
-use num_complex::Complex;
+//! complex families (Helmholtz, BEM/MoM kernel) produce `Complex<f64>`.
 
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -94,109 +90,13 @@ impl Rng {
     }
 }
 
-// --------------------------------------------------------------------------
-// Catalog: tagged, named matrices for benchmark sweeps.
-// --------------------------------------------------------------------------
-
-/// Sparsity / origin structure of a catalog matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Structure {
-    Stencil2D,
-    Stencil3D,
-    Bem,
-    Banded,
-    Arrow,
-    Random,
-    Spectral,
-}
-
-/// Symmetry class - selects the solver path (LDLᵀ vs LU).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Symmetry {
-    /// Real or complex symmetric positive definite.
-    Spd,
-    /// Complex-symmetric (A = Aᵀ, not Hermitian) - the EM-FEM case.
-    ComplexSymmetric,
-    /// Symmetric indefinite (saddle/KKT).
-    SymIndefinite,
-    /// Unsymmetric (MoM/BEM).
-    Unsymmetric,
-}
-
-/// Rough conditioning class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cond {
-    Well,
-    Moderate,
-    Ill,
-}
-
-/// Rough nonzeros-per-row class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Density {
-    Sparse,
-    Medium,
-    Dense,
-}
-
-/// A generated matrix in the form the solver consumes: symmetric matrices as a
-/// lower-triangle [`CscMatrix`] (→ LDLᵀ), unsymmetric as a full [`GeneralCsc`]
-/// (→ LU).
-pub enum Generated {
-    Symmetric(CscMatrix<Complex<f64>>),
-    Unsymmetric(GeneralCsc<Complex<f64>>),
-}
-
-impl Generated {
-    pub fn n(&self) -> usize {
-        match self {
-            Generated::Symmetric(a) => a.n,
-            Generated::Unsymmetric(a) => a.n,
-        }
-    }
-    pub fn nnz(&self) -> usize {
-        match self {
-            Generated::Symmetric(a) => a.values.len(),
-            Generated::Unsymmetric(a) => a.values.len(),
-        }
-    }
-}
-
-/// A catalog entry: a tagged, named, on-demand matrix builder.
-pub struct MatrixSpec {
-    pub name: &'static str,
-    pub structure: Structure,
-    pub symmetry: Symmetry,
-    pub cond: Cond,
-    pub density: Density,
-    /// Approximate dimension (the actual `n` may round to the grid size).
-    pub size: usize,
-    build: fn() -> Generated,
-}
-
-impl MatrixSpec {
-    pub fn build(&self) -> Generated {
-        (self.build)()
-    }
-}
-
-/// The full catalog of named, tagged test matrices. Filter with the iterator
-/// adapters, e.g. `catalog().into_iter().filter(|m| m.cond == Cond::Ill)`.
-pub fn catalog() -> Vec<MatrixSpec> {
-    let mut c = Vec::new();
-    stencil::add_to_catalog(&mut c);
-    bem::add_to_catalog(&mut c);
-    structured::add_to_catalog(&mut c);
-    random::add_to_catalog(&mut c);
-    c
-}
-
 #[cfg(test)]
 mod integration {
     //! Every family must produce matrices the solver actually factors and solves -
     //! the whole point. Small instances, exact factorization, true residual.
     use super::*;
     use crate::{LdltSymbolic, LuSymbolic, SolverSettings};
+    use num_complex::Complex;
 
     type C = Complex<f64>;
 
@@ -392,28 +292,5 @@ mod integration {
         assert!(ld.threads >= 1);
         assert!(ld.estimate.is_some());
         assert_eq!(ld.estimate.unwrap().value_bytes, 16);
-    }
-
-    #[test]
-    fn catalog_is_well_formed() {
-        let cat = catalog();
-        assert!(cat.len() >= 15, "catalog has a useful number of entries");
-        // Names unique.
-        let mut names: Vec<&str> = cat.iter().map(|m| m.name).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), cat.len(), "catalog names are unique");
-        // Every symmetry class is represented.
-        for sym in [
-            Symmetry::Spd,
-            Symmetry::ComplexSymmetric,
-            Symmetry::SymIndefinite,
-            Symmetry::Unsymmetric,
-        ] {
-            assert!(
-                cat.iter().any(|m| m.symmetry == sym),
-                "missing symmetry {sym:?}"
-            );
-        }
     }
 }

@@ -540,17 +540,15 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
 name = "rslab"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "gemm",
  "num-complex",
  "rayon",
  "rslab-amd",
  "rslab-amf",
- "rslab-kahip",
  "rslab-metis",
  "rslab-ordering-core",
- "rslab-scotch",
  "serde",
  "serde_json",
  "sysinfo",
@@ -571,15 +569,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rslab-kahip"
-version = "0.2.2"
-dependencies = [
- "rslab-amd",
- "rslab-metis",
- "rslab-ordering-core",
-]
-
-[[package]]
 name = "rslab-metis"
 version = "0.2.2"
 dependencies = [
@@ -593,21 +582,12 @@ version = "0.2.2"
 
 [[package]]
 name = "rslab-py"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "num-complex",
  "numpy",
  "pyo3",
  "rslab",
-]
-
-[[package]]
-name = "rslab-scotch"
-version = "0.2.2"
-dependencies = [
- "rslab-amd",
- "rslab-metis",
- "rslab-ordering-core",
 ]
 
 [[package]]

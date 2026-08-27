@@ -47,24 +47,6 @@ mod sep_refine;
 #[allow(dead_code, missing_docs)]
 pub mod separator;
 
-/// Crate-internal infrastructure exposed for sibling ordering
-/// crates (notably `rslab-scotch`) that share the multilevel
-/// coarsening, initial-bisection, and FM-refinement plumbing.
-///
-/// **Not part of the stable public API.** No semver guarantees on
-/// signatures inside `internals`; consumers re-export it at their
-/// own risk. This module exists solely so rslab-scotch does not
-/// have to clone the multilevel framework.
-#[doc(hidden)]
-pub mod internals {
-    pub use crate::coarsen;
-    pub use crate::fm_refine;
-    pub use crate::graph;
-    pub use crate::initial_partition;
-    pub use crate::rng;
-    pub use crate::separator;
-}
-
 pub use rslab_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
 /// Tunable parameters for METIS nested-dissection ordering.

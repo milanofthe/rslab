@@ -18,27 +18,11 @@ python benches/head_to_head.py $OUT/h2h_sym.jsonl $OUT/h2h_unsym.jsonl
 echo "[report] Apple-Silicon bench: RSLAB vs Apple Accelerate (needs $OUT/apple_*.jsonl)"
 python benches/apple_silicon.py $OUT
 
-echo "[report] auto-tuner end-to-end (per path: by-size + Pareto cloud)"
-python benches/autotune_plot.py $OUT/pareto_ldlt.jsonl ldlt "LDLt tuner Pareto modes vs default"
-python benches/autotune_plot.py $OUT/pareto_lu.jsonl lu "LU tuner Pareto modes vs default"
-
 echo "[report] thread scaling per solver"
 python benches/agg_thread_scaling_solvers.py $OUT/corpus_threads.jsonl
 
-echo "[report] block GMRES BCGS2 scaling (needs $OUT/block_gmres_bcgs2.jsonl; MGS ref is committed)"
-python benches/block_gmres_plot.py
-
-echo "[report] preconditioner + GMRES trade-off (needs $OUT/precond_gmres.jsonl)"
-python benches/precond_gmres_plot.py
-
-echo "[report] GCRO-DR subspace recycling (needs $OUT/recycle_study.jsonl)"
-python benches/recycle_study_plot.py
-
 echo "[report] block-GMRES within-cycle deflation (needs $OUT/deflation_study.jsonl)"
 python benches/deflation_study_plot.py
-
-echo "[report] adaptive GMRES restart under a memory budget (needs $OUT/adaptive_restart.jsonl)"
-python benches/adaptive_restart_plot.py
 
 echo "[report] memory + runtime breakdown (RSLAB LL/MF)"
 python benches/corpus_breakdown.py $OUT/corpus.jsonl $OUT/corpus_estimate.jsonl

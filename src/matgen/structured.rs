@@ -7,10 +7,7 @@
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
-use super::{Cond, Density, Generated, MatrixSpec, Rng, Structure, Symmetry};
-use num_complex::Complex;
-
-type C = Complex<f64>;
+use super::Rng;
 
 /// Symmetric **banded** SPD matrix: random off-diagonals within `bandwidth`, with
 /// each diagonal set to its row's absolute off-diagonal sum plus `alpha`. Strict
@@ -82,52 +79,6 @@ pub fn arrow<T: Scalar>(n: usize, border: usize, gamma: f64, seed: u64) -> CscMa
     }
     let _ = border;
     super::build_sym(n, &rows, &cols, &vals)
-}
-
-pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
-    fn cx(m: CscMatrix<C>) -> Generated {
-        Generated::Symmetric(m)
-    }
-    // Narrow band (sparse), well-conditioned.
-    c.push(MatrixSpec {
-        name: "banded_narrow",
-        structure: Structure::Banded,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Well,
-        density: Density::Sparse,
-        size: 50_000,
-        build: || cx(banded(50_000, 4, 1.0, 11)),
-    });
-    // Wide band (denser), nearly singular (small alpha ⇒ ill-conditioned).
-    c.push(MatrixSpec {
-        name: "banded_wide_ill",
-        structure: Structure::Banded,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Ill,
-        density: Density::Medium,
-        size: 20_000,
-        build: || cx(banded(20_000, 32, 1e-4, 12)),
-    });
-    // KKT / saddle (symmetric indefinite), moderate border.
-    c.push(MatrixSpec {
-        name: "kkt_arrow",
-        structure: Structure::Arrow,
-        symmetry: Symmetry::SymIndefinite,
-        cond: Cond::Moderate,
-        density: Density::Medium,
-        size: 20_000,
-        build: || cx(arrow(20_000, 64, 1e-2, 13)),
-    });
-    // KKT with a true zero-ish (2,2) block ⇒ strongly indefinite.
-    c.push(MatrixSpec {
-        name: "kkt_saddle",
-        structure: Structure::Arrow,
-        symmetry: Symmetry::SymIndefinite,
-        cond: Cond::Ill,
-        density: Density::Medium,
-        size: 10_000,
-        build: || cx(arrow(10_000, 100, 1e-8, 14)),
-    });
 }
 
 #[cfg(test)]

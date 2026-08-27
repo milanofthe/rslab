@@ -104,6 +104,7 @@ fn frob<T: Scalar>(a: &[T]) -> f64 {
 /// peel off the rank-1 cross `R[:,j*] · R[i*,:] / R[i*,j*]` (Schur step of
 /// Gaussian elimination with full pivoting), and stop when the residual
 /// Frobenius norm falls to `eps · ‖B‖_F`.
+#[cfg(test)]
 pub fn compress_aca<T: Scalar>(
     b: &[T],
     m: usize,
@@ -254,9 +255,13 @@ fn compress_aca_impl<T: Scalar>(
 /// `U(VᵀU)Vᵀ`-style block arithmetic.
 #[derive(Debug, Clone)]
 pub enum Block<T: Scalar> {
-    /// Column-major `rows × cols` dense tile.
+    /// Column-major `rows × cols` dense tile. The shape fields are read only
+    /// by the test-only `storage` accounting; production consumes `data` with
+    /// the extent coming from the partition.
     Dense {
+        #[cfg_attr(not(test), allow(dead_code))]
         rows: usize,
+        #[cfg_attr(not(test), allow(dead_code))]
         cols: usize,
         data: Vec<T>,
     },
@@ -266,6 +271,8 @@ pub enum Block<T: Scalar> {
 
 impl<T: Scalar> Block<T> {
     /// Stored scalar count - `rows·cols` dense, `rank·(rows+cols)` low-rank.
+    // Test-only: the compression tests assert BLR beats dense storage.
+    #[cfg(test)]
     pub fn storage(&self) -> usize {
         match self {
             Block::Dense { rows, cols, .. } => rows * cols,
@@ -335,6 +342,8 @@ impl<T: Scalar> BlrMatrix<T> {
     }
 
     /// Total stored scalars across all tiles - the BLR memory footprint.
+    // Test-only: the compression tests assert BLR beats dense storage.
+    #[cfg(test)]
     pub fn storage(&self) -> usize {
         self.blocks.iter().map(Block::storage).sum()
     }
@@ -444,50 +453,6 @@ impl<T: Scalar> BlrMatrix<T> {
             }
         }
         out
-    }
-}
-
-/// Diagnostic: partition a dense front `f` (`n × n` column-major, of which the
-/// leading `ncol` columns are eliminated) into `b × b` blocks and report how
-/// compressible its strictly-lower-triangle off-diagonal blocks are at several
-/// Frobenius tolerances. This is the empirical BLR-benefit estimate - mean rank
-/// and compressed-vs-dense storage of the off-diagonal blocks that BLR would
-/// represent in low-rank form. Prints to stderr; gated by the caller.
-pub fn probe_front<T: Scalar>(f: &[T], n: usize, ncol: usize, b: usize) {
-    let nb = n.div_ceil(b);
-    for &eps in &[1e-2f64, 1e-4, 1e-8] {
-        let mut dense = 0usize;
-        let mut comp = 0usize;
-        let mut sumrank = 0usize;
-        let mut nblk = 0usize;
-        for jb in 0..nb {
-            let j0 = jb * b;
-            let jn = (j0 + b).min(n);
-            for ib in (jb + 1)..nb {
-                let i0 = ib * b;
-                let im = (i0 + b).min(n);
-                let (bm, bn) = (im - i0, jn - j0);
-                let mut blk = vec![T::zero(); bm * bn];
-                for jj in 0..bn {
-                    for ii in 0..bm {
-                        blk[jj * bm + ii] = f[(j0 + jj) * n + (i0 + ii)];
-                    }
-                }
-                let lr = compress_aca(&blk, bm, bn, eps, bm.min(bn));
-                dense += bm * bn;
-                comp += lr.storage();
-                sumrank += lr.rank;
-                nblk += 1;
-            }
-        }
-        if nblk > 0 {
-            eprintln!(
-                "[BLR_PROBE] n={n} ncol={ncol} b={b} eps={eps:.0e}: off-diag-blocks={nblk} \
-                 mean-rank={:.1}/{b} compressed={:.0}% of dense",
-                sumrank as f64 / nblk as f64,
-                100.0 * comp as f64 / dense as f64,
-            );
-        }
     }
 }
 

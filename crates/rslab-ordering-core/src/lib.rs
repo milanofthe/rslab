@@ -1,7 +1,7 @@
 //! Shared contract types for RSLAB's fill-reducing ordering crates.
 //!
-//! This crate exists so that `rslab-amd`, `rslab-metis`, `rslab-scotch`,
-//! and `rslab-kahip` all accept the same input type and emit the same
+//! This crate exists so that `rslab-amd`, `rslab-amf`, and `rslab-metis`
+//! all accept the same input type and emit the same
 //! stats / error types without a type-conversion layer at their
 //! boundary. The contract itself is documented in
 //! `dev/plans/ordering-crate-contract.md`.
@@ -149,7 +149,7 @@ pub struct OrderingStats {
     /// Predicted non-zeros in L (upper bound if known).
     ///
     /// `None` when the algorithm does not produce an estimate.
-    /// AMD can populate this; METIS / Scotch / KaHIP typically
+    /// AMD can populate this; METIS typically
     /// cannot without a follow-up symbolic pass.
     pub fill_estimate: Option<u64>,
     /// Predicted factorization flops. `None` when not produced.

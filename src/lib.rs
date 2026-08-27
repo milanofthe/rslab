@@ -72,20 +72,14 @@
 // ONLY surface `cargo doc` should show. Every module is therefore `pub(crate)`;
 // the intended-public items are re-exported at the crate root and documented
 // there. The exceptions are modules that in-tree tooling (benches, integration
-// tests, the `bench_sparse` bin, xtask) reaches by their full module path for
+// tests, xtask) reaches by their full module path for
 // internal building blocks that are deliberately NOT part of the embedder API:
 // those stay `pub` but `#[doc(hidden)]`, so they compile as external crates see
 // them yet never appear in the public docs. Each such case is commented.
 // -------------------------------------------------------------------------
 
-/// Structural feature extraction (the "structure analyzer"): distils a matrix +
-/// its symbolic analysis into a compact [`analysis::StructuralFeatures`] vector
-/// for diagnostics and auto-tuning input.
+/// Single-solve thread-count policy from the symbolic analysis.
 pub(crate) mod analysis;
-/// Auto-tuner: predict the knob config minimizing a weighted time/memory score
-/// for a matrix from its [`analysis::StructuralFeatures`], via an embedded MLP
-/// performance model (trained offline on the corpus sweep; pure-Rust inference).
-pub(crate) mod auto_tune;
 /// Monotonic clock shim: std Instant natively, inert on wasm32 (no OS clock).
 pub(crate) mod clock;
 pub(crate) mod dense;
@@ -96,11 +90,11 @@ pub(crate) mod error;
 pub(crate) mod inertia;
 pub(crate) mod io;
 /// Parametrized test-matrix generators (feature `matgen`): PDE stencils, BEM/MoM
-/// kernels, banded/arrow, random + spectral, plus a tagged catalog for benchmarks.
-/// Optional `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
+/// kernels, banded/arrow, random + spectral. Optional `matgen-download` adds a
+/// SuiteSparse / Matrix Market fetcher.
 ///
-/// Not part of the embedder API: `pub` only so the in-tree benches and xtask can
-/// build test matrices; hidden from the public docs.
+/// Not part of the embedder API: `pub` only so the in-tree benches can build
+/// test matrices; hidden from the public docs.
 #[cfg(feature = "matgen")]
 #[doc(hidden)]
 pub mod matgen;
@@ -118,7 +112,7 @@ pub(crate) mod scalar;
 pub(crate) mod scaling;
 pub(crate) mod sparse;
 /// Symbolic analysis internals. Not part of the embedder API beyond the root
-/// re-exports (`OrderingMethod`, `RelaxAmalgamation`, `SymbolicProfileReport`):
+/// re-exports (`OrderingMethod`, `RelaxAmalgamation`):
 /// `pub` because the in-tree tests drive `symbolic::{symbolic_factorize,
 /// column_counts_gnp, ...}` and `symbolic::supernode::OrderingPreprocess` by
 /// path; hidden from public docs.
@@ -136,12 +130,7 @@ pub mod tuning;
 // Flat public API re-exported at crate root - a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
-pub use analysis::{recommend_threads_from, StructuralFeatures, SymbolicShape};
-pub use auto_tune::{
-    apply_profile, default_profile, recommend_settings, recommend_settings_pathed,
-    recommend_settings_vetoed, recommend_with_profile, SolverPath, TunerProfile,
-    DEFAULT_TUNE_WEIGHT,
-};
+pub use analysis::recommend_threads_from;
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::RslabError;
@@ -161,7 +150,6 @@ pub use numeric::multifrontal_ldlt::{
     SolverSettings, Threads, ZeroPivotAction,
 };
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
-pub use numeric::mixed::{MixedInfo, MixedLdltSolver, MixedLuSolver, MixedScalar};
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,
 // plus the raw factor type and free building blocks.
@@ -170,7 +158,6 @@ pub use io::mtx::{
     parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_any,
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
-pub use numeric::condition::{hager_higham_inverse_norm_1, ConditionOperator};
 pub use numeric::iterative::{
     cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_block_fn_mon, gmres_block_mon, gmres_fn,
     gmres_recycled, BlockKrylovResult, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,
@@ -179,15 +166,14 @@ pub use numeric::iterative::{
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
-    solve_lu_transpose, take_blr_cb_stats, take_front_stats, FrontStat, LuFactors, LuSolver,
-    LuSymbolic,
+    solve_lu_transpose, LuFactors, LuSolver, LuSymbolic,
 };
 // KLU-style third direct path (BTF + per-block Gilbert-Peierls): sequential,
 // bit-deterministic, built for circuit-shaped matrices and sweep refactoring.
 pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
-pub use symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicProfileReport};
+pub use symbolic::{OrderingMethod, RelaxAmalgamation};
 
 /// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /
 /// preconditioner. `use rslab::prelude::*;` brings in the matrix type, the

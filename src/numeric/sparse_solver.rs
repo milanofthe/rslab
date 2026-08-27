@@ -23,18 +23,6 @@ use crate::numeric::multifrontal_ldlt::{
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
-/// Floor for the [`LdltSolver::tuned`] nested-dissection bakeoff: below this
-/// predicted factor cost the numeric phase is seconds at most and the extra
-/// symbolic analysis isn't worth scheduling. Above it, a missed ND win on a
-/// 3D-mesh pattern costs 10x the analysis price (measured on 87k-DOF
-/// Nedelec-2 curl-curl: 2e11 flops AMD vs 1.8e10 MetisND).
-pub(crate) const ND_BAKEOFF_MIN_FLOPS: u64 = 5_000_000_000;
-/// Small systems never enter the bakeoff regardless of predicted flops -
-/// dense-ish small matrices can post huge flops without an ND story.
-pub(crate) const ND_BAKEOFF_MIN_N: usize = 10_000;
-/// Adopt ND only on a clear predicted win, not a coin flip.
-pub(crate) const ND_BAKEOFF_ADOPT_RATIO: f64 = 0.75;
-
 /// A factored sparse symmetric matrix, ready to solve against many right-hand
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
 pub struct LdltSolver<T> {
@@ -89,8 +77,7 @@ impl<T: Scalar> LdltSolver<T> {
     /// exact nested-dissection bakeoff on large systems. Hardware-agnostic; if the
     /// one-time install diagnosis has run (feature `tuning`,
     /// [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
-    /// additionally comes from this machine's cached calibration. The optional ML
-    /// tuner is [`factor_auto`](Self::factor_auto).
+    /// additionally comes from this machine's cached calibration.
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, RslabError> {
         let (sym, s) = Self::tuned(a)?;
         sym.factor(a, &s)
@@ -109,156 +96,14 @@ impl<T: Scalar> LdltSolver<T> {
     ///    [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
     ///    from the calibrated cost model instead of the capped structural default.
     pub fn tuned(a: &CscMatrix<T>) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        let sym = LdltSymbolic::analyze(a)?;
-        let s = SolverSettings::default();
-        #[allow(unused_mut)]
-        let (sym, mut s) = if a.n >= ND_BAKEOFF_MIN_N
-            && sym.estimate_memory::<T>().factor_flops >= ND_BAKEOFF_MIN_FLOPS
-        {
-            Self::nd_bakeoff(a, sym, s)?
-        } else {
-            (sym, s)
-        };
-        // Install-diagnosed worker count: only when a calibration cache exists
-        // (written once by `tuning::install_diagnose`); never measures here.
-        #[cfg(feature = "tuning")]
-        if let Some((cores, calib)) = crate::tuning::cached_calibration() {
-            let est = sym.estimate_memory::<T>();
-            let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
-            s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
-        }
-        Ok((sym, s))
-    }
-
-    /// **Optional ML-tuned** factorization at an explicit Pareto `weight` (`1` =
-    /// fastest, `0` = smallest peak memory;
-    /// [`DEFAULT_TUNE_WEIGHT`](crate::auto_tune::DEFAULT_TUNE_WEIGHT) leans toward
-    /// speed). Picks the solver settings from the matrix's structural features via
-    /// the embedded performance model, **guarded**: it only deviates from the
-    /// proven default when a clear, memory-vetoed win is predicted.
-    ///
-    /// This is the opt-in path for tuning to a specific problem class on specific
-    /// hardware - typically with a retrained
-    /// [`TunerProfile`](crate::TunerProfile) (`cargo xtask tune`, applied via
-    /// [`apply_profile`](crate::apply_profile) or `RSLAB_TUNER_PROFILE`). The
-    /// default [`factor`](Self::factor) uses the model-free heuristic
-    /// [`tuned`](Self::tuned) instead.
-    pub fn factor_auto(a: &CscMatrix<T>, weight: f64) -> Result<Self, RslabError> {
-        let (sym, s) = Self::tuned_model(a, weight)?;
-        sym.factor(a, &s)
-    }
-
-    /// The ML tuner's choice for `a` at Pareto `weight`: the symbolic to factor
-    /// with plus the guarded, memory-backstopped [`SolverSettings`]. Runs the
-    /// analysis, the model recommendation, and the deterministic memory backstop
-    /// (exact fill + realistic floor, never more memory than the default). Shared by
-    /// [`factor_auto`](Self::factor_auto) and the benchmark harness so both exercise
-    /// identical logic. See [`tuned`](Self::tuned) for the model-free default.
-    pub fn tuned_model(
-        a: &CscMatrix<T>,
-        weight: f64,
-    ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        let sym = LdltSymbolic::analyze(a)?;
-        let est = sym.estimate_memory::<T>();
-        let feat = crate::StructuralFeatures::from_symmetric(a, &sym);
-        // MF/LL-floor ratio for the veto (the floor is the reliable LL reference).
-        let mf_ll = if est.panel_live_peak_bytes > 0 {
-            est.mf_transient_peak_bytes as f64 / est.panel_live_peak_bytes as f64
-        } else {
-            1.0
-        };
-        let s = crate::auto_tune::recommend_settings_pathed(
-            &feat,
-            weight,
-            mf_ll,
-            crate::auto_tune::SolverPath::Ldlt,
-        );
-        let d = SolverSettings::default();
-        // Hard a-priori memory backstop (never more memory than the default). Fill is
-        // compared via the *exact* symbolic fill (`symbolic_factor_nnz`), not
-        // `MemoryEstimate::factor_nnz`: the latter is a dense-supernode upper bound
-        // that overshoots the real fill non-uniformly across orderings, so comparing
-        // two of them once let a MetisND+high-nemin pick with 2x the real fill slip
-        // through on banded matrices. The realistic transient floor stays under the
-        // default's (MF pick vs LL floor, LL pick floor-vs-floor).
-        let default_fill = sym.symbolic_factor_nnz();
-        let mem_ok =
-            |e: &crate::diagnostics::MemoryEstimate, m: crate::FactorMethod, pick_fill: usize| {
-                let fill_ok = pick_fill as f64 <= default_fill as f64 * 1.02;
-                let flops_ok = e.factor_flops as f64 <= est.factor_flops as f64 * 1.05;
-                if m == crate::FactorMethod::Multifrontal {
-                    fill_ok && flops_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
-                } else {
-                    fill_ok && flops_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
-                }
-            };
-        // Reuse the default analysis unless the tuner changed an analyze-time knob.
-        let (sym, s) = if (s.reorder, s.ordering, s.nemin, s.relax)
-            == (d.reorder, d.ordering, d.nemin, d.relax)
-        {
-            if mem_ok(&est, s.method, default_fill) {
-                (sym, s)
-            } else {
-                (sym, d)
-            }
-        } else {
-            let sym2 = LdltSymbolic::analyze_with(a, &s)?;
-            let est2 = sym2.estimate_memory::<T>();
-            if mem_ok(&est2, s.method, sym2.symbolic_factor_nnz()) {
-                (sym2, s)
-            } else {
-                (sym, d) // memory regression by the estimate -> safe default
-            }
-        };
-        // Large systems: measured nested-dissection bakeoff (see below). The
-        // model's corpus cannot see matrix provenance, and on 3D-mesh
-        // patterns a minimum-degree pick misses ND wins of 10x in factor
-        // time; here the extra analysis is a small fraction of the numeric
-        // factorization it can save.
-        if a.n >= ND_BAKEOFF_MIN_N
-            && sym.estimate_memory::<T>().factor_flops >= ND_BAKEOFF_MIN_FLOPS
-        {
-            return Self::nd_bakeoff(a, sym, s);
-        }
-        Ok((sym, s))
-    }
-
-    /// Re-analyze with [`OrderingMethod::MetisND`] and keep whichever
-    /// ordering the *exact* symbolic quantities favour: ND is adopted only
-    /// on a clear predicted-flops win with no regression in exact fill or
-    /// in the method-relevant transient peak, so the pick is Pareto-safe at
-    /// any tune weight. Deterministic - both candidates are measured on
-    /// this matrix, nothing is modeled.
-    fn nd_bakeoff(
-        a: &CscMatrix<T>,
-        sym: LdltSymbolic,
-        s: SolverSettings,
-    ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        use crate::symbolic::OrderingMethod;
-        if s.ordering == OrderingMethod::MetisND {
-            return Ok((sym, s));
-        }
-        let mut s_nd = s.clone();
-        s_nd.ordering = OrderingMethod::MetisND;
-        let sym_nd = match LdltSymbolic::analyze_with(a, &s_nd) {
-            Ok(x) => x,
-            Err(_) => return Ok((sym, s)), // ND analysis failed -> keep the pick
-        };
-        let est = sym.estimate_memory::<T>();
-        let est_nd = sym_nd.estimate_memory::<T>();
-        let peak = |e: &crate::diagnostics::MemoryEstimate| match s.method {
-            crate::FactorMethod::Multifrontal => e.mf_transient_peak_bytes,
-            _ => e.panel_live_peak_bytes,
-        };
-        let flops_win =
-            (est_nd.factor_flops as f64) < est.factor_flops as f64 * ND_BAKEOFF_ADOPT_RATIO;
-        let fill_ok = sym_nd.symbolic_factor_nnz() <= sym.symbolic_factor_nnz();
-        let mem_ok = peak(&est_nd) <= peak(&est);
-        if flops_win && fill_ok && mem_ok {
-            Ok((sym_nd, s_nd))
-        } else {
-            Ok((sym, s))
-        }
+        crate::numeric::ll_common::tuned(
+            a,
+            a.n,
+            LdltSymbolic::analyze,
+            LdltSymbolic::analyze_with,
+            |sym| sym.estimate_memory::<T>(),
+            LdltSymbolic::symbolic_factor_nnz,
+        )
     }
 
     /// Equilibrate and factor `A` with explicit options - notably
@@ -483,7 +328,7 @@ pub struct LdltSymbolic {
     /// size. The estimate is a pure function of the structure and
     /// `size_of::<T>()`, but computing it rebuilds the supernode row
     /// structures, expensive enough that the `tuned` → `nd_bakeoff` →
-    /// `factor` pipeline used to pay it up to four times per `factor_auto`.
+    /// `factor` pipeline used to pay it several times per factorization.
     est_cache: std::sync::Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
 }
 
@@ -758,7 +603,15 @@ mod tests {
         let amd_fill = sym_amd.symbolic_factor_nnz();
         let amd_flops = sym_amd.estimate_memory::<f64>().factor_flops;
 
-        let (sym_pick, s_pick) = LdltSolver::<f64>::nd_bakeoff(&a, sym_amd, s_amd).unwrap();
+        let (sym_pick, s_pick) = crate::numeric::ll_common::nd_bakeoff(
+            &a,
+            sym_amd,
+            s_amd,
+            &LdltSymbolic::analyze_with,
+            &|sym: &LdltSymbolic| sym.estimate_memory::<f64>(),
+            &LdltSymbolic::symbolic_factor_nnz,
+        )
+        .unwrap();
 
         assert!(
             sym_pick.symbolic_factor_nnz() <= amd_fill,
@@ -787,11 +640,19 @@ mod tests {
         let sym_amd = LdltSymbolic::analyze_with(&a, &s_amd).unwrap();
         let amd_flops = sym_amd.estimate_memory::<Complex<f64>>().factor_flops;
 
-        let (sym, s) = LdltSolver::<Complex<f64>>::nd_bakeoff(&a, sym_amd, s_amd).unwrap();
+        let (sym, s) = crate::numeric::ll_common::nd_bakeoff(
+            &a,
+            sym_amd,
+            s_amd,
+            &LdltSymbolic::analyze_with,
+            &|sym: &LdltSymbolic| sym.estimate_memory::<Complex<f64>>(),
+            &LdltSymbolic::symbolic_factor_nnz,
+        )
+        .unwrap();
         assert_eq!(s.ordering, crate::symbolic::OrderingMethod::MetisND);
         assert!(
             (sym.estimate_memory::<Complex<f64>>().factor_flops as f64)
-                < amd_flops as f64 * ND_BAKEOFF_ADOPT_RATIO
+                < amd_flops as f64 * crate::numeric::ll_common::ND_BAKEOFF_ADOPT_RATIO
         );
     }
 
@@ -816,7 +677,7 @@ mod tests {
         assert_ne!(s.ordering, crate::symbolic::OrderingMethod::Amd);
         assert!(
             (sym.estimate_memory::<Complex<f64>>().factor_flops as f64)
-                < amd_flops as f64 * ND_BAKEOFF_ADOPT_RATIO
+                < amd_flops as f64 * crate::numeric::ll_common::ND_BAKEOFF_ADOPT_RATIO
         );
     }
 

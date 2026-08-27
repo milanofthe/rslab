@@ -45,102 +45,6 @@ use crate::symbolic::{
 use rayon::prelude::*;
 
 use crate::numeric::gemm_tuning::KernelTuning;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-
-// Opt-in cdiv sub-phase profiler (set `RLA_PROFILE=1`): serial BK panel (getf2)
-// vs the deferred Schur update, summed across worker threads. Zero cost when off.
-static PROF_LDLT_GETF2_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_SCHUR_NS: AtomicU64 = AtomicU64::new(0);
-// Left-looking phase profiler (assembly / cmod updates / cdiv panel factor),
-// parity with the LU twin's `[RLA_LL_PROFILE]`.
-static PROF_LDLT_ASM_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_CMOD_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_CDIV_NS: AtomicU64 = AtomicU64::new(0);
-// cmod descendant-distribution: counts/geom-flops split by dispatch path
-// (scalar tiny / serial gemm / parallel gemm), parity with `[RLA_CMOD_DIST]`.
-static PROF_LDLT_CMOD_SCAL_N: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_CMOD_SCAL_F: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_CMOD_GSER_N: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_CMOD_GSER_F: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_CMOD_GPAR_N: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_CMOD_GPAR_F: AtomicU64 = AtomicU64::new(0);
-static PROF_LDLT_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-#[inline]
-fn ldlt_prof_on() -> bool {
-    *PROF_LDLT_FLAG.get_or_init(|| {
-        std::env::var("RLA_PROFILE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
-}
-
-// Wall-clock node-concurrency histogram (`RLA_PROFILE=1`): time integral of the
-// number of `ll_factor_node` calls in flight. `hist_ns[k]` = wall ns with
-// exactly k nodes active (k capped at 16). Separates "the tree does not keep
-// the workers busy" (mass at 1-2) from "per-node work is slow", mutex on node
-// entry/exit only, ~2 lock ops per supernode, zero cost when profiling is off.
-struct LlConcProf {
-    last: crate::clock::Instant,
-    active: usize,
-    hist_ns: [u64; 17],
-}
-static PROF_LDLT_CONC: std::sync::OnceLock<std::sync::Mutex<LlConcProf>> =
-    std::sync::OnceLock::new();
-fn ll_conc_event(enter: bool) {
-    let m = PROF_LDLT_CONC.get_or_init(|| {
-        std::sync::Mutex::new(LlConcProf {
-            last: crate::clock::Instant::now(),
-            active: 0,
-            hist_ns: [0; 17],
-        })
-    });
-    let Ok(mut g) = m.lock() else { return };
-    let now = crate::clock::Instant::now();
-    // First event after a reset: arm the clock without accumulating the
-    // between-factorizations gap as "idle".
-    let fresh = g.active == 0 && g.hist_ns.iter().all(|&x| x == 0);
-    if !fresh {
-        let k = g.active.min(16);
-        g.hist_ns[k] += now.duration_since(g.last).as_nanos() as u64;
-    }
-    g.last = now;
-    g.active = if enter {
-        g.active + 1
-    } else {
-        g.active.saturating_sub(1)
-    };
-}
-
-// Per-node wall profile: the top-K most expensive supernodes with their phase
-// split - names the nodes behind the low-concurrency wall share.
-struct LlNodeCost {
-    wall_ms: f64,
-    asm_ms: f64,
-    cmod_ms: f64,
-    cdiv_ms: f64,
-    nrow: usize,
-    ncol: usize,
-    n_upd: usize,
-    cmod_gflop: f64,
-}
-static PROF_LDLT_NODES: std::sync::OnceLock<std::sync::Mutex<Vec<LlNodeCost>>> =
-    std::sync::OnceLock::new();
-fn ll_node_cost(c: LlNodeCost) {
-    if c.wall_ms < 2.0 {
-        return;
-    }
-    let m = PROF_LDLT_NODES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-    if let Ok(mut v) = m.lock() {
-        v.push(c);
-    }
-}
-/// RAII guard so early `?` returns in `ll_factor_node` still close the interval.
-struct LlConcGuard;
-impl Drop for LlConcGuard {
-    fn drop(&mut self) {
-        ll_conc_event(false);
-    }
-}
 
 /// Always-on (relaxed, ~free) count of `ll_factor_node` calls in flight for
 /// THIS factorization - the fork-dispatch signal: in the separator-chain
@@ -282,16 +186,6 @@ pub enum FactorMethod {
     /// [`preconditioner`]: SolverSettings::preconditioner
     #[default]
     LeftLooking,
-    /// Right-looking supernodal: factor the assembly-tree fronts sequentially in
-    /// postorder, holding **every** front live and pushing each factored front's
-    /// contribution into its parent (no contribution-block frontier free, no
-    /// per-front extract). The classic right-looking schedule - higher transient
-    /// memory (all fronts co-resident) traded for a simple, barrier-free push. The
-    /// numeric factor is equivalent to the other methods; this is an **opt-in**
-    /// method (not auto-selected) for the memory/schedule trade on classes where a
-    /// dense all-fronts residency is acceptable. See Davis 2006, *Direct Methods
-    /// for Sparse Linear Systems*, §4 (left-/right-looking supernodal schedules).
-    RightLooking,
 }
 
 /// Options controlling the generic multifrontal factorization. Defaults give an
@@ -402,7 +296,7 @@ pub enum Threads {
     /// the machine without oversubscription).
     Fixed(usize),
     /// Predict the worker count per-matrix from the structural fingerprint (the
-    /// validated [`recommend_threads`](crate::StructuralFeatures::recommend_threads)
+    /// validated [`recommend_threads_from`](crate::recommend_threads_from)
     /// policy: thin / tiny systems stay low where they would only regress, big
     /// BLAS-3-rich systems use the cores), **capped at `max`** (`0` = all logical
     /// cores). The single-solve default: best throughput without oversubscribing
@@ -1301,23 +1195,7 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Raw base pointer of a panel buffer, smuggled across rayon workers so each
-/// task can write its own **disjoint row range** of a column-major panel. Safe
-/// only because callers partition the rows so no two tasks touch the same cell
-/// (the LU twin's `PanelPtr` pattern).
-#[derive(Clone, Copy)]
-struct LdltPanelPtr<T>(*mut T);
-// SAFETY: the pointer is only dereferenced on disjoint, caller-partitioned cells.
-unsafe impl<T> Send for LdltPanelPtr<T> {}
-unsafe impl<T> Sync for LdltPanelPtr<T> {}
-impl<T> LdltPanelPtr<T> {
-    /// Taking `self` by value forces closures to capture the whole (Send+Sync)
-    /// wrapper rather than disjoint-capturing the bare `*mut T` field.
-    #[inline]
-    fn get(self) -> *mut T {
-        self.0
-    }
-}
+use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -1809,29 +1687,6 @@ fn analyze_with_inner(
     })
 }
 
-/// Postorder (children before parent) over the assembly forest, used by the
-/// right-looking sequential schedule so every child is factored before its parent
-/// consumes its contribution. Iterative to avoid recursion depth on deep trees.
-fn supernode_postorder(sym: &SymbolicFactorization, roots: &[usize]) -> Vec<usize> {
-    let mut order = Vec::with_capacity(sym.supernodes.len());
-    let mut stack: Vec<(usize, usize)> = Vec::new();
-    for &r in roots {
-        stack.push((r, 0));
-        // Pop, then re-push with an advanced child cursor (avoids an in-place
-        // mutable peek): a node is emitted only once all its children are done.
-        while let Some((node, ci)) = stack.pop() {
-            let children = &sym.supernodes[node].children;
-            if ci < children.len() {
-                stack.push((node, ci + 1));
-                stack.push((children[ci], 0));
-            } else {
-                order.push(node);
-            }
-        }
-    }
-    order
-}
-
 /// PARDISO phases 2-3: numeric factorization reusing a [`MultifrontalSymbolic`].
 /// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
 /// from. Honours static pivoting and incomplete-factor dropping via `opts`.
@@ -1949,48 +1804,18 @@ pub fn factor_numeric<T: Scalar>(
     // Shared front-buffer pool (see `FrontPool` in the LU twin): recycles the
     // transient `nrow²` buffers instead of churning the allocator per front.
     let pool = crate::numeric::multifrontal_lu::FrontPool::<T>::new();
-    if opts.method == FactorMethod::RightLooking {
-        // Right-looking schedule: factor supernodes sequentially in postorder,
-        // holding every front live (no contribution-block frontier free), each
-        // pushed into its parent by the shared `factor_one_node` assembly. Same
-        // factor as the other paths; the trade is all-fronts residency for a
-        // simple, barrier-free push (opt-in, not auto-selected).
-        let order = supernode_postorder(sym, &roots);
-        opts.threads
-            .run(stack, recommend, || -> Result<(), RslabError> {
-                for &s in &order {
-                    let nf = {
-                        let mut child_refs: Vec<&NodeFactor<T>> = Vec::new();
-                        for &ch in &sym.supernodes[s].children {
-                            match node_results[ch].as_ref() {
-                                Some(c) => child_refs.push(c),
-                                None => {
-                                    return Err(RslabError::InvalidInput(
-                                        "internal: child not factored before parent".to_string(),
-                                    ))
-                                }
-                            }
-                        }
-                        factor_one_node(s, sym, &a_perm, &child_refs, perturb_floor, &pool, kt)?
-                    };
-                    node_results[s] = Some(nf);
-                }
-                Ok(())
-            })?;
-    } else {
-        let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(stack, recommend, || {
-            roots
-                .par_iter()
-                .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, &pool, kt))
-                .collect::<Result<Vec<_>, _>>()
-        })?;
-        // Scatter the subtree factors into `node_results` (by supernode id) for the
-        // global emit pass, which still walks supernodes in postorder.
-        for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
-            node_results[roots[i]] = Some(own);
-            for (s, nf) in subtree {
-                node_results[s] = Some(nf);
-            }
+    let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(stack, recommend, || {
+        roots
+            .par_iter()
+            .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, &pool, kt))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    // Scatter the subtree factors into `node_results` (by supernode id) for the
+    // global emit pass, which still walks supernodes in postorder.
+    for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
+        node_results[roots[i]] = Some(own);
+        for (s, nf) in subtree {
+            node_results[s] = Some(nf);
         }
     }
 
@@ -2153,94 +1978,28 @@ pub(crate) fn compute_supernode_row_structures(sym: &SymbolicFactorization) -> V
     rs
 }
 
-/// Concurrently-filled store of the left-looking factor panels. Each cell is
-/// written exactly once - by its owning supernode's factorization, which
-/// completes before any ancestor (its only reader) runs, per the subtree
-/// recursion - and concurrent writers touch disjoint indices, so the unsynchronized
-/// interior mutability is sound.
-struct LlStore<T> {
-    panels: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    dvals: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    /// Sub-diagonal D entry of each 2×2 Bunch-Kaufman block (per eliminated
-    /// column, in the panel's pivoted order; zero on 1×1 columns and on the
-    /// second column of a 2×2 block).
-    dsubs: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    /// `true` at the first column of each 2×2 block (pivoted order).
-    twos: Vec<std::cell::UnsafeCell<Vec<bool>>>,
-    /// Local within-panel pivot permutation (length = panel `nrow`, identity on
-    /// the off-diagonal rows `[ncol, nrow)` since pivoting is bounded to the
-    /// fully-summed block). Pivoted index `i` ↔ original local index `lperm[i]`.
-    lperms: Vec<std::cell::UnsafeCell<Vec<usize>>>,
+/// One factored supernode's left-looking payload: the dense panel, the
+/// Bunch-Kaufman D (diagonal + sub-diagonal + 2x2 flags, pivoted order), and
+/// the within-panel pivot permutation (identity on the off-diagonal rows).
+struct LdltSlot<T> {
+    panel: Vec<T>,
+    d: Vec<T>,
+    dsub: Vec<T>,
+    two: Vec<bool>,
+    lperm: Vec<usize>,
 }
-// SAFETY: see the type doc - single-writer-before-readers, disjoint indices.
-unsafe impl<T: Send> Sync for LlStore<T> {}
-
-impl<T: Scalar> LlStore<T> {
-    fn new(nsuper: usize) -> Self {
-        LlStore {
-            panels: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            dvals: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            dsubs: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            twos: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            lperms: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
+impl<T> Default for LdltSlot<T> {
+    fn default() -> Self {
+        LdltSlot {
+            panel: Vec::new(),
+            d: Vec::new(),
+            dsub: Vec::new(),
+            two: Vec::new(),
+            lperm: Vec::new(),
         }
     }
-    /// SAFETY: `k` must be a fully-factored descendant of the current node.
-    unsafe fn panel(&self, k: usize) -> &Vec<T> {
-        &*self.panels[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn dval(&self, k: usize) -> &Vec<T> {
-        &*self.dvals[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn dsub(&self, k: usize) -> &Vec<T> {
-        &*self.dsubs[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn two(&self, k: usize) -> &Vec<bool> {
-        &*self.twos[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn lperm(&self, k: usize) -> &Vec<usize> {
-        &*self.lperms[k].get()
-    }
-    /// SAFETY: only the owner of supernode `s` calls this, exactly once.
-    unsafe fn set(
-        &self,
-        s: usize,
-        panel: Vec<T>,
-        d: Vec<T>,
-        dsub: Vec<T>,
-        two: Vec<bool>,
-        lperm: Vec<usize>,
-    ) {
-        *self.panels[s].get() = panel;
-        *self.dvals[s].get() = d;
-        *self.dsubs[s].get() = dsub;
-        *self.twos[s].get() = two;
-        *self.lperms[s].get() = lperm;
-    }
-    /// Release `k`'s dense panel + D/lperm once it has been compacted.
-    /// SAFETY: `k`'s last consumer is done - no other thread reads its cells.
-    unsafe fn free(&self, k: usize) {
-        *self.panels[k].get() = Vec::new();
-        *self.dvals[k].get() = Vec::new();
-        *self.dsubs[k].get() = Vec::new();
-        *self.twos[k].get() = Vec::new();
-        *self.lperms[k].get() = Vec::new();
-    }
 }
+type LlStore<T> = crate::numeric::ll_common::SlotStore<LdltSlot<T>>;
 
 /// Compact (CSC-fragment) form of one supernode's L factor, produced the moment
 /// its last consumer pulls from it so the dense panel can be freed during
@@ -2338,9 +2097,8 @@ fn ldlt_emit_and_free<T: Scalar>(
     let ncol = sym.supernodes[k].ncol;
     let nrow = rs[k].len();
     // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
-    let panel = unsafe { store.panel(k) };
-    let lperm = unsafe { store.lperm(k) };
-    let t2 = unsafe { store.two(k) };
+    let slot = unsafe { store.get(k) };
+    let (panel, lperm, t2) = (&slot.panel, &slot.lperm, &slot.two);
     let one = T::one();
     let mut cl = CompactL::<T>::default();
     cl.ptr.reserve(ncol + 1);
@@ -2420,14 +2178,6 @@ fn ll_factor_node<T: Scalar>(
     let (first, ncol) = (snode.first_col, snode.ncol);
     let nrow = rs[s].len();
     let n = sym.n;
-    let prof = ldlt_prof_on();
-    let _conc = prof.then(|| {
-        ll_conc_event(true);
-        LlConcGuard
-    });
-    let t_node = prof.then(crate::clock::Instant::now);
-    let mut node_ph_ns = [0u64; 3]; // asm / cmod / cdiv
-    let t_asm = prof.then(crate::clock::Instant::now);
     let mut panel = vec![T::zero(); nrow * ncol];
 
     // Thread-local global→local scratch (held at all-`usize::MAX`).
@@ -2446,11 +2196,6 @@ fn ll_factor_node<T: Scalar>(
             panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
         }
     }
-    if let Some(t) = t_asm {
-        node_ph_ns[0] = t.elapsed().as_nanos() as u64;
-        PROF_LDLT_ASM_NS.fetch_add(node_ph_ns[0], AtomicOrdering::Relaxed);
-    }
-    let t_cmod = prof.then(crate::clock::Instant::now);
     // Pre-pass over the updaters: locate each one's landing range in this
     // panel once ([p0, p1) of its off-diagonal rows) and total the update
     // flops - the dispatch between the column-tiled parallel cmod and the
@@ -2470,18 +2215,6 @@ fn ll_factor_node<T: Scalar>(
         let flop = (nok - p0) * npk * nck;
         cmod_flops += flop;
         spans.push((kk, p0, p1));
-        if prof {
-            if flop < ll_gemm_gate {
-                PROF_LDLT_CMOD_SCAL_N.fetch_add(1, AtomicOrdering::Relaxed);
-                PROF_LDLT_CMOD_SCAL_F.fetch_add(flop as u64, AtomicOrdering::Relaxed);
-            } else if flop >= ll_gemm_par {
-                PROF_LDLT_CMOD_GPAR_N.fetch_add(1, AtomicOrdering::Relaxed);
-                PROF_LDLT_CMOD_GPAR_F.fetch_add(flop as u64, AtomicOrdering::Relaxed);
-            } else {
-                PROF_LDLT_CMOD_GSER_N.fetch_add(1, AtomicOrdering::Relaxed);
-                PROF_LDLT_CMOD_GSER_F.fetch_add(flop as u64, AtomicOrdering::Relaxed);
-            }
-        }
     }
 
     // Column-tiled parallel cmod: partition THIS panel into column slabs
@@ -2553,10 +2286,8 @@ fn ll_factor_node<T: Scalar>(
                     }
                     // SAFETY: `kk` is a factored descendant of `s`, its cells
                     // are written and never mutated again.
-                    let pk = unsafe { store.panel(kk) };
-                    let dk = unsafe { store.dval(kk) };
-                    let dsub_k = unsafe { store.dsub(kk) };
-                    let two_k = unsafe { store.two(kk) };
+                    let slot = unsafe { store.get(kk) };
+                    let (pk, dk, dsub_k, two_k) = (&slot.panel, &slot.d, &slot.dsub, &slot.two);
                     // G = (kk's block rows q0..q1) · D, column-major npk × nck.
                     vd_buf.clear();
                     vd_buf.resize(npk * nck, T::zero());
@@ -2622,13 +2353,12 @@ fn ll_factor_node<T: Scalar>(
         let nok = ok.len();
         // SAFETY: `kk` is a factored descendant of `s` (its update reaches `s`),
         // so its panel/dval cells are written and never mutated again.
-        let pk = unsafe { store.panel(kk) };
-        let dk = unsafe { store.dval(kk) };
+        let slot = unsafe { store.get(kk) };
+        let (pk, dk) = (&slot.panel, &slot.d);
         // Bunch-Kaufman block structure of `kk`'s D (pivoted column order). The
         // cmod `L·D·Lᵀ` is invariant under `kk`'s internal column permutation, so
         // only the block-diagonal `D`-apply has to honor the 2×2 blocks.
-        let dsub_k = unsafe { store.dsub(kk) };
-        let two_k = unsafe { store.two(kk) };
+        let (dsub_k, two_k) = (&slot.dsub, &slot.two);
         let npk = p1 - p0;
         // Gate on the REAL work (rows >= p0); the scalar path already
         // iterates from the target block, so small tails route there.
@@ -2728,10 +2458,6 @@ fn ll_factor_node<T: Scalar>(
             }
         }
     }
-    if let Some(t) = t_cmod {
-        node_ph_ns[1] = t.elapsed().as_nanos() as u64;
-        PROF_LDLT_CMOD_NS.fetch_add(node_ph_ns[1], AtomicOrdering::Relaxed);
-    }
     ll_cdiv_emit(
         s,
         sym,
@@ -2744,10 +2470,6 @@ fn ll_factor_node<T: Scalar>(
         kt,
         panel,
         gloc,
-        t_node,
-        node_ph_ns,
-        cmod_flops,
-        update_list[s].len(),
     )
 }
 
@@ -3019,16 +2741,10 @@ fn ll_cdiv_emit<T: Scalar>(
     kt: KernelTuning,
     mut panel: Vec<T>,
     mut gloc: Vec<usize>,
-    t_node: Option<crate::clock::Instant>,
-    mut node_ph_ns: [u64; 3],
-    cmod_flops: usize,
-    n_upd: usize,
 ) -> Result<(), RslabError> {
     let snode = &sym.supernodes[s];
     let ncol = snode.ncol;
     let nrow = rs[s].len();
-    let prof = ldlt_prof_on();
-    let t_cdiv = prof.then(crate::clock::Instant::now);
     // cdiv: partial **blocked** Bunch-Kaufman LDLᵀ (1×1 and 2×2 pivots), the
     // rectangular `nrow × ncol` analogue of `factor_front`'s panel kernel. The
     // fully-summed columns are factored in panels of width `NB` with pivoting
@@ -3106,11 +2822,6 @@ fn ll_cdiv_emit<T: Scalar>(
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + nb).min(ncol);
-        let t_g = if prof && kb >= done_through {
-            Some(crate::clock::Instant::now())
-        } else {
-            None
-        };
         if kb >= done_through {
             let r = ll_bk_panel_step(
                 &mut panel,
@@ -3138,14 +2849,6 @@ fn ll_cdiv_emit<T: Scalar>(
                 }
             }
         }
-        if let Some(t) = t_g {
-            PROF_LDLT_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-        }
-        let t_s = if prof {
-            Some(crate::clock::Instant::now())
-        } else {
-            None
-        };
         // Deferred panel trailing update: panel[ke.., ke..ncol] −= L21·D·Rᵀ, where
         // L21 = panel rows [ke,nrow) × panel cols [kb,ke) (mt×pw), G = L21·D (block-
         // diagonal D), and R = the first `cw` rows of L21 (the rows that are
@@ -3230,8 +2933,7 @@ fn ll_cdiv_emit<T: Scalar>(
                 let (gbuf_ref, l21_ref, tw_ref) = (&gbuf, &l21buf, &mut tmp_w);
                 let (step_res, ()) = rayon::join(
                     || {
-                        let t_g2 = prof.then(crate::clock::Instant::now);
-                        let r = ll_bk_panel_step(
+                        ll_bk_panel_step(
                             left,
                             nrow,
                             ke,
@@ -3248,12 +2950,7 @@ fn ll_cdiv_emit<T: Scalar>(
                             &mut l2b,
                             &mut deep_swaps_b,
                             &mut mult_snap_b,
-                        );
-                        if let Some(tg) = t_g2 {
-                            PROF_LDLT_GETF2_NS
-                                .fetch_add(tg.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                        }
-                        r
+                        )
                     },
                     || {
                         // SAFETY: distinct allocations; the rhs offset selects
@@ -3335,26 +3032,7 @@ fn ll_cdiv_emit<T: Scalar>(
                 }
             }
         }
-        if let Some(t) = t_s {
-            PROF_LDLT_SCHUR_NS.fetch_add(t.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-        }
         kb = ke;
-    }
-    if let Some(t) = t_cdiv {
-        node_ph_ns[2] = t.elapsed().as_nanos() as u64;
-        PROF_LDLT_CDIV_NS.fetch_add(node_ph_ns[2], AtomicOrdering::Relaxed);
-    }
-    if let Some(t) = t_node {
-        ll_node_cost(LlNodeCost {
-            wall_ms: t.elapsed().as_secs_f64() * 1e3,
-            asm_ms: node_ph_ns[0] as f64 / 1e6,
-            cmod_ms: node_ph_ns[1] as f64 / 1e6,
-            cdiv_ms: node_ph_ns[2] as f64 / 1e6,
-            nrow,
-            ncol,
-            n_upd,
-            cmod_gflop: cmod_flops as f64 / 1e9,
-        });
     }
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
@@ -3423,7 +3101,18 @@ fn ll_cdiv_emit<T: Scalar>(
     emit.inertia_neg.fetch_add(ineg, Ordering::Relaxed);
     emit.inertia_zero.fetch_add(izero, Ordering::Relaxed);
     // SAFETY: this thread owns supernode `s` and writes its cell exactly once.
-    unsafe { store.set(s, panel, d, d_subdiag, two_by_two, lperm) };
+    unsafe {
+        store.set(
+            s,
+            LdltSlot {
+                panel,
+                d,
+                dsub: d_subdiag,
+                two: two_by_two,
+                lperm,
+            },
+        )
+    };
     Ok(())
 }
 
@@ -3607,97 +3296,6 @@ fn factor_left_looking<T: Scalar>(
         .collect::<Result<Vec<()>, _>>()?;
     drop(store); // panels freed incrementally; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
-    if ldlt_prof_on() {
-        let asm = PROF_LDLT_ASM_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
-        let cmod = PROF_LDLT_CMOD_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
-        let cdiv = PROF_LDLT_CDIV_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
-        let tot = (asm + cmod + cdiv).max(1.0);
-        eprintln!(
-            "[RLA_LDLT_LL] CPU-ms  asm {asm:.0} ({:.0}%)  cmod {cmod:.0} ({:.0}%)  cdiv {cdiv:.0} ({:.0}%)",
-            100.0 * asm / tot,
-            100.0 * cmod / tot,
-            100.0 * cdiv / tot,
-        );
-        let sn = PROF_LDLT_CMOD_SCAL_N.swap(0, AtomicOrdering::Relaxed);
-        let sf = PROF_LDLT_CMOD_SCAL_F.swap(0, AtomicOrdering::Relaxed);
-        let rn = PROF_LDLT_CMOD_GSER_N.swap(0, AtomicOrdering::Relaxed);
-        let rf = PROF_LDLT_CMOD_GSER_F.swap(0, AtomicOrdering::Relaxed);
-        let pn = PROF_LDLT_CMOD_GPAR_N.swap(0, AtomicOrdering::Relaxed);
-        let pf = PROF_LDLT_CMOD_GPAR_F.swap(0, AtomicOrdering::Relaxed);
-        let ftot = (sf + rf + pf).max(1) as f64;
-        eprintln!(
-            "[RLA_LDLT_CMOD_DIST] updates  scalar n={sn} ({:.1}% flop)  gemm-ser n={rn} ({:.1}% flop)  gemm-par n={pn} ({:.1}% flop)",
-            100.0 * sf as f64 / ftot,
-            100.0 * rf as f64 / ftot,
-            100.0 * pf as f64 / ftot,
-        );
-        let g = PROF_LDLT_GETF2_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
-        let s = PROF_LDLT_SCHUR_NS.swap(0, AtomicOrdering::Relaxed) as f64 / 1e6;
-        let t = (g + s).max(1.0);
-        eprintln!(
-            "[RLA_LDLT_CDIV] CPU-ms  getf2(BK panel) {g:.0} ({:.0}% ser)  schur(deferred GEMM) {s:.0} ({:.0}% par)",
-            100.0 * g / t,
-            100.0 * s / t,
-        );
-        if let Some(m) = PROF_LDLT_CONC.get() {
-            if let Ok(mut cg) = m.lock() {
-                // Close the last open interval, report, reset for the next run.
-                let now = crate::clock::Instant::now();
-                let k = cg.active.min(16);
-                cg.hist_ns[k] += now.duration_since(cg.last).as_nanos() as u64;
-                cg.last = now;
-                let tot: u64 = cg.hist_ns.iter().sum::<u64>().max(1);
-                let mean: f64 = cg
-                    .hist_ns
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &ns)| k as f64 * ns as f64)
-                    .sum::<f64>()
-                    / tot as f64;
-                let pct = |ns: u64| 100.0 * ns as f64 / tot as f64;
-                let b12 = cg.hist_ns[1] + cg.hist_ns[2];
-                let b34 = cg.hist_ns[3] + cg.hist_ns[4];
-                let b58: u64 = cg.hist_ns[5..=8].iter().sum();
-                let b9: u64 = cg.hist_ns[9..].iter().sum();
-                eprintln!(
-                    "[RLA_LDLT_CONC] mean active nodes {mean:.2}  wall-share: idle {:.0}%  1-2 {:.0}%  3-4 {:.0}%  5-8 {:.0}%  9+ {:.0}%",
-                    pct(cg.hist_ns[0]),
-                    pct(b12),
-                    pct(b34),
-                    pct(b58),
-                    pct(b9),
-                );
-                cg.hist_ns = [0; 17];
-            }
-        }
-        if let Some(m) = PROF_LDLT_NODES.get() {
-            if let Ok(mut v) = m.lock() {
-                v.sort_by(|a, b| b.wall_ms.total_cmp(&a.wall_ms));
-                let top_sum: f64 = v.iter().take(12).map(|c| c.wall_ms).sum();
-                let all_sum: f64 = v.iter().map(|c| c.wall_ms).sum();
-                eprintln!(
-                    "[RLA_LDLT_NODES] {} nodes >2ms, wall sum {all_sum:.0} ms (top-12: {top_sum:.0} ms)",
-                    v.len()
-                );
-                for c in v.iter().take(12) {
-                    eprintln!(
-                        "  node {}x{} upd {:>4}: wall {:>6.1} ms = asm {:>5.1} + cmod {:>6.1} + cdiv {:>6.1}  (cmod {:>5.2} Gflop, {:>5.1} Gflop/s)",
-                        c.nrow,
-                        c.ncol,
-                        c.n_upd,
-                        c.wall_ms,
-                        c.asm_ms,
-                        c.cmod_ms,
-                        c.cdiv_ms,
-                        c.cmod_gflop,
-                        c.cmod_gflop / (c.cmod_ms / 1e3).max(1e-9),
-                    );
-                }
-                v.clear();
-            }
-        }
-    }
-
     // Assemble global L (CSC) by concatenating the per-supernode compact fragments
     // produced (and freed) incrementally during factorization - taken by value and
     // dropped right after appending, so the peak is the growing CSC + one fragment,
@@ -3873,60 +3471,6 @@ mod tests {
             "parallel front subtraction not bit-identical"
         );
         assert_eq!(parallel.d_diag, serial.d_diag);
-    }
-
-    #[test]
-    fn right_looking_matches_multifrontal_and_solves() {
-        // The right-looking schedule reuses the same per-front assembly + emit as
-        // the multifrontal path (only the traversal differs: sequential postorder,
-        // all fronts live), so its factor must be *bit-identical* to multifrontal
-        // and solve correctly (numerically equivalent to left-looking).
-        let m = 12;
-        let n = m * m;
-        let idx = |a: usize, b: usize| a * m + b;
-        let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
-        for a in 0..m {
-            for b in 0..m {
-                let p = idx(a, b);
-                r.push(p);
-                cc.push(p);
-                v.push(6.0_f64);
-                if b + 1 < m {
-                    r.push(idx(a, b + 1));
-                    cc.push(p);
-                    v.push(-1.0);
-                }
-                if a + 1 < m {
-                    r.push(idx(a + 1, b));
-                    cc.push(p);
-                    v.push(-1.0);
-                }
-            }
-        }
-        let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
-        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
-        let mk = |method| {
-            SolverSettings::default()
-                .with_method(method)
-                .with_threads(0)
-        };
-        let mf = factor_sparse_ldlt_with(&a, &mk(FactorMethod::Multifrontal)).unwrap();
-        let rl = factor_sparse_ldlt_with(&a, &mk(FactorMethod::RightLooking)).unwrap();
-        assert_eq!(
-            rl.l_values, mf.l_values,
-            "right-looking L differs from multifrontal"
-        );
-        assert_eq!(
-            rl.l_row_idx, mf.l_row_idx,
-            "right-looking L pattern differs"
-        );
-        assert_eq!(rl.d_diag, mf.d_diag, "right-looking D differs");
-        let x = solve_ldlt(&rl, &b).unwrap();
-        assert!(
-            residual_inf(&a, &x, &b) < 1e-9,
-            "right-looking residual {}",
-            residual_inf(&a, &x, &b)
-        );
     }
 
     #[test]

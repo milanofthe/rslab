@@ -1,21 +1,15 @@
 [workspace]
-members = [".", "xtask", "crates/rslab-ordering-core", "crates/rslab-amd", "crates/rslab-amf", "crates/rslab-metis", "crates/rslab-scotch", "crates/rslab-kahip"]
+members = [".", "xtask", "crates/rslab-ordering-core", "crates/rslab-amd", "crates/rslab-amf", "crates/rslab-metis"]
 # The PyO3 bindings live in `python/` and are built by maturin, not cargo. They
 # depend on `rslab` via path and carry a `cdylib` linking libpython, so they are
 # explicitly excluded from the pure-Rust workspace (FFI lives only in tooling /
 # bindings, never the solver core). Build them with `maturin` from `python/`.
 exclude = ["python"]
-# Root commands (`cargo build`/`test`/`clippy` with no -p/--workspace) operate
-# on the `rslab` package only. `rslab-diagnostics` is a member so it shares the
-# lockfile and `cargo run -p rslab-diagnostics --bin <name>` works, but it is
-# NOT a dependency of `rslab`, so the default build/test set never compiles its
-# ~144 one-off binaries (issue #71). Build them explicitly with
-# `cargo build -p rslab-diagnostics`.
 resolver = "2"
 
 [package]
 name = "rslab"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2021"
 license = "MIT"
 description = "RSLAB - pure-Rust sparse complex/real direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
@@ -88,8 +82,6 @@ rslab-ordering-core = { path = "crates/rslab-ordering-core", version = "0.2" }
 rslab-amd = { path = "crates/rslab-amd", version = "0.2" }
 rslab-amf = { path = "crates/rslab-amf", version = "0.2" }
 rslab-metis = { path = "crates/rslab-metis", version = "0.2" }
-rslab-scotch = { path = "crates/rslab-scotch", version = "0.2" }
-rslab-kahip = { path = "crates/rslab-kahip", version = "0.2" }
 # Optional, only for the `matgen-download` feature (SuiteSparse/Matrix Market
 # fetcher). Pure Rust: ureq+rustls (no OpenSSL), flate2/miniz_oxide, tar.
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
@@ -123,112 +115,9 @@ harness = false
 required-features = ["matgen-download"]
 
 [[bench]]
-name = "catalog"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
 name = "bench_suite"
 harness = false
 required-features = ["matgen"]
-
-[[bench]]
-name = "sweep"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "validate_axes"
-harness = false
-required-features = ["matgen-download"]
-
-[[bench]]
-name = "perf_axes"
-harness = false
-required-features = ["matgen-download"]
-
-[[bench]]
-name = "probe_complex"
-harness = false
-required-features = ["matgen-download"]
-
-[[bench]]
-name = "front_profile"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "phased_reuse"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "leftlook_mem"
-harness = false
-
-[[bench]]
-name = "block_gmres"
-harness = false
-
-[[bench]]
-name = "block_gmres_scaling"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "precond_gmres"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "recycle_study"
-harness = false
-
-[[bench]]
-name = "deflation_study"
-harness = false
-
-[[bench]]
-name = "fgmres_accounting"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "adaptive_restart"
-harness = false
-required-features = ["matgen"]
-
-[[bench]]
-name = "solve_many"
-harness = false
-
-[[bench]]
-name = "precond"
-harness = false
-
-[[bench]]
-name = "mom_loop"
-harness = false
-
-[[bench]]
-name = "mom_factor_probe"
-harness = false
-
-[[bench]]
-name = "lu_warm_probe"
-harness = false
-
-[[bench]]
-name = "mom_diag"
-harness = false
-
-[[bench]]
-name = "gemm_peak"
-harness = false
-
-[[bench]]
-name = "front_mem"
-harness = false
 
 [profile.release]
 debug = true

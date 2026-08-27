@@ -36,7 +36,7 @@ use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Reusable dense front-buffer pool. The multifrontal driver factors thousands
@@ -83,40 +83,6 @@ impl<T: Scalar> FrontPool<T> {
     }
 }
 
-// Opt-in coarse factorization profiler (set `RLA_PROFILE=1`): CPU-nanosecond
-// accumulators for the assembly (scatter + extend-add) vs the per-front LU
-// kernel, summed across all worker threads. Zero overhead when disabled.
-static PROF_ASM_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_FRONT_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_PANEL_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_EXTRACT_NS: AtomicU64 = AtomicU64::new(0);
-// Left-looking phase profiler (assembly / cmod updates / cdiv panel factor).
-static PROF_LL_ASM_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_LL_CMOD_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_LL_CDIV_NS: AtomicU64 = AtomicU64::new(0);
-// cmod descendant-distribution profiler: counts/flops split by path
-// (scalar tiny / serial gemm / parallel gemm) to expose update fragmentation.
-static PROF_CMOD_SCAL_N: AtomicU64 = AtomicU64::new(0);
-static PROF_CMOD_SCAL_F: AtomicU64 = AtomicU64::new(0);
-static PROF_CMOD_GSER_N: AtomicU64 = AtomicU64::new(0);
-static PROF_CMOD_GSER_F: AtomicU64 = AtomicU64::new(0);
-static PROF_CMOD_GPAR_N: AtomicU64 = AtomicU64::new(0);
-static PROF_CMOD_GPAR_F: AtomicU64 = AtomicU64::new(0);
-// cdiv internal sub-phase profiler: serial getf2 panel / serial TRSM / parallel
-// trailing GEMM - to locate the serial fraction inside the dense node factor.
-static PROF_CDIV_GETF2_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_CDIV_TRSM_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_CDIV_GEMM_NS: AtomicU64 = AtomicU64::new(0);
-static PROF_CMOD_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-#[inline]
-fn cmod_prof_on() -> bool {
-    *PROF_CMOD_FLAG.get_or_init(|| {
-        std::env::var("RLA_PROFILE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
-}
-
 /// Always-on (relaxed, ~free) count of `lu_ll_factor_node` calls in flight for
 /// THIS factorization - the fork-dispatch signal, ported from the LDLT twin:
 /// in the separator-chain phase (few active nodes) even a small node's
@@ -126,85 +92,12 @@ fn cmod_prof_on() -> bool {
 /// dependents). Scheduling-only: the dispatch never changes the computed bits
 /// (identical per-entry accumulation order on every path), so a racy counter
 /// read is benign and bit-identity across thread counts holds.
-// Wall-clock node-concurrency histogram (`RLA_PROFILE=1`), ported from the
-// LDLT twin: time integral of the number of `lu_ll_factor_node` calls in
-// flight; `hist_ns[k]` = wall ns with exactly k nodes active (k capped 16).
-struct LuConcProf {
-    last: crate::clock::Instant,
-    active: usize,
-    hist_ns: [u64; 17],
-}
-static PROF_LU_CONC: std::sync::OnceLock<std::sync::Mutex<LuConcProf>> = std::sync::OnceLock::new();
-fn lu_conc_event(enter: bool) {
-    let m = PROF_LU_CONC.get_or_init(|| {
-        std::sync::Mutex::new(LuConcProf {
-            last: crate::clock::Instant::now(),
-            active: 0,
-            hist_ns: [0; 17],
-        })
-    });
-    let Ok(mut g) = m.lock() else { return };
-    let now = crate::clock::Instant::now();
-    let fresh = g.active == 0 && g.hist_ns.iter().all(|&x| x == 0);
-    if !fresh {
-        let k = g.active.min(16);
-        g.hist_ns[k] += now.duration_since(g.last).as_nanos() as u64;
-    }
-    g.last = now;
-    g.active = if enter {
-        g.active + 1
-    } else {
-        g.active.saturating_sub(1)
-    };
-}
-struct LuConcGuard;
-impl Drop for LuConcGuard {
-    fn drop(&mut self) {
-        lu_conc_event(false);
-    }
-}
-
-// Per-node wall profile: the top-K most expensive supernodes with their
-// phase split - names the nodes behind the low-concurrency wall share.
-struct LuNodeCost {
-    wall_ms: f64,
-    cmod_ms: f64,
-    cdiv_ms: f64,
-    nrow: usize,
-    ncol: usize,
-    n_upd: usize,
-    cmod_gflop: f64,
-}
-static PROF_LU_NODES: std::sync::OnceLock<std::sync::Mutex<Vec<LuNodeCost>>> =
-    std::sync::OnceLock::new();
-fn lu_node_cost(c: LuNodeCost) {
-    if c.wall_ms < 2.0 {
-        return;
-    }
-    let m = PROF_LU_NODES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-    if let Ok(mut v) = m.lock() {
-        v.push(c);
-    }
-}
-
 struct LuActiveGuard<'a>(&'a AtomicUsize);
 impl Drop for LuActiveGuard<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
-// Experiment gate: force all left-looking GEMMs serial (no nested rayon), so the
-// node-internal parallelism can be isolated from the tree-level `par_iter`.
-static LL_GEMM_SERIAL_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-#[inline]
-fn ll_gemm_serial() -> bool {
-    *LL_GEMM_SERIAL_FLAG.get_or_init(|| {
-        std::env::var("RLA_GEMM_SERIAL")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
-}
-
 thread_local! {
     /// Per-worker global→front-local index scratch (`usize`, scalar-independent),
     /// reused across every front a thread factors. Held at the all-`usize::MAX`
@@ -270,20 +163,6 @@ impl<T: Scalar> Contribution<T> {
             }
         }
     }
-}
-
-// Aggregate CB-compression accounting (written when CB-BLR is active).
-static CB_DENSE_SCALARS: AtomicU64 = AtomicU64::new(0);
-static CB_BLR_SCALARS: AtomicU64 = AtomicU64::new(0);
-
-/// Read and reset the BLR-CB accounting: `(dense_equiv_scalars, stored_scalars)`
-/// summed over the CBs compressed since the last call - the realized CB-stack
-/// compression ratio. Returns `(0, 0)` when CB compression is disabled.
-pub fn take_blr_cb_stats() -> (u64, u64) {
-    (
-        CB_DENSE_SCALARS.swap(0, Ordering::Relaxed),
-        CB_BLR_SCALARS.swap(0, Ordering::Relaxed),
-    )
 }
 
 /// Per-front unsymmetric partial-factorization output, in elimination order
@@ -417,17 +296,9 @@ fn lu_front<T: Scalar>(
     ncol: usize,
     perturb_floor: Option<f64>,
     blr: BlrMode,
-    profile: bool,
     kt: KernelTuning,
 ) -> Result<(FrontLu<T>, Contribution<T>), RslabError> {
     let n = nrow;
-    // BLR compressibility probe (opt-in `RLA_BLR_PROBE`): on large fronts, report
-    // how low-rank the assembled off-diagonal blocks are - the empirical go/no-go
-    // and rank distribution for the BLR front factorization.
-    if nrow >= 512 && std::env::var("RLA_BLR_PROBE").is_ok() {
-        crate::numeric::blr::probe_front(f, nrow, ncol, 256);
-    }
-    let t_panel = profile.then(crate::clock::Instant::now);
     let mut pivots = vec![T::zero(); ncol];
     let mut n_perturbed = 0usize;
     // Row permutation of the front (partial pivoting interchanges rows). Only
@@ -546,10 +417,6 @@ fn lu_front<T: Scalar>(
         }
         kb = ke;
     }
-    if let Some(t) = t_panel {
-        PROF_PANEL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-    let t_extract = profile.then(crate::clock::Instant::now);
     // Pivots from the factored diagonal of the fully-summed block.
     for k in 0..ncol {
         pivots[k] = f[k * n + k];
@@ -580,9 +447,6 @@ fn lu_front<T: Scalar>(
         cb[c * cnrow..c * cnrow + cnrow].copy_from_slice(&f[base..base + cnrow]);
     }
 
-    if let Some(t) = t_extract {
-        PROF_EXTRACT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
     // Compress large CBs for the stack (BlrMode::ContributionBlocks). The
     // off-diagonal tiles of the frontal Schur complement are low-rank; storing
     // them compressed shrinks the live CB-stack transient. Densified
@@ -593,12 +457,9 @@ fn lu_front<T: Scalar>(
             min_cnrow,
             b,
             adaptive,
-        } if cnrow >= min_cnrow => {
-            let blr = BlrMatrix::from_dense_with(&cb, cnrow, cnrow, b, eps, adaptive);
-            CB_DENSE_SCALARS.fetch_add((cnrow * cnrow) as u64, Ordering::Relaxed);
-            CB_BLR_SCALARS.fetch_add(blr.storage() as u64, Ordering::Relaxed);
-            Contribution::Blr(blr)
-        }
+        } if cnrow >= min_cnrow => Contribution::Blr(BlrMatrix::from_dense_with(
+            &cb, cnrow, cnrow, b, eps, adaptive,
+        )),
         _ => Contribution::Dense(cb),
     };
     Ok((
@@ -627,14 +488,12 @@ fn factor_one_node_lu<T: Scalar>(
     perturb_floor: Option<f64>,
     blr: BlrMode,
     pool: &FrontPool<T>,
-    profile: bool,
     kt: KernelTuning,
 ) -> Result<NodeLu<T>, RslabError> {
     let snode = &sym.supernodes[s];
     let n = sym.n;
     let ncol = snode.ncol;
     let own_last = snode.first_col + ncol;
-    let t_asm = profile.then(crate::clock::Instant::now);
 
     // Front row structure: own columns ++ sorted trailing rows (symmetrized
     // pattern of own columns plus children contribution rows).
@@ -724,14 +583,7 @@ fn factor_one_node_lu<T: Scalar>(
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
 
-    if let Some(t) = t_asm {
-        PROF_ASM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-    let t_front = profile.then(crate::clock::Instant::now);
-    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, blr, profile, kt)?;
-    if let Some(t) = t_front {
-        PROF_FRONT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
+    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, blr, kt)?;
     // `lu_front` has copied L/U/CB out; recycle the front buffer.
     pool.give(fbuf);
     Ok(NodeLu {
@@ -765,26 +617,13 @@ fn factor_subtree<T: Scalar>(
     perturb_floor: Option<f64>,
     blr: BlrMode,
     pool: &FrontPool<T>,
-    profile: bool,
     kt: KernelTuning,
 ) -> Result<SubtreeFactors<T>, RslabError> {
     let children = &sym.supernodes[s].children;
     // Factor the child subtrees concurrently.
     let mut outs: Vec<SubtreeFactors<T>> = children
         .par_iter()
-        .map(|&ch| {
-            factor_subtree(
-                ch,
-                sym,
-                a_perm,
-                a_perm_t,
-                perturb_floor,
-                blr,
-                pool,
-                profile,
-                kt,
-            )
-        })
+        .map(|&ch| factor_subtree(ch, sym, a_perm, a_perm_t, perturb_floor, blr, pool, kt))
         .collect::<Result<Vec<_>, _>>()?;
     // Factor this node from the children's own (subtree-root) factors.
     let nf = {
@@ -798,7 +637,6 @@ fn factor_subtree<T: Scalar>(
             perturb_floor,
             blr,
             pool,
-            profile,
             kt,
         )?
     };
@@ -1070,127 +908,14 @@ impl<T: Scalar> LuSolver<T> {
     /// analysis with the adaptive ordering heuristic, the proven default kernel
     /// configuration, and (on large systems) the exact nested-dissection bakeoff.
     pub fn tuned(a: &GeneralCsc<T>) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        let sym = LuSymbolic::analyze(a)?;
-        let s = SolverSettings::default();
-        #[allow(unused_mut)]
-        let (sym, mut s) = if a.n >= crate::numeric::sparse_solver::ND_BAKEOFF_MIN_N
-            && sym.estimate_memory::<T>().factor_flops
-                >= crate::numeric::sparse_solver::ND_BAKEOFF_MIN_FLOPS
-        {
-            Self::nd_bakeoff(a, sym, s)?
-        } else {
-            (sym, s)
-        };
-        // Install-diagnosed worker count: only when a calibration cache exists
-        // (written once by `tuning::install_diagnose`); never measures here.
-        #[cfg(feature = "tuning")]
-        if let Some((cores, calib)) = crate::tuning::cached_calibration() {
-            let est = sym.estimate_memory::<T>();
-            let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
-            s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
-        }
-        Ok((sym, s))
-    }
-
-    /// Re-analyze with [`OrderingMethod`](crate::symbolic::OrderingMethod)`::MetisND`
-    /// and keep whichever ordering the *exact* symbolic quantities favour - the
-    /// LU mirror of the LDLᵀ bakeoff: ND is adopted only on a clear
-    /// predicted-flops win with no regression in exact fill or in the
-    /// method-relevant transient peak. Deterministic; nothing is modeled.
-    fn nd_bakeoff(
-        a: &GeneralCsc<T>,
-        sym: LuSymbolic,
-        s: SolverSettings,
-    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        use crate::symbolic::OrderingMethod;
-        if s.ordering == OrderingMethod::MetisND {
-            return Ok((sym, s));
-        }
-        let mut s_nd = s.clone();
-        s_nd.ordering = OrderingMethod::MetisND;
-        let sym_nd = match LuSymbolic::analyze_with(a, &s_nd) {
-            Ok(x) => x,
-            Err(_) => return Ok((sym, s)),
-        };
-        let est = sym.estimate_memory::<T>();
-        let est_nd = sym_nd.estimate_memory::<T>();
-        let peak = |e: &crate::diagnostics::MemoryEstimate| match s.method {
-            FactorMethod::Multifrontal => e.mf_transient_peak_bytes,
-            _ => e.panel_live_peak_bytes,
-        };
-        let flops_win = (est_nd.factor_flops as f64)
-            < est.factor_flops as f64 * crate::numeric::sparse_solver::ND_BAKEOFF_ADOPT_RATIO;
-        let fill_ok = sym_nd.symbolic_factor_nnz() <= sym.symbolic_factor_nnz();
-        let mem_ok = peak(&est_nd) <= peak(&est);
-        if flops_win && fill_ok && mem_ok {
-            Ok((sym_nd, s_nd))
-        } else {
-            Ok((sym, s))
-        }
-    }
-
-    /// **Optional ML-tuned** factorization at Pareto `weight` (`1` = fastest, `0` =
-    /// smallest peak memory). Picks the settings from the matrix's structural
-    /// features via the embedded performance model, **guarded** (only deviates from
-    /// the default on a clear, memory-vetoed predicted win). The unsymmetric
-    /// counterpart of [`LdltSolver::factor_auto`](crate::LdltSolver::factor_auto);
-    /// the model-free heuristic default is [`tuned`](Self::tuned), and explicit
-    /// settings go to [`factor`](Self::factor).
-    pub fn factor_auto(a: &GeneralCsc<T>, weight: f64) -> Result<Self, RslabError> {
-        let (sym, s) = Self::tuned_model(a, weight)?;
-        sym.factor(a, &s)
-    }
-
-    /// The ML tuner's choice for `a`: the symbolic + guarded, memory-backstopped
-    /// settings (shared by [`factor_auto`](Self::factor_auto) and the benchmark).
-    /// See [`tuned`](Self::tuned) for the model-free heuristic default.
-    pub fn tuned_model(
-        a: &GeneralCsc<T>,
-        weight: f64,
-    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        let sym = LuSymbolic::analyze(a)?;
-        let est = sym.estimate_memory::<T>();
-        let feat = crate::StructuralFeatures::from_general(a, &sym);
-        let mf_ll = if est.panel_live_peak_bytes > 0 {
-            est.mf_transient_peak_bytes as f64 / est.panel_live_peak_bytes as f64
-        } else {
-            1.0
-        };
-        let s = crate::auto_tune::recommend_settings_pathed(
-            &feat,
-            weight,
-            mf_ll,
-            crate::auto_tune::SolverPath::Lu,
-        );
-        let d = SolverSettings::default();
-        // Fill compared via the *exact* symbolic fill, not the dense-panel
-        // `MemoryEstimate::factor_nnz` (which overshoots ~6-7x non-uniformly across
-        // orderings, so comparing two once could pass a pick with far more real fill).
-        let default_fill = sym.symbolic_factor_nnz();
-        let mem_ok = |e: &crate::diagnostics::MemoryEstimate, m: FactorMethod, pick_fill: usize| {
-            let fill_ok = pick_fill as f64 <= default_fill as f64 * 1.02;
-            let flops_ok = e.factor_flops as f64 <= est.factor_flops as f64 * 1.05;
-            if m == FactorMethod::Multifrontal {
-                fill_ok && flops_ok && e.mf_transient_peak_bytes <= est.panel_live_peak_bytes
-            } else {
-                fill_ok && flops_ok && e.panel_live_peak_bytes <= est.panel_live_peak_bytes
-            }
-        };
-        if (s.reorder, s.ordering, s.nemin, s.relax) == (d.reorder, d.ordering, d.nemin, d.relax) {
-            if mem_ok(&est, s.method, default_fill) {
-                Ok((sym, s))
-            } else {
-                Ok((sym, d))
-            }
-        } else {
-            let sym2 = LuSymbolic::analyze_with(a, &s)?;
-            let est2 = sym2.estimate_memory::<T>();
-            if mem_ok(&est2, s.method, sym2.symbolic_factor_nnz()) {
-                Ok((sym2, s))
-            } else {
-                Ok((sym, d))
-            }
-        }
+        crate::numeric::ll_common::tuned(
+            a,
+            a.n,
+            LuSymbolic::analyze,
+            LuSymbolic::analyze_with,
+            |sym| sym.estimate_memory::<T>(),
+            LuSymbolic::symbolic_factor_nnz,
+        )
     }
 
     /// Per-call diagnostics: measured factor time, fill, thread budget, and the
@@ -1259,46 +984,6 @@ pub fn factor_general_lu<T: Scalar>(
     factor_general_lu_numeric(&LuSymbolic::analyze(a)?, a, opts)
 }
 
-// ===========================================================================
-// ===========================================================================
-// #14 front-growth introspection (opt-in: RSLAB_FRONT_STATS=1)
-//
-// Per-supernode factor extrema collected during the LU, the instrument for
-// localizing element growth that outside-in probes cannot see (a single
-// ordinary-looking row can carry the discharged error of a distant front).
-// Collected into a process-global store (cheap Mutex push, gated) and drained
-// by the caller via [`take_front_stats`]. Column/row indices are in the
-// PERMUTED (post-ordering) numbering of this factorization.
-// ===========================================================================
-
-/// One supernode's factor extrema (permuted numbering).
-#[derive(Clone, Copy, Debug)]
-pub struct FrontStat {
-    pub s: usize,
-    pub first_col: usize,
-    pub ncol: usize,
-    pub nrow: usize,
-    pub min_piv: f64,
-    pub max_l: f64,
-    pub max_u: f64,
-    pub perturbed: usize,
-}
-
-static FRONT_STATS: std::sync::Mutex<Vec<FrontStat>> = std::sync::Mutex::new(Vec::new());
-
-pub(crate) fn front_stats_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RSLAB_FRONT_STATS").as_deref() == Ok("1"))
-}
-
-/// Drain the front stats collected since the last call (empty unless
-/// `RSLAB_FRONT_STATS=1` was set at first factor).
-pub fn take_front_stats() -> Vec<FrontStat> {
-    // Stats collection is best-effort diagnostics: recover the data even if a
-    // panicking factor thread poisoned the mutex.
-    std::mem::take(&mut FRONT_STATS.lock().unwrap_or_else(|p| p.into_inner()))
-}
-
 // Supernodal left-looking LU (FactorMethod::LeftLooking)
 //
 // The unsymmetric twin of the left-looking LDLᵀ path: each supernode keeps two
@@ -1314,36 +999,27 @@ pub fn take_front_stats() -> Vec<FrontStat> {
 // multifrontal v1; matches the equilibrated preconditioner use case.
 // ===========================================================================
 
-/// Concurrently-filled store of the left-looking LU factor panels (`lbuf`,
-/// `ubuf` per supernode). Each cell is written once by its owner before any
-/// ancestor reads it (subtree recursion); concurrent writers are disjoint.
-struct LuLlStore<T> {
-    lbuf: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    ubuf: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    /// Per-node within-front row permutation from partial pivoting: `rperm[i]` is
-    /// the row-structure index (`rs[s]`) physically at panel position `i`.
-    /// Identity on the trailing rows (never interchanged); only read by the emit.
-    rperm: Vec<std::cell::UnsafeCell<Vec<usize>>>,
+/// One factored supernode's left-looking payload: the dense L panel, the U12
+/// rows, and the within-front row permutation from partial pivoting
+/// (`rperm[i]` is the row-structure index physically at panel position `i`;
+/// identity on the trailing rows, only read by the emit).
+struct LuSlot<T> {
+    l: Vec<T>,
+    u: Vec<T>,
+    rperm: Vec<usize>,
 }
-// SAFETY: single-writer-before-readers, disjoint indices (see LDLᵀ `LlStore`).
-unsafe impl<T: Send> Sync for LuLlStore<T> {}
-
-/// Raw base pointer of a panel buffer, smuggled across rayon workers so each task
-/// can write its own **disjoint row range** of a column-major panel. Safe only
-/// because callers partition the rows so no two tasks touch the same cell.
-#[derive(Clone, Copy)]
-struct PanelPtr<T>(*mut T);
-// SAFETY: the pointer is only dereferenced on disjoint, caller-partitioned cells.
-unsafe impl<T> Send for PanelPtr<T> {}
-unsafe impl<T> Sync for PanelPtr<T> {}
-impl<T> PanelPtr<T> {
-    /// Extract the raw pointer. Taking `self` by value forces a closure to capture
-    /// the whole (Send+Sync) wrapper rather than disjoint-capturing the bare field.
-    #[inline]
-    fn get(self) -> *mut T {
-        self.0
+impl<T> Default for LuSlot<T> {
+    fn default() -> Self {
+        LuSlot {
+            l: Vec::new(),
+            u: Vec::new(),
+            rperm: Vec::new(),
+        }
     }
 }
+type LuLlStore<T> = crate::numeric::ll_common::SlotStore<LuSlot<T>>;
+
+use crate::numeric::ll_common::PanelPtr;
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -1383,47 +1059,6 @@ unsafe fn apply_panel_trailing<T: Scalar>(
                 }
             }
         }
-    }
-}
-
-impl<T: Scalar> LuLlStore<T> {
-    fn new(nsuper: usize) -> Self {
-        LuLlStore {
-            lbuf: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            ubuf: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            rperm: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-        }
-    }
-    /// SAFETY: `k` must be a fully-factored descendant of the current node.
-    unsafe fn l(&self, k: usize) -> &Vec<T> {
-        &*self.lbuf[k].get()
-    }
-    /// SAFETY: as [`l`](Self::l).
-    unsafe fn u(&self, k: usize) -> &Vec<T> {
-        &*self.ubuf[k].get()
-    }
-    /// SAFETY: factorization of `k` is complete.
-    unsafe fn rperm(&self, k: usize) -> &Vec<usize> {
-        &*self.rperm[k].get()
-    }
-    /// SAFETY: only the owner of supernode `s` calls this, exactly once.
-    unsafe fn set(&self, s: usize, l: Vec<T>, u: Vec<T>, rperm: Vec<usize>) {
-        *self.lbuf[s].get() = l;
-        *self.ubuf[s].get() = u;
-        *self.rperm[s].get() = rperm;
-    }
-    /// Release the dense panels + `rperm` of `k` once it has been compacted.
-    /// SAFETY: `k`'s last consumer is done - no other thread reads its panels.
-    unsafe fn free(&self, k: usize) {
-        *self.lbuf[k].get() = Vec::new();
-        *self.ubuf[k].get() = Vec::new();
-        *self.rperm[k].get() = Vec::new();
     }
 }
 
@@ -1535,9 +1170,8 @@ fn emit_and_free<T: Scalar>(
     let nrow = rs[k].len();
     let cnrow = nrow - ncol;
     // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
-    let lbuf = unsafe { store.l(k) };
-    let ubuf = unsafe { store.u(k) };
-    let rperm = unsafe { store.rperm(k) };
+    let slot = unsafe { store.get(k) };
+    let (lbuf, ubuf, rperm) = (&slot.l, &slot.u, &slot.rperm);
     let one = T::one();
     let mut cn = CompactNode::<T>::default();
     cn.l_ptr.reserve(ncol + 1);
@@ -1608,21 +1242,7 @@ fn emit_and_free<T: Scalar>(
     // SAFETY: exactly one thread emits `k`; `compact[k]` is written once.
     unsafe { *emit.compact[k].get() = cn };
     // SAFETY: last consumer done - no other thread reads `k`'s panels.
-    if !ll_no_free() {
-        unsafe { store.free(k) };
-    }
-}
-
-// A/B toggle (`RLA_NO_FREE=1`): keep dense panels resident (legacy behaviour) so
-// the live-memory effect of incremental freeing can be measured in isolation.
-static LL_NO_FREE_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-#[inline]
-fn ll_no_free() -> bool {
-    *LL_NO_FREE_FLAG.get_or_init(|| {
-        std::env::var("RLA_NO_FREE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
+    unsafe { store.free(k) };
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1642,12 +1262,6 @@ fn lu_ll_factor_node<T: Scalar>(
 ) -> Result<(), RslabError> {
     ll_active.fetch_add(1, Ordering::Relaxed);
     let _active = LuActiveGuard(ll_active);
-    let prof_node = cmod_prof_on();
-    let _conc = prof_node.then(|| {
-        lu_conc_event(true);
-        LuConcGuard
-    });
-    let t_node = prof_node.then(crate::clock::Instant::now);
     let ll_gemm_gate = kt.scalar_gate;
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
@@ -1666,7 +1280,6 @@ fn lu_ll_factor_node<T: Scalar>(
     for (li, &g) in rs[s].iter().enumerate() {
         gloc[g] = li;
     }
-    let t_asm = crate::clock::Instant::now();
     // Assemble columns of s (full) into lbuf, and the U12 rows into ubuf.
     for p in 0..ncol {
         let c = first + p;
@@ -1683,8 +1296,6 @@ fn lu_ll_factor_node<T: Scalar>(
             }
         }
     }
-    PROF_LL_ASM_NS.fetch_add(t_asm.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    let t_cmod = crate::clock::Instant::now();
     // cmod from every factored descendant. NOTE: cmod-aggregation (K-stacking many
     // descendant updates into one fat GEMM) was measured and rejected - across MoM
     // topologies 91-95 % of cmod flop already runs as large parallel GEMMs, and the
@@ -1711,26 +1322,13 @@ fn lu_ll_factor_node<T: Scalar>(
         let flop = mrows * npk * nck;
         cmod_flops += flop + npk * (nok - p1) * nck;
         spans.push((kk, p0, p1));
-        if cmod_prof_on() {
-            if flop < ll_gemm_gate {
-                PROF_CMOD_SCAL_N.fetch_add(1, Ordering::Relaxed);
-                PROF_CMOD_SCAL_F.fetch_add(flop as u64, Ordering::Relaxed);
-            } else if flop >= ll_gemm_par {
-                PROF_CMOD_GPAR_N.fetch_add(1, Ordering::Relaxed);
-                PROF_CMOD_GPAR_F.fetch_add(flop as u64, Ordering::Relaxed);
-            } else {
-                PROF_CMOD_GSER_N.fetch_add(1, Ordering::Relaxed);
-                PROF_CMOD_GSER_F.fetch_add(flop as u64, Ordering::Relaxed);
-            }
-        }
     }
     // Fork only above real node-local work, or in the chain phase (<= 2 nodes
     // in flight - workers idle, nothing to steal). Below: strictly serial.
     const LU_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
     let fork_gate = LU_CMOD_FORK_MIN_FLOPS.max(ll_gemm_par);
     let chain_phase = ll_active.load(Ordering::Relaxed) <= 2;
-    let forks = !ll_gemm_serial()
-        && (cmod_flops >= fork_gate || (chain_phase && cmod_flops >= ll_gemm_par));
+    let forks = cmod_flops >= fork_gate || (chain_phase && cmod_flops >= ll_gemm_par);
     let tile_w = (ncol / 16).clamp(32, 256);
     let tile_u = (cnrow.max(1) / 16).clamp(32, 256);
     // Deterministic mode pick (the LDLT twin's tiled-cmod note applies
@@ -1740,7 +1338,7 @@ fn lu_ll_factor_node<T: Scalar>(
     // still decides only bit-neutral parallelism (`forks` for the
     // sequential GEMMs, `ll_cdiv_par`). A racy pick broke the bit-identity
     // guarantee; see tests/ll_thread_determinism.rs.
-    let tiled = !ll_gemm_serial() && ncol >= 2 * tile_w && cmod_flops >= fork_gate;
+    let tiled = ncol >= 2 * tile_w && cmod_flops >= fork_gate;
 
     // Column-tiled parallel cmod: disjoint `&mut` slabs of the target
     // buffers; per slab every updater's contribution in updater order with a
@@ -1771,8 +1369,8 @@ fn lu_ll_factor_node<T: Scalar>(
                         continue;
                     }
                     // SAFETY: `kk` is a factored descendant of `s`.
-                    let lk = unsafe { store.l(kk) };
-                    let uk = unsafe { store.u(kk) };
+                    let slot = unsafe { store.get(kk) };
+                    let (lk, uk) = (&slot.l, &slot.u);
                     let mrows = nok - p0;
                     lupd.clear();
                     lupd.resize(mrows * npk, T::zero());
@@ -1837,8 +1435,8 @@ fn lu_ll_factor_node<T: Scalar>(
                             continue;
                         }
                         // SAFETY: `kk` is a factored descendant of `s`.
-                        let lk = unsafe { store.l(kk) };
-                        let uk = unsafe { store.u(kk) };
+                        let slot = unsafe { store.get(kk) };
+                        let (lk, uk) = (&slot.l, &slot.u);
                         uupd.clear();
                         uupd.resize(npk * ntr, T::zero());
                         // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
@@ -1887,8 +1485,8 @@ fn lu_ll_factor_node<T: Scalar>(
         let ok = &rs[kk][nck..];
         let nok = ok.len();
         // SAFETY: `kk` is a factored descendant of `s`.
-        let lk = unsafe { store.l(kk) };
-        let uk = unsafe { store.u(kk) };
+        let slot = unsafe { store.get(kk) };
+        let (lk, uk) = (&slot.l, &slot.u);
         let npk = p1 - p0;
         let mrows = nok - p0; // rows used by the L update (Ok ⊆ rs[s] from here)
         let ntrail = nok - p1;
@@ -1999,9 +1597,6 @@ fn lu_ll_factor_node<T: Scalar>(
             }
         }
     }
-    let cmod_ns = t_cmod.elapsed().as_nanos() as u64;
-    PROF_LL_CMOD_NS.fetch_add(cmod_ns, Ordering::Relaxed);
-    let t_cdiv = crate::clock::Instant::now();
     // cdiv: in-place **blocked** panel LU (1×1 static pivoting), no trailing/CB
     // update. Mirrors the multifrontal `lu_front` getrf - unblocked `getf2` over
     // an NB-wide panel, then the dominant trailing update as a single SIMD GEMM
@@ -2029,17 +1624,11 @@ fn lu_ll_factor_node<T: Scalar>(
     // interchanged, so the contribution rows `Ok` ancestors pull are unaffected
     // and `cmod` needs no permutation awareness.
     let mut rperm: Vec<usize> = (0..nrow).collect();
-    let prof = cmod_prof_on();
     // Pivot reciprocals of the current panel, reused by the parallel trailing apply.
     let mut pinv_blk: Vec<T> = vec![T::zero(); nb_cdiv];
     let mut kb = 0;
     while kb < ncol {
         let ke = (kb + nb_cdiv).min(ncol);
-        let t_g = if prof {
-            Some(crate::clock::Instant::now())
-        } else {
-            None
-        };
         // getf2: factor columns [kb, ke) over the **fully-summed rows [k+1, ncol)**
         // only - the deep trailing rows [ncol, nrow) (never pivot candidates) are
         // lifted off this serial path into the parallel apply below.
@@ -2117,7 +1706,7 @@ fn lu_ll_factor_node<T: Scalar>(
         // full-height getf2 - same per-row op sequence - but the dominant `cnrow`
         // work now runs on all idle workers instead of the serial panel path.
         if cnrow > 0 {
-            let par = !ll_gemm_serial() && cnrow * pw * pw >= ll_cdiv_par;
+            let par = cnrow * pw * pw >= ll_cdiv_par;
             if par {
                 let pp = PanelPtr(lbuf.as_mut_ptr());
                 let nthreads = rayon::current_num_threads().max(1);
@@ -2142,20 +1731,12 @@ fn lu_ll_factor_node<T: Scalar>(
                 };
             }
         }
-        if let Some(t) = t_g {
-            PROF_CDIV_GETF2_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        }
-        let t_t = if prof {
-            Some(crate::clock::Instant::now())
-        } else {
-            None
-        };
         // TRSM: U = L11⁻¹ · (trailing panel columns of lbuf) and the U12 rows.
         // Each trailing column is an independent forward substitution reading
         // only the finished panel columns [kb, ke), so the block parallelizes
         // over disjoint column chunks - bit-identical per-column op order.
         // Profiled at 22% of cdiv CPU when serial (MoM fronts).
-        if !ll_gemm_serial() && (ncol - ke) * pw * pw >= ll_cdiv_par {
+        if (ncol - ke) * pw * pw >= ll_cdiv_par {
             let (head, tail) = lbuf.split_at_mut(ke * nrow);
             tail.par_chunks_mut(nrow).for_each(|col| {
                 for r in (kb + 1)..ke {
@@ -2189,7 +1770,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 col[r] = acc;
             }
         };
-        if !ll_gemm_serial() && cnrow * pw * pw >= ll_cdiv_par {
+        if cnrow * pw * pw >= ll_cdiv_par {
             let lref: &[T] = &lbuf;
             ubuf.par_chunks_mut(ncol).for_each(|col| trsm_u(col, lref));
         } else {
@@ -2197,19 +1778,11 @@ fn lu_ll_factor_node<T: Scalar>(
                 trsm_u(&mut ubuf[t * ncol..t * ncol + ncol], &lbuf);
             }
         }
-        if let Some(t) = t_t {
-            PROF_CDIV_TRSM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        }
-        let t_m = if prof {
-            Some(crate::clock::Instant::now())
-        } else {
-            None
-        };
         // GEMM: lbuf[ke.., ke..ncol] −= L21[ke.., kb..ke] · U[kb..ke, ke..ncol].
         let mt = nrow - ke;
         let nt = ncol - ke;
         if mt > 0 && nt > 0 {
-            let par = if !ll_gemm_serial() && (mt * nt * pw) >= ll_cdiv_par {
+            let par = if (mt * nt * pw) >= ll_cdiv_par {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -2242,7 +1815,7 @@ fn lu_ll_factor_node<T: Scalar>(
         }
         // GEMM: ubuf[ke..ncol, :] −= L[ke..ncol, kb..ke] · U12[kb..ke, :].
         if cnrow > 0 && nt > 0 {
-            let par = if !ll_gemm_serial() && (nt * cnrow * pw) >= ll_cdiv_par {
+            let par = if (nt * cnrow * pw) >= ll_cdiv_par {
                 gemm::Parallelism::Rayon(0)
             } else {
                 gemm::Parallelism::None
@@ -2275,51 +1848,10 @@ fn lu_ll_factor_node<T: Scalar>(
                 );
             }
         }
-        if let Some(t) = t_m {
-            PROF_CDIV_GEMM_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        }
         kb = ke;
-    }
-    let cdiv_ns = t_cdiv.elapsed().as_nanos() as u64;
-    PROF_LL_CDIV_NS.fetch_add(cdiv_ns, Ordering::Relaxed);
-    if let Some(t) = t_node {
-        lu_node_cost(LuNodeCost {
-            wall_ms: t.elapsed().as_secs_f64() * 1e3,
-            cmod_ms: cmod_ns as f64 / 1e6,
-            cdiv_ms: cdiv_ns as f64 / 1e6,
-            nrow,
-            ncol,
-            n_upd: update_list[s].len(),
-            cmod_gflop: cmod_flops as f64 / 1e9,
-        });
     }
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
-    }
-    // #14 front-growth introspection: record this supernode's factor extrema.
-    if front_stats_on() {
-        let mut min_piv = f64::INFINITY;
-        for k in 0..ncol {
-            let m = lbuf[k * nrow + k].magnitude();
-            if m < min_piv {
-                min_piv = m;
-            }
-        }
-        let max_l = lbuf.iter().map(|v| v.magnitude()).fold(0.0f64, f64::max);
-        let max_u = ubuf.iter().map(|v| v.magnitude()).fold(0.0f64, f64::max);
-        FRONT_STATS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(FrontStat {
-                s,
-                first_col: first,
-                ncol,
-                nrow,
-                min_piv,
-                max_l,
-                max_u,
-                perturbed: local_perturbed,
-            });
     }
     for &g in &rs[s] {
         gloc[g] = usize::MAX;
@@ -2341,7 +1873,16 @@ fn lu_ll_factor_node<T: Scalar>(
         }
     }
     // SAFETY: this thread owns `s`, writes its cells exactly once.
-    unsafe { store.set(s, lbuf, ubuf, rperm) };
+    unsafe {
+        store.set(
+            s,
+            LuSlot {
+                l: lbuf,
+                u: ubuf,
+                rperm,
+            },
+        )
+    };
     Ok(())
 }
 
@@ -2456,46 +1997,6 @@ fn factor_lu_left_looking<T: Scalar>(
         }
     }
 
-    // Diagnostic (RLA_PROFILE): simulate the achievable peak panel memory under a
-    // refcount free-schedule (free a panel once its last consumer has pulled it),
-    // in elimination/postorder, vs the current all-panels-resident peak. Decides
-    // whether panel-freeing is worth the concurrent machinery before building it.
-    if cmod_prof_on() {
-        let tb = std::mem::size_of::<T>();
-        let bytes = |k: usize| -> usize {
-            let nc = sym.supernodes[k].ncol;
-            let nr = rs[k].len();
-            (nr * nc + nc * (nr - nc)) * tb
-        };
-        let total: usize = (0..nsuper).map(bytes).sum();
-        let mut refc = vec![0usize; nsuper];
-        for ul in &update_list {
-            for &k in ul {
-                refc[k] += 1;
-            }
-        }
-        let mut live = 0usize;
-        let mut peak = 0usize;
-        for s in 0..nsuper {
-            live += bytes(s);
-            for &k in &update_list[s] {
-                refc[k] -= 1;
-                if refc[k] == 0 {
-                    live -= bytes(k);
-                }
-            }
-            if refc[s] == 0 {
-                live -= bytes(s);
-            }
-            peak = peak.max(live);
-        }
-        eprintln!(
-            "[RLA_LL_MEMSIM] panels: all-resident {:.0}MB  refcount-freed peak {:.0}MB  ({:.2}x reduction)",
-            total as f64 / 1e6,
-            peak as f64 / 1e6,
-            total as f64 / (peak.max(1) as f64),
-        );
-    }
     let store = LuLlStore::<T>::new(nsuper);
     let emit = LlEmit::<T>::new(sym, &update_list);
     let n_perturbed_atomic = AtomicUsize::new(0);
@@ -2529,93 +2030,6 @@ fn factor_lu_left_looking<T: Scalar>(
         .collect::<Result<Vec<()>, _>>()?;
     drop(store); // all panels already freed incrementally; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
-    if std::env::var("RLA_PROFILE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        let asm = PROF_LL_ASM_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        let cmod = PROF_LL_CMOD_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        let cdiv = PROF_LL_CDIV_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        let tot = (asm + cmod + cdiv).max(1.0);
-        eprintln!(
-            "[RLA_LL_PROFILE] CPU-ms  asm {asm:.0} ({:.0}%)  cmod {cmod:.0} ({:.0}%)  cdiv {cdiv:.0} ({:.0}%)",
-            100.0 * asm / tot,
-            100.0 * cmod / tot,
-            100.0 * cdiv / tot,
-        );
-        if let Some(m) = PROF_LU_CONC.get() {
-            if let Ok(mut cg) = m.lock() {
-                let now = crate::clock::Instant::now();
-                let k = cg.active.min(16);
-                cg.hist_ns[k] += now.duration_since(cg.last).as_nanos() as u64;
-                cg.last = now;
-                let tot: u64 = cg.hist_ns.iter().sum::<u64>().max(1);
-                let mean: f64 = cg
-                    .hist_ns
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &ns)| k as f64 * ns as f64)
-                    .sum::<f64>()
-                    / tot as f64;
-                let pct = |ns: u64| 100.0 * ns as f64 / tot as f64;
-                let b12 = cg.hist_ns[1] + cg.hist_ns[2];
-                let b34 = cg.hist_ns[3] + cg.hist_ns[4];
-                let b58: u64 = cg.hist_ns[5..=8].iter().sum();
-                let b9: u64 = cg.hist_ns[9..].iter().sum();
-                eprintln!(
-                    "[RLA_LU_CONC] mean active nodes {mean:.2}  wall-share: idle {:.0}%  1-2 {:.0}%  3-4 {:.0}%  5-8 {:.0}%  9+ {:.0}%",
-                    pct(cg.hist_ns[0]),
-                    pct(b12),
-                    pct(b34),
-                    pct(b58),
-                    pct(b9),
-                );
-                cg.hist_ns = [0; 17];
-            }
-        }
-        if let Some(m) = PROF_LU_NODES.get() {
-            if let Ok(mut v) = m.lock() {
-                v.sort_by(|a, b| b.wall_ms.total_cmp(&a.wall_ms));
-                for c in v.iter().take(8) {
-                    eprintln!(
-                        "  lu node {}x{} upd {:>4}: wall {:>7.1} ms = cmod {:>7.1} + cdiv {:>7.1}  (cmod {:>5.2} Gflop, {:>5.1} Gflop/s)",
-                        c.nrow,
-                        c.ncol,
-                        c.n_upd,
-                        c.wall_ms,
-                        c.cmod_ms,
-                        c.cdiv_ms,
-                        c.cmod_gflop,
-                        c.cmod_gflop / (c.cmod_ms / 1e3).max(1e-9),
-                    );
-                }
-                v.clear();
-            }
-        }
-        let sn = PROF_CMOD_SCAL_N.swap(0, Ordering::Relaxed);
-        let sf = PROF_CMOD_SCAL_F.swap(0, Ordering::Relaxed);
-        let rn = PROF_CMOD_GSER_N.swap(0, Ordering::Relaxed);
-        let rf = PROF_CMOD_GSER_F.swap(0, Ordering::Relaxed);
-        let pn = PROF_CMOD_GPAR_N.swap(0, Ordering::Relaxed);
-        let pf = PROF_CMOD_GPAR_F.swap(0, Ordering::Relaxed);
-        let ftot = (sf + rf + pf).max(1) as f64;
-        eprintln!(
-            "[RLA_CMOD_DIST] updates  scalar n={sn} ({:.1}% flop)  gemm-ser n={rn} ({:.1}% flop)  gemm-par n={pn} ({:.1}% flop)",
-            100.0 * sf as f64 / ftot,
-            100.0 * rf as f64 / ftot,
-            100.0 * pf as f64 / ftot,
-        );
-        let g2 = PROF_CDIV_GETF2_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        let tr = PROF_CDIV_TRSM_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        let gm = PROF_CDIV_GEMM_NS.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        let ct = (g2 + tr + gm).max(1.0);
-        eprintln!(
-            "[RLA_CDIV_SUB] CPU-ms  getf2 {g2:.0} ({:.0}% ser)  trsm {tr:.0} ({:.0}% ser)  gemm {gm:.0} ({:.0}% par)",
-            100.0 * g2 / ct,
-            100.0 * tr / ct,
-            100.0 * gm / ct,
-        );
-    }
 
     // Assemble the global L (CSC) / U (CSR) by concatenating the per-supernode
     // compact fragments produced (and freed) incrementally during factorization.
@@ -2805,14 +2219,6 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         return Ok(fac);
     }
 
-    let profile = std::env::var("RLA_PROFILE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    if profile {
-        PROF_ASM_NS.store(0, Ordering::Relaxed);
-        PROF_FRONT_NS.store(0, Ordering::Relaxed);
-    }
-
     let nsuper = sym.supernodes.len();
     // Roots of the assembly forest: supernodes that are no node's child.
     let mut is_child = vec![false; nsuper];
@@ -2834,19 +2240,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         || {
             roots
                 .par_iter()
-                .map(|&r| {
-                    factor_subtree(
-                        r,
-                        sym,
-                        &a_perm,
-                        &a_perm_t,
-                        perturb_floor,
-                        blr,
-                        &pool,
-                        profile,
-                        kt,
-                    )
-                })
+                .map(|&r| factor_subtree(r, sym, &a_perm, &a_perm_t, perturb_floor, blr, &pool, kt))
                 .collect::<Result<Vec<_>, _>>()
         },
     )?;
@@ -2859,19 +2253,6 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             node_results[s] = Some(nf);
         }
     }
-    if profile {
-        let asm = PROF_ASM_NS.load(Ordering::Relaxed) as f64 / 1e6;
-        let front = PROF_FRONT_NS.load(Ordering::Relaxed) as f64 / 1e6;
-        let panel = PROF_PANEL_NS.load(Ordering::Relaxed) as f64 / 1e6;
-        let extract = PROF_EXTRACT_NS.load(Ordering::Relaxed) as f64 / 1e6;
-        let total = (asm + front).max(1.0);
-        eprintln!(
-            "[RLA_PROFILE] CPU-ms  assembly {asm:.0} ({:.0}%)  front-LU {front:.0} ({:.0}%)  [panel {panel:.0} | extract {extract:.0}]",
-            100.0 * asm / total,
-            100.0 * front / total,
-        );
-    }
-
     let mut nodes: Vec<&NodeLu<T>> = Vec::with_capacity(nsuper);
     for node_opt in &node_results {
         match node_opt {

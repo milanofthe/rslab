@@ -1,6 +1,5 @@
 pub mod column_counts;
 pub mod ldlt_compress;
-pub mod profiler;
 pub mod small_leaf;
 pub mod supernode;
 
@@ -12,7 +11,6 @@ use crate::sparse::csc::{CscMatrix, CscPattern};
 
 pub use column_counts::{column_counts_gnp, total_factor_nnz};
 pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
-pub use profiler::{record_stage, StagePct, StageTiming, SymbolicProfileReport, SymbolicProfiler};
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
 pub use supernode::{
     find_supernodes, pick_amalgamation_strategy, AmalgamationStrategy, OrderingPreprocess,
@@ -55,22 +53,6 @@ pub enum OrderingMethod {
     Amf,
     /// rslab-metis multilevel nested dissection.
     MetisND,
-    /// rslab-scotch nested dissection.
-    ScotchND,
-    /// rslab-kahip flow-based nested dissection.
-    ///
-    /// Includes K1 (Ost-Schulz-Strash 2021 Rule 1, conservative
-    /// termination) preprocessing inside the KaHIP pipeline. Wired
-    /// at `crates/rslab-kahip/src/node_nd.rs`.
-    ///
-    /// **Not selected by `pick_default_method`.** The session 08
-    /// 41-matrix bake-off (`dev/research/ordering-kahip-driver-
-    /// integration.md`) showed `KahipND` ties `MetisND` on fill
-    /// geomean (1.023 vs 1.024 relative to AMD) at 4-6× the per-call
-    /// symbolic-time cost (81s vs 68s vs AMD 14s, total).
-    /// Reachable explicitly via `symbolic_factorize_with_method`
-    /// for callers who want it.
-    KahipND,
     /// Reverse Cuthill-McKee band/profile-reducing ordering
     /// (`rslab-ordering-core`: George-Liu degree-sorted BFS from a
     /// pseudo-peripheral start, reversed; Cuthill & McKee 1969,
@@ -110,7 +92,7 @@ pub enum OrderingMethod {
     Auto,
     /// Race-based dispatcher: runs the cheap symbolic *prefix*
     /// (ordering, postorder, etree, column counts) on each concrete
-    /// candidate in {`Amd`, `MetisND`, `ScotchND`, `KahipND`, `Rcm`}
+    /// candidate in {`Amd`, `MetisND`, `Rcm`}
     /// and finishes (supernode detection, memory plan) only the one
     /// with the smallest exact factor nnz (feral #144 port).
     ///
@@ -183,10 +165,8 @@ pub enum OrderingMethod {
 /// (vs KahipND's 16), aggregate AMF fill is 0.87× AMD vs KahipND's
 /// 0.98×, aggregate AMF time is 0.83× AMD vs KahipND's 0.99×. After
 /// deletion these matrices fall through to `pick_default_method`'s
-/// `n ≤ 10_000 → Amf` rule. KahipND retains 20 strict wins
-/// concentrated on high-avg-deg cases (STEENBRD, HADAMARD, TABLE8),
-/// all sub-22k nnz_L absolute and reachable explicitly via
-/// `OrderingMethod::KahipND` for callers who want them.
+/// `n ≤ 10_000 → Amf` rule. (KahipND itself was removed in the 2026-08
+/// consolidation; the bakeoff evidence stays in dev/research.)
 ///
 /// `pattern` is expected to be the matrix's full-symmetric pattern (the
 /// shape produced by `CscMatrix::symmetric_pattern`); the
@@ -378,7 +358,7 @@ pub struct SymbolicFactorization {
     pub snode_group: Vec<Option<usize>>,
 
     /// Concrete ordering method actually dispatched. Records the
-    /// `OrderingMethod::Auto → AMD/MetisND/ScotchND/KahipND`
+    /// `OrderingMethod::Auto → AMD/AMF/MetisND`
     /// resolution made by `choose_adaptive`. For non-`Auto` callers
     /// this is identical to the requested method.
     pub resolved_method: OrderingMethod,
@@ -392,16 +372,6 @@ pub struct SymbolicFactorization {
     /// `pick_ordering_preprocess`; this field records `None` or
     /// `LdltCompress` after that dispatch.
     pub resolved_preprocess: supernode::OrderingPreprocess,
-
-    /// F3.2: When this factorization was produced by
-    /// [`symbolic_factorize_with_schur`], records the size of the Schur
-    /// tail. The last `n_schur` columns of `perm` correspond to the
-    /// user-supplied `schur_indices` in the supplied order. `None` for
-    /// factorizations produced by [`symbolic_factorize`] or
-    /// [`symbolic_factorize_with_method`]. The numeric phase reads this
-    /// to enforce the per-front NPIV ≤ NASS − NVSCHUR stopping rule
-    /// (F3.2b).
-    pub is_schur_tail: Option<usize>,
 }
 
 /// Size-only base ordering rule from cheap matrix dimensions (no pattern
@@ -544,7 +514,7 @@ pub fn symbolic_factorize(
 }
 
 /// Convert an owned-`usize` `CscPattern` into the contract's borrowed-`i32`
-/// shape used by `rslab-metis` / `rslab-scotch`. Returns buffers the
+/// shape used by `rslab-metis`. Returns buffers the
 /// caller must keep alive for the lifetime of the produced `CscPattern<'_>`.
 fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), RslabError> {
     let col_ptr: Result<Vec<i32>, _> = pattern.col_ptr.iter().map(|&x| i32::try_from(x)).collect();
@@ -574,25 +544,11 @@ fn run_external_ordering(
     // upstream by `symbolic_factorize_with_method` against the
     // original matrix's pattern, before any preprocessing.
     debug_assert_ne!(method, OrderingMethod::Auto);
-    // `actual` diverges from `method` only when ScotchND silently
-    // falls back to amd_leaf for every recursion (issue #3): the
-    // returned permutation is bit-identical to AMD's, so the
-    // `resolved_method` field must report Amd, not ScotchND.
-    let mut actual = method;
+    let actual = method;
     let perm_i32 = match method {
         OrderingMethod::Amd => rslab_amd::amd_order(&pat),
         OrderingMethod::Amf => rslab_amf::amf_order(&pat),
         OrderingMethod::MetisND => rslab_metis::metis_order(&pat),
-        OrderingMethod::ScotchND => {
-            let opts = rslab_scotch::ScotchOptions::default();
-            rslab_scotch::scotch_order_full(&pat, &opts).map(|(perm, _, sstats)| {
-                if sstats.n_separator_vertices == 0 {
-                    actual = OrderingMethod::Amd;
-                }
-                perm
-            })
-        }
-        OrderingMethod::KahipND => rslab_kahip::kahip_order(&pat),
         OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
@@ -630,8 +586,6 @@ fn run_external_ordering(
 const RACE_CANDIDATES: &[OrderingMethod] = &[
     OrderingMethod::Amd,
     OrderingMethod::MetisND,
-    OrderingMethod::ScotchND,
-    OrderingMethod::KahipND,
     // Cheap band/profile reducer: wins on banded / structured patterns where the
     // dissection candidates over-separate. Selected only if its factor_nnz is the
     // smallest, so it never hurts the race outcome.
@@ -662,21 +616,7 @@ fn symbolic_factorize_race(
     let mut best: Option<SymbolicPrefix> = None;
     let mut last_err: Option<RslabError> = None;
     for &cand in RACE_CANDIDATES {
-        // S7: when a symbolic profiler is attached, give each candidate its
-        // own fresh profiler instead of letting all RACE_CANDIDATES append
-        // into the caller's shared one (which inflated every pct_of_total).
-        // The winner's profiler travels inside its prefix's
-        // `effective_params`, collects the finish stages too, and is copied
-        // into the caller's shared profiler at the end.
-        let cand_prof = snode_params
-            .symbolic_profiler
-            .as_ref()
-            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new())));
-        let cand_params = SupernodeParams {
-            symbolic_profiler: cand_prof,
-            ..snode_params.clone()
-        };
-        match symbolic_prefix(matrix, &cand_params, cand) {
+        match symbolic_prefix(matrix, snode_params, cand) {
             Ok(prefix) => {
                 let is_better = best
                     .as_ref()
@@ -696,17 +636,7 @@ fn symbolic_factorize_race(
             RslabError::InvalidInput("AutoRace: no candidates available".to_string())
         }));
     };
-    let win_prof = winner.effective_params.symbolic_profiler.clone();
-    let sym = symbolic_finish(winner)?;
-    // Copy the winning candidate's stage timings (prefix + finish) into the
-    // caller's shared profiler so `report()` reflects one run, not all
-    // candidates concatenated.
-    if let (Some(shared), Some(win)) = (snode_params.symbolic_profiler.as_ref(), win_prof) {
-        if let (Ok(mut p), Ok(w)) = (shared.lock(), win.lock()) {
-            *p = w.clone();
-        }
-    }
-    Ok(sym)
+    symbolic_finish(winner)
 }
 
 /// Like [`symbolic_factorize`] but lets the caller pick the
@@ -748,11 +678,7 @@ struct SymbolicPrefix {
     /// Params with `AmalgamationStrategy::Auto` resolved to a concrete
     /// strategy (Phase 2.13a resolution happens in the prefix; the finish
     /// and the recorded `resolved_amalgamation` must see the same pick).
-    /// Carries the per-candidate profiler used by both halves.
     effective_params: SupernodeParams,
-    /// Prefix wall time (µs) when profiling, else 0; the finish adds its
-    /// own elapsed time so `set_total` reflects prefix + finish.
-    prefix_us: u64,
 }
 
 /// Ceiling on the fill inflation `OrderingPreprocess::Auto` accepts from
@@ -780,47 +706,25 @@ fn symbolic_prefix(
     snode_params: &SupernodeParams,
     method: OrderingMethod,
 ) -> Result<SymbolicPrefix, RslabError> {
-    let prof = snode_params.symbolic_profiler.as_ref();
-    // Dispatch-level clock: the returned prefix's `prefix_us` must cover
-    // everything recorded into the caller's profiler up to the finish
-    // (the preprocess pick and, on the verify path, BOTH variant runs) -
-    // else the report's stage sum can exceed its total.
-    let t_dispatch = prof.map(|_| crate::clock::Instant::now());
-    let t_pick = prof.map(|_| crate::clock::Instant::now());
     let resolved_preprocess = match snode_params.preprocess {
         OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
         other => other,
     };
-    if let Some(t) = t_pick {
-        record_stage(prof, "pick_preprocess", t);
-    }
     let verify = matches!(snode_params.preprocess, OrderingPreprocess::Auto)
         && matches!(resolved_preprocess, OrderingPreprocess::LdltCompress);
     if !verify {
-        let mut px = symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess)?;
-        if let Some(t) = t_dispatch {
-            px.prefix_us = t.elapsed().as_micros() as u64;
-        }
-        return Ok(px);
+        return symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess);
     }
     // Verify the predicate's LdltCompress pick against the `None` baseline.
-    // Each variant gets its own fresh profiler (the S7 rule: never let two
-    // pipeline runs append into one stage list); the chosen prefix carries
-    // its profiler onward in `effective_params`, so the finish and any
-    // outer race copy exactly one run's stages.
     let variant_params = |pre: OrderingPreprocess| SupernodeParams {
         preprocess: pre,
-        symbolic_profiler: snode_params
-            .symbolic_profiler
-            .as_ref()
-            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new()))),
         ..snode_params.clone()
     };
     let p_none = variant_params(OrderingPreprocess::None);
     let none = symbolic_prefix_with(matrix, &p_none, method, OrderingPreprocess::None);
     let p_comp = variant_params(OrderingPreprocess::LdltCompress);
     let comp = symbolic_prefix_with(matrix, &p_comp, method, OrderingPreprocess::LdltCompress);
-    let mut winner = match (none, comp) {
+    let winner = match (none, comp) {
         (Ok(none), Ok(comp)) => {
             let limit = (none.factor_nnz as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
             if (comp.factor_nnz as f64) <= limit {
@@ -834,25 +738,6 @@ fn symbolic_prefix(
         (Err(_), Ok(comp)) => comp,
         (Err(e), Err(_)) => return Err(e),
     };
-    // Adopt the winner's stages into the caller's profiler and point the
-    // prefix back at it, so the finish stages and `set_total` land where
-    // the caller looks. The loser's stages are dropped (S7: one run's
-    // stage list, never two concatenated).
-    if let Some(shared) = snode_params.symbolic_profiler.as_ref() {
-        if let Some(win) = winner.effective_params.symbolic_profiler.as_ref() {
-            if let (Ok(mut sp), Ok(wp)) = (shared.lock(), win.lock()) {
-                for st in wp.stages() {
-                    sp.record(st.name, st.us);
-                }
-            }
-        }
-        winner.effective_params.symbolic_profiler = snode_params.symbolic_profiler.clone();
-    }
-    if let Some(t) = t_dispatch {
-        // Both variants' wall time counts: the loser's run is real dispatch
-        // cost and surfaces as report overhead, never as stages > total.
-        winner.prefix_us = t.elapsed().as_micros() as u64;
-    }
     Ok(winner)
 }
 
@@ -865,13 +750,6 @@ fn symbolic_prefix_with(
     resolved_preprocess: OrderingPreprocess,
 ) -> Result<SymbolicPrefix, RslabError> {
     let n = matrix.n;
-
-    // Phase 2.13b per-stage profiler. Every timer is `Some` only when
-    // `snode_params.symbolic_profiler.is_some()`; the `None` path
-    // does no `Instant::now()` calls. See
-    // `dev/research/phase-2.13b-symbolic-profiler.md`.
-    let prof = snode_params.symbolic_profiler.as_ref();
-    let t_total = prof.map(|_| crate::clock::Instant::now());
 
     // β refactor: scaling is no longer computed here. It moved to
     // `factorize_multifrontal` so that `SymbolicFactorization`
@@ -891,11 +769,7 @@ fn symbolic_prefix_with(
     // length `n` before handing it to the rest of the pipeline. See
     // `src/symbolic/ldlt_compress.rs` and
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
-    let t_sym = prof.map(|_| crate::clock::Instant::now());
     let full_pattern = matrix.symmetric_pattern();
-    if let Some(t) = t_sym {
-        record_stage(prof, "symmetric_pattern", t);
-    }
 
     // Resolve `OrderingMethod::Auto` against the original matrix's
     // pattern *before* preprocessing. If we resolved against the
@@ -917,11 +791,7 @@ fn symbolic_prefix_with(
     // actual `run_external_ordering` call so every path records exactly one
     // `ordering` stage.
     let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), RslabError> {
-        let t_ord = prof.map(|_| crate::clock::Instant::now());
         let r = run_external_ordering(pat, method)?;
-        if let Some(t) = t_ord {
-            record_stage(prof, "ordering", t);
-        }
         Ok(r)
     };
     let (amd_perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {
@@ -936,29 +806,17 @@ fn symbolic_prefix_with(
             // matching carries no value information (see the
             // `scaling::Mc64Cache` note); the retired `cached_mc64` field
             // that promised that reuse was unwireable dead weight.
-            let t_pre = prof.map(|_| crate::clock::Instant::now());
             let cache = crate::scaling::compute_mc64_cache(matrix)?;
             let map = build_supermap(&cache.perm);
-            if let Some(t) = t_pre {
-                record_stage(prof, "ldlt_compress", t);
-            }
             if map.n_super() == n {
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
                 record_ordering(&full_pattern)?
             } else {
-                let t_cmp = prof.map(|_| crate::clock::Instant::now());
                 let cpat = compress_pattern(&full_pattern, &map);
-                if let Some(t) = t_cmp {
-                    record_stage(prof, "compress_pattern", t);
-                }
                 let (super_perm, resolved) = record_ordering(&cpat)?;
-                let t_exp = prof.map(|_| crate::clock::Instant::now());
                 let expanded = expand_permutation(&super_perm, &map);
-                if let Some(t) = t_exp {
-                    record_stage(prof, "expand_perm", t);
-                }
                 (expanded, resolved)
             }
         }
@@ -969,47 +827,27 @@ fn symbolic_prefix_with(
     // The local name `amd_*` is kept from the AMD-only era to minimise the
     // diff; semantically these are now "ordering output" and "permuted
     // pattern from that ordering", regardless of method.
-    let t_perm1 = prof.map(|_| crate::clock::Instant::now());
     let amd_pattern = permute_pattern(&full_pattern, &amd_perm);
-    if let Some(t) = t_perm1 {
-        record_stage(prof, "permute1", t);
-    }
-    let t_etree0 = prof.map(|_| crate::clock::Instant::now());
     let amd_etree = EliminationTree::from_pattern(&amd_pattern);
-    if let Some(t) = t_etree0 {
-        record_stage(prof, "etree_initial", t);
-    }
 
     // Step 3: Postorder the etree (CHOLMOD-style composition).
     // Without this step, supernode amalgamation merges columns whose indices
     // are not consecutive in the column numbering, and downstream code that
     // assumes `first_col..first_col+ncol` is the eliminated set silently
     // factors the wrong columns. See dev/research/postorder-pipeline.md.
-    let t_post = prof.map(|_| crate::clock::Instant::now());
     let (post, post_inv) = postorder(&amd_etree);
-    if let Some(t) = t_post {
-        record_stage(prof, "postorder", t);
-    }
 
     // Step 4: Compose AMD perm with the postorder.
     //   final_perm[k] = amd_perm[post[k]]
     // The composition maps postorder position k to the original column.
-    let t_compose = prof.map(|_| crate::clock::Instant::now());
     let perm: Vec<usize> = post.iter().map(|&p| amd_perm[p]).collect();
     let mut perm_inv = vec![0usize; n];
     for (new, &old) in perm.iter().enumerate() {
         perm_inv[old] = new;
     }
-    if let Some(t) = t_compose {
-        record_stage(prof, "perm_compose", t);
-    }
 
     // Step 5: Re-permute the matrix on the composed permutation.
-    let t_perm2 = prof.map(|_| crate::clock::Instant::now());
     let permuted_pattern = permute_pattern(&full_pattern, &perm);
-    if let Some(t) = t_perm2 {
-        record_stage(prof, "permute2", t);
-    }
 
     // Step 5b: Build the final elimination tree by renumbering `amd_etree`
     // through the postorder. Postorder is a topological relabeling of the
@@ -1019,7 +857,6 @@ fn symbolic_prefix_with(
     // final etree in O(n) instead of re-running `from_pattern` at
     // O(nnz · α(n)). A 3-run bench shows ~3% small-frontal p90 improvement
     // over the old two-from_pattern approach.
-    let t_relabel = prof.map(|_| crate::clock::Instant::now());
     let final_parent: Vec<Option<usize>> = (0..n)
         .map(|new| {
             let old_amd = post[new];
@@ -1030,20 +867,13 @@ fn symbolic_prefix_with(
         parent: final_parent,
         n,
     };
-    if let Some(t) = t_relabel {
-        record_stage(prof, "etree_relabel", t);
-    }
 
     // Step 6: Column counts on the final pattern + etree.
     // Phase 2.5.1 switched this from the O(n²) elimination simulation
     // (still available as `column_counts`) to Gilbert-Ng-Peyton at
     // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
     // KKT matrices - see `dev/validation/phase-2.5.1-*`.
-    let t_cc = prof.map(|_| crate::clock::Instant::now());
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
-    if let Some(t) = t_cc {
-        record_stage(prof, "col_counts", t);
-    }
 
     // Phase 2.12: optional SSIDS-style merge-biased postorder.
     // Predict desired merges using only the etree + column counts,
@@ -1078,7 +908,6 @@ fn symbolic_prefix_with(
     }
     let snode_params: &SupernodeParams = &effective_params;
 
-    let t_renumber = prof.map(|_| crate::clock::Instant::now());
     if matches!(
         snode_params.amalgamation_strategy,
         supernode::AmalgamationStrategy::Renumber
@@ -1112,11 +941,7 @@ fn symbolic_prefix_with(
             col_counts = new_col_counts;
         }
     }
-    if let Some(t) = t_renumber {
-        record_stage(prof, "renumber", t);
-    }
     let factor_nnz = total_factor_nnz(&col_counts);
-    let prefix_us = t_total.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
     Ok(SymbolicPrefix {
         n,
         perm,
@@ -1128,7 +953,6 @@ fn symbolic_prefix_with(
         resolved_method,
         resolved_preprocess,
         effective_params,
-        prefix_us,
     })
 }
 
@@ -1147,14 +971,10 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
         resolved_method,
         resolved_preprocess,
         effective_params,
-        prefix_us,
     } = prefix;
     let snode_params: &SupernodeParams = &effective_params;
-    let prof = snode_params.symbolic_profiler.as_ref();
-    let t_finish = prof.map(|_| crate::clock::Instant::now());
 
     // Step 7: Supernode detection on the postordered etree
-    let t_find = prof.map(|_| crate::clock::Instant::now());
     let mut supernodes = find_supernodes(&etree, &col_counts, snode_params);
     // Issue #55 Phase B2: assign per-supernode incoming-delay budget.
     // Bounded-cost postorder pass; runs once per symbolic factor and
@@ -1162,37 +982,20 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     // refactors. No effect until the numeric-time enforcement (B3)
     // and CB-rewire (B5) check `Supernode::delayed_capacity`.
     supernode::assign_delayed_capacities(&mut supernodes);
-    if let Some(t) = t_find {
-        record_stage(prof, "find_supernodes", t);
-    }
 
     // Step 7b: Phase 2.9 small-leaf grouping. Runs unconditionally;
     // the groups are consumed at numeric time only when the
     // `small_leaf` gate is `On`. O(n_snodes), no allocations beyond
     // the groups themselves.
-    let t_slg = prof.map(|_| crate::clock::Instant::now());
     let (small_leaf_groups, snode_group) =
         find_small_leaf_groups(&supernodes, &permuted_pattern, &snode_params.small_leaf);
-    if let Some(t) = t_slg {
-        record_stage(prof, "small_leaf_groups", t);
-    }
 
     // Step 5: Compute contribution sizes and peak memory
-    let t_pk = prof.map(|_| crate::clock::Instant::now());
     let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
 
     let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
-    if let Some(t) = t_pk {
-        record_stage(prof, "peak_contrib", t);
-    }
 
     let factor_slack = 1.2;
-
-    if let (Some(arc), Some(t)) = (prof, t_finish) {
-        if let Ok(mut p) = arc.lock() {
-            p.set_total(prefix_us + t.elapsed().as_micros() as u64);
-        }
-    }
 
     Ok(SymbolicFactorization {
         n,
@@ -1211,472 +1014,7 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
         resolved_method,
         resolved_amalgamation: snode_params.amalgamation_strategy,
         resolved_preprocess,
-        is_schur_tail: None,
     })
-}
-
-/// Symbolic factorization with a user-supplied Schur tail (F3.2a).
-///
-/// Like [`symbolic_factorize_with_method`] except the last `n_schur`
-/// columns of the produced permutation are pinned to `schur_indices` in
-/// the supplied order - i.e. `perm[n - n_schur + i] == schur_indices[i]`
-/// for every `i`. This is the symbolic side of the Schur-complement API
-/// described in `dev/research/schur-complement.md` (F3.0).
-///
-/// The pipeline diverges from [`symbolic_factorize_with_method`] in
-/// three places:
-///
-/// 1. **Ordering.** The fill-reducing ordering is fixed to AMD on the
-///    non-Schur subgraph, via [`crate::ordering::schur::compute_schur_aware_perm`]
-///    (F3.1). Other methods are not yet wired in for the Schur path
-///    because each external ordering crate would need a "constrained
-///    ordering" or subgraph hook to honour the Schur tail invariant.
-///    See `dev/research/schur-complement.md` D3.
-///
-/// 2. **Postorder.** Standard CHOLMOD postorder is replaced by
-///    [`crate::ordering::postorder::schur_constrained_postorder`], which
-///    pins Schur nodes to their etree-index positions. The Schur subset
-///    forms a top-forest of the etree (parent always strictly greater
-///    than child, and Schur indices occupy `[n - n_schur, n)`), so the
-///    constraint is satisfiable.
-///
-/// 3. **Preprocessor / amalgamation strategy.** The
-///    [`OrderingPreprocess::LdltCompress`] preprocessor and the
-///    [`AmalgamationStrategy::Renumber`] reorderer both rewrite the
-///    column numbering and would break the tail invariant. The Schur
-///    path forces `preprocess == None` and `amalgamation_strategy ==
-///    Adjacency` regardless of what the caller passed in
-///    `snode_params`.
-///
-/// Empty `schur_indices` ⇒ returns the same result as
-/// [`symbolic_factorize_with_method`] with `OrderingMethod::Amd`.
-///
-/// `schur_indices.len() == n` ⇒ `InvalidInput` (the elimination set
-/// would be empty; almost certainly an upstream logic bug).
-///
-/// Returns `is_schur_tail = Some(n_schur)` so the numeric phase (F3.2b)
-/// can enforce the per-front `NPIV ≤ NASS − NVSCHUR` stopping rule.
-pub fn symbolic_factorize_with_schur(
-    matrix: &CscMatrix,
-    snode_params: &SupernodeParams,
-    schur_indices: &[usize],
-) -> Result<SymbolicFactorization, RslabError> {
-    let n = matrix.n;
-    let n_schur = schur_indices.len();
-
-    if n_schur == 0 {
-        // Empty Schur ⇒ standard symbolic factorization with AMD.
-        return symbolic_factorize_with_method(matrix, snode_params, OrderingMethod::Amd);
-    }
-
-    // Force the preprocessor and amalgamation strategy to values that
-    // preserve the column numbering. LdltCompress rewrites columns via
-    // the MC64 supermap; Renumber re-postorders. Both would break the
-    // Schur tail invariant.
-    let mut effective_params = snode_params.clone();
-    effective_params.preprocess = OrderingPreprocess::None;
-    effective_params.amalgamation_strategy = supernode::AmalgamationStrategy::Adjacency;
-
-    // Step 1: Schur-aware ordering. AMD on the non-Schur subgraph,
-    // followed by the Schur tail in user-supplied order. Validates
-    // schur_indices (duplicates / out-of-range / full-n).
-    let initial_perm = crate::ordering::schur::compute_schur_aware_perm(matrix, schur_indices)?;
-
-    // Step 2: build full symmetric pattern + permute.
-    let full_pattern = matrix.symmetric_pattern();
-    let initial_permuted = permute_pattern(&full_pattern, &initial_perm);
-
-    // Step 3: etree of permuted pattern. By construction Schur columns
-    // sit at indices [n - n_schur, n); etree.parent[j] > j for every j,
-    // so the Schur subset is closed under `parent` (top-forest).
-    let initial_etree = EliminationTree::from_pattern(&initial_permuted);
-
-    // Step 4: Schur-constrained postorder. Non-Schur descendants of
-    // Schur nodes emit first (subtree-size order); Schur nodes emit at
-    // their etree-index positions, preserving the user's input order.
-    // Mark the highest n_schur indices in the etree as Schur. By
-    // construction (compute_schur_aware_perm appends the Schur tail at
-    // the end of initial_perm), these positions correspond to the user's
-    // schur_indices in user-supplied order.
-    let mut is_schur = vec![false; n];
-    for slot in is_schur.iter_mut().skip(n - n_schur) {
-        *slot = true;
-    }
-    let (post, post_inv) =
-        crate::ordering::postorder::schur_constrained_postorder(&initial_etree, &is_schur);
-
-    // Postorder identity check on the Schur tail (defensive - the
-    // top-forest invariant should make this hold by construction).
-    for (k, &p) in post.iter().enumerate().skip(n - n_schur) {
-        debug_assert_eq!(
-            p, k,
-            "schur_constrained_postorder violated tail identity at k={}",
-            k
-        );
-    }
-
-    // Step 5: compose perm₀ with the postorder.
-    let perm: Vec<usize> = post.iter().map(|&p| initial_perm[p]).collect();
-    let mut perm_inv = vec![0usize; n];
-    for (new, &old) in perm.iter().enumerate() {
-        perm_inv[old] = new;
-    }
-
-    // Tail-invariant assertion: this is the F3.2a contract.
-    debug_assert_eq!(
-        &perm[n - n_schur..],
-        schur_indices,
-        "Schur tail invariant violated"
-    );
-
-    // Step 6: re-permute and rebuild etree on the final pattern.
-    let permuted_pattern = permute_pattern(&full_pattern, &perm);
-    let final_parent: Vec<Option<usize>> = (0..n)
-        .map(|new| {
-            let old_initial = post[new];
-            initial_etree.parent[old_initial].map(|old_par| post_inv[old_par])
-        })
-        .collect();
-    let etree = EliminationTree {
-        parent: final_parent,
-        n,
-    };
-
-    // Step 7: column counts on the final pattern + etree.
-    let col_counts = column_counts::column_counts_gnp(&permuted_pattern, &etree);
-    let factor_nnz = column_counts::total_factor_nnz(&col_counts);
-
-    // Step 8: supernode detection. Adjacency strategy only - Renumber
-    // would re-postorder and break the tail invariant.
-    let mut supernodes = supernode::find_supernodes(&etree, &col_counts, &effective_params);
-
-    // Step 8b (F3.2b multi-supernode tail): force-merge any Schur-bearing
-    // supernodes into a single tail supernode, matching the semantics of
-    // MUMPS's HALO-SCHUR amalgamation (all Schur variables collapse into
-    // one supervariable) so the numeric stopping rule lives in one
-    // place. rslab's adjacency-only amalgamation (size_based with
-    // nemin=32, trivial_chain) does not always merge the Schur tail -
-    // when the Schur block is large or the row patterns of constituent
-    // Schur cols differ enough, multiple supernodes carry Schur cols,
-    // and the F3.2b numeric driver would reject. The merge here keeps
-    // the design contract from `dev/research/schur-complement.md` D4
-    // ("the only front with nvschur > 0 is the root") satisfied without
-    // requiring a multi-supernode numeric path.
-    //
-    // Safety: the F3.2a postorder pins Schur cols to `[n - n_schur, n)`
-    // and the supernode column ranges are contiguous in this numbering,
-    // so the merged supernode covers the contiguous range
-    // `[n - n_schur, n)` - preserving the find_supernodes contiguity
-    // invariant downstream code relies on.
-    merge_schur_tail_supernodes(&mut supernodes, n, n_schur)?;
-
-    // Issue #55 Phase B2: assign per-supernode incoming-delay budget.
-    // Runs after the Schur-tail merge so the surviving root supernode
-    // gets a single budget computed from its post-merge subtree.
-    supernode::assign_delayed_capacities(&mut supernodes);
-
-    // Step 9: small-leaf grouping (consumed at numeric time only when
-    // the small_leaf gate is On). Same as the standard pipeline.
-    let (small_leaf_groups, snode_group) =
-        find_small_leaf_groups(&supernodes, &permuted_pattern, &effective_params.small_leaf);
-
-    // Step 10: contribution sizes + peak memory.
-    let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
-    let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
-
-    let factor_slack = 1.2;
-
-    Ok(SymbolicFactorization {
-        n,
-        perm,
-        perm_inv,
-        supernodes,
-        factor_nnz_estimate: (factor_nnz as f64 * factor_slack) as usize,
-        factor_slack,
-        contrib_sizes,
-        peak_contrib_bytes,
-        etree,
-        permuted_pattern,
-        col_counts,
-        small_leaf_groups,
-        snode_group,
-        resolved_method: OrderingMethod::Amd,
-        resolved_amalgamation: effective_params.amalgamation_strategy,
-        resolved_preprocess: OrderingPreprocess::None,
-        is_schur_tail: Some(n_schur),
-    })
-}
-
-/// F3.2b helper: collapse all Schur-bearing supernodes (those whose
-/// column range intersects `[n - n_schur, n)`) into a single tail
-/// supernode, matching the semantics of MUMPS's HALO-SCHUR
-/// amalgamation.
-///
-/// Returns `InvalidInput` if the Schur-bearing supernodes are not
-/// contiguous at the tail of the supernode list (would only arise from
-/// a reducible matrix where the Schur set spans multiple etree roots -
-/// not encountered in the KKT use cases this API targets).
-fn merge_schur_tail_supernodes(
-    supernodes: &mut Vec<Supernode>,
-    n: usize,
-    n_schur: usize,
-) -> Result<(), RslabError> {
-    let schur_lo = n - n_schur;
-
-    // Step 0: split any supernode that straddles `schur_lo` into a
-    // non-Schur half and a Schur half. This restores the invariant that
-    // no supernode mixes eliminated-set columns with Schur-tail columns,
-    // which the merge logic below assumes. The straddle case occurs
-    // when adjacency-only amalgamation merges a small non-Schur
-    // fundamental supernode into the first Schur fundamental supernode
-    // via the size-based rule (both `< nemin`); without this split the
-    // resulting compound supernode crosses `schur_lo` and the F3.2b
-    // numeric driver would mis-locate the Schur columns.
-    split_straddling_supernode(supernodes, schur_lo)?;
-
-    // Identify Schur-bearing supernodes. Walk forward and find the
-    // contiguous tail run; verify no Schur-bearing supernode lives
-    // below that run (which would indicate a forest-structured Schur
-    // set incompatible with F3.2a's postorder contract).
-    let mut tail_start: Option<usize> = None;
-    for (s, snode) in supernodes.iter().enumerate().rev() {
-        let col_lo = snode.first_col;
-        let col_hi = col_lo + snode.ncol();
-        let intersects = col_hi > schur_lo && col_lo < n;
-        if intersects {
-            tail_start = Some(s);
-        } else {
-            // First non-Schur supernode walking back from the end
-            // marks the boundary; nothing below should be Schur.
-            break;
-        }
-    }
-    // Verify nothing below `tail_start` is Schur-bearing (would imply
-    // forest Schur structure).
-    if let Some(start) = tail_start {
-        for (s, snode) in supernodes.iter().enumerate().take(start) {
-            let col_lo = snode.first_col;
-            let col_hi = col_lo + snode.ncol();
-            let intersects = col_hi > schur_lo && col_lo < n;
-            if intersects {
-                return Err(RslabError::InvalidInput(format!(
-                    "Schur-bearing supernodes are not contiguous at the \
-                     tail (snode {} bears Schur cols but lies below \
-                     non-Schur supernode(s) preceding the tail run \
-                     starting at index {}). This requires a forest- \
-                     structured Schur set; see \
-                     dev/research/schur-complement.md F3.2b.",
-                    s, start
-                )));
-            }
-        }
-    }
-
-    let Some(start) = tail_start else {
-        return Err(RslabError::InvalidInput(
-            "F3.2b merge: no Schur-bearing supernodes found despite \
-             n_schur > 0 (symbolic invariant broken)"
-                .to_string(),
-        ));
-    };
-    if start == supernodes.len() - 1 {
-        // Already a single Schur supernode at the tail - nothing to do.
-        // Verify it covers the full Schur range.
-        let last = &supernodes[start];
-        let col_lo = last.first_col;
-        let col_hi = col_lo + last.ncol();
-        if col_lo > schur_lo || col_hi != n {
-            return Err(RslabError::InvalidInput(format!(
-                "F3.2b merge: single Schur supernode at index {} does not \
-                 cover the full Schur tail [{}, {}) (covers [{}, {}))",
-                start, schur_lo, n, col_lo, col_hi
-            )));
-        }
-        return Ok(());
-    }
-
-    // Multi-supernode Schur tail: merge supernodes[start..] into one.
-    // The merged supernode replaces supernodes[start] in place, and all
-    // higher-indexed Schur supernodes are dropped from the list.
-    //
-    // Invariants on the merge set (verified):
-    //   - Column ranges are contiguous and together cover [schur_lo, n).
-    //   - Their union of children, minus the merge set itself, becomes
-    //     the new merged supernode's children. (No merged supernode can
-    //     be a child of another since they all bear Schur cols and the
-    //     etree forces parent > child in the postordered numbering, but
-    //     a child relationship would still place both in the merge set.)
-    //   - nrow is bumped to cover the row pattern union; we use a
-    //     conservative upper bound `(merged_first_col..n).len()` because
-    //     all merged supernodes share rows in `[merged_first_col, n)`.
-    let merged_first_col = supernodes[start].first_col;
-    if merged_first_col != schur_lo {
-        return Err(RslabError::InvalidInput(format!(
-            "F3.2b merge: tail run starts at col {} but Schur tail \
-             begins at {}",
-            merged_first_col, schur_lo
-        )));
-    }
-
-    // Verify contiguity of the column ranges.
-    let mut expected = merged_first_col;
-    for (s, snode) in supernodes.iter().enumerate().skip(start) {
-        if snode.first_col != expected {
-            return Err(RslabError::InvalidInput(format!(
-                "F3.2b merge: supernode {} starts at col {} but expected {} \
-                 (Schur supernode column ranges must be contiguous)",
-                s, snode.first_col, expected
-            )));
-        }
-        expected = snode.first_col + snode.ncol();
-    }
-    if expected != n {
-        return Err(RslabError::InvalidInput(format!(
-            "F3.2b merge: tail run ends at col {} but Schur tail ends at {}",
-            expected, n
-        )));
-    }
-
-    // Conservative nrow: max over merged supernodes of
-    // `(s.first_col + s.nrow) - merged_first_col`. Each constituent
-    // supernode's row pattern starts at its own first_col (in the
-    // find_supernodes layout) and extends `nrow` rows. The merged
-    // supernode starts at `merged_first_col`, so its row count must be
-    // at least the largest constituent extent above `merged_first_col`.
-    let mut merged_nrow = 0usize;
-    let merge_indices: std::collections::HashSet<usize> = (start..supernodes.len()).collect();
-    let mut merged_children: Vec<usize> = Vec::new();
-    for snode in supernodes.iter().skip(start) {
-        let extent = (snode.first_col + snode.nrow) - merged_first_col;
-        if extent > merged_nrow {
-            merged_nrow = extent;
-        }
-        for &c in &snode.children {
-            if !merge_indices.contains(&c) {
-                merged_children.push(c);
-            }
-        }
-    }
-    let merged_ncol = n_schur;
-    if merged_nrow < merged_ncol {
-        merged_nrow = merged_ncol;
-    }
-    let merged_row_indices: Vec<usize> =
-        (merged_first_col..merged_first_col + merged_nrow).collect();
-
-    // Replace supernodes[start] with the merged supernode and drop the
-    // rest. Children indices in the surviving supernodes don't shift -
-    // all merged supernodes are at the tail, so their indices were the
-    // largest in the old list.
-    supernodes[start] = Supernode {
-        first_col: merged_first_col,
-        ncol: merged_ncol,
-        nrow: merged_nrow,
-        row_indices: merged_row_indices,
-        children: merged_children,
-        // B1: merged supernode inherits the unbounded sentinel; the
-        // B2 capacity-estimate pass runs after all merges complete
-        // so it sees the post-merge tree and assigns a single
-        // estimate per surviving supernode.
-        delayed_capacity: usize::MAX,
-    };
-    supernodes.truncate(start + 1);
-    Ok(())
-}
-
-/// F3.2b helper: split a supernode that straddles the Schur boundary
-/// (`first_col < schur_lo < first_col + ncol`) into a non-Schur half
-/// `[first_col, schur_lo)` and a Schur half `[schur_lo, first_col + ncol)`.
-/// The Schur half inherits the original supernode's etree-parent slot
-/// (the topmost cols of the original); the non-Schur half becomes the
-/// only child of the Schur half.
-///
-/// At most one straddler can exist after `find_supernodes` (column
-/// ranges are disjoint), so we either split exactly one or no-op.
-///
-/// Re-indexing rule: the new Schur half is inserted at position `b + 1`
-/// where `b` is the original index. Any reference to a child index `> b`
-/// shifts to `+1`; any reference `== b` (i.e., a parent that listed the
-/// original as a child) remaps to `b + 1` since the Schur half now
-/// occupies the original's etree role.
-fn split_straddling_supernode(
-    supernodes: &mut Vec<Supernode>,
-    schur_lo: usize,
-) -> Result<(), RslabError> {
-    let mut straddle_idx: Option<usize> = None;
-    for (s, snode) in supernodes.iter().enumerate() {
-        let lo = snode.first_col;
-        let hi = lo + snode.ncol;
-        if lo < schur_lo && hi > schur_lo {
-            if straddle_idx.is_some() {
-                return Err(RslabError::InvalidInput(format!(
-                    "F3.2b split: multiple supernodes straddle schur_lo={} \
-                     (impossible after find_supernodes - column ranges are disjoint)",
-                    schur_lo
-                )));
-            }
-            straddle_idx = Some(s);
-        }
-    }
-    let Some(b) = straddle_idx else {
-        return Ok(());
-    };
-
-    let original = supernodes[b].clone();
-    let ncol_ns = schur_lo - original.first_col;
-    let ncol_sc = original.ncol - ncol_ns;
-    let nrow_total = original.nrow;
-    if original.row_indices.len() != nrow_total {
-        return Err(RslabError::InvalidInput(format!(
-            "F3.2b split: supernode {} has nrow={} but row_indices len={}",
-            b,
-            nrow_total,
-            original.row_indices.len()
-        )));
-    }
-
-    // Rewrite all child references before insertion. Indices > b shift
-    // up by one; index == b (the original) remaps to b + 1 (the Schur
-    // half) since the Schur half occupies the original's parental
-    // position in the etree.
-    for snode in supernodes.iter_mut() {
-        for c in snode.children.iter_mut() {
-            if *c == b {
-                *c = b + 1;
-            } else if *c > b {
-                *c += 1;
-            }
-        }
-    }
-
-    // Non-Schur half replaces the original at index b. It keeps the
-    // original's children (etree-children all have indices < b, so they
-    // are unaffected by the shift above and still point at the right
-    // supernodes after the split). Row pattern stays full nrow_total
-    // because the contribution block of the non-Schur half feeds into
-    // the Schur half above it.
-    let non_schur = Supernode {
-        first_col: original.first_col,
-        ncol: ncol_ns,
-        nrow: nrow_total,
-        row_indices: original.row_indices.clone(),
-        children: original.children,
-        // B1: inherit the unbounded sentinel. The split happens
-        // before the B2 capacity-estimate pass, so the post-split
-        // supernodes get their real estimates uniformly.
-        delayed_capacity: usize::MAX,
-    };
-    let schur_half = Supernode {
-        first_col: schur_lo,
-        ncol: ncol_sc,
-        nrow: nrow_total - ncol_ns,
-        row_indices: original.row_indices[ncol_ns..].to_vec(),
-        children: vec![b],
-        delayed_capacity: usize::MAX,
-    };
-    supernodes[b] = non_schur;
-    supernodes.insert(b + 1, schur_half);
-    Ok(())
 }
 
 /// Compute the peak contribution pool size needed during postorder traversal.
@@ -1751,67 +1089,6 @@ mod tests {
         // Total supernode columns = n
         let total_cols: usize = sym.supernodes.iter().map(|s| s.ncol()).sum();
         assert_eq!(total_cols, 4);
-    }
-
-    #[test]
-    fn autorace_does_not_quadruple_symbolic_profiler_stages() {
-        // S7 (repo-review-2026-06-09.md): AutoRace runs every
-        // RACE_CANDIDATE against the *same* profiler Arc. Because
-        // `SymbolicProfiler::record` appends and `set_total` overwrites,
-        // the shared profiler ends with one full stage list per candidate
-        // (~4x) measured against a single candidate's total. That yields
-        // duplicate stage names and a spurious "stage sum exceeds total"
-        // warning, and percentages that sum past 100%. The fix isolates
-        // each candidate's profiler and copies only the winner's run into
-        // the caller's shared profiler.
-        let n = 16;
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        let mut vals = Vec::new();
-        for j in 0..n {
-            rows.push(j);
-            cols.push(j);
-            vals.push(2.0);
-            if j + 1 < n {
-                rows.push(j + 1);
-                cols.push(j);
-                vals.push(-1.0);
-            }
-        }
-        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
-
-        let prof = std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new()));
-        let params = SupernodeParams {
-            symbolic_profiler: Some(prof.clone()),
-            ..Default::default()
-        };
-        let _ = symbolic_factorize_with_method(&m, &params, OrderingMethod::AutoRace).unwrap();
-
-        let report = prof.lock().unwrap().report();
-
-        // Timing-independent invariant: the shared profiler must reflect
-        // exactly one ordering run, so each instrumented stage name must
-        // appear at most once. Pre-fix, ~RACE_CANDIDATES.len() copies of
-        // each common-path stage are present regardless of how fast the
-        // machine is (record() pushes even for 0 µs samples).
-        let mut seen = std::collections::HashSet::new();
-        for s in &report.stages {
-            assert!(
-                seen.insert(s.name),
-                "stage '{}' recorded more than once - AutoRace leaked {} candidates' \
-                 stages into the shared profiler (stages: {:?})",
-                s.name,
-                RACE_CANDIDATES.len(),
-                report.stages.iter().map(|s| s.name).collect::<Vec<_>>(),
-            );
-        }
-        // The stage-sum-exceeds-total warning must not fire for a single
-        // ordering run.
-        assert!(
-            report.validation_warnings.is_empty(),
-            "spurious profiler warnings: {:?}",
-            report.validation_warnings
-        );
     }
 
     #[test]
@@ -1957,34 +1234,6 @@ mod tests {
         let m = small_grid_5x5();
         let params = SupernodeParams::default();
         let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::MetisND).unwrap();
-        assert_eq!(sym.n, 25);
-        let mut sorted = sym.perm.clone();
-        sorted.sort();
-        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
-        for i in 0..25 {
-            assert_eq!(sym.perm[sym.perm_inv[i]], i);
-        }
-    }
-
-    #[test]
-    fn symbolic_factorize_scotch_produces_valid_perm() {
-        let m = small_grid_5x5();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
-        assert_eq!(sym.n, 25);
-        let mut sorted = sym.perm.clone();
-        sorted.sort();
-        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
-        for i in 0..25 {
-            assert_eq!(sym.perm[sym.perm_inv[i]], i);
-        }
-    }
-
-    #[test]
-    fn symbolic_factorize_kahip_produces_valid_perm() {
-        let m = small_grid_5x5();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::KahipND).unwrap();
         assert_eq!(sym.n, 25);
         let mut sorted = sym.perm.clone();
         sorted.sort();
@@ -2277,163 +1526,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pick_default_method_never_returns_kahip() {
-        // Pins the session-08 driver-integration decision: KaHIP is
-        // reachable only via explicit `with_method` or `Auto`. The
-        // dispatcher must never return it on its own. See
-        // `dev/research/ordering-kahip-driver-integration.md` for
-        // the bake-off evidence (KaHIP ties METIS on fill at 4-6×
-        // the per-call cost on 41 matrices). If a future change wants
-        // to route some pattern to KaHIP by default, the maintainer
-        // must consciously update this test and the research note.
-        let shapes: &[(usize, usize)] = &[
-            (0, 0),
-            (10, 30),
-            (500, 1500),
-            (3083, 13333), // VESUVIOU
-            (5314, 22566), // CRESC132
-            (10_000, 50_000),
-            (100_000, 500_000),
-            (345_241, 1_343_126), // c-big from the shape bake-off
-        ];
-        for &(n, nnz) in shapes {
-            let m = pick_default_method(n, nnz);
-            assert_ne!(
-                m,
-                OrderingMethod::KahipND,
-                "pick_default_method({}, {}) returned KahipND; \
-                 see dev/research/ordering-kahip-driver-integration.md",
-                n,
-                nnz
-            );
-        }
-    }
-
-    /// 6×6 KKT-shaped matrix: leading 4×4 identity-like block, dense
-    /// trailing 2×2 Schur, with off-diagonal coupling A_FS connecting
-    /// rows {0..4} to columns {4,5}. Same structure used in the F3.1
-    /// schur.rs unit tests.
-    fn small_kkt_6x6() -> CscMatrix {
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        let mut vals = Vec::new();
-        // Diagonal in non-Schur block (1..=4 along positions 0..4).
-        for i in 0..4 {
-            rows.push(i);
-            cols.push(i);
-            vals.push((i + 1) as f64);
-        }
-        // Coupling A_FS: column 4 connects to rows 0,2; column 5 connects to rows 1,3.
-        rows.push(4);
-        cols.push(0);
-        vals.push(0.5);
-        rows.push(4);
-        cols.push(2);
-        vals.push(0.7);
-        rows.push(5);
-        cols.push(1);
-        vals.push(0.3);
-        rows.push(5);
-        cols.push(3);
-        vals.push(0.9);
-        // Trailing 2×2 Schur block, dense.
-        rows.push(4);
-        cols.push(4);
-        vals.push(1.5);
-        rows.push(5);
-        cols.push(4);
-        vals.push(0.2);
-        rows.push(5);
-        cols.push(5);
-        vals.push(2.5);
-        CscMatrix::from_triplets(6, &rows, &cols, &vals).unwrap()
-    }
-
-    #[test]
-    fn schur_symbolic_tail_invariant_user_order() {
-        // schur_indices = [4, 5] in user order.
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
-        assert_eq!(sym.n, 6);
-        assert_eq!(sym.is_schur_tail, Some(2));
-        assert_eq!(&sym.perm[4..], &[4, 5]);
-    }
-
-    #[test]
-    fn schur_symbolic_tail_invariant_reversed_user_order() {
-        // schur_indices = [5, 4] - user-supplied order MUST be preserved
-        // exactly, not sorted.
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_schur(&m, &params, &[5, 4]).unwrap();
-        assert_eq!(sym.is_schur_tail, Some(2));
-        assert_eq!(&sym.perm[4..], &[5, 4]);
-    }
-
-    #[test]
-    fn schur_symbolic_perm_is_valid_permutation() {
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
-        let mut sorted = sym.perm.clone();
-        sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5]);
-        // perm_inv consistency.
-        for (new, &old) in sym.perm.iter().enumerate() {
-            assert_eq!(sym.perm_inv[old], new);
-        }
-    }
-
-    #[test]
-    fn schur_symbolic_empty_falls_back_to_standard() {
-        // Empty schur_indices must produce a SymbolicFactorization with
-        // is_schur_tail = None (delegates to symbolic_factorize_with_method).
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_schur(&m, &params, &[]).unwrap();
-        assert_eq!(sym.is_schur_tail, None);
-    }
-
-    #[test]
-    fn schur_symbolic_full_n_rejected() {
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let result = symbolic_factorize_with_schur(&m, &params, &[0, 1, 2, 3, 4, 5]);
-        assert!(matches!(result, Err(RslabError::InvalidInput(_))));
-    }
-
-    #[test]
-    fn schur_symbolic_duplicate_rejected() {
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let result = symbolic_factorize_with_schur(&m, &params, &[4, 4]);
-        assert!(matches!(result, Err(RslabError::InvalidInput(_))));
-    }
-
-    #[test]
-    fn schur_symbolic_supernodes_cover_n() {
-        // Sanity check: the supernode layout still covers all n columns.
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
-        let total: usize = sym.supernodes.iter().map(|s| s.ncol()).sum();
-        assert_eq!(total, 6);
-    }
-
-    #[test]
-    fn schur_symbolic_single_schur_index() {
-        let m = small_kkt_6x6();
-        let params = SupernodeParams::default();
-        let sym = symbolic_factorize_with_schur(&m, &params, &[5]).unwrap();
-        assert_eq!(sym.is_schur_tail, Some(1));
-        assert_eq!(sym.perm[5], 5);
-        let mut sorted = sym.perm.clone();
-        sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5]);
-    }
-
     /// PoissonControl KKT lower-triangle CSC, mirrors
     /// `src/bin/diag_poisson_kkt.rs`. n_kkt = 3K². K=20 → n=1200,
     /// large enough to exceed amd_switch=120 (so SCOTCH actually
@@ -2491,61 +1583,6 @@ mod tests {
             }
         }
         CscMatrix::from_triplets(n_kkt, &rows, &cols, &vals).expect("kkt csc")
-    }
-
-    #[test]
-    fn issue_3_scotchnd_on_kkt_recurses_after_o13() {
-        // History: SCOTCH bisection used to produce no separator on
-        // bordered-KKT patterns - its vertex-separator FM stopped the
-        // whole pass the first time both PQ heads were imbalance-
-        // rejected, abandoning feasible queued moves - so the recursion
-        // collapsed into amd_leaf for the entire graph and
-        // `resolved_method` reported `Amd`.
-        //
-        // Finding O13 fixed that early stop. SCOTCH now finds a real
-        // separator on this KKT pattern (verified directly in
-        // `crates/rslab-scotch/tests/issue_3_kkt_repro.rs`:
-        // `issue_3_scotch_recurses_on_kkt_after_o13`), so ScotchND no
-        // longer degenerates: `resolved_method` reports the requested
-        // ScotchND, and the ordering is genuinely SCOTCH's - not a
-        // relabelled AMD leaf. This test guards that post-O13 behavior
-        // at the `rslab` symbolic boundary.
-        //
-        // Preprocess is pinned to None so SCOTCH sees the raw KKT
-        // pattern (LdltCompress would shrink it past the point the
-        // degeneracy ever exercised).
-        let m = poisson_kkt_csc(20);
-        let params = SupernodeParams {
-            preprocess: OrderingPreprocess::None,
-            ..SupernodeParams::default()
-        };
-        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
-        assert_eq!(
-            sym.resolved_method,
-            OrderingMethod::ScotchND,
-            "post-O13 SCOTCH recurses on this KKT pattern; resolved_method \
-             must report ScotchND, not the AMD-leaf fallback"
-        );
-
-        // The permutation must be a valid bijection over 0..n.
-        let n = m.n;
-        assert_eq!(sym.perm.len(), n);
-        let mut seen = vec![false; n];
-        for &p in &sym.perm {
-            assert!(p < n, "perm entry out of range");
-            assert!(!seen[p], "perm is not a bijection");
-            seen[p] = true;
-        }
-
-        // And it must differ from AMD's ordering - proof the recursion
-        // ran SCOTCH nested dissection rather than collapsing to the
-        // AMD leaf (which would return AMD's permutation verbatim).
-        let amd = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
-        assert_ne!(
-            sym.perm, amd.perm,
-            "ScotchND ordering must not be bit-identical to AMD's; \
-             that would indicate the degenerate AMD-leaf fallback"
-        );
     }
 
     #[test]
