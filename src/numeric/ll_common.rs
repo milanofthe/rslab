@@ -484,3 +484,50 @@ pub(crate) fn ll_subtree(
     }
     Ok(())
 }
+
+/// The multifrontal assembly-forest recursion shared by the LDLT/LU twins:
+/// factor every child subtree concurrently, factor this node from the
+/// children's fronts, free the children's contribution blocks the moment they
+/// have been extend-added (the CB stack is the dominant transient - keeping it
+/// to the end OOMed on large fronts), and flatten the subtree's node results.
+/// Returns `(own, [(supernode, node)...])` for the parent / forest scatter.
+pub(crate) type NodeFactorFn<'a, N> = dyn Fn(usize, &[&N]) -> Result<N, RslabError> + Sync + 'a;
+
+pub(crate) fn mf_subtree<N: Send>(
+    s: usize,
+    sym: &crate::symbolic::SymbolicFactorization,
+    factor_one: &NodeFactorFn<'_, N>,
+    free_contrib: &(dyn Fn(&mut N) + Sync),
+) -> Result<(N, Vec<(usize, N)>), RslabError> {
+    use rayon::prelude::*;
+    let children = &sym.supernodes[s].children;
+    let mut outs: Vec<(N, Vec<(usize, N)>)> = children
+        .par_iter()
+        .map(|&ch| mf_subtree(ch, sym, factor_one, free_contrib))
+        .collect::<Result<Vec<_>, _>>()?;
+    let nf = {
+        let child_refs: Vec<&N> = outs.iter().map(|(own, _)| own).collect();
+        factor_one(s, &child_refs)?
+    };
+    for (own, _) in outs.iter_mut() {
+        free_contrib(own);
+    }
+    let mut subtree = Vec::new();
+    for (i, (own, rest)) in outs.into_iter().enumerate() {
+        subtree.push((children[i], own));
+        subtree.extend(rest);
+    }
+    Ok((nf, subtree))
+}
+
+/// Roots of the assembly forest: supernodes that are no node's child.
+pub(crate) fn forest_roots(sym: &crate::symbolic::SymbolicFactorization) -> Vec<usize> {
+    let nsuper = sym.supernodes.len();
+    let mut is_child = vec![false; nsuper];
+    for snode in &sym.supernodes {
+        for &ch in &snode.children {
+            is_child[ch] = true;
+        }
+    }
+    (0..nsuper).filter(|&s| !is_child[s]).collect()
+}

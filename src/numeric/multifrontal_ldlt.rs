@@ -1411,44 +1411,6 @@ fn factor_one_node<T: Scalar>(
     })
 }
 
-/// Recursively factor the assembly subtree rooted at supernode `s` with a
-/// work-stealing tree schedule: the children's subtrees factor concurrently and
-/// this node only after they finish. Independent subtrees fill idle threads and
-/// the per-front GEMM shares the same rayon pool - no level-barrier stall. See
-/// the unsymmetric twin in [`crate::numeric::multifrontal_lu`].
-fn factor_subtree<T: Scalar>(
-    s: usize,
-    sym: &SymbolicFactorization,
-    a_perm: &CscMatrix<T>,
-    perturb_floor: Option<f64>,
-    pool: &crate::numeric::multifrontal_lu::FrontPool<T>,
-    kt: KernelTuning,
-) -> Result<SubtreeFactors<T>, RslabError> {
-    let children = &sym.supernodes[s].children;
-    let mut outs: Vec<SubtreeFactors<T>> = children
-        .par_iter()
-        .map(|&ch| factor_subtree(ch, sym, a_perm, perturb_floor, pool, kt))
-        .collect::<Result<Vec<_>, _>>()?;
-    let nf = {
-        let child_refs: Vec<&NodeFactor<T>> = outs.iter().map(|(own, _)| own).collect();
-        factor_one_node(s, sym, a_perm, &child_refs, perturb_floor, pool, kt)?
-    };
-    // Free the children's contribution blocks NOW: they have been extend-added
-    // into this front and are never read again (the global emit uses only the
-    // L/D factor). Retaining the whole `Σ cnrow²` CB stack to the end was the
-    // dominant transient-memory cost (OOMs on large fronts); dropping each CB as
-    // its parent consumes it keeps only the active contribution frontier live.
-    for (own, _) in outs.iter_mut() {
-        own.contrib = Vec::new();
-    }
-    let mut subtree = Vec::new();
-    for (i, (own, rest)) in outs.into_iter().enumerate() {
-        subtree.push((children[i], own));
-        subtree.extend(rest);
-    }
-    Ok((nf, subtree))
-}
-
 /// Factor a sparse symmetric matrix `A` as `Pᵀ A P = L D Lᵀ` via generic
 /// multifrontal Bunch-Kaufman. Works for `T = f64` and `T = Complex<f64>`
 /// (complex symmetric, `A = Aᵀ`).
@@ -1804,14 +1766,7 @@ pub fn factor_numeric<T: Scalar>(
     //    consulted here (it remains available via `MultifrontalSymbolic::n_levels`).
     let nsuper = sym.supernodes.len();
 
-    // Roots of the assembly forest: supernodes that are no node's child.
-    let mut is_child = vec![false; nsuper];
-    for snode in &sym.supernodes {
-        for &ch in &snode.children {
-            is_child[ch] = true;
-        }
-    }
-    let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    let roots = crate::numeric::ll_common::forest_roots(sym);
     let kt = opts.kernel();
     // Run the work-stealing tree recursion in a scoped pool of `opts.threads` with
     // the depth-sized stack (honours the thread budget and is overflow-safe on
@@ -1821,10 +1776,14 @@ pub fn factor_numeric<T: Scalar>(
     // Shared front-buffer pool (see `FrontPool` in the LU twin): recycles the
     // transient `nrow²` buffers instead of churning the allocator per front.
     let pool = crate::numeric::multifrontal_lu::FrontPool::<T>::new();
+    let factor_one = |s: usize, child_refs: &[&NodeFactor<T>]| {
+        factor_one_node(s, sym, &a_perm, child_refs, perturb_floor, &pool, kt)
+    };
+    let free_contrib = |nf: &mut NodeFactor<T>| nf.contrib = Vec::new();
     let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(stack, recommend, || {
         roots
             .par_iter()
-            .map(|&r| factor_subtree(r, sym, &a_perm, perturb_floor, &pool, kt))
+            .map(|&r| crate::numeric::ll_common::mf_subtree(r, sym, &factor_one, &free_contrib))
             .collect::<Result<Vec<_>, _>>()
     })?;
     // Scatter the subtree factors into `node_results` (by supernode id) for the
@@ -3109,13 +3068,7 @@ fn factor_left_looking<T: Scalar>(
     let store = LlStore::<T>::new(nsuper);
     let emit = LlEmitLdlt::<T>::new(sym, sched);
     let n_perturbed_atomic = AtomicUsize::new(0);
-    let mut is_child = vec![false; nsuper];
-    for snode in &sym.supernodes {
-        for &ch in &snode.children {
-            is_child[ch] = true;
-        }
-    }
-    let roots: Vec<usize> = (0..nsuper).filter(|&s| !is_child[s]).collect();
+    let roots = crate::numeric::ll_common::forest_roots(sym);
     let kt = opts.kernel();
     let ll_active = AtomicUsize::new(0);
     let factor_node = |s: usize| {
