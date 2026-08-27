@@ -589,6 +589,9 @@ fn run_external_ordering(
 /// cost is roughly one ND plus the exact scoring), the score is the exact
 /// scalar nnz(L) via permuted-etree column counts, and the winner is the
 /// minimum fill with the LOWEST seed breaking ties - fully deterministic.
+/// The candidates run on the ambient rayon pool, which `analyze_with` scopes
+/// to the settings' thread budget - a `with_threads(1)` analysis runs the
+/// ensemble strictly sequentially.
 const ND_SEED_CANDIDATES: &[u64] = &[1, 2, 3];
 
 /// Best-of-seeds nested dissection (see [`ND_SEED_CANDIDATES`]).
