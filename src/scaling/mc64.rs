@@ -67,16 +67,6 @@ pub(crate) struct Mc64Cache {
     pub n_matched: usize,
 }
 
-/// Probe counter: number of times `compute_matching` ran the full
-/// Hungarian pipeline. Process-global; readable from any thread.
-/// Used by the value-bounded-cache investigation (see
-/// `dev/research/mc64-value-bounded-cache-2026-05-17.md`) to confirm
-/// whether MC64 dominates warm IPM wall in the live ipopt-rslab path,
-/// not just on the pounce-dumped corpus. Set `RSLAB_MC64_TRACE=1` in
-/// the environment to also stream per-call wall time to stderr.
-pub static MC64_RECOMPUTE_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 /// Run the expensive MC64 pipeline - build the cost graph and run
 /// the Hungarian kernel - and return the full output. The cheap
 /// scaling-vector post-processing is in [`scaling_from_cache`].
@@ -91,17 +81,6 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabErr
             n_matched: 0,
         });
     }
-    MC64_RECOMPUTE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let trace = matches!(
-        std::env::var("RSLAB_MC64_TRACE").as_deref(),
-        Ok("1") | Ok("on")
-    );
-    let t0 = if trace {
-        Some(crate::clock::Instant::now())
-    } else {
-        None
-    };
-
     let (cost_graph, cmax) = build_cost_graph(matrix)?;
     let Matching {
         perm,
@@ -109,18 +88,6 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabErr
         v,
         n_matched,
     } = hungarian_match(&cost_graph);
-
-    if let Some(t0) = t0 {
-        let ms = t0.elapsed().as_secs_f64() * 1e3;
-        let count = MC64_RECOMPUTE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-        eprintln!(
-            "[rslab mc64] call #{} n={} nnz={} matching {:.1} ms",
-            count,
-            n,
-            matrix.row_idx.len(),
-            ms,
-        );
-    }
 
     Ok(Mc64Cache {
         perm,

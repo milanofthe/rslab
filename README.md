@@ -38,8 +38,8 @@ headline results.
   with size), a 20-point same-pattern sweep 10-40x faster end to end, and
   1.6-2.7x / 2.1-3.4x ahead of SuiteSparse KLU on parallel factor / refactor
   (`cargo bench --bench klu_circuit`).
-- Three factorization schedules: supernodal left-looking (default, frees each dense
-  panel after its last consumer), multifrontal, and right-looking.
+- Two factorization schedules: supernodal left-looking (default, frees each dense
+  panel after its last consumer) and multifrontal.
 - Fill-reducing orderings: AMD, AMF, nested dissection (METIS), and
   RCM (band/profile), selectable or raced per matrix.
 - Tunable equilibration (one-pass ∞-norm, iterative Ruiz, MC64 matching, off) and

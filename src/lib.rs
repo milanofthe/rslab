@@ -118,7 +118,7 @@ pub(crate) mod scalar;
 pub(crate) mod scaling;
 pub(crate) mod sparse;
 /// Symbolic analysis internals. Not part of the embedder API beyond the root
-/// re-exports (`OrderingMethod`, `RelaxAmalgamation`, `SymbolicProfileReport`):
+/// re-exports (`OrderingMethod`, `RelaxAmalgamation`):
 /// `pub` because the in-tree tests drive `symbolic::{symbolic_factorize,
 /// column_counts_gnp, ...}` and `symbolic::supernode::OrderingPreprocess` by
 /// path; hidden from public docs.
@@ -177,15 +177,14 @@ pub use numeric::iterative::{
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
-    solve_lu_transpose, take_blr_cb_stats, take_front_stats, FrontStat, LuFactors, LuSolver,
-    LuSymbolic,
+    solve_lu_transpose, LuFactors, LuSolver, LuSymbolic,
 };
 // KLU-style third direct path (BTF + per-block Gilbert-Peierls): sequential,
 // bit-deterministic, built for circuit-shaped matrices and sweep refactoring.
 pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
-pub use symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicProfileReport};
+pub use symbolic::{OrderingMethod, RelaxAmalgamation};
 
 /// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /
 /// preconditioner. `use rslab::prelude::*;` brings in the matrix type, the

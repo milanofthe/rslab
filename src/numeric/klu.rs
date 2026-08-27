@@ -203,12 +203,7 @@ impl KluSymbolic {
         a: &GeneralCsc<T>,
         settings: &KluSettings,
     ) -> Result<Self, RslabError> {
-        let prof = std::env::var("RLA_KLU_PROF")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let tv = crate::clock::Instant::now();
         a.validate()?;
-        let t_validate = tv.elapsed();
         let n = a.n;
         // Same 31-bit range gate as factor time (the whole path is Ki-based;
         // checking here lets analyze and the BTF pass use narrow indices).
@@ -217,11 +212,6 @@ impl KluSymbolic {
                 "klu: dimension/nnz exceeds the 31-bit index range of this path".to_string(),
             ));
         }
-        let t0 = crate::clock::Instant::now();
-        let mut sym_s = 0.0f64;
-        let mut amd_s = 0.0f64;
-        let mut tarjan_s = 0.0f64;
-        let mut match_s = 0.0f64;
 
         // Matching bakeoff (BTF on): deterministic maximum-matching
         // candidates (see `btf::matching_candidates`); with more than one,
@@ -233,20 +223,13 @@ impl KluSymbolic {
         // beats guessing. The common MNA case (complete structural
         // diagonal) short-circuits to a single candidate and pays nothing.
         let (pre_row_perm, col_perm, block_ptr) = if settings.btf {
-            let tm = crate::clock::Instant::now();
             let cands = btf::matching_candidates(n, &a.col_ptr, &a.row_idx)
                 .ok_or(RslabError::StructurallySingular)?;
-            match_s = tm.elapsed().as_secs_f64();
             let score_it = cands.len() > 1;
             let mut best: Option<OrderedForm> = None;
             for m in cands {
-                let tt = crate::clock::Instant::now();
                 let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
-                tarjan_s += tt.elapsed().as_secs_f64();
-                let of = order_blocks(a, form, score_it, &mut sym_s, &mut amd_s)?;
-                if prof && score_it {
-                    eprintln!("[klu-prof] analyze: candidate lnz score {}", of.score);
-                }
+                let of = order_blocks(a, form, score_it)?;
                 best = match best {
                     Some(b) if b.score <= of.score => Some(b),
                     _ => Some(of),
@@ -268,15 +251,13 @@ impl KluSymbolic {
                 col_perm: ident,
                 block_ptr: bp,
             };
-            let of = order_blocks(a, form, false, &mut sym_s, &mut amd_s)?;
+            let of = order_blocks(a, form, false)?;
             (of.pre_row_perm, of.col_perm, of.block_ptr)
         };
-        let t_order = t0.elapsed();
 
         // Freeze the analyzed pattern in the (final) pre-pivot space for the
         // a-priori estimators. Narrow inverse permutation: the gather is
         // bound by the random `pinv_pre[r]` reads.
-        let tf = crate::clock::Instant::now();
         let mut pinv_pre = vec![0 as Ki; n];
         for (k, &r) in pre_row_perm.iter().enumerate() {
             pinv_pre[r] = k as Ki;
@@ -289,17 +270,6 @@ impl KluSymbolic {
                 pat_row_idx.push(pinv_pre[r] as usize);
             }
             pat_col_ptr.push(pat_row_idx.len());
-        }
-        if prof {
-            let order_ms = t_order.as_secs_f64() * 1e3;
-            let (m, t, s, d) = (match_s * 1e3, tarjan_s * 1e3, sym_s * 1e3, amd_s * 1e3);
-            eprintln!(
-                "[klu-prof] analyze: validate {:.1}ms  matchings {m:.1}ms  tarjan {t:.1}ms  \
-                 symmetrize {s:.1}ms  amd {d:.1}ms  order-misc {:.1}ms  freeze {:.1}ms",
-                t_validate.as_secs_f64() * 1e3,
-                order_ms - m - t - s - d,
-                tf.elapsed().as_secs_f64() * 1e3,
-            );
         }
 
         Ok(Self {
@@ -615,8 +585,6 @@ fn order_blocks<T: Scalar>(
     a: &GeneralCsc<T>,
     form: btf::BtfForm,
     score_it: bool,
-    sym_s: &mut f64,
-    amd_s: &mut f64,
 ) -> Result<OrderedForm, RslabError> {
     let n = a.n;
     let btf::BtfForm {
@@ -639,7 +607,6 @@ fn order_blocks<T: Scalar>(
         if bn <= 2 {
             continue;
         }
-        let ts = crate::clock::Instant::now();
         // Symmetrized block adjacency (B + Bᵀ + diagonal), canonical form
         // (sorted, deduplicated columns). Built as: the off-diagonal
         // in-block entries B column by column (sequential writes, one random
@@ -725,11 +692,8 @@ fn order_blocks<T: Scalar>(
         }
         let pat = rslab_ordering_core::CscPattern::new(bn, &colptr_i32, &rowidx_i32)
             .ok_or_else(|| RslabError::InvalidInput("klu: malformed block pattern".to_string()))?;
-        *sym_s += ts.elapsed().as_secs_f64();
-        let ta = crate::clock::Instant::now();
         let lperm = rslab_amd::amd_order(&pat)
             .map_err(|e| RslabError::InvalidInput(format!("klu: AMD ordering failed: {e:?}")))?;
-        *amd_s += ta.elapsed().as_secs_f64();
         if score_it {
             // Exact Cholesky lnz of the AMD-ordered block: permute the full
             // symmetric pattern, then etree + GNP column counts. Both accept
@@ -1278,10 +1242,6 @@ fn factor_impl<T: Scalar>(
         KluParallel::Auto => nblocks >= 4 && sym.nnz >= 8_000 && sym.max_block_size() * 2 <= sym.n,
     } && nblocks > 1;
     let max_bn = sym.max_block_size();
-    let prof = std::env::var("RLA_KLU_PROF")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let t_blocks = crate::clock::Instant::now();
 
     // Numeric output buffers, filled either incrementally block-by-block
     // (sequential: one reused scratch + one reused block buffer, no
@@ -1355,12 +1315,6 @@ fn factor_impl<T: Scalar>(
                 scatter_target[k as usize] = fin;
             }
         }
-        if prof {
-            eprintln!(
-                "[klu-prof] blocks+append {:.1}ms",
-                t_blocks.elapsed().as_secs_f64() * 1e3
-            );
-        }
     } else {
         use rayon::prelude::*;
         let blocks: Vec<Result<BlockOut<T>, RslabError>> = (0..nblocks)
@@ -1385,13 +1339,6 @@ fn factor_impl<T: Scalar>(
             )
             .collect();
 
-        if prof {
-            eprintln!(
-                "[klu-prof] blocks {:.1}ms",
-                t_blocks.elapsed().as_secs_f64() * 1e3
-            );
-        }
-        let t_splice = crate::clock::Instant::now();
         // Splice the per-block outputs. Two phases: exact-size global arrays are
         // carved into disjoint per-block chunks (offsets by prefix sums) and the
         // heavy value/index copies run per block, in parallel when enabled; the
@@ -1491,13 +1438,6 @@ fn factor_impl<T: Scalar>(
                 scatter_expect[k as usize] = fin;
                 scatter_target[k as usize] = fin;
             }
-        }
-
-        if prof {
-            eprintln!(
-                "[klu-prof] splice {:.1}ms",
-                t_splice.elapsed().as_secs_f64() * 1e3
-            );
         }
     }
 
