@@ -14,7 +14,7 @@
 //! diagonal (common in complex-symmetric and saddle-point systems). Solving
 //! `A x = b` becomes: factor `Â`, then `x = D · (Â⁻¹ · (D b))`.
 
-use crate::dense::ldlt_generic::{solve_ldlt_many, LdltFactors};
+use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::{
     analyze as analyze_pattern, analyze_with as analyze_pattern_with, factor_numeric,
@@ -149,30 +149,14 @@ impl<T: Scalar> LdltSolver<T> {
     /// calls - the factor structure is traversed once and each value applied to
     /// all RHS (the FEM multiple-load-case / block-Krylov use).
     pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
-        let n = self.factors.n;
-        if nrhs == 0 || b.len() != n * nrhs {
-            return Err(RslabError::DimensionMismatch {
-                expected: n * nrhs,
-                got: b.len(),
-            });
-        }
-        // B̂ = D B (real diagonal scale per row, applied to every RHS column).
-        let mut b_hat = b.to_vec();
-        for i in 0..n {
-            let s = T::from_real(self.scale[i]);
-            for c in 0..nrhs {
-                b_hat[i * nrhs + c] = b_hat[i * nrhs + c] * s;
-            }
-        }
-        let mut x = solve_ldlt_many(&self.factors, &b_hat, nrhs)?;
-        // X = D X̂
-        for i in 0..n {
-            let s = T::from_real(self.scale[i]);
-            for c in 0..nrhs {
-                x[i * nrhs + c] = x[i * nrhs + c] * s;
-            }
-        }
-        Ok(x)
+        // Equilibration fused into the block kernel's permutation gather/scatter
+        // (no scaled intermediate copies of the `n × nrhs` blocks).
+        crate::dense::ldlt_generic::solve_ldlt_many_scaled(
+            &self.factors,
+            b,
+            nrhs,
+            Some(&self.scale),
+        )
     }
 
     /// Solve `A · x = rhs` with iterative refinement against the original
