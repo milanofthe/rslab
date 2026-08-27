@@ -1195,23 +1195,7 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Raw base pointer of a panel buffer, smuggled across rayon workers so each
-/// task can write its own **disjoint row range** of a column-major panel. Safe
-/// only because callers partition the rows so no two tasks touch the same cell
-/// (the LU twin's `PanelPtr` pattern).
-#[derive(Clone, Copy)]
-struct LdltPanelPtr<T>(*mut T);
-// SAFETY: the pointer is only dereferenced on disjoint, caller-partitioned cells.
-unsafe impl<T> Send for LdltPanelPtr<T> {}
-unsafe impl<T> Sync for LdltPanelPtr<T> {}
-impl<T> LdltPanelPtr<T> {
-    /// Taking `self` by value forces closures to capture the whole (Send+Sync)
-    /// wrapper rather than disjoint-capturing the bare `*mut T` field.
-    #[inline]
-    fn get(self) -> *mut T {
-        self.0
-    }
-}
+use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -1994,94 +1978,28 @@ pub(crate) fn compute_supernode_row_structures(sym: &SymbolicFactorization) -> V
     rs
 }
 
-/// Concurrently-filled store of the left-looking factor panels. Each cell is
-/// written exactly once - by its owning supernode's factorization, which
-/// completes before any ancestor (its only reader) runs, per the subtree
-/// recursion - and concurrent writers touch disjoint indices, so the unsynchronized
-/// interior mutability is sound.
-struct LlStore<T> {
-    panels: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    dvals: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    /// Sub-diagonal D entry of each 2×2 Bunch-Kaufman block (per eliminated
-    /// column, in the panel's pivoted order; zero on 1×1 columns and on the
-    /// second column of a 2×2 block).
-    dsubs: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    /// `true` at the first column of each 2×2 block (pivoted order).
-    twos: Vec<std::cell::UnsafeCell<Vec<bool>>>,
-    /// Local within-panel pivot permutation (length = panel `nrow`, identity on
-    /// the off-diagonal rows `[ncol, nrow)` since pivoting is bounded to the
-    /// fully-summed block). Pivoted index `i` ↔ original local index `lperm[i]`.
-    lperms: Vec<std::cell::UnsafeCell<Vec<usize>>>,
+/// One factored supernode's left-looking payload: the dense panel, the
+/// Bunch-Kaufman D (diagonal + sub-diagonal + 2x2 flags, pivoted order), and
+/// the within-panel pivot permutation (identity on the off-diagonal rows).
+struct LdltSlot<T> {
+    panel: Vec<T>,
+    d: Vec<T>,
+    dsub: Vec<T>,
+    two: Vec<bool>,
+    lperm: Vec<usize>,
 }
-// SAFETY: see the type doc - single-writer-before-readers, disjoint indices.
-unsafe impl<T: Send> Sync for LlStore<T> {}
-
-impl<T: Scalar> LlStore<T> {
-    fn new(nsuper: usize) -> Self {
-        LlStore {
-            panels: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            dvals: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            dsubs: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            twos: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            lperms: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
+impl<T> Default for LdltSlot<T> {
+    fn default() -> Self {
+        LdltSlot {
+            panel: Vec::new(),
+            d: Vec::new(),
+            dsub: Vec::new(),
+            two: Vec::new(),
+            lperm: Vec::new(),
         }
     }
-    /// SAFETY: `k` must be a fully-factored descendant of the current node.
-    unsafe fn panel(&self, k: usize) -> &Vec<T> {
-        &*self.panels[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn dval(&self, k: usize) -> &Vec<T> {
-        &*self.dvals[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn dsub(&self, k: usize) -> &Vec<T> {
-        &*self.dsubs[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn two(&self, k: usize) -> &Vec<bool> {
-        &*self.twos[k].get()
-    }
-    /// SAFETY: as [`panel`](Self::panel).
-    unsafe fn lperm(&self, k: usize) -> &Vec<usize> {
-        &*self.lperms[k].get()
-    }
-    /// SAFETY: only the owner of supernode `s` calls this, exactly once.
-    unsafe fn set(
-        &self,
-        s: usize,
-        panel: Vec<T>,
-        d: Vec<T>,
-        dsub: Vec<T>,
-        two: Vec<bool>,
-        lperm: Vec<usize>,
-    ) {
-        *self.panels[s].get() = panel;
-        *self.dvals[s].get() = d;
-        *self.dsubs[s].get() = dsub;
-        *self.twos[s].get() = two;
-        *self.lperms[s].get() = lperm;
-    }
-    /// Release `k`'s dense panel + D/lperm once it has been compacted.
-    /// SAFETY: `k`'s last consumer is done - no other thread reads its cells.
-    unsafe fn free(&self, k: usize) {
-        *self.panels[k].get() = Vec::new();
-        *self.dvals[k].get() = Vec::new();
-        *self.dsubs[k].get() = Vec::new();
-        *self.twos[k].get() = Vec::new();
-        *self.lperms[k].get() = Vec::new();
-    }
 }
+type LlStore<T> = crate::numeric::ll_common::SlotStore<LdltSlot<T>>;
 
 /// Compact (CSC-fragment) form of one supernode's L factor, produced the moment
 /// its last consumer pulls from it so the dense panel can be freed during
@@ -2179,9 +2097,8 @@ fn ldlt_emit_and_free<T: Scalar>(
     let ncol = sym.supernodes[k].ncol;
     let nrow = rs[k].len();
     // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
-    let panel = unsafe { store.panel(k) };
-    let lperm = unsafe { store.lperm(k) };
-    let t2 = unsafe { store.two(k) };
+    let slot = unsafe { store.get(k) };
+    let (panel, lperm, t2) = (&slot.panel, &slot.lperm, &slot.two);
     let one = T::one();
     let mut cl = CompactL::<T>::default();
     cl.ptr.reserve(ncol + 1);
@@ -2369,10 +2286,8 @@ fn ll_factor_node<T: Scalar>(
                     }
                     // SAFETY: `kk` is a factored descendant of `s`, its cells
                     // are written and never mutated again.
-                    let pk = unsafe { store.panel(kk) };
-                    let dk = unsafe { store.dval(kk) };
-                    let dsub_k = unsafe { store.dsub(kk) };
-                    let two_k = unsafe { store.two(kk) };
+                    let slot = unsafe { store.get(kk) };
+                    let (pk, dk, dsub_k, two_k) = (&slot.panel, &slot.d, &slot.dsub, &slot.two);
                     // G = (kk's block rows q0..q1) · D, column-major npk × nck.
                     vd_buf.clear();
                     vd_buf.resize(npk * nck, T::zero());
@@ -2438,13 +2353,12 @@ fn ll_factor_node<T: Scalar>(
         let nok = ok.len();
         // SAFETY: `kk` is a factored descendant of `s` (its update reaches `s`),
         // so its panel/dval cells are written and never mutated again.
-        let pk = unsafe { store.panel(kk) };
-        let dk = unsafe { store.dval(kk) };
+        let slot = unsafe { store.get(kk) };
+        let (pk, dk) = (&slot.panel, &slot.d);
         // Bunch-Kaufman block structure of `kk`'s D (pivoted column order). The
         // cmod `L·D·Lᵀ` is invariant under `kk`'s internal column permutation, so
         // only the block-diagonal `D`-apply has to honor the 2×2 blocks.
-        let dsub_k = unsafe { store.dsub(kk) };
-        let two_k = unsafe { store.two(kk) };
+        let (dsub_k, two_k) = (&slot.dsub, &slot.two);
         let npk = p1 - p0;
         // Gate on the REAL work (rows >= p0); the scalar path already
         // iterates from the target block, so small tails route there.
@@ -3187,7 +3101,18 @@ fn ll_cdiv_emit<T: Scalar>(
     emit.inertia_neg.fetch_add(ineg, Ordering::Relaxed);
     emit.inertia_zero.fetch_add(izero, Ordering::Relaxed);
     // SAFETY: this thread owns supernode `s` and writes its cell exactly once.
-    unsafe { store.set(s, panel, d, d_subdiag, two_by_two, lperm) };
+    unsafe {
+        store.set(
+            s,
+            LdltSlot {
+                panel,
+                d,
+                dsub: d_subdiag,
+                two: two_by_two,
+                lperm,
+            },
+        )
+    };
     Ok(())
 }
 

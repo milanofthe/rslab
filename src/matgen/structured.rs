@@ -8,9 +8,6 @@ use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
 use super::Rng;
-use num_complex::Complex;
-
-type C = Complex<f64>;
 
 /// Symmetric **banded** SPD matrix: random off-diagonals within `bandwidth`, with
 /// each diagonal set to its row's absolute off-diagonal sum plus `alpha`. Strict

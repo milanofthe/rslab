@@ -908,63 +908,14 @@ impl<T: Scalar> LuSolver<T> {
     /// analysis with the adaptive ordering heuristic, the proven default kernel
     /// configuration, and (on large systems) the exact nested-dissection bakeoff.
     pub fn tuned(a: &GeneralCsc<T>) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        let sym = LuSymbolic::analyze(a)?;
-        let s = SolverSettings::default();
-        #[allow(unused_mut)]
-        let (sym, mut s) = if a.n >= crate::numeric::sparse_solver::ND_BAKEOFF_MIN_N
-            && sym.estimate_memory::<T>().factor_flops
-                >= crate::numeric::sparse_solver::ND_BAKEOFF_MIN_FLOPS
-        {
-            Self::nd_bakeoff(a, sym, s)?
-        } else {
-            (sym, s)
-        };
-        // Install-diagnosed worker count: only when a calibration cache exists
-        // (written once by `tuning::install_diagnose`); never measures here.
-        #[cfg(feature = "tuning")]
-        if let Some((cores, calib)) = crate::tuning::cached_calibration() {
-            let est = sym.estimate_memory::<T>();
-            let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
-            s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
-        }
-        Ok((sym, s))
-    }
-
-    /// Re-analyze with [`OrderingMethod`](crate::symbolic::OrderingMethod)`::MetisND`
-    /// and keep whichever ordering the *exact* symbolic quantities favour - the
-    /// LU mirror of the LDLᵀ bakeoff: ND is adopted only on a clear
-    /// predicted-flops win with no regression in exact fill or in the
-    /// method-relevant transient peak. Deterministic; nothing is modeled.
-    fn nd_bakeoff(
-        a: &GeneralCsc<T>,
-        sym: LuSymbolic,
-        s: SolverSettings,
-    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        use crate::symbolic::OrderingMethod;
-        if s.ordering == OrderingMethod::MetisND {
-            return Ok((sym, s));
-        }
-        let mut s_nd = s.clone();
-        s_nd.ordering = OrderingMethod::MetisND;
-        let sym_nd = match LuSymbolic::analyze_with(a, &s_nd) {
-            Ok(x) => x,
-            Err(_) => return Ok((sym, s)),
-        };
-        let est = sym.estimate_memory::<T>();
-        let est_nd = sym_nd.estimate_memory::<T>();
-        let peak = |e: &crate::diagnostics::MemoryEstimate| match s.method {
-            FactorMethod::Multifrontal => e.mf_transient_peak_bytes,
-            _ => e.panel_live_peak_bytes,
-        };
-        let flops_win = (est_nd.factor_flops as f64)
-            < est.factor_flops as f64 * crate::numeric::sparse_solver::ND_BAKEOFF_ADOPT_RATIO;
-        let fill_ok = sym_nd.symbolic_factor_nnz() <= sym.symbolic_factor_nnz();
-        let mem_ok = peak(&est_nd) <= peak(&est);
-        if flops_win && fill_ok && mem_ok {
-            Ok((sym_nd, s_nd))
-        } else {
-            Ok((sym, s))
-        }
+        crate::numeric::ll_common::tuned(
+            a,
+            a.n,
+            LuSymbolic::analyze,
+            LuSymbolic::analyze_with,
+            |sym| sym.estimate_memory::<T>(),
+            LuSymbolic::symbolic_factor_nnz,
+        )
     }
 
     /// Per-call diagnostics: measured factor time, fill, thread budget, and the
@@ -1048,36 +999,27 @@ pub fn factor_general_lu<T: Scalar>(
 // multifrontal v1; matches the equilibrated preconditioner use case.
 // ===========================================================================
 
-/// Concurrently-filled store of the left-looking LU factor panels (`lbuf`,
-/// `ubuf` per supernode). Each cell is written once by its owner before any
-/// ancestor reads it (subtree recursion); concurrent writers are disjoint.
-struct LuLlStore<T> {
-    lbuf: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    ubuf: Vec<std::cell::UnsafeCell<Vec<T>>>,
-    /// Per-node within-front row permutation from partial pivoting: `rperm[i]` is
-    /// the row-structure index (`rs[s]`) physically at panel position `i`.
-    /// Identity on the trailing rows (never interchanged); only read by the emit.
-    rperm: Vec<std::cell::UnsafeCell<Vec<usize>>>,
+/// One factored supernode's left-looking payload: the dense L panel, the U12
+/// rows, and the within-front row permutation from partial pivoting
+/// (`rperm[i]` is the row-structure index physically at panel position `i`;
+/// identity on the trailing rows, only read by the emit).
+struct LuSlot<T> {
+    l: Vec<T>,
+    u: Vec<T>,
+    rperm: Vec<usize>,
 }
-// SAFETY: single-writer-before-readers, disjoint indices (see LDLᵀ `LlStore`).
-unsafe impl<T: Send> Sync for LuLlStore<T> {}
-
-/// Raw base pointer of a panel buffer, smuggled across rayon workers so each task
-/// can write its own **disjoint row range** of a column-major panel. Safe only
-/// because callers partition the rows so no two tasks touch the same cell.
-#[derive(Clone, Copy)]
-struct PanelPtr<T>(*mut T);
-// SAFETY: the pointer is only dereferenced on disjoint, caller-partitioned cells.
-unsafe impl<T> Send for PanelPtr<T> {}
-unsafe impl<T> Sync for PanelPtr<T> {}
-impl<T> PanelPtr<T> {
-    /// Extract the raw pointer. Taking `self` by value forces a closure to capture
-    /// the whole (Send+Sync) wrapper rather than disjoint-capturing the bare field.
-    #[inline]
-    fn get(self) -> *mut T {
-        self.0
+impl<T> Default for LuSlot<T> {
+    fn default() -> Self {
+        LuSlot {
+            l: Vec::new(),
+            u: Vec::new(),
+            rperm: Vec::new(),
+        }
     }
 }
+type LuLlStore<T> = crate::numeric::ll_common::SlotStore<LuSlot<T>>;
+
+use crate::numeric::ll_common::PanelPtr;
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -1117,47 +1059,6 @@ unsafe fn apply_panel_trailing<T: Scalar>(
                 }
             }
         }
-    }
-}
-
-impl<T: Scalar> LuLlStore<T> {
-    fn new(nsuper: usize) -> Self {
-        LuLlStore {
-            lbuf: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            ubuf: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-            rperm: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(Vec::new()))
-                .collect(),
-        }
-    }
-    /// SAFETY: `k` must be a fully-factored descendant of the current node.
-    unsafe fn l(&self, k: usize) -> &Vec<T> {
-        &*self.lbuf[k].get()
-    }
-    /// SAFETY: as [`l`](Self::l).
-    unsafe fn u(&self, k: usize) -> &Vec<T> {
-        &*self.ubuf[k].get()
-    }
-    /// SAFETY: factorization of `k` is complete.
-    unsafe fn rperm(&self, k: usize) -> &Vec<usize> {
-        &*self.rperm[k].get()
-    }
-    /// SAFETY: only the owner of supernode `s` calls this, exactly once.
-    unsafe fn set(&self, s: usize, l: Vec<T>, u: Vec<T>, rperm: Vec<usize>) {
-        *self.lbuf[s].get() = l;
-        *self.ubuf[s].get() = u;
-        *self.rperm[s].get() = rperm;
-    }
-    /// Release the dense panels + `rperm` of `k` once it has been compacted.
-    /// SAFETY: `k`'s last consumer is done - no other thread reads its panels.
-    unsafe fn free(&self, k: usize) {
-        *self.lbuf[k].get() = Vec::new();
-        *self.ubuf[k].get() = Vec::new();
-        *self.rperm[k].get() = Vec::new();
     }
 }
 
@@ -1269,9 +1170,8 @@ fn emit_and_free<T: Scalar>(
     let nrow = rs[k].len();
     let cnrow = nrow - ncol;
     // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
-    let lbuf = unsafe { store.l(k) };
-    let ubuf = unsafe { store.u(k) };
-    let rperm = unsafe { store.rperm(k) };
+    let slot = unsafe { store.get(k) };
+    let (lbuf, ubuf, rperm) = (&slot.l, &slot.u, &slot.rperm);
     let one = T::one();
     let mut cn = CompactNode::<T>::default();
     cn.l_ptr.reserve(ncol + 1);
@@ -1469,8 +1369,8 @@ fn lu_ll_factor_node<T: Scalar>(
                         continue;
                     }
                     // SAFETY: `kk` is a factored descendant of `s`.
-                    let lk = unsafe { store.l(kk) };
-                    let uk = unsafe { store.u(kk) };
+                    let slot = unsafe { store.get(kk) };
+                    let (lk, uk) = (&slot.l, &slot.u);
                     let mrows = nok - p0;
                     lupd.clear();
                     lupd.resize(mrows * npk, T::zero());
@@ -1535,8 +1435,8 @@ fn lu_ll_factor_node<T: Scalar>(
                             continue;
                         }
                         // SAFETY: `kk` is a factored descendant of `s`.
-                        let lk = unsafe { store.l(kk) };
-                        let uk = unsafe { store.u(kk) };
+                        let slot = unsafe { store.get(kk) };
+                        let (lk, uk) = (&slot.l, &slot.u);
                         uupd.clear();
                         uupd.resize(npk * ntr, T::zero());
                         // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
@@ -1585,8 +1485,8 @@ fn lu_ll_factor_node<T: Scalar>(
         let ok = &rs[kk][nck..];
         let nok = ok.len();
         // SAFETY: `kk` is a factored descendant of `s`.
-        let lk = unsafe { store.l(kk) };
-        let uk = unsafe { store.u(kk) };
+        let slot = unsafe { store.get(kk) };
+        let (lk, uk) = (&slot.l, &slot.u);
         let npk = p1 - p0;
         let mrows = nok - p0; // rows used by the L update (Ok ⊆ rs[s] from here)
         let ntrail = nok - p1;
@@ -1973,7 +1873,16 @@ fn lu_ll_factor_node<T: Scalar>(
         }
     }
     // SAFETY: this thread owns `s`, writes its cells exactly once.
-    unsafe { store.set(s, lbuf, ubuf, rperm) };
+    unsafe {
+        store.set(
+            s,
+            LuSlot {
+                l: lbuf,
+                u: ubuf,
+                rperm,
+            },
+        )
+    };
     Ok(())
 }
 

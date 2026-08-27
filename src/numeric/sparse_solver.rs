@@ -23,18 +23,6 @@ use crate::numeric::multifrontal_ldlt::{
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
-/// Floor for the [`LdltSolver::tuned`] nested-dissection bakeoff: below this
-/// predicted factor cost the numeric phase is seconds at most and the extra
-/// symbolic analysis isn't worth scheduling. Above it, a missed ND win on a
-/// 3D-mesh pattern costs 10x the analysis price (measured on 87k-DOF
-/// Nedelec-2 curl-curl: 2e11 flops AMD vs 1.8e10 MetisND).
-pub(crate) const ND_BAKEOFF_MIN_FLOPS: u64 = 5_000_000_000;
-/// Small systems never enter the bakeoff regardless of predicted flops -
-/// dense-ish small matrices can post huge flops without an ND story.
-pub(crate) const ND_BAKEOFF_MIN_N: usize = 10_000;
-/// Adopt ND only on a clear predicted win, not a coin flip.
-pub(crate) const ND_BAKEOFF_ADOPT_RATIO: f64 = 0.75;
-
 /// A factored sparse symmetric matrix, ready to solve against many right-hand
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
 pub struct LdltSolver<T> {
@@ -108,63 +96,14 @@ impl<T: Scalar> LdltSolver<T> {
     ///    [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
     ///    from the calibrated cost model instead of the capped structural default.
     pub fn tuned(a: &CscMatrix<T>) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        let sym = LdltSymbolic::analyze(a)?;
-        let s = SolverSettings::default();
-        #[allow(unused_mut)]
-        let (sym, mut s) = if a.n >= ND_BAKEOFF_MIN_N
-            && sym.estimate_memory::<T>().factor_flops >= ND_BAKEOFF_MIN_FLOPS
-        {
-            Self::nd_bakeoff(a, sym, s)?
-        } else {
-            (sym, s)
-        };
-        // Install-diagnosed worker count: only when a calibration cache exists
-        // (written once by `tuning::install_diagnose`); never measures here.
-        #[cfg(feature = "tuning")]
-        if let Some((cores, calib)) = crate::tuning::cached_calibration() {
-            let est = sym.estimate_memory::<T>();
-            let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
-            s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
-        }
-        Ok((sym, s))
-    }
-
-    /// Re-analyze with [`OrderingMethod::MetisND`] and keep whichever
-    /// ordering the *exact* symbolic quantities favour: ND is adopted only
-    /// on a clear predicted-flops win with no regression in exact fill or
-    /// in the method-relevant transient peak, so the pick is Pareto-safe at
-    /// any tune weight. Deterministic - both candidates are measured on
-    /// this matrix, nothing is modeled.
-    fn nd_bakeoff(
-        a: &CscMatrix<T>,
-        sym: LdltSymbolic,
-        s: SolverSettings,
-    ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        use crate::symbolic::OrderingMethod;
-        if s.ordering == OrderingMethod::MetisND {
-            return Ok((sym, s));
-        }
-        let mut s_nd = s.clone();
-        s_nd.ordering = OrderingMethod::MetisND;
-        let sym_nd = match LdltSymbolic::analyze_with(a, &s_nd) {
-            Ok(x) => x,
-            Err(_) => return Ok((sym, s)), // ND analysis failed -> keep the pick
-        };
-        let est = sym.estimate_memory::<T>();
-        let est_nd = sym_nd.estimate_memory::<T>();
-        let peak = |e: &crate::diagnostics::MemoryEstimate| match s.method {
-            crate::FactorMethod::Multifrontal => e.mf_transient_peak_bytes,
-            _ => e.panel_live_peak_bytes,
-        };
-        let flops_win =
-            (est_nd.factor_flops as f64) < est.factor_flops as f64 * ND_BAKEOFF_ADOPT_RATIO;
-        let fill_ok = sym_nd.symbolic_factor_nnz() <= sym.symbolic_factor_nnz();
-        let mem_ok = peak(&est_nd) <= peak(&est);
-        if flops_win && fill_ok && mem_ok {
-            Ok((sym_nd, s_nd))
-        } else {
-            Ok((sym, s))
-        }
+        crate::numeric::ll_common::tuned(
+            a,
+            a.n,
+            LdltSymbolic::analyze,
+            LdltSymbolic::analyze_with,
+            |sym| sym.estimate_memory::<T>(),
+            LdltSymbolic::symbolic_factor_nnz,
+        )
     }
 
     /// Equilibrate and factor `A` with explicit options - notably
@@ -664,7 +603,15 @@ mod tests {
         let amd_fill = sym_amd.symbolic_factor_nnz();
         let amd_flops = sym_amd.estimate_memory::<f64>().factor_flops;
 
-        let (sym_pick, s_pick) = LdltSolver::<f64>::nd_bakeoff(&a, sym_amd, s_amd).unwrap();
+        let (sym_pick, s_pick) = crate::numeric::ll_common::nd_bakeoff(
+            &a,
+            sym_amd,
+            s_amd,
+            &LdltSymbolic::analyze_with,
+            &|sym: &LdltSymbolic| sym.estimate_memory::<f64>(),
+            &LdltSymbolic::symbolic_factor_nnz,
+        )
+        .unwrap();
 
         assert!(
             sym_pick.symbolic_factor_nnz() <= amd_fill,
@@ -693,11 +640,19 @@ mod tests {
         let sym_amd = LdltSymbolic::analyze_with(&a, &s_amd).unwrap();
         let amd_flops = sym_amd.estimate_memory::<Complex<f64>>().factor_flops;
 
-        let (sym, s) = LdltSolver::<Complex<f64>>::nd_bakeoff(&a, sym_amd, s_amd).unwrap();
+        let (sym, s) = crate::numeric::ll_common::nd_bakeoff(
+            &a,
+            sym_amd,
+            s_amd,
+            &LdltSymbolic::analyze_with,
+            &|sym: &LdltSymbolic| sym.estimate_memory::<Complex<f64>>(),
+            &LdltSymbolic::symbolic_factor_nnz,
+        )
+        .unwrap();
         assert_eq!(s.ordering, crate::symbolic::OrderingMethod::MetisND);
         assert!(
             (sym.estimate_memory::<Complex<f64>>().factor_flops as f64)
-                < amd_flops as f64 * ND_BAKEOFF_ADOPT_RATIO
+                < amd_flops as f64 * crate::numeric::ll_common::ND_BAKEOFF_ADOPT_RATIO
         );
     }
 
@@ -722,7 +677,7 @@ mod tests {
         assert_ne!(s.ordering, crate::symbolic::OrderingMethod::Amd);
         assert!(
             (sym.estimate_memory::<Complex<f64>>().factor_flops as f64)
-                < amd_flops as f64 * ND_BAKEOFF_ADOPT_RATIO
+                < amd_flops as f64 * crate::numeric::ll_common::ND_BAKEOFF_ADOPT_RATIO
         );
     }
 
