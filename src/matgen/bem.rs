@@ -12,7 +12,7 @@
 
 use num_complex::Complex;
 
-use super::{Cond, Density, Generated, MatrixSpec, Rng, Structure, Symmetry};
+use super::Rng;
 use crate::sparse::general::GeneralCsc;
 
 type C = Complex<f64>;
@@ -102,75 +102,6 @@ pub fn kernel(n: usize, opts: &BemOpts) -> GeneralCsc<C> {
         }
     }
     super::build_gen(n, &rows, &cols, &vals)
-}
-
-pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
-    fn un(m: GeneralCsc<C>) -> Generated {
-        Generated::Unsymmetric(m)
-    }
-    // Near-field (sparse) MoM block, well-conditioned.
-    c.push(MatrixSpec {
-        name: "mom_nearfield",
-        structure: Structure::Bem,
-        symmetry: Symmetry::Unsymmetric,
-        cond: Cond::Moderate,
-        density: Density::Medium,
-        size: 8_000,
-        build: || un(kernel(8_000, &BemOpts::default())),
-    });
-    // Larger, sparser near-field block.
-    c.push(MatrixSpec {
-        name: "mom_nearfield_large",
-        structure: Structure::Bem,
-        symmetry: Symmetry::Unsymmetric,
-        cond: Cond::Moderate,
-        density: Density::Sparse,
-        size: 30_000,
-        build: || {
-            un(kernel(
-                30_000,
-                &BemOpts {
-                    cutoff: 0.25,
-                    ..Default::default()
-                },
-            ))
-        },
-    });
-    // High wavenumber near a sphere resonance ⇒ ill-conditioned.
-    c.push(MatrixSpec {
-        name: "mom_resonant",
-        structure: Structure::Bem,
-        symmetry: Symmetry::Unsymmetric,
-        cond: Cond::Ill,
-        density: Density::Medium,
-        size: 8_000,
-        build: || {
-            let o = BemOpts {
-                k: 8.0,
-                self_term: Complex::new(0.5, 1e-3),
-                ..Default::default()
-            };
-            un(kernel(8_000, &o))
-        },
-    });
-    // Denser block (larger cutoff ⇒ more nonzeros per row).
-    c.push(MatrixSpec {
-        name: "mom_dense",
-        structure: Structure::Bem,
-        symmetry: Symmetry::Unsymmetric,
-        cond: Cond::Moderate,
-        density: Density::Dense,
-        size: 4_000,
-        build: || {
-            un(kernel(
-                4_000,
-                &BemOpts {
-                    cutoff: 1.0,
-                    ..Default::default()
-                },
-            ))
-        },
-    });
 }
 
 #[cfg(test)]

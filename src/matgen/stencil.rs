@@ -11,7 +11,7 @@ use num_complex::Complex;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
-use super::{Cond, Density, Generated, MatrixSpec, Rng, Structure, Symmetry};
+use super::Rng;
 
 /// Knobs for the grid Laplacian.
 #[derive(Clone)]
@@ -129,126 +129,6 @@ pub fn helmholtz(dims: &[usize], k2: Complex<f64>, opts: &StencilOpts) -> CscMat
         vals.push(Complex::new(w, 0.0));
     }
     super::build_sym(n, &rows, &cols, &vals)
-}
-
-/// A roughly-cubic 3D grid dimension triple with `≈ target` nodes.
-fn cube(target: usize) -> [usize; 3] {
-    let k = (target as f64).cbrt().round().max(2.0) as usize;
-    [k, k, k]
-}
-
-/// A roughly-square 2D grid dimension pair with `≈ target` nodes.
-fn square(target: usize) -> [usize; 2] {
-    let k = (target as f64).sqrt().round().max(2.0) as usize;
-    [k, k]
-}
-
-pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
-    fn cx(m: CscMatrix<Complex<f64>>) -> Generated {
-        Generated::Symmetric(m)
-    }
-    // 2D Poisson (SPD), small/medium/large.
-    c.push(MatrixSpec {
-        name: "poisson2d_small",
-        structure: Structure::Stencil2D,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Moderate,
-        density: Density::Sparse,
-        size: 2_500,
-        build: || cx(laplacian(&square(2_500), &StencilOpts::default())),
-    });
-    c.push(MatrixSpec {
-        name: "poisson2d_large",
-        structure: Structure::Stencil2D,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Ill, // κ ∼ h⁻², large grid ⇒ ill-conditioned
-        density: Density::Sparse,
-        size: 160_000,
-        build: || cx(laplacian(&square(160_000), &StencilOpts::default())),
-    });
-    // 3D Poisson (SPD) - the EM-FEM sparsity, small and large.
-    c.push(MatrixSpec {
-        name: "poisson3d_small",
-        structure: Structure::Stencil3D,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Moderate,
-        density: Density::Sparse,
-        size: 8_000,
-        build: || cx(laplacian(&cube(8_000), &StencilOpts::default())),
-    });
-    c.push(MatrixSpec {
-        name: "poisson3d_large",
-        structure: Structure::Stencil3D,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Ill,
-        density: Density::Sparse,
-        size: 125_000,
-        build: || cx(laplacian(&cube(125_000), &StencilOpts::default())),
-    });
-    // Anisotropic 3D (harder ordering / conditioning).
-    c.push(MatrixSpec {
-        name: "aniso3d",
-        structure: Structure::Stencil3D,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Ill,
-        density: Density::Sparse,
-        size: 64_000,
-        build: || {
-            let o = StencilOpts {
-                aniso: [1.0, 1.0, 1000.0],
-                ..Default::default()
-            };
-            cx(laplacian(&cube(64_000), &o))
-        },
-    });
-    // Jumping-coefficient 3D (high contrast ⇒ ill-conditioned heterogeneous media).
-    c.push(MatrixSpec {
-        name: "jump3d",
-        structure: Structure::Stencil3D,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Ill,
-        density: Density::Sparse,
-        size: 64_000,
-        build: || {
-            let o = StencilOpts {
-                jump_contrast: 1e6,
-                seed: 7,
-                ..Default::default()
-            };
-            cx(laplacian(&cube(64_000), &o))
-        },
-    });
-    // Complex-symmetric Helmholtz (EM): well below resonance, and near-resonance.
-    c.push(MatrixSpec {
-        name: "helmholtz3d",
-        structure: Structure::Stencil3D,
-        symmetry: Symmetry::ComplexSymmetric,
-        cond: Cond::Moderate,
-        density: Density::Sparse,
-        size: 64_000,
-        build: || {
-            cx(helmholtz(
-                &cube(64_000),
-                Complex::new(0.5, 0.05),
-                &StencilOpts::default(),
-            ))
-        },
-    });
-    c.push(MatrixSpec {
-        name: "helmholtz3d_indef",
-        structure: Structure::Stencil3D,
-        symmetry: Symmetry::ComplexSymmetric,
-        cond: Cond::Ill, // large real shift ⇒ strongly indefinite
-        density: Density::Sparse,
-        size: 64_000,
-        build: || {
-            cx(helmholtz(
-                &cube(64_000),
-                Complex::new(6.0, 0.1),
-                &StencilOpts::default(),
-            ))
-        },
-    });
 }
 
 #[cfg(test)]

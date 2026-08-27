@@ -535,10 +535,9 @@ cargo xtask calibrate
 ```rust
 # #[cfg(feature = "matgen")]
 # fn demo() {
-use rslab::matgen::{self, stencil, bem};
+use rslab::matgen::{stencil, bem};
 let a = stencil::laplacian::<f64>(&[64, 64, 64], &stencil::StencilOpts::default());
 let k = bem::kernel(8000, &bem::BemOpts::default());
-for spec in matgen::catalog() { let _ = spec.name; }
 # }
 ```
 
@@ -567,7 +566,7 @@ and the estimates are pure functions of the symbolic structure.
 | Feature | Adds |
 |---------|------|
 | (default) | solver core, pure Rust |
-| `matgen` | test-matrix generators + catalog |
+| `matgen` | test-matrix generators |
 | `matgen-download` | SuiteSparse / Matrix Market fetcher (pure-Rust HTTP/gzip/tar) |
 | `tuning` | hardware probe + calibration cache + budget planner (pulls `sysinfo`) |
 

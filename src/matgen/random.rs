@@ -12,10 +12,7 @@ use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
 
-use super::{Cond, Density, Generated, MatrixSpec, Rng, Structure, Symmetry};
-use num_complex::Complex;
-
-type C = Complex<f64>;
+use super::Rng;
 
 /// Random **symmetric** sparse SPD matrix: ~`avg_deg` random off-diagonals per
 /// row, each diagonal loaded to its row's |off|-sum plus `alpha` (strict diagonal
@@ -143,73 +140,6 @@ pub fn spectral<T: Scalar>(n: usize, kappa: f64, indefinite: bool, seed: u64) ->
         }
     }
     super::build_sym(n, &rows, &cols, &vals)
-}
-
-pub(super) fn add_to_catalog(c: &mut Vec<MatrixSpec>) {
-    fn cs(m: CscMatrix<C>) -> Generated {
-        Generated::Symmetric(m)
-    }
-    fn cu(m: GeneralCsc<C>) -> Generated {
-        Generated::Unsymmetric(m)
-    }
-    // NOTE: random patterns are the worst case for a direct solver (no structure
-    // for the ordering ⇒ near-dense fill), so these stay deliberately small - they
-    // stress the symbolic/ordering stage, not large-n throughput.
-    c.push(MatrixSpec {
-        name: "rand_spd",
-        structure: Structure::Random,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Moderate,
-        density: Density::Sparse,
-        size: 6_000,
-        build: || cs(random_spd(6_000, 16, 1.0, 21)),
-    });
-    c.push(MatrixSpec {
-        name: "rand_spd_ill",
-        structure: Structure::Random,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Ill,
-        density: Density::Sparse,
-        size: 6_000,
-        build: || cs(random_spd(6_000, 16, 1e-3, 22)),
-    });
-    c.push(MatrixSpec {
-        name: "rand_unsym",
-        structure: Structure::Random,
-        symmetry: Symmetry::Unsymmetric,
-        cond: Cond::Moderate,
-        density: Density::Sparse,
-        size: 5_000,
-        build: || cu(random_unsym(5_000, 16, 2.0, 23)),
-    });
-    // Spectral, exact condition numbers (dense, small).
-    c.push(MatrixSpec {
-        name: "spectral_well",
-        structure: Structure::Spectral,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Well,
-        density: Density::Dense,
-        size: 300,
-        build: || cs(spectral(300, 10.0, false, 24)),
-    });
-    c.push(MatrixSpec {
-        name: "spectral_ill",
-        structure: Structure::Spectral,
-        symmetry: Symmetry::Spd,
-        cond: Cond::Ill,
-        density: Density::Dense,
-        size: 300,
-        build: || cs(spectral(300, 1e10, false, 25)),
-    });
-    c.push(MatrixSpec {
-        name: "spectral_indef",
-        structure: Structure::Spectral,
-        symmetry: Symmetry::SymIndefinite,
-        cond: Cond::Moderate,
-        density: Density::Dense,
-        size: 300,
-        build: || cs(spectral(300, 1e3, true, 26)),
-    });
 }
 
 #[cfg(test)]
