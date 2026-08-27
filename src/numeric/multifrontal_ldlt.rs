@@ -1196,7 +1196,7 @@ thread_local! {
 }
 
 use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells};
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, PermScatter};
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -1489,6 +1489,10 @@ struct SymbolicInner {
     /// Assembly-tree levels: `by_level[l]` are the supernodes at level `l`, all
     /// mutually independent (factored concurrently by the rayon driver).
     by_level: Vec<Vec<usize>>,
+    /// Lazily built scatter program for `Pᵀ A P` (lower fold): the permuted
+    /// structure is fixed per pattern, so every (re)factorization reduces to
+    /// one linear values scatter. See [`crate::numeric::ll_common::PermScatter`].
+    lower_scatter: std::sync::OnceLock<crate::numeric::ll_common::PermScatter>,
 }
 
 impl MultifrontalSymbolic {
@@ -1682,7 +1686,11 @@ fn analyze_with_inner(
     }
 
     Ok(MultifrontalSymbolic {
-        inner: Some(SymbolicInner { sym, by_level }),
+        inner: Some(SymbolicInner {
+            sym,
+            by_level,
+            lower_scatter: std::sync::OnceLock::new(),
+        }),
         n,
         nnz,
     })
@@ -1740,13 +1748,26 @@ pub fn factor_numeric<T: Scalar>(
     // factorization never overflows on deep chain trees (banded / 1D + low nemin).
     let stack = stack_for_depth(supernode_tree_depth(sym));
 
+    // A_perm = Pᵀ A P (lower fold) through the cached scatter program: the
+    // structure is frozen on the first factorization of this pattern; every
+    // later (re)factorization pays one linear values pass only.
+    let scatter = inner
+        .lower_scatter
+        .get_or_init(|| PermScatter::build_lower(n, &a.col_ptr, &a.row_idx, &sym.perm_inv));
+    let a_perm = CscMatrix {
+        n,
+        col_ptr: scatter.col_ptr.clone(),
+        row_idx: scatter.row_idx.clone(),
+        values: scatter.scatter(&a.values, |_, v| v),
+    };
+
     // Supernodal left-looking path: same factor, low transient (no CB stack). Run
     // in a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
         return opts.threads.run(
             stack,
             |cap| recommend_threads_for_sym(symb, cap),
-            || factor_left_looking(sym, a, opts),
+            || factor_left_looking(sym, a, a_perm, opts),
         );
     }
 
@@ -1761,10 +1782,6 @@ pub fn factor_numeric<T: Scalar>(
             Some(anorm.max(1.0) * f64::EPSILON)
         }
     };
-
-    // 2. Permuted matrix A_perm = Pᵀ A P in permuted (new) numbering, lower
-    //    triangle. `perm_inv` is old→new; direct counting build, no triplets.
-    let a_perm = a.permute_lower(&sym.perm_inv);
 
     // 3. Multifrontal numeric factorization with a work-stealing schedule over
     //    the assembly tree: each subtree factors independently (children before
@@ -3170,6 +3187,7 @@ fn ll_factor_subtree<T: Scalar>(
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     a: &CscMatrix<T>,
+    a_perm: CscMatrix<T>,
     opts: &SolverSettings,
 ) -> Result<LdltFactors<T>, RslabError> {
     let n = sym.n;
@@ -3181,9 +3199,6 @@ fn factor_left_looking<T: Scalar>(
             Some(anorm.max(1.0) * f64::EPSILON)
         }
     };
-
-    // A_perm = Pᵀ A P, lower triangle (same build as the multifrontal path).
-    let a_perm = a.permute_lower(&sym.perm_inv);
 
     let nsuper = sym.supernodes.len();
     let rs = compute_supernode_row_structures(sym);
