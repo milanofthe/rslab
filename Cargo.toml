@@ -125,10 +125,5 @@ name = "bench_suite"
 harness = false
 required-features = ["matgen"]
 
-[[bench]]
-name = "sweep"
-harness = false
-required-features = ["matgen"]
-
 [profile.release]
 debug = true

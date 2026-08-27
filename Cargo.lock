@@ -2208,9 +2208,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
- "num-complex",
  "rslab",
- "serde_json",
 ]
 
 [[package]]

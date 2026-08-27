@@ -78,14 +78,8 @@
 // them yet never appear in the public docs. Each such case is commented.
 // -------------------------------------------------------------------------
 
-/// Structural feature extraction (the "structure analyzer"): distils a matrix +
-/// its symbolic analysis into a compact [`analysis::StructuralFeatures`] vector
-/// for diagnostics and auto-tuning input.
+/// Single-solve thread-count policy from the symbolic analysis.
 pub(crate) mod analysis;
-/// Auto-tuner: predict the knob config minimizing a weighted time/memory score
-/// for a matrix from its [`analysis::StructuralFeatures`], via an embedded MLP
-/// performance model (trained offline on the corpus sweep; pure-Rust inference).
-pub(crate) mod auto_tune;
 /// Monotonic clock shim: std Instant natively, inert on wasm32 (no OS clock).
 pub(crate) mod clock;
 pub(crate) mod dense;
@@ -136,12 +130,7 @@ pub mod tuning;
 // Flat public API re-exported at crate root - a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
-pub use analysis::{recommend_threads_from, StructuralFeatures, SymbolicShape};
-pub use auto_tune::{
-    apply_profile, default_profile, recommend_settings, recommend_settings_pathed,
-    recommend_settings_vetoed, recommend_with_profile, SolverPath, TunerProfile,
-    DEFAULT_TUNE_WEIGHT,
-};
+pub use analysis::recommend_threads_from;
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
 pub use error::RslabError;

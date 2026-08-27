@@ -54,22 +54,6 @@ headline results.
   with the cache present, the worker count comes from the calibrated cost model
   (critical-path-aware), otherwise from the conservative structural default. The
   solvers never measure implicitly.
-- Optional **learned auto-tuner** (`factor_auto` / `tuned_model`), **one model per
-  path** (symmetric LDLᵀ / unsymmetric LU): a small MLP selects the solver
-  configuration (ordering incl. `MetisND`, method, amalgamation, threshold-pivot
-  `u` on LU, equilibration, memory mode, kernel gates) per matrix from its
-  structural features, guarded by a deterministic a-priori memory backstop so it
-  never uses more memory than the default. For tuning to a specific problem class
-  on specific hardware; the default `factor()` does not consult it.
-- **Runtime tuner profile** (no recompile): the two models plus hardware-calibrated
-  guard thresholds ship as a `tuner_profile.json` config artifact. Point
-  `RSLAB_TUNER_PROFILE` at one (or call `apply_profile`) to specialize the tuner to
-  a machine or problem class. Produced by the **meta-tuner** `cargo xtask tune`
-  (sweep → train → hardware-calibrate → assemble → held-out validate), which only
-  writes a profile that passes a **ship-gate** (must not regress the shipped default
-  on a held-out generator corpus). Calibration sets the deviate guard to the
-  machine's own timing noise floor (`z·CV`), so the tuner never chases a predicted
-  gain smaller than the measurement variance.
 - The numeric factor is bit-identical across thread counts; the parallel multi-RHS
   solve (8-19x faster than per-column) is bit-identical to the serial path.
 - 32-bit index compression (`CompressedLdltFactors`, when `n < 2^31`): half the
@@ -285,21 +269,6 @@ spliced output) is **1.6-2.7x faster than SuiteSparse KLU on factor and
 2.1-3.4x on refactor**, which puts the 20-point sweep ~2.4x ahead end to
 end. Both reach ~1e-15 residuals.
 
-### The optional learned auto-tuner
-
-The default `factor()` is model-free (the heuristic pick above). For tuning to
-a **specific problem class on specific hardware** there is an opt-in learned
-tuner (`factor_auto` / `tuned_model`): one MLP per path selects the whole
-`SolverSettings` vector (ordering incl. `MetisND`, method, amalgamation,
-threshold-pivot `u` on LU, equilibration, memory mode, kernel gates) from the
-matrix's structural fingerprint, constrained by a deterministic guard stack (a
-re-analysis check that the pick's exact fill/flops/memory floor stay within
-`1.02x`/`1.05x`/`1.0x` of the default's, plus a minimum-improvement threshold)
-so **peak memory is guaranteed never to exceed the default**. Its value is the
-retrainable profile: `cargo xtask tune` (sweep → train → calibrate → assemble →
-held-out ship-gate) emits a class-specialized `tuner_profile.json` applied at
-runtime via `RSLAB_TUNER_PROFILE` / `apply_profile`, no recompile.
-
 ### A-priori predictors
 
 ![Memory estimate vs measured](docs/figures/memory_breakdown.png)
@@ -310,8 +279,7 @@ simulation (live panels + factor + input/scratch) and the multifrontal
 level-parallel model (fronts plus live contribution blocks). Over the corpus both
 bounds hold at an estimate/measured ratio of **~1.3 in geomean and never
 under-predict**, so either is safe to compare against RAM for fail-fast
-scheduling; the panel-freeing floor is the tighter quantity the tuner's memory
-veto uses. The KLU path carries the same contract (a pattern-only
+scheduling; the panel-freeing floor is the tighter of the two. The KLU path carries the same contract (a pattern-only
 Gilbert-Peierls pass gives its fill and flops exactly under diagonal pivoting).
 
 The thread-aware runtime estimate combines the calibrated machine throughput
@@ -552,22 +520,15 @@ held-out error reduction) refines the analytical speedup curve; it is additive o
 the calibrated base and floored at the critical path, so it never extrapolates a
 true chain into an impossible speedup.
 
-### Meta-tuner (`cargo xtask`)
+### Hardware calibration (`cargo xtask calibrate`)
 
-The offline pipeline that produces a `tuner_profile.json` (feature `tuning`):
+A one-time in-process microbench (feature `tuning`) that measures this
+machine's proxy GFLOP/s, parallel speedup curve and timing noise, and writes
+the calibration cache consumed by `tuned()`'s cost-model worker-count pick.
 
 ```
-cargo xtask calibrate                       # hardware microbench summary
-cargo xtask tune   <workdir>                # sweep -> train -> profile -> ship-gate
-cargo xtask profile <models_dir> <out> [class]   # assemble + ship-gate only
-cargo xtask validate <profile.json>         # held-out geomean speedup vs default
+cargo xtask calibrate
 ```
-
-`tune` runs the corpus sweep, trains the two per-path models, measures this
-machine's calibration, assembles a candidate profile, and validates it on a
-held-out generator corpus (curl-curl + saddle-point). The **ship-gate** writes the
-profile only if it does not regress the shipped default. Load the result at runtime
-with `RSLAB_TUNER_PROFILE=<path>`, no recompile.
 
 ### Test-matrix generators (feature `matgen`)
 

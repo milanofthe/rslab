@@ -296,7 +296,7 @@ pub enum Threads {
     /// the machine without oversubscription).
     Fixed(usize),
     /// Predict the worker count per-matrix from the structural fingerprint (the
-    /// validated [`recommend_threads`](crate::StructuralFeatures::recommend_threads)
+    /// validated [`recommend_threads_from`](crate::recommend_threads_from)
     /// policy: thin / tiny systems stay low where they would only regress, big
     /// BLAS-3-rich systems use the cores), **capped at `max`** (`0` = all logical
     /// cores). The single-solve default: best throughput without oversubscribing
