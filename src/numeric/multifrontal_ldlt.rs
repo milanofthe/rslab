@@ -1196,7 +1196,7 @@ thread_local! {
 }
 
 use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, PermScatter};
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, LlSchedule, PermScatter};
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -1493,6 +1493,9 @@ struct SymbolicInner {
     /// structure is fixed per pattern, so every (re)factorization reduces to
     /// one linear values scatter. See [`crate::numeric::ll_common::PermScatter`].
     lower_scatter: std::sync::OnceLock<crate::numeric::ll_common::PermScatter>,
+    /// Lazily built left-looking schedule (row structures + updater lists),
+    /// pattern-only and shared by the numeric drivers and the estimators.
+    ll_schedule: std::sync::OnceLock<LlSchedule>,
 }
 
 impl MultifrontalSymbolic {
@@ -1506,6 +1509,15 @@ impl MultifrontalSymbolic {
     /// empty (`n == 0`) analysis.
     pub(crate) fn sym_and_levels(&self) -> Option<(&SymbolicFactorization, &[Vec<usize>])> {
         self.inner.as_ref().map(|i| (&i.sym, i.by_level.as_slice()))
+    }
+
+    /// The cached pattern-only left-looking schedule (row structures + updater
+    /// lists), built on first use and shared by the numeric drivers and the
+    /// a-priori estimators. `None` for the empty analysis.
+    pub(crate) fn ll_schedule(&self) -> Option<&LlSchedule> {
+        self.inner
+            .as_ref()
+            .map(|i| i.ll_schedule.get_or_init(|| LlSchedule::build(&i.sym)))
     }
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)`: the number of
@@ -1690,6 +1702,7 @@ fn analyze_with_inner(
             sym,
             by_level,
             lower_scatter: std::sync::OnceLock::new(),
+            ll_schedule: std::sync::OnceLock::new(),
         }),
         n,
         nnz,
@@ -1764,10 +1777,11 @@ pub fn factor_numeric<T: Scalar>(
     // Supernodal left-looking path: same factor, low transient (no CB stack). Run
     // in a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
     if opts.method == FactorMethod::LeftLooking {
+        let sched = inner.ll_schedule.get_or_init(|| LlSchedule::build(sym));
         return opts.threads.run(
             stack,
             |cap| recommend_threads_for_sym(symb, cap),
-            || factor_left_looking(sym, a, a_perm, opts),
+            || factor_left_looking(sym, sched, a, a_perm, opts),
         );
     }
 
@@ -1942,45 +1956,6 @@ pub fn factor_numeric<T: Scalar>(
     })
 }
 
-/// Filled `L` row structure of every supernode (bottom-up, children before
-/// parents), mirroring the multifrontal assembly value-free: a supernode's
-/// structure is its own columns ++ the sorted union of its column patterns'
-/// trailing rows and its children's off-diagonal rows. `rs[s][0..ncol]` are the
-/// eliminated columns `first_col..first_col+ncol`; `rs[s][ncol..]` are the
-/// (sorted) below-diagonal fill rows.
-pub(crate) fn compute_supernode_row_structures(sym: &SymbolicFactorization) -> Vec<Vec<usize>> {
-    let nsuper = sym.supernodes.len();
-    let mut rs: Vec<Vec<usize>> = Vec::with_capacity(nsuper);
-    for s in 0..nsuper {
-        let snode = &sym.supernodes[s];
-        let own_last = snode.first_col + snode.ncol;
-        let mut trailing: Vec<usize> = Vec::new();
-        for j in snode.first_col..own_last {
-            for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
-                let r = sym.permuted_pattern.row_idx[k];
-                if r >= own_last {
-                    trailing.push(r);
-                }
-            }
-        }
-        for &ch in &snode.children {
-            let nck = sym.supernodes[ch].ncol;
-            for &r in &rs[ch][nck..] {
-                if r >= own_last {
-                    trailing.push(r);
-                }
-            }
-        }
-        trailing.sort_unstable();
-        trailing.dedup();
-        let mut ri = Vec::with_capacity(snode.ncol + trailing.len());
-        ri.extend(snode.first_col..own_last);
-        ri.extend(trailing);
-        rs.push(ri);
-    }
-    rs
-}
-
 /// One factored supernode's left-looking payload: the dense panel, the
 /// Bunch-Kaufman D (diagonal + sub-diagonal + 2x2 flags, pivoted order), and
 /// the within-panel pivot permutation (identity on the off-diagonal rows).
@@ -2041,10 +2016,10 @@ struct LlEmitLdlt<T> {
 }
 
 impl<T: Scalar> LlEmitLdlt<T> {
-    fn new(sym: &SymbolicFactorization, update_list: &[Vec<usize>]) -> Self {
+    fn new(sym: &SymbolicFactorization, sched: &LlSchedule) -> Self {
         let nsuper = sym.supernodes.len();
         let n = sym.n;
-        let (refcount, e_offset) = emit_refcount_offsets(sym, update_list);
+        let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
         LlEmitLdlt {
             refcount,
             e_offset,
@@ -2073,11 +2048,11 @@ fn ldlt_emit_and_free<T: Scalar>(
     store: &LlStore<T>,
     emit: &LlEmitLdlt<T>,
     sym: &SymbolicFactorization,
-    rs: &[Vec<usize>],
+    sched: &LlSchedule,
     drop_tol: Option<f64>,
 ) {
     let ncol = sym.supernodes[k].ncol;
-    let nrow = rs[k].len();
+    let nrow = sched.rows(k).len();
     // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
     let slot = unsafe { store.get(k) };
     let (panel, lperm, t2) = (&slot.panel, &slot.lperm, &slot.two);
@@ -2088,14 +2063,14 @@ fn ldlt_emit_and_free<T: Scalar>(
     let mut col: Vec<(usize, T)> = Vec::with_capacity(nrow);
     for p in 0..ncol {
         col.clear();
-        let diag_e = unsafe { emit.eg(rs[k][lperm[p]]) };
+        let diag_e = unsafe { emit.eg(sched.rows(k)[lperm[p]]) };
         col.push((diag_e, one));
         // Skip the 2×2 block's `d21` coupling row (D, not an L multiplier).
         let i0 = if t2[p] { p + 2 } else { p + 1 };
         for i in i0..nrow {
             let v = panel[i + p * nrow];
             if v != T::zero() {
-                col.push((unsafe { emit.eg(rs[k][lperm[i]]) }, v));
+                col.push((unsafe { emit.eg(sched.rows(k)[lperm[i]]) }, v));
             }
         }
         if let Some(tau) = drop_tol {
@@ -2143,8 +2118,7 @@ fn ll_factor_node<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
     a_perm: &CscMatrix<T>,
-    rs: &[Vec<usize>],
-    update_list: &[Vec<usize>],
+    sched: &LlSchedule,
     store: &LlStore<T>,
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
@@ -2158,7 +2132,7 @@ fn ll_factor_node<T: Scalar>(
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
-    let nrow = rs[s].len();
+    let nrow = sched.rows(s).len();
     let n = sym.n;
     let mut panel = vec![T::zero(); nrow * ncol];
 
@@ -2167,7 +2141,7 @@ fn ll_factor_node<T: Scalar>(
     if gloc.len() < n {
         gloc.resize(n, usize::MAX);
     }
-    for (li, &g) in rs[s].iter().enumerate() {
+    for (li, &g) in sched.rows(s).iter().enumerate() {
         gloc[g] = li;
     }
     // Assemble A's lower-triangle columns of this supernode.
@@ -2182,11 +2156,11 @@ fn ll_factor_node<T: Scalar>(
     // panel once ([p0, p1) of its off-diagonal rows) and total the update
     // flops - the dispatch between the column-tiled parallel cmod and the
     // sequential per-update path below.
-    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(update_list[s].len());
+    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(sched.updaters(s).len());
     let mut cmod_flops: usize = 0;
-    for &kk in &update_list[s] {
+    for &kk in sched.updaters(s) {
         let nck = sym.supernodes[kk].ncol;
-        let ok = &rs[kk][nck..];
+        let ok = &sched.rows(kk)[nck..];
         let nok = ok.len();
         let p0 = ok.partition_point(|&g| g < first);
         let p1 = ok.partition_point(|&g| g < first + ncol);
@@ -2256,8 +2230,8 @@ fn ll_factor_node<T: Scalar>(
                 let mut u_buf: Vec<T> = Vec::new();
                 for &(kk, p0, p1) in spans_ref {
                     let nck = sym.supernodes[kk].ncol;
-                    let nrk = rs[kk].len();
-                    let ok = &rs[kk][nck..];
+                    let nrk = sched.rows(kk).len();
+                    let ok = &sched.rows(kk)[nck..];
                     let nok = ok.len();
                     // Updater columns landing in this slab.
                     let q0 = p0 + ok[p0..p1].partition_point(|&g| g < first + c0);
@@ -2330,8 +2304,8 @@ fn ll_factor_node<T: Scalar>(
     let mut u_buf: Vec<T> = Vec::new();
     for &(kk, p0, p1) in spans.iter().filter(|_| !tiled) {
         let nck = sym.supernodes[kk].ncol;
-        let nrk = rs[kk].len();
-        let ok = &rs[kk][nck..];
+        let nrk = sched.rows(kk).len();
+        let ok = &sched.rows(kk)[nck..];
         let nok = ok.len();
         // SAFETY: `kk` is a factored descendant of `s` (its update reaches `s`),
         // so its panel/dval cells are written and never mutated again.
@@ -2443,7 +2417,7 @@ fn ll_factor_node<T: Scalar>(
     ll_cdiv_emit(
         s,
         sym,
-        rs,
+        sched,
         store,
         emit,
         perturb_floor,
@@ -2714,7 +2688,7 @@ fn ll_bk_panel_step<T: Scalar>(
 fn ll_cdiv_emit<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
-    rs: &[Vec<usize>],
+    sched: &LlSchedule,
     store: &LlStore<T>,
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
@@ -2726,7 +2700,7 @@ fn ll_cdiv_emit<T: Scalar>(
 ) -> Result<(), RslabError> {
     let snode = &sym.supernodes[s];
     let ncol = snode.ncol;
-    let nrow = rs[s].len();
+    let nrow = sched.rows(s).len();
     // cdiv: partial **blocked** Bunch-Kaufman LDLᵀ (1×1 and 2×2 pivots), the
     // rectangular `nrow × ncol` analogue of `factor_front`'s panel kernel. The
     // fully-summed columns are factored in panels of width `NB` with pivoting
@@ -2786,7 +2760,7 @@ fn ll_cdiv_emit<T: Scalar>(
     // Helper to restore the `gloc` scratch invariant before an early return.
     macro_rules! restore_gloc {
         () => {{
-            for &g in &rs[s] {
+            for &g in sched.rows(s) {
                 gloc[g] = usize::MAX;
             }
             GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
@@ -3019,7 +2993,7 @@ fn ll_cdiv_emit<T: Scalar>(
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
     }
-    for &g in &rs[s] {
+    for &g in sched.rows(s) {
         gloc[g] = usize::MAX;
     }
     GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
@@ -3030,7 +3004,7 @@ fn ll_cdiv_emit<T: Scalar>(
     let (mut ipos, mut ineg, mut izero) = (0usize, 0usize, 0usize);
     let mut pp = 0;
     while pp < ncol {
-        let g = rs[s][lperm[pp]];
+        let g = sched.rows(s)[lperm[pp]];
         let e = eoff + pp;
         // SAFETY: each global index / position is written by exactly one supernode.
         unsafe {
@@ -3039,7 +3013,7 @@ fn ll_cdiv_emit<T: Scalar>(
             emit.d_diag.set(e, d[pp]);
         }
         if two_by_two[pp] {
-            let g2 = rs[s][lperm[pp + 1]];
+            let g2 = sched.rows(s)[lperm[pp + 1]];
             unsafe {
                 emit.e_of_g.set(g2, e + 1);
                 emit.perm.set(e + 1, sym.perm[g2]);
@@ -3106,8 +3080,7 @@ fn ll_factor_subtree<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
     a_perm: &CscMatrix<T>,
-    rs: &[Vec<usize>],
-    update_list: &[Vec<usize>],
+    sched: &LlSchedule,
     store: &LlStore<T>,
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
@@ -3124,8 +3097,7 @@ fn ll_factor_subtree<T: Scalar>(
                 ch,
                 sym,
                 a_perm,
-                rs,
-                update_list,
+                sched,
                 store,
                 emit,
                 perturb_floor,
@@ -3140,8 +3112,7 @@ fn ll_factor_subtree<T: Scalar>(
         s,
         sym,
         a_perm,
-        rs,
-        update_list,
+        sched,
         store,
         emit,
         perturb_floor,
@@ -3153,21 +3124,21 @@ fn ll_factor_subtree<T: Scalar>(
     // itself if it has no consumers - compacting before releasing the dense panel.
     // Disjoint `k`, so the wide top-of-tree free runs in parallel.
     const FREE_PAR: usize = 64;
-    if update_list[s].len() >= FREE_PAR {
-        update_list[s].par_iter().for_each(|&k| {
+    if sched.updaters(s).len() >= FREE_PAR {
+        sched.updaters(s).par_iter().for_each(|&k| {
             if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                ldlt_emit_and_free(k, store, emit, sym, rs, drop_tol);
+                ldlt_emit_and_free(k, store, emit, sym, sched, drop_tol);
             }
         });
     } else {
-        for &k in &update_list[s] {
+        for &k in sched.updaters(s) {
             if emit.refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
-                ldlt_emit_and_free(k, store, emit, sym, rs, drop_tol);
+                ldlt_emit_and_free(k, store, emit, sym, sched, drop_tol);
             }
         }
     }
     if emit.refcount[s].load(Ordering::Relaxed) == 0 {
-        ldlt_emit_and_free(s, store, emit, sym, rs, drop_tol);
+        ldlt_emit_and_free(s, store, emit, sym, sched, drop_tol);
     }
     Ok(())
 }
@@ -3186,6 +3157,7 @@ fn ll_factor_subtree<T: Scalar>(
 /// (zero-/tiny-diagonal) systems via the 2×2 blocks.
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
+    sched: &LlSchedule,
     a: &CscMatrix<T>,
     a_perm: CscMatrix<T>,
     opts: &SolverSettings,
@@ -3201,34 +3173,12 @@ fn factor_left_looking<T: Scalar>(
     };
 
     let nsuper = sym.supernodes.len();
-    let rs = compute_supernode_row_structures(sym);
-
-    // Map each global column to its owning supernode, and build per-supernode
-    // updater lists: `k` updates `s` iff one of `k`'s off-diagonal rows is an
-    // eliminated column of `s` (its sorted off-diag rows hit `s`'s column run).
-    let mut col_to_snode = vec![0usize; n];
-    for (s, snode) in sym.supernodes.iter().enumerate() {
-        col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
-    }
-    let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
-    for (k, rsk) in rs.iter().enumerate() {
-        let nck = sym.supernodes[k].ncol;
-        let mut last = usize::MAX;
-        for &r in &rsk[nck..] {
-            let s = col_to_snode[r];
-            if s != last {
-                update_list[s].push(k);
-                last = s;
-            }
-        }
-    }
-
     // Factor in parallel over the assembly forest: sibling subtrees concurrently,
     // each node after its subtree (whose panels are its only updaters). Panels are
     // written once and read only by ancestors → no synchronization needed beyond
     // the recursion structure (see `LlStore`).
     let store = LlStore::<T>::new(nsuper);
-    let emit = LlEmitLdlt::<T>::new(sym, &update_list);
+    let emit = LlEmitLdlt::<T>::new(sym, sched);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let mut is_child = vec![false; nsuper];
     for snode in &sym.supernodes {
@@ -3246,8 +3196,7 @@ fn factor_left_looking<T: Scalar>(
                 r,
                 sym,
                 &a_perm,
-                &rs,
-                &update_list,
+                sched,
                 &store,
                 &emit,
                 perturb_floor,

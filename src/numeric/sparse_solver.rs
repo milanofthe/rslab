@@ -413,36 +413,30 @@ impl LdltSymbolic {
                 0,
                 &|_| 0,
                 &|_| 0,
-                &[],
+                &|_| &[],
                 value_bytes,
                 0,
             );
         };
         let nsuper = sym.supernodes.len();
-        let rs = crate::numeric::multifrontal_ldlt::compute_supernode_row_structures(sym);
-        let mut col_to_snode = vec![0usize; sym.n];
-        for (s, snode) in sym.supernodes.iter().enumerate() {
-            col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
-        }
-        let mut update_list: Vec<Vec<usize>> = vec![Vec::new(); nsuper];
-        for (k, rsk) in rs.iter().enumerate() {
-            let nck = sym.supernodes[k].ncol;
-            let mut last = usize::MAX;
-            for &r in &rsk[nck..] {
-                let s = col_to_snode[r];
-                if s != last {
-                    update_list[s].push(k);
-                    last = s;
-                }
-            }
-        }
+        let Some(sched) = self.symbolic.ll_schedule() else {
+            return crate::diagnostics::estimate_left_looking(
+                0,
+                &|_| 0,
+                &|_| 0,
+                &|_| &[],
+                value_bytes,
+                0,
+            );
+        };
         // LDLᵀ: one dense panel per supernode (no separate U), and the compact
         // factor is `L` only (no `U`); the input copy is a single lower triangle.
-        let panel_bytes =
-            |s: usize| -> u64 { (rs[s].len() * sym.supernodes[s].ncol * value_bytes) as u64 };
+        let panel_bytes = |s: usize| -> u64 {
+            (sched.rows(s).len() * sym.supernodes[s].ncol * value_bytes) as u64
+        };
         let compact_bytes = |s: usize| -> u64 {
             let nc = sym.supernodes[s].ncol;
-            let cnrow = rs[s].len() - nc;
+            let cnrow = sched.rows(s).len() - nc;
             ((nc * (nc + 1) / 2 + cnrow * nc) * (value_bytes + 8)) as u64
         };
         let input_bytes = (self.nnz * (value_bytes + 8)) as u64;
@@ -450,13 +444,13 @@ impl LdltSymbolic {
             nsuper,
             &panel_bytes,
             &compact_bytes,
-            &update_list,
+            &|s| sched.updaters(s),
             value_bytes,
             input_bytes,
         );
         est.factor_flops = (0..nsuper)
             .map(|s| {
-                let (nc, nr) = (sym.supernodes[s].ncol as u64, rs[s].len() as u64);
+                let (nc, nr) = (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
                 nr * nr * nc
             })
             .sum();
@@ -466,7 +460,7 @@ impl LdltSymbolic {
         let mut crit = vec![0u64; nsuper];
         let mut cp = 0u64;
         for s in 0..nsuper {
-            let (nc, nr) = (sym.supernodes[s].ncol as u64, rs[s].len() as u64);
+            let (nc, nr) = (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
             let ff = nr * nr * nc;
             let cmax = sym.supernodes[s]
                 .children
@@ -486,7 +480,7 @@ impl LdltSymbolic {
         let children: Vec<Vec<usize>> = sym.supernodes.iter().map(|s| s.children.clone()).collect();
         let mf_active = crate::diagnostics::estimate_multifrontal_active_peak(
             levels,
-            &|s| rs[s].len() as u64,
+            &|s| sched.rows(s).len() as u64,
             &|s| sym.supernodes[s].ncol as u64,
             &children,
             value_bytes as u64,
