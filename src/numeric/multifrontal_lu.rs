@@ -670,6 +670,10 @@ pub struct LuSymbolic {
     /// size (the estimate depends on `T` only through `size_of::<T>()`, and
     /// rebuilding the supernode row structures per call is expensive).
     est_cache: Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
+    /// Lazily built scatter programs for `Pᵀ A P` and its transpose: the
+    /// permuted structures are fixed per pattern, so every (re)factorization
+    /// reduces to one linear values scatter (equilibration applied on the way).
+    perm_scatter: std::sync::OnceLock<(PermScatter, PermScatter)>,
 }
 
 impl LuSymbolic {
@@ -698,6 +702,7 @@ impl LuSymbolic {
                 n: 0,
                 nnz: 0,
                 est_cache: Mutex::new(Vec::new()),
+                perm_scatter: std::sync::OnceLock::new(),
             });
         }
         let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
@@ -707,6 +712,7 @@ impl LuSymbolic {
             n,
             nnz,
             est_cache: Mutex::new(Vec::new()),
+            perm_scatter: std::sync::OnceLock::new(),
         })
     }
 
@@ -1019,7 +1025,7 @@ impl<T> Default for LuSlot<T> {
 }
 type LuLlStore<T> = crate::numeric::ll_common::SlotStore<LuSlot<T>>;
 
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, PanelPtr};
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, PanelPtr, PermScatter};
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -2152,10 +2158,39 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         .collect();
 
     // Full permuted, equilibrated matrix Â_perm = Pᵀ (D_r A D_c) P and its
-    // transpose (no triangle folding - unsymmetric values kept distinct);
-    // direct counting build, no triplets.
-    let a_perm = a.permute_scaled(&sym.perm_inv, &d_row, &d_col);
-    let a_perm_t = a_perm.transpose();
+    // transpose (no triangle folding - unsymmetric values kept distinct),
+    // through the cached scatter programs: structures frozen on the first
+    // factorization of this pattern, later (re)factorizations pay one linear
+    // values pass (each scaled value computed once, written to both layouts).
+    let (fwd, bwd) = lusym.perm_scatter.get_or_init(|| {
+        (
+            PermScatter::build_full(n, &a.col_ptr, &a.row_idx, &sym.perm_inv),
+            PermScatter::build_full_transposed(n, &a.col_ptr, &a.row_idx, &sym.perm_inv),
+        )
+    });
+    let nnz = a.row_idx.len();
+    let mut vals = vec![T::zero(); nnz];
+    let mut vals_t = vec![T::zero(); nnz];
+    for j in 0..n {
+        let dc = d_col[j];
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let sv = a.values[k] * T::from_real(d_row[a.row_idx[k]] * dc);
+            vals[fwd.pos[k]] = sv;
+            vals_t[bwd.pos[k]] = sv;
+        }
+    }
+    let a_perm = GeneralCsc {
+        n,
+        col_ptr: fwd.col_ptr.clone(),
+        row_idx: fwd.row_idx.clone(),
+        values: vals,
+    };
+    let a_perm_t = GeneralCsc {
+        n,
+        col_ptr: bwd.col_ptr.clone(),
+        row_idx: bwd.row_idx.clone(),
+        values: vals_t,
+    };
     // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
     // trees), shared by both LU paths.
     let stack = crate::numeric::multifrontal_ldlt::stack_for_depth(

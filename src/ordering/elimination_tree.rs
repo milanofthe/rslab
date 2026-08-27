@@ -26,14 +26,39 @@ impl EliminationTree {
     /// using path compression until finding a root or reaching j. Make j the
     /// parent of that root. This produces parent[j] = min { i > j : L(i,j) ≠ 0 }.
     pub fn from_pattern(pattern: &CscPattern) -> Self {
-        let n = pattern.n;
+        Self::from_cols(pattern.n, |j| {
+            pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]]
+                .iter()
+                .copied()
+        })
+    }
+
+    /// The elimination tree of the **permuted** pattern `Pᵀ A P` (with
+    /// `perm[new] = old` and `perm_inv[old] = new`), computed without
+    /// materializing the permuted pattern: column `new` reads the original
+    /// column `perm[new]` and maps each row through `perm_inv` on the fly.
+    /// The etree is a unique function of the pattern, so this is identical to
+    /// `from_pattern(&permute_pattern(pattern, perm))` at one O(nnz) pattern
+    /// build less.
+    pub fn from_permuted_pattern(pattern: &CscPattern, perm: &[usize], perm_inv: &[usize]) -> Self {
+        Self::from_cols(pattern.n, |jn| {
+            let j = perm[jn];
+            pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]]
+                .iter()
+                .map(|&r| perm_inv[r])
+        })
+    }
+
+    /// Liu's union-find etree construction over an abstract column-entry view:
+    /// `cols(j)` yields the row indices of column `j` (any order; entries
+    /// `>= j` are skipped). The result is a unique function of the pattern.
+    fn from_cols<I: Iterator<Item = usize>>(n: usize, cols: impl Fn(usize) -> I) -> Self {
         let mut parent: Vec<Option<usize>> = vec![None; n];
         let mut ancestor = vec![0usize; n]; // union-find forest
 
         for j in 0..n {
             ancestor[j] = j; // j is its own root initially
-            for k in pattern.col_ptr[j]..pattern.col_ptr[j + 1] {
-                let i = pattern.row_idx[k];
+            for i in cols(j) {
                 if i >= j {
                     continue; // only process entries with i < j
                 }

@@ -822,13 +822,17 @@ fn symbolic_prefix_with(
         }
     };
 
-    // Step 2: Build the etree on the permuted pattern. This etree is
-    // intermediate - we use it to compute the postorder and then discard it.
-    // The local name `amd_*` is kept from the AMD-only era to minimise the
-    // diff; semantically these are now "ordering output" and "permuted
-    // pattern from that ordering", regardless of method.
-    let amd_pattern = permute_pattern(&full_pattern, &amd_perm);
-    let amd_etree = EliminationTree::from_pattern(&amd_pattern);
+    // Step 2: Build the etree of the ordering-permuted pattern. This etree is
+    // intermediate - we use it to compute the postorder and then discard it -
+    // so the permuted pattern is never materialized: the etree reads the
+    // original pattern through the permutation on the fly. The local name
+    // `amd_*` is kept from the AMD-only era; semantically this is "ordering
+    // output", regardless of method.
+    let mut amd_perm_inv = vec![0usize; n];
+    for (new, &old) in amd_perm.iter().enumerate() {
+        amd_perm_inv[old] = new;
+    }
+    let amd_etree = EliminationTree::from_permuted_pattern(&full_pattern, &amd_perm, &amd_perm_inv);
 
     // Step 3: Postorder the etree (CHOLMOD-style composition).
     // Without this step, supernode amalgamation merges columns whose indices
