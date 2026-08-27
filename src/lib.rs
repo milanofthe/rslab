@@ -161,7 +161,6 @@ pub use numeric::multifrontal_ldlt::{
     SolverSettings, Threads, ZeroPivotAction,
 };
 // High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
-pub use numeric::mixed::{MixedInfo, MixedLdltSolver, MixedLuSolver, MixedScalar};
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,
 // plus the raw factor type and free building blocks.
@@ -170,7 +169,6 @@ pub use io::mtx::{
     parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_any,
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
-pub use numeric::condition::{hager_higham_inverse_norm_1, ConditionOperator};
 pub use numeric::iterative::{
     cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_block_fn_mon, gmres_block_mon, gmres_fn,
     gmres_recycled, BlockKrylovResult, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,

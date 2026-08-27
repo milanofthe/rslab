@@ -74,13 +74,6 @@ headline results.
   solve (8-19x faster than per-column) is bit-identical to the serial path.
 - 32-bit index compression (`CompressedLdltFactors`, when `n < 2^31`): half the
   index footprint at no accuracy cost.
-- **Mixed precision with a certificate** (`MixedLdltSolver` / `MixedLuSolver`):
-  factor in single precision (half the memory, measurably faster), solve via an
-  explicit refinement ladder - plain IR escalating to GMRES-IR against the
-  double-precision original - and get an honest normwise-backward-error
-  certificate back (`MixedInfo`; `solve_to` for preconditioner-grade targets).
-  On the reference class the c32 factor runs 1.64x at eps-level certified
-  accuracy after 2 refinement steps.
 - **Adaptive-precision low-rank storage**: BLR contribution blocks can keep
   their small trailing crosses in single precision under an explicit rounding
   budget (`BlrMode::contribution_blocks_adaptive`), shrinking the compressed
