@@ -7,12 +7,12 @@ heuristic pick, solve via the explicit refinement ladder - plain IR
 corrections, stagnation guard) escalating to GMRES-IR (the c32 factor as
 preconditioner, warm-started) - and report an honest certificate
 ([`MixedInfo`]): normwise backward error vs. a target (default
-`64·eps_f64`), iteration counts, `certified` flag. `solve_to` takes an
+`64*eps_f64`), iteration counts, `certified` flag. `solve_to` takes an
 explicit target for preconditioner-grade use.
 
 ## Measured
 
-helmholtz 40³ c64 reference (probe, warm best-of-3, calibrated 12 threads,
+helmholtz 40^3 c64 reference (probe, warm best-of-3, calibrated 12 threads,
 analysis excluded on both sides):
 
 | | c64 | c32 (mixed) |

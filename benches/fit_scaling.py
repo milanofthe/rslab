@@ -109,7 +109,7 @@ def plot_residual(recs, out, order=ORDER):
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("nonzeros (nnz)")
-    ax.set_ylabel("relative residual ‖Ax-b‖/‖b‖")
+    ax.set_ylabel("relative residual ||Ax-b||/||b||")
     ax.set_title("Corpus accuracy (relative residual)")
     ax.grid(True, which="both", ls=":", alpha=0.4)
     bench_style.legend_below(fig, ax=ax)

@@ -1,5 +1,5 @@
 //! Shared scaffolding of the supernodal left-looking drivers - the pieces that
-//! are identical between the LDLᵀ and the LU twin: the per-supernode slot
+//! are identical between the LDL^T and the LU twin: the per-supernode slot
 //! store, the raw panel pointer used for disjoint-row parallel writes, and the
 //! heuristic `tuned` driver (ND bakeoff + calibrated worker count).
 
@@ -187,9 +187,9 @@ pub(crate) struct PermScatter {
 }
 
 impl PermScatter {
-    /// Build for the symmetric lower-triangle fold `Pᵀ A P` (LDLᵀ path):
+    /// Build for the symmetric lower-triangle fold `P^T A P` (LDL^T path):
     /// original entry `(i, j)` lands at permuted `(max(gi, gj), min(gi, gj))`
-    /// with `g = perm_inv[·]`. Columns come out row-sorted.
+    /// with `g = perm_inv[*]`. Columns come out row-sorted.
     pub fn build_lower(
         n: usize,
         a_col_ptr: &[usize],
@@ -211,7 +211,7 @@ impl PermScatter {
         )
     }
 
-    /// Build for the full (unfolded) permutation `Pᵀ A P` (LU path).
+    /// Build for the full (unfolded) permutation `P^T A P` (LU path).
     pub fn build_full(
         n: usize,
         a_col_ptr: &[usize],
@@ -221,7 +221,7 @@ impl PermScatter {
         Self::build_with(n, a_col_ptr, a_row_idx, |gi, gj| (gi, gj), perm_inv)
     }
 
-    /// Build for the transpose of the full permutation, `(Pᵀ A P)ᵀ` (the LU
+    /// Build for the transpose of the full permutation, `(P^T A P)^T` (the LU
     /// path's `a_perm_t`): entry `(i, j)` lands at `(gj, gi)`.
     pub fn build_full_transposed(
         n: usize,
@@ -415,7 +415,7 @@ impl LlSchedule {
 
 /// The left-looking assembly-forest recursion shared by the LDLT/LU twins:
 /// factor every child subtree concurrently, then this node, then compact and
-/// free every descendant whose last consumer this node was (refcount→0), and
+/// free every descendant whose last consumer this node was (refcount->0), and
 /// the node itself if nothing above consumes it. `factor_node` and `emit_free`
 /// carry the path-specific kernels; everything else is the shared schedule.
 pub(crate) fn ll_subtree(

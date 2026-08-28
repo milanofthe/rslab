@@ -1,6 +1,6 @@
 //! Shared bench-only loader for the SuiteSparse KLU reference shim
 //! (`benches/klu_shim.c`). Compiled at bench runtime against a locally
-//! installed SuiteSparse and loaded via `libloading` — the same
+//! installed SuiteSparse and loaded via `libloading` - the same
 //! runtime-reference pattern as the MKL / Accelerate shims; nothing from
 //! SuiteSparse is distributed with RSLAB, it is only measured against when
 //! present on the machine.
@@ -8,7 +8,7 @@
 //! Prefix resolution (`RLA_KLU_SS_PREFIX` always wins):
 //! * macOS: `/opt/homebrew` (Homebrew), links `-lklu` from `<prefix>/lib`.
 //! * Linux: `/usr`, links `-lklu`.
-//! * Windows: no default — point `RLA_KLU_SS_PREFIX` at a directory with
+//! * Windows: no default - point `RLA_KLU_SS_PREFIX` at a directory with
 //!   `bin/klu.dll` and `include/suitesparse/klu.h` (e.g. a conda-forge
 //!   `suitesparse` env's `Library` dir). The shim links directly against the
 //!   DLL (MinGW GCC understands that), and `<prefix>/bin` is prepended to

@@ -19,7 +19,7 @@ use rslab_ordering_core::CscPattern;
 // can borrow them into a `CscPattern` without lifetime juggling.
 // ---------------------------------------------------------------------
 
-/// 3×3 arrowhead with hub at row 0:
+/// 3x3 arrowhead with hub at row 0:
 ///
 /// ```text
 /// * * *
@@ -38,7 +38,7 @@ fn arrow_3() -> (Vec<i32>, Vec<i32>) {
     (col_ptr, row_idx)
 }
 
-/// 5×5 dual-arrowhead with two hubs at rows 0 and 4 connected by
+/// 5x5 dual-arrowhead with two hubs at rows 0 and 4 connected by
 /// the spine 1-2-3:
 ///
 /// ```text
@@ -69,7 +69,7 @@ fn dual_arrow_5() -> (Vec<i32>, Vec<i32>) {
     (col_ptr, row_idx)
 }
 
-/// Tridiagonal `n×n` with adjacencies `i ~ i±1`.
+/// Tridiagonal `nxn` with adjacencies `i ~ i+/-1`.
 fn tridiag(n: usize) -> (Vec<i32>, Vec<i32>) {
     let mut col_ptr = Vec::with_capacity(n + 1);
     let mut row_idx = Vec::new();

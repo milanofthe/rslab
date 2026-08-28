@@ -13,7 +13,7 @@
 //! A self-contained replacement for PARDISO's sparse symmetric path, with no
 //! MKL or other native dependency. RSLAB factors **real symmetric** (`f64`,
 //! PARDISO `mtype 2`) and **complex symmetric** (`Complex<f64>`, `mtype 6`)
-//! matrices as `Pᵀ A P = L D Lᵀ` by a rayon-parallel multifrontal
+//! matrices as `P^T A P = L D L^T` by a rayon-parallel multifrontal
 //! Bunch-Kaufman method with a SIMD (`gemm`) Schur kernel.
 //!
 //! Three intended uses:
@@ -24,7 +24,7 @@
 //! * **Circuit-shaped unsymmetric solve** - the sequential, bit-deterministic
 //!   [`KluSolver`] (BTF + per-block Gilbert-Peierls) with a numeric-only
 //!   [`refactor`](KluSolver::refactor) for fixed-pattern sweeps and a
-//!   [`solve_transpose`](KluSolver::solve_transpose) (`Aᵀx = b` on the same
+//!   [`solve_transpose`](KluSolver::solve_transpose) (`A^Tx = b` on the same
 //!   factors) for adjoint / sensitivity solves.
 //!
 //! ## PARDISO-style phased workflow (FEM)
@@ -35,7 +35,7 @@
 //! ```
 //! # fn main() -> Result<(), rslab::RslabError> {
 //! use rslab::prelude::*;
-//! // Real symmetric matrix, lower triangle (i ≥ j).
+//! // Real symmetric matrix, lower triangle (i >= j).
 //! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!                                         &[2.0, 2.0, 2.0, -1.0])?;
 //! let analysis = LdltSymbolic::analyze(&a)?;                 // phase 1
@@ -139,7 +139,7 @@ pub use numeric::gemm_tuning::{
 };
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
-// Generic dense LDLᵀ kernel (the multifrontal fronts reduce to this).
+// Generic dense LDL^T kernel (the multifrontal fronts reduce to this).
 pub use dense::ldlt_generic::{
     factor_ldlt, solve_ldlt, solve_ldlt_many, CompressedLdltFactors, LdltFactors,
 };
@@ -149,9 +149,9 @@ pub use numeric::multifrontal_ldlt::{
     with_threads, BlrMode, FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode,
     SolverSettings, Threads, ZeroPivotAction,
 };
-// High-level symmetric LDLᵀ solver: `LdltSymbolic::analyze → .factor → LdltSolver`.
+// High-level symmetric LDL^T solver: `LdltSymbolic::analyze -> .factor -> LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
-// High-level unsymmetric LU solver: `LuSymbolic::analyze → .factor → LuSolver`,
+// High-level unsymmetric LU solver: `LuSymbolic::analyze -> .factor -> LuSolver`,
 // plus the raw factor type and free building blocks.
 pub use inertia::Inertia;
 pub use io::mtx::{
@@ -195,7 +195,7 @@ pub mod prelude {
         CscMatrix,
         Factorization,
         GeneralCsc,
-        // high-level phased solvers: `XSymbolic::analyze → .factor → XSolver`
+        // high-level phased solvers: `XSymbolic::analyze -> .factor -> XSolver`
         KluSettings,
         KluSolver,
         KluSymbolic,

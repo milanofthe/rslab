@@ -15,7 +15,7 @@
 use num_complex::Complex;
 use rslab::{factor_sparse_ldlt_with, CscMatrix, GeneralCsc, LuSolver, SolverSettings};
 
-/// 3D 7-point Laplacian (k³ grid, SPD, lower triangle).
+/// 3D 7-point Laplacian (k^3 grid, SPD, lower triangle).
 fn grid3d(k: usize) -> CscMatrix<f64> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;

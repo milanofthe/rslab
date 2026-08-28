@@ -1,9 +1,9 @@
 //! Phase 2.13a - `AmalgamationStrategy::Auto` dispatch tests.
 //!
 //! Verifies the cheap O(n) etree shape predicate routes:
-//!   * pure path etree → `Adjacency` (Renumber over-merging case)
-//!   * bushy etree → `Renumber` (IPM-KKT amalgamation case)
-//!   * empty / leaf-only forest → `Adjacency`
+//!   * pure path etree -> `Adjacency` (Renumber over-merging case)
+//!   * bushy etree -> `Renumber` (IPM-KKT amalgamation case)
+//!   * empty / leaf-only forest -> `Adjacency`
 //!
 //! See `dev/research/phase-2.13a-amalgamation-auto.md`.
 
@@ -128,7 +128,7 @@ fn auto_default_resolves_under_threshold() {
 #[test]
 fn near_path_with_one_branch_still_adjacency() {
     // 100-node path with a single 2-child junction: multi_child_frac
-    // = 1/99 ≈ 0.010, below the 0.05 threshold.
+    // = 1/99 ~ 0.010, below the 0.05 threshold.
     let n = 100;
     // Add one extra leaf branching into node 50: build an n+1 node
     // version with a single extra child of node 50.
@@ -144,8 +144,8 @@ fn near_path_with_one_branch_still_adjacency() {
     };
     // child counts: node 50 has 2 children (49 and the extra),
     // every other internal has 1. internal count = 99 + 1 (node 50
-    // is still internal) → 99. multi_child = 1.
-    // multi_child_frac ~ 1/99 ≈ 0.010 < 0.05 → Adjacency.
+    // is still internal) -> 99. multi_child = 1.
+    // multi_child_frac ~ 1/99 ~ 0.010 < 0.05 -> Adjacency.
     assert_eq!(
         pick_amalgamation_strategy(&etree),
         AmalgamationStrategy::Adjacency,
@@ -157,7 +157,7 @@ fn fan_at_root_dispatches_to_renumber() {
     // n=20, all nodes 0..18 attach directly to node 19. Single
     // multi-child internal (the root), with 19 children.
     // Internals = 1 (just the root). multi_child = 1.
-    // multi_child_frac = 1.0 ≥ 0.05 → Renumber.
+    // multi_child_frac = 1.0 >= 0.05 -> Renumber.
     let n = 20;
     let mut parent = vec![None::<usize>; n];
     for i in 0..n - 1 {

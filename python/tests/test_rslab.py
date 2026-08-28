@@ -111,7 +111,7 @@ def test_lu_gmres_block_preconditioned():
 
 
 def test_ldlt_gmres_block_complex():
-    # Complex-symmetric multi-RHS via block GMRES preconditioned by the LDLᵀ factor.
+    # Complex-symmetric multi-RHS via block GMRES preconditioned by the LDL^T factor.
     A = _complex_sym(200)
     B = (np.random.default_rng(6).standard_normal((200, 4))
          + 1j * np.random.default_rng(7).standard_normal((200, 4)))
@@ -199,7 +199,7 @@ def test_gmres_warm_start_cuts_iterations():
 
 
 def _stagnating_operator(m=18, rank=3, seed=4):
-    # A convection-diffusion grid plus a global near-low-rank coupling U Uᵀ that an
+    # A convection-diffusion grid plus a global near-low-rank coupling U U^T that an
     # *incomplete* LU factor cannot capture - so the preconditioned system keeps a
     # small near-invariant cluster and restarted GMRES genuinely stagnates. This is
     # the regime GCRO-DR recycling targets.
@@ -218,7 +218,7 @@ def _stagnating_operator(m=18, rank=3, seed=4):
 
 def test_gmres_recycle_cross_solve_beats_warm_and_cold():
     # GCRO-DR recycling (issue #5) across a sequence of related solves (slowly
-    # rotating RHS, weak incomplete factor → stagnation). Total iterations must
+    # rotating RHS, weak incomplete factor -> stagnation). Total iterations must
     # order recycled < warm-start < cold, with recycled a clear margin below cold.
     A, rng = _stagnating_operator(m=18, rank=3, seed=4)
     n = A.shape[0]

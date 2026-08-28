@@ -8,7 +8,7 @@ name = "rslab"
 # fills it in at build time. A hardcoded copy here silently pinned every
 # wheel to 0.18.0 across three version tags (PyPI then rejected the upload).
 dynamic = ["version"]
-description = "Pure-Rust sparse direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, with NumPy/SciPy bindings."
+description = "Pure-Rust sparse direct solver (symmetric LDL^T + unsymmetric LU) and preconditioner, with NumPy/SciPy bindings."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

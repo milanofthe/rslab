@@ -99,7 +99,7 @@ pub enum AmalgamationStrategy {
     /// picks `Adjacency` for path / near-path elimination trees and
     /// `Renumber` for bushy ones, eliminating Renumber's
     /// over-merging regression on path-like trees (MUONSINE_0000:
-    /// 5.5× → 1.4× MUMPS) while keeping the IPM-KKT tail wins.
+    /// 5.5x -> 1.4x MUMPS) while keeping the IPM-KKT tail wins.
     /// Default since Phase 2.13a. See
     /// `dev/research/phase-2.13a-amalgamation-auto.md`.
     #[default]
@@ -192,7 +192,7 @@ impl Supernode {
 
 /// Phase 2.13a - shape predicate threshold.
 ///
-/// `multi_child_frac < THRESH` ⇒ path / near-path tree, dispatch to
+/// `multi_child_frac < THRESH` => path / near-path tree, dispatch to
 /// `Adjacency`. Otherwise dispatch to `Renumber`. Threshold chosen
 /// from the etree-shape probe (`src/bin/diag_etree_shape.rs`) on
 /// the 7 known-answer matrices. MUONSINE (the only Renumber-loses
@@ -291,7 +291,7 @@ pub fn find_supernodes(
     // index. On a multi-child parent only the highest-index child is
     // adjacent to the parent, so only one child merges per multi-child
     // parent (this is what `dev/research/phase-2.12-column-renumbering.md`
-    // §2 documents).
+    // section 2 documents).
     //
     // Reverse iteration (`Renumber` strategy) processes the parent
     // first, then descends to children in decreasing index order.
@@ -424,7 +424,7 @@ pub fn find_supernodes(
     // Step 3: Build final supernode list
     // Collect non-merged supernodes
     let mut final_snodes: Vec<Supernode> = Vec::new();
-    let mut new_snode_id = vec![0usize; n_snodes]; // old → new supernode index
+    let mut new_snode_id = vec![0usize; n_snodes]; // old -> new supernode index
 
     for s in 0..n_snodes {
         if merged_into[s].is_some() {
@@ -521,7 +521,7 @@ pub const DELAY_CAPACITY_MIN_FLOOR: usize = 16;
 /// - The second term tightens that to a constant multiple of the
 ///   supernode's own width, which is the quantity that drives
 ///   frontal-matrix memory at numeric time (the frontal is sized
-///   as `(own_ncol + n_delayed_in) × nrow`).
+///   as `(own_ncol + n_delayed_in) x nrow`).
 ///
 /// The `min` of the two is the cap actually enforced. For leaves
 /// (no children, `subtree_ncol == own_ncol`) the first term is 0,

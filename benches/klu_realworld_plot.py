@@ -3,11 +3,11 @@
 Reads the JSONL written by `RLA_BENCH_OUT=... cargo bench --bench
 klu_realworld --features matgen-download` and renders:
 
-* ``bench_out/h2h_klu_realworld.png`` — house-style two-panel (factor /
+* ``bench_out/h2h_klu_realworld.png`` - house-style two-panel (factor /
   20-point refactor+solve sweep) grouped bars, RSLAB KLU vs SuiteSparse KLU
   on the SuiteSparse-collection circuit corpus. ``RSLAB_REPORT=1`` redirects
   to ``docs/report/figures/h2h_klu_realworld.pdf`` (paper skin).
-* ``bench_out/klu_social.png`` — standalone dark share-card: per-matrix
+* ``bench_out/klu_social.png`` - standalone dark share-card: per-matrix
   speedup of RSLAB KLU over SuiteSparse KLU (factor phase), opaque
   background, self-explanatory annotations. Not affected by RSLAB_REPORT.
 

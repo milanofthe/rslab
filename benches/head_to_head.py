@@ -1,10 +1,10 @@
 """Per-path head-to-head: RSLAB vs faer vs MKL PARDISO, one figure per solver path.
 
-LDLᵀ (symmetric) and LU (unsymmetric) are separate solvers a caller dispatches to
+LDL^T (symmetric) and LU (unsymmetric) are separate solvers a caller dispatches to
 explicitly, so each is benchmarked and plotted against *its own* PARDISO mtype
 (6 for complex-symmetric, 13 for unsymmetric) and faer. Each path is one **two-panel**
 figure: factor wall-clock time (left) and peak memory (right) vs nonzeros on log-log
-axes, with a least-squares power-law fit `y = C·nnz^alpha` per solver (the exponent,
+axes, with a least-squares power-law fit `y = C*nnz^alpha` per solver (the exponent,
 the empirical scaling order, is annotated on each fit line) and one shared legend.
 
 The RSLAB curve is the shipped default pick (`LdltSolver`/`LuSolver::tuned`), the

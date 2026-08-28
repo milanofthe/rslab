@@ -32,7 +32,7 @@ and quote its provenance (generator spec or file SHA-256).
 | `diag_4`        | 4   | programmatic: diagonal (bandwidth 0)               |
 | `tridiag_10`    | 10  | programmatic: tridiagonal                          |
 | `grid_7x7`      | 49  | programmatic: 2D 5-point stencil                   |
-| `amd_demo_24`   | 24  | programmatic (6×4 grid) - SYNTHETIC SUBSTITUTE (§) |
+| `amd_demo_24`   | 24  | programmatic (6x4 grid) - SYNTHETIC SUBSTITUTE (section ) |
 | `gh_258`        | 52  | file: faer-rs regression matrix (SHA-256 below)    |
 
 ### Provenance of `gh_258`
@@ -40,16 +40,16 @@ and quote its provenance (generator spec or file SHA-256).
 Input file: `../ripopt/ref/faer-rs/faer/test_data/sparse_cholesky/gh_258.txt`
 SHA-256: `9f70a3cfb1b068984cf76b8b11da1a786a39c8701a1cc48a909fd25aca282c40`
 
-### §  `amd_demo_24` is a synthetic substitute
+### section   `amd_demo_24` is a synthetic substitute
 
-The AMD algorithm's canonical worked example (Davis 2006, §7.2) is
+The AMD algorithm's canonical worked example (Davis 2006, section 7.2) is
 shipped as `AMD/Demo/can_24.mtx` with SuiteSparse and requires a
 network fetch we did not perform here. `amd_demo_24.txt` is
-generated from a 6×4 2D grid as a same-sized stand-in. Replace in a
+generated from a 6x4 2D grid as a same-sized stand-in. Replace in a
 follow-up commit once `can_24.mtx` is downloaded.
 
 Similarly, `HB/can_24` and `HB/bcsstk01` (referenced in the plan's
-§T4) are deferred. They are expected to land in a follow-up commit
+section T4) are deferred. They are expected to land in a follow-up commit
 that also enables a CI job to fetch them.
 
 ## Reproducing

@@ -2,8 +2,8 @@
 //! `rslab-metis::metis_order_full`.
 //!
 //! Oracle: research note `dev/research/orbit2-cluster-regression.md`,
-//! §6 ("Fix A"). The technique is published in Davis & Hager (2009)
-//! §3.2 and AMD §5; see the docstring on
+//! section 6 ("Fix A"). The technique is published in Davis & Hager (2009)
+//! section 3.2 and AMD section 5; see the docstring on
 //! `MetisOptions::dense_quotient_enabled`.
 //!
 //! These tests do NOT touch the ORBIT2_0000 fixture - that is an
@@ -81,7 +81,7 @@ fn banded_triples(n: usize, band: usize) -> Vec<(usize, usize)> {
 
 #[test]
 fn dense_column_lands_at_end_of_perm() {
-    // n = 1000, band = 7 → max off-degree from band ≈ 4.
+    // n = 1000, band = 7 -> max off-degree from band ~ 4.
     // Threshold for n=1000 is max(40, ceil(10*sqrt(1000))) = 317.
     // Inject one column (id 500) coupled to 800 other rows. That is
     // well above 317, so it must be quotiented out and land at the
@@ -238,13 +238,13 @@ fn threshold_override_promotes_lower_degree_column() {
     let (cp, ri) = csc_from_triples(N, &t);
     let pat = CscPattern::new(N, &cp, &ri).expect("valid CSC");
 
-    // Default threshold: 50 < max(40, 142) = 142 → not dense, no
+    // Default threshold: 50 < max(40, 142) = 142 -> not dense, no
     // forced placement. We assert only validity here.
     let opts_default = MetisOptions::default();
     let (perm_default, _, _) = metis_order_full(&pat, &opts_default).expect("ok");
     assert_is_permutation(&perm_default, N);
 
-    // Forced threshold 30: column degree 50 > 30 → dense, must be
+    // Forced threshold 30: column degree 50 > 30 -> dense, must be
     // last. Quotient is OFF by default (post-2026-04-27 expert review),
     // so opt in explicitly.
     let opts_forced = MetisOptions {

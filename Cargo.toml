@@ -12,7 +12,7 @@ name = "rslab"
 version = "0.28.0"
 edition = "2021"
 license = "MIT"
-description = "RSLAB - pure-Rust sparse complex/real direct solver (symmetric LDLᵀ + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
+description = "RSLAB - pure-Rust sparse complex/real direct solver (symmetric LDL^T + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."
 authors = ["Milan Rother"]
 repository = "https://github.com/milanofthe/rslab"
 homepage = "https://github.com/milanofthe/rslab"
@@ -94,9 +94,9 @@ sysinfo = { version = "0.31", optional = true, default-features = false, feature
 approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
 # Reference competitor for the complex-symmetric benchmark. faer's sparse
-# path has no complex-*symmetric* LDLᵀ (its BK/LDLT is Hermitian), so the
-# fair analogue is its sparse LU on the full matrix - exactly the 2×
-# storage/flops we beat by exploiting A = Aᵀ. Dev-only: pulls its own pulp,
+# path has no complex-*symmetric* LDL^T (its BK/LDLT is Hermitian), so the
+# fair analogue is its sparse LU on the full matrix - exactly the 2x
+# storage/flops we beat by exploiting A = A^T. Dev-only: pulls its own pulp,
 # independent of our pinned 0.22.2. faer's `c64` is `num_complex::Complex<f64>`.
 faer = "0.22"
 # Dynamic loader for the MKL PARDISO reference comparison (bench-only FFI; the

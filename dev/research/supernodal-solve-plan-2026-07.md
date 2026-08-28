@@ -10,9 +10,9 @@ plan text follows the two results sections.
 Implemented on `feat/supernodal-solve`: post-hoc panel detection on the
 stored factor, dense panels, gather-form sweeps (edge runs forward,
 per-column gathers backward), level schedule on the supernodal DAG,
-**verified bit-identical** to the flat solve (incl. 2×2 pivots and the
+**verified bit-identical** to the flat solve (incl. 2x2 pivots and the
 equilibrated wrapper) at every thread count. Three partition variants
-measured (3D 7-point grid, `LdltSolver::factor` defaults, best-of-3 × 50):
+measured (3D 7-point grid, `LdltSolver::factor` defaults, best-of-3 x 50):
 
 ```
 variant                          n=21952                       n=64000
@@ -26,8 +26,8 @@ TRUE factor partition  @1 57   @8 37     (n=64k,  1099, lvl  19, pad 1.80x)
 The schedule itself is now right (18-20 levels, real panels), the killer is
 **densification padding**: emit drops the relaxed-amalgamation padding
 zeros, and rebuilding the factorization's panels re-materializes them
-(pad 1.8-2.05×). A sparse triangular solve is **memory-bandwidth-bound**, so
-2× the streamed bytes ≈ 2× the time, and the level parallelism (1.4-1.5×
+(pad 1.8-2.05x). A sparse triangular solve is **memory-bandwidth-bound**, so
+2x the streamed bytes ~ 2x the time, and the level parallelism (1.4-1.5x
 @8) cannot buy that back. Padding-free panel variants degenerate to the
 stage-1 problem (extra index traffic / tiny panels).
 
@@ -42,11 +42,11 @@ rslab ll  1488 ms      39.8 ms    20.6 M
 pardiso    168 ms      33.8 ms    12.9 M
 ```
 
-* **The single-RHS solve gap is 1.18×**, and rslab carries **1.6× more
+* **The single-RHS solve gap is 1.18x**, and rslab carries **1.6x more
   fill**. Per stored nonzero our flat sweep is already *faster* than
   PARDISO's solve. The solve "gap" is a **fill (ordering) gap**, not a
   kernel gap; a parallel solve kernel attacks the wrong term.
-* **The factor gap is 8.8×** on this class, that is where the PARDISO work
+* **The factor gap is 8.8x** on this class, that is where the PARDISO work
   belongs.
 * Side-findings worth their own issues: (a) `tuned()`'s ND bakeoff ran and
   **rejected our MetisND** on this matrix (fill stayed 20.6 M) while MKL's
@@ -57,7 +57,7 @@ pardiso    168 ms      33.8 ms    12.9 M
 
 **Verdict:** stop investing in parallel single-RHS solve kernels. The
 evidence-ranked levers toward PARDISO are (1) numeric factor throughput
-(8.8×), (2) ND ordering quality on 3D classes (1.6× fill, which also closes
+(8.8x), (2) ND ordering quality on 3D classes (1.6x fill, which also closes
 the remaining solve gap for free), (3) the `auto`-path regression.
 Multi-RHS workloads are already served by `solve_many`.
 
@@ -103,7 +103,7 @@ future attempt at scalar-level scheduling should be rejected on sight,
 the numbers above are the evidence.
 
 The one keeper from the experiment: the dot-form sweep with per-element
-`fmadd(L, -y_j, ·)` reproduces the flat scatter sweep bit-for-bit, so a
+`fmadd(L, -y_j, *)` reproduces the flat scatter sweep bit-for-bit, so a
 supernodal implementation can (and should) keep "bit-identical to the flat
 solve" as a testable acceptance criterion.
 
@@ -119,7 +119,7 @@ solve" as a testable acceptance criterion.
 ### 1. Keep the panels, a supernodal factor view
 
 Both emit paths already produce per-supernode compact CSC fragments
-(`CompactL` in the LDLᵀ path, `CompactNode` in the LU path) before
+(`CompactL` in the LDL^T path, `CompactNode` in the LU path) before
 concatenating them into the flat global CSC. The plan is NOT to change
 `LdltFactors`/`LuFactors` (public, load-bearing) but to add an **optional
 sidecar** built at emit time:
@@ -150,15 +150,15 @@ Per level (rayon scope), per panel: gather the RHS entries of the panel's
 rows, run a small dense `trsv` on the `ncol x ncol` unit-lower block, then a
 dense `gemv` for the below-panel rows. Writes of different panels in one
 level target disjoint elimination positions **only for the trsv part**; the
-gemv scatter can collide → accumulate per-panel into a thread-local sparse
+gemv scatter can collide -> accumulate per-panel into a thread-local sparse
 update buffer and combine per level in panel order (deterministic, same
 trick as `ORTHO_CHUNK` reductions). Determinism bar: fixed panel order per
 level, fixed chunking, bit-identical across thread counts, matching the
 factor's guarantee.
 
-### 3. Backward solve (Lᵀ / U): gather form
+### 3. Backward solve (L^T / U): gather form
 
-Backward is already a gather (`acc -= L(i,j)·y[i]`), panel version is a
+Backward is already a gather (`acc -= L(i,j)*y[i]`), panel version is a
 dense `gemv`(transposed) per panel walking levels root-to-leaves. No write
 collisions at all (each panel writes only its own columns), so this side is
 embarrassingly level-parallel.
@@ -170,7 +170,7 @@ banded/1D factors degenerate to a serial chain where the dense kernels only
 add overhead. Reuse the existing machinery:
 
 * a-priori: `max_tree_width`, mean `ncol` from `front_dims()`, cheap gate
-  (e.g. width ≥ 8 and mean ncol ≥ 16, calibrate on the corpus);
+  (e.g. width >= 8 and mean ncol >= 16, calibrate on the corpus);
 * measured: extend `benches/solve_many` with a single-RHS latency column,
   RSLAB vs MKL PARDISO phase 33, across the h2h corpus;
 * auto: let `tuned()` flip `with_supernodal_solve` from the structural
@@ -180,10 +180,10 @@ add overhead. Reuse the existing machinery:
 
 1. bit-identical across thread counts (the house guarantee);
 2. exact same solution as the flat sweep within the documented fmadd ulp
-   (ideally: identical op order per element ⇒ bit-identical to flat);
-3. single-RHS solve ≥ 2x faster than the flat sweep on the h2h FEM corpus
+   (ideally: identical op order per element => bit-identical to flat);
+3. single-RHS solve >= 2x faster than the flat sweep on the h2h FEM corpus
    median at 8 threads, and **never** > 5 % slower where the gate opens;
-4. memory: sidecar ≤ 1.15x factor bytes on the corpus median (else keep
+4. memory: sidecar <= 1.15x factor bytes on the corpus median (else keep
    default off).
 
 ## Why deferred
