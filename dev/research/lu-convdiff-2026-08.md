@@ -96,9 +96,58 @@ gain is negative anyway, because the one class where multifrontal loses badly
 
 Left-looking stays the default for both twins. Discarded, no code change.
 
+## Rejected: scheduling on the exact updater DAG
+
+`ll_subtree` makes a node wait for its whole child subtrees, while a
+left-looking node only consumes `sched.updaters(s)`. Dropping that false
+dependency looked like free concurrency, so the executor was rebuilt as a
+dataflow scheduler: pending counter per node, consumers as the transpose of the
+updater lists, `rayon::scope` spawning a node when its last updater retires,
+same refcount protocol for the panel lifetimes.
+
+It is bit-identical (verified by hashing the solution bits of nine matrices
+across both executors: all equal, which is what the fixed per-node update order
+buys), and mostly slower. Factor wall time, 8 threads, forest recursion ->
+dataflow:
+
+| matrix | recursion | DAG | |
+|---|--:|--:|---|
+| convdiff2d_9216 | 22.7 | 31.1 | -37% |
+| convdiff2d_13924 | 42.2 | 61.7 | -46% |
+| convdiff2d_21025 | 62.0 | 88.8 | -43% |
+| convdiff2d_31684 | 137.3 | 129.6 | +6% |
+| convdiff3d_5832 | 94.6 | 67.9 | **+28%** |
+| helmholtz_9261 | 91.5 | 71.5 | **+22%** |
+| mom_48035 | 1477 | 1634 | -11% |
+| curlcurl_20577 | 709 | 1216 | -71% |
+| saddle_48387 | 175 | 277 | -59% |
+
+The false dependencies are therefore not what costs the time. Two effects
+dominate instead. The recursion keeps a subtree on one worker, so its panels stay
+hot; the dataflow scheduler spreads the same nodes across workers and pays the
+misses. And where the flops concentrate in a few large fronts (curl-curl carries
+48-53% of them in a single front), the recursion's idle workers are exactly what
+the *in-node* parallel kernels steal to help, while the dataflow scheduler keeps
+them busy on unrelated nodes and starves the critical front. Saddle adds a third:
+3263 tiny fronts make the per-node spawn and the atomic edge decrements visible.
+Discarded, no code kept.
+
+## Rejected: opening the in-node fork gates
+
+If the idle workers cannot be filled with other nodes, the other route is to let
+them into the node that is running. Scaling the shipped gates
+(`scalar_gate` 4096, `par_gemm` 1e6, `par_cdiv` 8e6) down by 4x, 16x and 64x on
+the convdiff2d matrices: 24.7 -> 22.4, 45.8 -> 41.6, 67.1 -> 60.7, 99.0 -> 97.8
+ms at the best setting per matrix. Consistent in direction, 5-10%, no setting
+wins everywhere, and the largest matrix is flat. Not worth a default change on
+this evidence, and it does not touch the structural gap.
+
 ## What is left
 
-The concurrency lever, which is lever 1 of `ldlt-lu-m3-audit-2026-08.md`:
-overlap a parent's early panels with the tail of its children instead of
-fork-join per tree level. The 59% idle share is the budget it attacks, and it
-must preserve bit-identity (per-column operation order stays fixed).
+The 59% idle share is not a scheduling artifact: the tree at these sizes does not
+contain more independent work, and the workers that would absorb it are needed
+inside the nodes, where the medium-node kernels run at 2-4 GF/s (lever 2 of
+`ldlt-lu-m3-audit-2026-08.md`). The remaining lever is therefore the same one the
+saddle note scopes: a fused small/medium-node kernel that does assembly, update
+and elimination in one pass instead of dispatching per updater. That raises the
+floor the idle time is measured against, rather than redistributing it.
