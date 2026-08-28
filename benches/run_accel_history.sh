@@ -21,6 +21,9 @@
 # Usage: benches/run_accel_history.sh          # build + run + aggregate
 #        ROUNDS=3 benches/run_accel_history.sh
 #        SKIP_BUILD=1 benches/run_accel_history.sh
+#        SKIP_BUILD=1 ROUND_START=3 ROUNDS=5 benches/run_accel_history.sh
+#          (adds rounds 3-5 to an existing run; the aggregate always folds
+#           every round file in the output dir)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -29,9 +32,12 @@ ROUNDS=${ROUNDS:-2}
 OUT=$WORK/out
 mkdir -p "$WORK/bin" "$WORK/wt" "$OUT"
 
-# One entry per release that moved the numeric paths (patch releases that only
-# touched wasm/CI are folded into their line). Append the new tag on release.
-TAGS=${TAGS:-"v0.20.0 v0.21.0 v0.22.0 v0.23.0 v0.24.0 v0.25.0 v0.26.0 v0.26.4 v0.27.0"}
+# Every release the bench harness can run. v0.17.0 is the floor: bench_suite.rs
+# does not exist before it, and from there on the harness, the `auto` entry point
+# and the generators are unchanged (the nnz cross-check in the aggregate proves
+# it per matrix). Append the new tag on release.
+TAGS=${TAGS:-"v0.17.0 v0.18.0 v0.19.0 v0.19.1 v0.20.0 v0.21.0 v0.22.0 v0.23.0 \
+v0.24.0 v0.25.0 v0.26.0 v0.26.1 v0.26.2 v0.26.3 v0.26.4 v0.27.0"}
 HEAD_TAG=${HEAD_TAG:-v$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')}
 
 # The reduced head-to-head grid (9 log-spaced sizes 4k-110k for the generator
@@ -65,7 +71,7 @@ run() { # tag family sizes solvers round
   echo "  $1 $2 r$5: $(wc -l < "$out" | tr -d ' ') records"
 }
 
-for r in $(seq 1 "$ROUNDS"); do
+for r in $(seq "${ROUND_START:-1}" "$ROUNDS"); do
   echo "=== round $r ==="
   for v in $TAGS $HEAD_TAG; do
     [ -x "$WORK/bin/$v" ] || { echo "  ! no binary for $v"; continue; }

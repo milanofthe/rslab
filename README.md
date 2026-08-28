@@ -148,26 +148,41 @@ and a memory budget into concrete settings, using the calibration that
 
 Corpus: structured-grid generators (curl-curl Maxwell, shifted Helmholtz,
 Stokes/KKT saddle point, convection-diffusion, BEM/MoM near field) plus complex
-SuiteSparse matrices. RSLAB runs its shipped default throughout.
+SuiteSparse matrices. RSLAB runs its shipped default throughout, which caps at 4
+workers while Accelerate uses all cores; on the convection-diffusion class that
+cap alone costs 12-17%.
 
 ### vs Apple Accelerate (M3, 8 threads, 4k-200k)
 
 ![per class](docs/figures/accel_classes.png)
 
+Wall time divided by Accelerate's, so 1.0 is Accelerate and lower is faster:
+
 | matrix class | factor only | one-shot (analyze+factor+solve) |
 |---|:-:|:-:|
-| circuit MNA (KLU path) | **2.41x** | **5.64x** |
-| curl-curl Maxwell | **1.34x** | **1.67x** |
-| Helmholtz 3D | 0.78x | **1.40x** |
-| convection-diffusion 2D | 0.21x | 0.93x |
-| convection-diffusion 3D | 0.49x | 0.91x |
-| BEM/MoM near field | 0.72x | 0.65x |
-| Stokes saddle point | 0.78x | 0.51x |
-| geomean over the three paths | 0.94x | 1.79x |
+| circuit MNA (KLU path) | **0.42** | **0.18** |
+| curl-curl Maxwell | **0.72** | **0.59** |
+| Helmholtz 3D | **0.98** | **0.59** |
+| Stokes saddle point | 1.28 | **0.68** |
+| convection-diffusion 3D | 1.61 | **0.90** |
+| BEM/MoM near field | 1.39 | 1.53 |
+| convection-diffusion 2D | 3.92 | **0.89** |
+| geomean over the three paths | **0.97** | **0.48** |
 
-Accelerate's AMX kernels own the small and mid sizes, and the ratio grows with
-the problem: Helmholtz crosses parity at ~1e5 nonzeros and reaches 2.14x at
-n=110592.
+Factor only is the repeated-factorization cost, one-shot is what a caller solving
+a system once waits for; both solvers race orderings inside their analyze, so the
+one-shot column is like for like. Accelerate's AMX kernels own the small and mid
+sizes and the ratio improves with the problem: Helmholtz crosses parity at ~1e5
+nonzeros and reaches 0.46 at n=110592.
+
+The classes that stay behind carry their own evidence notes: the saddle/KKT
+family (small-node overhead and chain serialization,
+`dev/research/saddle-vs-accelerate-2026-08.md`), the near-dense BEM/MoM blocks
+(the medium-node kernel floor, `dev/research/ldlt-lu-m3-audit-2026-08.md`), and
+convection-diffusion, where the factor is concurrency-bound: 59% of the thread
+time is idle workers and 1 to 8 threads buys only 2.4-2.8x, so single-thread work
+that would reach parity at ideal scaling lands 3x behind
+(`dev/research/lu-convdiff-2026-08.md`).
 
 ![vs size](docs/figures/accel_scaling.png)
 
