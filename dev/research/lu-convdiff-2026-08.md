@@ -142,12 +142,63 @@ ms at the best setting per matrix. Consistent in direction, 5-10%, no setting
 wins everywhere, and the largest matrix is flat. Not worth a default change on
 this evidence, and it does not touch the structural gap.
 
-## What is left
+## Where the update work actually sits (2026-08-28)
 
-The 59% idle share is not a scheduling artifact: the tree at these sizes does not
-contain more independent work, and the workers that would absorb it are needed
-inside the nodes, where the medium-node kernels run at 2-4 GF/s (lever 2 of
-`ldlt-lu-m3-audit-2026-08.md`). The remaining lever is therefore the same one the
-saddle note scopes: a fused small/medium-node kernel that does assembly, update
-and elimination in one pass instead of dispatching per updater. That raises the
-floor the idle time is measured against, rather than redistributing it.
+The fused-kernel plan assumed the dense kernel is bad at these shapes. Measured,
+it is not. Four numbers, on convdiff2d_21025 unless stated.
+
+**Shape distribution.** Recomputing the cmod spans from the symbolic structure
+and bucketing the update flops by how many target columns an update lands in:
+
+| landing width | updates | flops | share | mean k |
+|---|--:|--:|--:|--:|
+| npk = 1 | 4877 | 4.7e5 | 4.3% | 3.5 |
+| npk = 2 | 324 | 1.8e4 | 0.2% | 1.7 |
+| npk 3-4 | 1637 | 3.0e4 | 0.3% | 1.3 |
+| npk 5-8 | 49 | 1.2e5 | 1.1% | 18.9 |
+| npk 9-16 | 185 | 2.2e6 | 19.7% | 19.6 |
+| npk 17-32 | 84 | 2.0e6 | 17.8% | 21.6 |
+| npk > 32 | 36 | 6.2e6 | 56.8% | 38.4 |
+
+6838 of the 7192 updates carry 4.8% of the flops. No single update exceeds 1e6
+flops, and the whole factor is 1.1e7 complex FMAs, about 88 MFLOP.
+
+**The dense kernel is fine.** The packed complex GEMM at exactly these shapes,
+single thread, hot buffers: 31 GF/s at (50,10,10), 40 at (100,20,20), 40 at
+(200,30,30), 36 at (800,100,100). Narrow shapes cost something but not much:
+12 GF/s at n=1, 22 at n=2, 36 from n=4 on. At 35 GF/s the factor's arithmetic is
+about 8 ms of work; the single-threaded factor takes 163 ms.
+
+**Raising the scalar gate makes it worse**, so the naive triple loop is not the
+better kernel in the 1e4-1e6 band either: gate 4096 -> 4e6 moves convdiff2d_21025
+from 62 to 122 ms, helmholtz_9261 from 67 to 164 ms.
+
+**Single-thread profile** (20 s loop, top of stack): gemm microkernels 4599
+samples (57%), the left-looking driver closures 2399 (30%), allocator
+(madvise/bzero/memmove) 769 (9.5%), gemm packing 305 (3.8%).
+
+So 57% of the time is inside the same microkernel that runs at 35 GF/s on hot
+buffers, while the factor extracts about 3 GF/s from it. The difference is not
+the shapes and not the kernel, it is that every update touches cold memory: the
+updater's panel (strided), a fresh `vd_buf` for the D-apply, a fresh `u_buf` for
+the product, and then a read-modify-write pass over the target panel through
+`gloc`. The arithmetic intensity of an update is `nck` FMAs per output element,
+i.e. 20-38 here, but the operands are streamed once and never reused.
+
+## Next lever, with its ceiling
+
+Fuse the update: accumulate the product straight into the target panel through
+the row map instead of materializing `u_buf` and then scattering it. That removes
+one write plus one read of `mrows * npk` complex values per update, roughly a
+third of the update path's traffic on these shapes, so expect 20-30% on this
+class - not the 3x to Accelerate. It needs a scatter-accumulating complex kernel
+that beats the packed GEMM on strided input, which on this machine means FCMA
+intrinsics; the gemm crate's kernel cannot take a row map.
+
+The rest of the gap is structural: Accelerate factors these matrices on AMX,
+where the same small dense blocks run at a multiple of the NEON rate, and it
+appears to amalgamate more aggressively (our 3878 supernodes for n=21025 average
+5.4 eliminated columns). An amalgamation sweep (nemin 32-128, max_extra_rows
+16-256) moved this class by up to 26% but regressed curl-curl by the same margin
+and did not behave monotonically in the node count, so it needs an interleaved
+study before any default moves.
