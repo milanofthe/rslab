@@ -41,10 +41,10 @@ fn map_err(e: RslabError) -> PyErr {
 //
 // The Arnoldi basis is allocated **up front**, so its size is fixed by `restart`,
 // not by how few iterations actually run:
-//   * block  `gmres_block`: one basis `vbas` = `n · nrhs · (restart+1)` scalars;
-//   * single `gmres`      : the flexible `V` + `Z` pair = `2 · n · (restart+1)`.
-// With the old fixed `restart=80` a large `n·nrhs` allocates silently: e.g.
-// `n=100k, nrhs=10, complex128` ⇒ `100000·10·81·16 B ≈ 13 GB`. When the caller
+//   * block  `gmres_block`: one basis `vbas` = `n * nrhs * (restart+1)` scalars;
+//   * single `gmres`      : the flexible `V` + `Z` pair = `2 * n * (restart+1)`.
+// With the old fixed `restart=80` a large `n*nrhs` allocates silently: e.g.
+// `n=100k, nrhs=10, complex128` => `100000*10*81*16 B ~ 13 GB`. When the caller
 // does **not** pin `restart`, the binding instead caps it so the basis stays under
 // `GMRES_BASIS_BUDGET_BYTES`, clamped to a still-useful `[MIN, MAX]`. An explicit
 // `restart=` argument always wins (honoured exactly, even past the budget).
@@ -52,10 +52,10 @@ const GMRES_BASIS_BUDGET_BYTES: usize = 1 << 30; // 1 GiB
 const GMRES_RESTART_MIN: usize = 20;
 const GMRES_RESTART_MAX: usize = 80;
 
-/// Restart length keeping the up-front `bases · n · columns · (restart+1)`-scalar
+/// Restart length keeping the up-front `bases * n * columns * (restart+1)`-scalar
 /// Arnoldi basis under [`GMRES_BASIS_BUDGET_BYTES`], clamped to `[MIN, MAX]`.
 /// `bases` is `1` for `gmres_block`'s single block basis, `2` for the single-RHS
-/// FGMRES `V`+`Z` pair. Predictable and monotone in `n·columns`.
+/// FGMRES `V`+`Z` pair. Predictable and monotone in `n*columns`.
 fn adaptive_restart(n: usize, columns: usize, scalar_bytes: usize, bases: usize) -> usize {
     let per_layer = n
         .saturating_mul(columns)
@@ -64,7 +64,7 @@ fn adaptive_restart(n: usize, columns: usize, scalar_bytes: usize, bases: usize)
     if per_layer == 0 {
         return GMRES_RESTART_MAX;
     }
-    // basis = per_layer · (restart+1) ≤ budget  ⇒  restart ≤ budget/per_layer − 1.
+    // basis = per_layer * (restart+1) <= budget  =>  restart <= budget/per_layer - 1.
     let cap = (GMRES_BASIS_BUDGET_BYTES / per_layer).saturating_sub(1);
     cap.clamp(GMRES_RESTART_MIN, GMRES_RESTART_MAX)
 }
@@ -154,7 +154,7 @@ fn build_general<T: Scalar + numpy::Element>(
 }
 
 // ---------------------------------------------------------------------------
-// Symmetric LDLᵀ factor
+// Symmetric LDL^T factor
 // ---------------------------------------------------------------------------
 
 /// A factored symmetric matrix over one of the four scalar fields. The original
@@ -170,7 +170,7 @@ enum LdltAny {
 
 /// A factored symmetric (real or complex-symmetric) matrix, ready to solve
 /// against many right-hand sides. Created by `rslab.ldlt(...)`.
-/// A reusable symmetric factor handle, ``Pᵀ A P = L D Lᵀ``.
+/// A reusable symmetric factor handle, ``P^T A P = L D L^T``.
 ///
 /// Returned by :func:`rslab.ldlt` (or :func:`rslab.spsolve` internally). Holds the
 /// Bunch-Kaufman factor and the fill-reducing permutation, so the expensive
@@ -252,7 +252,7 @@ macro_rules! ldlt_solve_many_arm {
 /// solver-in-the-loop caller can branch on convergence instead of silently
 /// accepting a stalled iterate (issue #6): `converged` is `True` only when every
 /// column reached `tol`, `iters` is the block iteration count, and `final_res`
-/// is the per-column relative residual `‖B[:,c] − A X[:,c]‖ / ‖B[:,c]‖`.
+/// is the per-column relative residual `||B[:,c] - A X[:,c]|| / ||B[:,c]||`.
 macro_rules! gmres_block_arm {
     ($py:expr, $b:expr, $x0:expr, $op:expr, $pc:expr, $tol:expr, $maxit:expr, $restart:expr, $T:ty) => {{
         let bb: PyReadonlyArray2<$T> = $b
@@ -261,7 +261,7 @@ macro_rules! gmres_block_arm {
         let shape = bb.shape();
         let (n, nrhs) = (shape[0], shape[1]);
         // Resolve the restart length (issue #12): an explicit value is honoured
-        // exactly; `None` caps it so the up-front `n·nrhs·(restart+1)` basis stays
+        // exactly; `None` caps it so the up-front `n*nrhs*(restart+1)` basis stays
         // under the memory budget.
         let restart: usize = match $restart {
             Some(r) => r,
@@ -327,7 +327,7 @@ macro_rules! gmres_arm {
             .map_err(|_| PyValueError::new_err("rhs dtype does not match the factor dtype"))?;
         let rhs = bb.as_slice()?.to_vec();
         // Resolve the restart length (issue #12): explicit value honoured exactly;
-        // `None` caps it so the up-front `2·n·(restart+1)` FGMRES `V`+`Z` basis
+        // `None` caps it so the up-front `2*n*(restart+1)` FGMRES `V`+`Z` basis
         // stays under the memory budget.
         let restart: usize = match $restart {
             Some(r) => r,
@@ -384,7 +384,7 @@ enum RecycleAny {
 /// subspace from the start instead of re-discovering it, typically cutting restart
 /// counts several-fold. It composes with the ``x0=`` warm start. Passing it to an
 /// unrelated system is safe (never wrong) but may not help. The recycle matvecs
-/// ``C = A M⁻¹ U`` (``k`` matvecs + ``k`` preconditioner solves) are recomputed
+/// ``C = A M^-1 U`` (``k`` matvecs + ``k`` preconditioner solves) are recomputed
 /// each solve, so a changed operator is handled exactly.
 ///
 /// Memory: ``U`` is ``n * k`` scalars of the factor's dtype.
@@ -415,7 +415,7 @@ impl PyRecycle {
         }
     }
 
-    /// Number of recycle vectors currently stored (``≤ k``).
+    /// Number of recycle vectors currently stored (``<= k``).
     #[getter]
     fn active(&self) -> usize {
         match &*self.inner.borrow() {
@@ -935,7 +935,7 @@ enum LuAny {
     C32(LuSolver<Complex<f32>>, GeneralCsc<Complex<f32>>),
 }
 
-/// A reusable general (unsymmetric) factor handle, ``Pᵀ A P = L U``.
+/// A reusable general (unsymmetric) factor handle, ``P^T A P = L U``.
 ///
 /// Returned by :func:`rslab.lu` (or :func:`rslab.spsolve` internally). Holds the
 /// multifrontal ``L U`` factor, the fill-reducing permutation, and a copy of the

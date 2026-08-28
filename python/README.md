@@ -1,7 +1,7 @@
 # rslab (Python bindings)
 
 NumPy/SciPy bindings for [RSLAB](https://github.com/milanofthe/rslab), a
-pure-Rust sparse direct solver and preconditioner: complex/real symmetric LDLᵀ
+pure-Rust sparse direct solver and preconditioner: complex/real symmetric LDL^T
 (Bunch-Kaufman), unsymmetric LU, and a KLU-style path for circuit-shaped
 matrices. A thin wrapper, all numeric work happens in Rust.
 
@@ -100,7 +100,7 @@ default applies). Keyword arguments override the pick:
 | `pivot_tol`   | `1e-3`  | diagonal-preference threshold; `1.0` = plain partial pivoting    |
 | `row_scaling` | `True`  | divide each row by its max-magnitude entry before factoring      |
 | `btf`         | `True`  | permute to block upper triangular form first (keep it on)       |
-| `parallel`    | `None`  | per-block parallel factor/refactor over the BTF blocks; `None` = auto gate (≥4 blocks, ≥8000 nnz, no dominant block), `True`/`False` force on/off; bit-identical result in every mode |
+| `parallel`    | `None`  | per-block parallel factor/refactor over the BTF blocks; `None` = auto gate (>=4 blocks, >=8000 nnz, no dominant block), `True`/`False` force on/off; bit-identical result in every mode |
 
 Supported dtypes: `float64`, `float32`, `complex128`, `complex64`.
 
@@ -113,28 +113,28 @@ lives in the docstrings (`help(rslab.klu)` etc.).
 
 | function | meaning |
 |----------|---------|
-| `spsolve(A, b, **kw)` | one-shot factor-and-solve; detects symmetry and picks the LDLᵀ or LU path |
-| `ldlt(A, **kw) -> Ldlt` | factor a real/complex **symmetric** matrix (Bunch-Kaufman LDLᵀ) |
+| `spsolve(A, b, **kw)` | one-shot factor-and-solve; detects symmetry and picks the LDL^T or LU path |
+| `ldlt(A, **kw) -> Ldlt` | factor a real/complex **symmetric** matrix (Bunch-Kaufman LDL^T) |
 | `lu(A, **kw) -> Lu` | factor a general unsymmetric matrix (supernodal multifrontal LU) |
 | `klu(A, **kw) -> Klu` | factor a circuit-shaped matrix (BTF + per-block Gilbert-Peierls LU) |
 | `install_diagnose()` | one-time machine calibration; caches the measured thread-speedup curve |
 
-**Factor handles** — factor once, then:
+**Factor handles** - factor once, then:
 
 | method / attribute | `Ldlt` | `Lu` | `Klu` | meaning |
 |--------------------|:-:|:-:|:-:|---------|
-| `solve(b, refine=0)` | ✓ | ✓ | ✓ | solve one RHS, optional iterative-refinement steps against the original `A` |
-| `solve_many(B)` | ✓ | ✓ | ✓ | solve `n × nrhs` RHS in one batched pass |
-| `solve_transpose(b)` | – | – | ✓ | solve `Aᵀ y = b` on the same factors (plain transpose, not conjugate) |
-| `refactor(data)` | – | – | ✓ | numeric-only re-factorization for new values on the **same** pattern (no symbolic work, no pivot search) |
-| `gmres(b, tol=1e-8, maxit=400, restart=None, x0=None, recycle=None)` | ✓ | ✓ | ✓ | GMRES with this factor as preconditioner |
-| `gmres_block(B, tol=1e-8, maxit=400, restart=None, x0=None)` | ✓ | ✓ | ✓ | block GMRES for multiple RHS |
-| `recycle(k)` | ✓ | ✓ | ✓ | a `Recycle` workspace holding up to `k` deflation vectors across `gmres` calls |
-| `n`, `factor_nnz`, `n_perturbed`, `dtype` | ✓ | ✓ | ✓ | dimension, stored factor entries, perturbed pivots (always `0` for `Klu`), NumPy dtype name |
-| `inertia` | ✓ | – | – | `(n_pos, n_neg, n_zero)` eigenvalue counts from LDLᵀ |
-| `n_blocks` | – | – | ✓ | number of BTF diagonal blocks |
+| `solve(b, refine=0)` | yes | yes | yes | solve one RHS, optional iterative-refinement steps against the original `A` |
+| `solve_many(B)` | yes | yes | yes | solve `n x nrhs` RHS in one batched pass |
+| `solve_transpose(b)` | - | - | yes | solve `A^T y = b` on the same factors (plain transpose, not conjugate) |
+| `refactor(data)` | - | - | yes | numeric-only re-factorization for new values on the **same** pattern (no symbolic work, no pivot search) |
+| `gmres(b, tol=1e-8, maxit=400, restart=None, x0=None, recycle=None)` | yes | yes | yes | GMRES with this factor as preconditioner |
+| `gmres_block(B, tol=1e-8, maxit=400, restart=None, x0=None)` | yes | yes | yes | block GMRES for multiple RHS |
+| `recycle(k)` | yes | yes | yes | a `Recycle` workspace holding up to `k` deflation vectors across `gmres` calls |
+| `n`, `factor_nnz`, `n_perturbed`, `dtype` | yes | yes | yes | dimension, stored factor entries, perturbed pivots (always `0` for `Klu`), NumPy dtype name |
+| `inertia` | yes | - | - | `(n_pos, n_neg, n_zero)` eigenvalue counts from LDL^T |
+| `n_blocks` | - | - | yes | number of BTF diagonal blocks |
 
-**`Recycle`** — deflation-subspace carrier for sweeps: attributes `k`,
+**`Recycle`** - deflation-subspace carrier for sweeps: attributes `k`,
 `active`, `dtype`; `clear()` resets it.
 
 ## License

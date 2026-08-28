@@ -10,10 +10,10 @@
 //! factor/refactor; SuiteSparse KLU is sequential by design.
 //!
 //! Run: `cargo bench --bench klu_realworld --features matgen-download`
-//! Env:  `RLA_KLU_SS_PREFIX` — SuiteSparse install for the reference shim
+//! Env:  `RLA_KLU_SS_PREFIX` - SuiteSparse install for the reference shim
 //!       (see `benches/ss_klu_ref.rs`); without it only RSLAB rows appear.
-//!       `RLA_KLU_RW_BIG=1` — include the multi-million-row Freescale set.
-//!       `RLA_BENCH_OUT=path.jsonl` — append one JSONL record per
+//!       `RLA_KLU_RW_BIG=1` - include the multi-million-row Freescale set.
+//!       `RLA_BENCH_OUT=path.jsonl` - append one JSONL record per
 //!       (matrix, solver) for `benches/klu_realworld_plot.py`.
 
 use std::time::Instant;

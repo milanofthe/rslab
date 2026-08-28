@@ -190,7 +190,7 @@ def ldlt(
         sharing the machine. The factor is bit-identical either way.
     preconditioner : float, optional
         Enable never-fail **static pivoting**: any pivot with magnitude below this
-        absolute floor (typically ``eps_rel * ‖A‖``) is lifted to it, so the
+        absolute floor (typically ``eps_rel * ||A||``) is lifted to it, so the
         stored factor is of a perturbed :math:`A + E`. The factorization then
         never fails on a (near-)singular pivot, at the cost of an inexact factor -
         recover full accuracy by driving ``solve(b, refine=k)``, which does ``k``
@@ -547,7 +547,7 @@ def klu(
 
 
 def _is_symmetric(A, tol: float = 1e-12) -> bool:
-    """Cheap structural+value symmetry test for picking the LDLᵀ vs LU path."""
+    """Cheap structural+value symmetry test for picking the LDL^T vs LU path."""
     sp = _require_scipy()
     A = sp.csc_matrix(A)
     if A.shape[0] != A.shape[1]:

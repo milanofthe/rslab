@@ -3,7 +3,7 @@
 //!
 //! Given a sparse symmetric matrix (lower triangle only in the
 //! input CSC), this module produces a symmetric scaling vector
-//! `s` such that `D · A · D` (with `D = diag(s)`) has
+//! `s` such that `D * A * D` (with `D = diag(s)`) has
 //! magnitude-bounded off-diagonals and unit-scale diagonals.
 //!
 //! Algorithm (mirrors `ref/spral/src/scaling.f90::hungarian_wrapper`,
@@ -11,7 +11,7 @@
 //!
 //!   1. Expand the lower-triangle CSC to a full symmetric pattern,
 //!      carrying the original values with the transpose entries.
-//!   2. Drop explicit zero entries (log of zero is -∞).
+//!   2. Drop explicit zero entries (log of zero is -inf).
 //!   3. Compute `c[k] = log |a[k]|` on the remaining entries.
 //!   4. For each column j, compute `cmax[j] = max_k c[k]` and replace
 //!      each `c[k]` by `cmax[j] - c[k]`. The cost graph is now
@@ -32,7 +32,7 @@
 //! The partial-singular path deviates from SPRAL, which runs a
 //! second Hungarian pass on the full-rank submatrix and then
 //! applies a Duff-Pralet correction (scaling.f90:688-800). The
-//! research note `dev/research/mc64-scaling.md` §"Structurally
+//! research note `dev/research/mc64-scaling.md` section "Structurally
 //! singular matrices" specifies identity fallback for unmatched
 //! rows/columns as the correct behavior for rslab, because KKT
 //! matrices from IPOPT are occasionally structurally rank-deficient
@@ -45,7 +45,7 @@ use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
 
 /// Upper bound on the argument to `exp` before overflow.
-/// `ln(f64::MAX) ≈ 709.78`. We use 709.0 as a safe ceiling.
+/// `ln(f64::MAX) ~ 709.78`. We use 709.0 as a safe ceiling.
 const LOG_HUGE: f64 = 709.0;
 
 /// Cached MC64 output: the full Hungarian matching plus the
@@ -168,11 +168,11 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
         let mut arg = (u[i] + v[i] - cmax[i]) / 2.0;
 
         // Clamp to avoid overflow on `exp`. A dual variable can
-        // grow to ±∞-ish magnitudes on pathological inputs; mature
+        // grow to +/-inf-ish magnitudes on pathological inputs; mature
         // MC64-style implementations (MUMPS, SSIDS) guard against
         // this too. The clamp is symmetric so that a clamped row
         // exponentiates to a very large or very small but finite
-        // value rather than `+∞` or `0`.
+        // value rather than `+inf` or `0`.
         if !arg.is_finite() {
             scaling[i] = 1.0;
             continue;
@@ -379,7 +379,7 @@ mod tests {
     /// `cmax`). The contract requires `s[0] = 1.0` (row 0 unmatched) and
     /// `s[1] = 1.0` (column 1 unmatched). Pre-fix the code only skipped on an
     /// unmatched COLUMN, so index 0 took `exp((0 + v[0] - cmax[0]) / 2)
-    /// = exp((0 + 2 - 1) / 2) = exp(0.5) ≈ 1.6487` - the witness.
+    /// = exp((0 + 2 - 1) / 2) = exp(0.5) ~ 1.6487` - the witness.
     #[test]
     fn unmatched_row_with_matched_column_falls_back_to_identity() {
         let cache = Mc64Cache {
@@ -409,7 +409,7 @@ mod tests {
         );
     }
 
-    /// Empty 0×0 matrix returns an empty scaling vector.
+    /// Empty 0x0 matrix returns an empty scaling vector.
     #[test]
     fn empty_matrix_returns_empty_scaling() {
         let csc = CscMatrix {

@@ -1,4 +1,4 @@
-﻿# Standalone workspace: the bindings are built by maturin, fully decoupled from
+# Standalone workspace: the bindings are built by maturin, fully decoupled from
 # the pure-Rust solver workspace one level up (own target dir, own lockfile).
 [workspace]
 

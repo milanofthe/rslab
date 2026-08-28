@@ -1,6 +1,6 @@
 //! KLU-style sparse LU: BTF + per-block left-looking Gilbert-Peierls.
 //!
-//! The third direct path next to the multifrontal LDLáµ€ and LU, built for
+//! The third direct path next to the multifrontal LDL^T and LU, built for
 //! circuit-shaped matrices: extremely sparse, unsymmetric, near-triangularizable,
 //! with diagonal blocks far too small for supernodal/BLAS-3 kernels to pay off.
 //! Algorithmic reference: SuiteSparse KLU (Davis & Palamadai Natarajan); this is
@@ -74,7 +74,7 @@ pub struct KluSettings {
     /// does not depend on scheduling or thread count. The default `Auto`
     /// enables it through a deterministic structural gate (no implicit
     /// measuring): at least 4 diagonal blocks, 8000 input nonzeros, and no
-    /// dominant block (largest block at most half of `n`) — real circuits
+    /// dominant block (largest block at most half of `n`) - real circuits
     /// are often one giant irreducible block plus thousands of singletons,
     /// where distributing blocks cannot help.
     /// Cap the pool with [`with_threads`](crate::with_threads) scoping for
@@ -156,7 +156,7 @@ impl KluSettings {
 pub struct KluSymbolic {
     n: usize,
     nnz: usize,
-    /// Pre-pivot row permutation (new-to-old): BTF matching âˆ˜ SCC order âˆ˜
+    /// Pre-pivot row permutation (new-to-old): BTF matching then SCC order then
     /// per-block AMD. Partial pivoting at factor time refines this within
     /// each block.
     pre_row_perm: Vec<usize>,
@@ -220,7 +220,7 @@ impl KluSymbolic {
         // lnz (Gilbert-Ng-Peyton column counts on the ordered symmetrized
         // pattern) and the cheapest matching wins. Different maximum
         // matchings differ by several-x fill on the harmonic-balance class
-        // (onetone/twotone), in matrix-dependent directions — measuring
+        // (onetone/twotone), in matrix-dependent directions - measuring
         // beats guessing. The common MNA case (complete structural
         // diagonal) short-circuits to a single candidate and pays nothing.
         let (pre_row_perm, col_perm, block_ptr) = if settings.btf {
@@ -389,7 +389,7 @@ impl KluSymbolic {
     ///
     /// KLU specifics: the fill is exact under diagonal pivoting (threshold
     /// pivoting can shift it slightly); `factor_flops` is the Gilbert-Peierls
-    /// flop count (not the supernodal `nrowÂ²Â·ncol` proxy); the path is
+    /// flop count (not the supernodal `nrow^2*ncol` proxy); the path is
     /// strictly sequential, so `critical_path_flops == factor_flops` and
     /// `max_tree_width == 1`; there are no dense panels.
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
@@ -493,7 +493,7 @@ fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
 ///    gains 2.7x). The floor is overhead physics; no setting bypasses it.
 /// 2. **Concurrency ratio** ([`KLU_PAR_MIN_RATIO`]): parallelism engages only
 ///    where the structure offers at least this much simultaneous work.
-///    Across BTF blocks that is the exact Amdahl bound `Σ work / max block
+///    Across BTF blocks that is the exact Amdahl bound `sum work / max block
 ///    work`; inside a block it is the mean level width of the frozen
 ///    elimination DAG - the average number of simultaneously replayable
 ///    columns. (A chain-work critical-path bound would be the "exact" ratio
@@ -503,7 +503,7 @@ const KLU_PAR_MIN_WORK: u64 = 50_000_000;
 const KLU_PAR_MIN_RATIO: f64 = 2.0;
 
 /// The replay-parallelism plan, computed once at factor time from the
-/// pivot-final pattern: per-block replay work `W_b = Σ_j Σ_{p in U(:,j)}
+/// pivot-final pattern: per-block replay work `W_b = sum_j sum_{p in U(:,j)}
 /// |L(:,p)|` and elimination-DAG level structure.
 ///
 /// A block is **pipelined** (NICSLU pipeline mode, Chen/Wang/Yang TCAD 2013)
@@ -650,12 +650,12 @@ struct OrderedForm {
     score: u64,
 }
 
-/// Per-block AMD on the symmetrized block pattern (B + Bᵀ, with diagonal,
+/// Per-block AMD on the symmetrized block pattern (B + B^T, with diagonal,
 /// matching what the multifrontal paths feed rslab-amd), applied
 /// symmetrically to the form's permutations. Blocks of size <= 2 have
 /// nothing to reorder. With `score_it`, additionally accumulates the exact
 /// Cholesky lnz of each AMD-ordered block pattern (Gilbert-Ng-Peyton column
-/// counts, near-linear) as the bakeoff score — the trivial blocks are
+/// counts, near-linear) as the bakeoff score - the trivial blocks are
 /// identical across candidates and are skipped consistently.
 fn order_blocks<T: Scalar>(
     a: &GeneralCsc<T>,
@@ -683,18 +683,18 @@ fn order_blocks<T: Scalar>(
         if bn <= 2 {
             continue;
         }
-        // Symmetrized block adjacency (B + Bᵀ + diagonal), canonical form
+        // Symmetrized block adjacency (B + B^T + diagonal), canonical form
         // (sorted, deduplicated columns). Built as: the off-diagonal
         // in-block entries B column by column (sequential writes, one random
         // `pinv0` read per entry), a per-column sort of B's short columns,
-        // Bᵀ by counting transpose (whose columns come out sorted for
+        // B^T by counting transpose (whose columns come out sorted for
         // free), then a linear three-way sorted merge per column. One
         // random counting/scatter pass over the entries instead of the two
-        // of the old both-directions scatter — the random writes, not the
+        // of the old both-directions scatter - the random writes, not the
         // short-column sorts, dominate this stage.
         // 1) B: off-diagonal in-block entries, block-local coordinates.
         // Single pass over the matrix (the random `pinv0` reads are this
-        // stage's bottleneck — no separate counting pass), sequential
+        // stage's bottleneck - no separate counting pass), sequential
         // pushes, then a short per-column sort.
         let cap: usize = (bs..be)
             .map(|j| {
@@ -718,7 +718,7 @@ fn order_blocks<T: Scalar>(
             bcol.push(bri.len());
         }
         let m = bcol[bn];
-        // 2) Bᵀ via counting transpose; columns arrive sorted because the
+        // 2) B^T via counting transpose; columns arrive sorted because the
         // source columns are visited in ascending order.
         let mut tcol = vec![0usize; bn + 1];
         for &li in &bri {
@@ -737,7 +737,7 @@ fn order_blocks<T: Scalar>(
                 }
             }
         }
-        // 3) Per-column sorted merge of B, Bᵀ, and the diagonal, deduped.
+        // 3) Per-column sorted merge of B, B^T, and the diagonal, deduped.
         let mut colptr_i32 = Vec::with_capacity(bn + 1);
         let mut rowidx_i32 = Vec::with_capacity(2 * m + bn);
         colptr_i32.push(0i32);
@@ -1322,7 +1322,7 @@ fn factor_impl<T: Scalar>(
 
     // Numeric output buffers, filled either incrementally block-by-block
     // (sequential: one reused scratch + one reused block buffer, no
-    // per-block allocations and no separate splice pass — the allocator and
+    // per-block allocations and no separate splice pass - the allocator and
     // the extra copy dominated on the tens-of-thousands-of-tiny-blocks
     // circuit class) or by the two-phase parallel splice below.
     let mut l_colptr: Vec<usize> = Vec::with_capacity(n + 1);
@@ -1643,18 +1643,18 @@ impl<T: Scalar> KluSolver<T> {
         Ok(xout)
     }
 
-    /// Solve the transposed system `Aáµ€ x = b` with the **same** factorization.
+    /// Solve the transposed system `A^T x = b` with the **same** factorization.
     ///
     /// This is the plain transpose, NOT the conjugate transpose: for a complex
-    /// adjoint solve `Aá´´ x = b`, conjugate `b` before and `x` after. (This
+    /// adjoint solve `A^H x = b`, conjugate `b` before and `x` after. (This
     /// matches the convention of the usual sparse-LU transpose solves, and is
     /// what implicit-function adjoints over holomorphic residuals need.)
     ///
-    /// The stored form is `A = Rs Â· P_ráµ€ Â· M Â· C` with `M` the block-upper
+    /// The stored form is `A = Rs * P_r^T * M * C` with `M` the block-upper
     /// (BTF) permuted, row-scaled matrix and `M_bb = L_b U_b` per diagonal
-    /// block, so `Aáµ€ x = b` is `Máµ€ (P_r Rs x) = C b`: gather `b` through the
+    /// block, so `A^T x = b` is `M^T (P_r Rs x) = C b`: gather `b` through the
     /// column permutation, run the transposed block substitution (blocks
-    /// forward, per block `Uáµ€` forward then `Láµ€` backward, off-block `Fáµ€`
+    /// forward, per block `U^T` forward then `L^T` backward, off-block `F^T`
     /// contributions from the already-solved earlier blocks), then scatter
     /// through the row permutation and undo the row scaling. Sequential and
     /// bit-deterministic, like [`solve`](Self::solve).
@@ -1666,13 +1666,13 @@ impl<T: Scalar> KluSolver<T> {
                 got: b.len(),
             });
         }
-        // w = CÂ·b: position k of the permuted system reads b at its column.
+        // w = C*b: position k of the permuted system reads b at its column.
         let mut w = vec![T::zero(); f.n];
         for (k, &c) in f.col_perm.iter().enumerate() {
             w[k] = b[c];
         }
         self.solve_permuted_transpose(&mut w);
-        // x = Rsâ»Â¹ Â· P_ráµ€ Â· w: scatter through the row permutation, then undo
+        // x = Rs^-1 * P_r^T * w: scatter through the row permutation, then undo
         // the row scaling (Rs is diagonal, so it transposes onto the solution).
         let mut xout = vec![T::zero(); f.n];
         for (k, &orig) in f.row_perm.iter().enumerate() {
@@ -1681,10 +1681,10 @@ impl<T: Scalar> KluSolver<T> {
         Ok(xout)
     }
 
-    /// The transposed block substitution on the permuted vector: `Máµ€` is block
+    /// The transposed block substitution on the permuted vector: `M^T` is block
     /// **lower** triangular (the transpose of the BTF block-upper `M`), so the
-    /// blocks run forward, and within a block `M_bbáµ€ = U_báµ€ L_báµ€` solves as
-    /// `Uáµ€` (lower, diagonal `udiag`) forward then `Láµ€` (unit upper) backward.
+    /// blocks run forward, and within a block `M_bb^T = U_b^T L_b^T` solves as
+    /// `U^T` (lower, diagonal `udiag`) forward then `L^T` (unit upper) backward.
     /// Column `j` of the stored `U`/`L`/`F` is row `j` of the transpose, so
     /// every inner loop is a gather over the existing column storage.
     fn solve_permuted_transpose(&self, w: &mut [T]) {
@@ -1696,7 +1696,7 @@ impl<T: Scalar> KluSolver<T> {
         let f = &self.factors;
         for b in 0..f.block_ptr.len() - 1 {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
-            // Fáµ€: this block's rows read the already-solved earlier blocks.
+            // F^T: this block's rows read the already-solved earlier blocks.
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
@@ -1704,7 +1704,7 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 w[j] = acc;
             }
-            // Uáµ€ (lower triangular, diagonal `udiag`) forward within the block.
+            // U^T (lower triangular, diagonal `udiag`) forward within the block.
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
@@ -1712,7 +1712,7 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 w[j] = acc / f.udiag[j];
             }
-            // Láµ€ (unit upper) backward within the block.
+            // L^T (unit upper) backward within the block.
             for j in (bs..be).rev() {
                 let mut acc = w[j];
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
@@ -1758,7 +1758,7 @@ impl<T: Scalar> KluSolver<T> {
             // L (unit lower) forward within the block. Negating the factor
             // value (loop-invariant here) instead of `xj` keeps each column's
             // FMA product bitwise equal to `solve_permuted`'s
-            // (`(-a)Â·b == aÂ·(-b)` exactly per real FMA).
+            // (`(-a)*b == a*(-b)` exactly per real FMA).
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
@@ -1853,7 +1853,7 @@ impl<T: Scalar> KluSolver<T> {
     /// The block forward/backward substitution on the permuted/scaled vector.
     /// The axpys run through `fmadd` with the loop-invariant operand negated
     /// once per column, `solve_many` negates the per-entry factor value
-    /// instead, which is bitwise the same product (`(-a)Â·b == aÂ·(-b)` holds
+    /// instead, which is bitwise the same product (`(-a)*b == a*(-b)` holds
     /// exactly per real FMA), so the two stay bit-identical per column.
     fn solve_permuted(&self, w: &mut [T]) {
         let f = &self.factors;
@@ -2630,7 +2630,7 @@ mod tests {
         assert!(s.refactor(&a2).is_err(), "changed pattern must be rejected");
     }
 
-    /// Max-norm relative residual of the *transposed* system `Aáµ€ x = b`.
+    /// Max-norm relative residual of the *transposed* system `A^T x = b`.
     fn resid_t<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
         resid(&a.transpose(), x, b)
     }
@@ -2638,7 +2638,7 @@ mod tests {
     #[test]
     fn klu_solve_transpose_matches_factored_transpose() {
         // Reducible circuit-shaped matrix: solve_transpose on A's factors must
-        // agree with a fresh factorization of Aáµ€, and satisfy Aáµ€ x = b.
+        // agree with a fresh factorization of A^T, and satisfy A^T x = b.
         let a = circuit_like(200, 42);
         let b: Vec<f64> = (0..200).map(|i| ((i * 3) % 13) as f64 - 6.0).collect();
         let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
@@ -2664,8 +2664,8 @@ mod tests {
 
     #[test]
     fn klu_solve_transpose_complex_plain_not_conjugate() {
-        // Complex: solve_transpose must solve the PLAIN transpose Aáµ€ x = b
-        // (adjoint convention: the caller conjugates for Aá´´). Off-diagonal
+        // Complex: solve_transpose must solve the PLAIN transpose A^T x = b
+        // (adjoint convention: the caller conjugates for A^H). Off-diagonal
         // pivoting pressure included (small diagonal), as in the solve test.
         let c = |re, im| Complex::new(re, im);
         let m = 6;
@@ -2709,7 +2709,7 @@ mod tests {
             "residual {}",
             resid_t(&a, &x, &b)
         );
-        // Aá´´ x = b via the documented conjugation recipe.
+        // A^H x = b via the documented conjugation recipe.
         let bc: Vec<Complex<f64>> = b.iter().map(|v| v.conj()).collect();
         let xh: Vec<Complex<f64>> = s
             .solve_transpose(&bc)

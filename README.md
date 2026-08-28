@@ -1,598 +1,240 @@
 # RSLAB
 
-Rust Sparse Linear Algebra Backend. A sparse direct solver for real and complex
-matrices with **three paths matched to their operator classes**: symmetric LDLᵀ
-(Bunch-Kaufman), unsymmetric LU, and a KLU path for circuit-shaped matrices,
-with the factor usable as a preconditioner. The solver core is pure Rust with no
-BLAS, LAPACK, or MKL dependency.
+Rust Sparse Linear Algebra Backend: a sparse direct solver for real and complex
+matrices, with three paths matched to their operator classes - symmetric LDLT
+(Bunch-Kaufman), unsymmetric LU, and KLU for circuit-shaped matrices. The solver
+core is pure Rust: no BLAS, LAPACK or MKL. Every factor also works as a
+preconditioner for the built-in Krylov solvers.
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-RSLAB factors `Pᵀ A P = L D Lᵀ` (complex-symmetric, PARDISO `mtype 6`),
-`Pᵀ A P = L U` (unsymmetric, `mtype 13`), or a BTF block factorization
-(circuit-shaped, KLU-style), then solves against one or many right-hand sides.
-It is a fork of [feral](https://github.com/jkitchin/feral); see [NOTICE](NOTICE).
-The accompanying technical report ([`docs/report/rslab.pdf`](docs/report/rslab.pdf))
-derives the algorithms and carries the full evaluation; the numbers below are its
-headline results.
+- `P^T A P = L D L^T` (complex-symmetric, PARDISO `mtype 6`), `P^T A P = L U`
+  (unsymmetric, `mtype 13`), or a BTF block factorization (KLU-style), generic
+  over `f64`, `f32`, `Complex<f64>`, `Complex<f32>`.
+- Bit-identical factors across thread counts, validated over 180 SuiteSparse
+  matrices. Defaults are deterministic: the ordering is picked by an exact race
+  on measured fill, and nothing is measured implicitly at runtime.
+- A-priori peak-memory and runtime estimates from the symbolic structure alone.
+- Krylov layer: restarted GMRES (single and block), COCG, COCR, GCRO-DR
+  recycling, warm starts.
 
-## Features
-
-- Pure-Rust solver core. No native dependencies. Optional bench/tooling features
-  may load external libraries; the library does not.
-- Generic over scalar type: `f64`, `f32`, `Complex<f64>`, `Complex<f32>`. A test
-  factors and solves all four through both paths.
-- Symmetric LDLᵀ with Bunch-Kaufman 1x1/2x2 pivoting (stores only `L`), and
-  threshold-pivoted LU (exposed, tunable tolerance `u`) for unsymmetric matrices.
-- **KLU path** for circuit-shaped matrices (`KluSymbolic::analyze → factor →
-  KluSolver`): BTF (maximum transversal + Tarjan SCC, detects structural
-  singularity a-priori) + per-block AMD + left-looking Gilbert-Peierls LU with
-  threshold pivoting and row scaling. Strictly sequential and bit-deterministic;
-  numeric-only `refactor` (frozen pattern + pivots) for frequency sweeps and
-  Newton steps, plus `solve_transpose` (`Aᵀx = b` on the same factors) for
-  adjoint / sensitivity solves. Factor and refactor run the independent BTF
-  blocks in parallel when a deterministic structural gate says it pays
-  (`KluParallel::Auto`, bit-identical to sequential in every mode; force
-  `Off` for strictly sequential execution). Refactorization additionally
-  pipelines the columns *inside* a dominant irreducible block (NICSLU-style
-  just-in-time dependency waits on the frozen elimination DAG, work-gated):
-  2.0-2.9x on the work-heavy SuiteSparse circuit matrices (rajat15, twotone,
-  ASIC_100ks, onetone1), still bit-identical. On MNA-like matrices: 5-12x
-  faster factor with 1.7-5.7x less fill than the multifrontal LU (widening
-  with size), a 20-point same-pattern sweep 10-40x faster end to end, and
-  1.6-2.7x / 2.1-3.4x ahead of SuiteSparse KLU on parallel factor / refactor
-  (`cargo bench --bench klu_circuit`).
-- Two factorization schedules: supernodal left-looking (default, frees each dense
-  panel after its last consumer) and multifrontal.
-- Fill-reducing orderings: AMD, AMF, nested dissection (METIS), and
-  RCM (band/profile), selectable or raced per matrix.
-- Tunable equilibration (one-pass ∞-norm, iterative Ruiz, MC64 matching, off) and
-  factor emit/memory mode, all through one flat `SolverSettings` interface.
-- **Heuristic default settings** (hardware-agnostic, deterministic, model-free):
-  `factor()` picks its configuration from exact a-priori quantities - an exact
-  two-stage **ordering race** ({AMD, AMF, RCM} prefixes concurrently, smallest
-  exact fill wins; the MetisND candidate joins only above a work floor where
-  its cost amortizes, and internally runs a best-of-seeds ensemble) plus the
-  proven default kernel knobs. An optional **one-time
-  install diagnosis** (`cargo xtask calibrate` / `tuning::install_diagnose`)
-  measures this machine's throughput + parallel-speedup curve once and caches it;
-  with the cache present, the worker count comes from the calibrated cost model
-  (critical-path-aware), otherwise from the conservative structural default. The
-  solvers never measure implicitly.
-- The numeric factor is bit-identical across thread counts; the parallel multi-RHS
-  solve (8-19x faster than per-column) is bit-identical to the serial path.
-- 32-bit index compression (`CompressedLdltFactors`, when `n < 2^31`): half the
-  index footprint at no accuracy cost.
-- **Adaptive-precision low-rank storage**: BLR contribution blocks can keep
-  their small trailing crosses in single precision under an explicit rounding
-  budget (`BlrMode::contribution_blocks_adaptive`), shrinking the compressed
-  transient further at the same approximation class.
-- Static pivot reuse for fixed-pattern value sequences (frequency sweeps, time
-  stepping): skip the pivot search across refactorizations.
-- Preconditioner mode: static pivoting (never-fail), optional incomplete drop and
-  block-low-rank compression.
-- Iterative solvers: flexible restarted GMRES (single + block/multi-RHS), COCG,
-  COCR, with warm start (`x0`) and GCRO-DR Krylov subspace recycling (a `Recycle`
-  handle carried across a sequence of related solves) for solver-in-the-loop work.
-- A-priori peak-memory and runtime estimates computed from the symbolic structure
-  before any numeric work; scoped per-solve thread pools; per-call diagnostics; an
-  optional hardware-aware budget planner.
-
-## Benchmarks
-
-All cross-solver figures come from the `bench_suite` engine over a
-complete-distribution corpus: structured-grid generators (curl-curl Maxwell,
-shifted Helmholtz, Stokes/KKT saddle-point, convection-diffusion over the
-grid-Péclet range, BEM/MoM near-field kernels; `src/matgen/fem.rs`) plus the
-complex SuiteSparse matrices, 8k-125k DOFs, all `Complex<f64>`, measured in one
-run on a quiet 12-core machine, so the cross-solver ratios carry no run-to-run
-drift. RSLAB runs its shipped default, the deterministic heuristic pick
-(`tuned()`: exact ordering race, calibrated worker count); each
-path is compared **on its own class** against its own MKL PARDISO mtype and
-[faer](https://github.com/sarah-quinones/faer-rs).
-
-Reproduce: `RLA_BENCH_FAMILY=sym|unsym cargo bench --bench bench_suite
---features matgen`, then `benches/head_to_head.py`; the KLU comparison is
-`cargo bench --bench klu_circuit`.
-
-### Per-path scaling: RSLAB vs faer vs MKL PARDISO
-
-Factor time and peak memory vs nonzeros, log-log, one power-law fit per solver.
-Each plot carries two RSLAB curves, the **fixed default config** (gray) and the
-**heuristic pick** as shipped (blue), so the gap the pick closes toward PARDISO
-is visible; it widens with problem size (a mispicked ordering costs most on the
-big matrices) and never comes at a memory cost (the ordering race picks by
-exact fill).
-
-**LDLᵀ path (symmetric, PARDISO mtype 6)**: factor time (left) and peak memory (right):
-
-![LDLt factor time (left) and peak memory (right)](docs/figures/h2h_ldlt.png)
-
-**LU path (unsymmetric, PARDISO mtype 13)**: factor time (left) and peak memory (right):
-
-![LU factor time (left) and peak memory (right)](docs/figures/h2h_lu.png)
-
-Head-to-head geomean ratios (63 sizes per path, 1k-110k DOFs, over the
-matrices both solvers factor to `< 0.1` residual):
-
-| RSLAB (heuristic pick) vs | LDLᵀ (sym) | LU (unsym) |
-|---------------------------|:----------:|:----------:|
-| **MKL PARDISO**: factor time | 5.6x slower | 5.1x slower |
-| **MKL PARDISO**: peak memory | 2.8x more | 3.6x more |
-| **faer LU**: factor time | **6.7x faster** | **2.7x faster** |
-| **faer LU**: peak memory | **1.8x less** | 1.4x more |
-| **fixed default cfg**: factor time | **1.84x faster** | **1.49x faster** |
-| **fixed default cfg**: peak memory | **0.90x** (less) | 1.11x more |
-
-RSLAB sits between the two: faster than the pure-Rust faer, moderately behind
-the hand-optimized MKL PARDISO. faer has no symmetric path (it factors
-symmetric matrices as LU too), so its LDLᵀ gap is structurally largest; it
-also OOMs on the largest matrices, so its head-to-head is a conservative
-floor. On time the LU pick scales flatter than PARDISO (`α≈1.01` vs `1.25`).
-The unsym memory ratios above 1 are the worker-count trade: the calibrated
-pick runs more workers than the capped fixed config, and more concurrent
-panels raise the transient peak; cap `threads` to trade it back.
-
-`RAYON_NUM_THREADS` drives the fixed-config RSLAB curve, faer, and MKL alike;
-the heuristic pick chooses its **own** worker count from the cached hardware
-calibration (the shipped behaviour: often fewer, critical-path-aware).
-Without an install diagnosis (`cargo xtask calibrate`) the library default is
-`Threads::Auto { max: 4 }`, a deliberate cap at the measured efficiency knee
-so concurrent solver-in-the-loop instances coexist; pass `.with_threads(0)`
-(all logical cores) for a like-for-like run against PARDISO's all-cores
-default.
-
-### Accuracy (SuiteSparse)
-
-![SuiteSparse residual](docs/figures/corpus_residual.png)
-
-Relative residual `‖Ax-b‖/‖b‖` as the accuracy check across the corpus.
-
-- Where RSLAB factors, it is accurate: 24/31 matrices below `1e-8` residual, matching
-  PARDISO and ahead of faer, which returns a degraded or garbage solution on several
-  (pdb1HYS, bcsstk18, msc10848, wang3).
-- Exact-mode limit: RSLAB's exact LDLᵀ (pivoting bounded to each supernode) cannot
-  factor some indefinite saddle-point / KKT matrices (stokes64, bratu3d, cont-201) that
-  PARDISO factors directly; it declines them rather than returning a degraded solution.
-- Preconditioner mode covers most of that gap: a never-fail static-pivot factor used as
-  a GMRES preconditioner reaches 28/33 below `1e-8` (matching PARDISO) and rescues the
-  exact-mode failures bratu3d and cont-201; it also refines RSLAB's one inaccurate exact
-  solve (qc2534, `3.6e-4` to `1.8e-13`). The hardest saddle-point/CFD cases (stokes64,
-  ex11) stay out of reach. RSLAB targets the complex-symmetric EM/FEM regime, not
-  general indefinite KKT.
-
-The determinism and equivalence properties were validated over 180 SuiteSparse
-matrices: right-looking vs multifrontal, both emit modes, parallel vs serial
-front subtraction, and the 32-bit compressed factor are all bit-identical.
-
-### Apple Silicon: RSLAB vs Apple Accelerate
-
-Same engine, same corpus, different silicon: all three solver paths re-measured
-in one run on an Apple M3 (8 cores, 16 GB, macOS 15.6) against **Apple
-Accelerate's sparse direct solvers**, including the complex support and the
-sparse LU that Accelerate gained in macOS 15.5. RSLAB runs its shipped default
-(heuristic pick, `cargo xtask calibrate`d for this machine); Accelerate runs
-its vendor-recommended best configuration per class:
-
-| matrix class | Accelerate path |
-|---|---|
-| real symmetric | Cholesky first (AMX-fast on SPD), LDLᵀ fallback on the indefinite ones |
-| complex-symmetric (EM/FEM) | sparse LU on the full matrix (its complex LDLᵀ is Hermitian-only (verified: the lower triangle is mirrored *conjugated*), so like faer it cannot exploit `A = Aᵀ` |
-| unsymmetric / circuit | sparse LU (TPP, `pivotTolerance 0.01`) |
-
-plus an **AMD-vs-Metis ordering bakeoff** per matrix (the vendor docs say "try
-both"; `SparseOrderDefault` turned out to be plain AMD, which costs up to 4.4x
-the fill of Metis on the large EM/FEM systems; that bakeoff is the analogue of
-RSLAB's exact ordering race and its cost is counted in Accelerate's analyze time).
-Memory uses the same live-bytes semantics as the Rust solvers: Accelerate's
-allocations run through instrumented `SparseSymbolicFactorOptions` malloc/free
-callbacks. Accelerate has no thread knob (internal parallelism); RSLAB uses its
-calibrated pick.
-
-**LDLᵀ path (sym)** | **LU path (unsym)** | **KLU path (circuit)**:
-
-![Apple LDLt](docs/figures/h2h_apple_ldlt.png)
-![Apple LU](docs/figures/h2h_apple_lu.png)
-![Apple KLU](docs/figures/h2h_apple_klu.png)
-
-Head-to-head geomean ratios (Accelerate / RSLAB shipped path, over the matrices
-both solve to `< 0.1` residual; one-shot analyze+factor+solve):
-
-| corpus | factor time | peak memory | matrices |
-|---|:-:|:-:|:-:|
-| sym (LDLᵀ path) | **0.64x** (accel faster) | **0.58x** | 49 |
-| unsym (LU path) | **0.27x** | **0.29x** | 60 |
-| circuit (vs RSLAB KLU) | **0.77x** | **0.75x** | 15 |
-| SuiteSparse corpus | **0.23x** | **0.45x** | 30 |
-
-On its home silicon the vendor library is the faster direct solver on most of
-the distribution: the AMX-backed kernels win the small and mid sizes outright
-(RSLAB's calibrated complex proxy throughput on the M3 is 9.4 GFLOP/s; AMX
-sustains a multiple of that). The structural story survives at scale: on the
-largest complex-symmetric systems (curl-curl/Helmholtz above ~3·10⁵ nnz)
-RSLAB's `A = Aᵀ` exploitation turns the tables (accel 1.3-1.35x slower there;
-its time scales at `α≈1.67` vs RSLAB's `1.38`). On the circuit class the gap
-is down to 1.3x (sequential KLU baseline; the bit-identical parallel factor
-above closes it), and the comparison is one-shot only; KLU's refactor-driven
-sweeps (its actual niche) are not exercised.
-
-**Update (v0.28, 2026-08-27, reduced 9-point 4k-110k grid, time pass):** the
-consolidation campaign moved these ratios substantially. The circuit class now
-runs **2.2-2.6x ahead of Accelerate on factor and 2.2x on solve** at every
-measured size (parallel first factor + the NICSLU-style pipelined refactor);
-the large complex-symmetric systems reach **2.2x** (Helmholtz 110k) with the
-solve 1.4x ahead in geomean; and the former unsym outlier class
-(convection-diffusion, previously 3-8x behind) tightened to ~2x after the
-ordering race replaced the pinned-AMD default (factor -40% on convdiff2d).
-The remaining known deficits are the small/mid sizes (AMX kernels), and the
-saddle/KKT family (0.65-0.83x - diagnosed as small-node overhead, see
-`dev/research/saddle-vs-accelerate-2026-08.md`).
-
-Accuracy over the corpus: Accelerate reaches `< 1e-8` on 25/36 (including
-qc2534 at `2.5e-13` directly, where RSLAB's exact mode needs its
-preconditioner+GMRES path), but on five hard indefinite/ill-scaled matrices
-(stokes64, bratu3d, cont-201, rim, lhr34) it **returns NaN or garbage with an
-OK status** (residuals `1e1-1e9`), the same silent-degradation failure mode as
-faer. RSLAB declines those cleanly instead of returning a wrong answer
-(24/31 attempted below `1e-8`, no garbage returns; the pc mode rescues most of
-the declined set, see above).
-
-Reproduce: `benches/run_apple_silicon.sh`, then `python benches/apple_silicon.py`.
-
-### KLU path on circuit-shaped matrices
-
-KLU vs the multifrontal LU (defaults) on MNA-like matrices: ~4-5 nnz/column,
-unsymmetric, column-diagonally dominant, cascaded stages giving a genuinely
-reducible BTF structure (`cargo bench --bench klu_circuit`, Apple M3):
-
-| n | nnz | KLU factor | KLU refactor | KLU fill | BTF blocks | MF-LU factor | MF-LU fill | sweep ratio |
-|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 2k | 15k | 1.7 ms | 0.8 ms | 79k | 8 | 8.1 ms | 132k | 9.8x |
-| 10k | 73k | 8.0 ms | 4.1 ms | 439k | 16 | 54.7 ms | 1.03M | 12.5x |
-| 50k | 366k | 45.4 ms | 24.3 ms | 2.32M | 32 | 304 ms | 9.21M | 13.9x |
-| 200k | 1.47M | 179 ms | 96 ms | 9.17M | 64 | 2.16 s | 52.2M | 40x |
-
-The KLU factor is 5-12x faster with 1.7-5.7x less fill, the gap widening with
-size as the multifrontal fronts grow; the numeric-only refactor runs ~2x faster
-still, so a 20-point sweep (refactor+solve vs factor+solve, the "sweep ratio")
-is 10-40x faster end to end. Both solvers reach machine-precision residuals
-(~1e-15) on every size. The numbers are the sequential kernel;
-`KluParallel::Auto` (the shipped default) runs the independent BTF diagonal
-blocks in parallel once a deterministic structural gate clears (at least 4
-blocks and 8k nonzeros), **bit-identical** to the sequential result, for
-another 3.1-3.9x on factor (0.7 / 2.6 / 11.9 / 51 ms) and 3.9-4.5x on
-refactor.
-
-Against the reference C implementation, **SuiteSparse KLU** (Davis & Palamadai
-Natarajan, loaded at runtime when installed; the bench auto-detects the
-Homebrew prefix):
-
-| n | factor seq / par | SuiteSparse factor | refactor seq / par | SuiteSparse refactor | fill RSLAB / SS |
-|--:|--:|--:|--:|--:|--:|
-| 2k | 2.6 / **0.7 ms** | 1.1 ms | 1.2 / **0.26 ms** | 0.56 ms | 79.3k / 80.8k |
-| 10k | 8.0 / **2.6 ms** | 5.9 ms | 4.0 / **1.0 ms** | 3.3 ms | 439k / 445k |
-| 50k | 43 / **11.9 ms** | 33 ms | 22.5 / **5.3 ms** | 18.4 ms | 2.32M / 2.35M |
-| 200k | 170 / **51 ms** | 135 ms | 94 / **24 ms** | 79 ms | 9.17M / 9.30M |
-
-Structure is at parity: identical BTF block counts and fill within 1.5% (RSLAB
-slightly less), so the analyze pipeline (maximum transversal, Tarjan SCC,
-per-block AMD) matches the reference. On the numeric kernel, RSLAB's
-Gilbert-Peierls (32-bit index streams, packed DFS marks, Eisenstat-Liu
-symmetric pruning, a recorded refactor scatter program) runs the sequential
-factor within 1.2-1.6x of the C code and the refactor within 1.15-1.4x. The
-parallel per-block execution (the `KluParallel::Auto` shipped default on
-gated structures; bit-identical, covers factor **and** refactor; two-phase
-spliced output) is **1.6-2.7x faster than SuiteSparse KLU on factor and
-2.1-3.4x on refactor**, which puts the 20-point sweep ~2.4x ahead end to
-end. Both reach ~1e-15 residuals.
-
-### A-priori predictors
-
-![Memory estimate vs measured](docs/figures/memory_breakdown.png)
-
-RSLAB predicts the factor-memory peak from the symbolic analysis alone, before
-any numeric work, with a separate model per path: the left-looking panel-freeing
-simulation (live panels + factor + input/scratch) and the multifrontal
-level-parallel model (fronts plus live contribution blocks). Over the corpus both
-bounds hold at an estimate/measured ratio of **~1.3 in geomean and never
-under-predict**, so either is safe to compare against RAM for fail-fast
-scheduling; the panel-freeing floor is the tighter of the two. The KLU path carries the same contract (a pattern-only
-Gilbert-Peierls pass gives its fill and flops exactly under diagonal pivoting).
-
-The thread-aware runtime estimate combines the calibrated machine throughput
-with an Amdahl critical-path floor from the assembly tree (a learned additive
-residual on the speedup curve cuts the held-out error ~26%). The
-`Threads::Auto` predictor lands within ~10% of the per-matrix-optimal worker
-count (geomean) against ~50% for a fixed budget of 2, which is why the default
-caps at 4 workers, the pareto-optimal throughput-per-core point.
-
-### Iterative layer
-
-The Krylov results, measured with their concepts: block-CGS2 lifts multi-RHS
-strong scaling to **~2.2x at 12 cores** where per-RHS MGS is flat-to-negative
-(preconditioned convection-diffusion, n=40000, complex), with per-RHS cost
-near-flat in the block width; within-cycle deflation compacts the batched
-operator applies to **0.66x** the full-width bound at `s=16`; GCRO-DR recycling
-cuts the cross-solve iteration total **6.4x** on a stagnating 8-solve sequence
-(2.9x on the first solve alone) for a ~1.5x wall-clock win; and the
-incomplete-factor sweet spot at `drop_tol=1e-2` **halves the factor memory** at
-a total wall time within a few percent of the exact direct solve. FGMRES's
-flexible-basis update saves exactly one preconditioner solve per restart cycle;
-the parallel `solve_many` behind the block preconditioner applies is 8-19x
-faster than per-column. All of it stays bit-identical across thread counts.
+Fork of [feral](https://github.com/jkitchin/feral), see [NOTICE](NOTICE). The
+technical report [`docs/report/rslab.pdf`](docs/report/rslab.pdf) derives the
+algorithms and carries the full evaluation.
 
 ## Install
 
 ```toml
 [dependencies]
-rslab = "0.18"
+rslab = "0.28"
 ```
 
-### Python (NumPy / SciPy)
-
-```bash
-pip install rslab
-```
+Python bindings: `pip install rslab`.
 
 ```python
-import numpy as np, scipy.sparse as sp, rslab
-x = rslab.spsolve(A, b)              # one-shot (auto symmetric/unsymmetric)
+import rslab
+x = rslab.spsolve(A, b)              # one-shot, picks symmetric or unsymmetric
 f = rslab.ldlt(A); x = f.solve(b)    # factor once, solve many; also rslab.lu(A)
-
-k = rslab.klu(A_circuit)             # circuit-shaped: BTF + Gilbert-Peierls
-A_circuit.data *= 1.5                # sweep: same pattern, new values
-k.refactor(A_circuit.data)           # numeric-only refactor, then solve again
-xt = k.solve_transpose(b)            # A^T x = b on the same factors (adjoint)
+k = rslab.klu(A_circuit)             # BTF + Gilbert-Peierls, then k.refactor(data)
 ```
 
-A thin wrapper over the Rust core; the matrix dtype selects the field
-(`float64`/`float32` real, `complex128`/`complex64` complex). All factor knobs
-are keyword arguments (`threads`, `preconditioner`, `drop_tol`, `method`,
-`memory` on `ldlt`/`lu`; `pivot_tol`, `row_scaling`, `btf` on `klu`). See
+The dtype selects the field, factor knobs are keyword arguments. See
 [`python/README.md`](python/README.md).
 
 ## Usage
 
-### Symmetric direct solve (LDLᵀ)
+Analyze the pattern once, factor values many times, solve against one or many
+right-hand sides.
 
 ```rust
 use rslab::prelude::*;
 
-// Real symmetric, lower triangle (i >= j).
+// Symmetric: pass the lower triangle (i >= j).
 let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
                                         &[2.0, 2.0, 2.0, -1.0])?;
-let sym = LdltSymbolic::analyze(&a)?;            // phase 1: analyze pattern once
-let f   = sym.factor(&a, &FactorOptions::default())?;  // phases 2-3: factor
-let x   = f.solve(&[1.0, 2.0, 3.0])?;            // solve A x = b
-# Ok::<(), rslab::RslabError>(())
+let sym = LdltSymbolic::analyze(&a)?;
+let f = sym.factor(&a, &SolverSettings::default())?;
+
+let x = f.solve(&[1.0, 2.0, 3.0])?;
+let xs = f.solve_many(&vec![1.0; 3 * 4], 4)?;   // 4 RHS, row-major n x nrhs
+let f2 = sym.factor(&a2, &SolverSettings::default())?;   // same pattern, new values
 ```
 
-### Unsymmetric direct solve (LU)
+Unsymmetric matrices take the same shape through `GeneralCsc` and `LuSymbolic`.
+`LdltSolver::factor(&a)` and `LuSolver::factor(&a, &settings)` are the one-shot
+forms; `LdltSolver::tuned(&a)` returns the analyzed pattern plus the settings the
+ordering race picked, so a sweep can reuse both.
 
-```rust
-use rslab::prelude::*;
-use num_complex::Complex;
+### Circuit-shaped matrices
 
-let c = |re, im| Complex::new(re, im);
-let a = GeneralCsc::from_triplets(2, &[0, 1, 0, 1], &[0, 1, 1, 0],
-                                  &[c(2., 0.), c(2., 0.), c(1., 0.), c(-1., 0.)])?;
-let f = LuSymbolic::analyze(&a)?.factor(&a, &FactorOptions::default())?;
-let x = f.solve(&[c(1., 0.), c(0., 1.)])?;
-# Ok::<(), rslab::RslabError>(())
-```
-
-### Circuit-shaped direct solve (KLU)
+The KLU path adds a numeric-only `refactor` (frozen pattern and pivots) for
+frequency sweeps and Newton steps, and a transpose solve for adjoints.
 
 ```rust
 use rslab::prelude::*;
 
-# fn demo(a: &GeneralCsc<f64>, a2: &GeneralCsc<f64>, b: &[f64]) -> Result<(), rslab::RslabError> {
-// BTF + per-block AMD + Gilbert-Peierls LU; strictly sequential, bit-deterministic.
-let sym   = KluSymbolic::analyze(a)?;                  // pattern once (BTF + AMD + symbolic)
-let est   = sym.estimate_memory::<f64>();              // a-priori, before numeric work
-let mut f = sym.factor(a, &KluSettings::default())?;
-let x  = f.solve(b)?;
-let xt = f.solve_transpose(b)?;                        // A^T x = b (adjoint/sensitivity)
-f.refactor(a2)?;                                       // same pattern, new values: no pivot search
-let x2 = f.solve(b)?;
-# let _ = (est, x, xt, x2); Ok(()) }
+let sym = KluSymbolic::analyze(&a)?;             // BTF + per-block AMD + symbolic
+let est = sym.estimate_memory::<f64>();          // before any numeric work
+let mut f = sym.factor(&a, &KluSettings::default())?;
+
+let x = f.solve(&b)?;
+let xt = f.solve_transpose(&b)?;                 // A^T x = b on the same factors
+f.refactor(&a2)?;                                // new values, no pivot search
+let x2 = f.solve(&b)?;
 ```
 
-### Preconditioned iteration
+### Solver in the loop
+
+Static pivoting never fails, so the factor is always usable as a preconditioner;
+the drop tolerance trades fill for iterations. The factor never depends on the
+thread count, and the default `Threads::Auto { max: 4 }` caps at the measured
+efficiency knee so concurrent solves coexist.
 
 ```rust
 use rslab::prelude::*;
-# use num_complex::Complex;
-# let c = |re, im| Complex::new(re, im);
-# let a = CscMatrix::<Complex<f64>>::from_triplets(3, &[0,1,2,1], &[0,1,2,0],
-#     &[c(4.,1.), c(4.,1.), c(4.,1.), c(-1.,0.2)])?;
-// Static pivoting + incomplete drop give a never-fail preconditioner.
-let opts = FactorOptions::preconditioner(1e-8).with_drop_tol(1e-2);
+use rslab::{factor_general_lu, gmres_block, with_threads};
+
+let opts = SolverSettings::preconditioner(1e-8).with_drop_tol(1e-2);
 let m = LdltSolver::factor_with(&a, &opts)?;
-let b = vec![c(1.0, 0.0); 3];
 let res = cocg(&a, &b, &m, 1e-10, 100)?;
-assert!(res.converged);
-# Ok::<(), rslab::RslabError>(())
-```
 
-## API reference
-
-### Phased workflow
-
-Analyze-once, factor-many (PARDISO phases):
-
-| Phase | Symmetric | Unsymmetric | Circuit-shaped |
-|-------|-----------|-------------|----------------|
-| 1: analyze pattern | `LdltSymbolic::analyze(&a)` | `LuSymbolic::analyze(&a)` | `KluSymbolic::analyze(&a)` |
-| 2-3: factor values | `sym.factor(&a, &opts)` -> `LdltSolver<T>` | `sym.factor(&a, &opts)` -> `LuSolver<T>` | `sym.factor(&a, &settings)` -> `KluSolver<T>` |
-| solve | `f.solve(&b)` / `f.solve_many(&b, nrhs)` | `f.solve(&b)` / `f.solve_many(&b, nrhs)` | `f.solve(&b)` / `f.solve_many(&b, nrhs)` / `f.solve_transpose(&b)` |
-| re-factor same pattern | `sym.factor(&a2, …)` | `sym.factor(&a2, …)` | `f.refactor(&a2)` (numeric-only, frozen pivots) |
-
-One-shot: `LdltSolver::factor(&a)` / `LuSolver::factor(&a, &opts)` /
-`KluSolver::factor(&a, &settings)`.
-
-### FactorOptions
-
-| Method | Effect |
-|--------|--------|
-| `preconditioner(floor)` / `exact()` | static-pivot preconditioner vs fail on singular pivot |
-| `with_drop_tol(τ)` | drop fill below relative `τ` (incomplete factor) |
-| `with_blr(BlrMode::…)` | block-low-rank compression of large fronts |
-| `with_method(FactorMethod::…)` | `LeftLooking` (default) or `Multifrontal` |
-| `with_threads(n)` | scoped pool of exactly `n` workers (`0` = all cores) |
-| `with_thread_policy(Threads::…)` | `Auto{max}` (predict per matrix, capped; **default `max:4`**), `Fixed(n)`, or `Ambient` (use the current pool, no new spawn) |
-| `with_memory(MemoryMode::…)` | transient-memory strategy |
-
-The factor is bit-identical regardless of `threads`; the thread count affects time
-and transient working set, not the result. The default caps at **4 workers**, the
-pareto-optimal throughput-per-core point (the efficiency knee is ~4–6 threads) and
-the safe default for concurrent / embedded use.
-
-### Solver handles
-
-```rust
-# use rslab::prelude::*;
-# fn demo(f: &LdltSolver<f64>, b: &[f64]) -> Result<(), rslab::RslabError> {
-let x  = f.solve(b)?;                 // single RHS
-let xs = f.solve_many(b, 4)?;         // 4 RHS at once (row-major n x nrhs)
-let nnz = f.factor_nnz();             // fill (nnz of L, or L+U)
-let d = f.diagnostics();              // per-call factor diagnostics
-# Ok(()) }
-```
-
-### Diagnostics
-
-`solver.diagnostics()` returns per-call, concurrency-safe data (no global state):
-measured factor time, fill, thread count, and the a-priori `MemoryEstimate`.
-
-### A-priori estimate
-
-`sym.estimate_memory::<T>()` is a deterministic function of the analyzed structure,
-callable before any numeric work:
-
-```rust
-use rslab::prelude::*;
-use num_complex::Complex;
-# fn demo(a: &CscMatrix<Complex<f64>>) -> Result<(), rslab::RslabError> {
-let sym = LdltSymbolic::analyze(a)?;
-let est = sym.estimate_memory::<Complex<f64>>();
-let runtime_ms = est.est_runtime_ms(2.0, 4.0);   // gflops, parallel speedup
-if !est.fits_in(8 << 30) { /* over 8 GiB */ }
-# Ok(()) }
-```
-
-### Iterative solvers
-
-`gmres`, `gmres_block`, `cocg`, `cocr` over any `LinearOperator` + `Preconditioner`.
-A factor implements `Preconditioner`. A `Complex<f32>` factor can precondition an
-`f64` GMRES via `LowPrecisionPreconditioner`.
-
-`gmres_block` drives `s` right-hand sides in lockstep and orthogonalizes the whole
-panel with **block-CGS2**, a parallel, panel-wide sweep instead of per-RHS
-Gram-Schmidt, so the multi-RHS solve now scales across threads (~2.5x at 12 cores
-on a deep-Krylov solve, where the old per-RHS path was flat) while staying
-bit-identical across thread counts.
-
-**Solver-in-the-loop thread capping.** The block orthogonalization runs on the
-ambient rayon pool, so cap the whole solve with one pool: factor once (its own
-bounded, `Auto{max:4}` pool), then run the RHS loop inside `with_threads(4, …)`:
-
-```rust
-# use rslab::{factor_general_lu, gmres_block, with_threads, SolverSettings, RslabError};
-# use rslab::sparse::general::GeneralCsc;
-# fn demo(a: &GeneralCsc<f64>, batches: &[Vec<f64>], s: usize) -> Result<(), RslabError> {
-let lu = factor_general_lu(a, &SolverSettings::default())?;   // Auto{max:4}
+// Keep both phases on one pool: factor bounded, then the RHS loop inside it.
+let lu = factor_general_lu(&a2, &SolverSettings::default())?;
 with_threads(4, || {
-    for rhs in batches { let _ = gmres_block(a, rhs, s, &lu, 1e-8, 400, 80)?; }
+    for rhs in &batches {
+        let _ = gmres_block(&a2, rhs, s, &lu, 1e-8, 400, 80)?;
+    }
     Ok::<_, RslabError>(())
 })?;
-# Ok(()) }
 ```
 
-Both phases stay on 4 cores with no per-call thread spawn. To also re-factor on the
-shared pool (e.g. every Newton step), pass `Threads::Ambient` in the settings.
+`Threads::Ambient` factors on the surrounding pool instead of a scoped one.
 
-### Tuning (feature `tuning`)
+## API
 
 ```rust
-# #[cfg(feature = "tuning")]
-# fn demo(sym: &rslab::LuSymbolic) {
-use rslab::tuning::{HardwareInfo, Calibration, Budget, plan};
-let hw    = HardwareInfo::probe();              // cores + RAM
-let calib = Calibration::load_or_measure(&hw);  // measured throughput, cached to disk
-let est   = sym.estimate_memory::<f64>();
-let budget = Budget { max_mem_bytes: Some(4 << 30), allow_mixed_precision: true,
-                      allow_drop_tol: Some(1e-3), ..Default::default() };
-let p = plan(&est, &budget, &hw, &calib);
-// p.opts, p.use_mixed_precision, p.est_peak_bytes, p.est_runtime_ms, p.fits, p.note
-# }
+use rslab::prelude::*;
+use rslab::{BlrMode, FactorMethod, OrderingMethod, Threads};
+use num_complex::Complex;
+
+// Settings are one flat builder, shared by the LDLT and LU paths.
+let opts = SolverSettings::exact()                  // or ::preconditioner(floor)
+    .with_drop_tol(1e-2)                            // incomplete factor
+    .with_blr(BlrMode::contribution_blocks(1e-6))   // low-rank compression
+    .with_method(FactorMethod::LeftLooking)         // or Multifrontal
+    .with_ordering(OrderingMethod::AutoRace)        // exact race, the default
+    .with_thread_policy(Threads::Auto { max: 4 });
+
+// A-priori: both estimates are pure functions of the analyzed structure.
+let sym = LdltSymbolic::analyze(&a)?;
+let est = sym.estimate_memory::<Complex<f64>>();
+let ms = est.est_runtime_ms(2.0, 4.0);              // gflops, parallel speedup
+if !est.fits_in(8 << 30) { /* over 8 GiB, pick another plan */ }
+
+// A-posteriori: per call, no global state.
+let f = sym.factor(&a, &opts)?;
+let (nnz, d) = (f.factor_nnz(), f.diagnostics());
 ```
 
-`plan` is a pure function of `(estimate, budget, hw, calibration)`. The thread
-count it picks is cost-model-driven: the fewest cores that reach the near-minimum
-predicted time, using an Amdahl critical-path floor from the assembly tree, so it
-stops adding workers once the serial critical path (not total work) dominates. A
-small learned residual (`benches/fit_residual.py`, `amdahl_frac`-driven, ~26%
-held-out error reduction) refines the analytical speedup curve; it is additive on
-the calibrated base and floored at the critical path, so it never extrapolates a
-true chain into an impossible speedup.
+`gmres`, `gmres_block`, `cocg` and `cocr` accept any `LinearOperator` plus
+`Preconditioner`; every factor implements `Preconditioner`, and a `Complex<f32>`
+factor can precondition an `f64` GMRES through `LowPrecisionPreconditioner`.
 
-### Hardware calibration (`cargo xtask calibrate`)
+With the `tuning` feature, `plan(&est, &budget, &hw, &calib)` turns an estimate
+and a memory budget into concrete settings, using the calibration that
+`cargo xtask calibrate` writes once per machine.
 
-A one-time in-process microbench (feature `tuning`) that measures this
-machine's proxy GFLOP/s, parallel speedup curve and timing noise, and writes
-the calibration cache consumed by `tuned()`'s cost-model worker-count pick.
+## Benchmarks
 
-```
-cargo xtask calibrate
-```
+Corpus: structured-grid generators (curl-curl Maxwell, shifted Helmholtz,
+Stokes/KKT saddle point, convection-diffusion, BEM/MoM near field) plus complex
+SuiteSparse matrices. RSLAB runs its shipped default throughout.
 
-### Test-matrix generators (feature `matgen`)
+### vs Apple Accelerate (M3, 8 threads, 4k-200k)
 
-```rust
-# #[cfg(feature = "matgen")]
-# fn demo() {
-use rslab::matgen::{stencil, bem};
-let a = stencil::laplacian::<f64>(&[64, 64, 64], &stencil::StencilOpts::default());
-let k = bem::kernel(8000, &bem::BemOpts::default());
-# }
-```
+![per class](docs/figures/accel_classes.png)
+
+| matrix class | factor only | one-shot (analyze+factor+solve) |
+|---|:-:|:-:|
+| circuit MNA (KLU path) | **2.41x** | **5.64x** |
+| curl-curl Maxwell | **1.34x** | **1.67x** |
+| Helmholtz 3D | 0.78x | **1.40x** |
+| convection-diffusion 2D | 0.21x | 0.93x |
+| convection-diffusion 3D | 0.49x | 0.91x |
+| BEM/MoM near field | 0.72x | 0.65x |
+| Stokes saddle point | 0.78x | 0.51x |
+| geomean over the three paths | 0.94x | 1.79x |
+
+Accelerate's AMX kernels own the small and mid sizes, and the ratio grows with
+the problem: Helmholtz crosses parity at ~1e5 nonzeros and reaches 2.14x at
+n=110592.
+
+![vs size](docs/figures/accel_scaling.png)
+
+The same measurement across every release, and the analyze-budget lever it
+exposed, are in
+[`dev/research/accel-release-history-2026-08.md`](dev/research/accel-release-history-2026-08.md).
+
+### vs MKL PARDISO and faer (12 cores, 1k-110k, geomean factor time)
+
+RSLAB sits between the two: 5.6x (LDLT) and 5.1x (LU) behind MKL PARDISO, 6.7x
+and 2.7x ahead of faer, which has no symmetric path. The ordering race is worth
+1.84x and 1.49x over a fixed default configuration.
+
+### KLU path
+
+On MNA-like matrices the KLU path factors 5-12x faster than the multifrontal LU
+with 1.7-5.7x less fill, so a 20-point sweep runs 10-40x faster end to end.
+Against SuiteSparse KLU (same structure: identical BTF block counts, fill within
+1.5%), with the parallel per-block factor that `KluParallel::Auto` enables:
+
+| n | factor | SuiteSparse | refactor | SuiteSparse |
+|--:|--:|--:|--:|--:|
+| 2k | **0.7 ms** | 1.1 ms | **0.26 ms** | 0.56 ms |
+| 10k | **2.6 ms** | 5.9 ms | **1.0 ms** | 3.3 ms |
+| 50k | **11.9 ms** | 33 ms | **5.3 ms** | 18.4 ms |
+| 200k | **51 ms** | 135 ms | **24 ms** | 79 ms |
+
+Refactor also pipelines the columns inside a dominant irreducible block
+(NICSLU-style just-in-time waits on the frozen elimination DAG): 2.0-2.9x on the
+work-heavy SuiteSparse circuit matrices, still bit-identical.
+
+### Accuracy and estimates
+
+RSLAB solves 24/31 attempted SuiteSparse matrices below `1e-8` relative residual,
+28/33 with the static-pivot factor used as a GMRES preconditioner. What it cannot
+factor exactly it declines; faer and Accelerate return garbage with an OK status
+on five of those. The memory estimate holds at ~1.3x measured in geomean and
+never under-predicts.
+
+Reproduce: `cargo bench --bench bench_suite --features matgen` with
+`RLA_BENCH_FAMILY=sym|unsym` plus `benches/head_to_head.py`;
+`benches/run_apple_silicon.sh` and `benches/accel_story.py` for the Accelerate
+figures; `cargo bench --bench klu_circuit` for KLU.
 
 ## Architecture
 
-- Ordering: nested dissection (METIS) with an AMD/AMF fallback selected by a
-  size/structure heuristic.
-- Left-looking supernodal (default): each panel pulls BLAS-3 updates from its
-  factored descendants, then a blocked in-place panel factorization (Bunch-Kaufman
-  for LDLᵀ, threshold partial pivoting for LU). Panels are compacted and freed once
-  their last consumer is done.
-- Multifrontal (opt-in): assembly tree of dense fronts.
-- Parallelism: rayon over the assembly tree plus a SIMD (`gemm`) Schur update, in a
-  scoped pool. Thread scaling saturates early because work concentrates in a few
-  large top-of-tree supernodes.
-
-## Determinism and scalar genericity
-
-The `analyze -> factor -> solve` pipeline is generic over `Scalar`
-(`f64`/`f32`/`Complex<f64>`/`Complex<f32>`); the estimator scales with
-`size_of::<T>()`. The factor's `L`/`U`/`D` are bit-identical for any thread count,
-and the estimates are pure functions of the symbolic structure.
+- Left-looking supernodal by default: each panel pulls BLAS-3 updates from its
+  factored descendants, then a blocked in-place panel factorization, and is freed
+  once its last consumer is done. Multifrontal is an option.
+- KLU: Hopcroft-Karp maximum transversal plus Tarjan SCC for the BTF form,
+  per-block AMD, Gilbert-Peierls LU with threshold pivoting. Independent blocks
+  run in parallel behind a deterministic structural gate.
+- Parallelism: rayon over the assembly tree with SIMD `gemm` Schur updates in a
+  scoped pool; the KLU pipeline uses OS threads directly.
+- 32-bit index compression for `n < 2^31`, adaptive-precision low-rank BLR tail,
+  static pivot reuse for fixed-pattern sequences.
 
 ## Cargo features
 
-| Feature | Adds |
-|---------|------|
-| (default) | solver core, pure Rust |
-| `matgen` | test-matrix generators |
-| `matgen-download` | SuiteSparse / Matrix Market fetcher (pure-Rust HTTP/gzip/tar) |
-| `tuning` | hardware probe + calibration cache + budget planner (pulls `sysinfo`) |
+Default is the pure-Rust solver core. `matgen` adds the test-matrix generators,
+`matgen-download` the SuiteSparse / Matrix Market fetcher, `tuning` the hardware
+probe, calibration cache and budget planner.
 
 ## License
 
-MIT, Copyright (c) 2026 Milan Rother. RSLAB is a fork of feral
-(https://github.com/jkitchin/feral), Copyright (c) 2026 John Kitchin, also MIT.
-See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+MIT, Copyright (c) 2026 Milan Rother. Fork of feral, Copyright (c) 2026 John
+Kitchin, also MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-## Commercial support
-
-Consulting, integration and commercial support: [milanrother.com/consulting](https://milanrother.com/consulting/)
+Consulting, integration and commercial support:
+[milanrother.com/consulting](https://milanrother.com/consulting/)

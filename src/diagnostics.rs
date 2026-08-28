@@ -12,12 +12,12 @@ use std::fmt;
 /// are deterministic functions of the symbolic structure and the scalar size.
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryEstimate {
-    /// Scalar size in bytes (`16` for `Complex<f64>`, `8` for `f64`, …).
+    /// Scalar size in bytes (`16` for `Complex<f64>`, `8` for `f64`, ...).
     pub value_bytes: usize,
-    /// Structural nonzeros in the factor (`L`+`U` for LU, `L` for LDLᵀ) - an upper
+    /// Structural nonzeros in the factor (`L`+`U` for LU, `L` for LDL^T) - an upper
     /// bound on the emitted factor (numeric cancellation can only lower it).
     pub factor_nnz: u64,
-    /// Bytes of the resident factor (the CSC output): `factor_nnz·(value+index)`.
+    /// Bytes of the resident factor (the CSC output): `factor_nnz*(value+index)`.
     pub factor_bytes: u64,
     /// Dense supernode panels if **all** were held at once (the naive left-looking
     /// peak, i.e. without panel-freeing).
@@ -37,7 +37,7 @@ pub struct MemoryEstimate {
     /// Defaults to [`transient_peak_bytes`](Self::transient_peak_bytes) until the
     /// path-specific model fills it.
     pub mf_transient_peak_bytes: u64,
-    /// Geometric factorization work proxy `Σ nrow²·ncol` over supernodes (type-
+    /// Geometric factorization work proxy `sum nrow^2*ncol` over supernodes (type-
     /// independent). Divide by a calibrated geometric-flops/s rate for a runtime
     /// estimate - see [`est_runtime_ms`](Self::est_runtime_ms).
     pub factor_flops: u64,
@@ -96,7 +96,7 @@ impl fmt::Display for MemoryEstimate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "transient-peak ≤ {:.0} MB (panels {:.0} + factor {:.0} + input/scratch); \
+            "transient-peak <= {:.0} MB (panels {:.0} + factor {:.0} + input/scratch); \
              factor ~{} nnz; panel-freed floor {:.0} MB",
             self.transient_peak_bytes as f64 / 1e6,
             self.panels_all_bytes as f64 / 1e6,
@@ -158,8 +158,8 @@ pub(crate) fn estimate_left_looking<'a>(
     // panel-freeing path makes the *actual* peak lower (down to `panel_live_peak`),
     // so this never under-predicts.
     // Per-thread scratch (cmod/cdiv buffers, gloc, the emit double-buffer) plus a
-    // small absolute floor - tuned so the bound stays ≥ the measured peak across
-    // sizes (validated: est/measured ≈ 1.0-1.2×), never under-predicting.
+    // small absolute floor - tuned so the bound stays >= the measured peak across
+    // sizes (validated: est/measured ~ 1.0-1.2x), never under-predicting.
     let scratch = (panels_all + factor_bytes) / 4 + 32_000_000;
     let transient = panels_all + factor_bytes + input_bytes + scratch;
     MemoryEstimate {
@@ -181,14 +181,14 @@ pub(crate) fn estimate_left_looking<'a>(
 /// Multifrontal transient-peak model: the **contribution-block stack** under the
 /// rayon work-stealing schedule. Unlike left-looking, multifrontal holds dense
 /// fronts plus the contribution blocks (packed lower triangles,
-/// `cnrow·(cnrow+1)/2` each, the symmetric-LDLᵀ storage the numeric path
+/// `cnrow*(cnrow+1)/2` each, the symmetric-LDL^T storage the numeric path
 /// actually uses) of completed subtrees not yet consumed by their parent. The
 /// driver factors a whole assembly-tree level concurrently, so the
 /// conservative peak is, over the levels, the level's total front memory
-/// (`Σ nrow²`) plus the contribution blocks of its children feeding the
+/// (`sum nrow^2`) plus the contribution blocks of its children feeding the
 /// assembly. Assuming a full level live at once never under-predicts at any
 /// thread count - the transient the left-looking estimate does not capture.
-/// (LDLᵀ-path model only; the unsymmetric LU path stores full-square CBs and
+/// (LDL^T-path model only; the unsymmetric LU path stores full-square CBs and
 /// does not consult this.)
 pub(crate) fn estimate_multifrontal_active_peak(
     by_level: &[Vec<usize>],

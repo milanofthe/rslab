@@ -73,7 +73,7 @@ fn tridiagonal(n: usize) -> CscMatrix {
 fn arrow_matrix_collapses_under_renumber() {
     let m = arrow_matrix(8);
 
-    // Adjacency strategy: only one merge possible. Expect ≥3
+    // Adjacency strategy: only one merge possible. Expect >=3
     // supernodes (specifically: many leaf singletons + the root).
     let adj_params = SupernodeParams {
         nemin: 32,
@@ -87,8 +87,8 @@ fn arrow_matrix_collapses_under_renumber() {
         adj_sym.supernodes.len()
     );
 
-    // Renumber strategy: with nemin=32 ≥ n=8, every fundamental
-    // supernode is a candidate to merge into its parent → 1
+    // Renumber strategy: with nemin=32 >= n=8, every fundamental
+    // supernode is a candidate to merge into its parent -> 1
     // supernode covering all 8 columns.
     let renum_params = SupernodeParams {
         nemin: 32,
@@ -108,7 +108,7 @@ fn arrow_matrix_collapses_under_renumber() {
 fn bushy_fan_collapses_under_renumber() {
     // Same shape as the arrow matrix at larger n. Catches the case
     // where the bias-emit-late traversal needs to handle multiple
-    // (≥10) sibling subtrees correctly.
+    // (>=10) sibling subtrees correctly.
     let m = bushy_fan(33);
     let params = SupernodeParams {
         nemin: 64,
@@ -128,7 +128,7 @@ fn bushy_fan_collapses_under_renumber() {
 fn tridiagonal_renumber_is_at_least_as_aggressive() {
     // Tridiagonal under both strategies must total to n columns.
     // Renumber is strictly more aggressive (reverse iteration +
-    // bias) so its supernode count must be ≤ Adjacency's.
+    // bias) so its supernode count must be <= Adjacency's.
     let m = tridiagonal(8);
     let adj_params = SupernodeParams {
         nemin: 32,

@@ -3,11 +3,11 @@
 Status: **LANDED** on `feat/cmod-throughput`. Follow-up to the cmod
 roadmap item in `factor-throughput-2026-07.md`; baseline is the heuristic
 default (MetisND via bakeoff, calibrated 12 threads) at ~687 ms on the
-helmholtz 40³ reference. Result after both changes, measured on an idle
+helmholtz 40^3 reference. Result after both changes, measured on an idle
 machine (warm best-of-3, three independent processes): **553-575 ms**
-(49-50 geom-Gflop/s), i.e. **−18 %**. Factor trajectory on this case:
-1552 ms (pre-audit) → 1216 (kernel fixes) → 774/695 (ND + heuristic
-defaults) → **~560 ms**; MKL PARDISO is 168-221 ms (gap ~2.6-3.3×).
+(49-50 geom-Gflop/s), i.e. **-18 %**. Factor trajectory on this case:
+1552 ms (pre-audit) -> 1216 (kernel fixes) -> 774/695 (ND + heuristic
+defaults) -> **~560 ms**; MKL PARDISO is 168-221 ms (gap ~2.6-3.3x).
 
 ## Diagnosis (new instrumentation, `RLA_PROFILE=1`)
 
@@ -16,14 +16,14 @@ Two additions to the LL profiler:
 * `[RLA_LDLT_CONC]` - wall-clock histogram of the number of
   `ll_factor_node` calls in flight (mutex-timestamped enter/exit).
 * `[RLA_LDLT_NODES]` - top-12 most expensive supernodes with per-phase
-  wall (asm/cmod/cdiv), updater count, and cmod Gflop → achieved Gflop/s.
+  wall (asm/cmod/cdiv), updater count, and cmod Gflop -> achieved Gflop/s.
 
 Findings at 12 workers:
 
 1. **Mean node concurrency was 2.2-2.4**; 50-58 % of the wall runs with
    only 1-2 nodes active. The separator-chain head dominates; whole-tree
    work-stealing cannot help there - only intra-node parallelism can.
-2. **The 1600×1600 root (top separator) alone cost 226 ms = 1/3 of the
+2. **The 1600x1600 root (top separator) alone cost 226 ms = 1/3 of the
    factor wall**: cmod 151 ms over 378 updaters + cdiv 72 ms, running
    solo.
 3. **Join-steal stalls**: small nodes showed e.g. 74 ms of "cmod" at
@@ -43,15 +43,15 @@ Findings at 12 workers:
    node instead of per update; the slab stays cache-hot across the
    updaters. Bit-identical: each panel entry lives in exactly one slab and
    receives its contributions in the same updater order with the same
-   kernel. Root: cmod 151 → 78 ms (5.13 Gflop at ~73-75 Gflop/s), node
-   wall 226 → 150 ms; helmholtz 687 → ~600 ms; mean concurrency 2.3 → 3.3,
-   idle 26 % → 10 %.
+   kernel. Root: cmod 151 -> 78 ms (5.13 Gflop at ~73-75 Gflop/s), node
+   wall 226 -> 150 ms; helmholtz 687 -> ~600 ms; mean concurrency 2.3 -> 3.3,
+   idle 26 % -> 10 %.
 2. **Join-steal guard** (commit `1689473`): a node forks inside cmod/cdiv
    only above ~1e8 flops of node-local work (`LL_CMOD_FORK_MIN_FLOPS`,
-   same idea for `ll_cdiv_par` via `nrow·ncol²`); below it the node runs
+   same idea for `ll_cdiv_par` via `nrow*ncol^2`); below it the node runs
    strictly serial and can never block on stolen foreign work. The
-   0-Gflop stall entries disappear from the top list; the 2260×425 node
-   went 71 → 38 ms.
+   0-Gflop stall entries disappear from the top list; the 2260x425 node
+   went 71 -> 38 ms.
 
 Verification: full workspace suite green (incl. the bit-identical
 across-thread-counts fixtures); the bit-identity argument is structural
@@ -64,11 +64,11 @@ design time**: merging updaters into one GEMM needs zero-padding to the
 union row/column space - exactly the flop blow-up the cmod trimming
 removed. Instead the fork *dispatch* became adaptive: an always-on relaxed
 counter of in-flight `ll_factor_node` calls; a small node forks its
-cmod/cdiv exactly when ≤ 2 nodes are active (chain phase: workers idle,
+cmod/cdiv exactly when <= 2 nodes are active (chain phase: workers idle,
 little foreign work for a blocked join to steal). The dispatch is
 bit-neutral - both paths accumulate each panel entry in the same updater
 order - so a racy counter read is benign and bit-identity across thread
-counts holds. Measured (idle machine, 3 processes): 553-575 → **532-547
+counts holds. Measured (idle machine, 3 processes): 553-575 -> **532-547
 ms**. Remaining low-rate nodes (4-6 Gflop/s, gather-bound) run in the busy
 phase where serial-under-tree-parallelism is the right call.
 
@@ -77,8 +77,8 @@ phase where serial-under-tree-parallelism is the right call.
 Root cdiv was GEMM-*shape* bound, not getf2-bound: the fresh split shows
 getf2's 165 CPU-ms spread over the ~2700 small nodes, while the root's
 deferred Schur GEMMs ran with inner dimension k = nb = 64 - too thin at
-1600×1600. `nb = max(panel_nb, 128)` for `ncol >= 512` (pure function of
-the node): root cdiv 70 → 47 ms (−33 %), total ~532-547 → **500-546 ms**
+1600x1600. `nb = max(panel_nb, 128)` for `ncol >= 512` (pure function of
+the node): root cdiv 70 -> 47 ms (-33 %), total ~532-547 -> **500-546 ms**
 (best 500). A 192-tier for `ncol >= 1024` measured no further gain -
 rejected. The global-nb sweep's "128 loses" verdict was the small panels'
 share, not the wide ones'.
@@ -108,7 +108,7 @@ step before more kernel work.
 
 ## Open (next candidates, evidence-ranked)
 
-Post-tiling profile: root = cmod 71-78 ms (≈73 Gflop/s, fair for
+Post-tiling profile: root = cmod 71-78 ms (~73 Gflop/s, fair for
 tall-skinny slabs) + cdiv 70-73 ms; ~60 % of wall still at 1-2 active
 nodes; mid-chain nodes with many small updates run serial at 4-6 Gflop/s
 (gather-bound).

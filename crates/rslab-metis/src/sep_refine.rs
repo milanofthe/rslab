@@ -21,7 +21,7 @@
 //!
 //! ## The move
 //!
-//! State is a tri-section `labels[v] ∈ {A, B, SEP}` where SEP blocks
+//! State is a tri-section `labels[v] in {A, B, SEP}` where SEP blocks
 //! every A-B edge. The elementary refinement step takes a separator
 //! vertex `v` and assigns it to a chosen side `s`; every neighbor of
 //! `v` on the far side must then enter the separator to keep the
@@ -286,7 +286,7 @@ fn side_pass(
 /// two side-passes each (lighter side first); stops early once a full
 /// round brings no improvement. Returns the final separator weight.
 ///
-/// `labels[v] ∈ {PART_A, PART_B, PART_SEP}` must form a valid
+/// `labels[v] in {PART_A, PART_B, PART_SEP}` must form a valid
 /// tri-section on entry; it does on exit. Deterministic per seed.
 pub(crate) fn refine_node_separator(
     graph: &Graph,

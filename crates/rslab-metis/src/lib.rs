@@ -105,15 +105,15 @@ pub struct MetisOptions {
     ///
     /// References (kept for the opt-in code path):
     /// - Davis & Hager, "Dynamic supernodes in sparse Cholesky
-    ///   update/downdate and triangular solves" (2009), §3.2.
-    /// - Davis (1996) AMD paper, §5 ("dense rows / `Alpha` parameter").
+    ///   update/downdate and triangular solves" (2009), section 3.2.
+    /// - Davis (1996) AMD paper, section 5 ("dense rows / `Alpha` parameter").
     /// - MUMPS source: `ana_orderings.F:5226-5650` (QAMD).
     pub dense_quotient_enabled: bool,
     /// Override the off-diagonal-degree threshold above which a column
     /// is treated as quasi-dense.
     ///
     /// When `None` (the default) the threshold is computed as
-    /// `max(40, ceil(10 * sqrt(n)))` per Davis & Hager / AMD §5. Set
+    /// `max(40, ceil(10 * sqrt(n)))` per Davis & Hager / AMD section 5. Set
     /// to `Some(usize::MAX)` to effectively disable the quotient
     /// without flipping `dense_quotient_enabled` (useful for
     /// regression sweeps).
@@ -223,7 +223,7 @@ pub fn metis_order_full(
         let sub_perm = node_nd::nd_order(&sub_pat, opts, &mut stats)?;
         // Lift sub-perm back to original indices and append dense
         // columns at the end (in descending degree order - Davis &
-        // Hager 2009 §3.2 ordering choice; ties broken by ascending
+        // Hager 2009 section 3.2 ordering choice; ties broken by ascending
         // original index).
         let mut perm: Vec<i32> = Vec::with_capacity(pattern.n);
         for &local in &sub_perm {
@@ -258,7 +258,7 @@ pub fn metis_order_full(
 
 /// Resolve the dense-column threshold for an `n`-vertex graph.
 ///
-/// `max(40, ceil(10 * sqrt(n)))` per Davis & Hager 2009 §3.2 and
+/// `max(40, ceil(10 * sqrt(n)))` per Davis & Hager 2009 section 3.2 and
 /// MUMPS `ICNTL(6)` defaults. Honours the caller's override when
 /// `opts.dense_quotient_threshold` is `Some(_)`.
 fn resolve_dense_threshold(n: usize, opts: &MetisOptions) -> usize {
@@ -276,7 +276,7 @@ fn resolve_dense_threshold(n: usize, opts: &MetisOptions) -> usize {
 /// Returns:
 /// - `Some((col_ptr, row_idx, sub_n))` carrying the induced
 ///   sub-pattern, plus the dense column list (in descending degree
-///   order) and the `sparse_local → original` mapping. When the
+///   order) and the `sparse_local -> original` mapping. When the
 ///   dense set is empty, returns `(None, Vec::new(), Vec::new())` so
 ///   the caller can fast-path to the original pattern.
 type DenseSplit = (Option<(Vec<i32>, Vec<i32>, usize)>, Vec<i32>, Vec<i32>);
@@ -318,7 +318,7 @@ fn split_dense_columns(
     }
 
     // Sort dense columns by *descending* degree, ties by ascending
-    // original index - Davis & Hager 2009 §3.2: "eliminate the densest
+    // original index - Davis & Hager 2009 section 3.2: "eliminate the densest
     // last".
     dense.sort_by(|&a, &b| {
         deg[b as usize]

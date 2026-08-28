@@ -7,7 +7,7 @@
 //! Solvers: RLA left-looking (`ll`) and multifrontal (`mf`), `faer` sparse LU,
 //! MKL `pardiso` (mtype 6 for the symmetric family, 13 for the unsymmetric), and
 //! Apple `accel`erate Sparse Solvers (macOS 15.5+: LDLT for real-symmetric, the
-//! new sparse LU otherwise). Symmetric matrices ⇒ RLA LDLᵀ; unsymmetric ⇒ RLA LU.
+//! new sparse LU otherwise). Symmetric matrices => RLA LDL^T; unsymmetric => RLA LU.
 //! Memory is the live-bytes peak (Rust solvers and Accelerate, whose allocations
 //! run through instrumented callbacks) or the working-set transient (PARDISO/MKL).
 //!
@@ -328,7 +328,7 @@ fn full_csr(a: &GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
 }
 
 /// Upper-triangle CSR (0-based) from a lower-triangle symmetric `CscMatrix` - for
-/// PARDISO mtype 6. A lower entry `(r,c)` (r≥c) maps to the upper CSR cell `(c,r)`.
+/// PARDISO mtype 6. A lower entry `(r,c)` (r>=c) maps to the upper CSR cell `(c,r)`.
 fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let n = a.n;
     // row of the upper-CSR = original column c; count per c.
@@ -344,9 +344,9 @@ fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let mut next = ia.clone();
     for c in 0..n {
         for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-            let r = a.row_idx[k]; // r ≥ c
+            let r = a.row_idx[k]; // r >= c
             let d = next[c] as usize;
-            ja[d] = r as i32; // upper: col = r ≥ row = c
+            ja[d] = r as i32; // upper: col = r >= row = c
             va[d] = a.values[k];
             next[c] += 1;
         }
@@ -355,7 +355,7 @@ fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
 }
 
 /// Full unsymmetric `GeneralCsc` from a lower-triangle symmetric `CscMatrix`
-/// (`A = Aᵀ`, complex-symmetric, no conjugate) - for faer's LU.
+/// (`A = A^T`, complex-symmetric, no conjugate) - for faer's LU.
 fn sym_to_full(a: &CscMatrix<C>) -> GeneralCsc<C> {
     let n = a.n;
     let mut rows = Vec::with_capacity(a.values.len() * 2);
@@ -421,7 +421,7 @@ fn emit(
     );
 }
 
-/// A test system: symmetric (→ LDLᵀ / PARDISO mtype 6) or unsymmetric (→ LU /
+/// A test system: symmetric (-> LDL^T / PARDISO mtype 6) or unsymmetric (-> LU /
 /// mtype 13). faer always factors the full matrix as LU.
 enum Mat {
     Sym(CscMatrix<C>),
@@ -462,7 +462,7 @@ impl Rng {
 /// MNA-like circuit matrix (see `benches/klu_circuit.rs`): `n` nodes in
 /// `n_stages` cascaded stages (one-way inter-stage feed -> reducible BTF),
 /// each stage internally coupled. The conductance part follows the klu_circuit
-/// generator exactly; on top the diagonal gets the AC small-signal `+ jωC`
+/// generator exactly; on top the diagonal gets the AC small-signal `+ jomegaC`
 /// term (grounded capacitor per node), so the matrix is genuinely complex like
 /// a frequency-domain MNA system - the KLU sweep use-case.
 fn circuit_matrix(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<C> {
@@ -505,7 +505,7 @@ fn circuit_matrix(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<C> {
             colsum[j] += g;
         }
     }
-    // Diagonal: conductance sum + dominance margin, plus the AC term jωC with a
+    // Diagonal: conductance sum + dominance margin, plus the AC term jomegaC with a
     // per-node grounded capacitance - keeps every column strictly dominant in
     // modulus while making the values genuinely complex.
     for (j, &cs) in colsum.iter().enumerate() {
@@ -744,7 +744,7 @@ fn run_matrix(
     .unwrap_or(0.0);
     let faer_ok = n <= faer_max && rslab_est_mb < faer_est_mb;
     if has("faer") && !faer_ok {
-        eprintln!("[faer] skip {name} (n={n}, RSLAB est {rslab_est_mb:.0} MB ⇒ faer over budget)");
+        eprintln!("[faer] skip {name} (n={n}, RSLAB est {rslab_est_mb:.0} MB => faer over budget)");
     }
     if has("faer") && faer_ok {
         let fa = match mat {
@@ -1021,7 +1021,7 @@ fn run_matrix(
     }
 
     // --- RSLAB preconditioner mode (static pivoting, never-fail) + GMRES refinement.
-    // Factors a perturbed Â (never rank-deficient), then refines A x = b with GMRES
+    // Factors a perturbed A_hat (never rank-deficient), then refines A x = b with GMRES
     // preconditioned by that factor - so the indefinite / hard matrices where exact
     // factorization fails are still solved. `slv_ms` here is the Krylov refinement cost.
     if has("pc") {
@@ -1094,11 +1094,11 @@ fn run_matrix(
 }
 
 /// Build the matrices for a family. `sym` = 3D Helmholtz (sparse stencil); `unsym`
-/// = BEM/MoM near-field kernel with a **density-matched** cutoff (≈120 nnz/row at
+/// = BEM/MoM near-field kernel with a **density-matched** cutoff (~120 nnz/row at
 /// any `n`, like real MoM); `real` = the on-disk `precond_matrices` (smallest first).
 fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
     match family {
-        // Complex-symmetric distribution (LDLᵀ path): the three hard EM/FEM classes
+        // Complex-symmetric distribution (LDL^T path): the three hard EM/FEM classes
         // per size - Helmholtz (shifted, complex), curl-curl Maxwell (complex
         // indefinite, gradient near-null-space), and Stokes/KKT saddle-point
         // (symmetric indefinite). All genuinely complex-valued.
@@ -1192,7 +1192,7 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
         // matrices - very sparse (~4-5 nnz/col), unsymmetric, column-diagonally
         // dominant, cascaded stages giving a reducible BTF structure (the
         // klu_circuit generator), made genuinely complex by the frequency-domain
-        // diagonal G + jωC. Stage count grows with size as in klu_circuit
+        // diagonal G + jomegaC. Stage count grows with size as in klu_circuit
         // (8 @ 2k ... 64 @ 200k).
         "circuit" => sizes
             .iter()
@@ -1237,8 +1237,8 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
 }
 
 /// SuiteSparse validation corpus: download each `group/name`, auto-detect its type,
-/// and route symmetric → LDLᵀ, general → LU. Curated to be diverse (SPD / CFD /
-/// circuit / complex), non-singular, and memory-safe (n ≤ ~30k, run sequentially).
+/// and route symmetric -> LDL^T, general -> LU. Curated to be diverse (SPD / CFD /
+/// circuit / complex), non-singular, and memory-safe (n <= ~30k, run sequentially).
 /// Override with `RLA_BENCH_CORPUS` as a comma-separated `group/name` list. A
 /// matrix that fails to download/parse is skipped with a note.
 #[cfg(feature = "matgen-download")]

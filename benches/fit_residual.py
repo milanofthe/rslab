@@ -81,7 +81,7 @@ def features(cost, threads):
 def ridge_fit(X, y, lam=1e-2):
     """Closed-form ridge regression (normal equations); pure Python."""
     m = len(X[0])
-    # A = XᵀX + lam I ; b = Xᵀy
+    # A = X^TX + lam I ; b = X^Ty
     A = [[sum(X[k][i] * X[k][j] for k in range(len(X))) + (lam if i == j else 0.0)
           for j in range(m)] for i in range(m)]
     b = [sum(X[k][i] * y[k] for k in range(len(X))) for i in range(m)]
