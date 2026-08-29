@@ -26,7 +26,7 @@ algorithms and carries the full evaluation.
 
 ```toml
 [dependencies]
-rslab = "0.28"
+rslab = "0.29"
 ```
 
 Python bindings: `pip install rslab`.
@@ -161,28 +161,28 @@ Wall time divided by Accelerate's, so 1.0 is Accelerate and lower is faster:
 | matrix class | factor only | one-shot (analyze+factor+solve) |
 |---|:-:|:-:|
 | circuit MNA (KLU path) | **0.42** | **0.18** |
-| curl-curl Maxwell | **0.72** | **0.59** |
-| Helmholtz 3D | **0.98** | **0.59** |
-| Stokes saddle point | 1.28 | **0.68** |
-| convection-diffusion 3D | 1.61 | **0.90** |
-| BEM/MoM near field | 1.39 | 1.53 |
-| convection-diffusion 2D | 3.92 | **0.89** |
-| geomean over the three paths | **0.97** | **0.48** |
+| Stokes saddle point | **0.68** | **0.43** |
+| Helmholtz 3D | **0.73** | **0.47** |
+| curl-curl Maxwell | **0.74** | **0.61** |
+| convection-diffusion 3D | 1.04 | **0.64** |
+| convection-diffusion 2D | 1.06 | **0.35** |
+| BEM/MoM near field | 1.26 | 1.49 |
+| geomean over the three paths | **0.70** | **0.38** |
 
 Factor only is the repeated-factorization cost, one-shot is what a caller solving
 a system once waits for; both solvers race orderings inside their analyze, so the
 one-shot column is like for like. Accelerate's AMX kernels own the small and mid
-sizes and the ratio improves with the problem: Helmholtz crosses parity at ~1e5
-nonzeros and reaches 0.46 at n=110592.
+sizes and the ratio improves with the problem: Helmholtz reaches 0.52 at
+n=110592, convection-diffusion 3D 0.68 at the same size.
 
-The classes that stay behind carry their own evidence notes: the saddle/KKT
-family (small-node overhead and chain serialization,
-`dev/research/saddle-vs-accelerate-2026-08.md`), the near-dense BEM/MoM blocks
-(the medium-node kernel floor, `dev/research/ldlt-lu-m3-audit-2026-08.md`), and
-convection-diffusion, where the factor is concurrency-bound: 59% of the thread
-time is idle workers and 1 to 8 threads buys only 2.4-2.8x, so single-thread work
-that would reach parity at ideal scaling lands 3x behind
-(`dev/research/lu-convdiff-2026-08.md`).
+The one class behind on both metrics is the near-dense BEM/MoM block, the
+medium-node kernel floor of `dev/research/ldlt-lu-m3-audit-2026-08.md`. Where
+convection-diffusion sits at parity on factor it is concurrency-bound rather than
+kernel-bound: 59% of the thread time is idle workers and 1 to 8 threads buys only
+2.4-2.8x (`dev/research/lu-convdiff-2026-08.md`, which also records the
+scheduler, method-pick and fused-kernel experiments measured and rejected on it).
+The saddle/KKT family is scoped in
+`dev/research/saddle-vs-accelerate-2026-08.md`.
 
 ![vs size](docs/figures/accel_scaling.png)
 
