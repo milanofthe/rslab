@@ -185,15 +185,49 @@ the product, and then a read-modify-write pass over the target panel through
 `gloc`. The arithmetic intensity of an update is `nck` FMAs per output element,
 i.e. 20-38 here, but the operands are streamed once and never reused.
 
-## Next lever, with its ceiling
+## Rejected: the fused scatter-accumulating update (2026-08-29)
 
-Fuse the update: accumulate the product straight into the target panel through
-the row map instead of materializing `u_buf` and then scattering it. That removes
-one write plus one read of `mrows * npk` complex values per update, roughly a
-third of the update path's traffic on these shapes, so expect 20-30% on this
-class - not the 3x to Accelerate. It needs a scatter-accumulating complex kernel
-that beats the packed GEMM on strided input, which on this machine means FCMA
-intrinsics; the gemm crate's kernel cannot take a row map.
+Built and measured. `scatter_gemm_sub` computes
+`dst[col_off[j] + row_off[i]] -= sum_k a[i + k*lda] * b[k + j*ldb]` in one pass,
+blocked 4x2 so every `k` step reuses four `a` values against two `b` values in
+registers, ascending `k` like the scalar path it replaces. It removes the
+intermediate product entirely: one write and one read of `m*n` complex values per
+update, plus the separate scatter pass.
+
+Factor wall time, 8 threads, packed GEMM plus scatter -> fused:
+
+| matrix | current | fused | |
+|---|--:|--:|---|
+| convdiff2d_9216 | 25.4 | 51.8 | -104% |
+| convdiff2d_13924 | 46.4 | 95.7 | -106% |
+| convdiff2d_21025 | 91.6 | 139.9 | -53% |
+| convdiff2d_31684 | 127.7 | 215.8 | -69% |
+| convdiff3d_5832 | 72.2 | 126.8 | -76% |
+| convdiff3d_4096 | 72.1 | 64.8 | +10% |
+
+Saving the traffic does not come close to paying for the lost kernel quality.
+Generic Rust over `Complex<f64>` compiles to scalar multiply-add pairs on an
+interleaved layout; the packed path gets NEON FCMA micro-kernels with packed
+operands and 3x4 register blocking. Matching that inside a scatter kernel means
+writing the FCMA intrinsics by hand, per architecture, and the measured headroom
+it would be fighting for is the traffic share, which this experiment just showed
+to be worth less than the kernel gap. Discarded, no code kept.
+
+## Where that leaves the class
+
+Three levers measured and rejected on the same class: the scheduler (dataflow
+over the exact updater DAG), the kernel selection (multifrontal, wider fork
+gates, a higher scalar gate) and now the kernel itself. The remaining honest
+statement is that the factor is bound by dense-kernel efficiency at small shapes,
+that the packed GEMM is already the best tool available for it in portable Rust,
+and that Accelerate's advantage here is AMX plus a coarser supernode partition
+(our 3878 supernodes for n=21025 average 5.4 eliminated columns).
+
+The one lever still untested is that partition. The amalgamation sweep (nemin
+32-128, max_extra_rows 16-256) moved this class by up to 26% but regressed
+curl-curl by the same margin and was not monotone in the node count, so it needs
+an interleaved study across all five classes before any default moves. That is
+the next thing to try, and it is a parameter study, not a kernel project.
 
 The rest of the gap is structural: Accelerate factors these matrices on AMX,
 where the same small dense blocks run at a multiple of the NEON rate, and it
