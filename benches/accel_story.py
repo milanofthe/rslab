@@ -64,6 +64,7 @@ RELEASE_NOTES = {
     "v0.26.0": "KLU parallel\nby default",
     "v0.27.0": "Hopcroft-Karp BTF",
     "v0.28.0": "consolidation,\nordering race",
+    "v0.29.0": "amalgamation\noff by default",
 }
 
 METRICS = {
@@ -86,12 +87,26 @@ def versions(rows):
                   key=lambda v: tuple(int(p) for p in v.lstrip("v").split(".")))
 
 
-def accel_ref(rows, metric):
-    """(family, name) -> Accelerate time under `metric`, from the newest run."""
-    newest = versions(rows)[-1]
+def accel_ref(rows, metric, version=None):
+    """(family, name) -> Accelerate time under `metric`, for one RSLAB version.
+
+    Accelerate is measured by the newest binary of each measuring session, so the
+    file carries one accel block per session. A version is normalized against the
+    accel of its own session: the smallest accel-carrying version that is not
+    older than it. Mixing sessions would compare an RSLAB time from a heat-soaked
+    machine against an Accelerate time from a cool one - on this fanless machine
+    that is a factor of two, enough to invent regressions in paths that did not
+    change."""
     cost = METRICS[metric][1]
+    key = lambda v: tuple(int(p) for p in v.lstrip("v").split("."))
+    carriers = sorted({r["version"] for r in rows if r["solver"] == "accel"}, key=key)
+    if not carriers:
+        return {}
+    if version is None:
+        version = carriers[-1]
+    ref_v = next((c for c in carriers if key(c) >= key(version)), carriers[-1])
     return {(r["family"], r["name"]): cost(r) for r in rows
-            if r["version"] == newest and r["solver"] == "accel" and r["res"] < 0.1}
+            if r["version"] == ref_v and r["solver"] == "accel" and r["res"] < 0.1}
 
 
 def normalized(rows, ref, metric, version, family, solver):
@@ -118,7 +133,7 @@ def log_axis(ax, axis="y"):
 
 def per_class(rows, metric, version):
     """[(label, geomean normalized time, matrices, color)] for one version."""
-    ref = accel_ref(rows, metric)
+    ref = accel_ref(rows, metric, version)
     color = {fam: c for fam, _, _, c in PATHS}
     out = []
     for prefix, (label, fam, solv) in CLASSES.items():
@@ -169,7 +184,8 @@ def timeline(rows, ax, metric, annotate=True):
     xs = np.arange(len(vers))
     series = {}
     for fam, solv, label, color in PATHS:
-        ys = [geomean(list(normalized(rows, ref, metric, v, fam, solv).values()))
+        ys = [geomean(list(normalized(rows, accel_ref(rows, metric, v), metric, v,
+                                      fam, solv).values()))
               for v in vers]
         series[label] = ys
         ax.plot(xs, ys, marker="o", ms=3.5, color=color, lw=1.4, label=label)

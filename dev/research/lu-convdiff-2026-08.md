@@ -223,7 +223,13 @@ that the packed GEMM is already the best tool available for it in portable Rust,
 and that Accelerate's advantage here is AMX plus a coarser supernode partition
 (our 3878 supernodes for n=21025 average 5.4 eliminated columns).
 
-The one lever still untested is that partition. The amalgamation sweep (nemin
+RESOLVED 2026-08-29: it was that partition. See
+`dev/research/amalgamation-2026-08.md` - the shipped relaxed amalgamation was
+padding these narrow fundamental supernodes into wide fronts and carrying the
+explicit zeros through every update. Turning it off is 2.6-4x on this class, and
+moves the LU path from 2.25 to 1.10 against Accelerate.
+
+The lever that was still untested is that partition. The amalgamation sweep (nemin
 32-128, max_extra_rows 16-256) moved this class by up to 26% but regressed
 curl-curl by the same margin and was not monotone in the node count, so it needs
 an interleaved study across all five classes before any default moves. That is
