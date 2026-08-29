@@ -493,10 +493,18 @@ impl Default for SolverSettings {
             reorder: ReorderMode::default(),
             ordering: OrderingMethod::default(),
             nemin: 16,
-            relax: Some(RelaxAmalgamation {
-                max_width: 256,
-                max_extra_rows: 64,
-            }),
+            // Relaxed amalgamation OFF. It was tuned in June on the MoM and FEM
+            // classes, where padding narrow fundamental supernodes into wider
+            // dense fronts pays; on the grid classes that entered the corpus
+            // later it is a large pessimization, because the padded fronts carry
+            // their explicit zeros through every update. Measured over the
+            // 18-matrix head-to-head grid on the M3, relaxed vs off, interleaved,
+            // minimum of three: geomean 0.654 for off, 16 of 18 matrices faster,
+            // convection-diffusion 2D 2.6-4x, worst case curl-curl 14739 at
+            // +12%. Fill is identical or lower without it (MoM 34.2M -> 32.1M).
+            // See `dev/research/amalgamation-2026-08.md`. Opt in per call with
+            // `with_relax(Some(..))` where the fronts are dense enough to want it.
+            relax: None,
             // Kernel defaults (reproduce the former process-wide atomic defaults).
             panel_nb: DEFAULT_PANEL_NB,
             scalar_gate: DEFAULT_SCALAR_GATE,
