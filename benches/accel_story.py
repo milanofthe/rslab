@@ -64,6 +64,7 @@ RELEASE_NOTES = {
     "v0.26.0": "KLU parallel\nby default",
     "v0.27.0": "Hopcroft-Karp BTF",
     "v0.28.0": "consolidation,\nordering race",
+    "v0.29.0": "amalgamation\noff by default",
 }
 
 METRICS = {
