@@ -61,9 +61,9 @@ a-priori peak-memory, work, and runtime predictors as exact functions of the mat
 structure; the default configuration is deterministic and model-free (an exact ordering
 race that scores candidates by their true factor fill, the measured kernel knobs, and a
 worker count from a one-time cached hardware calibration); and the numeric factorization
-is bit-identical regardless of the worker count. A mixed-precision mode
-factors in single precision and refines to double against the original matrix with an
-explicit backward-error certificate. When the factor is made approximate (static-pivoted or
+is bit-identical regardless of the worker count. A single-precision factor
+can precondition a double-precision Krylov solve, recovering the accuracy at half the
+factor memory. When the factor is made approximate (static-pivoted or
 thresholded) it becomes a preconditioner, and a matching Krylov layer (COCG/COCR,
 flexible GMRES, batched multi-RHS block GMRES with within-cycle deflation, and GCRO-DR
 subspace recycling) closes the accuracy gap. This report documents the core algorithms,
@@ -337,13 +337,12 @@ and, after a one-time cached hardware calibration, a critical-path-aware worker 
 from the calibrated cost model. Every input to the pick is an exact a-priori quantity;
 nothing is modeled, and nothing is measured implicitly at solve time.
 
-The mixed-precision solvers (\code{MixedLdltSolver}/\code{MixedLuSolver}) factor
-$\mathrm{cast}_{32}(A)$ at half the memory and solve through an explicit refinement
-ladder (plain iterative refinement escalating to GMRES-IR with the single-precision
-factor as the preconditioner), reporting the achieved normwise backward error and
-whether the double-precision certificate holds (Carson--Higham multi-precision IR); on
-the reference class the single-precision factor runs $1.64	imes$ and certifies at the
-roundoff level after two refinement steps.
+Mixed precision enters through the preconditioner rather than through a separate
+solver: an \code{f32} factor at half the memory
+(\code{LowPrecisionPreconditioner}/\code{LowPrecisionLu}) preconditions an
+\code{f64} Krylov solve, GMRES-IR in the sense of Carson--Higham~\cite{carsonhigham}
+with the working precision fixed at \code{f64}. On the reference class the
+single-precision factor runs $1.64\times$ the double one.
 
 \section{Solver-in-the-loop and resource governance}
 \label{sec:sil}
@@ -731,6 +730,10 @@ multifrontal method. \emph{ACM Trans. Math. Softw.} 30(2):196--199, 2004.
 unsymmetric sparse symbolic factorization. SIAM J. Matrix Anal. Appl., 13(1), 1992.
 \bibitem{klu} T.~A. Davis, E. Palamadai Natarajan. Algorithm 907: KLU, a direct sparse
 solver for circuit simulation problems. \emph{ACM Trans. Math. Softw.} 37(3):36, 2010.
+
+\bibitem{carsonhigham} E. Carson, N.~J. Higham. Accelerating the solution of linear
+systems by iterative refinement in three precisions. \emph{SIAM J. Sci. Comput.}
+40(2):A817--A847, 2018.
 
 \bibitem{hopcroftkarp} J.~E. Hopcroft, R.~M. Karp. An $n^{5/2}$ algorithm for maximum
 matchings in bipartite graphs. \emph{SIAM J. Comput.} 2(4):225--231, 1973.
