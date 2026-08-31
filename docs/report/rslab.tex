@@ -366,6 +366,20 @@ runtimes are predicted, the aggregate footprint and makespan of a batch are comp
 before the batch runs. Per-call diagnostics (stage timings, fill, the attached estimate)
 close the loop after the fact, estimate against measured.
 
+A fourth mechanism bounds the loop in time: the numeric factorization is
+cancellable. The caller owns an \code{AtomicBool}, arms it on the settings, and
+\rT{} polls it at supernode, dense-panel and BTF-block boundaries, returning
+\code{Interrupted} on the first observation. The library only ever reads the
+flag, so re-arming belongs to the caller, and taking a flag rather than a
+deadline keeps the solver clock-agnostic: wall-versus-CPU-versus-budget policy
+stays with the host that owns the deadline. Without it a host cannot enforce a
+time budget it can be smaller than a single factorization, because control never
+returns while one runs. The factors after an interrupt are invalid exactly as
+after any failed factor, no partial result is promised, and the symbolic
+analysis is not interruptible. Unarmed, the poll is one \code{Option} branch
+that touches no atomic and measures within noise ($1.007$, $1.012$, $0.998$ on
+the reference matrices).
+
 \section{Preconditioned and recycled Krylov layer}
 \label{sec:iterative}
 When the factor is approximate, accuracy is recovered by iteration. The iteration and

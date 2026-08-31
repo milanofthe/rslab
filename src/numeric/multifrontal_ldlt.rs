@@ -230,6 +230,16 @@ pub struct SolverSettings {
     /// all cores). The numeric result is bit-identical regardless of this value.
     pub threads: Threads,
 
+    /// Caller-owned cancellation flag for the numeric factorization. The solver
+    /// only ever *reads* it, at supernode and dense-panel boundaries; on the
+    /// first observation of `true` the factorization stops and returns
+    /// [`RslabError::Interrupted`](crate::RslabError::Interrupted). Re-arming
+    /// after an interrupt is the caller's `store(false)`. Taking a flag rather
+    /// than a deadline keeps the library clock-agnostic and leaves
+    /// wall-versus-CPU budget policy with the host. **Default `None`**, which
+    /// costs one `Option` branch per boundary and touches no atomic.
+    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
     // ---- Analysis-phase knobs (read by `analyze_with`; ignored by `factor`) ----
     /// Child-reordering strategy (CB-stack peak vs leaf parallelism). Analyze-time.
     pub reorder: ReorderMode,
@@ -489,6 +499,7 @@ impl Default for SolverSettings {
             blr: BlrMode::Off,
             method: FactorMethod::LeftLooking,
             threads: Threads::default(),
+            interrupt: None,
             // Analysis-phase defaults (reproduce the historically-tuned analysis).
             reorder: ReorderMode::default(),
             ordering: OrderingMethod::default(),
@@ -657,7 +668,7 @@ impl SolverSettings {
 
     /// The kernel scheduling knobs as a cheap `Copy` bundle, threaded into the
     /// dense-front / left-looking kernels (replaces the former atomic loads).
-    pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning {
+    pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning<'_> {
         crate::numeric::gemm_tuning::KernelTuning {
             scalar_gate: self.scalar_gate,
             par_gemm: self.par_gemm,
@@ -665,7 +676,15 @@ impl SolverSettings {
             panel_nb: self.panel_nb.max(8),
             use_gemm_schur: self.use_gemm_schur,
             pivot_u: self.pivot_u.clamp(0.0, 1.0),
+            interrupt: self.interrupt.as_deref(),
         }
+    }
+
+    /// Builder: arm the numeric factorization with a caller-owned cancellation
+    /// flag (see [`interrupt`](Self::interrupt)).
+    pub fn with_interrupt(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.interrupt = Some(flag);
+        self
     }
 
     /// A static upper bound on the worker count for *reporting*, without the
@@ -839,6 +858,7 @@ fn factor_front<T: Scalar>(
     let nb = kt.panel_nb;
     let mut kb = 0;
     while kb < ncol {
+        kt.interrupted()?;
         let ke = (kb + nb).min(ncol);
         let mut k = kb;
         while k < ke {
@@ -1321,6 +1341,7 @@ fn factor_one_node<T: Scalar>(
     pool: &crate::numeric::multifrontal_lu::FrontPool<T>,
     kt: KernelTuning,
 ) -> Result<NodeFactor<T>, RslabError> {
+    kt.interrupted()?;
     let snode = &sym.supernodes[s];
     let n = sym.n;
     let ncol = snode.ncol;
@@ -2098,6 +2119,7 @@ fn ll_factor_node<T: Scalar>(
     ll_active: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
+    kt.interrupted()?;
     ll_active.fetch_add(1, Ordering::Relaxed);
     let _active = LlActiveGuard(ll_active);
     let ll_gemm_gate = kt.scalar_gate;

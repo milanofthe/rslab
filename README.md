@@ -110,6 +110,13 @@ with_threads(4, || {
 
 `Threads::Ambient` factors on the surrounding pool instead of a scoped one.
 
+A long factorization can be cancelled: arm the settings with a caller-owned flag
+(`with_interrupt(Arc<AtomicBool>)`, also on `KluSettings`) and the numeric phase
+stops at the next supernode or panel boundary with `RslabError::Interrupted`.
+The library only reads the flag, so re-arming is the caller's `store(false)`, and
+taking a flag rather than a deadline keeps the wall-versus-CPU budget policy with
+the host. Unarmed it costs one branch per boundary.
+
 ## API
 
 ```rust

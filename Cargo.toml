@@ -114,6 +114,11 @@ name = "klu_realworld"
 harness = false
 required-features = ["matgen-download"]
 
+# The cancellation test builds its matrices with the generators.
+[[test]]
+name = "interrupt"
+required-features = ["matgen"]
+
 [[bench]]
 name = "bench_suite"
 harness = false
