@@ -317,6 +317,7 @@ fn lu_front<T: Scalar>(
     const NB: usize = 32;
     let mut kb = 0;
     while kb < ncol {
+        kt.interrupted()?;
         let ke = (kb + NB).min(ncol);
         // --- Panel factor (getf2) over columns [kb, ke), full height ---
         for k in kb..ke {
@@ -1173,6 +1174,7 @@ fn lu_ll_factor_node<T: Scalar>(
     ll_active: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
+    kt.interrupted()?;
     ll_active.fetch_add(1, Ordering::Relaxed);
     let _active = LuActiveGuard(ll_active);
     let ll_gemm_gate = kt.scalar_gate;
@@ -1527,6 +1529,7 @@ fn lu_ll_factor_node<T: Scalar>(
     let mut pinv_blk: Vec<T> = vec![T::zero(); nb_cdiv];
     let mut kb = 0;
     while kb < ncol {
+        kt.interrupted()?;
         let ke = (kb + nb_cdiv).min(ncol);
         // getf2: factor columns [kb, ke) over the **fully-summed rows [k+1, ncol)**
         // only - the deep trailing rows [ncol, nrow) (never pivot candidates) are

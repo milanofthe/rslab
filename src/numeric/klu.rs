@@ -81,6 +81,13 @@ pub struct KluSettings {
     /// solver-in-the-loop use, or force `Off` for strictly sequential
     /// execution.
     pub parallel: KluParallel,
+
+    /// Caller-owned cancellation flag for the numeric phase, read and never
+    /// written, polled at block boundaries and inside the pipelined refactor at
+    /// column boundaries. The flag armed for a factorization is carried into
+    /// the factors, so a later [`refactor`](KluSolver::refactor) on them
+    /// observes the same flag. **Default `None`**.
+    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Parallel per-block execution policy for the KLU path
@@ -105,11 +112,24 @@ impl Default for KluSettings {
             row_scaling: true,
             btf: true,
             parallel: KluParallel::Auto,
+            interrupt: None,
         }
     }
 }
 
 impl KluSettings {
+    /// Builder: arm the numeric phase with a caller-owned cancellation flag.
+    pub fn with_interrupt(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.interrupt = Some(flag);
+        self
+    }
+
+    /// Poll the caller's flag; `Ok(())` when unarmed or clear.
+    #[inline]
+    pub(crate) fn interrupted(&self) -> Result<(), RslabError> {
+        interrupt_check(self.interrupt.as_deref())
+    }
+
     /// Composable override of the diagonal-preference threshold
     /// (see [`pivot_tol`](Self::pivot_tol)). `1.0` is plain partial pivoting.
     pub fn with_pivot_tol(mut self, tol: f64) -> Self {
@@ -555,6 +575,8 @@ fn compute_replay_plan(
 /// off-block entries, with row scaling folded in.
 #[derive(Debug, Clone)]
 struct KluFactors<T> {
+    /// The flag armed for the factorization, carried so `refactor` polls it too.
+    interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     n: usize,
     nnz_a: usize,
     block_ptr: Vec<usize>,
@@ -616,6 +638,17 @@ fn pattern_mismatch() -> RslabError {
         "klu: matrix pattern does not match the symbolic analysis / stored factorization"
             .to_string(),
     )
+}
+
+/// Poll a caller-owned cancellation flag. One `Option` branch when unarmed.
+#[inline]
+pub(crate) fn interrupt_check(
+    flag: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(), RslabError> {
+    match flag {
+        Some(f) if f.load(std::sync::atomic::Ordering::Relaxed) => Err(RslabError::Interrupted),
+        _ => Ok(()),
+    }
 }
 
 /// Row-max scaling reciprocals (1 for empty rows / scaling off).
@@ -1356,6 +1389,7 @@ fn factor_impl<T: Scalar>(
         let mut scratch = KluScratch::<T>::new(max_bn);
         let mut out = BlockOut::<T>::default();
         for b in 0..nblocks {
+            settings.interrupted()?;
             let bs = sym.block_ptr[b];
             let be = sym.block_ptr[b + 1];
             factor_block(
@@ -1399,6 +1433,7 @@ fn factor_impl<T: Scalar>(
             .map_init(
                 || KluScratch::<T>::new(max_bn),
                 |scratch, b| {
+                    settings.interrupted()?;
                     let mut out = BlockOut::<T>::default();
                     factor_block(
                         sym,
@@ -1542,6 +1577,7 @@ fn factor_impl<T: Scalar>(
     };
 
     Ok(KluFactors {
+        interrupt: settings.interrupt.clone(),
         n,
         nnz_a: sym.nnz,
         block_ptr: sym.block_ptr.clone(),
@@ -1920,6 +1956,10 @@ impl<T: Scalar> KluSolver<T> {
     pub fn refactor(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         a.validate()?;
         let t = crate::clock::Instant::now();
+        // Cloned out of the factors so the borrow below stays exclusive; the
+        // flag is read-only for us either way.
+        let int_flag = self.factors.interrupt.clone();
+        let int_flag = int_flag.as_deref();
         let f = &mut self.factors;
         if a.n != f.n {
             return Err(RslabError::DimensionMismatch {
@@ -1963,6 +2003,7 @@ impl<T: Scalar> KluSolver<T> {
             let (mut lv, mut uv) = (f.l_val.as_mut_slice(), f.u_val.as_mut_slice());
             let (mut ud, mut fv) = (f.udiag.as_mut_slice(), f.f_val.as_mut_slice());
             for b in 0..nblocks {
+                interrupt_check(int_flag)?;
                 let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
                 let (a1, r1) =
                     std::mem::take(&mut lv).split_at_mut(f.l_colptr[be] - f.l_colptr[bs]);
@@ -2121,6 +2162,7 @@ impl<T: Scalar> KluSolver<T> {
                                 let mut x = vec![T::zero(); bn];
                                 let mut jj = bs + w;
                                 while jj < be {
+                                    interrupt_check(int_flag)?;
                                     // SAFETY: worker-owned column; deps are
                                     // fenced by the ready Acquire loads inside
                                     // `replay_col`.
