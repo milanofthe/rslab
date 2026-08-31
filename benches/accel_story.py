@@ -273,6 +273,10 @@ def scaling(rows, ax, metric="factor"):
 
 
 def card(fig, name):
+    """Share-card skin. Paper mode owns the figure's rcParams, so a card written
+    from a report run would carry the serif page style: skip it there."""
+    if st.REPORT:
+        return
     out = OUT / name
     fig.savefig(out, dpi=200, transparent=False, facecolor="white", bbox_inches="tight")
     print(f"wrote {out}")

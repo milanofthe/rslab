@@ -15,8 +15,8 @@ python benches/fit_scaling.py $OUT/corpus.jsonl
 echo "[report] per-path head-to-head (two-panel: factor time + peak memory)"
 python benches/head_to_head.py $OUT/h2h_sym.jsonl $OUT/h2h_unsym.jsonl
 
-echo "[report] Apple-Silicon bench: RSLAB vs Apple Accelerate (needs $OUT/apple_*.jsonl)"
-python benches/apple_silicon.py $OUT
+echo "[report] Accelerate head-to-head per class, per release, and vs size"
+python benches/accel_story.py
 
 echo "[report] thread scaling per solver"
 python benches/agg_thread_scaling_solvers.py $OUT/corpus_threads.jsonl
