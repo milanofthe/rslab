@@ -109,14 +109,15 @@ pub(crate) mod scalar;
 // `LdltCompress` matching (`compute_mc64_cache`/`Mc64Cache`, structural only),
 // `ScalingStrategy`, and the inf-norm / one-pass equilibration used by the
 // factor path.
-pub(crate) mod scaling;
-pub(crate) mod sparse;
 /// Symbolic analysis internals. Not part of the embedder API beyond the root
 /// re-exports (`OrderingMethod`, `RelaxAmalgamation`):
 /// `pub` because the in-tree tests drive `symbolic::{symbolic_factorize,
 /// column_counts_gnp, ...}` and `symbolic::supernode::OrderingPreprocess` by
 /// path; hidden from public docs.
 #[doc(hidden)]
+pub mod refine;
+pub(crate) mod scaling;
+pub(crate) mod sparse;
 pub mod symbolic;
 /// Hardware-aware auto-tuning + resource governor (feature `tuning`): hardware
 /// probe, calibration cache, and a budget-driven factorization planner.
@@ -137,6 +138,7 @@ pub use error::RslabError;
 pub use numeric::gemm_tuning::{
     GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
 };
+pub use refine::{BackwardError, RefineOutcome, RefinePolicy};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
 // Generic dense LDL^T kernel (the multifrontal fronts reduce to this).

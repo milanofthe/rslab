@@ -166,40 +166,43 @@ impl<T: Scalar> LdltSolver<T> {
         rhs: &[T],
         max_iter: usize,
     ) -> Result<Vec<T>, RslabError> {
+        Ok(self
+            .solve_refined_with(a, rhs, &crate::refine::RefinePolicy::steps(max_iter))?
+            .0)
+    }
+
+    /// Iterative refinement under an explicit [`RefinePolicy`], reporting the
+    /// achieved backward error. The default policy stops as soon as the
+    /// componentwise backward error reaches the roundoff floor instead of
+    /// spending the whole step budget.
+    pub fn solve_refined_with(
+        &self,
+        a: &CscMatrix<T>,
+        rhs: &[T],
+        policy: &crate::refine::RefinePolicy,
+    ) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError> {
+        let mut x = self.solve(rhs)?;
+        let outcome = self.refine_into(a, rhs, &mut x, policy)?;
+        Ok((x, outcome))
+    }
+
+    /// Refine an existing iterate in place: no allocation of the solution, for
+    /// a host that owns its buffers across a sweep.
+    pub fn refine_into(
+        &self,
+        a: &CscMatrix<T>,
+        rhs: &[T],
+        x: &mut [T],
+        policy: &crate::refine::RefinePolicy,
+    ) -> Result<crate::refine::RefineOutcome, RslabError> {
         let n = self.factors.n;
-        if a.n != n {
+        if a.n != n || rhs.len() != n || x.len() != n {
             return Err(RslabError::DimensionMismatch {
                 expected: n,
                 got: a.n,
             });
         }
-        let mut x = self.solve(rhs)?;
-        let mut ax = vec![T::zero(); n];
-        let mut best_x = x.clone();
-        let mut best_res = f64::INFINITY;
-        // `max_iter` correction steps, each followed by a residual evaluation
-        // (plus the initial one). Every computed correction is evaluated: the
-        // final pass only measures, so no solve is spent on an iterate that
-        // could never be returned.
-        for it in 0..=max_iter {
-            a.symv(&x, &mut ax);
-            let r: Vec<T> = rhs.iter().zip(&ax).map(|(&b, &axi)| b - axi).collect();
-            let res = r.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
-            // Track the best iterate - refinement can be non-monotone on very
-            // ill-conditioned systems.
-            if res < best_res {
-                best_res = res;
-                best_x.clone_from(&x);
-            }
-            if res == 0.0 || it == max_iter {
-                break;
-            }
-            let dx = self.solve(&r)?;
-            for (xi, &d) in x.iter_mut().zip(&dx) {
-                *xi = *xi + d;
-            }
-        }
-        Ok(best_x)
+        crate::refine::refine_in_place(a, rhs, x, policy, |r| self.solve(r))
     }
 }
 

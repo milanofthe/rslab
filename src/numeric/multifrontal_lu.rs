@@ -884,6 +884,37 @@ impl<T: Scalar> LuSolver<T> {
         solve_lu_refined(&self.factors, a, b, max_iter)
     }
 
+    /// Iterative refinement under an explicit
+    /// [`RefinePolicy`](crate::refine::RefinePolicy), reporting the achieved
+    /// backward error.
+    pub fn solve_refined_with(
+        &self,
+        a: &GeneralCsc<T>,
+        b: &[T],
+        policy: &crate::refine::RefinePolicy,
+    ) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError> {
+        solve_lu_refined_with(&self.factors, a, b, policy)
+    }
+
+    /// Refine an existing iterate in place, allocating nothing for the
+    /// solution.
+    pub fn refine_into(
+        &self,
+        a: &GeneralCsc<T>,
+        b: &[T],
+        x: &mut [T],
+        policy: &crate::refine::RefinePolicy,
+    ) -> Result<crate::refine::RefineOutcome, RslabError> {
+        let n = self.factors.n;
+        if a.n != n || b.len() != n || x.len() != n {
+            return Err(RslabError::DimensionMismatch {
+                expected: n,
+                got: a.n,
+            });
+        }
+        crate::refine::refine_in_place(a, b, x, policy, |r| solve_lu(&self.factors, r))
+    }
+
     /// Stored fill `nnz(L) + nnz(U)`.
     pub fn factor_nnz(&self) -> usize {
         self.factors.factor_nnz()
@@ -2506,6 +2537,18 @@ pub fn solve_lu_refined<T: Scalar>(
     b: &[T],
     max_iter: usize,
 ) -> Result<Vec<T>, RslabError> {
+    Ok(solve_lu_refined_with(f, a, b, &crate::refine::RefinePolicy::steps(max_iter))?.0)
+}
+
+/// Iterative refinement of an `LU` solve under an explicit
+/// [`RefinePolicy`](crate::refine::RefinePolicy), reporting the achieved
+/// backward error.
+pub fn solve_lu_refined_with<T: Scalar>(
+    f: &LuFactors<T>,
+    a: &GeneralCsc<T>,
+    b: &[T],
+    policy: &crate::refine::RefinePolicy,
+) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError> {
     let n = f.n;
     if a.n != n || b.len() != n {
         return Err(RslabError::DimensionMismatch {
@@ -2514,28 +2557,8 @@ pub fn solve_lu_refined<T: Scalar>(
         });
     }
     let mut x = solve_lu(f, b)?;
-    let mut ax = vec![T::zero(); n];
-    let mut best_x = x.clone();
-    let mut best_res = f64::INFINITY;
-    // Every computed correction is evaluated: the final pass only measures,
-    // so no solve is spent on an iterate that could never be returned.
-    for it in 0..=max_iter {
-        a.matvec(&x, &mut ax);
-        let r: Vec<T> = b.iter().zip(&ax).map(|(&bi, &axi)| bi - axi).collect();
-        let res = r.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
-        if res < best_res {
-            best_res = res;
-            best_x.clone_from(&x);
-        }
-        if res == 0.0 || it == max_iter {
-            break;
-        }
-        let dx = solve_lu(f, &r)?;
-        for (xi, &d) in x.iter_mut().zip(&dx) {
-            *xi = *xi + d;
-        }
-    }
-    Ok(best_x)
+    let outcome = crate::refine::refine_in_place(a, b, &mut x, policy, |r| solve_lu(f, r))?;
+    Ok((x, outcome))
 }
 
 #[cfg(test)]
