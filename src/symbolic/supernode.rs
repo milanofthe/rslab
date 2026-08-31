@@ -286,6 +286,29 @@ pub fn find_supernodes(
     // Track the actual first column of each supernode (may change during merging)
     let mut snode_first_col: Vec<usize> = snode_starts;
 
+    // Frontal height per supernode, exact through amalgamation.
+    //
+    // For a *fundamental* supernode the columns' row structures are nested, so
+    // the first column's count is the frontal height. After a merge that is no
+    // longer true: the merged group's first column is the child's, whose
+    // pattern misses the rows only the parent contributes.
+    //
+    // The union is still exact in closed form. In an elimination tree a
+    // parent's row structure contains the child's minus the child's own
+    // eliminated columns (Liu, "The role of elimination trees in sparse
+    // factorization"), so the merged group's row set is the child's own column
+    // block - dense, and disjoint from the parent's rows - united with the
+    // parent group's row set:
+    //
+    //   merged_nrow = child_group_ncol + parent_group_nrow
+    //
+    // The rule composes along a chain under both iteration orders: a group that
+    // later merges upward carries its whole accumulated `ncol` into the next
+    // parent.
+    let mut snode_nrow: Vec<usize> = (0..n_snodes)
+        .map(|s| col_counts[snode_first_col[s]].max(snode_ncols[s]))
+        .collect();
+
     // Iteration order: forward (legacy / `Adjacency` strategy) is the
     // historical behavior - children processed in increasing postorder
     // index. On a multi-child parent only the highest-index child is
@@ -417,6 +440,9 @@ pub fn find_supernodes(
                 // so the merged range is [s_first, p_first+p_ncol).
                 snode_ncols[root_p] = merged_ncol;
                 snode_first_col[root_p] = s_first;
+                // The merged front gains exactly the child's own column block;
+                // every other child row already lies in the parent's row set.
+                snode_nrow[root_p] += child_ncol;
             }
         }
     }
@@ -433,9 +459,10 @@ pub fn find_supernodes(
 
         let first_col = snode_first_col[s];
         let ncol = snode_ncols[s];
-        // nrow = col_counts[first_col]: number of rows in L for the first
-        // column of this supernode, which gives the frontal matrix height
-        let nrow = col_counts[first_col].max(ncol);
+        // Frontal height, tracked exactly through amalgamation above.
+        // `col_counts[first_col]` alone is the fundamental-supernode case and
+        // understates every merged group.
+        let nrow = snode_nrow[s].max(ncol);
 
         // Row indices: the first_col..first_col+ncol are the eliminated columns,
         // plus the remaining rows from col_counts
