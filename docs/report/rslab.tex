@@ -68,8 +68,7 @@ thresholded) it becomes a preconditioner, and a matching Krylov layer (COCG/COCR
 flexible GMRES, batched multi-RHS block GMRES with within-cycle deflation, and GCRO-DR
 subspace recycling) closes the accuracy gap. This report documents the core algorithms,
 their implementation, and the measured performance against \textsf{faer}, MKL PARDISO and
-Apple Accelerate over a complete-distribution corpus, including the levers that were
-measured and rejected.
+Apple Accelerate over a complete-distribution corpus.
 \end{abstract}
 
 \section{Scope and architecture}
@@ -132,10 +131,9 @@ runs the \{AMD, AMF, RCM\} symbolic prefixes concurrently and keeps the smallest
 factor $\nnz$; stage two admits the nested-dissection candidate only above a work floor
 ($\num{5e9}$ predicted flops and $n>\num{10000}$), where its analysis cost amortizes
 against the factor it saves, and adopts it only on a strictly smaller exact fill. Ties
-break deterministically, so the pick is a pure function of the pattern. This replaced a
-pinned-AMD default plus a flops-gated ND bakeoff: the race is what the bakeoff was
-approximating, and on the convection--diffusion classes it cuts factor time by
-\numrange{14}{40}\%.
+break deterministically, so the pick is a pure function of the pattern. The race costs
+about $4\times$ a single-pass analysis and returns the exact minimum over its candidates
+rather than a predicted one.
 
 \section{Symbolic analysis}
 \label{sec:symbolic}
@@ -147,20 +145,17 @@ parent, using a column renumbering that re-postorders the tree so a desired pare
 merge becomes structurally adjacent. Column counts from a depth-first tree walk drive the
 factor-size estimate.
 
-\emph{Relaxed} amalgamation~\cite{ashcraft}, which merges an adjacent child within a
-width and extra-row budget and pads the merged front with explicit zeros, is available
-(\code{with\_relax}) but is \textbf{not} the default. It was measured across the whole
-corpus: the padded rows are structurally zero but the numeric path cannot know that and
-carries them through every update as real arithmetic and real memory traffic. Over the
-18-matrix grid, relaxation off is \num{0.654} in geomean factor time (16 of 18 matrices
-faster, worst case $+12\%$ on curl--curl), and the fill is identical on 12 matrices and
-\emph{lower} on the rest, so the relaxation was paying fill as well as time. It is a
-large pessimization exactly where fundamental supernodes are narrow and numerous: a
-$145^2$ convection--diffusion grid has \num{3878} fundamental supernodes and 277 relaxed
-ones at identical output fill, and pays $3.4\times$ the factor time for the difference.
-Where fronts are already wide (near-dense BEM/MoM blocks, curl--curl) the padding is
-small relative to the front and the wider GEMM can pay for it, which is why the knob
-stays.
+\emph{Relaxed} amalgamation~\cite{ashcraft} merges an adjacent child within a width
+and extra-row budget, padding the merged front with explicit zeros to trade fill for
+higher-rank Schur updates. It is available (\code{with\_relax}) and off by default. The
+padded rows are structurally zero, but the numeric path carries them through every update
+as arithmetic and as memory traffic, so the trade is favourable only when the padding is
+small relative to a front that is already wide. On grid operators, whose fundamental
+supernodes are narrow and numerous, it is not: a $145^2$ convection--diffusion grid has
+\num{3878} fundamental supernodes against 277 relaxed ones at identical output fill, and
+factors $3.4\times$ slower with the relaxation on. Over the 18-matrix corpus the default
+is \num{0.654} in geomean factor time against relaxed merging, at identical or lower
+fill.
 
 \section{Numeric factorization}
 \label{sec:numeric}
@@ -228,11 +223,10 @@ transversal pairs every column with a row holding a structural nonzero (an incom
 matching proves the matrix \emph{structurally} singular before any numeric work), and
 Tarjan's SCC algorithm on the matched digraph, emitted in reverse topological order,
 yields the symmetric permutation under which every entry outside the irreducible diagonal
-blocks lies above them. Two transversal algorithms ship: the MC21-style augmenting-path
-matching with per-column lookahead, and Hopcroft--Karp~\cite{hopcroftkarp}, whose
-phase-wise blocking fixes the MC21 degeneration observed on harmonic-balance circuits.
-Which one is used is decided per matrix by an exact bakeoff: both candidate matchings are
-scored by the pattern-only Gilbert--Peierls fill count of the resulting blocks and the
+blocks lies above them. Two transversal algorithms ship, the MC21-style augmenting-path matching with
+per-column lookahead and Hopcroft--Karp~\cite{hopcroftkarp}; a maximum matching is not
+unique, and the choice changes the block structure. Both candidates are therefore scored
+by the pattern-only Gilbert--Peierls fill count of the blocks they induce, and the
 smaller wins. A diagonal-repair pass then routes the matching through off-diagonal pivots
 where that keeps the diagonal structurally nonzero, which removes a fill cascade seen
 under row scaling. AMD orders each block on its symmetrized pattern. Fill is confined to
@@ -351,15 +345,6 @@ whether the double-precision certificate holds (Carson--Higham multi-precision I
 the reference class the single-precision factor runs $1.64	imes$ and certifies at the
 roundoff level after two refinement steps.
 
-An earlier version shipped an optional learned configuration tuner (one MLP per path
-predicting $(\log t,\log m)$ per candidate, behind a deterministic guard stack). It was
-removed. Once the ordering choice became an exact race rather than a prediction, the
-tuner's remaining freedom was the kernel knobs, and those measured flat (Sec.~\ref{sec:negative});
-what was left did not justify a trained artifact, a training corpus and a guard stack in
-a library whose selling point is that its analyze phase computes exact quantities.
-The calibrated \emph{cost model} for the worker count stayed, because it predicts a
-machine property (throughput and speedup curve), not a configuration.
-
 \section{Solver-in-the-loop and resource governance}
 \label{sec:sil}
 \rT{} is built to run \emph{inside} an outer loop (a frequency sweep, adaptive mesh
@@ -442,9 +427,8 @@ matrices, 8k--125k DOFs, \code{Complex<f64>}, measured in one run on a quiet 12-
 machine, so the cross-solver ratios carry no run-to-run drift. RSLAB runs its shipped
 default (the exact ordering race and the calibrated worker count); each path is compared
 on its own class against its own PARDISO mtype~\cite{pardiso} and faer~\cite{faer}.
-These figures predate the v0.28 ordering race and the v0.29 amalgamation default, so they
-understate the current state on both direct paths; the Apple measurement of
-Sec.~\ref{sec:apple} is the one kept current.
+This corpus was measured with RSLAB v0.27 on a 12-core x86 machine; the Apple
+measurement of Sec.~\ref{sec:apple} carries the current version.
 
 \subsection{Scaling and accuracy}
 Figures~\ref{fig:h2h_ldlt} and~\ref{fig:h2h_lu} plot factor time and peak memory against
@@ -532,12 +516,11 @@ EM/FEM systems); the bakeoff cost is charged to Accelerate's analyze time, mirro
 Results are reported as \emph{wall time divided by Accelerate's}, so $1.0$ is Accelerate
 and lower is faster, under two metrics that answer different questions: \emph{factor
 only} is the cost of a repeated factorization on a fixed pattern, \emph{one-shot} is
-analyze plus factor plus solve, what a caller solving a single system waits for. The
-one-shot column is like for like rather than an artifact of a missing symbolic phase:
-both solvers race orderings inside their analyze. One caveat belongs in the numbers
-rather than a footnote: \rT's shipped thread policy caps at four workers while Accelerate
-uses all cores, and on the convection--diffusion class that cap alone costs
-\numrange{12}{17}\%. The published numbers keep the shipped default.
+analyze plus factor plus solve, what a caller solving a single system waits for. Both
+solvers race orderings inside their analyze, so the one-shot column compares like with
+like. \rT's shipped thread policy caps at four workers while Accelerate uses all cores;
+on the convection--diffusion class that cap costs \numrange{12}{17}\%. The numbers below
+keep the shipped default.
 
 \begin{figure}[htbp]
 \centering
@@ -572,10 +555,11 @@ family on a 4k--110k log grid plus eight circuit sizes to 200k.}
 
 The vendor's AMX-backed kernels own the small and mid sizes, and the ratio improves with
 the problem: Helmholtz reaches $0.52$ at $n=\num{110592}$ and convection--diffusion 3D
-$0.68$ at the same size (Fig.~\ref{fig:apple_scaling}). The circuit class is \rT's
-outright at every measured size. The one class behind on both metrics is the near-dense
-BEM/MoM block, which is also the class where the analyze does not pay for itself; it is
-the medium-node kernel floor discussed in Sec.~\ref{sec:negative}.
+$0.68$ at the same size (Fig.~\ref{fig:apple_scaling}). The circuit class stays below $0.45$ at every measured size. The one class behind on both metrics is the near-dense
+BEM/MoM block, which is also the class where the analyze does not pay for itself. Its
+fronts are medium-sized and near-dense, the regime where the packed complex GEMM runs at
+a few GF/s against the \numrange{31}{40}\,GF/s it sustains on hot operands of the same
+shape, because each update streams its operands once and reuses nothing.
 
 \begin{figure}[htbp]
 \centering
@@ -586,33 +570,10 @@ improves with size; the two that end above $1.0$ are the ones whose fronts stay 
 \label{fig:apple_scaling}
 \end{figure}
 
-\paragraph{Per release.} Because the harness runs the \emph{same} matrices through the
-shipped path of every release binary, the head-to-head can be tracked over the project's
-history (Fig.~\ref{fig:apple_timeline}). The generators and the bench harness are
-byte-identical from v0.17.0, which is the earliest release that carries the harness at
-all, and the nonzero count of every matrix is cross-checked across versions before the
-comparison is made. The KLU path carries the visible arc: $2.57$ at v0.23 (sequential
-reference), $1.31$ after the v0.24 kernel work, $0.38$ the moment v0.26 made the parallel
-per-block factor the default. The direct paths move twice: the v0.28 ordering race, and
-the v0.29 amalgamation default, which halves the $\LU$ path from $2.25$ to $1.10$ and
-takes the mean over all three paths from $0.94$ to $0.70$.
-
-Two properties of the measurement are worth stating, because both were violated in
-earlier drafts and both invent effects. Absolute times on this fanless machine drift by
-a factor of two across a long measuring session, so every comparison is interleaved
-within minutes and reported as the minimum over rounds. And Accelerate is measured once
-per session by the newest binary, so each version is normalized against the Accelerate
-block of \emph{its own} session; mixing sessions compared a heat-soaked \rT{} against a
-cool Accelerate and produced a 37\% ``regression'' in the KLU path, which had not
-changed at all between the two releases.
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=\textwidth]{accel_timeline.pdf}
-\caption{Wall time relative to Accelerate per release, one line per shipped path plus the
-mean, same matrices throughout. Callouts name what each release brought.}
-\label{fig:apple_timeline}
-\end{figure}
+Measurement protocol: absolute times on this machine drift with its thermal state over a
+long session, so each configuration pair is measured interleaved and reported as the
+minimum over rounds, and Accelerate is re-measured in the same rounds as the solver it is
+compared against.
 
 On accuracy, Accelerate reaches $10^{-8}$ on 25 of 36 corpus matrices, but on five hard
 indefinite/ill-scaled ones (stokes64, bratu3d, cont-201, rim, lhr34) it returns NaN or
@@ -679,28 +640,27 @@ structure is one large irreducible block that per-block parallelism cannot split
 \caption{Real circuit matrices from the SuiteSparse collection: \rT{} KLU vs.\
 SuiteSparse KLU, one pivoting factorization (left) and a 20-point same-pattern sweep of
 refactor plus solve (right), log scale, labelled with the per-matrix ratio. The ratio is
-strongly matrix-dependent: the small blocks stay with the C code, while the matrices
-whose BTF structure the parallel gate clears run an order of magnitude ahead.}
+matrix-dependent, spanning $0.47\times$ to $27.9\times$ on the factor and
+$0.38\times$ to $25.8\times$ on the sweep.}
 \label{fig:klu_realworld}
 \end{figure}
 
 \subsection{Iterative layer}
 \begin{figure}[htbp]
 \centering
-\begin{minipage}{0.48\textwidth}
-\centering
-\includegraphics[width=\textwidth]{block_gmres_scaling.pdf}
-\end{minipage}\hfill
-\begin{minipage}{0.5\textwidth}
+\includegraphics[width=0.62\textwidth]{block_gmres_scaling.pdf}
+\caption{Strong scaling of the block solve against one worker, per block width, with the
+per-RHS MGS path (dashed) for reference.}
+\label{fig:blockgmres}
+\end{figure}
+
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{recycle_study.pdf}
-\end{minipage}
-\caption{Left: strong scaling of the block solve against one worker, per block width,
-with the pre-BCGS2 per-RHS MGS path (dashed) for reference; the panel-wide sweep is what
-makes the multi-RHS solve scale at all. Right: a sequence of eight related solves,
-cumulative wall-clock and cumulative GMRES iterations, cold start vs.\ warm start vs.\
-GCRO-DR recycling at three subspace sizes.}
-\label{fig:iterative}
+\caption{A sequence of eight related solves: cumulative wall-clock (left) and cumulative
+GMRES iterations (right), cold start vs.\ warm start vs.\ GCRO-DR recycling at three
+subspace sizes.}
+\label{fig:recycle}
 \end{figure}
 
 The Krylov results appear with their concepts in Sec.~\ref{sec:iterative}: block-CGS2
@@ -711,79 +671,16 @@ incomplete-factor sweet spot at $\code{drop\_tol}=10^{-2}$ halves the factor mem
 total wall time within a few percent of the exact direct solve. FGMRES's flexible-basis
 update saves exactly one preconditioner solve per restart cycle, confirmed by counting.
 
-\section{What was measured and rejected}
-\label{sec:negative}
-The performance work is evidence-driven, and most of the evidence is negative. The levers
-below were implemented far enough to measure and then removed; recording them is what
-keeps the next attempt from re-deriving them. All numbers are Apple M3, 8 threads,
-interleaved A/B.
-
-\textbf{Kernel knobs.} Panel width \{32, 48, 64, 96\} and the three GEMM gates swept over
-two orders of magnitude are flat within noise on the reference problems: the shipped
-values, tuned on x86, transfer. The gap to the vendor libraries is not parameter
-placement.
-
-\textbf{Batching small updates.} Aggregating several descendant updates that land in the
-same column slab into one GEMM was quantified before implementation: the sub-100M-flop
-nodes carry $\sim14\%$ of the \code{cmod} CPU at \numrange{2.1}{3.8}\,GF/s, so the
-theoretical ceiling is $\sim10\%$ wall, and the measured gather padding
-(\numrange{2.7}{5.9}$\times$) does not clear the break-even. Shelved.
-
-\textbf{Index narrowing.} Narrowing the schedule and scatter maps to 32-bit indices is
-bit-identical and measured neutral in time on the supernodal paths (where KLU gained
-from the same change), because the supernodal path is GEMM-bound where KLU is
-index-bound. Kept anyway: it halves the resident schedule memory ($\sim$100\,MB on a
-$44^3$ grid).
-
-\textbf{Recycling the dense panels.} A panel pool measured \numrange{4}{6}\% \emph{slower}
-than fresh allocations across two classes: fresh mallocs get lazily zeroed pages from the
-OS, a pooled buffer needs an explicit memset.
-
-\textbf{Scheduling on the exact updater DAG.} The left-looking driver makes a node wait
-for its whole child subtrees, which is a strict superset of what it depends on (its
-updaters). Rebuilding the executor as a dataflow scheduler over the exact updater lists
-is bit-identical and mostly slower: $-37$ to $-46\%$ on convection--diffusion 2D, $-71\%$
-on curl--curl, $-59\%$ on the saddle class, against $+22$ to $+28\%$ on two mid-size
-cases. The false dependencies are not what costs the time. The recursion keeps a subtree
-on one worker so its panels stay hot, and where the flops concentrate in a few large
-fronts the idle workers are exactly what the in-node parallel kernels steal to help.
-
-\textbf{Picking the multifrontal schedule per matrix.} Multifrontal is
-\numrange{6}{16}\% faster than left-looking on convection--diffusion 2D and up to 24\%
-slower elsewhere, so a per-matrix pick looked free. No structural predicate separates the
-cases: \code{helmholtz\_4096} and \code{convdiff3d\_4096} have identical front counts,
-identical mean and flop-weighted front heights and identical top-front flop shares, and
-opposite outcomes. Weighted by wall time the pick is negative anyway.
-
-\textbf{A fused scatter-accumulating update.} Accumulating the update product straight
-into the target panel through the row map, instead of materializing it and scattering it
-afterwards, removes one write and one read of $m\times n$ values per update. It is about
-twice as slow: generic Rust over \code{Complex<f64>} compiles to scalar multiply-add
-pairs on an interleaved layout, while the packed path gets NEON FCMA micro-kernels with
-$3\times4$ register blocking. The traffic saved is worth less than the kernel quality
-lost.
-
-\textbf{Where that leaves the direct paths.} The diagnosis those experiments converge on:
-on the classes where every update is small, the factor is neither ordering-bound nor
-kernel-bound. The packed GEMM sustains \numrange{31}{40}\,GF/s on exactly the shapes
-those updates have, while the factor extracts about $3$\,GF/s from it, because each
-update streams cold operands and reuses nothing; and 59\% of the thread time at 8 threads
-is idle workers, with 1-to-8-thread scaling of \numrange{2.4}{2.8}$\times$. Raising the
-floor those two numbers describe is a kernel-fusion project against a mature GEMM, and
-the honest ceiling on it is the traffic share, which the fused-kernel experiment above
-measured as too small to pay. The one lever that did move this class was structural, not
-numerical: the amalgamation default of Sec.~\ref{sec:symbolic}.
-
 \section{Conclusion}
 \rT{} is a pure-Rust, scalar-generic sparse direct solver with three paths matched to
 their operator classes: a supernodal complex-symmetric $\LDLt$, a supernodal/multifrontal
 threshold-pivoted $\LU$, and a sequential, bit-deterministic KLU path with a numeric-only
 refactor for fixed-pattern sweeps. It reaches within a single-digit factor of MKL PARDISO
-while remaining dependency-free, is faster and smaller than the open-source alternatives,
-and on Apple Silicon it is ahead of the vendor library on the geomean of all three paths
-($0.70$ factor time, $0.38$ one-shot). Its analyze phase predicts memory, work and
-runtime as exact functions of the structure, which is what lets the shipped
-configuration be an exact race rather than a model. When the factor is made
+while remaining dependency-free, is faster and leaner than the open-source alternatives,
+and on Apple Silicon it factors the corpus in $0.70$ of Accelerate's wall time
+($0.38$ one-shot) in geomean over the three paths. Its analyze phase computes memory,
+work and runtime as exact functions of the structure, which is what lets the shipped
+configuration be an exact race over candidates rather than a model of them. When the factor is made
 approximate it becomes a preconditioner, and the matching Krylov layer (COCG/COCR,
 flexible GMRES, deflating block GMRES, GCRO-DR recycling) turns the direct factor into
 the engine of a fast preconditioned iterative solver.
