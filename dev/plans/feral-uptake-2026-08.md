@@ -126,7 +126,7 @@ in-place entry points.
   the certified ladder they carried should come back as this contract plus the
   existing `LowPrecisionPreconditioner`, not as new solver types.
 
-## WP5 - Multi-RHS solve
+## WP5 - Multi-RHS solve (closed 2026-08-31: measured, no change)
 
 feral measured their BLAS-3 multi-RHS path losing 1.4-1.8x when `nrhs` is not a
 multiple of 8, because a row stride of exactly `nrhs` puts every panel row across
@@ -144,19 +144,29 @@ worth 1.36x geomean at `nrhs = 33`.
      has to be designed against our existing structure: the fused equilibration
      scale, the parallel chunking, and the bit-identity-across-thread-counts
      guarantee all live in the current kernel and must survive.
-- **Test.** A `to_bits()` equality test across every `nrhs % 8` residue against
-  the current kernel, and the existing thread-invariance tests extended to the
-  panel path.
+- **Outcome.** Neither half survives measurement, see
+  `dev/research/multi-rhs-and-mc64-2026-08.md`. There is no residue hump to
+  recover (per-RHS cost falls monotonically with the block width; `nrhs = 31`
+  sits between 30 and 32), and at `nrhs = 64` the AXPY block solve already runs
+  at 41 GF/s, the rate the packed GEMM reaches on hot operands. A panel path has
+  no headroom to build into.
 
-## WP6 - Small, self-contained
+## WP6 - Small, self-contained (closed 2026-08-31)
 
-- **MC64 Hungarian heap:** store the key inline in the heap entry (feral: 4-5%
-  on large matchings, bit-identical).
-- **Scaling cache fingerprint:** feral found their cache rejecting matrices
-  against their own fingerprint. Check whether our scaling reuse has the same
-  hole; we may not have the cache at all, in which case this is a no-op.
-- **Thread-pool fallback:** a failed scoped pool should fall back to the
-  sequential driver instead of propagating; check `in_scoped_pool`.
+- **MC64 Hungarian heap:** implemented and declined. The inline key is a 5-6%
+  regression here, because our heap holds one augmenting search's touched set
+  rather than the whole row set: the indirection it removes was already
+  cache-resident, and the key doubles the bytes per move.
+- **Scaling cache fingerprint:** not applicable. RSLAB has no cross-call scaling
+  cache; the matching is computed and consumed inside one analysis.
+- **Thread-pool fallback:** already present. `in_scoped_pool` runs the closure on
+  the calling thread when the pool cannot be built.
+
+## Status
+
+WP1, WP2 (merged), WP3 (merged), WP4 (merged) shipped. WP5 and WP6 are closed by
+measurement without a code change; the evidence is in
+`dev/research/multi-rhs-and-mc64-2026-08.md`. That completes the uptake.
 
 ## Sequencing
 
