@@ -272,6 +272,25 @@ threshold dropping (\code{drop\_tol}: incomplete factors) and \code{f32} mixed
 precision, this never-fail factor is the preconditioner the Krylov layer consumes.
 The KLU path never perturbs: a vanishing pivot is a hard, attributed error.
 
+\subsection{Iterative refinement and what it certifies}
+\label{sec:refine}
+A solve can be refined against the original matrix, and what counts as converged
+is the caller's to state: a policy object names the step budget, the target
+and the measure, and every entry point returns the achieved backward error
+rather than only the step count. With $r=b-Ax$ the two measures are the normwise
+$\omega=\|r\|_\infty/(\|A\|_\infty\|x\|_\infty+\|b\|_\infty)$ and the
+componentwise $\omega=\max_i|r_i|/(|A||x|+|b|)_i$, the backward errors of
+$(A+\delta A)x=b+\delta b$ under $\|\delta A\|\le\omega\|A\|$ and
+$|\delta A|\le\omega|A|$ respectively. The componentwise one is the default and
+the stricter: a row scaled far below the matrix norm can carry a large relative
+error in its own equation while contributing nothing to the normwise ratio, so a
+normwise stop certifies solutions a componentwise stop rejects. Refinement is not
+monotone on ill-conditioned systems, so the iterate returned is the best measured
+one, and a non-finite iterate never certifies. The same contract and the same two
+formulas serve the $\LDLt$, $\LU$ and KLU paths; in-place entry points refine a
+caller-owned buffer without allocating. The Krylov layer keeps its own stop test
+on the true relative residual, a weaker quantity than either backward error.
+
 \section{A-priori predictors}
 \label{sec:pred}
 The analyze phase computes a set of predictors as \emph{exact functions of the symbolic

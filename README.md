@@ -143,6 +143,21 @@ let f = sym.factor(&a, &opts)?;
 let (nnz, d) = (f.factor_nnz(), f.diagnostics());
 ```
 
+```rust
+use rslab::{BackwardError, RefinePolicy};
+
+// Refinement says what it achieved, not just how many steps it took. The
+// default stops at the componentwise backward error, the criterion a normwise
+// one cannot see through a badly scaled row.
+let policy = RefinePolicy::default().with_measure(BackwardError::Componentwise);
+let (x, outcome) = f.solve_refined_with(&a, &b, &policy)?;
+if !outcome.certified { /* omega = outcome.omega after outcome.steps steps */ }
+
+// Or refine a buffer the caller owns, allocating nothing for the solution.
+let mut x = f.solve(&b)?;
+let outcome = f.refine_into(&a, &b, &mut x, &policy)?;
+```
+
 `gmres`, `gmres_block`, `cocg` and `cocr` accept any `LinearOperator` plus
 `Preconditioner`; every factor implements `Preconditioner`, and a `Complex<f32>`
 factor can precondition an `f64` GMRES through `LowPrecisionPreconditioner`.
