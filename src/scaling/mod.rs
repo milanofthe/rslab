@@ -556,8 +556,23 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 /// order of magnitude below MUONSINE's (512), giving the widest
 /// possible margin on either side of the validation panel.
 ///
-/// One O(n+nnz) pass over the column pointers and row indices.
-/// No allocations.
+/// **Routing on the matrix, not on the numbering.** The head gate measures the
+/// *symmetric* degree of an index, not the length of its stored column. A
+/// `CscMatrix` holds one triangle, so a stored column counts couplings to one
+/// side of `j` only - a property of the index order. Under the pure relabeling
+/// `P(i) = n-1-i` an arrow head reports its full degree one way and its
+/// diagonal-plus-one the other, and the route flips. Symmetric degree is never
+/// smaller than the stored degree, so the gate can only become easier to pass:
+/// no matrix loses `Mc64Symmetric` to this.
+///
+/// The slack-mass gate is still order-dependent; every invariant reformulation
+/// measured at the fork upstream stripped `Mc64Symmetric` from matrices that
+/// need it, so it stays as it is.
+///
+/// Cost: one allocation-free `O(n+nnz)` pass decides every matrix that fails the
+/// slack-mass gate or whose densest stored column already clears the threshold
+/// (sound, by the monotonicity above). Only the ambiguous remainder allocates
+/// the `n`-length degree accumulator.
 pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     /// Maximum stored column nnz for the Auto policy to consider the
     /// matrix "banded enough" that InfNorm is the safe choice even
@@ -598,9 +613,31 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
             diag_only += 1;
         }
     }
-    let has_arrow_head = max_col_nnz > MAX_COL_NNZ_FOR_INFNORM;
     let has_slack_mass = diag_only as f64 / n as f64 >= 0.3;
-    if has_arrow_head && has_slack_mass {
+    if !has_slack_mass {
+        return ScalingStrategy::InfNorm;
+    }
+    // Stored degree is a lower bound on symmetric degree: clearing the gate on
+    // the cheap pass is already decisive.
+    if max_col_nnz > MAX_COL_NNZ_FOR_INFNORM {
+        return ScalingStrategy::Mc64Symmetric;
+    }
+    // Ambiguous: the stored column is short, but the index may still be the
+    // arrow head seen from the other side. Count both directions.
+    let mut deg = vec![0usize; n];
+    for j in 0..n {
+        for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+            if matrix.values[k] == 0.0 {
+                continue;
+            }
+            let i = matrix.row_idx[k];
+            deg[i] += 1;
+            if i != j {
+                deg[j] += 1;
+            }
+        }
+    }
+    if deg.iter().copied().max().unwrap_or(0) > MAX_COL_NNZ_FOR_INFNORM {
         ScalingStrategy::Mc64Symmetric
     } else {
         ScalingStrategy::InfNorm
@@ -616,6 +653,121 @@ pub(crate) use hungarian::{hungarian_match, CostGraph, Matching};
 mod tests {
     use super::*;
     use crate::sparse::csc::CscMatrix;
+
+    /// Lower-triangle CSC from triplets `(row, col, value)` with `row >= col`.
+    fn from_lower(n: usize, trip: &[(usize, usize, f64)]) -> CscMatrix {
+        let (rows, cols, vals): (Vec<_>, Vec<_>, Vec<_>) = trip
+            .iter()
+            .map(|&(i, j, v)| {
+                assert!(i >= j, "lower triangle only");
+                (i, j, v)
+            })
+            .fold((vec![], vec![], vec![]), |mut acc, (i, j, v)| {
+                acc.0.push(i);
+                acc.1.push(j);
+                acc.2.push(v);
+                acc
+            });
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    /// Relabel by `P(i) = n-1-i` and re-fold into the lower triangle. This is a
+    /// pure renumbering: the matrix is the same operator with its indices
+    /// reversed, so every routing decision must be unchanged.
+    fn reversed(n: usize, trip: &[(usize, usize, f64)]) -> Vec<(usize, usize, f64)> {
+        trip.iter()
+            .map(|&(i, j, v)| {
+                let (pi, pj) = (n - 1 - i, n - 1 - j);
+                (pi.max(pj), pi.min(pj), v)
+            })
+            .collect()
+    }
+
+    /// `n_iso` isolated diagonal-only indices plus a star of `leaves` indices
+    /// around one head. The head's couplings are stored in its own column when
+    /// the head has the smallest index of the star, and in the leaves' columns
+    /// when it has the largest - which is exactly the asymmetry a stored-column
+    /// gate reads and a symmetric-degree gate does not. The slack-mass gate
+    /// passes in both orientations by construction (the leaves are degree-1 one
+    /// way, the head and the isolated indices are degree-1 the other).
+    fn star_with_isolated(n_iso: usize, leaves: usize) -> (usize, Vec<(usize, usize, f64)>) {
+        let n = n_iso + 1 + leaves;
+        let head = n_iso; // smallest index of the star
+        let mut trip: Vec<(usize, usize, f64)> = (0..n).map(|i| (i, i, 4.0)).collect();
+        for l in 0..leaves {
+            let leaf = n_iso + 1 + l;
+            trip.push((leaf.max(head), leaf.min(head), 0.5));
+        }
+        (n, trip)
+    }
+
+    /// `n_iso` isolated diagonal-only indices plus a genuine band of `n_band`
+    /// indices with half-bandwidth `bw`: every index couples only to its
+    /// neighbours, so its symmetric degree is at most `2*bw+1` no matter how the
+    /// indices are numbered. This is the clnlbeam shape - high diagonal-only
+    /// mass, narrow coupling - that the head gate must keep on InfNorm.
+    fn banded_with_isolated(
+        n_iso: usize,
+        n_band: usize,
+        bw: usize,
+    ) -> (usize, Vec<(usize, usize, f64)>) {
+        let n = n_iso + n_band;
+        let mut trip: Vec<(usize, usize, f64)> = (0..n).map(|i| (i, i, 4.0)).collect();
+        for j in n_iso..n {
+            for d in 1..=bw {
+                if j + d < n {
+                    trip.push((j + d, j, -1.0));
+                }
+            }
+        }
+        (n, trip)
+    }
+
+    /// The route is a property of the matrix, not of the numbering.
+    #[test]
+    fn scaling_route_is_permutation_invariant() {
+        let (n, star) = star_with_isolated(60, 35);
+        let (n_small, small_star) = star_with_isolated(60, 20);
+        let tri: Vec<(usize, usize, f64)> = (0..200)
+            .flat_map(|i| {
+                let mut e = vec![(i, i, 4.0)];
+                if i + 1 < 200 {
+                    e.push((i + 1, i, -1.0));
+                }
+                e
+            })
+            .collect();
+
+        for (label, n, trip) in [
+            ("star head degree 36", n, star),
+            ("star head degree 21", n_small, small_star),
+            ("tridiagonal", 200, tri),
+        ] {
+            let forward = pick_scaling_strategy(&from_lower(n, &trip));
+            let backward = pick_scaling_strategy(&from_lower(n, &reversed(n, &trip)));
+            assert_eq!(forward, backward, "{label}: route flipped under relabeling");
+        }
+    }
+
+    /// The head gate itself still separates: a star wide enough to be an arrow
+    /// head routes to MC64 from either end, a narrow one to InfNorm from either.
+    #[test]
+    fn scaling_head_gate_separates_by_symmetric_degree() {
+        let (n, wide) = star_with_isolated(60, 35);
+        let (n2, narrow) = star_with_isolated(60, 20);
+        for trip in [wide.clone(), reversed(n, &wide)] {
+            assert_eq!(
+                pick_scaling_strategy(&from_lower(n, &trip)),
+                ScalingStrategy::Mc64Symmetric
+            );
+        }
+        for trip in [narrow.clone(), reversed(n2, &narrow)] {
+            assert_eq!(
+                pick_scaling_strategy(&from_lower(n2, &trip)),
+                ScalingStrategy::InfNorm
+            );
+        }
+    }
 
     /// Build an arrow-KKT-shaped CSC.
     ///
@@ -762,13 +914,17 @@ mod tests {
 
     #[test]
     fn pick_scaling_strategy_picks_infnorm_for_banded_high_diag_only() {
-        // The clnlbeam shape: large n, high diag_only ratio (0.40)
-        // but narrow band (max_col_nnz=5). Must route to InfNorm -
-        // this is the entire motivation for adding the dense-column
-        // gate. See `dev/journal/2026-05-17-01.org` section 14:30.
-        // 60 slack cols + 40 banded cols (diag + 4 earlier rows).
-        let csc = shape_csc(100, 60, 4);
-        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
+        // The clnlbeam shape: high diagonal-only mass (0.60) but a narrow
+        // band, so no index couples widely. Must route to InfNorm - this is
+        // the entire motivation for the head gate. See
+        // `dev/journal/2026-05-17-01.org` section 14:30. The band is built as
+        // a band rather than as couplings to a few shared leading rows: the
+        // latter is an arrow head that only the stored-column view hides.
+        let (n, trip) = banded_with_isolated(60, 40, 2);
+        assert_eq!(
+            pick_scaling_strategy(&from_lower(n, &trip)),
+            ScalingStrategy::InfNorm
+        );
     }
 
     #[test]
@@ -792,14 +948,18 @@ mod tests {
 
     #[test]
     fn pick_scaling_strategy_max_col_nnz_threshold_boundary() {
-        // diag_only/n satisfied for both (50/100=0.50 >= 0.30).
-        // Only the dense-column degree varies across the boundary at 32.
-        // 50 slacks + 50 cols of (1 diag + 31 off) = 32 nnz -> fails gate.
-        let at32 = shape_csc(100, 50, 31);
-        assert_eq!(pick_scaling_strategy(&at32), ScalingStrategy::InfNorm);
-        // 50 slacks + 50 cols of (1 diag + 32 off) = 33 nnz -> passes.
-        let at33 = shape_csc(100, 50, 32);
-        assert_eq!(pick_scaling_strategy(&at33), ScalingStrategy::Mc64Symmetric);
+        // Diagonal-only mass is satisfied for both; only the head's symmetric
+        // degree crosses the boundary at 32.
+        let (n32, at32) = star_with_isolated(60, 31); // head degree 32 -> fails
+        assert_eq!(
+            pick_scaling_strategy(&from_lower(n32, &at32)),
+            ScalingStrategy::InfNorm
+        );
+        let (n33, at33) = star_with_isolated(60, 32); // head degree 33 -> passes
+        assert_eq!(
+            pick_scaling_strategy(&from_lower(n33, &at33)),
+            ScalingStrategy::Mc64Symmetric
+        );
     }
 
     #[test]

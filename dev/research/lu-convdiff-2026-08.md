@@ -72,6 +72,14 @@ like cheap money. It is not, because it loses everywhere else and no structural
 statistic separates the two cases. `mf_gain` is left-looking time over
 multifrontal time, so above 1.0 means multifrontal wins:
 
+Measured under the pre-v0.29 default (relaxed amalgamation on) and with the
+frontal heights as the symbolic reported them before the exact-nrow fix of
+2026-08-31; both moved afterwards. Under the current default the two decisive
+rows still carry identical structure: `helmholtz_4096` and `convdiff3d_4096`
+both report 947 fronts, mean height 4.3, flop-weighted height 77 and top-front
+share 0.404. The counterexample therefore stands; the absolute numbers below do
+not.
+
 | matrix | fronts | mean rows | flop-weighted rows | top-front flop share | mf_gain |
 |---|--:|--:|--:|--:|--:|
 | convdiff2d_21025 | 277 | 75.9 | 238 | 0.019 | **1.163** |

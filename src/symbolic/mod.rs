@@ -1145,6 +1145,62 @@ fn compute_peak_contrib(supernodes: &[Supernode], contrib_sizes: &[usize]) -> us
 
 #[cfg(test)]
 mod tests {
+
+    /// The frontal height reported by the symbolic phase must equal the row set
+    /// the numeric phase actually builds. They come from different code: the
+    /// symbolic tracks the union cardinality through amalgamation, the schedule
+    /// materializes the rows from the permuted pattern. A merged supernode is
+    /// where the two used to disagree, so the amalgamation is swept.
+    #[test]
+    fn supernode_nrow_matches_the_built_row_sets() {
+        use crate::numeric::ll_common::LlSchedule;
+        // 2D 5-point Laplacian, lower triangle.
+        let k = 20usize;
+        let n = k * k;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        let push = |i: usize,
+                    j: usize,
+                    v: f64,
+                    rows: &mut Vec<usize>,
+                    cols: &mut Vec<usize>,
+                    vals: &mut Vec<f64>| {
+            rows.push(i.max(j));
+            cols.push(i.min(j));
+            vals.push(v);
+        };
+        for y in 0..k {
+            for x in 0..k {
+                let idx = y * k + x;
+                push(idx, idx, 4.0, &mut rows, &mut cols, &mut vals);
+                if x + 1 < k {
+                    push(idx + 1, idx, -1.0, &mut rows, &mut cols, &mut vals);
+                }
+                if y + 1 < k {
+                    push(idx + k, idx, -1.0, &mut rows, &mut cols, &mut vals);
+                }
+            }
+        }
+        let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
+
+        for nemin in [1usize, 16, 32] {
+            let params = SupernodeParams {
+                nemin,
+                ..Default::default()
+            };
+            let sym = symbolic_factorize(&a, &params).unwrap();
+            let sched = LlSchedule::build(&sym);
+            let merged = sym.supernodes.iter().filter(|sn| sn.ncol > 1).count();
+            assert!(merged > 0, "nemin={nemin}: nothing merged, test is vacuous");
+            for (s, snode) in sym.supernodes.iter().enumerate() {
+                assert_eq!(
+                    snode.nrow,
+                    sched.rows(s).len(),
+                    "nemin={nemin}, supernode {s} (ncol={})",
+                    snode.ncol
+                );
+            }
+        }
+    }
     use super::*;
 
     #[test]
