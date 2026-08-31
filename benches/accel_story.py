@@ -53,18 +53,20 @@ CLASSES = {
 
 # Short note per release for the timeline callouts. Releases without an entry stay
 # unlabeled (patch releases, wasm and CI fixes).
+# Kept to a few words each: the callouts are set vertically at their release, so
+# their length is headroom the data has to give up.
 RELEASE_NOTES = {
-    "v0.18.0": "ND bakeoff\nin tuned()",
-    "v0.19.0": "heuristic default pick,\nLL throughput work",
-    "v0.20.0": "mixed precision,\nBLR tail",
-    "v0.22.0": "bit-identity fix,\nAutoRace prefixes",
+    "v0.18.0": "ND bakeoff",
+    "v0.19.0": "heuristic pick",
+    "v0.20.0": "mixed precision",
+    "v0.22.0": "bit-identity fix",
     "v0.23.0": "circuit family",
-    "v0.24.0": "clean-room ND,\nKLU 32-bit kernels",
-    "v0.25.0": "KLU parallel\nrefactor",
-    "v0.26.0": "KLU parallel\nby default",
+    "v0.24.0": "clean-room ND",
+    "v0.25.0": "KLU parallel refactor",
+    "v0.26.0": "KLU parallel default",
     "v0.27.0": "Hopcroft-Karp BTF",
-    "v0.28.0": "consolidation,\nordering race",
-    "v0.29.0": "amalgamation\noff by default",
+    "v0.28.0": "ordering race",
+    "v0.29.0": "amalgamation off",
 }
 
 METRICS = {
@@ -169,6 +171,7 @@ def class_bars(rows, ax):
     ax.set_xlim(0, max(vals) * 1.12)
     ax.set_xlabel(YLABEL, fontsize=9)
     ax.grid(axis="x", alpha=0.3, linewidth=0.5)
+    st.despine(ax)
     ax.set_title(f"RSLAB {latest} vs Accelerate, per matrix class (M3, 8 threads)",
                  fontsize=9)
     handles = [Patch(facecolor=st.DARKGRAY, label="one-shot"),
@@ -191,29 +194,30 @@ def timeline(rows, ax, metric, annotate=True):
         ax.plot(xs, ys, marker="o", ms=3.5, color=color, lw=1.4, label=label)
     mean = [geomean([series[l][i] for _, _, l, _ in PATHS]) for i in range(len(vers))]
     ax.plot(xs, mean, color=st.DARKGRAY, lw=2.2, ls=":", label="mean over all paths")
-    ax.axhline(1.0, color=st.GRAY, lw=1.0, ls="--")
-    ax.text(len(vers) - 0.5, 1.0, "Accelerate", color=st.GRAY, fontsize=7,
-            va="bottom", ha="right")
+    ax.axhline(1.0, color=st.GRAY, lw=1.0, ls="--", label="Accelerate")
 
     log_axis(ax, "y")
     lo = np.nanmin([y for ys in series.values() for y in ys])
     hi = np.nanmax([y for ys in series.values() for y in ys])
     if annotate:
+        # Set vertically at a common baseline above the data: with 18 releases a
+        # horizontal callout is wider than the space between two of them, so
+        # rotating is what keeps the labels from running into each other.
         for i, v in enumerate(vers):
             note = RELEASE_NOTES.get(v)
             if not note:
                 continue
-            ha = "left" if i == 0 else ("right" if i == len(vers) - 1 else "center")
-            ax.annotate(note, (i, hi), xytext=(0, 12 if i % 2 == 0 else 30),
-                        textcoords="offset points", ha=ha, fontsize=6,
-                        color="black" if st.REPORT else st.GRAY)
-        hi *= 2.6
+            ax.annotate(note, (i, hi), xytext=(0, 5), textcoords="offset points",
+                        rotation=90, rotation_mode="anchor", ha="left", va="center",
+                        fontsize=6, color="black" if st.REPORT else st.GRAY)
+        hi *= 4.5
     ax.set_ylim(lo / 1.3, hi * 1.05)
     ax.set_xticks(xs)
     ax.set_xticklabels([v.lstrip("v") for v in vers], fontsize=7, rotation=60,
                        ha="right")
     ax.set_ylabel(YLABEL, fontsize=9)
     ax.grid(axis="y", alpha=0.3, linewidth=0.5)
+    st.despine(ax)
     ax.set_title(f"Per release, same matrices ({METRICS[metric][0]})", fontsize=9)
     return vers, series, mean
 
@@ -226,6 +230,7 @@ def scaling(rows, ax, metric="factor"):
     latest = versions(rows)[-1]
     cost = METRICS[metric][1]
     color = {fam: c for fam, _, _, c in PATHS}
+    labels = []
     for prefix, (label, fam, solv) in CLASSES.items():
         pts = sorted((r["nnz"], cost(r) / ref[(fam, r["name"])]) for r in rows
                      if r["version"] == latest and r["family"] == fam
@@ -235,17 +240,35 @@ def scaling(rows, ax, metric="factor"):
             continue
         ax.plot([p[0] for p in pts], [p[1] for p in pts], marker="o", ms=3.5,
                 color=color[fam], lw=1.3)
-        ax.annotate(f" {label}", pts[-1], fontsize=6.5, color=color[fam],
-                    va="center", ha="left")
+        labels.append([pts[-1][0], pts[-1][1], label, color[fam]])
+    # Label each class at its largest matrix, then push apart the ones that would
+    # print on top of each other: two classes can end at nearly the same size and
+    # ratio, and a fixed placement then overlaps.
+    labels.sort(key=lambda l: l[1])
+    min_sep = 0.055                       # decades of y, at this figure height
+    for i in range(1, len(labels)):
+        x, y, _, _ = labels[i]
+        px, py, _, _ = labels[i - 1]
+        close_x = abs(np.log10(x / px)) < 0.5
+        if close_x and np.log10(y / py) < min_sep:
+            labels[i][1] = py * 10 ** min_sep
+    for x, y, label, c in labels:
+        ax.annotate(f" {label}", (x, y), fontsize=6.5, color=c, va="center",
+                    ha="left")
+
     ax.axhline(1.0, color=st.GRAY, lw=1.0, ls="--")
-    ax.text(ax.get_xlim()[0], 1.0, " Accelerate", color=st.GRAY, fontsize=7,
-            va="bottom", ha="left")
+    # Anchored in axes fraction, not in data: anchoring to `get_xlim()` before
+    # the scale switch put the label at the linear-scale origin, which a log axis
+    # then had to grow to include (a 241534 px wide figure).
+    ax.text(0.01, 1.0, " Accelerate", color=st.GRAY, fontsize=7, va="bottom",
+            ha="left", transform=ax.get_yaxis_transform())
     ax.set_xscale("log")
     log_axis(ax, "y")
     ax.set_xlim(right=ax.get_xlim()[1] * 3.2)
     ax.set_xlabel("nonzeros in A", fontsize=9)
     ax.set_ylabel(YLABEL, fontsize=9)
     ax.grid(alpha=0.3, linewidth=0.5)
+    st.despine(ax)
     ax.set_title("Wall time vs problem size (factor only)", fontsize=9)
 
 

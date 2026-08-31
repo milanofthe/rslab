@@ -111,6 +111,14 @@ def two_panel(figsize=(11.0, 4.6)):
     return fig, (ax_wct, ax_mem)
 
 
+def despine(*axes):
+    """Drop the top and right spines: the frame carries no information once the
+    grid is there, and the open corner leaves room for callouts."""
+    for ax in axes:
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+
 def legend_below(fig, handles=None, labels=None, ax=None, ncol=None, fontsize=9):
     """Place the figure legend in a compact block just **below** the plot: a
     single horizontal row, wrapping to two rows only when there are many entries.
