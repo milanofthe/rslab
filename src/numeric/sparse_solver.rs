@@ -107,7 +107,9 @@ impl<T: Scalar> LdltSolver<T> {
     /// call; for the *analyze once, factor many* workflow use
     /// [`LdltSymbolic`].
     pub fn factor_with(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
-        LdltSymbolic::analyze(a)?.factor(a, opts)
+        // The analysis honours the caller's symbolic settings (ordering, child reordering):
+        // `analyze` alone took the defaults and silently ignored `opts.ordering`.
+        LdltSymbolic::analyze_with(a, opts)?.factor(a, opts)
     }
 
     /// Solve `A * x = rhs` using the stored factors. The equilibration
