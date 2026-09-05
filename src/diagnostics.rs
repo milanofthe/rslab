@@ -228,21 +228,137 @@ pub struct StageReport {
     pub bytes: u64,
 }
 
-/// Per-stage diagnostics for one factorization. Per-call and concurrency-safe (no
-/// global state), so a solver-in-the-loop with many concurrent solves gets correct
-/// per-solve numbers. Carries the a-priori [`MemoryEstimate`] alongside the
-/// measured factor time for estimate-vs-actual feedback.
+/// The choices the solver made on its own for one factorization: what the
+/// `Auto` settings resolved to and what the structure looked like. Plain
+/// strings (the `Debug` form of the enums) so a host can display or serialise
+/// them without the enum types.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Decisions {
+    /// The ordering the caller asked for (`Auto` included).
+    pub ordering_requested: String,
+    /// The ordering actually dispatched after `Auto` resolution.
+    pub ordering_used: String,
+    /// The ordering preprocessor actually used (`None` / `LdltCompress`).
+    pub preprocess: String,
+    /// The supernode amalgamation strategy actually used.
+    pub amalgamation: String,
+    /// The equilibration applied before factoring (the symmetric path); the
+    /// unsymmetric paths name their built-in scaling.
+    pub scaling: String,
+    /// The numeric kernel (`LeftLooking`, `Multifrontal`, `Klu`).
+    pub method: String,
+    pub n_supernodes: usize,
+    /// Largest front (rows) after amalgamation.
+    pub max_front: usize,
+    /// Depth of the assembly tree.
+    pub tree_levels: usize,
+    /// KLU: number of BTF blocks (0 when BTF is off or not a KLU factor).
+    pub btf_blocks: usize,
+}
+
+/// What the numeric phase did to the pivots.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NumericReport {
+    /// Pivots lifted by the static-pivoting floor (`n_perturbed`).
+    pub perturbed: usize,
+    /// Bunch-Kaufman 2x2 pivots (`None` for the LU paths).
+    pub two_by_two: Option<usize>,
+    /// Inertia `(positive, negative, zero)` of a symmetric factor.
+    pub inertia: Option<(usize, usize, usize)>,
+}
+
+/// Solve-phase accumulators (updated by every `solve*` call on the factor).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SolveStats {
+    /// Right-hand sides solved (a `solve_many` counts each column).
+    pub rhs: usize,
+    /// `solve*` calls.
+    pub calls: usize,
+    pub wall_ms: f64,
+    /// Iterative-refinement steps taken over all calls.
+    pub refine_steps: usize,
+}
+
+impl SolveStats {
+    pub fn record(&mut self, rhs: usize, wall_ms: f64, refine_steps: usize) {
+        self.rhs += rhs;
+        self.calls += 1;
+        self.wall_ms += wall_ms;
+        self.refine_steps += refine_steps;
+    }
+}
+
+/// [`SolveStats`] behind a mutex, so a factor handle records its solves
+/// through `&self`; cloning snapshots the counters (a cloned handle starts a
+/// separate account).
+#[derive(Debug, Default)]
+pub struct SolveCounter(std::sync::Mutex<SolveStats>);
+
+impl SolveCounter {
+    pub fn record(&self, rhs: usize, wall_ms: f64, refine_steps: usize) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(rhs, wall_ms, refine_steps);
+    }
+    pub fn snapshot(&self) -> SolveStats {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Clone for SolveCounter {
+    fn clone(&self) -> Self {
+        SolveCounter(std::sync::Mutex::new(self.snapshot()))
+    }
+}
+
+/// Everything one factorization can tell about itself: the per-stage cost,
+/// the decisions taken, the numeric outcome, the settings that had no effect
+/// on the chosen path, and the solve-phase accumulators. Per-call and
+/// concurrency-safe (no global state), so a solver-in-the-loop with many
+/// concurrent solves gets correct per-solve numbers. Carries the a-priori
+/// [`MemoryEstimate`] alongside the measured factor time for estimate-vs-actual
+/// feedback. Logged as one `Info` line per factorization (see
+/// [`summary`](Self::summary)) and readable from the factor handle.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
+    /// `analyze` (ordering + symbolic; the analysis time of the reused
+    /// symbolic object), `scale`, `factor`, `refactor` in order.
     pub stages: Vec<StageReport>,
     pub threads: usize,
+    pub n: usize,
+    /// Stored nonzeros of the input pattern.
+    pub nnz_a: u64,
     pub factor_nnz: u64,
     pub estimate: Option<MemoryEstimate>,
+    pub decisions: Decisions,
+    pub numeric: NumericReport,
+    /// Settings the caller set to a non-default value that the chosen factor
+    /// path does not read (also emitted as `Warning` log records).
+    pub warnings: Vec<String>,
+    pub solves: SolveStats,
 }
 
 impl Diagnostics {
+    /// Wall time of the recorded stages (the analysis stage included when the
+    /// symbolic object recorded it).
     pub fn total_ms(&self) -> f64 {
         self.stages.iter().map(|s| s.wall_ms).sum()
+    }
+    /// Wall time of one stage by name, `None` if not recorded.
+    pub fn stage_ms(&self, name: &str) -> Option<f64> {
+        self.stages
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.wall_ms)
+    }
+    /// `nnz(L) / nnz(A)` (`0` without an input count).
+    pub fn fill_ratio(&self) -> f64 {
+        if self.nnz_a == 0 {
+            0.0
+        } else {
+            self.factor_nnz as f64 / self.nnz_a as f64
+        }
     }
     pub fn push(&mut self, name: &'static str, wall_ms: f64, flops: u64, bytes: u64) {
         self.stages.push(StageReport {
@@ -252,15 +368,62 @@ impl Diagnostics {
             bytes,
         });
     }
+    /// The one-line account the `Info` log carries per factorization.
+    pub fn summary(&self) -> String {
+        let mut s = format!(
+            "{} n={} nnz(A)={} nnz(L)={} fill={:.2} threads={} ordering={}",
+            self.decisions.method,
+            self.n,
+            self.nnz_a,
+            self.factor_nnz,
+            self.fill_ratio(),
+            self.threads,
+            self.decisions.ordering_used,
+        );
+        if self.decisions.ordering_requested != self.decisions.ordering_used
+            && !self.decisions.ordering_requested.is_empty()
+        {
+            s.push_str(&format!(
+                " (requested {})",
+                self.decisions.ordering_requested
+            ));
+        }
+        if self.decisions.n_supernodes > 0 {
+            s.push_str(&format!(
+                " supernodes={} max_front={} levels={}",
+                self.decisions.n_supernodes, self.decisions.max_front, self.decisions.tree_levels
+            ));
+        }
+        if self.decisions.btf_blocks > 0 {
+            s.push_str(&format!(" btf_blocks={}", self.decisions.btf_blocks));
+        }
+        if self.numeric.perturbed > 0 {
+            s.push_str(&format!(" perturbed={}", self.numeric.perturbed));
+        }
+        if let Some(k) = self.numeric.two_by_two {
+            s.push_str(&format!(" pivots2x2={k}"));
+        }
+        for st in &self.stages {
+            s.push_str(&format!(" {}={:.1}ms", st.name, st.wall_ms));
+        }
+        if let Some(e) = &self.estimate {
+            s.push_str(&format!(" est_peak={:.0}MB", e.transient_peak_mb()));
+        }
+        s
+    }
 }
 
 impl fmt::Display for Diagnostics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "factorization diagnostics: {}", self.summary())?;
         writeln!(
             f,
-            "factorization diagnostics (threads={}, factor_nnz={}):",
-            self.threads, self.factor_nnz
+            "  decisions: preprocess={} amalgamation={} scaling={}",
+            self.decisions.preprocess, self.decisions.amalgamation, self.decisions.scaling
         )?;
+        if let Some((p, n, z)) = self.numeric.inertia {
+            writeln!(f, "  inertia: +{p} -{n} 0:{z}")?;
+        }
         let tot = self.total_ms().max(1e-9);
         for s in &self.stages {
             writeln!(
@@ -272,6 +435,16 @@ impl fmt::Display for Diagnostics {
                 s.flops / 1_000_000,
                 s.bytes as f64 / 1e6,
             )?;
+        }
+        if self.solves.calls > 0 {
+            writeln!(
+                f,
+                "  solves: {} calls, {} rhs, {:.1} ms, {} refinement steps",
+                self.solves.calls, self.solves.rhs, self.solves.wall_ms, self.solves.refine_steps
+            )?;
+        }
+        for w in &self.warnings {
+            writeln!(f, "  warning: {w}")?;
         }
         Ok(())
     }

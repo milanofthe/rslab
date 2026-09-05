@@ -188,6 +188,17 @@ pub enum FactorMethod {
     LeftLooking,
 }
 
+/// The factor path a [`SolverSettings`] is applied to; each reads a different
+/// subset of the settings (see [`SolverSettings::ignored_on`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactorPath {
+    /// Symmetric `LDL^T` ([`LdltSolver`](crate::LdltSolver)).
+    Ldlt,
+    /// Unsymmetric LU ([`LuSolver`](crate::LuSolver)), left-looking or
+    /// multifrontal per [`SolverSettings::method`].
+    Lu,
+}
+
 /// Options controlling the generic multifrontal factorization. Defaults give an
 /// **exact** complete factorization that fails on rank deficiency. Relaxing
 /// them turns the factorization into a robust, memory-light **preconditioner**.
@@ -698,6 +709,57 @@ impl SolverSettings {
             Threads::Fixed(n) | Threads::Auto { max: n } => n,
             Threads::Ambient => rayon::current_num_threads().max(1),
         }
+    }
+
+    /// The settings set to a non-default value that `path` does not read, each
+    /// as one sentence naming the field and why. A factorization logs them as
+    /// `Warning` records and carries them in its
+    /// [`Diagnostics::warnings`](crate::Diagnostics::warnings), so a setting
+    /// with no effect is never silent. Empty when every set field is honoured.
+    pub fn ignored_on(&self, path: FactorPath) -> Vec<String> {
+        let d = SolverSettings::default();
+        let mut out = Vec::new();
+        match path {
+            FactorPath::Ldlt => {
+                if self.pivot_u != d.pivot_u {
+                    out.push(format!(
+                        "pivot_u = {} is ignored by the LDL^T path (Bunch-Kaufman pivots the \
+                         fully-summed block; the knob belongs to the left-looking LU)",
+                        self.pivot_u
+                    ));
+                }
+            }
+            FactorPath::Lu => {
+                if self.scaling != d.scaling {
+                    out.push(format!(
+                        "scaling = {:?} is ignored by the LU path (it equilibrates rows and \
+                         columns with its own two-sided scaling)",
+                        self.scaling
+                    ));
+                }
+                if self.method == FactorMethod::Multifrontal && self.pivot_u != d.pivot_u {
+                    out.push(format!(
+                        "pivot_u = {} is ignored by the multifrontal LU (its fronts pivot fully; \
+                         the knob applies to the left-looking LU)",
+                        self.pivot_u
+                    ));
+                }
+                if self.panel_nb != d.panel_nb {
+                    out.push(format!(
+                        "panel_nb = {} is ignored by the LU path (the panel width is an LDL^T \
+                         kernel knob)",
+                        self.panel_nb
+                    ));
+                }
+                if self.use_gemm_schur != d.use_gemm_schur {
+                    out.push(
+                        "use_gemm_schur is ignored by the LU path (an LDL^T kernel A/B knob)"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1520,6 +1582,43 @@ impl MultifrontalSymbolic {
             Some(i) => i.sym.supernodes.iter().map(|s| (s.ncol, s.nrow)).collect(),
             None => Vec::new(),
         }
+    }
+
+    pub fn n_supernodes(&self) -> usize {
+        self.inner.as_ref().map_or(0, |i| i.sym.supernodes.len())
+    }
+
+    /// Rows of the largest front after amalgamation.
+    pub fn max_front(&self) -> usize {
+        self.inner
+            .as_ref()
+            .and_then(|i| i.sym.supernodes.iter().map(|s| s.nrow).max())
+            .unwrap_or(0)
+    }
+
+    /// The decisions the analysis took on its own (what `Auto` resolved to),
+    /// for the [`Diagnostics`](crate::Diagnostics) of every factorization
+    /// reusing it. `requested` is the ordering the caller asked for.
+    pub fn decisions(
+        &self,
+        requested: crate::symbolic::OrderingMethod,
+    ) -> crate::diagnostics::Decisions {
+        let mut d = crate::diagnostics::Decisions {
+            ordering_requested: format!("{requested:?}"),
+            n_supernodes: self.n_supernodes(),
+            max_front: self.max_front(),
+            tree_levels: self.n_levels(),
+            ..Default::default()
+        };
+        match &self.inner {
+            Some(i) => {
+                d.ordering_used = format!("{:?}", i.sym.resolved_method);
+                d.preprocess = format!("{:?}", i.sym.resolved_preprocess);
+                d.amalgamation = format!("{:?}", i.sym.resolved_amalgamation);
+            }
+            None => d.ordering_used = d.ordering_requested.clone(),
+        }
+        d
     }
 
     /// Number of assembly-tree levels (the level-parallel factorization depth).

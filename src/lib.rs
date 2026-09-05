@@ -89,6 +89,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod error;
 pub(crate) mod inertia;
 pub(crate) mod io;
+pub mod logging;
 /// Parametrized test-matrix generators (feature `matgen`): PDE stencils, BEM/MoM
 /// kernels, banded/arrow, random + spectral. Optional `matgen-download` adds a
 /// SuiteSparse / Matrix Market fetcher.
@@ -133,8 +134,11 @@ pub mod tuning;
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
 pub use analysis::recommend_threads_from;
 pub use dense::matrix::SymmetricMatrix;
-pub use diagnostics::{Diagnostics, MemoryEstimate, StageReport};
+pub use diagnostics::{
+    Decisions, Diagnostics, MemoryEstimate, NumericReport, SolveCounter, SolveStats, StageReport,
+};
 pub use error::RslabError;
+pub use logging::{LogLevel, LogSink};
 pub use numeric::gemm_tuning::{
     GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
 };
@@ -148,7 +152,7 @@ pub use dense::ldlt_generic::{
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
-    with_threads, BlrMode, FactorMethod, MemoryMode, MultifrontalSymbolic, ReorderMode,
+    with_threads, BlrMode, FactorMethod, FactorPath, MemoryMode, MultifrontalSymbolic, ReorderMode,
     SolverSettings, Threads, ZeroPivotAction,
 };
 // High-level symmetric LDL^T solver: `LdltSymbolic::analyze -> .factor -> LdltSolver`.

@@ -143,6 +143,46 @@ let f = sym.factor(&a, &opts)?;
 let (nnz, d) = (f.factor_nnz(), f.diagnostics());
 ```
 
+### Diagnostics and logging
+
+Every factor handle answers `diagnostics()`: the per-stage wall times
+(`analyze`, `scale`, `factor`, and `klu-refactor` on the KLU path), the input
+and factor nonzeros with the fill ratio, the threads actually used, the
+decisions the solver took on its own (`decisions`: the ordering `Auto` resolved
+to next to the one requested, the ordering preprocessor, the amalgamation
+strategy, the scaling, the numeric kernel, supernode count, largest front, tree
+depth, BTF blocks), the numeric outcome (`numeric`: perturbed pivots, 2x2
+Bunch-Kaufman pivots, inertia), the solve accumulators (`solves`: calls,
+right-hand sides, wall time, refinement steps), the a-priori estimate, and the
+settings the chosen path did not read (`warnings`). `Display` prints it as a
+table, `summary()` as one line.
+
+A setting is never silently ignored: `SolverSettings::ignored_on(FactorPath)`
+lists the fields set to a non-default value that the path does not read
+(`pivot_u` on the LDL^T path; `scaling`, `panel_nb`, `use_gemm_schur`, and
+`pivot_u` under the multifrontal kernel on the LU path). Every factorization
+evaluates it, logs each entry as a warning and carries it in its diagnostics.
+
+Logging has one sink and one level, no dependencies. The default level is
+`warning`; `info` prints one line per analysis and factorization (the
+diagnostics summary), `debug` adds every solve. The environment variable
+`RLA_LOG` sets the initial level, `rslab::logging::set_level` changes it at run
+time, and `set_sink` installs a `LogSink` so a host captures everything in one
+place instead of reading stdout.
+
+```rust
+use rslab::logging::{self, LogLevel};
+logging::set_level(LogLevel::Info);
+let f = LdltSolver::factor_with(&a, &opts)?;
+// 12:03:41 - INFO - ldlt analyze: n=90000 nnz(A)=448800 ordering=MetisND (requested Auto) ...
+// 12:03:41 - INFO - ldlt factor: LeftLooking n=90000 nnz(A)=448800 nnz(L)=6.4e6 fill=14.3 threads=4 ...
+println!("{}", f.diagnostics());
+```
+
+From Python the same dict comes from `f.diagnostics()`, the level from
+`rslab.set_log_level("info")`, and `ldlt`/`lu` take `ordering`, `scaling`,
+`pivot_u` and `nemin` alongside the existing keywords.
+
 ```rust
 use rslab::{BackwardError, RefinePolicy};
 

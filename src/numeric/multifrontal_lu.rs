@@ -604,6 +604,10 @@ pub struct LuSymbolic {
     symb: crate::numeric::multifrontal_ldlt::MultifrontalSymbolic,
     n: usize,
     nnz: usize,
+    /// Wall time of the analysis and the ordering it was asked for, carried
+    /// into the diagnostics of every factorization reusing it.
+    analyze_ms: f64,
+    requested_ordering: crate::symbolic::OrderingMethod,
     /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
     /// size (the estimate depends on `T` only through `size_of::<T>()`, and
     /// rebuilding the supernode row structures per call is expensive).
@@ -639,16 +643,38 @@ impl LuSymbolic {
                 symb: analyze_with(0, &[0], &[], opts)?,
                 n: 0,
                 nnz: 0,
+                analyze_ms: 0.0,
+                requested_ordering: opts.ordering,
                 est_cache: Mutex::new(Vec::new()),
                 perm_scatter: std::sync::OnceLock::new(),
             });
         }
+        let t = crate::clock::Instant::now();
         let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
         let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
+        let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
+        if crate::logging::enabled(crate::logging::LogLevel::Info) {
+            let d = symb.decisions(opts.ordering);
+            crate::logging::info(&format!(
+                "lu analyze: n={n} nnz(A)={nnz} ordering={}{} supernodes={} max_front={} \
+                 levels={} {analyze_ms:.1} ms",
+                d.ordering_used,
+                if d.ordering_used != d.ordering_requested {
+                    format!(" (requested {})", d.ordering_requested)
+                } else {
+                    String::new()
+                },
+                d.n_supernodes,
+                d.max_front,
+                d.tree_levels
+            ));
+        }
         Ok(LuSymbolic {
             symb,
             n,
             nnz,
+            analyze_ms,
+            requested_ordering: opts.ordering,
             est_cache: Mutex::new(Vec::new()),
             perm_scatter: std::sync::OnceLock::new(),
         })
@@ -668,22 +694,48 @@ impl LuSymbolic {
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symb, cap)
         });
+        let warnings = opts.ignored_on(crate::numeric::multifrontal_ldlt::FactorPath::Lu);
+        for w in &warnings {
+            crate::logging::warn(&format!("lu settings: {w}"));
+        }
         let t = crate::clock::Instant::now();
         let factors = factor_general_lu_numeric(self, a, opts)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let nnz = factors.factor_nnz() as u64;
+        let mut decisions = self.symb.decisions(self.requested_ordering);
+        decisions.scaling = "TwoSidedRowCol".to_string();
+        decisions.method = format!("{:?}", opts.method);
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
+            n: self.n,
+            nnz_a: self.nnz as u64,
             factor_nnz: nnz,
             estimate: Some(estimate),
+            decisions,
+            numeric: crate::diagnostics::NumericReport {
+                perturbed: factors.n_perturbed,
+                two_by_two: None,
+                inertia: None,
+            },
+            warnings,
             ..Default::default()
         };
         // Bytes per stored entry: the scalar value plus its usize index.
         let entry_bytes = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
-        diagnostics.push("factor", factor_ms, 0, nnz * entry_bytes);
+        diagnostics.push("analyze", self.analyze_ms, 0, 0);
+        diagnostics.push(
+            "factor",
+            factor_ms,
+            estimate.factor_flops,
+            nnz * entry_bytes,
+        );
+        if crate::logging::enabled(crate::logging::LogLevel::Info) {
+            crate::logging::info(&format!("lu factor: {}", diagnostics.summary()));
+        }
         Ok(LuSolver {
             factors,
             diagnostics,
+            solves: Default::default(),
         })
     }
 
@@ -823,6 +875,8 @@ impl LuSymbolic {
 pub struct LuSolver<T> {
     factors: LuFactors<T>,
     diagnostics: crate::diagnostics::Diagnostics,
+    /// Solve-phase accumulators (every `solve*` call records into them).
+    solves: crate::diagnostics::SolveCounter,
 }
 
 impl<T: Scalar> LuSolver<T> {
@@ -836,10 +890,10 @@ impl<T: Scalar> LuSolver<T> {
 
     /// One-shot analyze + equilibrate + factor of a general matrix `A`.
     pub fn factor(a: &GeneralCsc<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
-        Ok(Self {
-            factors: factor_general_lu(a, opts)?,
-            diagnostics: crate::diagnostics::Diagnostics::default(),
-        })
+        // Through the symbolic object, so the diagnostics are filled the same
+        // way as on the analyze-once path (the former direct call returned
+        // an empty `Diagnostics`).
+        LuSymbolic::analyze_with(a, opts)?.factor(a, opts)
     }
 
     /// The **heuristic** settings pick for `a` - the model-free default, the
@@ -856,20 +910,42 @@ impl<T: Scalar> LuSolver<T> {
     /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate). Populated by
     /// the phased [`LuSymbolic::factor`]; empty for the one-shot
     /// [`factor`](Self::factor).
-    pub fn diagnostics(&self) -> &crate::diagnostics::Diagnostics {
-        &self.diagnostics
+    /// Everything this factorization can tell about itself (see
+    /// [`Diagnostics`](crate::Diagnostics)), the solve-phase accumulators
+    /// included. A snapshot.
+    pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
+        let mut d = self.diagnostics.clone();
+        d.solves = self.solves.snapshot();
+        d
+    }
+
+    fn record_solve(&self, rhs: usize, t: crate::clock::Instant, refine_steps: usize) {
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        self.solves.record(rhs, ms, refine_steps);
+        if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+            crate::logging::debug(&format!(
+                "lu solve: n={} rhs={rhs} refine_steps={refine_steps} {ms:.3} ms",
+                self.factors.n
+            ));
+        }
     }
 
     /// Solve `A x = b` using the stored factors.
     pub fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        solve_lu(&self.factors, b)
+        let t = crate::clock::Instant::now();
+        let x = solve_lu(&self.factors, b)?;
+        self.record_solve(1, t, 0);
+        Ok(x)
     }
 
     /// Solve `A * X = B` for `nrhs` right-hand sides at once. `b` and the
     /// returned `x` are **row-major** `n x nrhs` buffers (`b[i*nrhs + c]` is RHS
     /// `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve) calls.
     pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
-        solve_lu_many(&self.factors, b, nrhs)
+        let t = crate::clock::Instant::now();
+        let x = solve_lu_many(&self.factors, b, nrhs)?;
+        self.record_solve(nrhs, t, 0);
+        Ok(x)
     }
 
     /// Solve `A x = b` with iterative refinement against the original matrix `a`
@@ -893,7 +969,10 @@ impl<T: Scalar> LuSolver<T> {
         b: &[T],
         policy: &crate::refine::RefinePolicy,
     ) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError> {
-        solve_lu_refined_with(&self.factors, a, b, policy)
+        let t = crate::clock::Instant::now();
+        let (x, outcome) = solve_lu_refined_with(&self.factors, a, b, policy)?;
+        self.record_solve(1, t, outcome.steps);
+        Ok((x, outcome))
     }
 
     /// Refine an existing iterate in place, allocating nothing for the
