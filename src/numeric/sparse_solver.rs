@@ -17,8 +17,7 @@
 use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::{
-    analyze as analyze_pattern, analyze_with as analyze_pattern_with, factor_numeric,
-    MultifrontalSymbolic, SolverSettings,
+    analyze_with as analyze_pattern_with, factor_numeric, MultifrontalSymbolic, SolverSettings,
 };
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -30,8 +29,10 @@ pub struct LdltSolver<T> {
     factors: LdltFactors<T>,
     /// Real symmetric equilibration diagonal `s` (`D = diag(s)`).
     scale: Vec<f64>,
-    /// Per-call factor diagnostics (time + a-priori memory estimate).
+    /// Per-call factor diagnostics (stages, decisions, numeric outcome).
     diagnostics: crate::diagnostics::Diagnostics,
+    /// Solve-phase accumulators (every `solve*` call records into them).
+    solves: crate::diagnostics::SolveCounter,
 }
 
 impl<T: Scalar> LdltSolver<T> {
@@ -42,8 +43,24 @@ impl<T: Scalar> LdltSolver<T> {
 
     /// Per-call diagnostics for this factorization: measured factor time, fill,
     /// thread budget, and the a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate).
-    pub fn diagnostics(&self) -> &crate::diagnostics::Diagnostics {
-        &self.diagnostics
+    /// Everything this factorization can tell about itself (see
+    /// [`Diagnostics`](crate::Diagnostics)), the solve-phase accumulators
+    /// included. A snapshot.
+    pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
+        let mut d = self.diagnostics.clone();
+        d.solves = self.solves.snapshot();
+        d
+    }
+
+    fn record_solve(&self, rhs: usize, t: crate::clock::Instant, refine_steps: usize) {
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        self.solves.record(rhs, ms, refine_steps);
+        if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+            crate::logging::debug(&format!(
+                "ldlt solve: n={} rhs={rhs} refine_steps={refine_steps} {ms:.3} ms",
+                self.factors.n
+            ));
+        }
     }
 
     /// Number of stored nonzeros in the global lower-triangular factor `L`
@@ -117,6 +134,13 @@ impl<T: Scalar> LdltSolver<T> {
     /// around the triangular sweeps - one pass in, one pass out, no
     /// intermediate scaled copy.
     pub fn solve(&self, rhs: &[T]) -> Result<Vec<T>, RslabError> {
+        let t = crate::clock::Instant::now();
+        let x = self.solve_inner(rhs)?;
+        self.record_solve(1, t, 0);
+        Ok(x)
+    }
+
+    fn solve_inner(&self, rhs: &[T]) -> Result<Vec<T>, RslabError> {
         let n = self.factors.n;
         if rhs.len() != n {
             return Err(RslabError::DimensionMismatch {
@@ -146,6 +170,13 @@ impl<T: Scalar> LdltSolver<T> {
     /// calls - the factor structure is traversed once and each value applied to
     /// all RHS (the FEM multiple-load-case / block-Krylov use).
     pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
+        let t = crate::clock::Instant::now();
+        let x = self.solve_many_inner(b, nrhs)?;
+        self.record_solve(nrhs, t, 0);
+        Ok(x)
+    }
+
+    fn solve_many_inner(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
         // Equilibration fused into the block kernel's permutation gather/scatter
         // (no scaled intermediate copies of the `n x nrhs` blocks).
         crate::dense::ldlt_generic::solve_ldlt_many_scaled(
@@ -191,6 +222,19 @@ impl<T: Scalar> LdltSolver<T> {
     /// Refine an existing iterate in place: no allocation of the solution, for
     /// a host that owns its buffers across a sweep.
     pub fn refine_into(
+        &self,
+        a: &CscMatrix<T>,
+        rhs: &[T],
+        x: &mut [T],
+        policy: &crate::refine::RefinePolicy,
+    ) -> Result<crate::refine::RefineOutcome, RslabError> {
+        let t = crate::clock::Instant::now();
+        let outcome = self.refine_into_inner(a, rhs, x, policy)?;
+        self.record_solve(0, t, outcome.steps);
+        Ok(outcome)
+    }
+
+    fn refine_into_inner(
         &self,
         a: &CscMatrix<T>,
         rhs: &[T],
@@ -312,6 +356,10 @@ fn equilibrate_with<T: Scalar>(
 pub struct LdltSymbolic {
     symbolic: MultifrontalSymbolic,
     nnz: usize,
+    /// Wall time of the analysis and the ordering it was asked for, carried
+    /// into the diagnostics of every factorization reusing it.
+    analyze_ms: f64,
+    requested_ordering: crate::symbolic::OrderingMethod,
     /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
     /// size. The estimate is a pure function of the structure and
     /// `size_of::<T>()`, but computing it rebuilds the supernode row
@@ -324,12 +372,7 @@ impl LdltSymbolic {
     /// Phase 1: analyze the sparsity pattern of `a`. The values are ignored, so
     /// any matrix with the target pattern (even a zero-valued template) works.
     pub fn analyze<T: Scalar>(a: &CscMatrix<T>) -> Result<Self, RslabError> {
-        a.validate()?;
-        Ok(Self {
-            symbolic: analyze_pattern(a.n, &a.col_ptr, &a.row_idx)?,
-            nnz: a.row_idx.len(),
-            est_cache: std::sync::Mutex::new(Vec::new()),
-        })
+        Self::analyze_with(a, &SolverSettings::default())
     }
 
     /// [`analyze`](Self::analyze) with explicit composable [`SolverSettings`] -
@@ -340,11 +383,36 @@ impl LdltSymbolic {
         opts: &SolverSettings,
     ) -> Result<Self, RslabError> {
         a.validate()?;
-        Ok(Self {
-            symbolic: analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?,
+        let t = crate::clock::Instant::now();
+        let symbolic = analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?;
+        let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
+        let sym = Self {
+            symbolic,
             nnz: a.row_idx.len(),
+            analyze_ms,
+            requested_ordering: opts.ordering,
             est_cache: std::sync::Mutex::new(Vec::new()),
-        })
+        };
+        if crate::logging::enabled(crate::logging::LogLevel::Info) {
+            let d = sym.symbolic.decisions(opts.ordering);
+            crate::logging::info(&format!(
+                "ldlt analyze: n={} nnz(A)={} ordering={}{} preprocess={} supernodes={} \
+                 max_front={} levels={} {analyze_ms:.1} ms",
+                a.n,
+                sym.nnz,
+                d.ordering_used,
+                if d.ordering_used != d.ordering_requested {
+                    format!(" (requested {})", d.ordering_requested)
+                } else {
+                    String::new()
+                },
+                d.preprocess,
+                d.n_supernodes,
+                d.max_front,
+                d.tree_levels
+            ));
+        }
+        Ok(sym)
     }
 
     /// The analyzed matrix dimension.
@@ -512,28 +580,56 @@ impl LdltSymbolic {
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symbolic, cap)
         });
+        let warnings = opts.ignored_on(crate::numeric::multifrontal_ldlt::FactorPath::Ldlt);
+        for w in &warnings {
+            crate::logging::warn(&format!("ldlt settings: {w}"));
+        }
         let t = crate::clock::Instant::now();
         let (scaled, scale) = equilibrate_with(a, &opts.scaling)?;
+        let scale_ms = t.elapsed().as_secs_f64() * 1e3;
+        let t = crate::clock::Instant::now();
         let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let mut decisions = self.symbolic.decisions(self.requested_ordering);
+        decisions.scaling = format!("{:?}", opts.scaling);
+        decisions.method = format!("{:?}", opts.method);
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
+            n: a.n,
+            nnz_a: self.nnz as u64,
             factor_nnz: factors.l_values.len() as u64,
             estimate: Some(estimate),
+            decisions,
+            numeric: crate::diagnostics::NumericReport {
+                perturbed: factors.n_perturbed,
+                two_by_two: Some(factors.two_by_two.iter().filter(|&&b| b).count()),
+                inertia: Some((
+                    factors.inertia.positive,
+                    factors.inertia.negative,
+                    factors.inertia.zero,
+                )),
+            },
+            warnings,
             ..Default::default()
         };
         // Bytes per stored entry: the scalar value plus its usize row index.
         let entry_bytes = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
+        diagnostics.push("analyze", self.analyze_ms, 0, 0);
+        diagnostics.push("scale", scale_ms, 0, 0);
         diagnostics.push(
             "factor",
             factor_ms,
-            0,
+            estimate.factor_flops,
             factors.l_values.len() as u64 * entry_bytes,
         );
+        if crate::logging::enabled(crate::logging::LogLevel::Info) {
+            crate::logging::info(&format!("ldlt factor: {}", diagnostics.summary()));
+        }
         Ok(LdltSolver {
             factors,
             scale,
             diagnostics,
+            solves: Default::default(),
         })
     }
 }

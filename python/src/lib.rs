@@ -25,11 +25,116 @@ use numpy::{
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+use pyo3::types::PyDict;
 use rslab::{
     gmres as gmres_core, gmres_block as gmres_block_core, gmres_recycled as gmres_recycled_core,
-    CscMatrix, FactorMethod, GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSolver, LuSolver,
-    MemoryMode, Recycle, RslabError, Scalar, SolverSettings, ZeroPivotAction,
+    CscMatrix, Diagnostics, FactorMethod, GeneralCsc, KluParallel, KluSettings, KluSolver,
+    LdltSolver, LuSolver, MemoryMode, OrderingMethod, Recycle, RslabError, Scalar, ScalingStrategy,
+    SolverSettings, ZeroPivotAction,
 };
+
+/// The [`Diagnostics`] of a factor as a plain dict (stages as a list of dicts,
+/// decisions and numeric outcome as nested dicts), so a host can print, log or
+/// serialise it without the Rust types.
+fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
+    let out = PyDict::new_bound(py);
+    out.set_item("n", d.n)?;
+    out.set_item("nnz_a", d.nnz_a)?;
+    out.set_item("factor_nnz", d.factor_nnz)?;
+    out.set_item("fill_ratio", d.fill_ratio())?;
+    out.set_item("threads", d.threads)?;
+    let stages = pyo3::types::PyList::empty_bound(py);
+    for s in &d.stages {
+        let st = PyDict::new_bound(py);
+        st.set_item("name", s.name)?;
+        st.set_item("wall_ms", s.wall_ms)?;
+        st.set_item("flops", s.flops)?;
+        st.set_item("bytes", s.bytes)?;
+        stages.append(st)?;
+    }
+    out.set_item("stages", stages)?;
+    out.set_item("total_ms", d.total_ms())?;
+    let dec = PyDict::new_bound(py);
+    dec.set_item("ordering_requested", &d.decisions.ordering_requested)?;
+    dec.set_item("ordering_used", &d.decisions.ordering_used)?;
+    dec.set_item("preprocess", &d.decisions.preprocess)?;
+    dec.set_item("amalgamation", &d.decisions.amalgamation)?;
+    dec.set_item("scaling", &d.decisions.scaling)?;
+    dec.set_item("method", &d.decisions.method)?;
+    dec.set_item("n_supernodes", d.decisions.n_supernodes)?;
+    dec.set_item("max_front", d.decisions.max_front)?;
+    dec.set_item("tree_levels", d.decisions.tree_levels)?;
+    dec.set_item("btf_blocks", d.decisions.btf_blocks)?;
+    out.set_item("decisions", dec)?;
+    let num = PyDict::new_bound(py);
+    num.set_item("perturbed", d.numeric.perturbed)?;
+    num.set_item("two_by_two", d.numeric.two_by_two)?;
+    num.set_item("inertia", d.numeric.inertia)?;
+    out.set_item("numeric", num)?;
+    let sv = PyDict::new_bound(py);
+    sv.set_item("calls", d.solves.calls)?;
+    sv.set_item("rhs", d.solves.rhs)?;
+    sv.set_item("wall_ms", d.solves.wall_ms)?;
+    sv.set_item("refine_steps", d.solves.refine_steps)?;
+    out.set_item("solves", sv)?;
+    out.set_item("warnings", d.warnings.clone())?;
+    if let Some(e) = &d.estimate {
+        let est = PyDict::new_bound(py);
+        est.set_item("factor_mb", e.factor_mb())?;
+        est.set_item("transient_peak_mb", e.transient_peak_mb())?;
+        est.set_item("factor_flops", e.factor_flops)?;
+        est.set_item("critical_path_flops", e.critical_path_flops)?;
+        out.set_item("estimate", est)?;
+    } else {
+        out.set_item("estimate", py.None())?;
+    }
+    out.set_item("summary", d.summary())?;
+    Ok(out.into_any().unbind())
+}
+
+fn parse_ordering(s: &str) -> PyResult<OrderingMethod> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "auto" => OrderingMethod::Auto,
+        "auto_race" | "autorace" | "race" => OrderingMethod::AutoRace,
+        "amd" => OrderingMethod::Amd,
+        "amf" => OrderingMethod::Amf,
+        "metis" | "metisnd" | "metis_nd" | "nd" => OrderingMethod::MetisND,
+        "rcm" => OrderingMethod::Rcm,
+        other => return Err(PyValueError::new_err(format!(
+            "ordering must be 'auto', 'auto_race', 'amd', 'amf', 'metis' or 'rcm', got '{other}'"
+        ))),
+    })
+}
+
+fn parse_scaling(s: &str) -> PyResult<ScalingStrategy> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "auto" => ScalingStrategy::Auto,
+        "inf_norm" | "infnorm" | "ruiz" => ScalingStrategy::InfNorm,
+        "one_pass" | "one_pass_inf_norm" | "default" => ScalingStrategy::OnePassInfNorm,
+        "mc64" | "mc64_symmetric" => ScalingStrategy::Mc64Symmetric,
+        "identity" | "none" | "off" => ScalingStrategy::Identity,
+        other => return Err(PyValueError::new_err(format!(
+            "scaling must be 'auto', 'inf_norm', 'one_pass', 'mc64' or 'identity', got '{other}'"
+        ))),
+    })
+}
+
+/// Set the library log level for the process: `'debug'`, `'info'`,
+/// `'warning'` (default), `'error'` or `'off'`. `info` prints one line per
+/// analysis and factorization (the diagnostics summary), `debug` adds every
+/// solve. The environment variable `RLA_LOG` sets the initial level.
+#[pyfunction]
+fn set_log_level(level: &str) -> PyResult<()> {
+    match rslab::LogLevel::parse(level) {
+        Some(l) => {
+            rslab::logging::set_level(l);
+            Ok(())
+        }
+        None => Err(PyValueError::new_err(format!(
+            "level must be 'debug', 'info', 'warning', 'error' or 'off', got '{level}'"
+        ))),
+    }
+}
 use std::cell::RefCell;
 
 /// Map a core solver error onto a Python `RuntimeError` carrying its message.
@@ -78,11 +183,27 @@ fn build_opts(
     method: &str,
     memory: &str,
     force_accept: bool,
+    ordering: Option<&str>,
+    scaling: Option<&str>,
+    pivot_u: Option<f64>,
+    nemin: Option<usize>,
 ) -> PyResult<SolverSettings> {
     let mut o = match preconditioner {
         Some(floor) => SolverSettings::preconditioner(floor),
         None => SolverSettings::default(),
     };
+    if let Some(s) = ordering {
+        o = o.with_ordering(parse_ordering(s)?);
+    }
+    if let Some(s) = scaling {
+        o = o.with_scaling(parse_scaling(s)?);
+    }
+    if let Some(u) = pivot_u {
+        o = o.with_pivot_u(u);
+    }
+    if let Some(k) = nemin {
+        o = o.with_nemin(k);
+    }
     // `threads=None` keeps the core default (Threads::Auto { max: 4 } - the
     // per-matrix predictor capped at 4 workers); an explicit value pins the count.
     if let Some(n) = threads {
@@ -511,6 +632,23 @@ macro_rules! gmres_recycled_arm {
 
 #[pymethods]
 impl Ldlt {
+    /// Everything the factorization can tell about itself, as a dict: per-stage
+    /// wall times (`stages`), the decisions the solver took on its own
+    /// (`decisions`: ordering used, preprocessing, scaling, method, supernodes,
+    /// largest front, tree depth), the numeric outcome (`numeric`: perturbed
+    /// pivots, 2x2 pivots, inertia), the solve accumulators (`solves`), the
+    /// settings the chosen path ignored (`warnings`), the a-priori memory
+    /// estimate (`estimate`) and a one-line `summary`.
+    fn diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = match &self.inner {
+            LdltAny::F64(s, _) => s.diagnostics(),
+            LdltAny::F32(s, _) => s.diagnostics(),
+            LdltAny::C64(s, _) => s.diagnostics(),
+            LdltAny::C32(s, _) => s.diagnostics(),
+        };
+        diagnostics_dict(py, &d)
+    }
+
     /// Matrix dimension `n`.
     #[getter]
     fn n(&self) -> usize {
@@ -860,7 +998,7 @@ impl Ldlt {
 /// `data` array's dtype picks the scalar field.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (n, indptr, indices, data, threads, preconditioner, drop_tol, method, memory, force_accept))]
+#[pyo3(signature = (n, indptr, indices, data, threads, preconditioner, drop_tol, method, memory, force_accept, ordering=None, scaling=None, pivot_u=None, nemin=None))]
 fn ldlt_factor(
     py: Python<'_>,
     n: usize,
@@ -873,6 +1011,10 @@ fn ldlt_factor(
     method: &str,
     memory: &str,
     force_accept: bool,
+    ordering: Option<&str>,
+    scaling: Option<&str>,
+    pivot_u: Option<f64>,
+    nemin: Option<usize>,
 ) -> PyResult<Ldlt> {
     let opts = build_opts(
         threads,
@@ -881,6 +1023,10 @@ fn ldlt_factor(
         method,
         memory,
         force_accept,
+        ordering,
+        scaling,
+        pivot_u,
+        nemin,
     )?;
     let ip = indptr.as_slice()?;
     let ii = indices.as_slice()?;
@@ -900,6 +1046,12 @@ fn ldlt_factor(
                 let mut opts = opts.clone();
                 let s = py
                     .allow_threads(|| {
+                        // An explicit `ordering` analyses with the caller's
+                        // settings; otherwise the heuristic pick's analysis
+                        // (adaptive ordering, ND bakeoff) is reused.
+                        if ordering.is_some() {
+                            return rslab::LdltSymbolic::analyze_with(&a, &opts)?.factor(&a, &opts);
+                        }
                         let (sym, pick) = LdltSolver::<$T>::tuned(&a)?;
                         if threads.is_none() {
                             opts.threads = pick.threads;
@@ -1003,6 +1155,23 @@ macro_rules! lu_solve_many_arm {
 
 #[pymethods]
 impl Lu {
+    /// Everything the factorization can tell about itself, as a dict: per-stage
+    /// wall times (`stages`), the decisions the solver took on its own
+    /// (`decisions`: ordering used, preprocessing, scaling, method, supernodes,
+    /// largest front, tree depth), the numeric outcome (`numeric`: perturbed
+    /// pivots, 2x2 pivots, inertia), the solve accumulators (`solves`), the
+    /// settings the chosen path ignored (`warnings`), the a-priori memory
+    /// estimate (`estimate`) and a one-line `summary`.
+    fn diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = match &self.inner {
+            LuAny::F64(s, _) => s.diagnostics(),
+            LuAny::F32(s, _) => s.diagnostics(),
+            LuAny::C64(s, _) => s.diagnostics(),
+            LuAny::C32(s, _) => s.diagnostics(),
+        };
+        diagnostics_dict(py, &d)
+    }
+
     /// Matrix dimension `n`.
     #[getter]
     fn n(&self) -> usize {
@@ -1339,7 +1508,7 @@ impl Lu {
 /// picks the scalar field.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (n, indptr, indices, data, threads, preconditioner, drop_tol, method, memory, force_accept))]
+#[pyo3(signature = (n, indptr, indices, data, threads, preconditioner, drop_tol, method, memory, force_accept, ordering=None, scaling=None, pivot_u=None, nemin=None))]
 fn lu_factor(
     py: Python<'_>,
     n: usize,
@@ -1352,6 +1521,10 @@ fn lu_factor(
     method: &str,
     memory: &str,
     force_accept: bool,
+    ordering: Option<&str>,
+    scaling: Option<&str>,
+    pivot_u: Option<f64>,
+    nemin: Option<usize>,
 ) -> PyResult<Lu> {
     let opts = build_opts(
         threads,
@@ -1360,6 +1533,10 @@ fn lu_factor(
         method,
         memory,
         force_accept,
+        ordering,
+        scaling,
+        pivot_u,
+        nemin,
     )?;
     let ip = indptr.as_slice()?;
     let ii = indices.as_slice()?;
@@ -1473,6 +1650,23 @@ macro_rules! klu_refactor_arm {
 
 #[pymethods]
 impl Klu {
+    /// Everything the factorization can tell about itself, as a dict: per-stage
+    /// wall times (`stages`), the decisions the solver took on its own
+    /// (`decisions`: ordering used, preprocessing, scaling, method, supernodes,
+    /// largest front, tree depth), the numeric outcome (`numeric`: perturbed
+    /// pivots, 2x2 pivots, inertia), the solve accumulators (`solves`), the
+    /// settings the chosen path ignored (`warnings`), the a-priori memory
+    /// estimate (`estimate`) and a one-line `summary`.
+    fn diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = match &self.inner {
+            KluAny::F64(s, _) => s.diagnostics(),
+            KluAny::F32(s, _) => s.diagnostics(),
+            KluAny::C64(s, _) => s.diagnostics(),
+            KluAny::C32(s, _) => s.diagnostics(),
+        };
+        diagnostics_dict(py, &d)
+    }
+
     /// Matrix dimension `n`.
     #[getter]
     fn n(&self) -> usize {
@@ -1851,6 +2045,7 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lu_factor, m)?)?;
     m.add_function(wrap_pyfunction!(klu_factor, m)?)?;
     m.add_function(wrap_pyfunction!(install_diagnose, m)?)?;
+    m.add_function(wrap_pyfunction!(set_log_level, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

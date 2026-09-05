@@ -87,7 +87,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import _rslab
-from ._rslab import Klu, Ldlt, Lu, Recycle, install_diagnose
+from ._rslab import Klu, Ldlt, Lu, Recycle, install_diagnose, set_log_level
 
 __all__ = [
     "ldlt",
@@ -95,6 +95,7 @@ __all__ = [
     "klu",
     "spsolve",
     "install_diagnose",
+    "set_log_level",
     "Klu",
     "Ldlt",
     "Lu",
@@ -143,7 +144,8 @@ def _full_csc(A):
     return A
 
 
-def _opts(threads, preconditioner, drop_tol, method, memory, force_accept):
+def _opts(threads, preconditioner, drop_tol, method, memory, force_accept,
+          ordering=None, scaling=None, pivot_u=None, nemin=None):
     return (
         None if threads is None else int(threads),
         None if preconditioner is None else float(preconditioner),
@@ -151,7 +153,12 @@ def _opts(threads, preconditioner, drop_tol, method, memory, force_accept):
         str(method),
         str(memory),
         bool(force_accept),
+        None if ordering is None else str(ordering),
+        None if scaling is None else str(scaling),
+        None if pivot_u is None else float(pivot_u),
+        None if nemin is None else int(nemin),
     )
+
 
 
 def ldlt(
@@ -163,6 +170,10 @@ def ldlt(
     method: str = "left_looking",
     memory: str = "low",
     force_accept: bool = False,
+    ordering: str | None = None,
+    scaling: str | None = None,
+    pivot_u: float | None = None,
+    nemin: int | None = None,
 ) -> Ldlt:
     """Factor a **symmetric** matrix as :math:`P^{\\mathsf{T}} A P = L D L^{\\mathsf{T}}`.
 
@@ -216,14 +227,32 @@ def ldlt(
         instead of raising on rank deficiency. Ignored when ``preconditioner`` is
         set. Use only when you know the system is well-conditioned.
 
+    ordering : str, optional
+        Fill-reducing ordering: ``'auto'`` (the adaptive heuristic), ``'amd'``,
+        ``'amf'``, ``'metis'`` (nested dissection) or ``'rcm'``. ``None`` keeps
+        the default pick; the ordering actually used is reported in
+        ``diagnostics()['decisions']``.
+    scaling : str, optional
+        Symmetric equilibration before factoring (``ldlt`` only): ``'one_pass'``
+        (default), ``'inf_norm'`` (iterative Ruiz), ``'mc64'``, ``'auto'`` or
+        ``'identity'``. The LU path uses its own two-sided scaling and reports
+        a set value under ``diagnostics()['warnings']``.
+    pivot_u : float, optional
+        Threshold partial-pivoting tolerance of the left-looking LU (``lu``
+        only, ``0.1`` by default); ignored, and reported, on the other paths.
+    nemin : int, optional
+        Supernode amalgamation threshold of the analysis.
+
     Returns
     -------
     Ldlt
         A reusable factor handle exposing :meth:`~Ldlt.solve`,
         :meth:`~Ldlt.solve_many`, :meth:`~Ldlt.gmres` (preconditioned single-RHS
         iterative solve), :meth:`~Ldlt.gmres_block` (preconditioned multi-RHS
-        iterative solve), and the read-only attributes ``n``,
-        ``factor_nnz`` (fill), ``n_perturbed``, ``inertia`` and ``dtype``.
+        iterative solve), :meth:`~Ldlt.diagnostics` (stages, decisions,
+        numeric outcome, solve accumulators, warnings) and the read-only
+        attributes ``n``, ``factor_nnz`` (fill), ``n_perturbed``, ``inertia``
+        and ``dtype``.
 
     Raises
     ------
@@ -298,7 +327,8 @@ def ldlt(
         L.indptr.astype(np.int64),
         L.indices.astype(np.int64),
         data,
-        *_opts(threads, preconditioner, drop_tol, method, memory, force_accept),
+        *_opts(threads, preconditioner, drop_tol, method, memory, force_accept,
+               ordering, scaling, pivot_u, nemin),
     )
 
 
@@ -311,6 +341,10 @@ def lu(
     method: str = "left_looking",
     memory: str = "low",
     force_accept: bool = False,
+    ordering: str | None = None,
+    scaling: str | None = None,
+    pivot_u: float | None = None,
+    nemin: int | None = None,
 ) -> Lu:
     """Factor a **general** (unsymmetric) matrix as :math:`P^{\\mathsf{T}} A P = L U`.
 
@@ -351,6 +385,22 @@ def lu(
     force_accept : bool, default False
         In exact mode, accept tiny pivots instead of raising on rank deficiency.
         Ignored when ``preconditioner`` is set.
+
+    ordering : str, optional
+        Fill-reducing ordering: ``'auto'`` (the adaptive heuristic), ``'amd'``,
+        ``'amf'``, ``'metis'`` (nested dissection) or ``'rcm'``. ``None`` keeps
+        the default pick; the ordering actually used is reported in
+        ``diagnostics()['decisions']``.
+    scaling : str, optional
+        Symmetric equilibration before factoring (``ldlt`` only): ``'one_pass'``
+        (default), ``'inf_norm'`` (iterative Ruiz), ``'mc64'``, ``'auto'`` or
+        ``'identity'``. The LU path uses its own two-sided scaling and reports
+        a set value under ``diagnostics()['warnings']``.
+    pivot_u : float, optional
+        Threshold partial-pivoting tolerance of the left-looking LU (``lu``
+        only, ``0.1`` by default); ignored, and reported, on the other paths.
+    nemin : int, optional
+        Supernode amalgamation threshold of the analysis.
 
     Returns
     -------
@@ -412,7 +462,8 @@ def lu(
         M.indptr.astype(np.int64),
         M.indices.astype(np.int64),
         data,
-        *_opts(threads, preconditioner, drop_tol, method, memory, force_accept),
+        *_opts(threads, preconditioner, drop_tol, method, memory, force_accept,
+               ordering, scaling, pivot_u, nemin),
     )
 
 

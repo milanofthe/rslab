@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "rslab"
-version = "0.30.2"
+version = "0.31.0"
 edition = "2021"
 license = "MIT"
 description = "RSLAB - pure-Rust sparse complex/real direct solver (symmetric LDL^T + unsymmetric LU) and preconditioner, a PARDISO-style embeddable replacement."

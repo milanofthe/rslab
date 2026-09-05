@@ -482,8 +482,22 @@ impl KluSymbolic {
         let entry = (std::mem::size_of::<T>() + std::mem::size_of::<Ki>()) as u64;
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: 1,
+            n: a.n,
+            nnz_a: a.row_idx.len() as u64,
             factor_nnz: nnz,
             estimate,
+            decisions: crate::diagnostics::Decisions {
+                ordering_requested: "Amd".to_string(),
+                ordering_used: "Amd".to_string(),
+                scaling: if settings.row_scaling {
+                    "RowMaxAbs".to_string()
+                } else {
+                    "Identity".to_string()
+                },
+                method: "Klu".to_string(),
+                btf_blocks: if settings.btf { self.n_blocks() } else { 0 },
+                ..Default::default()
+            },
             ..Default::default()
         };
         diagnostics.push(
@@ -492,9 +506,13 @@ impl KluSymbolic {
             diagnostics_flops(&diagnostics),
             nnz * entry,
         );
+        if crate::logging::enabled(crate::logging::LogLevel::Info) {
+            crate::logging::info(&format!("klu factor: {}", diagnostics.summary()));
+        }
         Ok(KluSolver {
             factors,
             diagnostics,
+            solves: Default::default(),
         })
     }
 }
@@ -631,6 +649,8 @@ struct KluFactors<T> {
 pub struct KluSolver<T> {
     factors: KluFactors<T>,
     diagnostics: crate::diagnostics::Diagnostics,
+    /// Solve-phase accumulators (every `solve*` call records into them).
+    solves: crate::diagnostics::SolveCounter,
 }
 
 fn pattern_mismatch() -> RslabError {
@@ -1610,20 +1630,34 @@ impl<T: Scalar> KluSolver<T> {
     /// like [`LuSolver::factor`](crate::LuSolver::factor); use the phased
     /// [`KluSymbolic::factor`] for populated diagnostics.
     pub fn factor(a: &GeneralCsc<T>, settings: &KluSettings) -> Result<Self, RslabError> {
-        let sym = KluSymbolic::analyze_with(a, settings)?;
-        let factors = factor_impl(&sym, a, settings)?;
-        Ok(Self {
-            factors,
-            diagnostics: crate::diagnostics::Diagnostics::default(),
-        })
+        // Through the symbolic object, so the diagnostics are filled the same
+        // way as on the analyze-once path (the former direct call returned
+        // an empty `Diagnostics`).
+        KluSymbolic::analyze_with(a, settings)?.factor(a, settings)
     }
 
     /// Per-call diagnostics: measured factor/refactor stages, fill, and the
     /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate).
     /// Populated by the phased [`KluSymbolic::factor`]; empty for the
     /// one-shot [`factor`](Self::factor).
-    pub fn diagnostics(&self) -> &crate::diagnostics::Diagnostics {
-        &self.diagnostics
+    /// Everything this factorization can tell about itself (see
+    /// [`Diagnostics`](crate::Diagnostics)), the solve-phase accumulators
+    /// included. A snapshot.
+    pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
+        let mut d = self.diagnostics.clone();
+        d.solves = self.solves.snapshot();
+        d
+    }
+
+    fn record_solve(&self, rhs: usize, t: crate::clock::Instant, refine_steps: usize) {
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        self.solves.record(rhs, ms, refine_steps);
+        if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+            crate::logging::debug(&format!(
+                "klu solve: n={} rhs={rhs} refine_steps={refine_steps} {ms:.3} ms",
+                self.factors.n
+            ));
+        }
     }
 
     /// Thread policy the solve phase should honour: the KLU path is strictly
@@ -1660,6 +1694,13 @@ impl<T: Scalar> KluSolver<T> {
 
     /// Solve `A x = b`.
     pub fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
+        let t = crate::clock::Instant::now();
+        let x = self.solve_inner(b)?;
+        self.record_solve(1, t, 0);
+        Ok(x)
+    }
+
+    fn solve_inner(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
         let f = &self.factors;
         if b.len() != f.n {
             return Err(RslabError::DimensionMismatch {
@@ -1770,6 +1811,13 @@ impl<T: Scalar> KluSolver<T> {
     /// [`solve`](Self::solve), so the result is bit-identical to `nrhs`
     /// single solves.
     pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
+        let t = crate::clock::Instant::now();
+        let x = self.solve_many_inner(b, nrhs)?;
+        self.record_solve(nrhs, t, 0);
+        Ok(x)
+    }
+
+    fn solve_many_inner(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
         let f = &self.factors;
         if nrhs == 0 || b.len() != f.n * nrhs {
             return Err(RslabError::DimensionMismatch {
@@ -1875,6 +1923,19 @@ impl<T: Scalar> KluSolver<T> {
     /// Refine an existing iterate in place, allocating nothing for the
     /// solution.
     pub fn refine_into(
+        &self,
+        a: &GeneralCsc<T>,
+        b: &[T],
+        x: &mut [T],
+        policy: &crate::refine::RefinePolicy,
+    ) -> Result<crate::refine::RefineOutcome, RslabError> {
+        let t = crate::clock::Instant::now();
+        let outcome = self.refine_into_inner(a, b, x, policy)?;
+        self.record_solve(0, t, outcome.steps);
+        Ok(outcome)
+    }
+
+    fn refine_into_inner(
         &self,
         a: &GeneralCsc<T>,
         b: &[T],
@@ -2938,7 +2999,8 @@ mod tests {
         assert_eq!(d.stages[0].name, "klu-factor");
 
         let mut s2 = KluSolver::factor(&a, &KluSettings::default()).unwrap();
-        assert!(s2.diagnostics().stages.is_empty());
+        // the one-shot factor fills its diagnostics like the phased path
+        assert_eq!(s2.diagnostics().stages.last().unwrap().name, "klu-factor");
         s2.refactor(&a).unwrap();
         assert_eq!(s2.diagnostics().stages.last().unwrap().name, "klu-refactor");
     }
