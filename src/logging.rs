@@ -64,21 +64,26 @@ impl LogLevel {
     }
 }
 
-/// A destination for log records. Install one with [`set_sink`].
+/// A destination for log records. Install one with [`set_sink`]. The sink
+/// receives the level and the bare message; formatting (timestamp, level
+/// label) stays with the sink, so a host re-emitting into its own logger does
+/// not carry a second timestamp.
 pub trait LogSink: Send + Sync {
     fn emit(&self, level: LogLevel, msg: &str);
 }
 
-/// The default sink: `Info` and `Warning` to stdout (progress, not errors, so a
-/// host capturing stderr does not render them as failures), `Error` to stderr.
+/// The default sink: `HH:MM:SS - LEVEL - msg`, `Info` and `Warning` to stdout
+/// (progress, not errors, so a host capturing stderr does not render them as
+/// failures), `Error` to stderr.
 pub struct DefaultSink;
 
 impl LogSink for DefaultSink {
     fn emit(&self, level: LogLevel, msg: &str) {
+        let line = format!("{} - {} - {}", timestamp(), level.label(), msg);
         if level >= LogLevel::Error {
-            eprintln!("{msg}");
+            eprintln!("{line}");
         } else {
-            println!("{msg}");
+            println!("{line}");
         }
     }
 }
@@ -148,11 +153,10 @@ pub fn emit(level: LogLevel, msg: &str) {
     if !enabled(level) {
         return;
     }
-    let line = format!("{} - {} - {}", timestamp(), level.label(), msg);
     let guard = SINK.read().unwrap_or_else(|e| e.into_inner());
     match guard.as_ref() {
-        Some(sink) => sink.emit(level, &line),
-        None => DefaultSink.emit(level, &line),
+        Some(sink) => sink.emit(level, msg),
+        None => DefaultSink.emit(level, msg),
     }
 }
 
@@ -204,7 +208,7 @@ mod tests {
         reset_sink();
         set_level(LogLevel::Warning);
         assert_eq!(v.len(), 2, "{v:?}");
-        assert!(v[0].1.ends_with("- INFO - shown"));
+        assert_eq!(v[0].1, "shown");
         assert_eq!(v[1].0, LogLevel::Warning);
     }
 }
