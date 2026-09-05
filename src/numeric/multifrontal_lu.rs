@@ -946,7 +946,9 @@ pub fn factor_general_lu<T: Scalar>(
     a: &GeneralCsc<T>,
     opts: &SolverSettings,
 ) -> Result<LuFactors<T>, RslabError> {
-    factor_general_lu_numeric(&LuSymbolic::analyze(a)?, a, opts)
+    // The analysis honours the caller's symbolic settings (ordering, child reordering):
+    // `analyze` alone took the defaults and silently ignored `opts.ordering`.
+    factor_general_lu_numeric(&LuSymbolic::analyze_with(a, opts)?, a, opts)
 }
 
 // Supernodal left-looking LU (FactorMethod::LeftLooking)

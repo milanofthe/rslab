@@ -126,3 +126,6 @@ required-features = ["matgen"]
 
 [profile.release]
 debug = true
+
+[[example]]
+name = "ordering_bakeoff"
