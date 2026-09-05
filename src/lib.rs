@@ -162,9 +162,9 @@ pub use io::mtx::{
 };
 pub use numeric::iterative::{
     cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_block_fn_mon, gmres_block_mon, gmres_fn,
-    gmres_recycled, BlockKrylovResult, Factorization, KrylovResult, LinearOperator, LowPrecisionLu,
-    LowPrecisionPreconditioner, NoPreconditioner, Preconditioner, Recycle, RecycleScalar,
-    StopReason,
+    gmres_recycled, gmres_recycled_fn, BlockKrylovResult, Factorization, KrylovResult,
+    LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
+    Recycle, RecycleScalar, StopReason,
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,

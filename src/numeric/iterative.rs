@@ -1286,6 +1286,14 @@ pub struct Recycle<T> {
 }
 
 impl<T: Scalar> Recycle<T> {
+    /// The stored recycle vectors: column-major `n x kc` (`kc` columns of length `n`),
+    /// in the preconditioned space — the approximate smallest-magnitude eigenvectors of
+    /// `A M^-1` the last solve found. For inspection (which physical directions a solver
+    /// keeps re-discovering); empty before the first solve.
+    pub fn vectors(&self) -> (&[T], usize, usize) {
+        (&self.u, self.n, self.kc)
+    }
+
     /// A fresh, empty recycle handle targeting `k` harmonic-Ritz vectors. The
     /// first solve seeds `U` (there is nothing to deflate yet); subsequent solves
     /// deflate and refresh it. `k` is capped at `restart/2` inside the solve.
@@ -2417,6 +2425,35 @@ where
         f: std::cell::RefCell::new(precond),
     };
     gmres_block_mon(&op, b, s, &pc, tol, max_iter, restart, x0, mon)
+}
+
+/// Closure entry point for [`gmres_recycled`] (single RHS, GCRO-DR): the operator and
+/// preconditioner as `FnMut` closures, the recycle handle updated in place - see [`gmres_fn`].
+#[allow(clippy::too_many_arguments)]
+pub fn gmres_recycled_fn<T, F, G>(
+    op: F,
+    precond: G,
+    b: &[T],
+    n: usize,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+    x0: Option<&[T]>,
+    recycle: &mut Recycle<T>,
+) -> Result<KrylovResult<T>, RslabError>
+where
+    T: RecycleScalar,
+    F: FnMut(&[T], &mut [T], usize),
+    G: FnMut(&[T], &mut [T], usize) -> Result<(), RslabError>,
+{
+    let op = FnOp {
+        f: std::cell::RefCell::new(op),
+        n,
+    };
+    let pc = FnPc {
+        f: std::cell::RefCell::new(precond),
+    };
+    gmres_recycled(&op, b, &pc, tol, max_iter, restart, x0, recycle)
 }
 
 /// Closure entry point for [`gmres`] (single RHS) - see [`gmres_block_fn`].
