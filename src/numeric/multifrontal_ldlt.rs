@@ -8,19 +8,25 @@
 //!
 //! This is the single, data-type-generic symmetric multifrontal driver (the
 //! former f64-dedicated driver has been removed). It is rayon-parallel with a
-//! `gemm` BLAS-3 Schur update and relaxed amalgamation; delayed pivoting and
-//! the remaining rslab robustness features are being ported in.
+//! `gemm` BLAS-3 Schur update and relaxed amalgamation, and it also hosts the
+//! left-looking supernodal kernel ([`FactorMethod::LeftLooking`], the shipped
+//! default) over the same symbolic analysis.
 //!
-//! ## Current pivoting scope
+//! ## Pivoting scope
 //!
-//! * Pivoting is restricted to the **fully-summed block** of each front (no
-//!   delayed pivoting). This produces a valid factorization whenever each
-//!   fully-summed block is nonsingular; pathological indefinite cases that
-//!   would require delaying a pivot to the parent are out of scope for now and
-//!   surface as [`RslabError::NumericallyRankDeficient`].
-//! * The reassembled factor is held as a dense `nxn` global `L`. This is
-//!   `O(n^2)` memory and is a correctness-first choice; a sparse-CSC global `L`
-//!   with a supernodal triangular solve is a later optimization.
+//! * Pivoting is restricted to the **fully-summed block** of each front: dense
+//!   Bunch-Kaufman with 1x1 and 2x2 pivots, so an indefinite block (a KKT
+//!   saddle, a circuit's zero-diagonal source row next to its node) factors
+//!   whenever the pair sits in one front, which the amalgamation makes the
+//!   common case (a 45k-node power grid: 1690 2x2 pivots, no failure). There
+//!   is no delayed pivoting: a fully-summed block that is singular in exact
+//!   mode surfaces as [`RslabError::NumericallyRankDeficient`], and the
+//!   static-pivot mode ([`ZeroPivotAction`], the `preconditioner` settings)
+//!   lifts the pivot to the floor instead and reports it in `n_perturbed`.
+//! * The global factor `L` is assembled as sparse CSC from the per-supernode
+//!   compact fragments, which are freed as they are emitted; the memory peak
+//!   is the growing CSC plus one fragment (see the a-priori
+//!   [`MemoryEstimate`](crate::diagnostics::MemoryEstimate)).
 //!
 //! The result is returned as an [`LdltFactors`] in factorization order, so the
 //! generic [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt) handles the
