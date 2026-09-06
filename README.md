@@ -186,6 +186,10 @@ Every report carries throughput rates (`d.rates()`: analysis, factorization
 and solve in MDOF/s, the factorization in GFlop/s and Mnnz/s); the summary
 line and the `info` log print the factor rate.
 
+The nested-dissection ordering (`metis`, and the default pick on large
+systems) runs the two sides of every bisection in parallel; the ordering
+is a function of the seed alone, so it is the same for every thread count.
+
 The LDL^T and LU solves are supernodal and tree-parallel: after the
 factorization the factor is laid out once as dense column panels per
 supernode (the fronts) with one shared `u32` row list each (the
