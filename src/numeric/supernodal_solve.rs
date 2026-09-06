@@ -133,24 +133,6 @@ impl<T> Shared<T> {
 }
 
 impl<T: Scalar> SolvePlan<T> {
-    /// Build the plan from a lower-triangular CSC factor: row indices
-    /// ascending per column, the diagonal leading each column (unit when
-    /// `unit`, else the value to divide by in the backward sweep), and the
-    /// producer's column partition into supernodes (`supernode_ptr`, empty
-    /// to detect it from the structure).
-    pub fn build_csc(
-        n: usize,
-        col_ptr: &[usize],
-        row_idx: &[usize],
-        values: &[T],
-        supernode_ptr: &[usize],
-        supernode_parent: &[usize],
-        unit: bool,
-    ) -> Self {
-        let factor = PanelFactor::from_csc(n, col_ptr, row_idx, values, supernode_ptr);
-        Self::from_panels(factor, supernode_parent, unit)
-    }
-
     /// Build the schedule over a factor in panel form, taking the panels as
     /// the plan's storage (no copy). `supernode_parent` is the supernode
     /// tree of the analysis (`usize::MAX` for a root); an empty or

@@ -637,7 +637,7 @@ impl LdltSymbolic {
         let scale_ms = t.elapsed().as_secs_f64() * 1e3;
         let t = crate::clock::Instant::now();
         let numeric = factor_numeric(&self.symbolic, &scaled, opts)?;
-        let factor_nnz = (numeric.factor.nnz() - numeric.n_dropped) as u64;
+        let factor_nnz = (numeric.factor.nnz() - numeric.n_zeros) as u64;
         let factor_bytes = numeric.factor.bytes() as u64;
         let (factor, factors) = numeric.into_parts();
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;

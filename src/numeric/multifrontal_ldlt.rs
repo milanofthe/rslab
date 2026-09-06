@@ -38,7 +38,7 @@
 use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, swap_sym_lower_bounded, LdltFactors};
 use crate::error::RslabError;
 use crate::inertia::Inertia;
-use crate::numeric::panel_factor::{permute_panel_rows, PanelFactor};
+use crate::numeric::panel_factor::{assemble_panels, finish_panel, PanelFactor, PanelOut};
 use crate::scalar::Scalar;
 
 /// Scale-invariant singularity floor for a 2x2 Bunch-Kaufman pivot: a block
@@ -1870,9 +1870,9 @@ pub struct LdltNumeric<T> {
     pub supernode_parent: Vec<usize>,
     /// Pivots perturbed by the static regularization.
     pub n_perturbed: usize,
-    /// Entries zeroed by `drop_tol`; the panels keep their slots, so the
-    /// stored nonzeros are `factor.nnz() - n_dropped`.
-    pub n_dropped: usize,
+    /// Structural panel slots holding an exact zero (cancellation or
+    /// `drop_tol`); the stored nonzeros are `factor.nnz() - n_zeros`.
+    pub n_zeros: usize,
     /// Inertia of the factored matrix.
     pub inertia: Inertia,
 }
@@ -1926,115 +1926,6 @@ impl<T: Scalar> LdltNumeric<T> {
     }
 }
 
-/// One supernode's emitted panel: its off-block rows (elimination indices,
-/// ascending) and the `(w + m) x w` column-major values.
-struct PanelOut<T> {
-    rows: Vec<u32>,
-    panel: Vec<T>,
-    /// Entries zeroed by `drop_tol` (the panel keeps their slots).
-    dropped: usize,
-}
-impl<T> Default for PanelOut<T> {
-    fn default() -> Self {
-        PanelOut {
-            rows: Vec::new(),
-            panel: Vec::new(),
-            dropped: 0,
-        }
-    }
-}
-
-/// Finish one supernode's panel for the store: rows `0..w` are the
-/// supernode's own columns in elimination order, the `m` rows below are
-/// permuted into ascending elimination order (`e_rows[i]` is the elimination
-/// index of panel row `w + i` on entry), the `(p+1, p)` entry of each 2x2
-/// pivot is cleared (that coupling lives in `D`), and `drop_tol` zeroes the
-/// entries below `tau * max|col|` of their column. Consumes `e_rows`.
-fn finish_panel<T: Scalar>(
-    mut panel: Vec<T>,
-    w: usize,
-    mut e_rows: Vec<u32>,
-    two_by_two: &[bool],
-    drop_tol: Option<f64>,
-) -> PanelOut<T> {
-    let m = e_rows.len();
-    let ld = w + m;
-    debug_assert_eq!(panel.len(), ld * w);
-    let sorted = e_rows.windows(2).all(|p| p[0] < p[1]);
-    if !sorted {
-        let mut order: Vec<u32> = (0..m as u32).collect();
-        order.sort_unstable_by_key(|&i| e_rows[i as usize]);
-        let full: Vec<u32> = (0..w as u32)
-            .chain(order.iter().map(|&i| w as u32 + i))
-            .collect();
-        let mut tmp = Vec::with_capacity(ld);
-        permute_panel_rows(&mut panel, ld, w, &full, &mut tmp);
-        e_rows = order.iter().map(|&i| e_rows[i as usize]).collect();
-    }
-    let zero = T::zero();
-    for p in 0..w {
-        if two_by_two[p] && p + 1 < w {
-            panel[p * ld + p + 1] = zero;
-        }
-    }
-    let mut dropped = 0usize;
-    if let Some(tau) = drop_tol {
-        for p in 0..w {
-            let col = &mut panel[p * ld..(p + 1) * ld];
-            let colmax = col[p + 1..]
-                .iter()
-                .map(|v| v.magnitude())
-                .fold(0.0, f64::max);
-            let thresh = tau * colmax;
-            for v in col[p + 1..].iter_mut() {
-                if *v != zero && v.magnitude() < thresh {
-                    *v = zero;
-                    dropped += 1;
-                }
-            }
-        }
-    }
-    PanelOut {
-        rows: e_rows,
-        panel,
-        dropped,
-    }
-}
-
-/// Assemble the per-supernode panels (elimination order, empty supernodes
-/// skipped) into the factor.
-fn assemble_panels<T: Scalar>(
-    n: usize,
-    ncols: impl Iterator<Item = usize>,
-    mut outs: impl FnMut(usize) -> PanelOut<T>,
-) -> (PanelFactor<T>, usize) {
-    let mut sn_col: Vec<u32> = vec![0];
-    let mut rows = Vec::new();
-    let mut panels = Vec::new();
-    let mut dropped = 0usize;
-    for (s, w) in ncols.enumerate() {
-        if w == 0 {
-            continue;
-        }
-        let out = outs(s);
-        debug_assert_eq!(out.panel.len(), (w + out.rows.len()) * w);
-        sn_col.push(sn_col.last().copied().unwrap_or(0) + w as u32);
-        rows.push(out.rows);
-        panels.push(out.panel);
-        dropped += out.dropped;
-    }
-    debug_assert_eq!(sn_col.last().copied(), Some(n as u32));
-    (
-        PanelFactor {
-            n,
-            sn_col,
-            rows,
-            panels,
-        },
-        dropped,
-    )
-}
-
 pub fn factor_numeric<T: Scalar>(
     symb: &MultifrontalSymbolic,
     a: &CscMatrix<T>,
@@ -2057,7 +1948,7 @@ pub fn factor_numeric<T: Scalar>(
                 perm: Vec::new(),
                 supernode_parent: Vec::new(),
                 n_perturbed: 0,
-                n_dropped: 0,
+                n_zeros: 0,
                 inertia: Inertia::new(0, 0, 0),
             });
         }
@@ -2223,7 +2114,7 @@ pub fn factor_numeric<T: Scalar>(
             panel,
             w,
             e_rows,
-            &ff.two_by_two[..w],
+            Some(&ff.two_by_two[..w]),
             opts.drop_tol,
         ))
     };
@@ -2235,7 +2126,7 @@ pub fn factor_numeric<T: Scalar>(
             PanelOut::default()
         });
     }
-    let (factor, n_dropped) =
+    let (factor, n_zeros) =
         assemble_panels(n, ncols.iter().copied(), |s| std::mem::take(&mut outs[s]));
 
     Ok(LdltNumeric {
@@ -2246,7 +2137,7 @@ pub fn factor_numeric<T: Scalar>(
         perm,
         supernode_parent,
         n_perturbed,
-        n_dropped,
+        n_zeros,
         inertia,
     })
 }
@@ -2343,7 +2234,7 @@ fn ldlt_emit_and_free<T: Scalar>(
     let e_rows: Vec<u32> = (ncol..nrow)
         .map(|i| unsafe { emit.eg(sched.rows(k)[lperm[i]] as usize) } as u32)
         .collect();
-    let out = finish_panel(panel, ncol, e_rows, &t2[..ncol], drop_tol);
+    let out = finish_panel(panel, ncol, e_rows, Some(&t2[..ncol]), drop_tol);
     unsafe { emit.panels.set(k, out) };
     if ldlt_no_free() {
         // The debugging hold: keep an (emptied) shell in place.
@@ -3382,7 +3273,7 @@ fn factor_left_looking<T: Scalar>(
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
-    let (factor, n_dropped) =
+    let (factor, n_zeros) =
         assemble_panels(n, sym.supernodes.iter().map(|sn| sn.ncol), |s| unsafe {
             std::mem::take(emit.panels.get_mut(s))
         });
@@ -3404,7 +3295,7 @@ fn factor_left_looking<T: Scalar>(
         perm,
         supernode_parent,
         n_perturbed,
-        n_dropped,
+        n_zeros,
         inertia,
     })
 }

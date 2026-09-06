@@ -175,7 +175,7 @@ pub use numeric::iterative::{
 };
 pub use numeric::multifrontal_lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
-    solve_lu_transpose, LuFactors, LuSolver, LuSymbolic,
+    solve_lu_transpose, LuFactors, LuNumeric, LuSolver, LuSymbolic,
 };
 // KLU-style third direct path (BTF + per-block Gilbert-Peierls): sequential,
 // bit-deterministic, built for circuit-shaped matrices and sweep refactoring.
