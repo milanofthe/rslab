@@ -142,6 +142,7 @@ impl<T: Scalar> SolvePlan<T> {
             &f.l_row_idx,
             &f.l_values,
             &f.supernode_ptr,
+            &f.supernode_parent,
             true,
         )
     }
@@ -157,6 +158,7 @@ impl<T: Scalar> SolvePlan<T> {
         row_idx: &[usize],
         values: &[T],
         supernode_ptr: &[usize],
+        supernode_parent: &[usize],
         unit: bool,
     ) -> Self {
         let nnz_l = values.len();
@@ -268,14 +270,28 @@ impl<T: Scalar> SolvePlan<T> {
             val_ptr.push(vals.len());
         }
 
-        // Supernodal elimination tree and subtree work.
+        // Supernodal elimination tree: the factorization's assembly tree
+        // when known (every column's structure lies within its ancestors
+        // there, which the numeric structure alone does not guarantee once
+        // exact zeros are dropped or rows are pivoted), else the tree of the
+        // structure itself. Subtree work follows.
         let mut parent = vec![NONE; ns];
         let mut children: Vec<Vec<u32>> = vec![Vec::new(); ns];
-        for s in 0..ns {
-            if row_ptr[s + 1] > row_ptr[s] {
-                let p = sn_of[rows[row_ptr[s]] as usize];
-                parent[s] = p;
-                children[p as usize].push(s as u32);
+        if known && supernode_parent.len() == ns {
+            for s in 0..ns {
+                let p = supernode_parent[s];
+                if p != usize::MAX && p < ns && p > s {
+                    parent[s] = p as u32;
+                    children[p].push(s as u32);
+                }
+            }
+        } else {
+            for s in 0..ns {
+                if row_ptr[s + 1] > row_ptr[s] {
+                    let p = sn_of[rows[row_ptr[s]] as usize];
+                    parent[s] = p;
+                    children[p as usize].push(s as u32);
+                }
             }
         }
         let mut work = vec![0u64; ns];
@@ -431,9 +447,16 @@ impl<T: Scalar> SolvePlan<T> {
             }
         }
         let (subtrees, top, top_levels, top_paths, ext_slot) = if degenerate {
-            // One sequential chain: every node an ancestor without slots.
+            // The structure does not follow an elimination tree (a pruned
+            // factor, or an LU whose row pivoting moved rows across
+            // subtrees): one sequential chain, every node an ancestor
+            // without slots. Levels run from the root, so the deepest level
+            // (processed first by the forward sweep) is the first column.
+            if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+                crate::logging::debug("solve layout: structure not tree-nested, sequential sweeps");
+            }
             let all: Vec<u32> = (0..ns as u32).collect();
-            let levels: Vec<Vec<u32>> = all.iter().map(|&s| vec![s]).collect();
+            let levels: Vec<Vec<u32>> = all.iter().rev().map(|&s| vec![s]).collect();
             let paths = vec![Vec::new(); ns];
             (Vec::new(), all, levels, paths, vec![NONE; rows.len()])
         } else {

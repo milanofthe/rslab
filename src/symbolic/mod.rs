@@ -13,8 +13,9 @@ pub use column_counts::{column_counts_gnp, total_factor_nnz};
 pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
 pub use supernode::{
-    find_supernodes, pick_amalgamation_strategy, AmalgamationStrategy, OrderingPreprocess,
-    RelaxAmalgamation, Supernode, SupernodeParams, AUTO_MULTI_CHILD_FRAC_THRESHOLD,
+    find_supernodes, pick_amalgamation_strategy, supernode_parents, AmalgamationStrategy,
+    OrderingPreprocess, RelaxAmalgamation, Supernode, SupernodeParams,
+    AUTO_MULTI_CHILD_FRAC_THRESHOLD,
 };
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].

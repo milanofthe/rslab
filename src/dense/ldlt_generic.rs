@@ -58,6 +58,10 @@ pub struct LdltFactors<T> {
     /// shared. Length `ns + 1`; empty when the producer does not know it
     /// (the solve layout then detects supernodes from the structure).
     pub supernode_ptr: Vec<usize>,
+    /// Parent of every supernode in the assembly tree (`usize::MAX` for a
+    /// root), the same length as `supernode_ptr` minus one; empty when
+    /// unknown. Every column's structure lies within its ancestors.
+    pub supernode_parent: Vec<usize>,
     /// Number of pivots that were statically perturbed (replaced by a floor)
     /// to avoid a singular/tiny pivot. Zero for an exact factorization;
     /// nonzero only when static-pivoting (preconditioner) mode is enabled. The
@@ -335,6 +339,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
         two_by_two,
         perm,
         supernode_ptr: vec![0, n],
+        supernode_parent: vec![usize::MAX],
         n_perturbed: 0,
         inertia,
     })

@@ -46,7 +46,7 @@ fn analyze_ldlt_core<T: Field>(
     if st.explicit_ordering {
         return Ok((LdltSymbolic::analyze_with(a, &opts)?, opts));
     }
-    let (sym, pick) = LdltSolver::<T>::tuned(a)?;
+    let (sym, pick) = LdltSolver::<T>::tuned_with(a, &opts)?;
     if !st.explicit_threads {
         opts.threads = pick.threads;
     }
@@ -227,7 +227,7 @@ fn analyze_lu_core<T: Field>(
     if st.explicit_ordering {
         return Ok((LuSymbolic::analyze_with(a, &opts)?, opts));
     }
-    let (sym, pick) = LuSolver::<T>::tuned(a)?;
+    let (sym, pick) = LuSolver::<T>::tuned_with(a, &opts)?;
     if !st.explicit_threads {
         opts.threads = pick.threads;
     }

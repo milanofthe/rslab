@@ -100,12 +100,14 @@ print(s.to_dict())
 | `drop_tol` | `None` | incomplete-factor threshold (ILU-style preconditioner) |
 | `method`, `memory` | `"left_looking"`, `"low"` | numeric schedule and factor emit strategy |
 | `pivot_u` | 0.1 | threshold-pivoting tolerance of the LU path |
+| `matching` | `True` | MC64 row matching and scaling before the LU analysis (bounded pivot growth) |
 | `scaling` | `"one_pass"` | LDL^T equilibration: `"inf_norm"`, `"mc64"`, `"auto"`, `"identity"` |
 | `blr`, `panel_nb` | off, 64 | block-low-rank tolerance, dense panel width |
 | `scalar_gate`, `par_gemm`, `par_cdiv`, `use_gemm_schur` | calibrated | kernel tuning knobs |
 | `interrupt` | `None` | an `rslab.Interrupt` cancellation flag |
 
 `KluSettings`: `pivot_tol` (1e-3), `row_scaling` (on), `btf` (on),
+`matching` (on: MC64 row matching as the BTF transversal),
 `parallel` (`None` = structural auto gate, `True` / `False` force), `interrupt`.
 
 Settings a path ignores are reported under `diagnostics()["warnings"]`.

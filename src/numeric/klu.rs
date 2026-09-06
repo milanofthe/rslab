@@ -81,6 +81,15 @@ pub struct KluSettings {
     /// solver-in-the-loop use, or force `Off` for strictly sequential
     /// execution.
     pub parallel: KluParallel,
+    /// Maximum-product row matching (MC64) as the transversal of the block
+    /// triangular form: the matched, largest-product entries become the
+    /// diagonal, so the diagonal-preference pivoting rarely has to leave
+    /// it. The structural transversal only guarantees a zero-free
+    /// diagonal; on the ibmpg1 power grid it leaves 14k of 45k columns to
+    /// off-diagonal pivots and the fill at seven times the symbolic
+    /// estimate. Analysis-time (value dependent); a `refactor` keeps the
+    /// matching. Default `true`; needs `btf`.
+    pub matching: bool,
 
     /// Caller-owned cancellation flag for the numeric phase, read and never
     /// written, polled at block boundaries and inside the pipelined refactor at
@@ -112,6 +121,7 @@ impl Default for KluSettings {
             row_scaling: true,
             btf: true,
             parallel: KluParallel::Auto,
+            matching: true,
             interrupt: None,
         }
     }
@@ -145,6 +155,13 @@ impl KluSettings {
     }
 
     /// Composable toggle for the BTF permutation (see [`btf`](Self::btf)).
+    /// Enable or disable the MC64 row matching (see
+    /// [`KluSettings::matching`]).
+    pub fn with_matching(mut self, on: bool) -> Self {
+        self.matching = on;
+        self
+    }
+
     pub fn with_btf(mut self, on: bool) -> Self {
         self.btf = on;
         self
@@ -243,7 +260,19 @@ impl KluSymbolic {
         // (onetone/twotone), in matrix-dependent directions - measuring
         // beats guessing. The common MNA case (complete structural
         // diagonal) short-circuits to a single candidate and pays nothing.
-        let (pre_row_perm, col_perm, block_ptr) = if settings.btf {
+        let weighted = if settings.btf && settings.matching {
+            let cache = crate::scaling::mc64::compute_matching_general(a)?;
+            (cache.n_matched == n).then_some(cache.perm)
+        } else {
+            None
+        };
+        let (pre_row_perm, col_perm, block_ptr) = if let Some(m) = weighted {
+            // The weighted matching decides the transversal; the blocks are
+            // its strongly connected components.
+            let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
+            let of = order_blocks(a, form, false)?;
+            (of.pre_row_perm, of.col_perm, of.block_ptr)
+        } else if settings.btf {
             let cands = btf::matching_candidates(n, &a.col_ptr, &a.row_idx)
                 .ok_or(RslabError::StructurallySingular)?;
             let score_it = cands.len() > 1;
@@ -2330,6 +2359,80 @@ impl<T: Scalar> KluSolver<T> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The MC64 transversal keeps the diagonal-preference pivoting on the
+    /// diagonal: on a row-scrambled, badly scaled grid the numeric fill
+    /// equals the symbolic estimate, while the structural transversal
+    /// pivots off the diagonal and fills.
+    #[test]
+    fn klu_matching_keeps_fill_at_the_symbolic_estimate() {
+        let m = 40usize;
+        let n = m * m;
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for j in 0..n {
+            let (x, y) = (j % m, j / m);
+            let rs = |i: usize| 10f64.powi(((i * 7919) % 13) as i32 - 6);
+            let mut push = |i: usize, v: f64| cols[j].push(((i + 17) % n, v * rs(i)));
+            push(j, 4.0);
+            if x > 0 {
+                push(j - 1, -1.4);
+            }
+            if x + 1 < m {
+                push(j + 1, -0.6);
+            }
+            if y > 0 {
+                push(j - m, -1.0);
+            }
+            if y + 1 < m {
+                push(j + m, -1.0);
+            }
+        }
+        let (mut col_ptr, mut row_idx, mut values) = (vec![0usize], Vec::new(), Vec::new());
+        for c in &mut cols {
+            c.sort_by_key(|e| e.0);
+            for &(r, v) in c.iter() {
+                row_idx.push(r);
+                values.push(v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let a = GeneralCsc {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
+        let with = KluSettings::default();
+        let sym = KluSymbolic::analyze_with(&a, &with).unwrap();
+        let s = sym.factor(&a, &with).unwrap();
+        assert_eq!(
+            s.factor_nnz(),
+            sym.symbolic_factor_nnz(),
+            "no pivot-induced fill"
+        );
+        let x = s.solve(&b).unwrap();
+        let mut r = b.clone();
+        let mut d: Vec<f64> = b.iter().map(|v| v.abs()).collect();
+        for j in 0..n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                r[a.row_idx[k]] -= a.values[k] * x[j];
+                d[a.row_idx[k]] += a.values[k].abs() * x[j].abs();
+            }
+        }
+        let omega = r
+            .iter()
+            .zip(&d)
+            .map(|(ri, di)| ri.abs() / di)
+            .fold(0.0, f64::max);
+        assert!(omega < 1e-13, "backward error {omega}");
+        let without = KluSettings::default().with_matching(false);
+        let s0 = KluSolver::factor(&a, &without).unwrap();
+        assert!(
+            s0.factor_nnz() > s.factor_nnz(),
+            "structural transversal fills more"
+        );
+    }
     use super::*;
     use crate::numeric::multifrontal_ldlt::SolverSettings;
     use crate::numeric::multifrontal_lu::{factor_general_lu, solve_lu};

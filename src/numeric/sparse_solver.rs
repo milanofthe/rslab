@@ -125,9 +125,23 @@ impl<T: Scalar> LdltSolver<T> {
     ///    [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
     ///    from the calibrated cost model instead of the capped structural default.
     pub fn tuned(a: &CscMatrix<T>) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        crate::numeric::ll_common::tuned(a, LdltSymbolic::analyze_with, |sym: &LdltSymbolic| {
-            sym.estimate_memory::<T>()
-        })
+        Self::tuned_with(a, &SolverSettings::default())
+    }
+
+    /// [`tuned`](Self::tuned) on top of the caller's settings: the analysis
+    /// knobs (`nemin`, `relax`, `reorder`, ...) come from `base`, the
+    /// ordering is the heuristic race, the thread count the calibrated
+    /// pick.
+    pub fn tuned_with(
+        a: &CscMatrix<T>,
+        base: &SolverSettings,
+    ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
+        crate::numeric::ll_common::tuned(
+            a,
+            base,
+            LdltSymbolic::analyze_with,
+            |sym: &LdltSymbolic| sym.estimate_memory::<T>(),
+        )
     }
 
     /// Equilibrate and factor `A` with explicit options - notably
