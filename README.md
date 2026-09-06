@@ -26,7 +26,7 @@ algorithms and carries the full evaluation.
 
 ```toml
 [dependencies]
-rslab = "0.30"
+rslab = "0.32"
 ```
 
 Python bindings: `pip install rslab`.
@@ -38,8 +38,11 @@ f = rslab.ldlt(A); x = f.solve(b)    # factor once, solve many; also rslab.lu(A)
 k = rslab.klu(A_circuit)             # BTF + Gilbert-Peierls, then k.refactor(data)
 ```
 
-The dtype selects the field, factor knobs are keyword arguments. See
-[`python/README.md`](python/README.md).
+The dtype selects the field, factor knobs are keyword arguments or a
+`rslab.Settings` object; `rslab.analyze(A)` gives the symbolic analysis alone
+for factor-many sweeps, and `rslab.gmres` / `cocg` / `cocr` take any factor
+handle as preconditioner. See [`python/README.md`](python/README.md) and the
+generated API reference [`python/docs/api.md`](python/docs/api.md).
 
 ## Usage
 
@@ -180,8 +183,8 @@ println!("{}", f.diagnostics());
 ```
 
 From Python the same dict comes from `f.diagnostics()`, the level from
-`rslab.set_log_level("info")`, and `ldlt`/`lu` take `ordering`, `scaling`,
-`pivot_u` and `nemin` alongside the existing keywords.
+`rslab.set_log_level("info")`, a custom sink from `rslab.set_log_sink(fn)`,
+and every `SolverSettings` knob is a `rslab.Settings` keyword.
 
 ```rust
 use rslab::{BackwardError, RefinePolicy};

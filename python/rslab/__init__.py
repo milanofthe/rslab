@@ -30,11 +30,22 @@ field, so ``float64`` / ``float32`` run the real path and ``complex128`` /
 ``complex64`` the complex path through the *same* call, at half the memory
 for the 32-bit fields.
 
+The API has four layers, each a thin step below the previous one:
+
+1. :func:`spsolve` - one-shot factor, solve, discard.
+2. :func:`ldlt` / :func:`lu` / :func:`klu` - factor once into a handle
+   (:class:`Ldlt`, :class:`Lu`, :class:`Klu`), solve many.
+3. :func:`analyze` - the symbolic analysis alone (:class:`LdltSymbolic`,
+   :class:`LuSymbolic`, :class:`KluSymbolic`); factor many value sets on one
+   pattern.
+4. :func:`gmres` / :func:`gmres_block` / :func:`cocg` / :func:`cocr` -
+   Krylov solvers, optionally preconditioned by any factor handle.
+
+Configuration is a :class:`Settings` (LDL^T / LU) or :class:`KluSettings`
+object, or the same keywords given to the factor functions directly.
+
 Example
 -------
-The one-shot :func:`spsolve` auto-detects symmetry, factors, solves, and
-discards - the drop-in replacement:
-
 .. code-block:: python
 
     import numpy as np, scipy.sparse as sp, rslab
@@ -42,23 +53,15 @@ discards - the drop-in replacement:
     A = sp.random(2000, 2000, density=1e-3, format="csc") + sp.eye(2000) * 10
     A = A + A.T                       # make it symmetric
     b = np.random.rand(2000)
-
     x = rslab.spsolve(A, b)           # one-shot: factor + solve + discard
-
-When the same matrix is solved against many right-hand sides, factor once
-through the explicit handle and reuse it:
-
-.. code-block:: python
 
     f = rslab.ldlt(A)                 # factor once ...
     x1 = f.solve(b)                   # ... solve many
     X  = f.solve_many(np.random.rand(2000, 8))   # 8 right-hand sides at once
 
-Unsymmetric operators go through :func:`lu`, circuit-shaped ones through
-:func:`klu`; the factor configuration is passed as keyword arguments on each
-(``threads``, ``preconditioner``, ``drop_tol``, ``method``, ``memory`` on
-:func:`ldlt` / :func:`lu`; ``pivot_tol``, ``row_scaling``, ``btf``,
-``parallel`` on :func:`klu`).
+    sym = rslab.analyze(A, path="ldlt")          # analyze once ...
+    for scale in (1.0, 2.0, 3.0):
+        f = sym.factor(A.data * scale)           # ... factor many value sets
 
 Note
 ----
@@ -66,9 +69,7 @@ The numeric factor is **bit-identical regardless of the thread count**; the
 worker budget affects wall time and transient memory, not the result. By
 default the factorization uses at most 4 workers (the pareto-optimal
 throughput-per-core point on typical sparse factorizations); pass an explicit
-``threads`` to override. The KLU path factors each BTF block sequentially;
-its opt-in block parallelism (``parallel`` on :func:`klu`) only distributes
-independent blocks and never changes the result.
+``threads`` to override.
 
 References
 ----------
@@ -87,20 +88,57 @@ from __future__ import annotations
 import numpy as np
 
 from . import _rslab
-from ._rslab import Klu, Ldlt, Lu, Recycle, install_diagnose, set_log_level
+from ._rslab import (
+    Interrupt,
+    Klu,
+    KluSettings,
+    KluSymbolic,
+    KrylovResult,
+    Ldlt,
+    LdltSymbolic,
+    Lu,
+    LuSymbolic,
+    Recycle,
+    Settings,
+    install_diagnose,
+    log_level,
+    set_log_level,
+    set_log_sink,
+)
 
 __all__ = [
+    # one-shot
+    "spsolve",
+    # factor handles
     "ldlt",
     "lu",
     "klu",
-    "spsolve",
-    "install_diagnose",
-    "set_log_level",
-    "Klu",
     "Ldlt",
     "Lu",
+    "Klu",
+    # symbolic analysis
+    "analyze",
+    "LdltSymbolic",
+    "LuSymbolic",
+    "KluSymbolic",
+    # configuration
+    "Settings",
+    "KluSettings",
+    "Interrupt",
+    # Krylov
+    "gmres",
+    "gmres_block",
+    "cocg",
+    "cocr",
+    "KrylovResult",
     "Recycle",
+    # machine and logging
+    "install_diagnose",
+    "set_log_level",
+    "log_level",
+    "set_log_sink",
 ]
+
 __version__ = _rslab.__version__
 
 # The four scalar fields the Rust core supports, by NumPy dtype.
@@ -144,115 +182,57 @@ def _full_csc(A):
     return A
 
 
-def _opts(threads, preconditioner, drop_tol, method, memory, force_accept,
-          ordering=None, scaling=None, pivot_u=None, nemin=None):
+def _parts(M):
+    """``(n, indptr, indices, data)`` of a prepared CSC matrix, as the core wants them."""
+    n = M.shape[0]
+    if M.shape[1] != n:
+        raise ValueError(f"matrix must be square, got {M.shape}")
     return (
-        None if threads is None else int(threads),
-        None if preconditioner is None else float(preconditioner),
-        None if drop_tol is None else float(drop_tol),
-        str(method),
-        str(memory),
-        bool(force_accept),
-        None if ordering is None else str(ordering),
-        None if scaling is None else str(scaling),
-        None if pivot_u is None else float(pivot_u),
-        None if nemin is None else int(nemin),
+        n,
+        np.ascontiguousarray(M.indptr, dtype=np.int64),
+        np.ascontiguousarray(M.indices, dtype=np.int64),
+        np.ascontiguousarray(_normalize_dtype(M.data)),
     )
 
 
+def _csc_parts(A, path: str):
+    return _parts(_lower_csc(A) if path == "ldlt" else _full_csc(A))
 
-def ldlt(
-    A,
-    *,
-    threads: int | None = None,
-    preconditioner: float | None = None,
-    drop_tol: float | None = None,
-    method: str = "left_looking",
-    memory: str = "low",
-    force_accept: bool = False,
-    ordering: str | None = None,
-    scaling: str | None = None,
-    pivot_u: float | None = None,
-    nemin: int | None = None,
-) -> Ldlt:
+
+# ---------------------------------------------------------------------------
+# Factor handles
+# ---------------------------------------------------------------------------
+
+
+def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
     """Factor a **symmetric** matrix as :math:`P^{\\mathsf{T}} A P = L D L^{\\mathsf{T}}`.
 
     A supernodal Bunch-Kaufman :math:`L D L^{\\mathsf{T}}` factorization with a
-    fill-reducing ordering :math:`P`, for real symmetric
-    (``float64`` / ``float32``) and **complex-symmetric** (``complex128`` /
-    ``complex64``, i.e. :math:`A = A^{\\mathsf{T}}`, *not* Hermitian) matrices; the
-    ``dtype`` selects the path. Only the lower triangle is read (extracted
-    automatically), so ``A`` may be stored full or triangular. Returns a reusable
-    factor handle - factor once, then :meth:`Ldlt.solve` against as many
-    right-hand sides as needed.
+    fill-reducing ordering :math:`P`, for real symmetric (``float64`` /
+    ``float32``) and **complex-symmetric** (``complex128`` / ``complex64``,
+    i.e. :math:`A = A^{\\mathsf{T}}`, *not* Hermitian) matrices; the ``dtype``
+    selects the path. Only the lower triangle is read (extracted
+    automatically), so ``A`` may be stored full or triangular.
 
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The symmetric :math:`n \\times n` system matrix. Converted to CSC and its
-        lower triangle taken; duplicate entries are summed.
-    threads : int, optional
-        Worker-thread budget for the (scoped) factorization pool. ``None``
-        (default) uses the **auto** per-matrix predictor - thin / tiny systems
-        stay low where extra threads only regress, larger BLAS-3-rich systems
-        scale up - **capped at 4 workers**, the pareto-optimal
-        throughput-per-core point. An explicit integer pins the count
-        (``0`` = all logical cores); pin a small value for many concurrent solves
-        sharing the machine. The factor is bit-identical either way.
-    preconditioner : float, optional
-        Enable never-fail **static pivoting**: any pivot with magnitude below this
-        absolute floor (typically ``eps_rel * ||A||``) is lifted to it, so the
-        stored factor is of a perturbed :math:`A + E`. The factorization then
-        never fails on a (near-)singular pivot, at the cost of an inexact factor -
-        recover full accuracy by driving ``solve(b, refine=k)``, which does ``k``
-        steps of iterative refinement against the original ``A``. A good starting
-        floor is ``1e-4``.
-    drop_tol : float, optional
-        Incomplete-factorization threshold. Fill entries whose magnitude is below
-        this value *relative to the column* are discarded, trading factor accuracy
-        for memory and turning the factor into an ILU-style preconditioner (pair
-        with ``refine`` or an outer Krylov iteration). ``None`` keeps the complete
-        factor.
-    method : {'left_looking', 'multifrontal'}, default 'left_looking'
-        Numeric factorization schedule. Both produce the **same** factor and
-        differ only in the transient-memory / parallel-scheduling profile:
-        ``'left_looking'`` has the lower transient working set, ``'multifrontal'``
-        exposes more front-level parallelism.
-    memory : {'low', 'eager'}, default 'low'
-        Factor-emit strategy. ``'low'`` frees each front as soon as it is emitted
-        (lower peak RSS); ``'eager'`` keeps them resident. Bit-identical factors
-        either way.
-    force_accept : bool, default False
-        In exact mode (no ``preconditioner``), accept tiny pivots at face value
-        instead of raising on rank deficiency. Ignored when ``preconditioner`` is
-        set. Use only when you know the system is well-conditioned.
-
-    ordering : str, optional
-        Fill-reducing ordering: ``'auto'`` (the adaptive heuristic), ``'amd'``,
-        ``'amf'``, ``'metis'`` (nested dissection) or ``'rcm'``. ``None`` keeps
-        the default pick; the ordering actually used is reported in
-        ``diagnostics()['decisions']``.
-    scaling : str, optional
-        Symmetric equilibration before factoring (``ldlt`` only): ``'one_pass'``
-        (default), ``'inf_norm'`` (iterative Ruiz), ``'mc64'``, ``'auto'`` or
-        ``'identity'``. The LU path uses its own two-sided scaling and reports
-        a set value under ``diagnostics()['warnings']``.
-    pivot_u : float, optional
-        Threshold partial-pivoting tolerance of the left-looking LU (``lu``
-        only, ``0.1`` by default); ignored, and reported, on the other paths.
-    nemin : int, optional
-        Supernode amalgamation threshold of the analysis.
+        The symmetric :math:`n \\times n` system matrix. Converted to CSC and
+        its lower triangle taken; duplicate entries are summed.
+    settings : Settings, optional
+        A prepared :class:`Settings` object.
+    **kwargs
+        Any :class:`Settings` keyword (``threads``, ``preconditioner``,
+        ``drop_tol``, ``method``, ``memory``, ``force_accept``, ``ordering``,
+        ``scaling``, ``pivot_u``, ``nemin``, ``relax``, ``reorder``, ``blr``,
+        ``panel_nb``, ``interrupt`` ...), overriding ``settings``.
 
     Returns
     -------
     Ldlt
-        A reusable factor handle exposing :meth:`~Ldlt.solve`,
-        :meth:`~Ldlt.solve_many`, :meth:`~Ldlt.gmres` (preconditioned single-RHS
-        iterative solve), :meth:`~Ldlt.gmres_block` (preconditioned multi-RHS
-        iterative solve), :meth:`~Ldlt.diagnostics` (stages, decisions,
-        numeric outcome, solve accumulators, warnings) and the read-only
-        attributes ``n``, ``factor_nnz`` (fill), ``n_perturbed``, ``inertia``
-        and ``dtype``.
+        A reusable factor handle: :meth:`Ldlt.solve`, :meth:`Ldlt.solve_many`,
+        the Krylov methods with the factor as preconditioner, and
+        :meth:`Ldlt.diagnostics`.
 
     Raises
     ------
@@ -260,401 +240,335 @@ def ldlt(
         If a pivot is numerically zero in exact mode (the matrix is rank
         deficient). Set ``preconditioner=...`` (recommended) or
         ``force_accept=True`` to proceed.
+    ValueError
+        On an unsupported dtype, a non-square matrix or an invalid setting.
 
-    See Also
-    --------
-    lu : the unsymmetric counterpart, :math:`P^{\\mathsf{T}} A P = L U`.
-    klu : the circuit-shaped unsymmetric path (BTF + Gilbert-Peierls).
-    spsolve : one-shot factor-and-solve with automatic symmetry detection.
-
-    Notes
-    -----
-    The complex path uses the *unconjugated* bilinear form throughout, which is
-    the correct geometry for complex-symmetric (:math:`A = A^{\\mathsf{T}}`)
-    operators such as those from time-harmonic Maxwell / MoM discretizations -
-    it is **not** a Hermitian solver.
-
-    Examples
-    --------
-    Build a symmetric test system and factor it exactly:
-
+    Example
+    -------
     .. code-block:: python
 
-        import numpy as np, scipy.sparse as sp, rslab
-
-        A = sp.random(5000, 5000, density=5e-4, format="csc")
-        A = A + A.T + sp.eye(5000) * 20          # symmetric, diagonally dominant
-
-        f = rslab.ldlt(A)                        # exact factor
-        x = f.solve(np.random.rand(5000))
-
-    The handle carries the factorization diagnostics - the fill and the
-    inertia :math:`(n_+, n_-, n_0)`:
-
-    .. code-block:: python
-
-        print(f.factor_nnz, f.inertia)
-
-    On a near-singular or indefinite system, enable never-fail static
-    pivoting and recover accuracy with iterative refinement against the
-    original matrix:
-
-    .. code-block:: python
-
-        g = rslab.ldlt(A, preconditioner=1e-4)
-        x = g.solve(np.random.rand(5000), refine=2)
-
-    An *incomplete* factor (thresholded fill) is a memory-light
-    preconditioner; drive the built-in GMRES with it to recover the exact
-    solution:
-
-    .. code-block:: python
-
-        p = rslab.ldlt(A, drop_tol=1e-2)         # half the fill, inexact
-        x, converged, iters, res, stop = p.gmres(np.random.rand(5000))
-
-    References
-    ----------
-    .. [1] Bunch, J. R., & Kaufman, L. (1977). "Some stable methods for
-           calculating inertia and solving symmetric linear systems."
-           *Mathematics of Computation*, 31(137), 163-179.
-           :doi:`10.1090/S0025-5718-1977-0428694-0`
+        f = rslab.ldlt(A)                       # heuristic defaults
+        f = rslab.ldlt(A, ordering="metis", threads=2)
+        f = rslab.ldlt(A, preconditioner=1e-4)  # never-fail static pivoting
+        x = f.solve(b, refine=2)
+        print(f.inertia, f.diagnostics()["summary"])
     """
-    L = _lower_csc(A)
-    data = _normalize_dtype(L.data)
-    return _rslab.ldlt_factor(
-        L.shape[0],
-        L.indptr.astype(np.int64),
-        L.indices.astype(np.int64),
-        data,
-        *_opts(threads, preconditioner, drop_tol, method, memory, force_accept,
-               ordering, scaling, pivot_u, nemin),
-    )
+    return _rslab.ldlt_factor(*_csc_parts(A, "ldlt"), settings=settings, **kwargs)
 
 
-def lu(
-    A,
-    *,
-    threads: int | None = None,
-    preconditioner: float | None = None,
-    drop_tol: float | None = None,
-    method: str = "left_looking",
-    memory: str = "low",
-    force_accept: bool = False,
-    ordering: str | None = None,
-    scaling: str | None = None,
-    pivot_u: float | None = None,
-    nemin: int | None = None,
-) -> Lu:
-    """Factor a **general** (unsymmetric) matrix as :math:`P^{\\mathsf{T}} A P = L U`.
+def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
+    """Factor a **general** (unsymmetric) matrix as :math:`P_r^{\\mathsf{T}} A P_c = L U`.
 
-    A supernodal multifrontal :math:`L U` factorization with a fill-reducing
-    ordering :math:`P`, for real and complex dtypes (the ``dtype`` selects the
-    path). The full matrix - both triangles - is used, so this is the path for any
-    non-symmetric operator (e.g. convection-diffusion, non-reciprocal MoM).
-    Returns a reusable factor handle; factor once, then :meth:`Lu.solve` against
-    many right-hand sides.
+    A supernodal left-looking (default) or multifrontal LU with threshold
+    partial pivoting and two-sided equilibration, over the same four scalar
+    fields as :func:`ldlt`. The full matrix is read.
 
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The general :math:`n \\times n` system matrix. Converted to CSC; duplicate
-        entries are summed.
-    threads : int, optional
-        Worker-thread budget for the (scoped) factorization pool. ``None``
-        (default) uses the **auto** per-matrix predictor, **capped at 4 workers**
-        (the pareto-optimal throughput-per-core point); an explicit integer pins
-        the count (``0`` = all logical cores). The factor is bit-identical either
-        way.
-    preconditioner : float, optional
-        Enable never-fail **static pivoting**: a pivot below this absolute floor is
-        lifted, so the stored factor is of a perturbed :math:`A + E` and the
-        factorization never fails on a (near-)singular pivot. Recover accuracy with
-        ``solve(b, refine=k)`` (iterative refinement against the original ``A``). A
-        good starting floor is ``1e-4``.
-    drop_tol : float, optional
-        Incomplete-factorization threshold: fill below this value (relative to the
-        column) is dropped, trading accuracy for memory and yielding an ILU-style
-        preconditioner. ``None`` keeps the complete factor.
-    method : {'left_looking', 'multifrontal'}, default 'left_looking'
-        Numeric factorization schedule. Both produce the **same** factor and differ
-        only in transient memory / parallel scheduling.
-    memory : {'low', 'eager'}, default 'low'
-        Factor-emit strategy; ``'low'`` frees each front as emitted for a lower
-        peak RSS. Bit-identical either way.
-    force_accept : bool, default False
-        In exact mode, accept tiny pivots instead of raising on rank deficiency.
-        Ignored when ``preconditioner`` is set.
-
-    ordering : str, optional
-        Fill-reducing ordering: ``'auto'`` (the adaptive heuristic), ``'amd'``,
-        ``'amf'``, ``'metis'`` (nested dissection) or ``'rcm'``. ``None`` keeps
-        the default pick; the ordering actually used is reported in
-        ``diagnostics()['decisions']``.
-    scaling : str, optional
-        Symmetric equilibration before factoring (``ldlt`` only): ``'one_pass'``
-        (default), ``'inf_norm'`` (iterative Ruiz), ``'mc64'``, ``'auto'`` or
-        ``'identity'``. The LU path uses its own two-sided scaling and reports
-        a set value under ``diagnostics()['warnings']``.
-    pivot_u : float, optional
-        Threshold partial-pivoting tolerance of the left-looking LU (``lu``
-        only, ``0.1`` by default); ignored, and reported, on the other paths.
-    nemin : int, optional
-        Supernode amalgamation threshold of the analysis.
+        The :math:`n \\times n` system matrix. Converted to CSC; duplicates
+        summed.
+    settings : Settings, optional
+        A prepared :class:`Settings` object.
+    **kwargs
+        Any :class:`Settings` keyword, overriding ``settings``. ``pivot_u``
+        (default 0.1) is the threshold-pivoting tolerance of this path;
+        ``scaling`` is ignored here (the LU path scales two-sided) and
+        reported under ``diagnostics()['warnings']``.
 
     Returns
     -------
     Lu
-        A reusable factor handle exposing :meth:`~Lu.solve`,
-        :meth:`~Lu.solve_many`, :meth:`~Lu.gmres` (preconditioned single-RHS
-        iterative solve), :meth:`~Lu.gmres_block` (preconditioned multi-RHS
-        iterative solve), and the read-only attributes ``n``, ``factor_nnz`` (fill
-        in ``L + U``), ``n_perturbed`` and ``dtype``.
+        A reusable factor handle (:meth:`Lu.solve`, :meth:`Lu.solve_many`,
+        Krylov methods, :meth:`Lu.diagnostics`).
 
     Raises
     ------
     RuntimeError
-        If a pivot is numerically zero in exact mode (rank-deficient matrix). Set
-        ``preconditioner=...`` (recommended) or ``force_accept=True`` to proceed.
+        On a numerically zero pivot in exact mode.
+    ValueError
+        On an unsupported dtype, a non-square matrix or an invalid setting.
 
-    See Also
-    --------
-    ldlt : the symmetric counterpart, :math:`P^{\\mathsf{T}} A P = L D L^{\\mathsf{T}}`.
-    spsolve : one-shot factor-and-solve with automatic symmetry detection.
-
-    Examples
-    --------
-    Factor a general unsymmetric matrix and solve one or many right-hand
-    sides against it:
-
+    Example
+    -------
     .. code-block:: python
 
-        import numpy as np, scipy.sparse as sp, rslab
-
-        A = sp.random(4000, 4000, density=1e-3, format="csc") + sp.eye(4000) * 10
-        f = rslab.lu(A)                          # unsymmetric factor
-        x = f.solve(np.random.rand(4000))
-
-    The multi-RHS solve traverses the factor once for all columns - faster
-    than looping :meth:`~Lu.solve`:
-
-    .. code-block:: python
-
-        X = f.solve_many(np.random.rand(4000, 4))
-
-    A dropped (incomplete) factor plus the built-in preconditioned GMRES
-    trades factor memory against a few iterations:
-
-    .. code-block:: python
-
-        p = rslab.lu(A, drop_tol=1e-2)
-        x, converged, iters, res, stop = p.gmres(np.random.rand(4000))
-
-    References
-    ----------
-    .. [1] Davis, T. A. (2006). *Direct Methods for Sparse Linear Systems*. SIAM,
-           chs. 5-6 (multifrontal / supernodal LU). :doi:`10.1137/1.9780898718881`
+        f = rslab.lu(A)
+        x = f.solve(b)
+        r = f.gmres(b, tol=1e-10)               # the factor as preconditioner
+        x, converged, iters, res, stop = rslab.lu(A, drop_tol=1e-2).gmres(b)
     """
-    M = _full_csc(A)
-    data = _normalize_dtype(M.data)
-    return _rslab.lu_factor(
-        M.shape[0],
-        M.indptr.astype(np.int64),
-        M.indices.astype(np.int64),
-        data,
-        *_opts(threads, preconditioner, drop_tol, method, memory, force_accept,
-               ordering, scaling, pivot_u, nemin),
-    )
+    return _rslab.lu_factor(*_csc_parts(A, "lu"), settings=settings, **kwargs)
 
 
-def klu(
-    A,
-    *,
-    pivot_tol: float = 1e-3,
-    row_scaling: bool = True,
-    btf: bool = True,
-    parallel: bool | None = None,
-) -> Klu:
+def klu(A, *, settings: KluSettings | None = None, **kwargs) -> Klu:
     """Factor a general matrix through the **KLU** path (circuit-shaped systems).
 
-    Block triangular form (maximum transversal + Tarjan SCC) plus a per-block
-    left-looking Gilbert-Peierls :math:`L U` with threshold partial pivoting -
-    the method of SuiteSparse KLU, reimplemented in pure Rust. Built for
-    circuit-shaped matrices: extremely sparse, unsymmetric, near-triangularizable
-    (MNA / SPICE-class operators), where it factors several times faster than
-    :func:`lu` with a fraction of the fill. **Bit-deterministic** across runs
-    and thread counts: each BTF block factors sequentially, and the opt-in
-    block parallelism (``parallel``) only distributes independent blocks, so
-    the factor is bit-identical in every mode.
-
-    The distinctive extra over :func:`lu` is :meth:`Klu.refactor`: a
-    numeric-only re-factorization for a new value set on the **same** pattern
-    (frequency sweeps, time stepping, Newton iterations) that skips all
-    symbolic work and pivot searching.
+    Block triangular form (BTF) plus a per-block AMD-ordered Gilbert-Peierls
+    left-looking LU with diagonal-preference pivoting, following KLU
+    (Davis & Palamadai Natarajan 2010). Built for MNA / SPICE matrices:
+    extremely sparse, unsymmetric, nearly triangular. The
+    :meth:`Klu.refactor` fast path re-factors new values on the same pattern
+    without symbolic work or pivot search.
 
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The general :math:`n \\times n` system matrix. Converted to CSC; duplicate
-        entries are summed.
-    pivot_tol : float, default 1e-3
-        Diagonal-preference threshold: the (structurally nonzero) diagonal is
-        kept as the pivot when :math:`|a_{jj}| \\ge \\mathrm{tol} \\cdot
-        \\max_i |a_{ij}|`; ``1.0`` is plain partial pivoting.
-    row_scaling : bool, default True
-        Divide each row by its max-magnitude entry before factoring (more
-        robust on badly equilibrated inputs; folded into the solve).
-    btf : bool, default True
-        Permute to block upper triangular form first. Leave on: it confines
-        fill to the irreducible diagonal blocks and detects structural
-        singularity a-priori.
-    parallel : bool or None, default None
-        Per-block parallel factor/refactor over the independent BTF diagonal
-        blocks (ambient rayon pool, capped by ``threads`` scoping on the Rust
-        side). ``None`` is the structural auto gate: parallel when the matrix
-        has at least 4 diagonal blocks, 8000 nonzeros, and no dominant block
-        (largest block at most half of ``n`` - real circuits are often one
-        giant irreducible block plus thousands of singletons, where
-        distributing blocks cannot help). ``True`` forces it on, ``False``
-        forces strictly sequential execution. The policy is frozen into the
-        handle and also governs :meth:`Klu.refactor`. The result is
-        bit-identical in every mode.
+        The :math:`n \\times n` system matrix (full, CSC after conversion).
+    settings : KluSettings, optional
+        A prepared :class:`KluSettings` object.
+    **kwargs
+        Any :class:`KluSettings` keyword (``pivot_tol``, ``row_scaling``,
+        ``btf``, ``parallel``, ``interrupt``), overriding ``settings``.
 
     Returns
     -------
     Klu
-        A reusable factor handle exposing :meth:`~Klu.solve`,
-        :meth:`~Klu.solve_many`, :meth:`~Klu.refactor` (numeric-only sweep
-        re-factorization), :meth:`~Klu.gmres` / :meth:`~Klu.gmres_block`, and
-        the read-only attributes ``n``, ``factor_nnz``, ``n_blocks``,
-        ``n_perturbed`` (always ``0``) and ``dtype``.
+        A reusable factor handle with :meth:`Klu.solve`, :meth:`Klu.solve_many`,
+        :meth:`Klu.solve_transpose`, :meth:`Klu.refactor`, the Krylov methods
+        and :meth:`Klu.diagnostics`.
 
     Raises
     ------
     RuntimeError
-        If the matrix is structurally singular (no complete column-row
-        matching; singular for every value assignment) or a pivot is
-        numerically zero.
+        If the matrix is structurally singular (no complete matching) or a
+        block hits a numerically zero pivot.
 
-    See Also
-    --------
-    lu : the supernodal multifrontal path for general unsymmetric matrices
-        (the better choice for fill-heavy FEM/MoM-class operators).
-    spsolve : one-shot factor-and-solve with automatic symmetry detection.
-
-    Examples
-    --------
-    Factor a circuit-shaped matrix - the analysis finds the block triangular
-    form and confines all fill to its irreducible diagonal blocks:
-
+    Example
+    -------
     .. code-block:: python
 
-        import numpy as np, scipy.sparse as sp, rslab
-
-        A = sp.random(4000, 4000, density=5e-4, format="csc") + sp.eye(4000) * 10
-        f = rslab.klu(A)                       # BTF + per-block LU
-        x = f.solve(np.random.rand(4000))
-        print(f.n_blocks, f.factor_nnz)        # BTF blocks and fill
-
-    In a frequency sweep the pattern is fixed and only the values change;
-    :meth:`~Klu.refactor` replays the stored pattern and pivot sequence on
-    the new values - no symbolic work, no pivot search:
-
-    .. code-block:: python
-
-        for scale in (1.0, 1.5, 2.0):
-            A2 = A * scale                     # same pattern, new values
-            f.refactor(A2.data)                # numeric-only, several x faster
-            x = f.solve(np.random.rand(4000))
-
-    A structurally singular input (some set of columns with entries in fewer
-    rows than columns) is detected in the analysis, before any numeric work:
-
-    .. code-block:: python
-
-        try:
-            rslab.klu(singular_A)
-        except RuntimeError as e:
-            print(e)                           # "structurally singular ..."
-
-    References
-    ----------
-    .. [1] Davis, T. A., & Palamadai Natarajan, E. (2010). Algorithm 907: KLU,
-           a direct sparse solver for circuit simulation problems. *ACM TOMS*,
-           37(3). :doi:`10.1145/1824801.1824814`
+        f = rslab.klu(A)                        # factor once
+        x = f.solve(b)
+        f.refactor(A2.data)                     # same pattern, new values
+        x2 = f.solve(b)
+        y = f.solve_transpose(b)                # A^T y = b on the same factors
     """
-    M = _full_csc(A)
-    data = _normalize_dtype(M.data)
-    return _rslab.klu_factor(
-        M.shape[0],
-        M.indptr.astype(np.int64),
-        M.indices.astype(np.int64),
-        data,
-        pivot_tol,
-        row_scaling,
-        btf,
-        parallel,
-    )
+    return _rslab.klu_factor(*_csc_parts(A, "klu"), settings=settings, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Symbolic analysis
+# ---------------------------------------------------------------------------
+
+
+def analyze(A, path: str = "auto", *, settings=None, **kwargs):
+    """Symbolic analysis of the pattern of ``A``: analyze once, factor many.
+
+    The analysis (ordering, elimination tree, supernodes; for KLU the block
+    triangular form) depends only on the sparsity pattern, so a sequence of
+    matrices with the same pattern (frequency sweeps, Newton iterations,
+    parameter studies) pays it once and factors each value set through
+    ``symbolic.factor(data)``.
+
+    Parameters
+    ----------
+    A : scipy.sparse matrix or array-like
+        The :math:`n \\times n` matrix whose pattern (and, for the heuristic
+        ordering pick, values) is analyzed.
+    path : {'auto', 'ldlt', 'lu', 'klu'}, default 'auto'
+        The factorization path: ``'ldlt'`` for symmetric matrices (the lower
+        triangle is analyzed), ``'lu'`` for general ones, ``'klu'`` for
+        circuit-shaped ones. ``'auto'`` picks ``'ldlt'`` when ``A`` is
+        symmetric and ``'lu'`` otherwise.
+    settings : Settings or KluSettings, optional
+        Analysis-time settings (``ordering``, ``nemin``, ``relax``,
+        ``reorder`` for LDL^T / LU; ``btf`` for KLU). Numeric settings given
+        here become the defaults of ``factor``.
+    **kwargs
+        The same keywords, overriding ``settings``.
+
+    Returns
+    -------
+    LdltSymbolic or LuSymbolic or KluSymbolic
+        The analysis handle: fill and memory estimates, and ``factor(data)``.
+
+    Example
+    -------
+    .. code-block:: python
+
+        sym = rslab.analyze(A, path="lu", ordering="amd")
+        print(sym.factor_nnz, sym.estimate_memory()["factor_mb"])
+        for omega in frequencies:
+            f = sym.factor((K + 1j * omega * C).data)    # same pattern
+            x = f.solve(b)
+
+    Note
+    ----
+    ``factor(data)`` takes the CSC value array in the analyzed pattern's
+    order, i.e. of a matrix prepared the same way (sorted indices, summed
+    duplicates). Build the sweep matrices from one pattern to guarantee it.
+    """
+    if path == "auto":
+        path = "ldlt" if _is_symmetric(A) else "lu"
+    if path == "ldlt":
+        return _rslab.analyze_ldlt(*_csc_parts(A, "ldlt"), settings=settings, **kwargs)
+    if path == "lu":
+        return _rslab.analyze_lu(*_csc_parts(A, "lu"), settings=settings, **kwargs)
+    if path == "klu":
+        return _rslab.analyze_klu(*_csc_parts(A, "klu"), settings=settings, **kwargs)
+    raise ValueError(f"path must be 'auto', 'ldlt', 'lu' or 'klu', got {path!r}")
+
+
+# ---------------------------------------------------------------------------
+# Krylov solvers
+# ---------------------------------------------------------------------------
+
+
+def gmres(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400, restart: int | None = None,
+          x0=None, recycle: Recycle | None = None) -> KrylovResult:
+    """Flexible restarted GMRES on ``A x = b``, optionally preconditioned.
+
+    Parameters
+    ----------
+    A : scipy.sparse matrix or array-like
+        The operator (any square matrix; converted to CSC).
+    b : ndarray, shape (n,)
+        Right-hand side; cast to the operator's (or preconditioner's) dtype.
+    M : Ldlt or Lu or Klu, optional
+        A factor handle used as the preconditioner, e.g. an incomplete or
+        low-precision factor of ``A`` or a factor of a nearby matrix.
+        ``None`` runs unpreconditioned.
+    tol : float, default 1e-8
+        Relative residual target ``||b - A x|| <= tol * ||b||``.
+    maxit : int, default 400
+        Iteration budget.
+    restart : int, optional
+        Arnoldi basis size; by default chosen so the basis stays under 1 GiB
+        (between 20 and 80).
+    x0 : ndarray, optional
+        Initial guess (warm start).
+    recycle : Recycle, optional
+        Deflation subspace carried across calls (needs ``M``; create it with
+        ``M.recycle(k)``).
+
+    Returns
+    -------
+    KrylovResult
+        ``x``, ``converged``, ``iters``, ``final_res``, ``stop``; unpacks as
+        a 5-tuple.
+
+    Example
+    -------
+    .. code-block:: python
+
+        M = rslab.lu(A, drop_tol=1e-3)                    # ILU-style preconditioner
+        x, ok, iters, res, stop = rslab.gmres(A, b, M, tol=1e-10)
+        r = rslab.gmres(A2, b, M)                         # M reused on a nearby A2
+    """
+    parts = _csc_parts(A, "lu")
+    if M is None:
+        b = np.ascontiguousarray(b, dtype=parts[3].dtype)
+        return _rslab.gmres_plain(*parts, b, tol=tol, maxit=maxit, restart=restart, x0=x0)
+    b = _match_dtype(b, M.dtype)
+    return M.gmres(b, tol=tol, maxit=maxit, restart=restart, x0=x0, recycle=recycle,
+                   operator=_cast_operator(parts, M.dtype))
+
+
+def gmres_block(A, B, M=None, *, tol: float = 1e-8, maxit: int = 400,
+                restart: int | None = None, x0=None) -> KrylovResult:
+    """Block GMRES on ``A X = B`` for an ``n x nrhs`` block, optionally preconditioned.
+
+    Same arguments as :func:`gmres` (without ``recycle``); ``B`` and ``x0``
+    are 2-D ``n x nrhs`` arrays and ``final_res`` holds one residual per
+    column.
+    """
+    parts = _csc_parts(A, "lu")
+    if M is None:
+        B = np.ascontiguousarray(B, dtype=parts[3].dtype)
+        return _rslab.gmres_block_plain(*parts, B, tol=tol, maxit=maxit, restart=restart, x0=x0)
+    B = _match_dtype(B, M.dtype)
+    return M.gmres_block(B, tol=tol, maxit=maxit, restart=restart, x0=x0,
+                         operator=_cast_operator(parts, M.dtype))
+
+
+def cocg(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
+    """Conjugate orthogonal conjugate gradient (COCG) on ``A x = b``.
+
+    The short-recurrence Krylov method for **complex-symmetric**
+    (:math:`A = A^{\\mathsf{T}}`) and real symmetric operators: constant
+    memory, one matrix-vector product per iteration, no restart. Same
+    ``A``, ``b``, ``M``, ``tol``, ``maxit`` as :func:`gmres`.
+    """
+    parts = _csc_parts(A, "lu")
+    if M is None:
+        b = np.ascontiguousarray(b, dtype=parts[3].dtype)
+        return _rslab.cocg_plain(*parts, b, tol=tol, maxit=maxit)
+    b = _match_dtype(b, M.dtype)
+    return M.cocg(b, tol=tol, maxit=maxit, operator=_cast_operator(parts, M.dtype))
+
+
+def cocr(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
+    """Conjugate orthogonal conjugate residual (COCR) on ``A x = b``.
+
+    The minimal-residual sibling of :func:`cocg` for complex-symmetric
+    operators (smoother residual history). Same arguments as :func:`cocg`.
+    """
+    parts = _csc_parts(A, "lu")
+    if M is None:
+        b = np.ascontiguousarray(b, dtype=parts[3].dtype)
+        return _rslab.cocr_plain(*parts, b, tol=tol, maxit=maxit)
+    b = _match_dtype(b, M.dtype)
+    return M.cocr(b, tol=tol, maxit=maxit, operator=_cast_operator(parts, M.dtype))
+
+
+def _cast_operator(parts, dtype_name: str):
+    """The operator tuple with its values cast to the preconditioner's dtype."""
+    n, indptr, indices, data = parts
+    return (n, indptr, indices, np.ascontiguousarray(data, dtype=np.dtype(dtype_name)))
+
+
+# ---------------------------------------------------------------------------
+# One-shot
+# ---------------------------------------------------------------------------
 
 
 def _is_symmetric(A, tol: float = 1e-12) -> bool:
-    """Cheap structural+value symmetry test for picking the LDL^T vs LU path."""
+    """Structural + value symmetry test (``A - A^T`` small relative to ``max|A|``)."""
     sp = _require_scipy()
     A = sp.csc_matrix(A)
     if A.shape[0] != A.shape[1]:
         return False
-    d = A - A.T
-    if d.nnz == 0:
+    d = (A - A.T).tocsc().data
+    if d.size == 0:
         return True
     return float(abs(d).max()) <= tol * (float(abs(A).max()) or 1.0)
 
 
 def _match_dtype(b: np.ndarray, dtype_name: str) -> np.ndarray:
-    """Cast a right-hand side to the factor's dtype (the Rust solve is strict)."""
+    """``b`` as a contiguous array in the factor's dtype."""
     return np.ascontiguousarray(b, dtype=np.dtype(dtype_name))
 
 
-def spsolve(
-    A,
-    b,
-    *,
-    symmetric: bool | None = None,
-    refine: int = 0,
-    **opts,
-):
+def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
     """One-shot solve of :math:`A x = b` (factor, solve, discard).
 
-    The convenience entry point mirroring :func:`scipy.sparse.linalg.spsolve`:
-    detects whether ``A`` is symmetric, factors it with :func:`ldlt` or
-    :func:`lu` accordingly, solves, and drops the factor. Use :func:`ldlt` /
-    :func:`lu` directly when the same matrix is solved repeatedly, to reuse the
-    (expensive) factorization.
+    Detects symmetry, factors through :func:`ldlt` or :func:`lu`, solves,
+    and drops the factor. For repeated solves against one matrix keep the
+    handle instead (:func:`ldlt` / :func:`lu` / :func:`klu`).
 
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
         The :math:`n \\times n` system matrix.
-    b : array-like
-        Right-hand side: a 1-D vector of length ``n`` or a 2-D ``n x nrhs`` block.
-        Cast to the factor's dtype automatically.
+    b : ndarray
+        Right-hand side: a 1-D vector of length ``n`` or a 2-D ``n x nrhs``
+        block. Cast to the factor's dtype automatically.
     symmetric : bool, optional
         Force the symmetric :math:`L D L^{\\mathsf{T}}` path (``True``) or the
         unsymmetric :math:`L U` path (``False``). When omitted, symmetry is
-        auto-detected from ``A`` (a structural + value test); pass it explicitly to
-        skip the check or to override a borderline case.
+        auto-detected from ``A`` (a structural + value test).
     refine : int, default 0
-        Steps of iterative refinement against the original matrix, applied per
-        right-hand side. Meaningful together with ``preconditioner=...`` /
+        Steps of iterative refinement against the original matrix, per
+        right-hand side. Meaningful with ``preconditioner=...`` /
         ``drop_tol=...``, where the factor is inexact.
-    **opts
-        Forwarded to :func:`ldlt` / :func:`lu`: ``threads``, ``preconditioner``,
-        ``drop_tol``, ``method``, ``memory``, ``force_accept``.
+    **kwargs
+        Forwarded to :func:`ldlt` / :func:`lu` (any :class:`Settings` keyword).
 
     Returns
     -------
-    numpy.ndarray
-        The solution, matching the shape of ``b`` (1-D for a vector, ``n x nrhs``
-        for a block).
+    ndarray
+        The solution, matching the shape of ``b``.
 
     Raises
     ------
@@ -664,29 +578,17 @@ def spsolve(
         If the (exact-mode) factorization hits a zero pivot; set
         ``preconditioner=...`` to use never-fail static pivoting.
 
-    See Also
-    --------
-    ldlt, lu, klu : reusable factor handles for the factor-once, solve-many workflow.
-
-    Examples
-    --------
+    Example
+    -------
     .. code-block:: python
 
-        import numpy as np, scipy.sparse as sp, rslab
-
-        A = sp.random(3000, 3000, density=1e-3, format="csc") + sp.eye(3000) * 10
-        b = np.random.rand(3000)
         x = rslab.spsolve(A, b)                          # auto-detects symmetry
-
-        X = rslab.spsolve(A, np.random.rand(3000, 5))    # 5 right-hand sides
-
-        # Never-fail static pivoting + refinement for an indefinite system:
+        X = rslab.spsolve(A, np.random.rand(n, 5))       # 5 right-hand sides
         x = rslab.spsolve(A, b, preconditioner=1e-4, refine=2)
     """
     if symmetric is None:
         symmetric = _is_symmetric(A)
-    f = ldlt(A, **opts) if symmetric else lu(A, **opts)
-    b = np.asarray(b)
+    f = ldlt(A, **kwargs) if symmetric else lu(A, **kwargs)
     rhs = _match_dtype(b, f.dtype)
     if rhs.ndim == 1:
         return f.solve(rhs, refine)
@@ -696,4 +598,4 @@ def spsolve(
             cols = [f.solve(np.ascontiguousarray(rhs[:, c]), refine) for c in range(rhs.shape[1])]
             return np.stack(cols, axis=1)
         return f.solve_many(rhs)
-    raise ValueError("b must be 1-D or 2-D")
+    raise ValueError("b must be 1-D (vector) or 2-D (n x nrhs block)")
