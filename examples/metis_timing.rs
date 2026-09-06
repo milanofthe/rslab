@@ -128,6 +128,44 @@ fn main() {
         ),
     ];
     let which = std::env::args().nth(1).unwrap_or_else(|| "all".into());
+    if which.ends_with(".mtx") {
+        // A symmetric Matrix Market file: symmetrize the lower pattern.
+        let rslab::MtxLoaded::Symmetric(a) =
+            rslab::read_mtx_any(std::path::Path::new(&which)).unwrap()
+        else {
+            panic!("symmetric mtx expected");
+        };
+        let n = a.n;
+        let mut adj: Vec<Vec<i32>> = vec![Vec::new(); n];
+        for j in 0..n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                let i = a.row_idx[k];
+                adj[j].push(i as i32);
+                if i != j {
+                    adj[i].push(j as i32);
+                }
+            }
+        }
+        let (mut cp, mut ri) = (vec![0i32], Vec::new());
+        for l in &mut adj {
+            l.sort_unstable();
+            l.dedup();
+            ri.extend_from_slice(l);
+            cp.push(ri.len() as i32);
+        }
+        let name = std::path::Path::new(&which)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let sel: Vec<(&str, MetisOptions)> = if std::env::var("ALL_VARIANTS").is_ok() {
+            variants.clone()
+        } else {
+            vec![variants[0].clone()]
+        };
+        run(&name, &cp, &ri, &sel);
+        return;
+    }
     if which == "all" || which == "2d" {
         let (cp, ri) = grid2d(500);
         run("grid2d 500", &cp, &ri, &variants);

@@ -52,7 +52,9 @@ pub enum OrderingMethod {
     /// CHARDIS1_0000 the lone documented metric-divergence skip.
     Amf,
     /// rslab-metis multilevel nested dissection: one run with the default
-    /// seed (METIS semantics). The ordering race (`Auto` on large systems,
+    /// seed (METIS semantics), the two sides of every bisection ordered in
+    /// parallel on the rayon pool (the result depends on the seed only, not
+    /// on the thread count). The ordering race (`Auto` on large systems,
     /// `AutoRace`) additionally runs a small seed ensemble and keeps the
     /// lowest-fill result when the predicted factorization work is large
     /// enough to pay for the extra runs (`ND_SEED_RACE_MIN_FLOPS`).

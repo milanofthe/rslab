@@ -183,6 +183,9 @@ pub fn metis_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> 
 /// Runs the M1-M7 pipeline: coarsen, initial bisection, FM, separator
 /// construction, and recursive nested dissection with an AMD leaf
 /// fallback for subgraphs of at most `nd_to_amd_switch` vertices.
+/// The two sides of every bisection are ordered in parallel on the ambient
+/// rayon pool once a subproblem is large enough; child seeds are derived
+/// structurally, so the permutation depends on `opts.seed` only.
 pub fn metis_order_full(
     pattern: &CscPattern<'_>,
     opts: &MetisOptions,
