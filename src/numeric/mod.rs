@@ -7,3 +7,4 @@ pub(crate) mod ll_common;
 pub mod multifrontal_ldlt;
 pub mod multifrontal_lu;
 pub mod sparse_solver;
+pub(crate) mod supernodal_solve;

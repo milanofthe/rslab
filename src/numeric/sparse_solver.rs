@@ -13,6 +13,15 @@
 //! conditioning and, because it uses off-diagonal magnitudes, tolerates a zero
 //! diagonal (common in complex-symmetric and saddle-point systems). Solving
 //! `A x = b` becomes: factor `A_hat`, then `x = D * (A_hat^-1 * (D b))`.
+//!
+//! ## Solves
+//!
+//! After the numeric factorization the factor is laid out once in the
+//! supernodal solve layout of [`crate::numeric::supernodal_solve`] (dense
+//! column panels per front, one shared row list each; the `solve-layout`
+//! diagnostics stage) and the CSC arrays are released. [`LdltSolver::solve`]
+//! and [`LdltSolver::solve_many`] then run tree-parallel sweeps whose result
+//! is bit-identical for every thread count.
 
 use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
@@ -33,6 +42,9 @@ pub struct LdltSolver<T> {
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
+    /// The factor in supernodal solve layout with the tree schedule; the CSC
+    /// arrays of `factors` are released once it exists.
+    pub(crate) plan: crate::numeric::supernodal_solve::SolvePlan<T>,
 }
 
 impl<T: Scalar> LdltSolver<T> {
@@ -68,7 +80,7 @@ impl<T: Scalar> LdltSolver<T> {
     /// the symmetric factorization, against which a general LU stores both
     /// `L` and `U` of the full (two-triangle) matrix.
     pub fn factor_nnz(&self) -> usize {
-        self.factors.l_values.len()
+        self.plan.nnz_l()
     }
 
     /// Number of statically perturbed pivots (preconditioner mode). Zero for
@@ -155,7 +167,7 @@ impl<T: Scalar> LdltSolver<T> {
             .iter()
             .map(|&p| rhs[p] * T::from_real(self.scale[p]))
             .collect();
-        crate::dense::ldlt_generic::solve_ldlt_permuted(&self.factors, &mut y)?;
+        self.plan.solve_in_place(&self.factors, &mut y)?;
         // x = D * (P v): x[p] = v[i] * s[p].
         let mut x = vec![T::zero(); n];
         for (i, &p) in self.factors.perm.iter().enumerate() {
@@ -177,14 +189,35 @@ impl<T: Scalar> LdltSolver<T> {
     }
 
     fn solve_many_inner(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
-        // Equilibration fused into the block kernel's permutation gather/scatter
-        // (no scaled intermediate copies of the `n x nrhs` blocks).
-        crate::dense::ldlt_generic::solve_ldlt_many_scaled(
-            &self.factors,
-            b,
-            nrhs,
-            Some(&self.scale),
-        )
+        let n = self.factors.n;
+        if nrhs == 0 || b.len() != n * nrhs {
+            return Err(RslabError::DimensionMismatch {
+                expected: n * nrhs,
+                got: b.len(),
+            });
+        }
+        // Permute and scale into the row-major block, solve in place, undo.
+        let mut y = vec![T::zero(); n * nrhs];
+        for (i, &p) in self.factors.perm.iter().enumerate() {
+            let sp = T::from_real(self.scale[p]);
+            let src = &b[p * nrhs..(p + 1) * nrhs];
+            let dst = &mut y[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                dst[c] = src[c] * sp;
+            }
+        }
+        self.plan
+            .solve_block_in_place(&self.factors, &mut y, nrhs)?;
+        let mut x = vec![T::zero(); n * nrhs];
+        for (i, &p) in self.factors.perm.iter().enumerate() {
+            let sp = T::from_real(self.scale[p]);
+            let src = &y[i * nrhs..(i + 1) * nrhs];
+            let dst = &mut x[p * nrhs..(p + 1) * nrhs];
+            for c in 0..nrhs {
+                dst[c] = src[c] * sp;
+            }
+        }
+        Ok(x)
     }
 
     /// Solve `A * x = rhs` with iterative refinement against the original
@@ -625,11 +658,26 @@ impl LdltSymbolic {
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             crate::logging::info(&format!("ldlt factor: {}", diagnostics.summary()));
         }
+        // Solve layout: supernodal panels plus the tree schedule; the CSC
+        // arrays are released so the factor is held once.
+        let t = crate::clock::Instant::now();
+        let plan = crate::numeric::supernodal_solve::SolvePlan::build(&factors);
+        diagnostics.push(
+            "solve-layout",
+            t.elapsed().as_secs_f64() * 1e3,
+            0,
+            plan.bytes() as u64,
+        );
+        let mut factors = factors;
+        factors.l_col_ptr = Vec::new();
+        factors.l_row_idx = Vec::new();
+        factors.l_values = Vec::new();
         Ok(LdltSolver {
             factors,
             scale,
             diagnostics,
             solves: Default::default(),
+            plan,
         })
     }
 }

@@ -1851,6 +1851,7 @@ pub fn factor_numeric<T: Scalar>(
                 d_subdiag: Vec::new(),
                 two_by_two: Vec::new(),
                 perm: Vec::new(),
+                supernode_ptr: vec![0],
                 n_perturbed: 0,
                 inertia: Inertia::new(0, 0, 0),
             });
@@ -1998,12 +1999,17 @@ pub fn factor_numeric<T: Scalar>(
     let mut l_row_idx: Vec<usize> = Vec::new();
     let mut l_values: Vec<T> = Vec::new();
     let mut col: Vec<(usize, T)> = Vec::new();
+    let mut supernode_ptr = Vec::with_capacity(node_results.len() + 1);
+    supernode_ptr.push(0);
     for node_opt in node_results.iter_mut() {
         let node = node_opt.as_mut().ok_or_else(|| {
             RslabError::InvalidInput("internal: unfactored supernode".to_string())
         })?;
         let ff = &node.front;
         let nrow = ff.nrow;
+        if ff.nelim > 0 {
+            supernode_ptr.push(supernode_ptr.last().copied().unwrap_or(0) + ff.nelim);
+        }
         for j in 0..ff.nelim {
             col.clear();
             let diag_e = e_of_g[node.row_indices[ff.perm[j]]];
@@ -2049,6 +2055,7 @@ pub fn factor_numeric<T: Scalar>(
         d_subdiag,
         two_by_two,
         perm,
+        supernode_ptr,
         n_perturbed,
         inertia,
     })
@@ -3234,6 +3241,8 @@ fn factor_left_looking<T: Scalar>(
     l_col_ptr.push(0);
     let mut l_row_idx: Vec<usize> = Vec::new();
     let mut l_values: Vec<T> = Vec::new();
+    let mut supernode_ptr = Vec::with_capacity(sym.supernodes.len() + 1);
+    supernode_ptr.push(0);
     for (s, snode) in sym.supernodes.iter().enumerate() {
         // SAFETY: factorization complete; `compact[s]` written exactly once.
         let cl = unsafe { std::mem::take(emit.compact.get_mut(s)) };
@@ -3242,6 +3251,9 @@ fn factor_left_looking<T: Scalar>(
             l_row_idx.extend_from_slice(&cl.idx[a..b]);
             l_values.extend_from_slice(&cl.val[a..b]);
             l_col_ptr.push(l_row_idx.len());
+        }
+        if snode.ncol > 0 {
+            supernode_ptr.push(l_col_ptr.len() - 1);
         }
     }
     // SAFETY: factorization complete; every position written exactly once in-node.
@@ -3264,6 +3276,7 @@ fn factor_left_looking<T: Scalar>(
         d_subdiag,
         two_by_two,
         perm,
+        supernode_ptr,
         n_perturbed,
         inertia,
     })

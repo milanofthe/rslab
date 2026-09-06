@@ -186,6 +186,14 @@ Every report carries throughput rates (`d.rates()`: analysis, factorization
 and solve in MDOF/s, the factorization in GFlop/s and Mnnz/s); the summary
 line and the `info` log print the factor rate.
 
+The LDL^T and LU solves are supernodal and tree-parallel: after the
+factorization the factor is laid out once as dense column panels per
+supernode (the fronts) with one shared `u32` row list each (the
+`solve-layout` stage), and a solve runs the independent leaf subtrees of the
+elimination tree in parallel, the wide top separators with parallel sections
+inside the node. The result is bit-identical for every thread count; set
+`RLA_LOG=debug` to see the per-phase times of a solve.
+
 From Python the same dict comes from `f.diagnostics()`, the level from
 `rslab.set_log_level("info")`, a custom sink from `rslab.set_log_sink(fn)`,
 and every `SolverSettings` knob is a `rslab.Settings` keyword.
