@@ -153,9 +153,11 @@ pub use dense::ldlt_generic::{
 // Shared options + the low-level multifrontal symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
-    with_threads, BlrMode, FactorMethod, FactorPath, MemoryMode, MultifrontalSymbolic, ReorderMode,
-    SolverSettings, Threads, ZeroPivotAction,
+    with_threads, BlrMode, FactorMethod, FactorPath, LdltNumeric, MemoryMode, MultifrontalSymbolic,
+    ReorderMode, SolverSettings, Threads, ZeroPivotAction,
 };
+// The supernodal panel form of a factor (`LdltNumeric::factor`).
+pub use numeric::panel_factor::PanelFactor;
 // High-level symmetric LDL^T solver: `LdltSymbolic::analyze -> .factor -> LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze -> .factor -> LuSolver`,

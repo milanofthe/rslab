@@ -16,12 +16,13 @@
 //!
 //! ## Solves
 //!
-//! After the numeric factorization the factor is laid out once in the
-//! supernodal solve layout of [`crate::numeric::supernodal_solve`] (dense
-//! column panels per front, one shared row list each; the `solve-layout`
-//! diagnostics stage) and the CSC arrays are released. [`LdltSolver::solve`]
-//! and [`LdltSolver::solve_many`] then run tree-parallel sweeps whose result
-//! is bit-identical for every thread count.
+//! The numeric factorization produces the factor in supernodal panel form
+//! ([`crate::PanelFactor`]: dense column panels per front, one shared row
+//! list each), which the solve plan of [`crate::numeric::supernodal_solve`]
+//! takes as its storage; the `solve-layout` diagnostics stage is the tree
+//! schedule built over it. [`LdltSolver::solve`] and
+//! [`LdltSolver::solve_many`] then run tree-parallel sweeps whose result is
+//! bit-identical for every thread count.
 
 use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
@@ -42,8 +43,9 @@ pub struct LdltSolver<T> {
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
-    /// The factor in supernodal solve layout with the tree schedule; the CSC
-    /// arrays of `factors` are released once it exists.
+    /// The factor `L` (the panels, its only storage) with the tree schedule;
+    /// `factors` carries `D`, the permutation and the outcome with empty CSC
+    /// arrays.
     pub(crate) plan: crate::numeric::supernodal_solve::SolvePlan<T>,
 }
 
@@ -80,7 +82,7 @@ impl<T: Scalar> LdltSolver<T> {
     /// the symmetric factorization, against which a general LU stores both
     /// `L` and `U` of the full (two-triangle) matrix.
     pub fn factor_nnz(&self) -> usize {
-        self.plan.nnz_l()
+        self.diagnostics.factor_nnz as usize
     }
 
     /// Number of statically perturbed pivots (preconditioner mode). Zero for
@@ -531,6 +533,7 @@ impl LdltSymbolic {
                 &|_| &[],
                 value_bytes,
                 0,
+                true,
             );
         };
         let nsuper = sym.supernodes.len();
@@ -542,26 +545,24 @@ impl LdltSymbolic {
                 &|_| &[],
                 value_bytes,
                 0,
+                true,
             );
         };
-        // LDL^T: one dense panel per supernode (no separate U), and the compact
-        // factor is `L` only (no `U`); the input copy is a single lower triangle.
+        // LDL^T: one dense panel per supernode (no separate U), and the panel
+        // *is* the stored factor (no compact copy, see `PanelFactor`); the
+        // input copy is a single lower triangle.
         let panel_bytes = |s: usize| -> u64 {
             (sched.rows(s).len() * sym.supernodes[s].ncol * value_bytes) as u64
-        };
-        let compact_bytes = |s: usize| -> u64 {
-            let nc = sym.supernodes[s].ncol;
-            let cnrow = sched.rows(s).len() - nc;
-            ((nc * (nc + 1) / 2 + cnrow * nc) * (value_bytes + 8)) as u64
         };
         let input_bytes = (self.nnz * (value_bytes + 8)) as u64;
         let mut est = crate::diagnostics::estimate_left_looking(
             nsuper,
             &panel_bytes,
-            &compact_bytes,
+            &panel_bytes,
             &|s| sched.updaters(s),
             value_bytes,
             input_bytes,
+            true,
         );
         est.factor_flops = (0..nsuper)
             .map(|s| {
@@ -635,7 +636,10 @@ impl LdltSymbolic {
         let (scaled, scale) = equilibrate_with(a, &opts.scaling)?;
         let scale_ms = t.elapsed().as_secs_f64() * 1e3;
         let t = crate::clock::Instant::now();
-        let factors = factor_numeric(&self.symbolic, &scaled, opts)?;
+        let numeric = factor_numeric(&self.symbolic, &scaled, opts)?;
+        let factor_nnz = (numeric.factor.nnz() - numeric.n_dropped) as u64;
+        let factor_bytes = numeric.factor.bytes() as u64;
+        let (factor, factors) = numeric.into_parts();
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let mut decisions = self.symbolic.decisions(self.requested_ordering);
         decisions.scaling = format!("{:?}", opts.scaling);
@@ -644,7 +648,7 @@ impl LdltSymbolic {
             threads: resolved_threads,
             n: a.n,
             nnz_a: self.nnz as u64,
-            factor_nnz: factors.l_values.len() as u64,
+            factor_nnz,
             estimate: Some(estimate),
             decisions,
             numeric: crate::diagnostics::NumericReport {
@@ -660,32 +664,26 @@ impl LdltSymbolic {
             ..Default::default()
         };
         // Bytes per stored entry: the scalar value plus its usize row index.
-        let entry_bytes = (std::mem::size_of::<T>() + std::mem::size_of::<usize>()) as u64;
         diagnostics.push("analyze", self.analyze_ms, 0, 0);
         diagnostics.push("scale", scale_ms, 0, 0);
-        diagnostics.push(
-            "factor",
-            factor_ms,
-            estimate.factor_flops,
-            factors.l_values.len() as u64 * entry_bytes,
-        );
+        diagnostics.push("factor", factor_ms, estimate.factor_flops, factor_bytes);
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             crate::logging::info(&format!("ldlt factor: {}", diagnostics.summary()));
         }
         // Solve layout: supernodal panels plus the tree schedule; the CSC
         // arrays are released so the factor is held once.
         let t = crate::clock::Instant::now();
-        let plan = crate::numeric::supernodal_solve::SolvePlan::build(&factors);
+        let plan = crate::numeric::supernodal_solve::SolvePlan::from_panels(
+            factor,
+            &factors.supernode_parent,
+            true,
+        );
         diagnostics.push(
             "solve-layout",
             t.elapsed().as_secs_f64() * 1e3,
             0,
             plan.bytes() as u64,
         );
-        let mut factors = factors;
-        factors.l_col_ptr = Vec::new();
-        factors.l_row_idx = Vec::new();
-        factors.l_values = Vec::new();
         Ok(LdltSolver {
             factors,
             scale,

@@ -1,15 +1,15 @@
 //! Supernodal, tree-parallel triangular solves for the sparse LDL^T factor.
 //!
-//! The numeric factorization emits `L` as a scalar CSC. For the solves that
-//! layout is the bottleneck: every entry costs a value, a `usize` row index
-//! and a random access into the right-hand side, on one core. This module
-//! reorganises the factor once, after the factorization, into *supernodal
-//! panels*: runs of consecutive columns with nested row structure become one
-//! dense column-major panel (unit-lower diagonal block on top, the off-block
-//! rows below) with a single shared list of `u32` row indices. A forward or
-//! backward sweep then streams contiguous panels, touches each row index once
-//! per panel instead of once per entry, and runs the inner loops over
-//! contiguous memory.
+//! A scalar CSC factor is the wrong layout for a solve: every entry costs a
+//! value, a `usize` row index and a random access into the right-hand side,
+//! on one core. The plan works on the factor in *supernodal panel form*
+//! ([`PanelFactor`]): one dense column-major panel per supernode (unit-lower
+//! diagonal block on top, the off-block rows below) with a single shared
+//! list of `u32` row indices. The LDL^T drivers produce that form directly,
+//! so the plan takes the panels as its storage without a copy; a CSC factor
+//! (the LU path) is converted once. A forward or backward sweep then streams
+//! contiguous panels, touches each row index once per panel instead of once
+//! per entry, and runs the inner loops over contiguous memory.
 //!
 //! Parallelism comes from the supernodal elimination tree. The tree is cut
 //! into a fixed number of independent leaf subtrees ([`LEAF_SUBTREES`], not a
@@ -31,6 +31,7 @@ use rayon::prelude::*;
 
 use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
+use crate::numeric::panel_factor::PanelFactor;
 use crate::scalar::{fmadd, Scalar};
 
 const NONE: u32 = u32::MAX;
@@ -65,8 +66,6 @@ pub(crate) struct Subtree {
 /// The factor in solve layout plus the tree schedule.
 pub(crate) struct SolvePlan<T> {
     n: usize,
-    /// Entries of the CSC factor this plan was built from (reporting).
-    nnz_l: usize,
     /// Supernode column ranges, `ns + 1`.
     sn_col: Vec<u32>,
     /// Off-block row ranges into `rows` / `ext_slot`, `ns + 1`.
@@ -76,10 +75,10 @@ pub(crate) struct SolvePlan<T> {
     /// Per off-block row: accumulator slot when the row lies outside the
     /// supernode's leaf subtree, `NONE` when it is written directly.
     ext_slot: Vec<u32>,
-    /// Panel ranges into `vals`, `ns + 1`; a panel is `(w + m) x w`
-    /// column-major with leading dimension `w + m`.
-    val_ptr: Vec<usize>,
-    vals: Vec<T>,
+    /// The panels, one `(w + m) x w` column-major block per supernode with
+    /// leading dimension `w + m` (the factor's own storage, see
+    /// [`PanelFactor`]).
+    panels: Vec<Vec<T>>,
     /// Reciprocal diagonal per column for a non-unit triangular factor (the
     /// `U^T` of an LU); empty for a unit-diagonal factor.
     diag_inv: Vec<T>,
@@ -134,19 +133,6 @@ impl<T> Shared<T> {
 }
 
 impl<T: Scalar> SolvePlan<T> {
-    /// Build the plan from an LDL^T factor's unit-lower `L`.
-    pub fn build(f: &LdltFactors<T>) -> Self {
-        Self::build_csc(
-            f.n,
-            &f.l_col_ptr,
-            &f.l_row_idx,
-            &f.l_values,
-            &f.supernode_ptr,
-            &f.supernode_parent,
-            true,
-        )
-    }
-
     /// Build the plan from a lower-triangular CSC factor: row indices
     /// ascending per column, the diagonal leading each column (unit when
     /// `unit`, else the value to divide by in the backward sweep), and the
@@ -161,123 +147,55 @@ impl<T: Scalar> SolvePlan<T> {
         supernode_parent: &[usize],
         unit: bool,
     ) -> Self {
-        let nnz_l = values.len();
-        let zero = T::zero();
+        let factor = PanelFactor::from_csc(n, col_ptr, row_idx, values, supernode_ptr);
+        Self::from_panels(factor, supernode_parent, unit)
+    }
+
+    /// Build the schedule over a factor in panel form, taking the panels as
+    /// the plan's storage (no copy). `supernode_parent` is the supernode
+    /// tree of the analysis (`usize::MAX` for a root); an empty or
+    /// mismatched one is replaced by the parent implied by the first
+    /// off-block row of every supernode.
+    pub fn from_panels(factor: PanelFactor<T>, supernode_parent: &[usize], unit: bool) -> Self {
+        let n = factor.n;
+        let ns = factor.n_supernodes();
+        let sn_col: Vec<u32> = factor.sn_col.clone();
+        let mut sn_of = vec![0u32; n];
+        for s in 0..ns {
+            for c in sn_col[s] as usize..sn_col[s + 1] as usize {
+                sn_of[c] = s as u32;
+            }
+        }
+        let mut row_ptr = Vec::with_capacity(ns + 1);
+        row_ptr.push(0usize);
+        let mut rows: Vec<u32> = Vec::with_capacity(factor.rows.iter().map(|r| r.len()).sum());
+        for r in &factor.rows {
+            debug_assert!(
+                r.windows(2).all(|p| p[0] < p[1]),
+                "off-block rows ascending"
+            );
+            rows.extend_from_slice(r);
+            row_ptr.push(rows.len());
+        }
         let diag_inv: Vec<T> = if unit {
             Vec::new()
         } else {
-            (0..n)
-                .map(|c| {
-                    debug_assert_eq!(row_idx[col_ptr[c]], c, "diagonal must lead its column");
-                    values[col_ptr[c]].recip()
-                })
-                .collect()
+            let mut d = Vec::with_capacity(n);
+            for s in 0..ns {
+                let (_, w, m) = factor.shape(s);
+                let ld = w + m;
+                for k in 0..w {
+                    d.push(factor.panels[s][k * ld + k].recip());
+                }
+            }
+            d
         };
+        let panels = factor.panels;
+        let known = supernode_parent.len() == ns;
 
-        // Supernodes: the factorization's own partition (its fronts) when
-        // it is known; otherwise column j+1 joins the run starting at c0
-        // when its structure lies within rows(c0) plus the diagonal block.
-        let mut sn_col: Vec<u32> = vec![0];
-        let mut sn_of = vec![0u32; n];
-        let known = supernode_ptr.len() >= 2
-            && supernode_ptr[0] == 0
-            && supernode_ptr.last().copied() == Some(n)
-            && supernode_ptr.windows(2).all(|p| p[0] < p[1]);
-        if known {
-            for (s, p) in supernode_ptr.windows(2).enumerate() {
-                for c in p[0]..p[1] {
-                    sn_of[c] = s as u32;
-                }
-                sn_col.push(p[1] as u32);
-            }
-        } else {
-            let mut mark = vec![NONE; n]; // mark[r] = c0 of the run whose first column has row r
-            let mut j = 0;
-            while j < n {
-                let c0 = j;
-                for &r in &row_idx[col_ptr[c0]..col_ptr[c0 + 1]] {
-                    mark[r] = c0 as u32;
-                }
-                let mut c1 = c0 + 1;
-                while c1 < n {
-                    let fits = row_idx[col_ptr[c1]..col_ptr[c1 + 1]]
-                        .iter()
-                        .all(|&r| mark[r] == c0 as u32 || (r >= c0 && r <= c1));
-                    if !fits {
-                        break;
-                    }
-                    c1 += 1;
-                }
-                let s = sn_col.len() - 1;
-                for c in c0..c1 {
-                    sn_of[c] = s as u32;
-                }
-                sn_col.push(c1 as u32);
-                j = c1;
-            }
-        }
-        let ns = sn_col.len() - 1;
-
-        // Panels and off-block rows.
-        let mut row_ptr = Vec::with_capacity(ns + 1);
-        let mut rows: Vec<u32> = Vec::new();
-        let mut val_ptr = Vec::with_capacity(ns + 1);
-        let mut vals: Vec<T> = Vec::new();
-        row_ptr.push(0);
-        val_ptr.push(0);
-        let mut pos = vec![NONE; n];
-        for s in 0..ns {
-            let (c0, c1) = (sn_col[s] as usize, sn_col[s + 1] as usize);
-            let w = c1 - c0;
-            let r0 = rows.len();
-            // Off-block rows: the union over the supernode's columns (a
-            // known partition may carry dropped zeros in any column).
-            for c in c0..c1 {
-                for &r in &row_idx[col_ptr[c]..col_ptr[c + 1]] {
-                    if r >= c1 && pos[r] == NONE {
-                        pos[r] = 0;
-                        rows.push(r as u32);
-                    }
-                }
-            }
-            rows[r0..].sort_unstable();
-            let m = rows.len() - r0;
-            let ld = w + m;
-            for (i, &r) in rows[r0..].iter().enumerate() {
-                pos[r as usize] = (w + i) as u32;
-            }
-            for c in c0..c1 {
-                pos[c] = (c - c0) as u32;
-            }
-            let v0 = vals.len();
-            vals.resize(v0 + ld * w, zero);
-            for c in c0..c1 {
-                let k = c - c0;
-                let col = &mut vals[v0 + k * ld..v0 + (k + 1) * ld];
-                for e in col_ptr[c]..col_ptr[c + 1] {
-                    let r = row_idx[e];
-                    debug_assert_ne!(pos[r], NONE, "row outside the supernode panel");
-                    col[pos[r] as usize] = values[e];
-                }
-            }
-            for &r in &rows[r0..] {
-                pos[r as usize] = NONE;
-            }
-            for c in c0..c1 {
-                pos[c] = NONE;
-            }
-            row_ptr.push(rows.len());
-            val_ptr.push(vals.len());
-        }
-
-        // Supernodal elimination tree: the factorization's assembly tree
-        // when known (every column's structure lies within its ancestors
-        // there, which the numeric structure alone does not guarantee once
-        // exact zeros are dropped or rows are pivoted), else the tree of the
-        // structure itself. Subtree work follows.
         let mut parent = vec![NONE; ns];
         let mut children: Vec<Vec<u32>> = vec![Vec::new(); ns];
-        if known && supernode_parent.len() == ns {
+        if known {
             for s in 0..ns {
                 let p = supernode_parent[s];
                 if p != usize::MAX && p < ns && p > s {
@@ -471,13 +389,11 @@ impl<T: Scalar> SolvePlan<T> {
         };
         Self {
             n,
-            nnz_l,
             sn_col,
             row_ptr,
             rows,
             ext_slot,
-            val_ptr,
-            vals,
+            panels,
             diag_inv,
             subtrees,
             top_levels,
@@ -486,13 +402,10 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    pub fn nnz_l(&self) -> usize {
-        self.nnz_l
-    }
-
     /// Bytes of the panel storage (values plus row indices).
     pub fn bytes(&self) -> usize {
-        self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * 4
+        self.panels.iter().map(|p| p.len()).sum::<usize>() * std::mem::size_of::<T>()
+            + self.rows.len() * 4
     }
 
     #[inline]
@@ -502,7 +415,7 @@ impl<T: Scalar> SolvePlan<T> {
         let w = self.sn_col[s + 1] as usize - c0;
         let r0 = self.row_ptr[s];
         let m = self.row_ptr[s + 1] - r0;
-        let panel = &self.vals[self.val_ptr[s]..self.val_ptr[s + 1]];
+        let panel = self.panels[s].as_slice();
         (c0, w, r0, m, w + m, panel)
     }
 

@@ -23,18 +23,22 @@
 //!   mode surfaces as [`RslabError::NumericallyRankDeficient`], and the
 //!   static-pivot mode ([`ZeroPivotAction`], the `preconditioner` settings)
 //!   lifts the pivot to the floor instead and reports it in `n_perturbed`.
-//! * The global factor `L` is assembled as sparse CSC from the per-supernode
-//!   compact fragments, which are freed as they are emitted; the memory peak
-//!   is the growing CSC plus one fragment (see the a-priori
-//!   [`MemoryEstimate`](crate::diagnostics::MemoryEstimate)).
+//! * The global factor `L` is kept in supernodal panel form
+//!   ([`PanelFactor`]): each supernode's dense panel, once its last consumer
+//!   is done, is finished in place (off-block rows into elimination order,
+//!   the 2x2 couplings cleared, `drop_tol` applied) and becomes the stored
+//!   factor, so the memory peak is the resident panels themselves (see the
+//!   a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate)).
 //!
-//! The result is returned as an [`LdltFactors`] in factorization order, so the
-//! generic [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt) handles the
-//! triangular/diagonal solves and permutation directly.
+//! The result is an [`LdltNumeric`] in factorization order: the panels plus
+//! `D`, the permutation and the outcome. [`LdltNumeric::into_factors`]
+//! materializes the compressed-column [`LdltFactors`] for the generic
+//! [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
 
 use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower, swap_sym_lower_bounded, LdltFactors};
 use crate::error::RslabError;
 use crate::inertia::Inertia;
+use crate::numeric::panel_factor::{permute_panel_rows, PanelFactor};
 use crate::scalar::Scalar;
 
 /// Scale-invariant singularity floor for a 2x2 Bunch-Kaufman pivot: a block
@@ -1546,7 +1550,7 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
     opts: &SolverSettings,
 ) -> Result<LdltFactors<T>, RslabError> {
     let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
-    factor_numeric(&symb, a, opts)
+    factor_numeric(&symb, a, opts).map(LdltNumeric::into_factors)
 }
 
 /// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
@@ -1844,11 +1848,198 @@ pub(crate) fn recommend_threads_for_sym(symb: &MultifrontalSymbolic, max_cores: 
     crate::analysis::recommend_threads_from(flops, front_nrow_max, tree_width_max, max_cores)
 }
 
+/// The numeric result of a sparse LDL^T factorization: the unit lower factor
+/// `L` in supernodal panel form (the storage the solves run on, written by
+/// the drivers without a copy) plus the block diagonal `D`, the pivot
+/// permutation and the numeric outcome. [`into_factors`](Self::into_factors)
+/// materializes the compressed-column [`LdltFactors`] for the reference
+/// solves.
+#[derive(Clone, Debug)]
+pub struct LdltNumeric<T> {
+    /// `L` in panel form, in elimination order.
+    pub factor: PanelFactor<T>,
+    /// Diagonal of the block-diagonal `D`, length `n`.
+    pub d_diag: Vec<T>,
+    /// Sub-diagonal of `D` (the `(k+1, k)` entry of a 2x2 block at `k`).
+    pub d_subdiag: Vec<T>,
+    /// `true` at the first column of each 2x2 pivot block.
+    pub two_by_two: Vec<bool>,
+    /// `perm[e]` is the original index eliminated at position `e`.
+    pub perm: Vec<usize>,
+    /// Supernode tree over the factor's supernodes (`usize::MAX` for a root).
+    pub supernode_parent: Vec<usize>,
+    /// Pivots perturbed by the static regularization.
+    pub n_perturbed: usize,
+    /// Entries zeroed by `drop_tol`; the panels keep their slots, so the
+    /// stored nonzeros are `factor.nnz() - n_dropped`.
+    pub n_dropped: usize,
+    /// Inertia of the factored matrix.
+    pub inertia: Inertia,
+}
+
+impl<T: Scalar> LdltNumeric<T> {
+    /// Dimension.
+    pub fn n(&self) -> usize {
+        self.factor.n
+    }
+
+    /// The compressed-column form for the reference solves (copies the factor).
+    pub fn into_factors(self) -> LdltFactors<T> {
+        let (l_col_ptr, l_row_idx, l_values) = self.factor.to_csc(true);
+        let supernode_ptr: Vec<usize> = self.factor.sn_col.iter().map(|&c| c as usize).collect();
+        LdltFactors {
+            n: self.factor.n,
+            l_col_ptr,
+            l_row_idx,
+            l_values,
+            d_diag: self.d_diag,
+            d_subdiag: self.d_subdiag,
+            two_by_two: self.two_by_two,
+            perm: self.perm,
+            supernode_ptr,
+            supernode_parent: self.supernode_parent,
+            n_perturbed: self.n_perturbed,
+            inertia: self.inertia,
+        }
+    }
+
+    /// Split into the panel factor and an [`LdltFactors`] shell carrying `D`,
+    /// the permutation and the outcome with empty CSC arrays: the solver keeps
+    /// the shell for the diagonal solves and hands the panels to its plan.
+    pub(crate) fn into_parts(self) -> (PanelFactor<T>, LdltFactors<T>) {
+        let supernode_ptr: Vec<usize> = self.factor.sn_col.iter().map(|&c| c as usize).collect();
+        let shell = LdltFactors {
+            n: self.factor.n,
+            l_col_ptr: Vec::new(),
+            l_row_idx: Vec::new(),
+            l_values: Vec::new(),
+            d_diag: self.d_diag,
+            d_subdiag: self.d_subdiag,
+            two_by_two: self.two_by_two,
+            perm: self.perm,
+            supernode_ptr,
+            supernode_parent: self.supernode_parent,
+            n_perturbed: self.n_perturbed,
+            inertia: self.inertia,
+        };
+        (self.factor, shell)
+    }
+}
+
+/// One supernode's emitted panel: its off-block rows (elimination indices,
+/// ascending) and the `(w + m) x w` column-major values.
+struct PanelOut<T> {
+    rows: Vec<u32>,
+    panel: Vec<T>,
+    /// Entries zeroed by `drop_tol` (the panel keeps their slots).
+    dropped: usize,
+}
+impl<T> Default for PanelOut<T> {
+    fn default() -> Self {
+        PanelOut {
+            rows: Vec::new(),
+            panel: Vec::new(),
+            dropped: 0,
+        }
+    }
+}
+
+/// Finish one supernode's panel for the store: rows `0..w` are the
+/// supernode's own columns in elimination order, the `m` rows below are
+/// permuted into ascending elimination order (`e_rows[i]` is the elimination
+/// index of panel row `w + i` on entry), the `(p+1, p)` entry of each 2x2
+/// pivot is cleared (that coupling lives in `D`), and `drop_tol` zeroes the
+/// entries below `tau * max|col|` of their column. Consumes `e_rows`.
+fn finish_panel<T: Scalar>(
+    mut panel: Vec<T>,
+    w: usize,
+    mut e_rows: Vec<u32>,
+    two_by_two: &[bool],
+    drop_tol: Option<f64>,
+) -> PanelOut<T> {
+    let m = e_rows.len();
+    let ld = w + m;
+    debug_assert_eq!(panel.len(), ld * w);
+    let sorted = e_rows.windows(2).all(|p| p[0] < p[1]);
+    if !sorted {
+        let mut order: Vec<u32> = (0..m as u32).collect();
+        order.sort_unstable_by_key(|&i| e_rows[i as usize]);
+        let full: Vec<u32> = (0..w as u32)
+            .chain(order.iter().map(|&i| w as u32 + i))
+            .collect();
+        let mut tmp = Vec::with_capacity(ld);
+        permute_panel_rows(&mut panel, ld, w, &full, &mut tmp);
+        e_rows = order.iter().map(|&i| e_rows[i as usize]).collect();
+    }
+    let zero = T::zero();
+    for p in 0..w {
+        if two_by_two[p] && p + 1 < w {
+            panel[p * ld + p + 1] = zero;
+        }
+    }
+    let mut dropped = 0usize;
+    if let Some(tau) = drop_tol {
+        for p in 0..w {
+            let col = &mut panel[p * ld..(p + 1) * ld];
+            let colmax = col[p + 1..]
+                .iter()
+                .map(|v| v.magnitude())
+                .fold(0.0, f64::max);
+            let thresh = tau * colmax;
+            for v in col[p + 1..].iter_mut() {
+                if *v != zero && v.magnitude() < thresh {
+                    *v = zero;
+                    dropped += 1;
+                }
+            }
+        }
+    }
+    PanelOut {
+        rows: e_rows,
+        panel,
+        dropped,
+    }
+}
+
+/// Assemble the per-supernode panels (elimination order, empty supernodes
+/// skipped) into the factor.
+fn assemble_panels<T: Scalar>(
+    n: usize,
+    ncols: impl Iterator<Item = usize>,
+    mut outs: impl FnMut(usize) -> PanelOut<T>,
+) -> (PanelFactor<T>, usize) {
+    let mut sn_col: Vec<u32> = vec![0];
+    let mut rows = Vec::new();
+    let mut panels = Vec::new();
+    let mut dropped = 0usize;
+    for (s, w) in ncols.enumerate() {
+        if w == 0 {
+            continue;
+        }
+        let out = outs(s);
+        debug_assert_eq!(out.panel.len(), (w + out.rows.len()) * w);
+        sn_col.push(sn_col.last().copied().unwrap_or(0) + w as u32);
+        rows.push(out.rows);
+        panels.push(out.panel);
+        dropped += out.dropped;
+    }
+    debug_assert_eq!(sn_col.last().copied(), Some(n as u32));
+    (
+        PanelFactor {
+            n,
+            sn_col,
+            rows,
+            panels,
+        },
+        dropped,
+    )
+}
+
 pub fn factor_numeric<T: Scalar>(
     symb: &MultifrontalSymbolic,
     a: &CscMatrix<T>,
     opts: &SolverSettings,
-) -> Result<LdltFactors<T>, RslabError> {
+) -> Result<LdltNumeric<T>, RslabError> {
     a.validate()?;
     let n = symb.n;
     if a.n != n || a.row_idx.len() != symb.nnz {
@@ -1858,18 +2049,15 @@ pub fn factor_numeric<T: Scalar>(
     }
     let inner = match &symb.inner {
         None => {
-            return Ok(LdltFactors {
-                n: 0,
-                l_col_ptr: vec![0],
-                l_row_idx: Vec::new(),
-                l_values: Vec::new(),
+            return Ok(LdltNumeric {
+                factor: PanelFactor::empty(),
                 d_diag: Vec::new(),
                 d_subdiag: Vec::new(),
                 two_by_two: Vec::new(),
                 perm: Vec::new(),
-                supernode_ptr: vec![0],
                 supernode_parent: Vec::new(),
                 n_perturbed: 0,
+                n_dropped: 0,
                 inertia: Inertia::new(0, 0, 0),
             });
         }
@@ -2003,83 +2191,62 @@ pub fn factor_numeric<T: Scalar>(
     // into the global CSC, shrinking the per-front transient as the global factor
     // grows (parity with the multifrontal LU emit). `Eager` keeps every front's
     // dense factor until the end (a throughput A/B knob; bit-identical factor).
-    let low_mem = opts.memory == MemoryMode::LowMemory;
-
-    // 4b. Emit each front's L columns into the global CSC L, in e-order. A
-    //     supernode's eliminated columns form a contiguous increasing e-range,
-    //     so iterating nodes then `j` yields columns in ascending CSC order;
-    //     rows within a column are sorted. Iterated mutably so `LowMemory` can
-    //     drop `front.l` per front (every id is `Some`, validated above).
-    let one = T::one();
-    let mut l_col_ptr = Vec::with_capacity(n + 1);
-    l_col_ptr.push(0);
-    let mut l_row_idx: Vec<usize> = Vec::new();
-    let mut l_values: Vec<T> = Vec::new();
-    let mut col: Vec<(usize, T)> = Vec::new();
-    let mut supernode_ptr = Vec::with_capacity(node_results.len() + 1);
-    supernode_ptr.push(0);
+    // Every front's eliminated columns become the supernode's panel: the
+    // front's `L` block is already the `(w + m) x w` column-major panel, only
+    // its off-block rows need the ancestors' elimination order. Fronts are
+    // released as they are emitted (`MemoryMode::LowMemory` once did this;
+    // it is now the only behaviour, the panels are the factor).
     let kept: Vec<bool> = node_results
         .iter()
         .map(|n| n.as_ref().is_some_and(|nd| nd.front.nelim > 0))
         .collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
-    for node_opt in node_results.iter_mut() {
-        let node = node_opt.as_mut().ok_or_else(|| {
+    let ncols: Vec<usize> = node_results
+        .iter()
+        .map(|n| n.as_ref().map_or(0, |nd| nd.front.nelim))
+        .collect();
+    let mut emit_panel = |s: usize| -> Result<PanelOut<T>, RslabError> {
+        let node = node_results[s].as_mut().ok_or_else(|| {
             RslabError::InvalidInput("internal: unfactored supernode".to_string())
         })?;
-        let ff = &node.front;
-        let nrow = ff.nrow;
-        if ff.nelim > 0 {
-            supernode_ptr.push(supernode_ptr.last().copied().unwrap_or(0) + ff.nelim);
-        }
-        for j in 0..ff.nelim {
-            col.clear();
-            let diag_e = e_of_g[node.row_indices[ff.perm[j]]];
-            col.push((diag_e, one));
-            for i in (j + 1)..nrow {
-                let v = ff.l[j * nrow + i];
-                if v != T::zero() {
-                    let row_e = e_of_g[node.row_indices[ff.perm[i]]];
-                    col.push((row_e, v));
-                }
-            }
-            // Incomplete factorization: drop sub-threshold fill (relative to the
-            // column's largest multiplier), keeping the unit diagonal. Shrinks
-            // nnz(L) and the apply cost - an approximate factor for use as a
-            // preconditioner. `None` keeps the factor complete.
-            if let Some(tau) = opts.drop_tol {
-                let colmax = col
-                    .iter()
-                    .filter(|&&(r, _)| r != diag_e)
-                    .map(|&(_, v)| v.magnitude())
-                    .fold(0.0, f64::max);
-                let thresh = tau * colmax;
-                col.retain(|&(r, v)| r == diag_e || v.magnitude() >= thresh);
-            }
-            col.sort_unstable_by_key(|&(r, _)| r);
-            for &(r, v) in &col {
-                l_row_idx.push(r);
-                l_values.push(v);
-            }
-            l_col_ptr.push(l_row_idx.len());
-        }
-        if low_mem {
-            node.front.l = Vec::new();
-        }
+        let ff = &mut node.front;
+        let (nrow, w) = (ff.nrow, ff.nelim);
+        let mut panel = std::mem::take(&mut ff.l);
+        panel.truncate(nrow * w);
+        let e_rows: Vec<u32> = (w..nrow)
+            .map(|i| e_of_g[node.row_indices[ff.perm[i]]] as u32)
+            .collect();
+        debug_assert!((0..w)
+            .all(|i| e_of_g[node.row_indices[ff.perm[i]]]
+                == e_of_g[node.row_indices[ff.perm[0]]] + i));
+        Ok(finish_panel(
+            panel,
+            w,
+            e_rows,
+            &ff.two_by_two[..w],
+            opts.drop_tol,
+        ))
+    };
+    let mut outs: Vec<PanelOut<T>> = Vec::with_capacity(ncols.len());
+    for (s, &w) in ncols.iter().enumerate() {
+        outs.push(if w > 0 {
+            emit_panel(s)?
+        } else {
+            PanelOut::default()
+        });
     }
+    let (factor, n_dropped) =
+        assemble_panels(n, ncols.iter().copied(), |s| std::mem::take(&mut outs[s]));
 
-    Ok(LdltFactors {
-        n,
-        l_col_ptr,
-        l_row_idx,
-        l_values,
+    Ok(LdltNumeric {
+        factor,
         d_diag,
         d_subdiag,
         two_by_two,
         perm,
-        supernode_ptr,
         supernode_parent,
         n_perturbed,
+        n_dropped,
         inertia,
     })
 }
@@ -2110,28 +2277,10 @@ type LlStore<T> = crate::numeric::ll_common::SlotStore<LdltSlot<T>>;
 /// Compact (CSC-fragment) form of one supernode's L factor, produced the moment
 /// its last consumer pulls from it so the dense panel can be freed during
 /// factorization. Row indices are already final elimination positions.
-struct CompactL<T> {
-    ptr: Vec<usize>,
-    idx: Vec<usize>,
-    val: Vec<T>,
-}
-impl<T> Default for CompactL<T> {
-    fn default() -> Self {
-        CompactL {
-            ptr: Vec::new(),
-            idx: Vec::new(),
-            val: Vec::new(),
-        }
-    }
-}
-
-/// Incremental-emit state for the LDL^T left-looking path: consumer refcounts (free
-/// the panel at 0), the compact L sink, and the O(n) maps populated in-node
-/// (block-aware for Bunch-Kaufman 1x1/2x2 D) and read after the barrier.
 struct LlEmitLdlt<T> {
     refcount: Vec<AtomicUsize>,
     e_offset: Vec<usize>,
-    compact: Cells<CompactL<T>>,
+    panels: Cells<PanelOut<T>>,
     e_of_g: Cells<usize>,
     perm: Cells<usize>,
     d_diag: Cells<T>,
@@ -2151,7 +2300,7 @@ impl<T: Scalar> LlEmitLdlt<T> {
         LlEmitLdlt {
             refcount,
             e_offset,
-            compact: Cells::new_default(nsuper),
+            panels: Cells::new_default(nsuper),
             e_of_g: Cells::new(n, usize::MAX),
             perm: Cells::new(n, 0),
             d_diag: Cells::new(n, T::zero()),
@@ -2181,52 +2330,27 @@ fn ldlt_emit_and_free<T: Scalar>(
 ) {
     let ncol = sym.supernodes[k].ncol;
     let nrow = sched.rows(k).len();
-    // SAFETY: `k` is fully factored and its last consumer is done - exclusive.
-    let slot = unsafe { store.get(k) };
-    let (panel, lperm, t2) = (&slot.panel, &slot.lperm, &slot.two);
-    let one = T::one();
-    let mut cl = CompactL::<T>::default();
-    cl.ptr.reserve(ncol + 1);
-    cl.ptr.push(0);
-    let mut col: Vec<(usize, T)> = Vec::with_capacity(nrow);
-    for p in 0..ncol {
-        col.clear();
-        let diag_e = unsafe { emit.eg(sched.rows(k)[lperm[p]] as usize) };
-        col.push((diag_e, one));
-        // Skip the 2x2 block's `d21` coupling row (D, not an L multiplier).
-        let i0 = if t2[p] { p + 2 } else { p + 1 };
-        for i in i0..nrow {
-            let v = panel[i + p * nrow];
-            if v != T::zero() {
-                col.push((unsafe { emit.eg(sched.rows(k)[lperm[i]] as usize) }, v));
-            }
-        }
-        if let Some(tau) = drop_tol {
-            let colmax = col
-                .iter()
-                .filter(|&&(r, _)| r != diag_e)
-                .map(|&(_, v)| v.magnitude())
-                .fold(0.0, f64::max);
-            let thresh = tau * colmax;
-            col.retain(|&(r, v)| r == diag_e || v.magnitude() >= thresh);
-        }
-        col.sort_unstable_by_key(|&(r, _)| r);
-        for &(r, v) in &col {
-            cl.idx.push(r);
-            cl.val.push(v);
-        }
-        cl.ptr.push(cl.idx.len());
-    }
-    // SAFETY: exactly one thread emits `k`; `compact[k]` is written once.
-    unsafe { emit.compact.set(k, cl) };
-    // SAFETY: last consumer done - no other thread reads `k`'s cells.
-    if !ldlt_no_free() {
-        unsafe { store.free(k) };
+    // SAFETY: the owner of supernode `k` emits it exactly once, after its last
+    // updater has read the panel (refcount zero); nobody reads it afterwards.
+    let slot = unsafe { store.take(k) };
+    let (panel, lperm, t2) = (slot.panel, &slot.lperm, &slot.two);
+    debug_assert_eq!(panel.len(), nrow * ncol);
+    debug_assert!(
+        (0..ncol)
+            .all(|p| unsafe { emit.eg(sched.rows(k)[lperm[p]] as usize) } == emit.e_offset[k] + p),
+        "the diagonal block is in elimination order"
+    );
+    let e_rows: Vec<u32> = (ncol..nrow)
+        .map(|i| unsafe { emit.eg(sched.rows(k)[lperm[i]] as usize) } as u32)
+        .collect();
+    let out = finish_panel(panel, ncol, e_rows, &t2[..ncol], drop_tol);
+    unsafe { emit.panels.set(k, out) };
+    if ldlt_no_free() {
+        // The debugging hold: keep an (emptied) shell in place.
+        unsafe { store.set(k, LdltSlot::default()) };
     }
 }
 
-// A/B toggle (`RLA_NO_FREE=1`): keep dense panels resident, to isolate the
-// live-memory effect of incremental freeing.
 static LDLT_NO_FREE_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 fn ldlt_no_free() -> bool {
@@ -3204,7 +3328,7 @@ fn factor_left_looking<T: Scalar>(
     a: &CscMatrix<T>,
     a_perm: CscMatrix<T>,
     opts: &SolverSettings,
-) -> Result<LdltFactors<T>, RslabError> {
+) -> Result<LdltNumeric<T>, RslabError> {
     let n = sym.n;
     let perturb_floor: Option<f64> = match opts.on_zero_pivot {
         ZeroPivotAction::Fail => None,
@@ -3254,34 +3378,14 @@ fn factor_left_looking<T: Scalar>(
             )
         })
         .collect::<Result<Vec<()>, _>>()?;
-    drop(store); // panels freed incrementally; release the shells
+    drop(store); // panels moved into the emit cells; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
-    // Assemble global L (CSC) by concatenating the per-supernode compact fragments
-    // produced (and freed) incrementally during factorization - taken by value and
-    // dropped right after appending, so the peak is the growing CSC + one fragment,
-    // not all fragments + the full CSC. D / perm / inertia were populated in-node.
-    let mut l_col_ptr = Vec::with_capacity(n + 1);
-    l_col_ptr.push(0);
-    let mut l_row_idx: Vec<usize> = Vec::new();
-    let mut l_values: Vec<T> = Vec::new();
-    let mut supernode_ptr = Vec::with_capacity(sym.supernodes.len() + 1);
-    supernode_ptr.push(0);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
-    for (s, snode) in sym.supernodes.iter().enumerate() {
-        // SAFETY: factorization complete; `compact[s]` written exactly once.
-        let cl = unsafe { std::mem::take(emit.compact.get_mut(s)) };
-        for c in 0..snode.ncol {
-            let (a, b) = (cl.ptr[c], cl.ptr[c + 1]);
-            l_row_idx.extend_from_slice(&cl.idx[a..b]);
-            l_values.extend_from_slice(&cl.val[a..b]);
-            l_col_ptr.push(l_row_idx.len());
-        }
-        if snode.ncol > 0 {
-            supernode_ptr.push(l_col_ptr.len() - 1);
-        }
-    }
-    // SAFETY: factorization complete; every position written exactly once in-node.
+    let (factor, n_dropped) =
+        assemble_panels(n, sym.supernodes.iter().map(|sn| sn.ncol), |s| unsafe {
+            std::mem::take(emit.panels.get_mut(s))
+        });
     let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm.get(e) }).collect();
     let d_diag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_diag.get(e) }).collect();
     let d_subdiag: Vec<T> = (0..n).map(|e| unsafe { *emit.d_subdiag.get(e) }).collect();
@@ -3292,18 +3396,15 @@ fn factor_left_looking<T: Scalar>(
         emit.inertia_zero.load(Ordering::Relaxed),
     );
 
-    Ok(LdltFactors {
-        n,
-        l_col_ptr,
-        l_row_idx,
-        l_values,
+    Ok(LdltNumeric {
+        factor,
         d_diag,
         d_subdiag,
         two_by_two,
         perm,
-        supernode_ptr,
         supernode_parent,
         n_perturbed,
+        n_dropped,
         inertia,
     })
 }
@@ -3469,7 +3570,7 @@ mod tests {
         for ord in [OrderingMethod::Rcm, OrderingMethod::AutoRace] {
             let opts = SolverSettings::default().with_ordering(ord);
             let symb = analyze_with(a.n, &a.col_ptr, &a.row_idx, &opts).unwrap();
-            let f = factor_numeric(&symb, &a, &opts).unwrap();
+            let f = factor_numeric(&symb, &a, &opts).unwrap().into_factors();
             let x = solve_ldlt(&f, &b).unwrap();
             assert!(
                 residual_inf(&a, &x, &b) < 1e-9,

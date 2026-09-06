@@ -955,6 +955,7 @@ impl LuSymbolic {
                 &|_| &[],
                 value_bytes,
                 0,
+                false,
             );
         };
         let nsuper = sym.supernodes.len();
@@ -966,6 +967,7 @@ impl LuSymbolic {
                 &|_| &[],
                 value_bytes,
                 0,
+                false,
             );
         };
         let panel_bytes = |s: usize| -> u64 {
@@ -991,6 +993,7 @@ impl LuSymbolic {
             &|s| sched.updaters(s),
             value_bytes,
             input_bytes,
+            false,
         );
         est.factor_flops = (0..nsuper)
             .map(|s| {
