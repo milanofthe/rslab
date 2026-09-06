@@ -76,6 +76,7 @@ impl<T> PanelPtr<T> {
 /// calibrated cost-model worker count.
 pub(crate) fn tuned<A: ?Sized, S>(
     a: &A,
+    base: &SolverSettings,
     analyze_with: impl Fn(&A, &SolverSettings) -> Result<S, RslabError>,
     estimate: impl Fn(&S) -> MemoryEstimate,
 ) -> Result<(S, SolverSettings), RslabError> {
@@ -86,7 +87,7 @@ pub(crate) fn tuned<A: ?Sized, S>(
     // Amd-pinned default plus flops-gated ND bakeoff with one exact
     // measurement (the race is what the bakeoff approximated).
     #[allow(unused_mut)]
-    let mut s = SolverSettings::default().with_ordering(OrderingMethod::AutoRace);
+    let mut s = base.clone().with_ordering(OrderingMethod::AutoRace);
     let sym = analyze_with(a, &s)?;
     // Install-diagnosed worker count: only when a calibration cache exists
     // (written once by `tuning::install_diagnose`); never measures here.

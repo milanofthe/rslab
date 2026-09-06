@@ -38,7 +38,7 @@ use crate::sparse::csc::CscMatrix;
 
 mod hungarian;
 mod infnorm;
-mod mc64;
+pub(crate) mod mc64;
 
 /// Cached MC64 output: the matching (`perm`) that drives the
 /// `LdltCompress` ordering preprocessor, plus the dual data a scaling

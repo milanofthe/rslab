@@ -736,6 +736,44 @@ pub(crate) fn predict_merges(
     bias
 }
 
+/// Parent of every supernode in the assembly tree (`usize::MAX` for a root),
+/// renumbered over the supernodes for which `kept` holds (an empty supernode
+/// contributes no factor columns; its children attach to the nearest kept
+/// ancestor). The result is indexed by the kept supernodes in order.
+pub fn supernode_parents(supernodes: &[Supernode], kept: &[bool]) -> Vec<usize> {
+    let ns = supernodes.len();
+    let mut parent = vec![usize::MAX; ns];
+    for (s, sn) in supernodes.iter().enumerate() {
+        for &c in &sn.children {
+            parent[c] = s;
+        }
+    }
+    let mut new_index = vec![usize::MAX; ns];
+    let mut next = 0;
+    for s in 0..ns {
+        if kept[s] {
+            new_index[s] = next;
+            next += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(next);
+    for s in 0..ns {
+        if !kept[s] {
+            continue;
+        }
+        let mut p = parent[s];
+        while p != usize::MAX && !kept[p] {
+            p = parent[p];
+        }
+        out.push(if p == usize::MAX {
+            usize::MAX
+        } else {
+            new_index[p]
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

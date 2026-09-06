@@ -220,6 +220,9 @@ pub struct LuFactors<T> {
     /// `supernode_ptr[s]..supernode_ptr[s + 1]` of `L` and rows of `U` share
     /// one structure. Length `ns + 1`; empty when unknown.
     pub supernode_ptr: Vec<usize>,
+    /// Parent of every supernode in the assembly tree (`usize::MAX` for a
+    /// root); empty when unknown.
+    pub supernode_parent: Vec<usize>,
     /// Number of statically perturbed pivots.
     pub n_perturbed: usize,
     /// Thread policy the **solve phase** should honour (issue #9): resolved from
@@ -597,6 +600,17 @@ fn factor_one_node_lu<T: Scalar>(
     })
 }
 
+/// Fold the MC64 row matching back into the factors: pivot rows and the row
+/// scaling are reported in `A`'s row indices, as the solves expect.
+fn finish_matching<T: Scalar>(fac: &mut LuFactors<T>, lusym: &LuSymbolic) {
+    if let Some(m) = &lusym.matching {
+        for e in fac.perm_row.iter_mut() {
+            *e = m.row_of[*e];
+        }
+        fac.d_row = m.r.clone();
+    }
+}
+
 /// A supernode's own factor plus the flat `(supernode-id, factor)` list for the
 /// rest of its subtree - the return shape of [`factor_subtree`].
 type SubtreeFactors<T> = (NodeLu<T>, Vec<(usize, NodeLu<T>)>);
@@ -604,10 +618,20 @@ type SubtreeFactors<T> = (NodeLu<T>, Vec<(usize, NodeLu<T>)>);
 /// Reusable symbolic analysis for the unsymmetric LU path - the symmetrized
 /// pattern `A union A^T` analyzed once. Pass to [`factor_general_lu_numeric`] for
 /// each value-set that shares the pattern (frequency sweep / Newton).
+/// The MC64 row matching the analysis was done under: the factored matrix
+/// is `B = diag(r) P A diag(c)` with `B` row `i` = `A` row `row_of[i]`.
+struct LuMatching {
+    row_of: Vec<usize>,
+    /// `A`-row scaling.
+    r: Vec<f64>,
+    c: Vec<f64>,
+}
+
 pub struct LuSymbolic {
     symb: crate::numeric::multifrontal_ldlt::MultifrontalSymbolic,
     n: usize,
     nnz: usize,
+    matching: Option<LuMatching>,
     /// Wall time of the analysis and the ordering it was asked for, carried
     /// into the diagnostics of every factorization reusing it.
     analyze_ms: f64,
@@ -647,6 +671,7 @@ impl LuSymbolic {
                 symb: analyze_with(0, &[0], &[], opts)?,
                 n: 0,
                 nnz: 0,
+                matching: None,
                 analyze_ms: 0.0,
                 requested_ordering: opts.ordering,
                 est_cache: Mutex::new(Vec::new()),
@@ -654,7 +679,33 @@ impl LuSymbolic {
             });
         }
         let t = crate::clock::Instant::now();
-        let (col_ptr, row_idx) = symmetrized_lower_pattern(a);
+        // MC64 row matching: analyze the row-permuted matrix `B` whose
+        // diagonal carries the matched entries.
+        let matching = if opts.lu_matching {
+            let cache = crate::scaling::mc64::compute_matching_general(a)?;
+            if cache.n_matched == n {
+                let (r, c) = crate::scaling::mc64::unsymmetric_scaling(&cache);
+                // `cache.perm[j]` is the row matched to column `j`: it becomes
+                // row `j` of `B`.
+                Some(LuMatching {
+                    row_of: cache.perm,
+                    r,
+                    c,
+                })
+            } else {
+                crate::logging::warn(&format!(
+                    "lu analyze: structurally rank-deficient ({} of {n} columns matched); row matching skipped",
+                    cache.n_matched
+                ));
+                None
+            }
+        } else {
+            None
+        };
+        let (col_ptr, row_idx) = match &matching {
+            Some(m) => symmetrized_lower_pattern(&Self::row_permuted(a, m)),
+            None => symmetrized_lower_pattern(a),
+        };
         let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
         let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
@@ -677,11 +728,50 @@ impl LuSymbolic {
             symb,
             n,
             nnz,
+            matching,
             analyze_ms,
             requested_ordering: opts.ordering,
             est_cache: Mutex::new(Vec::new()),
             perm_scatter: std::sync::OnceLock::new(),
         })
+    }
+
+    /// `A` with its rows permuted by the matching (values untouched; the
+    /// scaling is applied in the numeric phase).
+    fn row_permuted<T: Scalar>(a: &GeneralCsc<T>, m: &LuMatching) -> GeneralCsc<T> {
+        let n = a.n;
+        let mut b_row_of_a = vec![0usize; n];
+        for (b, &ar) in m.row_of.iter().enumerate() {
+            b_row_of_a[ar] = b;
+        }
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        let mut row_idx = Vec::with_capacity(a.row_idx.len());
+        let mut values = Vec::with_capacity(a.values.len());
+        col_ptr.push(0);
+        let mut col: Vec<(usize, T)> = Vec::new();
+        for j in 0..n {
+            col.clear();
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                col.push((b_row_of_a[a.row_idx[k]], a.values[k]));
+            }
+            col.sort_unstable_by_key(|e| e.0);
+            for &(r, v) in &col {
+                row_idx.push(r);
+                values.push(v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        GeneralCsc {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
+    /// Whether the analysis carries an MC64 row matching.
+    pub fn has_matching(&self) -> bool {
+        self.matching.is_some()
     }
 
     /// PARDISO **phases 2-3**: equilibrate and LU-factor `a`, reusing this
@@ -707,7 +797,11 @@ impl LuSymbolic {
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let nnz = factors.factor_nnz() as u64;
         let mut decisions = self.symb.decisions(self.requested_ordering);
-        decisions.scaling = "TwoSidedRowCol".to_string();
+        decisions.scaling = if self.matching.is_some() {
+            "Mc64RowMatching".to_string()
+        } else {
+            "TwoSidedRowCol".to_string()
+        };
         decisions.method = format!("{:?}", opts.method);
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
@@ -745,6 +839,7 @@ impl LuSymbolic {
             &factors.l_row_idx,
             &factors.l_values,
             &factors.supernode_ptr,
+            &factors.supernode_parent,
             true,
         );
         let plan_u = crate::numeric::supernodal_solve::SolvePlan::build_csc(
@@ -753,6 +848,7 @@ impl LuSymbolic {
             &factors.u_col_idx,
             &factors.u_values,
             &factors.supernode_ptr,
+            &factors.supernode_parent,
             false,
         );
         diagnostics.push(
@@ -946,7 +1042,18 @@ impl<T: Scalar> LuSolver<T> {
     /// analysis with the adaptive ordering heuristic, the proven default kernel
     /// configuration, and (on large systems) the exact nested-dissection bakeoff.
     pub fn tuned(a: &GeneralCsc<T>) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        crate::numeric::ll_common::tuned(a, LuSymbolic::analyze_with, |sym: &LuSymbolic| {
+        Self::tuned_with(a, &SolverSettings::default())
+    }
+
+    /// [`tuned`](Self::tuned) on top of the caller's settings: the analysis
+    /// knobs (`nemin`, `relax`, `reorder`, `lu_matching`, ...) come from
+    /// `base`, the ordering is the heuristic race, the thread count the
+    /// calibrated pick.
+    pub fn tuned_with(
+        a: &GeneralCsc<T>,
+        base: &SolverSettings,
+    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
+        crate::numeric::ll_common::tuned(a, base, LuSymbolic::analyze_with, |sym: &LuSymbolic| {
             sym.estimate_memory::<T>()
         })
     }
@@ -2054,6 +2161,8 @@ fn factor_lu_left_looking<T: Scalar>(
     u_row_ptr.push(0);
     let mut supernode_ptr = Vec::with_capacity(sym.supernodes.len() + 1);
     supernode_ptr.push(0);
+    let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
+    let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     for (s, snode) in sym.supernodes.iter().enumerate() {
         // Take ownership and drop each fragment right after appending, so the peak
         // is (growing final CSC) + (one supernode's fragment), not all fragments +
@@ -2091,6 +2200,7 @@ fn factor_lu_left_looking<T: Scalar>(
         d_row: d_row.to_vec(),
         d_col: d_col.to_vec(),
         supernode_ptr,
+        supernode_parent,
         n_perturbed,
         // Placeholder; the caller (`factor_general_lu_numeric`) overwrites this
         // with the resolved solve-phase policy once the factor is built.
@@ -2127,6 +2237,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             d_row: Vec::new(),
             d_col: Vec::new(),
             supernode_ptr: vec![0],
+            supernode_parent: Vec::new(),
             n_perturbed: 0,
             solve_threads: crate::numeric::multifrontal_ldlt::Threads::Ambient,
         });
@@ -2167,47 +2278,58 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // matrices span ~6 orders) so the LU factor - and any incomplete drop -
     // stays well-scaled; the solve undoes it transparently. Computed from the
     // original (unpermuted) A.
-    let mut rmax = vec![0.0f64; n];
-    let mut cmax = vec![0.0f64; n];
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
-            let m = a.values[k].magnitude();
-            if m > rmax[i] {
-                rmax[i] = m;
-            }
-            if m > cmax[j] {
-                cmax[j] = m;
-            }
+    // The matrix the pipeline factors: `A` itself, or its MC64 row-permuted
+    // form `B` (row `i` of `B` is row `row_of[i]` of `A`) with the matching's
+    // scalings; otherwise the max-norm equilibration.
+    let input;
+    let a_in: &GeneralCsc<T> = match &lusym.matching {
+        Some(m) => {
+            input = LuSymbolic::row_permuted(a, m);
+            &input
         }
-    }
-    let d_row: Vec<f64> = rmax
-        .iter()
-        .map(|&r| crate::scaling::inv_sqrt_scale_guarded(r))
-        .collect();
-    let d_col: Vec<f64> = cmax
-        .iter()
-        .map(|&c| crate::scaling::inv_sqrt_scale_guarded(c))
-        .collect();
+        None => a,
+    };
+    let (d_row, d_col): (Vec<f64>, Vec<f64>) = match &lusym.matching {
+        Some(m) => ((0..n).map(|i| m.r[m.row_of[i]]).collect(), m.c.clone()),
+        None => {
+            let mut rmax = vec![0.0f64; n];
+            let mut cmax = vec![0.0f64; n];
+            for j in 0..n {
+                for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                    let i = a.row_idx[k];
+                    let m = a.values[k].magnitude();
+                    if m > rmax[i] {
+                        rmax[i] = m;
+                    }
+                    if m > cmax[j] {
+                        cmax[j] = m;
+                    }
+                }
+            }
+            (
+                rmax.iter()
+                    .map(|&r| crate::scaling::inv_sqrt_scale_guarded(r))
+                    .collect(),
+                cmax.iter()
+                    .map(|&c| crate::scaling::inv_sqrt_scale_guarded(c))
+                    .collect(),
+            )
+        }
+    };
 
-    // Full permuted, equilibrated matrix A_hat_perm = P^T (D_r A D_c) P and its
-    // transpose (no triangle folding - unsymmetric values kept distinct),
-    // through the cached scatter programs: structures frozen on the first
-    // factorization of this pattern, later (re)factorizations pay one linear
-    // values pass (each scaled value computed once, written to both layouts).
     let (fwd, bwd) = lusym.perm_scatter.get_or_init(|| {
         (
-            PermScatter::build_full(n, &a.col_ptr, &a.row_idx, &sym.perm_inv),
-            PermScatter::build_full_transposed(n, &a.col_ptr, &a.row_idx, &sym.perm_inv),
+            PermScatter::build_full(n, &a_in.col_ptr, &a_in.row_idx, &sym.perm_inv),
+            PermScatter::build_full_transposed(n, &a_in.col_ptr, &a_in.row_idx, &sym.perm_inv),
         )
     });
-    let nnz = a.row_idx.len();
+    let nnz = a_in.row_idx.len();
     let mut vals = vec![T::zero(); nnz];
     let mut vals_t = vec![T::zero(); nnz];
     for j in 0..n {
         let dc = d_col[j];
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let sv = a.values[k] * T::from_real(d_row[a.row_idx[k]] * dc);
+        for k in a_in.col_ptr[j]..a_in.col_ptr[j + 1] {
+            let sv = a_in.values[k] * T::from_real(d_row[a_in.row_idx[k]] * dc);
             vals[fwd.pos[k]] = sv;
             vals_t[bwd.pos[k]] = sv;
         }
@@ -2253,6 +2375,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             },
         )?;
         fac.solve_threads = solve_policy;
+        finish_matching(&mut fac, lusym);
         return Ok(fac);
     }
 
@@ -2358,6 +2481,11 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let mut urow: Vec<(usize, T)> = Vec::new();
     let mut supernode_ptr = Vec::with_capacity(node_results.len() + 1);
     supernode_ptr.push(0);
+    let kept: Vec<bool> = node_results
+        .iter()
+        .map(|n| n.as_ref().is_some_and(|nd| nd.front.nelim > 0))
+        .collect();
+    let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     for node_opt in node_results.iter_mut() {
         let node = node_opt.as_mut().ok_or_else(|| {
             RslabError::InvalidInput("internal: unfactored supernode".to_string())
@@ -2435,7 +2563,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         }
     }
 
-    Ok(LuFactors {
+    let mut fac = LuFactors {
         n,
         l_col_ptr,
         l_row_idx,
@@ -2448,9 +2576,12 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         d_row,
         d_col,
         supernode_ptr,
+        supernode_parent,
         n_perturbed,
         solve_threads: solve_policy,
-    })
+    };
+    finish_matching(&mut fac, lusym);
+    Ok(fac)
 }
 
 /// Solve `A x = b` from an unsymmetric LU factorization (`P^T A P = L U`).
@@ -2745,6 +2876,85 @@ pub fn solve_lu_refined_with<T: Scalar>(
 
 #[cfg(test)]
 mod tests {
+
+    /// A badly scaled, row-scrambled unsymmetric system: without the MC64
+    /// row matching the front-restricted pivoting finds no usable pivot or
+    /// loses digits; with it (the default) the componentwise backward error
+    /// is roundoff.
+    #[test]
+    fn lu_matching_bounds_pivot_growth() {
+        let m = 40usize;
+        let n = m * m;
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for j in 0..n {
+            let (x, y) = (j % m, j / m);
+            let rs = |i: usize| 10f64.powi(((i * 7919) % 13) as i32 - 6);
+            let mut push = |i: usize, v: f64| cols[j].push(((i + 17) % n, v * rs(i)));
+            push(j, 4.0);
+            if x > 0 {
+                push(j - 1, -1.4);
+            }
+            if x + 1 < m {
+                push(j + 1, -0.6);
+            }
+            if y > 0 {
+                push(j - m, -1.0);
+            }
+            if y + 1 < m {
+                push(j + m, -1.0);
+            }
+        }
+        let (mut col_ptr, mut row_idx, mut values) = (vec![0usize], Vec::new(), Vec::new());
+        for c in &mut cols {
+            c.sort_by_key(|e| e.0);
+            for &(r, v) in c.iter() {
+                row_idx.push(r);
+                values.push(v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let a = GeneralCsc {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
+        // Componentwise backward error `max_i |r_i| / (|A||x| + |b|)_i`: the
+        // rows span twelve decades, so a normwise residual would only
+        // measure the largest rows.
+        let omega = |x: &[f64]| {
+            let mut r = b.clone();
+            let mut d: Vec<f64> = b.iter().map(|v| v.abs()).collect();
+            for j in 0..n {
+                for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                    r[a.row_idx[k]] -= a.values[k] * x[j];
+                    d[a.row_idx[k]] += a.values[k].abs() * x[j].abs();
+                }
+            }
+            r.iter()
+                .zip(&d)
+                .map(|(ri, di)| if *di > 0.0 { ri.abs() / di } else { 0.0 })
+                .fold(0.0, f64::max)
+        };
+        for method in [FactorMethod::LeftLooking, FactorMethod::Multifrontal] {
+            let opts = SolverSettings::default()
+                .with_threads(1)
+                .with_method(method);
+            let s = LuSolver::factor(&a, &opts).unwrap();
+            assert_eq!(s.diagnostics().decisions.scaling, "Mc64RowMatching");
+            let x = s.solve(&b).unwrap();
+            assert!(
+                omega(&x) < 1e-12,
+                "{method:?} backward error with matching {}",
+                omega(&x)
+            );
+            // Without the matching the shifted rows leave the fully-summed
+            // blocks without a usable pivot.
+            let s0 = LuSolver::factor(&a, &opts.with_lu_matching(false));
+            assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
+        }
+    }
     use super::*;
     use num_complex::Complex;
 

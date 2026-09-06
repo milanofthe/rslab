@@ -35,6 +35,7 @@ class Settings:
         ordering: str | None = ...,
         scaling: str | None = ...,
         pivot_u: float | None = ...,
+        matching: bool | None = ...,
         nemin: int | None = ...,
         relax: bool | tuple[int, int] | None = ...,
         reorder: str | None = ...,
@@ -56,6 +57,7 @@ class KluSettings:
         row_scaling: bool | None = ...,
         btf: bool | None = ...,
         parallel: bool | None = ...,
+        matching: bool | None = ...,
         interrupt: Interrupt | None = ...,
     ) -> None: ...
     def to_dict(self) -> dict[str, Any]: ...

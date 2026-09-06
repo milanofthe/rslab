@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 0.32.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 0.33.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -678,6 +678,11 @@ pivot_u : float, optional
 scaling : {'one_pass', 'inf_norm', 'mc64', 'auto', 'identity'}, optional
     Symmetric equilibration before the LDL^T factorization. The LU path
     uses its own two-sided scaling and reports a set value.
+matching : bool, default True
+    Maximum-product row matching (MC64) before the LU analysis: rows are
+    permuted so the matched entries form the diagonal and both sides are
+    scaled to unit magnitude there, which keeps the element growth of the
+    front-restricted pivoting bounded. LU path only.
 blr : float or False, optional
     Block-low-rank compression of the contribution blocks with the given
     relative tolerance; `False` (default) keeps exact dense fronts.
@@ -708,6 +713,7 @@ Settings of the KLU (circuit) path.
 - `pivot_tol` : float, default 1e-3 Diagonal-preference threshold: the diagonal entry is the pivot when `|a_jj| >= pivot_tol * max_i |a_ij|`; `1.0` is plain partial pivoting.
 - `row_scaling` : bool, default True Divide each row by its max-magnitude entry before factoring.
 - `btf` : bool, default True Permute to block upper triangular form first (keep it on).
+- `matching` : bool, default True Maximum-product row matching (MC64) as the transversal of the block triangular form, so the diagonal-preference pivoting rarely leaves the diagonal; needs `btf`.
 - `parallel` : bool, optional Per-block parallel factor / refactor over the BTF blocks. `None` (default) is the structural auto gate (at least 4 blocks, 8000 nonzeros, no dominant block); `True` / `False` force it. The result is bit-identical in every mode.
 - `interrupt` : Interrupt, optional A cancellation flag polled by the numeric phase.
 

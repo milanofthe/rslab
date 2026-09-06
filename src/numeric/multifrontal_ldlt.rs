@@ -312,6 +312,14 @@ pub struct SolverSettings {
     /// Consumed by the symmetric path; the unsymmetric LU path uses its own
     /// two-sided row/column equilibration.
     pub scaling: crate::scaling::ScalingStrategy,
+    /// Maximum-product row matching (MC64) before the **LU** analysis: rows
+    /// are permuted so the matched, largest-product entries form the
+    /// diagonal and both sides are scaled to make them unit magnitude. The
+    /// front-local pivot search then rarely needs an off-diagonal pivot,
+    /// which keeps the element growth of the block-restricted pivoting
+    /// bounded (on the ibmpg1 power grid the residual improves from 4e-5 to
+    /// roundoff). Default `true`; ignored by the symmetric and KLU paths.
+    pub lu_matching: bool,
 }
 
 /// Worker-thread policy for a factorization. The numeric result is bit-identical
@@ -541,6 +549,7 @@ impl Default for SolverSettings {
             use_gemm_schur: true,
             pivot_u: DEFAULT_PIVOT_U,
             scaling: crate::scaling::ScalingStrategy::OnePassInfNorm,
+            lu_matching: true,
         }
     }
 }
@@ -680,6 +689,13 @@ impl SolverSettings {
     /// symmetric path). See [`scaling`](Self::scaling).
     pub fn with_scaling(mut self, scaling: crate::scaling::ScalingStrategy) -> Self {
         self.scaling = scaling;
+        self
+    }
+
+    /// Enable or disable the MC64 row matching of the LU path (see
+    /// [`SolverSettings::lu_matching`]).
+    pub fn with_lu_matching(mut self, on: bool) -> Self {
+        self.lu_matching = on;
         self
     }
 
@@ -1852,6 +1868,7 @@ pub fn factor_numeric<T: Scalar>(
                 two_by_two: Vec::new(),
                 perm: Vec::new(),
                 supernode_ptr: vec![0],
+                supernode_parent: Vec::new(),
                 n_perturbed: 0,
                 inertia: Inertia::new(0, 0, 0),
             });
@@ -2001,6 +2018,11 @@ pub fn factor_numeric<T: Scalar>(
     let mut col: Vec<(usize, T)> = Vec::new();
     let mut supernode_ptr = Vec::with_capacity(node_results.len() + 1);
     supernode_ptr.push(0);
+    let kept: Vec<bool> = node_results
+        .iter()
+        .map(|n| n.as_ref().is_some_and(|nd| nd.front.nelim > 0))
+        .collect();
+    let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     for node_opt in node_results.iter_mut() {
         let node = node_opt.as_mut().ok_or_else(|| {
             RslabError::InvalidInput("internal: unfactored supernode".to_string())
@@ -2056,6 +2078,7 @@ pub fn factor_numeric<T: Scalar>(
         two_by_two,
         perm,
         supernode_ptr,
+        supernode_parent,
         n_perturbed,
         inertia,
     })
@@ -3243,6 +3266,8 @@ fn factor_left_looking<T: Scalar>(
     let mut l_values: Vec<T> = Vec::new();
     let mut supernode_ptr = Vec::with_capacity(sym.supernodes.len() + 1);
     supernode_ptr.push(0);
+    let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
+    let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     for (s, snode) in sym.supernodes.iter().enumerate() {
         // SAFETY: factorization complete; `compact[s]` written exactly once.
         let cl = unsafe { std::mem::take(emit.compact.get_mut(s)) };
@@ -3277,6 +3302,7 @@ fn factor_left_looking<T: Scalar>(
         two_by_two,
         perm,
         supernode_ptr,
+        supernode_parent,
         n_perturbed,
         inertia,
     })

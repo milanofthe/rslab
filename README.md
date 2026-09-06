@@ -190,6 +190,15 @@ The nested-dissection ordering (`metis`, and the default pick on large
 systems) runs the two sides of every bisection in parallel; the ordering
 is a function of the seed alone, so it is the same for every thread count.
 
+The unsymmetric paths start with a maximum-product row matching (MC64):
+the LU path permutes and scales the rows so the matched entries form a
+unit diagonal, which keeps the element growth of its front-restricted
+pivoting bounded; the KLU path uses the matching as the transversal of its
+block triangular form, so the diagonal-preference pivoting rarely leaves
+the diagonal and the numeric fill stays at the symbolic estimate (ibmpg1:
+4.7M to 0.85M factor entries, factor 390 ms to 35 ms). Both are on by
+default (`lu_matching`, `KluSettings::matching`).
+
 The LDL^T and LU solves are supernodal and tree-parallel: after the
 factorization the factor is laid out once as dense column panels per
 supernode (the fronts) with one shared `u32` row list each (the

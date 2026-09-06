@@ -572,6 +572,7 @@ dependencies = [
 name = "rslab-metis"
 version = "0.2.2"
 dependencies = [
+ "rayon",
  "rslab-amd",
  "rslab-ordering-core",
 ]

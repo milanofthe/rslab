@@ -56,6 +56,24 @@ def test_settings_roundtrip_and_repr():
     assert rslab.Settings().to_dict()["threads"] is None
 
 
+def test_lu_matching_setting():
+    assert rslab.Settings().to_dict()["matching"] is True
+    assert rslab.Settings(matching=False).to_dict()["matching"] is False
+    A = _general(200)
+    assert rslab.lu(A).diagnostics()["decisions"]["scaling"] == "Mc64RowMatching"
+    assert rslab.lu(A, matching=False).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
+
+
+def test_klu_matching_setting():
+    assert rslab.KluSettings().to_dict()["matching"] is True
+    A = _circuit(300)
+    f1 = rslab.klu(A)
+    f0 = rslab.klu(A, matching=False)
+    assert f1.n == f0.n
+    b = np.ones(300)
+    assert _res(A, f1.solve(b), b) < 1e-10 and _res(A, f0.solve(b), b) < 1e-10
+
+
 def test_settings_reject_unknown_and_invalid():
     with pytest.raises(TypeError):
         rslab.Settings(threds=2)

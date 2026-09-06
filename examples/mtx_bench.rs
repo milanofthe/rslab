@@ -279,6 +279,181 @@ fn main() {
                     resid(&a, &x, &b)
                 );
             }
+            // Matching diagnostics: growth, residual and permutation sanity per variant.
+            for (label, opts) in [
+                (
+                    "dbg-amd-u.1",
+                    SolverSettings::default().with_ordering(OrderingMethod::Amd),
+                ),
+                (
+                    "dbg-amd-u.1-nomatch",
+                    SolverSettings::default()
+                        .with_ordering(OrderingMethod::Amd)
+                        .with_lu_matching(false),
+                ),
+                (
+                    "dbg-amd-u0",
+                    SolverSettings::default()
+                        .with_ordering(OrderingMethod::Amd)
+                        .with_pivot_u(0.0),
+                ),
+                (
+                    "dbg-amf-u.1",
+                    SolverSettings::default().with_ordering(OrderingMethod::Amf),
+                ),
+                (
+                    "dbg-metis-u.1",
+                    SolverSettings::default().with_ordering(OrderingMethod::MetisND),
+                ),
+                (
+                    "dbg-amd-u.1-mf",
+                    SolverSettings::default()
+                        .with_ordering(OrderingMethod::Amd)
+                        .with_method(rslab::FactorMethod::Multifrontal),
+                ),
+            ] {
+                let f = rslab::factor_general_lu(&a, &opts).unwrap();
+                let umax = f.u_values.iter().map(|v| v.norm()).fold(0.0, f64::max);
+                let lmax = f.l_values.iter().map(|v| v.norm()).fold(0.0, f64::max);
+                let mut seen = vec![false; n];
+                let mut dup = 0;
+                for &r in &f.perm_row {
+                    if seen[r] {
+                        dup += 1;
+                    }
+                    seen[r] = true;
+                }
+                let mut seenc = vec![false; n];
+                let mut dupc = 0;
+                for &c in &f.perm {
+                    if seenc[c] {
+                        dupc += 1;
+                    }
+                    seenc[c] = true;
+                }
+                let x = rslab::solve_lu(&f, &b).unwrap();
+                let interchanges = f
+                    .perm
+                    .iter()
+                    .zip(&f.perm_row)
+                    .filter(|(c, r)| c != r)
+                    .count();
+                let u_bad = (0..n).filter(|&e| f.u_col_idx[f.u_row_ptr[e]] != e).count();
+                let l_bad = (0..n).filter(|&j| f.l_row_idx[f.l_col_ptr[j]] != j).count();
+                let unsorted_l = (0..n)
+                    .filter(|&j| {
+                        f.l_row_idx[f.l_col_ptr[j]..f.l_col_ptr[j + 1]]
+                            .windows(2)
+                            .any(|w| w[0] >= w[1])
+                    })
+                    .count();
+                let unsorted_u = (0..n)
+                    .filter(|&j| {
+                        f.u_col_idx[f.u_row_ptr[j] + 1..f.u_row_ptr[j + 1]]
+                            .windows(2)
+                            .any(|w| w[0] >= w[1])
+                    })
+                    .count();
+                // Elimination-tree nesting of the emitted L (parent = min row below the diagonal).
+                let nest = |col_ptr: &[usize], row_idx: &[usize]| -> usize {
+                    let mut parent = vec![usize::MAX; n];
+                    for j in 0..n {
+                        parent[j] = row_idx[col_ptr[j]..col_ptr[j + 1]]
+                            .iter()
+                            .copied()
+                            .filter(|&r| r > j)
+                            .min()
+                            .unwrap_or(usize::MAX);
+                    }
+                    let mut bad = 0;
+                    for j in 0..n {
+                        for &r in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
+                            if r <= j {
+                                continue;
+                            }
+                            let mut p = parent[j];
+                            let mut ok = false;
+                            let mut steps = 0;
+                            while p != usize::MAX && steps < 100000 {
+                                if p == r {
+                                    ok = true;
+                                    break;
+                                }
+                                if p > r {
+                                    break;
+                                }
+                                p = parent[p];
+                                steps += 1;
+                            }
+                            if !ok && r != parent[j] {
+                                bad += 1;
+                            }
+                        }
+                    }
+                    bad
+                };
+                let l_nest = nest(&f.l_col_ptr, &f.l_row_idx);
+                let u_nest = nest(&f.u_row_ptr, &f.u_col_idx);
+                println!("{label:>22} etree violations: L={l_nest} U^T={u_nest}");
+                let sv = LuSolver::factor(&a, &opts).unwrap();
+                let xs = sv.solve(&b).unwrap();
+                println!("{label:>22} nnzLU={} max|U|={:.1e} max|L|={:.1e} dups={dup}/{dupc} row!=col={interchanges} diag-not-first U={u_bad} L={l_bad} unsorted L={unsorted_l} U={unsorted_u} res(csc)={:.1e} res(plan)={:.1e}", f.factor_nnz(), umax, lmax, resid(&a, &x, &b), resid(&a, &xs, &b));
+            }
+            // Growth and pivot-free variants.
+            for (label, opts) in [
+                ("lu-u0", SolverSettings::default().with_pivot_u(0.0)),
+                (
+                    "lu-u1-mf",
+                    SolverSettings::default()
+                        .with_pivot_u(1.0)
+                        .with_method(rslab::FactorMethod::Multifrontal),
+                ),
+            ] {
+                let f = rslab::factor_general_lu(&a, &opts).unwrap();
+                let amax = a.values.iter().map(|v| v.norm()).fold(0.0, f64::max);
+                let umax = f.u_values.iter().map(|v| v.norm()).fold(0.0, f64::max);
+                let lmax = f.l_values.iter().map(|v| v.norm()).fold(0.0, f64::max);
+                let x = rslab::solve_lu(&f, &b).unwrap();
+                println!(
+                    "{label:>18} nnzLU={} growth max|U|/max|A|={:.1e} max|L|={:.1e} res={:.1e}",
+                    f.factor_nnz(),
+                    umax / amax,
+                    lmax,
+                    resid(&a, &x, &b)
+                );
+            }
+            {
+                // Transposed system: the same structure with rows and columns swapped.
+                let mut t_col: Vec<Vec<(usize, C)>> = vec![Vec::new(); n];
+                for j in 0..n {
+                    for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                        t_col[a.row_idx[k]].push((j, a.values[k]));
+                    }
+                }
+                let (mut cp, mut ri, mut vv) = (vec![0usize], Vec::new(), Vec::new());
+                for col in &mut t_col {
+                    col.sort_by_key(|e| e.0);
+                    for &(r, v) in col.iter() {
+                        ri.push(r);
+                        vv.push(v);
+                    }
+                    cp.push(ri.len());
+                }
+                let at = rslab::GeneralCsc {
+                    n,
+                    col_ptr: cp,
+                    row_idx: ri,
+                    values: vv,
+                };
+                let s = LuSolver::factor(&at, &SolverSettings::default()).unwrap();
+                let x = s.solve(&b).unwrap();
+                println!(
+                    "{:>18} nnzLU={} res={:.1e}",
+                    "lu-transposed",
+                    s.factor_nnz(),
+                    resid(&at, &x, &b)
+                );
+            }
             // Reference: the scalar CSC solve on the plain LU factors.
             {
                 let f = rslab::factor_general_lu(&a, &SolverSettings::default()).unwrap();

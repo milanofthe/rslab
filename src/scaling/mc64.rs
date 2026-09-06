@@ -98,6 +98,95 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabErr
     })
 }
 
+/// MC64 on a general (unsymmetric) matrix: the maximum-product matching of
+/// rows to columns plus the row and column duals, for the LU path's
+/// row permutation and two-sided scaling (SPRAL `hungarian_scale_unsym`).
+pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
+    a: &crate::sparse::general::GeneralCsc<T>,
+) -> Result<Mc64Cache, RslabError> {
+    let n = a.n;
+    if n == 0 {
+        return Ok(Mc64Cache {
+            perm: Vec::new(),
+            u: Vec::new(),
+            v: Vec::new(),
+            cmax: Vec::new(),
+            n_matched: 0,
+        });
+    }
+    // Cost graph in the column's own structure: `cmax[j] - log|a_ij|`
+    // over the nonzero entries, so every column has a zero-cost minimum.
+    let mut col_ptr = vec![0usize; n + 1];
+    let mut row_idx = Vec::with_capacity(a.row_idx.len());
+    let mut cost = Vec::with_capacity(a.row_idx.len());
+    let mut cmax = vec![f64::NEG_INFINITY; n];
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let m = a.values[k].magnitude();
+            if m == 0.0 || !m.is_finite() {
+                continue;
+            }
+            let l = m.ln();
+            row_idx.push(a.row_idx[k]);
+            cost.push(l);
+            if l > cmax[j] {
+                cmax[j] = l;
+            }
+        }
+        col_ptr[j + 1] = row_idx.len();
+    }
+    for j in 0..n {
+        if !cmax[j].is_finite() {
+            cmax[j] = 0.0;
+        }
+        for c in &mut cost[col_ptr[j]..col_ptr[j + 1]] {
+            *c = cmax[j] - *c;
+        }
+    }
+    let graph = CostGraph {
+        n,
+        col_ptr,
+        row_idx,
+        cost,
+    };
+    let Matching {
+        perm,
+        u,
+        v,
+        n_matched,
+    } = hungarian_match(&graph);
+    Ok(Mc64Cache {
+        perm,
+        u,
+        v,
+        cmax,
+        n_matched,
+    })
+}
+
+/// Row and column scalings of a general matching: `r[i] = exp(u[i])`,
+/// `c[j] = exp(v[j] - cmax[j])`, so `|r_i a_ij c_j| <= 1` with equality on
+/// the matched entries (SPRAL scaling.f90 unsymmetric unwind). Guarded
+/// against overflow; a non-finite factor is reset to `1.0`.
+pub(crate) fn unsymmetric_scaling(cache: &Mc64Cache) -> (Vec<f64>, Vec<f64>) {
+    let guard = |x: f64| {
+        let s = x.clamp(-LOG_HUGE, LOG_HUGE).exp();
+        if s == 0.0 || !s.is_finite() {
+            1.0
+        } else {
+            s
+        }
+    };
+    let r: Vec<f64> = cache.u.iter().map(|&u| guard(u)).collect();
+    let c: Vec<f64> = cache
+        .v
+        .iter()
+        .zip(&cache.cmax)
+        .map(|(&v, &cm)| guard(v - cm))
+        .collect();
+    (r, c)
+}
+
 pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     let cache = compute_matching(matrix)?;
     Ok(scaling_from_cache(&cache))
