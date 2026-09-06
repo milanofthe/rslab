@@ -109,7 +109,10 @@ print(s.to_dict())
 `parallel` (`None` = structural auto gate, `True` / `False` force), `interrupt`.
 
 Settings a path ignores are reported under `diagnostics()["warnings"]`.
-Throughput is always reported: `diagnostics()["rates"]` holds the analysis,
+`solve` and `solve_many` on `Ldlt` and `Lu` handles are supernodal and
+tree-parallel (leaf subtrees of the elimination tree in parallel, parallel
+sections inside the wide top separators), bit-identical for every thread
+count. Throughput is always reported: `diagnostics()["rates"]` holds the analysis,
 factorization and solve rates in million unknowns per second (MDOF/s), the
 factorization flop rate (GFlop/s) and the factor-entry rate (Mnnz/s); the
 `summary` line and the `info` log carry the factor rate too.

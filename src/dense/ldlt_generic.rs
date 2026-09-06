@@ -52,6 +52,12 @@ pub struct LdltFactors<T> {
     /// Symmetric pivot permutation (forward): `perm[i] = j` means original
     /// index `j` occupies pivot position `i`.
     pub perm: Vec<usize>,
+    /// Column partition of `L` into supernodes (the fronts of the numeric
+    /// factorization): `supernode_ptr[s]..supernode_ptr[s + 1]` are the
+    /// columns of supernode `s`, whose off-diagonal-block structure is
+    /// shared. Length `ns + 1`; empty when the producer does not know it
+    /// (the solve layout then detects supernodes from the structure).
+    pub supernode_ptr: Vec<usize>,
     /// Number of pivots that were statically perturbed (replaced by a floor)
     /// to avoid a singular/tiny pivot. Zero for an exact factorization;
     /// nonzero only when static-pivoting (preconditioner) mode is enabled. The
@@ -328,6 +334,7 @@ pub fn factor_ldlt<T: Scalar>(matrix: &SymmetricMatrix<T>) -> Result<LdltFactors
         d_subdiag,
         two_by_two,
         perm,
+        supernode_ptr: vec![0, n],
         n_perturbed: 0,
         inertia,
     })

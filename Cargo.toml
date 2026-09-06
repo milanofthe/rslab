@@ -131,4 +131,7 @@ debug = true
 name = "metis_timing"
 
 [[example]]
+name = "solve_timing"
+
+[[example]]
 name = "ordering_bakeoff"

@@ -216,6 +216,10 @@ pub struct LuFactors<T> {
     /// Solve applies `D_r` to the RHS and `D_c` to the result. Both length `n`.
     pub d_row: Vec<f64>,
     pub d_col: Vec<f64>,
+    /// Column partition of the factor into supernodes (the fronts): columns
+    /// `supernode_ptr[s]..supernode_ptr[s + 1]` of `L` and rows of `U` share
+    /// one structure. Length `ns + 1`; empty when unknown.
+    pub supernode_ptr: Vec<usize>,
     /// Number of statically perturbed pivots.
     pub n_perturbed: usize,
     /// Thread policy the **solve phase** should honour (issue #9): resolved from
@@ -732,8 +736,43 @@ impl LuSymbolic {
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             crate::logging::info(&format!("lu factor: {}", diagnostics.summary()));
         }
+        // Solve layout: supernodal panels of `L` and `U^T` plus the tree
+        // schedule; the CSC arrays are released so the factor is held once.
+        let t = crate::clock::Instant::now();
+        let plan_l = crate::numeric::supernodal_solve::SolvePlan::build_csc(
+            factors.n,
+            &factors.l_col_ptr,
+            &factors.l_row_idx,
+            &factors.l_values,
+            &factors.supernode_ptr,
+            true,
+        );
+        let plan_u = crate::numeric::supernodal_solve::SolvePlan::build_csc(
+            factors.n,
+            &factors.u_row_ptr,
+            &factors.u_col_idx,
+            &factors.u_values,
+            &factors.supernode_ptr,
+            false,
+        );
+        diagnostics.push(
+            "solve-layout",
+            t.elapsed().as_secs_f64() * 1e3,
+            0,
+            (plan_l.bytes() + plan_u.bytes()) as u64,
+        );
+        let mut factors = factors;
+        factors.l_col_ptr = Vec::new();
+        factors.l_row_idx = Vec::new();
+        factors.l_values = Vec::new();
+        factors.u_row_ptr = Vec::new();
+        factors.u_col_idx = Vec::new();
+        factors.u_values = Vec::new();
         Ok(LuSolver {
             factors,
+            plan_l,
+            plan_u,
+            nnz: nnz as usize,
             diagnostics,
             solves: Default::default(),
         })
@@ -874,6 +913,12 @@ impl LuSymbolic {
 /// [`LuSolver::factor`].
 pub struct LuSolver<T> {
     factors: LuFactors<T>,
+    /// `L` and `U^T` in supernodal solve layout (see
+    /// [`crate::numeric::supernodal_solve`]); the CSC arrays of `factors`
+    /// are released once these exist.
+    plan_l: crate::numeric::supernodal_solve::SolvePlan<T>,
+    plan_u: crate::numeric::supernodal_solve::SolvePlan<T>,
+    nnz: usize,
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
@@ -933,9 +978,46 @@ impl<T: Scalar> LuSolver<T> {
     /// Solve `A x = b` using the stored factors.
     pub fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
         let t = crate::clock::Instant::now();
-        let x = solve_lu(&self.factors, b)?;
+        let x = self.solve_inner(b, 1)?;
         self.record_solve(1, t, 0);
         Ok(x)
+    }
+
+    /// `x = A^{-1} b` on `nrhs` row-major right-hand sides: row scaling and
+    /// permutation, the supernodal `L` and `U` sweeps, column permutation
+    /// and scaling.
+    fn solve_inner(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
+        let f = &self.factors;
+        let n = f.n;
+        if nrhs == 0 || b.len() != n * nrhs {
+            return Err(RslabError::DimensionMismatch {
+                expected: n * nrhs,
+                got: b.len(),
+            });
+        }
+        let mut y = vec![T::zero(); n * nrhs];
+        for e in 0..n {
+            let orig = f.perm_row[e];
+            let sr = T::from_real(f.d_row[orig]);
+            let src = &b[orig * nrhs..(orig + 1) * nrhs];
+            let dst = &mut y[e * nrhs..(e + 1) * nrhs];
+            for c in 0..nrhs {
+                dst[c] = src[c] * sr;
+            }
+        }
+        self.plan_l.forward(nrhs, &mut y);
+        self.plan_u.backward(nrhs, &mut y);
+        let mut out = vec![T::zero(); n * nrhs];
+        for e in 0..n {
+            let orig = f.perm[e];
+            let sc = T::from_real(f.d_col[orig]);
+            let src = &y[e * nrhs..(e + 1) * nrhs];
+            let dst = &mut out[orig * nrhs..(orig + 1) * nrhs];
+            for c in 0..nrhs {
+                dst[c] = src[c] * sc;
+            }
+        }
+        Ok(out)
     }
 
     /// Solve `A * X = B` for `nrhs` right-hand sides at once. `b` and the
@@ -943,7 +1025,7 @@ impl<T: Scalar> LuSolver<T> {
     /// `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve) calls.
     pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
         let t = crate::clock::Instant::now();
-        let x = solve_lu_many(&self.factors, b, nrhs)?;
+        let x = self.solve_inner(b, nrhs)?;
         self.record_solve(nrhs, t, 0);
         Ok(x)
     }
@@ -957,7 +1039,9 @@ impl<T: Scalar> LuSolver<T> {
         b: &[T],
         max_iter: usize,
     ) -> Result<Vec<T>, RslabError> {
-        solve_lu_refined(&self.factors, a, b, max_iter)
+        Ok(self
+            .solve_refined_with(a, b, &crate::refine::RefinePolicy::steps(max_iter))?
+            .0)
     }
 
     /// Iterative refinement under an explicit
@@ -970,7 +1054,8 @@ impl<T: Scalar> LuSolver<T> {
         policy: &crate::refine::RefinePolicy,
     ) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError> {
         let t = crate::clock::Instant::now();
-        let (x, outcome) = solve_lu_refined_with(&self.factors, a, b, policy)?;
+        let mut x = self.solve_inner(b, 1)?;
+        let outcome = self.refine_into(a, b, &mut x, policy)?;
         self.record_solve(1, t, outcome.steps);
         Ok((x, outcome))
     }
@@ -991,12 +1076,12 @@ impl<T: Scalar> LuSolver<T> {
                 got: a.n,
             });
         }
-        crate::refine::refine_in_place(a, b, x, policy, |r| solve_lu(&self.factors, r))
+        crate::refine::refine_in_place(a, b, x, policy, |r| self.solve_inner(r, 1))
     }
 
     /// Stored fill `nnz(L) + nnz(U)`.
     pub fn factor_nnz(&self) -> usize {
-        self.factors.factor_nnz()
+        self.nnz
     }
 
     /// Number of statically perturbed pivots (preconditioner mode).
@@ -1011,6 +1096,9 @@ impl<T: Scalar> LuSolver<T> {
 
     /// Borrow the underlying raw factors (CSC `L` / CSR `U`, permutations,
     /// equilibration), e.g. to use as a [`Preconditioner`](crate::Preconditioner).
+    /// The factor's permutations, scalings and counters. The CSC arrays of
+    /// `L` and `U` are empty here: the values live in the supernodal solve
+    /// layout (use [`factor_general_lu`] for a factor with CSC arrays).
     pub fn factors(&self) -> &LuFactors<T> {
         &self.factors
     }
@@ -1964,12 +2052,17 @@ fn factor_lu_left_looking<T: Scalar>(
         (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
     l_col_ptr.push(0);
     u_row_ptr.push(0);
+    let mut supernode_ptr = Vec::with_capacity(sym.supernodes.len() + 1);
+    supernode_ptr.push(0);
     for (s, snode) in sym.supernodes.iter().enumerate() {
         // Take ownership and drop each fragment right after appending, so the peak
         // is (growing final CSC) + (one supernode's fragment), not all fragments +
         // the full CSC simultaneously.
         // SAFETY: factorization complete; `compact[s]` written exactly once.
         let cn = unsafe { std::mem::take(emit.compact.get_mut(s)) };
+        if snode.ncol > 0 {
+            supernode_ptr.push(supernode_ptr.last().copied().unwrap_or(0) + snode.ncol);
+        }
         for c in 0..snode.ncol {
             let (la, lb) = (cn.l_ptr[c], cn.l_ptr[c + 1]);
             l_row_idx.extend_from_slice(&cn.l_idx[la..lb]);
@@ -1997,6 +2090,7 @@ fn factor_lu_left_looking<T: Scalar>(
         perm_row,
         d_row: d_row.to_vec(),
         d_col: d_col.to_vec(),
+        supernode_ptr,
         n_perturbed,
         // Placeholder; the caller (`factor_general_lu_numeric`) overwrites this
         // with the resolved solve-phase policy once the factor is built.
@@ -2032,6 +2126,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             perm_row: Vec::new(),
             d_row: Vec::new(),
             d_col: Vec::new(),
+            supernode_ptr: vec![0],
             n_perturbed: 0,
             solve_threads: crate::numeric::multifrontal_ldlt::Threads::Ambient,
         });
@@ -2261,12 +2356,17 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     u_row_ptr.push(0);
     let mut lcol: Vec<(usize, T)> = Vec::new();
     let mut urow: Vec<(usize, T)> = Vec::new();
+    let mut supernode_ptr = Vec::with_capacity(node_results.len() + 1);
+    supernode_ptr.push(0);
     for node_opt in node_results.iter_mut() {
         let node = node_opt.as_mut().ok_or_else(|| {
             RslabError::InvalidInput("internal: unfactored supernode".to_string())
         })?;
         let ff = &node.front;
         let nr = ff.nrow;
+        if ff.nelim > 0 {
+            supernode_ptr.push(supernode_ptr.last().copied().unwrap_or(0) + ff.nelim);
+        }
         for j in 0..ff.nelim {
             // Diagonal position (= column position = pivot-row position).
             let diag_e = col_pos_of_g[node.row_indices[j]];
@@ -2347,6 +2447,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         perm_row,
         d_row,
         d_col,
+        supernode_ptr,
         n_perturbed,
         solve_threads: solve_policy,
     })
