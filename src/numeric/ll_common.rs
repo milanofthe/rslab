@@ -45,6 +45,12 @@ impl<P: Default> SlotStore<P> {
     pub unsafe fn free(&self, k: usize) {
         *self.slots[k].get() = P::default();
     }
+
+    /// Move the panel out, leaving the default in its place. SAFETY: the
+    /// owner of supernode `k`, after its last reader is done.
+    pub unsafe fn take(&self, k: usize) -> P {
+        std::mem::take(&mut *self.slots[k].get())
+    }
 }
 
 /// Raw base pointer of a panel buffer, smuggled across rayon workers so each

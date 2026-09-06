@@ -44,6 +44,15 @@ fn main() {
         ("amf", Some(OrderingMethod::Amf)),
         ("metis", Some(OrderingMethod::MetisND)),
     ];
+    // `MTX_ORDERINGS=metis,auto` restricts the orderings (large matrices).
+    let only = std::env::var("MTX_ORDERINGS").ok();
+    let orderings: Vec<_> = orderings
+        .into_iter()
+        .filter(|(name, _)| {
+            only.as_ref()
+                .is_none_or(|f| f.split(',').any(|x| x == *name))
+        })
+        .collect();
     match loaded {
         MtxLoaded::Symmetric(a) => {
             let n = a.n;
@@ -76,7 +85,7 @@ fn main() {
                     "solve8 ms",
                     "MDOF/s"
                 );
-                for (name, om) in orderings {
+                for &(name, om) in &orderings {
                     let mut opts = SolverSettings::default();
                     if let Some(o) = om {
                         opts = opts.with_ordering(o);
@@ -137,7 +146,7 @@ fn main() {
                 "solve8 ms",
                 "MDOF/s"
             );
-            for (name, om) in orderings {
+            for &(name, om) in &orderings {
                 let mut opts = SolverSettings::default();
                 if let Some(o) = om {
                     opts = opts.with_ordering(o);
@@ -465,7 +474,7 @@ fn main() {
                     resid(&a, &x, &b)
                 );
             }
-            for (name, om) in orderings {
+            for &(name, om) in &orderings {
                 let mut opts = SolverSettings::default();
                 if let Some(o) = om {
                     opts = opts.with_ordering(o);

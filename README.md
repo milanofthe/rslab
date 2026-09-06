@@ -199,13 +199,19 @@ the diagonal and the numeric fill stays at the symbolic estimate (ibmpg1:
 4.7M to 0.85M factor entries, factor 390 ms to 35 ms). Both are on by
 default (`lu_matching`, `KluSettings::matching`).
 
-The LDL^T and LU solves are supernodal and tree-parallel: after the
-factorization the factor is laid out once as dense column panels per
-supernode (the fronts) with one shared `u32` row list each (the
-`solve-layout` stage), and a solve runs the independent leaf subtrees of the
+The LDL^T and LU solves are supernodal and tree-parallel: the factor is
+stored as dense column panels per supernode (the fronts) with one shared
+`u32` row list each, and a solve runs the independent leaf subtrees of the
 elimination tree in parallel, the wide top separators with parallel sections
 inside the node. The result is bit-identical for every thread count; set
 `RLA_LOG=debug` to see the per-phase times of a solve.
+
+For LDL^T the panels are the factor's only storage: the left-looking driver
+hands each finished panel over without a copy, so a complex factor costs 16
+bytes per entry (a compressed-column factor with a `usize` index per entry
+costs 24, and the earlier solve layout was a second copy on top). On a
+245k-DOF complex FEM matrix the peak went from 7.0 GB to 3.8 GB and the
+factorization lost its compaction pass (4.8 s to 4.1 s with METIS).
 
 From Python the same dict comes from `f.diagnostics()`, the level from
 `rslab.set_log_level("info")`, a custom sink from `rslab.set_log_sink(fn)`,

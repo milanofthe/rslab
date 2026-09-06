@@ -120,6 +120,7 @@ pub(crate) fn estimate_left_looking<'a>(
     updaters: &dyn Fn(usize) -> &'a [crate::numeric::ll_common::Li],
     value_bytes: usize,
     input_bytes: u64,
+    zero_copy: bool,
 ) -> MemoryEstimate {
     let mut refc = vec![0usize; nsuper];
     for s in 0..nsuper {
@@ -160,11 +161,26 @@ pub(crate) fn estimate_left_looking<'a>(
     // Per-thread scratch (cmod/cdiv buffers, gloc, the emit double-buffer) plus a
     // small absolute floor - tuned so the bound stays >= the measured peak across
     // sizes (validated: est/measured ~ 1.0-1.2x), never under-predicting.
-    let scratch = (panels_all + factor_bytes) / 4 + 32_000_000;
-    let transient = panels_all + factor_bytes + input_bytes + scratch;
+    // With zero-copy panels (`zero_copy`: the emitted panel is the stored
+    // factor, `compact_bytes == panel_bytes`) nothing is built on top of the
+    // resident panels, so the bound is the panels themselves plus the input
+    // and the scratch margin.
+    let (scratch, transient) = if zero_copy {
+        let scratch = panels_all / 4 + 32_000_000;
+        (scratch, panels_all + input_bytes + scratch)
+    } else {
+        let scratch = (panels_all + factor_bytes) / 4 + 32_000_000;
+        (scratch, panels_all + factor_bytes + input_bytes + scratch)
+    };
+    let _ = scratch;
+    let entry_bytes = if zero_copy {
+        value_bytes as u64
+    } else {
+        value_bytes as u64 + 8
+    };
     MemoryEstimate {
         value_bytes,
-        factor_nnz: factor_bytes / (value_bytes as u64 + 8).max(1),
+        factor_nnz: factor_bytes / entry_bytes.max(1),
         factor_bytes,
         panels_all_bytes: panels_all,
         panel_live_peak_bytes: panel_live_peak,
