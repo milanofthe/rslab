@@ -74,68 +74,99 @@ f = rslab.ldlt(A, preconditioner=1e-4)
 x = f.solve(b, refine=20)        # refine against the original A
 ```
 
-## Configuration (keyword arguments)
+## Configuration
 
-By default `ldlt`, `lu` and `spsolve` use RSLAB's deterministic heuristic
-pick, the adaptive ordering plus an exact nested-dissection bakeoff on large
-systems (adopted only on a clear predicted win with no fill/memory
-regression). A one-time `rslab.install_diagnose()` measures this machine's
-throughput and speedup curve and caches it; afterwards the default also picks
-its worker count from the calibration (until then the conservative capped
-default applies). Keyword arguments override the pick:
+`ldlt`, `lu` and `spsolve` take a `Settings` object (or the same keywords
+directly), `klu` a `KluSettings`. By default the factor uses RSLAB's
+deterministic heuristic pick: the adaptive ordering plus an exact
+nested-dissection bakeoff on large systems, and at most 4 workers (the
+calibrated count after a one-time `rslab.install_diagnose()`). Keywords
+override the pick:
 
-| kwarg            | default          | meaning                                                        |
-|------------------|------------------|----------------------------------------------------------------|
-| `threads`        | `None` (auto)    | `None` = calibrated/structural per-matrix pick; int = fixed (`0` = all) |
-| `preconditioner` | `None`           | static-pivot floor (e.g. `1e-4`); never-fail, refine to solve  |
-| `drop_tol`       | `None`           | incomplete-factor threshold (preconditioner)                   |
-| `method`         | `"left_looking"` | `"left_looking"` or `"multifrontal"`                           |
-| `memory`         | `"low"`          | `"low"` or `"eager"` factor emit strategy                      |
-| `force_accept`   | `False`          | accept tiny pivots in exact mode instead of failing            |
+```python
+s = rslab.Settings(ordering="metis", threads=2, preconditioner=1e-4)
+f = rslab.ldlt(A, settings=s)
+f = rslab.lu(A, ordering="amd", pivot_u=0.5)        # the same, as keywords
+print(s.to_dict())
+```
 
-`klu` accepts:
+| `Settings` keyword | default | meaning |
+|---|---|---|
+| `ordering` | heuristic pick | `"auto"`, `"auto_race"`, `"amd"`, `"amf"`, `"metis"`, `"rcm"` |
+| `nemin`, `relax`, `reorder` | 16, on, `"hybrid_liu"` | supernode amalgamation and elimination-tree reordering |
+| `threads` | predictor, max 4 | int (`0` = all cores), `"auto"`, `"ambient"`; the factor is bit-identical either way |
+| `preconditioner` | `None` | static-pivot floor (e.g. `1e-4`): never-fail, refine to solve |
+| `force_accept` | `False` | accept tiny pivots in exact mode instead of failing |
+| `drop_tol` | `None` | incomplete-factor threshold (ILU-style preconditioner) |
+| `method`, `memory` | `"left_looking"`, `"low"` | numeric schedule and factor emit strategy |
+| `pivot_u` | 0.1 | threshold-pivoting tolerance of the LU path |
+| `scaling` | `"one_pass"` | LDL^T equilibration: `"inf_norm"`, `"mc64"`, `"auto"`, `"identity"` |
+| `blr`, `panel_nb` | off, 64 | block-low-rank tolerance, dense panel width |
+| `scalar_gate`, `par_gemm`, `par_cdiv`, `use_gemm_schur` | calibrated | kernel tuning knobs |
+| `interrupt` | `None` | an `rslab.Interrupt` cancellation flag |
 
-| kwarg         | default | meaning                                                          |
-|---------------|---------|------------------------------------------------------------------|
-| `pivot_tol`   | `1e-3`  | diagonal-preference threshold; `1.0` = plain partial pivoting    |
-| `row_scaling` | `True`  | divide each row by its max-magnitude entry before factoring      |
-| `btf`         | `True`  | permute to block upper triangular form first (keep it on)       |
-| `parallel`    | `None`  | per-block parallel factor/refactor over the BTF blocks; `None` = auto gate (>=4 blocks, >=8000 nnz, no dominant block), `True`/`False` force on/off; bit-identical result in every mode |
+`KluSettings`: `pivot_tol` (1e-3), `row_scaling` (on), `btf` (on),
+`parallel` (`None` = structural auto gate, `True` / `False` force), `interrupt`.
 
-Supported dtypes: `float64`, `float32`, `complex128`, `complex64`.
+Settings a path ignores are reported under `diagnostics()["warnings"]`.
+
+## Symbolic reuse
+
+The analysis depends only on the sparsity pattern. Pay it once and factor
+each value set of a sweep on it:
+
+```python
+sym = rslab.analyze(A, path="lu")                # LdltSymbolic / LuSymbolic / KluSymbolic
+print(sym.factor_nnz, sym.estimate_memory()["factor_mb"])
+for omega in frequencies:
+    f = sym.factor((K + 1j * omega * C).data)    # same pattern, new values
+    x = f.solve(b)
+```
+
+## Krylov solvers
+
+`gmres`, `gmres_block`, `cocg` and `cocr` run on any matrix, optionally
+preconditioned by any factor handle (an incomplete factor, or the factor of
+a nearby matrix):
+
+```python
+M = rslab.lu(A, drop_tol=1e-3)                   # ILU-style preconditioner
+x, converged, iters, res, stop = rslab.gmres(A, b, M, tol=1e-10)
+r = rslab.gmres(A_next, b, M, recycle=M.recycle(8))   # reuse M, deflate across solves
+```
+
+## Logging
+
+```python
+rslab.set_log_level("info")                      # or the RLA_LOG environment variable
+log = logging.getLogger("rslab")
+rslab.set_log_sink(lambda level, msg: log.log(logging.getLevelName(level.upper()), msg))
+```
 
 ## API
 
-Everything ships in the flat `rslab` namespace; full parameter documentation
-lives in the docstrings (`help(rslab.klu)` etc.).
+The full reference, generated from the docstrings, is in
+[`docs/api.md`](docs/api.md) (`help(rslab.ldlt)` etc. show the same text).
 
-**Functions**
-
-| function | meaning |
-|----------|---------|
+| name | meaning |
+|------|---------|
 | `spsolve(A, b, **kw)` | one-shot factor-and-solve; detects symmetry and picks the LDL^T or LU path |
 | `ldlt(A, **kw) -> Ldlt` | factor a real/complex **symmetric** matrix (Bunch-Kaufman LDL^T) |
-| `lu(A, **kw) -> Lu` | factor a general unsymmetric matrix (supernodal multifrontal LU) |
+| `lu(A, **kw) -> Lu` | factor a general unsymmetric matrix (supernodal LU) |
 | `klu(A, **kw) -> Klu` | factor a circuit-shaped matrix (BTF + per-block Gilbert-Peierls LU) |
-| `install_diagnose()` | one-time machine calibration; caches the measured thread-speedup curve |
+| `analyze(A, path, **kw)` | the symbolic analysis alone; `.factor(data)` per value set |
+| `Settings`, `KluSettings`, `Interrupt` | configuration objects |
+| `gmres`, `gmres_block`, `cocg`, `cocr` | Krylov solvers, `M=` any factor handle |
+| `install_diagnose()` | one-time machine calibration |
+| `set_log_level`, `log_level`, `set_log_sink` | the core's logger |
 
-**Factor handles** - factor once, then:
+Factor handles share `solve(b, refine=0, target=None, measure="normwise")`,
+`solve_many(B)`, `gmres`, `gmres_block`, `cocg`, `cocr`, `recycle(k)`,
+`diagnostics()` and the attributes `n`, `factor_nnz`, `n_perturbed`,
+`dtype`; `Ldlt` adds `inertia`, `Klu` adds `n_blocks`, `solve_transpose(b)`
+and the numeric-only `refactor(data)`.
 
-| method / attribute | `Ldlt` | `Lu` | `Klu` | meaning |
-|--------------------|:-:|:-:|:-:|---------|
-| `solve(b, refine=0)` | yes | yes | yes | solve one RHS, optional iterative-refinement steps against the original `A` |
-| `solve_many(B)` | yes | yes | yes | solve `n x nrhs` RHS in one batched pass |
-| `solve_transpose(b)` | - | - | yes | solve `A^T y = b` on the same factors (plain transpose, not conjugate) |
-| `refactor(data)` | - | - | yes | numeric-only re-factorization for new values on the **same** pattern (no symbolic work, no pivot search) |
-| `gmres(b, tol=1e-8, maxit=400, restart=None, x0=None, recycle=None)` | yes | yes | yes | GMRES with this factor as preconditioner |
-| `gmres_block(B, tol=1e-8, maxit=400, restart=None, x0=None)` | yes | yes | yes | block GMRES for multiple RHS |
-| `recycle(k)` | yes | yes | yes | a `Recycle` workspace holding up to `k` deflation vectors across `gmres` calls |
-| `n`, `factor_nnz`, `n_perturbed`, `dtype` | yes | yes | yes | dimension, stored factor entries, perturbed pivots (always `0` for `Klu`), NumPy dtype name |
-| `inertia` | yes | - | - | `(n_pos, n_neg, n_zero)` eigenvalue counts from LDL^T |
-| `n_blocks` | - | - | yes | number of BTF diagonal blocks |
-
-**`Recycle`** - deflation-subspace carrier for sweeps: attributes `k`,
-`active`, `dtype`; `clear()` resets it.
+Supported dtypes: `float64`, `float32`, `complex128`, `complex64`.
 
 ## License
 

@@ -43,7 +43,8 @@ impl LogLevel {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// Tag of the level (`"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"OFF"`).
+    pub fn label(self) -> &'static str {
         match self {
             LogLevel::Debug => "DEBUG",
             LogLevel::Info => "INFO",
