@@ -40,12 +40,6 @@ impl<P: Default> SlotStore<P> {
         *self.slots[s].get() = p;
     }
 
-    /// Release `k`'s payload once it has been compacted.
-    /// SAFETY: `k`'s last consumer is done - no other thread reads this slot.
-    pub unsafe fn free(&self, k: usize) {
-        *self.slots[k].get() = P::default();
-    }
-
     /// Move the panel out, leaving the default in its place. SAFETY: the
     /// owner of supernode `k`, after its last reader is done.
     pub unsafe fn take(&self, k: usize) -> P {

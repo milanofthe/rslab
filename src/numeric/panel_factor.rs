@@ -246,6 +246,127 @@ pub fn permute_panel_rows<T: Copy>(
     }
 }
 
+/// One supernode's emitted panel: its off-block rows (elimination indices,
+/// ascending) and the `(w + m) x w` column-major values.
+pub(crate) struct PanelOut<T> {
+    pub rows: Vec<u32>,
+    pub panel: Vec<T>,
+    /// Structural slots (diagonal excluded) holding an exact zero: numeric
+    /// cancellation, the symmetrized pattern of an unsymmetric matrix, or
+    /// `drop_tol`. The panel keeps the slots; `nnz() - zeros` is the stored
+    /// nonzero count a sparse factor would report.
+    pub zeros: usize,
+}
+impl<T> Default for PanelOut<T> {
+    fn default() -> Self {
+        PanelOut {
+            rows: Vec::new(),
+            panel: Vec::new(),
+            zeros: 0,
+        }
+    }
+}
+
+/// Finish one supernode's panel for the store: rows `0..w` are the
+/// supernode's own columns in elimination order, the `m` rows below are
+/// permuted into ascending elimination order (`e_rows[i]` is the elimination
+/// index of panel row `w + i` on entry), for an LDL^T factor the `(p+1, p)`
+/// entry of each 2x2 pivot is cleared (that coupling lives in `D`), and
+/// `drop_tol` zeroes the entries below `tau * max|col|` of their column
+/// (the diagonal excluded). Consumes `e_rows`.
+pub(crate) fn finish_panel<T: Scalar>(
+    mut panel: Vec<T>,
+    w: usize,
+    mut e_rows: Vec<u32>,
+    two_by_two: Option<&[bool]>,
+    drop_tol: Option<f64>,
+) -> PanelOut<T> {
+    let m = e_rows.len();
+    let ld = w + m;
+    debug_assert_eq!(panel.len(), ld * w);
+    let sorted = e_rows.windows(2).all(|p| p[0] < p[1]);
+    if !sorted {
+        let mut order: Vec<u32> = (0..m as u32).collect();
+        order.sort_unstable_by_key(|&i| e_rows[i as usize]);
+        let full: Vec<u32> = (0..w as u32)
+            .chain(order.iter().map(|&i| w as u32 + i))
+            .collect();
+        let mut tmp = Vec::with_capacity(ld);
+        permute_panel_rows(&mut panel, ld, w, &full, &mut tmp);
+        e_rows = order.iter().map(|&i| e_rows[i as usize]).collect();
+    }
+    let zero = T::zero();
+    if let Some(two_by_two) = two_by_two {
+        for p in 0..w {
+            if two_by_two[p] && p + 1 < w {
+                panel[p * ld + p + 1] = zero;
+            }
+        }
+    }
+    if let Some(tau) = drop_tol {
+        for p in 0..w {
+            let col = &mut panel[p * ld..(p + 1) * ld];
+            let colmax = col[p + 1..]
+                .iter()
+                .map(|v| v.magnitude())
+                .fold(0.0, f64::max);
+            let thresh = tau * colmax;
+            for v in col[p + 1..].iter_mut() {
+                if v.magnitude() < thresh {
+                    *v = zero;
+                }
+            }
+        }
+    }
+    let zeros = (0..w)
+        .map(|p| {
+            panel[p * ld + p + 1..(p + 1) * ld]
+                .iter()
+                .filter(|&&v| v == zero)
+                .count()
+        })
+        .sum();
+    PanelOut {
+        rows: e_rows,
+        panel,
+        zeros,
+    }
+}
+
+/// Assemble the per-supernode panels (elimination order, empty supernodes
+/// skipped) into the factor.
+pub(crate) fn assemble_panels<T: Scalar>(
+    n: usize,
+    ncols: impl Iterator<Item = usize>,
+    mut outs: impl FnMut(usize) -> PanelOut<T>,
+) -> (PanelFactor<T>, usize) {
+    let mut sn_col: Vec<u32> = vec![0];
+    let mut rows = Vec::new();
+    let mut panels = Vec::new();
+    let mut zeros = 0usize;
+    for (s, w) in ncols.enumerate() {
+        if w == 0 {
+            continue;
+        }
+        let out = outs(s);
+        debug_assert_eq!(out.panel.len(), (w + out.rows.len()) * w);
+        sn_col.push(sn_col.last().copied().unwrap_or(0) + w as u32);
+        rows.push(out.rows);
+        panels.push(out.panel);
+        zeros += out.zeros;
+    }
+    debug_assert_eq!(sn_col.last().copied(), Some(n as u32));
+    (
+        PanelFactor {
+            n,
+            sn_col,
+            rows,
+            panels,
+        },
+        zeros,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
