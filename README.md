@@ -182,6 +182,10 @@ let f = LdltSolver::factor_with(&a, &opts)?;
 println!("{}", f.diagnostics());
 ```
 
+Every report carries throughput rates (`d.rates()`: analysis, factorization
+and solve in MDOF/s, the factorization in GFlop/s and Mnnz/s); the summary
+line and the `info` log print the factor rate.
+
 From Python the same dict comes from `f.diagnostics()`, the level from
 `rslab.set_log_level("info")`, a custom sink from `rslab.set_log_sink(fn)`,
 and every `SolverSettings` knob is a `rslab.Settings` keyword.

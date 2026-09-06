@@ -51,7 +51,11 @@ pub enum OrderingMethod {
     /// is within 1.10x MUMPS HAMF4 nnz_L on 183_277 matrices, with
     /// CHARDIS1_0000 the lone documented metric-divergence skip.
     Amf,
-    /// rslab-metis multilevel nested dissection.
+    /// rslab-metis multilevel nested dissection: one run with the default
+    /// seed (METIS semantics). The ordering race (`Auto` on large systems,
+    /// `AutoRace`) additionally runs a small seed ensemble and keeps the
+    /// lowest-fill result when the predicted factorization work is large
+    /// enough to pay for the extra runs (`ND_SEED_RACE_MIN_FLOPS`).
     MetisND,
     /// Reverse Cuthill-McKee band/profile-reducing ordering
     /// (`rslab-ordering-core`: George-Liu degree-sorted BFS from a
@@ -536,6 +540,7 @@ fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>)
 fn run_external_ordering(
     pattern: &CscPattern,
     method: OrderingMethod,
+    nd_seeds: &[u64],
 ) -> Result<(Vec<usize>, OrderingMethod), RslabError> {
     let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
     let pat = rslab_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
@@ -548,7 +553,7 @@ fn run_external_ordering(
     let perm_i32 = match method {
         OrderingMethod::Amd => rslab_amd::amd_order(&pat),
         OrderingMethod::Amf => rslab_amf::amf_order(&pat),
-        OrderingMethod::MetisND => metis_seed_race(pattern, &pat),
+        OrderingMethod::MetisND => metis_seed_race(pattern, &pat, nd_seeds),
         OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
@@ -594,13 +599,33 @@ fn run_external_ordering(
 /// ensemble strictly sequentially.
 const ND_SEED_CANDIDATES: &[u64] = &[1, 2, 3];
 
+/// One nested-dissection run: what an explicit `MetisND` request gets
+/// (METIS semantics), and what the ordering race uses below
+/// [`ND_SEED_RACE_MIN_FLOPS`].
+const ND_SINGLE_SEED: &[u64] = &[1];
+
+/// Predicted factorization flops (sum of squared column counts of the cheap
+/// champion) from which the ordering race runs the full seed ensemble. Each
+/// extra seed costs one nested dissection; the ensemble buys a few percent
+/// of fill (up to 15 percent on 3D meshes), which only pays when the numeric
+/// factorization is the dominant cost.
+const ND_SEED_RACE_MIN_FLOPS: u64 = 50_000_000_000;
+
 /// Best-of-seeds nested dissection (see [`ND_SEED_CANDIDATES`]).
 fn metis_seed_race(
     pattern: &CscPattern,
     pat: &rslab_ordering_core::CscPattern<'_>,
+    seeds: &[u64],
 ) -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
     use rayon::prelude::*;
-    let scored: Vec<(usize, u64, Vec<i32>)> = ND_SEED_CANDIDATES
+    if let [seed] = seeds {
+        let opts = rslab_metis::MetisOptions {
+            seed: *seed,
+            ..Default::default()
+        };
+        return rslab_metis::metis_order_full(pat, &opts).map(|(perm, _, _)| perm);
+    }
+    let scored: Vec<(usize, u64, Vec<i32>)> = seeds
         .par_iter()
         .filter_map(|&seed| {
             let opts = rslab_metis::MetisOptions {
@@ -682,7 +707,7 @@ fn symbolic_factorize_race(
     // breaking ties - regardless of completion order.
     let results: Vec<Result<SymbolicPrefix, RslabError>> = RACE_CHEAP
         .par_iter()
-        .map(|&cand| symbolic_prefix(matrix, snode_params, cand))
+        .map(|&cand| symbolic_prefix(matrix, snode_params, cand, ND_SINGLE_SEED))
         .collect();
     let mut best: Option<SymbolicPrefix> = None;
     let mut last_err: Option<RslabError> = None;
@@ -705,8 +730,14 @@ fn symbolic_factorize_race(
     // Stage 2: the expensive ND candidate, only where its cost can amortize
     // (see [`ND_RACE_MIN_FLOPS`]).
     if let Some(champ) = &best {
-        if matrix.n > 10_000 && prefix_flops(champ) >= ND_RACE_MIN_FLOPS {
-            if let Ok(nd) = symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND) {
+        let flops = prefix_flops(champ);
+        if matrix.n > 10_000 && flops >= ND_RACE_MIN_FLOPS {
+            let seeds = if flops >= ND_SEED_RACE_MIN_FLOPS {
+                ND_SEED_CANDIDATES
+            } else {
+                ND_SINGLE_SEED
+            };
+            if let Ok(nd) = symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, seeds) {
                 if nd.factor_nnz < champ.factor_nnz {
                     best = Some(nd);
                 }
@@ -738,7 +769,12 @@ pub fn symbolic_factorize_with_method(
     if method == OrderingMethod::AutoRace {
         return symbolic_factorize_race(matrix, snode_params);
     }
-    symbolic_finish(symbolic_prefix(matrix, snode_params, method)?)
+    symbolic_finish(symbolic_prefix(
+        matrix,
+        snode_params,
+        method,
+        ND_SINGLE_SEED,
+    )?)
 }
 
 /// Everything the cheap pipeline *prefix* produces: ordering (incl.
@@ -787,6 +823,7 @@ fn symbolic_prefix(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
+    nd_seeds: &[u64],
 ) -> Result<SymbolicPrefix, RslabError> {
     let resolved_preprocess = match snode_params.preprocess {
         OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
@@ -795,7 +832,7 @@ fn symbolic_prefix(
     let verify = matches!(snode_params.preprocess, OrderingPreprocess::Auto)
         && matches!(resolved_preprocess, OrderingPreprocess::LdltCompress);
     if !verify {
-        return symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess);
+        return symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess, nd_seeds);
     }
     // Verify the predicate's LdltCompress pick against the `None` baseline.
     let variant_params = |pre: OrderingPreprocess| SupernodeParams {
@@ -803,9 +840,15 @@ fn symbolic_prefix(
         ..snode_params.clone()
     };
     let p_none = variant_params(OrderingPreprocess::None);
-    let none = symbolic_prefix_with(matrix, &p_none, method, OrderingPreprocess::None);
+    let none = symbolic_prefix_with(matrix, &p_none, method, OrderingPreprocess::None, nd_seeds);
     let p_comp = variant_params(OrderingPreprocess::LdltCompress);
-    let comp = symbolic_prefix_with(matrix, &p_comp, method, OrderingPreprocess::LdltCompress);
+    let comp = symbolic_prefix_with(
+        matrix,
+        &p_comp,
+        method,
+        OrderingPreprocess::LdltCompress,
+        nd_seeds,
+    );
     let winner = match (none, comp) {
         (Ok(none), Ok(comp)) => {
             let limit = (none.factor_nnz as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
@@ -830,6 +873,7 @@ fn symbolic_prefix_with(
     snode_params: &SupernodeParams,
     method: OrderingMethod,
     resolved_preprocess: OrderingPreprocess,
+    nd_seeds: &[u64],
 ) -> Result<SymbolicPrefix, RslabError> {
     let n = matrix.n;
 
@@ -873,7 +917,7 @@ fn symbolic_prefix_with(
     // actual `run_external_ordering` call so every path records exactly one
     // `ordering` stage.
     let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), RslabError> {
-        let r = run_external_ordering(pat, method)?;
+        let r = run_external_ordering(pat, method, nd_seeds)?;
         Ok(r)
     };
     let (amd_perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {

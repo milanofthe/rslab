@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 0.31.1 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 0.32.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -264,7 +264,10 @@ scaling, method, supernode counts), `numeric` (perturbed
 pivots, 2x2 pivots, inertia), `solves` (accumulated solve
 calls, right-hand sides, wall time, refinement steps),
 `warnings` (settings that were ignored on this path), the
-a-priori `estimate` and a one-line `summary`.
+throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
+`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
+`solve_mdof_s`; million unknowns per second and GFlop/s),
+the a-priori `estimate` and a one-line `summary`.
 
 #### `Ldlt.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
 
@@ -344,7 +347,10 @@ scaling, method, supernode counts), `numeric` (perturbed
 pivots, 2x2 pivots, inertia), `solves` (accumulated solve
 calls, right-hand sides, wall time, refinement steps),
 `warnings` (settings that were ignored on this path), the
-a-priori `estimate` and a one-line `summary`.
+throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
+`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
+`solve_mdof_s`; million unknowns per second and GFlop/s),
+the a-priori `estimate` and a one-line `summary`.
 
 #### `Lu.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
 
@@ -426,7 +432,10 @@ scaling, method, supernode counts), `numeric` (perturbed
 pivots, 2x2 pivots, inertia), `solves` (accumulated solve
 calls, right-hand sides, wall time, refinement steps),
 `warnings` (settings that were ignored on this path), the
-a-priori `estimate` and a one-line `summary`.
+throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
+`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
+`solve_mdof_s`; million unknowns per second and GFlop/s),
+the a-priori `estimate` and a one-line `summary`.
 
 #### `Klu.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
 
@@ -619,8 +628,10 @@ directly. Unknown keywords raise `TypeError`; invalid values `ValueError`.
 ordering : {'auto', 'auto_race', 'amd', 'amf', 'metis', 'rcm'}, optional
     Fill-reducing ordering. `None` (default) uses the heuristic pick,
     the adaptive ordering plus an exact nested-dissection bakeoff on large
-    systems; an explicit value analyzes with exactly that ordering. The
-    ordering actually used is reported in `diagnostics()['decisions']`.
+    systems (with a small seed ensemble once the factorization is heavy
+    enough to pay for it); an explicit value analyzes with exactly that
+    ordering, `'metis'` being one nested-dissection run. The ordering
+    actually used is reported in `diagnostics()['decisions']`.
 nemin : int, optional
     Supernode amalgamation threshold (default 16). Smaller means finer
     supernodes: less fill, more per-front overhead.

@@ -92,7 +92,7 @@ print(s.to_dict())
 
 | `Settings` keyword | default | meaning |
 |---|---|---|
-| `ordering` | heuristic pick | `"auto"`, `"auto_race"`, `"amd"`, `"amf"`, `"metis"`, `"rcm"` |
+| `ordering` | heuristic pick | `"auto"`, `"auto_race"`, `"amd"`, `"amf"`, `"metis"` (one nested-dissection run), `"rcm"` |
 | `nemin`, `relax`, `reorder` | 16, on, `"hybrid_liu"` | supernode amalgamation and elimination-tree reordering |
 | `threads` | predictor, max 4 | int (`0` = all cores), `"auto"`, `"ambient"`; the factor is bit-identical either way |
 | `preconditioner` | `None` | static-pivot floor (e.g. `1e-4`): never-fail, refine to solve |
@@ -109,6 +109,10 @@ print(s.to_dict())
 `parallel` (`None` = structural auto gate, `True` / `False` force), `interrupt`.
 
 Settings a path ignores are reported under `diagnostics()["warnings"]`.
+Throughput is always reported: `diagnostics()["rates"]` holds the analysis,
+factorization and solve rates in million unknowns per second (MDOF/s), the
+factorization flop rate (GFlop/s) and the factor-entry rate (Mnnz/s); the
+`summary` line and the `info` log carry the factor rate too.
 
 ## Symbolic reuse
 

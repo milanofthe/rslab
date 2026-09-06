@@ -207,6 +207,20 @@ def test_handle_krylov_methods_accept_operator_override():
 # ---------------------------------------------------------------------------
 
 
+def test_diagnostics_report_throughput_rates():
+    A = _spd(300)
+    f = rslab.ldlt(A)
+    f.solve(np.ones(300))
+    r = f.diagnostics()["rates"]
+    for key in ("analyze_mdof_s", "factor_mdof_s", "factor_gflops", "factor_mnnz_s", "total_mdof_s", "solve_mdof_s"):
+        assert r[key] >= 0.0
+    assert r["factor_mdof_s"] > 0 and r["solve_mdof_s"] > 0
+    assert "MDOF/s" in f.diagnostics()["summary"]
+    k = rslab.klu(_circuit(300))
+    k.refactor(rslab._full_csc(_circuit(300)).data)
+    assert k.diagnostics()["rates"]["factor_mdof_s"] > 0
+
+
 def test_solve_refine_target_and_measure():
     A = _spd(200)
     f = rslab.ldlt(A, preconditioner=1e-2)

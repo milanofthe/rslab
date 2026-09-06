@@ -279,6 +279,15 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     sv.set_item("refine_steps", d.solves.refine_steps)?;
     out.set_item("solves", sv)?;
     out.set_item("warnings", d.warnings.clone())?;
+    let r = d.rates();
+    let rates = PyDict::new_bound(py);
+    rates.set_item("analyze_mdof_s", r.analyze_mdof_s)?;
+    rates.set_item("factor_mdof_s", r.factor_mdof_s)?;
+    rates.set_item("factor_gflops", r.factor_gflops)?;
+    rates.set_item("factor_mnnz_s", r.factor_mnnz_s)?;
+    rates.set_item("total_mdof_s", r.total_mdof_s)?;
+    rates.set_item("solve_mdof_s", r.solve_mdof_s)?;
+    out.set_item("rates", rates)?;
     match &d.estimate {
         Some(e) => out.set_item("estimate", memory_estimate_dict(py, e)?)?,
         None => out.set_item("estimate", py.None())?,
