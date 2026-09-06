@@ -135,7 +135,8 @@ pub mod tuning;
 pub use analysis::recommend_threads_from;
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{
-    Decisions, Diagnostics, MemoryEstimate, NumericReport, SolveCounter, SolveStats, StageReport,
+    Decisions, Diagnostics, MemoryEstimate, NumericReport, Rates, SolveCounter, SolveStats,
+    StageReport,
 };
 pub use error::RslabError;
 pub use logging::{LogLevel, LogSink};

@@ -145,8 +145,10 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 /// ordering : {'auto', 'auto_race', 'amd', 'amf', 'metis', 'rcm'}, optional
 ///     Fill-reducing ordering. ``None`` (default) uses the heuristic pick,
 ///     the adaptive ordering plus an exact nested-dissection bakeoff on large
-///     systems; an explicit value analyzes with exactly that ordering. The
-///     ordering actually used is reported in ``diagnostics()['decisions']``.
+///     systems (with a small seed ensemble once the factorization is heavy
+///     enough to pay for it); an explicit value analyzes with exactly that
+///     ordering, ``'metis'`` being one nested-dissection run. The ordering
+///     actually used is reported in ``diagnostics()['decisions']``.
 /// nemin : int, optional
 ///     Supernode amalgamation threshold (default 16). Smaller means finer
 ///     supernodes: less fill, more per-front overhead.

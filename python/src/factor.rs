@@ -466,7 +466,10 @@ macro_rules! handle {
             /// pivots, 2x2 pivots, inertia), ``solves`` (accumulated solve
             /// calls, right-hand sides, wall time, refinement steps),
             /// ``warnings`` (settings that were ignored on this path), the
-            /// a-priori ``estimate`` and a one-line ``summary``.
+            /// throughput ``rates`` (``analyze_mdof_s``, ``factor_mdof_s``,
+            /// ``factor_gflops``, ``factor_mnnz_s``, ``total_mdof_s``,
+            /// ``solve_mdof_s``; million unknowns per second and GFlop/s),
+            /// the a-priori ``estimate`` and a one-line ``summary``.
             fn diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
                 dispatch!($any, &self.inner, |p| p.diagnostics(py))
             }

@@ -128,4 +128,7 @@ required-features = ["matgen"]
 debug = true
 
 [[example]]
+name = "metis_timing"
+
+[[example]]
 name = "ordering_bakeoff"
