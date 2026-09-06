@@ -494,8 +494,13 @@ fn main() {
                 let d = s.diagnostics();
                 let rt = d.rates();
                 let (ts, x) = best(5, || s.solve(&b).unwrap());
-                println!("{:>7} nnzLU={:>9} fill={:>5.1} | analyze {:>8.0} ms factor {:>8.1} ms ({:.2} MDOF/s, {:.1} GF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={:.1e}",
-                    format!("lu-{name}"), s.factor_nnz(), s.factor_nnz() as f64 / a.values.len() as f64,
+                let plan_mb = d
+                    .stages
+                    .iter()
+                    .find(|st| st.name == "solve-layout")
+                    .map_or(0.0, |st| st.bytes as f64 / 1e6);
+                println!("{:>7} nnzLU={:>9} fill={:>5.1} plan={:>6.1} MB | analyze {:>8.0} ms factor {:>8.1} ms ({:.2} MDOF/s, {:.1} GF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={:.1e}",
+                    format!("lu-{name}"), s.factor_nnz(), s.factor_nnz() as f64 / a.values.len() as f64, plan_mb,
                     d.stage_ms("analyze").unwrap_or(0.0), d.stage_ms("factor").unwrap_or(0.0), rt.factor_mdof_s, rt.factor_gflops,
                     ts * 1e3, n as f64 / ts / 1e6, resid(&a, &x, &b));
             }
