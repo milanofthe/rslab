@@ -25,6 +25,10 @@ fn best<R>(reps: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 
 fn main() {
     let path = std::env::args().nth(1).expect("matrix path");
+    let reps: usize = std::env::var("MTX_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     let threads: usize = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -91,7 +95,14 @@ fn main() {
                     if threads > 0 {
                         opts = opts.with_threads(threads);
                     }
-                    let (t_all, s) = best(1, || {
+                    if let Ok(m) = std::env::var("MTX_METHOD") {
+                        opts = opts.with_method(if m == "multifrontal" {
+                            rslab::FactorMethod::Multifrontal
+                        } else {
+                            rslab::FactorMethod::LeftLooking
+                        });
+                    }
+                    let (t_all, s) = best(reps, || {
                         if om.is_none() {
                             let (sym, mut pick) = LdltSolver::<f64>::tuned(&ar).unwrap();
                             if threads > 0 {
@@ -158,7 +169,7 @@ fn main() {
                 if threads > 0 {
                     opts = opts.with_threads(threads);
                 }
-                let (t_all, s) = best(1, || {
+                let (t_all, s) = best(reps, || {
                     if om.is_none() {
                         let (sym, mut pick) = LdltSolver::<C>::tuned(&a).unwrap();
                         if threads > 0 {
