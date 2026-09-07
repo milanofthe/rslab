@@ -11,9 +11,6 @@ matrices. A thin wrapper, all numeric work happens in Rust.
 pip install rslab
 ```
 
-On macOS a wheel built with `maturin build --features accelerate` routes the
-dense kernels to Apple's Accelerate BLAS (AMX): about 1.6x faster
-single-core factorizations, last-bit differences to the pure-Rust build.
 
 ## Usage
 

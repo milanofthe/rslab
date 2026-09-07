@@ -54,12 +54,6 @@ matgen-download = ["matgen", "dep:ureq", "dep:flate2", "dep:tar"]
 # Hardware-aware auto-tuning + resource governor (HardwareInfo via sysinfo,
 # calibration cache, budget planner). Pure-Rust dep.
 tuning = ["dep:sysinfo"]
-# Route the dense trailing updates to Apple's Accelerate BLAS (AMX matrix
-# units) on macOS: several times the single-core GEMM throughput of NEON. No
-# extra crate; links the system framework. Results differ from the pure-Rust
-# build in the last bits (summation order), so it is opt-in. No effect on
-# other platforms.
-accelerate = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
