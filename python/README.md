@@ -90,21 +90,52 @@ f = rslab.lu(A, ordering="amd", pivot_u=0.5)        # the same, as keywords
 print(s.to_dict())
 ```
 
-| `Settings` keyword | default | meaning |
-|---|---|---|
-| `ordering` | heuristic pick | `"auto"`, `"auto_race"`, `"amd"`, `"amf"`, `"metis"` (one nested-dissection run), `"rcm"` |
-| `nemin`, `relax`, `reorder` | 16, on, `"hybrid_liu"` | supernode amalgamation and elimination-tree reordering |
-| `threads` | predictor, max 4 | int (`0` = all cores), `"auto"`, `"ambient"`; the factor is bit-identical either way |
-| `preconditioner` | `None` | static-pivot floor (e.g. `1e-4`): never-fail, refine to solve |
-| `force_accept` | `False` | accept tiny pivots in exact mode instead of failing |
-| `drop_tol` | `None` | incomplete-factor threshold (ILU-style preconditioner) |
-| `method`, `memory` | `"left_looking"`, `"low"` | numeric schedule and factor emit strategy |
-| `pivot_u` | 0.1 | threshold-pivoting tolerance of the LU path |
-| `matching` | `True` | MC64 row matching and scaling before the LU analysis (bounded pivot growth) |
-| `scaling` | `"one_pass"` | LDL^T equilibration: `"inf_norm"`, `"mc64"`, `"auto"`, `"identity"` |
-| `blr`, `panel_nb` | off, 64 | block-low-rank tolerance, dense panel width |
-| `scalar_gate`, `par_gemm`, `par_cdiv`, `use_gemm_schur` | calibrated | kernel tuning knobs |
-| `interrupt` | `None` | an `rslab.Interrupt` cancellation flag |
+| `Settings` keyword | default | what it does | options |
+|---|---|---|---|
+| `ordering` | heuristic pick | fill-reducing ordering of the symmetric pattern (LDL^T and LU) | `"auto"` heuristic pick, `"auto_race"` AMD and nested dissection raced on the fill estimate, `"amd"`, `"amf"`, `"metis"` one nested-dissection run, `"rcm"` |
+| `nemin` | 16 | supernode amalgamation threshold | int; smaller means finer supernodes (less fill, more per-front overhead) |
+| `relax` | on | relaxed, fill-tolerant amalgamation | `True` built-in thresholds, `False` off, `(max_width, max_extra_rows)` explicit |
+| `reorder` | `"hybrid_liu"` | child order of the elimination tree | `"hybrid_liu"` smaller contribution-stack peak, `"off"` natural leaf order (more leaf parallelism) |
+| `threads` | predictor, max 4 | worker budget of the factorization pool; the factor is bit-identical for every value | int (`0` = all cores), `"auto"` predictor without the cap, `"ambient"` the caller's rayon pool |
+| `preconditioner` | `None` | static-pivot floor: pivots below it are lifted, the factorization never fails (factor of a nearby `A + E`; recover with `solve(b, refine=k)`) | float, e.g. `1e-4` |
+| `force_accept` | `False` | accept tiny pivots in exact mode instead of raising on rank deficiency | bool |
+| `drop_tol` | `None` | incomplete factorization: fill below the threshold (relative to its column) is dropped, an ILU-style preconditioner | float, `None` keeps the complete factor |
+| `method` | `"left_looking"` | numeric schedule (same factor, different transient memory and parallel profile) | `"left_looking"`, `"multifrontal"` |
+| `memory` | `"low"` | when fronts are released | `"low"` each front freed as it is emitted, `"eager"` fronts stay resident |
+| `pivot_u` | 0.1 | threshold partial-pivoting tolerance of the LU path (`1.0` is full partial pivoting); ignored on LDL^T | float in `[0, 1]` |
+| `matching` | `True` | MC64 row matching and scaling before the LU analysis (bounded pivot growth); LU path only | bool |
+| `scaling` | `"one_pass"` | symmetric equilibration before LDL^T (the LU path scales its own way) | `"one_pass"`, `"inf_norm"`, `"mc64"`, `"auto"`, `"identity"` |
+| `blr` | off | block-low-rank compression of the contribution blocks with a relative tolerance | float tolerance, `False` exact dense fronts |
+| `panel_nb` | 64 | panel width (blocking factor) of the dense kernels | int |
+| `scalar_gate` | calibrated | flop count below which an update runs as a scalar loop | int |
+| `par_gemm` | calibrated | flop count at or above which the front GEMM runs in parallel | int |
+| `par_cdiv` | calibrated | flop count at or above which the panel-trailing update runs in parallel | int |
+| `use_gemm_schur` | `True` | SIMD GEMM (`True`) or the scalar loop for the front Schur update | bool |
+| `interrupt` | `None` | cancellation flag polled by the numeric phase | an `rslab.Interrupt` |
+
+`KluSettings` (the circuit path):
+
+| keyword | default | what it does | options |
+|---|---|---|---|
+| `pivot_tol` | `1e-3` | diagonal preference: the diagonal is the pivot when `abs(a_jj) >= pivot_tol * max_i abs(a_ij)` | float, `1.0` is plain partial pivoting |
+| `row_scaling` | `True` | divide each row by its largest magnitude before factoring | bool |
+| `btf` | `True` | permute to block upper triangular form first | bool (keep it on) |
+| `matching` | `True` | MC64 maximum-product transversal of the block triangular form (the diagonal-preference pivoting rarely leaves the diagonal); needs `btf` | bool |
+| `parallel` | auto | per-block parallel factor and refactor over the BTF blocks; bit-identical in every mode | `None` structural auto gate, `True`, `False` |
+| `interrupt` | `None` | cancellation flag polled by the numeric phase | an `rslab.Interrupt` |
+
+Solve-time options of every handle (`solve(b, refine=0, target=None, measure="normwise")`):
+
+| keyword | default | what it does | options |
+|---|---|---|---|
+| `refine` | 0 | iterative refinement steps on the factor | int |
+| `target` | `None` | stop refining once the backward error is below it | float |
+| `measure` | `"normwise"` | the backward error used by `target` and reported in the diagnostics | `"normwise"`, `"componentwise"` |
+
+The symbolic handles factor new values on the analyzed pattern with
+`sym.factor(A)`, where `A` is the matrix itself (its lower triangle is
+taken on the LDL^T path, the pattern is checked) or the CSC value array in
+the order of the analysis; `Klu.refactor(A)` takes the same forms.
 
 `KluSettings`: `pivot_tol` (1e-3), `row_scaling` (on), `btf` (on),
 `matching` (on: MC64 row matching as the BTF transversal),

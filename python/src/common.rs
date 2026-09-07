@@ -121,6 +121,51 @@ impl Pattern {
         Ok(())
     }
 
+    /// The value array for this pattern from either a value array (in the
+    /// pattern's order) or a SciPy sparse matrix with the same pattern: the
+    /// matrix is reduced to its lower triangle (`lower`) or taken whole,
+    /// sorted and summed like at analysis time, and its pattern is checked
+    /// against this one entry by entry before its values are used.
+    pub fn values_of<'py>(
+        &self,
+        py: Python<'py>,
+        obj: &Bound<'py, PyAny>,
+        lower: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if !obj.hasattr("indptr")? {
+            return Ok(obj.clone());
+        }
+        let rslab = py.import_bound("rslab")?;
+        let prep = rslab.getattr(if lower { "_lower_csc" } else { "_full_csc" })?;
+        let m = prep.call1((obj,))?;
+        let shape: (usize, usize) = m.getattr("shape")?.extract()?;
+        if shape.0 != self.n || shape.1 != self.n {
+            return Err(PyValueError::new_err(format!(
+                "matrix is {}x{}, the analyzed pattern is {}x{}",
+                shape.0, shape.1, self.n, self.n
+            )));
+        }
+        let indptr: PyReadonlyArray1<i64> = m
+            .getattr("indptr")?
+            .call_method1("astype", ("int64",))?
+            .extract()?;
+        let indices: PyReadonlyArray1<i64> = m
+            .getattr("indices")?
+            .call_method1("astype", ("int64",))?
+            .extract()?;
+        let (ip, ix) = (indptr.as_slice()?, indices.as_slice()?);
+        let same = ip.len() == self.col_ptr.len()
+            && ix.len() == self.row_idx.len()
+            && ip.iter().zip(&self.col_ptr).all(|(&a, &b)| a as usize == b)
+            && ix.iter().zip(&self.row_idx).all(|(&a, &b)| a as usize == b);
+        if !same {
+            return Err(PyValueError::new_err(
+                "the matrix has a different sparsity pattern than the one that was analyzed (same positions, any values, are required; re-analyze for a new pattern)",
+            ));
+        }
+        m.getattr("data")
+    }
+
     pub fn csc<T: Scalar>(&self, values: Vec<T>) -> PyResult<rslab::CscMatrix<T>> {
         self.check_values(values.len())?;
         let m = rslab::CscMatrix {

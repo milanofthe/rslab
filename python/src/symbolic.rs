@@ -116,6 +116,14 @@ impl PyLdltSymbolic {
     /// Numeric settings (``threads``, ``preconditioner``, ``drop_tol``,
     /// ``pivot_u``, ``scaling`` ...) may be overridden per call.
     #[pyo3(signature = (data, settings = None, **kwargs))]
+
+    /// Numeric factorization of new values on the analyzed pattern.
+    ///
+    /// ``data`` is either the matrix itself (any SciPy sparse matrix with
+    /// the analyzed pattern: its lower triangle is taken, sorted and summed like at
+    /// analysis time, and the pattern is checked entry by entry) or the CSC
+    /// value array of that lower triangle in the order of the analysis. Keyword
+    /// settings override the analysis settings for this factorization.
     fn factor(
         &self,
         py: Python<'_>,
@@ -128,6 +136,7 @@ impl PyLdltSymbolic {
             kwargs,
         )?;
         let opts = st.resolved();
+        let data = &self.pattern.values_of(py, data, true)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.csc::<T>(d)?;
             let s = py
@@ -287,6 +296,14 @@ impl PyLuSymbolic {
     /// Numeric factorization of ``data`` (the full CSC value array in the
     /// analyzed pattern's order). Numeric settings may be overridden per call.
     #[pyo3(signature = (data, settings = None, **kwargs))]
+
+    /// Numeric factorization of new values on the analyzed pattern.
+    ///
+    /// ``data`` is either the matrix itself (any SciPy sparse matrix with
+    /// the analyzed pattern: its matrix is taken, sorted and summed like at
+    /// analysis time, and the pattern is checked entry by entry) or the CSC
+    /// value array of that matrix in the order of the analysis. Keyword
+    /// settings override the analysis settings for this factorization.
     fn factor(
         &self,
         py: Python<'_>,
@@ -299,6 +316,7 @@ impl PyLuSymbolic {
             kwargs,
         )?;
         let opts = st.resolved();
+        let data = &self.pattern.values_of(py, data, false)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.general::<T>(d)?;
             let s = py
@@ -442,6 +460,14 @@ impl PyKluSymbolic {
     /// Numeric factorization of ``data`` (the full CSC value array in the
     /// analyzed pattern's order). KLU settings may be overridden per call.
     #[pyo3(signature = (data, settings = None, **kwargs))]
+
+    /// Numeric factorization of new values on the analyzed pattern.
+    ///
+    /// ``data`` is either the matrix itself (any SciPy sparse matrix with
+    /// the analyzed pattern: its matrix is taken, sorted and summed like at
+    /// analysis time, and the pattern is checked entry by entry) or the CSC
+    /// value array of that matrix in the order of the analysis. Keyword
+    /// settings override the analysis settings for this factorization.
     fn factor(
         &self,
         py: Python<'_>,
@@ -453,6 +479,7 @@ impl PyKluSymbolic {
             Some(settings.unwrap_or_else(|| self.settings.clone())),
             kwargs,
         )?;
+        let data = &self.pattern.values_of(py, data, false)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.general::<T>(d)?;
             let s = py
