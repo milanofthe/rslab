@@ -1340,16 +1340,6 @@ use crate::numeric::ll_common::{emit_refcount_offsets, Cells, Li, LlSchedule, Pe
 ///
 /// SAFETY: `[r0, r1)` must be this caller's exclusive rows and within the
 /// buffer; columns `[kb, ke)` must be in bounds under stride `nrow`.
-/// Rows per chunk of the sequential panel-trailing sweep: the chunk of every
-/// panel column together fits a 32 KB working set (64 rows of a 64-column
-/// `f64` panel, 32 rows complex), which stays in L1 for the whole pivot
-/// sweep. Unchunked, a deep panel is re-read from L2 once per pivot; the
-/// chunking is worth about 20% of a real single-core factorization.
-fn trailing_row_chunk<T>(pw: usize) -> usize {
-    const WORKING_SET: usize = 32 * 1024;
-    (WORKING_SET / (pw.max(1) * std::mem::size_of::<T>())).clamp(16, 256)
-}
-
 #[allow(clippy::too_many_arguments)]
 unsafe fn apply_bk_panel_trailing<T: Scalar>(
     base: *mut T,
@@ -1365,61 +1355,164 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     r0: usize,
     r1: usize,
 ) {
-    let mut k = kb;
-    while k < ke {
-        let kp = deep_swaps[k - kb];
-        if kp != usize::MAX {
-            // Deep segment of this step's row/column interchange: columns
-            // swap wholesale below the panel (the symmetric in-panel part
-            // already happened in getf2).
-            let src = if two_by_two[k] { k + 1 } else { k };
-            let ca = base.add(src * nrow);
-            let cb = base.add(kp * nrow);
-            for i in r0..r1 {
-                core::ptr::swap(ca.add(i), cb.add(i));
-            }
+    // Blocked form of the per-pivot sweep. Pivots are taken in sub-blocks of
+    // `TRAILING_SB` columns: inside a sub-block a pivot's rank-1 (rank-2)
+    // update reaches only the sub-block's remaining columns (scalar loops),
+    // while its contribution to the columns beyond the sub-block is deferred
+    // and applied as one GEMM `B[:, ke2..ke] -= W * M` per sub-block, where
+    // `W` holds the pivot columns before their `D^{-1}` scaling and `M` the
+    // multipliers of `mult_snap`. A pivot swap that reaches beyond the
+    // sub-block first flushes the pending pivots (the swapped-in column must
+    // carry every earlier update, as it does in the sequential sweep). Rows
+    // are independent, so any row range gives the same values.
+    let deep = r1.saturating_sub(r0);
+    if deep == 0 || ke <= kb {
+        return;
+    }
+    // One spare column: a 2x2 pivot that starts on a sub-block's last
+    // column extends the sub-block by one, the pair is never split.
+    let mut w: Vec<T> = vec![T::zero(); deep * (TRAILING_SB + 1)];
+    let mut kb2 = kb;
+    while kb2 < ke {
+        let mut ke2 = (kb2 + TRAILING_SB).min(ke);
+        if ke2 < ke && two_by_two[ke2 - 1] {
+            ke2 += 1;
         }
-        if two_by_two[k] {
-            let (d11, d21, d22) = (d_diag[k], d_subdiag[k], d_diag[k + 1]);
-            let det = d11 * d22 - d21 * d21;
-            let detinv = det.recip();
-            let colk = base.add(k * nrow);
-            let colk1 = base.add((k + 1) * nrow);
-            for j in (k + 2)..ke {
-                let l1j = mult_snap[(k - kb) * nb + (j - kb)];
-                let l2j = mult_snap[(k + 1 - kb) * nb + (j - kb)];
-                let colj = base.add(j * nrow);
+        // Pending pivots [pend0, k) whose deferred update has not been applied.
+        let mut pend0 = kb2;
+        let mut k = kb2;
+        while k < ke2 {
+            let kp = deep_swaps[k - kb];
+            if kp != usize::MAX {
+                if kp >= ke2 {
+                    flush_trailing(
+                        base, nrow, kb, ke, kb2, ke2, pend0, k, &w, deep, mult_snap, nb, r0,
+                    );
+                    pend0 = k;
+                }
+                let src = if two_by_two[k] { k + 1 } else { k };
+                let ca = base.add(src * nrow);
+                let cb = base.add(kp * nrow);
                 for i in r0..r1 {
-                    *colj.add(i) = *colj.add(i) - *colk.add(i) * l1j - *colk1.add(i) * l2j;
+                    core::ptr::swap(ca.add(i), cb.add(i));
                 }
             }
-            for i in r0..r1 {
-                let wik = *colk.add(i);
-                let wik1 = *colk1.add(i);
-                *colk.add(i) = (d22 * wik - d21 * wik1) * detinv;
-                *colk1.add(i) = (d11 * wik1 - d21 * wik) * detinv;
-            }
-            k += 2;
-        } else {
-            let dinv = d_diag[k].recip();
-            let colk = base.add(k * nrow);
-            for j in (k + 1)..ke {
-                // Step k's coefficient `w_j * d^-1` for in-panel row j, from
-                // the time-of-step snapshot.
-                let wj_dinv = mult_snap[(k - kb) * nb + (j - kb)];
-                if wj_dinv != T::zero() {
+            if two_by_two[k] {
+                let (d11, d21, d22) = (d_diag[k], d_subdiag[k], d_diag[k + 1]);
+                let det = d11 * d22 - d21 * d21;
+                let detinv = det.recip();
+                let colk = base.add(k * nrow);
+                let colk1 = base.add((k + 1) * nrow);
+                for j in (k + 2)..ke2 {
+                    let l1j = mult_snap[(k - kb) * nb + (j - kb)];
+                    let l2j = mult_snap[(k + 1 - kb) * nb + (j - kb)];
                     let colj = base.add(j * nrow);
                     for i in r0..r1 {
-                        *colj.add(i) = *colj.add(i) - *colk.add(i) * wj_dinv;
+                        *colj.add(i) = *colj.add(i) - *colk.add(i) * l1j - *colk1.add(i) * l2j;
                     }
                 }
+                let (head, tail) = w.split_at_mut((k + 1 - kb2) * deep);
+                let wk = &mut head[(k - kb2) * deep..];
+                let wk1 = &mut tail[..deep];
+                for i in r0..r1 {
+                    let wik = *colk.add(i);
+                    let wik1 = *colk1.add(i);
+                    wk[i - r0] = wik;
+                    wk1[i - r0] = wik1;
+                    *colk.add(i) = (d22 * wik - d21 * wik1) * detinv;
+                    *colk1.add(i) = (d11 * wik1 - d21 * wik) * detinv;
+                }
+                k += 2;
+            } else {
+                let dinv = d_diag[k].recip();
+                let colk = base.add(k * nrow);
+                for j in (k + 1)..ke2 {
+                    let wj_dinv = mult_snap[(k - kb) * nb + (j - kb)];
+                    if wj_dinv != T::zero() {
+                        let colj = base.add(j * nrow);
+                        for i in r0..r1 {
+                            *colj.add(i) = *colj.add(i) - *colk.add(i) * wj_dinv;
+                        }
+                    }
+                }
+                let wk = &mut w[(k - kb2) * deep..(k - kb2 + 1) * deep];
+                for i in r0..r1 {
+                    let v = *colk.add(i);
+                    wk[i - r0] = v;
+                    *colk.add(i) = v * dinv;
+                }
+                k += 1;
             }
-            for i in r0..r1 {
-                *colk.add(i) = *colk.add(i) * dinv;
-            }
-            k += 1;
         }
+        flush_trailing(
+            base, nrow, kb, ke, kb2, ke2, pend0, ke2, &w, deep, mult_snap, nb, r0,
+        );
+        kb2 = ke2;
     }
+}
+
+/// Columns per sub-block of the blocked trailing sweep (the `k` of its
+/// GEMMs). 16 measured best: 32 doubles the scalar within-block work,
+/// 8 halves the GEMM efficiency.
+const TRAILING_SB: usize = 16;
+
+/// Apply the deferred updates of pivots `[p0, p1)` of the sub-block
+/// `[kb2, ke2)` (their unscaled columns in `w`, indexed from `kb2`) to the
+/// columns `[ke2, ke)` of rows `r0..r0 + deep`:
+/// `B[:, ke2..ke] -= W[:, p0..p1] * M[p0..p1, ke2..ke]`.
+///
+/// # Safety
+/// `base` is the panel with leading dimension `nrow`; the row range is
+/// this task's own.
+#[allow(clippy::too_many_arguments)]
+unsafe fn flush_trailing<T: Scalar>(
+    base: *mut T,
+    nrow: usize,
+    kb: usize,
+    ke: usize,
+    kb2: usize,
+    ke2: usize,
+    p0: usize,
+    p1: usize,
+    w: &[T],
+    deep: usize,
+    mult_snap: &[T],
+    nb: usize,
+    r0: usize,
+) {
+    let npend = p1 - p0;
+    let ncols = ke - ke2;
+    if npend == 0 || ncols == 0 {
+        return;
+    }
+    let lhs = w.as_ptr().add((p0 - kb2) * deep);
+    // M rows p0..p1, columns ke2..ke: row-major with stride `nb`.
+    let rhs = mult_snap.as_ptr().add((p0 - kb) * nb + (ke2 - kb));
+    let dst = base.add(ke2 * nrow + r0);
+    // The direct kernel, not the backend entry: these products are skinny
+    // (k = TRAILING_SB), where the complex split's plane copies cost more
+    // than they save (measured: 1.84 s against 1.98 s single-core).
+    gemm::gemm(
+        deep,
+        ncols,
+        npend,
+        dst,
+        nrow as isize,
+        1,
+        true,
+        lhs,
+        deep as isize,
+        1,
+        rhs,
+        1,
+        nb as isize,
+        T::one(),
+        T::zero() - T::one(),
+        false,
+        false,
+        false,
+        gemm::Parallelism::None,
+    );
 }
 
 /// A supernode's own factor plus the flat `(supernode-id, factor)` list for the
@@ -2815,29 +2908,23 @@ fn ll_bk_panel_step<T: Scalar>(
             // pivot; unchunked, a deep panel is re-read from L2 `pw` times).
             // Rows are independent, so every row's arithmetic is unchanged:
             // bit-identical to one call over all rows.
-            let chunk = trailing_row_chunk::<T>(pw);
-            let mut r0 = ke;
-            while r0 < nrow {
-                let r1 = (r0 + chunk).min(nrow);
-                // SAFETY: single task, one row chunk at a time.
-                unsafe {
-                    apply_bk_panel_trailing(
-                        panel.as_mut_ptr(),
-                        nrow,
-                        kb,
-                        ke,
-                        d,
-                        d_subdiag,
-                        two_by_two,
-                        deep_swaps,
-                        mult_snap,
-                        nb,
-                        r0,
-                        r1,
-                    )
-                };
-                r0 = r1;
-            }
+            // SAFETY: single task over all deep rows.
+            unsafe {
+                apply_bk_panel_trailing(
+                    panel.as_mut_ptr(),
+                    nrow,
+                    kb,
+                    ke,
+                    d,
+                    d_subdiag,
+                    two_by_two,
+                    deep_swaps,
+                    mult_snap,
+                    nb,
+                    ke,
+                    nrow,
+                )
+            };
         }
     }
 
