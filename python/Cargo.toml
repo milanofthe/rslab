@@ -29,8 +29,3 @@ num-complex = "0.4"
 # abi3-py39: one wheel for CPython 3.9+ per platform.
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
 numpy = "0.22"
-
-[features]
-# `maturin build --features accelerate`: route the dense updates to Apple's
-# Accelerate BLAS (AMX) on macOS; see the crate feature of the same name.
-accelerate = ["rslab/accelerate"]

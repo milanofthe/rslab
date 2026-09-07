@@ -41,35 +41,6 @@ pub trait Scalar:
     /// The multiplicative identity `1`.
     fn one() -> Self;
 
-    /// The `accelerate` feature's GEMM for this scalar: `dst := alpha * dst
-    /// `+ beta * lhs * rhs` with the strides of `gemm::gemm`. Returns
-    /// `false` when the type or the strides are not covered, and the caller
-    /// falls back to the pure-Rust kernel.
-    ///
-    /// # Safety
-    /// The pointers and strides must describe valid, non-overlapping
-    /// matrices of the given sizes.
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn accelerate_gemm(
-        _m: usize,
-        _n: usize,
-        _k: usize,
-        _dst: *mut Self,
-        _dst_cs: isize,
-        _dst_rs: isize,
-        _read_dst: bool,
-        _lhs: *const Self,
-        _lhs_cs: isize,
-        _lhs_rs: isize,
-        _rhs: *const Self,
-        _rhs_cs: isize,
-        _rhs_rs: isize,
-        _alpha: Self,
-        _beta: Self,
-    ) -> bool {
-        false
-    }
-
     /// Embed a real number into the field (e.g. an `f64` scaling factor).
     fn from_real(r: f64) -> Self;
 
@@ -143,53 +114,6 @@ pub(crate) fn fmadd<T: Scalar>(a: T, b: T, c: T) -> T {
 }
 
 impl Scalar for f64 {
-    #[cfg(all(feature = "accelerate", target_vendor = "apple"))]
-    unsafe fn accelerate_gemm(
-        m: usize,
-        n: usize,
-        k: usize,
-        dst: *mut Self,
-        dst_cs: isize,
-        dst_rs: isize,
-        read_dst: bool,
-        lhs: *const Self,
-        lhs_cs: isize,
-        lhs_rs: isize,
-        rhs: *const Self,
-        rhs_cs: isize,
-        rhs_rs: isize,
-        alpha: Self,
-        beta: Self,
-    ) -> bool {
-        use crate::dense::gemm_backend::accelerate::*;
-        if m == 0 || n == 0 || k == 0 || !fits(m, n, k) || dst_rs != 1 || dst_cs < m as isize {
-            return false;
-        }
-        let (Some((ta, lda)), Some((tb, ldb))) =
-            (operand(lhs_cs, lhs_rs, m, k), operand(rhs_cs, rhs_rs, k, n))
-        else {
-            return false;
-        };
-        let b = if read_dst { alpha } else { 0.0 };
-        cblas_dgemm(
-            COL_MAJOR,
-            ta,
-            tb,
-            m as i32,
-            n as i32,
-            k as i32,
-            beta,
-            lhs,
-            lda,
-            rhs,
-            ldb,
-            b,
-            dst,
-            dst_cs as i32,
-        );
-        true
-    }
-
     type Lo = f32;
     const LO_SHRINKS: bool = true;
     const EPS_LO: f64 = f32::EPSILON as f64;
@@ -254,57 +178,6 @@ impl Scalar for f64 {
 }
 
 impl Scalar for Complex<f64> {
-    #[cfg(all(feature = "accelerate", target_vendor = "apple"))]
-    unsafe fn accelerate_gemm(
-        m: usize,
-        n: usize,
-        k: usize,
-        dst: *mut Self,
-        dst_cs: isize,
-        dst_rs: isize,
-        read_dst: bool,
-        lhs: *const Self,
-        lhs_cs: isize,
-        lhs_rs: isize,
-        rhs: *const Self,
-        rhs_cs: isize,
-        rhs_rs: isize,
-        alpha: Self,
-        beta: Self,
-    ) -> bool {
-        use crate::dense::gemm_backend::accelerate::*;
-        if m == 0 || n == 0 || k == 0 || !fits(m, n, k) || dst_rs != 1 || dst_cs < m as isize {
-            return false;
-        }
-        let (Some((ta, lda)), Some((tb, ldb))) =
-            (operand(lhs_cs, lhs_rs, m, k), operand(rhs_cs, rhs_rs, k, n))
-        else {
-            return false;
-        };
-        let b = if read_dst {
-            alpha
-        } else {
-            Complex::new(0.0, 0.0)
-        };
-        cblas_zgemm(
-            COL_MAJOR,
-            ta,
-            tb,
-            m as i32,
-            n as i32,
-            k as i32,
-            &beta as *const Self as *const std::ffi::c_void,
-            lhs as *const std::ffi::c_void,
-            lda,
-            rhs as *const std::ffi::c_void,
-            ldb,
-            &b as *const Self as *const std::ffi::c_void,
-            dst as *mut std::ffi::c_void,
-            dst_cs as i32,
-        );
-        true
-    }
-
     type Lo = Complex<f32>;
     const LO_SHRINKS: bool = true;
     const EPS_LO: f64 = f32::EPSILON as f64;

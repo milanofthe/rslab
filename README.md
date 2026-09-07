@@ -341,17 +341,6 @@ figures; `cargo bench --bench klu_circuit` for KLU.
 
 ## Cargo features
 
-`accelerate` (macOS only, off by default) routes the dense trailing updates
-of the LDL^T and LU kernels to Apple's Accelerate BLAS, which runs them on
-the AMX matrix units: on an M3 the single-core factorization of a 98k-DOF
-FEM matrix drops from 537 ms to 326 ms (real) and from 1.80 s to 1.33 s
-(complex); with 8 workers 152 ms to 118 ms. rslab keeps its own
-tree-level parallelism and pins Accelerate to one thread underneath
-(`VECLIB_MAXIMUM_THREADS=1`, unless set). The results differ from the
-pure-Rust build in the last bits (a different summation order), which is
-why the feature is opt-in; the pure-Rust kernels stay the reference. Build
-the Python wheel with it through `maturin build --features accelerate`.
-
 
 Default is the pure-Rust solver core. `matgen` adds the test-matrix generators,
 `matgen-download` the SuiteSparse / Matrix Market fetcher, `tuning` the hardware
