@@ -65,7 +65,7 @@ def _render_rst(doc: str) -> str:
                 block.append(lines[i])
                 i += 1
             code = textwrap.dedent("\n".join(block)).strip("\n")
-            out.append(f"```{lang}\n{code}\n```")
+            out.append(f"\x00FENCE\x00{lang}\n{code}\n\x00FENCE\x00")
             continue
         # Numpydoc section headers: a title line followed by dashes.
         if i + 1 < len(lines) and lines[i + 1].strip() and set(lines[i + 1].strip()) == {"-"} and stripped:
@@ -78,7 +78,7 @@ def _render_rst(doc: str) -> str:
         # type for Returns / Raises) at column 0, indented description below.
         if section in ENTRY_SECTIONS and stripped and not line.startswith(" ") and not stripped.startswith("."):
             name, sep, typ = stripped.partition(" : ")
-            out.append(f"- `{name}` : {typ}" if sep else f"- `{name}`:")
+            out.append(f"- `{name}` ({typ}):" if sep else f"- `{name}`:")
             i += 1
             continue
         if section in ENTRY_SECTIONS and line.startswith("    ") and out and out[-1].startswith("- `"):
@@ -90,7 +90,7 @@ def _render_rst(doc: str) -> str:
     text = "\n".join(out)
     for role in (":func:", ":class:", ":meth:", ":attr:", ":math:", ":doi:"):
         text = text.replace(role, "")
-    return text.replace("``", "`")
+    return text.replace("``", "`").replace("\x00FENCE\x00", "```")
 
 
 def _members(cls):
