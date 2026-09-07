@@ -6,9 +6,7 @@
 //!
 //! `cargo run --release --example mtx_bench -- <file.mtx> [threads]`
 use num_complex::Complex;
-use rslab::{
-    KluSettings, KluSolver, LdltSolver, LuSolver, MtxLoaded, OrderingMethod, SolverSettings,
-};
+use rslab::{KluSettings, LdltSolver, LuSolver, MtxLoaded, OrderingMethod, SolverSettings};
 use std::time::Instant;
 
 type C = Complex<f64>;
@@ -191,17 +189,59 @@ fn main() {
                 ("klu-nobtf", KluSettings::default().with_btf(false)),
                 ("klu-noscl", KluSettings::default().with_row_scaling(false)),
             ] {
-                let Ok((tf, mut k)) = std::panic::catch_unwind(|| {
-                    best(2, || KluSolver::factor(&a, &settings).unwrap())
+                let Ok((ta, sym)) = std::panic::catch_unwind(|| {
+                    best(2, || {
+                        rslab::KluSymbolic::analyze_with(&a, &settings).unwrap()
+                    })
                 }) else {
+                    println!("{label:>9} analysis failed");
+                    continue;
+                };
+                let Ok((tf, mut k)) =
+                    std::panic::catch_unwind(|| best(2, || sym.factor(&a, &settings).unwrap()))
+                else {
                     println!("{label:>9} failed");
                     continue;
                 };
                 let (tr, _) = best(2, || k.refactor(&a).unwrap());
                 let (ts, x) = best(5, || k.solve(&b).unwrap());
                 let res = resid(&a, &x, &b);
-                println!("{label:>9} nnzLU={:>9} blocks={:>6} | factor {:>8.2} ms ({:.2} MDOF/s) refactor {:>8.2} ms ({:.2} MDOF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={res:.1e}",
-                    k.factor_nnz(), k.n_blocks(), tf * 1e3, n as f64 / tf / 1e6, tr * 1e3, n as f64 / tr / 1e6, ts * 1e3, n as f64 / ts / 1e6);
+                println!("{label:>9} nnzLU={:>9} blocks={:>6} | analyze {:>7.2} ms factor {:>8.2} ms ({:.2} MDOF/s) refactor {:>8.2} ms ({:.2} MDOF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={res:.1e}",
+                    k.factor_nnz(), k.n_blocks(), ta * 1e3, tf * 1e3, n as f64 / tf / 1e6, tr * 1e3, n as f64 / tr / 1e6, ts * 1e3, n as f64 / ts / 1e6);
+            }
+            // Real-valued runs when the file is real: the general Matrix
+            // Market loader always yields complex values, but a circuit's
+            // matrix is real and that is what the KLU comparisons measure.
+            if a.values.iter().all(|v| v.im == 0.0) {
+                let ar = rslab::GeneralCsc {
+                    n: a.n,
+                    col_ptr: a.col_ptr.clone(),
+                    row_idx: a.row_idx.clone(),
+                    values: a.values.iter().map(|v| v.re).collect::<Vec<f64>>(),
+                };
+                let br: Vec<f64> = b.iter().map(|v| v.re).collect();
+                let settings = KluSettings::default();
+                let (ta, sym) = best(2, || {
+                    rslab::KluSymbolic::analyze_with(&ar, &settings).unwrap()
+                });
+                let (tf, mut k) = best(2, || sym.factor(&ar, &settings).unwrap());
+                let (tr, _) = best(2, || k.refactor(&ar).unwrap());
+                let (ts, x) = best(5, || k.solve(&br).unwrap());
+                let mut ax = vec![0.0f64; n];
+                for j in 0..n {
+                    for e in ar.col_ptr[j]..ar.col_ptr[j + 1] {
+                        ax[ar.row_idx[e]] += ar.values[e] * x[j];
+                    }
+                }
+                let res = ax
+                    .iter()
+                    .zip(&br)
+                    .map(|(p, q)| (p - q) * (p - q))
+                    .sum::<f64>()
+                    .sqrt()
+                    / br.iter().map(|v| v * v).sum::<f64>().sqrt();
+                println!("  klu-f64 nnzLU={:>9} blocks={:>6} | analyze {:>7.2} ms factor {:>8.2} ms ({:.2} MDOF/s) refactor {:>8.2} ms ({:.2} MDOF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={res:.1e}",
+                    k.factor_nnz(), k.n_blocks(), ta * 1e3, tf * 1e3, n as f64 / tf / 1e6, tr * 1e3, n as f64 / tr / 1e6, ts * 1e3, n as f64 / ts / 1e6);
             }
             // Symbolic view of the KLU analysis: predicted vs actual fill.
             {
