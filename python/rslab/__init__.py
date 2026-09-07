@@ -6,19 +6,19 @@ factor-once, solve-many workloads that dominate FEM, method-of-moments, and
 circuit-extraction codes. Three factorization paths cover the operator
 classes:
 
-**Symmetric** matrices (real, or complex-symmetric :math:`A = A^{\\mathsf{T}}`)
+**Symmetric** matrices (real, or complex-symmetric ``A = A^T``)
 are factored by a supernodal Bunch-Kaufman method,
 
 .. math::
 
-    P^{\\mathsf{T}} A P = L D L^{\\mathsf{T}},
+    P^T A P = L D L^T,
 
 **general unsymmetric** matrices by a supernodal / multifrontal LU with
 threshold partial pivoting,
 
 .. math::
 
-    P_r^{\\mathsf{T}} A P_c = L U,
+    P_r^T A P_c = L U,
 
 and **circuit-shaped** matrices (MNA / SPICE class: extremely sparse,
 unsymmetric, near-triangularizable) by a KLU-style path - block triangular
@@ -205,19 +205,19 @@ def _csc_parts(A, path: str):
 
 
 def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
-    """Factor a **symmetric** matrix as :math:`P^{\\mathsf{T}} A P = L D L^{\\mathsf{T}}`.
+    """Factor a **symmetric** matrix as ``P^T A P = L D L^T``.
 
-    A supernodal Bunch-Kaufman :math:`L D L^{\\mathsf{T}}` factorization with a
-    fill-reducing ordering :math:`P`, for real symmetric (``float64`` /
+    A supernodal Bunch-Kaufman ``L D L^T`` factorization with a
+    fill-reducing ordering ``P``, for real symmetric (``float64`` /
     ``float32``) and **complex-symmetric** (``complex128`` / ``complex64``,
-    i.e. :math:`A = A^{\\mathsf{T}}`, *not* Hermitian) matrices; the ``dtype``
+    i.e. ``A = A^T``, *not* Hermitian) matrices; the ``dtype``
     selects the path. Only the lower triangle is read (extracted
     automatically), so ``A`` may be stored full or triangular.
 
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The symmetric :math:`n \\times n` system matrix. Converted to CSC and
+        The symmetric ``n x n`` system matrix. Converted to CSC and
         its lower triangle taken; duplicate entries are summed.
     settings : Settings, optional
         A prepared :class:`Settings` object.
@@ -257,7 +257,7 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
 
 
 def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
-    """Factor a **general** (unsymmetric) matrix as :math:`P_r^{\\mathsf{T}} A P_c = L U`.
+    """Factor a **general** (unsymmetric) matrix as ``P_r^T A P_c = L U``.
 
     A supernodal left-looking (default) or multifrontal LU with threshold
     partial pivoting and two-sided equilibration, over the same four scalar
@@ -266,7 +266,7 @@ def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The :math:`n \\times n` system matrix. Converted to CSC; duplicates
+        The ``n x n`` system matrix. Converted to CSC; duplicates
         summed.
     settings : Settings, optional
         A prepared :class:`Settings` object.
@@ -314,7 +314,7 @@ def klu(A, *, settings: KluSettings | None = None, **kwargs) -> Klu:
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The :math:`n \\times n` system matrix (full, CSC after conversion).
+        The ``n x n`` system matrix (full, CSC after conversion).
     settings : KluSettings, optional
         A prepared :class:`KluSettings` object.
     **kwargs
@@ -364,7 +364,7 @@ def analyze(A, path: str = "auto", *, settings=None, **kwargs):
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The :math:`n \\times n` matrix whose pattern (and, for the heuristic
+        The ``n x n`` matrix whose pattern (and, for the heuristic
         ordering pick, values) is analyzed.
     path : {'auto', 'ldlt', 'lu', 'klu'}, default 'auto'
         The factorization path: ``'ldlt'`` for symmetric matrices (the lower
@@ -469,9 +469,28 @@ def gmres_block(A, B, M=None, *, tol: float = 1e-8, maxit: int = 400,
                 restart: int | None = None, x0=None) -> KrylovResult:
     """Block GMRES on ``A X = B`` for an ``n x nrhs`` block, optionally preconditioned.
 
-    Same arguments as :func:`gmres` (without ``recycle``); ``B`` and ``x0``
-    are 2-D ``n x nrhs`` arrays and ``final_res`` holds one residual per
-    column.
+    Parameters
+    ----------
+    A : scipy.sparse matrix
+        The ``n x n`` operator.
+    B : ndarray, shape (n, nrhs)
+        Right-hand side block.
+    M : factor handle, optional
+        A factor used as the preconditioner.
+    tol : float, default 1e-8
+        Relative residual target per column.
+    maxit : int, default 400
+        Iteration budget.
+    restart : int, optional
+        Block Arnoldi basis size (see :func:`gmres`).
+    x0 : ndarray, shape (n, nrhs), optional
+        Initial guess.
+
+    Returns
+    -------
+    KrylovResult
+        ``x`` of shape ``(n, nrhs)``, ``converged``, ``iters``, ``final_res``
+        (one residual per column), ``stop``.
     """
     parts = _csc_parts(A, "lu")
     if M is None:
@@ -486,9 +505,27 @@ def cocg(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
     """Conjugate orthogonal conjugate gradient (COCG) on ``A x = b``.
 
     The short-recurrence Krylov method for **complex-symmetric**
-    (:math:`A = A^{\\mathsf{T}}`) and real symmetric operators: constant
-    memory, one matrix-vector product per iteration, no restart. Same
-    ``A``, ``b``, ``M``, ``tol``, ``maxit`` as :func:`gmres`.
+    (``A = A^T``) and real symmetric operators: constant
+    memory, one matrix-vector product per iteration, no restart.
+
+    Parameters
+    ----------
+    A : scipy.sparse matrix
+        The ``n x n`` operator.
+    b : ndarray, shape (n,)
+        Right-hand side.
+    M : factor handle, optional
+        A factor (``ldlt``, ``lu``, ``klu``, typically incomplete or
+        low-rank) used as the preconditioner.
+    tol : float, default 1e-8
+        Relative residual target ``||b - A x|| <= tol * ||b||``.
+    maxit : int, default 400
+        Iteration budget.
+
+    Returns
+    -------
+    KrylovResult
+        ``x``, ``converged``, ``iters``, ``final_res``, ``stop``.
     """
     parts = _csc_parts(A, "lu")
     if M is None:
@@ -502,7 +539,25 @@ def cocr(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
     """Conjugate orthogonal conjugate residual (COCR) on ``A x = b``.
 
     The minimal-residual sibling of :func:`cocg` for complex-symmetric
-    operators (smoother residual history). Same arguments as :func:`cocg`.
+    operators (smoother residual history).
+
+    Parameters
+    ----------
+    A : scipy.sparse matrix
+        The ``n x n`` operator.
+    b : ndarray, shape (n,)
+        Right-hand side.
+    M : factor handle, optional
+        A factor used as the preconditioner.
+    tol : float, default 1e-8
+        Relative residual target.
+    maxit : int, default 400
+        Iteration budget.
+
+    Returns
+    -------
+    KrylovResult
+        ``x``, ``converged``, ``iters``, ``final_res``, ``stop``.
     """
     parts = _csc_parts(A, "lu")
     if M is None:
@@ -541,7 +596,7 @@ def _match_dtype(b: np.ndarray, dtype_name: str) -> np.ndarray:
 
 
 def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
-    """One-shot solve of :math:`A x = b` (factor, solve, discard).
+    """One-shot solve of ``A x = b`` (factor, solve, discard).
 
     Detects symmetry, factors through :func:`ldlt` or :func:`lu`, solves,
     and drops the factor. For repeated solves against one matrix keep the
@@ -550,13 +605,13 @@ def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The :math:`n \\times n` system matrix.
+        The ``n x n`` system matrix.
     b : ndarray
         Right-hand side: a 1-D vector of length ``n`` or a 2-D ``n x nrhs``
         block. Cast to the factor's dtype automatically.
     symmetric : bool, optional
-        Force the symmetric :math:`L D L^{\\mathsf{T}}` path (``True``) or the
-        unsymmetric :math:`L U` path (``False``). When omitted, symmetry is
+        Force the symmetric ``L D L^T`` path (``True``) or the
+        unsymmetric ``L U`` path (``False``). When omitted, symmetry is
         auto-detected from ``A`` (a structural + value test).
     refine : int, default 0
         Steps of iterative refinement against the original matrix, per

@@ -140,8 +140,8 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 /// :func:`rslab.analyze`, or give the same keywords to those functions
 /// directly. Unknown keywords raise ``TypeError``; invalid values ``ValueError``.
 ///
-/// Analysis (pattern) knobs
-/// ------------------------
+/// Parameters
+/// ----------
 /// ordering : {'auto', 'auto_race', 'amd', 'amf', 'metis', 'rcm'}, optional
 ///     Fill-reducing ordering. ``None`` (default) uses the heuristic pick,
 ///     the adaptive ordering plus an exact nested-dissection bakeoff on large
@@ -160,10 +160,7 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///     Child reordering of the elimination tree: ``'hybrid_liu'`` (default)
 ///     shrinks the contribution-stack peak, ``'off'`` keeps the natural leaf
 ///     order for maximum leaf parallelism.
-///
-/// Numeric knobs
-/// -------------
-/// threads : int or 'auto' or ('auto', int) or 'ambient', optional
+////// threads : int or 'auto' or ('auto', int) or 'ambient', optional
 ///     Worker budget of the scoped factorization pool. ``None`` (default) is
 ///     the per-matrix predictor capped at 4 workers (or the calibrated pick
 ///     after :func:`rslab.install_diagnose`); an ``int`` pins the count
@@ -215,11 +212,17 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 /// interrupt : Interrupt, optional
 ///     A cancellation flag polled by the numeric phase.
 ///
-/// Kernel tuning (benchmark knobs; the defaults are calibrated)
-/// -----------------------------------------------------------
-/// scalar_gate, par_gemm, par_cdiv : int, optional
-///     Flop-count thresholds below which an update runs as a scalar loop, and
-///     at or above which the GEMM / the panel-trailing update run in parallel.
+/// Other Parameters
+/// ----------------
+/// scalar_gate : int, optional
+///     Flop count below which an update runs as a scalar loop (benchmark
+///     knob; the default is calibrated).
+/// par_gemm : int, optional
+///     Flop count at or above which the front GEMM runs in parallel
+///     (calibrated default).
+/// par_cdiv : int, optional
+///     Flop count at or above which the panel-trailing update runs in
+///     parallel (calibrated default).
 /// use_gemm_schur : bool, optional
 ///     Use the SIMD GEMM (``True``, default) or the scalar loop for the front
 ///     Schur update.

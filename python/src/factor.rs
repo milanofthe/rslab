@@ -506,6 +506,16 @@ macro_rules! handle {
             }
 
             /// Solve ``A X = B`` for an ``n x nrhs`` block in one batched pass.
+            ///
+            /// Parameters
+            /// ----------
+            /// b : ndarray, shape (n, nrhs)
+            ///     Right-hand side block in the factor's dtype.
+            ///
+            /// Returns
+            /// -------
+            /// ndarray, shape (n, nrhs)
+            ///     The solutions, one column per right-hand side.
             fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
                 dispatch!($any, &self.inner, |p| p.solve_many(py, b))
             }
@@ -557,8 +567,28 @@ macro_rules! handle {
             }
 
             /// Block GMRES for an ``n x nrhs`` right-hand side block with this
-            /// factor as the preconditioner. Same arguments as :meth:`gmres`
-            /// without ``recycle``; ``final_res`` is one value per column.
+            /// factor as the preconditioner.
+            ///
+            /// Parameters
+            /// ----------
+            /// b : ndarray, shape (n, nrhs)
+            ///     Right-hand side block.
+            /// tol : float, default 1e-8
+            ///     Relative residual target per column.
+            /// maxit : int, default 400
+            ///     Iteration budget.
+            /// restart : int, optional
+            ///     Block Arnoldi basis size (see :meth:`gmres`).
+            /// x0 : ndarray, shape (n, nrhs), optional
+            ///     Initial guess.
+            /// operator : tuple, optional
+            ///     A different CSC matrix to iterate on, as in :meth:`gmres`.
+            ///
+            /// Returns
+            /// -------
+            /// KrylovResult
+            ///     ``x`` of shape ``(n, nrhs)``, ``converged``, ``iters``,
+            ///     ``final_res`` (one value per column), ``stop``.
             #[pyo3(signature = (b, tol = 1e-8, maxit = 400, restart = None, x0 = None, operator = None))]
             #[allow(clippy::too_many_arguments)]
             fn gmres_block(
@@ -579,7 +609,22 @@ macro_rules! handle {
             /// Conjugate orthogonal conjugate gradient (COCG) with this factor
             /// as the preconditioner: the short-recurrence method for
             /// complex-symmetric (``A = A^T``) and real symmetric operators.
-            /// Same ``operator`` override as :meth:`gmres`.
+            ///
+            /// Parameters
+            /// ----------
+            /// b : ndarray, shape (n,)
+            ///     Right-hand side.
+            /// tol : float, default 1e-8
+            ///     Relative residual target.
+            /// maxit : int, default 400
+            ///     Iteration budget.
+            /// operator : tuple, optional
+            ///     A different CSC matrix to iterate on, as in :meth:`gmres`.
+            ///
+            /// Returns
+            /// -------
+            /// KrylovResult
+            ///     ``x``, ``converged``, ``iters``, ``final_res``, ``stop``.
             #[pyo3(signature = (b, tol = 1e-8, maxit = 400, operator = None))]
             fn cocg(
                 &self,
@@ -595,6 +640,22 @@ macro_rules! handle {
             /// Conjugate orthogonal conjugate residual (COCR) with this factor
             /// as the preconditioner; the minimal-residual sibling of
             /// :meth:`cocg` for complex-symmetric operators.
+            ///
+            /// Parameters
+            /// ----------
+            /// b : ndarray, shape (n,)
+            ///     Right-hand side.
+            /// tol : float, default 1e-8
+            ///     Relative residual target.
+            /// maxit : int, default 400
+            ///     Iteration budget.
+            /// operator : tuple, optional
+            ///     A different CSC matrix to iterate on, as in :meth:`gmres`.
+            ///
+            /// Returns
+            /// -------
+            /// KrylovResult
+            ///     ``x``, ``converged``, ``iters``, ``final_res``, ``stop``.
             #[pyo3(signature = (b, tol = 1e-8, maxit = 400, operator = None))]
             fn cocr(
                 &self,
@@ -609,6 +670,16 @@ macro_rules! handle {
 
             /// A :class:`Recycle` workspace holding up to ``k`` deflation
             /// vectors for a sequence of :meth:`gmres` calls.
+            ///
+            /// Parameters
+            /// ----------
+            /// k : int
+            ///     Maximum number of deflation vectors kept.
+            ///
+            /// Returns
+            /// -------
+            /// Recycle
+            ///     The workspace to pass as ``recycle=`` to :meth:`gmres`.
             fn recycle(&self, k: usize) -> PyRecycle {
                 dispatch!($any, &self.inner, |p| p.recycle(k))
             }
@@ -667,6 +738,16 @@ handle! {
     /// Solve ``A^T y = b`` on the same factors (plain transpose, not the
     /// conjugate transpose; conjugate the right-hand side and the result for
     /// ``A^H``).
+    ///
+    /// Parameters
+    /// ----------
+    /// b : ndarray, shape (n,)
+    ///     Right-hand side in the factor's dtype.
+    ///
+    /// Returns
+    /// -------
+    /// ndarray, shape (n,)
+    ///     The solution ``y``.
     fn solve_transpose(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         dispatch!(KluAny, &self.inner, |p| p.solve_transpose(py, b))
     }
@@ -679,6 +760,18 @@ handle! {
     /// matrix that was factored.
     /// The handle is invalid until a successful ``refactor`` or a fresh
     /// factor if this raises.
+    ///
+    /// Parameters
+    /// ----------
+    /// data : scipy.sparse matrix or ndarray
+    ///     The matrix with the factored pattern, or its CSC value array.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the pattern differs or the value count does not match.
+    /// RuntimeError
+    ///     If a pivot is numerically zero.
     fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         dispatch!(KluAny, &mut self.inner, |p| p.refactor(py, data))
     }

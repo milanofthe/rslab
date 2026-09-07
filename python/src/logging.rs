@@ -4,9 +4,18 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rslab::{LogLevel, LogSink};
 
-/// Set the log level of the solver core: ``'debug'``, ``'info'``,
-/// ``'warning'`` (default), ``'error'`` or ``'off'``. The environment variable
-/// ``RLA_LOG`` sets the initial level.
+/// Set the log level of the solver core.
+///
+/// Parameters
+/// ----------
+/// level : str
+///     ``'debug'``, ``'info'``, ``'warning'`` (default), ``'error'`` or
+///     ``'off'``. The environment variable ``RLA_LOG`` sets the initial
+///     level.
+///
+/// Returns
+/// -------
+/// None
 #[pyfunction]
 pub fn set_log_level(level: &str) -> PyResult<()> {
     match LogLevel::parse(level) {
@@ -20,7 +29,12 @@ pub fn set_log_level(level: &str) -> PyResult<()> {
     }
 }
 
-/// The current log level of the solver core as a lowercase string.
+/// The current log level of the solver core.
+///
+/// Returns
+/// -------
+/// str
+///     The level name in lowercase.
 #[pyfunction]
 pub fn log_level() -> String {
     rslab::logging::level().label().to_ascii_lowercase()
@@ -49,6 +63,15 @@ impl LogSink for PySink {
 ///     rslab.set_log_sink(lambda level, msg: log.log(logging.getLevelName(level.upper()), msg))
 ///
 /// The sink may be called from solver worker threads.
+///
+/// Parameters
+/// ----------
+/// sink : callable or None
+///     ``sink(level, message)``; ``None`` restores the default writer.
+///
+/// Returns
+/// -------
+/// None
 #[pyfunction]
 #[pyo3(signature = (sink))]
 pub fn set_log_sink(sink: Option<PyObject>) {

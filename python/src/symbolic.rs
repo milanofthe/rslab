@@ -98,9 +98,20 @@ impl PyLdltSymbolic {
         self.settings.clone()
     }
 
-    /// A-priori memory and work estimate for a factor in the given dtype:
-    /// ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
-    /// ``transient_peak_mb``, ``factor_flops``, ``critical_path_flops``.
+    /// A-priori memory and work estimate for a factor in the given dtype.
+    ///
+    /// Parameters
+    /// ----------
+    /// dtype : str, default 'float64'
+    ///     The value type the factor will use (``'float64'``, ``'complex128'``,
+    ///     ``'float32'``, ``'complex64'``).
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
+    ///     ``transient_peak_mb`` (the peak during the factorization),
+    ///     ``factor_flops``, ``critical_path_flops``.
     #[pyo3(signature = (dtype = "float64"))]
     fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
         let e = estimate_for(scalar_bytes(dtype)?, |b| match b {
@@ -119,11 +130,30 @@ impl PyLdltSymbolic {
 
     /// Numeric factorization of new values on the analyzed pattern.
     ///
-    /// ``data`` is either the matrix itself (any SciPy sparse matrix with
-    /// the analyzed pattern: its lower triangle is taken, sorted and summed like at
-    /// analysis time, and the pattern is checked entry by entry) or the CSC
-    /// value array of that lower triangle in the order of the analysis. Keyword
-    /// settings override the analysis settings for this factorization.
+    /// Parameters
+    /// ----------
+    /// data : scipy.sparse matrix or ndarray
+    ///     The matrix itself (any SciPy sparse matrix with the analyzed
+    ///     pattern: its lower triangle is taken, sorted and summed like at analysis
+    ///     time, and the pattern is checked entry by entry), or the CSC value
+    ///     array of that lower triangle in the order of the analysis.
+    /// settings : Settings, optional
+    ///     Numeric settings for this factorization; the analysis settings by
+    ///     default.
+    /// **kwargs
+    ///     Any settings keyword, overriding ``settings``.
+    ///
+    /// Returns
+    /// -------
+    /// factor handle
+    ///     The numeric factor with the solve methods and diagnostics.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the pattern or the value count differs from the analysis.
+    /// RuntimeError
+    ///     If a pivot is numerically zero in exact mode.
     fn factor(
         &self,
         py: Python<'_>,
@@ -281,8 +311,20 @@ impl PyLuSymbolic {
         self.settings.clone()
     }
 
-    /// A-priori memory and work estimate for a factor in the given dtype
-    /// (same keys as :meth:`LdltSymbolic.estimate_memory`).
+    /// A-priori memory and work estimate for a factor in the given dtype.
+    ///
+    /// Parameters
+    /// ----------
+    /// dtype : str, default 'float64'
+    ///     The value type the factor will use (``'float64'``, ``'complex128'``,
+    ///     ``'float32'``, ``'complex64'``).
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
+    ///     ``transient_peak_mb`` (the peak during the factorization),
+    ///     ``factor_flops``, ``critical_path_flops``.
     #[pyo3(signature = (dtype = "float64"))]
     fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
         let e = estimate_for(scalar_bytes(dtype)?, |b| match b {
@@ -299,11 +341,30 @@ impl PyLuSymbolic {
 
     /// Numeric factorization of new values on the analyzed pattern.
     ///
-    /// ``data`` is either the matrix itself (any SciPy sparse matrix with
-    /// the analyzed pattern: its matrix is taken, sorted and summed like at
-    /// analysis time, and the pattern is checked entry by entry) or the CSC
-    /// value array of that matrix in the order of the analysis. Keyword
-    /// settings override the analysis settings for this factorization.
+    /// Parameters
+    /// ----------
+    /// data : scipy.sparse matrix or ndarray
+    ///     The matrix itself (any SciPy sparse matrix with the analyzed
+    ///     pattern: its matrix is taken, sorted and summed like at analysis
+    ///     time, and the pattern is checked entry by entry), or the CSC value
+    ///     array of that matrix in the order of the analysis.
+    /// settings : Settings, optional
+    ///     Numeric settings for this factorization; the analysis settings by
+    ///     default.
+    /// **kwargs
+    ///     Any settings keyword, overriding ``settings``.
+    ///
+    /// Returns
+    /// -------
+    /// factor handle
+    ///     The numeric factor with the solve methods and diagnostics.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the pattern or the value count differs from the analysis.
+    /// RuntimeError
+    ///     If a pivot is numerically zero in exact mode.
     fn factor(
         &self,
         py: Python<'_>,
@@ -445,8 +506,20 @@ impl PyKluSymbolic {
         self.settings.clone()
     }
 
-    /// A-priori memory and work estimate for a factor in the given dtype
-    /// (same keys as :meth:`LdltSymbolic.estimate_memory`).
+    /// A-priori memory and work estimate for a factor in the given dtype.
+    ///
+    /// Parameters
+    /// ----------
+    /// dtype : str, default 'float64'
+    ///     The value type the factor will use (``'float64'``, ``'complex128'``,
+    ///     ``'float32'``, ``'complex64'``).
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
+    ///     ``transient_peak_mb`` (the peak during the factorization),
+    ///     ``factor_flops``, ``critical_path_flops``.
     #[pyo3(signature = (dtype = "float64"))]
     fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
         let e = estimate_for(scalar_bytes(dtype)?, |b| match b {
@@ -463,11 +536,30 @@ impl PyKluSymbolic {
 
     /// Numeric factorization of new values on the analyzed pattern.
     ///
-    /// ``data`` is either the matrix itself (any SciPy sparse matrix with
-    /// the analyzed pattern: its matrix is taken, sorted and summed like at
-    /// analysis time, and the pattern is checked entry by entry) or the CSC
-    /// value array of that matrix in the order of the analysis. Keyword
-    /// settings override the analysis settings for this factorization.
+    /// Parameters
+    /// ----------
+    /// data : scipy.sparse matrix or ndarray
+    ///     The matrix itself (any SciPy sparse matrix with the analyzed
+    ///     pattern: its matrix is taken, sorted and summed like at analysis
+    ///     time, and the pattern is checked entry by entry), or the CSC value
+    ///     array of that matrix in the order of the analysis.
+    /// settings : Settings, optional
+    ///     Numeric settings for this factorization; the analysis settings by
+    ///     default.
+    /// **kwargs
+    ///     Any settings keyword, overriding ``settings``.
+    ///
+    /// Returns
+    /// -------
+    /// factor handle
+    ///     The numeric factor with the solve methods and diagnostics.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the pattern or the value count differs from the analysis.
+    /// RuntimeError
+    ///     If a pivot is numerically zero in exact mode.
     fn factor(
         &self,
         py: Python<'_>,

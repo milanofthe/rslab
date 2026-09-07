@@ -95,6 +95,9 @@ fn main() {
                     if threads > 0 {
                         opts = opts.with_threads(threads);
                     }
+                    if let Some(n) = std::env::var("MTX_NEMIN").ok().and_then(|v| v.parse().ok()) {
+                        opts = opts.with_nemin(n);
+                    }
                     if let Ok(m) = std::env::var("MTX_METHOD") {
                         opts = opts.with_method(if m == "multifrontal" {
                             rslab::FactorMethod::Multifrontal
