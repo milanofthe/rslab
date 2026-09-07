@@ -855,7 +855,7 @@ unsafe fn lower_tile_gemm<T: Scalar>(
         };
         // Dst tile = columns [c0, c0+tw) rows [c0, m) of `tmp`; lhs = rows
         // [c0, m); rhs = columns [c0, c0+tw).
-        gemm::gemm(
+        crate::dense::gemm_backend::gemm(
             mrows,
             tw,
             k,

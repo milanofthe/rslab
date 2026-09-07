@@ -88,9 +88,15 @@ fn main() {
                     if let Some(o) = om {
                         opts = opts.with_ordering(o);
                     }
+                    if threads > 0 {
+                        opts = opts.with_threads(threads);
+                    }
                     let (t_all, s) = best(1, || {
                         if om.is_none() {
-                            let (sym, pick) = LdltSolver::<f64>::tuned(&ar).unwrap();
+                            let (sym, mut pick) = LdltSolver::<f64>::tuned(&ar).unwrap();
+                            if threads > 0 {
+                                pick = pick.with_threads(threads);
+                            }
                             sym.factor(&ar, &pick).unwrap()
                         } else {
                             LdltSolver::factor_with(&ar, &opts).unwrap()
@@ -149,9 +155,15 @@ fn main() {
                 if let Some(o) = om {
                     opts = opts.with_ordering(o);
                 }
+                if threads > 0 {
+                    opts = opts.with_threads(threads);
+                }
                 let (t_all, s) = best(1, || {
                     if om.is_none() {
-                        let (sym, pick) = LdltSolver::<C>::tuned(&a).unwrap();
+                        let (sym, mut pick) = LdltSolver::<C>::tuned(&a).unwrap();
+                        if threads > 0 {
+                            pick = pick.with_threads(threads);
+                        }
                         sym.factor(&a, &pick).unwrap()
                     } else {
                         LdltSolver::factor_with(&a, &opts).unwrap()
