@@ -334,3 +334,47 @@ def test_symbolic_factor_and_refactor_accept_the_matrix():
     D = (G + sp.eye(n, k=1, format="csc")).tocsc()
     with pytest.raises(ValueError):
         rslab.analyze(G, "lu").factor(D)
+
+
+def test_every_setting_round_trips():
+    """Every Settings and KluSettings keyword is accepted and reported by to_dict."""
+    import numpy as np
+
+    s = rslab.Settings(
+        threads=("auto", 2),
+        preconditioner=1e-6,
+        drop_tol=1e-3,
+        method="multifrontal",
+        memory="eager",
+        ordering="amf",
+        scaling="mc64",
+        pivot_u=0.5,
+        matching=False,
+        nemin=8,
+        relax=(4, 12),
+        reorder="off",
+        blr={"eps": 1e-6, "min_cnrow": 128, "b": 64, "adaptive": True},
+        panel_nb=32,
+        scalar_gate=1000,
+        par_gemm=100000,
+        par_cdiv=200000,
+        use_gemm_schur=False,
+    )
+    d = s.to_dict()
+    assert d["threads"] == ("auto", 2)
+    assert d["method"] == "multifrontal" and d["memory"] == "eager"
+    assert d["ordering"] == "amf" and d["scaling"] == "mc64"
+    assert d["relax"] == (4, 12) and d["reorder"] == "off"
+    assert d["blr"] == {"eps": 1e-6, "min_cnrow": 128, "b": 64, "adaptive": True}
+    assert (d["panel_nb"], d["scalar_gate"], d["par_gemm"], d["par_cdiv"]) == (32, 1000, 100000, 200000)
+    assert d["use_gemm_schur"] is False and d["matching"] is False
+    # an external scaling vector
+    ext = rslab.Settings(scaling=np.ones(3))
+    assert ext.to_dict()["scaling"] == "external"
+    k = rslab.KluSettings(pivot_tol=0.5, row_scaling=False, btf=True, matching=False, parallel=True)
+    kd = k.to_dict()
+    assert kd["pivot_tol"] == 0.5 and kd["row_scaling"] is False and kd["parallel"] is True
+    with pytest.raises(TypeError):
+        rslab.Settings(no_such_option=1)
+    with pytest.raises(ValueError):
+        rslab.Settings(blr={"eps": 1e-6, "bogus": 1})
