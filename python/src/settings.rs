@@ -163,13 +163,14 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///
 /// Numeric knobs
 /// -------------
-/// threads : int or 'auto' or 'ambient', optional
+/// threads : int or 'auto' or ('auto', int) or 'ambient', optional
 ///     Worker budget of the scoped factorization pool. ``None`` (default) is
 ///     the per-matrix predictor capped at 4 workers (or the calibrated pick
 ///     after :func:`rslab.install_diagnose`); an ``int`` pins the count
 ///     (``0`` = all logical cores); ``'auto'`` is the predictor without the
-///     cap; ``'ambient'`` runs on the caller's rayon pool. The factor is
-///     bit-identical for every value.
+///     cap, ``('auto', max)`` the predictor capped at ``max``; ``'ambient'``
+///     runs on the caller's rayon pool. The factor is bit-identical for
+///     every value.
 /// preconditioner : float, optional
 ///     Static-pivot floor: a pivot with magnitude below it is lifted to it,
 ///     so the factorization never fails and produces the factor of a nearby
@@ -192,17 +193,23 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///     Threshold partial-pivoting tolerance of the LU path in ``[0, 1]``
 ///     (default 0.1; ``1.0`` is full partial pivoting). Ignored, and reported
 ///     in the diagnostics, on the LDL^T path.
-/// scaling : {'one_pass', 'inf_norm', 'mc64', 'auto', 'identity'}, optional
-///     Symmetric equilibration before the LDL^T factorization. The LU path
-///     uses its own two-sided scaling and reports a set value.
+/// scaling : {'one_pass', 'inf_norm', 'mc64', 'auto', 'identity'} or array, optional
+///     Symmetric equilibration before the LDL^T factorization: a named
+///     strategy, or a float array ``s`` of length ``n`` applying the
+///     external scaling ``diag(s) A diag(s)``. The LU path uses its own
+///     two-sided scaling and reports a set value.
 /// matching : bool, default True
 ///     Maximum-product row matching (MC64) before the LU analysis: rows are
 ///     permuted so the matched entries form the diagonal and both sides are
 ///     scaled to unit magnitude there, which keeps the element growth of the
 ///     front-restricted pivoting bounded. LU path only.
-/// blr : float or False, optional
-///     Block-low-rank compression of the contribution blocks with the given
-///     relative tolerance; ``False`` (default) keeps exact dense fronts.
+/// blr : float or False or dict, optional
+///     Block-low-rank compression of the contribution blocks. A float is
+///     the relative tolerance with the default block parameters; a dict
+///     ``{'eps': tol, 'min_cnrow': 256, 'b': 256, 'adaptive': False}`` sets
+///     the smallest contribution block that is compressed, the block size
+///     and adaptive per-vector precision; ``False`` (default) keeps exact
+///     dense fronts.
 /// panel_nb : int, optional
 ///     Panel width (blocking factor) of the dense kernels, default 64.
 /// interrupt : Interrupt, optional
@@ -252,11 +259,16 @@ impl PySettings {
                 self.explicit_threads = true;
                 if let Ok(n) = v.extract::<usize>() {
                     o.with_threads(n)
+                } else if let Ok((word, max)) = v.extract::<(String, usize)>() {
+                    if word.to_lowercase() != "auto" {
+                        return Err(bad(key, "an int, 'auto', ('auto', max) or 'ambient'", v));
+                    }
+                    o.with_thread_policy(Threads::Auto { max })
                 } else {
                     match lower(key, v)?.as_str() {
                         "auto" => o.with_thread_policy(Threads::Auto { max: usize::MAX }),
                         "ambient" => o.with_thread_policy(Threads::Ambient),
-                        _ => return Err(bad(key, "an int, 'auto' or 'ambient'", v)),
+                        _ => return Err(bad(key, "an int, 'auto', ('auto', max) or 'ambient'", v)),
                     }
                 }
             }
@@ -284,7 +296,15 @@ impl PySettings {
                 self.explicit_ordering = true;
                 o.with_ordering(parse_ordering(&lower(key, v)?)?)
             }
-            "scaling" => o.with_scaling(parse_scaling(&lower(key, v)?)?),
+            "scaling" => {
+                if let Ok(name) = v.extract::<String>() {
+                    o.with_scaling(parse_scaling(&name.to_lowercase())?)
+                } else if let Ok(arr) = v.extract::<numpy::PyReadonlyArray1<f64>>() {
+                    o.with_scaling(ScalingStrategy::External(arr.as_slice()?.to_vec()))
+                } else {
+                    return Err(bad(key, "a scaling name or a float array of length n", v));
+                }
+            }
             "pivot_u" => o.with_pivot_u(v.extract().map_err(|_| bad(key, "a float", v))?),
             "nemin" => o.with_nemin(v.extract().map_err(|_| bad(key, "an int", v))?),
             "relax" => {
@@ -313,8 +333,39 @@ impl PySettings {
                     o.with_blr(BlrMode::Off)
                 } else if let Ok(eps) = v.extract::<f64>() {
                     o.with_blr(BlrMode::contribution_blocks(eps))
+                } else if let Ok(d) = v.downcast::<PyDict>() {
+                    let get = |name: &str| d.get_item(name).ok().flatten();
+                    let eps: f64 = get("eps")
+                        .ok_or_else(|| bad(key, "a dict with 'eps'", v))?
+                        .extract()
+                        .map_err(|_| bad(key, "a float 'eps'", v))?;
+                    let mut mode = BlrMode::contribution_blocks(eps);
+                    if let BlrMode::ContributionBlocks {
+                        min_cnrow,
+                        b,
+                        adaptive,
+                        ..
+                    } = &mut mode
+                    {
+                        if let Some(x) = get("min_cnrow") {
+                            *min_cnrow = x.extract().map_err(|_| bad(key, "an int 'min_cnrow'", v))?;
+                        }
+                        if let Some(x) = get("b") {
+                            *b = x.extract().map_err(|_| bad(key, "an int 'b'", v))?;
+                        }
+                        if let Some(x) = get("adaptive") {
+                            *adaptive = x.extract().map_err(|_| bad(key, "a bool 'adaptive'", v))?;
+                        }
+                    }
+                    for (k, _) in d.iter() {
+                        let k: String = k.extract()?;
+                        if !matches!(k.as_str(), "eps" | "min_cnrow" | "b" | "adaptive") {
+                            return Err(bad(key, "a dict with eps, min_cnrow, b, adaptive", v));
+                        }
+                    }
+                    o.with_blr(mode)
                 } else {
-                    return Err(bad(key, "a float tolerance or False", v));
+                    return Err(bad(key, "a float tolerance, False or a dict", v));
                 }
             }
             "panel_nb" => o.with_panel_nb(v.extract().map_err(|_| bad(key, "an int", v))?),
@@ -364,6 +415,7 @@ impl PySettings {
         match self.inner.threads {
             Threads::Fixed(n) => n.into_py(py),
             Threads::Auto { max } if max == usize::MAX => "auto".into_py(py),
+            Threads::Auto { max } if self.explicit_threads => ("auto", max).into_py(py),
             Threads::Auto { .. } => py.None(),
             Threads::Ambient => "ambient".into_py(py),
         }
@@ -432,7 +484,35 @@ impl PySettings {
             "blr",
             match &o.blr {
                 BlrMode::Off => false.into_py(py),
-                BlrMode::ContributionBlocks { eps, .. } => eps.into_py(py),
+                BlrMode::ContributionBlocks {
+                    eps,
+                    min_cnrow,
+                    b,
+                    adaptive,
+                } if BlrMode::contribution_blocks(*eps)
+                    == (BlrMode::ContributionBlocks {
+                        eps: *eps,
+                        min_cnrow: *min_cnrow,
+                        b: *b,
+                        adaptive: *adaptive,
+                    }) =>
+                {
+                    // Default block parameters: the tolerance alone, as given.
+                    eps.into_py(py)
+                }
+                BlrMode::ContributionBlocks {
+                    eps,
+                    min_cnrow,
+                    b,
+                    adaptive,
+                } => {
+                    let bd = PyDict::new_bound(py);
+                    bd.set_item("eps", eps)?;
+                    bd.set_item("min_cnrow", min_cnrow)?;
+                    bd.set_item("b", b)?;
+                    bd.set_item("adaptive", adaptive)?;
+                    bd.into_any().unbind()
+                }
             },
         )?;
         d.set_item("panel_nb", o.panel_nb)?;
