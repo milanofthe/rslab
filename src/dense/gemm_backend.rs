@@ -5,17 +5,19 @@
 //! arbitrary strides): the pure-Rust SIMD kernels, the same on every
 //! platform, so a factorization is bit-identical wherever it runs.
 //!
-//! Complex products do not run on the crate's complex kernel: on every
-//! machine measured its interleaved complex microkernel reaches about 80% of
-//! the real kernel's flop rate, so a complex product is split into real
-//! products of the real and imaginary planes ([`complex_gemm_3m`]: three
-//! real products of the same size, the Gauss form, 6/8 of the direct flop
-//! count; [`complex_gemm_4m`]: the four products of the textbook form,
-//! same flops as direct). The split is deterministic (fixed kernels, fixed
-//! association), and the rounding differs from the interleaved kernel's
-//! only in the association order, so results stay bit-identical across
-//! thread counts. Tiny products and conjugated operands take the direct
-//! kernel.
+//! Sequential complex products do not run on the crate's complex kernel:
+//! its interleaved complex microkernel reaches about 80% of the real
+//! kernel's flop rate, so a complex product is split into real products of
+//! the real and imaginary planes in the Gauss form ([`complex_gemm_3m`]:
+//! three real products of the same size, 6/8 of the direct flop count; the
+//! textbook four-product form [`complex_gemm_4m`] is kept for reference).
+//! The split trades flops for memory traffic (the planes are copied), which
+//! pays on a compute-bound core and not on a bandwidth-bound machine, so
+//! products that run in parallel take the direct kernel; on a 102k-DOF
+//! complex FEM factorization the split is worth about 10% single-core and
+//! nothing at 8 workers. The split is deterministic (fixed kernels, fixed
+//! association), so results stay bit-identical across thread counts. Tiny
+//! products and conjugated operands take the direct kernel.
 
 use std::cell::RefCell;
 
@@ -261,6 +263,7 @@ unsafe fn combine<R: SplitReal>(
 /// # Safety
 /// As `gemm::gemm`.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub unsafe fn complex_gemm_4m<R: SplitReal>(
     m: usize,
     n: usize,
@@ -465,52 +468,25 @@ pub unsafe fn complex_gemm<R: SplitReal>(
     Complex<R>: 'static,
 {
     let sequential = matches!(parallelism, gemm::Parallelism::None);
-    if split_worthwhile(m, n, k, conj_dst || conj_lhs || conj_rhs)
-        && (sequential || split_parallel())
-    {
-        match complex_gemm_mode() {
-            SplitMode::ThreeM => {
-                return complex_gemm_3m(
-                    m,
-                    n,
-                    k,
-                    dst,
-                    dst_cs,
-                    dst_rs,
-                    read_dst,
-                    lhs,
-                    lhs_cs,
-                    lhs_rs,
-                    rhs,
-                    rhs_cs,
-                    rhs_rs,
-                    alpha,
-                    beta,
-                    parallelism,
-                )
-            }
-            SplitMode::FourM => {
-                return complex_gemm_4m(
-                    m,
-                    n,
-                    k,
-                    dst,
-                    dst_cs,
-                    dst_rs,
-                    read_dst,
-                    lhs,
-                    lhs_cs,
-                    lhs_rs,
-                    rhs,
-                    rhs_cs,
-                    rhs_rs,
-                    alpha,
-                    beta,
-                    parallelism,
-                )
-            }
-            SplitMode::Direct => {}
-        }
+    if sequential && split_worthwhile(m, n, k, conj_dst || conj_lhs || conj_rhs) {
+        return complex_gemm_3m(
+            m,
+            n,
+            k,
+            dst,
+            dst_cs,
+            dst_rs,
+            read_dst,
+            lhs,
+            lhs_cs,
+            lhs_rs,
+            rhs,
+            rhs_cs,
+            rhs_rs,
+            alpha,
+            beta,
+            parallelism,
+        );
     }
     gemm::gemm(
         m,
@@ -533,29 +509,6 @@ pub unsafe fn complex_gemm<R: SplitReal>(
         conj_rhs,
         parallelism,
     )
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SplitMode {
-    ThreeM,
-    FourM,
-    Direct,
-}
-
-/// EXPERIMENT: `RSLAB_CGEMM_PAR=1` also splits products that run in parallel.
-fn split_parallel() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("RSLAB_CGEMM_PAR").as_deref() == Ok("1"))
-}
-
-/// EXPERIMENT: `RSLAB_CGEMM=3m|4m|direct` selects the complex product form.
-fn complex_gemm_mode() -> SplitMode {
-    static MODE: std::sync::OnceLock<SplitMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("RSLAB_CGEMM").as_deref() {
-        Ok("4m") => SplitMode::FourM,
-        Ok("direct") => SplitMode::Direct,
-        _ => SplitMode::ThreeM,
-    })
 }
 
 #[cfg(test)]
