@@ -186,12 +186,24 @@ fn main() {
                 let d = s.diagnostics();
                 let r = d.rates();
                 let ana = d.stage_ms("analyze").unwrap_or(0.0);
-                let (ts, _) = best(5, || s.solve(&b).unwrap());
+                let (ts, x) = best(5, || s.solve(&b).unwrap());
                 let bb: Vec<C> = (0..n * 8)
                     .map(|k| C::new(((k * 11) % 17) as f64 - 8.0, 0.0))
                     .collect();
                 let (t8, _) = best(3, || s.solve_many(&bb, 8).unwrap());
-                println!("{name:>7} {:>10} {:>5.1} | {ana:>8.0} {:>8.1} {:>7.2} {:>6.1} | {:>8.2} {:>7.1} {:>9.2} {:>7.1}   total={t_all:.2}s",
+                let mut res = b.clone();
+                for j in 0..n {
+                    for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                        let i = a.row_idx[k];
+                        res[i] -= a.values[k] * x[j];
+                        if i != j {
+                            res[j] -= a.values[k] * x[i];
+                        }
+                    }
+                }
+                let rn = res.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt()
+                    / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+                println!("{name:>7} {:>10} {:>5.1} | {ana:>8.0} {:>8.1} {:>7.2} {:>6.1} | {:>8.2} {:>7.1} {:>9.2} {:>7.1}   total={t_all:.2}s res={rn:.1e}",
                     s.factor_nnz(), s.factor_nnz() as f64 / a.values.len() as f64,
                     d.stage_ms("factor").unwrap_or(0.0), r.factor_mdof_s, r.factor_gflops,
                     ts * 1e3, n as f64 / ts / 1e6, t8 * 1e3, 8.0 * n as f64 / t8 / 1e6);

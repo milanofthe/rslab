@@ -41,6 +41,58 @@ pub trait Scalar:
     /// The multiplicative identity `1`.
     fn one() -> Self;
 
+    /// The dense product `dst := (read_dst ? alpha * dst : 0) + beta * lhs *
+    /// rhs` of this scalar with the strides of `gemm::gemm` (the one GEMM
+    /// entry of the numeric kernels, see `dense::gemm_backend`).
+    ///
+    /// # Safety
+    /// The pointers and strides must describe valid, non-overlapping
+    /// matrices of the given sizes.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn gemm(
+        m: usize,
+        n: usize,
+        k: usize,
+        dst: *mut Self,
+        dst_cs: isize,
+        dst_rs: isize,
+        read_dst: bool,
+        lhs: *const Self,
+        lhs_cs: isize,
+        lhs_rs: isize,
+        rhs: *const Self,
+        rhs_cs: isize,
+        rhs_rs: isize,
+        alpha: Self,
+        beta: Self,
+        conj_dst: bool,
+        conj_lhs: bool,
+        conj_rhs: bool,
+        parallelism: gemm::Parallelism,
+    ) {
+        gemm::gemm(
+            m,
+            n,
+            k,
+            dst,
+            dst_cs,
+            dst_rs,
+            read_dst,
+            lhs,
+            lhs_cs,
+            lhs_rs,
+            rhs,
+            rhs_cs,
+            rhs_rs,
+            alpha,
+            beta,
+            conj_dst,
+            conj_lhs,
+            conj_rhs,
+            parallelism,
+        )
+    }
+
     /// Embed a real number into the field (e.g. an `f64` scaling factor).
     fn from_real(r: f64) -> Self;
 
@@ -178,6 +230,50 @@ impl Scalar for f64 {
 }
 
 impl Scalar for Complex<f64> {
+    unsafe fn gemm(
+        m: usize,
+        n: usize,
+        k: usize,
+        dst: *mut Self,
+        dst_cs: isize,
+        dst_rs: isize,
+        read_dst: bool,
+        lhs: *const Self,
+        lhs_cs: isize,
+        lhs_rs: isize,
+        rhs: *const Self,
+        rhs_cs: isize,
+        rhs_rs: isize,
+        alpha: Self,
+        beta: Self,
+        conj_dst: bool,
+        conj_lhs: bool,
+        conj_rhs: bool,
+        parallelism: gemm::Parallelism,
+    ) {
+        crate::dense::gemm_backend::complex_gemm(
+            m,
+            n,
+            k,
+            dst,
+            dst_cs,
+            dst_rs,
+            read_dst,
+            lhs,
+            lhs_cs,
+            lhs_rs,
+            rhs,
+            rhs_cs,
+            rhs_rs,
+            alpha,
+            beta,
+            conj_dst,
+            conj_lhs,
+            conj_rhs,
+            parallelism,
+        )
+    }
+
     type Lo = Complex<f32>;
     const LO_SHRINKS: bool = true;
     const EPS_LO: f64 = f32::EPSILON as f64;
@@ -316,6 +412,50 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex<f32> {
+    unsafe fn gemm(
+        m: usize,
+        n: usize,
+        k: usize,
+        dst: *mut Self,
+        dst_cs: isize,
+        dst_rs: isize,
+        read_dst: bool,
+        lhs: *const Self,
+        lhs_cs: isize,
+        lhs_rs: isize,
+        rhs: *const Self,
+        rhs_cs: isize,
+        rhs_rs: isize,
+        alpha: Self,
+        beta: Self,
+        conj_dst: bool,
+        conj_lhs: bool,
+        conj_rhs: bool,
+        parallelism: gemm::Parallelism,
+    ) {
+        crate::dense::gemm_backend::complex_gemm(
+            m,
+            n,
+            k,
+            dst,
+            dst_cs,
+            dst_rs,
+            read_dst,
+            lhs,
+            lhs_cs,
+            lhs_rs,
+            rhs,
+            rhs_cs,
+            rhs_rs,
+            alpha,
+            beta,
+            conj_dst,
+            conj_lhs,
+            conj_rhs,
+            parallelism,
+        )
+    }
+
     type Lo = Complex<f32>;
     const LO_SHRINKS: bool = false;
     const EPS_LO: f64 = f32::EPSILON as f64;
