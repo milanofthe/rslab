@@ -495,7 +495,7 @@ fn lu_front<T: Scalar>(
             // supported gemm element type.
             let base = f.as_mut_ptr();
             unsafe {
-                gemm::gemm(
+                crate::dense::gemm_backend::gemm(
                     mt,
                     mt,
                     pw,
@@ -1614,7 +1614,7 @@ fn lu_ll_factor_node<T: Scalar>(
                     lupd.resize(mrows * npk, T::zero());
                     // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
                     unsafe {
-                        gemm::gemm(
+                        crate::dense::gemm_backend::gemm(
                             mrows,
                             npk,
                             nck,
@@ -1680,7 +1680,7 @@ fn lu_ll_factor_node<T: Scalar>(
                         uupd.resize(npk * ntr, T::zero());
                         // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
                         unsafe {
-                            gemm::gemm(
+                            crate::dense::gemm_backend::gemm(
                                 npk,
                                 ntr,
                                 nck,
@@ -1769,7 +1769,7 @@ fn lu_ll_factor_node<T: Scalar>(
             // SAFETY: lhs (lk off-diag rows), rhs (uk Pk cols), dst (lupd) are
             // disjoint; strides in bounds.
             unsafe {
-                gemm::gemm(
+                crate::dense::gemm_backend::gemm(
                     mrows,
                     npk,
                     nck,
@@ -1805,7 +1805,7 @@ fn lu_ll_factor_node<T: Scalar>(
                 uupd.resize(npk * ntrail, T::zero());
                 // SAFETY: as above; rhs is the trailing U columns of `uk`.
                 unsafe {
-                    gemm::gemm(
+                    crate::dense::gemm_backend::gemm(
                         npk,
                         ntrail,
                         nck,
@@ -2032,7 +2032,7 @@ fn lu_ll_factor_node<T: Scalar>(
             let base = lbuf.as_mut_ptr();
             // SAFETY: the three sub-blocks of `lbuf` are disjoint; strides in bounds.
             unsafe {
-                gemm::gemm(
+                crate::dense::gemm_backend::gemm(
                     mt,
                     nt,
                     pw,
@@ -2067,7 +2067,7 @@ fn lu_ll_factor_node<T: Scalar>(
             // SAFETY: dst (`ubuf` trailing rows) is disjoint from the read
             // sub-blocks of `lbuf`/`ubuf`; strides in bounds.
             unsafe {
-                gemm::gemm(
+                crate::dense::gemm_backend::gemm(
                     nt,
                     cnrow,
                     pw,
