@@ -301,3 +301,36 @@ def test_api_reference_is_current():
         text=True,
     )
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_symbolic_factor_and_refactor_accept_the_matrix():
+    import numpy as np
+    import scipy.sparse as sp
+
+    n = 40
+    rng = np.random.default_rng(3)
+    A = sp.random(n, n, density=0.15, random_state=rng, format="csc") + 10.0 * sp.eye(n, format="csc")
+    S = (A + A.T).tocsc()
+    b = rng.standard_normal(n)
+    # LDLT: the symbolic factor takes the full symmetric matrix (lower triangle extracted)
+    sym = rslab.analyze(S, "ldlt")
+    f = sym.factor(S)
+    assert np.linalg.norm(S @ f.solve(b) - b) < 1e-9 * np.linalg.norm(b)
+    S2 = (S * 2.0).tocsc()
+    f2 = sym.factor(S2)
+    assert np.linalg.norm(S2 @ f2.solve(b) - b) < 1e-9 * np.linalg.norm(b)
+    # the value array in the analysis order still works
+    f3 = sym.factor(sp.tril(S2).tocsc().data)
+    assert np.allclose(f3.solve(b), f2.solve(b))
+    # LU and KLU take the full matrix
+    G = A.tocsc()
+    lu = rslab.analyze(G, "lu").factor(G)
+    assert np.linalg.norm(G @ lu.solve(b) - b) < 1e-9 * np.linalg.norm(b)
+    k = rslab.klu(G)
+    G2 = (G * 3.0).tocsc()
+    k.refactor(G2)
+    assert np.linalg.norm(G2 @ k.solve(b) - b) < 1e-9 * np.linalg.norm(b)
+    # a different pattern is refused
+    D = (G + sp.eye(n, k=1, format="csc")).tocsc()
+    with pytest.raises(ValueError):
+        rslab.analyze(G, "lu").factor(D)

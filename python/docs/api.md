@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 0.33.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 0.34.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -468,9 +468,12 @@ vectors for a sequence of `gmres` calls.
 
 #### `Klu.refactor(data)`
 
-Numeric-only refactorization with new values on the **same** pattern
-(`data` is the CSC value array in the factor's dtype, in the order
-of the matrix that was factored): no symbolic work, no pivot search.
+Numeric-only refactorization with new values on the **same** pattern:
+no symbolic work, no pivot search. `data` is either the matrix
+itself (any SciPy sparse matrix with the factored pattern; it is
+sorted and summed like at analysis time, and the pattern is checked)
+or its CSC value array in the factor's dtype, in the order of the
+matrix that was factored.
 The handle is invalid until a successful `refactor` or a fresh
 factor if this raises.
 
@@ -560,6 +563,13 @@ Numeric factorization of `data` (the CSC value array of the lower
 triangle, in the analyzed pattern's order, in any supported dtype).
 Numeric settings (`threads`, `preconditioner`, `drop_tol`,
 `pivot_u`, `scaling` ...) may be overridden per call.
+Numeric factorization of new values on the analyzed pattern.
+
+`data` is either the matrix itself (any SciPy sparse matrix with
+the analyzed pattern: its lower triangle is taken, sorted and summed like at
+analysis time, and the pattern is checked entry by entry) or the CSC
+value array of that lower triangle in the order of the analysis. Keyword
+settings override the analysis settings for this factorization.
 
 ### class `LuSymbolic`
 
@@ -585,6 +595,13 @@ A-priori memory and work estimate for a factor in the given dtype
 
 Numeric factorization of `data` (the full CSC value array in the
 analyzed pattern's order). Numeric settings may be overridden per call.
+Numeric factorization of new values on the analyzed pattern.
+
+`data` is either the matrix itself (any SciPy sparse matrix with
+the analyzed pattern: its matrix is taken, sorted and summed like at
+analysis time, and the pattern is checked entry by entry) or the CSC
+value array of that matrix in the order of the analysis. Keyword
+settings override the analysis settings for this factorization.
 
 ### class `KluSymbolic`
 
@@ -610,6 +627,13 @@ A-priori memory and work estimate for a factor in the given dtype
 
 Numeric factorization of `data` (the full CSC value array in the
 analyzed pattern's order). KLU settings may be overridden per call.
+Numeric factorization of new values on the analyzed pattern.
+
+`data` is either the matrix itself (any SciPy sparse matrix with
+the analyzed pattern: its matrix is taken, sorted and summed like at
+analysis time, and the pattern is checked entry by entry) or the CSC
+value array of that matrix in the order of the analysis. Keyword
+settings override the analysis settings for this factorization.
 
 ## Configuration
 

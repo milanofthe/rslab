@@ -379,6 +379,12 @@ impl<T: Field> Pair<T, KluSolver<T>> {
     }
 
     pub fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let pattern = crate::common::Pattern {
+            n: self.a.n,
+            col_ptr: self.a.col_ptr.clone(),
+            row_idx: self.a.row_idx.clone(),
+        };
+        let data = &pattern.values_of(py, data, false)?;
         let d = vector::<T>(data, "data")?;
         if d.len() != self.a.values.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -665,9 +671,12 @@ handle! {
         dispatch!(KluAny, &self.inner, |p| p.solve_transpose(py, b))
     }
 
-    /// Numeric-only refactorization with new values on the **same** pattern
-    /// (``data`` is the CSC value array in the factor's dtype, in the order
-    /// of the matrix that was factored): no symbolic work, no pivot search.
+    /// Numeric-only refactorization with new values on the **same** pattern:
+    /// no symbolic work, no pivot search. ``data`` is either the matrix
+    /// itself (any SciPy sparse matrix with the factored pattern; it is
+    /// sorted and summed like at analysis time, and the pattern is checked)
+    /// or its CSC value array in the factor's dtype, in the order of the
+    /// matrix that was factored.
     /// The handle is invalid until a successful ``refactor`` or a fresh
     /// factor if this raises.
     fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
