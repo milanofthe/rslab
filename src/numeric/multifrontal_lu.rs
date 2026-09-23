@@ -728,6 +728,14 @@ pub struct LuSymbolic {
 }
 
 impl LuSymbolic {
+    /// The fill-reducing column ordering of the analysis (`perm[k]` the column of the
+    /// (row-matched) matrix that became column `k`): pass it to
+    /// [`SolverSettings::with_permutation`] to analyse a nearby pattern without a new
+    /// ordering.
+    pub fn permutation(&self) -> &[usize] {
+        self.symb.permutation()
+    }
+
     /// PARDISO **phase 1**: analyze the symmetrized pattern `A union A^T` of `a`
     /// (values ignored, so any matrix with the target pattern works). Reuse the
     /// result across many [`factor`](Self::factor) calls that share the pattern
@@ -3044,6 +3052,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An analysis on a given ordering: its own ordering reproduces the factor, a
+    /// neighbouring pattern takes it with the elimination tree and counts recomputed, and a
+    /// non-permutation is refused.
+    #[test]
+    fn analysis_on_a_given_ordering() {
+        let m = 12;
+        let n = m * m;
+        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..m {
+            for b in 0..m {
+                let i = a * m + b;
+                r.push(i);
+                c.push(i);
+                v.push(4.5 + 0.01 * i as f64);
+                for j in [(a + 1 < m).then(|| i + m), (b + 1 < m).then(|| i + 1)]
+                    .into_iter()
+                    .flatten()
+                {
+                    r.push(i);
+                    c.push(j);
+                    v.push(-1.0);
+                    r.push(j);
+                    c.push(i);
+                    v.push(-1.2);
+                }
+            }
+        }
+        let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
+        let o = SolverSettings::default().with_lu_matching(false);
+        let s0 = LuSymbolic::analyze_with(&a, &o).unwrap();
+        let f0 = s0.factor(&a, &o).unwrap();
+        let o1 = o.clone().with_permutation(s0.permutation().into());
+        let s1 = LuSymbolic::analyze_with(&a, &o1).unwrap();
+        assert_eq!(s1.permutation(), s0.permutation());
+        let f1 = s1.factor(&a, &o1).unwrap();
+        assert_eq!(f1.factor_nnz(), f0.factor_nnz());
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        assert_eq!(f1.solve(&b).unwrap(), f0.solve(&b).unwrap());
+        // a neighbouring pattern (one more coupling) on the same ordering
+        let (mut r2, mut c2, mut v2) = (r.clone(), c.clone(), v.clone());
+        r2.extend([0, n - 1]);
+        c2.extend([n - 1, 0]);
+        v2.extend([-0.1, -0.1]);
+        let a2 = GeneralCsc::<f64>::from_triplets(n, &r2, &c2, &v2).unwrap();
+        let s2 = LuSymbolic::analyze_with(&a2, &o1).unwrap();
+        let x = s2.factor(&a2, &o1).unwrap().solve(&b).unwrap();
+        let mut ax = vec![0.0f64; n];
+        for col in 0..n {
+            for k in a2.col_ptr[col]..a2.col_ptr[col + 1] {
+                ax[a2.row_idx[k]] += a2.values[k] * x[col];
+            }
+        }
+        let res = ax
+            .iter()
+            .zip(&b)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0, f64::max);
+        assert!(res < 1e-12, "residual on the reused ordering {res:.1e}");
+        // not a permutation
+        let bad: Vec<usize> = (0..n).map(|i| i / 2).collect();
+        assert!(LuSymbolic::analyze_with(&a, &o.clone().with_permutation(bad.into())).is_err());
     }
 
     #[test]

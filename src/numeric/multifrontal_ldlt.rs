@@ -260,6 +260,9 @@ pub struct SolverSettings {
     /// lever. `Some` (default `<=256` wide, `<=64` extra rows) trades a little
     /// explicit-zero fill for wider, higher-rank dense fronts. Analyze-time.
     pub relax: Option<RelaxAmalgamation>,
+    /// A fill-reducing ordering to use instead of `ordering` (see
+    /// [`with_permutation`](Self::with_permutation)). Analyze-time.
+    pub permutation: Option<std::sync::Arc<[usize]>>,
 
     // ---- Kernel scheduling knobs (formerly process-wide atomics) ----
     /// Bunch-Kaufman / LU panel width (blocking factor). Default `64`. Changes the
@@ -530,6 +533,7 @@ impl Default for SolverSettings {
             // See `dev/research/amalgamation-2026-08.md`. Opt in per call with
             // `with_relax(Some(..))` where the fronts are dense enough to want it.
             relax: None,
+            permutation: None,
             // Kernel defaults (reproduce the former process-wide atomic defaults).
             panel_nb: DEFAULT_PANEL_NB,
             scalar_gate: DEFAULT_SCALAR_GATE,
@@ -642,6 +646,18 @@ impl SolverSettings {
     /// structural/size merges). Analyze-time.
     pub fn with_relax(mut self, relax: Option<RelaxAmalgamation>) -> Self {
         self.relax = relax;
+        self
+    }
+
+    /// Builder: analyse with this fill-reducing ordering (`perm[k]` the column that
+    /// becomes column `k`) instead of computing one. For a sequence of nearby patterns - a
+    /// sweep whose drop tolerances move a few entries - the previous analysis's
+    /// [`LuSymbolic::permutation`](crate::LuSymbolic::permutation) keeps its fill quality at
+    /// the cost of the elimination tree and column counts alone, not of a new ordering.
+    /// With the LU row matching the ordering is one of the row-matched matrix, so it carries
+    /// over only where the (value-dependent) matching does. Analyze-time.
+    pub fn with_permutation(mut self, perm: std::sync::Arc<[usize]>) -> Self {
+        self.permutation = Some(perm);
         self
     }
 
@@ -1651,6 +1667,14 @@ pub struct MultifrontalSymbolic {
     nnz: usize,
 }
 
+impl MultifrontalSymbolic {
+    /// The fill-reducing ordering the analysis settled on (`perm[k]` the column that became
+    /// column `k`); empty for `n = 0`.
+    pub fn permutation(&self) -> &[usize] {
+        self.inner.as_ref().map_or(&[], |i| &i.sym.perm[..])
+    }
+}
+
 struct SymbolicInner {
     sym: SymbolicFactorization,
     /// Assembly-tree levels: `by_level[l]` are the supernodes at level `l`, all
@@ -1830,6 +1854,7 @@ fn analyze_with_inner(
         preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
         nemin: opts.nemin,
         relax: opts.relax,
+        given_perm: opts.permutation.clone(),
         ..SupernodeParams::default()
     };
     let mut sym = symbolic_factorize_with_method(&pattern, &snode_params, opts.ordering)?;
