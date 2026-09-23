@@ -793,7 +793,7 @@ impl<T: Scalar> SolvePlan<T> {
                         if nr == 1 {
                             out[0] = dot4(col, tail);
                         } else {
-                            gemv_t_block(out, col, tail, nr);
+                            dot4_block(out, col, tail, nr);
                         }
                     }
                 };
@@ -865,8 +865,7 @@ impl<T: Scalar> SolvePlan<T> {
         accv.resize(nr, T::zero());
         for k in (0..w).rev() {
             let col = &panel[k * ld..(k + 1) * ld];
-            accv.iter_mut().for_each(|a| *a = T::zero());
-            gemv_t_block(accv, &col[w..], g, nr);
+            dot4_block(accv, &col[w..], g, nr);
             for i in k + 1..w {
                 let l = col[i];
                 let xi = &x[(c0 + i) * nr..(c0 + i + 1) * nr];
@@ -966,29 +965,34 @@ fn axpy<T: Scalar>(y: &mut [T], a: T, x: &[T]) {
     }
 }
 
-/// `out += sum_i col[i] * g[i, :]` over the row-major `g` (`nr` wide), with
-/// four independent partial sums to hide the FMA latency (fixed order).
+/// `out[c] = dot4(col, g[:, c])` for every column of the row-major `g` (`nr`
+/// wide): four independent partial sums to hide the FMA latency, in exactly
+/// the association of [`dot4`]. A column's value therefore does not depend on
+/// how many right-hand sides share the sweep, which a non-flexible Krylov
+/// method needs (its update applies the solve to one column, its Arnoldi
+/// steps to a block; any difference breaks the Arnoldi relation).
 #[inline(always)]
-fn gemv_t_block<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize) {
+fn dot4_block<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize) {
     let m = col.len().min(g.len() / nr.max(1));
-    let mut acc1 = vec![T::zero(); nr];
-    let mut acc2 = vec![T::zero(); nr];
-    let mut acc3 = vec![T::zero(); nr];
+    let mut s = vec![T::zero(); 4 * nr];
+    let (s0, rest) = s.split_at_mut(nr);
+    let (s1, rest) = rest.split_at_mut(nr);
+    let (s2, s3) = rest.split_at_mut(nr);
     let mut i = 0;
     while i + 4 <= m {
-        axpy(out, col[i], &g[i * nr..(i + 1) * nr]);
-        axpy(&mut acc1, col[i + 1], &g[(i + 1) * nr..(i + 2) * nr]);
-        axpy(&mut acc2, col[i + 2], &g[(i + 2) * nr..(i + 3) * nr]);
-        axpy(&mut acc3, col[i + 3], &g[(i + 3) * nr..(i + 4) * nr]);
+        axpy(s0, col[i], &g[i * nr..(i + 1) * nr]);
+        axpy(s1, col[i + 1], &g[(i + 1) * nr..(i + 2) * nr]);
+        axpy(s2, col[i + 2], &g[(i + 2) * nr..(i + 3) * nr]);
+        axpy(s3, col[i + 3], &g[(i + 3) * nr..(i + 4) * nr]);
         i += 4;
+    }
+    for c in 0..nr {
+        out[c] = (s0[c] + s1[c]) + (s2[c] + s3[c]);
     }
     while i < m {
         axpy(out, col[i], &g[i * nr..(i + 1) * nr]);
         i += 1;
     }
-    add_assign(out, &acc1);
-    add_assign(out, &acc2);
-    add_assign(out, &acc3);
 }
 
 /// `y -= a * x`.
@@ -1095,9 +1099,10 @@ fn tri_backward<T: Scalar>(
         if nr == 1 {
             ak[0] = ak[0] + dot4(col, &tail[..je - k - 1]);
         } else {
-            for (&l, xi) in col.iter().zip(tail[..(je - k - 1) * nr].chunks_exact(nr)) {
-                axpy(ak, l, xi);
-            }
+            // as the single column: the dot first, then onto the accumulator
+            let mut d = vec![T::zero(); nr];
+            dot4_block(&mut d, col, &tail[..(je - k - 1) * nr], nr);
+            add_assign(ak, &d);
         }
         let xk = &mut head[k * nr..];
         sub_assign(xk, ak);

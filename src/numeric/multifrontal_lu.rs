@@ -2976,6 +2976,76 @@ mod tests {
         }
     }
 
+    /// Every column of a block solve is BITWISE the single-column solve, whatever the
+    /// block width: a non-flexible Krylov method applies the solve to blocks in its Arnoldi
+    /// steps and to one column in its update, and any difference breaks the Arnoldi
+    /// relation (a single-precision factor made it 1e-3 on a saddle system). Covers the
+    /// leaf subtrees and the ancestor levels (a 2D grid) and the apex node (a dense block).
+    #[test]
+    fn lu_block_solve_is_bitwise_the_single_solve() {
+        let mut seed = 12345u64;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        };
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let grid = |m: usize, rnd: &mut dyn FnMut() -> f64| {
+            let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+            for a in 0..m {
+                for b in 0..m {
+                    let i = a * m + b;
+                    r.push(i);
+                    cc.push(i);
+                    v.push(c(4.5 + rnd(), rnd()));
+                    for j in [(a + 1 < m).then(|| i + m), (b + 1 < m).then(|| i + 1)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        r.push(i);
+                        cc.push(j);
+                        v.push(c(-1.0 + 0.3 * rnd(), 0.2 * rnd()));
+                        r.push(j);
+                        cc.push(i);
+                        v.push(c(-1.0 + 0.3 * rnd(), 0.2 * rnd()));
+                    }
+                }
+            }
+            (m * m, r, cc, v)
+        };
+        let dense = |n: usize, rnd: &mut dyn FnMut() -> f64| {
+            let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+            for i in 0..n {
+                for j in 0..n {
+                    r.push(i);
+                    cc.push(j);
+                    let d = if i == j { n as f64 } else { 0.0 };
+                    v.push(c(d + rnd(), rnd()));
+                }
+            }
+            (n, r, cc, v)
+        };
+        for (n, r, cc, v) in [grid(60, &mut rnd), dense(600, &mut rnd)] {
+            let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &r, &cc, &v).unwrap();
+            let solver = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+            for nrhs in [2usize, 3, 5] {
+                let b: Vec<Complex<f64>> = (0..n * nrhs).map(|_| c(rnd(), rnd())).collect();
+                let x = solver.solve_many(&b, nrhs).unwrap();
+                for col in 0..nrhs {
+                    let bc: Vec<Complex<f64>> = (0..n).map(|i| b[i * nrhs + col]).collect();
+                    let xc = solver.solve(&bc).unwrap();
+                    for i in 0..n {
+                        assert!(
+                            x[i * nrhs + col] == xc[i],
+                            "n {n} nrhs {nrhs} rhs {col} row {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn pivoting_triggered_small_diagonal() {
         // Small diagonal, large off-diagonals -> partial pivoting fires on
