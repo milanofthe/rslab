@@ -171,3 +171,40 @@ fn ll_lu_bit_identical_across_threads_and_runs() {
         );
     }
 }
+
+#[test]
+fn ll_lu_complex_bit_identical_across_threads_and_runs() {
+    // The complex twin: its GEMMs are not bit-identical between the serial and the
+    // parallel mode, so a timing-dependent choice between them (the former chain-phase
+    // gates) made the factor differ run to run.
+    let ar = grid3d_conv(K_LU);
+    let a = GeneralCsc::<Complex<f64>> {
+        n: ar.n,
+        col_ptr: ar.col_ptr.clone(),
+        row_idx: ar.row_idx.clone(),
+        values: ar
+            .values
+            .iter()
+            .enumerate()
+            .map(|(k, &v)| Complex::new(v, 0.1 * v + 0.01 * (k % 7) as f64))
+            .collect(),
+    };
+    let b: Vec<Complex<f64>> = (0..a.n)
+        .map(|i| Complex::new(((i % 11) as f64) - 5.0, (i % 3) as f64))
+        .collect();
+    let solve = |t: usize| -> Vec<Complex<f64>> {
+        let s = SolverSettings::default().with_threads(t);
+        LuSolver::<Complex<f64>>::factor(&a, &s)
+            .unwrap()
+            .solve(&b)
+            .unwrap()
+    };
+    let x1 = solve(1);
+    for _ in 0..4 {
+        assert_eq!(
+            bits_c64(&x1),
+            bits_c64(&solve(8)),
+            "LL complex LU solution differs between 1 and 8 threads or run to run"
+        );
+    }
+}
