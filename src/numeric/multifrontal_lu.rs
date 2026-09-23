@@ -86,21 +86,6 @@ impl<T: Scalar> FrontPool<T> {
     }
 }
 
-/// Always-on (relaxed, ~free) count of `lu_ll_factor_node` calls in flight for
-/// THIS factorization - the fork-dispatch signal, ported from the LDLT twin:
-/// in the separator-chain phase (few active nodes) even a small node's
-/// cmod/cdiv should fork (workers idle, little foreign work for a blocked join
-/// to steal); in the busy phase small nodes stay strictly serial (join-steal
-/// guard - a blocked join steals whole sibling subtrees and stalls this node's
-/// dependents). Scheduling-only: the dispatch never changes the computed bits
-/// (identical per-entry accumulation order on every path), so a racy counter
-/// read is benign and bit-identity across thread counts holds.
-struct LuActiveGuard<'a>(&'a AtomicUsize);
-impl Drop for LuActiveGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
-}
 thread_local! {
     /// Per-worker global->front-local index scratch (`usize`, scalar-independent),
     /// reused across every front a thread factors. Held at the all-`usize::MAX`
@@ -1505,12 +1490,9 @@ fn lu_ll_factor_node<T: Scalar>(
     emit: &LlEmit<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
-    ll_active: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     kt.interrupted()?;
-    ll_active.fetch_add(1, Ordering::Relaxed);
-    let _active = LuActiveGuard(ll_active);
     let ll_gemm_gate = kt.scalar_gate;
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
@@ -1560,21 +1542,20 @@ fn lu_ll_factor_node<T: Scalar>(
     // U-side rows, the fork/tiling dispatch input (see `ll_common::cmod_spans`).
     let (spans, cmod_flops) =
         crate::numeric::ll_common::cmod_spans(sym, sched, s, first, ncol, true);
-    // Fork only above real node-local work, or in the chain phase (<= 2 nodes
-    // in flight - workers idle, nothing to steal). Below: strictly serial.
+    // Fork only above real node-local work. Below: strictly serial.
     const LU_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
     let fork_gate = LU_CMOD_FORK_MIN_FLOPS.max(ll_gemm_par);
-    let chain_phase = ll_active.load(Ordering::Relaxed) <= 2;
-    let forks = cmod_flops >= fork_gate || (chain_phase && cmod_flops >= ll_gemm_par);
+    // Every dispatch below is a pure function of the node. A timing-dependent one (the
+    // former chain phase: fork below the gate while `<= 2` nodes were in flight) switched
+    // GEMMs between the serial and the parallel mode, which are not bit-identical for
+    // complex scalars, and the factor drifted run to run; measured without it: no loss.
+    let forks = cmod_flops >= fork_gate;
     let tile_w = (ncol / 16).clamp(32, 256);
     let tile_u = (cnrow.max(1) / 16).clamp(32, 256);
     // Deterministic mode pick (the LDLT twin's tiled-cmod note applies
     // verbatim): tiled-vs-sequential is NOT bit-identical (scalar-gate
-    // kernel dichotomy + shape-dependent GEMM bits), so `tiled` must be a
-    // pure function of the node - never of the racy `chain_phase`, which
-    // still decides only bit-neutral parallelism (`forks` for the
-    // sequential GEMMs, `ll_cdiv_par`). A racy pick broke the bit-identity
-    // guarantee; see tests/ll_thread_determinism.rs.
+    // kernel dichotomy + shape-dependent GEMM bits), so `tiled` is a pure
+    // function of the node; see tests/ll_thread_determinism.rs.
     let tiled = ncol >= 2 * tile_w && cmod_flops >= fork_gate;
 
     // Column-tiled parallel cmod: disjoint `&mut` slabs of the target
@@ -1851,9 +1832,8 @@ fn lu_ll_factor_node<T: Scalar>(
     // function of `ncol`, never of the thread count.
     let nb_cdiv = if ncol >= 512 { 128 } else { 32 };
     // Join-steal guard (see the cmod fork gate above): a small node must not
-    // fork inside its cdiv either - unless the chain phase makes it free.
-    let cdiv_chain = ll_active.load(Ordering::Relaxed) <= 2;
-    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 || cdiv_chain {
+    // fork inside its cdiv either.
+    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 {
         kt.par_cdiv
     } else {
         usize::MAX
@@ -2140,7 +2120,6 @@ fn factor_lu_left_looking<T: Scalar>(
     let emit = LlEmit::<T>::new(sym, sched);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let roots = crate::numeric::ll_common::forest_roots(sym);
-    let ll_active = AtomicUsize::new(0);
     let factor_node = |s: usize| {
         lu_ll_factor_node(
             s,
@@ -2152,7 +2131,6 @@ fn factor_lu_left_looking<T: Scalar>(
             &emit,
             perturb_floor,
             &n_perturbed_atomic,
-            &ll_active,
             kt,
         )
     };

@@ -56,21 +56,6 @@ use rayon::prelude::*;
 
 use crate::numeric::gemm_tuning::KernelTuning;
 
-/// Always-on (relaxed, ~free) count of `ll_factor_node` calls in flight for
-/// THIS factorization - the fork-dispatch signal: in the separator-chain
-/// phase (few active nodes) even a small node's cmod/cdiv should fork, since
-/// workers are idle and there is little foreign work a blocked join could
-/// steal; in the busy phase small nodes stay strictly serial (join-steal
-/// guard). Scheduling-only: the dispatch never changes the computed bits
-/// (identical per-entry accumulation order on every path), so reading a racy
-/// counter is benign and bit-identity across thread counts holds.
-struct LlActiveGuard<'a>(&'a std::sync::atomic::AtomicUsize);
-impl Drop for LlActiveGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Action to take when a near-zero pivot is encountered during factorization.
 ///
 /// This is the static-pivoting policy knob shared by the symmetric LDL^T and the
@@ -2380,12 +2365,9 @@ fn ll_factor_node<T: Scalar>(
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
-    ll_active: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     kt.interrupted()?;
-    ll_active.fetch_add(1, Ordering::Relaxed);
-    let _active = LlActiveGuard(ll_active);
     let ll_gemm_gate = kt.scalar_gate;
     let ll_gemm_par = kt.par_gemm;
     let snode = &sym.supernodes[s];
@@ -2437,8 +2419,7 @@ fn ll_factor_node<T: Scalar>(
     // update's span at slab boundaries changes the GEMM output shape, and
     // the gemm crate's per-element bits are shape-dependent (measured:
     // last-ulp drift persisted with a slab-replayed scalar gate). The MODE
-    // pick below is therefore a pure function of the node - never of the
-    // racy `chain_phase`.
+    // pick below is therefore a pure function of the node.
     let tile_w = (ncol / 16).clamp(32, 256);
     // Fork inside cmod only when the node's update work is genuinely large.
     // A small node that forks pays rayon's join-steal latency: while its
@@ -2450,17 +2431,13 @@ fn ll_factor_node<T: Scalar>(
     // tree-level parallelism covers it.
     const LL_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
     let fork_gate = LL_CMOD_FORK_MIN_FLOPS.max(ll_gemm_par);
-    // Chain phase (few nodes in flight): fork even below the gate - workers
-    // are idle and there is little foreign work a blocked join could steal.
-    let chain_phase = ll_active.load(Ordering::Relaxed) <= 2;
-    let forks = cmod_flops >= fork_gate || (chain_phase && cmod_flops >= ll_gemm_par);
-    // Deterministic mode pick (see the tiled-cmod note above): a
-    // `chain_phase`-dependent `tiled` broke the bit-identity guarantee
-    // (1-vs-8-thread and run-to-run last-ulp drift on a 3D grid; see
-    // tests/ll_thread_determinism.rs). `chain_phase` still decides
-    // *parallelism* (`seq_gemm_par` here, `ll_cdiv_par` below): GEMM
-    // Rayon-vs-serial splits only the output space and the deep-row apply
-    // is row-local, so those toggles never change the computed bits.
+    // Every dispatch below is a pure function of the node (see
+    // tests/ll_thread_determinism.rs). A timing-dependent one broke bit-identity twice:
+    // a chain-phase-dependent `tiled` (the sequential and the tiled path differ, see the
+    // note above), and the chain phase's fork below the gate (`<= 2` nodes in flight),
+    // which switched GEMMs between the serial and the parallel mode - not bit-identical
+    // for complex scalars.
+    let forks = cmod_flops >= fork_gate;
     let tiled = ncol >= 2 * tile_w && cmod_flops >= fork_gate;
     let seq_gemm_par = if forks { ll_gemm_par } else { usize::MAX };
     if tiled {
@@ -2670,7 +2647,6 @@ fn ll_factor_node<T: Scalar>(
         emit,
         perturb_floor,
         n_perturbed,
-        ll_active,
         kt,
         panel,
         gloc,
@@ -2946,7 +2922,6 @@ fn ll_cdiv_emit<T: Scalar>(
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
-    ll_active: &AtomicUsize,
     kt: KernelTuning,
     panel: &mut [T],
     mut gloc: Vec<Li>,
@@ -2982,10 +2957,8 @@ fn ll_cdiv_emit<T: Scalar>(
     // Same join-steal guard as cmod: a small node must not fork inside its
     // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
     // foreign subtree work and stalls this node's dependents. Total cdiv
-    // work ~ nrow*ncol^2 (panel + trailing updates). In the chain phase the
-    // guard lifts (see `chain_phase` above): workers are idle, forking pays.
-    let cdiv_chain = ll_active.load(Ordering::Relaxed) <= 2;
-    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 || cdiv_chain {
+    // work ~ nrow*ncol^2 (panel + trailing updates).
+    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 {
         kt.par_cdiv
     } else {
         usize::MAX
@@ -3363,7 +3336,6 @@ fn factor_left_looking<T: Scalar>(
     let n_perturbed_atomic = AtomicUsize::new(0);
     let roots = crate::numeric::ll_common::forest_roots(sym);
     let kt = opts.kernel();
-    let ll_active = AtomicUsize::new(0);
     let factor_node = |s: usize| {
         ll_factor_node(
             s,
@@ -3374,7 +3346,6 @@ fn factor_left_looking<T: Scalar>(
             &emit,
             perturb_floor,
             &n_perturbed_atomic,
-            &ll_active,
             kt,
         )
     };
