@@ -61,6 +61,10 @@ pub struct SupernodeParams {
     /// above [`RELAX_MIN_N`] unknowns so small problems are unaffected. `None`
     /// (default) = structural / size-based merges only.
     pub relax: Option<RelaxAmalgamation>,
+    /// A fill-reducing ordering to use instead of computing one (`perm[k]` the column
+    /// that becomes column `k`), with `OrderingPreprocess::None`. The rest of the analysis
+    /// (elimination tree, postorder, column counts, supernodes) runs as usual.
+    pub given_perm: Option<std::sync::Arc<[usize]>>,
 }
 
 /// Relaxed (fill-tolerant) amalgamation thresholds. See
@@ -132,6 +136,7 @@ impl Default for SupernodeParams {
             small_leaf: SmallLeafParams::default(),
             amalgamation_strategy: AmalgamationStrategy::default(),
             relax: None,
+            given_perm: None,
         }
     }
 }

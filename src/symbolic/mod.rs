@@ -535,6 +535,21 @@ fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>)
     Ok((col_ptr, row_idx))
 }
 
+/// A given ordering, checked to be a permutation of `0..n`.
+fn checked_permutation(p: &[usize], n: usize) -> Result<Vec<usize>, RslabError> {
+    let mut seen = vec![false; n];
+    if p.len() != n
+        || !p
+            .iter()
+            .all(|&k| k < n && !std::mem::replace(&mut seen[k], true))
+    {
+        return Err(RslabError::InvalidInput(format!(
+            "given ordering is not a permutation of 0..{n}"
+        )));
+    }
+    Ok(p.to_vec())
+}
+
 /// Run an external (contract-conforming) ordering crate on `pattern` and
 /// return the permutation as `Vec<usize>` in the in-tree convention
 /// (new-to-old: `perm[k]` is the original column that became column `k`),
@@ -924,7 +939,10 @@ fn symbolic_prefix_with(
         Ok(r)
     };
     let (amd_perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {
-        OrderingPreprocess::None => record_ordering(&full_pattern)?,
+        OrderingPreprocess::None => match &snode_params.given_perm {
+            Some(p) => (checked_permutation(p, n)?, method),
+            None => record_ordering(&full_pattern)?,
+        },
         OrderingPreprocess::Auto => unreachable!("resolved above"),
         OrderingPreprocess::LdltCompress => {
             // Run the MC64 matching once for the compression supermap. MC64
