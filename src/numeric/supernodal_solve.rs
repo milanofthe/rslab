@@ -725,7 +725,13 @@ impl<T: Scalar> SolvePlan<T> {
                     let vk = &vhead[k * nr..(k + 1) * nr];
                     let col = &panel[k * ld + je..(k + 1) * ld];
                     if nr == 1 {
-                        axpy(out, vk[0], col);
+                        // `col[i] * vk`, the block branch's operand order: the fused complex
+                        // multiply-add is not symmetric in its factors (the imaginary part
+                        // nests the two cross products in operand order), so the other order
+                        // made a one-column solve differ from a block column under FMA.
+                        for (o, &l) in out.iter_mut().zip(col) {
+                            *o = fmadd(l, vk[0], *o);
+                        }
                     } else {
                         for (row, &l) in out.chunks_exact_mut(nr).zip(col) {
                             axpy(row, l, vk);

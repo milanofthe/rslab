@@ -2980,7 +2980,9 @@ mod tests {
     /// block width: a non-flexible Krylov method applies the solve to blocks in its Arnoldi
     /// steps and to one column in its update, and any difference breaks the Arnoldi
     /// relation (a single-precision factor made it 1e-3 on a saddle system). Covers the
-    /// leaf subtrees and the ancestor levels (a 2D grid) and the apex node (a dense block).
+    /// leaf subtrees and the ancestor levels (a 2D grid) and the apex nodes with rows below
+    /// them (a 3D grid). Under FMA the fused complex multiply-add is not symmetric in its
+    /// factors, so the operand order of every single-column branch matters.
     #[test]
     fn lu_block_solve_is_bitwise_the_single_solve() {
         let mut seed = 12345u64;
@@ -3014,19 +3016,39 @@ mod tests {
             }
             (m * m, r, cc, v)
         };
-        let dense = |n: usize, rnd: &mut dyn FnMut() -> f64| {
+        // a 3D grid: its top separators are large enough for the apex sweep, with rows
+        // below them (the off-block product)
+        let grid3 = |m: usize, rnd: &mut dyn FnMut() -> f64| {
             let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
-            for i in 0..n {
-                for j in 0..n {
-                    r.push(i);
-                    cc.push(j);
-                    let d = if i == j { n as f64 } else { 0.0 };
-                    v.push(c(d + rnd(), rnd()));
+            let id = |a: usize, b: usize, e: usize| (a * m + b) * m + e;
+            for a in 0..m {
+                for b in 0..m {
+                    for e in 0..m {
+                        let i = id(a, b, e);
+                        r.push(i);
+                        cc.push(i);
+                        v.push(c(6.5 + rnd(), rnd()));
+                        for j in [
+                            (a + 1 < m).then(|| id(a + 1, b, e)),
+                            (b + 1 < m).then(|| id(a, b + 1, e)),
+                            (e + 1 < m).then(|| id(a, b, e + 1)),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            r.push(i);
+                            cc.push(j);
+                            v.push(c(-1.0 + 0.3 * rnd(), 0.2 * rnd()));
+                            r.push(j);
+                            cc.push(i);
+                            v.push(c(-1.0 + 0.3 * rnd(), 0.2 * rnd()));
+                        }
+                    }
                 }
             }
-            (n, r, cc, v)
+            (m * m * m, r, cc, v)
         };
-        for (n, r, cc, v) in [grid(60, &mut rnd), dense(600, &mut rnd)] {
+        for (n, r, cc, v) in [grid(60, &mut rnd), grid3(24, &mut rnd)] {
             let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &r, &cc, &v).unwrap();
             let solver = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
             for nrhs in [2usize, 3, 5] {
