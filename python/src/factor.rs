@@ -401,6 +401,40 @@ impl<T: Field> Pair<T, KluSolver<T>> {
         let (s, a) = (&mut self.s, &self.a);
         py.allow_threads(|| s.refactor(a)).map_err(map_err)
     }
+
+    pub fn l_matrix(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let l = self.s.l_matrix();
+        crate::common::csc_to_py(py, &l)
+    }
+
+    pub fn u_matrix(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let u = self.s.u_matrix();
+        crate::common::csc_to_py(py, &u)
+    }
+
+    pub fn f_matrix(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let f = self.s.f_matrix();
+        crate::common::csc_to_py(py, &f)
+    }
+
+    pub fn perm_r(&self, py: Python<'_>) -> PyObject {
+        let p: Vec<i32> = self.s.row_perm().iter().map(|&x| x as i32).collect();
+        crate::common::array1(py, p)
+    }
+
+    pub fn perm_c(&self, py: Python<'_>) -> PyObject {
+        let p: Vec<i32> = self.s.col_perm().iter().map(|&x| x as i32).collect();
+        crate::common::array1(py, p)
+    }
+
+    pub fn block_ptr(&self, py: Python<'_>) -> PyObject {
+        let bp: Vec<i32> = self.s.block_ptr().iter().map(|&x| x as i32).collect();
+        crate::common::array1(py, bp)
+    }
+
+    pub fn rs_inv(&self, py: Python<'_>) -> PyObject {
+        crate::common::array1(py, self.s.rs_inv().to_vec())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +763,9 @@ handle! {
 handle! {
     /// A KLU-path factor (block triangular form plus per-block Gilbert-Peierls
     /// LU) for circuit-shaped matrices, from :func:`rslab.klu` or
-    /// :meth:`KluSymbolic.factor`. Supports the numeric-only :meth:`refactor`
+    /// :meth:`KluSymbolic.factor`. Exposes the factor matrices :attr:`L`,
+    /// :attr:`U`, :attr:`F` and permutations :attr:`perm_r`, :attr:`perm_c`
+    /// (inspired by SuperLU), and supports the numeric-only :meth:`refactor`
     /// for fixed-pattern sweeps and :meth:`solve_transpose`.
     Klu, KluAny, KluSolver;
 
@@ -737,6 +773,86 @@ handle! {
     #[getter]
     fn n_blocks(&self) -> usize {
         dispatch!(KluAny, &self.inner, |p| p.s.n_blocks())
+    }
+
+    /// Unit lower-triangular factor L of the block triangular form as a
+    /// SciPy ``csc_matrix`` (implicit unit diagonal materialized).
+    #[getter(L)]
+    fn get_l(&self, py: Python<'_>) -> PyResult<PyObject> {
+        dispatch!(KluAny, &self.inner, |p| p.l_matrix(py))
+    }
+
+    #[getter(l)]
+    fn get_l_lower(&self, py: Python<'_>) -> PyResult<PyObject> {
+        dispatch!(KluAny, &self.inner, |p| p.l_matrix(py))
+    }
+
+    /// Upper-triangular factor U of the block triangular form as a SciPy
+    /// ``csc_matrix`` (diagonal pivots included).
+    #[getter(U)]
+    fn get_u(&self, py: Python<'_>) -> PyResult<PyObject> {
+        dispatch!(KluAny, &self.inner, |p| p.u_matrix(py))
+    }
+
+    #[getter(u)]
+    fn get_u_lower(&self, py: Python<'_>) -> PyResult<PyObject> {
+        dispatch!(KluAny, &self.inner, |p| p.u_matrix(py))
+    }
+
+    /// Off-diagonal block entries F of the block triangular form as a
+    /// SciPy ``csc_matrix``.
+    #[getter(F)]
+    fn get_f(&self, py: Python<'_>) -> PyResult<PyObject> {
+        dispatch!(KluAny, &self.inner, |p| p.f_matrix(py))
+    }
+
+    #[getter(f)]
+    fn get_f_lower(&self, py: Python<'_>) -> PyResult<PyObject> {
+        dispatch!(KluAny, &self.inner, |p| p.f_matrix(py))
+    }
+
+    /// Row permutation vector (``P_r``): row ``k`` of the permuted system is
+    /// row ``perm_r[k]`` of ``A``.
+    #[getter]
+    fn perm_r(&self, py: Python<'_>) -> PyObject {
+        dispatch!(KluAny, &self.inner, |p| p.perm_r(py))
+    }
+
+    /// Column permutation vector (``P_c``): column ``k`` of the permuted system
+    /// is column ``perm_c[k]`` of ``A``.
+    #[getter]
+    fn perm_c(&self, py: Python<'_>) -> PyObject {
+        dispatch!(KluAny, &self.inner, |p| p.perm_c(py))
+    }
+
+    /// Diagonal block boundaries of the block triangular form (BTF).
+    #[getter]
+    fn block_ptr(&self, py: Python<'_>) -> PyObject {
+        dispatch!(KluAny, &self.inner, |p| p.block_ptr(py))
+    }
+
+    /// Per-original-row scale factor reciprocals (all 1.0 when row scaling is off).
+    #[getter]
+    fn rs_inv(&self, py: Python<'_>) -> PyObject {
+        dispatch!(KluAny, &self.inner, |p| p.rs_inv(py))
+    }
+
+    /// Alias for :attr:`rs_inv`.
+    #[getter]
+    fn row_scale(&self, py: Python<'_>) -> PyObject {
+        dispatch!(KluAny, &self.inner, |p| p.rs_inv(py))
+    }
+
+    /// Shape of the factor ``(n, n)``, matching SuperLU.
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        dispatch!(KluAny, &self.inner, |p| (p.s.n(), p.s.n()))
+    }
+
+    /// Total stored factor nonzeros in L, U, and F (alias for :attr:`factor_nnz`).
+    #[getter]
+    fn nnz(&self) -> usize {
+        dispatch!(KluAny, &self.inner, |p| p.s.factor_nnz())
     }
 
     /// Solve ``A^T y = b`` on the same factors (plain transpose, not the

@@ -522,3 +522,82 @@ def test_klu_gmres_composes():
     assert conv and stop == "converged"
     assert iters <= 2  # exact preconditioner
     assert _residual(A, x, b) < 1e-10
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
+@pytest.mark.parametrize("row_scaling", [True, false if False else False])
+def test_klu_l_u_f_matrices(dtype, row_scaling):
+    rng = np.random.default_rng(42)
+    n = 40
+    # Two-block matrix with feed so F is non-trivial
+    A1 = _circuit(20, seed=1).astype(dtype)
+    A2 = _circuit(20, seed=2).astype(dtype)
+    A = sp.bmat([[A1, sp.csc_matrix((20, 20), dtype=dtype)], [None, A2]], format="csc")
+    # Add cross-block entries in the upper part
+    cross = sp.random(20, 20, density=0.2, format="csc", random_state=rng, dtype=dtype)
+    A = sp.bmat([[A1, cross], [None, A2]], format="csc")
+
+    f = rslab.klu(A, row_scaling=row_scaling)
+
+    # SuperLU-inspired properties
+    assert f.shape == (n, n)
+    assert f.nnz == f.factor_nnz
+    assert len(f.perm_r) == n
+    assert len(f.perm_c) == n
+    assert f.perm_r.dtype == np.int32
+    assert f.perm_c.dtype == np.int32
+    assert len(f.block_ptr) == f.n_blocks + 1
+    assert f.block_ptr[0] == 0 and f.block_ptr[-1] == n
+    assert len(f.rs_inv) == n
+    assert len(f.row_scale) == n
+
+    # Matrix types and shapes
+    for L in (f.L, f.l):
+        assert isinstance(L, sp.csc_matrix)
+        assert L.shape == (n, n)
+        assert L.dtype == np.dtype(dtype)
+    for U in (f.U, f.u):
+        assert isinstance(U, sp.csc_matrix)
+        assert U.shape == (n, n)
+        assert U.dtype == np.dtype(dtype)
+    for F in (f.F, f.f):
+        assert isinstance(F, sp.csc_matrix)
+        assert F.shape == (n, n)
+        assert F.dtype == np.dtype(dtype)
+
+    # Structural properties:
+    # L is unit lower triangular
+    L = f.L
+    assert np.allclose(L.diagonal(), 1.0)
+    assert (sp.tril(L) - L).nnz == 0
+
+    # U is upper triangular
+    U = f.U
+    assert (sp.triu(U) - U).nnz == 0
+
+    # F is strictly upper triangular (diagonal zero)
+    F = f.F
+    assert np.all(F.diagonal() == 0)
+    assert (sp.triu(F, k=1) - F).nnz == 0
+
+    # Algebraic identity: P_r * (Rs_inv * A) * P_c == L * U + F
+    Pr = sp.csc_matrix((np.ones(n, dtype=dtype), (np.arange(n), f.perm_r)), shape=(n, n))
+    Pc = sp.csc_matrix((np.ones(n, dtype=dtype), (f.perm_c, np.arange(n))), shape=(n, n))
+    Rs_inv = sp.diags(f.rs_inv.astype(dtype))
+    A_scaled = Pr @ Rs_inv @ A @ Pc
+    recon = L @ U + F
+
+    diff = np.max(np.abs((A_scaled - recon).toarray()))
+    tol = 1e-5 if np.dtype(dtype).itemsize == 4 or np.dtype(dtype).itemsize == 8 and np.iscomplexobj(A.data) and A.dtype == np.complex64 else 1e-11
+    assert diff < tol, f"Reconstruction error: {diff}"
+
+    # Verify after refactor with scaled values
+    A2 = A.copy()
+    A2.data = A2.data * 2.0
+    f.refactor(A2.data)
+    L2, U2, F2 = f.L, f.U, f.F
+    Rs_inv2 = sp.diags(f.rs_inv.astype(dtype))
+    A2_scaled = Pr @ Rs_inv2 @ A2 @ Pc
+    recon2 = L2 @ U2 + F2
+    diff2 = np.max(np.abs((A2_scaled - recon2).toarray()))
+    assert diff2 < tol, f"Reconstruction error after refactor: {diff2}"

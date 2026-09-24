@@ -1746,6 +1746,142 @@ impl<T: Scalar> KluSolver<T> {
             + self.factors.f_val.len()
     }
 
+    /// Return the unit lower-triangular factor L as a general CSC matrix.
+    ///
+    /// L is block-diagonal with unit diagonal: each BTF block contributes a
+    /// unit lower-triangular block. Row indices in each column are sorted.
+    pub fn l_matrix(&self) -> GeneralCsc<T> {
+        let f = &self.factors;
+        let n = f.n;
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        col_ptr.push(0);
+        let mut row_idx = Vec::with_capacity(n + f.l_val.len());
+        let mut values = Vec::with_capacity(n + f.l_val.len());
+
+        let mut off_diag = Vec::new();
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(T::one());
+
+            off_diag.clear();
+            for k in f.l_colptr[j]..f.l_colptr[j + 1] {
+                off_diag.push((f.l_rowidx[k] as usize, f.l_val[k]));
+            }
+            off_diag.sort_unstable_by_key(|&(r, _)| r);
+            for (r, v) in off_diag.drain(..) {
+                row_idx.push(r);
+                values.push(v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+
+        GeneralCsc {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
+    /// Return the upper-triangular factor U as a general CSC matrix.
+    ///
+    /// U is block-diagonal: each BTF block contributes an upper-triangular
+    /// block with the diagonal pivots from `udiag`. Row indices in each
+    /// column are sorted.
+    pub fn u_matrix(&self) -> GeneralCsc<T> {
+        let f = &self.factors;
+        let n = f.n;
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        col_ptr.push(0);
+        let mut row_idx = Vec::with_capacity(n + f.u_val.len());
+        let mut values = Vec::with_capacity(n + f.u_val.len());
+
+        let mut off_diag = Vec::new();
+        for j in 0..n {
+            off_diag.clear();
+            for k in f.u_colptr[j]..f.u_colptr[j + 1] {
+                off_diag.push((f.u_rowidx[k] as usize, f.u_val[k]));
+            }
+            off_diag.sort_unstable_by_key(|&(r, _)| r);
+            for (r, v) in off_diag.drain(..) {
+                row_idx.push(r);
+                values.push(v);
+            }
+            row_idx.push(j);
+            values.push(f.udiag[j]);
+
+            col_ptr.push(row_idx.len());
+        }
+
+        GeneralCsc {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
+    /// Return the off-diagonal block entries F as a general CSC matrix.
+    ///
+    /// F contains all entries outside the diagonal blocks of the block
+    /// triangular form. Row indices in each column are sorted.
+    pub fn f_matrix(&self) -> GeneralCsc<T> {
+        let f = &self.factors;
+        let n = f.n;
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        col_ptr.push(0);
+        let mut row_idx = Vec::with_capacity(f.f_val.len());
+        let mut values = Vec::with_capacity(f.f_val.len());
+
+        let mut col_entries = Vec::new();
+        for j in 0..n {
+            col_entries.clear();
+            for k in f.f_colptr[j]..f.f_colptr[j + 1] {
+                col_entries.push((f.f_rowidx[k] as usize, f.f_val[k]));
+            }
+            col_entries.sort_unstable_by_key(|&(r, _)| r);
+            for (r, v) in col_entries.drain(..) {
+                row_idx.push(r);
+                values.push(v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+
+        GeneralCsc {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
+    /// Row permutation vector (length `n`): row `k` of the permuted system
+    /// is row `row_perm[k]` of the original matrix.
+    pub fn row_perm(&self) -> &[usize] {
+        &self.factors.row_perm
+    }
+
+    /// Column permutation vector (length `n`): column `k` of the permuted system
+    /// is column `col_perm[k]` of the original matrix.
+    pub fn col_perm(&self) -> &[usize] {
+        &self.factors.col_perm
+    }
+
+    /// Diagonal block boundaries of the block triangular form (BTF).
+    pub fn block_ptr(&self) -> &[usize] {
+        &self.factors.block_ptr
+    }
+
+    /// Per-original-row scale factor reciprocals (all 1.0 when row scaling is off).
+    pub fn rs_inv(&self) -> &[f64] {
+        &self.factors.rs_inv
+    }
+
+    /// Whether row scaling was enabled during factorization.
+    pub fn is_row_scaled(&self) -> bool {
+        self.factors.scaled
+    }
+
     /// Solve `A x = b`.
     pub fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
         let t = crate::clock::Instant::now();
@@ -3258,5 +3394,102 @@ mod tests {
         let b: Vec<f64> = (0..a.n).map(|i| (i % 3) as f64).collect();
         let x = solver.solve(&b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-12);
+    }
+
+    #[test]
+    fn klu_exposes_l_u_f_matrices() {
+        for (seed, scaling, btf) in [(10, true, true), (20, false, true), (30, true, false)] {
+            let a = cascaded(60, 4, seed);
+            let s = KluSettings::default()
+                .with_row_scaling(scaling)
+                .with_btf(btf);
+            let solver = KluSolver::factor(&a, &s).unwrap();
+
+            let l = solver.l_matrix();
+            let u = solver.u_matrix();
+            let f = solver.f_matrix();
+
+            l.validate().expect("L must be canonical CSC");
+            u.validate().expect("U must be canonical CSC");
+            f.validate().expect("F must be canonical CSC");
+
+            assert_eq!(l.n, a.n);
+            assert_eq!(u.n, a.n);
+            assert_eq!(f.n, a.n);
+
+            // L is unit lower triangular
+            for j in 0..l.n {
+                let mut has_diag = false;
+                for k in l.col_ptr[j]..l.col_ptr[j + 1] {
+                    let r = l.row_idx[k];
+                    assert!(r >= j, "L entries must be on or below diagonal");
+                    if r == j {
+                        has_diag = true;
+                        assert_eq!(l.values[k], 1.0, "L diagonal must be 1.0");
+                    }
+                }
+                assert!(has_diag, "L must have unit diagonal at column {j}");
+            }
+
+            // U is upper triangular
+            for j in 0..u.n {
+                for k in u.col_ptr[j]..u.col_ptr[j + 1] {
+                    let r = u.row_idx[k];
+                    assert!(r <= j, "U entries must be on or above diagonal");
+                }
+            }
+
+            // F is strictly upper triangular (off-diagonal BTF blocks)
+            for j in 0..f.n {
+                for k in f.col_ptr[j]..f.col_ptr[j + 1] {
+                    let r = f.row_idx[k];
+                    assert!(r < j, "F entries must be strictly above diagonal");
+                }
+            }
+
+            // Test algebraic identity: P_r * (Rs_inv * A) * P_c == L * U + F
+            let rp = solver.row_perm();
+            let cp = solver.col_perm();
+            let rs = solver.rs_inv();
+            assert_eq!(rp.len(), a.n);
+            assert_eq!(cp.len(), a.n);
+            assert_eq!(rs.len(), a.n);
+
+            let mut rng = Rng(seed | 99);
+            let x: Vec<f64> = (0..a.n).map(|_| rng.next_f64()).collect();
+
+            // (L * U + F) * x = L * (U * x) + F * x
+            let mut ux = vec![0.0; a.n];
+            u.matvec(&x, &mut ux);
+            let mut lux = vec![0.0; a.n];
+            l.matvec(&ux, &mut lux);
+            let mut fx = vec![0.0; a.n];
+            f.matvec(&x, &mut fx);
+            let y_luf: Vec<f64> = lux.iter().zip(&fx).map(|(&a, &b)| a + b).collect();
+
+            // P_r * (Rs_inv * A) * P_c * x:
+            // 1. x_pc = P_c * x: column j of permuted is col_perm[j] of original
+            let mut x_pc = vec![0.0; a.n];
+            for (j, &c) in cp.iter().enumerate() {
+                x_pc[c] = x[j];
+            }
+            // 2. Ax = A * x_pc
+            let mut ax = vec![0.0; a.n];
+            a.matvec(&x_pc, &mut ax);
+            // 3. Rs_inv * Ax
+            for (i, v) in ax.iter_mut().enumerate() {
+                *v *= rs[i];
+            }
+            // 4. P_r * (Rs_inv * Ax): row k of permuted is row_perm[k] of original
+            let mut y_orig = vec![0.0; a.n];
+            for (k, &orig) in rp.iter().enumerate() {
+                y_orig[k] = ax[orig];
+            }
+
+            for k in 0..a.n {
+                let diff = (y_luf[k] - y_orig[k]).abs();
+                assert!(diff < 1e-12, "mismatch at {k}: {diff} (luf={}, orig={})", y_luf[k], y_orig[k]);
+            }
+        }
     }
 }
