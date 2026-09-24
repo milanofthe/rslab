@@ -570,8 +570,7 @@ fn lu_front<T: Scalar>(
 fn factor_one_node_lu<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
-    a_perm: &GeneralCsc<T>,
-    a_perm_t: &GeneralCsc<T>,
+    inp: LuInput<T>,
     child_refs: &[&NodeLu<T>],
     perturb_floor: Option<f64>,
     blr: BlrMode,
@@ -626,26 +625,20 @@ fn factor_one_node_lu<T: Scalar>(
         gloc[g] = li as Li;
     }
 
-    // Owned columns (full): scatter a_perm column c into front column p.
+    // Owned columns (full) into front column p, owned rows' trailing columns
+    // (U12) into front row p.
     for p in 0..ncol {
         let c = snode.first_col + p;
-        for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
-            let g = a_perm.row_idx[k];
+        for (g, v) in inp.col(c) {
             let lr = gloc[g];
             if lr != Li::MAX {
-                f[p * nrow + lr as usize] = f[p * nrow + lr as usize] + a_perm.values[k];
+                f[p * nrow + lr as usize] = f[p * nrow + lr as usize] + v;
             }
         }
-    }
-    // Owned rows, trailing columns only (U12): scatter a_perm^T column r (=
-    // a_perm row r) into front row p for trailing front columns.
-    for p in 0..ncol {
-        let r = snode.first_col + p;
-        for k in a_perm_t.col_ptr[r]..a_perm_t.col_ptr[r + 1] {
-            let g = a_perm_t.row_idx[k];
+        for (g, v) in inp.row(c) {
             let lc = gloc[g];
-            if lc != Li::MAX && lc as usize >= ncol {
-                f[lc as usize * nrow + p] = f[lc as usize * nrow + p] + a_perm_t.values[k];
+            if lc != Li::MAX {
+                f[lc as usize * nrow + p] = f[lc as usize * nrow + p] + v;
             }
         }
     }
@@ -708,6 +701,127 @@ struct LuMatching {
     c: Vec<f64>,
 }
 
+/// The permuted input of the numeric phase, split the way the supernodes read
+/// it: entry `(i, j)` of `P^T B P` (`B` the matrix factored, `A` or its
+/// row-matched form) goes to the columns of `j`'s supernode if row `i` lies in
+/// its diagonal block or below, else to the `U12` rows of `i`'s supernode (`j`
+/// then lies past it). Every entry is read once, so the values are one array
+/// of `nnz`: the column part `[..split]` (by column: `col_ptr`, `row_idx`),
+/// then the row part (by row: `row_ptr`, `col_idx`, offsets from `split`).
+/// The structure is fixed per analysis; a factorization scatters its values
+/// through `pos` (entry `k` of `A` to slot `pos[k]`), row matching included.
+struct LuScatter {
+    col_ptr: Vec<usize>,
+    row_idx: Vec<Li>,
+    row_ptr: Vec<usize>,
+    col_idx: Vec<Li>,
+    pos: Vec<usize>,
+}
+
+impl LuScatter {
+    /// `b_row[r]`: the row of `B` that row `r` of `A` becomes (`None`: `B = A`).
+    fn build(
+        a: &GeneralCsc<impl Scalar>,
+        b_row: Option<&[usize]>,
+        sym: &SymbolicFactorization,
+    ) -> Self {
+        let n = a.n;
+        let mut first = vec![0usize; n];
+        for sn in &sym.supernodes {
+            first[sn.first_col..sn.first_col + sn.ncol].fill(sn.first_col);
+        }
+        let at = |j: usize, k: usize| {
+            let r = a.row_idx[k];
+            (sym.perm_inv[b_row.map_or(r, |b| b[r])], sym.perm_inv[j])
+        };
+        // Count per target column / row, place `(index, entry)` pairs, sort each
+        // column / row by index (the assembly walks them in that order).
+        let (mut col_ptr, mut row_ptr) = (vec![0usize; n + 1], vec![0usize; n + 1]);
+        for j in 0..n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                let (gi, gj) = at(j, k);
+                if gi >= first[gj] {
+                    col_ptr[gj + 1] += 1;
+                } else {
+                    row_ptr[gi + 1] += 1;
+                }
+            }
+        }
+        for c in 0..n {
+            col_ptr[c + 1] += col_ptr[c];
+            row_ptr[c + 1] += row_ptr[c];
+        }
+        let split = col_ptr[n];
+        let mut pairs: Vec<(Li, usize)> = vec![(0, 0); a.row_idx.len()];
+        let (mut cc, mut rc) = (col_ptr[..n].to_vec(), row_ptr[..n].to_vec());
+        for j in 0..n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                let (gi, gj) = at(j, k);
+                if gi >= first[gj] {
+                    pairs[cc[gj]] = (gi as Li, k);
+                    cc[gj] += 1;
+                } else {
+                    pairs[split + rc[gi]] = (gj as Li, k);
+                    rc[gi] += 1;
+                }
+            }
+        }
+        drop((first, cc, rc));
+        let mut pos = vec![0usize; pairs.len()];
+        let mut idx = |ptr: &[usize], base: usize| -> Vec<Li> {
+            let mut out = vec![0 as Li; ptr[n]];
+            for c in 0..n {
+                let run = &mut pairs[base + ptr[c]..base + ptr[c + 1]];
+                run.sort_unstable_by_key(|&(g, _)| g);
+                for (p, &(g, k)) in (ptr[c]..ptr[c + 1]).zip(run.iter()) {
+                    out[p] = g;
+                    pos[k] = base + p;
+                }
+            }
+            out
+        };
+        let row_idx = idx(&col_ptr, 0);
+        let col_idx = idx(&row_ptr, split);
+        LuScatter {
+            col_ptr,
+            row_idx,
+            row_ptr,
+            col_idx,
+            pos,
+        }
+    }
+}
+
+/// One factorization's permuted input: the [`LuScatter`] structure and its values.
+#[derive(Clone, Copy)]
+struct LuInput<'a, T> {
+    sc: &'a LuScatter,
+    vals: &'a [T],
+}
+
+impl<'a, T: Scalar> LuInput<'a, T> {
+    /// Rows and values of column `c` in its supernode's columns (row `>=` the
+    /// supernode's first column).
+    #[inline]
+    fn col(self, c: usize) -> impl Iterator<Item = (usize, T)> + 'a {
+        let r = self.sc.col_ptr[c]..self.sc.col_ptr[c + 1];
+        let (idx, vals) = (&self.sc.row_idx[r.clone()], &self.vals[r]);
+        idx.iter().zip(vals).map(|(&g, &v)| (g as usize, v))
+    }
+
+    /// Columns and values of row `r` in its supernode's `U12` (column past the
+    /// supernode).
+    #[inline]
+    fn row(self, r: usize) -> impl Iterator<Item = (usize, T)> + 'a {
+        let split = self.sc.col_ptr[self.sc.col_ptr.len() - 1];
+        let k = split + self.sc.row_ptr[r]..split + self.sc.row_ptr[r + 1];
+        let idx = &self.sc.col_idx[self.sc.row_ptr[r]..self.sc.row_ptr[r + 1]];
+        idx.iter()
+            .zip(&self.vals[k])
+            .map(|(&g, &v)| (g as usize, v))
+    }
+}
+
 pub struct LuSymbolic {
     symb: crate::numeric::multifrontal_ldlt::MultifrontalSymbolic,
     n: usize,
@@ -721,10 +835,10 @@ pub struct LuSymbolic {
     /// size (the estimate depends on `T` only through `size_of::<T>()`, and
     /// rebuilding the supernode row structures per call is expensive).
     est_cache: Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
-    /// Lazily built scatter programs for `P^T A P` and its transpose: the
-    /// permuted structures are fixed per pattern, so every (re)factorization
-    /// reduces to one linear values scatter (equilibration applied on the way).
-    perm_scatter: std::sync::OnceLock<(PermScatter, PermScatter)>,
+    /// The split permuted input's structure ([`LuScatter`]), built at the first
+    /// factorization: every (re)factorization reduces to one linear values
+    /// scatter (row matching and equilibration applied on the way).
+    scatter: std::sync::OnceLock<LuScatter>,
 }
 
 impl LuSymbolic {
@@ -764,7 +878,7 @@ impl LuSymbolic {
                 analyze_ms: 0.0,
                 requested_ordering: opts.ordering,
                 est_cache: Mutex::new(Vec::new()),
-                perm_scatter: std::sync::OnceLock::new(),
+                scatter: std::sync::OnceLock::new(),
             });
         }
         let t = crate::clock::Instant::now();
@@ -821,7 +935,7 @@ impl LuSymbolic {
             analyze_ms,
             requested_ordering: opts.ordering,
             est_cache: Mutex::new(Vec::new()),
-            perm_scatter: std::sync::OnceLock::new(),
+            scatter: std::sync::OnceLock::new(),
         })
     }
 
@@ -1048,9 +1162,9 @@ impl LuSymbolic {
             (2 * nr * nc * value_bytes) as u64
         };
         let compact_bytes = panel_bytes;
-        // Persistent input copies: the equilibrated permuted `a_perm` and its
-        // transpose `a_perm_t` (both held through the left-looking factor).
-        let input_bytes = (2 * self.nnz * (value_bytes + 8)) as u64;
+        // The split permuted input: its values (per factorization) and structure
+        // (per analysis, `u32` indices and `usize` positions).
+        let input_bytes = (self.nnz * (value_bytes + 12)) as u64;
         let mut est = crate::diagnostics::estimate_left_looking(
             nsuper,
             &panel_bytes,
@@ -1315,9 +1429,7 @@ pub fn factor_general_lu<T: Scalar>(
 /// trailing rows, only read by the emit).
 type LuLlStore = crate::numeric::ll_common::SlotStore<Vec<usize>>;
 
-use crate::numeric::ll_common::{
-    emit_refcount_offsets, Cells, Li, LlSchedule, PanelPtr, PermScatter,
-};
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, Li, LlSchedule, PanelPtr};
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -1472,8 +1584,7 @@ fn emit_and_free<T: Scalar>(
 fn lu_ll_factor_node<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
-    a_perm: &GeneralCsc<T>,
-    a_perm_t: &GeneralCsc<T>,
+    inp: LuInput<T>,
     sched: &LlSchedule,
     store: &LuLlStore,
     emit: &LlEmit<T>,
@@ -1509,18 +1620,18 @@ fn lu_ll_factor_node<T: Scalar>(
     // Assemble columns of s (full) into lbuf, and the U12 rows into ut.
     for p in 0..ncol {
         let c = first + p;
-        for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
-            let li = gloc[a_perm.row_idx[k]];
+        for (g, v) in inp.col(c) {
+            let li = gloc[g];
             if li != Li::MAX {
                 let li = li as usize;
-                lbuf[p * nrow + li] = lbuf[p * nrow + li] + a_perm.values[k];
+                lbuf[p * nrow + li] = lbuf[p * nrow + li] + v;
             }
         }
-        for k in a_perm_t.col_ptr[c]..a_perm_t.col_ptr[c + 1] {
-            let lc = gloc[a_perm_t.row_idx[k]];
-            if lc != Li::MAX && lc as usize >= ncol {
+        for (g, v) in inp.row(c) {
+            let lc = gloc[g];
+            if lc != Li::MAX {
                 let lc = lc as usize;
-                ut[p * nrow + lc] = ut[p * nrow + lc] + a_perm_t.values[k];
+                ut[p * nrow + lc] = ut[p * nrow + lc] + v;
             }
         }
     }
@@ -2101,14 +2212,13 @@ fn lu_ll_factor_node<T: Scalar>(
 }
 
 /// Supernodal left-looking LU producing the same [`LuFactors`] as the
-/// multifrontal path. `a_perm`/`a_perm_t` are the equilibrated permuted matrix
-/// and its transpose; `d_row`/`d_col` the equilibration carried into the result.
+/// multifrontal path. `inp` is the equilibrated permuted matrix; `d_row`/`d_col`
+/// the equilibration carried into the result.
 #[allow(clippy::too_many_arguments)]
 fn factor_lu_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
-    a_perm: &GeneralCsc<T>,
-    a_perm_t: &GeneralCsc<T>,
+    inp: LuInput<T>,
     d_row: &[f64],
     d_col: &[f64],
     perturb_floor: Option<f64>,
@@ -2125,8 +2235,7 @@ fn factor_lu_left_looking<T: Scalar>(
         lu_ll_factor_node(
             s,
             sym,
-            a_perm,
-            a_perm_t,
+            inp,
             sched,
             &store,
             &emit,
@@ -2250,14 +2359,6 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // The matrix the pipeline factors: `A` itself, or its MC64 row-permuted
     // form `B` (row `i` of `B` is row `row_of[i]` of `A`) with the matching's
     // scalings; otherwise the max-norm equilibration.
-    let input;
-    let a_in: &GeneralCsc<T> = match &lusym.matching {
-        Some(m) => {
-            input = LuSymbolic::row_permuted(a, m);
-            &input
-        }
-        None => a,
-    };
     let (d_row, d_col): (Vec<f64>, Vec<f64>) = match &lusym.matching {
         Some(m) => ((0..n).map(|i| m.r[m.row_of[i]]).collect(), m.c.clone()),
         None => {
@@ -2286,35 +2387,28 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         }
     };
 
-    let (fwd, bwd) = lusym.perm_scatter.get_or_init(|| {
-        (
-            PermScatter::build_full(n, &a_in.col_ptr, &a_in.row_idx, &sym.perm_inv),
-            PermScatter::build_full_transposed(n, &a_in.col_ptr, &a_in.row_idx, &sym.perm_inv),
-        )
+    // `A`'s row `r` is `B`'s row `b_row[r]`, scaled by `d_row[b_row[r]]`.
+    let b_row: Option<Vec<usize>> = lusym.matching.as_ref().map(|m| {
+        let mut b = vec![0usize; n];
+        for (i, &r) in m.row_of.iter().enumerate() {
+            b[r] = i;
+        }
+        b
     });
-    let nnz = a_in.row_idx.len();
-    let mut vals = vec![T::zero(); nnz];
-    let mut vals_t = vec![T::zero(); nnz];
+    let sc = lusym
+        .scatter
+        .get_or_init(|| LuScatter::build(a, b_row.as_deref(), sym));
+    let mut vals = vec![T::zero(); a.row_idx.len()];
     for j in 0..n {
         let dc = d_col[j];
-        for k in a_in.col_ptr[j]..a_in.col_ptr[j + 1] {
-            let sv = a_in.values[k] * T::from_real(d_row[a_in.row_idx[k]] * dc);
-            vals[fwd.pos[k]] = sv;
-            vals_t[bwd.pos[k]] = sv;
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let r = a.row_idx[k];
+            let dr = d_row[b_row.as_ref().map_or(r, |b| b[r])];
+            vals[sc.pos[k]] = a.values[k] * T::from_real(dr * dc);
         }
     }
-    let a_perm = GeneralCsc {
-        n,
-        col_ptr: fwd.col_ptr.clone(),
-        row_idx: fwd.row_idx.clone(),
-        values: vals,
-    };
-    let a_perm_t = GeneralCsc {
-        n,
-        col_ptr: bwd.col_ptr.clone(),
-        row_idx: bwd.row_idx.clone(),
-        values: vals_t,
-    };
+    drop(b_row);
+    let inp = LuInput { sc, vals: &vals };
     // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
     // trees), shared by both LU paths.
     let stack = crate::numeric::multifrontal_ldlt::stack_for_depth(
@@ -2333,8 +2427,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
                     lusym.symb.ll_schedule().ok_or_else(|| {
                         RslabError::InvalidInput("internal: empty symbolic".to_string())
                     })?,
-                    &a_perm,
-                    &a_perm_t,
+                    inp,
                     &d_row,
                     &d_col,
                     perturb_floor,
@@ -2357,17 +2450,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // Scoped pool of `opts.threads` with the depth-sized stack (honours the thread
     // budget and is overflow-safe on deep trees, like the left-looking path).
     let factor_one = |s: usize, child_refs: &[&NodeLu<T>]| {
-        factor_one_node_lu(
-            s,
-            sym,
-            &a_perm,
-            &a_perm_t,
-            child_refs,
-            perturb_floor,
-            blr,
-            &pool,
-            kt,
-        )
+        factor_one_node_lu(s, sym, inp, child_refs, perturb_floor, blr, &pool, kt)
     };
     let free_contrib = |nf: &mut NodeLu<T>| nf.contrib = Contribution::Dense(Vec::new());
     let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(
