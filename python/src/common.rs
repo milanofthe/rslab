@@ -12,6 +12,36 @@ use rslab::{Diagnostics, MemoryEstimate, RslabError, Scalar};
 pub type C64 = Complex<f64>;
 pub type C32 = Complex<f32>;
 
+/// Run an analysis or factorization without the GIL, then hand the memory the
+/// allocator cached during it back to the system. mimalloc keeps freed pages in
+/// per-thread heaps, which is what makes the per-product buffers of the dense
+/// kernels cheap inside one call; the scoped pool's workers exit afterwards and
+/// leave those heaps holding up to the factor size again until forced.
+pub fn heavy<R: pyo3::marker::Ungil>(
+    py: Python<'_>,
+    f: impl pyo3::marker::Ungil + FnOnce() -> R,
+) -> R {
+    let out = py.allow_threads(f);
+    collect();
+    out
+}
+
+/// Last field of the objects that own a factor: dropped after the factor
+/// itself, it hands the freed pages back as [`heavy`] does.
+#[derive(Default)]
+pub struct Release;
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        collect();
+    }
+}
+
+fn collect() {
+    // SAFETY: a plain allocator call without preconditions.
+    unsafe { libmimalloc_sys::mi_collect(true) };
+}
+
 pub fn map_err(e: RslabError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }

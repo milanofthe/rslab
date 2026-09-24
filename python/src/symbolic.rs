@@ -10,7 +10,9 @@ use rslab::{
     MemoryEstimate, RslabError, SolverSettings,
 };
 
-use crate::common::{map_err, memory_estimate_dict, scalar_bytes, vector, with_dtype, Pattern};
+use crate::common::{
+    heavy, map_err, memory_estimate_dict, scalar_bytes, vector, with_dtype, Pattern,
+};
 use crate::factor::{Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
 
@@ -169,9 +171,7 @@ impl PyLdltSymbolic {
         let data = &self.pattern.values_of(py, data, true)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.csc::<T>(d)?;
-            let s = py
-                .allow_threads(|| self.sym.factor(&a, &opts))
-                .map_err(map_err)?;
+            let s = heavy(py, || self.sym.factor(&a, &opts)).map_err(map_err)?;
             Ok(Ldlt {
                 inner: T::ldlt(Pair::new(s, a)),
             })
@@ -205,9 +205,7 @@ pub fn analyze_ldlt(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.csc::<T>(d)?;
-        let (sym, opts) = py
-            .allow_threads(|| analyze_ldlt_core(&a, &st))
-            .map_err(map_err)?;
+        let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
         Ok(PyLdltSymbolic {
             sym,
             pattern,
@@ -232,12 +230,11 @@ pub fn ldlt_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.csc::<T>(d)?;
-        let s = py
-            .allow_threads(|| {
-                let (sym, opts) = analyze_ldlt_core(&a, &st)?;
-                sym.factor(&a, &opts)
-            })
-            .map_err(map_err)?;
+        let s = heavy(py, || {
+            let (sym, opts) = analyze_ldlt_core(&a, &st)?;
+            sym.factor(&a, &opts)
+        })
+        .map_err(map_err)?;
         Ok(Ldlt {
             inner: T::ldlt(Pair::new(s, a)),
         })
@@ -380,9 +377,7 @@ impl PyLuSymbolic {
         let data = &self.pattern.values_of(py, data, false)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.general::<T>(d)?;
-            let s = py
-                .allow_threads(|| self.sym.factor(&a, &opts))
-                .map_err(map_err)?;
+            let s = heavy(py, || self.sym.factor(&a, &opts)).map_err(map_err)?;
             Ok(Lu {
                 inner: T::lu(Pair::new(s, a)),
             })
@@ -415,9 +410,7 @@ pub fn analyze_lu(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
-        let (sym, opts) = py
-            .allow_threads(|| analyze_lu_core(&a, &st))
-            .map_err(map_err)?;
+        let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
         Ok(PyLuSymbolic {
             sym,
             pattern,
@@ -442,12 +435,11 @@ pub fn lu_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
-        let s = py
-            .allow_threads(|| {
-                let (sym, opts) = analyze_lu_core(&a, &st)?;
-                sym.factor(&a, &opts)
-            })
-            .map_err(map_err)?;
+        let s = heavy(py, || {
+            let (sym, opts) = analyze_lu_core(&a, &st)?;
+            sym.factor(&a, &opts)
+        })
+        .map_err(map_err)?;
         Ok(Lu {
             inner: T::lu(Pair::new(s, a)),
         })
@@ -574,9 +566,7 @@ impl PyKluSymbolic {
         let data = &self.pattern.values_of(py, data, false)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.general::<T>(d)?;
-            let s = py
-                .allow_threads(|| self.sym.factor(&a, &st.inner))
-                .map_err(map_err)?;
+            let s = heavy(py, || self.sym.factor(&a, &st.inner)).map_err(map_err)?;
             Ok(Klu {
                 inner: T::klu(Pair::new(s, a)),
             })
@@ -609,9 +599,7 @@ pub fn analyze_klu(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
-        let sym = py
-            .allow_threads(|| KluSymbolic::analyze_with(&a, &st.inner))
-            .map_err(map_err)?;
+        let sym = heavy(py, || KluSymbolic::analyze_with(&a, &st.inner)).map_err(map_err)?;
         Ok(PyKluSymbolic {
             sym,
             pattern,
@@ -636,9 +624,7 @@ pub fn klu_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
-        let s = py
-            .allow_threads(|| KluSolver::<T>::factor(&a, &st.inner))
-            .map_err(map_err)?;
+        let s = heavy(py, || KluSolver::<T>::factor(&a, &st.inner)).map_err(map_err)?;
         Ok(Klu {
             inner: T::klu(Pair::new(s, a)),
         })

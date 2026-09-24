@@ -14,7 +14,8 @@ use rslab::{
 };
 
 use crate::common::{
-    array1, array2_row_major, block_row_major, diagnostics_dict, map_err, vector, Pattern, C32, C64,
+    array1, array2_row_major, block_row_major, diagnostics_dict, map_err, vector, Pattern, Release,
+    C32, C64,
 };
 use crate::krylov::{self, Operator};
 
@@ -207,6 +208,8 @@ pub struct Pair<T: Field, S: Direct<T>> {
     pub s: S,
     pub a: S::Matrix,
     _t: PhantomData<T>,
+    // Declared last, so dropped after the factor.
+    _release: Release,
 }
 
 pub fn refine_policy(refine: usize, target: Option<f64>, measure: &str) -> PyResult<RefinePolicy> {
@@ -232,6 +235,7 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
             s,
             a,
             _t: PhantomData,
+            _release: Release,
         }
     }
 
