@@ -22,6 +22,7 @@
 
 use crate::numeric::ll_common::PanelPtr;
 use crate::scalar::Scalar;
+use rayon::prelude::*;
 
 /// A lower triangular factor in supernodal panel form (see the module docs).
 #[derive(Clone, Debug)]
@@ -287,7 +288,18 @@ impl<T: Scalar> PanelArena<T> {
             slot_ptr.push(slot_ptr.last().copied().unwrap_or(0) + len);
         }
         let total = slot_ptr.last().copied().unwrap_or(0);
-        let mut vals = vec![T::zero(); total];
+        // The whole factor, often hundreds of MB: zero it across the calling
+        // pool rather than on one thread (41 ms serial on a 465 MB factor).
+        let mut vals: Vec<T> = Vec::with_capacity(total);
+        vals.spare_capacity_mut()
+            .par_chunks_mut(1 << 16)
+            .for_each(|chunk| {
+                chunk.iter_mut().for_each(|v| {
+                    v.write(T::zero());
+                })
+            });
+        // SAFETY: every element of the first `total` was written above.
+        unsafe { vals.set_len(total) };
         let base = PanelPtr(vals.as_mut_ptr());
         PanelArena {
             slot_ptr,
