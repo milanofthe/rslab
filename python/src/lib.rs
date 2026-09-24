@@ -64,3 +64,8 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
+
+// See the `mimalloc` note in Cargo.toml: the core stays allocator-agnostic,
+// the extension module picks the allocator for the process.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

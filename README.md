@@ -29,6 +29,9 @@ algorithms and carries the full evaluation.
 rslab = "0.38"
 ```
 
+The factorization allocates per dense product, so applications gain from a
+caching global allocator such as `mimalloc` (the Python wheel installs it).
+
 Python bindings: `pip install rslab`.
 
 ```python
