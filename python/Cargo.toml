@@ -29,3 +29,8 @@ num-complex = "0.4"
 # abi3-py39: one wheel for CPython 3.9+ per platform.
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
 numpy = "0.22"
+# The dense kernels allocate their packing buffers per product. The Windows
+# heap serves blocks above ~512 KB with fresh VirtualAlloc pages, so every
+# product faults them in again; mimalloc reuses thread-local segments
+# (measured 15-20% faster factorization at 12 threads, 2x on small systems).
+mimalloc = { version = "0.1", default-features = false }
