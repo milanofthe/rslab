@@ -811,6 +811,16 @@ pub(crate) fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
 /// above-diagonal strip per tile (`< TILE/2` rows) is negligible.
 const SCHUR_TILE: usize = 256;
 
+/// Grow `buf` to at least `len` entries without clearing what it holds: the
+/// cmod callers overwrite the prefix they read (the D-apply loops fill `vc` and
+/// `vd_buf`, and `lower_tile_gemm` writes `u_buf` with `read_dst = false`), so
+/// zeroing it before every update only cost bandwidth.
+fn grow_scratch<T: Scalar>(buf: &mut Vec<T>, len: usize) {
+    if buf.len() < len {
+        buf.resize(len, T::zero());
+    }
+}
+
 /// Symmetric trailing-update GEMM computed **only on and below the tile
 /// diagonal**: `TMP[:, j] = G * L21^T[:, j]` for rows `>= tile start`. The
 /// consumers (the front Schur subtraction and the left-looking panel
@@ -2494,8 +2504,7 @@ fn ll_factor_node<T: Scalar>(
                     let pk: &[T] = unsafe { emit.arena.slot(kk) };
                     let (dk, dsub_k, two_k) = (&slot.d, &slot.dsub, &slot.two);
                     // G = (kk's block rows q0..q1) * D, column-major npk x nck.
-                    vd_buf.clear();
-                    vd_buf.resize(npk * nck, T::zero());
+                    grow_scratch(&mut vd_buf, npk * nck);
                     let mut ck = 0;
                     while ck < nck {
                         if two_k[ck] {
@@ -2516,8 +2525,7 @@ fn ll_factor_node<T: Scalar>(
                         }
                     }
                     let mrows = nok - q0;
-                    u_buf.clear();
-                    u_buf.resize(mrows * npk, T::zero());
+                    grow_scratch(&mut u_buf, mrows * npk);
                     // Serial per slab - the parallelism is across slabs.
                     // SAFETY: lhs (read), rhs (read), dst (write) pairwise
                     // disjoint; strides in bounds.
@@ -2569,8 +2577,7 @@ fn ll_factor_node<T: Scalar>(
         // Gate on the REAL work (rows >= p0); the scalar path already
         // iterates from the target block, so small tails route there.
         if (nok - p0) * npk * nck < ll_gemm_gate {
-            vc.clear();
-            vc.resize(nck, T::zero());
+            grow_scratch(&mut vc, nck);
             for c_idx in p0..p1 {
                 let tcol = ok[c_idx] as usize - first;
                 // vc = D * (column `c_idx` of kk's off-diagonal block), with D
@@ -2599,8 +2606,7 @@ fn ll_factor_node<T: Scalar>(
                 }
             }
         } else {
-            vd_buf.clear();
-            vd_buf.resize(npk * nck, T::zero());
+            grow_scratch(&mut vd_buf, npk * nck);
             // G = (kk's in-panel off-diagonal block) * D, stored column-major as
             // `vd_buf[c + ck*npk]`. D is block-diagonal (1x1 and 2x2 blocks); a
             // 2x2 block mixes its two columns. GEMM below is unchanged.
@@ -2636,8 +2642,7 @@ fn ll_factor_node<T: Scalar>(
             // updates into the topmost supernodes (`mrows ~ npk`) the full
             // rectangle wasted another ~half of the flops.
             let mrows = nok - p0;
-            u_buf.clear();
-            u_buf.resize(mrows * npk, T::zero());
+            grow_scratch(&mut u_buf, mrows * npk);
             // SAFETY: lhs (`pk` off-diag block from row p0, read), rhs
             // (`vd_buf`, read), dst (`u_buf`, write) are pairwise-disjoint;
             // strides in bounds.
