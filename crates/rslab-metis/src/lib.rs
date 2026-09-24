@@ -223,7 +223,7 @@ pub fn metis_order_full(
     }) {
         // Run ND on the sparse-induced subgraph.
         let sub_pat = CscPattern::new(sub_n, cp, ri).ok_or(OrderingError::MalformedInput)?;
-        let sub_perm = node_nd::nd_order(&sub_pat, opts, &mut stats)?;
+        let sub_perm = node_nd::nd_order(&sub_pat, None, opts, &mut stats)?;
         // Lift sub-perm back to original indices and append dense
         // columns at the end (in descending degree order - Davis &
         // Hager 2009 section 3.2 ordering choice; ties broken by ascending
@@ -248,9 +248,36 @@ pub fn metis_order_full(
         }
         perm
     } else {
-        node_nd::nd_order(pattern, opts, &mut stats)?
+        node_nd::nd_order(pattern, None, opts, &mut stats)?
     };
 
+    let ordering_stats = OrderingStats {
+        time_us: t0.elapsed().as_micros() as u64,
+        fill_estimate: None,
+        flop_estimate: None,
+    };
+    Ok((perm, ordering_stats, stats))
+}
+
+/// [`metis_order_full`] on a vertex-weighted graph.
+///
+/// `vwgt[v]` (at least 1) is the weight of vertex `v`, and the bisections
+/// balance the summed weight instead of the vertex count. The use is a
+/// compressed graph whose vertices stand for groups of original vertices
+/// with identical adjacency: weighting each by its group size keeps the
+/// separators as balanced as on the uncompressed graph. The dense-column
+/// quotient (`dense_quotient_enabled`) is not applied on this path.
+pub fn metis_order_weighted(
+    pattern: &CscPattern<'_>,
+    vwgt: &[i32],
+    opts: &MetisOptions,
+) -> Result<(Vec<i32>, OrderingStats, MetisStats), OrderingError> {
+    if pattern.col_ptr.len() != pattern.n + 1 {
+        return Err(OrderingError::MalformedInput);
+    }
+    let t0 = rslab_ordering_core::clock::Instant::now();
+    let mut stats = MetisStats::default();
+    let perm = node_nd::nd_order(pattern, Some(vwgt), opts, &mut stats)?;
     let ordering_stats = OrderingStats {
         time_us: t0.elapsed().as_micros() as u64,
         fill_estimate: None,

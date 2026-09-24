@@ -85,10 +85,17 @@ fn child_seed(seed: u64, which: u64) -> u64 {
 
 pub(crate) fn nd_order(
     pattern: &CscPattern<'_>,
+    vwgt: Option<&[i32]>,
     opts: &MetisOptions,
     stats: &mut MetisStats,
 ) -> Result<Vec<i32>, OrderingError> {
-    let graph = Graph::from_csc_pattern(pattern)?;
+    let mut graph = Graph::from_csc_pattern(pattern)?;
+    if let Some(w) = vwgt {
+        if w.len() != graph.nvtxs as usize || w.iter().any(|&x| x < 1) {
+            return Err(OrderingError::MalformedInput);
+        }
+        graph.vwgt = w.to_vec();
+    }
     let n = graph.nvtxs as usize;
     let writer = IpermWriter::new(n);
     let acc = AtomicStats::default();
@@ -600,7 +607,7 @@ mod tests {
         let pat = CscPattern::new(100, &cp, &ri).unwrap();
         let opts = MetisOptions::default();
         let mut stats = MetisStats::default();
-        let perm = nd_order(&pat, &opts, &mut stats).unwrap();
+        let perm = nd_order(&pat, None, &opts, &mut stats).unwrap();
         assert_eq!(perm.len(), 100);
         assert_permutation(&perm);
         assert!(stats.n_amd_leaf_calls >= 1);
@@ -615,7 +622,7 @@ mod tests {
         let pat = CscPattern::new(400, &cp, &ri).unwrap();
         let opts = MetisOptions::default();
         let mut stats = MetisStats::default();
-        let perm = nd_order(&pat, &opts, &mut stats).unwrap();
+        let perm = nd_order(&pat, None, &opts, &mut stats).unwrap();
         assert_eq!(perm.len(), 400);
         assert_permutation(&perm);
         assert!(
@@ -633,8 +640,8 @@ mod tests {
         let opts = MetisOptions::default();
         let mut s1 = MetisStats::default();
         let mut s2 = MetisStats::default();
-        let p1 = nd_order(&pat, &opts, &mut s1).unwrap();
-        let p2 = nd_order(&pat, &opts, &mut s2).unwrap();
+        let p1 = nd_order(&pat, None, &opts, &mut s1).unwrap();
+        let p2 = nd_order(&pat, None, &opts, &mut s2).unwrap();
         assert_eq!(p1, p2);
     }
 
@@ -649,7 +656,7 @@ mod tests {
         let pat = CscPattern::new(72, &cp, &ri).unwrap();
         let opts = MetisOptions::default();
         let mut stats = MetisStats::default();
-        let perm = nd_order(&pat, &opts, &mut stats).unwrap();
+        let perm = nd_order(&pat, None, &opts, &mut stats).unwrap();
         assert_eq!(perm.len(), 72);
         assert_permutation(&perm);
         assert_eq!(stats.n_components, 2);
@@ -767,7 +774,7 @@ mod tests {
 
         // Full ND for the total separator count.
         let mut stats2 = MetisStats::default();
-        let perm = nd_order(&pat, &opts, &mut stats2).unwrap();
+        let perm = nd_order(&pat, None, &opts, &mut stats2).unwrap();
         assert_eq!(perm.len(), n);
         println!(
             "full nd: sep_total={} amd_leaves={} levels={} two_hop={}",

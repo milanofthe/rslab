@@ -2,6 +2,7 @@ pub mod column_counts;
 pub mod ldlt_compress;
 pub mod small_leaf;
 pub mod supernode;
+pub(crate) mod supervariables;
 
 use crate::error::RslabError;
 use crate::ordering::amd::permute_pattern;
@@ -555,13 +556,30 @@ fn checked_permutation(p: &[usize], n: usize) -> Result<Vec<usize>, RslabError> 
 /// (new-to-old: `perm[k]` is the original column that became column `k`),
 /// along with the concrete `OrderingMethod` actually dispatched (matters
 /// when `method == Auto` is resolved adaptively).
+/// Compress the ordering graph only when the groups of indistinguishable
+/// vertices shrink it to at most this share of its vertices.
+const COMPRESS_MAX_RATIO: f64 = 0.95;
+
 fn run_external_ordering(
     pattern: &CscPattern,
     method: OrderingMethod,
     nd_seeds: &[u64],
 ) -> Result<(Vec<usize>, OrderingMethod), RslabError> {
-    let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
-    let pat = rslab_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
+    // Order the graph of indistinguishable-vertex groups when it is markedly
+    // smaller, and expand the ordering to the original vertices (see
+    // `supervariables`). Measured on second-order Nedelec FEM systems, whose
+    // groups halve the graph.
+    let groups = supervariables::Supervariables::of(pattern);
+    let groups = ((groups.len() as f64) <= COMPRESS_MAX_RATIO * pattern.n as f64).then_some(groups);
+    let compressed = groups.as_ref().map(|g| g.compress(pattern));
+    let ordered = compressed.as_ref().unwrap_or(pattern);
+    let weights = groups.as_ref().map(|g| g.weights());
+    let expand = |p: Vec<i32>| match &groups {
+        Some(g) => g.expand(&p),
+        None => p,
+    };
+    let (col_buf, row_buf) = to_contract_pattern_bufs(ordered)?;
+    let pat = rslab_ordering_core::CscPattern::new(ordered.n, &col_buf, &row_buf)
         .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
     // `method` is expected to be concrete here - `Auto` is resolved
     // upstream by `symbolic_factorize_with_method` against the
@@ -569,10 +587,12 @@ fn run_external_ordering(
     debug_assert_ne!(method, OrderingMethod::Auto);
     let actual = method;
     let perm_i32 = match method {
-        OrderingMethod::Amd => rslab_amd::amd_order(&pat),
-        OrderingMethod::Amf => rslab_amf::amf_order(&pat),
-        OrderingMethod::MetisND => metis_seed_race(pattern, &pat, nd_seeds),
-        OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
+        OrderingMethod::Amd => rslab_amd::amd_order(&pat).map(expand),
+        OrderingMethod::Amf => rslab_amf::amf_order(&pat).map(expand),
+        OrderingMethod::MetisND => {
+            metis_seed_race(pattern, &pat, weights.as_deref(), groups.as_ref(), nd_seeds)
+        }
+        OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat).map(expand),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
         }
@@ -633,24 +653,34 @@ const ND_SEED_RACE_MIN_FLOPS: u64 = 50_000_000_000;
 fn metis_seed_race(
     pattern: &CscPattern,
     pat: &rslab_ordering_core::CscPattern<'_>,
+    vwgt: Option<&[i32]>,
+    groups: Option<&supervariables::Supervariables>,
     seeds: &[u64],
 ) -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
     use rayon::prelude::*;
-    if let [seed] = seeds {
+    // One nested dissection of `pat` (weighted when it is the compressed
+    // graph), returned as an ordering of `pattern`'s vertices.
+    let order = |seed: u64| -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
         let opts = rslab_metis::MetisOptions {
-            seed: *seed,
+            seed,
             ..Default::default()
         };
-        return rslab_metis::metis_order_full(pat, &opts).map(|(perm, _, _)| perm);
+        let (perm, _, _) = match vwgt {
+            Some(w) => rslab_metis::metis_order_weighted(pat, w, &opts)?,
+            None => rslab_metis::metis_order_full(pat, &opts)?,
+        };
+        Ok(match groups {
+            Some(g) => g.expand(&perm),
+            None => perm,
+        })
+    };
+    if let [seed] = seeds {
+        return order(*seed);
     }
     let scored: Vec<(usize, u64, Vec<i32>)> = seeds
         .par_iter()
         .filter_map(|&seed| {
-            let opts = rslab_metis::MetisOptions {
-                seed,
-                ..Default::default()
-            };
-            let (perm_i32, _, _) = rslab_metis::metis_order_full(pat, &opts).ok()?;
+            let perm_i32 = order(seed).ok()?;
             // Exact scalar fill of this candidate: etree of the permuted
             // pattern (built through the permutation, no materialization)
             // plus GNP column counts on the permuted pattern.
@@ -913,7 +943,9 @@ fn symbolic_prefix_with(
     // length `n` before handing it to the rest of the pipeline. See
     // `src/symbolic/ldlt_compress.rs` and
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
+    let mut t = std::time::Instant::now();
     let full_pattern = matrix.symmetric_pattern();
+    diag_mark(&mut t, "symmetric_pattern");
 
     // Resolve `OrderingMethod::Auto` against the original matrix's
     // pattern *before* preprocessing. If we resolved against the
@@ -975,6 +1007,7 @@ fn symbolic_prefix_with(
     // original pattern through the permutation on the fly. The local name
     // `amd_*` is kept from the AMD-only era; semantically this is "ordering
     // output", regardless of method.
+    diag_mark(&mut t, "ordering");
     let mut amd_perm_inv = vec![0usize; n];
     for (new, &old) in amd_perm.iter().enumerate() {
         amd_perm_inv[old] = new;
@@ -998,7 +1031,9 @@ fn symbolic_prefix_with(
     }
 
     // Step 5: Re-permute the matrix on the composed permutation.
+    diag_mark(&mut t, "etree+postorder");
     let permuted_pattern = permute_pattern(&full_pattern, &perm);
+    diag_mark(&mut t, "permute_pattern");
 
     // Step 5b: Build the final elimination tree by renumbering `amd_etree`
     // through the postorder. Postorder is a topological relabeling of the
@@ -1025,6 +1060,7 @@ fn symbolic_prefix_with(
     // O(nnz(A) + n*alpha(n)). Bit-exact equivalence verified on 169585
     // KKT matrices - see `dev/validation/phase-2.5.1-*`.
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
+    diag_mark(&mut t, "column_counts");
 
     // Phase 2.12: optional SSIDS-style merge-biased postorder.
     // Predict desired merges using only the etree + column counts,
@@ -1093,6 +1129,7 @@ fn symbolic_prefix_with(
         }
     }
     let factor_nnz = total_factor_nnz(&col_counts);
+    diag_mark(&mut t, "renumber+rest");
     Ok(SymbolicPrefix {
         n,
         perm,
@@ -1126,7 +1163,9 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     let snode_params: &SupernodeParams = &effective_params;
 
     // Step 7: Supernode detection on the postordered etree
+    let mut t = std::time::Instant::now();
     let mut supernodes = find_supernodes(&etree, &col_counts, snode_params);
+    diag_mark(&mut t, "find_supernodes");
     // Issue #55 Phase B2: assign per-supernode incoming-delay budget.
     // Bounded-cost postorder pass; runs once per symbolic factor and
     // is cached in `SymbolicFactorization` for reuse across numeric
@@ -1145,6 +1184,7 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
 
     let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
+    diag_mark(&mut t, "groups+peak");
 
     let factor_slack = 1.2;
 
@@ -1813,4 +1853,15 @@ mod tests {
         );
         assert_eq!(auto.resolved_method, OrderingMethod::Amf);
     }
+}
+
+/// Diagnostics branch only: print and restart a phase timer under `RLA_DIAG`.
+pub(crate) fn diag_mark(t: &mut std::time::Instant, label: &str) {
+    if std::env::var_os("RLA_DIAG").is_some() {
+        eprintln!(
+            "[diag] {label:<24} {:8.1} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    *t = std::time::Instant::now();
 }
