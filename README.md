@@ -26,7 +26,7 @@ algorithms and carries the full evaluation.
 
 ```toml
 [dependencies]
-rslab = "0.37"
+rslab = "0.38"
 ```
 
 Python bindings: `pip install rslab`.
