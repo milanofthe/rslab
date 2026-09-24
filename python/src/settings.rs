@@ -351,13 +351,15 @@ impl PySettings {
                     } = &mut mode
                     {
                         if let Some(x) = get("min_cnrow") {
-                            *min_cnrow = x.extract().map_err(|_| bad(key, "an int 'min_cnrow'", v))?;
+                            *min_cnrow =
+                                x.extract().map_err(|_| bad(key, "an int 'min_cnrow'", v))?;
                         }
                         if let Some(x) = get("b") {
                             *b = x.extract().map_err(|_| bad(key, "an int 'b'", v))?;
                         }
                         if let Some(x) = get("adaptive") {
-                            *adaptive = x.extract().map_err(|_| bad(key, "a bool 'adaptive'", v))?;
+                            *adaptive =
+                                x.extract().map_err(|_| bad(key, "a bool 'adaptive'", v))?;
                         }
                     }
                     for (k, _) in d.iter() {
