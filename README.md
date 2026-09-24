@@ -18,9 +18,7 @@ preconditioner for the built-in Krylov solvers.
 - Krylov layer: restarted GMRES (single and block), COCG, COCR, GCRO-DR
   recycling, warm starts.
 
-Fork of [feral](https://github.com/jkitchin/feral), see [NOTICE](NOTICE). The
-technical report [`docs/report/rslab.pdf`](docs/report/rslab.pdf) derives the
-algorithms and carries the full evaluation.
+Fork of [feral](https://github.com/jkitchin/feral), see [NOTICE](NOTICE).
 
 ## Install
 
@@ -248,13 +246,50 @@ and a memory budget into concrete settings, using the calibration that
 
 ## Benchmarks
 
+### vs MKL PARDISO (x86, 12 threads each, 28 real systems)
+
+![per class](docs/figures/pardiso_classes.png)
+
+Systems exported from production codes: complex-symmetric curl-curl FEM from
+rapidfem (23k to 1.34M unknowns), the IBM power-grid DC systems from SANE,
+complex MoM near-field matrices from rapidmom (both solvers factor them as
+GMRES preconditioners with 1e-6 static pivoting, as rapidmom does), and 13
+SuiteSparse circuit matrices on the KLU path. Wall time divided by PARDISO's,
+geomean per class; Ryzen 9 9900X, oneMKL 2026.1:
+
+| class | factor | refactor | solve | one-shot |
+|---|:-:|:-:|:-:|:-:|
+| FEM curl-curl (6) | 1.46 | 1.46 | **0.36** | 1.28 |
+| power grid (2) | 3.91 | 4.35 | **0.47** | 1.12 |
+| MoM near field (7) | 1.39 | 1.29 | **0.40** | 1.21 |
+| circuit, KLU path (13) | 4.22 | 1.40 | **0.37** | **0.95** |
+
+The solve is 2.1-2.8x faster across the board. The factorization trails by
+1.3-1.5x on FEM and MoM and wins at the top end (patch antenna, 1.34M unknowns:
+65.7 s against 83.5 s). On fem_rfic_spiral PARDISO stops at a residual of
+5.5e-3 and refinement diverges from there; RSLAB returns 2.9e-10.
+
+![where the time goes](docs/figures/wct_breakdown.png)
+
+Where the one-shot time goes, normalized to PARDISO's: RSLAB's analysis (the
+ordering race and the symbolic factorization) costs about twice PARDISO's on
+the FEM systems, its solve a fraction.
+
+![per system](docs/figures/pardiso_systems.png)
+
+Peak memory above the input is 1.1-2.3x PARDISO's on FEM and MoM, the ratio
+shrinking with size. Reproduce:
+`python benches/pardiso_corpus.py <corpus dir>` then
+`python benches/pardiso_corpus_plot.py`.
+
+### vs Apple Accelerate (M3, 8 threads, 4k-200k)
+
 Corpus: structured-grid generators (curl-curl Maxwell, shifted Helmholtz,
 Stokes/KKT saddle point, convection-diffusion, BEM/MoM near field) plus complex
 SuiteSparse matrices. RSLAB runs its shipped default throughout, which caps at 4
 workers while Accelerate uses all cores; on the convection-diffusion class that
 cap alone costs 12-17%.
 
-### vs Apple Accelerate (M3, 8 threads, 4k-200k)
 
 ![per class](docs/figures/accel_classes.png)
 
@@ -292,12 +327,6 @@ The same measurement across every release, and the analyze-budget lever it
 exposed, are in
 [`dev/research/accel-release-history-2026-08.md`](dev/research/accel-release-history-2026-08.md).
 
-### vs MKL PARDISO and faer (12 cores, 1k-110k, geomean factor time)
-
-RSLAB sits between the two: 5.6x (LDLT) and 5.1x (LU) behind MKL PARDISO, 6.7x
-and 2.7x ahead of faer, which has no symmetric path. The ordering race is worth
-1.84x and 1.49x over a fixed default configuration.
-
 ### KLU path
 
 On MNA-like matrices the KLU path factors 5-12x faster than the multifrontal LU
@@ -321,13 +350,17 @@ work-heavy SuiteSparse circuit matrices, still bit-identical.
 RSLAB solves 24/31 attempted SuiteSparse matrices below `1e-8` relative residual,
 28/33 with the static-pivot factor used as a GMRES preconditioner. What it cannot
 factor exactly it declines; faer and Accelerate return garbage with an OK status
-on five of those. The memory estimate holds at ~1.3x measured in geomean and
-never under-predicts.
+on five of those.
 
-Reproduce: `cargo bench --bench bench_suite --features matgen` with
-`RLA_BENCH_FAMILY=sym|unsym` plus `benches/head_to_head.py`;
-`benches/run_apple_silicon.sh` and `benches/accel_story.py` for the Accelerate
-figures; `cargo bench --bench klu_circuit` for KLU.
+![estimates](docs/figures/estimate_accuracy.png)
+
+The analysis-time estimate of the factor storage lands at 1.10x the measured
+size on the corpus above (0.98 to 1.24). The transient estimate covers the
+factorization alone and reads 0.63x (0.42 to 0.93) of the process peak, which
+also holds the analysis and the input copies.
+
+Reproduce: `benches/run_apple_silicon.sh` and `benches/accel_story.py` for the
+Accelerate figures; `cargo bench --bench klu_circuit` for KLU.
 
 ## Architecture
 
