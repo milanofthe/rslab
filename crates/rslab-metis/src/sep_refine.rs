@@ -20,6 +20,15 @@ use crate::rng::SplitMix;
 /// long hill traversals (a METIS-style limit of 300 costs 10 to 35 percent
 /// fill on 2D and 3D grids for a 15 percent time saving), so a pass runs
 /// until the heap drains or the overshoot cap trips.
+///
+/// Re-measured with the compressed, vertex-weighted ordering graph (2026-09,
+/// Ryzen 9 9900X), exact nnz(L) under `ordering='metis'` against no limit:
+/// a limit of `min(5 * separator, 400)` costs +13 % on a 700^2 grid and
+/// +37 % on 40^3 (while second-order Nedelec FEM systems gain 1 to 3 %),
+/// 2 000 still costs +32 % on 40^3 and 10 000 costs +20 %; at 50 000 the fill
+/// and the time are those of no limit. The top-level refinement makes about
+/// 99 % of its moves on the way to a better separator that it undoes, which
+/// is what the grids need.
 const MOVE_LIMIT: usize = 1 << 20;
 
 /// A pass also stops when the separator has grown to this multiple of the
