@@ -200,23 +200,18 @@ pub fn vector<T: Element + Clone>(b: &Bound<'_, PyAny>, what: &str) -> PyResult<
 }
 
 /// A 2-D `n x nrhs` block of the factor's scalar type as `(n, nrhs, column-major data)`.
-pub fn block<T: Element + Copy + Default>(
+pub fn block<T: Element + Copy>(
     b: &Bound<'_, PyAny>,
     what: &str,
 ) -> PyResult<(usize, usize, Vec<T>)> {
     let arr: PyReadonlyArray2<T> = b.extract().map_err(|_| {
         PyValueError::new_err(format!("{what} dtype does not match the factor dtype"))
     })?;
-    let shape = arr.shape();
-    let (n, nrhs) = (shape[0], shape[1]);
-    let rm = arr.as_slice()?;
-    let mut cm = vec![T::default(); n * nrhs];
-    for i in 0..n {
-        for c in 0..nrhs {
-            cm[c * n + i] = rm[i * nrhs + c];
-        }
-    }
-    Ok((n, nrhs, cm))
+    let view = arr.as_array();
+    let (n, nrhs) = view.dim();
+    // Iterating the transposed view walks the block column by column in
+    // logical order, whatever memory order NumPy hands over.
+    Ok((n, nrhs, view.t().iter().copied().collect()))
 }
 
 /// A 2-D `n x nrhs` block in its native row-major layout, `(n, nrhs, data)`.
@@ -227,8 +222,11 @@ pub fn block_row_major<T: Element + Clone>(
     let arr: PyReadonlyArray2<T> = b.extract().map_err(|_| {
         PyValueError::new_err(format!("{what} dtype does not match the factor dtype"))
     })?;
-    let shape = arr.shape();
-    Ok((shape[0], shape[1], arr.as_slice()?.to_vec()))
+    let view = arr.as_array();
+    let (n, nrhs) = view.dim();
+    // `as_slice` accepts a Fortran-ordered block too and would hand back its
+    // memory unchanged; iterating the view gives row-major order for any layout.
+    Ok((n, nrhs, view.iter().cloned().collect()))
 }
 
 /// A row-major `n x nrhs` buffer as a NumPy array.

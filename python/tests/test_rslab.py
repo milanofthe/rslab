@@ -79,6 +79,23 @@ def test_solve_many():
         assert _residual(A, X[:, c], B[:, c]) < 1e-6
 
 
+@pytest.mark.parametrize("layout", ["C", "F", "strided"])
+def test_block_memory_order(layout):
+    # A block must mean the same matrix whatever its memory order.
+    rng = np.random.default_rng(12)
+    A = _spd(120)
+    base = rng.standard_normal((120, 10))
+    B = {"C": np.ascontiguousarray(base[:, :5]), "F": np.asfortranarray(base[:, :5]),
+         "strided": base[:, ::2]}[layout]
+    f = rslab.ldlt(A)
+    X = f.solve_many(B)
+    for c in range(B.shape[1]):
+        assert _residual(A, X[:, c], B[:, c]) < 1e-6
+    Xg = f.gmres_block(B, tol=1e-10, maxit=50)[0]
+    for c in range(B.shape[1]):
+        assert _residual(A, Xg[:, c], B[:, c]) < 1e-8
+
+
 def test_preconditioner_refine():
     # An indefinite-ish system where static pivoting + refinement is the recipe.
     A = _spd(200)
