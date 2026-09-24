@@ -16,8 +16,9 @@
 //! products that run in parallel take the direct kernel; on a 102k-DOF
 //! complex FEM factorization the split is worth about 10% single-core and
 //! nothing at 8 workers. The split is deterministic (fixed kernels, fixed
-//! association), so results stay bit-identical across thread counts. Tiny
-//! products and conjugated operands take the direct kernel.
+//! association), so results stay bit-identical across thread counts. Thin
+//! products (see [`SPLIT_MIN_RATIO`]) and conjugated operands take the direct
+//! kernel, and the split runs per tile, so its scratch stays bounded.
 
 use std::cell::RefCell;
 
@@ -76,17 +77,28 @@ pub unsafe fn gemm<T: Scalar>(
     )
 }
 
-/// Products with fewer flops than this take the direct kernel: the split's
-/// plane copies (`m k + k n + m n` entries) are not worth it below.
-const SPLIT_MIN_FLOPS: usize = 32 * 32 * 8;
+/// A product splits only when its flops `m n k` are at least this many times
+/// its plane copies `m k + k n + m n`. The saving is a quarter of the kernel
+/// time and the copies are memory traffic, so a thin product (one short
+/// dimension: the rank-`k` panel updates, or the narrow updates of a
+/// left-looking LU) loses: on a Ryzen 9900X, where the complex kernel runs at
+/// the real kernel's rate, a MoM LU factorization took 20% longer at 8
+/// workers with every product above 8k flops split, and the same as direct at
+/// this gate.
+const SPLIT_MIN_RATIO: usize = 64;
+
+/// Tile edge of the split: the planes of one `SPLIT_TILE x SPLIT_TILE` block
+/// of the product (`3 (2 SPLIT_TILE k + SPLIT_TILE^2)` reals) are the whole
+/// scratch, whatever the product's size.
+const SPLIT_TILE: usize = 256;
 
 /// Whether a complex product of this shape goes through the real kernels.
 #[inline]
 pub fn split_worthwhile(m: usize, n: usize, k: usize, conj: bool) -> bool {
-    !conj && k >= 4 && m * n * k >= SPLIT_MIN_FLOPS
+    !conj && m * n * k >= SPLIT_MIN_RATIO * (m * k + k * n + m * n)
 }
 
-/// Real plane scratch of one thread (grows to the largest product seen).
+/// Real plane scratch of one thread (grows to the largest tile seen).
 struct Planes<R> {
     buf: Vec<R>,
 }
@@ -351,7 +363,9 @@ pub unsafe fn complex_gemm_4m<R: SplitReal>(
 }
 
 /// The three-product (Gauss) form: `T1 = Ar Br`, `T2 = Ai Bi`,
-/// `T3 = (Ar + Ai)(Br + Bi)`, `Cr = T1 - T2`, `Ci = T3 - T1 - T2`.
+/// `T3 = (Ar + Ai)(Br + Bi)`, `Cr = T1 - T2`, `Ci = T3 - T1 - T2`, per
+/// [`SPLIT_TILE`] block of the product (the inner dimension whole, so every
+/// entry sums as in one product).
 ///
 /// # Safety
 /// As `gemm::gemm`.
@@ -375,65 +389,76 @@ pub unsafe fn complex_gemm_3m<R: SplitReal>(
     parallelism: gemm::Parallelism,
 ) {
     R::with_planes(|buf| {
-        let (mk, kn, mn) = (m * k, k * n, m * n);
-        buf.clear();
-        buf.resize(3 * mk + 3 * kn + 3 * mn, R::zero());
-        let (ar, rest) = buf.split_at_mut(mk);
-        let (ai, rest) = rest.split_at_mut(mk);
-        let (asum, rest) = rest.split_at_mut(mk);
-        let (br, rest) = rest.split_at_mut(kn);
-        let (bi, rest) = rest.split_at_mut(kn);
-        let (bsum, rest) = rest.split_at_mut(kn);
-        let (t1, rest) = rest.split_at_mut(mn);
-        let (t2, t3) = rest.split_at_mut(mn);
-        split_planes(lhs, lhs_cs, lhs_rs, m, k, ar, ai);
-        split_planes(rhs, rhs_cs, rhs_rs, k, n, br, bi);
-        for e in 0..mk {
-            asum[e] = ar[e] + ai[e];
+        let (mt, nt) = (m.min(SPLIT_TILE), n.min(SPLIT_TILE));
+        let need = 3 * (mt * k + k * nt + mt * nt);
+        // every plane is written in full before it is read: no clearing
+        if buf.len() < need {
+            buf.resize(need, R::zero());
         }
-        for e in 0..kn {
-            bsum[e] = br[e] + bi[e];
+        let (a_planes, rest) = buf.split_at_mut(3 * mt * k);
+        let (b_planes, c_planes) = rest.split_at_mut(3 * k * nt);
+        for j0 in (0..n).step_by(SPLIT_TILE) {
+            let nb = (n - j0).min(SPLIT_TILE);
+            let (br, rest) = b_planes.split_at_mut(k * nb);
+            let (bi, rest) = rest.split_at_mut(k * nb);
+            let bsum = &mut rest[..k * nb];
+            split_planes(
+                rhs.offset(j0 as isize * rhs_cs),
+                rhs_cs,
+                rhs_rs,
+                k,
+                nb,
+                br,
+                bi,
+            );
+            for e in 0..k * nb {
+                bsum[e] = br[e] + bi[e];
+            }
+            for i0 in (0..m).step_by(SPLIT_TILE) {
+                let mb = (m - i0).min(SPLIT_TILE);
+                let (ar, rest) = a_planes.split_at_mut(mb * k);
+                let (ai, rest) = rest.split_at_mut(mb * k);
+                let asum = &mut rest[..mb * k];
+                split_planes(
+                    lhs.offset(i0 as isize * lhs_rs),
+                    lhs_cs,
+                    lhs_rs,
+                    mb,
+                    k,
+                    ar,
+                    ai,
+                );
+                for e in 0..mb * k {
+                    asum[e] = ar[e] + ai[e];
+                }
+                let (t1, rest) = c_planes.split_at_mut(mb * nb);
+                let (t2, rest) = rest.split_at_mut(mb * nb);
+                let t3 = &mut rest[..mb * nb];
+                let one = R::one();
+                for (t, a, b) in [
+                    (&mut *t1, &*ar, &*br),
+                    (&mut *t2, &*ai, &*bi),
+                    (&mut *t3, &*asum, &*bsum),
+                ] {
+                    real_gemm(
+                        mb,
+                        nb,
+                        k,
+                        t.as_mut_ptr(),
+                        false,
+                        a.as_ptr(),
+                        b.as_ptr(),
+                        one,
+                        one,
+                        parallelism,
+                    );
+                }
+                let tile = dst.offset(i0 as isize * dst_rs + j0 as isize * dst_cs);
+                combine(mb, nb, tile, dst_cs, dst_rs, read_dst, alpha, beta, |e| {
+                    Complex::new(t1[e] - t2[e], t3[e] - t1[e] - t2[e])
+                });
+            }
         }
-        let one = R::one();
-        real_gemm(
-            m,
-            n,
-            k,
-            t1.as_mut_ptr(),
-            false,
-            ar.as_ptr(),
-            br.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        real_gemm(
-            m,
-            n,
-            k,
-            t2.as_mut_ptr(),
-            false,
-            ai.as_ptr(),
-            bi.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        real_gemm(
-            m,
-            n,
-            k,
-            t3.as_mut_ptr(),
-            false,
-            asum.as_ptr(),
-            bsum.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        combine(m, n, dst, dst_cs, dst_rs, read_dst, alpha, beta, |e| {
-            Complex::new(t1[e] - t2[e], t3[e] - t1[e] - t2[e])
-        });
     })
 }
 
@@ -639,6 +664,7 @@ mod tests {
             (129, 33, 65),
             (33, 129, 17),
             (300, 300, 300),
+            (513, 257, 7),
         ] {
             run(m, n, k, false, zero, one, false);
             run(m, n, k, true, one, neg, false);

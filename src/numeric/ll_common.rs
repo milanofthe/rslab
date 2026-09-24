@@ -212,27 +212,6 @@ impl PermScatter {
         )
     }
 
-    /// Build for the full (unfolded) permutation `P^T A P` (LU path).
-    pub fn build_full(
-        n: usize,
-        a_col_ptr: &[usize],
-        a_row_idx: &[usize],
-        perm_inv: &[usize],
-    ) -> Self {
-        Self::build_with(n, a_col_ptr, a_row_idx, |gi, gj| (gi, gj), perm_inv)
-    }
-
-    /// Build for the transpose of the full permutation, `(P^T A P)^T` (the LU
-    /// path's `a_perm_t`): entry `(i, j)` lands at `(gj, gi)`.
-    pub fn build_full_transposed(
-        n: usize,
-        a_col_ptr: &[usize],
-        a_row_idx: &[usize],
-        perm_inv: &[usize],
-    ) -> Self {
-        Self::build_with(n, a_col_ptr, a_row_idx, |gi, gj| (gj, gi), perm_inv)
-    }
-
     fn build_with(
         n: usize,
         a_col_ptr: &[usize],
