@@ -107,15 +107,15 @@ impl Supervariables {
             group_of[v] = g;
             sizes[g] += 1;
         }
-        let mut ptr = Vec::with_capacity(sizes.len() + 1);
-        ptr.push(0);
-        for s in &sizes {
-            ptr.push(ptr.last().unwrap() + s);
-        }
+        let ptr: Vec<usize> = std::iter::once(0)
+            .chain(sizes.iter().scan(0, |total, &s| {
+                *total += s;
+                Some(*total)
+            }))
+            .collect();
         let mut fill = ptr[..sizes.len()].to_vec();
         let mut members = vec![0; n];
-        for v in 0..n {
-            let g = group_of[v];
+        for (v, &g) in group_of.iter().enumerate() {
             members[fill[g]] = v;
             fill[g] += 1;
         }
