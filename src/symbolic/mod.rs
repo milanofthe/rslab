@@ -1095,7 +1095,7 @@ fn symbolic_prefix_with(
     ) {
         let bias = supernode::predict_merges(&etree, &col_counts, snode_params);
         if bias.iter().any(|&b| b) {
-            let (post2, _post2_inv) = biased_postorder(&etree, &bias);
+            let (post2, post2_inv) = biased_postorder(&etree, &bias);
             // Compose: perm_2[k] = perm[post2[k]]; the existing
             // `perm` already encodes AMD o post1.
             let new_perm: Vec<usize> = post2.iter().map(|&p| perm[p]).collect();
@@ -1104,16 +1104,27 @@ fn symbolic_prefix_with(
                 new_perm_inv[old] = new;
             }
             let new_permuted_pattern = permute_pattern(&full_pattern, &new_perm);
-            // Rebuild the etree on the renumbered pattern. We could
-            // relabel the existing etree through post2 in O(n) (as
-            // Step 5b does for the postorder), but since the
-            // permutation invariant is critical and post2 is a
-            // postorder of `etree`, the relabeled tree is equivalent
-            // by construction. Re-derive from scratch as a defense
-            // against the etree-invariance claim being subtly wrong;
-            // O(nnz * alpha(n)) is small for the matrices we target.
-            let new_etree = EliminationTree::from_pattern(&new_permuted_pattern);
-            let new_col_counts = column_counts_gnp(&new_permuted_pattern, &new_etree);
+            // `post2` is a postorder of `etree`, so the tree and the column
+            // counts carry over relabelled (every topological order of the
+            // elimination tree gives the same filled graph). Recomputing both
+            // from the renumbered pattern cost as much as the first pass;
+            // debug builds still do it, as the check on the invariance.
+            let new_etree = EliminationTree {
+                parent: post2
+                    .iter()
+                    .map(|&old| etree.parent[old].map(|p| post2_inv[p]))
+                    .collect(),
+                n,
+            };
+            let new_col_counts: Vec<usize> = post2.iter().map(|&old| col_counts[old]).collect();
+            debug_assert_eq!(
+                new_etree.parent,
+                EliminationTree::from_pattern(&new_permuted_pattern).parent
+            );
+            debug_assert_eq!(
+                new_col_counts,
+                column_counts_gnp(&new_permuted_pattern, &new_etree)
+            );
 
             perm = new_perm;
             perm_inv = new_perm_inv;
