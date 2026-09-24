@@ -142,7 +142,13 @@ pub fn build_supermap(perm: &[usize]) -> SuperMap {
 /// pattern as AMD) to deduplicate in O(nnz * avg_super_deg) without
 /// an explicit sort.
 pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
-    let n_super = map.n_super();
+    compress_pattern_by(pat, &map.super_of, map.n_super())
+}
+
+/// [`compress_pattern`] for any grouping: `super_of[i]` is the group of
+/// original variable `i`, groups are `0..n_super`, and an entry at or above
+/// `n_super` leaves the variable out.
+pub fn compress_pattern_by(pat: &CscPattern, super_of: &[usize], n_super: usize) -> CscPattern {
     if n_super == 0 {
         return CscPattern {
             n: 0,
@@ -162,9 +168,9 @@ pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
     let mut row_idx: Vec<usize> = Vec::new();
 
     // Inverse index: for each super-column `sc`, the list of originals
-    // that map to it. Build once from `map.super_of`.
+    // that map to it. Build once from `super_of`.
     let mut super_cols: Vec<Vec<usize>> = vec![Vec::new(); n_super];
-    for (orig, &sid) in map.super_of.iter().enumerate() {
+    for (orig, &sid) in super_of.iter().enumerate() {
         if sid < n_super {
             super_cols[sid].push(orig);
         }
@@ -186,7 +192,7 @@ pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
             let end = pat.col_ptr[orig_c + 1];
             for k in start..end {
                 let orig_r = pat.row_idx[k];
-                let sr = map.super_of[orig_r];
+                let sr = super_of[orig_r];
                 if sr == sc {
                     continue;
                 }

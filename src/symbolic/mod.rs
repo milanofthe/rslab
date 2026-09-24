@@ -2,6 +2,7 @@ pub mod column_counts;
 pub mod ldlt_compress;
 pub mod small_leaf;
 pub mod supernode;
+pub(crate) mod supervariables;
 
 use crate::error::RslabError;
 use crate::ordering::amd::permute_pattern;
@@ -555,13 +556,30 @@ fn checked_permutation(p: &[usize], n: usize) -> Result<Vec<usize>, RslabError> 
 /// (new-to-old: `perm[k]` is the original column that became column `k`),
 /// along with the concrete `OrderingMethod` actually dispatched (matters
 /// when `method == Auto` is resolved adaptively).
+/// Compress the ordering graph only when the groups of indistinguishable
+/// vertices shrink it to at most this share of its vertices.
+const COMPRESS_MAX_RATIO: f64 = 0.95;
+
 fn run_external_ordering(
     pattern: &CscPattern,
     method: OrderingMethod,
     nd_seeds: &[u64],
 ) -> Result<(Vec<usize>, OrderingMethod), RslabError> {
-    let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
-    let pat = rslab_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
+    // Order the graph of indistinguishable-vertex groups when it is markedly
+    // smaller, and expand the ordering to the original vertices (see
+    // `supervariables`). Measured on second-order Nedelec FEM systems, whose
+    // groups halve the graph.
+    let groups = supervariables::Supervariables::of(pattern);
+    let groups = ((groups.len() as f64) <= COMPRESS_MAX_RATIO * pattern.n as f64).then_some(groups);
+    let compressed = groups.as_ref().map(|g| g.compress(pattern));
+    let ordered = compressed.as_ref().unwrap_or(pattern);
+    let weights = groups.as_ref().map(|g| g.weights());
+    let expand = |p: Vec<i32>| match &groups {
+        Some(g) => g.expand(&p),
+        None => p,
+    };
+    let (col_buf, row_buf) = to_contract_pattern_bufs(ordered)?;
+    let pat = rslab_ordering_core::CscPattern::new(ordered.n, &col_buf, &row_buf)
         .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
     // `method` is expected to be concrete here - `Auto` is resolved
     // upstream by `symbolic_factorize_with_method` against the
@@ -569,10 +587,12 @@ fn run_external_ordering(
     debug_assert_ne!(method, OrderingMethod::Auto);
     let actual = method;
     let perm_i32 = match method {
-        OrderingMethod::Amd => rslab_amd::amd_order(&pat),
-        OrderingMethod::Amf => rslab_amf::amf_order(&pat),
-        OrderingMethod::MetisND => metis_seed_race(pattern, &pat, nd_seeds),
-        OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
+        OrderingMethod::Amd => rslab_amd::amd_order(&pat).map(expand),
+        OrderingMethod::Amf => rslab_amf::amf_order(&pat).map(expand),
+        OrderingMethod::MetisND => {
+            metis_seed_race(pattern, &pat, weights.as_deref(), groups.as_ref(), nd_seeds)
+        }
+        OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat).map(expand),
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
         }
@@ -633,24 +653,34 @@ const ND_SEED_RACE_MIN_FLOPS: u64 = 50_000_000_000;
 fn metis_seed_race(
     pattern: &CscPattern,
     pat: &rslab_ordering_core::CscPattern<'_>,
+    vwgt: Option<&[i32]>,
+    groups: Option<&supervariables::Supervariables>,
     seeds: &[u64],
 ) -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
     use rayon::prelude::*;
-    if let [seed] = seeds {
+    // One nested dissection of `pat` (weighted when it is the compressed
+    // graph), returned as an ordering of `pattern`'s vertices.
+    let order = |seed: u64| -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
         let opts = rslab_metis::MetisOptions {
-            seed: *seed,
+            seed,
             ..Default::default()
         };
-        return rslab_metis::metis_order_full(pat, &opts).map(|(perm, _, _)| perm);
+        let (perm, _, _) = match vwgt {
+            Some(w) => rslab_metis::metis_order_weighted(pat, w, &opts)?,
+            None => rslab_metis::metis_order_full(pat, &opts)?,
+        };
+        Ok(match groups {
+            Some(g) => g.expand(&perm),
+            None => perm,
+        })
+    };
+    if let [seed] = seeds {
+        return order(*seed);
     }
     let scored: Vec<(usize, u64, Vec<i32>)> = seeds
         .par_iter()
         .filter_map(|&seed| {
-            let opts = rslab_metis::MetisOptions {
-                seed,
-                ..Default::default()
-            };
-            let (perm_i32, _, _) = rslab_metis::metis_order_full(pat, &opts).ok()?;
+            let perm_i32 = order(seed).ok()?;
             // Exact scalar fill of this candidate: etree of the permuted
             // pattern (built through the permutation, no materialization)
             // plus GNP column counts on the permuted pattern.
