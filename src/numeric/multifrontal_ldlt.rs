@@ -1867,9 +1867,7 @@ fn analyze_with_inner(
         given_perm: opts.permutation.clone(),
         ..SupernodeParams::default()
     };
-    let mut t = std::time::Instant::now();
     let mut sym = symbolic_factorize_with_method(&pattern, &snode_params, opts.ordering)?;
-    crate::symbolic::diag_mark(&mut t, "symbolic total");
 
     // Liu (1986) contribution-stack minimization. Reorder each supernode's
     // children so the live contribution-block stack peak is minimized during
@@ -1943,7 +1941,6 @@ fn analyze_with_inner(
         by_level[lv].push(s);
     }
 
-    crate::symbolic::diag_mark(&mut t, "liu+levels");
     Ok(MultifrontalSymbolic {
         inner: Some(SymbolicInner {
             sym,

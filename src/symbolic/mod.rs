@@ -943,9 +943,7 @@ fn symbolic_prefix_with(
     // length `n` before handing it to the rest of the pipeline. See
     // `src/symbolic/ldlt_compress.rs` and
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
-    let mut t = std::time::Instant::now();
     let full_pattern = matrix.symmetric_pattern();
-    diag_mark(&mut t, "symmetric_pattern");
 
     // Resolve `OrderingMethod::Auto` against the original matrix's
     // pattern *before* preprocessing. If we resolved against the
@@ -1007,7 +1005,6 @@ fn symbolic_prefix_with(
     // original pattern through the permutation on the fly. The local name
     // `amd_*` is kept from the AMD-only era; semantically this is "ordering
     // output", regardless of method.
-    diag_mark(&mut t, "ordering");
     let mut amd_perm_inv = vec![0usize; n];
     for (new, &old) in amd_perm.iter().enumerate() {
         amd_perm_inv[old] = new;
@@ -1031,9 +1028,7 @@ fn symbolic_prefix_with(
     }
 
     // Step 5: Re-permute the matrix on the composed permutation.
-    diag_mark(&mut t, "etree+postorder");
     let permuted_pattern = permute_pattern(&full_pattern, &perm);
-    diag_mark(&mut t, "permute_pattern");
 
     // Step 5b: Build the final elimination tree by renumbering `amd_etree`
     // through the postorder. Postorder is a topological relabeling of the
@@ -1060,7 +1055,6 @@ fn symbolic_prefix_with(
     // O(nnz(A) + n*alpha(n)). Bit-exact equivalence verified on 169585
     // KKT matrices - see `dev/validation/phase-2.5.1-*`.
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
-    diag_mark(&mut t, "column_counts");
 
     // Phase 2.12: optional SSIDS-style merge-biased postorder.
     // Predict desired merges using only the etree + column counts,
@@ -1129,7 +1123,6 @@ fn symbolic_prefix_with(
         }
     }
     let factor_nnz = total_factor_nnz(&col_counts);
-    diag_mark(&mut t, "renumber+rest");
     Ok(SymbolicPrefix {
         n,
         perm,
@@ -1163,9 +1156,7 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     let snode_params: &SupernodeParams = &effective_params;
 
     // Step 7: Supernode detection on the postordered etree
-    let mut t = std::time::Instant::now();
     let mut supernodes = find_supernodes(&etree, &col_counts, snode_params);
-    diag_mark(&mut t, "find_supernodes");
     // Issue #55 Phase B2: assign per-supernode incoming-delay budget.
     // Bounded-cost postorder pass; runs once per symbolic factor and
     // is cached in `SymbolicFactorization` for reuse across numeric
@@ -1184,7 +1175,6 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
     let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
 
     let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
-    diag_mark(&mut t, "groups+peak");
 
     let factor_slack = 1.2;
 
@@ -1853,15 +1843,4 @@ mod tests {
         );
         assert_eq!(auto.resolved_method, OrderingMethod::Amf);
     }
-}
-
-/// Diagnostics branch only: print and restart a phase timer under `RLA_DIAG`.
-pub(crate) fn diag_mark(t: &mut std::time::Instant, label: &str) {
-    if std::env::var_os("RLA_DIAG").is_some() {
-        eprintln!(
-            "[diag] {label:<24} {:8.1} ms",
-            t.elapsed().as_secs_f64() * 1e3
-        );
-    }
-    *t = std::time::Instant::now();
 }
