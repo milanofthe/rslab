@@ -34,3 +34,5 @@ numpy = "0.22"
 # product faults them in again; mimalloc reuses thread-local segments
 # (measured 15-20% faster factorization at 12 threads, 2x on small systems).
 mimalloc = { version = "0.1", default-features = false }
+# `mi_collect`, see `common::heavy`.
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
