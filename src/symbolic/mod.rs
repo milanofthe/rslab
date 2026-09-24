@@ -753,10 +753,36 @@ fn symbolic_factorize_race(
     // mostly sequential, so the race wall is roughly the slowest candidate);
     // the pick is deterministic - smallest exact factor nnz, candidate order
     // breaking ties - regardless of completion order.
-    let results: Vec<Result<SymbolicPrefix, RslabError>> = RACE_CHEAP
-        .par_iter()
-        .map(|&cand| symbolic_prefix(matrix, snode_params, cand, ND_SINGLE_SEED))
-        .collect();
+    //
+    // With more than one worker, the nested-dissection candidates (one prefix
+    // per ensemble seed) start speculatively alongside stage 1 instead of
+    // after it: the ND prefixes are the longest part of the race, and stage 1
+    // leaves most workers idle. Stage 2 below decides from stage 1 alone which
+    // of them count, exactly as it would have run them, so the result does
+    // not depend on the thread count.
+    let speculate = matrix.n > 10_000 && rayon::current_num_threads() > 1;
+    let (results, speculative): (
+        Vec<Result<SymbolicPrefix, RslabError>>,
+        Vec<Option<SymbolicPrefix>>,
+    ) = rayon::join(
+        || {
+            RACE_CHEAP
+                .par_iter()
+                .map(|&cand| symbolic_prefix(matrix, snode_params, cand, ND_SINGLE_SEED))
+                .collect()
+        },
+        || {
+            if !speculate {
+                return Vec::new();
+            }
+            ND_SEED_CANDIDATES
+                .par_iter()
+                .map(|&seed| {
+                    symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, &[seed]).ok()
+                })
+                .collect()
+        },
+    );
     let mut best: Option<SymbolicPrefix> = None;
     let mut last_err: Option<RslabError> = None;
     for r in results {
@@ -776,7 +802,11 @@ fn symbolic_factorize_race(
         }
     }
     // Stage 2: the expensive ND candidate, only where its cost can amortize
-    // (see [`ND_RACE_MIN_FLOPS`]).
+    // (see [`ND_RACE_MIN_FLOPS`]), with the seed ensemble above
+    // [`ND_SEED_RACE_MIN_FLOPS`]. The ensemble's pick is the smallest exact
+    // factor nnz with the lowest seed breaking ties, which is the same choice
+    // `metis_seed_race` makes (its fill score is invariant under the
+    // postorders the prefix applies).
     if let Some(champ) = &best {
         let flops = prefix_flops(champ);
         if matrix.n > 10_000 && flops >= ND_RACE_MIN_FLOPS {
@@ -785,7 +815,17 @@ fn symbolic_factorize_race(
             } else {
                 ND_SINGLE_SEED
             };
-            if let Ok(nd) = symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, seeds) {
+            let nd = if speculate {
+                speculative
+                    .into_iter()
+                    .zip(ND_SEED_CANDIDATES)
+                    .filter(|(_, seed)| seeds.contains(seed))
+                    .filter_map(|(prefix, _)| prefix)
+                    .reduce(|a, b| if b.factor_nnz < a.factor_nnz { b } else { a })
+            } else {
+                symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, seeds).ok()
+            };
+            if let Some(nd) = nd {
                 if nd.factor_nnz < champ.factor_nnz {
                     best = Some(nd);
                 }
