@@ -3380,19 +3380,14 @@ fn factor_left_looking<T: Scalar>(
         )
     };
     let emit_free = |k: usize| ldlt_emit_and_free(k, &store, &emit, sym, sched, opts.drop_tol);
-    roots
-        .par_iter()
-        .map(|&r| {
-            crate::numeric::ll_common::ll_subtree(
-                r,
-                sym,
-                sched,
-                &emit.refcount,
-                &factor_node,
-                &emit_free,
-            )
-        })
-        .collect::<Result<Vec<()>, _>>()?;
+    crate::numeric::ll_common::ll_forest(
+        &roots,
+        sym,
+        sched,
+        &emit.refcount,
+        &factor_node,
+        &emit_free,
+    )?;
     drop(store); // panels moved into the emit cells; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
