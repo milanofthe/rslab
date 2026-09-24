@@ -216,61 +216,129 @@ fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
 /// Build the coarse graph from a fine graph and a fine-to-coarse map.
 fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
     let cn = cnvtxs as usize;
+    let n = fine.nvtxs as usize;
     // Accumulate vertex weights.
     let mut vwgt: Vec<i32> = vec![0; cn];
-    for v in 0..fine.nvtxs as usize {
+    for v in 0..n {
         vwgt[cmap[v] as usize] = vwgt[cmap[v] as usize].saturating_add(fine.vwgt[v]);
     }
     // Group fine vertices by coarse id to avoid rescans.
     let mut head: Vec<i32> = vec![-1; cn];
-    let mut next: Vec<i32> = vec![-1; fine.nvtxs as usize];
-    for v in 0..fine.nvtxs as usize {
+    let mut next: Vec<i32> = vec![-1; n];
+    for v in 0..n {
         let c = cmap[v] as usize;
         next[v] = head[c];
         head[c] = v as i32;
     }
-    // Contract one coarse vertex at a time with an edge-weight marker.
-    let mut marker: Vec<i32> = vec![-1; cn];
-    let mut weight_to: Vec<i32> = vec![0; cn];
-    let mut xadj: Vec<i32> = Vec::with_capacity(cn + 1);
-    let mut adjncy: Vec<i32> = Vec::with_capacity(fine.adjncy.len());
-    let mut adjwgt: Vec<i32> = Vec::with_capacity(fine.adjncy.len());
-    xadj.push(0);
-    let mut touched: Vec<i32> = Vec::new();
-    for (c, &head_c) in head.iter().enumerate().take(cn) {
-        touched.clear();
-        let mut v = head_c;
-        while v >= 0 {
-            let vu = v as usize;
-            let lo = fine.xadj[vu] as usize;
-            let hi = fine.xadj[vu + 1] as usize;
-            for k in lo..hi {
-                let nbr = fine.adjncy[k];
-                let cn2 = cmap[nbr as usize];
-                if cn2 == c as i32 {
-                    // self-loop after contraction - drop
-                    continue;
+    // The adjacency of coarse vertices `c0..c1`, one coarse vertex at a time
+    // with an edge-weight marker, appended to `adjncy`/`adjwgt` with each
+    // vertex's end offset pushed to `ends`. `marker` needs no reset between
+    // calls: its tags are coarse ids, and each is contracted exactly once.
+    let range = |c0: usize,
+                 c1: usize,
+                 marker: &mut [i32],
+                 weight_to: &mut [i32],
+                 touched: &mut Vec<i32>,
+                 ends: &mut Vec<usize>,
+                 adjncy: &mut Vec<i32>,
+                 adjwgt: &mut Vec<i32>| {
+        for (c, &first) in head.iter().enumerate().take(c1).skip(c0) {
+            touched.clear();
+            let mut v = first;
+            while v >= 0 {
+                let vu = v as usize;
+                let lo = fine.xadj[vu] as usize;
+                let hi = fine.xadj[vu + 1] as usize;
+                for k in lo..hi {
+                    let nbr = fine.adjncy[k];
+                    let cn2 = cmap[nbr as usize];
+                    if cn2 == c as i32 {
+                        // self-loop after contraction - drop
+                        continue;
+                    }
+                    let cu = cn2 as usize;
+                    if marker[cu] != c as i32 {
+                        marker[cu] = c as i32;
+                        weight_to[cu] = fine.adjwgt[k];
+                        touched.push(cn2);
+                    } else {
+                        weight_to[cu] = weight_to[cu].saturating_add(fine.adjwgt[k]);
+                    }
                 }
-                let cu = cn2 as usize;
-                if marker[cu] != c as i32 {
-                    marker[cu] = c as i32;
-                    weight_to[cu] = fine.adjwgt[k];
-                    touched.push(cn2);
-                } else {
-                    weight_to[cu] = weight_to[cu].saturating_add(fine.adjwgt[k]);
-                }
+                v = next[vu];
             }
-            v = next[vu];
+            for &tgt in touched.iter() {
+                adjncy.push(tgt);
+                adjwgt.push(weight_to[tgt as usize]);
+            }
+            ends.push(adjncy.len());
         }
-        for &tgt in &touched {
-            adjncy.push(tgt);
-            adjwgt.push(weight_to[tgt as usize]);
+    };
+
+    // Coarse vertices are independent, so large levels contract in parallel
+    // blocks whose outputs are concatenated in order: the coarse graph is the
+    // same as the serial loop's, whatever the thread count. On the top levels
+    // of a large nested dissection this was most of the coarsening time.
+    const PARALLEL_MIN_EDGES: usize = 200_000;
+    let blocks = if fine.adjncy.len() >= PARALLEL_MIN_EDGES {
+        (8 * rayon::current_num_threads()).min(cn)
+    } else {
+        1
+    };
+    let (mut xadj, adjncy, adjwgt) = if blocks <= 1 {
+        let mut ends = Vec::with_capacity(cn);
+        let mut adjncy = Vec::with_capacity(fine.adjncy.len());
+        let mut adjwgt = Vec::with_capacity(fine.adjncy.len());
+        range(
+            0,
+            cn,
+            &mut vec![-1; cn],
+            &mut vec![0; cn],
+            &mut Vec::new(),
+            &mut ends,
+            &mut adjncy,
+            &mut adjwgt,
+        );
+        (ends, adjncy, adjwgt)
+    } else {
+        use rayon::prelude::*;
+        let parts: Vec<(Vec<usize>, Vec<i32>, Vec<i32>)> = (0..blocks)
+            .into_par_iter()
+            .map_init(
+                || (vec![-1i32; cn], vec![0i32; cn], Vec::new()),
+                |(marker, weight_to, touched), b| {
+                    let (c0, c1) = (b * cn / blocks, (b + 1) * cn / blocks);
+                    let mut part = (Vec::with_capacity(c1 - c0), Vec::new(), Vec::new());
+                    range(
+                        c0,
+                        c1,
+                        marker,
+                        weight_to,
+                        touched,
+                        &mut part.0,
+                        &mut part.1,
+                        &mut part.2,
+                    );
+                    part
+                },
+            )
+            .collect();
+        let total: usize = parts.iter().map(|p| p.1.len()).sum();
+        let mut ends = Vec::with_capacity(cn);
+        let mut adjncy = Vec::with_capacity(total);
+        let mut adjwgt = Vec::with_capacity(total);
+        for (part_ends, part_adj, part_wgt) in parts {
+            let base = adjncy.len();
+            ends.extend(part_ends.iter().map(|&e| base + e));
+            adjncy.extend(part_adj);
+            adjwgt.extend(part_wgt);
         }
-        xadj.push(adjncy.len() as i32);
-    }
+        (ends, adjncy, adjwgt)
+    };
+    xadj.insert(0, 0);
     Graph {
         nvtxs: cnvtxs,
-        xadj,
+        xadj: xadj.into_iter().map(|e| e as i32).collect(),
         adjncy,
         vwgt,
         adjwgt,
@@ -305,6 +373,32 @@ mod tests {
             col_ptr.push(row_idx.len() as i32);
         }
         (col_ptr, row_idx)
+    }
+
+    #[test]
+    fn parallel_contract_matches_serial() {
+        // A 500 x 500 grid has ~1M directed edges, above the parallel
+        // threshold; contracting it in a 1-thread and a 4-thread pool must
+        // give the same coarse graph, entry for entry.
+        let g = grid(500, 500);
+        assert!(g.adjncy.len() >= 200_000);
+        let level = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut rng = SplitMix::new(3);
+                coarsen_level(&g, &mut rng, 0.95, &mut CoarsenCounters::default())
+            })
+        };
+        let (a, b) = (level(1), level(4));
+        assert_eq!(a.cmap, b.cmap);
+        assert_eq!(a.graph.nvtxs, b.graph.nvtxs);
+        assert_eq!(a.graph.xadj, b.graph.xadj);
+        assert_eq!(a.graph.adjncy, b.graph.adjncy);
+        assert_eq!(a.graph.adjwgt, b.graph.adjwgt);
+        assert_eq!(a.graph.vwgt, b.graph.vwgt);
     }
 
     fn grid(m: usize, n: usize) -> Graph {
