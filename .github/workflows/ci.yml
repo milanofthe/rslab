@@ -21,6 +21,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Overrides the repo's `target-cpu=native` (.cargo/config.toml): the cached
+  # target dir outlives the runner it was built on, and a runner with another
+  # CPU then dies with SIGILL. x86-64-v3 keeps the FMA/AVX2 paths under test.
+  RUSTFLAGS: -C target-cpu=x86-64-v3
 
 jobs:
   check:
