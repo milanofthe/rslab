@@ -5,11 +5,10 @@ klu_realworld --features matgen-download` and renders:
 
 * ``bench_out/h2h_klu_realworld.png`` - house-style two-panel (factor /
   20-point refactor+solve sweep) grouped bars, RSLAB KLU vs SuiteSparse KLU
-  on the SuiteSparse-collection circuit corpus. ``RSLAB_REPORT=1`` redirects
-  to ``docs/report/figures/h2h_klu_realworld.pdf`` (paper skin).
+  on the SuiteSparse-collection circuit corpus.
 * ``bench_out/klu_social.png`` - standalone dark share-card: per-matrix
   speedup of RSLAB KLU over SuiteSparse KLU (factor phase), opaque
-  background, self-explanatory annotations. Not affected by RSLAB_REPORT.
+  background, self-explanatory annotations.
 
 Usage: ``python benches/klu_realworld_plot.py [bench_out/klu_realworld.jsonl]``
 """
@@ -110,10 +109,7 @@ def social_card(data):
     ax.grid(axis="y", alpha=0.3, linewidth=0.5)
     ax.set_ylim(top=max(max(rs), max(ss)) * 3)
     st.legend_below(fig, ax=ax)
-    out = OUT / "klu_social.png"
-    fig.savefig(out, dpi=200, transparent=False, facecolor="white", bbox_inches="tight")
-    print(f"wrote {out}")
-    return out
+    return st.card(fig, OUT / "klu_social.png")
 
 
 if __name__ == "__main__":

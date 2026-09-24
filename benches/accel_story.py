@@ -15,8 +15,6 @@ questions: factor only is the repeated-factorization cost, one-shot is analyze +
 factor + solve, what a caller solving a system once waits for. Both solvers race
 orderings inside their analyze, so the one-shot number is like for like.
 
-``RSLAB_REPORT=1`` redirects the non-card figures to ``docs/report/figures/*.pdf``.
-
 Usage: ``python benches/accel_story.py [bench_out/accel_history.jsonl]``
 """
 import json
@@ -209,7 +207,7 @@ def timeline(rows, ax, metric, annotate=True):
                 continue
             ax.annotate(note, (i, hi), xytext=(0, 5), textcoords="offset points",
                         rotation=90, rotation_mode="anchor", ha="left", va="center",
-                        fontsize=6, color="black" if st.REPORT else st.GRAY)
+                        fontsize=6, color=st.GRAY)
         hi *= 4.5
     ax.set_ylim(lo / 1.3, hi * 1.05)
     ax.set_xticks(xs)
@@ -273,13 +271,7 @@ def scaling(rows, ax, metric="factor"):
 
 
 def card(fig, name):
-    """Share-card skin. Paper mode owns the figure's rcParams, so a card written
-    from a report run would carry the serif page style: skip it there."""
-    if st.REPORT:
-        return
-    out = OUT / name
-    fig.savefig(out, dpi=200, transparent=False, facecolor="white", bbox_inches="tight")
-    print(f"wrote {out}")
+    st.card(fig, OUT / name)
 
 
 def main():
