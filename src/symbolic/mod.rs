@@ -755,34 +755,52 @@ fn symbolic_factorize_race(
     // breaking ties - regardless of completion order.
     //
     // With more than one worker, the nested-dissection candidates (one prefix
-    // per ensemble seed) start speculatively alongside stage 1 instead of
-    // after it: the ND prefixes are the longest part of the race, and stage 1
-    // leaves most workers idle. Stage 2 below decides from stage 1 alone which
-    // of them count, exactly as it would have run them, so the result does
-    // not depend on the thread count.
-    let speculate = matrix.n > 10_000 && rayon::current_num_threads() > 1;
-    let (results, speculative): (
-        Vec<Result<SymbolicPrefix, RslabError>>,
-        Vec<Option<SymbolicPrefix>>,
-    ) = rayon::join(
+    // per ensemble seed) start speculatively instead of after stage 1: the ND
+    // prefixes are the longest part of the race, and stage 1 leaves most
+    // workers idle. On patterns with at least `EAGER_ND_MIN_NNZ` entries they
+    // start at once; on smaller ones only once the AMD prefix predicts enough
+    // work to pass the ND gate, because a discarded ND run on a small pattern
+    // outlasts the whole stage 1 (it doubled the race on a 128k power grid).
+    // Stage 2 below decides from stage 1 alone which of them count, exactly
+    // as it would have run them, so the result does not depend on the thread
+    // count or on whether anything was speculated.
+    const EAGER_ND_MIN_NNZ: usize = 2_000_000;
+    debug_assert_eq!(RACE_CHEAP[0], OrderingMethod::Amd);
+    let parallel = matrix.n > 10_000 && rayon::current_num_threads() > 1;
+    let eager = parallel && matrix.row_idx.len() >= EAGER_ND_MIN_NNZ;
+    let nd_candidates = || -> Vec<Option<SymbolicPrefix>> {
+        ND_SEED_CANDIDATES
+            .par_iter()
+            .map(|&seed| {
+                symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, &[seed]).ok()
+            })
+            .collect()
+    };
+    let ((amd, nd_late), (rest, nd_eager)) = rayon::join(
         || {
-            RACE_CHEAP
-                .par_iter()
-                .map(|&cand| symbolic_prefix(matrix, snode_params, cand, ND_SINGLE_SEED))
-                .collect()
+            let amd = symbolic_prefix(matrix, snode_params, RACE_CHEAP[0], ND_SINGLE_SEED);
+            let gated =
+                parallel && !eager && matches!(&amd, Ok(p) if prefix_flops(p) >= ND_RACE_MIN_FLOPS);
+            (amd, if gated { nd_candidates() } else { Vec::new() })
         },
         || {
-            if !speculate {
-                return Vec::new();
-            }
-            ND_SEED_CANDIDATES
-                .par_iter()
-                .map(|&seed| {
-                    symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, &[seed]).ok()
-                })
-                .collect()
+            rayon::join(
+                || {
+                    RACE_CHEAP[1..]
+                        .par_iter()
+                        .map(|&cand| symbolic_prefix(matrix, snode_params, cand, ND_SINGLE_SEED))
+                        .collect::<Vec<_>>()
+                },
+                || if eager { nd_candidates() } else { Vec::new() },
+            )
         },
     );
+    let results = std::iter::once(amd).chain(rest);
+    let speculative = if nd_eager.is_empty() {
+        nd_late
+    } else {
+        nd_eager
+    };
     let mut best: Option<SymbolicPrefix> = None;
     let mut last_err: Option<RslabError> = None;
     for r in results {
@@ -815,7 +833,7 @@ fn symbolic_factorize_race(
             } else {
                 ND_SINGLE_SEED
             };
-            let nd = if speculate {
+            let nd = if !speculative.is_empty() {
                 speculative
                     .into_iter()
                     .zip(ND_SEED_CANDIDATES)
