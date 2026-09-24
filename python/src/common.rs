@@ -3,9 +3,7 @@
 //! report types.
 
 use num_complex::Complex;
-use numpy::{
-    Element, IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
-};
+use numpy::{Element, IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -363,4 +361,123 @@ pub fn adaptive_restart(n: usize, columns: usize, scalar_bytes: usize, bases: us
     }
     let cap = (GMRES_BASIS_BUDGET_BYTES / per_layer).saturating_sub(1);
     cap.clamp(GMRES_RESTART_MIN, GMRES_RESTART_MAX)
+}
+
+/// Index type of a SciPy CSC matrix (`int32` or `int64`).
+trait CscIndex: Element + Copy + Ord {
+    fn to_usize(self) -> Option<usize>;
+    fn from_usize(v: usize) -> Option<Self>;
+}
+
+impl CscIndex for i32 {
+    fn to_usize(self) -> Option<usize> {
+        usize::try_from(self).ok()
+    }
+    fn from_usize(v: usize) -> Option<Self> {
+        i32::try_from(v).ok()
+    }
+}
+
+impl CscIndex for i64 {
+    fn to_usize(self) -> Option<usize> {
+        usize::try_from(self).ok()
+    }
+    fn from_usize(v: usize) -> Option<Self> {
+        i64::try_from(v).ok()
+    }
+}
+
+/// Lower triangle (rows at or below the diagonal) of an `n x n` CSC matrix in
+/// canonical format: sorted rows, no duplicates. Each column's lower part is a
+/// suffix of the column, found by binary search and copied as one slice.
+fn lower_suffixes<I: CscIndex, T: Copy>(
+    n: usize,
+    indptr: &[I],
+    indices: &[I],
+    data: &[T],
+) -> Option<(Vec<I>, Vec<I>, Vec<T>)> {
+    if indptr.len() != n + 1 || indices.len() != data.len() {
+        return None;
+    }
+    let ptr: Vec<usize> = indptr
+        .iter()
+        .map(|&p| p.to_usize())
+        .collect::<Option<_>>()?;
+    if ptr[0] != 0 || ptr[n] != indices.len() || ptr.windows(2).any(|w| w[0] > w[1]) {
+        return None;
+    }
+    let starts: Vec<usize> = (0..n)
+        .map(|j| {
+            let col = &indices[ptr[j]..ptr[j + 1]];
+            I::from_usize(j).map(|jj| ptr[j] + col.partition_point(|&r| r < jj))
+        })
+        .collect::<Option<_>>()?;
+    let mut out_ptr = Vec::with_capacity(n + 1);
+    let mut total = 0usize;
+    out_ptr.push(I::from_usize(0)?);
+    for j in 0..n {
+        total += ptr[j + 1] - starts[j];
+        out_ptr.push(I::from_usize(total)?);
+    }
+    let mut out_idx = Vec::with_capacity(total);
+    let mut out_val = Vec::with_capacity(total);
+    for j in 0..n {
+        out_idx.extend_from_slice(&indices[starts[j]..ptr[j + 1]]);
+        out_val.extend_from_slice(&data[starts[j]..ptr[j + 1]]);
+    }
+    Some((out_ptr, out_idx, out_val))
+}
+
+/// Lower triangle of a canonical `n x n` CSC matrix as `(indptr, indices,
+/// data)`, in the index and value types it came in. The fast path of the
+/// Python package's lower-triangle extraction; `_lower_csc` keeps the SciPy
+/// route for matrices that are not in canonical format.
+#[pyfunction]
+pub fn lower_triangle(
+    py: Python<'_>,
+    n: usize,
+    indptr: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    data: &Bound<'_, PyAny>,
+) -> PyResult<(PyObject, PyObject, PyObject)> {
+    fn by_value<I: CscIndex>(
+        py: Python<'_>,
+        n: usize,
+        ip: &[I],
+        ix: &[I],
+        data: &Bound<'_, PyAny>,
+    ) -> PyResult<(PyObject, PyObject, PyObject)> {
+        macro_rules! try_value {
+            ($T:ty) => {
+                if let Ok(d) = data.extract::<PyReadonlyArray1<$T>>() {
+                    let (p, i, v) = lower_suffixes(n, ip, ix, d.as_slice()?).ok_or_else(|| {
+                        PyValueError::new_err("lower_triangle: malformed CSC arrays")
+                    })?;
+                    return Ok((array1(py, p), array1(py, i), array1(py, v)));
+                }
+            };
+        }
+        try_value!(f64);
+        try_value!(C64);
+        try_value!(f32);
+        try_value!(C32);
+        Err(PyValueError::new_err(
+            "lower_triangle: data must be float32, float64, complex64 or complex128",
+        ))
+    }
+    macro_rules! try_index {
+        ($I:ty) => {
+            if let (Ok(ip), Ok(ix)) = (
+                indptr.extract::<PyReadonlyArray1<$I>>(),
+                indices.extract::<PyReadonlyArray1<$I>>(),
+            ) {
+                return by_value::<$I>(py, n, ip.as_slice()?, ix.as_slice()?, data);
+            }
+        };
+    }
+    try_index!(i32);
+    try_index!(i64);
+    Err(PyValueError::new_err(
+        "lower_triangle: indptr and indices must both be int32 or both int64",
+    ))
 }

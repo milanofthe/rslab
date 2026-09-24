@@ -96,6 +96,32 @@ def test_block_memory_order(layout):
         assert _residual(A, Xg[:, c], B[:, c]) < 1e-8
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
+@pytest.mark.parametrize("index", [np.int32, np.int64])
+def test_lower_csc_matches_tril(dtype, index):
+    # The fast path for canonical input must give exactly SciPy's lower triangle.
+    rng = np.random.default_rng(7)
+    A = sp.random(80, 80, density=0.08, random_state=rng, format="csc").astype(dtype)
+    A = (A + A.T + sp.eye(80, dtype=dtype)).tocsc()
+    A.indptr, A.indices = A.indptr.astype(index), A.indices.astype(index)
+    assert A.has_canonical_format
+    ref = sp.tril(A).tocsc()
+    ref.sort_indices()
+    L = rslab._lower_csc(A)
+    assert L.has_canonical_format and L.dtype == A.dtype
+    assert np.array_equal(L.indptr, ref.indptr)
+    assert np.array_equal(L.indices, ref.indices)
+    assert np.array_equal(L.data, ref.data)
+
+
+def test_lower_csc_sums_duplicates():
+    # Duplicate entries are not canonical and take the summing SciPy route.
+    A = sp.csc_matrix((np.array([1.0, 2.0, 3.0, 4.0]), np.array([0, 1, 1, 1]), np.array([0, 3, 4])), shape=(2, 2))
+    assert not A.has_canonical_format
+    L = rslab._lower_csc(A)
+    assert np.array_equal(L.toarray(), np.array([[1.0, 0.0], [5.0, 4.0]]))
+
+
 def test_preconditioner_refine():
     # An indefinite-ish system where static pivoting + refinement is the recipe.
     A = _spd(200)

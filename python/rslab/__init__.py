@@ -167,7 +167,16 @@ def _normalize_dtype(data: np.ndarray) -> np.ndarray:
 def _lower_csc(A):
     """Lower triangle of a symmetric matrix as a sorted, summed CSC matrix."""
     sp = _require_scipy()
-    L = sp.tril(sp.csc_matrix(A)).tocsc()
+    A = sp.csc_matrix(A)
+    n = A.shape[0]
+    if n == A.shape[1] and A.has_canonical_format:
+        # Sorted rows without duplicates: each column's lower part is a suffix,
+        # cut out in one pass without SciPy's COO round trip.
+        indptr, indices, data = _rslab.lower_triangle(n, A.indptr, A.indices, A.data)
+        L = sp.csc_matrix((data, indices, indptr), shape=A.shape)
+        L.has_canonical_format = True
+        return L
+    L = sp.tril(A).tocsc()
     L.sum_duplicates()
     L.sort_indices()
     return L
