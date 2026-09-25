@@ -79,7 +79,6 @@
 // -------------------------------------------------------------------------
 
 /// Single-solve thread-count policy from the symbolic analysis.
-pub(crate) mod analysis;
 /// Monotonic clock shim: std Instant natively, inert on wasm32 (no OS clock).
 pub(crate) mod clock;
 pub(crate) mod dense;
@@ -132,7 +131,6 @@ pub mod tuning;
 // Flat public API re-exported at crate root - a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
-pub use analysis::recommend_threads_from;
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{
     Decisions, Diagnostics, MemoryEstimate, NumericReport, Rates, SolveCounter, SolveStats,
@@ -143,6 +141,7 @@ pub use logging::{LogLevel, LogSink};
 pub use numeric::gemm_tuning::{
     GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
 };
+pub use numeric::supernodal::analysis::recommend_threads_from;
 pub use refine::{BackwardError, RefineOutcome, RefinePolicy};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;

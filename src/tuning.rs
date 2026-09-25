@@ -499,6 +499,52 @@ pub fn plan(
     }
 }
 
+/// 3D 7-point Laplacian (k^3 grid, Dirichlet, SPD, lower triangle), generic over
+/// the scalar type - the calibration's representative matrix. Complex-typed, it is
+/// real-valued but factors through the complex kernel, so it times the complex
+/// proxy-flops/s rate.
+fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
+    let n = k * k * k;
+    let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
+    for z in 0..k {
+        for y in 0..k {
+            for x in 0..k {
+                let p = idx(x, y, z);
+                rows.push(p);
+                cols.push(p);
+                vals.push(T::from_real(6.0));
+                let mut nb = |q: usize| {
+                    let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(T::from_real(-1.0));
+                };
+                if x + 1 < k {
+                    nb(idx(x + 1, y, z));
+                }
+                if y + 1 < k {
+                    nb(idx(x, y + 1, z));
+                }
+                if z + 1 < k {
+                    nb(idx(x, y, z + 1));
+                }
+            }
+        }
+    }
+    match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
+        Ok(m) => m,
+        Err(_) => CscMatrix {
+            n: 0,
+            col_ptr: vec![0],
+            row_idx: vec![],
+            values: vec![],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,51 +649,5 @@ mod tests {
             plan_tight.est_peak_bytes < est.transient_peak_bytes,
             "approximations shrink the peak"
         );
-    }
-}
-
-/// 3D 7-point Laplacian (k^3 grid, Dirichlet, SPD, lower triangle), generic over
-/// the scalar type - the calibration's representative matrix. Complex-typed, it is
-/// real-valued but factors through the complex kernel, so it times the complex
-/// proxy-flops/s rate.
-fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
-    let n = k * k * k;
-    let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
-    let mut rows = Vec::new();
-    let mut cols = Vec::new();
-    let mut vals: Vec<T> = Vec::new();
-    for z in 0..k {
-        for y in 0..k {
-            for x in 0..k {
-                let p = idx(x, y, z);
-                rows.push(p);
-                cols.push(p);
-                vals.push(T::from_real(6.0));
-                let mut nb = |q: usize| {
-                    let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
-                    rows.push(hi);
-                    cols.push(lo);
-                    vals.push(T::from_real(-1.0));
-                };
-                if x + 1 < k {
-                    nb(idx(x + 1, y, z));
-                }
-                if y + 1 < k {
-                    nb(idx(x, y + 1, z));
-                }
-                if z + 1 < k {
-                    nb(idx(x, y, z + 1));
-                }
-            }
-        }
-    }
-    match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
-        Ok(m) => m,
-        Err(_) => CscMatrix {
-            n: 0,
-            col_ptr: vec![0],
-            row_idx: vec![],
-            values: vec![],
-        },
     }
 }
