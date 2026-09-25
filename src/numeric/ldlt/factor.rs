@@ -3,7 +3,7 @@
 
 use super::node::ll_factor_node;
 use crate::numeric::supernodal::analysis::{
-    analyze, recommend_threads_for_sym, SupernodalAnalysis,
+    analyze_for, recommend_threads_for_sym, AnalysisUse, SupernodalAnalysis,
 };
 
 use crate::dense::ldlt_generic::LdltFactors;
@@ -32,7 +32,8 @@ pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>,
 /// Like [`factor_sparse_ldlt`] but with explicit [`SolverSettings`] -
 /// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
 ///
-/// Convenience wrapper: runs [`analyze`] then [`factor_numeric`]. For the
+/// Convenience wrapper: runs the analysis (for one factorization, see
+/// [`AnalysisUse`]) then [`factor_numeric`]. For the
 /// PARDISO-style *analyze once, factor many* workflow - FEM Newton steps or a
 /// frequency sweep that reuse one sparsity pattern - call them separately and
 /// keep the [`SupernodalAnalysis`] across factorizations.
@@ -40,7 +41,7 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
     a: &CscMatrix<T>,
     opts: &SolverSettings,
 ) -> Result<LdltFactors<T>, RslabError> {
-    let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
+    let symb = analyze_for(a.n, &a.col_ptr, &a.row_idx, opts, AnalysisUse::Once)?;
     factor_numeric(&symb, a, None, opts).map(LdltNumeric::into_factors)
 }
 

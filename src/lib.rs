@@ -151,7 +151,9 @@ pub use dense::ldlt_generic::{
 };
 // The low-level LDL^T symbolic/numeric building blocks.
 pub use numeric::ldlt::{factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, LdltNumeric};
-pub use numeric::supernodal::analysis::{analyze, analyze_with, SupernodalAnalysis};
+pub use numeric::supernodal::analysis::{
+    analyze, analyze_for, analyze_with, AnalysisUse, SupernodalAnalysis,
+};
 // Settings shared by the LDL^T and LU paths.
 pub use numeric::settings::{
     with_threads, FactorPath, ReorderMode, SolverSettings, Threads, ZeroPivotAction,
