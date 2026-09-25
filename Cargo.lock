@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "rslab"
-version = "0.38.0"
+version = "1.0.0"
 dependencies = [
  "approx",
  "criterion",
@@ -1560,21 +1560,21 @@ dependencies = [
 
 [[package]]
 name = "rslab-amd"
-version = "0.2.2"
+version = "1.0.0"
 dependencies = [
  "rslab-ordering-core",
 ]
 
 [[package]]
 name = "rslab-amf"
-version = "0.2.2"
+version = "1.0.0"
 dependencies = [
  "rslab-ordering-core",
 ]
 
 [[package]]
 name = "rslab-metis"
-version = "0.2.2"
+version = "1.0.0"
 dependencies = [
  "rayon",
  "rslab-amd",
@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "rslab-ordering-core"
-version = "0.2.2"
+version = "1.0.0"
 
 [[package]]
 name = "rustix"
