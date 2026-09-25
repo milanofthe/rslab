@@ -281,14 +281,6 @@ impl Clone for SolveCounter {
     }
 }
 
-/// Everything one factorization can tell about itself: the per-stage cost,
-/// the decisions taken, the numeric outcome, the settings that had no effect
-/// on the chosen path, and the solve-phase accumulators. Per-call and
-/// concurrency-safe (no global state), so a solver-in-the-loop with many
-/// concurrent solves gets correct per-solve numbers. Carries the a-priori
-/// [`MemoryEstimate`] alongside the measured factor time for estimate-vs-actual
-/// feedback. Logged as one `Info` line per factorization (see
-/// [`summary`](Self::summary)) and readable from the factor handle.
 /// Throughput of a factorization and its solves, derived from the stage
 /// records: the numbers to compare across orderings, thread counts and
 /// machines. Rates are `0.0` where the stage is absent or took no time.
@@ -314,6 +306,14 @@ pub struct Rates {
     pub solve_mdof_s: f64,
 }
 
+/// Everything one factorization can tell about itself: the per-stage cost,
+/// the decisions taken, the numeric outcome, the settings that had no effect
+/// on the chosen path, and the solve-phase accumulators. Per-call and
+/// concurrency-safe (no global state), so a solver-in-the-loop with many
+/// concurrent solves gets correct per-solve numbers. Carries the a-priori
+/// [`MemoryEstimate`] alongside the measured factor time for estimate-vs-actual
+/// feedback. Logged as one `Info` line per factorization (see
+/// [`summary`](Self::summary)) and readable from the factor handle.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
     /// `analyze` (ordering + symbolic; the analysis time of the reused
