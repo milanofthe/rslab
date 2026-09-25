@@ -53,6 +53,7 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(symbolic::analyze_lu, m)?)?;
     m.add_function(wrap_pyfunction!(symbolic::analyze_klu, m)?)?;
     m.add_function(wrap_pyfunction!(common::lower_triangle, m)?)?;
+    m.add_function(wrap_pyfunction!(common::is_symmetric, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::gmres_plain, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::gmres_block_plain, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::cocg_plain, m)?)?;

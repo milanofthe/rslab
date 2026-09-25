@@ -640,6 +640,7 @@ dependencies = [
  "num-complex",
  "numpy",
  "pyo3",
+ "rayon",
  "rslab",
 ]
 

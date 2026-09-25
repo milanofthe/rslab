@@ -153,6 +153,24 @@ def test_analyze_auto_picks_path():
     assert "LdltSymbolic(" in repr(rslab.analyze(_spd(80)))
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
+@pytest.mark.parametrize("index", [np.int32, np.int64])
+def test_symmetry_check_matches_difference(dtype, index):
+    # The Rust test on canonical arrays against the explicit `A - A^T`.
+    def reference(A, tol=1e-12):
+        d = abs(A - A.T)
+        return d.max() <= tol * (abs(A).max() or 1.0)
+
+    S, G = _spd(60, dtype=dtype), _general(60, dtype=dtype)
+    near = (S + sp.csc_matrix(([1e-9 * abs(S).max()], ([3], [7])), shape=S.shape)).astype(dtype)
+    for M in (S, G, near, S.tocsr(), G.tocsr(), sp.csc_matrix((5, 5), dtype=dtype)):
+        M = M.copy()
+        M.indptr, M.indices = M.indptr.astype(index), M.indices.astype(index)
+        assert M.has_canonical_format
+        assert rslab._is_symmetric(M) == reference(M)
+    assert not rslab._is_symmetric(near)
+
+
 def test_symbolic_rejects_wrong_nnz():
     sym = rslab.analyze(_general(100), path="lu")
     with pytest.raises(ValueError):
