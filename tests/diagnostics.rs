@@ -112,26 +112,37 @@ fn klu_diagnostics_are_filled() {
 
 #[test]
 fn settings_ignored_by_a_path_are_reported() {
-    // pivot_u belongs to the left-looking LU: the LDL^T path reports it.
+    // pivot_u belongs to the LU: the LDL^T path reports it.
+    let (sym, full) = (grid_lower(12), grid_full(12));
     let ldlt = SolverSettings::exact().with_pivot_u(0.5);
-    let w = ldlt.ignored_on(rslab::FactorPath::Ldlt);
+    let w = LdltSolver::factor_with(&sym, &ldlt)
+        .unwrap()
+        .diagnostics()
+        .warnings;
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains("pivot_u"));
-    assert!(ldlt.ignored_on(rslab::FactorPath::Lu).is_empty());
+    assert!(LuSolver::factor(&full, &ldlt)
+        .unwrap()
+        .diagnostics()
+        .warnings
+        .is_empty());
     // scaling belongs to the symmetric path: the LU path reports it.
     let lu = SolverSettings::exact().with_scaling(ScalingStrategy::Identity);
-    let w = lu.ignored_on(rslab::FactorPath::Lu);
+    let w = LuSolver::factor(&full, &lu).unwrap().diagnostics().warnings;
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains("scaling"));
-    assert!(lu.ignored_on(rslab::FactorPath::Ldlt).is_empty());
-    // defaults are honoured everywhere
-    assert!(SolverSettings::default()
-        .ignored_on(rslab::FactorPath::Lu)
+    assert!(LdltSolver::factor_with(&sym, &lu)
+        .unwrap()
+        .diagnostics()
+        .warnings
         .is_empty());
-    // and the warning rides on the factorization's diagnostics
-    let a = grid_lower(12);
-    let f = LdltSolver::factor_with(&a, &ldlt).unwrap();
-    assert_eq!(f.diagnostics().warnings.len(), 1);
+    // defaults are honoured everywhere
+    let d = SolverSettings::default();
+    assert!(LuSolver::factor(&full, &d)
+        .unwrap()
+        .diagnostics()
+        .warnings
+        .is_empty());
 }
 
 struct Capture(Arc<Mutex<Vec<(LogLevel, String)>>>);

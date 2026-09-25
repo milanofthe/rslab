@@ -83,7 +83,7 @@ fn cocr_solves_complex_symmetric_pre_and_unpre() {
 
 #[test]
 fn gmres_solves_unsymmetric_with_lu_preconditioner() {
-    use crate::numeric::lu::factor_general_lu;
+    use crate::numeric::lu::LuSolver;
     use crate::sparse::general::GeneralCsc;
     // Genuinely unsymmetric complex 2D grid (right != left couplings).
     let c = |re, im| Complex::new(re, im);
@@ -125,7 +125,7 @@ fn gmres_solves_unsymmetric_with_lu_preconditioner() {
     assert!(un.converged, "GMRES res={}", un.final_res);
 
     // LU factor as preconditioner -> 1-2 iterations.
-    let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let pre = gmres(&a, &b, &lu, 1e-10, 200, 40, None).unwrap();
     assert!(pre.converged, "preconditioned GMRES res={}", pre.final_res);
     assert!(
@@ -240,7 +240,7 @@ fn fgmres_saves_one_precond_apply_per_restart_cycle() {
     // multi-cycle solve the total preconditioner-apply count equals the total
     // iteration count. Plain right-preconditioned GMRES would spend one extra
     // `M^-1` per cycle (rebuilding `M^-1(V y)`), i.e. `iters + n_cycles`.
-    use crate::numeric::lu::factor_general_lu;
+    use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(10); // n = 100
     let n = a.n;
@@ -251,7 +251,7 @@ fn fgmres_saves_one_precond_apply_per_restart_cycle() {
         drop_tol: Some(8e-1),
         ..Default::default()
     };
-    let lu = factor_general_lu(&a, &opts).unwrap();
+    let lu = LuSolver::factor(&a, &opts).unwrap();
     let restart = 5;
     let counting = CountingPc {
         inner: &lu,
@@ -344,12 +344,12 @@ fn gmres_block_single_rhs_matches_scalar_gmres() {
     // so the projections sum in a different order and the true residual can
     // straddle `tol` by a rounding ULP. This is documented as a design point in
     // the module-level "Orthogonalization" note, not a defect.
-    use crate::numeric::lu::factor_general_lu;
+    use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(8);
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let single = gmres(&a, &b, &lu, 1e-10, 200, 40, None).unwrap();
     let blk = gmres_block(&a, &b, 1, &lu, 1e-10, 200, 40, None).unwrap();
     assert!(blk.converged);
@@ -369,7 +369,7 @@ fn gmres_block_single_rhs_matches_scalar_gmres() {
 fn gmres_block_multi_rhs_solves_each_column() {
     // Several distinct right-hand sides solved in one block iteration; every
     // column must reach its own system's true residual.
-    use crate::numeric::lu::factor_general_lu;
+    use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(10);
     let n = a.n;
@@ -381,7 +381,7 @@ fn gmres_block_multi_rhs_solves_each_column() {
             bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
         }
     }
-    let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let res = gmres_block(&a, &bblk, s, &lu, 1e-10, 200, 40, None).unwrap();
     assert!(
         res.converged,
@@ -526,7 +526,7 @@ fn gmres_block_bcgs2_bit_identical_across_thread_counts() {
     // chunk order, so the whole block solve is **bit-identical regardless of
     // the thread count** - the determinism guarantee. Solve the same block in
     // a 1-thread and an 8-thread rayon pool and require exact equality.
-    use crate::numeric::lu::factor_general_lu;
+    use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     // Wide enough that a chunked reduction actually spans several chunks.
     let a = unsym_grid(60);
@@ -538,7 +538,7 @@ fn gmres_block_bcgs2_bit_identical_across_thread_counts() {
             bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
         }
     }
-    let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let solve = || gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
     let x1 = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -561,40 +561,6 @@ fn gmres_block_bcgs2_bit_identical_across_thread_counts() {
 }
 
 #[test]
-fn with_threads_caps_block_gmres_pool_and_keeps_result() {
-    // `with_threads(p)` runs the block solve in a scoped pool of exactly `p`
-    // workers (the embedded / solver-in-the-loop cap) and produces the same
-    // result as the unbounded solve.
-    use crate::numeric::lu::factor_general_lu;
-    use crate::numeric::settings::with_threads;
-    let c = |re, im| Complex::new(re, im);
-    let a = unsym_grid(30);
-    let n = a.n;
-    let s = 4;
-    let mut bblk = vec![C::default(); n * s];
-    for k in 0..s {
-        for i in 0..n {
-            bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
-        }
-    }
-    let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let seen = with_threads(3, rayon::current_num_threads);
-    assert_eq!(
-        seen, 3,
-        "with_threads must cap the pool to the requested width"
-    );
-    let capped = with_threads(3, || {
-        gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap()
-    });
-    let plain = gmres_block(&a, &bblk, s, &lu, 1e-10, 300, 60, None).unwrap();
-    assert!(capped.converged);
-    assert!(
-        capped.x == plain.x,
-        "capped-pool solve must match the unbounded solve bit-for-bit"
-    );
-}
-
-#[test]
 fn block_gmres_orthogonalization_respects_factor_thread_cap() {
     // The block-GMRES orthogonalization must run in a pool derived
     // from the *factor's* Threads policy, not the ambient global pool. Factor
@@ -604,8 +570,8 @@ fn block_gmres_orthogonalization_respects_factor_thread_cap() {
     // stays bit-identical whether run bare or inside a wide ambient pool (the
     // chunk-order reduction is thread-count independent), so the cap changes
     // only the concurrency, never the numbers.
-    use crate::numeric::lu::factor_general_lu;
-    use crate::numeric::settings::{with_threads, Threads};
+    use crate::numeric::lu::LuSolver;
+    use crate::numeric::settings::Threads;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(30);
     let n = a.n;
@@ -617,7 +583,7 @@ fn block_gmres_orthogonalization_respects_factor_thread_cap() {
         }
     }
     // Factor capped to exactly 2 workers -> solve policy is Fixed(2).
-    let lu = factor_general_lu(&a, &SolverSettings::default().with_threads(2)).unwrap();
+    let lu = LuSolver::factor(&a, &SolverSettings::default().with_threads(2)).unwrap();
     assert_eq!(
         Preconditioner::<C>::solve_threads(&lu),
         Threads::Fixed(2),
@@ -653,17 +619,17 @@ fn ambient_threads_factor_matches_default_and_runs_on_shared_pool() {
     // re-factor-in-loop path. Inside a `with_threads(2)` pool the factor must be
     // bit-identical to the normal (scoped-pool) factor: the numeric result is
     // independent of the thread policy.
-    use crate::numeric::lu::factor_general_lu;
-    use crate::numeric::settings::{with_threads, Threads};
+    use crate::numeric::lu::LuSolver;
+    use crate::numeric::settings::Threads;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(24);
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    let lu_default = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+    let lu_default = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let opts_amb = SolverSettings::default().with_thread_policy(Threads::Ambient);
     let lu_amb = with_threads(2, || {
         assert_eq!(rayon::current_num_threads(), 2);
-        factor_general_lu(&a, &opts_amb).unwrap()
+        LuSolver::factor(&a, &opts_amb).unwrap()
     });
     let x_def = gmres_block(&a, &b, 1, &lu_default, 1e-10, 200, 40, None).unwrap();
     let x_amb = gmres_block(&a, &b, 1, &lu_amb, 1e-10, 200, 40, None).unwrap();
@@ -931,7 +897,7 @@ fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
     // an intrusive probe; instead we certify the *effect*: GMRES still drives
     // the true residual to `tol` and matches the exact (direct-LU) solution -
     // which it could not if the ill-conditioned basis went uncorrected.
-    use crate::numeric::lu::{factor_general_lu, solve_lu};
+    use crate::numeric::lu::LuSolver;
     use crate::sparse::general::GeneralCsc;
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 32;
@@ -956,8 +922,8 @@ fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
         "reorth must keep GMRES converging, res={}",
         res.final_res
     );
-    let lu = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let xstar = solve_lu(&lu, &b).unwrap();
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let xstar = lu.solve(&b).unwrap();
     let diff = (0..n)
         .map(|i| (res.x[i] - xstar[i]).norm())
         .fold(0.0, f64::max);
@@ -1017,7 +983,7 @@ fn gmres_block_incomplete_factor_multirate_deflation() {
     // within-cycle deflation must finalize each fast column and shrink the
     // batched applies to the still-active width, draining the panel to 1 - while
     // every column still matches its single-RHS solve.
-    use crate::numeric::lu::factor_general_lu;
+    use crate::numeric::lu::LuSolver;
     use crate::sparse::general::GeneralCsc;
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 8;
@@ -1044,7 +1010,7 @@ fn gmres_block_incomplete_factor_multirate_deflation() {
         drop_tol: Some(1e-2),
         ..Default::default()
     };
-    let lu = factor_general_lu(&pmat, &opts).unwrap();
+    let lu = LuSolver::factor(&pmat, &opts).unwrap();
 
     // RHS k = sum of the first k+1 unit vectors -> converges in exactly k+1 steps.
     let mut bblk = vec![C::default(); n * s];
@@ -1130,7 +1096,7 @@ fn gmres_recycled_matches_plain_on_hard_matrix() {
     // Correctness: the recycled solve must reach the SAME solution as plain
     // FGMRES on a hard preconditioned system (weak incomplete LU factor, short
     // restart -> many cycles), to the same tolerance.
-    use crate::numeric::lu::factor_general_lu;
+    use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(12); // n = 144
     let n = a.n;
@@ -1139,7 +1105,7 @@ fn gmres_recycled_matches_plain_on_hard_matrix() {
         drop_tol: Some(8e-1),
         ..Default::default()
     };
-    let lu = factor_general_lu(&a, &opts).unwrap();
+    let lu = LuSolver::factor(&a, &opts).unwrap();
     let (tol, maxit, restart) = (1e-10, 4000, 12);
     let plain = gmres(&a, &b, &lu, tol, maxit, restart, None).unwrap();
     let mut rec = Recycle::new(8);
@@ -1412,4 +1378,13 @@ fn gmres_recycled_real_scalar_path() {
     a.matvec(&r.x, &mut ax);
     let res = (0..n).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max);
     assert!(res < 1e-6, "real recycled residual {res}");
+}
+
+/// Run `f` in a fresh rayon pool of `threads` workers.
+fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(f)
 }

@@ -114,7 +114,7 @@ pub(super) const ORTHO_CHUNK: usize = 2048;
 /// from the preconditioner's [`Threads`] policy. `Ambient`
 /// returns `None` - the reductions then run on the caller's current pool (the
 /// solver-in-the-loop path, where the caller has already installed one bounded
-/// pool via [`with_threads`](crate::with_threads)). Any concrete policy builds a
+/// rayon pool). Any concrete policy builds a
 /// pool of that width **once** per solve; the four `block_project` / `block_subtract`
 /// calls per step reuse it (cheap `install`), so factor and solve share one
 /// concurrency budget instead of the solve fanning out over the global pool. The
@@ -139,7 +139,7 @@ pub(super) fn solve_thread_pool(policy: Threads) -> Option<rayon::ThreadPool> {
 /// Run an orthogonalization reduction `f` in the solve pool if one was built,
 /// else on the current pool. Confined to closures capturing only Krylov *data*
 /// (basis / panel slices) - never the operator or preconditioner - so it never
-/// imposes a `Send`/`Sync` bound on the matrix-free (`FnOp`/`FnPc`) call path.
+/// imposes a `Send`/`Sync` bound on the matrix-free (`FnOperator`/`FnPreconditioner`) call path.
 #[inline]
 pub(super) fn ortho_in_pool<R: Send>(
     pool: &Option<rayon::ThreadPool>,

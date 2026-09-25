@@ -15,24 +15,20 @@
 //!   static-pivot mode ([`ZeroPivotAction`], the `preconditioner` settings)
 //!   lifts the pivot to the floor instead and reports it in `n_perturbed`.
 //! * The global factor `L` is kept in supernodal panel form
-//!   ([`PanelFactor`]): each supernode's dense panel, once its last consumer
+//!   (`PanelFactor`): each supernode's dense panel, once its last consumer
 //!   is done, is finished in place (off-block rows into elimination order,
 //!   the 2x2 couplings cleared, `drop_tol` applied) and becomes the stored
 //!   factor, so the memory peak is the resident panels themselves (see the
 //!   a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate)).
-//!
-//! The result is an [`LdltNumeric`] in factorization order: the panels plus
-//! `D`, the permutation and the outcome. [`LdltNumeric::into_factors`]
-//! materializes the compressed-column [`LdltFactors`] for the generic
-//! [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
 
 mod bunch_kaufman;
 mod factor;
 mod gemm;
 mod node;
+mod pivots;
 mod solver;
 #[cfg(test)]
 mod tests;
 
-pub use factor::{factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, LdltNumeric};
+pub(crate) use pivots::LdltPivots;
 pub use solver::{LdltSolver, LdltSymbolic};

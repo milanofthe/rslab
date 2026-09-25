@@ -259,7 +259,7 @@ impl SolveStats {
 /// through `&self`; cloning snapshots the counters (a cloned handle starts a
 /// separate account).
 #[derive(Debug, Default)]
-pub struct SolveCounter(std::sync::Mutex<SolveStats>);
+pub(crate) struct SolveCounter(std::sync::Mutex<SolveStats>);
 
 impl SolveCounter {
     pub fn record(&self, rhs: usize, wall_ms: f64, refine_steps: usize) {

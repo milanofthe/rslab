@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::RslabError;
 use crate::scalar::Scalar;
@@ -21,7 +22,8 @@ impl<T: Scalar> MtxMatrix<T> {
     /// X2 (REG-4): duplicate coordinates are **summed**, matching `to_csc`
     /// (which sums via `CscMatrix::from_triplets`) and the Matrix Market /
     /// COO convention used by scipy and MATLAB.
-    pub fn to_dense(&self) -> SymmetricMatrix<T> {
+    #[cfg(test)]
+    pub(crate) fn to_dense(&self) -> SymmetricMatrix<T> {
         let mut mat = SymmetricMatrix::zeros(self.n);
         for &(i, j, v) in &self.entries {
             let prev = mat.get(i, j);

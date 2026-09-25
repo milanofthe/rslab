@@ -9,8 +9,8 @@ use crate::scalar::Scalar;
 /// **Flexible** right-preconditioned restarted **GMRES(`restart`)** (FGMRES,
 /// Saad 1993) for a general (unsymmetric) operator - the natural Krylov method
 /// for unsymmetric MoM/FEM systems where COCG/COCR do not apply. `op` may be
-/// matrix-free; `precond` supplies `M^-1` (e.g. an RLA
-/// [`LuFactors`](crate::numeric::lu::LuFactors) near-field factor).
+/// matrix-free; `precond` supplies `M^-1` (e.g. an
+/// [`LuSolver`](crate::LuSolver) near-field factor).
 /// Solves `A x = b` from the optional initial guess `x0` (default `x_0 = 0`).
 ///
 /// **Warm start:** pass `x0 = Some(prev)` to seed the iteration from a

@@ -29,8 +29,8 @@
 
 use rayon::prelude::*;
 
-use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
+use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::supernodal::panel::PanelFactor;
 use crate::scalar::{fmadd, Scalar};
 
@@ -498,11 +498,11 @@ impl<T: Scalar> SolvePlan<T> {
     }
 
     /// Solve `L D L^T y = y` in place on the permuted, scaled right-hand side.
-    pub fn solve_in_place(&self, f: &LdltFactors<T>, y: &mut [T]) -> Result<(), RslabError> {
+    pub fn solve_in_place(&self, f: &LdltPivots<T>, y: &mut [T]) -> Result<(), RslabError> {
         Self::in_pool(|| self.solve_in_place_inner(f, y))
     }
 
-    fn solve_in_place_inner(&self, f: &LdltFactors<T>, y: &mut [T]) -> Result<(), RslabError> {
+    fn solve_in_place_inner(&self, f: &LdltPivots<T>, y: &mut [T]) -> Result<(), RslabError> {
         debug_assert_eq!(y.len(), self.n);
         let mut phases = PhaseTrace::start();
         self.forward_single(y);
@@ -889,7 +889,7 @@ impl<T: Scalar> SolvePlan<T> {
     /// Solve `L D L^T Y = Y` in place on a row-major `n x nrhs` block.
     pub fn solve_block_in_place(
         &self,
-        f: &LdltFactors<T>,
+        f: &LdltPivots<T>,
         y: &mut [T],
         nr: usize,
     ) -> Result<(), RslabError> {
@@ -898,7 +898,7 @@ impl<T: Scalar> SolvePlan<T> {
 
     fn solve_block_inner(
         &self,
-        f: &LdltFactors<T>,
+        f: &LdltPivots<T>,
         y: &mut [T],
         nr: usize,
     ) -> Result<(), RslabError> {
@@ -1150,7 +1150,7 @@ fn dot4<T: Scalar>(a: &[T], b: &[T]) -> T {
 
 /// `D z = y` for the block diagonal (1x1 and 2x2 pivots), on `nr` right-hand
 /// sides stored row-major.
-fn solve_diagonal<T: Scalar>(f: &LdltFactors<T>, y: &mut [T], nr: usize) -> Result<(), RslabError> {
+fn solve_diagonal<T: Scalar>(f: &LdltPivots<T>, y: &mut [T], nr: usize) -> Result<(), RslabError> {
     let n = f.n;
     let mut k = 0;
     while k < n {
@@ -1188,7 +1188,6 @@ fn solve_diagonal<T: Scalar>(f: &LdltFactors<T>, y: &mut [T], nr: usize) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use crate::dense::ldlt_generic::solve_ldlt_many;
     use crate::{CscMatrix, LdltSolver, SolverSettings};
 
     /// A 2D grid Laplacian shifted to be indefinite (2x2 pivots appear).
@@ -1293,13 +1292,6 @@ mod tests {
                 for i in 0..n {
                     assert!((xb[i * nrhs + c] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
                 }
-            }
-            // The scalar CSC kernel on the same factor gives the same answer
-            // up to rounding.
-            let f = crate::factor_sparse_ldlt_with(a, &opts).unwrap();
-            let xs = solve_ldlt_many(&f, &b, 1).unwrap();
-            for i in 0..n {
-                assert!((xs[i] - x1[i]).abs() <= 1e-9 * (1.0 + x1[i].abs()));
             }
             // Bit-identical for every thread count.
             for threads in [1usize, 2, 5] {

@@ -6,7 +6,7 @@
 //! near-field saddle preconditioners, where the symmetric and antisymmetric
 //! parts are comparable) but reuses the full symmetric machinery: the
 //! fill-reducing ordering, supernodes and assembly tree
-//! ([`analyze`](crate::numeric::supernodal::analysis::analyze)) and the SIMD
+//! ([`LuSymbolic::analyze`]) and the SIMD
 //! `gemm` Schur kernel. Only the dense panel kernel changes - an unsymmetric
 //! LU producing separate `L` and `U` - and the analysis runs on the
 //! **symmetrized pattern** `A union A^T` so the elimination structure carries
@@ -21,10 +21,9 @@
 //!   or rejected in exact mode. Pivoting stays cheap on the equilibrated,
 //!   unit-diagonal MoM matrices while guarding the genuinely ill-scaled columns.
 //! * The factors `L` (unit lower) and `U^T` (the pivots on its diagonal) are
-//!   kept in supernodal panel form ([`PanelFactor`], see [`LuNumeric`]), in
-//!   factorization order: each supernode's finished panels become the stored
-//!   factor, and [`LuNumeric::into_factors`] materializes the sparse `L` (CSC)
-//!   and `U` (CSR) of [`LuFactors`] on demand. The factorization is the
+//!   kept in supernodal panel form (`PanelFactor`), in factorization order:
+//!   each supernode's finished panels become the stored factor. The
+//!   factorization is the
 //!   supernodal **left-looking** kernel (low transient, no contribution-block
 //!   stack).
 
@@ -36,8 +35,4 @@ mod structure;
 #[cfg(test)]
 mod tests;
 
-pub use factor::factor_general_lu_numeric;
-pub use factors::{
-    solve_lu, solve_lu_many, solve_lu_refined, solve_lu_transpose, LuFactors, LuNumeric,
-};
-pub use solver::{factor_general_lu, LuSolver, LuSymbolic};
+pub use solver::{LuSolver, LuSymbolic};

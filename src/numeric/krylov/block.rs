@@ -112,8 +112,8 @@ where
 /// ([`Preconditioner::solve_threads`], resolved at factor time), so factor and
 /// solve share **one** concurrency budget. A [`Threads::Ambient`](crate::Threads::Ambient) policy (or
 /// [`NoPreconditioner`]) leaves the reductions on the caller's current pool - the
-/// solver-in-the-loop path, where one bounded pool is installed via
-/// [`with_threads`](crate::with_threads) around the whole factor+solve loop. The
+/// solver-in-the-loop path, where one bounded rayon pool is installed around
+/// the whole factor+solve loop. The
 /// pool width never changes the numeric result (the chunk-order reduction fold is
 /// thread-count independent). The single-RHS [`gmres`] orthogonalizes serially, so
 /// it has no such pool.
@@ -143,14 +143,14 @@ where
     gmres_block_mon(op, b, s, precond, tol, max_iter, restart, x0, None)
 }
 
-/// [`gmres_block`] with an optional per-cycle progress MONITOR (rapidmom-local addition,
-/// upstream candidate): at the start of every restart cycle, right after the true
+/// [`gmres_block`] with an optional per-cycle progress monitor: at the start
+/// of every restart cycle, right after the true
 /// residuals `||b - A*x||/||b||` of all live columns were recomputed, `mon` receives
 /// `(iters_done, worst_live_residual, n_active_columns)` and returns whether the solve
 /// should CONTINUE. Long solves stop being a black box: the caller can stream residual
 /// trajectories to its log, and a `false` return cancels the solve early (a stagnation
 /// detector cutting a stopped-contracting iteration) with `StopReason::Stalled` and the
-/// best solution so far. `None` is the exact old behavior.
+/// best solution so far. `None` is exactly [`gmres_block`].
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn gmres_block_mon<T, A, M>(
     op: &A,

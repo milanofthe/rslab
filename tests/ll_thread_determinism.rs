@@ -13,7 +13,7 @@
 //! threads and a few hundred entries run-to-run at 8 threads.
 
 use num_complex::Complex;
-use rslab::{factor_sparse_ldlt_with, CscMatrix, GeneralCsc, LuSolver, SolverSettings};
+use rslab::{CscMatrix, GeneralCsc, LdltSolver, LuSolver, SolverSettings};
 
 /// 3D 7-point Laplacian (k^3 grid, SPD, lower triangle).
 fn grid3d(k: usize) -> CscMatrix<f64> {
@@ -103,21 +103,23 @@ const K_LU: usize = if cfg!(debug_assertions) { 14 } else { 22 };
 #[test]
 fn ll_ldlt_bit_identical_across_threads_and_runs() {
     let a = grid3d(K_LDLT);
-    let with = |t: usize| SolverSettings::default().with_threads(t);
-    let f1 = factor_sparse_ldlt_with(&a, &with(1)).unwrap();
-    let f8 = factor_sparse_ldlt_with(&a, &with(8)).unwrap();
+    let b: Vec<f64> = (0..a.n).map(|i| ((i % 11) as f64) - 5.0).collect();
+    let solve = |t: usize| -> Vec<f64> {
+        let s = SolverSettings::default().with_threads(t);
+        LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap()
+    };
+    let x1 = solve(1);
+    let x8 = solve(8);
     assert_eq!(
-        bits_f64(&f1.l_values),
-        bits_f64(&f8.l_values),
-        "LL LDLT L differs between 1 and 8 threads"
+        bits_f64(&x1),
+        bits_f64(&x8),
+        "LL LDLT solution differs between 1 and 8 threads"
     );
-    assert_eq!(bits_f64(&f1.d_diag), bits_f64(&f8.d_diag));
     for _ in 0..3 {
-        let fr = factor_sparse_ldlt_with(&a, &with(8)).unwrap();
         assert_eq!(
-            bits_f64(&f8.l_values),
-            bits_f64(&fr.l_values),
-            "LL LDLT L differs run-to-run at 8 threads"
+            bits_f64(&x8),
+            bits_f64(&solve(8)),
+            "LL LDLT solution differs run-to-run at 8 threads"
         );
     }
 }
@@ -137,13 +139,17 @@ fn ll_ldlt_complex_bit_identical_across_threads() {
             .map(|&v| Complex::new(v, 0.1 * v))
             .collect(),
     };
-    let with = |t: usize| SolverSettings::default().with_threads(t);
-    let f1 = factor_sparse_ldlt_with(&a, &with(1)).unwrap();
-    let f8 = factor_sparse_ldlt_with(&a, &with(8)).unwrap();
+    let b: Vec<Complex<f64>> = (0..a.n)
+        .map(|i| Complex::new(((i % 11) as f64) - 5.0, 1.0))
+        .collect();
+    let solve = |t: usize| -> Vec<Complex<f64>> {
+        let s = SolverSettings::default().with_threads(t);
+        LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap()
+    };
     assert_eq!(
-        bits_c64(&f1.l_values),
-        bits_c64(&f8.l_values),
-        "LL complex LDLT L differs between 1 and 8 threads"
+        bits_c64(&solve(1)),
+        bits_c64(&solve(8)),
+        "LL complex LDLT solution differs between 1 and 8 threads"
     );
 }
 

@@ -1,5 +1,4 @@
 use super::factor::factor_general_lu_numeric;
-use super::factors::*;
 use super::solver::*;
 use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::Li;
@@ -110,8 +109,8 @@ fn f64_unsymmetric_tridiag() {
     }
     let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
     let b: Vec<f64> = (0..n).map(|i| i as f64 - 9.5).collect();
-    let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let x = solve_lu(&f, &b).unwrap();
+    let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(resid(&a, &x, &b) < 1e-10, "residual {}", resid(&a, &x, &b));
 }
 
@@ -343,8 +342,8 @@ fn pivoting_triggered_small_diagonal() {
     }
     let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let x = solve_lu(&f, &b).unwrap();
+    let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
 }
 
@@ -390,8 +389,8 @@ fn lu_pivot_u_knob_wired_and_solves() {
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     for u in [0.0f64, 0.1, 0.5, 1.0] {
         let s = SolverSettings::default().with_pivot_u(u);
-        let f = factor_general_lu(&a, &s).unwrap();
-        let x = solve_lu(&f, &b).unwrap();
+        let f = LuSolver::factor(&a, &s).unwrap();
+        let x = f.solve(&b).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); n];
         a.matvec(&x, &mut ax);
         let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
@@ -453,10 +452,8 @@ fn static_pivot_reuse_across_value_sweep() {
             .collect();
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         // Reuse the one analysis; static factor (no pivot search).
-        let f = factor_general_lu_numeric(&analysis, &a, &static_opts)
-            .map(LuNumeric::into_factors)
-            .unwrap();
-        let x = solve_lu_refined(&f, &a, &b, 2).unwrap();
+        let f = &analysis.factor(&a, &static_opts).unwrap();
+        let x = f.solve_refined(&a, &b, 2).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); n];
         a.matvec(&x, &mut ax);
         let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
@@ -500,8 +497,8 @@ fn complex_unsymmetric_2d_grid() {
     }
     let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let x = solve_lu(&f, &b).unwrap();
+    let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
 }
 
@@ -539,8 +536,8 @@ fn complex_f32_lu_solves() {
     }
     let a = GeneralCsc::<num_complex::Complex<f32>>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<num_complex::Complex<f32>> = (0..n).map(|i| c((i % 5) as f32 - 2.0, 1.0)).collect();
-    let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let x = solve_lu(&f, &b).unwrap();
+    let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     let r = resid(&a, &x, &b);
     assert!(r < 1e-3, "f32 LU residual {}", r);
 }
@@ -595,12 +592,10 @@ fn phased_general_lu_analyze_once_factor_many() {
             })
             .collect();
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
-        let phased = factor_general_lu_numeric(&analysis, &a, &SolverSettings::default())
-            .map(LuNumeric::into_factors)
-            .unwrap();
-        let one_shot = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-        let xp = solve_lu(&phased, &b).unwrap();
-        let xo = solve_lu(&one_shot, &b).unwrap();
+        let phased = &analysis.factor(&a, &SolverSettings::default()).unwrap();
+        let one_shot = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+        let xp = phased.solve(&b).unwrap();
+        let xo = one_shot.solve(&b).unwrap();
         for (p, o) in xp.iter().zip(&xo) {
             assert!((p - o).norm() < 1e-10);
         }
@@ -648,13 +643,13 @@ fn incomplete_lu_reduces_fill_and_still_solves() {
     let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
 
-    let full = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+    let full = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let opts = SolverSettings {
         on_zero_pivot: ZeroPivotAction::Fail,
         drop_tol: Some(5e-2),
         ..Default::default()
     };
-    let inc = factor_general_lu(&a, &opts).unwrap();
+    let inc = LuSolver::factor(&a, &opts).unwrap();
     assert!(
         inc.factor_nnz() < full.factor_nnz(),
         "ILU should reduce fill: {} vs {}",
@@ -662,7 +657,7 @@ fn incomplete_lu_reduces_fill_and_still_solves() {
         full.factor_nnz()
     );
     // The incomplete factor + a few refinement steps still solves accurately.
-    let x = solve_lu_refined(&inc, &a, &b, 10).unwrap();
+    let x = inc.solve_refined(&a, &b, 10).unwrap();
     assert!(resid(&a, &x, &b) < 1e-6, "residual {}", resid(&a, &x, &b));
 }
 
