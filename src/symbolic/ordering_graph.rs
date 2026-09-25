@@ -98,7 +98,7 @@ impl<'a> OrderingGraph<'a> {
             OrderingMethod::Amf => rslab_amf::amf_order(&pat).map(expand),
             OrderingMethod::MetisND => self.metis_seed_race(g, &pat, nd_seeds),
             OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat).map(expand),
-            OrderingMethod::Auto | OrderingMethod::AutoRace => {
+            OrderingMethod::Auto => {
                 unreachable!("resolved by symbolic_factorize_with_method")
             }
         }

@@ -207,8 +207,6 @@ pub struct Decisions {
     pub ordering_requested: String,
     /// The ordering actually dispatched after `Auto` resolution.
     pub ordering_used: String,
-    /// The ordering preprocessor actually used (`None` / `LdltCompress`).
-    pub preprocess: String,
     /// The supernode amalgamation strategy actually used.
     pub amalgamation: String,
     /// The equilibration applied before factoring (the symmetric path); the
@@ -456,8 +454,8 @@ impl fmt::Display for Diagnostics {
         writeln!(f, "factorization diagnostics: {}", self.summary())?;
         writeln!(
             f,
-            "  decisions: preprocess={} amalgamation={} scaling={}",
-            self.decisions.preprocess, self.decisions.amalgamation, self.decisions.scaling
+            "  decisions: amalgamation={} scaling={}",
+            self.decisions.amalgamation, self.decisions.scaling
         )?;
         if let Some((p, n, z)) = self.numeric.inertia {
             writeln!(f, "  inertia: +{p} -{n} 0:{z}")?;

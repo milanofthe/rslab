@@ -1,8 +1,7 @@
-//! T4 oracle-match: compare `rslab-amd` output against the pinned
+//! Oracle match: compare `rslab-amd` output against the pinned
 //! SuiteSparse AMD fixtures under `tests/data/amd_oracle/`.
 //!
-//! With Slice B (mass elimination + supervariable detection) active,
-//! rslab-amd's output now matches the SuiteSparse AMD reference
+//! rslab-amd's output matches the SuiteSparse AMD reference
 //! byte-for-byte. We assert:
 //!
 //! - permutation exactly matches the oracle;
@@ -11,8 +10,8 @@
 //!
 //! A few focused tests additionally exercise the `n_mass_elim` and
 //! `n_supervar_merge` counters so a regression that silently
-//! disables either Slice B branch would surface even if the perm
-//! happened to still line up.
+//! disables mass elimination or supervariable detection would surface
+//! even if the perm happened to still line up.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -203,7 +202,7 @@ fn oracle_amd_demo_24() {
     run_fixture("amd_demo_24", &cp, &ri);
 }
 
-// ---- Slice B: counter firing checks ------------------------------
+// ---- mass elimination / supervariable counter checks -------------
 // Oracle files don't record n_mass_elim / n_supervar_merge (the
 // external `amd` crate does not expose them), so we assert
 // positivity on patterns known to exercise both branches.

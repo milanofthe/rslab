@@ -6,8 +6,8 @@
 //! `s` such that `D * A * D` (with `D = diag(s)`) has
 //! magnitude-bounded off-diagonals and unit-scale diagonals.
 //!
-//! Algorithm (mirrors `ref/spral/src/scaling.f90::hungarian_wrapper`,
-//! lines 597-801, in its non-singular branch):
+//! Algorithm (mirrors SPRAL `src/scaling.f90::hungarian_wrapper` in its
+//! non-singular branch):
 //!
 //!   1. Expand the lower-triangle CSC to a full symmetric pattern,
 //!      carrying the original values with the transpose entries.
@@ -31,13 +31,11 @@
 //!
 //! The partial-singular path deviates from SPRAL, which runs a
 //! second Hungarian pass on the full-rank submatrix and then
-//! applies a Duff-Pralet correction (scaling.f90:688-800). The
-//! research note `dev/research/mc64-scaling.md` section "Structurally
-//! singular matrices" specifies identity fallback for unmatched
-//! rows/columns as the correct behavior for rslab, because KKT
-//! matrices from IPOPT are occasionally structurally rank-deficient
-//! and a hard failure would regress the current `ForceAccept`
-//! pathway.
+//! applies a Duff-Pralet correction (scaling.f90:688-800). Here
+//! unmatched rows/columns fall back to identity scaling instead,
+//! because KKT matrices from interior-point solvers are occasionally
+//! structurally rank-deficient and a hard failure would bypass the
+//! `ZeroPivotAction::ForceAccept` handling in the factorization.
 
 use super::hungarian::{hungarian_match, CostGraph, Matching};
 use super::ScalingInfo;
@@ -48,16 +46,14 @@ use crate::sparse::csc::CscMatrix;
 /// `ln(f64::MAX) ~ 709.78`. We use 709.0 as a safe ceiling.
 const LOG_HUGE: f64 = 709.0;
 
-/// Cached MC64 output: the full Hungarian matching plus the
-/// column-max normalization, from which the scaling vector can be
-/// recovered without rerunning the expensive Hungarian kernel.
+/// MC64 output: the full Hungarian matching (`perm[j]` is the row
+/// matched to column `j`, `usize::MAX` if unmatched), the row and column
+/// duals `u` and `v`, and the column-max normalization `cmax`, from
+/// which the scaling vectors are recovered in O(n).
 ///
-/// Populated by [`compute_matching`] when `LdltCompress` preprocessing
-/// runs; consumed by [`scaling_from_cache`] in the numeric phase when
-/// the caller's scaling strategy resolves to `Mc64Symmetric`. Moves
-/// the ~70% of symbolic overhead (Hungarian + cost graph build) off
-/// the critical path for matrices where both compression and MC64
-/// scaling run.
+/// Produced by [`compute_matching`] (symmetric) and
+/// [`compute_matching_general`] (unsymmetric); consumed by
+/// [`scaling_from_cache`] and [`unsymmetric_scaling`].
 #[derive(Debug, Clone)]
 pub(crate) struct Mc64Cache {
     pub perm: Vec<usize>,
@@ -224,8 +220,7 @@ pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, Scaling
 }
 
 /// Cheap O(n) post-processing that turns a cached MC64 matching into
-/// the symmetric scaling vector. Mirrors the body of
-/// [`compute_symmetric`] from step 6 onward.
+/// the symmetric scaling vector (steps 6-9 of the module header).
 pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
     let n = cache.perm.len();
     if n == 0 {
@@ -239,7 +234,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
         n_matched,
     } = cache;
 
-    // Step 6-7: unwind normalization and form the symmetric average.
+    // Steps 6-7: unwind normalization and form the symmetric average.
     //
     //   rscaling[i] = u[i]
     //   cscaling[i] = v[i] - cmax[i]
@@ -252,7 +247,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
     // row appears here iff some column matched it. On a partial matching the
     // matched-row and matched-column sets can differ even for a symmetric
     // pattern (index i may have its column matched while its row is
-    // unmatched), so both must be consulted below (X4).
+    // unmatched), so both must be consulted below.
     let mut row_matched = vec![false; n];
     for &r in perm.iter() {
         if r != usize::MAX {
@@ -266,8 +261,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
         // `f64::NEG_INFINITY` (see `build_cost_graph`). Any such
         // index is "empty" - the Hungarian kernel cannot match
         // that column meaningfully - so we fall back to identity
-        // scaling for it. This is the structurally empty-column
-        // case from the research note.
+        // scaling for it (structurally empty column).
         if !cmax[i].is_finite() {
             scaling[i] = 1.0;
             continue;
@@ -276,7 +270,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
         // For an unmatched column (`perm[i] == MAX`) OR an unmatched row
         // (`!row_matched[i]`), fall back to identity scaling rather than
         // using the dual variables, which are meaningless on the unmatched
-        // part of the graph. The row check is what fixes X4: a matched column
+        // part of the graph. The row check matters: a matched column
         // with an unmatched row has `u[i]` zeroed by `build_matching`, so the
         // symmetric average would otherwise fold a meaningless zero half-dual
         // into `s[i]`.
@@ -337,7 +331,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
 /// `cmax[j] = f64::NEG_INFINITY`, which the caller treats as a
 /// "fall back to identity" signal.
 ///
-/// Algorithmic mirror: `ref/spral/src/scaling.f90:636-657`.
+/// Algorithmic mirror: SPRAL `src/scaling.f90:636-657`.
 fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), RslabError> {
     let n = matrix.n;
 
@@ -481,25 +475,24 @@ mod tests {
         }
     }
 
-    /// X4 (dev/research/repo-review-2026-06-09.md): on a partial matching an
+    /// On a partial matching an
     /// index `i` can have its COLUMN matched while its ROW is unmatched - the
     /// matched-row and matched-column sets differ even on symmetric patterns.
     /// `build_matching` zeroes `u[i]` for an unmatched row, so the symmetric
     /// average `s[i] = exp((u[i] + v[i] - cmax[i]) / 2)` folds a meaningless
     /// zero half-dual into the scaling - exactly the "duals are meaningless on
     /// the unmatched part" condition the adjacent comments warn about. The
-    /// documented contract (step 9 in the module header,
-    /// `dev/research/mc64-scaling.md`) is identity scaling for any index whose
-    /// row OR column is unmatched.
+    /// contract (step 9 in the module header) is identity scaling for any
+    /// index whose row OR column is unmatched.
     ///
     /// Synthetic cache for n = 2: column 0 is matched to row 1
     /// (`perm[0] = 1`), column 1 is unmatched (`perm[1] = usize::MAX`). The
     /// matched-row set is therefore {1}, so ROW 0 is unmatched and `u[0] = 0`
     /// (as `build_matching` leaves it). Both columns are non-empty (finite
     /// `cmax`). The contract requires `s[0] = 1.0` (row 0 unmatched) and
-    /// `s[1] = 1.0` (column 1 unmatched). Pre-fix the code only skipped on an
-    /// unmatched COLUMN, so index 0 took `exp((0 + v[0] - cmax[0]) / 2)
-    /// = exp((0 + 2 - 1) / 2) = exp(0.5) ~ 1.6487` - the witness.
+    /// `s[1] = 1.0` (column 1 unmatched). Checking only for an unmatched
+    /// COLUMN would give index 0 `exp((0 + v[0] - cmax[0]) / 2)
+    /// = exp((0 + 2 - 1) / 2) = exp(0.5) ~ 1.6487`.
     #[test]
     fn unmatched_row_with_matched_column_falls_back_to_identity() {
         let cache = Mc64Cache {
@@ -519,7 +512,7 @@ mod tests {
         assert!(
             (s[0] - 1.0).abs() < 1e-12,
             "index 0's ROW is unmatched; the contract requires identity \
-             scaling, got {} (X4)",
+             scaling, got {}",
             s[0]
         );
         assert!(

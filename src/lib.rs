@@ -155,9 +155,7 @@ pub use numeric::supernodal::analysis::{
     analyze, analyze_for, analyze_with, AnalysisUse, SupernodalAnalysis,
 };
 // Settings shared by the LDL^T and LU paths.
-pub use numeric::settings::{
-    with_threads, FactorPath, ReorderMode, SolverSettings, Threads, ZeroPivotAction,
-};
+pub use numeric::settings::{with_threads, FactorPath, SolverSettings, Threads, ZeroPivotAction};
 // The supernodal panel form of a factor (`LdltNumeric::factor`).
 pub use numeric::supernodal::panel::PanelFactor;
 // High-level symmetric LDL^T solver: `LdltSymbolic::analyze -> .factor -> LdltSolver`.

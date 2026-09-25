@@ -233,7 +233,7 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
     **kwargs
         Any :class:`Settings` keyword (``threads``, ``preconditioner``,
         ``drop_tol``, ``force_accept``, ``ordering``, ``scaling``, ``pivot_u``,
-        ``nemin``, ``relax``, ``reorder``, ``panel_nb``, ``interrupt`` ...),
+        ``nemin``, ``relax``, ``panel_nb``, ``interrupt`` ...),
         overriding ``settings``.
 
     Returns
@@ -382,8 +382,8 @@ def analyze(A, path: str = "auto", *, settings=None, **kwargs):
         circuit-shaped ones. ``'auto'`` picks ``'ldlt'`` when ``A`` is
         symmetric and ``'lu'`` otherwise.
     settings : Settings or KluSettings, optional
-        Analysis-time settings (``ordering``, ``nemin``, ``relax``,
-        ``reorder`` for LDL^T / LU; ``btf`` for KLU). Numeric settings given
+        Analysis-time settings (``ordering``, ``nemin``, ``relax`` for
+        LDL^T / LU; ``btf`` for KLU). Numeric settings given
         here become the defaults of ``factor``.
     **kwargs
         The same keywords, overriding ``settings``.

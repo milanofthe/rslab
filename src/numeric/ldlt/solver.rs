@@ -133,7 +133,7 @@ impl<T: Scalar> LdltSolver<T> {
     }
 
     /// [`tuned`](Self::tuned) on top of the caller's settings: the analysis
-    /// knobs (`nemin`, `relax`, `reorder`, ...) come from `base`, the
+    /// knobs (`nemin`, `relax`, ...) come from `base`, the
     /// ordering is the heuristic race, the thread count the calibrated
     /// pick.
     pub fn tuned_with(
@@ -163,7 +163,7 @@ impl<T: Scalar> LdltSolver<T> {
     /// call; for the *analyze once, factor many* workflow use
     /// [`LdltSymbolic`].
     pub fn factor_with(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
-        // The analysis honours the caller's symbolic settings (ordering, child reordering):
+        // The analysis honours the caller's symbolic settings (ordering, amalgamation):
         // `analyze` alone took the defaults and silently ignored `opts.ordering`.
         LdltSymbolic::analyze_for(a, opts, AnalysisUse::Once)?.factor(a, opts)
     }
@@ -418,7 +418,7 @@ impl LdltSymbolic {
     }
 
     /// [`analyze`](Self::analyze) with explicit composable [`SolverSettings`] -
-    /// fill-reducing ordering, supernode amalgamation, child-reordering. The
+    /// fill-reducing ordering and supernode amalgamation. The
     /// tunable analysis knobs for the auto-tuning sweep.
     pub fn analyze_with<T: Scalar>(
         a: &CscMatrix<T>,
@@ -448,7 +448,7 @@ impl LdltSymbolic {
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             let d = sym.symbolic.decisions(opts.ordering);
             crate::logging::info(&format!(
-                "ldlt analyze: n={} nnz(A)={} ordering={}{} preprocess={} supernodes={} \
+                "ldlt analyze: n={} nnz(A)={} ordering={}{} supernodes={} \
                  max_front={} levels={} {analyze_ms:.1} ms",
                 a.n,
                 sym.nnz,
@@ -458,7 +458,6 @@ impl LdltSymbolic {
                 } else {
                     String::new()
                 },
-                d.preprocess,
                 d.n_supernodes,
                 d.max_front,
                 d.tree_levels
@@ -502,7 +501,7 @@ impl LdltSymbolic {
     pub fn symbolic_factor_nnz(&self) -> usize {
         self.symbolic
             .sym_and_levels()
-            .map(|(s, _)| s.factor_nnz_estimate)
+            .map(|(s, _)| s.factor_nnz)
             .unwrap_or(0)
     }
 

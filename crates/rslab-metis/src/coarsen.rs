@@ -69,7 +69,7 @@ pub fn coarsen_level(
     // leaves as self-matches, inflating the coarse graph on the
     // irregular / power-law inputs SHEM is meant for. `sort_by_key` is
     // stable, so the random shuffle survives as the within-degree
-    // tie-break, preserving seed determinism. [O7]
+    // tie-break, preserving seed determinism.
     let mut order: Vec<i32> = (0..fine.nvtxs).collect();
     rng.shuffle(&mut order);
     order.sort_by_key(|&v| fine.xadj[v as usize + 1] - fine.xadj[v as usize]);
@@ -144,10 +144,10 @@ pub fn coarsen(
         if new_nvtxs == 0 || new_nvtxs as f64 > 0.95 * prev_nvtxs as f64 {
             // Stalled: this level made <5% progress, so stop. Keep it
             // only if it actually shrank, independent of whether earlier
-            // levels exist. The old `!levels.is_empty()` gate both
-            // discarded a *first* level that genuinely shrank (returning
-            // an empty hierarchy) and pushed a zero-progress later level
-            // (breaking the strictly-decreasing-nvtxs invariant). [O8]
+            // levels exist: a first level that genuinely shrank must not
+            // be discarded (that would return an empty hierarchy), and a
+            // zero-progress later level must not be pushed (that would
+            // break the strictly-decreasing-nvtxs invariant).
             if new_nvtxs > 0 && new_nvtxs < prev_nvtxs {
                 levels.push(level);
             }
@@ -506,7 +506,7 @@ mod tests {
         // 3<->2, then 0<->1 -> 2 coarse vertices. Ascending-degree
         // visitation is the defining property of METIS Match_SHEM
         // (Karypis & Kumar Sec. 3.1); plain shuffle order is HEM,
-        // not the advertised SHEM. [O7]
+        // not the advertised SHEM.
         let t = [
             (0, 0),
             (1, 1),
@@ -594,8 +594,8 @@ mod tests {
         // that still trips the <5% "stall" branch. The two-hop fallback
         // is disabled (threshold > 1) so nothing rescues the leaves and
         // the stall branch is the only exit. The level genuinely shrank
-        // and must be kept; the old code discarded it because `levels`
-        // was still empty, returning an empty hierarchy. [O8]
+        // and must be kept even though `levels` is still empty;
+        // dropping it would return an empty hierarchy.
         let mut t: Vec<(usize, usize)> = vec![(0, 0)];
         for l in 1..=24usize {
             t.push((l, l));

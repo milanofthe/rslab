@@ -349,7 +349,6 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     let dec = PyDict::new_bound(py);
     dec.set_item("ordering_requested", &d.decisions.ordering_requested)?;
     dec.set_item("ordering_used", &d.decisions.ordering_used)?;
-    dec.set_item("preprocess", &d.decisions.preprocess)?;
     dec.set_item("amalgamation", &d.decisions.amalgamation)?;
     dec.set_item("scaling", &d.decisions.scaling)?;
     dec.set_item("method", &d.decisions.method)?;

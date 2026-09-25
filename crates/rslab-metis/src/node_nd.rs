@@ -249,8 +249,7 @@ fn nd_subproblem(
 ///
 /// Refining the node separator through the hierarchy - instead of
 /// refining the edge bisection and converting at the finest level - is
-/// what closes the fill gap on 3D meshes; see
-/// `dev/research/metis-node-separator-2026-07.md`.
+/// what closes the fill gap on 3D meshes.
 fn multilevel_node_bisection(
     graph: &Graph,
     opts: &MetisOptions,
@@ -396,8 +395,7 @@ fn graph_to_csc_pattern(graph: &Graph) -> (Vec<i32>, Vec<i32>) {
 /// into the old->new permutation `perm` (where `perm[new_pos] = old`).
 ///
 /// Rejects an out-of-range or duplicated target position rather than
-/// silently emitting a non-bijection - parity with the scotch/kahip
-/// `invert_iperm` helpers (O20).
+/// silently emitting a non-bijection.
 fn invert_iperm(iperm: &[i32], n: usize) -> Result<Vec<i32>, OrderingError> {
     let mut perm: Vec<i32> = vec![-1; n];
     for (old, &new_pos) in iperm.iter().enumerate() {
@@ -570,8 +568,7 @@ mod tests {
         // iperm[old] = new_pos: old0->2, old1->0, old2->1 => perm = [1, 2, 0].
         assert_eq!(invert_iperm(&[2, 0, 1], 3).unwrap(), vec![1, 2, 0]);
         // Two olds claiming the same position must be rejected, not
-        // silently overwritten into a non-bijection (parity with the
-        // scotch/kahip duplicate-position check; O20).
+        // silently overwritten into a non-bijection.
         assert!(matches!(
             invert_iperm(&[0, 0, 2], 3),
             Err(OrderingError::Internal(_))

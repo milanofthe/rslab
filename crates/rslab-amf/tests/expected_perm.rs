@@ -1,4 +1,4 @@
-//! Hand-derived expected-perm fixtures for AMF (Phase B.4).
+//! Hand-derived expected-perm fixtures for AMF.
 //!
 //! Each fixture encodes a *qualitative* property of the AMF metric
 //! that follows directly from the score definition
@@ -6,13 +6,11 @@
 //! at iteration 0, when no element has been formed yet and the
 //! score reduces to the initial degree.
 //!
-//! The plan (`dev/plans/amf-clean-room.md` Phase B deliverable 6)
-//! sketches three fixtures. For each, only the assertion that is
+//! Three fixtures. For each, only the assertion that is
 //! *defensibly derivable from the metric without simulating the
 //! quotient-graph dynamics* is pinned here. Tighter pins (full perm
-//! match) are deferred to Phase C, where the MUMPS HAMF4 oracle
-//! will provide the external reference. Weaker, metric-only
-//! claims:
+//! match) would need an external HAMF4 reference. Weaker,
+//! metric-only claims:
 //!
 //! 1. 3x3 arrowhead -- the unique-max-degree hub vertex is
 //!    eliminated last. (Iteration 0 picks min-deg; iterations 1+
@@ -101,8 +99,8 @@ fn amf_dual_arrow_5_first_pick_is_spine() {
     // The stronger claim "both hubs deferred to the last two
     // positions" depends on score arithmetic at iteration 1 onward
     // (where one hub may achieve a lower fill score than a
-    // surviving spine, depending on quantization). That assertion
-    // is deferred to Phase C with the MUMPS HAMF4 oracle.
+    // surviving spine, depending on quantization), so it is not
+    // asserted here.
     let (cp, ri) = dual_arrow_5();
     let p = CscPattern::new(5, &cp, &ri).expect("valid pattern");
     let perm = amf_order(&p).expect("amf_order succeeds");

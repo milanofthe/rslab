@@ -202,9 +202,7 @@ mod tests {
 
     #[test]
     fn test_etree_arrow() {
-        // Arrow matrix: node 0 is connected to all others
-        // After natural ordering, etree should have 0 as root
-        // with nodes 1,2,3,4 filling through 0
+        // Arrow matrix: node 0 is connected to all others.
         let m = CscMatrix::from_triplets(
             5,
             &[0, 1, 2, 3, 4, 1, 2, 3, 4],
@@ -215,16 +213,10 @@ mod tests {
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
 
-        // With natural ordering on arrow matrix:
-        // All nodes 1-4 connect to 0, and eliminating 0 creates a clique
-        // among 1-4. So the etree should be 0->1->2->3->4 (chain from fill).
-        // Actually: parent[j] = min { i > j : L(i,j) != 0 }
-        // For column 0: rows 1,2,3,4 all have entries -> parent[0] = 1 (not a root!)
-        // Wait - arrow has column 0 connected to rows 1,2,3,4
-        // Column 0: entries at rows 1,2,3,4 -> parent[0] = min(1,2,3,4) = 1
-        // Column 1: entry at row 0 (but 0 < 1, skip). Fill from eliminating 0: rows 2,3,4
-        //   -> parent[1] = 2
-        // etc. So etree is a chain 0->1->2->3->4, root = 4
+        // With natural ordering, eliminating 0 creates a clique among 1-4.
+        // parent[j] = min { i > j : L(i,j) != 0 }: column 0 has rows 1-4
+        // -> parent[0] = 1; column 1 gets fill rows 2-4 -> parent[1] = 2;
+        // and so on. The etree is the chain 0->1->2->3->4, root = 4.
         assert_eq!(etree.parent[4], None);
         assert_eq!(etree.roots(), vec![4]);
     }

@@ -13,14 +13,10 @@
 //! remaining variables into degree-indexed linked lists ready for
 //! the elimination loop.
 //!
-//! Migrated from `rslab-amd` in 2026-04-27 to host the shared
-//! machinery for the planned `rslab-amf` crate; the AMD-vs-AMF
-//! delta lives entirely in the elimination metric (see
-//! `dev/research/amf-clean-room.md`).
+//! The workspace is shared by `rslab-amd` and `rslab-amf`; the
+//! AMD-vs-AMF delta lives entirely in the elimination metric.
 //
-// Items are consumed by the elimination loop in subsequent commits
-// (Commit 4 onwards). Until then several fields and helpers are
-// intentionally unused.
+// Not every field or helper is read by every elimination loop.
 #![allow(dead_code)]
 
 use super::WorkspaceOptions;
@@ -88,8 +84,8 @@ pub struct Workspace {
     ///
     /// `i64` (not `i32`): the un-quantized surface contribution has
     /// both factors `O(n)`, so it reaches ~`n^2` and overflows `i32`
-    /// for `n` >~ 46k before being consumed as `f64` in the RMF score
-    /// (O1, `dev/research/repo-review-2026-06-09.md`). HAMF4 computes
+    /// for `n` >~ 46k before being consumed as `f64` in the RMF score.
+    /// HAMF4 computes
     /// the RMF in DBLE for the same reason. The post-quantization RMF
     /// score stored here later is bounded by `i32::MAX - 1`.
     pub wf: Vec<i64>,
@@ -99,7 +95,7 @@ pub struct Workspace {
     /// Overflow ceiling for `wflg`: `i32::MAX - n`.
     pub wbig: i32,
     /// Largest element size encountered so far - used by supervariable
-    /// detection (Slice B) to bump `wflg` safely.
+    /// detection to bump `wflg` safely.
     pub lemax: i32,
     /// Lower bound on the next pivot's degree. Monotone non-decreasing.
     pub mindeg: usize,
@@ -177,7 +173,7 @@ impl Workspace {
             nzaat += cnt;
         }
 
-        // iwlen = nzaat + nzaat/5 + n  (plan A1 / faer amd.rs:921-924).
+        // iwlen = nzaat + nzaat/5 + n  (faer amd.rs:921-924).
         let iwlen = nzaat
             .checked_add(nzaat / 5)
             .and_then(|s| s.checked_add(n))

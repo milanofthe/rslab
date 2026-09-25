@@ -140,9 +140,34 @@ impl Supervariables {
     }
 
     /// The compressed graph: one vertex per group, an edge between two
-    /// groups whenever one of their members is adjacent, no self-loops.
+    /// groups whenever their members are adjacent, no self-loops, rows
+    /// sorted. The members of a group share their neighbours, so the
+    /// group's first member stands for all of them.
     pub fn compress(&self, pattern: &CscPattern) -> CscPattern {
-        super::ldlt_compress::compress_pattern_by(pattern, &self.group_of, self.len())
+        let n_groups = self.len();
+        let mut col_ptr = Vec::with_capacity(n_groups + 1);
+        col_ptr.push(0);
+        let mut row_idx = Vec::new();
+        let mut col: Vec<usize> = Vec::new();
+        for g in 0..n_groups {
+            let v = self.members[self.ptr[g]];
+            col.clear();
+            col.extend(
+                pattern.row_idx[pattern.col_ptr[v]..pattern.col_ptr[v + 1]]
+                    .iter()
+                    .map(|&r| self.group_of[r])
+                    .filter(|&h| h != g),
+            );
+            col.sort_unstable();
+            col.dedup();
+            row_idx.extend_from_slice(&col);
+            col_ptr.push(row_idx.len());
+        }
+        CscPattern {
+            n: n_groups,
+            col_ptr,
+            row_idx,
+        }
     }
 
     /// Expand an ordering of the groups (new-to-old, `i32` as the ordering

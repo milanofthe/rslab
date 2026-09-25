@@ -1,15 +1,10 @@
 //! Functional invariants of the quotient-graph ordering driver,
 //! parameterised over the [`Metric`] trait.
 //!
-//! Per `dev/plans/amf-clean-room.md` Phase B deliverable 5: every
-//! `Metric` impl that successfully drives `order` must produce a
-//! permutation of `0..n`. These tests pin that contract so Phase
-//! B.2's MinFill inner loop has a passing oracle to drive against.
-//!
-//! Phase B.2 has wired up the AMF inner loop, so every `Metric` arm
-//! now exercises the real `run_elimination`. The five fixtures hold
-//! both `MinDegree` and `MinFill` to the same generic invariant
-//! (output is a permutation of `0..n`).
+//! Every `Metric` impl that successfully drives `order` must produce
+//! a permutation of `0..n`. The five fixtures hold both `MinDegree`
+//! and `MinFill` (each through its real elimination loop) to that
+//! generic invariant.
 
 use rslab_ordering_core::quotient_graph::{order, Metric, MinDegree, MinFill, WorkspaceOptions};
 use rslab_ordering_core::CscPattern;

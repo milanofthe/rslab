@@ -2,11 +2,10 @@ use super::elimination_tree::EliminationTree;
 
 #[cfg(test)]
 thread_local! {
-    /// S1 (dev/research/repo-review-2026-06-09.md) work counter: total
-    /// number of child-list elements materialized+sorted across all
-    /// per-node sorts in [`postorder`]. Linear in `n` for the fixed
-    /// (sort-once-per-node) traversal; quadratic for the old
-    /// sort-on-every-stack-visit version. Test-only; compiled out of
+    /// Work counter: total number of child-list elements
+    /// materialized+sorted across all per-node sorts in [`postorder`].
+    /// Linear in `n` for the sort-once-per-node traversal; quadratic for
+    /// a sort-on-every-stack-visit version. Test-only; compiled out of
     /// production builds.
     static SORT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -18,7 +17,7 @@ thread_local! {
 /// - `inv_postorder[node]` = the position of node in the postorder (old-to-new)
 ///
 /// Children are visited in order of ascending subtree size (smallest first)
-/// to minimize peak memory usage in the ContribPool.
+/// to minimize peak contribution-block memory during the factorization.
 pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
     let n = etree.n;
     if n == 0 {
@@ -35,15 +34,13 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
     // `(node, sorted_children, child_idx)`. The sort runs exactly once per
     // node - when the node is first pushed - not once per stack visit.
     //
-    // The previous version stored only `(node, child_idx)` and re-cloned and
-    // re-sorted `children[node]` on every `stack.last_mut()` iteration. A node
-    // with `c` children sits on top of the stack `c+1` times (once per child
-    // push + once for the final pop), so it paid `O(c^2*log c)`. On a star
-    // etree (one root with `n-1` children - the arrow/bordered-KKT shape AMD
-    // produces for a dense trailing border) that made the default symbolic
-    // pipeline `O(n^2*log n)`. See S1, dev/research/repo-review-2026-06-09.md,
-    // and the matching cursor layout in `biased_postorder` /
-    // `EliminationTree::postorder`.
+    // A node with `c` children sits on top of the stack `c+1` times (once
+    // per child push + once for the final pop), so sorting on every visit
+    // would cost `O(c^2*log c)`. On a star etree (one root with `n-1`
+    // children - the arrow/bordered-KKT shape AMD produces for a dense
+    // trailing border) that would make the symbolic pipeline
+    // `O(n^2*log n)`. `biased_postorder` and `EliminationTree::postorder`
+    // use the same cursor layout.
     let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
 
     // Process roots in ascending subtree size order
@@ -77,7 +74,7 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
     (order, inv)
 }
 
-/// Phase 2.12 merge-biased postorder.
+/// Merge-biased postorder.
 ///
 /// Like [`postorder`], but when descending into a parent's children
 /// it partitions them into `bias[child] == false` (emit *first*) and
@@ -145,8 +142,7 @@ pub fn biased_postorder(etree: &EliminationTree, bias: &[bool]) -> (Vec<usize>, 
 
 /// Sort a node's children by ascending subtree size (smallest first), the
 /// peak-memory-minimizing visit order used by [`postorder`]. Factored out so
-/// the clone+sort runs exactly once per node (see S1,
-/// `dev/research/repo-review-2026-06-09.md`).
+/// the clone+sort runs exactly once per node.
 fn sorted_children_by_size(children: &[usize], sizes: &[usize]) -> Vec<usize> {
     #[cfg(test)]
     SORT_WORK.with(|w| w.set(w.get() + children.len()));
@@ -293,18 +289,18 @@ mod tests {
         EliminationTree::from_pattern(&pat)
     }
 
-    /// S1 (dev/research/repo-review-2026-06-09.md): the previous `postorder`
-    /// re-cloned and re-sorted `children[node]` on every stack visit, so a
-    /// node with `c` children (on top of the stack `c+1` times) paid
-    /// O(c^2*log c). On a star etree (one root with `n-1` children) that is
-    /// O(n^2*log n) - quadratic - in the default symbolic pipeline.
+    /// A `postorder` that re-cloned and re-sorted `children[node]` on every
+    /// stack visit would make a node with `c` children (on top of the stack
+    /// `c+1` times) pay O(c^2*log c). On a star etree (one root with `n-1`
+    /// children) that is O(n^2*log n) - quadratic - in the symbolic
+    /// pipeline.
     ///
-    /// Reproduction is deterministic via the `SORT_WORK` counter (total
+    /// The check is deterministic via the `SORT_WORK` counter (total
     /// child-list elements materialized across all per-node sorts), so no
-    /// flaky wall-clock timing is needed. Pre-fix the root's `(n-1)`-element
-    /// child list is materialized `n` times -> `~n^2` elements. Post-fix it is
-    /// materialized exactly once -> `~n` elements. The assertion `work <= 4*n`
-    /// fails on the quadratic version and passes on the linear fix.
+    /// flaky wall-clock timing is needed. Sorting per visit materializes the
+    /// root's `(n-1)`-element child list `n` times -> `~n^2` elements;
+    /// sorting once per node materializes it exactly once -> `~n` elements.
+    /// The assertion `work <= 4*n` separates the two.
     #[test]
     fn test_postorder_star_sort_work_is_linear() {
         let n = 2000;
@@ -326,8 +322,8 @@ mod tests {
             }
         }
 
-        // The fix: child-sorting work is linear, not quadratic. The old
-        // sort-on-every-visit code materializes ~n^2 elements here.
+        // Child-sorting work is linear, not quadratic. Sort-on-every-visit
+        // code would materialize ~n^2 elements here.
         assert!(
             work <= 4 * n,
             "postorder sort work {work} exceeds the linear bound {} (n={n}); \

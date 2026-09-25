@@ -233,106 +233,10 @@ impl<T: Scalar> CscMatrix<T> {
         Ok(())
     }
 
-    /// Expand the lower-triangle CSC to a full symmetric sparsity pattern.
-    ///
-    /// The result contains both (i,j) and (j,i) for every off-diagonal entry,
-    /// rows sorted within each column. Used for the orderings and the
-    /// elimination tree.
-    ///
-    /// Column `c` of the result is the transposed entries above the diagonal
-    /// followed by `c`'s own lower column. Walking the columns in order
-    /// delivers the transposed entries of every column in ascending order and
-    /// the lower columns are sorted already, so no column is sorted.
+    /// Expand the lower-triangle CSC to a full symmetric sparsity pattern
+    /// (see the free function `symmetric_pattern`).
     pub fn symmetric_pattern(&self) -> CscPattern {
-        let n = self.n;
-        // `above[c]`: entries of row `c` left of the diagonal.
-        let mut above = vec![0usize; n];
-        for j in 0..n {
-            for &i in &self.row_idx[self.col_ptr[j]..self.col_ptr[j + 1]] {
-                if i < j {
-                    // Not a lower triangle: place and sort.
-                    return self.symmetric_pattern_sorted();
-                }
-                if i != j {
-                    above[i] += 1;
-                }
-            }
-        }
-        let mut col_ptr = vec![0usize; n + 1];
-        for c in 0..n {
-            col_ptr[c + 1] = col_ptr[c] + above[c] + (self.col_ptr[c + 1] - self.col_ptr[c]);
-        }
-        let mut row_idx = vec![0usize; col_ptr[n]];
-        let mut next = col_ptr[..n].to_vec();
-        for j in 0..n {
-            let own = &self.row_idx[self.col_ptr[j]..self.col_ptr[j + 1]];
-            let at = col_ptr[j] + above[j];
-            row_idx[at..at + own.len()].copy_from_slice(own);
-            for &i in own {
-                if i != j {
-                    row_idx[next[i]] = j;
-                    next[i] += 1;
-                }
-            }
-        }
-        CscPattern {
-            n,
-            col_ptr,
-            row_idx,
-        }
-    }
-
-    /// [`symmetric_pattern`](Self::symmetric_pattern) of any pattern, by
-    /// placing both entries of each pair and sorting every column.
-    fn symmetric_pattern_sorted(&self) -> CscPattern {
-        // Count entries per column in the full pattern
-        let mut col_counts = vec![0usize; self.n];
-        for j in 0..self.n {
-            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
-                let i = self.row_idx[k];
-                col_counts[j] += 1; // lower triangle entry in column j
-                if i != j {
-                    col_counts[i] += 1; // transpose entry in column i
-                }
-            }
-        }
-
-        // Build col_ptr
-        let mut pat_col_ptr = vec![0usize; self.n + 1];
-        for j in 0..self.n {
-            pat_col_ptr[j + 1] = pat_col_ptr[j] + col_counts[j];
-        }
-        let pat_nnz = pat_col_ptr[self.n];
-        let mut pat_row_idx = vec![0usize; pat_nnz];
-
-        // Place entries
-        let mut offsets = pat_col_ptr[..self.n].to_vec();
-        for j in 0..self.n {
-            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
-                let i = self.row_idx[k];
-                // (i, j) in lower triangle
-                pat_row_idx[offsets[j]] = i;
-                offsets[j] += 1;
-                if i != j {
-                    // (j, i) - transpose
-                    pat_row_idx[offsets[i]] = j;
-                    offsets[i] += 1;
-                }
-            }
-        }
-
-        // Sort row indices within each column
-        for j in 0..self.n {
-            let start = pat_col_ptr[j];
-            let end = pat_col_ptr[j + 1];
-            pat_row_idx[start..end].sort_unstable();
-        }
-
-        CscPattern {
-            n: self.n,
-            col_ptr: pat_col_ptr,
-            row_idx: pat_row_idx,
-        }
+        symmetric_pattern(self.n, &self.col_ptr, &self.row_idx)
     }
 
     /// Symmetric matrix-vector product: y = A * x.
@@ -371,6 +275,103 @@ impl<T: Scalar> CscMatrix<T> {
             n: self.n,
             data: buf,
         }
+    }
+}
+
+/// The full symmetric pattern of a lower triangle (`col_ptr`, `row_idx`):
+/// both `(i, j)` and `(j, i)` for every off-diagonal entry, rows sorted
+/// within each column.
+///
+/// Column `c` is the transposed entries above the diagonal followed by `c`'s
+/// own lower column. Walking the columns in order delivers the transposed
+/// entries of every column in ascending order and the lower columns are
+/// sorted already, so no column is sorted.
+pub fn symmetric_pattern(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> CscPattern {
+    // `above[c]`: entries of row `c` left of the diagonal.
+    let mut above = vec![0usize; n];
+    for j in 0..n {
+        for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
+            if i < j {
+                // Not a lower triangle: place and sort.
+                return symmetric_pattern_sorted(n, col_ptr, row_idx);
+            }
+            if i != j {
+                above[i] += 1;
+            }
+        }
+    }
+    let mut out_ptr = vec![0usize; n + 1];
+    for c in 0..n {
+        out_ptr[c + 1] = out_ptr[c] + above[c] + (col_ptr[c + 1] - col_ptr[c]);
+    }
+    let mut out_idx = vec![0usize; out_ptr[n]];
+    let mut next = out_ptr[..n].to_vec();
+    for j in 0..n {
+        let own = &row_idx[col_ptr[j]..col_ptr[j + 1]];
+        let at = out_ptr[j] + above[j];
+        out_idx[at..at + own.len()].copy_from_slice(own);
+        for &i in own {
+            if i != j {
+                out_idx[next[i]] = j;
+                next[i] += 1;
+            }
+        }
+    }
+    CscPattern {
+        n,
+        col_ptr: out_ptr,
+        row_idx: out_idx,
+    }
+}
+
+/// [`symmetric_pattern`] of any pattern, by
+/// placing both entries of each pair and sorting every column.
+fn symmetric_pattern_sorted(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> CscPattern {
+    // Count entries per column in the full pattern
+    let mut col_counts = vec![0usize; n];
+    for j in 0..n {
+        for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
+            col_counts[j] += 1; // lower triangle entry in column j
+            if i != j {
+                col_counts[i] += 1; // transpose entry in column i
+            }
+        }
+    }
+
+    // Build col_ptr
+    let mut pat_col_ptr = vec![0usize; n + 1];
+    for j in 0..n {
+        pat_col_ptr[j + 1] = pat_col_ptr[j] + col_counts[j];
+    }
+    let pat_nnz = pat_col_ptr[n];
+    let mut pat_row_idx = vec![0usize; pat_nnz];
+
+    // Place entries
+    let mut offsets = pat_col_ptr[..n].to_vec();
+    for j in 0..n {
+        for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
+            // (i, j) in lower triangle
+            pat_row_idx[offsets[j]] = i;
+            offsets[j] += 1;
+            if i != j {
+                // (j, i) - transpose
+                pat_row_idx[offsets[i]] = j;
+                offsets[i] += 1;
+            }
+        }
+    }
+
+    // Sort row indices within each column
+    for j in 0..n {
+        let start = pat_col_ptr[j];
+        let end = pat_col_ptr[j + 1];
+        pat_row_idx[start..end].sort_unstable();
+    }
+
+    CscPattern {
+        n,
+        col_ptr: pat_col_ptr,
+        row_idx: pat_row_idx,
     }
 }
 

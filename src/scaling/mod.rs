@@ -1,37 +1,42 @@
-//! Global scaling for sparse symmetric indefinite matrices.
+//! Matrix scaling: symmetric equilibration for the LDL^T path and MC64
+//! weighted matching for the LU path.
 //!
-//! Implements MC64-style matching-based scaling following
-//! Duff & Koster 2001 and Duff & Pralet 2005, using a pure-Rust
-//! Hungarian algorithm. The resulting scaling vector `s` is applied
-//! symmetrically: `A |-> diag(s) * A * diag(s)` before factorization.
+//! ## Symmetric equilibration (LDL^T)
 //!
-//! Design: see `dev/research/mc64-scaling.md`.
-//! Plan:   see `dev/plans/mc64-scaling.md`.
+//! [`compute_scaling`] turns a [`ScalingStrategy`] into a real vector `s`
+//! such that the factored matrix is the congruence `A_hat = D A D`,
+//! `D = diag(s)`:
 //!
-//! This module is Phase 2.2.1 work - closing the residual gap that
-//! Phase 2.1.2's sanity check exposed on n > 500 matrices.
+//! - `OnePassInfNorm` (the `SolverSettings` default): a single
+//!   Knight-Ruiz step `s_i = 1/sqrt(max_j |A_ij|)`; tolerates a zero
+//!   diagonal.
+//! - `InfNorm`: iterative Knight-Ruiz inf-norm equilibration.
+//! - `Mc64Symmetric`: matching-based scaling after Duff & Koster (2001)
+//!   and Duff & Pralet (2005), computed with a pure-Rust Hungarian
+//!   algorithm, so that the largest entries of `D A D` lie on the
+//!   diagonal.
+//! - `Auto`: routes between `InfNorm` and `Mc64Symmetric` by matrix
+//!   shape, falling back to `InfNorm` when the MC64 vector is unusable.
+//! - `Identity`, and `External` (a caller-supplied vector).
 //!
-//! ## Quick reference
+//! The vector is in user-order indexing (the numbering of the input CSC).
+//! `LdltSolver` computes it at factor time (through this module on the
+//! `|A|` magnitude pattern, except for the one-pass default and
+//! `Identity`, which it handles natively), multiplies each entry
+//! `a[i,j]` by `s[i] * s[j]` while permuting the values for the
+//! factorization, and fuses the scaling into the permutation
+//! gather/scatter of the solve:
+//! `x = D * (A_hat^-1 * (D b))`. The same vector is applied on both ends,
+//! not its inverse. The sparsity pattern is unaffected.
 //!
-//! The caller computes scaling via `compute_scaling(matrix, strategy)`,
-//! which returns `(Vec<f64>, ScalingInfo)`. The vector is in user-order
-//! indexing (same numbering as the input CSC's row/column indices).
-//! It is the responsibility of later symbolic-factorization code to
-//! permute the vector into pivot-order before handing off to the
-//! numeric phase.
+//! ## Unsymmetric matching (LU)
 //!
-//! Once the scaling vector is available, three things must happen:
-//!
-//!   1. During frontal assembly in `numeric::factorize`, each original
-//!      matrix entry `a[i,j]` is multiplied by `s[i] * s[j]` as it is
-//!      scattered into the frontal matrix.
-//!   2. In `numeric::solve`, the right-hand side `b` is pre-scaled by
-//!      `b[i] *= s[i]` at the permutation boundary before the forward
-//!      sweep.
-//!   3. In `numeric::solve`, the solution `x` is post-scaled by
-//!      `x[i] *= s[i]` at the un-permutation boundary after the
-//!      backward sweep. **Same vector on both ends**, not its
-//!      inverse - see the research note for the derivation.
+//! `mc64::compute_matching_general` computes a maximum-product
+//! transversal of a general square matrix (Hungarian kernel in
+//! `hungarian.rs`), and `mc64::unsymmetric_scaling` turns its dual
+//! variables into row and column scalings. The LU path uses the matching
+//! as a row permutation that puts large entries on the diagonal, together
+//! with those scalings; the BTF analysis uses it as the transversal.
 
 use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
@@ -40,19 +45,8 @@ mod hungarian;
 mod infnorm;
 pub(crate) mod mc64;
 
-/// Cached MC64 output: the matching (`perm`) that drives the
-/// `LdltCompress` ordering preprocessor, plus the dual data a scaling
-/// derivation would need. NOTE: the once-planned "reuse the analyze-time
-/// matching for `Mc64Symmetric` scaling" optimization (Phase 2.4.4) is
-/// **impossible through the generic solver path**: `analyze_with_inner`
-/// feeds `symbolic_factorize` a unit-valued pattern (`values = 1.0`), so
-/// any matching cached there carries log-cost-0 duals and could never
-/// reproduce the value-based scaling. The cache therefore serves the
-/// (value-blind, structural) compression only.
-pub(crate) use mc64::Mc64Cache;
-
 /// One Knight-Ruiz equilibration step `d <- d / sqrt(m)`, guarded against
-/// overflow/underflow (feral issue #119 port). Applies the update only when
+/// overflow/underflow. Applies the update only when
 /// the result stays finite and strictly positive; otherwise `d` is held at
 /// its last good value. `m` is the row/column infinity-norm and is assumed
 /// `> 0` (the caller's existing `m > 0` guard).
@@ -76,8 +70,8 @@ pub(crate) fn kr_guarded_update(d: f64, m: f64) -> f64 {
     }
 }
 
-/// Guarded one-pass scale factor `1 / sqrt(m)` (single Knight-Ruiz step,
-/// feral issue #119 port): a zero, non-finite, or overflow-prone row max
+/// Guarded one-pass scale factor `1 / sqrt(m)` (single Knight-Ruiz
+/// step): a zero, non-finite, or overflow-prone row max
 /// yields the neutral `1.0` instead of a `0`/`Inf`/`NaN` factor that would
 /// silently poison the equilibrated matrix. Bit-identical to the bare
 /// expression for every healthy `m` (finite, `> 0`, not extreme).
@@ -95,52 +89,27 @@ pub(crate) fn inv_sqrt_scale_guarded(m: f64) -> f64 {
     }
 }
 
-/// Run the full MC64 pipeline once and return the cached output.
-/// Used by the symbolic `LdltCompress` preprocessor (see the
-/// [`Mc64Cache`] note on why it cannot also serve scaling).
-pub(crate) fn compute_mc64_cache(matrix: &CscMatrix) -> Result<Mc64Cache, RslabError> {
-    mc64::compute_matching(matrix)
-}
-
 /// User-facing scaling strategy selector.
 ///
-/// Default is `Auto` - adaptive shape-based routing that picks
-/// `Mc64Symmetric` for matrices with the arrow-KKT signature
-/// (`diag_only / n >= 0.30`) and `InfNorm` everywhere else. Flipped
-/// from the prior `InfNorm` default on 2026-04-19 after the
-/// per-matrix residual-set diff confirmed the trade: 8x tail
-/// compression on factor/MUMPS (worst case 83x -> 10x) and material
-/// wins on the VESUVIO/CRESC IPM corpus, against a net -9 change
-/// in the residual_pass count out of 154 588. Of the 21 regressions,
-/// 14 are oracle-`numerically_intractable` and 1 is `excluded`
-/// (boundary flicker on already-hard matrices); 5 of the remaining
-/// 6 `definitive` regressions are tolerance-edge effects (residuals
-/// 1e-10 -> 1e-9 around the `n*eps*1e6` threshold). The lone material
-/// residual regression is MSS1_0009 (6e-12 -> 1e-6, inertia preserved).
-/// Inertia hard rule is satisfied on every regression. See
-/// `dev/research/lever-c-residual-diff-2026-04-19.md`.
+/// The [`crate::SolverSettings`] default is `OnePassInfNorm`, the cheapest
+/// choice. The enum's own `Default` is `Auto`: adaptive shape-based
+/// routing that picks `Mc64Symmetric` for matrices with the arrow-KKT
+/// signature and `InfNorm` everywhere else (see `pick_scaling_strategy`
+/// and `compute_scaling_auto`). On arrow KKTs the matching scaling can
+/// markedly reduce factor time and residuals compared with inf-norm
+/// balancing.
 ///
-/// `InfNorm` (Knight-Ruiz iterative inf-norm equilibration) is still
-/// available as an opt-in; it is the only choice that solves
-/// MSS1_0009 to working precision today and is the right pick for
-/// pipelines that cannot tolerate the MSS1-class residual loss
-/// pending Policy 4 (post-scaling trial-residual diagnostic).
-///
-/// `Mc64Symmetric` is also opt-in; it is useful on matrices where
-/// matching provides better conditioning than inf-norm balancing
-/// (e.g. SSINE_2529, VESUVIA_0000 in the parity panel) but pays the
-/// MC64 symbolic overhead unconditionally.
+/// `InfNorm` (iterative Knight-Ruiz) is the safer pick where MC64 is
+/// known to hurt accuracy on a well-equilibrated matrix. `Mc64Symmetric`
+/// forces the matching, at its extra cost, on every matrix.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ScalingStrategy {
-    /// Knight-Ruiz inf-norm iterative equilibration. Matches the
-    /// scaling algorithm used by the dense BK path. Was the default
-    /// from Phase 2.2.3 through the 2026-04-19 lever-C residual diff
-    /// (now opt-in). The "iterative Ruiz" arm of the equilibration knob.
+    /// Knight-Ruiz inf-norm iterative equilibration (the "iterative Ruiz"
+    /// arm of the equilibration knob). See `infnorm::compute_infnorm`.
     InfNorm,
     /// One-pass symmetric inf-norm equilibration `s_i = 1/sqrt(max_j |A_ij|)` (a
-    /// single Knight-Ruiz step). The historical [`crate::LdltSolver`]
-    /// equilibration and the [`crate::SolverSettings`] default: cheapest,
-    /// tolerates a zero diagonal, no iteration. See
+    /// single Knight-Ruiz step). The [`crate::SolverSettings`] default:
+    /// cheapest, tolerates a zero diagonal, no iteration. See
     /// `infnorm::compute_onepass`.
     OnePassInfNorm,
     /// MC64-style symmetric matching-based scaling. Matches the
@@ -157,42 +126,38 @@ pub enum ScalingStrategy {
     /// Adaptive shape-based routing: `Mc64Symmetric` when the matrix
     /// has the arrow-KKT signature (many degree-1 "constraint slack"
     /// columns), else `InfNorm`. The routing rule is documented at
-    /// `pick_scaling_strategy`; threshold is `diag_only / n >= 0.3`.
-    /// Default since 2026-04-19. See
-    /// `dev/research/lever-c-residual-diff-2026-04-19.md`.
+    /// `pick_scaling_strategy`; `compute_scaling_auto` adds the
+    /// fallback to `InfNorm`.
     #[default]
     Auto,
 }
 
 /// Reason that `ScalingStrategy::Auto` chose InfNorm scaling instead
-/// of the MC64 matching it had nominally routed to. Issue #24.
-///
-/// See `dev/research/issue-24-mc64-fallback.md` for the rationale
-/// behind surfacing this signal as a distinct `ScalingInfo` variant.
+/// of the MC64 matching it had nominally routed to. Surfaced through
+/// `ScalingInfo::Mc64FallbackToInfnorm` so callers can tell it apart from
+/// a user-requested InfNorm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mc64FallbackReason {
     /// `Auto` picked MC64 by shape, but the pre-MC64 InfNorm trial
     /// (`scaling_spread(in_vec) < IN_SPREAD_GUARD`) produced a tight
     /// scaling - the matrix was already well-equilibrated and the
-    /// Hungarian matching never ran. ACOPP30 / MSS1 family.
+    /// Hungarian matching never ran.
     InfNormSpreadAcceptable,
     /// MC64 ran but produced a catastrophically worse scaling than
     /// InfNorm on a matrix whose raw `|diag|` range was tame enough
     /// that MC64 had no inherent ill-conditioning to recover from.
-    /// Policy 4 ratio guard (`mc_off > 1e6 and mc_off / in_off > 1e5
-    /// and raw_drng < 1e6`). MSS1_0009 class.
+    /// Ratio guard: `mc_off > 1e6 and mc_off / in_off > 1e5 and
+    /// raw_drng < 1e6`.
     Mc64WorseThanInfnorm,
     /// MC64 ran but the scaling vector it produced is itself
     /// numerically degenerate: its own spread `max|s| / min|s|`
     /// exceeds `1 / EPS ~ 4.5e15`. `D = diag(s)` is then singular to
     /// working precision, `D*A*D` underflows during the factorization,
     /// and Bunch-Kaufman force-accepts exact-zero pivots - a silently
-    /// wrong solve (issue #45). Seen on saddle-point KKTs with a
-    /// structurally-zero `(2,2)` block, where the symmetric matching
-    /// forces extreme path-accumulated dual potentials. The whole
-    /// parity corpus stays under `3.27e15`; the CHO `parmest` KKT hits
-    /// `~ 3e82`. See
-    /// `dev/research/kkt-mc64-scaling-blowup-2026-05-20.md`.
+    /// wrong solve. Seen on saddle-point KKTs with a structurally-zero
+    /// `(2,2)` block, where the symmetric matching forces extreme
+    /// path-accumulated dual potentials (spreads around `1e82` have been
+    /// observed on parameter-estimation KKTs).
     Mc64ScalingDegenerate,
 }
 
@@ -213,8 +178,7 @@ pub enum ScalingInfo {
     /// `ScalingStrategy::Auto` resolved to `Mc64Symmetric` by shape
     /// routing but then fell back to InfNorm. The scaling vector
     /// returned alongside this info is the InfNorm vector (so the
-    /// solve path applies it). Issue #24 - was previously
-    /// indistinguishable from `Applied` for InfNorm.
+    /// solve path applies it).
     Mc64FallbackToInfnorm { reason: Mc64FallbackReason },
     /// The scaling vector is all-ones - applying it is a no-op, so the
     /// solve path skips pre/post scaling entirely. Produced only by
@@ -233,9 +197,6 @@ pub enum ScalingInfo {
 /// `D * A * D` produces a matrix whose largest-magnitude entries lie
 /// on the diagonal. The off-diagonals are bounded by 1 in absolute
 /// value when MC64 succeeds on a non-singular matrix.
-///
-/// Users of the result must permute the vector into pivot-order
-/// indexing before the numeric phase looks it up.
 pub fn compute_scaling(
     matrix: &CscMatrix,
     strategy: &ScalingStrategy,
@@ -267,13 +228,15 @@ pub fn compute_scaling(
     }
 }
 
-/// Resolve `ScalingStrategy::Auto` with a Policy 4 fallback rule:
-/// when `pick_scaling_strategy` would pick `Mc64Symmetric`, check
-/// whether MC64 has produced a scaling that is catastrophically
-/// worse than InfNorm on a matrix where InfNorm would have done
-/// fine. If so, fall back to InfNorm.
+/// Resolve `ScalingStrategy::Auto` with a fallback rule: when
+/// `pick_scaling_strategy` would pick `Mc64Symmetric`, fall back to
+/// InfNorm if InfNorm alone already equilibrates the matrix (tight
+/// InfNorm spread), if the MC64 vector is degenerate (its own spread
+/// exceeds `1 / EPS`), or if MC64 has produced a scaling that is
+/// catastrophically worse than InfNorm on a matrix where InfNorm would
+/// have done fine.
 ///
-/// Rule (all three must fire):
+/// The last rule (all three must fire):
 /// 1. `raw_diag_range < RAW_GUARD` - the raw matrix's diagonal
 ///    spans only a few orders of magnitude. MC64 has nothing
 ///    to recover from raw ill-conditioning here, so any huge
@@ -287,14 +250,7 @@ pub fn compute_scaling(
 /// The first guard is the critical one: it lets matrices like
 /// MEYER3NE_0220 (raw_drng=4.77e19, but MC64 actually works) keep
 /// MC64, while still catching MSS1_0009 (raw_drng=51, where MC64
-/// produces noise).
-///
-/// Validated on a 17-matrix panel: MSS1_0009 falls back (recovers
-/// the 6e-12 InfNorm residual instead of the 1e-6 MC64 residual);
-/// VESUVIA / VESUVIO / VESUVIOU / MUONSINE / CRESC132 / HS75 /
-/// MEYER3NE all keep MC64 (preserving the 84x -> 9.4x factor
-/// speedup, the 4-order HS75 residual win, and the MEYER3NE parity
-/// tests). See `dev/research/policy-4-scaling-fallback.md`.
+/// produces noise: 1e-6 residual against 6e-12 with InfNorm).
 fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), RslabError> {
     const RAW_GUARD: f64 = 1e6;
     const MC_OFF_GUARD: f64 = 1e6;
@@ -303,21 +259,18 @@ fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), R
     // this threshold, the matrix is already nearly equilibrated by a
     // single Knight-Ruiz pass; MC64's heavier matching is gratuitous
     // and on some KKT families (ACOPP30 cond~3e16) produces a strictly
-    // worse factor. Threshold validated on a 9-matrix panel in
-    // `dev/research/acopp30-plateau-2.md`: catches ACOPP30 (1.63),
-    // MSS1 (1.09), HS75 (20.8) without flipping VESUVIA/VESUVIO/
-    // VESUVIOU/MEYER3NE/CRESC132 (all >> 1e3 or where MC64 strictly
-    // wins).
+    // worse factor. The threshold catches ACOPP30 (1.63), MSS1 (1.09)
+    // and HS75 (20.8) without flipping VESUVIA/VESUVIO/VESUVIOU/
+    // MEYER3NE/CRESC132 (all >> 1e3 or where MC64 strictly wins).
     const IN_SPREAD_GUARD: f64 = 1e3;
-    // Issue #45: an MC64 scaling vector whose own spread
-    // `max|s| / min|s|` exceeds `1 / EPS` is degenerate to working
-    // precision - `D = diag(s)` is singular, `D*A*D` underflows, and
-    // Bunch-Kaufman force-accepts exact-zero pivots, returning a
-    // silently wrong solve. Corpus max is 3.27e15 (ssine); the CHO
-    // `parmest` saddle-point KKT blows up to ~ 3e82. `1 / EPS`
-    // (~ 4.503e15) is a hard numerical invariant - every legitimate
-    // corpus matrix clears it. See
-    // `dev/research/kkt-mc64-scaling-blowup-2026-05-20.md`.
+    // An MC64 scaling vector whose own spread `max|s| / min|s|`
+    // exceeds `1 / EPS` is degenerate to working precision -
+    // `D = diag(s)` is singular, `D*A*D` underflows, and Bunch-Kaufman
+    // force-accepts exact-zero pivots, returning a silently wrong
+    // solve. Legitimate MC64 spreads seen on KKT test matrices stay
+    // below ~3.3e15 (ssine); saddle-point parameter-estimation KKTs can
+    // blow up to ~3e82. `1 / EPS` (~4.503e15) is a hard numerical
+    // limit.
     const MC64_SPREAD_GUARD: f64 = 1.0 / f64::EPSILON;
 
     let picked = pick_scaling_strategy(matrix);
@@ -329,11 +282,10 @@ fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), R
     // Pre-MC64 InfNorm trial: if Knight-Ruiz produces a tight
     // scaling vector, the matrix is already well-equilibrated and
     // MC64's matching can only hurt. This catches the ACOPP30
-    // plateau-2 family (raw_drng=1.06e10 but in_spread=1.63), which
-    // the legacy `raw_drng >= RAW_GUARD -> use MC64 unconditionally`
-    // fast-path mis-routed. See `dev/research/acopp30-plateau-2.md`.
+    // family (raw_drng=1.06e10 but in_spread=1.63), which the
+    // `raw_drng >= RAW_GUARD` pre-filter below would send to MC64.
     //
-    // Issue #24: tag the result as `Mc64FallbackToInfnorm` so
+    // Tag the result as `Mc64FallbackToInfnorm` so
     // downstream telemetry can distinguish a "user picked InfNorm"
     // from a "Auto routed to MC64 but fell back" outcome. The
     // underlying scaling vector is unchanged.
@@ -348,19 +300,18 @@ fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), R
     }
 
     // Compute the MC64 scaling once. Every branch below either
-    // returns this vector or inspects it; before issue #45 the
-    // `raw_diag_range` fast-path recomputed it on a separate return.
+    // returns this vector or inspects it.
     let (mc_vec, mc_info) = mc64::compute_symmetric(matrix)?;
 
-    // Issue #45: catastrophic-spread guard. An MC64 scaling whose own
-    // spread exceeds `MC64_SPREAD_GUARD` is degenerate to working
-    // precision and silently corrupts the factorization (see the
-    // constant's doc comment). Discard it and fall back to the
-    // already-computed InfNorm vector. This check is placed BEFORE
-    // the `raw_diag_range` fast-path so it fires regardless of raw
-    // conditioning - the CHO KKT is genuinely ill-conditioned
-    // (`raw_diag_range >= RAW_GUARD`) and so took the fast-path
-    // straight to the unchecked MC64 vector before this guard.
+    // Catastrophic-spread guard. An MC64 scaling whose own spread
+    // exceeds `MC64_SPREAD_GUARD` is degenerate to working precision
+    // and silently corrupts the factorization (see the constant's
+    // comment). Discard it and fall back to the already-computed
+    // InfNorm vector. This check is placed BEFORE the `raw_diag_range`
+    // fast-path so it fires regardless of raw conditioning: the
+    // affected saddle-point KKTs are genuinely ill-conditioned
+    // (`raw_diag_range >= RAW_GUARD`) and would otherwise take the
+    // fast-path straight to the unchecked MC64 vector.
     if scaling_spread(&mc_vec) > MC64_SPREAD_GUARD {
         return Ok((
             in_vec,
@@ -393,9 +344,8 @@ fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), R
         // MC64 is catastrophically worse than InfNorm AND the raw
         // matrix is already well-behaved - fall back to InfNorm.
         // The solve path applies the InfNorm scaling vector; tag
-        // the info as `Mc64FallbackToInfnorm` so callers (Solver
-        // telemetry, bench sidecar) can distinguish this from a
-        // user-requested InfNorm. Issue #24.
+        // the info as `Mc64FallbackToInfnorm` so callers can
+        // distinguish this from a user-requested InfNorm.
         Ok((
             in_vec,
             ScalingInfo::Mc64FallbackToInfnorm {
@@ -408,7 +358,7 @@ fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), R
 }
 
 /// Return `max|s|/min|s|` over the nonzero entries of `s`. Returns
-/// `+inf` if `s` has no nonzero entry. Used by Policy 4 as a fast
+/// `+inf` if `s` has no nonzero entry. Used by the `Auto` fallback as a fast
 /// "is the matrix already equilibrated?" probe on the InfNorm
 /// scaling vector.
 fn scaling_spread(s: &[f64]) -> f64 {
@@ -522,25 +472,25 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 ///
 /// Else routes to `InfNorm`.
 ///
-/// Both counts ignore explicit stored `0.0` entries (issue #47): an
+/// Both counts ignore explicit stored `0.0` entries: an
 /// explicit zero is not coupling and not mass, so a value-only zero
 /// must not change which scaling strategy a matrix routes to. Callers
-/// that refill a fixed sparsity pattern each solve (POUNCE-style IPM
-/// backends) leave such zeros in the zero-`(2,2)` block; a value-blind
-/// router would split the kept and stripped forms of the same KKT.
+/// that refill a fixed sparsity pattern each solve (IPM backends) leave
+/// such zeros in the zero-`(2,2)` block; a value-blind router would
+/// split the kept and stripped forms of the same KKT.
 ///
 /// **Why both gates are needed.** The diag_only ratio alone CANNOT
 /// distinguish a 1-D banded KKT like clnlbeam (n=99999, diag_only=40%,
 /// max_col_nnz=5) from a true arrow KKT like VESUVIO (n=3083,
 /// diag_only=33%, max_col_nnz=1026). clnlbeam scores HIGHER on
-/// diag_only/n than VESUVIO yet MC64 hurts its IPM trajectory by
-/// 4.36x iters and 28x wall time (see Mittelmann sweep
-/// 2026-05-16), while VESUVIO benefits 6x-243x from MC64. The dense
-/// column count (gate b) is what separates them: banded PDE-like KKTs
-/// have small max column degree by construction; arrow KKTs concentrate
-/// the slack/dual coupling in 1-8 dense columns of size ~ n/3.
+/// diag_only/n than VESUVIO yet MC64 hurts its IPM trajectory (about
+/// 4.4x the iterations), while VESUVIO benefits 6x-243x from MC64. The
+/// dense column count (gate b) is what separates them: banded PDE-like
+/// KKTs have small max column degree by construction; arrow KKTs
+/// concentrate the slack/dual coupling in 1-8 dense columns of size
+/// ~ n/3.
 ///
-/// Threshold calibration (`dev/journal/2026-05-17-01.org` section 14:30):
+/// Threshold calibration:
 ///
 /// | matrix          | n     | diag_only/n | max_col_nnz | MC64 helps? |
 /// |-----------------|-------|-------------|-------------|-------------|
@@ -550,7 +500,7 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 /// | VESUVIA_0000    | 3083  | 33.2%       | 1026        | YES         |
 /// | MUONSINE_0000   | 1537  | 33.3%       | 512         | YES         |
 /// | CRESC132_0000   | 5314  | 50.0%       | 2657        | YES         |
-/// | ACOPP30_0064    | 209   | 65.6%       | 29          | NO (Policy 4 fallback already proved this) |
+/// | ACOPP30_0064    | 209   | 65.6%       | 29          | NO          |
 ///
 /// `32` sits an order of magnitude above ACOPP30's max (29) and an
 /// order of magnitude below MUONSINE's (512), giving the widest
@@ -565,8 +515,8 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 /// smaller than the stored degree, so the gate can only become easier to pass:
 /// no matrix loses `Mc64Symmetric` to this.
 ///
-/// The slack-mass gate is still order-dependent; every invariant reformulation
-/// measured at the fork upstream stripped `Mc64Symmetric` from matrices that
+/// The slack-mass gate is still order-dependent; the order-invariant
+/// reformulations tried so far stripped `Mc64Symmetric` from matrices that
 /// need it, so it stays as it is.
 ///
 /// Cost: one allocation-free `O(n+nnz)` pass decides every matrix that fails the
@@ -588,13 +538,13 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     for j in 0..n {
         let start = matrix.col_ptr[j];
         let end = matrix.col_ptr[j + 1];
-        // Issue #47: count only structurally meaningful entries. An
-        // explicit stored `0.0` is not coupling and not mass - POUNCE
-        // -style callers refill a fixed pattern each IPM iterate,
-        // leaving value-only `0.0` slots in the zero-`(2,2)` block.
-        // Counting them lets a value-only zero flip this scaling
-        // router; the kept CHO `parmest` KKT then routes to MC64 while
-        // the structurally-identical stripped one routes to InfNorm.
+        // Count only structurally meaningful entries. An explicit
+        // stored `0.0` is not coupling and not mass - IPM callers
+        // refill a fixed pattern each iterate, leaving value-only `0.0`
+        // slots in the zero-`(2,2)` block. Counting them would let a
+        // value-only zero flip this router, sending the kept form of a
+        // KKT to MC64 and the structurally identical stripped form to
+        // InfNorm.
         let mut nnz_col = 0usize;
         let mut diag_nonzero = false;
         for k in start..end {
@@ -644,8 +594,8 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     }
 }
 
-// Hungarian types are used by the `mc64` module once Step 3 lands.
-// Not part of the public API.
+// Hungarian kernel types, used by the `mc64` module. Not part of the
+// public API.
 #[allow(unused_imports)]
 pub(crate) use hungarian::{hungarian_match, CostGraph, Matching};
 
@@ -810,7 +760,7 @@ mod tests {
     }
 
     /// Build the parameter-estimation saddle-point KKT used as the
-    /// issue-#45 spread-guard test oracle.
+    /// MC64 spread-guard test oracle.
     ///
     /// `[H B^T; B 0]` stored as the lower triangle: `ntheta` dense
     /// parameter columns (graded H diagonal `1 .. theta_top`, each
@@ -821,15 +771,12 @@ mod tests {
     /// `s-1` with coefficient `base`). The constant ratio makes the
     /// chain translation-invariant - InfNorm equilibrates it
     /// uniformly - while MC64's symmetric matching telescopes `base`
-    /// into a path-accumulated potential. The chain block is identical
-    /// to `src/bin/probe_mc64_synth.rs::build_kkt`, the documented
-    /// source of the measured MC64/InfNorm spreads (journal
-    /// 2026-05-20-02 16:34).
+    /// into a path-accumulated potential.
     ///
     /// `nslack` degree-1 columns with a *nonzero* unit diagonal are
     /// appended last. They model the bound slacks of a
     /// bound-constrained parameter-estimation KKT (real slack mass +
-    /// zero equality duals). They are required for issue #47: with the
+    /// zero equality duals). They are required because with the
     /// value-aware router the explicit-zero constraint/state diagonals
     /// no longer count as `diag_only`, so genuine slack mass is what
     /// routes this matrix to `Mc64Symmetric` (`nslack/n >= 0.30`,
@@ -916,8 +863,7 @@ mod tests {
     fn pick_scaling_strategy_picks_infnorm_for_banded_high_diag_only() {
         // The clnlbeam shape: high diagonal-only mass (0.60) but a narrow
         // band, so no index couples widely. Must route to InfNorm - this is
-        // the entire motivation for the head gate. See
-        // `dev/journal/2026-05-17-01.org` section 14:30. The band is built as
+        // the entire motivation for the head gate. The band is built as
         // a band rather than as couplings to a few shared leading rows: the
         // latter is an arrow head that only the stored-column view hides.
         let (n, trip) = banded_with_isolated(60, 40, 2);
@@ -973,12 +919,11 @@ mod tests {
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
     }
 
-    /// Issue #47 - `pick_scaling_strategy` must treat an explicit stored
-    /// `0.0` as structurally absent. POUNCE-style callers refill a fixed
-    /// KKT pattern each IPM iterate, leaving value-only `0.0` slots in
-    /// the zero-`(2,2)` block; a value-blind structural router counts
-    /// them and flips the scaling strategy (CHO `parmest`: kept routes
-    /// to MC64, stripped to InfNorm - `probe_explicit_zeros`).
+    /// `pick_scaling_strategy` must treat an explicit stored `0.0` as
+    /// structurally absent. IPM callers refill a fixed KKT pattern each
+    /// iterate, leaving value-only `0.0` slots in the zero-`(2,2)` block;
+    /// a value-blind structural router counts them and flips the scaling
+    /// strategy between the kept and the stripped form of the same KKT.
     ///
     /// Layout (n=100): 50 arrow-head columns each storing the diagonal
     /// plus 40 nonzero rows below it (41 nnz > 32 -> arrow head); then 50
@@ -1053,7 +998,7 @@ mod tests {
         );
     }
 
-    /// Issue #47 - an explicit-zero *off-diagonal* entry must neither
+    /// An explicit-zero *off-diagonal* entry must neither
     /// inflate `max_col_nnz` nor disqualify an otherwise-`diag_only`
     /// column. Here the 50 constraint columns each store a nonzero
     /// diagonal AND a single explicit-zero off-diagonal; value-aware
@@ -1091,12 +1036,10 @@ mod tests {
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
     }
 
-    /// Regression test for the clnlbeam IPM-iter-bloat bug
-    /// (Mittelmann sweep 2026-05-16, fix 2026-05-17). The clnlbeam KKT
-    /// scored 40% diag_only and would have routed to MC64 under the
-    /// pre-fix policy, costing 2367 IPM iters vs MA57's 543. With the
-    /// dense-column gate (max_col_nnz=5 fails) it routes to InfNorm,
-    /// which solved clnlbeam in 506 iters / 57 s end-to-end.
+    /// The clnlbeam KKT scores 40% diag_only and would route to MC64 on
+    /// the slack-mass gate alone, which inflates the IPM iteration count
+    /// about 4x. The dense-column gate (max_col_nnz=5 fails) routes it to
+    /// InfNorm. Skipped when the fixture is not present.
     #[test]
     fn pick_scaling_strategy_routes_clnlbeam_to_infnorm() {
         let path = std::path::Path::new("data/matrices/kkt-mittelmann/clnlbeam/clnlbeam_0000.mtx");
@@ -1144,7 +1087,7 @@ mod tests {
         };
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
         // Auto and explicit Mc64Symmetric must produce the same vector
-        // here - this is a well-conditioned shape, so the Policy 4
+        // here - this is a well-conditioned shape, so the ratio
         // fallback rule (mc_off > 1e6 and mc_off/in_off > 1e5) never fires.
         let (auto_s, _) =
             compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto routing should succeed");
@@ -1189,13 +1132,13 @@ mod tests {
         assert!(r.is_infinite(), "got {r}");
     }
 
-    /// Issue #24: an arrow KKT with uniform absolute values triggers
+    /// An arrow KKT with uniform absolute values triggers
     /// the `Auto` shape rule (high diag_only ratio + a dense arrow head
     /// of size > 32) but the pre-MC64 InfNorm trial gives a constant
     /// scaling vector (spread = 1), so `IN_SPREAD_GUARD` fires and the
     /// fallback is taken. Assert the returned `ScalingInfo` is
-    /// `Mc64FallbackToInfnorm{InfNormSpreadAcceptable}` - the
-    /// previously-silent fallback is structurally surfaced.
+    /// `Mc64FallbackToInfnorm{InfNormSpreadAcceptable}`, so the
+    /// fallback is visible to the caller.
     ///
     /// Construction: n=40. Column 0 stores diag + all 39 earlier-row
     /// entries with value 2.0 (40 stored entries -> exceeds the dense
@@ -1249,13 +1192,12 @@ mod tests {
         assert_eq!(auto_s, in_s, "fallback vector must be the InfNorm vector");
     }
 
-    /// Policy 4 fallback regression test - MSS1_0009 should resolve
-    /// to InfNorm under Auto despite the diag_only/n=0.45 ratio
-    /// triggering the MC64 routing rule. The fallback fires because
-    /// MC64 produces a scaled `max(|off|/|diag|) ~ 7.8e14` while
-    /// InfNorm gets ~ 2.0e8 - ratio 3.9e6 is well above the
-    /// 1e5 RATIO_GUARD. See `dev/research/policy-4-scaling-fallback.md`
-    /// table for the full numbers.
+    /// Fallback regression test - MSS1_0009 should resolve to InfNorm
+    /// under Auto despite the diag_only/n=0.45 ratio triggering the
+    /// MC64 routing rule. MC64 produces a scaled
+    /// `max(|off|/|diag|) ~ 7.8e14` while InfNorm gets ~ 2.0e8 - ratio
+    /// 3.9e6 is well above the 1e5 RATIO_GUARD. Skipped when the
+    /// fixture is not present.
     #[test]
     fn auto_falls_back_to_infnorm_on_mss1_0009() {
         let path = std::path::Path::new("data/matrices/kkt/MSS1/MSS1_0009.mtx");
@@ -1270,7 +1212,7 @@ mod tests {
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
 
         // But Auto should resolve to the InfNorm scaling because of
-        // the Policy 4 fallback.
+        // the fallback.
         let (auto_s, auto_info) = compute_scaling(&csc, &ScalingStrategy::Auto)
             .expect("Auto on MSS1_0009 should succeed");
         let (in_s, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
@@ -1282,8 +1224,7 @@ mod tests {
             auto_s, mc_s,
             "Auto must NOT use MC64 on MSS1_0009 (would regress residual to 1e-6)"
         );
-        // Issue #24: either Policy 4 fallback reason is acceptable
-        // here. The high-level invariant - "Auto falls back to
+        // Either fallback reason is acceptable here. The high-level invariant - "Auto falls back to
         // InfNorm on MSS1_0009" - is already proven by the
         // `assert_eq!(auto_s, in_s)` above. Empirically the earlier
         // `InfNormSpreadAcceptable` guard fires on this matrix
@@ -1298,8 +1239,8 @@ mod tests {
         }
     }
 
-    /// Policy 4 fallback must NOT fire on the VESUVIO/CRESC class -
-    /// these are the matrices the lever-C win is built on. MC64
+    /// The fallback must NOT fire on the VESUVIO/CRESC class - these
+    /// are the matrices MC64 scaling is routed for. MC64
     /// produces a scaled `mc_off ~ 4.84e12` for VESUVIA_0000 with
     /// `mc/in ~ 40` - well below the 1e5 RATIO_GUARD.
     #[test]
@@ -1336,20 +1277,11 @@ mod tests {
         assert_eq!(auto_s, mc_s, "Auto must keep MC64 on VESUVIOU_0000");
     }
 
-    /// ACOPP30_0064 was the seed plateau matrix for issue #23's
-    /// "plateau-2" investigation. Under the legacy Policy 4
-    /// fast-path (`raw_drng >= 1e6 -> MC64 unconditionally`),
-    /// raw_drng=1.06e10 routed it to MC64, which produced a
-    /// catastrophic scaling: factor zero pivot, rel_ref = 1.74e-1.
-    ///
-    /// Pre-2026-05-17 the matrix was rescued by the IN_SPREAD_GUARD
-    /// at the Policy-4 fallback layer. With the dense-column gate
-    /// added to `pick_scaling_strategy` (max_col_nnz=29 <= 32), the
-    /// routing itself now sends ACOPP30_0064 to InfNorm directly,
-    /// without needing the fallback safety net to fire. The end
-    /// result (Auto vector == InfNorm vector) is unchanged.
-    /// See `dev/research/acopp30-plateau-2.md` and
-    /// `dev/journal/2026-05-17-01.org` section 14:30.
+    /// ACOPP30_0064 has raw_drng=1.06e10; MC64 scaling on it produces
+    /// a catastrophic factor (zero pivot, rel_ref = 1.74e-1). The
+    /// dense-column gate of `pick_scaling_strategy` (max_col_nnz=29
+    /// <= 32) routes it to InfNorm directly, without needing the
+    /// fallback. Skipped when the fixture is not present.
     #[test]
     fn auto_picks_infnorm_on_acopp30_0064() {
         let path = std::path::Path::new("data/matrices/kkt/ACOPP30/ACOPP30_0064.mtx");
@@ -1358,7 +1290,7 @@ mod tests {
             Err(_) => return, // fixture not present - skip
         };
         let csc = mtx.to_csc().expect("ACOPP30_0064 CSC build");
-        // Routing rule now picks InfNorm directly because the
+        // Routing rule picks InfNorm directly because the
         // dense-column gate is not satisfied (max_col_nnz=29 <= 32).
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
         // And Auto still resolves to the InfNorm scaling vector.
@@ -1376,9 +1308,9 @@ mod tests {
             auto_s, mc_s,
             "Auto must NOT use MC64 on ACOPP30_0064 (regresses rel_ref to 1.7e-1)"
         );
-        // No fallback variant assertion: with the tightened routing
-        // the safety net is no longer the mechanism that rescues
-        // this matrix. The fallback path is exercised by the
+        // No fallback variant assertion: the routing, not the
+        // fallback, handles this matrix. The fallback path is
+        // exercised by the
         // synthetic `auto_surfaces_infnorm_spread_fallback_on_uniform_diag`
         // test and the fixture-gated MSS1_0009 test, both of which
         // build/load matrices that still satisfy the (>=0.30 and >32)
@@ -1387,12 +1319,9 @@ mod tests {
 
     /// HS75_0000 has in_spread ~ 20.8, so the IN_SPREAD_GUARD
     /// pre-MC64 InfNorm trial accepts InfNorm before ever calling
-    /// MC64. The original `auto_keeps_mc64_on_hs75_0000` test asserted
-    /// MC64 as "the win" based on a stale measurement; current probe
-    /// (`src/bin/probe_scaling_policy4.rs`) shows InfNorm = 4.20e-17
-    /// and MC64 = 1.31e-16 on HS75 - InfNorm strictly wins.
-    /// `dev/research/acopp30-plateau-2.md` records the per-matrix
-    /// rel_ref measurements that motivated the new policy.
+    /// MC64. Measured relative residuals on HS75 are 4.20e-17 with InfNorm
+    /// and 1.31e-16 with MC64, so InfNorm is the right pick. Skipped
+    /// when the fixture is not present.
     #[test]
     fn auto_picks_infnorm_on_hs75_0000() {
         let path = std::path::Path::new("data/matrices/kkt/HS75/HS75_0000.mtx");
@@ -1410,7 +1339,7 @@ mod tests {
         );
     }
 
-    // ---- Issue #45: MC64 catastrophic-spread guard ----
+    // ---- MC64 catastrophic-spread guard ----
 
     /// T1 - `scaling_spread` returns `max|s| / min|s|` over the
     /// nonzero entries. Hand-calculated oracle.
@@ -1424,22 +1353,20 @@ mod tests {
         assert!(scaling_spread(&[0.0, 0.0]).is_infinite());
     }
 
-    /// T2 - Issue #45. On a saddle-point KKT where MC64 symmetric
+    /// T2 - On a saddle-point KKT where MC64 symmetric
     /// scaling produces a vector whose own spread exceeds `1/EPS`,
     /// `Auto` must discard the degenerate MC64 vector and fall back
     /// to the InfNorm vector, tagging the result
     /// `Mc64FallbackToInfnorm{Mc64ScalingDegenerate}`.
     ///
-    /// Oracle: `src/bin/probe_mc64_synth` measured the chain block of
-    /// this matrix (`base = 4.0`) at MC64 spread 3.34e94 (far above
-    /// `1/EPS ~ 4.50e15`) and InfNorm spread 2.00e4 (above
-    /// `IN_SPREAD_GUARD = 1e3`, so the MC64 branch is genuinely
-    /// reached). The 120 appended unit slack columns (issue #47: they
+    /// Oracle: the chain block of this matrix (`base = 4.0`) has MC64
+    /// spread 3.34e94 (far above `1/EPS ~ 4.50e15`) and InfNorm spread
+    /// 2.00e4 (above `IN_SPREAD_GUARD = 1e3`, so the MC64 branch is
+    /// genuinely reached). The 120 appended unit slack columns (they
     /// carry the genuine `diag_only` mass the value-aware router
     /// requires) are disconnected from the chain, so neither spread
-    /// moves. All three preconditions below re-assert the measured
-    /// facts so the test fails loudly if the oracle ever drifts.
-    /// Journal: 2026-05-20-02 16:34.
+    /// moves. All three preconditions below re-assert these facts so
+    /// the test fails loudly if the oracle ever drifts.
     #[test]
     fn auto_falls_back_on_catastrophic_mc64_spread() {
         let csc = build_synth_kkt(8, 80, 1e8, 4.0, 0.5, 120);
@@ -1482,15 +1409,14 @@ mod tests {
         );
     }
 
-    /// T3 - Issue #45 non-regression. When MC64's scaling spread is
-    /// BELOW the guard, `Auto` must keep the MC64 vector - the guard
-    /// must not be over-eager. Same builder as T2 with `base = 1.1`:
-    /// `probe_mc64_synth` measured the chain block at MC64 spread
-    /// 9.31e6 (well under `1/EPS`) and InfNorm spread 1.05e4 (above
-    /// `IN_SPREAD_GUARD`, so the MC64 branch - and thus the new guard -
-    /// is genuinely reached rather than short-circuited). The 120
-    /// appended unit slack columns (issue #47) are disconnected and
-    /// move neither spread.
+    /// T3 - Non-regression. When MC64's scaling spread is BELOW the
+    /// guard, `Auto` must keep the MC64 vector - the guard must not be
+    /// over-eager. Same builder as T2 with `base = 1.1`: the chain block
+    /// has MC64 spread 9.31e6 (well under `1/EPS`) and InfNorm spread
+    /// 1.05e4 (above `IN_SPREAD_GUARD`, so the MC64 branch - and thus
+    /// the guard - is genuinely reached rather than short-circuited).
+    /// The 120 appended unit slack columns are disconnected and move
+    /// neither spread.
     #[test]
     fn auto_keeps_mc64_when_spread_below_guard() {
         let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5, 120);
