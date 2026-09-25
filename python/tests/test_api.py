@@ -50,8 +50,8 @@ def test_settings_roundtrip_and_repr():
     assert d["preconditioner"] == 1e-4
     assert d["relax"] == (128, 32)
     assert "Settings(" in repr(s) and "ordering='metis'" in repr(s)
-    # Defaults: heuristic pick, no explicit ordering.
-    assert rslab.Settings().to_dict()["ordering"] is None
+    # Defaults: the ordering race, the capped thread predictor.
+    assert rslab.Settings().to_dict()["ordering"] == "auto"
     assert rslab.Settings().to_dict()["threads"] is None
 
 
@@ -443,3 +443,15 @@ def test_tuned_knobs_still_solve():
     y = rslab.lu(A, race_candidates=["rcm", "amd"], pivot_threshold=1.0).solve(b)
     assert np.linalg.norm(A @ y - b) <= 1e-10 * np.linalg.norm(b)
 
+
+
+@pytest.mark.parametrize("path", ["ldlt", "lu", "klu"])
+def test_solve_transpose_on_every_handle(path):
+    A = {"ldlt": _spd(300), "lu": _general(300), "klu": _circuit(300)}[path]
+    f = getattr(rslab, path)(A)
+    b = np.arange(300, dtype=float)
+    y = f.solve_transpose(b)
+    assert np.linalg.norm(A.T @ y - b) <= 1e-10 * np.linalg.norm(b)
+    B = np.stack([b, b[::-1]], axis=1)
+    X = f.solve_many(B)
+    assert np.allclose(X[:, 0], f.solve(b)) and np.allclose(X[:, 1], f.solve(b[::-1]))

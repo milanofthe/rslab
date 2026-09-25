@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn thresholds_do_not_change_the_result() {
         let (a, b) = helmholtz(10);
-        let solve = |s: &SolverSettings| LdltSolver::factor_with(&a, s).unwrap().solve(&b).unwrap();
+        let solve = |s: &SolverSettings| LdltSolver::factor(&a, s).unwrap().solve(&b).unwrap();
 
         let x_def = solve(&SolverSettings::default().with_threads(0));
         let x_scalar = solve(&SolverSettings {
@@ -105,7 +105,7 @@ mod tests {
         for nb in [16usize, 32, 64, 100, 200] {
             let mut s = SolverSettings::default();
             s.kernels.panel_nb = nb;
-            let x = LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap();
+            let x = LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap();
             let mut ax = vec![Complex::new(0.0, 0.0); a.n];
             a.symv(&x, &mut ax);
             let res: f64 = (0..a.n)

@@ -177,7 +177,7 @@ impl Calibration {
     /// production-size systems.
     pub fn measure(hw: &HardwareInfo) -> Self {
         let a = grid3d_spd::<f64>(24); // ~ 13 800 DOFs, a few hundred ms
-        let Ok(sym) = LdltSymbolic::analyze(&a) else {
+        let Ok(sym) = LdltSymbolic::analyze(&a, &SolverSettings::default()) else {
             return Self::fallback(hw);
         };
         let flops = sym.estimate_memory::<f64>().factor_flops as f64;
@@ -218,7 +218,7 @@ impl Calibration {
         let ab = grid3d_spd::<Complex<f64>>(32);
         let opts_nd =
             SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::MetisND);
-        let Ok(symb) = LdltSymbolic::analyze_with(&ab, &opts_nd) else {
+        let Ok(symb) = LdltSymbolic::analyze(&ab, &opts_nd) else {
             return Self::fallback(hw);
         };
         let time_b = |t: usize| -> Option<f64> {
@@ -242,7 +242,7 @@ impl Calibration {
         // Complex rate: same grid, complex-typed, factored once at one thread. The
         // structure (fill, flops proxy) is identical; only the per-flop cost differs.
         let ac = grid3d_spd::<Complex<f64>>(24);
-        let geom_gflops_cplx = match LdltSymbolic::analyze(&ac) {
+        let geom_gflops_cplx = match LdltSymbolic::analyze(&ac, &SolverSettings::default()) {
             Ok(symc) => {
                 let fc = symc.estimate_memory::<Complex<f64>>().factor_flops as f64;
                 let start = crate::clock::Instant::now();

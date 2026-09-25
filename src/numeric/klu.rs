@@ -231,17 +231,13 @@ struct KluFill {
 }
 
 impl KluSymbolic {
-    /// Analyze with default [`KluSettings`].
-    pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<Self, RslabError> {
-        Self::analyze_with(a, &KluSettings::default())
-    }
-
     /// Analyze the pattern of `a`: BTF (unless disabled) + per-block AMD.
+    /// The values are read only by the row matching.
     ///
     /// Fails with [`RslabError::StructurallySingular`] when no complete
     /// matching exists (some set of `k` columns has entries in fewer than `k`
     /// rows), such a matrix is singular for *every* value assignment.
-    pub fn analyze_with<T: Scalar>(
+    pub fn analyze<T: Scalar>(
         a: &GeneralCsc<T>,
         settings: &KluSettings,
     ) -> Result<Self, RslabError> {
@@ -545,9 +541,37 @@ impl KluSymbolic {
             factors,
             diagnostics,
             solves: Default::default(),
+            solve_threads: crate::numeric::settings::Threads::Fixed(1),
         })
     }
 }
+
+impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
+    const NAME: &'static str = "klu";
+
+    fn dim(&self) -> usize {
+        self.factors.n
+    }
+
+    fn counter(&self) -> &crate::diagnostics::SolveCounter {
+        &self.solves
+    }
+
+    fn solve_raw(&self, b: &[T], nrhs: usize, transpose: bool) -> Result<Vec<T>, RslabError> {
+        let n = self.factors.n;
+        Ok(if transpose {
+            (0..nrhs)
+                .flat_map(|c| self.solve_transpose_one(&b[c * n..(c + 1) * n]))
+                .collect()
+        } else if nrhs == 1 {
+            self.solve_one(b)
+        } else {
+            self.solve_block(b, nrhs)
+        })
+    }
+}
+
+crate::numeric::direct::direct_solver!(KluSolver);
 
 /// The GP flop count carried on the attached estimate (0 when absent).
 fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
@@ -715,6 +739,9 @@ pub struct KluSolver<T> {
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
+    /// The solves are sequential (the determinism guarantee), so a Krylov
+    /// solve preconditioned by this factor orthogonalizes on one worker.
+    solve_threads: crate::numeric::settings::Threads,
 }
 
 fn pattern_mismatch() -> RslabError {
@@ -1721,10 +1748,7 @@ impl<T: Scalar> KluSolver<T> {
     /// like [`LuSolver::factor`](crate::LuSolver::factor); use the phased
     /// [`KluSymbolic::factor`] for populated diagnostics.
     pub fn factor(a: &GeneralCsc<T>, settings: &KluSettings) -> Result<Self, RslabError> {
-        // Through the symbolic object, so the diagnostics are filled the same
-        // way as on the analyze-once path (the former direct call returned
-        // an empty `Diagnostics`).
-        KluSymbolic::analyze_with(a, settings)?.factor(a, settings)
+        KluSymbolic::analyze(a, settings)?.factor(a, settings)
     }
 
     /// Per-call diagnostics: measured factor/refactor stages, fill, and the
@@ -1740,22 +1764,10 @@ impl<T: Scalar> KluSolver<T> {
         d
     }
 
-    fn record_solve(&self, rhs: usize, t: crate::clock::Instant, refine_steps: usize) {
-        let ms = t.elapsed().as_secs_f64() * 1e3;
-        self.solves.record(rhs, ms, refine_steps);
-        if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-            crate::logging::debug(&format!(
-                "klu solve: n={} rhs={rhs} refine_steps={refine_steps} {ms:.3} ms",
-                self.factors.n
-            ));
-        }
-    }
-
-    /// Thread policy the solve phase should honour: the KLU path is strictly
-    /// sequential (that is its determinism guarantee), so this is always a
-    /// fixed single-worker budget.
-    pub fn solve_thread_policy(&self) -> crate::numeric::settings::Threads {
-        crate::numeric::settings::Threads::Fixed(1)
+    /// Pivots lifted by a static regularization: always `0`, a vanishing
+    /// pivot is a [`RslabError::SingularBasis`] at factor time instead.
+    pub fn n_perturbed(&self) -> usize {
+        0
     }
 
     /// Matrix dimension.
@@ -1835,22 +1847,8 @@ impl<T: Scalar> KluSolver<T> {
         &self.factors.rs_inv
     }
 
-    /// Solve `A x = b`.
-    pub fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        let t = crate::clock::Instant::now();
-        let x = self.solve_inner(b)?;
-        self.record_solve(1, t, 0);
-        Ok(x)
-    }
-
-    fn solve_inner(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
+    fn solve_one(&self, b: &[T]) -> Vec<T> {
         let f = &self.factors;
-        if b.len() != f.n {
-            return Err(RslabError::DimensionMismatch {
-                expected: f.n,
-                got: b.len(),
-            });
-        }
         let mut w = vec![T::zero(); f.n];
         for (k, &orig) in f.row_perm.iter().enumerate() {
             w[k] = b[orig] * T::from_real(f.rs_inv[orig]);
@@ -1860,7 +1858,7 @@ impl<T: Scalar> KluSolver<T> {
         for (k, &c) in f.col_perm.iter().enumerate() {
             xout[c] = w[k];
         }
-        Ok(xout)
+        xout
     }
 
     /// Solve the transposed system `A^T x = b` with the **same** factorization.
@@ -1878,14 +1876,8 @@ impl<T: Scalar> KluSolver<T> {
     /// contributions from the already-solved earlier blocks), then scatter
     /// through the row permutation and undo the row scaling. Sequential and
     /// bit-deterministic, like [`solve`](Self::solve).
-    pub fn solve_transpose(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
+    fn solve_transpose_one(&self, b: &[T]) -> Vec<T> {
         let f = &self.factors;
-        if b.len() != f.n {
-            return Err(RslabError::DimensionMismatch {
-                expected: f.n,
-                got: b.len(),
-            });
-        }
         // w = C*b: position k of the permuted system reads b at its column.
         let mut w = vec![T::zero(); f.n];
         for (k, &c) in f.col_perm.iter().enumerate() {
@@ -1898,7 +1890,7 @@ impl<T: Scalar> KluSolver<T> {
         for (k, &orig) in f.row_perm.iter().enumerate() {
             xout[orig] = w[k] * T::from_real(f.rs_inv[orig]);
         }
-        Ok(xout)
+        xout
     }
 
     /// The transposed block substitution on the permuted vector: `M^T` is block
@@ -1943,39 +1935,15 @@ impl<T: Scalar> KluSolver<T> {
         }
     }
 
-    /// Solve for `nrhs` right-hand sides stored row-major (`b[i * nrhs + col]`),
-    /// matching [`crate::LuSolver::solve_many`]'s layout.
-    ///
-    /// Batched: the factor is traversed **once** and every stored entry is
-    /// applied to all `nrhs` columns through contiguous per-row inner loops
-    /// (SIMD-friendly and cache-reusing), the sparse-scalar factorization
-    /// cannot use BLAS-3, but the wide solve can still vectorize across the
-    /// right-hand sides. Each column's operation order is identical to
-    /// [`solve`](Self::solve), so the result is bit-identical to `nrhs`
-    /// single solves.
-    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
-        let t = crate::clock::Instant::now();
-        let x = self.solve_many_inner(b, nrhs)?;
-        self.record_solve(nrhs, t, 0);
-        Ok(x)
-    }
-
-    fn solve_many_inner(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
+    fn solve_block(&self, b: &[T], nrhs: usize) -> Vec<T> {
         let f = &self.factors;
-        if nrhs == 0 || b.len() != f.n * nrhs {
-            return Err(RslabError::DimensionMismatch {
-                expected: f.n * nrhs.max(1),
-                got: b.len(),
-            });
-        }
+        let n = f.n;
         // Permute + scale all columns into the row-major work block.
-        let mut w = vec![T::zero(); f.n * nrhs];
+        let mut w = vec![T::zero(); n * nrhs];
         for (k, &orig) in f.row_perm.iter().enumerate() {
             let sv = T::from_real(f.rs_inv[orig]);
-            let src = &b[orig * nrhs..orig * nrhs + nrhs];
-            let dst = &mut w[k * nrhs..k * nrhs + nrhs];
-            for (d, &s) in dst.iter_mut().zip(src) {
-                *d = s * sv;
+            for c in 0..nrhs {
+                w[k * nrhs + c] = b[c * n + orig] * sv;
             }
         }
         // Row j's values, staged so the axpy targets never alias the source.
@@ -2028,71 +1996,13 @@ impl<T: Scalar> KluSolver<T> {
             }
         }
         // Undo the column permutation.
-        let mut xout = vec![T::zero(); f.n * nrhs];
-        for (k, &c) in f.col_perm.iter().enumerate() {
-            xout[c * nrhs..c * nrhs + nrhs].copy_from_slice(&w[k * nrhs..k * nrhs + nrhs]);
+        let mut xout = vec![T::zero(); n * nrhs];
+        for (k, &col) in f.col_perm.iter().enumerate() {
+            for c in 0..nrhs {
+                xout[c * n + col] = w[k * nrhs + c];
+            }
         }
-        Ok(xout)
-    }
-
-    /// Solve with iterative refinement against the exact matrix (up to
-    /// `max_iter` refinement steps, keeping the best iterate by residual
-    /// max-norm), mirroring [`crate::LuSolver::solve_refined`].
-    pub fn solve_refined(
-        &self,
-        a: &GeneralCsc<T>,
-        b: &[T],
-        max_iter: usize,
-    ) -> Result<Vec<T>, RslabError> {
-        Ok(self
-            .solve_refined_with(a, b, &crate::refine::RefinePolicy::steps(max_iter))?
-            .0)
-    }
-
-    /// Iterative refinement under an explicit
-    /// [`RefinePolicy`](crate::refine::RefinePolicy), reporting the achieved
-    /// backward error.
-    pub fn solve_refined_with(
-        &self,
-        a: &GeneralCsc<T>,
-        b: &[T],
-        policy: &crate::refine::RefinePolicy,
-    ) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError> {
-        let mut x = self.solve(b)?;
-        let outcome = self.refine_into(a, b, &mut x, policy)?;
-        Ok((x, outcome))
-    }
-
-    /// Refine an existing iterate in place, allocating nothing for the
-    /// solution.
-    pub fn refine_into(
-        &self,
-        a: &GeneralCsc<T>,
-        b: &[T],
-        x: &mut [T],
-        policy: &crate::refine::RefinePolicy,
-    ) -> Result<crate::refine::RefineOutcome, RslabError> {
-        let t = crate::clock::Instant::now();
-        let outcome = self.refine_into_inner(a, b, x, policy)?;
-        self.record_solve(0, t, outcome.steps);
-        Ok(outcome)
-    }
-
-    fn refine_into_inner(
-        &self,
-        a: &GeneralCsc<T>,
-        b: &[T],
-        x: &mut [T],
-        policy: &crate::refine::RefinePolicy,
-    ) -> Result<crate::refine::RefineOutcome, RslabError> {
-        let n = self.factors.n;
-        if a.n != n || b.len() != n || x.len() != n {
-            return Err(RslabError::DimensionMismatch {
-                expected: n,
-                got: a.n,
-            });
-        }
-        crate::refine::refine_in_place(a, b, x, policy, |r| self.solve(r))
+        xout
     }
 
     /// The block forward/backward substitution on the permuted/scaled vector.
@@ -2518,7 +2428,7 @@ mod tests {
         };
         let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
         let with = KluSettings::default();
-        let sym = KluSymbolic::analyze_with(&a, &with).unwrap();
+        let sym = KluSymbolic::analyze(&a, &with).unwrap();
         let s = sym.factor(&a, &with).unwrap();
         assert_eq!(
             s.factor_nnz(),
@@ -2656,7 +2566,7 @@ mod tests {
             }
         }
         let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
-        let sym = KluSymbolic::analyze(&a).unwrap();
+        let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
         let f = sym.factor(&a, &KluSettings::default()).unwrap();
         assert!(
             (f.factor_nnz() as f64) < 1.5 * sym.symbolic_factor_nnz() as f64,
@@ -2763,7 +2673,7 @@ mod tests {
         // matching regardless of values.
         let a =
             GeneralCsc::<f64>::from_triplets(3, &[0, 1, 0], &[0, 1, 2], &[1.0, 1.0, 5.0]).unwrap();
-        match KluSymbolic::analyze(&a) {
+        match KluSymbolic::analyze(&a, &KluSettings::default()) {
             Err(RslabError::StructurallySingular) => {}
             other => panic!("expected StructurallySingular, got {other:?}"),
         }
@@ -3141,10 +3051,10 @@ mod tests {
         let b: Vec<f64> = (0..a.n * nrhs).map(|k| (k % 7) as f64 - 3.0).collect();
         let x = s.solve_many(&b, nrhs).unwrap();
         for col in 0..nrhs {
-            let bc: Vec<f64> = (0..a.n).map(|i| b[i * nrhs + col]).collect();
+            let bc: Vec<f64> = (0..a.n).map(|i| b[col * a.n + i]).collect();
             let xc = s.solve(&bc).unwrap();
             for i in 0..a.n {
-                assert_eq!(x[i * nrhs + col], xc[i], "rhs {col} row {i}");
+                assert_eq!(x[col * a.n + i], xc[i], "rhs {col} row {i}");
             }
         }
     }
@@ -3154,7 +3064,10 @@ mod tests {
         let a = circuit_like(120, 11);
         let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
         let b: Vec<f64> = (0..a.n).map(|i| ((i * i) % 23) as f64 - 11.0).collect();
-        let x = s.solve_refined(&a, &b, 2).unwrap();
+        let x = s
+            .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
+            .unwrap()
+            .0;
         assert!(resid(&a, &x, &b) < 1e-13);
     }
 
@@ -3188,7 +3101,7 @@ mod tests {
         // the diagonal-pivot symbolic fill must be EXACT, and the estimate's
         // factor_nnz must equal the factored fill.
         let a = circuit_like(150, 33);
-        let sym = KluSymbolic::analyze(&a).unwrap();
+        let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
         let est = sym.estimate_memory::<f64>();
         let s = sym.factor(&a, &KluSettings::default()).unwrap();
         assert_eq!(est.factor_nnz as usize, s.factor_nnz());
@@ -3201,7 +3114,7 @@ mod tests {
     #[test]
     fn klu_diagnostics_phased_vs_oneshot() {
         let a = circuit_like(100, 4);
-        let sym = KluSymbolic::analyze(&a).unwrap();
+        let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
         // factor() never estimates implicitly: the estimate is attached only
         // when it was computed explicitly beforehand.
         let s0 = sym.factor(&a, &KluSettings::default()).unwrap();
@@ -3279,7 +3192,7 @@ mod tests {
     #[test]
     fn klu_parallel_factor_bit_identical() {
         let a = circuit_like(600, 7);
-        let sym = KluSymbolic::analyze(&a).unwrap();
+        let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
         let s1 = sym
             .factor(&a, &KluSettings::default().with_parallel(KluParallel::Off))
             .unwrap();

@@ -14,8 +14,6 @@
 //! s.kernels = KernelSettings { panel_nb: 32, ..Default::default() };
 //! ```
 
-use crate::diagnostics::MemoryEstimate;
-use crate::error::RslabError;
 use crate::scaling::ScalingStrategy;
 use crate::symbolic::{
     AmalgamationStrategy, OrderingMethod, RelaxAmalgamation, SymbolicFactorization,
@@ -478,6 +476,19 @@ impl SolverSettings {
         self
     }
 
+    /// These settings with the worker count resolved to `threads` (an
+    /// `Ambient` policy stays ambient), so every stage of one factorization
+    /// uses the same count.
+    pub(crate) fn pinned(&self, threads: usize) -> Self {
+        Self {
+            threads: match self.threads {
+                Threads::Ambient => Threads::Ambient,
+                _ => Threads::Fixed(threads),
+            },
+            ..self.clone()
+        }
+    }
+
     /// The kernel knobs as the `Copy` bundle the kernels take.
     pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning<'_> {
         crate::numeric::gemm_tuning::KernelTuning {
@@ -716,31 +727,4 @@ pub(crate) fn stack_for_depth(depth: usize) -> usize {
     // small rayon default, which a moderate depth (a few hundred supernodes, as a
     // banded matrix amalgamates to) already overflows.
     depth.saturating_mul(FRAME).clamp(MIN, MAX)
-}
-
-/// The deterministic heuristic settings pick shared by `LdltSolver::tuned` and
-/// `LuSolver::tuned`: default settings, an exact ND bakeoff on large systems,
-/// and (feature `tuning`, when the one-time install diagnosis has run) the
-/// calibrated cost-model worker count.
-pub(crate) fn tuned<A: ?Sized, S>(
-    a: &A,
-    base: &SolverSettings,
-    analyze_with: impl Fn(&A, &SolverSettings) -> Result<S, RslabError>,
-    estimate: impl Fn(&S) -> MemoryEstimate,
-) -> Result<(S, SolverSettings), RslabError> {
-    #[cfg(not(feature = "tuning"))]
-    let _ = &estimate;
-    // The ordering race, whatever `base` asks for.
-    #[allow(unused_mut)]
-    let mut s = base.clone().with_ordering(OrderingMethod::Auto);
-    let sym = analyze_with(a, &s)?;
-    // Install-diagnosed worker count: only when a calibration cache exists
-    // (written once by `tuning::install_diagnose`); never measures here.
-    #[cfg(feature = "tuning")]
-    if let Some((cores, calib)) = crate::tuning::cached_calibration() {
-        let est = estimate(&sym);
-        let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
-        s.threads = Threads::Fixed(t);
-    }
-    Ok((sym, s))
 }

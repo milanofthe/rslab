@@ -151,7 +151,7 @@ automatically), so `A` may be stored full or triangular.
 **Example**
 
 ```python
-f = rslab.ldlt(A)                       # heuristic defaults
+f = rslab.ldlt(A)                       # defaults
 f = rslab.ldlt(A, ordering="metis", threads=2)
 f = rslab.ldlt(A, preconditioner=1e-4)  # never-fail static pivoting
 x = f.solve(b, refine=2)
@@ -362,6 +362,20 @@ Solve `A X = B` for an `n x nrhs` block in one batched pass.
 
 - `ndarray, shape (n, nrhs)`: The solutions, one column per right-hand side.
 
+#### `Ldlt.solve_transpose(b)`
+
+Solve `A^T y = b` on the same factors (plain transpose, not the
+conjugate transpose; conjugate the right-hand side and the result for
+`A^H`).
+
+**Parameters**
+
+- `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
+
+**Returns**
+
+- `ndarray, shape (n,)`: The solution `y`.
+
 ### class `Lu`
 
 A general (unsymmetric) factor `P_r^T A P_c = L U` (supernodal
@@ -493,6 +507,20 @@ Solve `A X = B` for an `n x nrhs` block in one batched pass.
 **Returns**
 
 - `ndarray, shape (n, nrhs)`: The solutions, one column per right-hand side.
+
+#### `Lu.solve_transpose(b)`
+
+Solve `A^T y = b` on the same factors (plain transpose, not the
+conjugate transpose; conjugate the right-hand side and the result for
+`A^H`).
+
+**Parameters**
+
+- `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
+
+**Returns**
+
+- `ndarray, shape (n,)`: The solution `y`.
 
 ### class `Klu`
 
@@ -685,7 +713,7 @@ parameter studies) pays it once and factors each value set through
 
 **Parameters**
 
-- `A` (scipy.sparse matrix or array-like): The `n x n` matrix whose pattern (and, for the heuristic ordering pick, values) is analyzed.
+- `A` (scipy.sparse matrix or array-like): The `n x n` matrix whose pattern (and, for the LU and KLU row matching, values) is analyzed.
 - `path` ({'auto', 'ldlt', 'lu', 'klu'}, default 'auto'): The factorization path: `'ldlt'` for symmetric matrices (the lower triangle is analyzed), `'lu'` for general ones, `'klu'` for circuit-shaped ones. `'auto'` picks `'ldlt'` when `A` is symmetric and `'lu'` otherwise.
 - `settings` (Settings or KluSettings, optional): Analysis-time settings (`ordering`, `nemin`, `relax` for LDL^T / LU; `btf` for KLU). Numeric settings given here become the defaults of `factor`.
 - `**kwargs`: The same keywords, overriding `settings`.
@@ -722,7 +750,7 @@ the same pattern with `factor`; the analysis is paid once.
 - `level_widths`: Supernodes per tree level, root level first.
 - `n`: Matrix dimension ``n``.
 - `n_levels`: Levels of the supernodal elimination tree.
-- `settings`: The settings the analysis adopted (including the heuristic thread pick); the defaults for :meth:`factor`.
+- `settings`: The settings of the analysis; the defaults for :meth:`factor`.
 
 #### `LdltSymbolic.estimate_memory(dtype='float64')`
 

@@ -98,17 +98,7 @@ fn main() {
                     if let Some(n) = std::env::var("MTX_NEMIN").ok().and_then(|v| v.parse().ok()) {
                         opts = opts.with_nemin(n);
                     }
-                    let (t_all, s) = best(reps, || {
-                        if om.is_none() {
-                            let (sym, mut pick) = LdltSolver::<f64>::tuned(&ar).unwrap();
-                            if threads > 0 {
-                                pick = pick.with_threads(threads);
-                            }
-                            sym.factor(&ar, &pick).unwrap()
-                        } else {
-                            LdltSolver::factor_with(&ar, &opts).unwrap()
-                        }
-                    });
+                    let (t_all, s) = best(reps, || LdltSolver::factor(&ar, &opts).unwrap());
                     let d = s.diagnostics();
                     let r = d.rates();
                     let ana = d.stage_ms("analyze").unwrap_or(0.0);
@@ -165,17 +155,7 @@ fn main() {
                 if threads > 0 {
                     opts = opts.with_threads(threads);
                 }
-                let (t_all, s) = best(reps, || {
-                    if om.is_none() {
-                        let (sym, mut pick) = LdltSolver::<C>::tuned(&a).unwrap();
-                        if threads > 0 {
-                            pick = pick.with_threads(threads);
-                        }
-                        sym.factor(&a, &pick).unwrap()
-                    } else {
-                        LdltSolver::factor_with(&a, &opts).unwrap()
-                    }
-                });
+                let (t_all, s) = best(reps, || LdltSolver::factor(&a, &opts).unwrap());
                 let d = s.diagnostics();
                 let r = d.rates();
                 let ana = d.stage_ms("analyze").unwrap_or(0.0);
@@ -221,9 +201,7 @@ fn main() {
                 ("klu-noscl", KluSettings::default().with_row_scaling(false)),
             ] {
                 let Ok((ta, sym)) = std::panic::catch_unwind(|| {
-                    best(2, || {
-                        rslab::KluSymbolic::analyze_with(&a, &settings).unwrap()
-                    })
+                    best(2, || rslab::KluSymbolic::analyze(&a, &settings).unwrap())
                 }) else {
                     println!("{label:>9} analysis failed");
                     continue;
@@ -252,9 +230,7 @@ fn main() {
                 };
                 let br: Vec<f64> = b.iter().map(|v| v.re).collect();
                 let settings = KluSettings::default();
-                let (ta, sym) = best(2, || {
-                    rslab::KluSymbolic::analyze_with(&ar, &settings).unwrap()
-                });
+                let (ta, sym) = best(2, || rslab::KluSymbolic::analyze(&ar, &settings).unwrap());
                 let (tf, mut k) = best(2, || sym.factor(&ar, &settings).unwrap());
                 let (tr, _) = best(2, || k.refactor(&ar).unwrap());
                 let (ts, x) = best(5, || k.solve(&br).unwrap());
@@ -276,7 +252,7 @@ fn main() {
             }
             // Symbolic view of the KLU analysis: predicted vs actual fill.
             {
-                let sym = rslab::KluSymbolic::analyze(&a).unwrap();
+                let sym = rslab::KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
                 let k = sym.factor(&a, &KluSettings::default()).unwrap();
                 let d = k.diagnostics();
                 println!(
@@ -297,7 +273,7 @@ fn main() {
                     .unwrap();
                 let x = s.solve(&b).unwrap();
                 let (xr, out) = s
-                    .solve_refined_with(&a, &b, &rslab::RefinePolicy::steps(3))
+                    .solve_refined(&a, &b, &rslab::RefinePolicy::steps(3))
                     .unwrap();
                 println!(
                     "{:>9} nnzLU={} perturbed={} res={:.1e} refined({} steps) res={:.1e}",
@@ -310,7 +286,7 @@ fn main() {
                 );
                 let s = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
                 let (xr, out) = s
-                    .solve_refined_with(&a, &b, &rslab::RefinePolicy::steps(3))
+                    .solve_refined(&a, &b, &rslab::RefinePolicy::steps(3))
                     .unwrap();
                 println!(
                     "{:>9} perturbed={} refined({} steps) res={:.1e}",
@@ -325,14 +301,7 @@ fn main() {
                 if let Some(o) = om {
                     opts = opts.with_ordering(o);
                 }
-                let r = std::panic::catch_unwind(|| {
-                    if om.is_none() {
-                        let (sym, pick) = LuSolver::<C>::tuned(&a).unwrap();
-                        sym.factor(&a, &pick).unwrap()
-                    } else {
-                        LuSolver::factor(&a, &opts).unwrap()
-                    }
-                });
+                let r = std::panic::catch_unwind(|| LuSolver::factor(&a, &opts).unwrap());
                 let Ok(s) = r else {
                     println!("{name:>7} lu failed");
                     continue;

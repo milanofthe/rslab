@@ -73,7 +73,7 @@ fn main() {
     let a = grid3d(m);
     let n = a.n;
     let t = Instant::now();
-    let s = LdltSolver::factor_with(
+    let s = LdltSolver::factor(
         &a,
         &SolverSettings::default().with_ordering(OrderingMethod::MetisND),
     )

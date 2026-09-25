@@ -17,7 +17,7 @@ fn tiny_row_system() -> (CscMatrix<f64>, Vec<f64>) {
 #[test]
 fn normwise_certifies_what_componentwise_rejects() {
     let (a, b) = tiny_row_system();
-    let f = LdltSolver::factor(&a).unwrap();
+    let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     // Measure only: no correction step, so this tests the criterion rather than
     // the solver.
     let measure_only = |m| RefinePolicy {
@@ -65,13 +65,13 @@ fn default_policy_stops_at_the_target() {
     }
     let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b: Vec<f64> = (0..n).map(|i| 1.0 + i as f64).collect();
-    let f = LdltSolver::factor(&a).unwrap();
+    let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
 
     let policy = RefinePolicy {
         max_steps: 8,
         ..Default::default()
     };
-    let (x, outcome) = f.solve_refined_with(&a, &b, &policy).unwrap();
+    let (x, outcome) = f.solve_refined(&a, &b, &policy).unwrap();
     assert!(outcome.certified, "omega {:.3e}", outcome.omega);
     assert!(
         outcome.steps < policy.max_steps,
@@ -106,17 +106,15 @@ fn entry_points_agree_bitwise() {
     }
     let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b: Vec<f64> = (0..n).map(|i| ((i % 7) as f64) - 3.0).collect();
-    let f = LdltSolver::factor(&a).unwrap();
+    let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
 
     let policy = RefinePolicy::steps(2);
-    let (x_alloc, _) = f.solve_refined_with(&a, &b, &policy).unwrap();
+    let (x_alloc, _) = f.solve_refined(&a, &b, &policy).unwrap();
     let mut x_into = f.solve(&b).unwrap();
     f.refine_into(&a, &b, &mut x_into, &policy).unwrap();
-    let x_legacy = f.solve_refined(&a, &b, 2).unwrap();
 
     for i in 0..n {
         assert_eq!(x_alloc[i].to_bits(), x_into[i].to_bits(), "row {i}");
-        assert_eq!(x_alloc[i].to_bits(), x_legacy[i].to_bits(), "row {i}");
     }
 }
 
@@ -142,14 +140,10 @@ fn lu_and_klu_report_the_same_way() {
     let b: Vec<f64> = (0..n).map(|i| 1.0 + (i % 3) as f64).collect();
 
     let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
-    let (_, out) = lu
-        .solve_refined_with(&a, &b, &RefinePolicy::default())
-        .unwrap();
+    let (_, out) = lu.solve_refined(&a, &b, &RefinePolicy::default()).unwrap();
     assert!(out.certified, "lu omega {:.3e}", out.omega);
 
     let klu = KluSolver::factor(&a, &KluSettings::default()).unwrap();
-    let (_, out) = klu
-        .solve_refined_with(&a, &b, &RefinePolicy::default())
-        .unwrap();
+    let (_, out) = klu.solve_refined(&a, &b, &RefinePolicy::default()).unwrap();
     assert!(out.certified, "klu omega {:.3e}", out.omega);
 }

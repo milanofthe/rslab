@@ -6,8 +6,8 @@ use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rslab::{
-    CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSolver, LdltSymbolic, LuSolver, LuSymbolic,
-    MemoryEstimate, RslabError, SolverSettings,
+    CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSymbolic, LuSymbolic, MemoryEstimate,
+    RslabError, SolverSettings,
 };
 
 use crate::common::{heavy, map_err, memory_estimate_dict, scalar_bytes, with_dtype, Pattern};
@@ -37,20 +37,12 @@ pub struct PyLdltSymbolic {
     settings: PySettings,
 }
 
-/// Heuristic-pick or explicit analysis.
 fn analyze_ldlt_core<T: Field>(
     a: &CscMatrix<T>,
     st: &PySettings,
 ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-    let mut opts = st.resolved();
-    if st.explicit_ordering {
-        return Ok((LdltSymbolic::analyze_with(a, &opts)?, opts));
-    }
-    let (sym, pick) = LdltSolver::<T>::tuned_with(a, &opts)?;
-    if !st.explicit_threads {
-        opts.threads = pick.threads;
-    }
-    Ok((sym, opts))
+    let opts = st.resolved();
+    Ok((LdltSymbolic::analyze(a, &opts)?, opts))
 }
 
 fn adopt(st: &PySettings, opts: SolverSettings) -> PySettings {
@@ -91,8 +83,7 @@ impl PyLdltSymbolic {
         self.sym.front_dims()
     }
 
-    /// The settings the analysis adopted (including the heuristic thread
-    /// pick); the defaults for :meth:`factor`.
+    /// The settings of the analysis; the defaults for :meth:`factor`.
     #[getter]
     fn settings(&self) -> PySettings {
         self.settings.clone()
@@ -257,15 +248,8 @@ fn analyze_lu_core<T: Field>(
     a: &GeneralCsc<T>,
     st: &PySettings,
 ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-    let mut opts = st.resolved();
-    if st.explicit_ordering {
-        return Ok((LuSymbolic::analyze_with(a, &opts)?, opts));
-    }
-    let (sym, pick) = LuSolver::<T>::tuned_with(a, &opts)?;
-    if !st.explicit_threads {
-        opts.threads = pick.threads;
-    }
-    Ok((sym, opts))
+    let opts = st.resolved();
+    Ok((LuSymbolic::analyze(a, &opts)?, opts))
 }
 
 #[pymethods]
@@ -597,7 +581,7 @@ pub fn analyze_klu(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
-        let sym = heavy(py, || KluSymbolic::analyze_with(&a, &st.inner)).map_err(map_err)?;
+        let sym = heavy(py, || KluSymbolic::analyze(&a, &st.inner)).map_err(map_err)?;
         Ok(PyKluSymbolic {
             sym,
             pattern,

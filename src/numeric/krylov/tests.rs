@@ -76,7 +76,7 @@ fn cocr_solves_complex_symmetric_pre_and_unpre() {
     assert!(res < 1e-7, "COCR residual {}", res);
 
     // RLA-preconditioned COCR collapses to a handful of iterations.
-    let m = LdltSolver::factor(&a).unwrap();
+    let m = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let pre = cocr(&a, &b, &m, 1e-10, 3000).unwrap();
     assert!(pre.converged && pre.iters <= 3, "iters {}", pre.iters);
 }
@@ -706,7 +706,7 @@ fn cocr_handles_indefinite_helmholtz() {
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c(1.0, (i % 3) as f64 - 1.0)).collect();
     let opts = SolverSettings::preconditioner(1e-10);
-    let m = LdltSolver::factor_with(&a, &opts).unwrap();
+    let m = LdltSolver::factor(&a, &opts).unwrap();
     let pre = cocr(&a, &b, &m, 1e-9, 500).unwrap();
     assert!(
         pre.converged,
@@ -729,9 +729,9 @@ fn incomplete_factor_reduces_fill_and_still_preconditions() {
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
-    let full = LdltSolver::factor(&a).unwrap();
+    let full = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let opts = SolverSettings::default().with_drop_tol(5e-2);
-    let inc = LdltSolver::factor_with(&a, &opts).unwrap();
+    let inc = LdltSolver::factor(&a, &opts).unwrap();
 
     assert!(
         inc.factor_nnz() < full.factor_nnz(),
@@ -786,7 +786,7 @@ fn rla_preconditioner_collapses_iteration_count() {
     let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
     let unpre = cocg(&a, &b, &NoPreconditioner, 1e-10, 5000).unwrap();
-    let m = LdltSolver::factor(&a).unwrap();
+    let m = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let pre = cocg(&a, &b, &m, 1e-10, 5000).unwrap();
 
     assert!(pre.converged && unpre.converged);

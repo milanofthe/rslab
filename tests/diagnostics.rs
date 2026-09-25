@@ -61,7 +61,7 @@ fn grid_full(k: usize) -> GeneralCsc<f64> {
 #[test]
 fn ldlt_diagnostics_are_filled() {
     let a = grid_lower(30);
-    let f = LdltSolver::factor_with(&a, &SolverSettings::exact()).unwrap();
+    let f = LdltSolver::factor(&a, &SolverSettings::exact()).unwrap();
     let b = vec![1.0; a.n];
     let _ = f.solve(&b).unwrap();
     let _ = f.solve_many(&vec![1.0; 2 * a.n], 2).unwrap();
@@ -115,7 +115,7 @@ fn settings_ignored_by_a_path_are_reported() {
     // the pivot threshold belongs to the LU: the LDL^T path reports it.
     let (sym, full) = (grid_lower(12), grid_full(12));
     let ldlt = SolverSettings::exact().with_pivot_threshold(0.5);
-    let w = LdltSolver::factor_with(&sym, &ldlt)
+    let w = LdltSolver::factor(&sym, &ldlt)
         .unwrap()
         .diagnostics()
         .warnings;
@@ -131,7 +131,7 @@ fn settings_ignored_by_a_path_are_reported() {
     let w = LuSolver::factor(&full, &lu).unwrap().diagnostics().warnings;
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains("scaling"));
-    assert!(LdltSolver::factor_with(&sym, &lu)
+    assert!(LdltSolver::factor(&sym, &lu)
         .unwrap()
         .diagnostics()
         .warnings
@@ -158,8 +158,7 @@ fn factorizations_log_through_the_sink() {
     logging::set_sink(Box::new(Capture(got.clone())));
     logging::set_level(LogLevel::Info);
     let a = grid_lower(12);
-    let f =
-        LdltSolver::factor_with(&a, &SolverSettings::exact().with_pivot_threshold(0.5)).unwrap();
+    let f = LdltSolver::factor(&a, &SolverSettings::exact().with_pivot_threshold(0.5)).unwrap();
     let _ = f.solve(&vec![1.0; a.n]).unwrap();
     let records = got.lock().unwrap().clone();
     logging::reset_sink();

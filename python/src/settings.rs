@@ -343,8 +343,6 @@ pub struct PySettings {
     pub inner: SolverSettings,
     /// `threads=` was given: an explicit count beats the calibrated pick.
     pub explicit_threads: bool,
-    /// `ordering=` was given: analyze with it instead of the heuristic pick.
-    pub explicit_ordering: bool,
     /// The static-pivot floor, kept for `to_dict()` / `repr`.
     preconditioner: Option<f64>,
     force_accept: bool,
@@ -398,10 +396,7 @@ impl PySettings {
                 self.force_accept = v.extract().map_err(|_| bad(key, "a bool", v))?;
             }
             "drop_tol" => o.drop_tol = Some(v.extract().map_err(|_| bad(key, "a float", v))?),
-            "ordering" => {
-                self.explicit_ordering = true;
-                o.ordering.method = parse_ordering(&lower(key, v)?)?;
-            }
+            "ordering" => o.ordering.method = parse_ordering(&lower(key, v)?)?,
             "race_candidates" => {
                 let names: Vec<String> = v
                     .extract()
@@ -491,11 +486,7 @@ impl PySettings {
         d.set_item("preconditioner", self.preconditioner)?;
         d.set_item("force_accept", self.force_accept)?;
         d.set_item("drop_tol", o.drop_tol)?;
-        d.set_item(
-            "ordering",
-            self.explicit_ordering
-                .then(|| ordering_name(&o.ordering.method)),
-        )?;
+        d.set_item("ordering", ordering_name(&o.ordering.method))?;
         d.set_item(
             "race_candidates",
             o.ordering

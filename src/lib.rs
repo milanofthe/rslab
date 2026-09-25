@@ -38,7 +38,7 @@
 //! // Real symmetric matrix, lower triangle (i >= j).
 //! let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!                                         &[2.0, 2.0, 2.0, -1.0])?;
-//! let analysis = LdltSymbolic::analyze(&a)?;                 // phase 1
+//! let analysis = LdltSymbolic::analyze(&a, &SolverSettings::default())?;                 // phase 1
 //! let factor = analysis.factor(&a, &SolverSettings::default())?; // 2/3
 //! let x = factor.solve(&[1.0, 2.0, 3.0])?;
 //! # let _ = x; Ok(()) }
@@ -58,7 +58,7 @@
 //!     3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!     &[c(4.0, 1.0), c(4.0, 1.0), c(4.0, 1.0), c(-1.0, 0.2)])?;
 //! let opts = SolverSettings::preconditioner(1e-8).with_drop_tol(1e-2); // composable
-//! let m = LdltSolver::factor_with(&a, &opts)?;          // preconditioner
+//! let m = LdltSolver::factor(&a, &opts)?;          // preconditioner
 //! let b = vec![c(1.0, 0.0); 3];
 //! let res = cocg(&a, &b, &m, 1e-10, 100)?;
 //! assert!(res.converged);
@@ -141,7 +141,7 @@ pub use io::mtx::{
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
 pub use logging::{LogLevel, LogSink};
-pub use refine::{BackwardError, RefineOutcome, RefinePolicy};
+pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
 // The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`.

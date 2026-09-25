@@ -256,7 +256,7 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
     -------
     .. code-block:: python
 
-        f = rslab.ldlt(A)                       # heuristic defaults
+        f = rslab.ldlt(A)                       # defaults
         f = rslab.ldlt(A, ordering="metis", threads=2)
         f = rslab.ldlt(A, preconditioner=1e-4)  # never-fail static pivoting
         x = f.solve(b, refine=2)
@@ -374,8 +374,8 @@ def analyze(A, path: str = "auto", *, settings=None, **kwargs):
     Parameters
     ----------
     A : scipy.sparse matrix or array-like
-        The ``n x n`` matrix whose pattern (and, for the heuristic
-        ordering pick, values) is analyzed.
+        The ``n x n`` matrix whose pattern (and, for the LU and KLU row
+        matching, values) is analyzed.
     path : {'auto', 'ldlt', 'lu', 'klu'}, default 'auto'
         The factorization path: ``'ldlt'`` for symmetric matrices (the lower
         triangle is analyzed), ``'lu'`` for general ones, ``'klu'`` for
