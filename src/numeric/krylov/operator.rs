@@ -353,7 +353,7 @@ impl<T: Scalar> Factorization<T> for crate::numeric::lu::LuSolver<T> {
 }
 
 /// The KLU path composes with the iterative stack exactly like the
-/// multifrontal solvers: an exact (or sweep-refactored) `M^-1 = (LU)^-1` for
+/// supernodal solvers: an exact (or sweep-refactored) `M^-1 = (LU)^-1` for
 /// [`gmres`](super::gmres)/[`gmres_block`](super::gmres_block). Sequential by design, so [`solve_threads`]
 /// pins the orthogonalization pool to one worker.
 ///

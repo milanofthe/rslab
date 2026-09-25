@@ -717,7 +717,7 @@ handle! {
 
 handle! {
     /// A general (unsymmetric) factor ``P_r^T A P_c = L U`` (supernodal
-    /// left-looking or multifrontal LU with threshold pivoting), from
+    /// left-looking LU with threshold pivoting), from
     /// :func:`rslab.lu` or :meth:`LuSymbolic.factor`.
     Lu, LuAny, LuSolver;
 

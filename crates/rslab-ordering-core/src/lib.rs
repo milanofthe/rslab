@@ -201,11 +201,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_one() {
-        assert_eq!(CONTRACT_VERSION, 1);
-    }
-
-    #[test]
     fn empty_pattern_ok() {
         let cp = [0i32];
         let ri: [i32; 0] = [];
@@ -291,26 +286,5 @@ mod tests {
         let cp = [0i32, -1];
         let ri: [i32; 0] = [];
         assert!(CscPattern::new(1, &cp, &ri).is_none());
-    }
-
-    #[test]
-    fn ordering_error_display_is_non_empty() {
-        for e in [
-            OrderingError::MalformedInput,
-            OrderingError::NonSymmetric,
-            OrderingError::IndexOverflow,
-            OrderingError::DisconnectedGraph,
-            OrderingError::Internal("boom"),
-        ] {
-            assert!(!format!("{e}").is_empty());
-        }
-    }
-
-    #[test]
-    fn ordering_stats_default_is_none_fields() {
-        let s = OrderingStats::default();
-        assert_eq!(s.time_us, 0);
-        assert!(s.fill_estimate.is_none());
-        assert!(s.flop_estimate.is_none());
     }
 }

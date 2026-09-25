@@ -148,22 +148,6 @@ impl<T: Scalar> GeneralCsc<T> {
         }
     }
 
-    /// One-norm `||A||_1 = max_j sum_i |a_ij|` (max absolute column sum) - the
-    /// norm side of the Hager-Higham condition estimate.
-    pub fn one_norm(&self) -> f64 {
-        let mut worst = 0.0f64;
-        for j in 0..self.n {
-            let mut colsum = 0.0f64;
-            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
-                colsum += self.values[k].magnitude();
-            }
-            if colsum > worst {
-                worst = colsum;
-            }
-        }
-        worst
-    }
-
     /// Validate structural invariants - the full canonical-form contract the
     /// numeric paths rely on, mirroring the X6-hardened
     /// [`CscMatrix::validate`](crate::sparse::csc::CscMatrix::validate):

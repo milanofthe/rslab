@@ -1,6 +1,6 @@
 //! High-level generic sparse symmetric direct solver.
 //!
-//! [`LdltSolver`] wraps the generic multifrontal factorization
+//! [`LdltSolver`] wraps the supernodal factorization
 //! ([`crate::numeric::ldlt`]) with symmetric equilibration and
 //! a convenient factor-once / solve-many interface. It works for both `f64`
 //! (real symmetric) and `Complex<f64>` (complex symmetric, PARDISO `mtype 6`).
@@ -336,7 +336,7 @@ fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
 /// copy, bit-identical to the historical one-pass); the iterative / matching
 /// strategies ([`InfNorm`](ScalingStrategy::InfNorm),
 /// [`Mc64Symmetric`](ScalingStrategy::Mc64Symmetric),
-/// [`Auto`](ScalingStrategy::Auto), [`External`](ScalingStrategy::External))
+/// [`External`](ScalingStrategy::External))
 /// route through [`crate::scaling::compute_scaling`] on the `|A|` magnitude
 /// pattern (a real `D` derived from magnitudes is the correct congruence for a
 /// complex-symmetric `A`). Scaling changes only values, so the sparsity pattern
@@ -885,7 +885,6 @@ mod tests {
             ScalingStrategy::Identity,
             ScalingStrategy::InfNorm,
             ScalingStrategy::Mc64Symmetric,
-            ScalingStrategy::Auto,
         ] {
             let opts = SolverSettings::default().with_scaling(strat.clone());
             let solver = sym.factor(&a, &opts).unwrap();

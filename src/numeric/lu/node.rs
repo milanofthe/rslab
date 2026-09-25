@@ -381,8 +381,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             }
         }
     }
-    // cdiv: in-place **blocked** panel LU (1x1 static pivoting), no trailing/CB
-    // update. Mirrors the multifrontal `lu_front` getrf - unblocked `getf2` over
+    // cdiv: in-place **blocked** panel LU (1x1 static pivoting), no trailing
+    // update outside the panel: a getrf - unblocked `getf2` over
     // an NB-wide panel, then the dominant trailing update as a single SIMD GEMM
     // (rank-NB) - but restricted to the panel: the trailing is the remaining
     // panel columns (`lbuf`) plus the `U12` rows (in `ut`), with no `A22`/CB. This

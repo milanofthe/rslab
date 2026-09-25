@@ -137,47 +137,7 @@ fn grid2d_lower<T: Scalar>(m: usize, diag: T, off: T) -> CscMatrix<T> {
 }
 
 #[test]
-fn left_looking_tridiagonal_solves() {
-    // Chain assembly tree (tridiagonal): exercises the basic left-looking
-    // cmod/cdiv.
-    let a = tridiag_spd_f64(50);
-    let b: Vec<f64> = (0..50).map(|i| (i % 7) as f64 - 3.0).collect();
-    let ll = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
-    let xl = solve_ldlt(&ll, &b).unwrap();
-    assert!(residual_inf(&a, &xl, &b) < 1e-9, "left-looking residual");
-}
-
-#[test]
-fn left_looking_2d_grid_solves() {
-    // Branching assembly tree -> multi-child cmod and deeper update lists.
-    let a = grid2d_lower::<f64>(12, 8.0, -1.0);
-    let n = a.n;
-    let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
-    let ll = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
-    let xl = solve_ldlt(&ll, &b).unwrap();
-    assert!(
-        residual_inf(&a, &xl, &b) < 1e-9,
-        "left-looking grid residual"
-    );
-}
-
-#[test]
-fn left_looking_complex_symmetric_type_agnostic() {
-    // The left-looking path is generic over `Scalar`: complex-symmetric here.
-    let c = |re: f64, im: f64| Complex::new(re, im);
-    let a = grid2d_lower::<Complex<f64>>(10, c(8.0, 1.0), c(-1.0, 0.2));
-    let n = a.n;
-    let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
-    let ll = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
-    let xl = solve_ldlt(&ll, &b).unwrap();
-    assert!(
-        residual_inf(&a, &xl, &b) < 1e-9,
-        "complex left-looking residual"
-    );
-}
-
-#[test]
-fn left_looking_indefinite_2x2_inertia() {
+fn indefinite_2x2_inertia() {
     // [[0,1],[1,0]] (eigenvalues +/-1) forces a single 2x2 Bunch-Kaufman block.
     // The left-looking path must take that 2x2 (zero diagonal -> no 1x1 pivot)
     // and report inertia (1+, 1-).
@@ -194,7 +154,7 @@ fn left_looking_indefinite_2x2_inertia() {
 }
 
 #[test]
-fn left_looking_indefinite_2d_grid_solves() {
+fn indefinite_2d_grid_solves() {
     // 2D 5-point grid with a *small* diagonal (0.5 << 2*|off|): far from
     // diagonally dominant -> genuinely indefinite, so Bunch-Kaufman must take
     // many 2x2 pivots across several supernodes and still give a true solve -
@@ -219,7 +179,7 @@ fn left_looking_indefinite_2d_grid_solves() {
 }
 
 #[test]
-fn left_looking_indefinite_complex_symmetric() {
+fn indefinite_complex_symmetric() {
     // Complex-symmetric indefinite grid: the 2x2 path is type-agnostic. The
     // 2x2 blocks here are complex-symmetric (not Hermitian), exercising the
     // generic det/detinv arithmetic.

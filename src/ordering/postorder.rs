@@ -16,8 +16,7 @@ thread_local! {
 /// - `postorder[k]` = the node visited at position k (new-to-old)
 /// - `inv_postorder[node]` = the position of node in the postorder (old-to-new)
 ///
-/// Children are visited in order of ascending subtree size (smallest first)
-/// to minimize peak contribution-block memory during the factorization.
+/// Children are visited in order of ascending subtree size (smallest first).
 pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
     postorder_with(etree, |kids, sizes| {
         #[cfg(test)]

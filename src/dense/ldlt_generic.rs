@@ -13,10 +13,8 @@
 //! symmetric `A = A^T`, not Hermitian). The pivot threshold is the classical
 //! `alpha = (1 + sqrt17)/8`.
 //!
-//! This is the shared, data-type-generic dense kernel that every multifrontal
-//! front reduces to (the former f64-dedicated dense path, with its blocked SIMD
-//! Schur kernel and rook rescue, has been removed in favour of this single
-//! generic path). Further performance work happens here.
+//! A dense, data-type-generic LDL^T; the sparse factorizations use its
+//! factor container and pivot kernels.
 
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::RslabError;

@@ -106,22 +106,20 @@ fn ordering_name(o: &OrderingMethod) -> &'static str {
 
 pub fn parse_scaling(s: &str) -> PyResult<ScalingStrategy> {
     Ok(match s {
-        "auto" => ScalingStrategy::Auto,
         "inf_norm" | "infnorm" | "ruiz" => ScalingStrategy::InfNorm,
         "one_pass" | "one_pass_inf_norm" | "default" => ScalingStrategy::OnePassInfNorm,
         "mc64" | "mc64_symmetric" => ScalingStrategy::Mc64Symmetric,
         "identity" | "none" | "off" => ScalingStrategy::Identity,
         other => {
             return Err(PyValueError::new_err(format!(
-            "scaling must be 'auto', 'inf_norm', 'one_pass', 'mc64' or 'identity', got '{other}'"
-        )))
+                "scaling must be 'inf_norm', 'one_pass', 'mc64' or 'identity', got '{other}'"
+            )))
         }
     })
 }
 
 fn scaling_name(s: &ScalingStrategy) -> &'static str {
     match s {
-        ScalingStrategy::Auto => "auto",
         ScalingStrategy::InfNorm => "inf_norm",
         ScalingStrategy::OnePassInfNorm => "one_pass",
         ScalingStrategy::Mc64Symmetric => "mc64",
@@ -184,7 +182,7 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///     Threshold partial-pivoting tolerance of the LU path in ``[0, 1]``
 ///     (default 0.1; ``1.0`` is full partial pivoting). Ignored, and reported
 ///     in the diagnostics, on the LDL^T path.
-/// scaling : {'one_pass', 'inf_norm', 'mc64', 'auto', 'identity'} or array, optional
+/// scaling : {'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional
 ///     Symmetric equilibration before the LDL^T factorization: a named
 ///     strategy, or a float array ``s`` of length ``n`` applying the
 ///     external scaling ``diag(s) A diag(s)``. The LU path uses its own

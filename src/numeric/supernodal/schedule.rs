@@ -50,7 +50,7 @@ pub(crate) struct LlSchedule {
 impl LlSchedule {
     /// Rows of supernode `s`: `rows(s)[0..ncol]` are its eliminated columns
     /// `first_col..first_col+ncol`; `rows(s)[ncol..]` the sorted
-    /// below-diagonal fill rows (the multifrontal assembly, value-free).
+    /// below-diagonal rows of the panel.
     #[inline]
     pub fn rows(&self, s: usize) -> &[Li] {
         &self.rs[self.rs_off[s]..self.rs_off[s + 1]]
