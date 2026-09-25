@@ -60,7 +60,7 @@
 //! let opts = SolverSettings::preconditioner(1e-8).with_drop_tol(1e-2); // composable
 //! let m = LdltSolver::factor(&a, &opts)?;          // preconditioner
 //! let b = vec![c(1.0, 0.0); 3];
-//! let res = cocg(&a, &b, &m, 1e-10, 100)?;
+//! let res = cocg(&a, &b, &m, &KrylovSettings::default().with_tol(1e-10))?;
 //! assert!(res.converged);
 //! # Ok(()) }
 //! ```
@@ -155,8 +155,8 @@ pub use numeric::settings::{
 };
 // The Krylov solvers and their operator and preconditioner traits.
 pub use numeric::krylov::{
-    cocg, cocr, gmres, gmres_block, gmres_block_mon, gmres_recycled, BlockKrylovResult,
-    Factorization, FnOperator, FnPreconditioner, KrylovResult, LinearOperator, LowPrecisionLu,
+    cocg, cocr, gmres, gmres_block, gmres_recycled, BlockKrylovResult, Factorization, FnOperator,
+    FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator, LowPrecisionLu,
     LowPrecisionPreconditioner, NoPreconditioner, Preconditioner, Recycle, RecycleScalar,
     StopReason,
 };
@@ -189,6 +189,7 @@ pub mod prelude {
         KluSolver,
         KluSymbolic,
         KrylovResult,
+        KrylovSettings,
         LdltSolver,
         LdltSymbolic,
         LinearOperator,

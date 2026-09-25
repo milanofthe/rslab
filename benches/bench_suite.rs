@@ -1050,7 +1050,16 @@ fn run_matrix(
                 let f = fr?;
                 let fac = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
-                let kr = gmres(a, &b, &f, 1e-10, maxit, restart, None)?;
+                let kr = gmres(
+                    a,
+                    &b,
+                    &f,
+                    &rslab::KrylovSettings::default()
+                        .with_tol(1e-10)
+                        .with_max_iter(maxit)
+                        .with_restart(restart),
+                    None,
+                )?;
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.symv(&kr.x, &mut ax);
@@ -1070,7 +1079,16 @@ fn run_matrix(
                 let f = fr?;
                 let fac = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
-                let kr = gmres(a, &b, &f, 1e-10, maxit, restart, None)?;
+                let kr = gmres(
+                    a,
+                    &b,
+                    &f,
+                    &rslab::KrylovSettings::default()
+                        .with_tol(1e-10)
+                        .with_max_iter(maxit)
+                        .with_restart(restart),
+                    None,
+                )?;
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 let mut ax = vec![Complex::new(0.0, 0.0); n];
                 a.matvec(&kr.x, &mut ax);

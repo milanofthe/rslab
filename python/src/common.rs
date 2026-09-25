@@ -358,32 +358,6 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     Ok(out.into_any().unbind())
 }
 
-// GMRES restart / basis-memory policy.
-//
-// The Arnoldi basis is allocated up front, so its size is fixed by `restart`,
-// not by how few iterations actually run: block GMRES holds one basis of
-// `n * nrhs * (restart+1)` scalars, flexible single-RHS GMRES the `V` + `Z`
-// pair, `2 * n * (restart+1)`. With a fixed `restart=80` a large `n*nrhs`
-// allocates silently (`n=100k, nrhs=10, complex128` is about 13 GB). When the
-// caller does not pin `restart`, the binding caps it so the basis stays under
-// `GMRES_BASIS_BUDGET_BYTES`, clamped to a still-useful `[MIN, MAX]`. An
-// explicit `restart=` always wins, even past the budget.
-const GMRES_BASIS_BUDGET_BYTES: usize = 1 << 30;
-const GMRES_RESTART_MIN: usize = 20;
-const GMRES_RESTART_MAX: usize = 80;
-
-pub fn adaptive_restart(n: usize, columns: usize, scalar_bytes: usize, bases: usize) -> usize {
-    let per_layer = n
-        .saturating_mul(columns)
-        .saturating_mul(scalar_bytes)
-        .saturating_mul(bases);
-    if per_layer == 0 {
-        return GMRES_RESTART_MAX;
-    }
-    let cap = (GMRES_BASIS_BUDGET_BYTES / per_layer).saturating_sub(1);
-    cap.clamp(GMRES_RESTART_MIN, GMRES_RESTART_MAX)
-}
-
 /// Index type of a SciPy CSC matrix (`int32` or `int64`).
 trait CscIndex: Element + Copy + Ord {
     fn to_usize(self) -> Option<usize>;
