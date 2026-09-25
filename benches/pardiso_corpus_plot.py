@@ -19,6 +19,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import to_rgb
 from matplotlib.patches import Patch
 
 import bench_style as st
@@ -68,6 +69,13 @@ def ordered(data):
     return sorted(data, key=lambda s: (cls(s), data[s]["rslab"]["n"]))
 
 
+def shade(metric):
+    """RSLAB's color lightened toward white for a metric, opaque so the
+    reference line stays behind the bars."""
+    a = METRIC_ALPHA[metric]
+    return tuple(a * c + (1 - a) for c in to_rgb(RSLAB))
+
+
 def geomean(xs):
     return float(np.exp(np.mean(np.log(xs))))
 
@@ -78,7 +86,7 @@ def log_ratio_axis(ax):
     ax.set_xticks(ticks)
     ax.set_xticklabels([f"{t:g}" for t in ticks])
     ax.minorticks_off()
-    ax.axvline(1.0, color=PARDISO, linewidth=1.2)
+    ax.axvline(1.0, color=PARDISO, linewidth=1.2, zorder=0)
 
 
 def classes(data, ax):
@@ -92,7 +100,7 @@ def classes(data, ax):
             r = geomean([med(data[s]["rslab"], key) / med(data[s]["pardiso"], key) for s in systems])
             table[(c, key)] = r
             y = yi + (mi - (len(METRICS) - 1) / 2) * h
-            ax.barh(y, r, h * 0.9, color=RSLAB, alpha=METRIC_ALPHA[key])
+            ax.barh(y, r, h * 0.9, color=shade(key))
             ax.text(r * 1.04, y, f"{r:.2f}", va="center", fontsize=7, color=st.GRAY)
     ax.set_yticks(range(len(present)))
     ax.set_yticklabels([f"{CLASSES[c][1]}\n{sum(cls(s) == c for s in data)} systems" for c in present],
@@ -102,7 +110,7 @@ def classes(data, ax):
     ax.set_xlabel("RSLAB wall time / PARDISO wall time (lower is faster)", fontsize=9)
     ax.grid(axis="x", alpha=0.3, linewidth=0.5)
     st.despine(ax)
-    handles = [Patch(facecolor=RSLAB, alpha=METRIC_ALPHA[k], label=l) for k, l in METRICS]
+    handles = [Patch(facecolor=shade(k), label=l) for k, l in METRICS]
     handles.append(plt.Line2D([], [], color=PARDISO, label="MKL PARDISO = 1"))
     return table, handles
 
@@ -156,7 +164,7 @@ def breakdown(data, ax, names):
     ax.set_yticks([v for i in range(len(names)) for v in (i - h / 2 - 0.02, i + h / 2 + 0.02)])
     ax.set_yticklabels([f"{short(s)}  {lab}" for s in names for lab in ("RSLAB", "PARDISO")], fontsize=7)
     ax.invert_yaxis()
-    ax.axvline(1.0, color=PARDISO, linewidth=1.0, alpha=0.6)
+    ax.axvline(1.0, color=PARDISO, linewidth=1.0, alpha=0.6, zorder=0)
     ax.set_xlabel("wall time / PARDISO one-shot (analysis + factorization + solve)", fontsize=9)
     ax.grid(axis="x", alpha=0.3, linewidth=0.5)
     st.despine(ax)
