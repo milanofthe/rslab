@@ -301,24 +301,6 @@ impl<T: Scalar> LdltSolver<T> {
     }
 }
 
-/// Apply a symmetric real scaling `A_hat = D A D`, `D = diag(scale)` (user-order),
-/// producing the scaled matrix with the identical pattern.
-fn apply_symmetric_scaling<T: Scalar>(a: &CscMatrix<T>, scale: &[f64]) -> CscMatrix<T> {
-    let mut scaled_values = Vec::with_capacity(a.values.len());
-    for j in 0..a.n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
-            scaled_values.push(a.values[k] * T::from_real(scale[i] * scale[j]));
-        }
-    }
-    CscMatrix::<T> {
-        n: a.n,
-        col_ptr: a.col_ptr.clone(),
-        row_idx: a.row_idx.clone(),
-        values: scaled_values,
-    }
-}
-
 /// Fast native one-pass inf-norm scaling on a generic (`f64`/`Complex`) matrix:
 /// `s_i = 1/sqrt(max_j |A_ij|)`. The [`ScalingStrategy::OnePassInfNorm`] default, kept
 /// on the generic type so the shipped path never densifies to a magnitude copy.
@@ -343,8 +325,9 @@ fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
         .collect()
 }
 
-/// Symmetric equilibration `A_hat = D A D` under the chosen [`ScalingStrategy`].
-/// Returns the scaled matrix (identical pattern) and the real scaling `s`.
+/// Symmetric equilibration `A_hat = D A D` under the chosen [`ScalingStrategy`]:
+/// the real scaling `s`, applied while the values are permuted for the
+/// factorization, so no scaled copy of `A` is held; `None` for `Identity`.
 ///
 /// The [`OnePassInfNorm`](ScalingStrategy::OnePassInfNorm) default and
 /// [`Identity`](ScalingStrategy::Identity) run natively on `T` (no magnitude
@@ -356,14 +339,14 @@ fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
 /// pattern (a real `D` derived from magnitudes is the correct congruence for a
 /// complex-symmetric `A`). Scaling changes only values, so the sparsity pattern
 /// and the a-priori memory estimate are unaffected.
-fn equilibrate_with<T: Scalar>(
+fn equilibration<T: Scalar>(
     a: &CscMatrix<T>,
     strategy: &crate::scaling::ScalingStrategy,
-) -> Result<(CscMatrix<T>, Vec<f64>), RslabError> {
+) -> Result<Option<Vec<f64>>, RslabError> {
     use crate::scaling::ScalingStrategy;
     let scale = match strategy {
         ScalingStrategy::OnePassInfNorm => onepass_scale(a),
-        ScalingStrategy::Identity => return Ok((a.clone(), vec![1.0; a.n])),
+        ScalingStrategy::Identity => return Ok(None),
         other => {
             // Real magnitude view `|A|` (same pattern) for the f64 scaling machinery.
             let mag = CscMatrix::<f64> {
@@ -376,8 +359,7 @@ fn equilibrate_with<T: Scalar>(
             s
         }
     };
-    let scaled = apply_symmetric_scaling(a, &scale);
-    Ok((scaled, scale))
+    Ok(Some(scale))
 }
 
 /// Reusable PARDISO-style **phase-1 analysis** for [`LdltSolver`].
@@ -633,10 +615,11 @@ impl LdltSymbolic {
             crate::logging::warn(&format!("ldlt settings: {w}"));
         }
         let t = crate::clock::Instant::now();
-        let (scaled, scale) = equilibrate_with(a, &opts.scaling)?;
+        let scale = equilibration(a, &opts.scaling)?;
         let scale_ms = t.elapsed().as_secs_f64() * 1e3;
         let t = crate::clock::Instant::now();
-        let numeric = factor_numeric(&self.symbolic, &scaled, opts)?;
+        let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), opts)?;
+        let scale = scale.unwrap_or_else(|| vec![1.0; a.n]);
         let factor_nnz = (numeric.factor.nnz() - numeric.n_zeros) as u64;
         let factor_bytes = numeric.factor.bytes() as u64;
         let (factor, factors) = numeric.into_parts();
@@ -889,7 +872,7 @@ mod tests {
         use crate::scaling::ScalingStrategy;
         // Well-conditioned SPD tridiagonal-plus-grid: every equilibration strategy
         // (and Identity/off) must factor and solve to a tiny residual, proving the
-        // knob is threaded end-to-end (SolverSettings.scaling -> equilibrate_with ->
+        // knob is threaded end-to-end (SolverSettings.scaling -> equilibration ->
         // compute_scaling). The default OnePassInfNorm stays bit-identical.
         let m = 6;
         let n = m * m;

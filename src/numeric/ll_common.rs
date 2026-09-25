@@ -261,18 +261,30 @@ impl PermScatter {
         }
     }
 
-    /// Scatter a fresh value set through the frozen structure: one linear pass.
-    /// `scale(k)` maps the original entry's value (e.g. equilibration); pass
-    /// the identity for the plain permutation.
+    /// Scatter a fresh value set of `a` (the pattern this was built from)
+    /// through the frozen structure in one linear pass, applying the symmetric
+    /// equilibration `a_ij * (s_i * s_j)` on the way when `scale` is given, so
+    /// no scaled copy of `a` is ever held.
     pub fn scatter<T: crate::scalar::Scalar>(
         &self,
-        values: &[T],
-        mut map: impl FnMut(usize, T) -> T,
+        a: &crate::sparse::csc::CscMatrix<T>,
+        scale: Option<&[f64]>,
     ) -> Vec<T> {
-        debug_assert_eq!(values.len(), self.pos.len());
-        let mut out = vec![T::zero(); values.len()];
-        for (k, &p) in self.pos.iter().enumerate() {
-            out[p] = map(k, values[k]);
+        debug_assert_eq!(a.values.len(), self.pos.len());
+        let mut out = vec![T::zero(); a.values.len()];
+        match scale {
+            None => {
+                for (k, &p) in self.pos.iter().enumerate() {
+                    out[p] = a.values[k];
+                }
+            }
+            Some(s) => {
+                for j in 0..a.n {
+                    for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                        out[self.pos[k]] = a.values[k] * T::from_real(s[a.row_idx[k]] * s[j]);
+                    }
+                }
+            }
         }
         out
     }

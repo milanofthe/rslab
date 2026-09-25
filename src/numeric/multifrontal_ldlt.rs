@@ -1664,7 +1664,7 @@ pub fn factor_sparse_ldlt_with<T: Scalar>(
     opts: &SolverSettings,
 ) -> Result<LdltFactors<T>, RslabError> {
     let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
-    factor_numeric(&symb, a, opts).map(LdltNumeric::into_factors)
+    factor_numeric(&symb, a, None, opts).map(LdltNumeric::into_factors)
 }
 
 /// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
@@ -2052,6 +2052,7 @@ impl<T: Scalar> LdltNumeric<T> {
 pub fn factor_numeric<T: Scalar>(
     symb: &MultifrontalSymbolic,
     a: &CscMatrix<T>,
+    scale: Option<&[f64]>,
     opts: &SolverSettings,
 ) -> Result<LdltNumeric<T>, RslabError> {
     a.validate()?;
@@ -2092,7 +2093,7 @@ pub fn factor_numeric<T: Scalar>(
         n,
         col_ptr: scatter.col_ptr.clone(),
         row_idx: scatter.row_idx.clone(),
-        values: scatter.scatter(&a.values, |_, v| v),
+        values: scatter.scatter(a, scale),
     };
 
     // Supernodal left-looking path: same factor, low transient (no CB stack). Run
@@ -2102,21 +2103,11 @@ pub fn factor_numeric<T: Scalar>(
         return opts.threads.run(
             stack,
             |cap| recommend_threads_for_sym(symb, cap),
-            || factor_left_looking(sym, sched, a, a_perm, opts),
+            || factor_left_looking(sym, sched, a_perm, opts),
         );
     }
 
-    // Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
-    // `PerturbToEps { abs_floor }` is taken as given (rslab convention: an
-    // absolute floor, typically `eps_rel * ||A||inf`); `Fail` disables perturbation.
-    let perturb_floor: Option<f64> = match opts.on_zero_pivot {
-        ZeroPivotAction::Fail => None,
-        ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
-        ZeroPivotAction::ForceAccept => {
-            let anorm = a.values.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
-            Some(anorm.max(1.0) * f64::EPSILON)
-        }
-    };
+    let perturb_floor = static_pivot_floor(&a_perm, opts);
 
     // 3. Multifrontal numeric factorization with a work-stealing schedule over
     //    the assembly tree: each subtree factors independently (children before
@@ -3339,22 +3330,33 @@ fn ll_cdiv_emit<T: Scalar>(
 /// PARDISO memory profile). Produces the same [`LdltFactors`] as the multifrontal
 /// path (numerically equivalent up to pivot order), including indefinite
 /// (zero-/tiny-diagonal) systems via the 2x2 blocks.
+/// Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
+/// `PerturbToEps { abs_floor }` is taken as given (rslab convention: an
+/// absolute floor, typically `eps_rel * ||A||inf`); `Fail` disables
+/// perturbation. `a_perm` holds the values being factored.
+fn static_pivot_floor<T: Scalar>(a_perm: &CscMatrix<T>, opts: &SolverSettings) -> Option<f64> {
+    match opts.on_zero_pivot {
+        ZeroPivotAction::Fail => None,
+        ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
+        ZeroPivotAction::ForceAccept => {
+            let anorm = a_perm
+                .values
+                .iter()
+                .map(|v| v.magnitude())
+                .fold(0.0, f64::max);
+            Some(anorm.max(1.0) * f64::EPSILON)
+        }
+    }
+}
+
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
-    a: &CscMatrix<T>,
     a_perm: CscMatrix<T>,
     opts: &SolverSettings,
 ) -> Result<LdltNumeric<T>, RslabError> {
     let n = sym.n;
-    let perturb_floor: Option<f64> = match opts.on_zero_pivot {
-        ZeroPivotAction::Fail => None,
-        ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
-        ZeroPivotAction::ForceAccept => {
-            let anorm = a.values.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
-            Some(anorm.max(1.0) * f64::EPSILON)
-        }
-    };
+    let perturb_floor = static_pivot_floor(&a_perm, opts);
 
     let nsuper = sym.supernodes.len();
     // Factor in parallel over the assembly forest: sibling subtrees concurrently,
@@ -3591,7 +3593,9 @@ mod tests {
         for ord in [OrderingMethod::Rcm, OrderingMethod::AutoRace] {
             let opts = SolverSettings::default().with_ordering(ord);
             let symb = analyze_with(a.n, &a.col_ptr, &a.row_idx, &opts).unwrap();
-            let f = factor_numeric(&symb, &a, &opts).unwrap().into_factors();
+            let f = factor_numeric(&symb, &a, None, &opts)
+                .unwrap()
+                .into_factors();
             let x = solve_ldlt(&f, &b).unwrap();
             assert!(
                 residual_inf(&a, &x, &b) < 1e-9,
