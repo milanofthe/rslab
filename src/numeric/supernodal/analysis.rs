@@ -225,6 +225,22 @@ pub(crate) fn recommend_threads_for_sym(symb: &SupernodalAnalysis, max_cores: us
     recommend_threads_from(flops, front_nrow_max, tree_width_max, max_cores)
 }
 
+/// The worker count of [`Threads::Auto`](crate::Threads::Auto), at most
+/// `cap`: the calibrated cost model where the one-time install diagnosis has
+/// run (feature `tuning`), else the structural predictor.
+pub(crate) fn auto_threads(
+    symb: &SupernodalAnalysis,
+    estimate: &crate::diagnostics::MemoryEstimate,
+    cap: usize,
+) -> usize {
+    #[cfg(feature = "tuning")]
+    if let Some((cores, calib)) = crate::tuning::cached_calibration() {
+        return crate::tuning::recommend_threads_cost_model(estimate, &calib, cap, cores);
+    }
+    let _ = estimate;
+    recommend_threads_for_sym(symb, cap)
+}
+
 /// The data-driven single-solve thread-count policy, as a free function over the
 /// three predictive features, so the factor path can apply it straight from the
 /// symbolic analysis. Returns a worker count in `1..=max_cores`.

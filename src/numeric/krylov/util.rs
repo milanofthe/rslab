@@ -2,7 +2,6 @@
 //! products, Givens rotations, the least-squares rank guard and the batched
 //! Gram-Schmidt passes of the block solver.
 
-use crate::error::RslabError;
 use crate::numeric::settings::Threads;
 use crate::scalar::Scalar;
 use rayon::prelude::*;
@@ -244,31 +243,4 @@ pub(super) fn block_subtract<T: Scalar>(
                 }
             });
     }
-}
-
-/// Shared block-apply adapter for the factored preconditioners: the Krylov
-/// panel is column-major (`n x s`, RHS `c` contiguous) while every
-/// `solve_many` takes row-major (`b[i*s + c]`), so transpose in, run the
-/// batched solve, transpose out (`O(n*s)`, cheap against the solve). One
-/// implementation instead of four copies across the `Preconditioner` impls.
-pub(super) fn apply_block_via_rowmajor<T: Scalar>(
-    r: &[T],
-    z: &mut [T],
-    s: usize,
-    n: usize,
-    solve_many: impl FnOnce(&[T], usize) -> Result<Vec<T>, RslabError>,
-) -> Result<(), RslabError> {
-    let mut rowmaj = vec![T::zero(); n * s];
-    for c in 0..s {
-        for i in 0..n {
-            rowmaj[i * s + c] = r[c * n + i];
-        }
-    }
-    let x = solve_many(&rowmaj, s)?;
-    for c in 0..s {
-        for i in 0..n {
-            z[c * n + i] = x[i * s + c];
-        }
-    }
-    Ok(())
 }

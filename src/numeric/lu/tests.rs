@@ -137,13 +137,10 @@ fn lu_solve_many_matches_single() {
     let b: Vec<f64> = (0..n * nrhs).map(|k| (k % 7) as f64 - 3.0).collect();
     let x = solver.solve_many(&b, nrhs).unwrap();
     for col in 0..nrhs {
-        let bc: Vec<f64> = (0..n).map(|i| b[i * nrhs + col]).collect();
+        let bc: Vec<f64> = (0..n).map(|i| b[col * n + i]).collect();
         let xc = solver.solve(&bc).unwrap();
         for i in 0..n {
-            assert!(
-                (x[i * nrhs + col] - xc[i]).abs() < 1e-10,
-                "rhs {col} row {i}"
-            );
+            assert!((x[col * n + i] - xc[i]).abs() < 1e-10, "rhs {col} row {i}");
         }
     }
 }
@@ -227,11 +224,11 @@ fn lu_block_solve_is_bitwise_the_single_solve() {
             let b: Vec<Complex<f64>> = (0..n * nrhs).map(|_| c(rnd(), rnd())).collect();
             let x = solver.solve_many(&b, nrhs).unwrap();
             for col in 0..nrhs {
-                let bc: Vec<Complex<f64>> = (0..n).map(|i| b[i * nrhs + col]).collect();
+                let bc: Vec<Complex<f64>> = (0..n).map(|i| b[col * n + i]).collect();
                 let xc = solver.solve(&bc).unwrap();
                 for i in 0..n {
                     assert!(
-                        x[i * nrhs + col] == xc[i],
+                        x[col * n + i] == xc[i],
                         "n {n} nrhs {nrhs} rhs {col} row {i}"
                     );
                 }
@@ -269,10 +266,10 @@ fn analysis_on_a_given_ordering() {
     }
     let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
     let o = SolverSettings::default().with_matching(false);
-    let s0 = LuSymbolic::analyze_with(&a, &o).unwrap();
+    let s0 = LuSymbolic::analyze(&a, &o).unwrap();
     let f0 = s0.factor(&a, &o).unwrap();
     let o1 = o.clone().with_permutation(s0.permutation().into());
-    let s1 = LuSymbolic::analyze_with(&a, &o1).unwrap();
+    let s1 = LuSymbolic::analyze(&a, &o1).unwrap();
     assert_eq!(s1.permutation(), s0.permutation());
     let f1 = s1.factor(&a, &o1).unwrap();
     assert_eq!(f1.factor_nnz(), f0.factor_nnz());
@@ -284,7 +281,7 @@ fn analysis_on_a_given_ordering() {
     c2.extend([n - 1, 0]);
     v2.extend([-0.1, -0.1]);
     let a2 = GeneralCsc::<f64>::from_triplets(n, &r2, &c2, &v2).unwrap();
-    let s2 = LuSymbolic::analyze_with(&a2, &o1).unwrap();
+    let s2 = LuSymbolic::analyze(&a2, &o1).unwrap();
     let x = s2.factor(&a2, &o1).unwrap().solve(&b).unwrap();
     let mut ax = vec![0.0f64; n];
     for col in 0..n {
@@ -300,7 +297,7 @@ fn analysis_on_a_given_ordering() {
     assert!(res < 1e-12, "residual on the reused ordering {res:.1e}");
     // not a permutation
     let bad: Vec<usize> = (0..n).map(|i| i / 2).collect();
-    assert!(LuSymbolic::analyze_with(&a, &o.clone().with_permutation(bad.into())).is_err());
+    assert!(LuSymbolic::analyze(&a, &o.clone().with_permutation(bad.into())).is_err());
 }
 
 #[test]
@@ -447,7 +444,7 @@ fn static_pivot_reuse_across_value_sweep() {
     let template =
         GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vec![c(1.0, 0.0); rr.len()])
             .unwrap();
-    let analysis = LuSymbolic::analyze(&template).unwrap();
+    let analysis = LuSymbolic::analyze(&template, &SolverSettings::default()).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 0.7)).collect();
     let static_opts = SolverSettings::default().with_pivot_threshold(0.0);
     for shift in [0.0, 1.5, -0.8, 3.0] {
@@ -465,7 +462,10 @@ fn static_pivot_reuse_across_value_sweep() {
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         // Reuse the one analysis; static factor (no pivot search).
         let f = &analysis.factor(&a, &static_opts).unwrap();
-        let x = f.solve_refined(&a, &b, 2).unwrap();
+        let x = f
+            .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
+            .unwrap()
+            .0;
         let mut ax = vec![Complex::new(0.0, 0.0); n];
         a.matvec(&x, &mut ax);
         let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
@@ -587,7 +587,7 @@ fn phased_general_lu_analyze_once_factor_many() {
     let template =
         GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vec![c(1.0, 0.0); rr.len()])
             .unwrap();
-    let analysis = LuSymbolic::analyze(&template).unwrap();
+    let analysis = LuSymbolic::analyze(&template, &SolverSettings::default()).unwrap();
     assert_eq!(analysis.n(), n);
 
     let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 1.0)).collect();
@@ -664,7 +664,10 @@ fn incomplete_lu_reduces_fill_and_still_solves() {
         full.factor_nnz()
     );
     // The incomplete factor + a few refinement steps still solves accurately.
-    let x = inc.solve_refined(&a, &b, 10).unwrap();
+    let x = inc
+        .solve_refined(&a, &b, &crate::RefinePolicy::steps(10))
+        .unwrap()
+        .0;
     assert!(resid(&a, &x, &b) < 1e-6, "residual {}", resid(&a, &x, &b));
 }
 
@@ -712,7 +715,7 @@ fn exact_structure_bounds_the_factor() {
     for (seed, matching) in [(7u64, false), (11, true), (13, true)] {
         let a = unsymmetric_holes(600, 3, seed, matching);
         let opts = SolverSettings::default().with_matching(matching);
-        let lusym = LuSymbolic::analyze_with(&a, &opts).unwrap();
+        let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
         assert_eq!(lusym.has_matching(), matching);
         let num = factor_general_lu_numeric(&lusym, &a, &opts).unwrap();
         let (sym, _) = lusym.symb.sym_and_levels().unwrap();
@@ -760,7 +763,116 @@ fn matching_only_where_the_diagonal_needs_it() {
     let opts = SolverSettings::default();
     for (holes, expect) in [(false, false), (true, true)] {
         let a = unsymmetric_holes(300, 3, 5, holes);
-        let lusym = LuSymbolic::analyze_with(&a, &opts).unwrap();
+        let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
         assert_eq!(lusym.has_matching(), expect, "holes = {holes}");
+    }
+}
+
+/// `||A^T x - b||inf / ||b||inf`.
+fn transpose_residual<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
+    let mut worst = 0.0f64;
+    for j in 0..a.n {
+        let mut acc = T::zero();
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            acc = acc + a.values[k] * x[a.row_idx[k]];
+        }
+        worst = worst.max((acc - b[j]).magnitude());
+    }
+    worst / b.iter().map(|v| v.magnitude()).fold(0.0, f64::max)
+}
+
+/// The transposed solve runs `U^T` forward and `L^T` backward on the same
+/// panels, with and without the row matching, and a column-major block of
+/// transposed solves is the columns solved one by one.
+#[test]
+fn lu_solve_transpose_on_the_same_factors() {
+    use crate::numeric::krylov::Factorization;
+    for holes in [false, true] {
+        let a = unsymmetric_holes(500, 3, 9, holes);
+        let s = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+        let b: Vec<f64> = (0..a.n).map(|i| ((i * 7) % 11) as f64 - 5.0).collect();
+        let x = s.solve_transpose(&b).unwrap();
+        let r = transpose_residual(&a, &x, &b);
+        assert!(r < 1e-10, "holes {holes}: transposed residual {r:.1e}");
+        let f: &dyn Factorization<f64> = &s;
+        assert_eq!(f.solve_transpose(&b).unwrap(), x);
+    }
+    let c = |re, im| num_complex::Complex::new(re, im);
+    let m = 30;
+    let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..m * m {
+        r.push(i);
+        cc.push(i);
+        v.push(c(4.0, 0.3));
+        for (d, w) in [(1, c(-1.2, 0.1)), (m, c(-0.7, -0.2))] {
+            if i + d < m * m {
+                r.push(i + d);
+                cc.push(i);
+                v.push(w);
+                r.push(i);
+                cc.push(i + d);
+                v.push(w * c(0.5, 0.4));
+            }
+        }
+    }
+    let a = GeneralCsc::from_triplets(m * m, &r, &cc, &v).unwrap();
+    let s = LuSolver::factor(
+        &a,
+        &SolverSettings::default().with_ordering(crate::OrderingMethod::MetisND),
+    )
+    .unwrap();
+    let b: Vec<_> = (0..a.n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
+    let x = s.solve_transpose(&b).unwrap();
+    assert!(transpose_residual(&a, &x, &b) < 1e-10);
+}
+
+/// The three direct solvers behind one trait object.
+#[test]
+fn every_direct_solver_is_a_factorization() {
+    use crate::numeric::krylov::Factorization;
+    use crate::{CscMatrix, KluSettings, KluSolver, LdltSolver};
+    let n = 200;
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..n {
+        r.push(i);
+        c.push(i);
+        v.push(4.0);
+        if i + 1 < n {
+            r.push(i + 1);
+            c.push(i);
+            v.push(-1.0);
+        }
+    }
+    let lower = CscMatrix::<f64>::from_triplets(n, &r, &c, &v).unwrap();
+    let (mut rf, mut cf, mut vf) = (r.clone(), c.clone(), v.clone());
+    for k in 0..r.len() {
+        if r[k] != c[k] {
+            rf.push(c[k]);
+            cf.push(r[k]);
+            vf.push(v[k]);
+        }
+    }
+    let full = GeneralCsc::<f64>::from_triplets(n, &rf, &cf, &vf).unwrap();
+    let s = SolverSettings::default();
+    let solvers: Vec<Box<dyn Factorization<f64>>> = vec![
+        Box::new(LdltSolver::factor(&lower, &s).unwrap()),
+        Box::new(LuSolver::factor(&full, &s).unwrap()),
+        Box::new(KluSolver::factor(&full, &KluSettings::default()).unwrap()),
+    ];
+    let b: Vec<f64> = (0..2 * n).map(|i| (i % 9) as f64 - 4.0).collect();
+    let reference = solvers[0].solve_many(&b, 2).unwrap();
+    for (k, f) in solvers.iter().enumerate() {
+        assert_eq!(f.n(), n);
+        let x = f.solve_many(&b, 2).unwrap();
+        for (p, q) in x.iter().zip(&reference) {
+            assert!((p - q).abs() < 1e-10);
+        }
+        let (xr, out) = f
+            .solve_refined(&full, &b[..n], &crate::RefinePolicy::default())
+            .unwrap();
+        assert!(out.omega < 1e-14 && (xr[0] - x[0]).abs() < 1e-10);
+        assert_eq!(f.n_perturbed(), 0);
+        // two solves here, one more for the reference on the first
+        assert_eq!(f.diagnostics().solves.calls, if k == 0 { 3 } else { 2 });
     }
 }

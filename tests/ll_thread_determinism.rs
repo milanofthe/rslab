@@ -106,7 +106,7 @@ fn ll_ldlt_bit_identical_across_threads_and_runs() {
     let b: Vec<f64> = (0..a.n).map(|i| ((i % 11) as f64) - 5.0).collect();
     let solve = |t: usize| -> Vec<f64> {
         let s = SolverSettings::default().with_threads(t);
-        LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap()
+        LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap()
     };
     let x1 = solve(1);
     let x8 = solve(8);
@@ -144,7 +144,7 @@ fn ll_ldlt_complex_bit_identical_across_threads() {
         .collect();
     let solve = |t: usize| -> Vec<Complex<f64>> {
         let s = SolverSettings::default().with_threads(t);
-        LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap()
+        LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap()
     };
     assert_eq!(
         bits_c64(&solve(1)),

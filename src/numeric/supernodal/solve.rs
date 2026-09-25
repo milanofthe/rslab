@@ -405,7 +405,11 @@ impl<T: Scalar> SolvePlan<T> {
     /// `acc` (rows outside the subtree).
     fn fwd_node(&self, s: u32, y: &mut [T], acc: &mut [T], t: &mut Vec<T>) {
         let (c0, w, r0, m, ld, panel) = self.node(s);
+        let unit = self.diag_inv.is_empty();
         for k in 0..w {
+            if !unit {
+                y[c0 + k] = y[c0 + k] * self.diag_inv[c0 + k];
+            }
             let yk = y[c0 + k];
             let col = &panel[k * ld..k * ld + w];
             for i in k + 1..w {
@@ -700,7 +704,8 @@ impl<T: Scalar> SolvePlan<T> {
         let gmax = self.cfg.block.div_ceil(self.cfg.ancestor_chunk);
         let partial = &mut sc.partial;
         for (jb, je) in col_blocks(w, self.cfg.block) {
-            tri_forward(v, panel, ld, nr, jb, je);
+            let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
+            tri_forward(v, panel, dinv, ld, nr, jb, je);
             if je == ld {
                 break;
             }
@@ -822,6 +827,11 @@ impl<T: Scalar> SolvePlan<T> {
         let (c0, w, r0, m, ld, panel) = self.node(s);
         for k in 0..w {
             let (head, tail) = y.split_at_mut((c0 + k + 1) * nr);
+            if let Some(&d) = self.diag_inv.get(c0 + k) {
+                for v in &mut head[(c0 + k) * nr..] {
+                    *v = *v * d;
+                }
+            }
             let yk = &head[(c0 + k) * nr..];
             let col = &panel[k * ld..k * ld + w];
             for i in k + 1..w {
@@ -1064,9 +1074,23 @@ impl PhaseTrace {
 
 /// Unit-lower triangular solve of column block `[jb, je)` on `v` (row-major
 /// `nr` wide), in place.
-fn tri_forward<T: Scalar>(v: &mut [T], panel: &[T], ld: usize, nr: usize, jb: usize, je: usize) {
+#[allow(clippy::too_many_arguments)]
+fn tri_forward<T: Scalar>(
+    v: &mut [T],
+    panel: &[T],
+    diag_inv: &[T],
+    ld: usize,
+    nr: usize,
+    jb: usize,
+    je: usize,
+) {
     for k in jb..je {
         let (head, tail) = v.split_at_mut((k + 1) * nr);
+        if let Some(&d) = diag_inv.get(k) {
+            for x in &mut head[k * nr..] {
+                *x = *x * d;
+            }
+        }
         let vk = &head[k * nr..];
         let col = &panel[k * ld + k + 1..k * ld + je];
         if nr == 1 {
@@ -1270,7 +1294,7 @@ mod tests {
             let opts = SolverSettings::default()
                 .with_threads(1)
                 .with_ordering(crate::OrderingMethod::MetisND);
-            let s = LdltSolver::factor_with(a, &opts).unwrap();
+            let s = LdltSolver::factor(a, &opts).unwrap();
             let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
             let x1 = s.solve(&b).unwrap();
             assert!(residual(a, &x1, &b) < 1e-10, "residual m={m} shift={shift}");
@@ -1281,10 +1305,10 @@ mod tests {
                 .collect();
             let xb = s.solve_many(&bb, nrhs).unwrap();
             for c in 0..nrhs {
-                let bc: Vec<f64> = (0..n).map(|i| bb[i * nrhs + c]).collect();
+                let bc: Vec<f64> = (0..n).map(|i| bb[c * n + i]).collect();
                 let xc = s.solve(&bc).unwrap();
                 for i in 0..n {
-                    assert!((xb[i * nrhs + c] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
+                    assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
                 }
             }
             // Bit-identical for every thread count.
@@ -1304,10 +1328,10 @@ mod tests {
     #[test]
     fn plan_cuts_the_tree_and_falls_back_on_pruned_factors() {
         let a = grid(60, 0.0);
-        let s = LdltSolver::factor_with(&a, &SolverSettings::default().with_threads(1)).unwrap();
+        let s = LdltSolver::factor(&a, &SolverSettings::default().with_threads(1)).unwrap();
         assert!(s.plan.subtrees.len() > 1);
         assert!(!s.plan.top_levels.is_empty());
-        let pruned = LdltSolver::factor_with(
+        let pruned = LdltSolver::factor(
             &a,
             &SolverSettings::default().with_threads(1).with_drop_tol(0.2),
         )
@@ -1384,15 +1408,15 @@ mod tests {
                 .collect();
             let xb = s.solve_many(&bb, nrhs).unwrap();
             for c in 0..nrhs {
-                let bc: Vec<f64> = (0..n).map(|i| bb[i * nrhs + c]).collect();
+                let bc: Vec<f64> = (0..n).map(|i| bb[c * n + i]).collect();
                 let xc = s.solve(&bc).unwrap();
                 for i in 0..n {
-                    assert!((xb[i * nrhs + c] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
+                    assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
                 }
             }
             // Refinement runs through the plans too.
             let (xr, out) = s
-                .solve_refined_with(&a, &b, &crate::RefinePolicy::steps(2))
+                .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
                 .unwrap();
             assert!(out.steps <= 2);
             assert!(residual_general(&a, &xr, &b) < 1e-12);

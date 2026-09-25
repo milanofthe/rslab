@@ -734,7 +734,7 @@ mod tests {
             Complex::new(0.0, 1.0),
             Complex::new(-1.0, 0.5),
         ];
-        let solver = LdltSolver::factor(&a).unwrap();
+        let solver = LdltSolver::factor(&a, &crate::SolverSettings::default()).unwrap();
         let x = solver.solve(&b).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); 3];
         a.symv(&x, &mut ax);

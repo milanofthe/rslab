@@ -74,7 +74,7 @@ fn ldlt_factor_with_honours_the_ordering_in_the_settings() {
     }
     let a = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
     let fill = |m: OrderingMethod| {
-        LdltSolver::factor_with(&a, &SolverSettings::exact().with_ordering(m))
+        LdltSolver::factor(&a, &SolverSettings::exact().with_ordering(m))
             .unwrap()
             .factor_nnz()
     };

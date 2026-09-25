@@ -153,18 +153,11 @@ impl LuSymbolic {
         self.symb.permutation()
     }
 
-    /// PARDISO **phase 1**: analyze the symmetrized pattern `A union A^T` of `a`
-    /// (values ignored, so any matrix with the target pattern works). Reuse the
-    /// result across many [`factor`](Self::factor) calls that share the pattern
-    /// - the unsymmetric twin of [`LdltSymbolic::analyze`].
-    ///
-    /// [`LdltSymbolic::analyze`]: crate::numeric::ldlt::LdltSymbolic::analyze
-    pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, RslabError> {
-        Self::analyze_with(a, &SolverSettings::default())
-    }
-
-    /// [`analyze`](Self::analyze) with explicit composable [`SolverSettings`].
-    pub fn analyze_with<T: Scalar>(
+    /// PARDISO phase 1: analyze the symmetrized pattern `A union A^T` of `a`
+    /// (values ignored, so any matrix with the target pattern works), with
+    /// the row matching where the diagonal needs it. Reuse the result across
+    /// many [`factor`](Self::factor) calls that share the pattern.
+    pub fn analyze<T: Scalar>(
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
     ) -> Result<LuSymbolic, RslabError> {
@@ -285,8 +278,9 @@ impl LuSymbolic {
     ) -> Result<LuSolver<T>, RslabError> {
         let estimate = self.estimate_memory::<T>();
         let resolved_threads = opts.threads.resolve(|cap| {
-            crate::numeric::supernodal::analysis::recommend_threads_for_sym(&self.symb, cap)
+            crate::numeric::supernodal::analysis::auto_threads(&self.symb, &estimate, cap)
         });
+        let opts = &opts.pinned(resolved_threads);
         let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
         for w in &warnings {
             crate::logging::warn(&format!("lu settings: {w}"));
@@ -347,6 +341,7 @@ impl LuSymbolic {
             (plan_l.bytes() + plan_u.bytes()) as u64,
         );
         Ok(LuSolver {
+            solve_threads: opts.threads,
             factors,
             plan_l,
             plan_u,
@@ -498,44 +493,15 @@ pub struct LuSolver<T> {
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
+    /// The worker policy the factorization ran with, which a Krylov solve
+    /// preconditioned by this factor orthogonalizes under.
+    solve_threads: crate::numeric::settings::Threads,
 }
 
 impl<T: Scalar> LuSolver<T> {
-    /// Thread policy the solve phase should honour: the resolved
-    /// [`Threads`](crate::Threads) budget the factorization used, carried on the
-    /// stored `LuPivots`. An iterative solve using this factor as a
-    /// preconditioner runs its parallel orthogonalization in a pool of this width.
-    pub fn solve_thread_policy(&self) -> crate::numeric::settings::Threads {
-        self.factors.solve_threads
-    }
-
     /// One-shot analyze + equilibrate + factor of a general matrix `A`.
     pub fn factor(a: &GeneralCsc<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
-        // Through the symbolic object, so the diagnostics are filled the same
-        // way as on the analyze-once path (the former direct call returned
-        // an empty `Diagnostics`).
-        LuSymbolic::analyze_with(a, opts)?.factor(a, opts)
-    }
-
-    /// The **heuristic** settings pick for `a` - the model-free default, the
-    /// unsymmetric counterpart of [`LdltSolver::tuned`](crate::LdltSolver::tuned):
-    /// analysis with the adaptive ordering heuristic, the proven default kernel
-    /// configuration, and (on large systems) the exact nested-dissection bakeoff.
-    pub fn tuned(a: &GeneralCsc<T>) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        Self::tuned_with(a, &SolverSettings::default())
-    }
-
-    /// [`tuned`](Self::tuned) on top of the caller's settings: the analysis
-    /// knobs (`nemin`, `relax`, `lu_matching`, ...) come from
-    /// `base`, the ordering is the heuristic race, the thread count the
-    /// calibrated pick.
-    pub fn tuned_with(
-        a: &GeneralCsc<T>,
-        base: &SolverSettings,
-    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        crate::numeric::settings::tuned(a, base, LuSymbolic::analyze_with, |sym: &LuSymbolic| {
-            sym.estimate_memory::<T>()
-        })
+        LuSymbolic::analyze(a, opts)?.factor(a, opts)
     }
 
     /// Per-call diagnostics: measured factor time, fill, thread budget, and the
@@ -549,121 +515,6 @@ impl<T: Scalar> LuSolver<T> {
         let mut d = self.diagnostics.clone();
         d.solves = self.solves.snapshot();
         d
-    }
-
-    fn record_solve(&self, rhs: usize, t: crate::clock::Instant, refine_steps: usize) {
-        let ms = t.elapsed().as_secs_f64() * 1e3;
-        self.solves.record(rhs, ms, refine_steps);
-        if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-            crate::logging::debug(&format!(
-                "lu solve: n={} rhs={rhs} refine_steps={refine_steps} {ms:.3} ms",
-                self.factors.n
-            ));
-        }
-    }
-
-    /// Solve `A x = b` using the stored factors.
-    pub fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        let t = crate::clock::Instant::now();
-        let x = self.solve_inner(b, 1)?;
-        self.record_solve(1, t, 0);
-        Ok(x)
-    }
-
-    /// `x = A^{-1} b` on `nrhs` row-major right-hand sides: row scaling and
-    /// permutation, the supernodal `L` and `U` sweeps, column permutation
-    /// and scaling.
-    fn solve_inner(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
-        let f = &self.factors;
-        let n = f.n;
-        if nrhs == 0 || b.len() != n * nrhs {
-            return Err(RslabError::DimensionMismatch {
-                expected: n * nrhs,
-                got: b.len(),
-            });
-        }
-        let mut y = vec![T::zero(); n * nrhs];
-        for e in 0..n {
-            let orig = f.perm_row[e];
-            let sr = T::from_real(f.d_row[orig]);
-            let src = &b[orig * nrhs..(orig + 1) * nrhs];
-            let dst = &mut y[e * nrhs..(e + 1) * nrhs];
-            for c in 0..nrhs {
-                dst[c] = src[c] * sr;
-            }
-        }
-        self.plan_l.forward(nrhs, &mut y);
-        self.plan_u.backward(nrhs, &mut y);
-        let mut out = vec![T::zero(); n * nrhs];
-        for e in 0..n {
-            let orig = f.perm[e];
-            let sc = T::from_real(f.d_col[orig]);
-            let src = &y[e * nrhs..(e + 1) * nrhs];
-            let dst = &mut out[orig * nrhs..(orig + 1) * nrhs];
-            for c in 0..nrhs {
-                dst[c] = src[c] * sc;
-            }
-        }
-        Ok(out)
-    }
-
-    /// Solve `A * X = B` for `nrhs` right-hand sides at once. `b` and the
-    /// returned `x` are **row-major** `n x nrhs` buffers (`b[i*nrhs + c]` is RHS
-    /// `c` at row `i`). Faster than `nrhs` separate [`solve`](Self::solve) calls.
-    pub fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError> {
-        let t = crate::clock::Instant::now();
-        let x = self.solve_inner(b, nrhs)?;
-        self.record_solve(nrhs, t, 0);
-        Ok(x)
-    }
-
-    /// Solve `A x = b` with iterative refinement against the original matrix `a`
-    /// (which must be the matrix this was factored from) - recovers accuracy on
-    /// hard systems where the static-pivoted factor alone is insufficient.
-    pub fn solve_refined(
-        &self,
-        a: &GeneralCsc<T>,
-        b: &[T],
-        max_iter: usize,
-    ) -> Result<Vec<T>, RslabError> {
-        Ok(self
-            .solve_refined_with(a, b, &crate::refine::RefinePolicy::steps(max_iter))?
-            .0)
-    }
-
-    /// Iterative refinement under an explicit
-    /// [`RefinePolicy`](crate::refine::RefinePolicy), reporting the achieved
-    /// backward error.
-    pub fn solve_refined_with(
-        &self,
-        a: &GeneralCsc<T>,
-        b: &[T],
-        policy: &crate::refine::RefinePolicy,
-    ) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError> {
-        let t = crate::clock::Instant::now();
-        let mut x = self.solve_inner(b, 1)?;
-        let outcome = self.refine_into(a, b, &mut x, policy)?;
-        self.record_solve(1, t, outcome.steps);
-        Ok((x, outcome))
-    }
-
-    /// Refine an existing iterate in place, allocating nothing for the
-    /// solution.
-    pub fn refine_into(
-        &self,
-        a: &GeneralCsc<T>,
-        b: &[T],
-        x: &mut [T],
-        policy: &crate::refine::RefinePolicy,
-    ) -> Result<crate::refine::RefineOutcome, RslabError> {
-        let n = self.factors.n;
-        if a.n != n || b.len() != n || x.len() != n {
-            return Err(RslabError::DimensionMismatch {
-                expected: n,
-                got: a.n,
-            });
-        }
-        crate::refine::refine_in_place(a, b, x, policy, |r| self.solve_inner(r, 1))
     }
 
     /// Stored fill `nnz(L) + nnz(U)`.
@@ -681,3 +532,54 @@ impl<T: Scalar> LuSolver<T> {
         self.factors.n
     }
 }
+
+impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
+    const NAME: &'static str = "lu";
+
+    fn dim(&self) -> usize {
+        self.factors.n
+    }
+
+    fn counter(&self) -> &crate::diagnostics::SolveCounter {
+        &self.solves
+    }
+
+    /// The factored matrix is `(P_r D_r) A (D_c P_c^T) = L U`. `A x = b`
+    /// gathers through the row side, sweeps `L` forward and `U` backward and
+    /// scatters through the column side; `A^T x = b` is the mirror image,
+    /// `U^T` forward and `L^T` backward.
+    fn solve_raw(&self, b: &[T], nrhs: usize, transpose: bool) -> Result<Vec<T>, RslabError> {
+        let f = &self.factors;
+        let n = f.n;
+        let (gather, g_scale, scatter, s_scale) = if transpose {
+            (&f.perm, &f.d_col, &f.perm_row, &f.d_row)
+        } else {
+            (&f.perm_row, &f.d_row, &f.perm, &f.d_col)
+        };
+        // The sweeps take the block row-major: y[e * nrhs + c].
+        let mut y = vec![T::zero(); n * nrhs];
+        for (e, &orig) in gather.iter().enumerate() {
+            let s = T::from_real(g_scale[orig]);
+            for c in 0..nrhs {
+                y[e * nrhs + c] = b[c * n + orig] * s;
+            }
+        }
+        if transpose {
+            self.plan_u.forward(nrhs, &mut y);
+            self.plan_l.backward(nrhs, &mut y);
+        } else {
+            self.plan_l.forward(nrhs, &mut y);
+            self.plan_u.backward(nrhs, &mut y);
+        }
+        let mut out = vec![T::zero(); n * nrhs];
+        for (e, &orig) in scatter.iter().enumerate() {
+            let s = T::from_real(s_scale[orig]);
+            for c in 0..nrhs {
+                out[c * n + orig] = y[e * nrhs + c] * s;
+            }
+        }
+        Ok(out)
+    }
+}
+
+crate::numeric::direct::direct_solver!(LuSolver);

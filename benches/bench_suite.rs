@@ -549,7 +549,7 @@ fn run_matrix(
 
     // A-priori memory estimate (validate against the measured live peak).
     if let Mat::Unsym(a) = mat {
-        if let Ok(sym) = LuSymbolic::analyze(a) {
+        if let Ok(sym) = LuSymbolic::analyze(a, &SolverSettings::default()) {
             eprintln!("[bench] {name} a-priori {}", sym.estimate_memory::<C>());
         }
     }
@@ -578,7 +578,10 @@ fn run_matrix(
         match mat {
             Mat::Sym(a) => {
                 let t = Instant::now();
-                let sym = skip_err!("analyze", LdltSymbolic::analyze(a));
+                let sym = skip_err!(
+                    "analyze",
+                    LdltSymbolic::analyze(a, &SolverSettings::default())
+                );
                 let ana = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
                 let (fr, mm) = live_peak(|| sym.factor(a, &o));
@@ -608,7 +611,10 @@ fn run_matrix(
             }
             Mat::Unsym(a) => {
                 let t = Instant::now();
-                let sym = skip_err!("analyze", LuSymbolic::analyze(a));
+                let sym = skip_err!(
+                    "analyze",
+                    LuSymbolic::analyze(a, &SolverSettings::default())
+                );
                 let ana = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
                 let (fr, mm) = live_peak(|| sym.factor(a, &o));
@@ -649,7 +655,8 @@ fn run_matrix(
             match mat {
                 Mat::Sym(a) => {
                     let t = Instant::now();
-                    let (sym, s) = rslab::LdltSolver::<C>::tuned(a)?;
+                    let s = rslab::SolverSettings::default();
+                    let sym = rslab::LdltSymbolic::analyze(a, &s)?;
                     let ana = t.elapsed().as_secs_f64() * 1e3;
                     let t = Instant::now();
                     let (fr, mm) = live_peak(|| sym.factor(a, &s));
@@ -679,7 +686,8 @@ fn run_matrix(
                 }
                 Mat::Unsym(a) => {
                     let t = Instant::now();
-                    let (sym, s) = rslab::LuSolver::<C>::tuned(a)?;
+                    let s = rslab::SolverSettings::default();
+                    let sym = rslab::LuSymbolic::analyze(a, &s)?;
                     let ana = t.elapsed().as_secs_f64() * 1e3;
                     let t = Instant::now();
                     let (fr, mm) = live_peak(|| sym.factor(a, &s));
@@ -729,10 +737,10 @@ fn run_matrix(
         .and_then(|v| v.parse().ok())
         .unwrap_or(3000.0);
     let rslab_est_mb = match mat {
-        Mat::Sym(a) => LdltSymbolic::analyze(a)
+        Mat::Sym(a) => LdltSymbolic::analyze(a, &SolverSettings::default())
             .ok()
             .map(|s| s.estimate_memory::<C>().transient_peak_bytes),
-        Mat::Unsym(a) => LuSymbolic::analyze(a)
+        Mat::Unsym(a) => LuSymbolic::analyze(a, &SolverSettings::default())
             .ok()
             .map(|s| s.estimate_memory::<C>().transient_peak_bytes),
     }
@@ -852,7 +860,7 @@ fn run_matrix(
         if let Mat::Unsym(a) = mat {
             let outcome = (|| -> Result<_, rslab::RslabError> {
                 let t = Instant::now();
-                let sym = KluSymbolic::analyze(a)?;
+                let sym = KluSymbolic::analyze(a, &KluSettings::default())?;
                 let ana = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
                 let (fr, mm) = live_peak(|| sym.factor(a, &KluSettings::default()));
@@ -1036,7 +1044,7 @@ fn run_matrix(
         let restart = envf("RLA_BENCH_PC_RESTART", 100.0) as usize;
         let pc_opts = SolverSettings::preconditioner(floor).with_threads(threads.max(1) as usize);
         let outcome = match mat {
-            Mat::Sym(a) => LdltSymbolic::analyze(a).and_then(|sym| {
+            Mat::Sym(a) => LdltSymbolic::analyze(a, &SolverSettings::default()).and_then(|sym| {
                 let t = Instant::now();
                 let (fr, mm) = live_peak(|| sym.factor(a, &pc_opts));
                 let f = fr?;
@@ -1056,7 +1064,7 @@ fn run_matrix(
                     kr.converged,
                 ))
             }),
-            Mat::Unsym(a) => LuSymbolic::analyze(a).and_then(|sym| {
+            Mat::Unsym(a) => LuSymbolic::analyze(a, &SolverSettings::default()).and_then(|sym| {
                 let t = Instant::now();
                 let (fr, mm) = live_peak(|| sym.factor(a, &pc_opts));
                 let f = fr?;
@@ -1347,10 +1355,10 @@ fn main() {
     for (name, mat) in build_family(&family, &sizes) {
         if estimate_only {
             let e = match &mat {
-                Mat::Sym(a) => LdltSymbolic::analyze(a)
+                Mat::Sym(a) => LdltSymbolic::analyze(a, &SolverSettings::default())
                     .ok()
                     .map(|s| s.estimate_memory::<C>()),
-                Mat::Unsym(a) => LuSymbolic::analyze(a)
+                Mat::Unsym(a) => LuSymbolic::analyze(a, &SolverSettings::default())
                     .ok()
                     .map(|s| s.estimate_memory::<C>()),
             };

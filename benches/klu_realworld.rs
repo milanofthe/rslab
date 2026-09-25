@@ -151,7 +151,7 @@ fn main() {
         // --- RSLAB KLU, strictly sequential (default settings otherwise) ---
         let seq = KluSettings::default().with_parallel(rslab::KluParallel::Off);
         let t = Instant::now();
-        let sym = match KluSymbolic::analyze_with(&a, &seq) {
+        let sym = match KluSymbolic::analyze(&a, &seq) {
             Ok(s) => s,
             Err(e) => {
                 println!("  rslab analyze FAILED: {e}");

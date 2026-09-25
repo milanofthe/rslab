@@ -207,7 +207,6 @@ fn factor_lu_left_looking<T: Scalar>(
         supernode_parent,
         n_perturbed,
         n_zeros: zeros_l + zeros_u,
-        solve_threads: crate::numeric::settings::Threads::Ambient,
     })
 }
 
@@ -237,20 +236,8 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
             supernode_parent: Vec::new(),
             n_perturbed: 0,
             n_zeros: 0,
-            solve_threads: crate::numeric::settings::Threads::Ambient,
         });
     }
-
-    // Resolve the solve-phase thread policy: `Ambient` stays ambient
-    // (caller-installed pool); every other policy is pinned to the concrete worker
-    // count the factorization itself used, so a preconditioned iterative solve
-    // orthogonalizes in a pool of exactly that width.
-    let solve_policy = match opts.threads {
-        crate::numeric::settings::Threads::Ambient => crate::numeric::settings::Threads::Ambient,
-        p => crate::numeric::settings::Threads::Fixed(p.resolve(|cap| {
-            crate::numeric::supernodal::analysis::recommend_threads_for_sym(&lusym.symb, cap)
-        })),
-    };
 
     let perturb_floor: Option<f64> = match opts.pivoting.on_zero_pivot {
         ZeroPivotAction::Fail => None,
@@ -343,7 +330,6 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
             )
         },
     )?;
-    fac.solve_threads = solve_policy;
     finish_matching(&mut fac, lusym);
     Ok(fac)
 }

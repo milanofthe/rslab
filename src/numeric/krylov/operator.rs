@@ -1,8 +1,6 @@
 //! The operator and preconditioner interfaces of the Krylov solvers, with
 //! their implementations for the sparse matrices and every factor type.
 
-use super::util::*;
-
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltSolver;
 use crate::numeric::settings::{SolverSettings, Threads};
@@ -99,9 +97,9 @@ impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
     }
 }
 
-/// A preconditioner `M ~ A`: applies `z = M^-1 r`. Implemented by a factored
-/// [`LdltSolver`](crate::numeric::ldlt::LdltSolver)
-/// and by [`NoPreconditioner`] (the unpreconditioned baseline).
+/// A preconditioner `M ~ A`: applies `z = M^-1 r`. Implemented by the direct
+/// solvers (see [`Factorization`]), the low-precision factors and
+/// [`NoPreconditioner`] (the unpreconditioned baseline).
 pub trait Preconditioner<T: Scalar> {
     /// Write `z <- M^-1 r`. `r` and `z` have length `n`.
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError>;
@@ -140,21 +138,6 @@ impl<T: Scalar> Preconditioner<T> for NoPreconditioner {
     }
 }
 
-/// A factored RLA solver is a preconditioner: `M^-1 r` is one forward/back
-/// substitution against the stored `LDL^T` factor.
-impl<T: Scalar> Preconditioner<T> for LdltSolver<T> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
-        let x = self.solve(r)?;
-        z.copy_from_slice(&x);
-        Ok(())
-    }
-    /// Block apply via [`solve_many`](LdltSolver::solve_many): one block
-    /// triangular solve loads each `L`/`D` value once for all `s` columns.
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        apply_block_via_rowmajor(r, z, s, n, |b, s| self.solve_many(b, s))
-    }
-}
-
 /// A memory-halved preconditioner: factor `A` (supplied in `Complex<f64>`) in
 /// `Complex<f32>` and apply it inside an `f64` Krylov iteration. The stored
 /// factor occupies **half the bytes** and its triangular solves run in single
@@ -180,7 +163,7 @@ impl LowPrecisionPreconditioner {
                 .collect(),
         };
         Ok(Self {
-            inner: LdltSolver::factor_with(&a32, opts)?,
+            inner: LdltSolver::factor(&a32, opts)?,
         })
     }
 
@@ -262,97 +245,34 @@ impl Preconditioner<Complex<f64>> for LowPrecisionLu {
         Ok(())
     }
     fn solve_threads(&self) -> Threads {
-        self.inner.solve_thread_policy()
+        Preconditioner::solve_threads(&self.inner)
     }
 }
 
-/// A factorization usable as both a **direct solver** and a [`Preconditioner`].
-/// Implemented by [`LdltSolver`], [`LuSolver`](crate::LuSolver) and
-/// [`KluSolver`](crate::KluSolver), so a caller's
-/// solver loop can hold `&dyn Factorization` and swap symmetric/general,
-/// exact/incomplete, or `f64`/`f32` factors freely.
+/// A direct solver: [`LdltSolver`], [`LuSolver`](crate::LuSolver) and
+/// [`KluSolver`](crate::KluSolver). Each is also a [`Preconditioner`], so a
+/// solver loop can hold `&dyn Factorization` and swap the symmetric, general
+/// and circuit paths, exact or incomplete factors, freely.
 pub trait Factorization<T: Scalar>: Preconditioner<T> {
-    /// Solve `A x = b` directly from the stored factor.
+    /// The matrix dimension.
+    fn n(&self) -> usize;
+    /// Solve `A x = b`.
     fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError>;
-    /// Stored fill (factor nonzeros) - the memory metric.
+    /// Solve `A X = B` for a column-major `n x nrhs` block.
+    fn solve_many(&self, b: &[T], nrhs: usize) -> Result<Vec<T>, RslabError>;
+    /// Solve `A^T x = b` (the plain transpose).
+    fn solve_transpose(&self, b: &[T]) -> Result<Vec<T>, RslabError>;
+    /// Solve `A x = b` with iterative refinement against `a`.
+    fn solve_refined(
+        &self,
+        a: &dyn crate::refine::RefineOperator<T>,
+        b: &[T],
+        policy: &crate::refine::RefinePolicy,
+    ) -> Result<(Vec<T>, crate::refine::RefineOutcome), RslabError>;
+    /// Stored factor entries, the memory metric.
     fn factor_nnz(&self) -> usize;
-    /// Number of statically perturbed pivots (0 for an exact factor).
+    /// Pivots lifted by the static regularization (0 for an exact factor).
     fn n_perturbed(&self) -> usize;
-}
-
-impl<T: Scalar> Factorization<T> for LdltSolver<T> {
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        LdltSolver::solve(self, b)
-    }
-    fn factor_nnz(&self) -> usize {
-        LdltSolver::factor_nnz(self)
-    }
-    fn n_perturbed(&self) -> usize {
-        LdltSolver::n_perturbed(self)
-    }
-}
-
-/// The high-level [`LuSolver`](crate::numeric::lu::LuSolver) is a
-/// preconditioner / factorization too - the unsymmetric twin of the
-/// [`LdltSolver`] impls, so solver-in-the-loop code can be generic over either.
-impl<T: Scalar> Preconditioner<T> for crate::numeric::lu::LuSolver<T> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
-        let x = self.solve(r)?;
-        z.copy_from_slice(&x);
-        Ok(())
-    }
-    fn solve_threads(&self) -> Threads {
-        self.solve_thread_policy()
-    }
-    /// Block apply via [`LuSolver::solve_many`](crate::numeric::lu::LuSolver::solve_many).
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        apply_block_via_rowmajor(r, z, s, n, |b, s| self.solve_many(b, s))
-    }
-}
-
-impl<T: Scalar> Factorization<T> for crate::numeric::lu::LuSolver<T> {
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        crate::numeric::lu::LuSolver::solve(self, b)
-    }
-    fn factor_nnz(&self) -> usize {
-        crate::numeric::lu::LuSolver::factor_nnz(self)
-    }
-    fn n_perturbed(&self) -> usize {
-        crate::numeric::lu::LuSolver::n_perturbed(self)
-    }
-}
-
-/// The KLU path composes with the iterative stack exactly like the
-/// supernodal solvers: an exact (or sweep-refactored) `M^-1 = (LU)^-1` for
-/// [`gmres`](super::gmres)/[`gmres_block`](super::gmres_block). Sequential by design, so [`solve_threads`]
-/// pins the orthogonalization pool to one worker.
-///
-/// [`solve_threads`]: Preconditioner::solve_threads
-impl<T: Scalar> Preconditioner<T> for crate::numeric::klu::KluSolver<T> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
-        let x = self.solve(r)?;
-        z.copy_from_slice(&x);
-        Ok(())
-    }
-    fn solve_threads(&self) -> Threads {
-        self.solve_thread_policy()
-    }
-    /// Block apply via [`KluSolver::solve_many`](crate::KluSolver::solve_many).
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        apply_block_via_rowmajor(r, z, s, n, |b, s| self.solve_many(b, s))
-    }
-}
-
-impl<T: Scalar> Factorization<T> for crate::numeric::klu::KluSolver<T> {
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        crate::numeric::klu::KluSolver::solve(self, b)
-    }
-    fn factor_nnz(&self) -> usize {
-        crate::numeric::klu::KluSolver::factor_nnz(self)
-    }
-    /// KLU never perturbs pivots: a vanishing pivot is a hard
-    /// [`RslabError::SingularBasis`] at factor time instead.
-    fn n_perturbed(&self) -> usize {
-        0
-    }
+    /// Everything the factorization reports about itself.
+    fn diagnostics(&self) -> crate::diagnostics::Diagnostics;
 }

@@ -1,4 +1,5 @@
 pub mod dense_eig;
+pub(crate) mod direct;
 pub mod gemm_tuning;
 pub mod klu;
 pub mod krylov;

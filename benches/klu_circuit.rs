@@ -141,7 +141,7 @@ fn settings_sweep() {
                         .with_row_scaling(scal)
                         .with_btf(btf);
                     let t = Instant::now();
-                    let sym = match KluSymbolic::analyze_with(&a, &s) {
+                    let sym = match KluSymbolic::analyze(&a, &s) {
                         Ok(x) => x,
                         Err(e) => {
                             println!(
@@ -229,7 +229,7 @@ fn main() {
 
         // --- KLU ---
         let t = Instant::now();
-        let sym = KluSymbolic::analyze(&a).unwrap();
+        let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
         let t_ana = t.elapsed();
         let t = Instant::now();
         let mut klu = sym.factor(&a, &KluSettings::default()).unwrap();
@@ -374,10 +374,10 @@ fn main() {
         let t = Instant::now();
         let mut xm_loop = vec![0.0; n * NRHS];
         for c in 0..NRHS {
-            let bc: Vec<f64> = (0..n).map(|i| bm[i * NRHS + c]).collect();
+            let bc: Vec<f64> = (0..n).map(|i| bm[c * n + i]).collect();
             let xc = klu.solve(&bc).unwrap();
             for i in 0..n {
-                xm_loop[i * NRHS + c] = xc[i];
+                xm_loop[c * n + i] = xc[i];
             }
         }
         let t_loop = t.elapsed();

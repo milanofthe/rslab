@@ -34,15 +34,15 @@ fn armed_flag_interrupts_every_path() {
 
     let a = helmholtz(12);
     let s = SolverSettings::default().with_interrupt(flag.clone());
-    let sym = LdltSymbolic::analyze_with(&a, &s).unwrap();
+    let sym = LdltSymbolic::analyze(&a, &s).unwrap();
     assert!(matches!(sym.factor(&a, &s), Err(RslabError::Interrupted)));
 
     let b = convdiff(40);
-    let sym = LuSymbolic::analyze_with(&b, &s).unwrap();
+    let sym = LuSymbolic::analyze(&b, &s).unwrap();
     assert!(matches!(sym.factor(&b, &s), Err(RslabError::Interrupted)));
 
     let ks = KluSettings::default().with_interrupt(flag.clone());
-    let sym = KluSymbolic::analyze(&b).unwrap();
+    let sym = KluSymbolic::analyze(&b, &KluSettings::default()).unwrap();
     assert!(matches!(sym.factor(&b, &ks), Err(RslabError::Interrupted)));
 }
 
@@ -53,7 +53,7 @@ fn cleared_flag_factors_cleanly() {
     let flag = Arc::new(AtomicBool::new(true));
     let a = helmholtz(12);
     let s = SolverSettings::default().with_interrupt(flag.clone());
-    let sym = LdltSymbolic::analyze_with(&a, &s).unwrap();
+    let sym = LdltSymbolic::analyze(&a, &s).unwrap();
     assert!(sym.factor(&a, &s).is_err());
 
     flag.store(false, Ordering::Relaxed);
@@ -81,7 +81,7 @@ fn flag_set_during_the_factor_stops_it() {
     let a = helmholtz(34);
     let flag = Arc::new(AtomicBool::new(false));
     let s = SolverSettings::default().with_interrupt(flag.clone());
-    let sym = LdltSymbolic::analyze_with(&a, &s).unwrap();
+    let sym = LdltSymbolic::analyze(&a, &s).unwrap();
 
     let watchdog = {
         let flag = flag.clone();
@@ -107,13 +107,13 @@ fn unarmed_flag_is_bit_identical() {
     let plain = SolverSettings::default();
     let armed = SolverSettings::default().with_interrupt(Arc::new(AtomicBool::new(false)));
 
-    let x0 = LdltSymbolic::analyze_with(&a, &plain)
+    let x0 = LdltSymbolic::analyze(&a, &plain)
         .unwrap()
         .factor(&a, &plain)
         .unwrap()
         .solve(&rhs)
         .unwrap();
-    let x1 = LdltSymbolic::analyze_with(&a, &armed)
+    let x1 = LdltSymbolic::analyze(&a, &armed)
         .unwrap()
         .factor(&a, &armed)
         .unwrap()
@@ -132,7 +132,7 @@ fn klu_refactor_observes_the_stored_flag() {
     let b = convdiff(40);
     let flag = Arc::new(AtomicBool::new(false));
     let ks = KluSettings::default().with_interrupt(flag.clone());
-    let sym = KluSymbolic::analyze(&b).unwrap();
+    let sym = KluSymbolic::analyze(&b, &KluSettings::default()).unwrap();
     let mut f = sym.factor(&b, &ks).expect("clean factor while unarmed");
 
     flag.store(true, Ordering::Relaxed);

@@ -24,15 +24,6 @@ pub(crate) struct LuPivots {
     pub supernode_parent: Vec<usize>,
     /// Number of statically perturbed pivots.
     pub n_perturbed: usize,
-    /// Thread policy the **solve phase** should honour: resolved from
-    /// the factorization's [`SolverSettings::threads`](crate::SolverSettings::threads) so an iterative solve using
-    /// this factor as a preconditioner runs its parallel orthogonalization in a
-    /// pool of the **same** width - factor and solve share one concurrency budget
-    /// instead of the solve silently fanning out over the global pool.
-    /// [`Threads::Ambient`](crate::Threads::Ambient) means "use the caller's
-    /// current pool" (the solver-in-the-loop path); otherwise a concrete
-    /// [`Threads::Fixed`](crate::Threads::Fixed) worker count.
-    pub solve_threads: crate::numeric::settings::Threads,
 }
 
 /// The numeric result of a sparse LU factorization: the unit lower `L` and
@@ -61,8 +52,6 @@ pub(crate) struct LuNumeric<T> {
     /// pattern, cancellation or `drop_tol`); the stored nonzeros are
     /// `l.nnz() + ut.nnz() - n_zeros`.
     pub n_zeros: usize,
-    /// Thread policy the solves inherit.
-    pub solve_threads: crate::numeric::settings::Threads,
 }
 
 impl<T: Scalar> LuNumeric<T> {
@@ -88,7 +77,6 @@ impl<T: Scalar> LuNumeric<T> {
             d_col: self.d_col,
             supernode_parent: self.supernode_parent,
             n_perturbed: self.n_perturbed,
-            solve_threads: self.solve_threads,
         };
         (self.l, self.ut, pivots)
     }
