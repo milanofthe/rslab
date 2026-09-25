@@ -1,7 +1,7 @@
 # RSLAB
 
 A sparse direct solver for real and complex matrices in pure Rust: no BLAS,
-LAPACK or MKL. Three paths, matched to their operator classes:
+LAPACK or MKL. Three paths:
 
 - **LDL^T** (Bunch-Kaufman) for symmetric and complex-symmetric matrices,
 - **LU** (threshold pivoting) for general unsymmetric matrices,
@@ -91,9 +91,6 @@ Reproduce with `python benches/pardiso_corpus.py <corpus>` and
 - Supernodal, tree-parallel solves on the factor's panels.
 - KLU: maximum transversal and Tarjan SCC for the block triangular form,
   per-block AMD, Gilbert-Peierls LU; independent blocks factor in parallel.
-
-The dense kernels allocate per product; a caching global allocator such as
-`mimalloc` helps, most on Windows (the Python wheel installs it).
 
 ## License
 
