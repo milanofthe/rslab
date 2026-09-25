@@ -89,6 +89,12 @@ pub struct SolverSettings {
     /// A fill-reducing ordering to use instead of `ordering` (see
     /// [`with_permutation`](Self::with_permutation)). Analyze-time.
     pub permutation: Option<std::sync::Arc<[usize]>>,
+    /// Let the ordering race keep the best of several nested-dissection
+    /// seeds on heavy factorizations. It buys a few tenths of a percent to a
+    /// few percent of fill (up to 15 percent on 3D meshes) for two more
+    /// dissections, which pays over many refactorizations of one analysis
+    /// (long sweeps), not for a few. Default `false`. Analyze-time.
+    pub nd_ensemble: bool,
 
     // ---- Kernel scheduling knobs (formerly process-wide atomics) ----
     /// Bunch-Kaufman / LU panel width (blocking factor). Default `64`. Changes the
@@ -358,6 +364,7 @@ impl Default for SolverSettings {
             // `with_relax(Some(..))` where the fronts are dense enough to want it.
             relax: None,
             permutation: None,
+            nd_ensemble: false,
             // Kernel defaults (reproduce the former process-wide atomic defaults).
             panel_nb: DEFAULT_PANEL_NB,
             scalar_gate: DEFAULT_SCALAR_GATE,
@@ -421,6 +428,13 @@ impl SolverSettings {
     /// Builder: set the worker-thread policy directly.
     pub fn with_thread_policy(mut self, threads: Threads) -> Self {
         self.threads = threads;
+        self
+    }
+
+    /// Builder: run the nested-dissection seed ensemble (see
+    /// [`nd_ensemble`](Self::nd_ensemble)).
+    pub fn with_nd_ensemble(mut self, on: bool) -> Self {
+        self.nd_ensemble = on;
         self
     }
 

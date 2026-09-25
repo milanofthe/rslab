@@ -6,8 +6,8 @@ use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rslab::{
-    AnalysisUse, CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSolver, LdltSymbolic, LuSolver,
-    LuSymbolic, MemoryEstimate, RslabError, SolverSettings,
+    CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSolver, LdltSymbolic, LuSolver, LuSymbolic,
+    MemoryEstimate, RslabError, SolverSettings,
 };
 
 use crate::common::{
@@ -39,17 +39,16 @@ pub struct PyLdltSymbolic {
     settings: PySettings,
 }
 
-/// Heuristic-pick or explicit analysis, for `usage` factorizations.
+/// Heuristic-pick or explicit analysis.
 fn analyze_ldlt_core<T: Field>(
     a: &CscMatrix<T>,
     st: &PySettings,
-    usage: AnalysisUse,
 ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
     let mut opts = st.resolved();
     if st.explicit_ordering {
-        return Ok((LdltSymbolic::analyze_for(a, &opts, usage)?, opts));
+        return Ok((LdltSymbolic::analyze_with(a, &opts)?, opts));
     }
-    let (sym, pick) = LdltSolver::<T>::tuned_for(a, &opts, usage)?;
+    let (sym, pick) = LdltSolver::<T>::tuned_with(a, &opts)?;
     if !st.explicit_threads {
         opts.threads = pick.threads;
     }
@@ -206,8 +205,7 @@ pub fn analyze_ldlt(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.csc::<T>(d)?;
-        let (sym, opts) =
-            heavy(py, || analyze_ldlt_core(&a, &st, AnalysisUse::Repeated)).map_err(map_err)?;
+        let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
         Ok(PyLdltSymbolic {
             sym,
             pattern,
@@ -233,7 +231,7 @@ pub fn ldlt_factor(
     with_dtype!(data, |d: T| {
         let a = pattern.csc::<T>(d)?;
         let s = heavy(py, || {
-            let (sym, opts) = analyze_ldlt_core(&a, &st, AnalysisUse::Once)?;
+            let (sym, opts) = analyze_ldlt_core(&a, &st)?;
             sym.factor(&a, &opts)
         })
         .map_err(map_err)?;
@@ -260,13 +258,12 @@ pub struct PyLuSymbolic {
 fn analyze_lu_core<T: Field>(
     a: &GeneralCsc<T>,
     st: &PySettings,
-    usage: AnalysisUse,
 ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
     let mut opts = st.resolved();
     if st.explicit_ordering {
-        return Ok((LuSymbolic::analyze_for(a, &opts, usage)?, opts));
+        return Ok((LuSymbolic::analyze_with(a, &opts)?, opts));
     }
-    let (sym, pick) = LuSolver::<T>::tuned_for(a, &opts, usage)?;
+    let (sym, pick) = LuSolver::<T>::tuned_with(a, &opts)?;
     if !st.explicit_threads {
         opts.threads = pick.threads;
     }
@@ -413,8 +410,7 @@ pub fn analyze_lu(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
-        let (sym, opts) =
-            heavy(py, || analyze_lu_core(&a, &st, AnalysisUse::Repeated)).map_err(map_err)?;
+        let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
         Ok(PyLuSymbolic {
             sym,
             pattern,
@@ -440,7 +436,7 @@ pub fn lu_factor(
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
         let s = heavy(py, || {
-            let (sym, opts) = analyze_lu_core(&a, &st, AnalysisUse::Once)?;
+            let (sym, opts) = analyze_lu_core(&a, &st)?;
             sym.factor(&a, &opts)
         })
         .map_err(map_err)?;

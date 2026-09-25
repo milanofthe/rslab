@@ -19,9 +19,7 @@ pub struct SupernodeParams {
     /// that becomes column `k`); the rest of the analysis runs as usual.
     pub given_perm: Option<std::sync::Arc<[usize]>>,
     /// Let the ordering race run the nested-dissection seed ensemble on large
-    /// problems (see `AnalysisUse`): it buys a little fill for several
-    /// orderings' time, which pays only when the analysis serves many
-    /// factorizations.
+    /// problems (see `SolverSettings::nd_ensemble`).
     pub nd_ensemble: bool,
 }
 
@@ -66,7 +64,7 @@ impl Default for SupernodeParams {
             amalgamation_strategy: AmalgamationStrategy::default(),
             relax: None,
             given_perm: None,
-            nd_ensemble: true,
+            nd_ensemble: false,
         }
     }
 }

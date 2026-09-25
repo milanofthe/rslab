@@ -137,21 +137,6 @@ impl SupernodalAnalysis {
     }
 }
 
-/// What an analysis will serve, which decides how much ordering effort it
-/// buys. The nested-dissection seed ensemble of the ordering race runs two
-/// further nested dissections for a small fill reduction (a few tenths of a
-/// percent to a few percent, up to 15 percent on 3D meshes): worth it when
-/// the analysis is reused across many factorizations, not for one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AnalysisUse {
-    /// One factorization (the one-shot entry points).
-    Once,
-    /// Many factorizations of the same pattern (the analyze-once entry
-    /// points).
-    #[default]
-    Repeated,
-}
-
 /// PARDISO phase 1: analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`,
 /// lower triangle). The result is value-independent and reusable across many
 /// [`factor_numeric`](crate::factor_numeric) calls that share the pattern.
@@ -181,19 +166,8 @@ pub fn analyze_with(
     // solver-in-the-loop contract the factorization honours), so every parallel
     // step inside the analysis - notably the ND seed ensemble - respects the
     // configured worker count instead of grabbing all cores.
-    analyze_for(n, col_ptr, row_idx, opts, AnalysisUse::Repeated)
-}
-
-/// [`analyze_with`] for the given [`AnalysisUse`].
-pub fn analyze_for(
-    n: usize,
-    col_ptr: &[usize],
-    row_idx: &[usize],
-    opts: &SolverSettings,
-    usage: AnalysisUse,
-) -> Result<SupernodalAnalysis, RslabError> {
     in_scoped_pool(opts.resolved_threads(), stack_for_depth(n), || {
-        analyze_with_inner(n, col_ptr, row_idx, opts, usage)
+        analyze_with_inner(n, col_ptr, row_idx, opts)
     })
 }
 
@@ -202,7 +176,6 @@ fn analyze_with_inner(
     col_ptr: &[usize],
     row_idx: &[usize],
     opts: &SolverSettings,
-    usage: AnalysisUse,
 ) -> Result<SupernodalAnalysis, RslabError> {
     let nnz = row_idx.len();
     if n == 0 {
@@ -217,7 +190,7 @@ fn analyze_with_inner(
         nemin: opts.nemin,
         relax: opts.relax,
         given_perm: opts.permutation.clone(),
-        nd_ensemble: usage == AnalysisUse::Repeated,
+        nd_ensemble: opts.nd_ensemble,
         ..SupernodeParams::default()
     };
     let sym = crate::logging::timed(

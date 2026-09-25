@@ -28,8 +28,9 @@ pub enum OrderingMethod {
     /// Race the orderings below on the exact size of their factors and keep
     /// the smallest: minimum degree, minimum fill and the band reducer
     /// always; nested dissection where the predicted factor time can pay for
-    /// it, with a seed ensemble on heavy factorizations whose analysis is
-    /// reused ([`AnalysisUse::Repeated`](crate::AnalysisUse::Repeated)).
+    /// it, with a seed ensemble on heavy factorizations where
+    /// [`SolverSettings::nd_ensemble`](crate::SolverSettings::nd_ensemble)
+    /// asks for it.
     #[default]
     Auto,
     /// Approximate minimum degree (Amestoy, Davis and Duff), on the

@@ -38,6 +38,7 @@ class Settings:
         pivot_u: float | None = ...,
         matching: bool | None = ...,
         nemin: int | None = ...,
+        nd_ensemble: bool | None = ...,
         relax: bool | tuple[int, int] | None = ...,
         panel_nb: int | None = ...,
         scalar_gate: int | None = ...,
