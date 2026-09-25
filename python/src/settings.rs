@@ -145,8 +145,10 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 /// ordering : {'auto', 'auto_race', 'amd', 'amf', 'metis', 'rcm'}, optional
 ///     Fill-reducing ordering. ``None`` (default) uses the heuristic pick,
 ///     the adaptive ordering plus an exact nested-dissection bakeoff on large
-///     systems (with a small seed ensemble once the factorization is heavy
-///     enough to pay for it); an explicit value analyzes with exactly that
+///     systems (with a small seed ensemble for :func:`rslab.analyze` once the
+///     factorization is heavy enough to pay for it over repeated
+///     factorizations; the one-shot functions run one seed); an explicit
+///     value analyzes with exactly that
 ///     ordering, ``'metis'`` being one nested-dissection run. The ordering
 ///     actually used is reported in ``diagnostics()['decisions']``.
 /// nemin : int, optional

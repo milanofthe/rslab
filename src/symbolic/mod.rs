@@ -61,7 +61,8 @@ pub enum OrderingMethod {
     /// on the thread count). The ordering race (`Auto` on large systems,
     /// `AutoRace`) additionally runs a small seed ensemble and keeps the
     /// lowest-fill result when the predicted factorization work is large
-    /// enough to pay for the extra runs (`ND_SEED_RACE_MIN_FLOPS`).
+    /// enough to pay for the extra runs (`ND_SEED_RACE_MIN_FLOPS`) and the
+    /// analysis serves repeated factorizations (`AnalysisUse::Repeated`).
     MetisND,
     /// Reverse Cuthill-McKee band/profile-reducing ordering
     /// (`rslab-ordering-core`: George-Liu degree-sorted BFS from a
@@ -724,7 +725,7 @@ fn symbolic_factorize_race(
         // [`ND_SEED_RACE_MIN_FLOPS`].
         let seeds = match &best {
             Some(champ) if matrix.n > 10_000 && prefix_work(champ) >= ND_RACE_MIN_WORK => {
-                if prefix_flops(champ) >= ND_SEED_RACE_MIN_FLOPS {
+                if snode_params.nd_ensemble && prefix_flops(champ) >= ND_SEED_RACE_MIN_FLOPS {
                     ND_SEED_CANDIDATES.len()
                 } else {
                     ND_SINGLE_SEED.len()

@@ -29,7 +29,7 @@ use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::analysis::{
-    analyze_with as analyze_pattern_with, SupernodalAnalysis,
+    analyze_for as analyze_pattern_for, AnalysisUse, SupernodalAnalysis,
 };
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -112,7 +112,7 @@ impl<T: Scalar> LdltSolver<T> {
     /// `tuning`), the worker count
     /// additionally comes from this machine's cached calibration.
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, RslabError> {
-        let (sym, s) = Self::tuned(a)?;
+        let (sym, s) = Self::tuned_for(a, &SolverSettings::default(), AnalysisUse::Once)?;
         sym.factor(a, &s)
     }
 
@@ -140,10 +140,19 @@ impl<T: Scalar> LdltSolver<T> {
         a: &CscMatrix<T>,
         base: &SolverSettings,
     ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
+        Self::tuned_for(a, base, AnalysisUse::Repeated)
+    }
+
+    /// [`tuned_with`](Self::tuned_with) for the given [`AnalysisUse`].
+    pub fn tuned_for(
+        a: &CscMatrix<T>,
+        base: &SolverSettings,
+        usage: AnalysisUse,
+    ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
         crate::numeric::settings::tuned(
             a,
             base,
-            LdltSymbolic::analyze_with,
+            |a, s| LdltSymbolic::analyze_for(a, s, usage),
             |sym: &LdltSymbolic| sym.estimate_memory::<T>(),
         )
     }
@@ -156,7 +165,7 @@ impl<T: Scalar> LdltSolver<T> {
     pub fn factor_with(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
         // The analysis honours the caller's symbolic settings (ordering, child reordering):
         // `analyze` alone took the defaults and silently ignored `opts.ordering`.
-        LdltSymbolic::analyze_with(a, opts)?.factor(a, opts)
+        LdltSymbolic::analyze_for(a, opts, AnalysisUse::Once)?.factor(a, opts)
     }
 
     /// Solve `A * x = rhs` using the stored factors. The equilibration
@@ -415,9 +424,19 @@ impl LdltSymbolic {
         a: &CscMatrix<T>,
         opts: &SolverSettings,
     ) -> Result<Self, RslabError> {
+        Self::analyze_for(a, opts, AnalysisUse::Repeated)
+    }
+
+    /// [`analyze_with`](Self::analyze_with) for the given [`AnalysisUse`]:
+    /// `Once` when the analysis serves a single factorization.
+    pub fn analyze_for<T: Scalar>(
+        a: &CscMatrix<T>,
+        opts: &SolverSettings,
+        usage: AnalysisUse,
+    ) -> Result<Self, RslabError> {
         a.validate()?;
         let t = crate::clock::Instant::now();
-        let symbolic = analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?;
+        let symbolic = analyze_pattern_for(a.n, &a.col_ptr, &a.row_idx, opts, usage)?;
         let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
         let sym = Self {
             symbolic,
