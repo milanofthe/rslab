@@ -52,7 +52,10 @@ impl EliminationTree {
     /// Liu's union-find etree construction over an abstract column-entry view:
     /// `cols(j)` yields the row indices of column `j` (any order; entries
     /// `>= j` are skipped). The result is a unique function of the pattern.
-    fn from_cols<I: Iterator<Item = usize>>(n: usize, cols: impl Fn(usize) -> I) -> Self {
+    pub(crate) fn from_cols<I: Iterator<Item = usize>>(
+        n: usize,
+        cols: impl Fn(usize) -> I,
+    ) -> Self {
         let mut parent: Vec<Option<usize>> = vec![None; n];
         let mut ancestor = vec![0usize; n]; // union-find forest
 

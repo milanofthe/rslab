@@ -94,11 +94,16 @@ pub fn total_factor_nnz(counts: &[usize]) -> usize {
 /// - Davis, *Direct Methods for Sparse Linear Systems* section 4.4
 /// - CSparse `cs_counts.c` (BSD, structural reference)
 pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<usize> {
-    gnp(pattern.n, etree, |i| {
-        pattern.row_idx[pattern.col_ptr[i]..pattern.col_ptr[i + 1]]
-            .iter()
-            .copied()
-    })
+    gnp(
+        pattern.n,
+        etree,
+        |i| {
+            pattern.row_idx[pattern.col_ptr[i]..pattern.col_ptr[i + 1]]
+                .iter()
+                .copied()
+        },
+        |_| 1,
+    )
 }
 
 /// [`column_counts_gnp`] of the permuted pattern `P^T A P` (`perm[new] =
@@ -113,21 +118,31 @@ pub fn column_counts_permuted(
     perm_inv: &[usize],
     etree: &EliminationTree,
 ) -> Vec<usize> {
-    gnp(pattern.n, etree, |i| {
-        let j = perm[i];
-        pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]]
-            .iter()
-            .map(|&r| perm_inv[r])
-    })
+    gnp(
+        pattern.n,
+        etree,
+        |i| {
+            let j = perm[i];
+            pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]]
+                .iter()
+                .map(|&r| perm_inv[r])
+        },
+        |_| 1,
+    )
 }
 
 /// The Gilbert-Ng-Peyton count over a column view: `cols(i)` yields the rows
 /// of column `i` (any order, no duplicates; entries on or above the diagonal
-/// are skipped).
-fn gnp<I: Iterator<Item = usize>>(
+/// are skipped), and row `r` counts `weight(r)` times. With every weight one
+/// these are the column counts; on a graph of groups of indistinguishable
+/// vertices weighted by their sizes, the count of a group is the one of its
+/// first member (every term of the count belongs to one row, and a group's
+/// rows enter together).
+pub(crate) fn gnp<I: Iterator<Item = usize>>(
     n: usize,
     etree: &EliminationTree,
     cols: impl Fn(usize) -> I,
+    weight: impl Fn(usize) -> i64,
 ) -> Vec<usize> {
     if n == 0 {
         return Vec::new();
@@ -141,7 +156,7 @@ fn gnp<I: Iterator<Item = usize>>(
     // T^r_i trivially contains i as a leaf whenever i has no etree children
     // - the contribution of every node i to its own column count).
     let mut delta: Vec<i64> = (0..n)
-        .map(|i| if children[i].is_empty() { 1 } else { 0 })
+        .map(|i| if children[i].is_empty() { weight(i) } else { 0 })
         .collect();
 
     // maxfirst[k]: max first[i_prev] over previously-seen row-subtree leaves
@@ -160,7 +175,7 @@ fn gnp<I: Iterator<Item = usize>>(
         // its parent's delta, canceling the double-count produced when
         // the accumulation pass merges i and parent(i)'s subtree sums.
         if let Some(p) = etree.parent[i] {
-            delta[p] -= 1;
+            delta[p] -= weight(i);
         }
 
         // Walk column i of the symmetric pattern. Entries with row
@@ -173,7 +188,7 @@ fn gnp<I: Iterator<Item = usize>>(
                 continue;
             }
             if fi > maxfirst[partner] {
-                delta[i] += 1;
+                delta[i] += weight(partner);
                 let pl = prevleaf[partner];
                 if pl != -1 {
                     // LCA of pl and i via path-compressed find on the
@@ -189,7 +204,7 @@ fn gnp<I: Iterator<Item = usize>>(
                         ancestor[cur] = root;
                         cur = next;
                     }
-                    delta[root] -= 1;
+                    delta[root] -= weight(partner);
                 }
                 prevleaf[partner] = i as i64;
                 maxfirst[partner] = fi;
