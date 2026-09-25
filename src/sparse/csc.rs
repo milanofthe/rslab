@@ -234,7 +234,7 @@ impl<T: Scalar> CscMatrix<T> {
     }
 
     /// Expand the lower-triangle CSC to a full symmetric sparsity pattern
-    /// (see [`symmetric_pattern`]).
+    /// (see the free function `symmetric_pattern`).
     pub fn symmetric_pattern(&self) -> CscPattern {
         symmetric_pattern(self.n, &self.col_ptr, &self.row_idx)
     }
@@ -330,8 +330,7 @@ fn symmetric_pattern_sorted(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> C
     // Count entries per column in the full pattern
     let mut col_counts = vec![0usize; n];
     for j in 0..n {
-        for k in col_ptr[j]..col_ptr[j + 1] {
-            let i = row_idx[k];
+        for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
             col_counts[j] += 1; // lower triangle entry in column j
             if i != j {
                 col_counts[i] += 1; // transpose entry in column i
@@ -350,8 +349,7 @@ fn symmetric_pattern_sorted(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> C
     // Place entries
     let mut offsets = pat_col_ptr[..n].to_vec();
     for j in 0..n {
-        for k in col_ptr[j]..col_ptr[j + 1] {
-            let i = row_idx[k];
+        for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
             // (i, j) in lower triangle
             pat_row_idx[offsets[j]] = i;
             offsets[j] += 1;

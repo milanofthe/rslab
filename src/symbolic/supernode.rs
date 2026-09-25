@@ -128,7 +128,7 @@ pub fn pick_amalgamation_strategy(etree: &EliminationTree) -> AmalgamationStrate
 ///
 /// A fundamental supernode is a maximal set of consecutive columns j, j+1, ..., j+k
 /// where each column's row structure is identical (the same set of row indices,
-/// minus the column being eliminated). See [`find_fundamental_supernodes`] for
+/// minus the column being eliminated). See `find_fundamental_supernodes` for
 /// the detection conditions.
 ///
 /// After detecting fundamental supernodes, amalgamation merges an adjacent
