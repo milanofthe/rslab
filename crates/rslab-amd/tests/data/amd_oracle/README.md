@@ -33,12 +33,6 @@ and quote its provenance (generator spec or file SHA-256).
 | `tridiag_10`    | 10  | programmatic: tridiagonal                          |
 | `grid_7x7`      | 49  | programmatic: 2D 5-point stencil                   |
 | `amd_demo_24`   | 24  | programmatic (6x4 grid) - synthetic substitute, see below |
-| `gh_258`        | 52  | file: faer-rs regression matrix (SHA-256 below)    |
-
-### Provenance of `gh_258`
-
-Input file: faer-rs `faer/test_data/sparse_cholesky/gh_258.txt`
-SHA-256: `9f70a3cfb1b068984cf76b8b11da1a786a39c8701a1cc48a909fd25aca282c40`
 
 ### `amd_demo_24` is a synthetic substitute
 

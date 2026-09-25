@@ -10,9 +10,7 @@ use rslab::{
     MemoryEstimate, RslabError, SolverSettings,
 };
 
-use crate::common::{
-    heavy, map_err, memory_estimate_dict, scalar_bytes, vector, with_dtype, Pattern,
-};
+use crate::common::{heavy, map_err, memory_estimate_dict, scalar_bytes, with_dtype, Pattern};
 use crate::factor::{Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
 
@@ -629,11 +627,4 @@ pub fn klu_factor(
             inner: T::klu(Pair::new(s, a)),
         })
     })
-}
-
-// Silence the unused-import lint for `vector` on targets where the symbolic
-// module does not extract vectors directly.
-#[allow(dead_code)]
-fn _uses_vector(b: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
-    vector::<f64>(b, "x")
 }

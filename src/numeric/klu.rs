@@ -1,6 +1,6 @@
 //! KLU-style sparse LU: BTF + per-block left-looking Gilbert-Peierls.
 //!
-//! The third direct path next to the multifrontal LDL^T and LU, built for
+//! The third direct path next to the supernodal LDL^T and LU, built for
 //! circuit-shaped matrices: extremely sparse, unsymmetric, near-triangularizable,
 //! with diagonal blocks far too small for supernodal/BLAS-3 kernels to pay off.
 //! Algorithmic reference: SuiteSparse KLU (Davis & Palamadai Natarajan); this is
@@ -26,9 +26,9 @@
 //!    became zero under the frozen pivot order fails cleanly so the caller can
 //!    re-[`factor`](KluSymbolic::factor) with pivoting.
 //!
-//! Every phase is strictly sequential and allocation-deterministic, so results
-//! are **bit-identical across runs and thread counts**, this path doubles as
-//! the determinism arbiter for the parallel multifrontal paths.
+//! Each block factors sequentially, and independent blocks may factor in
+//! parallel ([`KluParallel`]); the results are bit-identical across runs and
+//! thread counts.
 
 use crate::error::RslabError;
 use crate::numeric::supernodal::PanelPtr;
@@ -154,7 +154,6 @@ impl KluSettings {
         self
     }
 
-    /// Composable toggle for the BTF permutation (see [`btf`](Self::btf)).
     /// Enable or disable the MC64 row matching (see
     /// [`KluSettings::matching`]).
     pub fn with_matching(mut self, on: bool) -> Self {
@@ -162,6 +161,7 @@ impl KluSettings {
         self
     }
 
+    /// Composable toggle for the BTF permutation (see [`btf`](Self::btf)).
     pub fn with_btf(mut self, on: bool) -> Self {
         self.btf = on;
         self
@@ -766,7 +766,7 @@ struct OrderedForm {
 }
 
 /// Per-block AMD on the symmetrized block pattern (B + B^T, with diagonal,
-/// matching what the multifrontal paths feed rslab-amd), applied
+/// as the supernodal paths feed rslab-amd), applied
 /// symmetrically to the form's permutations. Blocks of size <= 2 have
 /// nothing to reorder. With `score_it`, additionally accumulates the exact
 /// Cholesky lnz of each AMD-ordered block pattern (Gilbert-Ng-Peyton column
@@ -1760,13 +1760,6 @@ impl<T: Scalar> KluSolver<T> {
     }
 
     /// Number of BTF diagonal blocks.
-    /// Diagnostic: blocks admitted to the pipelined refactor replay, with
-    /// their Amdahl-bounded worker counts.
-    #[doc(hidden)]
-    pub fn pipelined_blocks(&self) -> &[(usize, usize)] {
-        &self.factors.pipelined
-    }
-
     pub fn n_blocks(&self) -> usize {
         self.factors.block_ptr.len() - 1
     }
@@ -2673,14 +2666,14 @@ mod tests {
     }
 
     #[test]
-    fn klu_solves_circuit_like_and_matches_multifrontal() {
+    fn klu_solves_circuit_like_and_matches_lu() {
         let a = circuit_like(200, 42);
         let b: Vec<f64> = (0..200).map(|i| (i % 11) as f64 - 5.0).collect();
         let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
         assert!(s.n_blocks() >= 2, "bridge structure must be reducible");
         let x = s.solve(&b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-12, "residual {}", resid(&a, &x, &b));
-        // cross-check against the multifrontal LU
+        // cross-check against the supernodal LU
         let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let xr = solve_lu(&f, &b).unwrap();
         let diff = x
@@ -2688,14 +2681,14 @@ mod tests {
             .zip(&xr)
             .map(|(&p, &q)| (p - q).abs())
             .fold(0.0, f64::max);
-        assert!(diff < 1e-9, "klu vs multifrontal differ by {diff}");
+        assert!(diff < 1e-9, "klu vs lu differ by {diff}");
     }
 
     #[test]
     fn klu_complex_small_diagonal_pivots() {
         // Small diagonal, large off-diagonals: threshold pivoting must
         // abandon the diagonal and still solve accurately (same layout as
-        // the multifrontal LU pivoting test).
+        // the supernodal LU pivoting test).
         let c = |re, im| Complex::new(re, im);
         let m = 6;
         let n = m * m;

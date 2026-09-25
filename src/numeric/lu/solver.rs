@@ -709,18 +709,3 @@ pub fn factor_general_lu<T: Scalar>(
     factor_general_lu_numeric(&LuSymbolic::analyze_with(a, opts)?, a, opts)
         .map(LuNumeric::into_factors)
 }
-
-// Supernodal left-looking LU
-//
-// The unsymmetric twin of the left-looking LDL^T path: each supernode keeps two
-// dense panels - `lbuf` (its columns: diagonal block + L21, full height) and
-// U12 (its rows' trailing-column part, in the `U^T` panel) - assembled from `A` and
-// updated by every factored descendant. The contribution of descendant `k` is
-// the rank-`ncol_k` outer product `-L_k[Ok,:]*U_k[:,Ok]`; the part landing in
-// `s` splits into two GEMMs: `-L_k[Ok,:]*U_k[:,Pk]` into `lbuf` (columns of `s`)
-// and `-L_k[Pk,:]*U_k[:,trailing]` into U12 (rows of `s`). Then the panel
-// is factored in place (`cdiv`) with **no trailing/CB update** - there is no
-// contribution-block stack and no per-front extract copy-out, the PARDISO
-// transient profile. 1x1 static pivoting (no row interchange), as in the
-// multifrontal v1; matches the equilibrated preconditioner use case.
-// ===========================================================================

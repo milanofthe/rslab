@@ -45,7 +45,7 @@ pub(crate) struct KernelTuning<'a> {
     pub use_gemm_schur: bool,
     /// Threshold partial-pivoting tolerance `u in [0, 1]` for the left-looking LU
     /// path (see [`DEFAULT_PIVOT_U`]). Ignored by the LDL^T kernels (Bunch-Kaufman
-    /// has its own fixed `alpha`) and by the multifrontal LU front (full pivoting).
+    /// has its own fixed `alpha`).
     pub pivot_u: f64,
     /// The caller's cancellation flag, read and never written. `None` is the
     /// unarmed default: the poll is one `Option` branch and touches no atomic.
@@ -169,7 +169,7 @@ mod tests {
 
     /// The panel width changes the pivot sequence (a different but valid factor),
     /// so the factor is not bit-identical across NB - but every width must still
-    /// produce a correct solve, on both the left-looking and multifrontal paths.
+    /// produce a correct solve.
     #[test]
     fn panel_nb_preserves_correctness() {
         let (a, b) = helmholtz(9);

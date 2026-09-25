@@ -349,57 +349,6 @@ fn pivoting_triggered_small_diagonal() {
 }
 
 #[test]
-fn lu_left_looking_pivoting_small_diagonal() {
-    // Small diagonal, large off-diagonals -> restricted partial pivoting must
-    // fire on (nearly) every column. The left-looking path (1x1 static) would
-    // eliminate on the tiny pivots and lose accuracy; with pivoting it must
-    // match the multifrontal and hit a tiny residual.
-    let c = |re, im| Complex::new(re, im);
-    let m = 6;
-    let n = m * m;
-    let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
-    let idx = |a: usize, b: usize| a * m + b;
-    for a in 0..m {
-        for b in 0..m {
-            let p = idx(a, b);
-            rr.push(p);
-            cc.push(p);
-            vv.push(c(0.05, 0.01)); // tiny diagonal -> threshold pivoting fires
-            if b + 1 < m {
-                let q = idx(a, b + 1);
-                rr.push(p);
-                cc.push(q);
-                vv.push(c(2.0, 0.3));
-                rr.push(q);
-                cc.push(p);
-                vv.push(c(1.5, -0.2));
-            }
-            if a + 1 < m {
-                let q = idx(a + 1, b);
-                rr.push(p);
-                cc.push(q);
-                vv.push(c(1.8, 0.1));
-                rr.push(q);
-                cc.push(p);
-                vv.push(c(2.2, 0.4));
-            }
-        }
-    }
-    let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
-    let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    let ll = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let mf = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-    let xl = solve_lu(&ll, &b).unwrap();
-    let xm = solve_lu(&mf, &b).unwrap();
-    let mut ax = vec![Complex::new(0.0, 0.0); n];
-    a.matvec(&xl, &mut ax);
-    let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
-    assert!(res < 1e-9, "left-looking pivoting residual {res}");
-    let diff = (0..n).map(|i| (xl[i] - xm[i]).norm()).fold(0.0, f64::max);
-    assert!(diff < 1e-9, "left-looking vs multifrontal differ {diff}");
-}
-
-#[test]
 fn lu_pivot_u_knob_wired_and_solves() {
     // The tunable threshold `u` governs the left-looking LU pivot test. On a
     // well-scaled, diagonally-dominant grid the pivot never needs to move, so
@@ -554,51 +503,6 @@ fn complex_unsymmetric_2d_grid() {
     let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
     let x = solve_lu(&f, &b).unwrap();
     assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
-}
-
-#[test]
-fn lu_left_looking_2d_grid_solves() {
-    // Unsymmetric, diagonally dominant complex 2D grid.
-    let c = |re, im| Complex::new(re, im);
-    let m = 14;
-    let n = m * m;
-    let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
-    let idx = |a: usize, b: usize| a * m + b;
-    for a in 0..m {
-        for b in 0..m {
-            let p = idx(a, b);
-            rr.push(p);
-            cc.push(p);
-            vv.push(c(16.0, 1.0));
-            if b + 1 < m {
-                let q = idx(a, b + 1);
-                rr.push(p);
-                cc.push(q);
-                vv.push(c(-1.0, 0.2));
-                rr.push(q);
-                cc.push(p);
-                vv.push(c(-2.0, 0.1));
-            }
-            if a + 1 < m {
-                let q = idx(a + 1, b);
-                rr.push(p);
-                cc.push(q);
-                vv.push(c(-1.5, 0.3));
-                rr.push(q);
-                cc.push(p);
-                vv.push(c(-0.5, 0.4));
-            }
-        }
-    }
-    let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
-    let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
-    let sym = LuSymbolic::analyze(&a).unwrap();
-    let ll = sym.factor(&a, &SolverSettings::default()).unwrap();
-    let xl = ll.solve(&b).unwrap();
-    let mut am = vec![Complex::new(0.0, 0.0); n];
-    a.matvec(&xl, &mut am);
-    let res = (0..n).map(|i| (am[i] - b[i]).norm()).fold(0.0, f64::max);
-    assert!(res < 1e-8, "left-looking LU residual {res}");
 }
 
 #[test]

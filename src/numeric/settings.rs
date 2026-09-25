@@ -55,7 +55,7 @@ pub struct SolverSettings {
     /// Threshold dropping for incomplete factorization. When `Some(tau)`, fill
     /// entries of `L` with magnitude below `tau` (relative to the column) are
     /// discarded, trading factor accuracy for memory. `None` = complete
-    /// factorization. (Wired in a later stage.)
+    /// factorization.
     pub drop_tol: Option<f64>,
     /// Worker-thread policy for this factorization, run in a **scoped** rayon pool
     /// (not the global pool). Either a [`Fixed`](Threads::Fixed) count or
@@ -128,8 +128,8 @@ pub struct SolverSettings {
     /// (the historical one-pass inf-norm, bit-identical to before this knob).
     /// [`Identity`](crate::ScalingStrategy::Identity) disables scaling;
     /// [`InfNorm`](crate::ScalingStrategy::InfNorm) is the iterative Knight-Ruiz
-    /// (Ruiz) equilibration; [`Auto`](crate::ScalingStrategy::Auto) routes to
-    /// MC64 matching on the arrow-KKT signature else inf-norm. Scaling changes only
+    /// (Ruiz) equilibration; [`Mc64Symmetric`](crate::ScalingStrategy::Mc64Symmetric)
+    /// scales by a maximum-product matching. Scaling changes only
     /// values (not the pattern), so the a-priori memory estimate is unaffected.
     /// Consumed by the symmetric path; the unsymmetric LU path uses its own
     /// two-sided row/column equilibration.
@@ -326,7 +326,7 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
 /// committed only as the recursion descends), instead of a fixed guess that a
 /// deep enough chain overflows. `0` (shallow trees) keeps the rayon default.
 pub(crate) fn stack_for_depth(depth: usize) -> usize {
-    const FRAME: usize = 32 * 1024; // per-frame budget (LL ~6.7 KB measured; MF larger)
+    const FRAME: usize = 32 * 1024; // per-frame budget (~6.7 KB measured)
     const MIN: usize = 16 * 1024 * 1024; // floor (>= the rayon default; covers ~depth 500)
                                          // 8 GB cap (depth ~256k) on 64-bit; 1 GB on 32-bit targets (wasm32), where
                                          // the 64-bit literal would overflow usize at const evaluation.

@@ -143,8 +143,7 @@ fn emit_and_free<T: Scalar>(
     unsafe { emit.panels.set(k, (l_out, u_out)) };
 }
 
-/// Supernodal left-looking LU producing the same [`LuFactors`] as the
-/// multifrontal path. `inp` is the equilibrated permuted matrix; `d_row`/`d_col`
+/// Supernodal left-looking LU into [`LuFactors`]. `inp` is the equilibrated permuted matrix; `d_row`/`d_col`
 /// the equilibration carried into the result.
 #[allow(clippy::too_many_arguments)]
 fn factor_lu_left_looking<T: Scalar>(

@@ -20,8 +20,8 @@ use num_complex::Complex;
 use std::fmt::Debug;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
-/// A scalar field element supporting the operations the dense and multifrontal
-/// numeric kernels require.
+/// A scalar field element supporting the operations the numeric kernels
+/// require.
 pub trait Scalar:
     'static
     + Copy

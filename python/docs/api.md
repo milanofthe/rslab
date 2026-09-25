@@ -365,7 +365,7 @@ Solve `A X = B` for an `n x nrhs` block in one batched pass.
 ### class `Lu`
 
 A general (unsymmetric) factor `P_r^T A P_c = L U` (supernodal
-left-looking or multifrontal LU with threshold pivoting), from
+left-looking LU with threshold pivoting), from
 `rslab.lu` or `LuSymbolic.factor`.
 
 **Attributes**
@@ -878,7 +878,7 @@ directly. Unknown keywords raise `TypeError`; invalid values `ValueError`.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
 - `drop_tol` (float, optional): Incomplete-factorization threshold: fill below it (relative to the column) is discarded, turning the factor into an ILU-style preconditioner. `None` keeps the complete factor.
 - `pivot_u` (float, optional): Threshold partial-pivoting tolerance of the LU path in `[0, 1]` (default 0.1; `1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
-- `scaling` ({'one_pass', 'inf_norm', 'mc64', 'auto', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
+- `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
 - `matching` (bool, default True): Maximum-product row matching (MC64) before the LU analysis: rows are permuted so the matched entries form the diagonal and both sides are scaled to unit magnitude there, which keeps the element growth of the front-restricted pivoting bounded. Applied where a diagonal entry is missing, zero or negligible against its column; with a usable diagonal the matrix is analyzed as given. `False` never matches. LU path only.
 - `panel_nb` (int, optional): Panel width (blocking factor) of the dense kernels, default 64.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
@@ -1000,7 +1000,7 @@ memory, one matrix-vector product per iteration, no restart.
 
 - `A` (scipy.sparse matrix): The `n x n` operator.
 - `b` (ndarray, shape (n,)): Right-hand side.
-- `M` (factor handle, optional): A factor (`ldlt`, `lu`, `klu`, typically incomplete or low-rank) used as the preconditioner.
+- `M` (factor handle, optional): A factor (`ldlt`, `lu`, `klu`, typically incomplete or with static pivoting) used as the preconditioner.
 - `tol` (float, default 1e-8): Relative residual target `||b - A x|| <= tol * ||b||`.
 - `maxit` (int, default 400): Iteration budget.
 

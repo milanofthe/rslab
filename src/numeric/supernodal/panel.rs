@@ -262,8 +262,8 @@ pub fn permute_panel_rows<T: Copy>(
 /// The factor's buffer while a numeric driver fills it: one slot per
 /// supernode of the analysis, sized `(w + m) x w` from the symbolic row
 /// counts, back to back in supernode order. Each slot is written by the one
-/// task that owns its supernode (the left-looking drivers factor straight
-/// into it; the multifrontal drivers copy a finished front in), read by the
+/// task that owns its supernode (the drivers factor straight into it), read
+/// by the
 /// tasks that update from it once it is published, and finished in place
 /// ([`finish_panel`]). [`finish`](Self::finish) then closes the gaps left by
 /// dropped rows and yields the [`PanelFactor`].

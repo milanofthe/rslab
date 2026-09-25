@@ -525,8 +525,8 @@ def cocg(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
     b : ndarray, shape (n,)
         Right-hand side.
     M : factor handle, optional
-        A factor (``ldlt``, ``lu``, ``klu``, typically incomplete or
-        low-rank) used as the preconditioner.
+        A factor (``ldlt``, ``lu``, ``klu``, typically incomplete or with
+        static pivoting) used as the preconditioner.
     tol : float, default 1e-8
         Relative residual target ``||b - A x|| <= tol * ||b||``.
     maxit : int, default 400

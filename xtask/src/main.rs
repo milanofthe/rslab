@@ -37,6 +37,5 @@ fn cmd_calibrate() -> i32 {
         c.speedup, c.speedup_threads
     );
     println!("timing CV            : {:.3}", c.time_cv);
-    println!("=> calibrated min_gain guard : {:.3}", c.min_gain());
     0
 }
