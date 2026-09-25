@@ -456,7 +456,6 @@ impl KluSymbolic {
             panels_all_bytes: 0,
             panel_live_peak_bytes: 0,
             transient_peak_bytes: factor_bytes + input_bytes + workspace_bytes,
-            mf_transient_peak_bytes: factor_bytes + input_bytes + workspace_bytes,
             factor_flops: fill.flops,
             critical_path_flops: fill.flops,
             max_tree_width: 1,

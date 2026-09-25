@@ -5,12 +5,12 @@
 //! It targets matrices whose *values* are unsymmetric (e.g. MoM A-EFIE
 //! near-field saddle preconditioners, where the symmetric and antisymmetric
 //! parts are comparable) but reuses the full symmetric machinery: the
-//! fill-reducing ordering, supernodes, assembly tree, level parallelism
+//! fill-reducing ordering, supernodes and assembly tree
 //! ([`analyze`](crate::numeric::multifrontal_ldlt::analyze)) and the SIMD
-//! `gemm` Schur kernel. Only the per-front kernel changes - an unsymmetric LU
-//! producing separate `L` and `U` - and the analysis runs on the **symmetrized
-//! pattern** `A union A^T` so the elimination structure carries fill for both
-//! factors.
+//! `gemm` Schur kernel. Only the dense panel kernel changes - an unsymmetric
+//! LU producing separate `L` and `U` - and the analysis runs on the
+//! **symmetrized pattern** `A union A^T` so the elimination structure carries
+//! fill for both factors.
 //!
 //! ## Pivoting
 //!
@@ -24,66 +24,21 @@
 //!   kept in supernodal panel form ([`PanelFactor`], see [`LuNumeric`]), in
 //!   factorization order: each supernode's finished panels become the stored
 //!   factor, and [`LuNumeric::into_factors`] materializes the sparse `L` (CSC)
-//!   and `U` (CSR) of [`LuFactors`] on demand. The default factor path is the
-//!   supernodal **left-looking** kernel (low transient, no CB stack); the
-//!   multifrontal path is opt-in via [`SolverSettings::with_method`].
+//!   and `U` (CSR) of [`LuFactors`] on demand. The factorization is the
+//!   supernodal **left-looking** kernel (low transient, no contribution-block
+//!   stack).
 
 use crate::error::RslabError;
-use crate::numeric::blr::BlrMatrix;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::multifrontal_ldlt::{analyze_with, perturb_pivot};
 use crate::numeric::panel_factor::{finish_panel, PanelArena, PanelFactor, PanelOut};
-use crate::numeric::settings::{BlrMode, FactorMethod, SolverSettings, ZeroPivotAction};
+use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-
-/// Reusable dense front-buffer pool. The multifrontal driver factors thousands
-/// of fronts, each needing a transient `nrow^2 ` working buffer. Allocating one
-/// per front (and freeing it) churns the system allocator with large, varying
-/// sizes; on Windows the heap retains the freed blocks rather than returning
-/// them to the OS, so peak RSS balloons far above the live set (the OOM the
-/// pure-per-front allocation caused). This pool recycles a handful of buffers
-/// (~ the concurrency level) instead, capping the transient at the live set.
-/// Shared with the symmetric multifrontal twin
-/// ([`crate::numeric::multifrontal_ldlt`]), whose per-front `nrow^2` buffer has
-/// the same fragmentation exposure.
-pub(crate) struct FrontPool<T>(Mutex<Vec<Vec<T>>>);
-
-/// Only buffers up to this many entries are recycled. The churning majority of
-/// small/medium fronts (which drive fragmentation) stay pooled; the rare huge
-/// root/separator fronts are freed immediately rather than pinning their (GB-
-/// scale) capacity in the pool for the whole factorization. 4M entries ~ 64 MB
-/// for `Complex<f64>` (front height ~2000).
-const POOL_MAX_LEN: usize = 4_000_000;
-
-impl<T: Scalar> FrontPool<T> {
-    pub(crate) fn new() -> Self {
-        FrontPool(Mutex::new(Vec::new()))
-    }
-    /// Take a buffer (reused if available) and zero-fill it to `len`.
-    pub(crate) fn take(&self, len: usize) -> Vec<T> {
-        let mut buf = self
-            .0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .pop()
-            .unwrap_or_default();
-        buf.clear();
-        buf.resize(len, T::zero());
-        buf
-    }
-    /// Return a buffer for reuse, unless it is an oversized (huge-front) buffer
-    /// whose capacity we do not want to pin in the pool - those are dropped.
-    pub(crate) fn give(&self, buf: Vec<T>) {
-        if buf.capacity() <= POOL_MAX_LEN {
-            self.0.lock().unwrap_or_else(|p| p.into_inner()).push(buf);
-        }
-    }
-}
 
 thread_local! {
     /// Per-worker global->front-local index scratch (`usize`, scalar-independent),
@@ -93,92 +48,6 @@ thread_local! {
     /// driver is a work-stealing tree recursion rather than a level `par_iter`.
     static GLOC_SCRATCH: std::cell::RefCell<Vec<Li>> =
         const { std::cell::RefCell::new(Vec::new()) };
-}
-
-// --- BLR contribution-block compression (opt-in `RLA_BLR_CB`) --------------
-//
-// The dominant factorization transient is the live contribution-block (CB)
-// stack - `sum cnrow^2` across the active assembly frontier, ~5x the L/U volume and
-// the source of the memory spike / OOM. A CB is a frontal Schur complement of a
-// smooth (MoM near-field) operator, so its off-diagonal tiles are numerically
-// low-rank. Storing each large CB block-low-rank on the stack - and densifying
-// it tile-by-tile only at the parent's extend-add - shrinks the live stack by
-// the tile compression ratio at a small per-tile densify transient. The factor
-// then becomes approximate (a preconditioner), exactly the LU/MoM use case
-// where GMRES refinement absorbs the BLR tolerance. The fast dense `gemm`
-// `lu_front` kernel is unchanged; only the CB *storage* is compressed.
-
-/// A front's contribution block: dense, or BLR-compressed for the stack.
-enum Contribution<T: crate::scalar::Scalar> {
-    Dense(Vec<T>),
-    Blr(BlrMatrix<T>),
-}
-
-impl<T: Scalar> Contribution<T> {
-    /// Extend-add this CB into front `f` (`nrow`-tall, column-major) at the
-    /// parent-local positions `loc` (CB index -> front-local). `cn` is the CB
-    /// dimension (used by the dense case; the BLR case carries its own).
-    fn extend_add_into(&self, loc: &[usize], cn: usize, f: &mut [T], nrow: usize) {
-        match self {
-            Contribution::Dense(cb) => {
-                for jc in 0..cn {
-                    let frow = loc[jc] * nrow;
-                    let cb_col = &cb[jc * cn..jc * cn + cn];
-                    for ic in 0..cn {
-                        let dst = frow + loc[ic];
-                        f[dst] = f[dst] + cb_col[ic];
-                    }
-                }
-            }
-            Contribution::Blr(blr) => {
-                // Densify one tile at a time (<= bxb transient) and scatter.
-                for ib in 0..blr.nbr {
-                    let (r0, bm) = blr.row_extent(ib);
-                    for jb in 0..blr.nbc {
-                        let (c0, bn) = blr.col_extent(jb);
-                        let tile = blr.block(ib, jb).to_dense();
-                        for jj in 0..bn {
-                            let frow = loc[c0 + jj] * nrow;
-                            let tcol = &tile[jj * bm..jj * bm + bm];
-                            for ii in 0..bm {
-                                let dst = frow + loc[r0 + ii];
-                                f[dst] = f[dst] + tcol[ii];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Per-front unsymmetric partial-factorization output, in elimination order
-/// (static pivoting -> no interchange, so front-local order is pivot order).
-struct FrontLu<T> {
-    nrow: usize,
-    nelim: usize,
-    /// Unit-lower `L` of the front, `nrow x nelim` column-major (multipliers
-    /// below the diagonal; unit diagonal implicit).
-    l: Vec<T>,
-    /// Upper `U` of the front as `nrow x nelim` column-major over the *row*
-    /// index: `u[c*nrow + r]` is `U(c, r)` for `r >= c` (the eliminated row `c`
-    /// against front position `r`). The diagonal `u[c*nrow + c]` is the pivot.
-    u: Vec<T>,
-    /// Front row permutation from partial pivoting (`rperm[k]` is the original
-    /// front-local row that supplied pivot position `k`). Identity on trailing
-    /// rows. Drives the global row permutation `perm_row`.
-    rperm: Vec<usize>,
-    n_perturbed: usize,
-}
-
-/// Reassembled per-front result retained for the global pass and the parent's
-/// extend-add.
-struct NodeLu<T: Scalar> {
-    front: FrontLu<T>,
-    row_indices: Vec<usize>,
-    /// The `cnrow x cnrow` contribution block `A22 - L21*U12` - dense, or
-    /// BLR-compressed for the stack (opt-in `RLA_BLR_CB`).
-    contrib: Contribution<T>,
 }
 
 /// Stored unsymmetric LU factors, in factorization order. Solve with
@@ -372,307 +241,6 @@ fn symmetrized_lower_pattern<T: Scalar>(a: &GeneralCsc<T>) -> (Vec<usize>, Vec<u
     (col_ptr, row_idx)
 }
 
-/// Partially factor the first `ncol` fully-summed columns of a dense full front
-/// `f` (`nrow x nrow`, column-major) by unsymmetric LU with static pivoting.
-/// The trailing `[ncol, nrow)` block is returned as the contribution block
-/// `A22 - L21*U12` (computed by one `gemm`).
-fn lu_front<T: Scalar>(
-    f: &mut [T],
-    nrow: usize,
-    ncol: usize,
-    perturb_floor: Option<f64>,
-    blr: BlrMode,
-    kt: KernelTuning,
-) -> Result<(FrontLu<T>, Contribution<T>), RslabError> {
-    let n = nrow;
-    let mut pivots = vec![T::zero(); ncol];
-    let mut n_perturbed = 0usize;
-    // Row permutation of the front (partial pivoting interchanges rows). Only
-    // the fully-summed rows [0, ncol) are ever interchanged.
-    let mut rperm: Vec<usize> = (0..nrow).collect();
-
-    // Blocked right-looking LU (LAPACK getrf-style): factor the fully-summed
-    // columns in panels of width `NB`. Each panel is factored unblocked (getf2,
-    // within-block partial pivoting), then the dominant trailing update runs as
-    // a single SIMD `gemm` (rank-`NB`) - routing the O(ncol^2*nrow) work through
-    // the complex BLAS-3 kernel instead of scalar BLAS-2 column sweeps. This is
-    // the structure MKL/PARDISO use for the supernodal panel.
-    // Panel width. Smaller than the LAPACK-typical 64 because the `gemm` complex
-    // kernel is very fast (~460 Gflop/s rank-64) while the unblocked getf2 panel
-    // is serial BLAS-2: a narrower panel shifts work off the slow serial path
-    // onto the fast parallel GEMM. NB=32 measured best on the MoM fronts.
-    const NB: usize = 32;
-    let mut kb = 0;
-    while kb < ncol {
-        kt.interrupted()?;
-        let ke = (kb + NB).min(ncol);
-        // --- Panel factor (getf2) over columns [kb, ke), full height ---
-        for k in kb..ke {
-            // Partial pivoting within the fully-summed block (rows [k, ncol));
-            // compare squared magnitudes (same argmax, no per-candidate sqrt).
-            let mut p = k;
-            let mut best = f[k * n + k].magnitude_sq();
-            for i in (k + 1)..ncol {
-                let m = f[k * n + i].magnitude_sq();
-                if m > best {
-                    best = m;
-                    p = i;
-                }
-            }
-            if p != k {
-                for c in 0..nrow {
-                    f.swap(c * n + k, c * n + p);
-                }
-                rperm.swap(k, p);
-            }
-            let mut piv = f[k * n + k];
-            match perturb_floor {
-                Some(floor) if piv.magnitude() < floor => {
-                    piv = perturb_pivot(piv, floor);
-                    n_perturbed += 1;
-                }
-                None if piv == T::zero() => return Err(RslabError::NumericallyRankDeficient),
-                _ => {}
-            }
-            f[k * n + k] = piv;
-            let pinv = piv.recip();
-            // L multipliers: column k below the diagonal (full height).
-            for i in (k + 1)..n {
-                f[k * n + i] = f[k * n + i] * pinv;
-            }
-            // Within-panel Schur update only (columns [k+1, ke)); the trailing
-            // block is deferred to the panel GEMM.
-            for j in (k + 1)..ke {
-                let ukj = f[j * n + k];
-                if ukj != T::zero() {
-                    for i in (k + 1)..n {
-                        f[j * n + i] = f[j * n + i] - f[k * n + i] * ukj;
-                    }
-                }
-            }
-        }
-        let pw = ke - kb; // panel width
-                          // --- TRSM: U[kb:ke, ke:nrow] = L11^-1 * A[kb:ke, ke:nrow] ---
-                          // L11 is the unit-lower `pwxpw` diagonal block; forward-substitute each
-                          // trailing column over the panel rows.
-        for j in ke..n {
-            for r in (kb + 1)..ke {
-                let mut s = f[j * n + r];
-                for i in kb..r {
-                    s = s - f[i * n + r] * f[j * n + i]; // L11(r,i)*U12(i,j)
-                }
-                f[j * n + r] = s;
-            }
-        }
-        // --- GEMM: A[ke:, ke:] -= L[ke:, kb:ke] * U[kb:ke, ke:] (rank-`pw`) ---
-        let mt = n - ke; // trailing rows = cols
-        if mt > 0 && pw > 0 {
-            let flops = (mt as u128) * (mt as u128) * (pw as u128);
-            let par = if flops >= kt.par_cdiv as u128 {
-                gemm::Parallelism::Rayon(0)
-            } else {
-                gemm::Parallelism::None
-            };
-            // SAFETY: L21 (rows>=ke x cols[kb,ke)), U12 (rows[kb,ke) x cols>=ke)
-            // and the A22 dst (rows>=ke x cols>=ke) are pairwise-disjoint
-            // sub-blocks of `f`, all in bounds under col-stride `n`. `T` is a
-            // supported gemm element type.
-            let base = f.as_mut_ptr();
-            unsafe {
-                crate::dense::gemm_backend::gemm(
-                    mt,
-                    mt,
-                    pw,
-                    base.add(ke * n + ke),
-                    n as isize,
-                    1,
-                    true,
-                    base.add(kb * n + ke) as *const T,
-                    n as isize,
-                    1,
-                    base.add(ke * n + kb) as *const T,
-                    n as isize,
-                    1,
-                    T::one(),
-                    -T::one(),
-                    false,
-                    false,
-                    false,
-                    par,
-                );
-            }
-        }
-        kb = ke;
-    }
-    // Pivots from the factored diagonal of the fully-summed block.
-    for k in 0..ncol {
-        pivots[k] = f[k * n + k];
-    }
-
-    // Extract L (nrow x ncol col-major, unit lower) and U (nrow x ncol
-    // col-major over the row index, with the pivot on the diagonal), plus the
-    // contribution block (`f`'s Schur-updated trailing A22 = A22 - L21*U12).
-    // Kept serial: the work-stealing driver already overlaps each front's serial
-    // tail with other subtrees' work, so per-front extraction parallelism finds
-    // no idle threads to use (measured: no gain).
-    let one = T::one();
-    let cnrow = nrow - ncol;
-    let mut l = vec![T::zero(); nrow * ncol];
-    let mut u = vec![T::zero(); nrow * ncol];
-    let mut cb = vec![T::zero(); cnrow * cnrow];
-    for c in 0..ncol {
-        l[c * nrow + c] = one;
-        u[c * nrow + c] = pivots[c];
-        for r in (c + 1)..nrow {
-            l[c * nrow + r] = f[c * nrow + r]; // L(r, c)
-            u[c * nrow + r] = f[r * nrow + c]; // U(c, r)
-        }
-    }
-    // Each CB column is a contiguous run of `f`'s trailing block -> memcpy.
-    for c in 0..cnrow {
-        let base = (ncol + c) * n + ncol;
-        cb[c * cnrow..c * cnrow + cnrow].copy_from_slice(&f[base..base + cnrow]);
-    }
-
-    // Compress large CBs for the stack (BlrMode::ContributionBlocks). The
-    // off-diagonal tiles of the frontal Schur complement are low-rank; storing
-    // them compressed shrinks the live CB-stack transient. Densified
-    // tile-by-tile at the parent extend-add.
-    let contribution = match blr {
-        BlrMode::ContributionBlocks {
-            eps,
-            min_cnrow,
-            b,
-            adaptive,
-        } if cnrow >= min_cnrow => Contribution::Blr(BlrMatrix::from_dense_with(
-            &cb, cnrow, cnrow, b, eps, adaptive,
-        )),
-        _ => Contribution::Dense(cb),
-    };
-    Ok((
-        FrontLu {
-            nrow,
-            nelim: ncol,
-            l,
-            u,
-            rperm,
-            n_perturbed,
-        },
-        contribution,
-    ))
-}
-
-/// Factor one supernode's full front: build the (symmetric-pattern) row
-/// structure, assemble the owned columns (L side), owned rows in trailing
-/// columns (U side) and children contribution blocks, then LU-factor.
-#[allow(clippy::too_many_arguments)]
-fn factor_one_node_lu<T: Scalar>(
-    s: usize,
-    sym: &SymbolicFactorization,
-    inp: LuInput<T>,
-    child_refs: &[&NodeLu<T>],
-    perturb_floor: Option<f64>,
-    blr: BlrMode,
-    pool: &FrontPool<T>,
-    kt: KernelTuning,
-) -> Result<NodeLu<T>, RslabError> {
-    let snode = &sym.supernodes[s];
-    let n = sym.n;
-    let ncol = snode.ncol;
-    let own_last = snode.first_col + ncol;
-
-    // Front row structure: own columns ++ sorted trailing rows (symmetrized
-    // pattern of own columns plus children contribution rows).
-    let mut trailing: Vec<usize> = Vec::new();
-    for j in snode.first_col..own_last {
-        for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
-            let r = sym.permuted_pattern.row_idx[k];
-            if r >= own_last {
-                trailing.push(r);
-            }
-        }
-    }
-    for child in child_refs {
-        for &r in &child.row_indices[child.front.nelim..] {
-            if r >= own_last {
-                trailing.push(r);
-            }
-        }
-    }
-    trailing.sort_unstable();
-    trailing.dedup();
-    let mut ri = Vec::with_capacity(ncol + trailing.len());
-    ri.extend(snode.first_col..own_last);
-    ri.extend(trailing);
-    let nrow = ri.len();
-
-    // Front buffer (transient `nrow^2`), drawn from the reuse pool so the
-    // thousands of large per-front buffers become a handful of recycled ones -
-    // the fragmentation fix for the transient-memory OOM. Returned via
-    // `pool.give` once `lu_front` has consumed it below.
-    let mut fbuf: Vec<T> = pool.take(nrow * nrow);
-    let f = &mut fbuf[..];
-
-    // Take the thread-local global->local scratch for the assembly (held at the
-    // all-`usize::MAX` invariant). It is returned before `lu_front` so the
-    // front GEMM's work-stealing tasks can never re-enter the borrow.
-    let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
-    if gloc.len() < n {
-        gloc.resize(n, Li::MAX);
-    }
-    for (li, &g) in ri.iter().enumerate() {
-        gloc[g] = li as Li;
-    }
-
-    // Owned columns (full) into front column p, owned rows' trailing columns
-    // (U12) into front row p.
-    for p in 0..ncol {
-        let c = snode.first_col + p;
-        for (g, v) in inp.col(c) {
-            let lr = gloc[g];
-            if lr != Li::MAX {
-                f[p * nrow + lr as usize] = f[p * nrow + lr as usize] + v;
-            }
-        }
-        for (g, v) in inp.row(c) {
-            let lc = gloc[g];
-            if lc != Li::MAX {
-                f[lc as usize * nrow + p] = f[lc as usize * nrow + p] + v;
-            }
-        }
-    }
-
-    // Extend-add each child's full contribution block. Map the child's
-    // contribution rows to parent-front-local positions ONCE per child (`loc`,
-    // reused across children) rather than re-indexing `gloc` inside the inner
-    // loop - turning the cn^2 global->local lookups into cn, and slicing the
-    // contiguous contribution column for the inner accumulation.
-    let mut loc: Vec<usize> = Vec::new();
-    for child in child_refs {
-        let cn = child.front.nrow - child.front.nelim;
-        let crows = &child.row_indices[child.front.nelim..];
-        loc.clear();
-        loc.extend(crows.iter().map(|&g| gloc[g] as usize));
-        child.contrib.extend_add_into(&loc, cn, f, nrow);
-    }
-
-    // Restore the all-`Li::MAX` invariant and return the scratch to the
-    // thread-local before `lu_front` (which spawns work-stealing GEMM tasks).
-    for &g in &ri {
-        gloc[g] = Li::MAX;
-    }
-    GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
-
-    let (front, contrib) = lu_front(f, nrow, ncol, perturb_floor, blr, kt)?;
-    // `lu_front` has copied L/U/CB out; recycle the front buffer.
-    pool.give(fbuf);
-    Ok(NodeLu {
-        front,
-        row_indices: ri,
-        contrib,
-    })
-}
-
 /// Fold the MC64 row matching back into the factors: pivot rows and the row
 /// scaling are reported in `A`'s row indices, as the solves expect.
 fn finish_matching<T: Scalar>(fac: &mut LuNumeric<T>, lusym: &LuSymbolic) {
@@ -683,10 +251,6 @@ fn finish_matching<T: Scalar>(fac: &mut LuNumeric<T>, lusym: &LuSymbolic) {
         fac.d_row = m.r.clone();
     }
 }
-
-/// A supernode's own factor plus the flat `(supernode-id, factor)` list for the
-/// rest of its subtree - the return shape of [`factor_subtree`].
-type SubtreeFactors<T> = (NodeLu<T>, Vec<(usize, NodeLu<T>)>);
 
 /// Reusable symbolic analysis for the unsymmetric LU path - the symmetrized
 /// pattern `A union A^T` analyzed once. Pass to [`factor_general_lu_numeric`] for
@@ -1006,7 +570,7 @@ impl LuSymbolic {
         } else {
             "TwoSidedRowCol".to_string()
         };
-        decisions.method = format!("{:?}", opts.method);
+        decisions.method = "LeftLooking".to_string();
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
             n: self.n,
@@ -1407,7 +971,7 @@ pub fn factor_general_lu<T: Scalar>(
         .map(LuNumeric::into_factors)
 }
 
-// Supernodal left-looking LU (FactorMethod::LeftLooking)
+// Supernodal left-looking LU
 //
 // The unsymmetric twin of the left-looking LDL^T path: each supernode keeps two
 // dense panels - `lbuf` (its columns: diagonal block + L21, full height) and
@@ -2334,7 +1898,6 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             Some(anorm.max(1.0) * f64::EPSILON)
         }
     };
-    let blr = opts.blr;
 
     // The assembly-tree levels are no longer needed: the driver is a
     // work-stealing tree recursion, not a level-synchronous sweep.
@@ -2407,183 +1970,27 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         crate::numeric::settings::supernode_tree_depth(sym),
     );
 
-    // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
-    // a scoped pool of `opts.threads` so concurrent solves don't oversubscribe.
-    if opts.method == FactorMethod::LeftLooking {
-        let mut fac = opts.threads.run(
-            stack,
-            |cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap),
-            || {
-                factor_lu_left_looking(
-                    sym,
-                    lusym.symb.ll_schedule().ok_or_else(|| {
-                        RslabError::InvalidInput("internal: empty symbolic".to_string())
-                    })?,
-                    inp,
-                    &d_row,
-                    &d_col,
-                    perturb_floor,
-                    opts.drop_tol,
-                    opts.kernel(),
-                )
-            },
-        )?;
-        fac.solve_threads = solve_policy;
-        finish_matching(&mut fac, lusym);
-        return Ok(fac);
-    }
-
-    let nsuper = sym.supernodes.len();
-    let roots = crate::numeric::ll_common::forest_roots(sym);
-    // Factor every root subtree with the work-stealing tree schedule; the
-    // children-before-parent dependency is the recursion structure itself.
-    let pool = FrontPool::<T>::new();
-    let kt = opts.kernel();
-    // Scoped pool of `opts.threads` with the depth-sized stack (honours the thread
-    // budget and is overflow-safe on deep trees, like the left-looking path).
-    let factor_one = |s: usize, child_refs: &[&NodeLu<T>]| {
-        factor_one_node_lu(s, sym, inp, child_refs, perturb_floor, blr, &pool, kt)
-    };
-    let free_contrib = |nf: &mut NodeLu<T>| nf.contrib = Contribution::Dense(Vec::new());
-    let root_outs: Vec<SubtreeFactors<T>> = opts.threads.run(
+    // Run in a scoped pool of `opts.threads` so concurrent solves don't
+    // oversubscribe.
+    let mut fac = opts.threads.run(
         stack,
         |cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap),
         || {
-            roots
-                .par_iter()
-                .map(|&r| crate::numeric::ll_common::mf_subtree(r, sym, &factor_one, &free_contrib))
-                .collect::<Result<Vec<_>, _>>()
+            factor_lu_left_looking(
+                sym,
+                lusym.symb.ll_schedule().ok_or_else(|| {
+                    RslabError::InvalidInput("internal: empty symbolic".to_string())
+                })?,
+                inp,
+                &d_row,
+                &d_col,
+                perturb_floor,
+                opts.drop_tol,
+                opts.kernel(),
+            )
         },
     )?;
-    // Scatter the subtree factors into `node_results` (indexed by supernode id)
-    // for the global emit pass, which still walks supernodes in postorder.
-    let mut node_results: Vec<Option<NodeLu<T>>> = (0..nsuper).map(|_| None).collect();
-    for (i, (own, subtree)) in root_outs.into_iter().enumerate() {
-        node_results[roots[i]] = Some(own);
-        for (s, nf) in subtree {
-            node_results[s] = Some(nf);
-        }
-    }
-    let mut nodes: Vec<&NodeLu<T>> = Vec::with_capacity(nsuper);
-    for node_opt in &node_results {
-        match node_opt {
-            Some(nd) => nodes.push(nd),
-            None => {
-                return Err(RslabError::InvalidInput(
-                    "internal: unfactored supernode".to_string(),
-                ))
-            }
-        }
-    }
-
-    // Assign factorization order e (static pivoting -> front-local order is just
-    // the column order) and the permutation.
-    // Two index maps, distinct under row pivoting:
-    //   col_pos_of_g[g] = factorization position eliminating COLUMN g
-    //                     (-> U column indices, L column indices).
-    //   row_pos_of_g[g] = factorization position whose PIVOT ROW is g
-    //                     (-> L row indices). Equal to col_pos when no pivoting.
-    let mut col_pos_of_g = vec![usize::MAX; n];
-    let mut row_pos_of_g = vec![usize::MAX; n];
-    let mut perm = vec![0usize; n];
-    let mut perm_row = vec![0usize; n];
-    let mut e = 0usize;
-    for node in &nodes {
-        let ff = &node.front;
-        for j in 0..ff.nelim {
-            // Columns are not interchanged, so position j maps to column
-            // `row_indices[j]`; the pivot row is `row_indices[rperm[j]]`.
-            let g_col = node.row_indices[j];
-            let g_row = node.row_indices[ff.rperm[j]];
-            col_pos_of_g[g_col] = e;
-            row_pos_of_g[g_row] = e;
-            perm[e] = sym.perm[g_col];
-            perm_row[e] = sym.perm[g_row];
-            e += 1;
-        }
-    }
-    debug_assert_eq!(e, n, "every index eliminated exactly once");
-
-    // Sum the static-perturbation count before the emit may free the fronts.
-    let n_perturbed = nodes.iter().map(|nd| nd.front.n_perturbed).sum();
-    // End the `nodes` immutable borrow so the emit can take `node_results`
-    // mutably (LowMemory frees each front's dense factor as it is emitted).
-    drop(nodes);
-    // Every front's eliminated columns become the supernode's panels: the
-    // front's `l` block is the `L` panel and its `u` block (column `j` = row
-    // `j` of `U` over the front rows) is the `U^T` panel; only the off-block
-    // rows need the ancestors' elimination order. Fronts are released as
-    // they are emitted (the panels are the factor).
-    let kept: Vec<bool> = node_results
-        .iter()
-        .map(|n| n.as_ref().is_some_and(|nd| nd.front.nelim > 0))
-        .collect();
-    let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
-    let ncols: Vec<usize> = node_results
-        .iter()
-        .map(|n| n.as_ref().map_or(0, |nd| nd.front.nelim))
-        .collect();
-    let sizes = || {
-        node_results
-            .iter()
-            .map(|n| n.as_ref().map_or(0, |nd| nd.front.nrow * nd.front.nelim))
-    };
-    let l_arena = PanelArena::<T>::new(sizes());
-    let u_arena = PanelArena::<T>::new(sizes());
-    let mut emit_panels = |s: usize| -> Result<(PanelOut, PanelOut), RslabError> {
-        let node = node_results[s].as_mut().ok_or_else(|| {
-            RslabError::InvalidInput("internal: unfactored supernode".to_string())
-        })?;
-        let ff = &mut node.front;
-        let (nr, w) = (ff.nrow, ff.nelim);
-        let diag_e = col_pos_of_g[node.row_indices[0]];
-        debug_assert!(
-            (0..w).all(|j| col_pos_of_g[node.row_indices[j]] == diag_e + j)
-                && (0..w).all(|i| row_pos_of_g[node.row_indices[ff.rperm[i]]] == diag_e + i),
-            "the diagonal block is in elimination order"
-        );
-        // SAFETY: the sequential emit owns every slot.
-        let l = unsafe { l_arena.slot_mut(s) };
-        l.copy_from_slice(&ff.l[..nr * w]);
-        ff.l = Vec::new();
-        let l_rows: Vec<u32> = (w..nr)
-            .map(|i| row_pos_of_g[node.row_indices[ff.rperm[i]]] as u32)
-            .collect();
-        let ut = unsafe { u_arena.slot_mut(s) };
-        ut.copy_from_slice(&ff.u[..nr * w]);
-        ff.u = Vec::new();
-        let u_rows: Vec<u32> = (w..nr)
-            .map(|i| col_pos_of_g[node.row_indices[i]] as u32)
-            .collect();
-        Ok((
-            finish_panel(l, w, l_rows, None, opts.drop_tol),
-            finish_panel(ut, w, u_rows, None, opts.drop_tol),
-        ))
-    };
-    let mut outs: Vec<(PanelOut, PanelOut)> = Vec::with_capacity(ncols.len());
-    for (s, &w) in ncols.iter().enumerate() {
-        outs.push(if w > 0 {
-            emit_panels(s)?
-        } else {
-            Default::default()
-        });
-    }
-    let (l, zeros_l) = l_arena.finish(n, ncols.iter().copied(), |s| std::mem::take(&mut outs[s].0));
-    let (ut, zeros_u) =
-        u_arena.finish(n, ncols.iter().copied(), |s| std::mem::take(&mut outs[s].1));
-
-    let mut fac = LuNumeric {
-        l,
-        ut,
-        perm,
-        perm_row,
-        d_row,
-        d_col,
-        supernode_parent,
-        n_perturbed,
-        n_zeros: zeros_l + zeros_u,
-        solve_threads: solve_policy,
-    };
+    fac.solve_threads = solve_policy;
     finish_matching(&mut fac, lusym);
     Ok(fac)
 }
@@ -2880,7 +2287,6 @@ pub fn solve_lu_refined_with<T: Scalar>(
 
 #[cfg(test)]
 mod tests {
-    use crate::numeric::settings::MemoryMode;
 
     /// A badly scaled, row-scrambled unsymmetric system: without the MC64
     /// row matching the front-restricted pivoting finds no usable pivot or
@@ -2942,23 +2348,19 @@ mod tests {
                 .map(|(ri, di)| if *di > 0.0 { ri.abs() / di } else { 0.0 })
                 .fold(0.0, f64::max)
         };
-        for method in [FactorMethod::LeftLooking, FactorMethod::Multifrontal] {
-            let opts = SolverSettings::default()
-                .with_threads(1)
-                .with_method(method);
-            let s = LuSolver::factor(&a, &opts).unwrap();
-            assert_eq!(s.diagnostics().decisions.scaling, "Mc64RowMatching");
-            let x = s.solve(&b).unwrap();
-            assert!(
-                omega(&x) < 1e-12,
-                "{method:?} backward error with matching {}",
-                omega(&x)
-            );
-            // Without the matching the shifted rows leave the fully-summed
-            // blocks without a usable pivot.
-            let s0 = LuSolver::factor(&a, &opts.with_lu_matching(false));
-            assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
-        }
+        let opts = SolverSettings::default().with_threads(1);
+        let s = LuSolver::factor(&a, &opts).unwrap();
+        assert_eq!(s.diagnostics().decisions.scaling, "Mc64RowMatching");
+        let x = s.solve(&b).unwrap();
+        assert!(
+            omega(&x) < 1e-12,
+            "backward error with matching {}",
+            omega(&x)
+        );
+        // Without the matching the shifted rows leave the fully-summed
+        // blocks without a usable pivot.
+        let s0 = LuSolver::factor(&a, &opts.with_lu_matching(false));
+        assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
     }
     use super::*;
     use num_complex::Complex;
@@ -3268,11 +2670,7 @@ mod tests {
         }
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-        let ll = factor_general_lu(
-            &a,
-            &SolverSettings::default().with_method(FactorMethod::LeftLooking),
-        )
-        .unwrap();
+        let ll = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let mf = factor_general_lu(&a, &SolverSettings::default()).unwrap();
         let xl = solve_lu(&ll, &b).unwrap();
         let xm = solve_lu(&mf, &b).unwrap();
@@ -3325,9 +2723,7 @@ mod tests {
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
         for u in [0.0f64, 0.1, 0.5, 1.0] {
-            let s = SolverSettings::default()
-                .with_method(FactorMethod::LeftLooking)
-                .with_pivot_u(u);
+            let s = SolverSettings::default().with_pivot_u(u);
             let f = factor_general_lu(&a, &s).unwrap();
             let x = solve_lu(&f, &b).unwrap();
             let mut ax = vec![Complex::new(0.0, 0.0); n];
@@ -3444,67 +2840,8 @@ mod tests {
     }
 
     #[test]
-    fn low_memory_emit_is_bit_identical() {
-        // MemoryMode::LowMemory frees each front's dense factor during emit; it
-        // must produce exactly the same global L/U (it only changes when the
-        // dense per-front buffers are dropped, never the emitted values).
-        let m = 10;
-        let n = m * m;
-        let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
-        let idx = |a: usize, b: usize| a * m + b;
-        for a in 0..m {
-            for b in 0..m {
-                let p = idx(a, b);
-                rr.push(p);
-                cc.push(p);
-                vv.push(7.0_f64);
-                if b + 1 < m {
-                    let q = idx(a, b + 1);
-                    rr.push(p);
-                    cc.push(q);
-                    vv.push(-1.0);
-                    rr.push(q);
-                    cc.push(p);
-                    vv.push(-2.0);
-                }
-                if a + 1 < m {
-                    let q = idx(a + 1, b);
-                    rr.push(p);
-                    cc.push(q);
-                    vv.push(-1.5);
-                    rr.push(q);
-                    cc.push(p);
-                    vv.push(-0.5);
-                }
-            }
-        }
-        let a = GeneralCsc::<f64>::from_triplets(n, &rr, &cc, &vv).unwrap();
-        let sym = LuSymbolic::analyze(&a).unwrap();
-        let eager = factor_general_lu_numeric(
-            &sym,
-            &a,
-            &SolverSettings::default().with_memory(MemoryMode::Eager),
-        )
-        .map(LuNumeric::into_factors)
-        .unwrap();
-        let low = factor_general_lu_numeric(
-            &sym,
-            &a,
-            &SolverSettings::default().with_memory(MemoryMode::LowMemory),
-        )
-        .map(LuNumeric::into_factors)
-        .unwrap();
-        assert_eq!(eager.l_values, low.l_values, "L differs under LowMemory");
-        assert_eq!(eager.u_values, low.u_values, "U differs under LowMemory");
-        assert_eq!(eager.l_row_idx, low.l_row_idx);
-        assert_eq!(eager.u_col_idx, low.u_col_idx);
-    }
-
-    #[test]
-    fn lu_left_looking_matches_multifrontal() {
-        // Unsymmetric, diagonally dominant 2D grid (no pivoting needed -> the
-        // multifrontal's partial pivoting takes the diagonal, matching the
-        // left-looking 1x1 path). Same solution and comparable fill.
+    fn lu_left_looking_2d_grid_solves() {
+        // Unsymmetric, diagonally dominant complex 2D grid.
         let c = |re, im| Complex::new(re, im);
         let m = 14;
         let n = m * m;
@@ -3539,25 +2876,12 @@ mod tests {
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
         let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
         let sym = LuSymbolic::analyze(&a).unwrap();
-        let mf = sym.factor(&a, &SolverSettings::default()).unwrap();
-        let ll = sym
-            .factor(
-                &a,
-                &SolverSettings::default().with_method(FactorMethod::LeftLooking),
-            )
-            .unwrap();
-        let xm = mf.solve(&b).unwrap();
+        let ll = sym.factor(&a, &SolverSettings::default()).unwrap();
         let xl = ll.solve(&b).unwrap();
         let mut am = vec![Complex::new(0.0, 0.0); n];
         a.matvec(&xl, &mut am);
         let res = (0..n).map(|i| (am[i] - b[i]).norm()).fold(0.0, f64::max);
         assert!(res < 1e-8, "left-looking LU residual {res}");
-        let diff = (0..n).map(|i| (xm[i] - xl[i]).norm()).fold(0.0, f64::max);
-        assert!(diff < 1e-8, "LU solutions differ by {diff}");
-        // Fill should be within a few percent (same structure; values may zero
-        // out differently under a different summation order).
-        let (fm, fl) = (mf.factor_nnz() as f64, ll.factor_nnz() as f64);
-        assert!((fm - fl).abs() / fm < 0.05, "fill mf={fm} ll={fl}");
     }
 
     #[test]

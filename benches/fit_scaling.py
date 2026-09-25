@@ -23,9 +23,7 @@ import bench_style
 from bench_style import GRAY, SOLVERS
 
 # The auto-tuned default (`LdltSolver::factor` / `LuSolver::factor`) is the product
-# RSLAB ships: per matrix it picks left-looking or multifrontal under the memory /
-# OOD guards. We plot that single curve against the external solvers rather than the
-# two raw kernels (those are compared internally in corpus_breakdown.py).
+# RSLAB ships; we plot that single curve against the external solvers.
 ORDER = ["auto", "faer", "pardiso", "superlu"]
 # SuperLU's peak memory is sampled process RSS from a SciPy child (splu exposes no peak),
 # which is not comparable to the in-process live-bytes / iparm peaks and is unreliable

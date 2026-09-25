@@ -1,7 +1,6 @@
 //! Solver settings shared by the LDL^T and LU paths: the numeric and
-//! analysis knobs of [`SolverSettings`], the static-pivot policy, the method
-//! and memory options, and the worker-thread policy with the scoped pools the
-//! factorizations run in.
+//! analysis knobs of [`SolverSettings`], the static-pivot policy, and the
+//! worker-thread policy with the scoped pools the factorizations run in.
 
 use crate::symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicFactorization};
 
@@ -42,107 +41,17 @@ pub enum ReorderMode {
     Off,
 }
 
-/// Factor emit/memory strategy - composable via [`SolverSettings::with_memory`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MemoryMode {
-    /// Collect every front's factor, then emit the global `L`/`U`.
-    Eager,
-    /// Free each front's dense factor as soon as it is emitted into the global
-    /// structure (default) - lower peak RSS at no accuracy cost: bit-identical
-    /// factors, removes the emit-time per-front + global overlap.
-    #[default]
-    LowMemory,
-}
-
-/// Block-Low-Rank strategy - composable via [`SolverSettings::with_blr`]. BLR
-/// makes the factor **approximate** (a preconditioner); drive iterative
-/// refinement against the original matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum BlrMode {
-    /// Dense fronts and contribution blocks (default, exact).
-    #[default]
-    Off,
-    /// Store each large contribution block block-low-rank on the assembly stack:
-    /// `eps` per-tile Frobenius tolerance, `min_cnrow` CB-size threshold, `b`
-    /// tile size. Shrinks the live CB-stack transient.
-    ContributionBlocks {
-        eps: f64,
-        min_cnrow: usize,
-        b: usize,
-        /// Adaptive-precision tail (issue #19): store the small trailing
-        /// low-rank crosses of each tile in single precision - half the
-        /// bytes per tail entry, approximation class unchanged (the tail's
-        /// storage-rounding noise stays below `eps`).
-        adaptive: bool,
-    },
-}
-
-impl BlrMode {
-    /// BLR contribution blocks at per-tile tolerance `eps` with the default
-    /// `min_cnrow = 256`, `b = 256`.
-    pub fn contribution_blocks(eps: f64) -> Self {
-        BlrMode::ContributionBlocks {
-            eps,
-            min_cnrow: 256,
-            b: 256,
-            adaptive: false,
-        }
-    }
-
-    /// [`contribution_blocks`](Self::contribution_blocks) with the
-    /// adaptive-precision tail enabled.
-    pub fn contribution_blocks_adaptive(eps: f64) -> Self {
-        BlrMode::ContributionBlocks {
-            eps,
-            min_cnrow: 256,
-            b: 256,
-            adaptive: true,
-        }
-    }
-}
-
-/// Numeric factorization algorithm - composable via [`SolverSettings::with_method`].
-/// Both produce the same factor (numerically equivalent); they differ in the
-/// transient-memory and scheduling profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FactorMethod {
-    /// Multifrontal: assembly-tree of dense fronts, rayon work-stealing parallel,
-    /// with full pivoting (Bunch-Kaufman 2x2 for LDL^T, partial for LU). Carries
-    /// the contribution-block stack + a per-front extract transient. Kept as the
-    /// opt-in alternative (via [`with_method`]) for cross-checking and for fronts
-    /// where the per-front extract layout is preferable; the default is
-    /// [`LeftLooking`](Self::LeftLooking).
-    ///
-    /// [`with_method`]: SolverSettings::with_method
-    Multifrontal,
-    /// Supernodal left-looking (**the default**, and the [`preconditioner`]
-    /// choice): each panel pulls BLAS-3 updates from its factored descendants -
-    /// **no contribution-block stack, no extract phase** (the PARDISO transient
-    /// profile), parallel over the assembly tree, lower fill, faster than
-    /// multifrontal on the MoM matrices. Uses **Bunch-Kaufman 1x1/2x2 pivoting**
-    /// (LDL^T) / **threshold partial pivoting** (LU), bounded to each panel's
-    /// fully-summed block - pivoting parity with the multifrontal path - so it
-    /// handles indefinite (zero-/tiny-diagonal) systems directly. The
-    /// memory/throughput-optimal path for both exact direct solves and the
-    /// equilibrated preconditioner.
-    ///
-    /// [`preconditioner`]: SolverSettings::preconditioner
-    #[default]
-    LeftLooking,
-}
-
 /// The factor path a [`SolverSettings`] is applied to; each reads a different
 /// subset of the settings (see [`SolverSettings::ignored_on`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactorPath {
     /// Symmetric `LDL^T` ([`LdltSolver`](crate::LdltSolver)).
     Ldlt,
-    /// Unsymmetric LU ([`LuSolver`](crate::LuSolver)), left-looking or
-    /// multifrontal per [`SolverSettings::method`].
+    /// Unsymmetric LU ([`LuSolver`](crate::LuSolver)).
     Lu,
 }
 
-/// Options controlling the generic multifrontal factorization. Defaults give an
+/// Options controlling the sparse LDL^T and LU factorizations. Defaults give an
 /// **exact** complete factorization that fails on rank deficiency. Relaxing
 /// them turns the factorization into a robust, memory-light **preconditioner**.
 /// All knobs compose via the `with_*` builders.
@@ -161,22 +70,6 @@ pub struct SolverSettings {
     /// discarded, trading factor accuracy for memory. `None` = complete
     /// factorization. (Wired in a later stage.)
     pub drop_tol: Option<f64>,
-    /// Factor emit/memory strategy (peak-RSS vs simplicity). Default
-    /// [`LowMemory`] (lower peak, bit-identical factors).
-    ///
-    /// [`LowMemory`]: MemoryMode::LowMemory
-    pub memory: MemoryMode,
-    /// Block-Low-Rank strategy. Default [`Off`] (exact dense fronts).
-    ///
-    /// [`Off`]: BlrMode::Off
-    pub blr: BlrMode,
-    /// Numeric factorization algorithm. Default [`LeftLooking`] (lower transient
-    /// memory + faster); override with [`with_method`](Self::with_method) to force
-    /// the [`Multifrontal`] path.
-    ///
-    /// [`LeftLooking`]: FactorMethod::LeftLooking
-    /// [`Multifrontal`]: FactorMethod::Multifrontal
-    pub method: FactorMethod,
     /// Worker-thread policy for this factorization, run in a **scoped** rayon pool
     /// (not the global pool). Either a [`Fixed`](Threads::Fixed) count or
     /// [`Auto`](Threads::Auto) - the data-driven per-matrix predictor, capped at a
@@ -204,7 +97,7 @@ pub struct SolverSettings {
     /// `16`. Smaller = finer supernodes (less fill, more per-front overhead).
     /// Analyze-time.
     pub nemin: usize,
-    /// Relaxed (fill-tolerant) amalgamation thresholds, the multifrontal throughput
+    /// Relaxed (fill-tolerant) amalgamation thresholds, the supernode throughput
     /// lever. `Some` (default `<=256` wide, `<=64` extra rows) trades a little
     /// explicit-zero fill for wider, higher-rank dense fronts. Analyze-time.
     pub relax: Option<RelaxAmalgamation>,
@@ -230,14 +123,12 @@ pub struct SolverSettings {
     /// Use the SIMD GEMM (vs the scalar triple loop) for the front Schur update.
     /// Default `true`. A kernel A/B knob for benchmarking.
     pub use_gemm_schur: bool,
-    /// Threshold partial-pivoting tolerance `u in [0, 1]` for the **left-looking LU**
-    /// path (the shipped default for unsymmetric matrices). The diagonal pivot is
+    /// Threshold partial-pivoting tolerance `u in [0, 1]` for the LU path. The diagonal pivot is
     /// kept unless it falls below `u * |colmax|` in its fully-summed block. `u = 1`
     /// is full partial pivoting; `u -> 0` keeps the diagonal unless exactly zero
     /// (least fill, least stable). Default
     /// `DEFAULT_PIVOT_U = 0.1` (a `gemm_tuning` internal constant).
-    /// Ignored by the LDL^T path (Bunch-Kaufman) and the multifrontal LU front
-    /// (which uses full pivoting). Numeric-phase knob; a lower `u` trades a little
+    /// Ignored by the LDL^T path (Bunch-Kaufman). Numeric-phase knob; a lower `u` trades a little
     /// stability (backed by the near-zero pivot policy) for less fill and speed on
     /// well-scaled / diagonally-dominant systems.
     pub pivot_u: f64,
@@ -460,9 +351,6 @@ impl Default for SolverSettings {
         Self {
             on_zero_pivot: ZeroPivotAction::Fail,
             drop_tol: None,
-            memory: MemoryMode::LowMemory,
-            blr: BlrMode::Off,
-            method: FactorMethod::LeftLooking,
             threads: Threads::default(),
             interrupt: None,
             // Analysis-phase defaults (reproduce the historically-tuned analysis).
@@ -509,10 +397,6 @@ impl SolverSettings {
     pub fn preconditioner(abs_floor: f64) -> Self {
         Self {
             on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor },
-            // The equilibrated, refined preconditioner is exactly where the
-            // memory/throughput-optimal left-looking path (Bunch-Kaufman 1x1/2x2)
-            // belongs; override with `with_method` to force the multifrontal path.
-            method: FactorMethod::LeftLooking,
             ..Self::default()
         }
     }
@@ -527,26 +411,6 @@ impl SolverSettings {
     /// Builder: set the near-zero pivot policy.
     pub fn with_pivot(mut self, policy: ZeroPivotAction) -> Self {
         self.on_zero_pivot = policy;
-        self
-    }
-
-    /// Builder: set the factor emit/memory strategy.
-    pub fn with_memory(mut self, memory: MemoryMode) -> Self {
-        self.memory = memory;
-        self
-    }
-
-    /// Builder: set the Block-Low-Rank strategy (makes the factor a
-    /// preconditioner - refine against the original matrix).
-    pub fn with_blr(mut self, blr: BlrMode) -> Self {
-        self.blr = blr;
-        self
-    }
-
-    /// Builder: select the numeric factorization algorithm (multifrontal vs
-    /// supernodal left-looking).
-    pub fn with_method(mut self, method: FactorMethod) -> Self {
-        self.method = method;
         self
     }
 
@@ -710,13 +574,6 @@ impl SolverSettings {
                         "scaling = {:?} is ignored by the LU path (it equilibrates rows and \
                          columns with its own two-sided scaling)",
                         self.scaling
-                    ));
-                }
-                if self.method == FactorMethod::Multifrontal && self.pivot_u != d.pivot_u {
-                    out.push(format!(
-                        "pivot_u = {} is ignored by the multifrontal LU (its fronts pivot fully; \
-                         the knob applies to the left-looking LU)",
-                        self.pivot_u
                     ));
                 }
                 if self.panel_nb != d.panel_nb {

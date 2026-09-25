@@ -16,7 +16,7 @@ use num_complex::Complex;
 use crate::diagnostics::MemoryEstimate;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
-use crate::{BlrMode, LdltSymbolic, SolverSettings};
+use crate::{LdltSymbolic, SolverSettings};
 
 /// Detected machine capabilities - for budgeting and the calibration key.
 #[derive(Debug, Clone)]
@@ -335,14 +335,12 @@ pub struct Budget {
     pub allow_mixed_precision: bool,
     /// When over budget, may it drop small fill (incomplete factor)? `Some(tau)`.
     pub allow_drop_tol: Option<f64>,
-    /// When over budget, may it BLR-compress the big fronts?
-    pub allow_blr: bool,
 }
 
 /// A concrete factorization plan: tuned options + predictions + decisions.
 #[derive(Debug, Clone)]
 pub struct FactorPlan {
-    /// Tuned options (thread count, plus drop_tol / BLR if chosen to fit budget).
+    /// Tuned options (thread count, plus drop_tol if chosen to fit budget).
     pub opts: SolverSettings,
     /// Recommendation to factor in single precision (the caller casts the matrix);
     /// not expressible in `opts` since it is a matrix-type choice.
@@ -475,11 +473,6 @@ pub fn plan(
                 notes.push(format!("incomplete factor (drop_tol={tau:.0e})"));
             }
         }
-        if peak > maxm && budget.allow_blr {
-            opts = opts.with_blr(BlrMode::contribution_blocks(1e-4));
-            peak = (peak as f64 * 0.7) as u64; // BLR ~ -30% on big fronts
-            notes.push("BLR compression".into());
-        }
         if peak > maxm {
             notes.push(format!(
                 "STILL over budget ({:.0}>{:.0} MB) - recommend fail-fast",
@@ -529,7 +522,6 @@ mod tests {
             panels_all_bytes: 0,
             panel_live_peak_bytes: 0,
             transient_peak_bytes: 0,
-            mf_transient_peak_bytes: 0,
             factor_flops: 100_000_000_000, // 1e11 total work
             critical_path_flops: 0,
             max_tree_width: 256,
@@ -600,7 +592,6 @@ mod tests {
             max_threads: 0,
             allow_mixed_precision: true,
             allow_drop_tol: Some(1e-3),
-            allow_blr: true,
         };
         let plan_tight = plan(&est, &tight, &hw, &calib);
         assert!(

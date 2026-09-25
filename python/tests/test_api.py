@@ -43,13 +43,12 @@ def _res(A, x, b):
 
 
 def test_settings_roundtrip_and_repr():
-    s = rslab.Settings(threads=2, ordering="metis", preconditioner=1e-4, relax=(128, 32), blr=1e-6)
+    s = rslab.Settings(threads=2, ordering="metis", preconditioner=1e-4, relax=(128, 32))
     d = s.to_dict()
     assert d["threads"] == 2
     assert d["ordering"] == "metis"
     assert d["preconditioner"] == 1e-4
     assert d["relax"] == (128, 32)
-    assert d["blr"] == 1e-6
     assert "Settings(" in repr(s) and "ordering='metis'" in repr(s)
     # Defaults: heuristic pick, no explicit ordering.
     assert rslab.Settings().to_dict()["ordering"] is None
@@ -80,7 +79,7 @@ def test_settings_reject_unknown_and_invalid():
     with pytest.raises(ValueError):
         rslab.Settings(ordering="banana")
     with pytest.raises(ValueError):
-        rslab.Settings(method="fast")
+        rslab.Settings(reorder="fast")
     with pytest.raises(TypeError):
         rslab.ldlt(_spd(50), no_such_option=1)
 
@@ -344,8 +343,6 @@ def test_every_setting_round_trips():
         threads=("auto", 2),
         preconditioner=1e-6,
         drop_tol=1e-3,
-        method="multifrontal",
-        memory="eager",
         ordering="amf",
         scaling="mc64",
         pivot_u=0.5,
@@ -353,7 +350,6 @@ def test_every_setting_round_trips():
         nemin=8,
         relax=(4, 12),
         reorder="off",
-        blr={"eps": 1e-6, "min_cnrow": 128, "b": 64, "adaptive": True},
         panel_nb=32,
         scalar_gate=1000,
         par_gemm=100000,
@@ -362,10 +358,8 @@ def test_every_setting_round_trips():
     )
     d = s.to_dict()
     assert d["threads"] == ("auto", 2)
-    assert d["method"] == "multifrontal" and d["memory"] == "eager"
     assert d["ordering"] == "amf" and d["scaling"] == "mc64"
     assert d["relax"] == (4, 12) and d["reorder"] == "off"
-    assert d["blr"] == {"eps": 1e-6, "min_cnrow": 128, "b": 64, "adaptive": True}
     assert (d["panel_nb"], d["scalar_gate"], d["par_gemm"], d["par_cdiv"]) == (32, 1000, 100000, 200000)
     assert d["use_gemm_schur"] is False and d["matching"] is False
     # an external scaling vector
@@ -376,5 +370,5 @@ def test_every_setting_round_trips():
     assert kd["pivot_tol"] == 0.5 and kd["row_scaling"] is False and kd["parallel"] is True
     with pytest.raises(TypeError):
         rslab.Settings(no_such_option=1)
-    with pytest.raises(ValueError):
-        rslab.Settings(blr={"eps": 1e-6, "bogus": 1})
+    with pytest.raises(TypeError):
+        rslab.Settings(blr=1e-6)

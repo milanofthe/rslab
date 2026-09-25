@@ -125,14 +125,12 @@ the host. Unarmed it costs one branch per boundary.
 
 ```rust
 use rslab::prelude::*;
-use rslab::{BlrMode, FactorMethod, OrderingMethod, Threads};
+use rslab::{OrderingMethod, Threads};
 use num_complex::Complex;
 
 // Settings are one flat builder, shared by the LDLT and LU paths.
 let opts = SolverSettings::exact()                  // or ::preconditioner(floor)
     .with_drop_tol(1e-2)                            // incomplete factor
-    .with_blr(BlrMode::contribution_blocks(1e-6))   // low-rank compression
-    .with_method(FactorMethod::LeftLooking)         // or Multifrontal
     .with_ordering(OrderingMethod::AutoRace)        // exact race, the default
     .with_thread_policy(Threads::Auto { max: 4 });
 
@@ -163,8 +161,8 @@ table, `summary()` as one line.
 
 A setting is never silently ignored: `SolverSettings::ignored_on(FactorPath)`
 lists the fields set to a non-default value that the path does not read
-(`pivot_u` on the LDL^T path; `scaling`, `panel_nb`, `use_gemm_schur`, and
-`pivot_u` under the multifrontal kernel on the LU path). Every factorization
+(`pivot_u` on the LDL^T path; `scaling`, `panel_nb` and `use_gemm_schur` on
+the LU path). Every factorization
 evaluates it, logs each entry as a warning and carries it in its diagnostics.
 
 Logging has one sink and one level, no dependencies. The default level is
@@ -329,9 +327,8 @@ exposed, are in
 
 ### KLU path
 
-On MNA-like matrices the KLU path factors 5-12x faster than the multifrontal LU
-with 1.7-5.7x less fill, so a 20-point sweep runs 10-40x faster end to end.
-Against SuiteSparse KLU (same structure: identical BTF block counts, fill within
+On MNA-like matrices the KLU path stores 1.7-5.7x less fill than the
+supernodal LU. Against SuiteSparse KLU (same structure: identical BTF block counts, fill within
 1.5%), with the parallel per-block factor that `KluParallel::Auto` enables:
 
 | n | factor | SuiteSparse | refactor | SuiteSparse |
@@ -366,14 +363,14 @@ Accelerate figures; `cargo bench --bench klu_circuit` for KLU.
 
 - Left-looking supernodal by default: each panel pulls BLAS-3 updates from its
   factored descendants, then a blocked in-place panel factorization, and is freed
-  once its last consumer is done. Multifrontal is an option.
+  once its last consumer is done.
 - KLU: Hopcroft-Karp maximum transversal plus Tarjan SCC for the BTF form,
   per-block AMD, Gilbert-Peierls LU with threshold pivoting. Independent blocks
   run in parallel behind a deterministic structural gate.
 - Parallelism: rayon over the assembly tree with SIMD `gemm` Schur updates in a
   scoped pool; the KLU pipeline uses OS threads directly.
-- 32-bit index compression for `n < 2^31`, adaptive-precision low-rank BLR tail,
-  static pivot reuse for fixed-pattern sequences.
+- 32-bit index compression for `n < 2^31`, static pivot reuse for fixed-pattern
+  sequences.
 
 ## Cargo features
 

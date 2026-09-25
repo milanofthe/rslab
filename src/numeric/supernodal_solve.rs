@@ -1382,24 +1382,16 @@ mod tests {
     #[test]
     fn lu_plans_solve_and_are_thread_invariant() {
         use crate::{LuSolver, OrderingMethod};
-        for (m, method) in [
-            (30usize, crate::FactorMethod::LeftLooking),
-            (30, crate::FactorMethod::Multifrontal),
-            (60, crate::FactorMethod::LeftLooking),
-        ] {
+        for m in [30usize, 60] {
             let a = convdiff(m);
             let n = a.n;
             let opts = SolverSettings::default()
                 .with_threads(1)
-                .with_method(method)
                 .with_ordering(OrderingMethod::MetisND);
             let s = LuSolver::factor(&a, &opts).unwrap();
             let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
             let x1 = s.solve(&b).unwrap();
-            assert!(
-                residual_general(&a, &x1, &b) < 1e-10,
-                "residual m={m} {method:?}"
-            );
+            assert!(residual_general(&a, &x1, &b) < 1e-10, "residual m={m}");
             let nrhs = 3;
             let bb: Vec<f64> = (0..n * nrhs)
                 .map(|k| ((k * 13) % 11) as f64 - 5.0)
