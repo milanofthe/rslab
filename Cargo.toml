@@ -58,27 +58,14 @@ tuning = ["dep:sysinfo"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Complex scalar field for the complex-symmetric (PARDISO mtype 6) path.
-# Pure-Rust, already in the dependency tree transitively. Used by the
-# `Scalar` trait in src/scalar.rs and the generic numeric kernels.
+# Complex scalars (`Complex<f64>`, `Complex<f32>`) of the `Scalar` trait.
 num-complex = "0.4"
-# Data-parallelism for the multifrontal assembly tree (Phase 2.5.2).
-# Pure-Rust, fits the zero-non-Rust-dep constraint. Used only by
-# the opt-in parallel driver in src/numeric/factorize.rs; the
-# sequential path remains the default and reference implementation.
+# Work stealing for the assembly-tree drivers, the orderings and the solves.
 rayon = "1.10"
-# Complex/real SIMD GEMM (sarah-quinones, the faer author) for the trailing
-# Schur-complement update in the generic multifrontal front kernel. `c64` is
-# `num_complex::Complex<f64>`, so our `Scalar` values pass through unchanged;
-# runtime AVX2/AVX-512 dispatch; the AVX-512 kernels exist only with the
-# `x86-v4` feature. The small panel Bunch-Kaufman stays scalar
-# (PARDISO-style: tiny panel scalar, BLAS-3 trailing update). f64 production
-# keeps its own kernel in src/numeric/factorize.rs - this is the complex path.
+# Real and complex SIMD GEMM of the dense kernels (runtime AVX2/AVX-512
+# dispatch; the AVX-512 kernels exist only with `x86-v4`).
 gemm = { version = "0.19", features = ["x86-v4"] }
-# Ordering crates are consumed by `symbolic_factorize_with_method`
-# via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
-# src/ordering/amd.rs is still the default (OrderingMethod::Amd)
-# pending retirement per dev/decisions.md.
+# The fill-reducing orderings behind `OrderingMethod`.
 rslab-ordering-core = { path = "crates/rslab-ordering-core", version = "0.2" }
 rslab-amd = { path = "crates/rslab-amd", version = "0.2" }
 rslab-amf = { path = "crates/rslab-amf", version = "0.2" }
