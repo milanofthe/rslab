@@ -95,7 +95,41 @@ pub fn total_factor_nnz(counts: &[usize]) -> usize {
 /// - Davis, *Direct Methods for Sparse Linear Systems* section 4.4
 /// - CSparse `cs_counts.c` (BSD, structural reference)
 pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<usize> {
-    let n = pattern.n;
+    gnp(pattern.n, etree, |i| {
+        pattern.row_idx[pattern.col_ptr[i]..pattern.col_ptr[i + 1]]
+            .iter()
+            .copied()
+    })
+}
+
+/// [`column_counts_gnp`] of the permuted pattern `P^T A P` (`perm[new] =
+/// old`, `perm_inv[old] = new`, `etree` the elimination tree of the permuted
+/// pattern), read through the permutation: column `new` is the original
+/// column `perm[new]` with its rows mapped by `perm_inv`. The counts only
+/// need each column's entries below the diagonal, in any order, so the
+/// permuted pattern is never built or sorted.
+pub fn column_counts_permuted(
+    pattern: &CscPattern,
+    perm: &[usize],
+    perm_inv: &[usize],
+    etree: &EliminationTree,
+) -> Vec<usize> {
+    gnp(pattern.n, etree, |i| {
+        let j = perm[i];
+        pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]]
+            .iter()
+            .map(|&r| perm_inv[r])
+    })
+}
+
+/// The Gilbert-Ng-Peyton count over a column view: `cols(i)` yields the rows
+/// of column `i` (any order, no duplicates; entries on or above the diagonal
+/// are skipped).
+fn gnp<I: Iterator<Item = usize>>(
+    n: usize,
+    etree: &EliminationTree,
+    cols: impl Fn(usize) -> I,
+) -> Vec<usize> {
     if n == 0 {
         return Vec::new();
     }
@@ -135,10 +169,7 @@ pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<u
         // For each such partner, test whether i is a leaf of the row
         // subtree T^r_{partner}. Condition: first[i] > maxfirst[partner].
         let fi = first[i] as i64;
-        let row_start = pattern.col_ptr[i];
-        let row_end = pattern.col_ptr[i + 1];
-        for k in row_start..row_end {
-            let partner = pattern.row_idx[k];
+        for partner in cols(i) {
             if partner <= i {
                 continue;
             }

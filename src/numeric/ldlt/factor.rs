@@ -159,9 +159,12 @@ pub fn factor_numeric<T: Scalar>(
     // P^T A P (lower fold) through the cached input program: the structure is
     // frozen on the first factorization of this pattern; every later
     // (re)factorization pays one linear values pass only.
-    let prog = inner
-        .input
-        .get_or_init(|| InputProgram::symmetric(&a.col_ptr, &a.row_idx, &sym.perm_inv));
+    let prog = inner.input.get_or_init(|| {
+        crate::logging::timed(
+            || "ldlt: input program".into(),
+            || InputProgram::symmetric(&a.col_ptr, &a.row_idx, &sym.perm_inv),
+        )
+    });
     let weight = scale.map(|s| move |i: usize, j: usize| s[i] * s[j]);
     let vals = prog.values(
         &a.col_ptr,
@@ -173,7 +176,7 @@ pub fn factor_numeric<T: Scalar>(
 
     // Run in a scoped pool of `opts.threads` so concurrent solves don't
     // oversubscribe.
-    let sched = inner.ll_schedule.get_or_init(|| LlSchedule::build(sym));
+    let sched = inner.schedule();
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),

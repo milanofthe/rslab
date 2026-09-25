@@ -42,6 +42,18 @@ pub(crate) struct SymbolicInner {
     pub(crate) ll_schedule: std::sync::OnceLock<LlSchedule>,
 }
 
+impl SymbolicInner {
+    /// The left-looking schedule, built on first use.
+    pub(crate) fn schedule(&self) -> &LlSchedule {
+        self.ll_schedule.get_or_init(|| {
+            crate::logging::timed(
+                || "analysis: schedule".into(),
+                || LlSchedule::build(&self.sym),
+            )
+        })
+    }
+}
+
 impl SupernodalAnalysis {
     /// The analyzed dimension.
     pub fn n(&self) -> usize {
@@ -59,9 +71,7 @@ impl SupernodalAnalysis {
     /// lists), built on first use and shared by the numeric drivers and the
     /// a-priori estimators. `None` for the empty analysis.
     pub(crate) fn ll_schedule(&self) -> Option<&LlSchedule> {
-        self.inner
-            .as_ref()
-            .map(|i| i.ll_schedule.get_or_init(|| LlSchedule::build(&i.sym)))
+        self.inner.as_ref().map(SymbolicInner::schedule)
     }
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)`: the number of
@@ -209,7 +219,10 @@ fn analyze_with_inner(
         given_perm: opts.permutation.clone(),
         ..SupernodeParams::default()
     };
-    let mut sym = symbolic_factorize_with_method(&pattern, &snode_params, opts.ordering)?;
+    let mut sym = crate::logging::timed(
+        || format!("analysis: symbolic {:?}", opts.ordering),
+        || symbolic_factorize_with_method(&pattern, &snode_params, opts.ordering),
+    )?;
 
     // Liu (1986) contribution-stack minimization. Reorder each supernode's
     // children so the live contribution-block stack peak is minimized during

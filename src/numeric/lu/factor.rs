@@ -307,9 +307,12 @@ pub fn factor_general_lu_numeric<T: Scalar>(
 
     // `A`'s row `r` is `B`'s row `b_row[r]`, scaled by `d_row[b_row[r]]`.
     let b_row: Option<Vec<usize>> = lusym.matching.as_ref().map(|m| m.row_map());
-    let prog = lusym
-        .input
-        .get_or_init(|| InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym));
+    let prog = lusym.input.get_or_init(|| {
+        crate::logging::timed(
+            || "lu: input program".into(),
+            || InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym),
+        )
+    });
     let weight = |r: usize, j: usize| d_row[b_row.as_ref().map_or(r, |b| b[r])] * d_col[j];
     let vals = prog.values(&a.col_ptr, &a.row_idx, &a.values, Some(&weight));
     drop(b_row);
