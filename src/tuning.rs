@@ -1,6 +1,7 @@
 //! Hardware calibration (feature `tuning`).
 //!
-//! [`HardwareInfo::probe`] detects cores and RAM; [`Calibration::load_or_measure`]
+//! [`HardwareInfo::probe`](crate::tuning::HardwareInfo::probe) detects cores and RAM;
+//! [`Calibration::load_or_measure`](crate::tuning::Calibration::load_or_measure)
 //! measures this machine's factorization throughput and thread scaling once
 //! (by factoring representative grids) and caches it, keyed by a hardware
 //! fingerprint. The worker-count cost model reads it; the pick is
@@ -288,10 +289,9 @@ impl Calibration {
 /// factorization calibration, caching it keyed by the hardware fingerprint.
 ///
 /// Run once per machine (e.g. from an install script or `cargo xtask calibrate`);
-/// afterwards the heuristic default path ([`LdltSolver::tuned`](crate::LdltSolver::tuned),
-/// [`LuSolver::tuned`](crate::LuSolver::tuned)) picks its worker count from the
-/// cached calibration via the cost model instead of the conservative capped
-/// structural default. The solvers themselves **never** measure implicitly - no
+/// afterwards [`Threads::Auto`](crate::Threads::Auto) picks its worker count
+/// from the cached calibration via the cost model instead of the structural
+/// predictor. The solvers themselves **never** measure implicitly - no
 /// calibration cache means the hardware-agnostic default behaviour.
 pub fn install_diagnose() -> Calibration {
     let hw = HardwareInfo::probe();

@@ -49,6 +49,11 @@ jobs:
         # the matgen-gated benches and tests, and the tuning planner.
         run: cargo clippy --all-targets --features matgen,tuning -- -D warnings
 
+      - name: rustdoc (broken links are errors)
+        run: cargo doc --no-deps --features matgen,tuning
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: test (matgen superset)
         # Runs the full lib test set plus the matgen-gated tests in one pass.
         # The tuning tests time a calibration and stay local.
