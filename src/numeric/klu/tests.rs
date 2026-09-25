@@ -917,3 +917,43 @@ fn exported_factors_reproduce_the_matrix() {
         }
     }
 }
+
+/// The exported factors of a complex matrix reproduce it too.
+#[test]
+fn exported_complex_factors_reproduce_the_matrix() {
+    use num_complex::Complex;
+    type C = Complex<f64>;
+    let ar = cascaded(60, 4, 40);
+    let a = GeneralCsc::<C> {
+        n: ar.n,
+        col_ptr: ar.col_ptr.clone(),
+        row_idx: ar.row_idx.clone(),
+        values: ar
+            .values
+            .iter()
+            .enumerate()
+            .map(|(k, &v)| C::new(v, 0.3 * v * ((k % 3) as f64 - 1.0)))
+            .collect(),
+    };
+    let solver = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+    let (l, u, f) = (solver.l_matrix(), solver.u_matrix(), solver.f_matrix());
+    let n = a.n;
+    let x: Vec<C> = (0..n)
+        .map(|i| C::new(i as f64 * 0.1, 1.0 - i as f64 * 0.02))
+        .collect();
+    let zero = C::new(0.0, 0.0);
+    let (mut ux, mut lux, mut fx) = (vec![zero; n], vec![zero; n], vec![zero; n]);
+    u.matvec(&x, &mut ux);
+    l.matvec(&ux, &mut lux);
+    f.matvec(&x, &mut fx);
+    let mut xc = vec![zero; n];
+    for (k, &c) in solver.col_perm().iter().enumerate() {
+        xc[c] = x[k];
+    }
+    let mut ax = vec![zero; n];
+    a.matvec(&xc, &mut ax);
+    let rs = solver.row_scale();
+    for (k, &r) in solver.row_perm().iter().enumerate() {
+        assert!((lux[k] + fx[k] - ax[r] * rs[r]).norm() < 1e-12, "row {k}");
+    }
+}

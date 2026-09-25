@@ -38,13 +38,12 @@ impl<T: Scalar> KluSolver<T> {
         KluSymbolic::analyze(a, settings)?.factor(a, settings)
     }
 
-    /// Per-call diagnostics: measured factor/refactor stages, fill, and the
-    /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate).
-    /// Populated by the phased [`KluSymbolic::factor`]; empty for the
-    /// one-shot [`factor`](Self::factor).
     /// Everything this factorization can tell about itself (see
-    /// [`Diagnostics`](crate::Diagnostics)), the solve-phase accumulators
-    /// included. A snapshot.
+    /// [`Diagnostics`](crate::Diagnostics)): the measured factor and refactor
+    /// stages, the fill, the a-priori
+    /// [`MemoryEstimate`](crate::diagnostics::MemoryEstimate) where
+    /// [`KluSymbolic::estimate_memory`] computed it, and the solve-phase
+    /// accumulators. A snapshot.
     pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
         let mut d = self.diagnostics.clone();
         d.solves = self.solves.snapshot();

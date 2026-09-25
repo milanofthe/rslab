@@ -505,9 +505,7 @@ impl<T: Scalar> LuSolver<T> {
     }
 
     /// Per-call diagnostics: measured factor time, fill, thread budget, and the
-    /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate). Populated by
-    /// the phased [`LuSymbolic::factor`]; empty for the one-shot
-    /// [`factor`](Self::factor).
+    /// a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate).
     /// Everything this factorization can tell about itself (see
     /// [`Diagnostics`](crate::Diagnostics)), the solve-phase accumulators
     /// included. A snapshot.

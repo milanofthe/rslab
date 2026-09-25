@@ -671,9 +671,9 @@ fn incomplete_lu_reduces_fill_and_still_solves() {
     assert!(resid(&a, &x, &b) < 1e-6, "residual {}", resid(&a, &x, &b));
 }
 
-/// A strongly unsymmetric pattern: every column its diagonal plus a few rows
-/// drawn at random, so `A + A^T` is much larger than `A`.
-/// A random unsymmetric matrix with a dominant diagonal; with `holes` every
+/// A random unsymmetric matrix with a dominant diagonal (every column its
+/// diagonal plus a few random rows, so `A + A^T` is much larger than `A`);
+/// with `holes` every
 /// seventh diagonal entry is left out, its column carrying the pivot of the
 /// next row instead (a 2x2 swap the matching has to find).
 fn unsymmetric_holes(n: usize, per_col: usize, seed: u64, holes: bool) -> GeneralCsc<f64> {

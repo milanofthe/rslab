@@ -185,6 +185,37 @@ mod tests {
         }
     }
 
+    /// With the gates opened, nested dissection joins a small race and the
+    /// seed ensemble keeps its best seed: never more fill than one seed, and
+    /// the race settings are honoured (a candidate list, bad candidates).
+    #[test]
+    fn the_race_settings_steer_nested_dissection() {
+        let a = grid(40);
+        let mut s = SolverSettings::default();
+        s.ordering.race.nd_min_n = 0;
+        s.ordering.race.nd_min_work = 0;
+        let one = run(&a, &s, OrderingMethod::Auto);
+        let nd = run(&a, &s, OrderingMethod::MetisND);
+        assert!(one.factor_nnz <= nd.factor_nnz);
+        s.ordering.race.ensemble = true;
+        s.ordering.race.ensemble_min_flops = 0;
+        let ens = run(&a, &s, OrderingMethod::Auto);
+        assert!(ens.factor_nnz <= one.factor_nnz);
+        let mut rcm_only = SolverSettings::default();
+        rcm_only.ordering.race.candidates = vec![OrderingMethod::Rcm];
+        let r = run(&a, &rcm_only, OrderingMethod::Auto);
+        assert_eq!(r.resolved_method, OrderingMethod::Rcm);
+        for bad in [
+            vec![],
+            vec![OrderingMethod::MetisND],
+            vec![OrderingMethod::Auto],
+        ] {
+            let mut s = SolverSettings::default();
+            s.ordering.race.candidates = bad;
+            assert!(try_run(&a, &s, OrderingMethod::Auto).is_err());
+        }
+    }
+
     /// A given permutation is used as is, and rejected when it is not one.
     #[test]
     fn a_given_permutation_is_honoured() {
