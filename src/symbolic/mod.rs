@@ -791,7 +791,9 @@ fn symbolic_factorize_race(
                 || {
                     RACE_CHEAP[1..]
                         .par_iter()
-                        .map(|&cand| symbolic_prefix(matrix, full, snode_params, cand, ND_SINGLE_SEED))
+                        .map(|&cand| {
+                            symbolic_prefix(matrix, full, snode_params, cand, ND_SINGLE_SEED)
+                        })
                         .collect::<Vec<_>>()
                 },
                 || if eager { nd_candidates() } else { Vec::new() },
