@@ -169,22 +169,6 @@ impl Supervariables {
             row_idx,
         }
     }
-
-    /// Expand an ordering of the groups (new-to-old, `i32` as the ordering
-    /// crates return it) to an ordering of the original vertices: each group's
-    /// members in place of the group, ascending.
-    pub fn expand(&self, group_perm: &[i32]) -> Vec<i32> {
-        let mut out = Vec::with_capacity(self.members.len());
-        for &g in group_perm {
-            let g = g as usize;
-            out.extend(
-                self.members[self.ptr[g]..self.ptr[g + 1]]
-                    .iter()
-                    .map(|&v| v as i32),
-            );
-        }
-        out
-    }
 }
 
 #[cfg(test)]
@@ -214,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn twins_group_and_expand_in_place() {
+    fn twins_group_and_compress() {
         // 0 and 1 are adjacent twins (same closed neighbourhood {0,1,2});
         // 3 and 4 are adjacent twins ({2,3,4}); 2 is alone.
         let p = pattern(5, &[(0, 1), (0, 2), (1, 2), (2, 3), (2, 4), (3, 4)]);
@@ -224,7 +208,9 @@ mod tests {
         assert_eq!(s.weights(), vec![2, 1, 2]);
         let c = s.compress(&p);
         assert_eq!(c.n, 3);
-        assert_eq!(s.expand(&[2, 0, 1]), vec![3, 4, 0, 1, 2]);
+        // Groups {0, 1}, {2}, {3, 4}: the pairs touch only the middle.
+        assert_eq!(c.col_ptr, vec![0, 1, 3, 4]);
+        assert_eq!(c.row_idx, vec![1, 0, 2, 1]);
     }
 
     #[test]

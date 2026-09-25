@@ -8,8 +8,8 @@
 //! invariant under the postorder (a relabelling of the tree), so the
 //! candidates skip it.
 
-use super::column_counts::{column_counts_permuted, total_factor_nnz};
-use super::ordering_graph::OrderingGraph;
+use super::column_counts::total_factor_nnz;
+use super::ordering_graph::{structure, OrderingGraph};
 use super::supernode::{
     find_supernodes, pick_amalgamation_strategy, predict_merges, AmalgamationStrategy,
     SupernodeParams,
@@ -28,8 +28,9 @@ use crate::sparse::csc::CscPattern;
 /// them; the lowest seed breaks ties.
 pub(super) const ND_SEED_CANDIDATES: &[u64] = &[1, 2, 3];
 
-/// One nested dissection: what an explicit `MetisND` request gets.
-pub(super) const ND_SINGLE_SEED: &[u64] = &[1];
+/// The seed of a single nested dissection: what an explicit `MetisND`
+/// request and the cheap race stage use.
+pub(super) const ND_SEED: u64 = 1;
 
 /// Predicted flops (sum of squared column counts of the cheap champion) from
 /// which the race runs the seed ensemble. The ensemble buys a few percent of
@@ -93,37 +94,17 @@ pub(super) fn prefix(
     graph: &OrderingGraph,
     params: &SupernodeParams,
     method: OrderingMethod,
-    nd_seeds: &[u64],
+    nd_seed: u64,
 ) -> Result<Prefix, RslabError> {
-    let full = graph.pattern;
-    let n = full.n;
-    let perm = match &params.given_perm {
-        Some(p) => checked_permutation(p, n)?,
-        None => crate::logging::timed(
-            || format!("analysis: ordering {method:?} seeds {nd_seeds:?}"),
-            || graph.order(method, nd_seeds),
-        )?,
+    let s = match &params.given_perm {
+        Some(p) => structure(graph.pattern, checked_permutation(p, graph.pattern.n)?),
+        None => graph.order(method, nd_seed)?,
     };
-    let t = crate::clock::Instant::now();
-    let mut perm_inv = vec![0usize; n];
-    for (new, &old) in perm.iter().enumerate() {
-        perm_inv[old] = new;
-    }
-    let etree = EliminationTree::from_permuted_pattern(full, &perm, &perm_inv);
-    // Gilbert-Ng-Peyton, O(nnz(A) + n alpha(n)).
-    let col_counts = column_counts_permuted(full, &perm, &perm_inv, &etree);
-    let factor_nnz = total_factor_nnz(&col_counts);
-    if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-        crate::logging::debug(&format!(
-            "analysis: prefix tail {method:?} (etree, column counts): {:.1} ms",
-            t.elapsed().as_secs_f64() * 1e3
-        ));
-    }
     Ok(Prefix {
-        perm,
-        etree,
-        col_counts,
-        factor_nnz,
+        factor_nnz: total_factor_nnz(&s.col_counts),
+        perm: s.perm,
+        etree: s.etree,
+        col_counts: s.col_counts,
         method,
     })
 }
@@ -185,8 +166,12 @@ pub(super) fn race(
             if !started[i].swap(true, Ordering::Relaxed) {
                 let nd = &nd;
                 sc.spawn(move |_| {
-                    let seed = [ND_SEED_CANDIDATES[i]];
-                    let px = prefix(graph, params, OrderingMethod::MetisND, &seed);
+                    let px = prefix(
+                        graph,
+                        params,
+                        OrderingMethod::MetisND,
+                        ND_SEED_CANDIDATES[i],
+                    );
                     let _ = nd[i].set(px.ok());
                 });
             }
@@ -196,7 +181,7 @@ pub(super) fn race(
         }
         let (amd, rest) = rayon::join(
             || {
-                let amd = prefix(graph, params, RACE_CHEAP[0], ND_SINGLE_SEED);
+                let amd = prefix(graph, params, RACE_CHEAP[0], ND_SEED);
                 if parallel && matches!(&amd, Ok(p) if prefix_work(p) >= ND_RACE_MIN_WORK) {
                     start(0);
                 }
@@ -205,7 +190,7 @@ pub(super) fn race(
             || {
                 RACE_CHEAP[1..]
                     .par_iter()
-                    .map(|&cand| prefix(graph, params, cand, ND_SINGLE_SEED))
+                    .map(|&cand| prefix(graph, params, cand, ND_SEED))
                     .collect::<Vec<_>>()
             },
         );
@@ -232,7 +217,7 @@ pub(super) fn race(
                 if params.nd_ensemble && prefix_flops(champ) >= ND_SEED_RACE_MIN_FLOPS {
                     ND_SEED_CANDIDATES.len()
                 } else {
-                    ND_SINGLE_SEED.len()
+                    1
                 }
             }
             _ => 0,

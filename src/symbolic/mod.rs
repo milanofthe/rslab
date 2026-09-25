@@ -84,12 +84,7 @@ pub fn analyze(
     if method == OrderingMethod::Auto && params.given_perm.is_none() {
         return race::race(full, params);
     }
-    let px = race::prefix(
-        &OrderingGraph::new(full),
-        params,
-        method,
-        race::ND_SINGLE_SEED,
-    )?;
+    let px = race::prefix(&OrderingGraph::new(full), params, method, race::ND_SEED)?;
     race::finish(px, full, params)
 }
 
@@ -216,6 +211,54 @@ mod tests {
             for (s, sn) in sym.supernodes.iter().enumerate() {
                 assert_eq!(sn.nrow, sched.rows(s).len(), "nemin={nemin}, supernode {s}");
             }
+        }
+    }
+
+    /// Two unknowns per node of a 2D grid: pairs of indistinguishable
+    /// vertices, so the orderings run on the compressed graph and the
+    /// structure comes from the weighted count. It must equal the structure
+    /// computed on the full pattern under the same ordering.
+    #[test]
+    fn the_grouped_structure_equals_the_full_one() {
+        let (k, d) = (16usize, 2usize);
+        let (mut r, mut c) = (Vec::new(), Vec::new());
+        let node = |x: usize, y: usize| y * k + x;
+        for y in 0..k {
+            for x in 0..k {
+                let mut nbrs = vec![node(x, y)];
+                if x + 1 < k {
+                    nbrs.push(node(x + 1, y));
+                }
+                if y + 1 < k {
+                    nbrs.push(node(x, y + 1));
+                }
+                for &m in &nbrs {
+                    for a in 0..d {
+                        for b in 0..d {
+                            let (i, j) = (m * d + a, node(x, y) * d + b);
+                            if i >= j {
+                                r.push(i);
+                                c.push(j);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let n = k * k * d;
+        let a = CscMatrix::from_triplets(n, &r, &c, &vec![1.0; r.len()]).unwrap();
+        let full = crate::sparse::csc::symmetric_pattern(n, &a.col_ptr, &a.row_idx);
+        let graph = OrderingGraph::new(&full);
+        for method in [
+            OrderingMethod::Amd,
+            OrderingMethod::Amf,
+            OrderingMethod::MetisND,
+            OrderingMethod::Rcm,
+        ] {
+            let grouped = graph.order(method, 1).unwrap();
+            let direct = ordering_graph::structure(&full, grouped.perm.clone());
+            assert_eq!(grouped.etree.parent, direct.etree.parent, "{method:?}");
+            assert_eq!(grouped.col_counts, direct.col_counts, "{method:?}");
         }
     }
 
