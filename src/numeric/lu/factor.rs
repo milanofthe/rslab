@@ -3,9 +3,9 @@
 //! finished panel into `L` and `U^T`.
 
 use super::factors::LuNumeric;
-use super::input::{LuInput, LuScatter};
 use super::node::lu_ll_factor_node;
 use super::solver::LuSymbolic;
+use crate::numeric::supernodal::{Input, InputProgram};
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
@@ -149,7 +149,7 @@ fn emit_and_free<T: Scalar>(
 fn factor_lu_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
-    inp: LuInput<T>,
+    inp: Input<T>,
     d_row: &[f64],
     d_col: &[f64],
     perturb_floor: Option<f64>,
@@ -310,20 +310,13 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         }
         b
     });
-    let sc = lusym
-        .scatter
-        .get_or_init(|| LuScatter::build(a, b_row.as_deref(), sym));
-    let mut vals = vec![T::zero(); a.row_idx.len()];
-    for j in 0..n {
-        let dc = d_col[j];
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let r = a.row_idx[k];
-            let dr = d_row[b_row.as_ref().map_or(r, |b| b[r])];
-            vals[sc.pos[k]] = a.values[k] * T::from_real(dr * dc);
-        }
-    }
+    let prog = lusym
+        .input
+        .get_or_init(|| InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym));
+    let weight = |r: usize, j: usize| d_row[b_row.as_ref().map_or(r, |b| b[r])] * d_col[j];
+    let vals = prog.values(&a.col_ptr, &a.row_idx, &a.values, Some(&weight));
     drop(b_row);
-    let inp = LuInput { sc, vals: &vals };
+    let inp = Input::new(prog, &vals);
     // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
     // trees), shared by both LU paths.
     let stack = crate::numeric::settings::stack_for_depth(

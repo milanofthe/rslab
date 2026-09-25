@@ -13,7 +13,7 @@ use crate::numeric::settings::{
     stack_for_depth, supernode_tree_depth, SolverSettings, ZeroPivotAction,
 };
 use crate::numeric::supernodal::panel::{finish_panel, PanelArena, PanelFactor, PanelOut};
-use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule, PermScatter};
+use crate::numeric::supernodal::{emit_refcount_offsets, Cells, Input, InputProgram, LlSchedule};
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
@@ -156,18 +156,20 @@ pub fn factor_numeric<T: Scalar>(
     // factorization never overflows on deep chain trees (banded / 1D + low nemin).
     let stack = stack_for_depth(supernode_tree_depth(sym));
 
-    // A_perm = P^T A P (lower fold) through the cached scatter program: the
-    // structure is frozen on the first factorization of this pattern; every
-    // later (re)factorization pays one linear values pass only.
-    let scatter = inner
-        .lower_scatter
-        .get_or_init(|| PermScatter::build_lower(n, &a.col_ptr, &a.row_idx, &sym.perm_inv));
-    let a_perm = CscMatrix {
-        n,
-        col_ptr: scatter.col_ptr.clone(),
-        row_idx: scatter.row_idx.clone(),
-        values: scatter.scatter(a, scale),
-    };
+    // P^T A P (lower fold) through the cached input program: the structure is
+    // frozen on the first factorization of this pattern; every later
+    // (re)factorization pays one linear values pass only.
+    let prog = inner
+        .input
+        .get_or_init(|| InputProgram::symmetric(&a.col_ptr, &a.row_idx, &sym.perm_inv));
+    let weight = scale.map(|s| move |i: usize, j: usize| s[i] * s[j]);
+    let vals = prog.values(
+        &a.col_ptr,
+        &a.row_idx,
+        &a.values,
+        weight.as_ref().map(|w| w as &dyn Fn(usize, usize) -> f64),
+    );
+    let inp = Input::new(prog, &vals);
 
     // Run in a scoped pool of `opts.threads` so concurrent solves don't
     // oversubscribe.
@@ -175,7 +177,7 @@ pub fn factor_numeric<T: Scalar>(
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),
-        || factor_left_looking(sym, sched, a_perm, opts),
+        || factor_left_looking(sym, sched, inp, opts),
     )
 }
 
@@ -296,17 +298,13 @@ fn ldlt_no_free() -> bool {
 /// Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
 /// `PerturbToEps { abs_floor }` is taken as given (rslab convention: an
 /// absolute floor, typically `eps_rel * ||A||inf`); `Fail` disables
-/// perturbation. `a_perm` holds the values being factored.
-fn static_pivot_floor<T: Scalar>(a_perm: &CscMatrix<T>, opts: &SolverSettings) -> Option<f64> {
+/// perturbation. `values` are the values being factored.
+fn static_pivot_floor<T: Scalar>(values: &[T], opts: &SolverSettings) -> Option<f64> {
     match opts.on_zero_pivot {
         ZeroPivotAction::Fail => None,
         ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
         ZeroPivotAction::ForceAccept => {
-            let anorm = a_perm
-                .values
-                .iter()
-                .map(|v| v.magnitude())
-                .fold(0.0, f64::max);
+            let anorm = values.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
             Some(anorm.max(1.0) * f64::EPSILON)
         }
     }
@@ -326,11 +324,11 @@ fn static_pivot_floor<T: Scalar>(a_perm: &CscMatrix<T>, opts: &SolverSettings) -
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
-    a_perm: CscMatrix<T>,
+    inp: Input<T>,
     opts: &SolverSettings,
 ) -> Result<LdltNumeric<T>, RslabError> {
     let n = sym.n;
-    let perturb_floor = static_pivot_floor(&a_perm, opts);
+    let perturb_floor = static_pivot_floor(inp.values(), opts);
 
     let nsuper = sym.supernodes.len();
     // Factor in parallel over the assembly forest: sibling subtrees concurrently,
@@ -345,7 +343,7 @@ fn factor_left_looking<T: Scalar>(
         ll_factor_node(
             s,
             sym,
-            &a_perm,
+            inp,
             sched,
             &store,
             &emit,

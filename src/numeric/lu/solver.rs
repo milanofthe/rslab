@@ -3,7 +3,6 @@
 
 use super::factor::factor_general_lu_numeric;
 use super::factors::{LuFactors, LuNumeric};
-use super::input::LuScatter;
 
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
@@ -86,10 +85,10 @@ pub struct LuSymbolic {
     /// size (the estimate depends on `T` only through `size_of::<T>()`, and
     /// rebuilding the supernode row structures per call is expensive).
     pub(super) est_cache: Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
-    /// The split permuted input's structure ([`LuScatter`]), built at the first
+    /// The split permuted input's program ([`InputProgram::general`](crate::numeric::supernodal::InputProgram)), built at the first
     /// factorization: every (re)factorization reduces to one linear values
     /// scatter (row matching and equilibration applied on the way).
-    pub(super) scatter: std::sync::OnceLock<LuScatter>,
+    pub(super) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
 }
 
 impl LuSymbolic {
@@ -129,7 +128,7 @@ impl LuSymbolic {
                 analyze_ms: 0.0,
                 requested_ordering: opts.ordering,
                 est_cache: Mutex::new(Vec::new()),
-                scatter: std::sync::OnceLock::new(),
+                input: std::sync::OnceLock::new(),
             });
         }
         let t = crate::clock::Instant::now();
@@ -186,7 +185,7 @@ impl LuSymbolic {
             analyze_ms,
             requested_ordering: opts.ordering,
             est_cache: Mutex::new(Vec::new()),
-            scatter: std::sync::OnceLock::new(),
+            input: std::sync::OnceLock::new(),
         })
     }
 

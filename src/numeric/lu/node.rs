@@ -3,7 +3,7 @@
 //! blocked panel LU with threshold partial pivoting.
 
 use super::factor::{LlEmit, LuLlStore};
-use super::input::LuInput;
+use crate::numeric::supernodal::Input;
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
@@ -59,7 +59,7 @@ unsafe fn apply_panel_trailing<T: Scalar>(
 pub(super) fn lu_ll_factor_node<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
-    inp: LuInput<T>,
+    inp: Input<T>,
     sched: &LlSchedule,
     store: &LuLlStore,
     emit: &LlEmit<T>,
