@@ -275,6 +275,27 @@ pub fn array1<T: Element>(py: Python<'_>, v: Vec<T>) -> PyObject {
     v.into_pyarray_bound(py).into_any().unbind()
 }
 
+/// Wrap a GeneralCsc matrix as a SciPy `csc_matrix`.
+pub fn csc_to_py<T: Element + Clone>(
+    py: Python<'_>,
+    m: &rslab::GeneralCsc<T>,
+) -> PyResult<PyObject> {
+    let data = array1(py, m.values.clone());
+    let indices = array1(
+        py,
+        m.row_idx.iter().map(|&r| r as i32).collect::<Vec<i32>>(),
+    );
+    let indptr = array1(
+        py,
+        m.col_ptr.iter().map(|&p| p as i32).collect::<Vec<i32>>(),
+    );
+    let shape = (m.n, m.n);
+    let sp = py.import_bound("scipy.sparse")?;
+    let csc_cls = sp.getattr("csc_matrix")?;
+    let mat = csc_cls.call1(((data, indices, indptr), shape))?;
+    Ok(mat.into_any().unbind())
+}
+
 /// A column-major `n x nrhs` block as a row-major NumPy array.
 pub fn array2<T: Element + Copy + Default>(
     py: Python<'_>,
