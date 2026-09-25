@@ -91,6 +91,28 @@ impl EliminationTree {
     }
 
     /// Compute children lists from parent pointers.
+    /// Children of every node in one flat array, each node's children
+    /// ascending: those of `v` are `idx[ptr[v]..ptr[v + 1]]`.
+    pub(crate) fn children_flat(&self) -> (Vec<usize>, Vec<usize>) {
+        let n = self.n;
+        let mut ptr = vec![0usize; n + 1];
+        for p in self.parent.iter().flatten() {
+            ptr[p + 1] += 1;
+        }
+        for v in 0..n {
+            ptr[v + 1] += ptr[v];
+        }
+        let mut next = ptr[..n].to_vec();
+        let mut idx = vec![0usize; ptr[n]];
+        for j in 0..n {
+            if let Some(p) = self.parent[j] {
+                idx[next[p]] = j;
+                next[p] += 1;
+            }
+        }
+        (ptr, idx)
+    }
+
     pub fn children(&self) -> Vec<Vec<usize>> {
         let mut ch = vec![Vec::new(); self.n];
         for j in 0..self.n {
@@ -129,17 +151,17 @@ impl EliminationTree {
     pub fn postorder(&self) -> Vec<usize> {
         let n = self.n;
         let mut out = Vec::with_capacity(n);
-        let children = self.children();
-        let mut next_child = vec![0usize; n];
+        let (ptr, idx) = self.children_flat();
+        let mut next_child = ptr[..n].to_vec();
         let mut stack: Vec<usize> = Vec::with_capacity(n);
 
         for root in self.roots() {
             stack.push(root);
             while let Some(&node) = stack.last() {
                 let k = next_child[node];
-                if k < children[node].len() {
+                if k < ptr[node + 1] {
                     next_child[node] = k + 1;
-                    stack.push(children[node][k]);
+                    stack.push(idx[k]);
                 } else {
                     out.push(node);
                     stack.pop();

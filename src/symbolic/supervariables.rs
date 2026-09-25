@@ -70,27 +70,49 @@ impl Supervariables {
 
         // Within a run of equal keys, split into exact-equality classes
         // (hash collisions are rare; the leader is the smallest member).
+        // Runs are contiguous in `by_key` and independent, so they split in
+        // parallel: `lead[i]` is the leader of `by_key[i]`.
         const NONE: usize = usize::MAX;
-        let mut leader = vec![NONE; n];
+        let mut runs: Vec<&mut [usize]> = Vec::new();
+        let mut lead = vec![NONE; n];
+        let mut rest: &mut [usize] = &mut lead;
         let mut run = 0;
         while run < n {
             let mut end = run + 1;
             while end < n && keys[by_key[end]] == keys[by_key[run]] {
                 end += 1;
             }
-            for i in run..end {
-                let v = by_key[i];
-                if leader[v] != NONE {
-                    continue;
-                }
-                leader[v] = v;
-                for &u in &by_key[i + 1..end] {
-                    if leader[u] == NONE && same(v, u) {
-                        leader[u] = v;
+            let (head, tail) = rest.split_at_mut(end - run);
+            runs.push(head);
+            rest = tail;
+            run = end;
+        }
+        let mut offsets = Vec::with_capacity(runs.len());
+        let mut at = 0;
+        for r in &runs {
+            offsets.push(at);
+            at += r.len();
+        }
+        runs.into_par_iter()
+            .zip(offsets)
+            .with_min_len(64)
+            .for_each(|(lead, start)| {
+                let members = &by_key[start..start + lead.len()];
+                for i in 0..members.len() {
+                    if lead[i] != NONE {
+                        continue;
+                    }
+                    lead[i] = members[i];
+                    for k in i + 1..members.len() {
+                        if lead[k] == NONE && same(members[i], members[k]) {
+                            lead[k] = members[i];
+                        }
                     }
                 }
-            }
-            run = end;
+            });
+        let mut leader = vec![NONE; n];
+        for (i, &v) in by_key.iter().enumerate() {
+            leader[v] = lead[i];
         }
 
         // Number the groups by leader; `v` ascending visits every leader
@@ -139,35 +161,50 @@ impl Supervariables {
             .collect()
     }
 
-    /// The compressed graph: one vertex per group, an edge between two
-    /// groups whenever their members are adjacent, no self-loops, rows
-    /// sorted. The members of a group share their neighbours, so the
-    /// group's first member stands for all of them.
-    pub fn compress(&self, pattern: &CscPattern) -> CscPattern {
+    /// The compressed graph as the `i32` arrays of the ordering crates: one
+    /// vertex per group, an edge between two groups whenever their members
+    /// are adjacent, no self-loops, rows sorted. The members of a group share
+    /// their neighbours, so the group's first member stands for all of them.
+    /// Blocks of groups compress in parallel. `None` when the graph does not
+    /// fit `i32` indices.
+    pub fn compress(&self, pattern: &CscPattern) -> Option<(Vec<i32>, Vec<i32>)> {
         let n_groups = self.len();
+        i32::try_from(pattern.row_idx.len()).ok()?;
+        let blocks = (8 * rayon::current_num_threads()).clamp(1, n_groups.max(1));
+        let parts: Vec<(Vec<i32>, Vec<i32>)> = (0..blocks)
+            .into_par_iter()
+            .map(|b| {
+                let (g0, g1) = (b * n_groups / blocks, (b + 1) * n_groups / blocks);
+                let (mut lens, mut rows) = (Vec::with_capacity(g1 - g0), Vec::new());
+                let mut col: Vec<i32> = Vec::new();
+                for g in g0..g1 {
+                    let v = self.members[self.ptr[g]];
+                    col.clear();
+                    col.extend(
+                        pattern.row_idx[pattern.col_ptr[v]..pattern.col_ptr[v + 1]]
+                            .iter()
+                            .map(|&r| self.group_of[r])
+                            .filter(|&h| h != g)
+                            .map(|h| h as i32),
+                    );
+                    col.sort_unstable();
+                    col.dedup();
+                    lens.push(col.len() as i32);
+                    rows.extend_from_slice(&col);
+                }
+                (lens, rows)
+            })
+            .collect();
         let mut col_ptr = Vec::with_capacity(n_groups + 1);
-        col_ptr.push(0);
-        let mut row_idx = Vec::new();
-        let mut col: Vec<usize> = Vec::new();
-        for g in 0..n_groups {
-            let v = self.members[self.ptr[g]];
-            col.clear();
-            col.extend(
-                pattern.row_idx[pattern.col_ptr[v]..pattern.col_ptr[v + 1]]
-                    .iter()
-                    .map(|&r| self.group_of[r])
-                    .filter(|&h| h != g),
-            );
-            col.sort_unstable();
-            col.dedup();
-            row_idx.extend_from_slice(&col);
-            col_ptr.push(row_idx.len());
+        col_ptr.push(0i32);
+        let mut row_idx = Vec::with_capacity(parts.iter().map(|p| p.1.len()).sum());
+        for (lens, rows) in parts {
+            for l in lens {
+                col_ptr.push(col_ptr[col_ptr.len() - 1] + l);
+            }
+            row_idx.extend_from_slice(&rows);
         }
-        CscPattern {
-            n: n_groups,
-            col_ptr,
-            row_idx,
-        }
+        Some((col_ptr, row_idx))
     }
 }
 
@@ -206,11 +243,10 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert_eq!(s.group_of, vec![0, 0, 1, 2, 2]);
         assert_eq!(s.weights(), vec![2, 1, 2]);
-        let c = s.compress(&p);
-        assert_eq!(c.n, 3);
+        let (col_ptr, row_idx) = s.compress(&p).unwrap();
         // Groups {0, 1}, {2}, {3, 4}: the pairs touch only the middle.
-        assert_eq!(c.col_ptr, vec![0, 1, 3, 4]);
-        assert_eq!(c.row_idx, vec![1, 0, 2, 1]);
+        assert_eq!(col_ptr, vec![0, 1, 3, 4]);
+        assert_eq!(row_idx, vec![1, 0, 2, 1]);
     }
 
     #[test]

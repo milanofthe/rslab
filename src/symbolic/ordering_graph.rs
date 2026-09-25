@@ -61,8 +61,10 @@ impl<'a> OrderingGraph<'a> {
                         let groups = ((groups.len() as f64)
                             <= COMPRESS_MAX_RATIO * pattern.n as f64)
                             .then_some(groups);
-                        let compressed = groups.as_ref().map(|g| g.compress(pattern));
-                        let (col_ptr, row_idx) = to_i32(compressed.as_ref().unwrap_or(pattern))?;
+                        let (col_ptr, row_idx) = match &groups {
+                            Some(g) => g.compress(pattern).ok_or_else(too_large)?,
+                            None => to_i32(pattern)?,
+                        };
                         Ok(Ordered {
                             weights: groups.as_ref().map(Supervariables::weights),
                             groups,
@@ -215,13 +217,17 @@ fn checked(order: &[i32], n: usize) -> Result<Vec<usize>, RslabError> {
     }
 }
 
+fn too_large() -> String {
+    "matrix too large for i32-indexed ordering crates".to_string()
+}
+
 /// The pattern as the `i32` arrays of the ordering crates.
 fn to_i32(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), String> {
     let conv = |v: &[usize]| -> Result<Vec<i32>, String> {
         v.iter()
             .map(|&x| i32::try_from(x))
             .collect::<Result<_, _>>()
-            .map_err(|_| "matrix too large for i32-indexed ordering crates".to_string())
+            .map_err(|_| too_large())
     };
     Ok((conv(&pattern.col_ptr)?, conv(&pattern.row_idx)?))
 }

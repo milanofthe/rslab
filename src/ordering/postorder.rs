@@ -19,59 +19,11 @@ thread_local! {
 /// Children are visited in order of ascending subtree size (smallest first)
 /// to minimize peak contribution-block memory during the factorization.
 pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
-    let n = etree.n;
-    if n == 0 {
-        return (Vec::new(), Vec::new());
-    }
-
-    let children = etree.children();
-    let sizes = etree.subtree_sizes();
-    let roots = etree.roots();
-
-    let mut order = Vec::with_capacity(n);
-
-    // DFS stack carries each node's already-sorted child list plus a cursor:
-    // `(node, sorted_children, child_idx)`. The sort runs exactly once per
-    // node - when the node is first pushed - not once per stack visit.
-    //
-    // A node with `c` children sits on top of the stack `c+1` times (once
-    // per child push + once for the final pop), so sorting on every visit
-    // would cost `O(c^2*log c)`. On a star etree (one root with `n-1`
-    // children - the arrow/bordered-KKT shape AMD produces for a dense
-    // trailing border) that would make the symbolic pipeline
-    // `O(n^2*log n)`. `biased_postorder` and `EliminationTree::postorder`
-    // use the same cursor layout.
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
-
-    // Process roots in ascending subtree size order
-    let mut sorted_roots = roots;
-    sorted_roots.sort_unstable_by_key(|&r| sizes[r]);
-
-    for &root in &sorted_roots {
-        stack.push((root, sorted_children_by_size(&children[root], &sizes), 0));
-
-        while let Some((node, sorted_children, child_idx)) = stack.last_mut() {
-            let node_id = *node;
-            if *child_idx < sorted_children.len() {
-                let child = sorted_children[*child_idx];
-                *child_idx += 1;
-                let next = sorted_children_by_size(&children[child], &sizes);
-                stack.push((child, next, 0));
-            } else {
-                // All children visited - emit this node (postorder)
-                order.push(node_id);
-                stack.pop();
-            }
-        }
-    }
-
-    // Compute inverse
-    let mut inv = vec![0usize; n];
-    for (k, &node) in order.iter().enumerate() {
-        inv[node] = k;
-    }
-
-    (order, inv)
+    postorder_with(etree, |kids, sizes| {
+        #[cfg(test)]
+        SORT_WORK.with(|w| w.set(w.get() + kids.len()));
+        kids.sort_unstable_by_key(|&c| sizes[c]);
+    })
 }
 
 /// Merge-biased postorder.
@@ -93,77 +45,69 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
 /// Invariant: `biased_postorder(etree, &vec![false; n]) ==
 /// postorder(etree)`.
 pub fn biased_postorder(etree: &EliminationTree, bias: &[bool]) -> (Vec<usize>, Vec<usize>) {
-    let n = etree.n;
     debug_assert_eq!(
         bias.len(),
-        n,
+        etree.n,
         "biased_postorder bias length must equal etree.n"
     );
+    let mut late = Vec::new();
+    postorder_with(etree, |kids, sizes| {
+        // Unbiased children first, the biased ones (to be merged into the
+        // parent) last, next to it; each part by subtree size.
+        late.clear();
+        late.extend(kids.iter().copied().filter(|&c| bias[c]));
+        let mut w = 0;
+        for r in 0..kids.len() {
+            if !bias[kids[r]] {
+                kids[w] = kids[r];
+                w += 1;
+            }
+        }
+        kids[w..].copy_from_slice(&late);
+        let (early, tail) = kids.split_at_mut(w);
+        early.sort_unstable_by_key(|&c| sizes[c]);
+        tail.sort_unstable_by_key(|&c| sizes[c]);
+    })
+}
+
+/// The postorder visiting each node's children in the order `order_children`
+/// leaves them in (called once per node on its children, ascending, with the
+/// subtree sizes); roots by subtree size. Returns `(postorder, inverse)`.
+fn postorder_with(
+    etree: &EliminationTree,
+    mut order_children: impl FnMut(&mut [usize], &[usize]),
+) -> (Vec<usize>, Vec<usize>) {
+    let n = etree.n;
     if n == 0 {
         return (Vec::new(), Vec::new());
     }
-
-    let children = etree.children();
     let sizes = etree.subtree_sizes();
-    let roots = etree.roots();
-
+    let (ptr, mut idx) = etree.children_flat();
+    for v in 0..n {
+        order_children(&mut idx[ptr[v]..ptr[v + 1]], &sizes);
+    }
+    let mut roots = etree.roots();
+    roots.sort_unstable_by_key(|&r| sizes[r]);
     let mut order = Vec::with_capacity(n);
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
-
-    // Roots are not biased (no parent to be adjacent to). Use the
-    // unbiased subtree-size order.
-    let mut sorted_roots = roots;
-    sorted_roots.sort_unstable_by_key(|&r| sizes[r]);
-
-    for &root in &sorted_roots {
-        let merged = merge_bias_partition(&children[root], &sizes, bias);
-        stack.push((root, merged, 0));
-
-        while let Some((node, sorted_children, child_idx)) = stack.last_mut() {
-            let node_id = *node;
-            if *child_idx < sorted_children.len() {
-                let child = sorted_children[*child_idx];
-                *child_idx += 1;
-                let next_children = merge_bias_partition(&children[child], &sizes, bias);
-                stack.push((child, next_children, 0));
+    let mut next = ptr[..n].to_vec();
+    let mut stack: Vec<usize> = Vec::new();
+    for root in roots {
+        stack.push(root);
+        while let Some(&v) = stack.last() {
+            if next[v] < ptr[v + 1] {
+                stack.push(idx[next[v]]);
+                next[v] += 1;
             } else {
-                order.push(node_id);
+                order.push(v);
                 stack.pop();
             }
         }
     }
-
     let mut inv = vec![0usize; n];
-    for (k, &node) in order.iter().enumerate() {
-        inv[node] = k;
+    for (k, &v) in order.iter().enumerate() {
+        inv[v] = k;
     }
     (order, inv)
-}
-
-/// Sort a node's children by ascending subtree size (smallest first), the
-/// peak-memory-minimizing visit order used by [`postorder`]. Factored out so
-/// the clone+sort runs exactly once per node.
-fn sorted_children_by_size(children: &[usize], sizes: &[usize]) -> Vec<usize> {
-    #[cfg(test)]
-    SORT_WORK.with(|w| w.set(w.get() + children.len()));
-    let mut v = children.to_vec();
-    v.sort_unstable_by_key(|&c| sizes[c]);
-    v
-}
-
-/// Order a parent's children for the merge-biased postorder.
-///
-/// Partition: `bias[child] == false` first (emit early), then
-/// `bias[child] == true` (emit late, adjacent to the parent). Within
-/// each partition, ascending subtree size - the same heuristic as
-/// the unbiased postorder, applied independently to each partition.
-fn merge_bias_partition(children: &[usize], sizes: &[usize], bias: &[bool]) -> Vec<usize> {
-    let mut early: Vec<usize> = children.iter().copied().filter(|&c| !bias[c]).collect();
-    let mut late: Vec<usize> = children.iter().copied().filter(|&c| bias[c]).collect();
-    early.sort_unstable_by_key(|&c| sizes[c]);
-    late.sort_unstable_by_key(|&c| sizes[c]);
-    early.extend(late);
-    early
 }
 
 #[cfg(test)]
