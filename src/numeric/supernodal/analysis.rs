@@ -32,10 +32,11 @@ pub(crate) struct SymbolicInner {
     /// Assembly-tree levels: `by_level[l]` are the supernodes at level `l`, all
     /// mutually independent (factored concurrently by the rayon driver).
     pub(crate) by_level: Vec<Vec<usize>>,
-    /// Lazily built scatter program for `P^T A P` (lower fold): the permuted
-    /// structure is fixed per pattern, so every (re)factorization reduces to
-    /// one linear values scatter. See [`crate::numeric::supernodal::PermScatter`].
-    pub(crate) lower_scatter: std::sync::OnceLock<crate::numeric::supernodal::PermScatter>,
+    /// Lazily built input program of the LDL^T path (`P^T A P`, lower fold):
+    /// the permuted structure is fixed per pattern, so every (re)factorization
+    /// reduces to one linear values pass. See
+    /// [`crate::numeric::supernodal::InputProgram`].
+    pub(crate) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
     /// Lazily built left-looking schedule (row structures + updater lists),
     /// pattern-only and shared by the numeric drivers and the estimators.
     pub(crate) ll_schedule: std::sync::OnceLock<LlSchedule>,
@@ -286,7 +287,7 @@ fn analyze_with_inner(
         inner: Some(SymbolicInner {
             sym,
             by_level,
-            lower_scatter: std::sync::OnceLock::new(),
+            input: std::sync::OnceLock::new(),
             ll_schedule: std::sync::OnceLock::new(),
         }),
         n,

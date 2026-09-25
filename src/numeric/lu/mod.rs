@@ -30,7 +30,6 @@
 
 mod factor;
 mod factors;
-mod input;
 mod node;
 mod solver;
 #[cfg(test)]

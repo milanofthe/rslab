@@ -5,15 +5,15 @@
 
 pub(crate) mod analysis;
 mod forest;
+mod input;
 mod node;
 pub(crate) mod panel;
-mod scatter;
 mod schedule;
 pub(crate) mod solve;
 mod store;
 
 pub(crate) use forest::ll_forest;
+pub(crate) use input::{Input, InputProgram};
 pub(crate) use node::{perturb_pivot, CmodPlan, Gloc};
-pub(crate) use scatter::PermScatter;
 pub(crate) use schedule::{emit_refcount_offsets, Li, LlSchedule};
 pub(crate) use store::{Cells, PanelPtr, SlotStore};

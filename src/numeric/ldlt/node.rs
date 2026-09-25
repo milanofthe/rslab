@@ -5,12 +5,12 @@
 use super::bunch_kaufman::ll_cdiv_emit;
 use super::factor::{LlEmitLdlt, LlStore};
 use super::gemm::{grow_scratch, lower_tile_gemm};
+use crate::numeric::supernodal::Input;
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::LlSchedule;
 use crate::scalar::Scalar;
-use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
 use std::sync::atomic::AtomicUsize;
@@ -23,7 +23,7 @@ use std::sync::atomic::AtomicUsize;
 pub(super) fn ll_factor_node<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
-    a_perm: &CscMatrix<T>,
+    inp: Input<T>,
     sched: &LlSchedule,
     store: &LlStore<T>,
     emit: &LlEmitLdlt<T>,
@@ -49,9 +49,9 @@ pub(super) fn ll_factor_node<T: Scalar>(
     // Assemble A's lower-triangle columns of this supernode.
     for p in 0..ncol {
         let c = first + p;
-        for k in a_perm.col_ptr[c]..a_perm.col_ptr[c + 1] {
-            let li = gloc[a_perm.row_idx[k]] as usize;
-            panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
+        for (g, v) in inp.col(c) {
+            let li = gloc[g] as usize;
+            panel[li + p * nrow] = panel[li + p * nrow] + v;
         }
     }
     let plan = crate::numeric::supernodal::CmodPlan::new(sym, sched, s, false, ll_gemm_par);
