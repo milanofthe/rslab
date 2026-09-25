@@ -2,7 +2,7 @@
 //!
 //! [`CscMatrix`](crate::sparse::csc::CscMatrix) stores only the lower triangle
 //! of a *symmetric* matrix. The unsymmetric LU path
-//! ([`crate::numeric::multifrontal_lu`]) needs the **full** matrix with both
+//! ([`crate::numeric::lu`]) needs the **full** matrix with both
 //! triangles and genuinely distinct `A_ij != A_ji`; this type provides that.
 
 use crate::error::RslabError;

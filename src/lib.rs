@@ -174,7 +174,7 @@ pub use numeric::iterative::{
     LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
     Recycle, RecycleScalar, StopReason,
 };
-pub use numeric::multifrontal_lu::{
+pub use numeric::lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
     solve_lu_transpose, LuFactors, LuNumeric, LuSolver, LuSymbolic,
 };
