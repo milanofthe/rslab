@@ -13,12 +13,12 @@ use crate::scalar::Scalar;
 /// [`LuFactors`](crate::numeric::lu::LuFactors) near-field factor).
 /// Solves `A x = b` from the optional initial guess `x0` (default `x_0 = 0`).
 ///
-/// **Warm start (issue #5):** pass `x0 = Some(prev)` to seed the iteration from a
+/// **Warm start:** pass `x0 = Some(prev)` to seed the iteration from a
 /// previous, related solution - on a sequence of slowly varying systems this
 /// often cuts the iteration count substantially. Convergence is still measured
 /// relative to ||b||.
 ///
-/// **Flexible variant (issue #7):** the preconditioned Arnoldi vectors
+/// **Flexible variant:** the preconditioned Arnoldi vectors
 /// `z_j = M^-1 v_j` (already formed to build `w = A z_j`) are *kept* as a second
 /// basis `Z = [z_0 ... z_{m-1}]`, and the restart update is `x += Z y` directly.
 /// This (a) removes the one extra `M^-1` solve per cycle that plain right-
@@ -52,7 +52,7 @@ where
     const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
     let bnorm = norm2(b);
-    // Warm start (issue #5): seed `x` from the caller's initial guess `x0`; the
+    // Warm start: seed `x` from the caller's initial guess `x0`; the
     // per-cycle true residual `r = b - A x` then measures progress from that
     // guess. Convergence is still relative to ||b||. Absent `x0`, `x_0 = 0`.
     let mut x = match x0 {
@@ -90,7 +90,7 @@ where
     // second preconditioner solve, and so a *variable* `M` is honoured exactly.
     let mut zb = vec![T::zero(); n * m];
     // Per-restart Krylov scalars hoisted out of the outer loop and cleared/reused
-    // each cycle (issue #10): the Hessenberg `h` as one **flat** `(m+1)xm` buffer
+    // each cycle: the Hessenberg `h` as one **flat** `(m+1)xm` buffer
     // (row `i`, col `j` at `h[i*m + j]` - cache-friendlier than a `Vec<Vec<T>>`),
     // the Givens `cs`/`sn`, the LS RHS `g`, and the back-substitution `y`. A
     // many-restart solve (the ill-conditioned regime) then does no per-cycle heap
@@ -107,7 +107,7 @@ where
     // field operators, where the Hessenberg LS estimate can dip below `tol` while
     // the true residual is orders larger) and records it as `final_res`. On
     // convergence *or* exhausted iterations we break with that value already in
-    // hand - no separate post-loop matvec to report the residual (issue #10).
+    // hand - no separate post-loop matvec to report the residual.
     // Definitely assigned before every `break` (the only exits from the loop).
     let mut final_res;
     loop {

@@ -382,7 +382,7 @@ pub fn recommend_threads_cost_model(
         max_threads
     };
     let rate = calib.rate_for(estimate.value_bytes);
-    // Learned residual on the analytical speedup (issue #62): the bare
+    // Learned residual on the analytical speedup: the bare
     // `flops / max(crit, flops/speedup)` model mispredicts the achieved scaling
     // systematically --- the critical-path flops overstate the true serial
     // fraction (sibling subtrees overlap), so it is too pessimistic on
@@ -618,7 +618,7 @@ mod tests {
         let plan_ok = plan(&est, &Budget::default(), &hw, &calib);
         assert!(plan_ok.fits && !plan_ok.use_mixed_precision);
         assert!(plan_ok.est_runtime_ms > 0.0);
-        // v2 cost-model thread selection (#61) picks the fewest cores that reach
+        // v2 cost-model thread selection picks the fewest cores that reach
         // near-minimum predicted time, for a small grid the critical path or
         // saturation dominates, so it may (correctly) choose fewer than all cores.
         // The contract is 1 <= threads <= physical_cores, not "always all cores".

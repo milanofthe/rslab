@@ -356,22 +356,7 @@ impl<T: Scalar> CscMatrix<T> {
 
     /// Convert to dense symmetric matrix.
     pub fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix<T> {
-        self.to_dense_into(Vec::new())
-    }
-
-    /// Densify into a caller-provided buffer (reused to avoid the
-    /// `n * n` allocation on every call). The buffer is cleared and
-    /// resized to `n * n` zeros before the lower triangle is
-    /// scattered in; pass `Vec::new()` for a fresh allocation.
-    ///
-    /// Byte-exact equivalent to `to_dense()` for the same input.
-    /// Used by `FactorWorkspace` to pool the dense-fast-path buffer
-    /// across calls - see
-    /// `dev/research/phase-2.5.x-to-dense-pooling.md`.
-    pub fn to_dense_into(&self, mut buf: Vec<T>) -> crate::dense::matrix::SymmetricMatrix<T> {
-        let nn = self.n * self.n;
-        buf.clear();
-        buf.resize(nn, T::zero());
+        let mut buf = vec![T::zero(); self.n * self.n];
         // `from_triplets` guarantees all stored entries are lower-
         // triangle (row >= col), so every `(i, j)` lands at
         // `data[j*n + i]`.
@@ -472,7 +457,7 @@ mod tests {
         assert!(m.validate().is_err());
     }
 
-    /// Issue #4: upper-triangle triplets must be rejected, not silently
+    /// upper-triangle triplets must be rejected, not silently
     /// accepted. The two matrices below describe the same symmetric
     /// system; previously the upper-triangle form was accepted and
     /// produced different solve results downstream.
@@ -595,7 +580,7 @@ mod tests {
         assert!((y[2] - (2.0 - 1e-8)).abs() < 1e-14); // 1 + 1 - 1e-8
     }
 
-    /// X6 (dev/research/repo-review-2026-06-09.md): `validate()` must reject a
+    /// `validate()` must reject a
     /// non-monotone `col_ptr`. A valid CSC requires `col_ptr` to be
     /// monotonically non-decreasing (the standard column-pointer contract);
     /// without that check a non-monotone `ia` whose endpoints line up

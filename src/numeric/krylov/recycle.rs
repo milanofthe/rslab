@@ -8,7 +8,7 @@ use crate::scalar::Scalar;
 use num_complex::Complex;
 
 // ===========================================================================
-// GCRO-DR: Krylov subspace recycling for sequences of related solves (issue #5)
+// GCRO-DR: Krylov subspace recycling for sequences of related solves
 // ===========================================================================
 //
 // **When it helps.** RSLAB targets solver-in-the-loop workloads: many solves of
@@ -227,7 +227,7 @@ impl RecycleScalar for Complex<f32> {
 }
 
 /// An opaque **recycle subspace** carried across a sequence of related solves
-/// ([`gmres_recycled`], issue #5). Holds `k` harmonic-Ritz vectors `U` (in the
+/// ([`gmres_recycled`]). Holds `k` harmonic-Ritz vectors `U` (in the
 /// preconditioned space, i.e. approximate smallest eigenvectors of `A M^-1`) that
 /// dominate GMRES stagnation, so the next related solve deflates them from the
 /// start instead of re-discovering them.
@@ -468,7 +468,7 @@ fn recompute_recycle<T: RecycleScalar>(
 }
 
 /// **GCRO-DR** - flexible right-preconditioned restarted GMRES with **Krylov
-/// subspace recycling** (Parks/de Sturler et al. 2006, issue #5). The recycling
+/// subspace recycling** (Parks/de Sturler et al. 2006). The recycling
 /// companion to [`gmres`]: identical convergence semantics and diagnostics, plus
 /// a [`Recycle`] handle that (a) deflates a `k`-dimensional near-invariant
 /// subspace *across restarts within this solve* and (b) *carries it to the next

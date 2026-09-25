@@ -372,7 +372,7 @@ impl Default for SolverSettings {
             // minimum of three: geomean 0.654 for off, 16 of 18 matrices faster,
             // convection-diffusion 2D 2.6-4x, worst case curl-curl 14739 at
             // +12%. Fill is identical or lower without it (MoM 34.2M -> 32.1M).
-            // See `dev/research/amalgamation-2026-08.md`. Opt in per call with
+            // Opt in per call with
             // `with_relax(Some(..))` where the fronts are dense enough to want it.
             relax: None,
             permutation: None,

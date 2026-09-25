@@ -149,7 +149,7 @@ impl<T: Scalar> GeneralCsc<T> {
     }
 
     /// One-norm `||A||_1 = max_j sum_i |a_ij|` (max absolute column sum) - the
-    /// norm side of the Hager-Higham condition estimate (feral #94 port).
+    /// norm side of the Hager-Higham condition estimate.
     pub fn one_norm(&self) -> f64 {
         let mut worst = 0.0f64;
         for j in 0..self.n {

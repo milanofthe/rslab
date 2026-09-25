@@ -8,6 +8,6 @@ echo "[pre-commit] cargo fmt --check"
 cargo fmt --check
 
 if [ "${RSLAB_SKIP_CLIPPY:-0}" != "1" ]; then
-    echo "[pre-commit] cargo clippy --all-targets -- -D warnings   (RSLAB_SKIP_CLIPPY=1 skips)"
-    cargo clippy --all-targets -- -D warnings
+    echo "[pre-commit] cargo clippy (as CI; RSLAB_SKIP_CLIPPY=1 skips)"
+    cargo clippy --all-targets --features matgen,tuning -- -D warnings
 fi

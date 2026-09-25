@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit the learned residual for the v2 analytical cost model (issue #62).
+"""Fit the learned residual for the v2 analytical cost model.
 
 The v2 thread-aware time model predicts factor time from the a-priori cost
 triple (factor_flops, critical_path_flops) and the hardware calibration:
@@ -66,7 +66,7 @@ def features(cost, threads):
     analytical base (weight -> -1) and become a pure learned model. Keeping it out
     forces a genuine residual that refines the hardware-calibrated base rather than
     replacing it, which transfers across machines. `amdahl_frac` (the critical-path
-    fraction from issue #60) carries almost all of the signal."""
+    fraction) carries almost all of the signal."""
     flops = max(float(cost["factor_flops"]), 1.0)
     crit = max(float(cost["critical_path_flops"]), 1.0)
     width = max(float(cost["max_tree_width"]), 1.0)

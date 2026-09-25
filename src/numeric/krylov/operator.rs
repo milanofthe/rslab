@@ -115,7 +115,7 @@ pub trait Preconditioner<T: Scalar> {
         }
         Ok(())
     }
-    /// Thread policy the **solve phase** should honour (issue #9). A factored
+    /// Thread policy the **solve phase** should honour. A factored
     /// preconditioner returns the resolved [`Threads`] budget it was built with, so
     /// [`gmres_block`](super::gmres_block)'s parallel orthogonalization runs in a pool of the **same**
     /// width - factor and solve share one concurrency budget instead of the solve

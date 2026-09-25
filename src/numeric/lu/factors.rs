@@ -39,7 +39,7 @@ pub struct LuFactors<T> {
     pub supernode_parent: Vec<usize>,
     /// Number of statically perturbed pivots.
     pub n_perturbed: usize,
-    /// Thread policy the **solve phase** should honour (issue #9): resolved from
+    /// Thread policy the **solve phase** should honour: resolved from
     /// the factorization's [`SolverSettings::threads`](crate::SolverSettings::threads) so an iterative solve using
     /// this factor as a preconditioner runs its parallel orthogonalization in a
     /// pool of the **same** width - factor and solve share one concurrency budget
@@ -207,8 +207,7 @@ pub fn solve_lu<T: Scalar>(f: &LuFactors<T>, b: &[T]) -> Result<Vec<T>, RslabErr
     Ok(out)
 }
 
-/// Solve `A^T * x = b` against the stored factorization of `A` (feral #94
-/// enabler). The factor chain is `A^-1 = D_c P_c (LU)^-1 P_r^T D_r` (see
+/// Solve `A^T * x = b` against the stored factorization of `A`. The factor chain is `A^-1 = D_c P_c (LU)^-1 P_r^T D_r` (see
 /// [`solve_lu`]), so `A^-T = D_r P_r L^-T U^-T P_c^T D_c`: column-equilibrate
 /// and column-permute the RHS, forward-solve `U^T` (lower triangular; `U` is
 /// CSR with the pivot leading each row, so once `z[e]` is final it

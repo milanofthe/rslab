@@ -1,4 +1,4 @@
-//! KLU path vs multifrontal LU on circuit-shaped matrices (#15).
+//! KLU path vs multifrontal LU on circuit-shaped matrices.
 //!
 //! Generates MNA-like matrices: very sparse (~4-5 nnz/col), unsymmetric,
 //! diagonally weighted, with reducible (block upper triangular) structure,
