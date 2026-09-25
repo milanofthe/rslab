@@ -12,50 +12,67 @@ use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use std::sync::Mutex;
 
-/// Lower triangle of the symmetrized pattern `A union A^T` as CSC `(col_ptr,
-/// row_idx)`. The symmetric analysis needs a structurally symmetric pattern so
-/// the elimination tree carries fill for both `L` and `U`.
-fn symmetrized_lower_pattern<T: Scalar>(a: &GeneralCsc<T>) -> (Vec<usize>, Vec<usize>) {
+/// Lower triangle of the symmetrized pattern `B union B^T` as CSC `(col_ptr,
+/// row_idx)`, `B` the pattern of `a` with row `r` renamed `row_map[r]` (the
+/// matching's row permutation, applied on the fly). The symmetric analysis
+/// needs a structurally symmetric pattern so the elimination tree carries
+/// fill for both `L` and `U`.
+fn symmetrized_lower_pattern<T: Scalar>(
+    a: &GeneralCsc<T>,
+    row_map: Option<&[usize]>,
+) -> (Vec<usize>, Vec<usize>) {
+    use rayon::prelude::*;
     let n = a.n;
-    // Counting-scatter (no `BTreeSet`: no per-element heap allocation, no
-    // pointer-chasing). Each entry contributes a lower-triangle pair `(hi, lo)`
-    // to bucket `lo`; buckets are then sorted + deduped into CSC.
-    let mut counts = vec![0usize; n];
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
-            let lo = if i < j { i } else { j };
-            counts[lo] += 1;
-        }
-    }
+    let row = |k: usize| row_map.map_or(a.row_idx[k], |m| m[a.row_idx[k]]);
+    // Counting-scatter: each entry contributes a lower-triangle pair
+    // `(hi, lo)` to bucket `lo`; the buckets are then sorted and deduped.
     let mut start = vec![0usize; n + 1];
     for j in 0..n {
-        start[j + 1] = start[j] + counts[j];
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            start[row(k).min(j) + 1] += 1;
+        }
     }
-    let total = start[n];
-    let mut scattered = vec![0usize; total];
+    for j in 0..n {
+        start[j + 1] += start[j];
+    }
+    let mut scattered = vec![0usize; start[n]];
     let mut cursor = start[..n].to_vec();
     for j in 0..n {
         for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let i = a.row_idx[k];
+            let i = row(k);
             let (hi, lo) = if i >= j { (i, j) } else { (j, i) };
             scattered[cursor[lo]] = hi;
             cursor[lo] += 1;
         }
     }
+    // Sort and dedup every bucket in place (in parallel), then compact.
+    let mut buckets: Vec<&mut [usize]> = Vec::with_capacity(n);
+    let mut rest: &mut [usize] = &mut scattered;
+    for j in 0..n {
+        let (head, tail) = rest.split_at_mut(start[j + 1] - start[j]);
+        buckets.push(head);
+        rest = tail;
+    }
+    let kept: Vec<usize> = buckets
+        .into_par_iter()
+        .with_min_len(256)
+        .map(|seg| {
+            seg.sort_unstable();
+            let mut len = 0;
+            for p in 0..seg.len() {
+                if len == 0 || seg[p] != seg[len - 1] {
+                    seg[len] = seg[p];
+                    len += 1;
+                }
+            }
+            len
+        })
+        .collect();
     let mut col_ptr = Vec::with_capacity(n + 1);
     col_ptr.push(0);
-    let mut row_idx = Vec::with_capacity(total);
+    let mut row_idx = Vec::with_capacity(start[n]);
     for j in 0..n {
-        let seg = &mut scattered[start[j]..start[j + 1]];
-        seg.sort_unstable();
-        let mut last = usize::MAX;
-        for &i in seg.iter() {
-            if i != last {
-                row_idx.push(i);
-                last = i;
-            }
-        }
+        row_idx.extend_from_slice(&scattered[start[j]..start[j] + kept[j]]);
         col_ptr.push(row_idx.len());
     }
     (col_ptr, row_idx)
@@ -153,7 +170,11 @@ impl LuSymbolic {
         let matching = if opts.lu_matching {
             let cache = crate::logging::timed(
                 || "lu analyze: matching".into(),
-                || crate::scaling::mc64::compute_matching_general(a),
+                || {
+                    crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
+                        crate::scaling::mc64::compute_matching_general(a)
+                    })
+                },
             )?;
             if cache.n_matched == n {
                 let (r, c) = crate::scaling::mc64::unsymmetric_scaling(&cache);
@@ -176,9 +197,11 @@ impl LuSymbolic {
         };
         let (col_ptr, row_idx) = crate::logging::timed(
             || "lu analyze: symmetrized pattern".into(),
-            || match &matching {
-                Some(m) => symmetrized_lower_pattern(&Self::row_permuted(a, m)),
-                None => symmetrized_lower_pattern(a),
+            || {
+                let row_map = matching.as_ref().map(LuMatching::row_map);
+                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
+                    symmetrized_lower_pattern(a, row_map.as_deref())
+                })
             },
         );
         let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
@@ -220,39 +243,6 @@ impl LuSymbolic {
             input: std::sync::OnceLock::new(),
             structure,
         })
-    }
-
-    /// `A` with its rows permuted by the matching (values untouched; the
-    /// scaling is applied in the numeric phase).
-    fn row_permuted<T: Scalar>(a: &GeneralCsc<T>, m: &LuMatching) -> GeneralCsc<T> {
-        let n = a.n;
-        let mut b_row_of_a = vec![0usize; n];
-        for (b, &ar) in m.row_of.iter().enumerate() {
-            b_row_of_a[ar] = b;
-        }
-        let mut col_ptr = Vec::with_capacity(n + 1);
-        let mut row_idx = Vec::with_capacity(a.row_idx.len());
-        let mut values = Vec::with_capacity(a.values.len());
-        col_ptr.push(0);
-        let mut col: Vec<(usize, T)> = Vec::new();
-        for j in 0..n {
-            col.clear();
-            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                col.push((b_row_of_a[a.row_idx[k]], a.values[k]));
-            }
-            col.sort_unstable_by_key(|e| e.0);
-            for &(r, v) in &col {
-                row_idx.push(r);
-                values.push(v);
-            }
-            col_ptr.push(row_idx.len());
-        }
-        GeneralCsc {
-            n,
-            col_ptr,
-            row_idx,
-            values,
-        }
     }
 
     /// Whether the analysis carries an MC64 row matching.
