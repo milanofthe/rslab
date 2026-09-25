@@ -1,0 +1,399 @@
+//! The numeric LDL^T factorization: the permuted input, the left-looking
+//! driver over the assembly forest, and the emit of each finished panel.
+
+use super::node::ll_factor_node;
+use crate::numeric::supernodal::analysis::{
+    analyze, recommend_threads_for_sym, SupernodalAnalysis,
+};
+
+use crate::dense::ldlt_generic::LdltFactors;
+use crate::error::RslabError;
+use crate::inertia::Inertia;
+use crate::numeric::settings::{
+    stack_for_depth, supernode_tree_depth, SolverSettings, ZeroPivotAction,
+};
+use crate::numeric::supernodal::panel::{finish_panel, PanelArena, PanelFactor, PanelOut};
+use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule, PermScatter};
+use crate::scalar::Scalar;
+use crate::sparse::csc::CscMatrix;
+use crate::symbolic::SymbolicFactorization;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Factor a sparse symmetric matrix `A` as `P^T A P = L D L^T` with
+/// Bunch-Kaufman pivoting. Works for `T = f64` and `T = Complex<f64>`
+/// (complex symmetric, `A = A^T`).
+///
+/// Returns an [`LdltFactors`] in factorization order; solve with
+/// [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
+pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, RslabError> {
+    factor_sparse_ldlt_with(a, &SolverSettings::default())
+}
+
+/// Like [`factor_sparse_ldlt`] but with explicit [`SolverSettings`] -
+/// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
+///
+/// Convenience wrapper: runs [`analyze`] then [`factor_numeric`]. For the
+/// PARDISO-style *analyze once, factor many* workflow - FEM Newton steps or a
+/// frequency sweep that reuse one sparsity pattern - call them separately and
+/// keep the [`SupernodalAnalysis`] across factorizations.
+pub fn factor_sparse_ldlt_with<T: Scalar>(
+    a: &CscMatrix<T>,
+    opts: &SolverSettings,
+) -> Result<LdltFactors<T>, RslabError> {
+    let symb = analyze(a.n, &a.col_ptr, &a.row_idx)?;
+    factor_numeric(&symb, a, None, opts).map(LdltNumeric::into_factors)
+}
+
+/// The numeric result of a sparse LDL^T factorization: the unit lower factor
+/// `L` in supernodal panel form (the storage the solves run on, written by
+/// the drivers without a copy) plus the block diagonal `D`, the pivot
+/// permutation and the numeric outcome. [`into_factors`](Self::into_factors)
+/// materializes the compressed-column [`LdltFactors`] for the reference
+/// solves.
+#[derive(Clone, Debug)]
+pub struct LdltNumeric<T> {
+    /// `L` in panel form, in elimination order.
+    pub factor: PanelFactor<T>,
+    /// Diagonal of the block-diagonal `D`, length `n`.
+    pub d_diag: Vec<T>,
+    /// Sub-diagonal of `D` (the `(k+1, k)` entry of a 2x2 block at `k`).
+    pub d_subdiag: Vec<T>,
+    /// `true` at the first column of each 2x2 pivot block.
+    pub two_by_two: Vec<bool>,
+    /// `perm[e]` is the original index eliminated at position `e`.
+    pub perm: Vec<usize>,
+    /// Supernode tree over the factor's supernodes (`usize::MAX` for a root).
+    pub supernode_parent: Vec<usize>,
+    /// Pivots perturbed by the static regularization.
+    pub n_perturbed: usize,
+    /// Structural panel slots holding an exact zero (cancellation or
+    /// `drop_tol`); the stored nonzeros are `factor.nnz() - n_zeros`.
+    pub n_zeros: usize,
+    /// Inertia of the factored matrix.
+    pub inertia: Inertia,
+}
+
+impl<T: Scalar> LdltNumeric<T> {
+    /// Dimension.
+    pub fn n(&self) -> usize {
+        self.factor.n
+    }
+
+    /// The compressed-column form for the reference solves (copies the factor).
+    pub fn into_factors(self) -> LdltFactors<T> {
+        let (l_col_ptr, l_row_idx, l_values) = self.factor.to_csc(true);
+        let supernode_ptr: Vec<usize> = self.factor.sn_col.iter().map(|&c| c as usize).collect();
+        LdltFactors {
+            n: self.factor.n,
+            l_col_ptr,
+            l_row_idx,
+            l_values,
+            d_diag: self.d_diag,
+            d_subdiag: self.d_subdiag,
+            two_by_two: self.two_by_two,
+            perm: self.perm,
+            supernode_ptr,
+            supernode_parent: self.supernode_parent,
+            n_perturbed: self.n_perturbed,
+            inertia: self.inertia,
+        }
+    }
+
+    /// Split into the panel factor and an [`LdltFactors`] shell carrying `D`,
+    /// the permutation and the outcome with empty CSC arrays: the solver keeps
+    /// the shell for the diagonal solves and hands the panels to its plan.
+    pub(crate) fn into_parts(self) -> (PanelFactor<T>, LdltFactors<T>) {
+        let supernode_ptr: Vec<usize> = self.factor.sn_col.iter().map(|&c| c as usize).collect();
+        let shell = LdltFactors {
+            n: self.factor.n,
+            l_col_ptr: Vec::new(),
+            l_row_idx: Vec::new(),
+            l_values: Vec::new(),
+            d_diag: self.d_diag,
+            d_subdiag: self.d_subdiag,
+            two_by_two: self.two_by_two,
+            perm: self.perm,
+            supernode_ptr,
+            supernode_parent: self.supernode_parent,
+            n_perturbed: self.n_perturbed,
+            inertia: self.inertia,
+        };
+        (self.factor, shell)
+    }
+}
+
+pub fn factor_numeric<T: Scalar>(
+    symb: &SupernodalAnalysis,
+    a: &CscMatrix<T>,
+    scale: Option<&[f64]>,
+    opts: &SolverSettings,
+) -> Result<LdltNumeric<T>, RslabError> {
+    a.validate()?;
+    let n = symb.n;
+    if a.n != n || a.row_idx.len() != symb.nnz {
+        return Err(RslabError::InvalidInput(
+            "factor_numeric: matrix does not match the analyzed pattern".to_string(),
+        ));
+    }
+    let inner = match &symb.inner {
+        None => {
+            return Ok(LdltNumeric {
+                factor: PanelFactor::empty(),
+                d_diag: Vec::new(),
+                d_subdiag: Vec::new(),
+                two_by_two: Vec::new(),
+                perm: Vec::new(),
+                supernode_parent: Vec::new(),
+                n_perturbed: 0,
+                n_zeros: 0,
+                inertia: Inertia::new(0, 0, 0),
+            });
+        }
+        Some(i) => i,
+    };
+    let sym = &inner.sym;
+    // Worker stack sized to the assembly-tree depth so the recursive tree
+    // factorization never overflows on deep chain trees (banded / 1D + low nemin).
+    let stack = stack_for_depth(supernode_tree_depth(sym));
+
+    // A_perm = P^T A P (lower fold) through the cached scatter program: the
+    // structure is frozen on the first factorization of this pattern; every
+    // later (re)factorization pays one linear values pass only.
+    let scatter = inner
+        .lower_scatter
+        .get_or_init(|| PermScatter::build_lower(n, &a.col_ptr, &a.row_idx, &sym.perm_inv));
+    let a_perm = CscMatrix {
+        n,
+        col_ptr: scatter.col_ptr.clone(),
+        row_idx: scatter.row_idx.clone(),
+        values: scatter.scatter(a, scale),
+    };
+
+    // Run in a scoped pool of `opts.threads` so concurrent solves don't
+    // oversubscribe.
+    let sched = inner.ll_schedule.get_or_init(|| LlSchedule::build(sym));
+    opts.threads.run(
+        stack,
+        |cap| recommend_threads_for_sym(symb, cap),
+        || factor_left_looking(sym, sched, a_perm, opts),
+    )
+}
+
+/// One factored supernode's left-looking payload: the dense panel, the
+/// Bunch-Kaufman D (diagonal + sub-diagonal + 2x2 flags, pivoted order), and
+/// the within-panel pivot permutation (identity on the off-diagonal rows).
+pub(super) struct LdltSlot<T> {
+    pub(super) d: Vec<T>,
+    pub(super) dsub: Vec<T>,
+    pub(super) two: Vec<bool>,
+    pub(super) lperm: Vec<usize>,
+}
+impl<T> Default for LdltSlot<T> {
+    fn default() -> Self {
+        LdltSlot {
+            d: Vec::new(),
+            dsub: Vec::new(),
+            two: Vec::new(),
+            lperm: Vec::new(),
+        }
+    }
+}
+pub(super) type LlStore<T> = crate::numeric::supernodal::SlotStore<LdltSlot<T>>;
+
+/// Compact (CSC-fragment) form of one supernode's L factor, produced the moment
+/// its last consumer pulls from it so the dense panel can be freed during
+/// factorization. Row indices are already final elimination positions.
+pub(super) struct LlEmitLdlt<T> {
+    pub(super) refcount: Vec<AtomicUsize>,
+    pub(super) e_offset: Vec<usize>,
+    /// The factor's buffer: every supernode factors into its own slot.
+    pub(super) arena: PanelArena<T>,
+    pub(super) panels: Cells<PanelOut>,
+    pub(super) e_of_g: Cells<usize>,
+    pub(super) perm: Cells<usize>,
+    pub(super) d_diag: Cells<T>,
+    pub(super) d_subdiag: Cells<T>,
+    pub(super) two_by_two: Cells<bool>,
+    // Inertia accumulated across supernodes (block-aware).
+    pub(super) inertia_pos: AtomicUsize,
+    pub(super) inertia_neg: AtomicUsize,
+    pub(super) inertia_zero: AtomicUsize,
+}
+
+impl<T: Scalar> LlEmitLdlt<T> {
+    fn new(sym: &SymbolicFactorization, sched: &LlSchedule) -> Self {
+        let nsuper = sym.supernodes.len();
+        let n = sym.n;
+        let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
+        let arena =
+            PanelArena::new((0..nsuper).map(|s| sched.rows(s).len() * sym.supernodes[s].ncol));
+        LlEmitLdlt {
+            refcount,
+            e_offset,
+            arena,
+            panels: Cells::new_default(nsuper),
+            e_of_g: Cells::new(n, usize::MAX),
+            perm: Cells::new(n, 0),
+            d_diag: Cells::new(n, T::zero()),
+            d_subdiag: Cells::new(n, T::zero()),
+            two_by_two: Cells::new(n, false),
+            inertia_pos: AtomicUsize::new(0),
+            inertia_neg: AtomicUsize::new(0),
+            inertia_zero: AtomicUsize::new(0),
+        }
+    }
+    #[inline]
+    unsafe fn eg(&self, g: usize) -> usize {
+        *self.e_of_g.get(g)
+    }
+}
+
+/// Compact supernode `k`'s L factor and free its dense panel + D/lperm. Called the
+/// instant `k`'s last consumer pulled from it. Mirrors the per-supernode body of
+/// the legacy L emit (unit diagonal, skip the 2x2 `d21` coupling row).
+fn ldlt_emit_and_free<T: Scalar>(
+    k: usize,
+    store: &LlStore<T>,
+    emit: &LlEmitLdlt<T>,
+    sym: &SymbolicFactorization,
+    sched: &LlSchedule,
+    drop_tol: Option<f64>,
+) {
+    let ncol = sym.supernodes[k].ncol;
+    let nrow = sched.rows(k).len();
+    // SAFETY: the owner of supernode `k` emits it exactly once, after its last
+    // updater has read the slot (refcount zero); nobody reads it afterwards.
+    let slot = unsafe { store.take(k) };
+    let panel = unsafe { emit.arena.slot_mut(k) };
+    let (lperm, t2) = (&slot.lperm, &slot.two);
+    debug_assert_eq!(panel.len(), nrow * ncol);
+    debug_assert!(
+        (0..ncol)
+            .all(|p| unsafe { emit.eg(sched.rows(k)[lperm[p]] as usize) } == emit.e_offset[k] + p),
+        "the diagonal block is in elimination order"
+    );
+    let e_rows: Vec<u32> = (ncol..nrow)
+        .map(|i| unsafe { emit.eg(sched.rows(k)[lperm[i]] as usize) } as u32)
+        .collect();
+    let out = finish_panel(panel, ncol, e_rows, Some(&t2[..ncol]), drop_tol);
+    unsafe { emit.panels.set(k, out) };
+    if ldlt_no_free() {
+        // The debugging hold: keep an (emptied) shell in place.
+        unsafe { store.set(k, LdltSlot::default()) };
+    }
+}
+
+static LDLT_NO_FREE_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[inline]
+fn ldlt_no_free() -> bool {
+    *LDLT_NO_FREE_FLAG.get_or_init(|| {
+        std::env::var("RLA_NO_FREE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
+/// `PerturbToEps { abs_floor }` is taken as given (rslab convention: an
+/// absolute floor, typically `eps_rel * ||A||inf`); `Fail` disables
+/// perturbation. `a_perm` holds the values being factored.
+fn static_pivot_floor<T: Scalar>(a_perm: &CscMatrix<T>, opts: &SolverSettings) -> Option<f64> {
+    match opts.on_zero_pivot {
+        ZeroPivotAction::Fail => None,
+        ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
+        ZeroPivotAction::ForceAccept => {
+            let anorm = a_perm
+                .values
+                .iter()
+                .map(|v| v.magnitude())
+                .fold(0.0, f64::max);
+            Some(anorm.max(1.0) * f64::EPSILON)
+        }
+    }
+}
+
+/// Supernodal **left-looking** LDL^T with **Bunch-Kaufman 1x1/2x2 pivoting**. Each
+/// supernode's dense panel is assembled from `A`, updated by every previously
+/// factored descendant (`cmod`: pull the descendant's contribution columns that
+/// land in this panel, applying its block-diagonal `D`), then factored in place
+/// (`cdiv`: partial Bunch-Kaufman, no trailing update). Pivoting is bounded to
+/// each panel's fully-summed block, so the off-diagonal rows keep their identity
+/// and the descendant->ancestor `cmod` is unaffected by a panel's internal
+/// permutation. There is **no contribution-block stack and no extract copy-out**
+/// (the panels are the factor), so the transient is just the factor itself (the
+/// PARDISO memory profile), including indefinite (zero-/tiny-diagonal) systems
+/// via the 2x2 blocks.
+fn factor_left_looking<T: Scalar>(
+    sym: &SymbolicFactorization,
+    sched: &LlSchedule,
+    a_perm: CscMatrix<T>,
+    opts: &SolverSettings,
+) -> Result<LdltNumeric<T>, RslabError> {
+    let n = sym.n;
+    let perturb_floor = static_pivot_floor(&a_perm, opts);
+
+    let nsuper = sym.supernodes.len();
+    // Factor in parallel over the assembly forest: sibling subtrees concurrently,
+    // each node after its subtree (whose panels are its only updaters). Panels are
+    // written once and read only by ancestors -> no synchronization needed beyond
+    // the recursion structure (see `LlStore`).
+    let store = LlStore::<T>::new(nsuper);
+    let emit = LlEmitLdlt::<T>::new(sym, sched);
+    let n_perturbed_atomic = AtomicUsize::new(0);
+    let kt = opts.kernel();
+    let factor_node = |s: usize| {
+        ll_factor_node(
+            s,
+            sym,
+            &a_perm,
+            sched,
+            &store,
+            &emit,
+            perturb_floor,
+            &n_perturbed_atomic,
+            kt,
+        )
+    };
+    let emit_free = |k: usize| ldlt_emit_and_free(k, &store, &emit, sym, sched, opts.drop_tol);
+    crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
+    drop(store); // panels moved into the emit cells; release the shells
+    let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
+    let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
+    let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
+    let LlEmitLdlt {
+        arena,
+        panels,
+        perm,
+        d_diag,
+        d_subdiag,
+        two_by_two,
+        inertia_pos,
+        inertia_neg,
+        inertia_zero,
+        ..
+    } = emit;
+    let (factor, n_zeros) = arena.finish(n, sym.supernodes.iter().map(|sn| sn.ncol), |s| unsafe {
+        std::mem::take(panels.get_mut(s))
+    });
+    let perm: Vec<usize> = (0..n).map(|e| unsafe { *perm.get(e) }).collect();
+    let d_diag: Vec<T> = (0..n).map(|e| unsafe { *d_diag.get(e) }).collect();
+    let d_subdiag: Vec<T> = (0..n).map(|e| unsafe { *d_subdiag.get(e) }).collect();
+    let two_by_two: Vec<bool> = (0..n).map(|e| unsafe { *two_by_two.get(e) }).collect();
+    let inertia = Inertia::new(
+        inertia_pos.load(Ordering::Relaxed),
+        inertia_neg.load(Ordering::Relaxed),
+        inertia_zero.load(Ordering::Relaxed),
+    );
+
+    Ok(LdltNumeric {
+        factor,
+        d_diag,
+        d_subdiag,
+        two_by_two,
+        perm,
+        supernode_parent,
+        n_perturbed,
+        n_zeros,
+        inertia,
+    })
+}

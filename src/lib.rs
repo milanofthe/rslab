@@ -151,10 +151,8 @@ pub use dense::ldlt_generic::{
     factor_ldlt, solve_ldlt, solve_ldlt_many, CompressedLdltFactors, LdltFactors,
 };
 // The low-level LDL^T symbolic/numeric building blocks.
-pub use numeric::multifrontal_ldlt::{
-    analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
-    LdltNumeric, MultifrontalSymbolic,
-};
+pub use numeric::ldlt::{factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, LdltNumeric};
+pub use numeric::supernodal::analysis::{analyze, analyze_with, SupernodalAnalysis};
 // Settings shared by the LDL^T and LU paths.
 pub use numeric::settings::{
     with_threads, FactorPath, ReorderMode, SolverSettings, Threads, ZeroPivotAction,
@@ -162,7 +160,7 @@ pub use numeric::settings::{
 // The supernodal panel form of a factor (`LdltNumeric::factor`).
 pub use numeric::supernodal::panel::PanelFactor;
 // High-level symmetric LDL^T solver: `LdltSymbolic::analyze -> .factor -> LdltSolver`.
-pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
+pub use numeric::ldlt::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze -> .factor -> LuSolver`,
 // plus the raw factor type and free building blocks.
 pub use inertia::Inertia;

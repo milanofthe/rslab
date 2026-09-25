@@ -36,8 +36,8 @@
 //! not a bug; see the `gmres_block_single_rhs_matches_scalar_gmres` test.
 
 use crate::error::RslabError;
+use crate::numeric::ldlt::LdltSolver;
 use crate::numeric::settings::{SolverSettings, Threads};
-use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
@@ -133,7 +133,7 @@ impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
 }
 
 /// A preconditioner `M ~ A`: applies `z = M^-1 r`. Implemented by a factored
-/// [`LdltSolver`](crate::numeric::sparse_solver::LdltSolver)
+/// [`LdltSolver`](crate::numeric::ldlt::LdltSolver)
 /// and by [`NoPreconditioner`] (the unpreconditioned baseline).
 pub trait Preconditioner<T: Scalar> {
     /// Write `z <- M^-1 r`. `r` and `z` have length `n`.
