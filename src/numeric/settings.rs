@@ -33,7 +33,7 @@ pub enum ZeroPivotAction {
     /// magnitude is unbounded - use only when downstream code tolerates sign
     /// loss in the perturbed positions and re-checks inertia.
     ForceAccept,
-    /// Return [`RslabError::NumericallyRankDeficient`].
+    /// Return [`RslabError::NumericallyRankDeficient`](crate::RslabError::NumericallyRankDeficient).
     Fail,
     /// Replace the tiny pivot with `sign(d) * max(|d|, abs_floor)`, keeping the
     /// column live (LAPACK / MA57-style static pivoting). The factor satisfies

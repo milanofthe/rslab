@@ -4,11 +4,10 @@
 //!
 //! Design follows the established packages (MatrixDepot.jl, MATLAB `gallery`,
 //! LAPACK `xLATMS`): parametrized *generators* for structured coverage plus an
-//! optional *downloader* ([`download`], feature `matgen-download`) for real
-//! SuiteSparse / Matrix Market matrices. Conditioning is steered **structurally**
-//! (diagonal dominance, PDE refinement, near-resonance shift, coefficient jumps)
-//! for the sparse families, and **spectrally** (prescribed eigenvalues, `xLATMS`
-//! style) for the small dense [`spectral`] family where exact kappa is needed.
+//! optional *downloader* (module `download`, feature `matgen-download`) for
+//! real SuiteSparse / Matrix Market matrices. Conditioning is steered
+//! **structurally**: diagonal dominance, PDE refinement, near-resonance shift,
+//! coefficient jumps.
 //!
 //! The real-valued structural families are generic over [`Scalar`]; the inherently
 //! complex families (Helmholtz, BEM/MoM kernel) produce `Complex<f64>`.
