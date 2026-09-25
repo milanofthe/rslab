@@ -1717,8 +1717,8 @@ impl<T: Scalar> KluSolver<T> {
     /// Thread policy the solve phase should honour: the KLU path is strictly
     /// sequential (that is its determinism guarantee), so this is always a
     /// fixed single-worker budget.
-    pub fn solve_thread_policy(&self) -> crate::numeric::multifrontal_ldlt::Threads {
-        crate::numeric::multifrontal_ldlt::Threads::Fixed(1)
+    pub fn solve_thread_policy(&self) -> crate::numeric::settings::Threads {
+        crate::numeric::settings::Threads::Fixed(1)
     }
 
     /// Matrix dimension.
@@ -2459,8 +2459,8 @@ mod tests {
         );
     }
     use super::*;
-    use crate::numeric::multifrontal_ldlt::SolverSettings;
     use crate::numeric::multifrontal_lu::{factor_general_lu, solve_lu};
+    use crate::numeric::settings::SolverSettings;
     use num_complex::Complex;
 
     fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {

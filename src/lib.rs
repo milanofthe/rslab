@@ -150,11 +150,15 @@ pub use scaling::ScalingStrategy;
 pub use dense::ldlt_generic::{
     factor_ldlt, solve_ldlt, solve_ldlt_many, CompressedLdltFactors, LdltFactors,
 };
-// Shared options + the low-level multifrontal symbolic/numeric building blocks.
+// The low-level LDL^T symbolic/numeric building blocks.
 pub use numeric::multifrontal_ldlt::{
     analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
-    with_threads, BlrMode, FactorMethod, FactorPath, LdltNumeric, MemoryMode, MultifrontalSymbolic,
-    ReorderMode, SolverSettings, Threads, ZeroPivotAction,
+    LdltNumeric, MultifrontalSymbolic,
+};
+// Settings shared by the LDL^T and LU paths.
+pub use numeric::settings::{
+    with_threads, BlrMode, FactorMethod, FactorPath, MemoryMode, ReorderMode, SolverSettings,
+    Threads, ZeroPivotAction,
 };
 // The supernodal panel form of a factor (`LdltNumeric::factor`).
 pub use numeric::panel_factor::PanelFactor;

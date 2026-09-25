@@ -31,10 +31,9 @@
 use crate::error::RslabError;
 use crate::numeric::blr::BlrMatrix;
 use crate::numeric::gemm_tuning::KernelTuning;
-use crate::numeric::multifrontal_ldlt::{
-    analyze_with, perturb_pivot, BlrMode, FactorMethod, SolverSettings, ZeroPivotAction,
-};
+use crate::numeric::multifrontal_ldlt::{analyze_with, perturb_pivot};
 use crate::numeric::panel_factor::{finish_panel, PanelArena, PanelFactor, PanelOut};
+use crate::numeric::settings::{BlrMode, FactorMethod, SolverSettings, ZeroPivotAction};
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -222,7 +221,7 @@ pub struct LuFactors<T> {
     /// [`Threads::Ambient`](crate::Threads::Ambient) means "use the caller's
     /// current pool" (the solver-in-the-loop path); otherwise a concrete
     /// [`Threads::Fixed`](crate::Threads::Fixed) worker count.
-    pub solve_threads: crate::numeric::multifrontal_ldlt::Threads,
+    pub solve_threads: crate::numeric::settings::Threads,
 }
 
 /// The numeric result of a sparse LU factorization: the unit lower `L` and
@@ -255,7 +254,7 @@ pub struct LuNumeric<T> {
     /// `l.nnz() + ut.nnz() - n_zeros`.
     pub n_zeros: usize,
     /// Thread policy the solves inherit.
-    pub solve_threads: crate::numeric::multifrontal_ldlt::Threads,
+    pub solve_threads: crate::numeric::settings::Threads,
 }
 
 impl<T: Scalar> LuNumeric<T> {
@@ -991,7 +990,7 @@ impl LuSymbolic {
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symb, cap)
         });
-        let warnings = opts.ignored_on(crate::numeric::multifrontal_ldlt::FactorPath::Lu);
+        let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
         for w in &warnings {
             crate::logging::warn(&format!("lu settings: {w}"));
         }
@@ -1207,7 +1206,7 @@ impl<T: Scalar> LuSolver<T> {
     /// [`Threads`](crate::Threads) budget the factorization used, carried on the
     /// stored [`LuFactors`]. An iterative solve using this factor as a
     /// preconditioner runs its parallel orthogonalization in a pool of this width.
-    pub fn solve_thread_policy(&self) -> crate::numeric::multifrontal_ldlt::Threads {
+    pub fn solve_thread_policy(&self) -> crate::numeric::settings::Threads {
         self.factors.solve_threads
     }
 
@@ -2282,7 +2281,7 @@ fn factor_lu_left_looking<T: Scalar>(
         supernode_parent,
         n_perturbed,
         n_zeros: zeros_l + zeros_u,
-        solve_threads: crate::numeric::multifrontal_ldlt::Threads::Ambient,
+        solve_threads: crate::numeric::settings::Threads::Ambient,
     })
 }
 
@@ -2312,7 +2311,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
             supernode_parent: Vec::new(),
             n_perturbed: 0,
             n_zeros: 0,
-            solve_threads: crate::numeric::multifrontal_ldlt::Threads::Ambient,
+            solve_threads: crate::numeric::settings::Threads::Ambient,
         });
     }
 
@@ -2321,10 +2320,8 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // count the factorization itself used, so a preconditioned iterative solve
     // orthogonalizes in a pool of exactly that width.
     let solve_policy = match opts.threads {
-        crate::numeric::multifrontal_ldlt::Threads::Ambient => {
-            crate::numeric::multifrontal_ldlt::Threads::Ambient
-        }
-        p => crate::numeric::multifrontal_ldlt::Threads::Fixed(p.resolve(|cap| {
+        crate::numeric::settings::Threads::Ambient => crate::numeric::settings::Threads::Ambient,
+        p => crate::numeric::settings::Threads::Fixed(p.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
         })),
     };
@@ -2406,8 +2403,8 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let inp = LuInput { sc, vals: &vals };
     // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
     // trees), shared by both LU paths.
-    let stack = crate::numeric::multifrontal_ldlt::stack_for_depth(
-        crate::numeric::multifrontal_ldlt::supernode_tree_depth(sym),
+    let stack = crate::numeric::settings::stack_for_depth(
+        crate::numeric::settings::supernode_tree_depth(sym),
     );
 
     // Supernodal left-looking LU: same factor, low transient (no CB stack). Run in
@@ -2883,7 +2880,7 @@ pub fn solve_lu_refined_with<T: Scalar>(
 
 #[cfg(test)]
 mod tests {
-    use crate::numeric::multifrontal_ldlt::MemoryMode;
+    use crate::numeric::settings::MemoryMode;
 
     /// A badly scaled, row-scrambled unsymmetric system: without the MC64
     /// row matching the front-restricted pivoting finds no usable pivot or
@@ -3669,7 +3666,7 @@ mod tests {
 
     #[test]
     fn incomplete_lu_reduces_fill_and_still_solves() {
-        use crate::numeric::multifrontal_ldlt::ZeroPivotAction;
+        use crate::numeric::settings::ZeroPivotAction;
         // Unsymmetric grid: incomplete LU (drop_tol) must shrink nnz(L+U) yet
         // still drive iterative refinement to a small residual - the MoM
         // sparse-preconditioner configuration.
