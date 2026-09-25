@@ -74,7 +74,12 @@ time relative to PARDISO (below 1 is faster), geomean per class:
 
 One-shot is analysis, factorization and solve.
 
-![per class](docs/figures/pardiso_classes.png)
+![wall time per stage](docs/figures/wct_breakdown.png)
+
+The analysis predicts the factor storage and the peak memory before any
+numeric work:
+
+![memory estimate against the measurement](docs/figures/estimate_accuracy.png)
 
 Reproduce with `python benches/pardiso_corpus.py <corpus>` and
 `python benches/pardiso_corpus_plot.py`.

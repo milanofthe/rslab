@@ -3,12 +3,12 @@
 Reads ``bench_out/pardiso_corpus.jsonl`` (``benches/pardiso_corpus.py``) and writes
 into ``docs/figures/``:
 
-* ``pardiso_classes.png`` - wall time divided by PARDISO's per matrix class
-  (geomean), for factor, refactor, solve and one-shot,
-* ``pardiso_systems.png`` - factor time and peak memory per system,
 * ``wct_breakdown.png``   - wall time per stage, per system and solver,
+* ``wct_breakdown_social.png`` - its share card on a few systems,
 * ``estimate_accuracy.png`` - RSLAB's memory estimate against the measurement,
-* ``*_social.png``        - share cards of the class and breakdown figures.
+
+and prints the per-class table of the README: wall time divided by PARDISO's,
+geomean per matrix class, for factor, refactor, solve and one-shot.
 
 Usage: ``python benches/pardiso_corpus_plot.py [bench_out/pardiso_corpus.jsonl]``
 """
@@ -19,7 +19,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import to_rgb
 from matplotlib.patches import Patch
 
 import bench_style as st
@@ -31,7 +30,6 @@ CLASSES = [("fem_", "FEM, curl-curl (rapidfem)"), ("sane_", "power grid (SANE)")
            ("mom_", "MoM near field (rapidmom)"), ("ss_", "circuit, KLU path (SuiteSparse)")]
 METRICS = [("factor", "factor"), ("refactor", "refactor (new values)"), ("solve", "solve"),
            ("oneshot", "one-shot (analysis + factor + solve)")]
-METRIC_ALPHA = {"factor": 1.0, "refactor": 0.75, "solve": 0.5, "oneshot": 0.3}
 # The share card of the breakdown: one or two systems per class, small to large.
 CARD_SYSTEMS = ["fem_iris_filter_f00", "fem_microstrip_line_f00", "fem_patch_antenna_f00",
                 "sane_ibmpg2_dc", "mom_xformer_D350", "mom_opamp_c350n"]
@@ -69,74 +67,15 @@ def ordered(data):
     return sorted(data, key=lambda s: (cls(s), data[s]["rslab"]["n"]))
 
 
-def shade(metric):
-    """RSLAB's color lightened toward white for a metric, opaque so the
-    reference line stays behind the bars."""
-    a = METRIC_ALPHA[metric]
-    return tuple(a * c + (1 - a) for c in to_rgb(RSLAB))
-
-
 def geomean(xs):
     return float(np.exp(np.mean(np.log(xs))))
 
 
-def log_ratio_axis(ax):
-    ax.set_xscale("log")
-    ticks = [0.1, 0.2, 0.5, 1, 2, 5, 10]
-    ax.set_xticks(ticks)
-    ax.set_xticklabels([f"{t:g}" for t in ticks])
-    ax.minorticks_off()
-    ax.axvline(1.0, color=PARDISO, linewidth=1.2, zorder=0)
-
-
-def classes(data, ax):
-    """Grouped horizontal bars: per class, the geomean ratio of each metric."""
-    present = sorted({cls(s) for s in data})
-    h = 0.8 / len(METRICS)
-    table = {}
-    for yi, c in enumerate(present):
-        systems = [s for s in data if cls(s) == c]
-        for mi, (key, label) in enumerate(METRICS):
-            r = geomean([med(data[s]["rslab"], key) / med(data[s]["pardiso"], key) for s in systems])
-            table[(c, key)] = r
-            y = yi + (mi - (len(METRICS) - 1) / 2) * h
-            ax.barh(y, r, h * 0.9, color=shade(key))
-            ax.text(r * 1.04, y, f"{r:.2f}", va="center", fontsize=7, color=st.GRAY)
-    ax.set_yticks(range(len(present)))
-    ax.set_yticklabels([f"{CLASSES[c][1]}\n{sum(cls(s) == c for s in data)} systems" for c in present],
-                       fontsize=8)
-    ax.invert_yaxis()
-    log_ratio_axis(ax)
-    ax.set_xlabel("RSLAB wall time / PARDISO wall time (lower is faster)", fontsize=9)
-    ax.grid(axis="x", alpha=0.3, linewidth=0.5)
-    st.despine(ax)
-    handles = [Patch(facecolor=shade(k), label=l) for k, l in METRICS]
-    handles.append(plt.Line2D([], [], color=PARDISO, label="MKL PARDISO = 1"))
-    return table, handles
-
-
-def systems(data):
-    """Two panels over the systems: factor wall time and peak memory, both solvers."""
-    names = ordered(data)
-    xs = np.arange(len(names))
-    w = 0.4
-    fig, (ax_t, ax_m) = st.two_panel(figsize=(11.0, 4.4))
-    for ax, get, ylabel in ((ax_t, lambda r: med(r, "factor"), "factor wall time [s]"),
-                            (ax_m, lambda r: max(r["peak_mb"], 1.0) / 1e3, "peak memory above the input [GB]")):
-        for off, solver, color in ((-w / 2, "rslab", RSLAB), (w / 2, "pardiso", PARDISO)):
-            ax.bar(xs + off, [get(data[s][solver]) for s in names], w, color=color,
-                   label=st.SOLVERS["auto" if solver == "rslab" else solver][0].replace(" (heuristic pick)", ""))
-        ax.set_yscale("log")
-        ax.set_xticks(xs)
-        ax.set_xticklabels([short(s) for s in names], rotation=60, ha="right", fontsize=7)
-        ax.set_ylabel(ylabel, fontsize=9)
-        ax.grid(axis="y", alpha=0.3, linewidth=0.5)
-        bounds = [i - 0.5 for i in range(1, len(names)) if cls(names[i]) != cls(names[i - 1])]
-        for b in bounds:
-            ax.axvline(b, color=st.GRAY, linewidth=0.6, alpha=0.5)
-        st.despine(ax)
-    st.legend_below(fig, ax=ax_t)
-    return fig
+def class_table(data):
+    """{(class, metric): geomean over the class of RSLAB / PARDISO wall time}."""
+    return {(c, key): geomean([med(data[s]["rslab"], key) / med(data[s]["pardiso"], key)
+                               for s in data if cls(s) == c])
+            for c in sorted({cls(s) for s in data}) for key, _ in METRICS}
 
 
 def breakdown(data, ax, names):
@@ -216,14 +155,6 @@ def main():
     st.setup()
     OUT.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(7.4, 4.2))
-    table, handles = classes(data, ax)
-    st.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles], fontsize=8)
-    st.save(fig, OUT / "pardiso_classes.png")
-    st.card(fig, OUT / "pardiso_classes_social.png")
-
-    st.save(systems(data), OUT / "pardiso_systems.png")
-
     names = [s for s in ordered(data) if not s.startswith("ss_")]  # KLU reports no stages
     for subset, size, out in ((names, (8.0, 0.84 * len(names) + 1.2), None),
                               ([s for s in CARD_SYSTEMS if s in data], (9.0, 5.2), "social")):
@@ -238,6 +169,7 @@ def main():
     fig, ratios = estimates(data)
     st.save(fig, OUT / "estimate_accuracy.png")
 
+    table = class_table(data)
     print("\n| class | " + " | ".join(l for _, l in METRICS) + " |")
     print("|---" * (len(METRICS) + 1) + "|")
     for c in sorted({cls(s) for s in data}):
