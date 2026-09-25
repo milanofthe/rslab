@@ -150,13 +150,16 @@ pub(crate) fn gnp<I: Iterator<Item = usize>>(
 
     let post = etree.postorder();
     let first = etree.first_descendants(&post);
-    let children = etree.children();
+    let mut has_child = vec![false; n];
+    for p in etree.parent.iter().flatten() {
+        has_child[*p] = true;
+    }
 
     // delta[i] starts at 1 iff i is a leaf of the etree (the row subtree
     // T^r_i trivially contains i as a leaf whenever i has no etree children
     // - the contribution of every node i to its own column count).
     let mut delta: Vec<i64> = (0..n)
-        .map(|i| if children[i].is_empty() { weight(i) } else { 0 })
+        .map(|i| if has_child[i] { 0 } else { weight(i) })
         .collect();
 
     // maxfirst[k]: max first[i_prev] over previously-seen row-subtree leaves
