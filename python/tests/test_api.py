@@ -369,6 +369,7 @@ def test_every_setting_round_trips():
         pivot_u=0.5,
         matching=False,
         nemin=8,
+        nd_ensemble=True,
         relax=(4, 12),
         panel_nb=32,
         scalar_gate=1000,
@@ -379,7 +380,7 @@ def test_every_setting_round_trips():
     d = s.to_dict()
     assert d["threads"] == ("auto", 2)
     assert d["ordering"] == "amf" and d["scaling"] == "mc64"
-    assert d["relax"] == (4, 12)
+    assert d["relax"] == (4, 12) and d["nd_ensemble"] is True
     assert (d["panel_nb"], d["scalar_gate"], d["par_gemm"], d["par_cdiv"]) == (32, 1000, 100000, 200000)
     assert d["use_gemm_schur"] is False and d["matching"] is False
     # an external scaling vector

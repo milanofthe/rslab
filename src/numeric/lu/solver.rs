@@ -7,7 +7,7 @@ use super::structure::LuStructure;
 
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
-use crate::numeric::supernodal::analysis::{analyze_for, AnalysisUse};
+use crate::numeric::supernodal::analysis::analyze_with;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use std::sync::Mutex;
@@ -175,22 +175,12 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
     ) -> Result<LuSymbolic, RslabError> {
-        Self::analyze_for(a, opts, AnalysisUse::Repeated)
-    }
-
-    /// [`analyze_with`](Self::analyze_with) for the given [`AnalysisUse`]:
-    /// `Once` when the analysis serves a single factorization.
-    pub fn analyze_for<T: Scalar>(
-        a: &GeneralCsc<T>,
-        opts: &SolverSettings,
-        usage: AnalysisUse,
-    ) -> Result<LuSymbolic, RslabError> {
         a.validate()?;
         let n = a.n;
         let nnz = a.row_idx.len();
         if n == 0 {
             return Ok(LuSymbolic {
-                symb: analyze_for(0, &[0], &[], opts, usage)?,
+                symb: analyze_with(0, &[0], &[], opts)?,
                 n: 0,
                 nnz: 0,
                 matching: None,
@@ -242,7 +232,7 @@ impl LuSymbolic {
                 })
             },
         );
-        let symb = analyze_for(n, &col_ptr, &row_idx, opts, usage)?;
+        let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
         let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
             (Some((sym, _)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
@@ -528,7 +518,7 @@ impl<T: Scalar> LuSolver<T> {
         // Through the symbolic object, so the diagnostics are filled the same
         // way as on the analyze-once path (the former direct call returned
         // an empty `Diagnostics`).
-        LuSymbolic::analyze_for(a, opts, AnalysisUse::Once)?.factor(a, opts)
+        LuSymbolic::analyze_with(a, opts)?.factor(a, opts)
     }
 
     /// The **heuristic** settings pick for `a` - the model-free default, the
@@ -547,21 +537,9 @@ impl<T: Scalar> LuSolver<T> {
         a: &GeneralCsc<T>,
         base: &SolverSettings,
     ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        Self::tuned_for(a, base, AnalysisUse::Repeated)
-    }
-
-    /// [`tuned_with`](Self::tuned_with) for the given [`AnalysisUse`].
-    pub fn tuned_for(
-        a: &GeneralCsc<T>,
-        base: &SolverSettings,
-        usage: AnalysisUse,
-    ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        crate::numeric::settings::tuned(
-            a,
-            base,
-            |a, s| LuSymbolic::analyze_for(a, s, usage),
-            |sym: &LuSymbolic| sym.estimate_memory::<T>(),
-        )
+        crate::numeric::settings::tuned(a, base, LuSymbolic::analyze_with, |sym: &LuSymbolic| {
+            sym.estimate_memory::<T>()
+        })
     }
 
     /// Per-call diagnostics: measured factor time, fill, thread budget, and the
@@ -728,12 +706,8 @@ pub fn factor_general_lu<T: Scalar>(
 ) -> Result<LuFactors<T>, RslabError> {
     // The analysis honours the caller's symbolic settings (ordering, amalgamation):
     // `analyze` alone took the defaults and silently ignored `opts.ordering`.
-    factor_general_lu_numeric(
-        &LuSymbolic::analyze_for(a, opts, AnalysisUse::Once)?,
-        a,
-        opts,
-    )
-    .map(LuNumeric::into_factors)
+    factor_general_lu_numeric(&LuSymbolic::analyze_with(a, opts)?, a, opts)
+        .map(LuNumeric::into_factors)
 }
 
 // Supernodal left-looking LU

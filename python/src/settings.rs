@@ -143,11 +143,16 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 /// ordering : {'auto', 'amd', 'amf', 'metis', 'rcm'}, optional
 ///     Fill-reducing ordering. ``'auto'`` (default) races the orderings on
 ///     the exact size of their factors: minimum degree, minimum fill and the
-///     band reducer always, nested dissection on large systems, with a seed
-///     ensemble for :func:`rslab.analyze` when the factorization is heavy.
+///     band reducer always, nested dissection on large systems (with a seed
+///     ensemble under ``nd_ensemble``).
 ///     An explicit value analyzes with exactly that ordering, ``'metis'``
 ///     being one nested-dissection run. The ordering used is reported in
 ///     ``diagnostics()['decisions']``.
+/// nd_ensemble : bool, default False
+///     Keep the best of several nested-dissection seeds on heavy
+///     factorizations: a few tenths of a percent to a few percent less fill
+///     for two more dissections in the analysis. Pays over long sweeps that
+///     refactor one analysis many times.
 /// nemin : int, optional
 ///     Supernode amalgamation threshold (default 16). Smaller means finer
 ///     supernodes: less fill, more per-front overhead.
@@ -285,6 +290,7 @@ impl PySettings {
             }
             "pivot_u" => o.with_pivot_u(v.extract().map_err(|_| bad(key, "a float", v))?),
             "nemin" => o.with_nemin(v.extract().map_err(|_| bad(key, "an int", v))?),
+            "nd_ensemble" => o.with_nd_ensemble(v.extract().map_err(|_| bad(key, "a bool", v))?),
             "relax" => {
                 if let Ok(on) = v.extract::<bool>() {
                     if on {
@@ -383,6 +389,7 @@ impl PySettings {
         d.set_item("pivot_u", o.pivot_u)?;
         d.set_item("matching", o.lu_matching)?;
         d.set_item("nemin", o.nemin)?;
+        d.set_item("nd_ensemble", o.nd_ensemble)?;
         d.set_item(
             "relax",
             match &o.relax {
