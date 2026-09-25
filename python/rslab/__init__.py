@@ -590,9 +590,15 @@ def _cast_operator(parts, dtype_name: str):
 def _is_symmetric(A, tol: float = 1e-12) -> bool:
     """Structural + value symmetry test (``A - A^T`` small relative to ``max|A|``)."""
     sp = _require_scipy()
-    A = sp.csc_matrix(A)
-    if A.shape[0] != A.shape[1]:
+    if not (sp.issparse(A) and A.format in ("csc", "csr")):
+        A = sp.csc_matrix(A)
+    n = A.shape[0]
+    if n != A.shape[1]:
         return False
+    if A.has_canonical_format and A.data.dtype.type in _SUPPORTED:
+        # The test reads the same on CSC and CSR arrays: a parallel pass that
+        # looks up each transposed entry, with no difference matrix built.
+        return _rslab.is_symmetric(n, A.indptr, A.indices, A.data, tol)
     d = (A - A.T).tocsc().data
     if d.size == 0:
         return True
