@@ -764,7 +764,10 @@ fn incomplete_lu_reduces_fill_and_still_solves() {
 
 /// A strongly unsymmetric pattern: every column its diagonal plus a few rows
 /// drawn at random, so `A + A^T` is much larger than `A`.
-fn unsymmetric(n: usize, per_col: usize, seed: u64) -> GeneralCsc<f64> {
+/// A random unsymmetric matrix with a dominant diagonal; with `holes` every
+/// seventh diagonal entry is left out, its column carrying the pivot of the
+/// next row instead (a 2x2 swap the matching has to find).
+fn unsymmetric_holes(n: usize, per_col: usize, seed: u64, holes: bool) -> GeneralCsc<f64> {
     let mut x = seed;
     let mut next = move || {
         x ^= x << 13;
@@ -774,9 +777,15 @@ fn unsymmetric(n: usize, per_col: usize, seed: u64) -> GeneralCsc<f64> {
     };
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..n {
-        r.push(j);
-        c.push(j);
-        v.push(4.0 + (j % 3) as f64);
+        if holes && j % 7 == 0 && j + 1 < n {
+            r.extend([j + 1, j]);
+            c.extend([j, j + 1]);
+            v.extend([4.0, 4.0]);
+        } else {
+            r.push(j);
+            c.push(j);
+            v.push(4.0 + (j % 3) as f64);
+        }
         for _ in 0..per_col {
             let i = (next() % n as u64) as usize;
             if i != j {
@@ -795,9 +804,10 @@ fn unsymmetric(n: usize, per_col: usize, seed: u64) -> GeneralCsc<f64> {
 #[test]
 fn exact_structure_bounds_the_factor() {
     for (seed, matching) in [(7u64, false), (11, true), (13, true)] {
-        let a = unsymmetric(600, 3, seed);
+        let a = unsymmetric_holes(600, 3, seed, matching);
         let opts = SolverSettings::default().with_lu_matching(matching);
         let lusym = LuSymbolic::analyze_with(&a, &opts).unwrap();
+        assert_eq!(lusym.has_matching(), matching);
         let num = factor_general_lu_numeric(&lusym, &a, &opts).unwrap();
         let (sym, _) = lusym.symb.sym_and_levels().unwrap();
         let sched = lusym.symb.ll_schedule().unwrap();
@@ -834,5 +844,17 @@ fn exact_structure_bounds_the_factor() {
             exact < symmetric,
             "an unsymmetric pattern tightens the structure"
         );
+    }
+}
+
+/// The row matching runs only where a diagonal entry is missing: with a full
+/// diagonal the matrix is analyzed as given.
+#[test]
+fn matching_only_where_the_diagonal_needs_it() {
+    let opts = SolverSettings::default();
+    for (holes, expect) in [(false, false), (true, true)] {
+        let a = unsymmetric_holes(300, 3, 5, holes);
+        let lusym = LuSymbolic::analyze_with(&a, &opts).unwrap();
+        assert_eq!(lusym.has_matching(), expect, "holes = {holes}");
     }
 }

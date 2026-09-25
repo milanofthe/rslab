@@ -162,7 +162,7 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///     Child reordering of the elimination tree: ``'hybrid_liu'`` (default)
 ///     shrinks the contribution-stack peak, ``'off'`` keeps the natural leaf
 ///     order for maximum leaf parallelism.
-////// threads : int or 'auto' or ('auto', int) or 'ambient', optional
+/// threads : int or 'auto' or ('auto', int) or 'ambient', optional
 ///     Worker budget of the scoped factorization pool. ``None`` (default) is
 ///     the per-matrix predictor capped at 4 workers (or the calibrated pick
 ///     after :func:`rslab.install_diagnose`); an ``int`` pins the count
@@ -195,7 +195,10 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///     Maximum-product row matching (MC64) before the LU analysis: rows are
 ///     permuted so the matched entries form the diagonal and both sides are
 ///     scaled to unit magnitude there, which keeps the element growth of the
-///     front-restricted pivoting bounded. LU path only.
+///     front-restricted pivoting bounded. Applied where a diagonal entry is
+///     missing, zero or negligible against its column; with a usable
+///     diagonal the matrix is analyzed as given. ``False`` never matches.
+///     LU path only.
 /// panel_nb : int, optional
 ///     Panel width (blocking factor) of the dense kernels, default 64.
 /// interrupt : Interrupt, optional

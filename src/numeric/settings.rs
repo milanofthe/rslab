@@ -145,13 +145,17 @@ pub struct SolverSettings {
     /// Consumed by the symmetric path; the unsymmetric LU path uses its own
     /// two-sided row/column equilibration.
     pub scaling: crate::scaling::ScalingStrategy,
-    /// Maximum-product row matching (MC64) before the **LU** analysis: rows
-    /// are permuted so the matched, largest-product entries form the
-    /// diagonal and both sides are scaled to make them unit magnitude. The
-    /// front-local pivot search then rarely needs an off-diagonal pivot,
-    /// which keeps the element growth of the block-restricted pivoting
-    /// bounded (on the ibmpg1 power grid the residual improves from 4e-5 to
-    /// roundoff). Default `true`; ignored by the symmetric and KLU paths.
+    /// Maximum-product row matching (MC64) before the **LU** analysis, where
+    /// the matrix needs it: rows are permuted so the matched,
+    /// largest-product entries form the diagonal and both sides are scaled
+    /// to make them unit magnitude, so the front-local pivot search rarely
+    /// needs an off-diagonal pivot and the element growth of the
+    /// block-restricted pivoting stays bounded (on the ibmpg1 power grid the
+    /// residual improves from 4e-5 to roundoff). Applied only when a
+    /// diagonal entry is missing, zero or negligible against its column;
+    /// with a usable diagonal the permutation costs fill and pivot quality
+    /// and is skipped. Default `true`; `false` never matches. Ignored by
+    /// the symmetric and KLU paths.
     pub lu_matching: bool,
 }
 

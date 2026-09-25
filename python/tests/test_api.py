@@ -58,9 +58,14 @@ def test_settings_roundtrip_and_repr():
 def test_lu_matching_setting():
     assert rslab.Settings().to_dict()["matching"] is True
     assert rslab.Settings(matching=False).to_dict()["matching"] is False
+    # The matching runs only where the diagonal cannot pivot: a full
+    # diagonal is analyzed as given, a row swap is matched back.
     A = _general(200)
-    assert rslab.lu(A).diagnostics()["decisions"]["scaling"] == "Mc64RowMatching"
-    assert rslab.lu(A, matching=False).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
+    assert rslab.lu(A).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
+    P = sp.eye(200, format="csc")[np.r_[1, 0, 2:200]]
+    B = (P @ A).tocsc()
+    assert rslab.lu(B).diagnostics()["decisions"]["scaling"] == "Mc64RowMatching"
+    assert rslab.lu(B, matching=False).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
 
 
 def test_klu_matching_setting():
