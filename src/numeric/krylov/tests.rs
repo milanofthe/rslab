@@ -2,7 +2,7 @@ use super::util::*;
 use super::*;
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltSolver;
-use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
+use crate::numeric::settings::SolverSettings;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
@@ -626,7 +626,7 @@ fn ambient_threads_factor_matches_default_and_runs_on_shared_pool() {
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     let lu_default = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
-    let opts_amb = SolverSettings::default().with_thread_policy(Threads::Ambient);
+    let opts_amb = SolverSettings::default().with_threads(Threads::Ambient);
     let lu_amb = with_threads(2, || {
         assert_eq!(rayon::current_num_threads(), 2);
         LuSolver::factor(&a, &opts_amb).unwrap()
@@ -705,11 +705,7 @@ fn cocr_handles_indefinite_helmholtz() {
     let a = grid(10, c(-1.0, 0.3), c(1.0, 0.05));
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c(1.0, (i % 3) as f64 - 1.0)).collect();
-    let opts = SolverSettings {
-        on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 },
-        drop_tol: None,
-        ..Default::default()
-    };
+    let opts = SolverSettings::preconditioner(1e-10);
     let m = LdltSolver::factor_with(&a, &opts).unwrap();
     let pre = cocr(&a, &b, &m, 1e-9, 500).unwrap();
     assert!(
@@ -734,11 +730,7 @@ fn incomplete_factor_reduces_fill_and_still_preconditions() {
     let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
 
     let full = LdltSolver::factor(&a).unwrap();
-    let opts = SolverSettings {
-        on_zero_pivot: ZeroPivotAction::Fail,
-        drop_tol: Some(5e-2),
-        ..Default::default()
-    };
+    let opts = SolverSettings::default().with_drop_tol(5e-2);
     let inc = LdltSolver::factor_with(&a, &opts).unwrap();
 
     assert!(

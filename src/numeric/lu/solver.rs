@@ -80,7 +80,7 @@ fn symmetrized_lower_pattern<T: Scalar>(
 
 /// Whether the row matching is needed: some column's diagonal entry is
 /// missing, zero, or negligible against the column (`|a_jj|` below
-/// [`NEGLIGIBLE_DIAGONAL`] times its largest entry). There the front-local
+/// `negligible` times its largest entry). There the front-local
 /// pivot search has no usable diagonal and the element growth runs away;
 /// the circuit matrices of the KLU corpus all have such columns and factor to
 /// roundoff only with the matching. Where every diagonal entry can pivot the
@@ -89,7 +89,7 @@ fn symmetrized_lower_pattern<T: Scalar>(
 /// hundreds of perturbed pivots and residuals up to seven orders of
 /// magnitude worse, and the circuits with a full diagonal factor the same
 /// either way.
-fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>) -> bool {
+fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> bool {
     use rayon::prelude::*;
     (0..a.n).into_par_iter().with_min_len(1024).any(|j| {
         let (rows, vals) = (
@@ -98,17 +98,10 @@ fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>) -> bool {
         );
         let top = vals.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
         let diag = rows.binary_search(&j).map_or(0.0, |p| vals[p].magnitude());
-        diag.is_nan() || diag <= NEGLIGIBLE_DIAGONAL * top
+        diag.is_nan() || diag <= negligible * top
     })
 }
 
-/// Relative size below which a diagonal entry counts as absent for the
-/// matching decision.
-const NEGLIGIBLE_DIAGONAL: f64 = 1e-10;
-
-/// Reusable symbolic analysis for the unsymmetric LU path - the symmetrized
-/// pattern `A union A^T` analyzed once. Pass to [`factor_general_lu_numeric`] for
-/// each value-set that shares the pattern (frequency sweep / Newton).
 /// The MC64 row matching the analysis was done under: the factored matrix
 /// is `B = diag(r) P A diag(c)` with `B` row `i` = `A` row `row_of[i]`.
 pub(super) struct LuMatching {
@@ -185,7 +178,7 @@ impl LuSymbolic {
                 nnz: 0,
                 matching: None,
                 analyze_ms: 0.0,
-                requested_ordering: opts.ordering,
+                requested_ordering: opts.ordering.method,
                 est_cache: Mutex::new(Vec::new()),
                 input: std::sync::OnceLock::new(),
                 structure: LuStructure::empty(),
@@ -195,7 +188,9 @@ impl LuSymbolic {
         // MC64 row matching: analyze the row-permuted matrix `B` whose
         // diagonal carries the matched entries, where the diagonal of `A`
         // cannot carry the pivots itself.
-        let matching = if opts.lu_matching && diagonal_needs_matching(a) {
+        let matching = if opts.matching.enabled
+            && diagonal_needs_matching(a, opts.matching.negligible_diagonal)
+        {
             let cache = crate::logging::timed(
                 || "lu analyze: matching".into(),
                 || {
@@ -245,7 +240,7 @@ impl LuSymbolic {
         };
         let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
-            let d = symb.decisions(opts.ordering);
+            let d = symb.decisions(opts.ordering.method);
             crate::logging::info(&format!(
                 "lu analyze: n={n} nnz(A)={nnz} ordering={}{} supernodes={} max_front={} \
                  levels={} {analyze_ms:.1} ms",
@@ -266,7 +261,7 @@ impl LuSymbolic {
             nnz,
             matching,
             analyze_ms,
-            requested_ordering: opts.ordering,
+            requested_ordering: opts.ordering.method,
             est_cache: Mutex::new(Vec::new()),
             input: std::sync::OnceLock::new(),
             structure,
@@ -337,11 +332,13 @@ impl LuSymbolic {
             l,
             &factors.supernode_parent,
             true,
+            opts.solve,
         );
         let plan_u = crate::numeric::supernodal::solve::SolvePlan::from_panels(
             ut,
             &factors.supernode_parent,
             false,
+            opts.solve,
         );
         diagnostics.push(
             "solve-layout",

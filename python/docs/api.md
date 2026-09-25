@@ -137,7 +137,7 @@ automatically), so `A` may be stored full or triangular.
 
 - `A` (scipy.sparse matrix or array-like): The symmetric `n x n` system matrix. Converted to CSC and its lower triangle taken; duplicate entries are summed.
 - `settings` (Settings, optional): A prepared `Settings` object.
-- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `drop_tol`, `force_accept`, `ordering`, `scaling`, `pivot_u`, `nemin`, `relax`, `panel_nb`, `interrupt` ...), overriding `settings`.
+- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `drop_tol`, `force_accept`, `ordering`, `scaling`, `nemin`, `relax`, `panel_nb`, `interrupt` ...), overriding `settings`.
 
 **Returns**
 
@@ -170,7 +170,7 @@ fields as `ldlt`. The full matrix is read.
 
 - `A` (scipy.sparse matrix or array-like): The `n x n` system matrix. Converted to CSC; duplicates summed.
 - `settings` (Settings, optional): A prepared `Settings` object.
-- `**kwargs`: Any `Settings` keyword, overriding `settings`. `pivot_u` (default 0.1) is the threshold-pivoting tolerance of this path; `scaling` is ignored here (the LU path scales two-sided) and reported under `diagnostics()['warnings']`.
+- `**kwargs`: Any `Settings` keyword, overriding `settings`. `pivot_threshold` (default 0.1) is the threshold-pivoting tolerance of this path; `scaling` is ignored here (the LU path scales two-sided) and reported under `diagnostics()['warnings']`.
 
 **Returns**
 
@@ -205,7 +205,7 @@ without symbolic work or pivot search.
 
 - `A` (scipy.sparse matrix or array-like): The `n x n` system matrix (full, CSC after conversion).
 - `settings` (KluSettings, optional): A prepared `KluSettings` object.
-- `**kwargs`: Any `KluSettings` keyword (`pivot_tol`, `row_scaling`, `btf`, `parallel`, `interrupt`), overriding `settings`.
+- `**kwargs`: Any `KluSettings` keyword (`pivot_threshold`, `row_scaling`, `btf`, `parallel`, `interrupt`), overriding `settings`.
 
 **Returns**
 
@@ -741,7 +741,7 @@ A-priori memory and work estimate for a factor in the given dtype.
 Numeric factorization of `data` (the CSC value array of the lower
 triangle, in the analyzed pattern's order, in any supported dtype).
 Numeric settings (`threads`, `preconditioner`, `drop_tol`,
-`pivot_u`, `scaling` ...) may be overridden per call.
+`pivot_threshold`, `scaling` ...) may be overridden per call.
 Numeric factorization of new values on the analyzed pattern.
 
 **Parameters**
@@ -866,29 +866,44 @@ Wraps the core's `SolverSettings`. Construct it from keyword arguments
 `settings=` to `rslab.ldlt` / `rslab.lu` /
 `rslab.analyze`, or give the same keywords to those functions
 directly. Unknown keywords raise `TypeError`; invalid values `ValueError`.
+Every tuning constant of the solver is a keyword; the defaults are the
+tuned values, listed by `to_dict`.
 
 **Parameters**
 
 - `ordering` ({'auto', 'amd', 'amf', 'metis', 'rcm'}, optional): Fill-reducing ordering. `'auto'` (default) races the orderings on the exact size of their factors: minimum degree, minimum fill and the band reducer always, nested dissection on large systems (with a seed ensemble under `nd_ensemble`). An explicit value analyzes with exactly that ordering, `'metis'` being one nested-dissection run. The ordering used is reported in `diagnostics()['decisions']`.
-- `nd_ensemble` (bool, default False): Keep the best of several nested-dissection seeds on heavy factorizations: a few tenths of a percent to a few percent less fill for two more dissections in the analysis. Pays over long sweeps that refactor one analysis many times.
-- `nemin` (int, optional): Supernode amalgamation threshold (default 16). Smaller means finer supernodes: less fill, more per-front overhead.
-- `relax` (bool or (int, int), optional): Relaxed (fill-tolerant) amalgamation. `True` (default) keeps the built-in thresholds, `False` disables it, a pair `(max_width, max_extra_rows)` sets them explicitly.
+- `nd_ensemble` (bool, default False): Keep the best of several nested-dissection seeds on heavy factorizations: up to a few percent less fill for more dissections in the analysis. Pays over long sweeps that refactor one analysis.
+- `nemin` (int, default 16): Supernode amalgamation threshold. Smaller means finer supernodes: less fill, more per-front overhead.
+- `relax` (bool or (int, int), default False): Relaxed (fill-tolerant) amalgamation. `True` uses fronts up to 256 columns wide with at most 64 explicit-zero rows per merge, a pair `(max_width, max_extra_rows)` sets them.
 - `threads` (int or 'auto' or ('auto', int) or 'ambient', optional): Worker budget of the scoped factorization pool. `None` (default) is the per-matrix predictor capped at 4 workers (or the calibrated pick after `rslab.install_diagnose`); an `int` pins the count (`0` = all logical cores); `'auto'` is the predictor without the cap, `('auto', max)` the predictor capped at `max`; `'ambient'` runs on the caller's rayon pool. The factor is bit-identical for every value.
 - `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. `1e-4` is a good start.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
 - `drop_tol` (float, optional): Incomplete-factorization threshold: fill below it (relative to the column) is discarded, turning the factor into an ILU-style preconditioner. `None` keeps the complete factor.
-- `pivot_u` (float, optional): Threshold partial-pivoting tolerance of the LU path in `[0, 1]` (default 0.1; `1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
+- `pivot_threshold` (float, default 0.1): Threshold partial pivoting of the LU path in `[0, 1]` (`1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
 - `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
-- `matching` (bool, default True): Maximum-product row matching (MC64) before the LU analysis: rows are permuted so the matched entries form the diagonal and both sides are scaled to unit magnitude there, which keeps the element growth of the front-restricted pivoting bounded. Applied where a diagonal entry is missing, zero or negligible against its column; with a usable diagonal the matrix is analyzed as given. `False` never matches. LU path only.
-- `panel_nb` (int, optional): Panel width (blocking factor) of the dense kernels, default 64.
+- `matching` (bool, default True): Maximum-product row matching (MC64) before the LU analysis, applied where a diagonal entry is below `matching_negligible_diagonal` (default `1e-10`) times its column's largest entry. LU path only.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 
 **Other Parameters**
 
-- `scalar_gate` (int, optional): Flop count below which an update runs as a scalar loop (benchmark knob; the default is calibrated).
-- `par_gemm` (int, optional): Flop count at or above which the front GEMM runs in parallel (calibrated default).
-- `par_cdiv` (int, optional): Flop count at or above which the panel-trailing update runs in parallel (calibrated default).
-- `use_gemm_schur` (bool, optional): Use the SIMD GEMM (`True`, default) or the scalar loop for the front Schur update.
+- `race_candidates` (list of str, default ['amd', 'amf', 'rcm']): The cheap candidates of the ordering race.
+- `race_nd_min_n, race_nd_min_work, race_assumed_workers` (int): Nested dissection joins the race above `race_nd_min_n` unknowns (10 000) when the best cheap candidate predicts at least `race_nd_min_work` flops (1.25e9) per `race_assumed_workers` (4).
+- `race_eager_nd_min_nnz` (int, default 2 000 000): Entries from which the dissection starts speculatively.
+- `race_ensemble_size, race_ensemble_min_flops` (int): Seeds of the `nd_ensemble` (3) and the flops from which it runs (5e10).
+- `compress_max_ratio` (float, default 0.95): Order the graph of indistinguishable-vertex groups when they shrink it to at most this share.
+- `nd_seed, nd_init_trials, nd_coarsen_floor, nd_leaf_size` (int): Nested dissection: seed (1), initial bisections (7), coarsest graph size (120), subgraphs ordered by minimum degree (200).
+- `nd_two_hop_ratio, nd_max_imbalance, nd_max_overshoot` (float): Coarsening ratio below which two-hop matching runs (0.85), allowed side imbalance (0.2), separator growth that ends a refinement pass (4).
+- `nd_fm_passes, nd_move_limit` (int): Refinement passes per level (10) and moves without improvement that end one (1 048 576).
+- `nd_parallel_min_vertices, nd_parallel_min_edges` (int): Sizes from which subproblems (4096) and coarsening levels (200 000) run in parallel.
+- `amd_aggressive, amd_dense_alpha, amf_dense_alpha`: Minimum degree: aggressive absorption (True) and the dense-row threshold (10), also of minimum fill.
+- `amalgamation` ({'auto', 'adjacency', 'renumber'}, default 'auto'): How merges reach non-adjacent children; `'auto'` renumbers unless fewer than `path_like_fraction` (0.05) of the internal tree nodes have several children.
+- `relax_min_n` (int, default 1024): Relaxed amalgamation applies from this many unknowns.
+- `root_cap_min_n, root_cap_fraction, root_cap_max`: Merges into a root stop at `root_cap_fraction * n` columns (0.05), at most `root_cap_max` (2048), from `root_cap_min_n` unknowns (1024).
+- `panel_nb, trailing_block, schur_tile` (int): Bunch-Kaufman panel width (64), its trailing sub-block (16) and the Schur tile (256).
+- `scalar_gate, par_gemm, par_cdiv, fork_min_flops` (int): Update flops below which the scalar loop runs (4096), from which an update GEMM (1e6) and a panel's trailing update (8e6) run in parallel, and from which a supernode's updates fork (1e8).
+- `complex_split_min_ratio, complex_split_tile` (int): Complex products run as real products when their flops are this many times their plane copies (64), in tiles of this edge (256).
+- `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
+- `solve_leaf_subtrees, solve_block, solve_ancestor_chunk, solve_apex_min_work` (int): Triangular solves: leaf subtrees of the parallel sweeps (128), column block (512) and columns per task (32) of the ancestor sweeps, panel entries from which an ancestor uses the blocked sweep (262 144).
 
 #### `Settings.to_dict()`
 
@@ -900,11 +915,14 @@ Settings of the KLU (circuit) path.
 
 **Parameters**
 
-- `pivot_tol` (float, default 1e-3): Diagonal-preference threshold: the diagonal entry is the pivot when `|a_jj| >= pivot_tol * max_i |a_ij|`; `1.0` is plain partial pivoting.
+- `pivot_threshold` (float, default 1e-3): Diagonal-preference threshold: the diagonal entry is the pivot when `|a_jj| >= pivot_threshold * max_i |a_ij|`; `1.0` is plain partial pivoting.
 - `row_scaling` (bool, default True): Divide each row by its max-magnitude entry before factoring.
 - `btf` (bool, default True): Permute to block upper triangular form first (keep it on).
 - `matching` (bool, default True): Maximum-product row matching (MC64) as the transversal of the block triangular form, so the diagonal-preference pivoting rarely leaves the diagonal; needs `btf`.
-- `parallel` (bool, optional): Per-block parallel factor / refactor over the BTF blocks. `None` (default) is the structural auto gate (at least 4 blocks, 8000 nonzeros, no dominant block); `True` / `False` force it. The result is bit-identical in every mode.
+- `parallel` (bool, optional): Per-block parallel factor / refactor over the BTF blocks. `None` (default) is the structural auto gate (several blocks, `par_min_nnz` nonzeros, no dominant block); `True` / `False` force it. The result is bit-identical in every mode.
+- `par_min_nnz` (int, default 8000): Nonzeros from which the auto gate factors blocks in parallel.
+- `par_min_work` (int, default 5e7): Replay work a unit of parallel refactorization must carry.
+- `par_min_ratio` (float, default 2.0): Simultaneous work the structure must offer for a parallel refactor.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 
 #### `KluSettings.to_dict()`

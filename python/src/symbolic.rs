@@ -125,7 +125,7 @@ impl PyLdltSymbolic {
     /// Numeric factorization of ``data`` (the CSC value array of the lower
     /// triangle, in the analyzed pattern's order, in any supported dtype).
     /// Numeric settings (``threads``, ``preconditioner``, ``drop_tol``,
-    /// ``pivot_u``, ``scaling`` ...) may be overridden per call.
+    /// ``pivot_threshold``, ``scaling`` ...) may be overridden per call.
     #[pyo3(signature = (data, settings = None, **kwargs))]
 
     /// Numeric factorization of new values on the analyzed pattern.

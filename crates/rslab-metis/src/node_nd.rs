@@ -72,10 +72,6 @@ impl AtomicStats {
     }
 }
 
-/// Subproblems at least this large fork their two sides onto the rayon
-/// pool; smaller ones recurse sequentially (the fork cost would show).
-const PARALLEL_MIN_VERTICES: usize = 4096;
-
 /// A child's seed: derived from the parent's seed and the child's place, so
 /// the ordering is a function of the seed alone, however the subproblems
 /// are scheduled.
@@ -226,7 +222,7 @@ fn nd_subproblem(
     acc.add(&local);
 
     let (seed_a, seed_b) = (child_seed(seed, 1), child_seed(seed, 2));
-    if n >= PARALLEL_MIN_VERTICES && rayon::current_num_threads() > 1 {
+    if n >= opts.parallel_min_vertices && rayon::current_num_threads() > 1 {
         let (ra, rb) = rayon::join(
             || nd_subproblem(sub_a, map_a, offset, seed_a, opts, writer, acc),
             || nd_subproblem(sub_b, map_b, offset + na, seed_b, opts, writer, acc),
@@ -295,13 +291,7 @@ fn multilevel_node_bisection(
     // Convert the edge bisection to a node separator at the coarsest
     // level and refine it there (METIS InitSeparator tail).
     construct_separator(coarsest, &mut labels);
-    refine_node_separator(
-        coarsest,
-        &mut labels,
-        opts.max_imbalance,
-        opts.fm_passes,
-        rng,
-    );
+    refine_node_separator(coarsest, &mut labels, opts, rng);
     stats.n_fm_passes += opts.fm_passes;
 
     // Uncoarsen: project the tri-section and refine the node separator
@@ -322,13 +312,7 @@ fn multilevel_node_bisection(
         }
         labels = proj;
         balance_node_separator(prev_graph, &mut labels, opts.max_imbalance, rng);
-        refine_node_separator(
-            prev_graph,
-            &mut labels,
-            opts.max_imbalance,
-            opts.fm_passes,
-            rng,
-        );
+        refine_node_separator(prev_graph, &mut labels, opts, rng);
         stats.n_fm_passes += opts.fm_passes;
     }
 

@@ -1,16 +1,34 @@
 //! Solver settings shared by the LDL^T and LU paths: the numeric and
-//! analysis knobs of [`SolverSettings`], the static-pivot policy, and the
-//! worker-thread policy with the scoped pools the factorizations run in.
+//! analysis knobs of [`SolverSettings`], grouped by phase, the static-pivot
+//! policy, and the worker-thread policy with the scoped pools the
+//! factorizations run in.
+//!
+//! Every tuning constant of the analysis, the kernels and the solve is a
+//! field here, with the tuned value as its default. The groups compose
+//! with struct update syntax:
+//!
+//! ```
+//! use rslab::{KernelSettings, SolverSettings};
+//! let mut s = SolverSettings::default().with_threads(8);
+//! s.ordering.nd.fm_passes = 4;
+//! s.kernels = KernelSettings { panel_nb: 32, ..Default::default() };
+//! ```
 
 use crate::diagnostics::MemoryEstimate;
 use crate::error::RslabError;
-use crate::symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicFactorization};
+use crate::scaling::ScalingStrategy;
+use crate::symbolic::{
+    AmalgamationStrategy, OrderingMethod, RelaxAmalgamation, SymbolicFactorization,
+};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+pub use rslab_amd::AmdOptions;
+pub use rslab_amf::AmfOptions;
+pub use rslab_metis::MetisOptions;
 
 /// Action to take when a near-zero pivot is encountered during factorization.
-///
-/// This is the static-pivoting policy knob shared by the symmetric LDL^T and the
-/// unsymmetric LU paths (via [`SolverSettings`] and the LU options).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ZeroPivotAction {
     /// Accept the tiny pivot at face value (zero the column, count as a zero in
     /// the inertia signature, flag for iterative refinement). The perturbation
@@ -38,114 +56,498 @@ pub(crate) enum FactorPath {
     Lu,
 }
 
-/// Options controlling the sparse LDL^T and LU factorizations. Defaults give an
-/// **exact** complete factorization that fails on rank deficiency. Relaxing
-/// them turns the factorization into a robust, memory-light **preconditioner**.
-/// All knobs compose via the `with_*` builders.
+/// Settings of the sparse LDL^T and LU factorizations. Defaults give an
+/// **exact** complete factorization that fails on rank deficiency; relaxing
+/// [`pivoting`](Self::pivoting) and [`drop_tol`](Self::drop_tol) turns it
+/// into a robust, memory-light preconditioner. The analysis groups
+/// ([`ordering`](Self::ordering), [`amalgamation`](Self::amalgamation)) are
+/// read when analyzing, the rest when factoring and solving.
 #[derive(Debug, Clone)]
 pub struct SolverSettings {
-    /// Near-zero pivot policy. Reuses rslab's [`ZeroPivotAction`]: `Fail`
-    /// (exact, default) returns [`RslabError::NumericallyRankDeficient`] on a
-    /// singular pivot; `PerturbToEps { abs_floor }` is robust static pivoting -
-    /// a pivot below `abs_floor` is lifted to that floor (the
-    /// complex-symmetric analogue of rslab's f64 `perturb_to_floor`), so the
-    /// factorization never fails and produces `L D L^T = A + E` for small `E`.
-    /// That is exactly the never-fail behaviour a preconditioner needs.
-    pub on_zero_pivot: ZeroPivotAction,
-    /// Threshold dropping for incomplete factorization. When `Some(tau)`, fill
-    /// entries of `L` with magnitude below `tau` (relative to the column) are
-    /// discarded, trading factor accuracy for memory. `None` = complete
-    /// factorization.
+    /// Pivot selection and the near-zero pivot policy.
+    pub pivoting: PivotSettings,
+    /// Symmetric equilibration `A_hat = D A D` of the LDL^T path.
+    /// [`Identity`](ScalingStrategy::Identity) disables it. The LU path uses
+    /// its own two-sided scaling and ignores this.
+    pub scaling: ScalingStrategy,
+    /// The row matching of the LU path.
+    pub matching: MatchingSettings,
+    /// Threshold dropping for an incomplete factorization: fill entries below
+    /// `tau` relative to their column are discarded. `None` (default) keeps
+    /// the factor complete.
     pub drop_tol: Option<f64>,
-    /// Worker-thread policy for this factorization, run in a **scoped** rayon pool
-    /// (not the global pool). Either a [`Fixed`](Threads::Fixed) count or
-    /// [`Auto`](Threads::Auto) - the data-driven per-matrix predictor, capped at a
-    /// user-defined maximum. **Default [`Auto`](Threads::Auto)** (predict, up to
-    /// all cores). The numeric result is bit-identical regardless of this value.
+    /// The fill-reducing ordering. Analyze-time.
+    pub ordering: OrderingSettings,
+    /// How columns merge into supernodes. Analyze-time.
+    pub amalgamation: AmalgamationSettings,
+    /// Blocking and scheduling of the dense kernels. They change the
+    /// rounding at most, never the answer beyond it.
+    pub kernels: KernelSettings,
+    /// Scheduling of the triangular solves.
+    pub solve: SolveSettings,
+    /// Worker-thread policy. The factorization runs in a scoped rayon pool
+    /// of this width; the numeric result does not depend on it.
     pub threads: Threads,
-
     /// Caller-owned cancellation flag for the numeric factorization. The solver
     /// only ever *reads* it, at supernode and dense-panel boundaries; on the
     /// first observation of `true` the factorization stops and returns
     /// [`RslabError::Interrupted`](crate::RslabError::Interrupted). Re-arming
-    /// after an interrupt is the caller's `store(false)`. Taking a flag rather
-    /// than a deadline keeps the library clock-agnostic and leaves
-    /// wall-versus-CPU budget policy with the host. **Default `None`**, which
-    /// costs one `Option` branch per boundary and touches no atomic.
-    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// after an interrupt is the caller's `store(false)`. Default `None`.
+    pub interrupt: Option<Arc<AtomicBool>>,
+}
 
-    // ---- Analysis-phase knobs (read by `analyze_with`; ignored by `factor`) ----
-    /// Fill-reducing ordering (the cuDSS `REORDERING_ALG` analogue). Analyze-time.
-    /// Default [`OrderingMethod::Auto`] (the race on exact fill).
-    pub ordering: OrderingMethod,
-    /// Supernode amalgamation `nemin` (merge-candidate column threshold). Default
-    /// `16`. Smaller = finer supernodes (less fill, more per-front overhead).
-    /// Analyze-time.
+/// Pivot selection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PivotSettings {
+    /// Threshold partial pivoting of the LU path, `u in [0, 1]`: the diagonal
+    /// stays the pivot unless it falls below `u * |colmax|` in its
+    /// fully-summed block. `1` is full partial pivoting, `0` keeps the
+    /// diagonal unless it is exactly zero. Default `0.1`. The LDL^T path
+    /// pivots by Bunch-Kaufman and ignores it.
+    pub threshold: f64,
+    /// What a pivot that is still too small does. Default
+    /// [`Fail`](ZeroPivotAction::Fail).
+    pub on_zero_pivot: ZeroPivotAction,
+}
+
+impl Default for PivotSettings {
+    fn default() -> Self {
+        Self {
+            threshold: 0.1,
+            on_zero_pivot: ZeroPivotAction::Fail,
+        }
+    }
+}
+
+/// Maximum-product row matching (MC64) before the LU analysis: rows are
+/// permuted so the matched, largest-product entries form the diagonal and
+/// both sides are scaled to make them unit magnitude, which keeps the
+/// block-restricted pivoting stable (on the ibmpg1 power grid the residual
+/// improves from 4e-5 to roundoff). With a usable diagonal the permutation
+/// costs fill and pivot quality, so it is applied only where needed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchingSettings {
+    /// Allow the matching. Default `true`; `false` never matches.
+    pub enabled: bool,
+    /// A diagonal entry counts as missing below this fraction of its
+    /// column's largest magnitude; the matching runs when any is missing.
+    /// Default `1e-10`.
+    pub negligible_diagonal: f64,
+}
+
+impl Default for MatchingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            negligible_diagonal: 1e-10,
+        }
+    }
+}
+
+/// The fill-reducing ordering.
+#[derive(Debug, Clone)]
+pub struct OrderingSettings {
+    /// The method. Default [`Auto`](OrderingMethod::Auto), the race of
+    /// [`race`](Self::race) on exact fill.
+    pub method: OrderingMethod,
+    /// An ordering to use instead of computing one (`perm[k]` the column that
+    /// becomes column `k`). For a sequence of nearby patterns the previous
+    /// analysis's [`LuSymbolic::permutation`](crate::LuSymbolic::permutation)
+    /// keeps its fill quality at the cost of the elimination tree and column
+    /// counts alone. With the LU row matching the ordering is one of the
+    /// row-matched matrix, so it carries over only where the matching does.
+    pub permutation: Option<Arc<[usize]>>,
+    /// Order the graph of indistinguishable-vertex groups only when the
+    /// groups shrink it to at most this share of its vertices. Default
+    /// `0.95`.
+    pub compress_max_ratio: f64,
+    /// The ordering race of [`OrderingMethod::Auto`].
+    pub race: RaceSettings,
+    /// Nested dissection.
+    pub nd: MetisOptions,
+    /// Approximate minimum degree.
+    pub amd: AmdOptions,
+    /// Approximate minimum fill.
+    pub amf: AmfOptions,
+}
+
+impl Default for OrderingSettings {
+    fn default() -> Self {
+        Self {
+            method: OrderingMethod::Auto,
+            permutation: None,
+            compress_max_ratio: 0.95,
+            race: RaceSettings::default(),
+            nd: MetisOptions::default(),
+            amd: AmdOptions::default(),
+            amf: AmfOptions::default(),
+        }
+    }
+}
+
+/// The ordering race: the cheap candidates always run, nested dissection
+/// joins where the predicted factorization can pay for it, and the smallest
+/// exact factor wins, candidate order breaking ties.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RaceSettings {
+    /// The cheap candidates, run concurrently. The first one also decides,
+    /// on smaller patterns, whether nested dissection starts before the
+    /// others finish. Default AMD, AMF, RCM; nested dissection and `Auto`
+    /// are not allowed here.
+    pub candidates: Vec<OrderingMethod>,
+    /// Nested dissection joins only above this many unknowns. Default
+    /// `10_000`.
+    pub nd_min_n: usize,
+    /// ... and only when the best cheap candidate predicts at least this
+    /// factor time, in flops per worker or on the longest elimination chain.
+    /// Default `1.25e9`.
+    pub nd_min_work: u64,
+    /// Workers the time prediction assumes. Default `4`.
+    pub assumed_workers: usize,
+    /// Patterns with at least this many entries (lower triangle) start the
+    /// dissection at once, speculatively, where more than one worker is
+    /// available. Default `2_000_000`.
+    pub eager_nd_min_nnz: usize,
+    /// Keep the best of several dissection seeds on heavy factorizations.
+    /// Buys up to a few percent of fill (15 percent on 3D meshes) for more
+    /// dissections, which pays over many refactorizations of one analysis.
+    /// Default `false`.
+    pub ensemble: bool,
+    /// Seeds of the ensemble, `nd.seed` upwards. Default `3`.
+    pub ensemble_size: usize,
+    /// The ensemble runs from this predicted flop count (sum of squared
+    /// column counts). Default `5e10`.
+    pub ensemble_min_flops: u64,
+}
+
+impl Default for RaceSettings {
+    fn default() -> Self {
+        Self {
+            candidates: vec![
+                OrderingMethod::Amd,
+                OrderingMethod::Amf,
+                OrderingMethod::Rcm,
+            ],
+            nd_min_n: 10_000,
+            nd_min_work: 1_250_000_000,
+            assumed_workers: 4,
+            eager_nd_min_nnz: 2_000_000,
+            ensemble: false,
+            ensemble_size: 3,
+            ensemble_min_flops: 50_000_000_000,
+        }
+    }
+}
+
+/// How columns merge into supernodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AmalgamationSettings {
+    /// Supernodes narrower than this merge into their parent when the parent
+    /// is narrower too. Default `16`; `1` turns the size rule off.
     pub nemin: usize,
-    /// Relaxed (fill-tolerant) amalgamation thresholds, the supernode throughput
-    /// lever. `Some` (default `<=256` wide, `<=64` extra rows) trades a little
-    /// explicit-zero fill for wider, higher-rank dense fronts. Analyze-time.
+    /// Relaxed amalgamation: merge beyond the size rule while the merged
+    /// supernode stays within `max_width` columns and adds at most
+    /// `max_extra_rows` rows of explicit zeros. Wider fronts run their
+    /// updates at a higher GEMM rank for a little fill; on grid classes the
+    /// padded zeros cost more than that buys, so it is off by default.
     pub relax: Option<RelaxAmalgamation>,
-    /// A fill-reducing ordering to use instead of `ordering` (see
-    /// [`with_permutation`](Self::with_permutation)). Analyze-time.
-    pub permutation: Option<std::sync::Arc<[usize]>>,
-    /// Let the ordering race keep the best of several nested-dissection
-    /// seeds on heavy factorizations. It buys a few tenths of a percent to a
-    /// few percent of fill (up to 15 percent on 3D meshes) for two more
-    /// dissections, which pays over many refactorizations of one analysis
-    /// (long sweeps), not for a few. Default `false`. Analyze-time.
-    pub nd_ensemble: bool,
+    /// Relaxed amalgamation applies from this many unknowns. Default `1024`.
+    pub relax_min_n: usize,
+    /// How merges reach non-adjacent children. Default
+    /// [`Auto`](AmalgamationStrategy::Auto).
+    pub strategy: AmalgamationStrategy,
+    /// `Auto` treats a tree as path-like, and does not renumber, when fewer
+    /// than this share of its internal nodes have several children. Default
+    /// `0.05`.
+    pub path_like_fraction: f64,
+    /// Merges into a root supernode stop at `root_cap_fraction * n` columns,
+    /// at most `root_cap_max`, from `root_cap_min_n` unknowns: a wide
+    /// top-level Schur complement (interior-point KKT systems) otherwise
+    /// grows one dense root block. Defaults `1024`, `0.05`, `2048`.
+    pub root_cap_min_n: usize,
+    /// See [`root_cap_min_n`](Self::root_cap_min_n).
+    pub root_cap_fraction: f64,
+    /// See [`root_cap_min_n`](Self::root_cap_min_n).
+    pub root_cap_max: usize,
+}
 
-    // ---- Kernel scheduling knobs (formerly process-wide atomics) ----
-    /// Bunch-Kaufman / LU panel width (blocking factor). Default `64`. Changes the
-    /// pivot search window (a different but equally valid factor), not the answer.
-    /// Clamped to at least 8 on use.
+impl Default for AmalgamationSettings {
+    fn default() -> Self {
+        Self {
+            nemin: 16,
+            relax: None,
+            relax_min_n: 1024,
+            strategy: AmalgamationStrategy::Auto,
+            path_like_fraction: 0.05,
+            root_cap_min_n: 1024,
+            root_cap_fraction: 0.05,
+            root_cap_max: 2048,
+        }
+    }
+}
+
+/// Blocking and scheduling of the dense kernels, in flops of the update
+/// they gate unless noted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelSettings {
+    /// Bunch-Kaufman panel width. Changes the pivot search window (a
+    /// different, equally valid factor). Default `64`, at least 8.
     pub panel_nb: usize,
-    /// Below this flop count a contribution update runs as a scalar triple loop
-    /// instead of a SIMD GEMM. Default [`DEFAULT_SCALAR_GATE`](crate::DEFAULT_SCALAR_GATE).
+    /// Below this an update runs as a scalar loop instead of a SIMD GEMM.
+    /// Default `4096`.
     pub scalar_gate: usize,
-    /// At/above this flop count a cmod-class GEMM runs rayon-parallel. Default
-    /// [`DEFAULT_PAR_GEMM`](crate::DEFAULT_PAR_GEMM).
+    /// From this an update GEMM runs rayon-parallel. Default `1e6`.
     pub par_gemm: usize,
-    /// At/above this flop count the panel-trailing / Schur / LU-front GEMM runs
-    /// rayon-parallel (the top-of-tree node-parallelism lever). Default
-    /// [`DEFAULT_PAR_CDIV`](crate::DEFAULT_PAR_CDIV).
+    /// From this a panel's trailing update runs rayon-parallel. Default
+    /// `8e6`.
     pub par_cdiv: usize,
-    /// Use the SIMD GEMM (vs the scalar triple loop) for the front Schur update.
-    /// Default `true`. A kernel A/B knob for benchmarking.
+    /// From this the updates of one supernode fork across workers. A small
+    /// node that forks pays the join-steal latency: its waiting thread steals
+    /// other work, often a whole sibling subtree, and the node's chain stalls
+    /// (74 ms of cmod at 0.03 Gflop measured on a 1046x170 node). Default
+    /// `1e8`.
+    pub fork_min_flops: usize,
+    /// Column tile of the lower-triangular Schur GEMM. Default `256`.
+    pub schur_tile: usize,
+    /// Columns per sub-block of the deferred trailing sweep in the
+    /// Bunch-Kaufman panel (the rank of its GEMMs). Default `16`.
+    pub trailing_block: usize,
+    /// A complex product runs as real products on split planes when its
+    /// flops `m n k` are at least this many times its plane copies
+    /// `m k + k n + m n`; thin products lose on the copies. Default `64`.
+    pub complex_split_min_ratio: usize,
+    /// Tile edge of that split, which bounds its scratch. Default `256`.
+    pub complex_split_tile: usize,
+    /// Use the SIMD GEMM for the LDL^T Schur update (vs the scalar loop).
+    /// Default `true`.
     pub use_gemm_schur: bool,
-    /// Threshold partial-pivoting tolerance `u in [0, 1]` for the LU path. The diagonal pivot is
-    /// kept unless it falls below `u * |colmax|` in its fully-summed block. `u = 1`
-    /// is full partial pivoting; `u -> 0` keeps the diagonal unless exactly zero
-    /// (least fill, least stable). Default
-    /// `DEFAULT_PIVOT_U = 0.1` (a `gemm_tuning` internal constant).
-    /// Ignored by the LDL^T path (Bunch-Kaufman). Numeric-phase knob; a lower `u` trades a little
-    /// stability (backed by the near-zero pivot policy) for less fill and speed on
-    /// well-scaled / diagonally-dominant systems.
-    pub pivot_u: f64,
-    /// Symmetric equilibration strategy `A_hat = D A D` applied by [`LdltSolver`](crate::LdltSolver)
-    /// before factoring. Default [`OnePassInfNorm`](crate::ScalingStrategy::OnePassInfNorm)
-    /// (the historical one-pass inf-norm, bit-identical to before this knob).
-    /// [`Identity`](crate::ScalingStrategy::Identity) disables scaling;
-    /// [`InfNorm`](crate::ScalingStrategy::InfNorm) is the iterative Knight-Ruiz
-    /// (Ruiz) equilibration; [`Mc64Symmetric`](crate::ScalingStrategy::Mc64Symmetric)
-    /// scales by a maximum-product matching. Scaling changes only
-    /// values (not the pattern), so the a-priori memory estimate is unaffected.
-    /// Consumed by the symmetric path; the unsymmetric LU path uses its own
-    /// two-sided row/column equilibration.
-    pub scaling: crate::scaling::ScalingStrategy,
-    /// Maximum-product row matching (MC64) before the **LU** analysis, where
-    /// the matrix needs it: rows are permuted so the matched,
-    /// largest-product entries form the diagonal and both sides are scaled
-    /// to make them unit magnitude, so the front-local pivot search rarely
-    /// needs an off-diagonal pivot and the element growth of the
-    /// block-restricted pivoting stays bounded (on the ibmpg1 power grid the
-    /// residual improves from 4e-5 to roundoff). Applied only when a
-    /// diagonal entry is missing, zero or negligible against its column;
-    /// with a usable diagonal the permutation costs fill and pivot quality
-    /// and is skipped. Default `true`; `false` never matches. Ignored by
-    /// the symmetric and KLU paths.
-    pub lu_matching: bool,
+}
+
+impl Default for KernelSettings {
+    fn default() -> Self {
+        Self {
+            panel_nb: 64,
+            scalar_gate: 4096,
+            par_gemm: 1_000_000,
+            par_cdiv: 8_000_000,
+            fork_min_flops: 100_000_000,
+            schur_tile: 256,
+            trailing_block: 16,
+            complex_split_min_ratio: 64,
+            complex_split_tile: 256,
+            use_gemm_schur: true,
+        }
+    }
+}
+
+/// Scheduling of the supernodal triangular solves. The result does not
+/// depend on the thread count; these change at most the rounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolveSettings {
+    /// Independent leaf subtrees the tree is cut into for the parallel
+    /// sweeps. Default `128`.
+    pub leaf_subtrees: usize,
+    /// Column block of the ancestor sweeps: a block's triangle is one task,
+    /// its update of the rows below is spread over row tasks. Default `512`.
+    pub block: usize,
+    /// Columns per product or dot task of the ancestor sweeps. Default `32`.
+    pub ancestor_chunk: usize,
+    /// Panel entries from which an ancestor node uses the blocked sweep.
+    /// Default `262_144`.
+    pub apex_min_work: usize,
+}
+
+impl Default for SolveSettings {
+    fn default() -> Self {
+        Self {
+            leaf_subtrees: 128,
+            block: 512,
+            ancestor_chunk: 32,
+            apex_min_work: 1 << 18,
+        }
+    }
+}
+
+impl Default for SolverSettings {
+    fn default() -> Self {
+        Self {
+            pivoting: PivotSettings::default(),
+            scaling: ScalingStrategy::OnePassInfNorm,
+            matching: MatchingSettings::default(),
+            drop_tol: None,
+            ordering: OrderingSettings::default(),
+            amalgamation: AmalgamationSettings::default(),
+            kernels: KernelSettings::default(),
+            solve: SolveSettings::default(),
+            threads: Threads::default(),
+            interrupt: None,
+        }
+    }
+}
+
+impl SolverSettings {
+    /// Exact, complete factorization (the default): fail on a singular pivot,
+    /// no fill dropping.
+    pub fn exact() -> Self {
+        Self::default()
+    }
+
+    /// Robust never-fail preconditioner: static pivoting lifts any pivot below
+    /// `abs_floor` (typically `eps_rel * ||A||`) to it, so the factorization
+    /// always succeeds. Compose with [`with_drop_tol`](Self::with_drop_tol)
+    /// for an incomplete factor.
+    pub fn preconditioner(abs_floor: f64) -> Self {
+        Self::default().with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor })
+    }
+
+    /// Drop fill below `tau` relative to its column (see
+    /// [`drop_tol`](Self::drop_tol)).
+    pub fn with_drop_tol(mut self, tau: f64) -> Self {
+        self.drop_tol = Some(tau);
+        self
+    }
+
+    /// Set the near-zero pivot policy.
+    pub fn with_zero_pivot(mut self, action: ZeroPivotAction) -> Self {
+        self.pivoting.on_zero_pivot = action;
+        self
+    }
+
+    /// Set the LU pivot threshold `u`, clamped to `[0, 1]` (see
+    /// [`PivotSettings::threshold`]).
+    pub fn with_pivot_threshold(mut self, u: f64) -> Self {
+        self.pivoting.threshold = u.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set the worker-thread policy; a number is a fixed count (`0` = all
+    /// logical cores).
+    pub fn with_threads(mut self, threads: impl Into<Threads>) -> Self {
+        self.threads = threads.into();
+        self
+    }
+
+    /// Set the ordering method. Analyze-time.
+    pub fn with_ordering(mut self, method: OrderingMethod) -> Self {
+        self.ordering.method = method;
+        self
+    }
+
+    /// Analyze with this ordering instead of computing one (see
+    /// [`OrderingSettings::permutation`]).
+    pub fn with_permutation(mut self, perm: Arc<[usize]>) -> Self {
+        self.ordering.permutation = Some(perm);
+        self
+    }
+
+    /// Run the nested-dissection seed ensemble (see
+    /// [`RaceSettings::ensemble`]).
+    pub fn with_nd_ensemble(mut self, on: bool) -> Self {
+        self.ordering.race.ensemble = on;
+        self
+    }
+
+    /// Set the amalgamation `nemin`. Analyze-time.
+    pub fn with_nemin(mut self, nemin: usize) -> Self {
+        self.amalgamation.nemin = nemin;
+        self
+    }
+
+    /// Set the relaxed amalgamation (`None` for none). Analyze-time.
+    pub fn with_relax(mut self, relax: Option<RelaxAmalgamation>) -> Self {
+        self.amalgamation.relax = relax;
+        self
+    }
+
+    /// Set the symmetric equilibration of the LDL^T path.
+    pub fn with_scaling(mut self, scaling: ScalingStrategy) -> Self {
+        self.scaling = scaling;
+        self
+    }
+
+    /// Allow or forbid the LU row matching (see [`MatchingSettings`]).
+    pub fn with_matching(mut self, on: bool) -> Self {
+        self.matching.enabled = on;
+        self
+    }
+
+    /// Arm the numeric factorization with a caller-owned cancellation flag
+    /// (see [`interrupt`](Self::interrupt)).
+    pub fn with_interrupt(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.interrupt = Some(flag);
+        self
+    }
+
+    /// The kernel knobs as the `Copy` bundle the kernels take.
+    pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning<'_> {
+        crate::numeric::gemm_tuning::KernelTuning {
+            k: KernelSettings {
+                panel_nb: self.kernels.panel_nb.max(8),
+                ..self.kernels
+            },
+            pivot_threshold: self.pivoting.threshold.clamp(0.0, 1.0),
+            interrupt: self.interrupt.as_deref(),
+        }
+    }
+
+    /// A static upper bound on the worker count for *reporting*, without the
+    /// structural predictor: a fixed count resolves exactly; an
+    /// [`Auto`](Threads::Auto) policy reports its cap (all cores for `0`). The
+    /// concrete count actually used is resolved at factor time and recorded in
+    /// the [`Diagnostics`](crate::Diagnostics).
+    pub fn resolved_threads(&self) -> usize {
+        match self.threads {
+            Threads::Fixed(0) | Threads::Auto { max: 0 } => all_cores(),
+            Threads::Fixed(n) | Threads::Auto { max: n } => n,
+            Threads::Ambient => rayon::current_num_threads().max(1),
+        }
+    }
+
+    /// The settings set to a non-default value that `path` does not read, each
+    /// as one sentence naming the field and why. A factorization logs them as
+    /// `Warning` records and carries them in its
+    /// [`Diagnostics::warnings`](crate::Diagnostics::warnings), so a setting
+    /// with no effect is never silent.
+    pub(crate) fn ignored_on(&self, path: FactorPath) -> Vec<String> {
+        let d = SolverSettings::default();
+        let mut out = Vec::new();
+        match path {
+            FactorPath::Ldlt => {
+                if self.pivoting.threshold != d.pivoting.threshold {
+                    out.push(format!(
+                        "pivoting.threshold = {} is ignored by the LDL^T path (Bunch-Kaufman \
+                         pivots the fully-summed block)",
+                        self.pivoting.threshold
+                    ));
+                }
+                if self.matching != d.matching {
+                    out.push("matching is ignored by the LDL^T path (an LU setting)".to_string());
+                }
+            }
+            FactorPath::Lu => {
+                if self.scaling != d.scaling {
+                    out.push(format!(
+                        "scaling = {:?} is ignored by the LU path (it equilibrates rows and \
+                         columns with its own two-sided scaling)",
+                        self.scaling
+                    ));
+                }
+                if self.kernels.panel_nb != d.kernels.panel_nb {
+                    out.push(format!(
+                        "kernels.panel_nb = {} is ignored by the LU path (an LDL^T kernel knob)",
+                        self.kernels.panel_nb
+                    ));
+                }
+                if self.kernels.use_gemm_schur != d.kernels.use_gemm_schur {
+                    out.push(
+                        "kernels.use_gemm_schur is ignored by the LU path (an LDL^T kernel knob)"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Worker-thread policy for a factorization. The numeric result is bit-identical
@@ -180,6 +582,13 @@ impl Default for Threads {
         // and the safe default for concurrent / embedded (solver-in-the-loop) use.
         // `Auto` still predicts a smaller count per matrix where more would regress.
         Threads::Auto { max: 4 }
+    }
+}
+
+/// A fixed worker count (`0` = all logical cores).
+impl From<usize> for Threads {
+    fn from(n: usize) -> Self {
+        Threads::Fixed(n)
     }
 }
 
@@ -307,260 +716,6 @@ pub(crate) fn stack_for_depth(depth: usize) -> usize {
     // small rayon default, which a moderate depth (a few hundred supernodes, as a
     // banded matrix amalgamates to) already overflows.
     depth.saturating_mul(FRAME).clamp(MIN, MAX)
-}
-
-impl Default for SolverSettings {
-    fn default() -> Self {
-        use crate::numeric::gemm_tuning::{
-            DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_PIVOT_U,
-            DEFAULT_SCALAR_GATE,
-        };
-        Self {
-            on_zero_pivot: ZeroPivotAction::Fail,
-            drop_tol: None,
-            threads: Threads::default(),
-            interrupt: None,
-            // Analysis-phase defaults (reproduce the historically-tuned analysis).
-            ordering: OrderingMethod::default(),
-            nemin: 16,
-            // Relaxed amalgamation OFF. It was tuned in June on the MoM and FEM
-            // classes, where padding narrow fundamental supernodes into wider
-            // dense fronts pays; on the grid classes that entered the corpus
-            // later it is a large pessimization, because the padded fronts carry
-            // their explicit zeros through every update. Measured over the
-            // 18-matrix head-to-head grid on the M3, relaxed vs off, interleaved,
-            // minimum of three: geomean 0.654 for off, 16 of 18 matrices faster,
-            // convection-diffusion 2D 2.6-4x, worst case curl-curl 14739 at
-            // +12%. Fill is identical or lower without it (MoM 34.2M -> 32.1M).
-            // Opt in per call with
-            // `with_relax(Some(..))` where the fronts are dense enough to want it.
-            relax: None,
-            permutation: None,
-            nd_ensemble: false,
-            // Kernel defaults (reproduce the former process-wide atomic defaults).
-            panel_nb: DEFAULT_PANEL_NB,
-            scalar_gate: DEFAULT_SCALAR_GATE,
-            par_gemm: DEFAULT_PAR_GEMM,
-            par_cdiv: DEFAULT_PAR_CDIV,
-            use_gemm_schur: true,
-            pivot_u: DEFAULT_PIVOT_U,
-            scaling: crate::scaling::ScalingStrategy::OnePassInfNorm,
-            lu_matching: true,
-        }
-    }
-}
-
-impl SolverSettings {
-    /// Exact, complete factorization (the default): fail on a singular pivot,
-    /// no fill dropping. Use for a direct solve where accuracy is required.
-    pub fn exact() -> Self {
-        Self::default()
-    }
-
-    /// Robust never-fail **preconditioner** mode: static pivoting replaces any
-    /// pivot below `abs_floor` (typically `eps_rel*||A||`) so the factorization
-    /// always succeeds. Compose with [`with_drop_tol`](Self::with_drop_tol) for
-    /// an incomplete preconditioner.
-    pub fn preconditioner(abs_floor: f64) -> Self {
-        Self {
-            on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor },
-            ..Self::default()
-        }
-    }
-
-    /// Builder: enable incomplete-factor threshold dropping (`|fill| < tau` is
-    /// discarded, relative to the column/row).
-    pub fn with_drop_tol(mut self, tau: f64) -> Self {
-        self.drop_tol = Some(tau);
-        self
-    }
-
-    /// Builder: set the near-zero pivot policy.
-    pub fn with_pivot(mut self, policy: ZeroPivotAction) -> Self {
-        self.on_zero_pivot = policy;
-        self
-    }
-
-    /// Builder: set a **fixed** worker-thread budget (`0` = all logical cores).
-    /// The factor runs in a scoped pool of this size so concurrent solves don't
-    /// oversubscribe. Overrides the default [`Auto`](Threads::Auto) prediction.
-    pub fn with_threads(mut self, threads: usize) -> Self {
-        self.threads = Threads::Fixed(threads);
-        self
-    }
-
-    /// Builder: use the **auto** per-matrix thread predictor, capped at `max`
-    /// (`0` = all logical cores). This is the default policy; use it to bound the
-    /// predictor below the full core count.
-    pub fn with_auto_threads(mut self, max: usize) -> Self {
-        self.threads = Threads::Auto { max };
-        self
-    }
-
-    /// Builder: set the worker-thread policy directly.
-    pub fn with_thread_policy(mut self, threads: Threads) -> Self {
-        self.threads = threads;
-        self
-    }
-
-    /// Builder: run the nested-dissection seed ensemble (see
-    /// [`nd_ensemble`](Self::nd_ensemble)).
-    pub fn with_nd_ensemble(mut self, on: bool) -> Self {
-        self.nd_ensemble = on;
-        self
-    }
-
-    /// Builder: set the fill-reducing ordering method (analyze-time).
-    pub fn with_ordering(mut self, ordering: OrderingMethod) -> Self {
-        self.ordering = ordering;
-        self
-    }
-
-    /// Builder: set the supernode amalgamation `nemin` (analyze-time).
-    pub fn with_nemin(mut self, nemin: usize) -> Self {
-        self.nemin = nemin;
-        self
-    }
-
-    /// Builder: set the relaxed-amalgamation thresholds (`None` restricts to
-    /// structural/size merges). Analyze-time.
-    pub fn with_relax(mut self, relax: Option<RelaxAmalgamation>) -> Self {
-        self.relax = relax;
-        self
-    }
-
-    /// Builder: analyse with this fill-reducing ordering (`perm[k]` the column that
-    /// becomes column `k`) instead of computing one. For a sequence of nearby patterns - a
-    /// sweep whose drop tolerances move a few entries - the previous analysis's
-    /// [`LuSymbolic::permutation`](crate::LuSymbolic::permutation) keeps its fill quality at
-    /// the cost of the elimination tree and column counts alone, not of a new ordering.
-    /// With the LU row matching the ordering is one of the row-matched matrix, so it carries
-    /// over only where the (value-dependent) matching does. Analyze-time.
-    pub fn with_permutation(mut self, perm: std::sync::Arc<[usize]>) -> Self {
-        self.permutation = Some(perm);
-        self
-    }
-
-    /// Builder: set the Bunch-Kaufman / LU panel width (kernel blocking factor).
-    pub fn with_panel_nb(mut self, nb: usize) -> Self {
-        self.panel_nb = nb;
-        self
-    }
-
-    /// Builder: set the GEMM scheduling thresholds (scalar/SIMD and serial/parallel
-    /// cutoffs) in one shot.
-    pub fn with_gemm_thresholds(mut self, t: crate::numeric::gemm_tuning::GemmThresholds) -> Self {
-        self.scalar_gate = t.scalar_gate;
-        self.par_gemm = t.par_gemm;
-        self.par_cdiv = t.par_cdiv;
-        self
-    }
-
-    /// Builder: toggle the SIMD GEMM Schur update (vs the scalar triple loop).
-    pub fn with_use_gemm_schur(mut self, on: bool) -> Self {
-        self.use_gemm_schur = on;
-        self
-    }
-
-    /// Builder: set the left-looking LU threshold partial-pivoting tolerance
-    /// `u in [0, 1]` (clamped). Default `0.1`; `1.0` is full partial pivoting.
-    /// See [`pivot_u`](Self::pivot_u).
-    pub fn with_pivot_u(mut self, u: f64) -> Self {
-        self.pivot_u = u.clamp(0.0, 1.0);
-        self
-    }
-
-    /// Builder: set the symmetric equilibration strategy (analyze/factor-time,
-    /// symmetric path). See [`scaling`](Self::scaling).
-    pub fn with_scaling(mut self, scaling: crate::scaling::ScalingStrategy) -> Self {
-        self.scaling = scaling;
-        self
-    }
-
-    /// Enable or disable the MC64 row matching of the LU path (see
-    /// [`SolverSettings::lu_matching`]).
-    pub fn with_lu_matching(mut self, on: bool) -> Self {
-        self.lu_matching = on;
-        self
-    }
-
-    /// The kernel scheduling knobs as a cheap `Copy` bundle, threaded into the
-    /// dense-front / left-looking kernels (replaces the former atomic loads).
-    pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning<'_> {
-        crate::numeric::gemm_tuning::KernelTuning {
-            scalar_gate: self.scalar_gate,
-            par_gemm: self.par_gemm,
-            par_cdiv: self.par_cdiv,
-            panel_nb: self.panel_nb.max(8),
-            use_gemm_schur: self.use_gemm_schur,
-            pivot_u: self.pivot_u.clamp(0.0, 1.0),
-            interrupt: self.interrupt.as_deref(),
-        }
-    }
-
-    /// Builder: arm the numeric factorization with a caller-owned cancellation
-    /// flag (see [`interrupt`](Self::interrupt)).
-    pub fn with_interrupt(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        self.interrupt = Some(flag);
-        self
-    }
-
-    /// A static upper bound on the worker count for *reporting*, without the
-    /// structural predictor: a fixed count resolves exactly; an
-    /// [`Auto`](Threads::Auto) policy reports its cap (all cores for `0`). The
-    /// concrete count actually used is resolved at factor time and recorded in
-    /// the [`Diagnostics`](crate::Diagnostics).
-    pub fn resolved_threads(&self) -> usize {
-        match self.threads {
-            Threads::Fixed(0) | Threads::Auto { max: 0 } => all_cores(),
-            Threads::Fixed(n) | Threads::Auto { max: n } => n,
-            Threads::Ambient => rayon::current_num_threads().max(1),
-        }
-    }
-
-    /// The settings set to a non-default value that `path` does not read, each
-    /// as one sentence naming the field and why. A factorization logs them as
-    /// `Warning` records and carries them in its
-    /// [`Diagnostics::warnings`](crate::Diagnostics::warnings), so a setting
-    /// with no effect is never silent. Empty when every set field is honoured.
-    pub(crate) fn ignored_on(&self, path: FactorPath) -> Vec<String> {
-        let d = SolverSettings::default();
-        let mut out = Vec::new();
-        match path {
-            FactorPath::Ldlt => {
-                if self.pivot_u != d.pivot_u {
-                    out.push(format!(
-                        "pivot_u = {} is ignored by the LDL^T path (Bunch-Kaufman pivots the \
-                         fully-summed block; the knob belongs to the left-looking LU)",
-                        self.pivot_u
-                    ));
-                }
-            }
-            FactorPath::Lu => {
-                if self.scaling != d.scaling {
-                    out.push(format!(
-                        "scaling = {:?} is ignored by the LU path (it equilibrates rows and \
-                         columns with its own two-sided scaling)",
-                        self.scaling
-                    ));
-                }
-                if self.panel_nb != d.panel_nb {
-                    out.push(format!(
-                        "panel_nb = {} is ignored by the LU path (the panel width is an LDL^T \
-                         kernel knob)",
-                        self.panel_nb
-                    ));
-                }
-                if self.use_gemm_schur != d.use_gemm_schur {
-                    out.push(
-                        "use_gemm_schur is ignored by the LU path (an LDL^T kernel A/B knob)"
-                            .to_string(),
-                    );
-                }
-            }
-        }
-        out
-    }
 }
 
 /// The deterministic heuristic settings pick shared by `LdltSolver::tuned` and

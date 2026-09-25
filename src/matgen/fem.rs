@@ -335,7 +335,7 @@ mod tests {
         // needs perturbation), then refines to a small residual.
         let sym = LdltSymbolic::analyze(&a).unwrap();
         let opts = SolverSettings::default()
-            .with_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
+            .with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
         let solver = sym.factor(&a, &opts).unwrap();
         let n = a.n;
         let b: Vec<Complex<f64>> = (0..n)
@@ -356,7 +356,7 @@ mod tests {
         // factor would hit a non-positive pivot; Bunch-Kaufman handles it.
         let sym = LdltSymbolic::analyze(&a).unwrap();
         let opts = SolverSettings::default()
-            .with_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 });
+            .with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 });
         let solver = sym.factor(&a, &opts).unwrap();
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();

@@ -252,7 +252,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
         })),
     };
 
-    let perturb_floor: Option<f64> = match opts.on_zero_pivot {
+    let perturb_floor: Option<f64> = match opts.pivoting.on_zero_pivot {
         ZeroPivotAction::Fail => None,
         ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
         ZeroPivotAction::ForceAccept => {

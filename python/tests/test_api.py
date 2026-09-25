@@ -99,9 +99,9 @@ def test_settings_object_and_kwargs_compose():
 
 
 def test_klu_settings():
-    s = rslab.KluSettings(pivot_tol=0.5, parallel=False)
+    s = rslab.KluSettings(pivot_threshold=0.5, parallel=False)
     d = s.to_dict()
-    assert d["pivot_tol"] == 0.5 and d["parallel"] is False and d["btf"] is True
+    assert d["pivot_threshold"] == 0.5 and d["parallel"] is False and d["btf"] is True
     assert rslab.KluSettings().to_dict()["parallel"] is None
     with pytest.raises(TypeError):
         rslab.KluSettings(ordering="amd")
@@ -146,7 +146,7 @@ def test_analyze_then_factor_sweep(path):
         f = sym.factor(prepared.data * scale)
         assert _res(A * scale, f.solve(b), b) < 1e-10
     # Numeric settings can be overridden at factor time.
-    f = sym.factor(prepared.data, threads=1) if path != "klu" else sym.factor(prepared.data, pivot_tol=1.0)
+    f = sym.factor(prepared.data, threads=1) if path != "klu" else sym.factor(prepared.data, pivot_threshold=1.0)
     assert _res(A, f.solve(b), b) < 1e-10
 
 
@@ -366,7 +366,7 @@ def test_every_setting_round_trips():
         drop_tol=1e-3,
         ordering="amf",
         scaling="mc64",
-        pivot_u=0.5,
+        pivot_threshold=0.5,
         matching=False,
         nemin=8,
         nd_ensemble=True,
@@ -386,11 +386,60 @@ def test_every_setting_round_trips():
     # an external scaling vector
     ext = rslab.Settings(scaling=np.ones(3))
     assert ext.to_dict()["scaling"] == "external"
-    k = rslab.KluSettings(pivot_tol=0.5, row_scaling=False, btf=True, matching=False, parallel=True)
+    k = rslab.KluSettings(pivot_threshold=0.5, row_scaling=False, btf=True, matching=False, parallel=True)
     kd = k.to_dict()
-    assert kd["pivot_tol"] == 0.5 and kd["row_scaling"] is False and kd["parallel"] is True
+    assert kd["pivot_threshold"] == 0.5 and kd["row_scaling"] is False and kd["parallel"] is True
     with pytest.raises(TypeError):
         rslab.Settings(no_such_option=1)
     with pytest.raises(TypeError):
         rslab.Settings(blr=1e-6)
+
+
+def test_every_tuning_knob_round_trips():
+    """Each plain Settings / KluSettings keyword is set and reported back."""
+    for cls in (rslab.Settings, rslab.KluSettings):
+        for key, v in cls().to_dict().items():
+            if key == "relax":  # True reports the thresholds it stands for
+                continue
+            if isinstance(v, bool):
+                new = not v
+            elif isinstance(v, int):
+                new = v + 1
+            elif isinstance(v, float):
+                new = v * 0.5
+            else:
+                continue
+            assert cls(**{key: new}).to_dict()[key] == new, key
+
+
+def test_tuned_knobs_still_solve():
+    """Nondefault tuning constants change the schedule, not the solution."""
+    import numpy as np
+    import scipy.sparse as sp
+
+    k = 30
+    t = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(k, k))
+    A = (sp.kron(sp.eye(k), t) + sp.kron(t, sp.eye(k))).tocsc()
+    b = np.arange(A.shape[0], dtype=float)
+    knobs = dict(
+        ordering="metis",
+        nd_fm_passes=2,
+        nd_init_trials=3,
+        nd_leaf_size=50,
+        compress_max_ratio=1.0,
+        amalgamation="renumber",
+        nemin=4,
+        panel_nb=16,
+        trailing_block=4,
+        schur_tile=32,
+        fork_min_flops=0,
+        solve_leaf_subtrees=4,
+        solve_block=8,
+        solve_ancestor_chunk=4,
+        solve_apex_min_work=0,
+    )
+    x = rslab.ldlt(A, **knobs).solve(b)
+    assert np.linalg.norm(A @ x - b) <= 1e-10 * np.linalg.norm(b)
+    y = rslab.lu(A, race_candidates=["rcm", "amd"], pivot_threshold=1.0).solve(b)
+    assert np.linalg.norm(A @ y - b) <= 1e-10 * np.linalg.norm(b)
 

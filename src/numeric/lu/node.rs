@@ -70,8 +70,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     kt.interrupted()?;
-    let ll_gemm_gate = kt.scalar_gate;
-    let ll_gemm_par = kt.par_gemm;
+    let ll_gemm_gate = kt.k.scalar_gate;
+    let ll_gemm_par = kt.k.par_gemm;
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
     let (rows_l, cols_u) = (st.rows_l(s), st.cols_u(s));
@@ -121,6 +121,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         |k| (st.rows_l(k), st.cols_u(k)),
         true,
         ll_gemm_par,
+        kt.k.fork_min_flops,
     );
     let (spans, forks, tile_w, tiled) = (&plan.spans, plan.forks, plan.tile_w, plan.tiled);
     let tile_u = (cn_u.max(1) / 16).clamp(32, 256);
@@ -181,7 +182,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             false,
                             false,
                             false,
-                            gemm::Parallelism::None,
+                            crate::dense::gemm_backend::GemmMode::new(
+                                gemm::Parallelism::None,
+                                &kt.k,
+                            ),
                         );
                     }
                     for jj in 0..npk {
@@ -240,7 +244,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             false,
                             false,
                             false,
-                            gemm::Parallelism::None,
+                            crate::dense::gemm_backend::GemmMode::new(
+                                gemm::Parallelism::None,
+                                &kt.k,
+                            ),
                         );
                     }
                     for jj in 0..ntr {
@@ -331,7 +338,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     false,
                     false,
                     false,
-                    par(mrows * npk_u * nck),
+                    crate::dense::gemm_backend::GemmMode::new(par(mrows * npk_u * nck), &kt.k),
                 );
             }
             for jj in 0..npk_u {
@@ -368,7 +375,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     false,
                     false,
                     false,
-                    par(npk_l * ntrail * nck),
+                    crate::dense::gemm_backend::GemmMode::new(par(npk_l * ntrail * nck), &kt.k),
                 );
             }
             for jj in 0..ntrail {
@@ -396,7 +403,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // Join-steal guard (see the cmod fork gate above): a small node must not
     // fork inside its cdiv either.
     let ll_cdiv_par = if nrow_l * ncol * ncol >= 100_000_000 {
-        kt.par_cdiv
+        kt.k.par_cdiv
     } else {
         usize::MAX
     };
@@ -422,9 +429,9 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             // fully-summed block - so a well-scaled/equilibrated matrix never
             // interchanges (no fill or accuracy cost) while small/zero diagonals
             // still get a stable pivot. `THRESH^2` compared on squared magnitudes.
-            // `THRESH = kt.pivot_u` (tunable, default 0.1); `u = 1` recovers full
+            // `THRESH = kt.pivot_threshold` (tunable, default 0.1); `u = 1` recovers full
             // partial pivoting, `u = 0` keeps the diagonal unless it is exactly zero.
-            let thresh_sq = kt.pivot_u * kt.pivot_u;
+            let thresh_sq = kt.pivot_threshold * kt.pivot_threshold;
             // Static pivoting fast path (`u == 0`): keep the natural pivot order and
             // skip the argmax search entirely - the "skip pivot search" speed lever
             // for fixed-pattern value sequences (solver-in-the-loop: reuse a good
@@ -598,7 +605,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     false,
                     false,
                     false,
-                    par,
+                    crate::dense::gemm_backend::GemmMode::new(par, &kt.k),
                 );
             }
         }
@@ -633,7 +640,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     false,
                     false,
                     false,
-                    par,
+                    crate::dense::gemm_backend::GemmMode::new(par, &kt.k),
                 );
             }
         }

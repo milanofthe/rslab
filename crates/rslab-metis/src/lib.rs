@@ -78,6 +78,20 @@ pub struct MetisOptions {
     /// Number of FM passes at each uncoarsening level (METIS 5.2.0
     /// default: 10).
     pub fm_passes: u32,
+    /// A separator refinement pass stops after this many consecutive moves
+    /// without a better separator. Limits below about 50 000 cost fill on
+    /// grids (+37 % nnz(L) on a 40^3 grid at `min(5 * separator, 400)`),
+    /// so the default effectively never binds.
+    pub move_limit: usize,
+    /// A refinement pass also stops when the separator has grown to this
+    /// multiple of the best one seen.
+    pub max_overshoot: f64,
+    /// Subproblems with at least this many vertices order their two sides
+    /// in parallel. Affects time only, not the permutation.
+    pub parallel_min_vertices: usize,
+    /// Levels with at least this many adjacency entries contract in
+    /// parallel blocks. Affects time only, not the permutation.
+    pub parallel_min_edges: usize,
 }
 
 impl Default for MetisOptions {
@@ -90,6 +104,10 @@ impl Default for MetisOptions {
             two_hop_ratio_threshold: 0.85,
             max_imbalance: 0.20,
             fm_passes: 10,
+            move_limit: 1 << 20,
+            max_overshoot: 4.0,
+            parallel_min_vertices: 4096,
+            parallel_min_edges: 200_000,
         }
     }
 }

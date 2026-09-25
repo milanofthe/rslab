@@ -17,7 +17,7 @@
 //! complex FEM factorization the split is worth about 10% single-core and
 //! nothing at 8 workers. The split is deterministic (fixed kernels, fixed
 //! association), so results stay bit-identical across thread counts. Thin
-//! products (see [`SPLIT_MIN_RATIO`]) and conjugated operands take the direct
+//! products (see [`GemmMode::split_min_ratio`]) and conjugated operands take the direct
 //! kernel, and the split runs per tile, so its scratch stays bounded.
 
 use std::cell::RefCell;
@@ -52,50 +52,46 @@ pub unsafe fn gemm<T: Scalar>(
     conj_dst: bool,
     conj_lhs: bool,
     conj_rhs: bool,
-    parallelism: gemm::Parallelism,
+    mode: GemmMode,
 ) {
     T::gemm(
-        m,
-        n,
-        k,
-        dst,
-        dst_cs,
-        dst_rs,
-        read_dst,
-        lhs,
-        lhs_cs,
-        lhs_rs,
-        rhs,
-        rhs_cs,
-        rhs_rs,
-        alpha,
-        beta,
-        conj_dst,
-        conj_lhs,
-        conj_rhs,
-        parallelism,
+        m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs, alpha,
+        beta, conj_dst, conj_lhs, conj_rhs, mode,
     )
 }
 
-/// A product splits only when its flops `m n k` are at least this many times
-/// its plane copies `m k + k n + m n`. The saving is a quarter of the kernel
-/// time and the copies are memory traffic, so a thin product (one short
-/// dimension: the rank-`k` panel updates, or the narrow updates of a
-/// left-looking LU) loses: on a Ryzen 9900X, where the complex kernel runs at
-/// the real kernel's rate, a MoM LU factorization took 20% longer at 8
-/// workers with every product above 8k flops split, and the same as direct at
-/// this gate.
-const SPLIT_MIN_RATIO: usize = 64;
+/// How one product runs: the `gemm` crate's parallelism, and the complex
+/// split gate and tile of [`KernelSettings`](crate::KernelSettings).
+#[derive(Debug, Clone, Copy)]
+pub struct GemmMode {
+    pub parallelism: gemm::Parallelism,
+    /// A product splits only when its flops `m n k` are at least this many
+    /// times its plane copies `m k + k n + m n`. The saving is a quarter of
+    /// the kernel time and the copies are memory traffic, so a thin product
+    /// (one short dimension: the rank-`k` panel updates, or the narrow
+    /// updates of a left-looking LU) loses: on a Ryzen 9900X a MoM LU
+    /// factorization took 20% longer at 8 workers with every product above 8k
+    /// flops split, and the same as direct at the default `64`.
+    pub split_min_ratio: usize,
+    /// Tile edge of the split: the planes of one tile of the product
+    /// (`3 (2 tile k + tile^2)` reals) are the whole scratch.
+    pub split_tile: usize,
+}
 
-/// Tile edge of the split: the planes of one `SPLIT_TILE x SPLIT_TILE` block
-/// of the product (`3 (2 SPLIT_TILE k + SPLIT_TILE^2)` reals) are the whole
-/// scratch, whatever the product's size.
-const SPLIT_TILE: usize = 256;
+impl GemmMode {
+    pub fn new(parallelism: gemm::Parallelism, k: &crate::KernelSettings) -> Self {
+        Self {
+            parallelism,
+            split_min_ratio: k.complex_split_min_ratio,
+            split_tile: k.complex_split_tile.max(1),
+        }
+    }
+}
 
 /// Whether a complex product of this shape goes through the real kernels.
 #[inline]
-pub fn split_worthwhile(m: usize, n: usize, k: usize, conj: bool) -> bool {
-    !conj && m * n * k >= SPLIT_MIN_RATIO * (m * k + k * n + m * n)
+pub fn split_worthwhile(m: usize, n: usize, k: usize, conj: bool, min_ratio: usize) -> bool {
+    !conj && m * n * k >= min_ratio * (m * k + k * n + m * n)
 }
 
 /// Real plane scratch of one thread (grows to the largest tile seen).
@@ -364,7 +360,7 @@ pub unsafe fn complex_gemm_4m<R: SplitReal>(
 
 /// The three-product (Gauss) form: `T1 = Ar Br`, `T2 = Ai Bi`,
 /// `T3 = (Ar + Ai)(Br + Bi)`, `Cr = T1 - T2`, `Ci = T3 - T1 - T2`, per
-/// [`SPLIT_TILE`] block of the product (the inner dimension whole, so every
+/// `split_tile` block of the product (the inner dimension whole, so every
 /// entry sums as in one product).
 ///
 /// # Safety
@@ -387,9 +383,10 @@ pub unsafe fn complex_gemm_3m<R: SplitReal>(
     alpha: Complex<R>,
     beta: Complex<R>,
     parallelism: gemm::Parallelism,
+    tile: usize,
 ) {
     R::with_planes(|buf| {
-        let (mt, nt) = (m.min(SPLIT_TILE), n.min(SPLIT_TILE));
+        let (mt, nt) = (m.min(tile), n.min(tile));
         let need = 3 * (mt * k + k * nt + mt * nt);
         // every plane is written in full before it is read: no clearing
         if buf.len() < need {
@@ -397,8 +394,8 @@ pub unsafe fn complex_gemm_3m<R: SplitReal>(
         }
         let (a_planes, rest) = buf.split_at_mut(3 * mt * k);
         let (b_planes, c_planes) = rest.split_at_mut(3 * k * nt);
-        for j0 in (0..n).step_by(SPLIT_TILE) {
-            let nb = (n - j0).min(SPLIT_TILE);
+        for j0 in (0..n).step_by(tile) {
+            let nb = (n - j0).min(tile);
             let (br, rest) = b_planes.split_at_mut(k * nb);
             let (bi, rest) = rest.split_at_mut(k * nb);
             let bsum = &mut rest[..k * nb];
@@ -414,8 +411,8 @@ pub unsafe fn complex_gemm_3m<R: SplitReal>(
             for e in 0..k * nb {
                 bsum[e] = br[e] + bi[e];
             }
-            for i0 in (0..m).step_by(SPLIT_TILE) {
-                let mb = (m - i0).min(SPLIT_TILE);
+            for i0 in (0..m).step_by(tile) {
+                let mb = (m - i0).min(tile);
                 let (ar, rest) = a_planes.split_at_mut(mb * k);
                 let (ai, rest) = rest.split_at_mut(mb * k);
                 let asum = &mut rest[..mb * k];
@@ -488,12 +485,14 @@ pub unsafe fn complex_gemm<R: SplitReal>(
     conj_dst: bool,
     conj_lhs: bool,
     conj_rhs: bool,
-    parallelism: gemm::Parallelism,
+    mode: GemmMode,
 ) where
     Complex<R>: 'static,
 {
+    let parallelism = mode.parallelism;
     let sequential = matches!(parallelism, gemm::Parallelism::None);
-    if sequential && split_worthwhile(m, n, k, conj_dst || conj_lhs || conj_rhs) {
+    let conj = conj_dst || conj_lhs || conj_rhs;
+    if sequential && split_worthwhile(m, n, k, conj, mode.split_min_ratio) {
         return complex_gemm_3m(
             m,
             n,
@@ -511,6 +510,7 @@ pub unsafe fn complex_gemm<R: SplitReal>(
             alpha,
             beta,
             parallelism,
+            mode.split_tile,
         );
     }
     gemm::gemm(
@@ -615,6 +615,7 @@ mod tests {
                 alpha,
                 beta,
                 gemm::Parallelism::None,
+                256,
             );
             complex_gemm_4m(
                 m,
@@ -699,6 +700,7 @@ mod tests {
                 Complex64::new(0.0, 0.0),
                 Complex64::new(1.0, 0.0),
                 gemm::Parallelism::None,
+                256,
             );
             complex_gemm_3m(
                 m,
@@ -717,6 +719,7 @@ mod tests {
                 Complex64::new(0.0, 0.0),
                 Complex64::new(1.0, 0.0),
                 gemm::Parallelism::None,
+                256,
             );
         }
         assert!(a

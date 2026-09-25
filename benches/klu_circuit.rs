@@ -108,7 +108,7 @@ fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
 /// Settings sweep (`RLA_KLU_SWEEP=1`): grid over the three KLU knobs on the
 /// circuit family plus a badly row-scaled variant, warm best-of-3 per config.
 /// Evidence base for the KLU default-settings choice (heuristic defaults work,
-/// 2026-07): confirms/updates that `pivot_tol=1e-3, row_scaling=on, btf=on`
+/// 2026-07): confirms/updates that `pivot_threshold=1e-3, row_scaling=on, btf=on`
 /// is on the speed/fill/robustness Pareto front.
 fn settings_sweep() {
     println!(
@@ -137,7 +137,7 @@ fn settings_sweep() {
             for &scal in &[true, false] {
                 for &ptol in &[1e-3f64, 1e-2, 0.1, 1.0] {
                     let s = KluSettings::default()
-                        .with_pivot_tol(ptol)
+                        .with_pivot_threshold(ptol)
                         .with_row_scaling(scal)
                         .with_btf(btf);
                     let t = Instant::now();
@@ -311,7 +311,10 @@ fn main() {
         // --- parallel per-block factor + refactor (opt-in, ambient pool) ---
         let t = Instant::now();
         let mut klu_par = sym
-            .factor(&a, &KluSettings::default().with_parallel_factor(true))
+            .factor(
+                &a,
+                &KluSettings::default().with_parallel(rslab::KluParallel::On),
+            )
             .unwrap();
         let t_fac_par = t.elapsed();
         assert_eq!(klu_par.factor_nnz(), klu_nnz, "parallel factor differs");

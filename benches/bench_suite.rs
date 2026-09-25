@@ -1326,17 +1326,15 @@ fn main() {
     // RLA_BENCH_NB=<panel width>, RLA_BENCH_GATES=<scalar,par_gemm,par_cdiv>.
     if let Ok(nb) = std::env::var("RLA_BENCH_NB") {
         if let Ok(nb) = nb.parse::<usize>() {
-            opts = opts.with_panel_nb(nb);
+            opts.kernels.panel_nb = nb;
         }
     }
     if let Ok(g) = std::env::var("RLA_BENCH_GATES") {
         let v: Vec<usize> = g.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         if v.len() == 3 {
-            opts = opts.with_gemm_thresholds(rslab::GemmThresholds {
-                scalar_gate: v[0],
-                par_gemm: v[1],
-                par_cdiv: v[2],
-            });
+            opts.kernels.scalar_gate = v[0];
+            opts.kernels.par_gemm = v[1];
+            opts.kernels.par_cdiv = v[2];
         }
     }
 

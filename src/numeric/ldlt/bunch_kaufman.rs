@@ -63,9 +63,12 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     nb: usize,
     r0: usize,
     r1: usize,
+    sb: usize,
 ) {
     // Blocked form of the per-pivot sweep. Pivots are taken in sub-blocks of
-    // `TRAILING_SB` columns: inside a sub-block a pivot's rank-1 (rank-2)
+    // `sb` columns ([`KernelSettings::trailing_block`](crate::KernelSettings::trailing_block);
+    // 16 measured best: 32 doubles the scalar within-block work, 8 halves
+    // the GEMM efficiency): inside a sub-block a pivot's rank-1 (rank-2)
     // update reaches only the sub-block's remaining columns (scalar loops),
     // while its contribution to the columns beyond the sub-block is deferred
     // and applied as one GEMM `B[:, ke2..ke] -= W * M` per sub-block, where
@@ -80,10 +83,11 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     }
     // One spare column: a 2x2 pivot that starts on a sub-block's last
     // column extends the sub-block by one, the pair is never split.
-    let mut w: Vec<T> = vec![T::zero(); deep * (TRAILING_SB + 1)];
+    let sb = sb.max(1);
+    let mut w: Vec<T> = vec![T::zero(); deep * (sb + 1)];
     let mut kb2 = kb;
     while kb2 < ke {
-        let mut ke2 = (kb2 + TRAILING_SB).min(ke);
+        let mut ke2 = (kb2 + sb).min(ke);
         if ke2 < ke && two_by_two[ke2 - 1] {
             ke2 += 1;
         }
@@ -160,11 +164,6 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     }
 }
 
-/// Columns per sub-block of the blocked trailing sweep (the `k` of its
-/// GEMMs). 16 measured best: 32 doubles the scalar within-block work,
-/// 8 halves the GEMM efficiency.
-const TRAILING_SB: usize = 16;
-
 /// Apply the deferred updates of pivots `[p0, p1)` of the sub-block
 /// `[kb2, ke2)` (their unscaled columns in `w`, indexed from `kb2`) to the
 /// columns `[ke2, ke)` of rows `r0..r0 + deep`:
@@ -199,7 +198,7 @@ unsafe fn flush_trailing<T: Scalar>(
     let rhs = mult_snap.as_ptr().add((p0 - kb) * nb + (ke2 - kb));
     let dst = base.add(ke2 * nrow + r0);
     // The direct kernel, not the backend entry: these products are skinny
-    // (k = TRAILING_SB), where the complex split's plane copies cost more
+    // (k = trailing_block), where the complex split's plane copies cost more
     // than they save (measured: 1.84 s against 1.98 s single-core).
     gemm::gemm(
         deep,
@@ -241,6 +240,7 @@ fn ll_bk_panel_step<T: Scalar>(
     alpha: f64,
     perturb_floor: Option<f64>,
     ll_cdiv_par: usize,
+    trailing_block: usize,
     d: &mut [T],
     d_subdiag: &mut [T],
     two_by_two: &mut [bool],
@@ -446,6 +446,7 @@ fn ll_bk_panel_step<T: Scalar>(
                         nb,
                         r0,
                         r1,
+                        trailing_block,
                     )
                 };
             });
@@ -470,6 +471,7 @@ fn ll_bk_panel_step<T: Scalar>(
                     nb,
                     ke,
                     nrow,
+                    trailing_block,
                 )
             };
         }
@@ -520,16 +522,16 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     // because SMALL panels pay; widening only above `ncol >= 512` (a pure
     // function of the node, thread-count independent) keeps them at default.
     let nb = if ncol >= 512 {
-        kt.panel_nb.max(128)
+        kt.k.panel_nb.max(128)
     } else {
-        kt.panel_nb
+        kt.k.panel_nb
     };
     // Same join-steal guard as cmod: a small node must not fork inside its
     // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
     // foreign subtree work and stalls this node's dependents. Total cdiv
     // work ~ nrow*ncol^2 (panel + trailing updates).
     let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 {
-        kt.par_cdiv
+        kt.k.par_cdiv
     } else {
         usize::MAX
     };
@@ -575,6 +577,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 alpha,
                 perturb_floor,
                 ll_cdiv_par,
+                kt.k.trailing_block,
                 &mut d,
                 &mut d_subdiag,
                 &mut two_by_two,
@@ -640,7 +643,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             let ke2 = (ke + nb).min(ncol);
             let cw_n = ke2 - ke;
             let wide = cw - cw_n;
-            let look = kt.use_gemm_schur && wide > 0 && mt * wide * pw >= kt.par_cdiv;
+            let look = kt.k.use_gemm_schur && wide > 0 && mt * wide * pw >= kt.k.par_cdiv;
             if look {
                 // Narrow Schur into the next panel's columns.
                 tmp.clear();
@@ -658,6 +661,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                         l21buf.as_ptr(),
                         mt as isize,
                         ll_cdiv_par,
+                        &kt.k,
                     )
                 };
                 for cc2 in 0..cw_n {
@@ -684,6 +688,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                             alpha,
                             perturb_floor,
                             ll_cdiv_par,
+                            kt.k.trailing_block,
                             &mut d,
                             &mut d_subdiag,
                             &mut two_by_two,
@@ -708,6 +713,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                                 l21_ref.as_ptr().add(cw_n),
                                 mt as isize,
                                 ll_cdiv_par,
+                                &kt.k,
                             )
                         };
                         for cc2 in cw_n..cw {
@@ -730,7 +736,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             } else {
                 tmp.clear();
                 tmp.resize(mt * cw, T::zero());
-                if kt.use_gemm_schur {
+                if kt.k.use_gemm_schur {
                     // The write-back below reads only `rr >= cc2`, so compute the
                     // rectangular product tile-by-tile from each tile's diagonal
                     // downward. Matters most at the tree root where `cw ~ mt`
@@ -750,6 +756,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                             l21buf.as_ptr(),
                             mt as isize,
                             ll_cdiv_par,
+                            &kt.k,
                         )
                     };
                 } else {

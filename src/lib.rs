@@ -141,9 +141,6 @@ pub use io::mtx::{
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
 pub use logging::{LogLevel, LogSink};
-pub use numeric::gemm_tuning::{
-    GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
-};
 pub use refine::{BackwardError, RefineOutcome, RefinePolicy};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
@@ -151,7 +148,11 @@ pub use scaling::ScalingStrategy;
 pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
 pub use numeric::ldlt::{LdltSolver, LdltSymbolic};
 pub use numeric::lu::{LuSolver, LuSymbolic};
-pub use numeric::settings::{SolverSettings, Threads, ZeroPivotAction};
+pub use numeric::settings::{
+    AmalgamationSettings, AmdOptions, AmfOptions, KernelSettings, MatchingSettings, MetisOptions,
+    OrderingSettings, PivotSettings, RaceSettings, SolveSettings, SolverSettings, Threads,
+    ZeroPivotAction,
+};
 // The Krylov solvers and their operator and preconditioner traits.
 pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_block_mon, gmres_recycled, BlockKrylovResult,
@@ -161,7 +162,7 @@ pub use numeric::krylov::{
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
-pub use symbolic::{OrderingMethod, RelaxAmalgamation};
+pub use symbolic::{AmalgamationStrategy, OrderingMethod, RelaxAmalgamation};
 
 /// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /
 /// preconditioner. `use rslab::prelude::*;` brings in the matrix type, the

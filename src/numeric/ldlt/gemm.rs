@@ -3,11 +3,6 @@
 
 use crate::scalar::Scalar;
 
-/// Column-tile width for [`lower_tile_gemm`]. Wide enough that each tile's
-/// GEMM stays BLAS-3-efficient, narrow enough that the wasted
-/// above-diagonal strip per tile (`< TILE/2` rows) is negligible.
-const SCHUR_TILE: usize = 256;
-
 /// Grow `buf` to at least `len` entries without clearing what it holds: the
 /// cmod callers overwrite the prefix they read (the D-apply loops fill `vc` and
 /// `vd_buf`, and `lower_tile_gemm` writes `u_buf` with `read_dst = false`), so
@@ -26,7 +21,7 @@ pub(super) fn grow_scratch<T: Scalar>(buf: &mut Vec<T>, len: usize) {
 /// Schur, approaching half for wide root panels where `ncols ~ m`). Tiling
 /// the columns and starting each tile's rows at its own diagonal keeps the
 /// per-element summation deterministic while cutting the waste to
-/// `< SCHUR_TILE/2` rows per tile.
+/// `< schur_tile / 2` rows per tile ([`KernelSettings::schur_tile`](crate::KernelSettings::schur_tile)).
 ///
 /// Layouts: `tmp` is `m x ncols` column-major (column stride `m`, row
 /// stride 1); `lhs` is `m x k` with column stride `lhs_cs` (row stride 1);
@@ -49,12 +44,13 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
     rhs: *const T,
     rhs_rs: isize,
     par_cdiv: usize,
+    ks: &crate::KernelSettings,
 ) {
     debug_assert!(ncols <= m);
     debug_assert!(tmp.len() >= m * ncols);
     let mut c0 = 0usize;
     while c0 < ncols {
-        let tw = SCHUR_TILE.min(ncols - c0);
+        let tw = ks.schur_tile.max(1).min(ncols - c0);
         let mrows = m - c0;
         let par = if (mrows as u128) * (tw as u128) * (k as u128) >= par_cdiv as u128 {
             gemm::Parallelism::Rayon(0)
@@ -82,7 +78,7 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
             false,
             false,
             false,
-            par,
+            crate::dense::gemm_backend::GemmMode::new(par, ks),
         );
         c0 += tw;
     }

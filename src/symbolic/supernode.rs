@@ -1,30 +1,8 @@
+use crate::numeric::settings::AmalgamationSettings;
 use crate::ordering::elimination_tree::EliminationTree;
 
-/// Parameters of the symbolic analysis: the supernode amalgamation, a given
-/// ordering, and how much ordering effort the race may spend.
-#[derive(Clone)]
-pub struct SupernodeParams {
-    /// Supernodes narrower than this merge into their parent when the
-    /// parent is narrower too (the size rule). `1` turns the size rule off.
-    pub nemin: usize,
-    /// How merges find adjacent columns (see [`AmalgamationStrategy`]).
-    pub amalgamation_strategy: AmalgamationStrategy,
-    /// Relaxed amalgamation: merge a child into its parent beyond the size
-    /// rule while the merged supernode stays within `max_width` columns and
-    /// the merge adds at most `max_extra_rows` rows of explicit zeros. Wider
-    /// fronts run their updates at a higher GEMM rank, for a little fill.
-    /// Applies from [`RELAX_MIN_N`] unknowns and implies `Renumber`.
-    pub relax: Option<RelaxAmalgamation>,
-    /// An ordering to use instead of computing one (`perm[k]` the column
-    /// that becomes column `k`); the rest of the analysis runs as usual.
-    pub given_perm: Option<std::sync::Arc<[usize]>>,
-    /// Let the ordering race run the nested-dissection seed ensemble on large
-    /// problems (see `SolverSettings::nd_ensemble`).
-    pub nd_ensemble: bool,
-}
-
 /// Relaxed (fill-tolerant) amalgamation thresholds. See
-/// [`SupernodeParams::relax`].
+/// [`AmalgamationSettings::relax`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelaxAmalgamation {
     /// Cap on the merged supernode width (eliminated columns).
@@ -33,9 +11,15 @@ pub struct RelaxAmalgamation {
     pub max_extra_rows: usize,
 }
 
-/// Relaxed amalgamation applies from this many unknowns; below it the
-/// structural and size merges suffice.
-pub const RELAX_MIN_N: usize = 1024;
+/// Fronts up to 256 columns wide, at most 64 explicit-zero rows per merge.
+impl Default for RelaxAmalgamation {
+    fn default() -> Self {
+        Self {
+            max_width: 256,
+            max_extra_rows: 64,
+        }
+    }
+}
 
 /// How the amalgamation reaches the children it wants to merge.
 ///
@@ -55,18 +39,6 @@ pub enum AmalgamationStrategy {
     /// [`pick_amalgamation_strategy`]).
     #[default]
     Auto,
-}
-
-impl Default for SupernodeParams {
-    fn default() -> Self {
-        Self {
-            nemin: 16,
-            amalgamation_strategy: AmalgamationStrategy::default(),
-            relax: None,
-            given_perm: None,
-            nd_ensemble: false,
-        }
-    }
 }
 
 /// A supernode: consecutive columns with nested row structures, factored as
@@ -91,15 +63,14 @@ impl Supernode {
     }
 }
 
-/// Share of multi-child internal nodes below which a tree counts as
-/// path-like for [`pick_amalgamation_strategy`]. Measured trees sat at 0.002
-/// (path-like, where `Renumber` loses) and from 0.20 up (bushy, where it
-/// wins).
-pub const AUTO_MULTI_CHILD_FRAC_THRESHOLD: f64 = 0.05;
-
 /// Resolve [`AmalgamationStrategy::Auto`] from the tree's shape: `Adjacency`
-/// for a path-like tree, else `Renumber`.
-pub fn pick_amalgamation_strategy(etree: &EliminationTree) -> AmalgamationStrategy {
+/// for a path-like tree (fewer than `path_like_fraction` of the internal
+/// nodes with several children; measured trees sat at 0.002 where
+/// `Renumber` loses and from 0.20 up where it wins), else `Renumber`.
+pub fn pick_amalgamation_strategy(
+    etree: &EliminationTree,
+    path_like_fraction: f64,
+) -> AmalgamationStrategy {
     let n = etree.n;
     if n == 0 {
         return AmalgamationStrategy::Adjacency;
@@ -115,7 +86,7 @@ pub fn pick_amalgamation_strategy(etree: &EliminationTree) -> AmalgamationStrate
         return AmalgamationStrategy::Adjacency;
     }
     let n_multi_child = child_count.iter().filter(|&&c| c >= 2).count();
-    if (n_multi_child as f64) < AUTO_MULTI_CHILD_FRAC_THRESHOLD * n_internal as f64 {
+    if (n_multi_child as f64) < path_like_fraction * n_internal as f64 {
         AmalgamationStrategy::Adjacency
     } else {
         AmalgamationStrategy::Renumber
@@ -137,14 +108,14 @@ pub fn pick_amalgamation_strategy(etree: &EliminationTree) -> AmalgamationStrate
 /// 2. Size-based: both parent AND child have < nemin columns.
 ///
 /// On larger problems `params.relax` adds relaxed merges (from
-/// [`RELAX_MIN_N`] unknowns) and a width cap keeps the root supernode from
+/// `relax_min_n` unknowns) and a width cap keeps the root supernode from
 /// growing too wide (from 1024 unknowns).
 ///
 /// Returns supernodes in postorder (children before parents).
 pub fn find_supernodes(
     etree: &EliminationTree,
     col_counts: &[usize],
-    params: &SupernodeParams,
+    params: &AmalgamationSettings,
 ) -> Vec<Supernode> {
     let n = etree.n;
     if n == 0 {
@@ -152,11 +123,15 @@ pub fn find_supernodes(
     }
 
     // Relaxed/fill-tolerant amalgamation (wider fronts for throughput), applied
-    // only at scale (`n >= RELAX_MIN_N`) so small problems - and their supernode
+    // only at scale (`n >= relax_min_n`) so small problems - and their supernode
     // structure tests - are unaffected. When active it widens supernodes and
     // implies the Renumber merge order (bushy multi-child trees only merge with
     // the renumbered postorder).
-    let relax = if n >= RELAX_MIN_N { params.relax } else { None };
+    let relax = if n >= params.relax_min_n {
+        params.relax
+    } else {
+        None
+    };
     let relax_width = relax.map(|r| r.max_width);
     let relax_rows = relax.map_or(0, |r| r.max_extra_rows);
     let force_renumber = relax.is_some();
@@ -210,8 +185,7 @@ pub fn find_supernodes(
     // postorder (which places desired-merge children adjacent to
     // their parent in the column numbering), every desired merge
     // succeeds.
-    let reverse =
-        force_renumber || matches!(params.amalgamation_strategy, AmalgamationStrategy::Renumber);
+    let reverse = force_renumber || matches!(params.strategy, AmalgamationStrategy::Renumber);
     let order: Box<dyn Iterator<Item = usize>> = if reverse {
         Box::new((0..n_snodes).rev())
     } else {
@@ -284,19 +258,18 @@ pub fn find_supernodes(
             // front is then one large dense block - the worst case for
             // memory.
             //
-            // The cap applies only above `ROOT_CAP_MIN_N` (small
+            // The cap applies only above `root_cap_min_n` (small
             // problems can amalgamate freely; the wide-front pathology
             // only manifests at scale and the existing `nemin` logic
             // is the right constraint for small trees). Above the
             // threshold the merged root is capped at
-            // `min(0.05 * n, 2048)` columns - loose enough not to
+            // `min(root_cap_fraction * n, root_cap_max)` columns - loose enough not to
             // disturb non-pathological problems, tight enough that
             // nql180-class KKTs cannot grow back to a dense root.
-            const ROOT_CAP_MIN_N: usize = 1024;
             let parent_is_root = snode_parent[root_p].is_none();
             let merged_ncol = child_ncol + parent_ncol;
-            let root_cap = if n >= ROOT_CAP_MIN_N {
-                (n / 20).min(2048)
+            let root_cap = if n >= params.root_cap_min_n {
+                ((n as f64 * params.root_cap_fraction) as usize).min(params.root_cap_max)
             } else {
                 usize::MAX
             };
@@ -479,7 +452,7 @@ pub(crate) fn find_fundamental_supernodes(
 pub(crate) fn predict_merges(
     etree: &EliminationTree,
     col_counts: &[usize],
-    params: &SupernodeParams,
+    params: &AmalgamationSettings,
 ) -> Vec<bool> {
     let n = etree.n;
     let mut bias = vec![false; n];
@@ -578,7 +551,7 @@ mod tests {
         let counts = column_counts(&pat, &etree);
 
         // With nemin=1, we get 3 supernodes: {0}, {1}, {2,3}
-        let params = SupernodeParams {
+        let params = AmalgamationSettings {
             nemin: 1,
             ..Default::default()
         };
@@ -599,7 +572,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
+        let params = AmalgamationSettings {
             nemin: 32,
             ..Default::default()
         };
@@ -623,7 +596,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
+        let params = AmalgamationSettings {
             nemin: 1,
             ..Default::default()
         };
@@ -645,7 +618,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
+        let params = AmalgamationSettings {
             nemin: 1,
             ..Default::default()
         };
@@ -665,7 +638,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
+        let params = AmalgamationSettings {
             nemin: 1,
             ..Default::default()
         };
@@ -690,7 +663,7 @@ mod tests {
         let counts = column_counts(&pat, &etree);
 
         for nemin in [1, 5, 32] {
-            let params = SupernodeParams {
+            let params = AmalgamationSettings {
                 nemin,
                 ..Default::default()
             };
@@ -714,7 +687,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
+        let params = AmalgamationSettings {
             nemin: 1,
             ..Default::default()
         };

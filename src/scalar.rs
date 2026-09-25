@@ -68,7 +68,7 @@ pub trait Scalar:
         conj_dst: bool,
         conj_lhs: bool,
         conj_rhs: bool,
-        parallelism: gemm::Parallelism,
+        mode: crate::dense::gemm_backend::GemmMode,
     ) {
         gemm::gemm(
             m,
@@ -89,7 +89,7 @@ pub trait Scalar:
             conj_dst,
             conj_lhs,
             conj_rhs,
-            parallelism,
+            mode.parallelism,
         )
     }
 
@@ -222,28 +222,11 @@ impl Scalar for Complex<f64> {
         conj_dst: bool,
         conj_lhs: bool,
         conj_rhs: bool,
-        parallelism: gemm::Parallelism,
+        mode: crate::dense::gemm_backend::GemmMode,
     ) {
         crate::dense::gemm_backend::complex_gemm(
-            m,
-            n,
-            k,
-            dst,
-            dst_cs,
-            dst_rs,
-            read_dst,
-            lhs,
-            lhs_cs,
-            lhs_rs,
-            rhs,
-            rhs_cs,
-            rhs_rs,
-            alpha,
-            beta,
-            conj_dst,
-            conj_lhs,
-            conj_rhs,
-            parallelism,
+            m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+            alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
         )
     }
 
@@ -380,28 +363,11 @@ impl Scalar for Complex<f32> {
         conj_dst: bool,
         conj_lhs: bool,
         conj_rhs: bool,
-        parallelism: gemm::Parallelism,
+        mode: crate::dense::gemm_backend::GemmMode,
     ) {
         crate::dense::gemm_backend::complex_gemm(
-            m,
-            n,
-            k,
-            dst,
-            dst_cs,
-            dst_rs,
-            read_dst,
-            lhs,
-            lhs_cs,
-            lhs_rs,
-            rhs,
-            rhs_cs,
-            rhs_rs,
-            alpha,
-            beta,
-            conj_dst,
-            conj_lhs,
-            conj_rhs,
-            parallelism,
+            m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+            alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
         )
     }
 
