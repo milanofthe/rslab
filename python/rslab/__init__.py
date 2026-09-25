@@ -333,10 +333,10 @@ def klu(A, *, settings: KluSettings | None = None, **kwargs) -> Klu:
     Returns
     -------
     Klu
-        A reusable factor handle with factor matrices :attr:`Klu.L`, :attr:`Klu.U`,
-        :attr:`Klu.F`, permutations :attr:`Klu.perm_r`, :attr:`Klu.perm_c`,
-        :meth:`Klu.solve`, :meth:`Klu.solve_many`, :meth:`Klu.solve_transpose`,
-        :meth:`Klu.refactor`, the Krylov methods and :meth:`Klu.diagnostics`.
+        A reusable factor handle with :meth:`Klu.solve`, :meth:`Klu.solve_many`,
+        :meth:`Klu.solve_transpose`, :meth:`Klu.refactor`, the Krylov methods,
+        :meth:`Klu.diagnostics`, and the factors :attr:`Klu.L`, :attr:`Klu.U`,
+        :attr:`Klu.F` with their permutations and scaling.
 
     Raises
     ------
