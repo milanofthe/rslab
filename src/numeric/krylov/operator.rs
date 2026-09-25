@@ -216,7 +216,7 @@ impl Preconditioner<Complex<f64>> for LowPrecisionPreconditioner {
 /// `c32`); the outer GMRES keeps full `f64` accuracy. The unsymmetric analogue
 /// of [`LowPrecisionPreconditioner`], for MoM/FEM general systems.
 pub struct LowPrecisionLu {
-    inner: crate::numeric::lu::LuFactors<Complex<f32>>,
+    inner: crate::numeric::lu::LuSolver<Complex<f32>>,
 }
 
 impl LowPrecisionLu {
@@ -234,18 +234,18 @@ impl LowPrecisionLu {
                 .collect(),
         };
         Ok(Self {
-            inner: crate::numeric::lu::factor_general_lu(&a32, opts)?,
+            inner: crate::numeric::lu::LuSolver::factor(&a32, opts)?,
         })
     }
 
     /// Stored fill `nnz(L)+nnz(U)`, in single-precision entries.
     pub fn factor_nnz(&self) -> usize {
-        crate::numeric::lu::LuFactors::factor_nnz(&self.inner)
+        self.inner.factor_nnz()
     }
 
     /// Number of statically perturbed pivots.
     pub fn n_perturbed(&self) -> usize {
-        self.inner.n_perturbed
+        self.inner.n_perturbed()
     }
 }
 
@@ -255,20 +255,20 @@ impl Preconditioner<Complex<f64>> for LowPrecisionLu {
             .iter()
             .map(|v| Complex::new(v.re as f32, v.im as f32))
             .collect();
-        let z32 = crate::numeric::lu::solve_lu(&self.inner, &r32)?;
+        let z32 = self.inner.solve(&r32)?;
         for (zi, v) in z.iter_mut().zip(z32) {
             *zi = Complex::new(v.re as f64, v.im as f64);
         }
         Ok(())
     }
     fn solve_threads(&self) -> Threads {
-        self.inner.solve_threads
+        self.inner.solve_thread_policy()
     }
 }
 
 /// A factorization usable as both a **direct solver** and a [`Preconditioner`].
-/// Implemented by the symmetric [`LdltSolver`] and the general
-/// [`LuFactors`](crate::numeric::lu::LuFactors), so a caller's
+/// Implemented by [`LdltSolver`], [`LuSolver`](crate::LuSolver) and
+/// [`KluSolver`](crate::KluSolver), so a caller's
 /// solver loop can hold `&dyn Factorization` and swap symmetric/general,
 /// exact/incomplete, or `f64`/`f32` factors freely.
 pub trait Factorization<T: Scalar>: Preconditioner<T> {
@@ -289,36 +289,6 @@ impl<T: Scalar> Factorization<T> for LdltSolver<T> {
     }
     fn n_perturbed(&self) -> usize {
         LdltSolver::n_perturbed(self)
-    }
-}
-
-impl<T: Scalar> Preconditioner<T> for crate::numeric::lu::LuFactors<T> {
-    fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
-        let x = crate::numeric::lu::solve_lu(self, r)?;
-        z.copy_from_slice(&x);
-        Ok(())
-    }
-    fn solve_threads(&self) -> Threads {
-        self.solve_threads
-    }
-    /// Block apply via `solve_lu_many` (one block triangular solve over all `s`
-    /// columns).
-    fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
-        apply_block_via_rowmajor(r, z, s, n, |b, s| {
-            crate::numeric::lu::solve_lu_many(self, b, s)
-        })
-    }
-}
-
-impl<T: Scalar> Factorization<T> for crate::numeric::lu::LuFactors<T> {
-    fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        crate::numeric::lu::solve_lu(self, b)
-    }
-    fn factor_nnz(&self) -> usize {
-        crate::numeric::lu::LuFactors::factor_nnz(self)
-    }
-    fn n_perturbed(&self) -> usize {
-        self.n_perturbed
     }
 }
 

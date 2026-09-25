@@ -2,11 +2,9 @@
 //! driver over the assembly forest, and the emit of each finished panel.
 
 use super::node::ll_factor_node;
-use crate::numeric::supernodal::analysis::{
-    analyze_with, recommend_threads_for_sym, SupernodalAnalysis,
-};
+use super::pivots::LdltPivots;
+use crate::numeric::supernodal::analysis::{recommend_threads_for_sym, SupernodalAnalysis};
 
-use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
 use crate::inertia::Inertia;
 use crate::numeric::settings::{
@@ -19,110 +17,21 @@ use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Factor a sparse symmetric matrix `A` as `P^T A P = L D L^T` with
-/// Bunch-Kaufman pivoting. Works for `T = f64` and `T = Complex<f64>`
-/// (complex symmetric, `A = A^T`).
-///
-/// Returns an [`LdltFactors`] in factorization order; solve with
-/// [`solve_ldlt`](crate::dense::ldlt_generic::solve_ldlt).
-pub fn factor_sparse_ldlt<T: Scalar>(a: &CscMatrix<T>) -> Result<LdltFactors<T>, RslabError> {
-    factor_sparse_ldlt_with(a, &SolverSettings::default())
-}
-
-/// Like [`factor_sparse_ldlt`] but with explicit [`SolverSettings`] -
-/// notably static-pivoting (preconditioner) mode via `on_zero_pivot`.
-///
-/// Convenience wrapper: runs the analysis then [`factor_numeric`]. For the
-/// PARDISO-style *analyze once, factor many* workflow - FEM Newton steps or a
-/// frequency sweep that reuse one sparsity pattern - call them separately and
-/// keep the [`SupernodalAnalysis`] across factorizations.
-pub fn factor_sparse_ldlt_with<T: Scalar>(
-    a: &CscMatrix<T>,
-    opts: &SolverSettings,
-) -> Result<LdltFactors<T>, RslabError> {
-    let symb = analyze_with(a.n, &a.col_ptr, &a.row_idx, opts)?;
-    factor_numeric(&symb, a, None, opts).map(LdltNumeric::into_factors)
-}
-
 /// The numeric result of a sparse LDL^T factorization: the unit lower factor
 /// `L` in supernodal panel form (the storage the solves run on, written by
-/// the drivers without a copy) plus the block diagonal `D`, the pivot
-/// permutation and the numeric outcome. [`into_factors`](Self::into_factors)
-/// materializes the compressed-column [`LdltFactors`] for the reference
-/// solves.
-#[derive(Clone, Debug)]
-pub struct LdltNumeric<T> {
+/// the drivers without a copy) plus the block diagonal, the pivot
+/// permutation and the numeric outcome.
+pub(crate) struct LdltNumeric<T> {
     /// `L` in panel form, in elimination order.
     pub factor: PanelFactor<T>,
-    /// Diagonal of the block-diagonal `D`, length `n`.
-    pub d_diag: Vec<T>,
-    /// Sub-diagonal of `D` (the `(k+1, k)` entry of a 2x2 block at `k`).
-    pub d_subdiag: Vec<T>,
-    /// `true` at the first column of each 2x2 pivot block.
-    pub two_by_two: Vec<bool>,
-    /// `perm[e]` is the original index eliminated at position `e`.
-    pub perm: Vec<usize>,
-    /// Supernode tree over the factor's supernodes (`usize::MAX` for a root).
-    pub supernode_parent: Vec<usize>,
-    /// Pivots perturbed by the static regularization.
-    pub n_perturbed: usize,
+    /// `D`, the permutation and the outcome.
+    pub pivots: LdltPivots<T>,
     /// Structural panel slots holding an exact zero (cancellation or
     /// `drop_tol`); the stored nonzeros are `factor.nnz() - n_zeros`.
     pub n_zeros: usize,
-    /// Inertia of the factored matrix.
-    pub inertia: Inertia,
 }
 
-impl<T: Scalar> LdltNumeric<T> {
-    /// Dimension.
-    pub fn n(&self) -> usize {
-        self.factor.n
-    }
-
-    /// The compressed-column form for the reference solves (copies the factor).
-    pub fn into_factors(self) -> LdltFactors<T> {
-        let (l_col_ptr, l_row_idx, l_values) = self.factor.to_csc(true);
-        let supernode_ptr: Vec<usize> = self.factor.sn_col.iter().map(|&c| c as usize).collect();
-        LdltFactors {
-            n: self.factor.n,
-            l_col_ptr,
-            l_row_idx,
-            l_values,
-            d_diag: self.d_diag,
-            d_subdiag: self.d_subdiag,
-            two_by_two: self.two_by_two,
-            perm: self.perm,
-            supernode_ptr,
-            supernode_parent: self.supernode_parent,
-            n_perturbed: self.n_perturbed,
-            inertia: self.inertia,
-        }
-    }
-
-    /// Split into the panel factor and an [`LdltFactors`] shell carrying `D`,
-    /// the permutation and the outcome with empty CSC arrays: the solver keeps
-    /// the shell for the diagonal solves and hands the panels to its plan.
-    pub(crate) fn into_parts(self) -> (PanelFactor<T>, LdltFactors<T>) {
-        let supernode_ptr: Vec<usize> = self.factor.sn_col.iter().map(|&c| c as usize).collect();
-        let shell = LdltFactors {
-            n: self.factor.n,
-            l_col_ptr: Vec::new(),
-            l_row_idx: Vec::new(),
-            l_values: Vec::new(),
-            d_diag: self.d_diag,
-            d_subdiag: self.d_subdiag,
-            two_by_two: self.two_by_two,
-            perm: self.perm,
-            supernode_ptr,
-            supernode_parent: self.supernode_parent,
-            n_perturbed: self.n_perturbed,
-            inertia: self.inertia,
-        };
-        (self.factor, shell)
-    }
-}
-
-pub fn factor_numeric<T: Scalar>(
+pub(crate) fn factor_numeric<T: Scalar>(
     symb: &SupernodalAnalysis,
     a: &CscMatrix<T>,
     scale: Option<&[f64]>,
@@ -139,14 +48,17 @@ pub fn factor_numeric<T: Scalar>(
         None => {
             return Ok(LdltNumeric {
                 factor: PanelFactor::empty(),
-                d_diag: Vec::new(),
-                d_subdiag: Vec::new(),
-                two_by_two: Vec::new(),
-                perm: Vec::new(),
-                supernode_parent: Vec::new(),
-                n_perturbed: 0,
+                pivots: LdltPivots {
+                    n: 0,
+                    d_diag: Vec::new(),
+                    d_subdiag: Vec::new(),
+                    two_by_two: Vec::new(),
+                    perm: Vec::new(),
+                    supernode_parent: Vec::new(),
+                    n_perturbed: 0,
+                    inertia: Inertia::new(0, 0, 0),
+                },
                 n_zeros: 0,
-                inertia: Inertia::new(0, 0, 0),
             });
         }
         Some(i) => i,
@@ -388,13 +300,16 @@ fn factor_left_looking<T: Scalar>(
 
     Ok(LdltNumeric {
         factor,
-        d_diag,
-        d_subdiag,
-        two_by_two,
-        perm,
-        supernode_parent,
-        n_perturbed,
+        pivots: LdltPivots {
+            n,
+            d_diag,
+            d_subdiag,
+            two_by_two,
+            perm,
+            supernode_parent,
+            n_perturbed,
+            inertia,
+        },
         n_zeros,
-        inertia,
     })
 }

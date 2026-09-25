@@ -31,7 +31,7 @@ pub enum ZeroPivotAction {
 /// The factor path a [`SolverSettings`] is applied to; each reads a different
 /// subset of the settings (see [`SolverSettings::ignored_on`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactorPath {
+pub(crate) enum FactorPath {
     /// Symmetric `LDL^T` ([`LdltSolver`](crate::LdltSolver)).
     Ldlt,
     /// Unsymmetric LU ([`LuSolver`](crate::LuSolver)).
@@ -157,8 +157,7 @@ pub enum Threads {
     /// the machine without oversubscription).
     Fixed(usize),
     /// Predict the worker count per-matrix from the structural fingerprint (the
-    /// validated [`recommend_threads_from`](crate::recommend_threads_from)
-    /// policy: thin / tiny systems stay low where they would only regress, big
+    /// validated policy: thin / tiny systems stay low where they would only regress, big
     /// BLAS-3-rich systems use the cores), **capped at `max`** (`0` = all logical
     /// cores). The single-solve default: best throughput without oversubscribing
     /// the matrices that do not scale.
@@ -167,8 +166,8 @@ pub enum Threads {
         max: usize,
     },
     /// Use the **current** rayon pool as-is, without building a scoped pool. The
-    /// solver-in-the-loop path: build **one** bounded pool (e.g. 4 workers) with
-    /// [`with_threads`](crate::with_threads) and run the factorization *and* every
+    /// solver-in-the-loop path: build **one** bounded rayon pool (e.g. 4 workers)
+    /// and run the factorization *and* every
     /// iterative solve inside it, so both phases share the same capped pool with no
     /// per-call thread spawn. The numeric factor is unchanged.
     Ambient,
@@ -247,33 +246,6 @@ pub(crate) fn in_scoped_pool<R: Send>(
         Ok(pool) => pool.install(f),
         Err(_) => f(),
     }
-}
-
-/// Run `f` in a scoped rayon pool of `threads` workers (`0` = all logical cores),
-/// then tear the pool down. The **solver-in-the-loop / embedded** entry point:
-/// build **one** capped pool and drive many solves through it without a per-call
-/// thread spawn.
-///
-/// Typical pattern - factor once (its own bounded, depth-stacked pool via the
-/// default [`Threads::Auto`]`{max:4}`), then run the multi-RHS GMRES loop capped
-/// at the same width:
-/// ```ignore
-/// let lu = factor_general_lu(&a, &SolverSettings::default())?;   // Auto{max:4}
-/// with_threads(4, || {
-///     for rhs in batches { let _ = gmres_block(&a, rhs, s, &lu, tol, it, m, None)?; }
-///     Ok::<_, RslabError>(())
-/// })?;
-/// ```
-/// The block GMRES orthogonalization picks up this pool automatically (it uses the
-/// ambient rayon pool). To also run the *factorization* on this shared pool (e.g.
-/// re-factoring every Newton step), pass [`Threads::Ambient`] in the settings.
-///
-/// The pool gets a 16 MB worker stack (the factorization stack floor), so an
-/// `Ambient` factorization inside is safe for typical assembly-tree depths; the
-/// iterative solvers do not deep-recurse. For pathologically deep trees (banded /
-/// 1D at low `nemin`) build the pool yourself with a larger `stack_size`.
-pub fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
-    in_scoped_pool(threads, 16 * 1024 * 1024, f)
 }
 
 /// Maximum supernode-tree height (root-to-leaf), the recursion depth of the tree
@@ -551,7 +523,7 @@ impl SolverSettings {
     /// `Warning` records and carries them in its
     /// [`Diagnostics::warnings`](crate::Diagnostics::warnings), so a setting
     /// with no effect is never silent. Empty when every set field is honoured.
-    pub fn ignored_on(&self, path: FactorPath) -> Vec<String> {
+    pub(crate) fn ignored_on(&self, path: FactorPath) -> Vec<String> {
         let d = SolverSettings::default();
         let mut out = Vec::new();
         match path {

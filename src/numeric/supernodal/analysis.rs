@@ -12,7 +12,7 @@ use crate::symbolic::{SupernodeParams, SymbolicFactorization};
 /// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
 /// and pass to [`factor_numeric`](crate::factor_numeric) for each set of numeric values sharing the
 /// pattern - the PARDISO phase-1 analysis.
-pub struct SupernodalAnalysis {
+pub(crate) struct SupernodalAnalysis {
     pub(crate) inner: Option<SymbolicInner>,
     pub(crate) n: usize,
     pub(crate) nnz: usize,
@@ -137,19 +137,9 @@ impl SupernodalAnalysis {
     }
 }
 
-/// PARDISO phase 1: analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`,
-/// lower triangle). The result is value-independent and reusable across many
-/// [`factor_numeric`](crate::factor_numeric) calls that share the pattern.
-pub fn analyze(
-    n: usize,
-    col_ptr: &[usize],
-    row_idx: &[usize],
-) -> Result<SupernodalAnalysis, RslabError> {
-    analyze_with(n, col_ptr, row_idx, &SolverSettings::default())
-}
-
-/// [`analyze`] with explicit composable [`SolverSettings`]. Reuse the result across many `factor` calls that share the pattern.
-pub fn analyze_with(
+/// Analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`, lower
+/// triangle): value-independent, reused by every factorization of the pattern.
+pub(crate) fn analyze_with(
     n: usize,
     col_ptr: &[usize],
     row_idx: &[usize],
@@ -228,12 +218,9 @@ fn analyze_with_inner(
     })
 }
 
-/// PARDISO phases 2-3: numeric factorization reusing a [`SupernodalAnalysis`].
-/// `a` must carry the same sparsity pattern (`n`, `nnz`) the analysis was built
-/// from. Honours static pivoting and incomplete-factor dropping via `opts`.
 /// Realize a [`Threads::Auto`] policy from a symbolic analysis: compute the three
 /// predictive features (factor-flops, max front height, max tree width) and apply
-/// the [`recommend_threads_from`](recommend_threads_from) policy,
+/// the [`recommend_threads_from`] policy,
 /// capped at `max_cores`. Value-independent, so it is the same for every scalar.
 pub(crate) fn recommend_threads_for_sym(symb: &SupernodalAnalysis, max_cores: usize) -> usize {
     let fd = symb.front_dims();
@@ -249,7 +236,7 @@ pub(crate) fn recommend_threads_for_sym(symb: &SupernodalAnalysis, max_cores: us
 /// The data-driven single-solve thread-count policy, as a free function over the
 /// three predictive features, so the factor path can apply it straight from the
 /// symbolic analysis. Returns a worker count in `1..=max_cores`.
-pub fn recommend_threads_from(
+fn recommend_threads_from(
     factor_flops: u64,
     front_nrow_max: usize,
     tree_width_max: usize,

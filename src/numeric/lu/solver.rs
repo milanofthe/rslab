@@ -2,7 +2,7 @@
 //! (with the optional MC64 row matching), the factor handle and its solves.
 
 use super::factor::factor_general_lu_numeric;
-use super::factors::{LuFactors, LuNumeric};
+use super::factors::LuPivots;
 use super::structure::LuStructure;
 
 use crate::error::RslabError;
@@ -366,7 +366,7 @@ impl LuSymbolic {
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)` of the symmetrized
     /// pattern - for factorization-cost diagnostics (front-size distribution and
-    /// a factor-flop estimate). See [`SupernodalAnalysis::front_dims`](crate::SupernodalAnalysis::front_dims).
+    /// a factor-flop estimate). See `SupernodalAnalysis::front_dims`.
     pub fn front_dims(&self) -> Vec<(usize, usize)> {
         self.symb.front_dims()
     }
@@ -377,7 +377,7 @@ impl LuSymbolic {
     }
 
     /// Supernode count per assembly-tree level (available tree-parallelism by
-    /// depth). See [`SupernodalAnalysis::level_widths`](crate::SupernodalAnalysis::level_widths).
+    /// depth). See `SupernodalAnalysis::level_widths`.
     pub fn level_widths(&self) -> Vec<usize> {
         self.symb.level_widths()
     }
@@ -487,12 +487,11 @@ impl LuSymbolic {
 }
 
 /// A factored unsymmetric LU solver, ready to solve against many right-hand
-/// sides - the high-level, equilibrated counterpart of the raw [`LuFactors`]
-/// (and the unsymmetric twin of [`LdltSolver`](crate::numeric::ldlt::LdltSolver)).
+/// sides, the unsymmetric twin of [`LdltSolver`](crate::numeric::ldlt::LdltSolver).
 /// Build via [`LuSymbolic::factor`] (analyze once, factor many) or the one-shot
 /// [`LuSolver::factor`].
 pub struct LuSolver<T> {
-    factors: LuFactors<T>,
+    factors: LuPivots,
     /// `L` and `U^T` (the panels, their only storage) with the tree schedule
     /// of [`crate::numeric::supernodal::solve`]; `factors` carries the
     /// permutations, scalings and counters with empty CSC arrays.
@@ -507,7 +506,7 @@ pub struct LuSolver<T> {
 impl<T: Scalar> LuSolver<T> {
     /// Thread policy the solve phase should honour: the resolved
     /// [`Threads`](crate::Threads) budget the factorization used, carried on the
-    /// stored [`LuFactors`]. An iterative solve using this factor as a
+    /// stored `LuPivots`. An iterative solve using this factor as a
     /// preconditioner runs its parallel orthogonalization in a pool of this width.
     pub fn solve_thread_policy(&self) -> crate::numeric::settings::Threads {
         self.factors.solve_threads
@@ -684,28 +683,4 @@ impl<T: Scalar> LuSolver<T> {
     pub fn n(&self) -> usize {
         self.factors.n
     }
-
-    /// Borrow the underlying raw factors (CSC `L` / CSR `U`, permutations,
-    /// equilibration), e.g. to use as a [`Preconditioner`](crate::Preconditioner).
-    /// The factor's permutations, scalings and counters. The CSC arrays of
-    /// `L` and `U` are empty here: the values live in the panels of the solve
-    /// plans (use [`factor_general_lu`] for a factor with CSC arrays).
-    pub fn factors(&self) -> &LuFactors<T> {
-        &self.factors
-    }
-}
-
-/// Factor a general (unsymmetric) sparse matrix `A` as `P^T A P = L U` via
-/// generic multifrontal LU with partial pivoting. `a` holds the **full** matrix
-/// (both triangles). Convenience wrapper over [`LuSymbolic::analyze`] +
-/// [`factor_general_lu_numeric`]; for *analyze once, factor many* keep the
-/// [`LuSymbolic`] across calls. Solve with [`solve_lu`](crate::solve_lu) / [`solve_lu_refined`](crate::solve_lu_refined).
-pub fn factor_general_lu<T: Scalar>(
-    a: &GeneralCsc<T>,
-    opts: &SolverSettings,
-) -> Result<LuFactors<T>, RslabError> {
-    // The analysis honours the caller's symbolic settings (ordering, amalgamation):
-    // `analyze` alone took the defaults and silently ignored `opts.ordering`.
-    factor_general_lu_numeric(&LuSymbolic::analyze_with(a, opts)?, a, opts)
-        .map(LuNumeric::into_factors)
 }

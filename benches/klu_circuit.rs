@@ -1,19 +1,19 @@
-//! KLU path vs multifrontal LU on circuit-shaped matrices.
+//! KLU path vs supernodal LU on circuit-shaped matrices.
 //!
 //! Generates MNA-like matrices: very sparse (~4-5 nnz/col), unsymmetric,
 //! diagonally weighted, with reducible (block upper triangular) structure,
 //! and reports for each size:
 //!   * KLU: analyze / factor / refactor / solve wall time, factor nnz, blocks
-//!   * multifrontal LU (defaults): factor / solve wall time, factor nnz
+//!   * supernodal LU (defaults): factor / solve wall time, factor nnz
 //!
 //! plus the frequency-sweep proxy: 20 refactor+solve cycles KLU vs 20
-//! factor+solve cycles multifrontal.
+//! factor+solve cycles supernodal.
 //!
 //! Run: `cargo bench --bench klu_circuit`.
 
 use std::time::Instant;
 
-use rslab::{factor_general_lu, solve_lu, GeneralCsc, KluSettings, KluSymbolic, SolverSettings};
+use rslab::{GeneralCsc, KluSettings, KluSymbolic, LuSolver, SolverSettings};
 
 /// Deterministic xorshift.
 struct Rng(u64);
@@ -244,12 +244,12 @@ fn main() {
         let klu_nnz = klu.factor_nnz();
         let blocks = klu.n_blocks();
 
-        // --- multifrontal LU (defaults) ---
+        // --- supernodal LU (defaults) ---
         let t = Instant::now();
-        let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
+        let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
         let t_mf_fac = t.elapsed();
         let t = Instant::now();
-        let xm = solve_lu(&f, &b).unwrap();
+        let xm = f.solve(&b).unwrap();
         let t_mf_solve = t.elapsed();
         let mf_res = resid(&a, &xm, &b);
         let mf_nnz = f.factor_nnz();
@@ -257,7 +257,7 @@ fn main() {
             klu_res < 1e-8,
             "klu residual {klu_res} (mf residual {mf_res})"
         );
-        assert!(mf_res < 1e-8, "multifrontal residual {mf_res}");
+        assert!(mf_res < 1e-8, "supernodal residual {mf_res}");
 
         // --- sweep proxy: 20 value sets, same pattern ---
         let t = Instant::now();
@@ -282,8 +282,8 @@ fn main() {
                 row_idx: a.row_idx.clone(),
                 values: a.values.iter().map(|&v| v * scale).collect(),
             };
-            let f2 = factor_general_lu(&a2, &SolverSettings::default()).unwrap();
-            let _ = solve_lu(&f2, &b).unwrap();
+            let f2 = LuSolver::factor(&a2, &SolverSettings::default()).unwrap();
+            let _ = f2.solve(&b).unwrap();
         }
         let t_sweep_mf = t.elapsed();
 

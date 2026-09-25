@@ -1,7 +1,5 @@
 use super::*;
-use crate::dense::ldlt_generic::solve_ldlt;
 use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
-use crate::numeric::supernodal::analysis::analyze_with;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::OrderingMethod;
@@ -27,8 +25,8 @@ fn deep_chain_tree_does_not_overflow_stack() {
     }
     let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let s = SolverSettings::default().with_nemin(1).with_threads(0);
-    let f = factor_sparse_ldlt_with(&a, &s).expect("deep chain factors without overflow");
-    assert_eq!(f.n, n);
+    let f = LdltSolver::factor_with(&a, &s).expect("deep chain factors without overflow");
+    assert_eq!(f.n(), n);
 }
 
 #[test]
@@ -61,17 +59,21 @@ fn rcm_and_autorace_orderings_factor_and_solve() {
     let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
     for ord in [OrderingMethod::Rcm, OrderingMethod::Auto] {
         let opts = SolverSettings::default().with_ordering(ord);
-        let symb = analyze_with(a.n, &a.col_ptr, &a.row_idx, &opts).unwrap();
-        let f = factor_numeric(&symb, &a, None, &opts)
+        let x = LdltSolver::factor_with(&a, &opts)
             .unwrap()
-            .into_factors();
-        let x = solve_ldlt(&f, &b).unwrap();
+            .solve(&b)
+            .unwrap();
         assert!(
             residual_inf(&a, &x, &b) < 1e-9,
             "ordering {ord:?} residual {}",
             residual_inf(&a, &x, &b)
         );
     }
+}
+
+/// The number of 2x2 pivot blocks of a factorization.
+fn two_by_two<T: Scalar>(f: &LdltSolver<T>) -> usize {
+    f.diagnostics().numeric.two_by_two.unwrap_or(0)
 }
 
 fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
@@ -104,8 +106,8 @@ fn tridiag_spd_f64(n: usize) -> CscMatrix<f64> {
 fn f64_sparse_tridiag_residual() {
     let a = tridiag_spd_f64(20);
     let b: Vec<f64> = (0..20).map(|i| (i as f64) - 9.5).collect();
-    let f = factor_sparse_ldlt(&a).unwrap();
-    let x = solve_ldlt(&f, &b).unwrap();
+    let f = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(residual_inf(&a, &x, &b) < 1e-10);
 }
 
@@ -142,14 +144,18 @@ fn indefinite_2x2_inertia() {
     // The left-looking path must take that 2x2 (zero diagonal -> no 1x1 pivot)
     // and report inertia (1+, 1-).
     let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 0], &[0.0, 1.0]).unwrap();
-    let ll = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
-    assert!(ll.two_by_two.iter().any(|&t| t), "expected a 2x2 block");
+    let ll = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    assert!(two_by_two(&ll) > 0, "expected a 2x2 block");
     assert_eq!(
-        (ll.inertia.positive, ll.inertia.negative, ll.inertia.zero),
+        (
+            ll.inertia().positive,
+            ll.inertia().negative,
+            ll.inertia().zero
+        ),
         (1, 1, 0)
     );
     let b = [1.0_f64, -2.0];
-    let x = solve_ldlt(&ll, &b).unwrap();
+    let x = ll.solve(&b).unwrap();
     assert!(residual_inf(&a, &x, &b) < 1e-12, "2x2 residual");
 }
 
@@ -162,16 +168,16 @@ fn indefinite_2d_grid_solves() {
     let a = grid2d_lower::<f64>(10, 0.5, -1.0);
     let n = a.n;
     let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
-    let ll = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
+    let ll = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
     assert!(
-        ll.two_by_two.iter().filter(|&&t| t).count() > 0,
+        two_by_two(&ll) > 0,
         "indefinite system should use 2x2 pivots"
     );
     assert!(
-        ll.inertia.negative > 0 && ll.inertia.positive + ll.inertia.negative == n,
+        ll.inertia().negative > 0 && ll.inertia().positive + ll.inertia().negative == n,
         "indefinite, nonsingular inertia"
     );
-    let xl = solve_ldlt(&ll, &b).unwrap();
+    let xl = ll.solve(&b).unwrap();
     assert!(
         residual_inf(&a, &xl, &b) < 1e-9,
         "left-looking indefinite residual"
@@ -187,17 +193,17 @@ fn indefinite_complex_symmetric() {
     let a = grid2d_lower::<Complex<f64>>(9, c(0.4, 0.3), c(-1.0, 0.1));
     let n = a.n;
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 0.5)).collect();
-    let ll = factor_sparse_ldlt_with(&a, &SolverSettings::default()).unwrap();
+    let ll = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
     assert!(
-        ll.two_by_two.iter().filter(|&&t| t).count() > 0,
+        two_by_two(&ll) > 0,
         "indefinite system should use 2x2 pivots"
     );
     assert_eq!(
-        ll.inertia.positive + ll.inertia.negative + ll.inertia.zero,
+        ll.inertia().positive + ll.inertia().negative + ll.inertia().zero,
         n,
         "inertia covers every pivot"
     );
-    let xl = solve_ldlt(&ll, &b).unwrap();
+    let xl = ll.solve(&b).unwrap();
     assert!(
         residual_inf(&a, &xl, &b) < 1e-9,
         "complex left-looking indefinite residual"
@@ -224,8 +230,8 @@ fn f64_dense_front_blocked_multi_panel() {
     }
     let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
-    let f = factor_sparse_ldlt(&a).unwrap();
-    let x = solve_ldlt(&f, &b).unwrap();
+    let f = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(
         residual_inf(&a, &x, &b) < 1e-9,
         "residual {}",
@@ -252,8 +258,8 @@ fn complex_dense_front_blocked_multi_panel() {
     }
     let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b = vec![c(1.0, 0.5); n];
-    let f = factor_sparse_ldlt(&a).unwrap();
-    let x = solve_ldlt(&f, &b).unwrap();
+    let f = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(residual_inf(&a, &x, &b) < 1e-9);
 }
 
@@ -291,8 +297,8 @@ fn f64_sparse_2d_grid_residual() {
     }
     let a = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b: Vec<f64> = (0..n).map(|i| ((i % 7) as f64) - 3.0).collect();
-    let f = factor_sparse_ldlt(&a).unwrap();
-    let x = solve_ldlt(&f, &b).unwrap();
+    let f = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(
         residual_inf(&a, &x, &b) < 1e-9,
         "residual {}",
@@ -322,8 +328,8 @@ fn complex_sparse_tridiag_residual() {
     }
     let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 7.5, 1.0 - i as f64)).collect();
-    let f = factor_sparse_ldlt(&a).unwrap();
-    let x = solve_ldlt(&f, &b).unwrap();
+    let f = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(
         residual_inf(&a, &x, &b) < 1e-10,
         "residual {}",
@@ -366,8 +372,8 @@ fn complex_sparse_large_grid_parallel() {
     }
     let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 11) as f64 - 5.0, 1.0)).collect();
-    let f = factor_sparse_ldlt(&a).unwrap();
-    let x = solve_ldlt(&f, &b).unwrap();
+    let f = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(
         residual_inf(&a, &x, &b) < 1e-9,
         "residual {}",
@@ -389,7 +395,7 @@ fn perturb_rescues_singular_complex() {
     let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
 
     assert!(
-        factor_sparse_ldlt(&a).is_err(),
+        LdltSolver::factor_with(&a, &SolverSettings::default()).is_err(),
         "exact mode should reject the singular pivot"
     );
 
@@ -398,14 +404,14 @@ fn perturb_rescues_singular_complex() {
         drop_tol: None,
         ..Default::default()
     };
-    let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
+    let f = LdltSolver::factor_with(&a, &opts).unwrap();
     assert!(
-        f.n_perturbed >= 1,
+        f.n_perturbed() >= 1,
         "expected >=1 perturbation, got {}",
-        f.n_perturbed
+        f.n_perturbed()
     );
     let b = vec![c(1.0, 0.0); n];
-    let x = solve_ldlt(&f, &b).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(
         x.iter().all(|v| v.norm().is_finite()),
         "factor must stay finite"
@@ -437,9 +443,10 @@ fn exact_mode_never_perturbs_well_conditioned() {
         drop_tol: None,
         ..Default::default()
     };
-    let f = factor_sparse_ldlt_with(&a, &opts).unwrap();
+    let f = LdltSolver::factor_with(&a, &opts).unwrap();
     assert_eq!(
-        f.n_perturbed, 0,
+        f.n_perturbed(),
+        0,
         "well-conditioned matrix needs no perturbation"
     );
 }
@@ -478,8 +485,8 @@ fn complex_sparse_2d_grid_residual() {
     }
     let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    let f = factor_sparse_ldlt(&a).unwrap();
-    let x = solve_ldlt(&f, &b).unwrap();
+    let f = LdltSolver::factor_with(&a, &SolverSettings::default()).unwrap();
+    let x = f.solve(&b).unwrap();
     assert!(
         residual_inf(&a, &x, &b) < 1e-9,
         "residual {}",

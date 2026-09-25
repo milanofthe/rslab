@@ -77,9 +77,8 @@ pub struct KluSettings {
     /// dominant block (largest block at most half of `n`) - real circuits
     /// are often one giant irreducible block plus thousands of singletons,
     /// where distributing blocks cannot help.
-    /// Cap the pool with [`with_threads`](crate::with_threads) scoping for
-    /// solver-in-the-loop use, or force `Off` for strictly sequential
-    /// execution.
+    /// Run inside a bounded rayon pool to cap it for solver-in-the-loop use,
+    /// or force `Off` for strictly sequential execution.
     pub parallel: KluParallel,
     /// Maximum-product row matching (MC64) as the transversal of the block
     /// triangular form: the matched, largest-product entries become the
@@ -2033,7 +2032,7 @@ impl<T: Scalar> KluSolver<T> {
 
     /// Solve with iterative refinement against the exact matrix (up to
     /// `max_iter` refinement steps, keeping the best iterate by residual
-    /// max-norm), mirroring [`crate::solve_lu_refined`].
+    /// max-norm), mirroring [`crate::LuSolver::solve_refined`].
     pub fn solve_refined(
         &self,
         a: &GeneralCsc<T>,
@@ -2544,7 +2543,7 @@ mod tests {
         );
     }
     use super::*;
-    use crate::numeric::lu::{factor_general_lu, solve_lu};
+    use crate::numeric::lu::LuSolver;
     use crate::numeric::settings::SolverSettings;
     use num_complex::Complex;
 
@@ -2674,8 +2673,8 @@ mod tests {
         let x = s.solve(&b).unwrap();
         assert!(resid(&a, &x, &b) < 1e-12, "residual {}", resid(&a, &x, &b));
         // cross-check against the supernodal LU
-        let f = factor_general_lu(&a, &SolverSettings::default()).unwrap();
-        let xr = solve_lu(&f, &b).unwrap();
+        let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+        let xr = f.solve(&b).unwrap();
         let diff = x
             .iter()
             .zip(&xr)

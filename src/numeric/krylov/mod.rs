@@ -50,7 +50,7 @@ mod warmstart_tests;
 
 pub use block::{gmres_block, gmres_block_mon, BlockKrylovResult};
 pub use cg::{cocg, cocr};
-pub use closures::{gmres_block_fn, gmres_block_fn_mon, gmres_fn, gmres_recycled_fn};
+pub use closures::{FnOperator, FnPreconditioner};
 pub use gmres::gmres;
 pub use operator::{
     Factorization, LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner,

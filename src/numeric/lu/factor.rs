@@ -143,7 +143,7 @@ fn emit_and_free<T: Scalar>(
     unsafe { emit.panels.set(k, (l_out, u_out)) };
 }
 
-/// Supernodal left-looking LU into [`LuFactors`]. `inp` is the equilibrated permuted matrix; `d_row`/`d_col`
+/// Supernodal left-looking LU into an `LuNumeric`. `inp` is the equilibrated permuted matrix; `d_row`/`d_col`
 /// the equilibration carried into the result.
 #[allow(clippy::too_many_arguments)]
 fn factor_lu_left_looking<T: Scalar>(
@@ -214,7 +214,7 @@ fn factor_lu_left_looking<T: Scalar>(
 /// PARDISO phases 2-3 for the general path: numeric LU reusing a [`LuSymbolic`].
 /// `a` must share the analyzed pattern (`n`, `nnz`).
 #[allow(clippy::needless_range_loop)] // CSC column loops index col_ptr + scaling
-pub fn factor_general_lu_numeric<T: Scalar>(
+pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
     opts: &SolverSettings,

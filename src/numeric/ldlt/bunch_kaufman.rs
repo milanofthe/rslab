@@ -7,7 +7,6 @@ use super::factor::{LdltSlot, LlEmitLdlt, LlStore};
 use super::gemm::lower_tile_gemm;
 use crate::numeric::supernodal::perturb_pivot;
 
-use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower_bounded};
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::LlSchedule;
@@ -851,4 +850,40 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
         )
     };
     Ok(())
+}
+
+/// The Bunch-Kaufman pivot threshold `alpha = (1 + sqrt17)/8 ~ 0.6404`.
+#[inline]
+pub(crate) fn bk_alpha() -> f64 {
+    (1.0 + 17.0_f64.sqrt()) / 8.0
+}
+
+/// Symmetric interchange of rows and columns `p < q` in a column-major
+/// lower-triangle panel of leading dimension `n`, with the below-`q`
+/// column-segment swap bounded to rows `< row_limit`. The blocked Bunch-Kaufman panel kernels keep their pivot
+/// interchanges inside the panel rows and replay the deep-row segments later
+/// in the parallel trailing apply (`apply_bk_panel_trailing`), so the
+/// interchange sequence reaches every row exactly once, in step order.
+pub(crate) fn swap_sym_lower_bounded<T: Scalar>(
+    a: &mut [T],
+    n: usize,
+    p: usize,
+    q: usize,
+    row_limit: usize,
+) {
+    debug_assert!(p < q && q < n && q < row_limit);
+    // Column segment strictly below q: (i, p) <-> (i, q) for i > q.
+    for i in (q + 1)..row_limit {
+        a.swap(p * n + i, q * n + i);
+    }
+    // Middle cross strip: (i, p) <-> (q, i) for p < i < q.
+    for i in (p + 1)..q {
+        a.swap(p * n + i, i * n + q);
+    }
+    // Diagonal: (p, p) <-> (q, q).
+    a.swap(p * n + p, q * n + q);
+    // Left row segments: (p, j) <-> (q, j) for j < p.
+    for j in 0..p {
+        a.swap(j * n + p, j * n + q);
+    }
 }

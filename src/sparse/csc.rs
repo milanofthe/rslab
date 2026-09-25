@@ -259,7 +259,8 @@ impl<T: Scalar> CscMatrix<T> {
     }
 
     /// Convert to dense symmetric matrix.
-    pub fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix<T> {
+    #[cfg(test)]
+    pub(crate) fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix<T> {
         let mut buf = vec![T::zero(); self.n * self.n];
         // `from_triplets` guarantees all stored entries are lower-
         // triangle (row >= col), so every `(i, j)` lands at

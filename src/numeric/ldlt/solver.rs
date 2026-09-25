@@ -17,15 +17,15 @@
 //! ## Solves
 //!
 //! The numeric factorization produces the factor in supernodal panel form
-//! ([`crate::PanelFactor`]: dense column panels per front, one shared row
+//! (`PanelFactor`: dense column panels per front, one shared row
 //! list each), which the solve plan of [`crate::numeric::supernodal::solve`]
 //! takes as its storage; the `solve-layout` diagnostics stage is the tree
 //! schedule built over it. [`LdltSolver::solve`] and
 //! [`LdltSolver::solve_many`] then run tree-parallel sweeps whose result is
 //! bit-identical for every thread count.
 
-use super::factor::factor_numeric;
-use crate::dense::ldlt_generic::LdltFactors;
+use super::factor::{factor_numeric, LdltNumeric};
+use super::pivots::LdltPivots;
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::analysis::{
@@ -38,7 +38,7 @@ use crate::sparse::csc::CscMatrix;
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
 pub struct LdltSolver<T> {
     /// Factors of the equilibrated matrix `A_hat = D A D`, in factorization order.
-    factors: LdltFactors<T>,
+    factors: LdltPivots<T>,
     /// Real symmetric equilibration diagonal `s` (`D = diag(s)`).
     scale: Vec<f64>,
     /// Per-call factor diagnostics (stages, decisions, numeric outcome).
@@ -453,7 +453,7 @@ impl LdltSymbolic {
     }
 
     /// Per-supernode frontal dimensions `(ncol, nrow)` of the analyzed pattern.
-    /// See [`SupernodalAnalysis::front_dims`](crate::SupernodalAnalysis::front_dims).
+    /// See `SupernodalAnalysis::front_dims`.
     pub fn front_dims(&self) -> Vec<(usize, usize)> {
         self.symbolic.front_dims()
     }
@@ -464,7 +464,7 @@ impl LdltSymbolic {
     }
 
     /// Supernode count per assembly-tree level (available tree-parallelism by
-    /// depth). See [`SupernodalAnalysis::level_widths`](crate::SupernodalAnalysis::level_widths).
+    /// depth). See `SupernodalAnalysis::level_widths`.
     pub fn level_widths(&self) -> Vec<usize> {
         self.symbolic.level_widths()
     }
@@ -603,7 +603,11 @@ impl LdltSymbolic {
         let scale = scale.unwrap_or_else(|| vec![1.0; a.n]);
         let factor_nnz = (numeric.factor.nnz() - numeric.n_zeros) as u64;
         let factor_bytes = numeric.factor.bytes() as u64;
-        let (factor, factors) = numeric.into_parts();
+        let LdltNumeric {
+            factor,
+            pivots: factors,
+            ..
+        } = numeric;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let mut decisions = self.symbolic.decisions(self.requested_ordering);
         decisions.scaling = format!("{:?}", opts.scaling);
