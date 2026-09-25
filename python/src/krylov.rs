@@ -5,13 +5,11 @@ use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use rslab::{
     cocg as cocg_core, cocr as cocr_core, gmres as gmres_core, gmres_block as gmres_block_core,
-    gmres_recycled as gmres_recycled_core, BlockKrylovResult, KrylovResult, LinearOperator,
-    NoPreconditioner, Preconditioner,
+    gmres_recycled as gmres_recycled_core, BlockKrylovResult, KrylovResult, KrylovSettings,
+    LinearOperator, NoPreconditioner, Preconditioner,
 };
 
-use crate::common::{
-    adaptive_restart, array1, array2, block, map_err, vector, with_dtype, Pattern,
-};
+use crate::common::{array1, array2, block, map_err, vector, with_dtype, Pattern};
 use crate::factor::{Field, PyRecycle};
 
 /// An explicit CSC operator handed in from Python: `(n, indptr, indices, data)`.
@@ -132,6 +130,17 @@ fn blocked<T: Field>(
     .into_any())
 }
 
+/// The core's Krylov settings from the keyword arguments; an unset
+/// `restart` is fitted to the basis memory budget there.
+fn settings(tol: f64, maxit: usize, restart: Option<usize>) -> KrylovSettings {
+    KrylovSettings {
+        tol,
+        max_iter: maxit,
+        restart,
+        ..Default::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn gmres<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     py: Python<'_>,
@@ -145,12 +154,11 @@ pub fn gmres<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     recycle: Option<&Bound<'_, PyRecycle>>,
 ) -> PyResult<PyObject> {
     let rhs = vector::<T>(b, "rhs")?;
-    let restart =
-        restart.unwrap_or_else(|| adaptive_restart(rhs.len(), 1, std::mem::size_of::<T>(), 2));
+    let s = settings(tol, maxit, restart);
     let x0v = x0.map(|g| vector::<T>(g, "x0")).transpose()?;
     let r = match recycle {
         None => py
-            .allow_threads(|| gmres_core(op, &rhs, pc, tol, maxit, restart, x0v.as_deref()))
+            .allow_threads(|| gmres_core(op, &rhs, pc, &s, x0v.as_deref()))
             .map_err(map_err)?,
         Some(rc) => {
             let rc = rc.borrow();
@@ -160,10 +168,8 @@ pub fn gmres<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
                     "recycle dtype does not match the factor dtype",
                 )
             })?;
-            py.allow_threads(|| {
-                gmres_recycled_core(op, &rhs, pc, tol, maxit, restart, x0v.as_deref(), handle)
-            })
-            .map_err(map_err)?
+            py.allow_threads(|| gmres_recycled_core(op, &rhs, pc, &s, x0v.as_deref(), handle))
+                .map_err(map_err)?
         }
     };
     single(py, r)
@@ -181,7 +187,7 @@ pub fn gmres_block<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     x0: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
     let (n, nrhs, cm) = block::<T>(b, "rhs")?;
-    let restart = restart.unwrap_or_else(|| adaptive_restart(n, nrhs, std::mem::size_of::<T>(), 1));
+    let s = settings(tol, maxit, restart);
     let x0v = match x0 {
         Some(g) => {
             let (gn, gs, gcm) = block::<T>(g, "x0")?;
@@ -195,7 +201,7 @@ pub fn gmres_block<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
         None => None,
     };
     let r = py
-        .allow_threads(|| gmres_block_core(op, &cm, nrhs, pc, tol, maxit, restart, x0v.as_deref()))
+        .allow_threads(|| gmres_block_core(op, &cm, nrhs, pc, &s, x0v.as_deref(), None))
         .map_err(map_err)?;
     blocked(py, r, n, nrhs)
 }
@@ -210,7 +216,7 @@ pub fn cocg<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
 ) -> PyResult<PyObject> {
     let rhs = vector::<T>(b, "rhs")?;
     let r = py
-        .allow_threads(|| cocg_core(op, &rhs, pc, tol, maxit))
+        .allow_threads(|| cocg_core(op, &rhs, pc, &settings(tol, maxit, None)))
         .map_err(map_err)?;
     single(py, r)
 }
@@ -225,7 +231,7 @@ pub fn cocr<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
 ) -> PyResult<PyObject> {
     let rhs = vector::<T>(b, "rhs")?;
     let r = py
-        .allow_threads(|| cocr_core(op, &rhs, pc, tol, maxit))
+        .allow_threads(|| cocr_core(op, &rhs, pc, &settings(tol, maxit, None)))
         .map_err(map_err)?;
     single(py, r)
 }
