@@ -151,7 +151,10 @@ impl LuSymbolic {
         // MC64 row matching: analyze the row-permuted matrix `B` whose
         // diagonal carries the matched entries.
         let matching = if opts.lu_matching {
-            let cache = crate::scaling::mc64::compute_matching_general(a)?;
+            let cache = crate::logging::timed(
+                || "lu analyze: matching".into(),
+                || crate::scaling::mc64::compute_matching_general(a),
+            )?;
             if cache.n_matched == n {
                 let (r, c) = crate::scaling::mc64::unsymmetric_scaling(&cache);
                 // `cache.perm[j]` is the row matched to column `j`: it becomes
@@ -171,15 +174,21 @@ impl LuSymbolic {
         } else {
             None
         };
-        let (col_ptr, row_idx) = match &matching {
-            Some(m) => symmetrized_lower_pattern(&Self::row_permuted(a, m)),
-            None => symmetrized_lower_pattern(a),
-        };
+        let (col_ptr, row_idx) = crate::logging::timed(
+            || "lu analyze: symmetrized pattern".into(),
+            || match &matching {
+                Some(m) => symmetrized_lower_pattern(&Self::row_permuted(a, m)),
+                None => symmetrized_lower_pattern(a),
+            },
+        );
         let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
         let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
             (Some((sym, _)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
-                LuStructure::build(&a.col_ptr, &a.row_idx, row_map.as_deref(), sym, sched)
+                crate::logging::timed(
+                    || "lu analyze: exact structure".into(),
+                    || LuStructure::build(&a.col_ptr, &a.row_idx, row_map.as_deref(), sym, sched),
+                )
             }
             _ => LuStructure::empty(),
         };

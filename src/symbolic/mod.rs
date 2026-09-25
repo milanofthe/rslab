@@ -1,5 +1,6 @@
 pub mod column_counts;
 pub mod ldlt_compress;
+mod ordering_graph;
 pub mod small_leaf;
 pub mod supernode;
 pub(crate) mod supervariables;
@@ -9,8 +10,9 @@ use crate::ordering::amd::permute_pattern;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::{biased_postorder, postorder};
 use crate::sparse::csc::{CscMatrix, CscPattern};
+use ordering_graph::OrderingGraph;
 
-pub use column_counts::{column_counts_gnp, total_factor_nnz};
+pub use column_counts::{column_counts_gnp, column_counts_permuted, total_factor_nnz};
 pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
 pub use supernode::{
@@ -521,21 +523,6 @@ pub fn symbolic_factorize(
     symbolic_factorize_with_method(matrix, snode_params, OrderingMethod::Auto)
 }
 
-/// Convert an owned-`usize` `CscPattern` into the contract's borrowed-`i32`
-/// shape used by `rslab-metis`. Returns buffers the
-/// caller must keep alive for the lifetime of the produced `CscPattern<'_>`.
-fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), RslabError> {
-    let col_ptr: Result<Vec<i32>, _> = pattern.col_ptr.iter().map(|&x| i32::try_from(x)).collect();
-    let col_ptr = col_ptr.map_err(|_| {
-        RslabError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
-    })?;
-    let row_idx: Result<Vec<i32>, _> = pattern.row_idx.iter().map(|&x| i32::try_from(x)).collect();
-    let row_idx = row_idx.map_err(|_| {
-        RslabError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
-    })?;
-    Ok((col_ptr, row_idx))
-}
-
 /// A given ordering, checked to be a permutation of `0..n`.
 fn checked_permutation(p: &[usize], n: usize) -> Result<Vec<usize>, RslabError> {
     let mut seen = vec![false; n];
@@ -549,79 +536,6 @@ fn checked_permutation(p: &[usize], n: usize) -> Result<Vec<usize>, RslabError> 
         )));
     }
     Ok(p.to_vec())
-}
-
-/// Run an external (contract-conforming) ordering crate on `pattern` and
-/// return the permutation as `Vec<usize>` in the in-tree convention
-/// (new-to-old: `perm[k]` is the original column that became column `k`),
-/// along with the concrete `OrderingMethod` actually dispatched (matters
-/// when `method == Auto` is resolved adaptively).
-/// Compress the ordering graph only when the groups of indistinguishable
-/// vertices shrink it to at most this share of its vertices.
-const COMPRESS_MAX_RATIO: f64 = 0.95;
-
-fn run_external_ordering(
-    pattern: &CscPattern,
-    method: OrderingMethod,
-    nd_seeds: &[u64],
-) -> Result<(Vec<usize>, OrderingMethod), RslabError> {
-    // Order the graph of indistinguishable-vertex groups when it is markedly
-    // smaller, and expand the ordering to the original vertices (see
-    // `supervariables`). Measured on second-order Nedelec FEM systems, whose
-    // groups halve the graph.
-    let groups = supervariables::Supervariables::of(pattern);
-    let groups = ((groups.len() as f64) <= COMPRESS_MAX_RATIO * pattern.n as f64).then_some(groups);
-    let compressed = groups.as_ref().map(|g| g.compress(pattern));
-    let ordered = compressed.as_ref().unwrap_or(pattern);
-    let weights = groups.as_ref().map(|g| g.weights());
-    let expand = |p: Vec<i32>| match &groups {
-        Some(g) => g.expand(&p),
-        None => p,
-    };
-    let (col_buf, row_buf) = to_contract_pattern_bufs(ordered)?;
-    let pat = rslab_ordering_core::CscPattern::new(ordered.n, &col_buf, &row_buf)
-        .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
-    // `method` is expected to be concrete here - `Auto` is resolved
-    // upstream by `symbolic_factorize_with_method` against the
-    // original matrix's pattern, before any preprocessing.
-    debug_assert_ne!(method, OrderingMethod::Auto);
-    let actual = method;
-    let perm_i32 = match method {
-        OrderingMethod::Amd => rslab_amd::amd_order(&pat).map(expand),
-        OrderingMethod::Amf => rslab_amf::amf_order(&pat).map(expand),
-        OrderingMethod::MetisND => {
-            metis_seed_race(pattern, &pat, weights.as_deref(), groups.as_ref(), nd_seeds)
-        }
-        OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat).map(expand),
-        OrderingMethod::Auto => {
-            unreachable!("Auto is resolved by symbolic_factorize_with_method")
-        }
-        OrderingMethod::AutoRace => {
-            unreachable!("AutoRace is resolved by symbolic_factorize_with_method")
-        }
-    };
-    let perm_i32 = perm_i32
-        .map_err(|e| RslabError::InvalidInput(format!("external ordering failed: {}", e)))?;
-    if perm_i32.len() != pattern.n {
-        return Err(RslabError::InvalidInput(format!(
-            "external ordering returned {} entries for n={}",
-            perm_i32.len(),
-            pattern.n
-        )));
-    }
-    let mut out: Vec<usize> = Vec::with_capacity(perm_i32.len());
-    for x in perm_i32 {
-        let u = usize::try_from(x).map_err(|_| {
-            RslabError::InvalidInput("external ordering returned negative index".to_string())
-        })?;
-        if u >= pattern.n {
-            return Err(RslabError::InvalidInput(
-                "external ordering returned out-of-range index".to_string(),
-            ));
-        }
-        out.push(u);
-    }
-    Ok((out, actual))
 }
 
 /// Seeds of the deterministic nested-dissection ensemble: multilevel ND is
@@ -648,59 +562,6 @@ const ND_SINGLE_SEED: &[u64] = &[1];
 /// of fill (up to 15 percent on 3D meshes), which only pays when the numeric
 /// factorization is the dominant cost.
 const ND_SEED_RACE_MIN_FLOPS: u64 = 50_000_000_000;
-
-/// Best-of-seeds nested dissection (see [`ND_SEED_CANDIDATES`]).
-fn metis_seed_race(
-    pattern: &CscPattern,
-    pat: &rslab_ordering_core::CscPattern<'_>,
-    vwgt: Option<&[i32]>,
-    groups: Option<&supervariables::Supervariables>,
-    seeds: &[u64],
-) -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
-    use rayon::prelude::*;
-    // One nested dissection of `pat` (weighted when it is the compressed
-    // graph), returned as an ordering of `pattern`'s vertices.
-    let order = |seed: u64| -> Result<Vec<i32>, rslab_ordering_core::OrderingError> {
-        let opts = rslab_metis::MetisOptions {
-            seed,
-            ..Default::default()
-        };
-        let (perm, _, _) = match vwgt {
-            Some(w) => rslab_metis::metis_order_weighted(pat, w, &opts)?,
-            None => rslab_metis::metis_order_full(pat, &opts)?,
-        };
-        Ok(match groups {
-            Some(g) => g.expand(&perm),
-            None => perm,
-        })
-    };
-    if let [seed] = seeds {
-        return order(*seed);
-    }
-    let scored: Vec<(usize, u64, Vec<i32>)> = seeds
-        .par_iter()
-        .filter_map(|&seed| {
-            let perm_i32 = order(seed).ok()?;
-            // Exact scalar fill of this candidate: etree of the permuted
-            // pattern (built through the permutation, no materialization)
-            // plus GNP column counts on the permuted pattern.
-            let perm: Vec<usize> = perm_i32.iter().map(|&x| x as usize).collect();
-            let mut perm_inv = vec![0usize; perm.len()];
-            for (new, &old) in perm.iter().enumerate() {
-                perm_inv[old] = new;
-            }
-            let permuted = permute_pattern(pattern, &perm);
-            let etree = EliminationTree::from_pattern(&permuted);
-            let fill = total_factor_nnz(&column_counts_gnp(&permuted, &etree));
-            Some((fill, seed, perm_i32))
-        })
-        .collect();
-    scored
-        .into_iter()
-        .min_by_key(|&(fill, seed, _)| (fill, seed))
-        .map(|(_, _, perm)| perm)
-        .ok_or(rslab_ordering_core::OrderingError::MalformedInput)
-}
 
 /// The cheap candidates of the [`OrderingMethod::AutoRace`] ordering race,
 /// always run (each prefix costs a few milliseconds up to mid sizes):
@@ -737,14 +598,14 @@ fn prefix_flops(px: &SymbolicPrefix) -> u64 {
 /// judged by total flops alone they never met the ND floor, although ND
 /// halved the factor time there.
 fn prefix_work(px: &SymbolicPrefix) -> u64 {
-    // The etree is postordered, so every child precedes its parent.
+    // Every child precedes its parent in an elimination tree.
     let mut chain = vec![0u64; px.n];
     let mut longest = 0;
     for (j, &c) in px.col_counts.iter().enumerate() {
         let here = chain[j] + (c * c) as u64;
         longest = longest.max(here);
         if let Some(p) = px.etree.parent[j] {
-            debug_assert!(p > j, "prefix etree not postordered");
+            debug_assert!(p > j, "not an elimination tree");
             chain[p] = chain[p].max(here);
         }
     }
@@ -756,9 +617,9 @@ fn prefix_work(px: &SymbolicPrefix) -> u64 {
 ///
 /// Implements the [`OrderingMethod::AutoRace`] dispatcher. Feral #144
 /// port: each candidate runs only the cheap pipeline *prefix* (ordering,
-/// postorder, etree, column counts - everything the decision needs); the
-/// expensive tail (supernode detection, small-leaf grouping, memory plan)
-/// runs once, for the winner. Candidates that error out (e.g. external
+/// etree, column counts - everything the decision needs); the tail
+/// (postorder, supernode detection, small-leaf grouping, memory plan) runs
+/// once, for the winner. Candidates that error out (e.g. external
 /// crate failure) are skipped; the race succeeds as long as at least one
 /// candidate produces a valid prefix. Returns an error only if every
 /// candidate fails.
@@ -773,110 +634,119 @@ fn symbolic_factorize_race(
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, RslabError> {
     use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
     // Stage 1: the cheap candidates run concurrently (each prefix is itself
     // mostly sequential, so the race wall is roughly the slowest candidate);
     // the pick is deterministic - smallest exact factor nnz, candidate order
     // breaking ties - regardless of completion order.
     //
-    // With more than one worker, the nested-dissection candidates (one prefix
-    // per ensemble seed) start speculatively instead of after stage 1: the ND
-    // prefixes are the longest part of the race, and stage 1 leaves most
-    // workers idle. On patterns with at least `EAGER_ND_MIN_NNZ` entries they
-    // start at once; on smaller ones only once the AMD prefix predicts enough
-    // work to pass the ND gate, because a discarded ND run on a small pattern
-    // outlasts the whole stage 1 (it doubled the race on a 128k power grid).
-    // Stage 2 below decides from stage 1 alone which of them count, exactly
-    // as it would have run them, so the result does not depend on the thread
-    // count or on whether anything was speculated.
+    // With more than one worker, the first nested-dissection seed starts
+    // speculatively instead of after stage 1: the ND prefixes are the longest
+    // part of the race, and stage 1 leaves most workers idle. On patterns
+    // with at least `EAGER_ND_MIN_NNZ` entries it starts at once; on smaller
+    // ones only once the AMD prefix predicts enough work to pass the ND gate,
+    // because a discarded ND run on a small pattern outlasts the whole stage 1
+    // (it doubled the race on a 128k power grid). The other ensemble seeds
+    // start as soon as stage 1 has decided that they count. Stage 2 decides
+    // from stage 1 alone which seeds count, exactly as it would have run them,
+    // so the result does not depend on the thread count or on whether
+    // anything was speculated.
     const EAGER_ND_MIN_NNZ: usize = 2_000_000;
     debug_assert_eq!(RACE_CHEAP[0], OrderingMethod::Amd);
     let parallel = matrix.n > 10_000 && rayon::current_num_threads() > 1;
     let eager = parallel && matrix.row_idx.len() >= EAGER_ND_MIN_NNZ;
-    // One symmetric pattern for every candidate: built per candidate it was
-    // the largest allocation of the race (seven copies at once).
-    let full = &matrix.symmetric_pattern();
-    let nd_candidates = || -> Vec<Option<SymbolicPrefix>> {
-        ND_SEED_CANDIDATES
-            .par_iter()
-            .map(|&seed| {
-                symbolic_prefix(matrix, full, snode_params, OrderingMethod::MetisND, &[seed]).ok()
-            })
-            .collect()
-    };
-    let ((amd, nd_late), (rest, nd_eager)) = rayon::join(
-        || {
-            let amd = symbolic_prefix(matrix, full, snode_params, RACE_CHEAP[0], ND_SINGLE_SEED);
-            let gated =
-                parallel && !eager && matches!(&amd, Ok(p) if prefix_work(p) >= ND_RACE_MIN_WORK);
-            (amd, if gated { nd_candidates() } else { Vec::new() })
-        },
-        || {
-            rayon::join(
-                || {
-                    RACE_CHEAP[1..]
-                        .par_iter()
-                        .map(|&cand| {
-                            symbolic_prefix(matrix, full, snode_params, cand, ND_SINGLE_SEED)
-                        })
-                        .collect::<Vec<_>>()
-                },
-                || if eager { nd_candidates() } else { Vec::new() },
-            )
-        },
+    // One symmetric pattern and one ordering graph for every candidate: built
+    // per candidate, the pattern was the largest allocation of the race (seven
+    // copies at once) and the graph cost as much as a minimum-degree ordering.
+    let full = &crate::logging::timed(
+        || "analysis: symmetric pattern".into(),
+        || matrix.symmetric_pattern(),
     );
-    let results = std::iter::once(amd).chain(rest);
-    let speculative = if nd_eager.is_empty() {
-        nd_late
-    } else {
-        nd_eager
-    };
-    let mut best: Option<SymbolicPrefix> = None;
-    let mut last_err: Option<RslabError> = None;
-    for r in results {
-        match r {
-            Ok(prefix) => {
-                let is_better = best
-                    .as_ref()
-                    .map(|b| prefix.factor_nnz < b.factor_nnz)
-                    .unwrap_or(true);
-                if is_better {
-                    best = Some(prefix);
-                }
+    let graph = &OrderingGraph::new(full);
+    graph.prepare()?;
+    // One slot per ensemble seed, filled by its (at most one) ND prefix.
+    let nd: [OnceLock<Option<SymbolicPrefix>>; ND_SEED_CANDIDATES.len()] = Default::default();
+    let started: [AtomicBool; ND_SEED_CANDIDATES.len()] = Default::default();
+    let (mut best, last_err, seeds) = rayon::scope(|sc| {
+        let start = |i: usize| {
+            if !started[i].swap(true, Ordering::Relaxed) {
+                let nd = &nd;
+                sc.spawn(move |_| {
+                    let seed = [ND_SEED_CANDIDATES[i]];
+                    let prefix = symbolic_prefix(
+                        matrix,
+                        graph,
+                        snode_params,
+                        OrderingMethod::MetisND,
+                        &seed,
+                    );
+                    let _ = nd[i].set(prefix.ok());
+                });
             }
-            Err(e) => {
-                last_err = Some(e);
+        };
+        if eager {
+            start(0);
+        }
+        let (amd, rest) = rayon::join(
+            || {
+                let amd =
+                    symbolic_prefix(matrix, graph, snode_params, RACE_CHEAP[0], ND_SINGLE_SEED);
+                if parallel && matches!(&amd, Ok(p) if prefix_work(p) >= ND_RACE_MIN_WORK) {
+                    start(0);
+                }
+                amd
+            },
+            || {
+                RACE_CHEAP[1..]
+                    .par_iter()
+                    .map(|&cand| symbolic_prefix(matrix, graph, snode_params, cand, ND_SINGLE_SEED))
+                    .collect::<Vec<_>>()
+            },
+        );
+        let mut best: Option<SymbolicPrefix> = None;
+        let mut last_err: Option<RslabError> = None;
+        for r in std::iter::once(amd).chain(rest) {
+            match r {
+                Ok(prefix) => {
+                    if best
+                        .as_ref()
+                        .is_none_or(|b| prefix.factor_nnz < b.factor_nnz)
+                    {
+                        best = Some(prefix);
+                    }
+                }
+                Err(e) => last_err = Some(e),
             }
         }
-    }
-    // Stage 2: the expensive ND candidate, only where its cost can amortize
-    // (see [`ND_RACE_MIN_WORK`]), with the seed ensemble above
-    // [`ND_SEED_RACE_MIN_FLOPS`]. The ensemble's pick is the smallest exact
-    // factor nnz with the lowest seed breaking ties, which is the same choice
-    // `metis_seed_race` makes (its fill score is invariant under the
-    // postorders the prefix applies).
-    if let Some(champ) = &best {
-        let flops = prefix_flops(champ);
-        if matrix.n > 10_000 && prefix_work(champ) >= ND_RACE_MIN_WORK {
-            let seeds = if flops >= ND_SEED_RACE_MIN_FLOPS {
-                ND_SEED_CANDIDATES
-            } else {
-                ND_SINGLE_SEED
-            };
-            let nd = if !speculative.is_empty() {
-                speculative
-                    .into_iter()
-                    .zip(ND_SEED_CANDIDATES)
-                    .filter(|(_, seed)| seeds.contains(seed))
-                    .filter_map(|(prefix, _)| prefix)
-                    .reduce(|a, b| if b.factor_nnz < a.factor_nnz { b } else { a })
-            } else {
-                symbolic_prefix(matrix, full, snode_params, OrderingMethod::MetisND, seeds).ok()
-            };
-            if let Some(nd) = nd {
-                if nd.factor_nnz < champ.factor_nnz {
-                    best = Some(nd);
+        // Stage 2: the expensive ND candidate, only where its cost can
+        // amortize (see [`ND_RACE_MIN_WORK`]), with the seed ensemble above
+        // [`ND_SEED_RACE_MIN_FLOPS`].
+        let seeds = match &best {
+            Some(champ) if matrix.n > 10_000 && prefix_work(champ) >= ND_RACE_MIN_WORK => {
+                if prefix_flops(champ) >= ND_SEED_RACE_MIN_FLOPS {
+                    ND_SEED_CANDIDATES.len()
+                } else {
+                    ND_SINGLE_SEED.len()
                 }
             }
+            _ => 0,
+        };
+        for i in 0..seeds {
+            start(i);
+        }
+        (best, last_err, seeds)
+    });
+    // The ensemble's pick: the smallest exact factor nnz, the lowest seed
+    // breaking ties; it replaces the cheap champion only when smaller.
+    let nd = nd
+        .into_iter()
+        .take(seeds)
+        .filter_map(|slot| slot.into_inner().flatten())
+        .reduce(|a, b| if b.factor_nnz < a.factor_nnz { b } else { a });
+    if let (Some(nd), Some(champ)) = (nd, &best) {
+        if nd.factor_nnz < champ.factor_nnz {
+            best = Some(nd);
         }
     }
     let Some(winner) = best else {
@@ -884,7 +754,10 @@ fn symbolic_factorize_race(
             RslabError::InvalidInput("AutoRace: no candidates available".to_string())
         }));
     };
-    symbolic_finish(winner, full)
+    crate::logging::timed(
+        || "analysis: finish".into(),
+        || symbolic_finish(winner, full),
+    )
 }
 
 /// Like [`symbolic_factorize`] but lets the caller pick the
@@ -906,30 +779,35 @@ pub fn symbolic_factorize_with_method(
     }
     let full = &matrix.symmetric_pattern();
     symbolic_finish(
-        symbolic_prefix(matrix, full, snode_params, method, ND_SINGLE_SEED)?,
+        symbolic_prefix(
+            matrix,
+            &OrderingGraph::new(full),
+            snode_params,
+            method,
+            ND_SINGLE_SEED,
+        )?,
         full,
     )
 }
 
-/// Everything the cheap pipeline *prefix* produces: ordering (incl.
-/// preprocess), postorder composition, final etree, column counts, and the
-/// exact scalar factor nnz - the quantity every race dispatcher decides on.
-/// Produced by [`symbolic_prefix`], consumed by [`symbolic_finish`] (feral
-/// #144 port: race candidates run only the prefix; supernode detection,
+/// Everything the cheap pipeline *prefix* produces: the ordering (incl.
+/// preprocess), its elimination tree and column counts, and the exact scalar
+/// factor nnz - the quantity every race dispatcher decides on. Produced by
+/// [`symbolic_prefix`], consumed by [`symbolic_finish`] (feral #144 port:
+/// race candidates run only the prefix; the postorder, supernode detection,
 /// small-leaf grouping, and the memory plan run once, for the winner).
 struct SymbolicPrefix {
     n: usize,
+    /// The ordering, new-to-old, before the postorder.
     perm: Vec<usize>,
-    perm_inv: Vec<usize>,
+    /// Elimination tree and column counts under `perm`.
     etree: EliminationTree,
     col_counts: Vec<usize>,
     factor_nnz: usize,
     resolved_method: OrderingMethod,
     resolved_preprocess: OrderingPreprocess,
-    /// Params with `AmalgamationStrategy::Auto` resolved to a concrete
-    /// strategy (Phase 2.13a resolution happens in the prefix; the finish
-    /// and the recorded `resolved_amalgamation` must see the same pick).
-    effective_params: SupernodeParams,
+    /// The supernode parameters of this candidate (the preprocess variant).
+    params: SupernodeParams,
 }
 
 /// Ceiling on the fill inflation `OrderingPreprocess::Auto` accepts from
@@ -954,7 +832,7 @@ const PREPROCESS_FILL_INFLATION_LIMIT: f64 = 2.0;
 /// unconditionally, exactly as before.
 fn symbolic_prefix(
     matrix: &CscMatrix,
-    full_pattern: &CscPattern,
+    graph: &OrderingGraph,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
     nd_seeds: &[u64],
@@ -968,7 +846,7 @@ fn symbolic_prefix(
     if !verify {
         return symbolic_prefix_with(
             matrix,
-            full_pattern,
+            graph,
             snode_params,
             method,
             resolved_preprocess,
@@ -983,7 +861,7 @@ fn symbolic_prefix(
     let p_none = variant_params(OrderingPreprocess::None);
     let none = symbolic_prefix_with(
         matrix,
-        full_pattern,
+        graph,
         &p_none,
         method,
         OrderingPreprocess::None,
@@ -992,7 +870,7 @@ fn symbolic_prefix(
     let p_comp = variant_params(OrderingPreprocess::LdltCompress);
     let comp = symbolic_prefix_with(
         matrix,
-        full_pattern,
+        graph,
         &p_comp,
         method,
         OrderingPreprocess::LdltCompress,
@@ -1019,7 +897,7 @@ fn symbolic_prefix(
 /// [`symbolic_prefix`] once the `Auto` resolution/verification is done.
 fn symbolic_prefix_with(
     matrix: &CscMatrix,
-    full_pattern: &CscPattern,
+    graph: &OrderingGraph,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
     resolved_preprocess: OrderingPreprocess,
@@ -1051,6 +929,7 @@ fn symbolic_prefix_with(
     // `avg_deg` and reach a different conclusion than
     // `symbolic_factorize` (which uses `pick_default_method` on the
     // matrix directly). Issue #3.
+    let full_pattern = graph.pattern;
     let method = choose_adaptive(full_pattern, method);
 
     // `resolved_preprocess` arrives concrete from the dispatcher
@@ -1062,16 +941,18 @@ fn symbolic_prefix_with(
     // KKT (n=2.8M) MC64 is ~53s while `rslab_amd::amd_order` is ~0.3s - so
     // folding both into one "ordering" stage mis-attributes the cost and
     // led to the wrong diagnosis in issue #80. `record_ordering` wraps the
-    // actual `run_external_ordering` call so every path records exactly one
+    // actual `OrderingGraph::order` call so every path records exactly one
     // `ordering` stage.
-    let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), RslabError> {
-        let r = run_external_ordering(pat, method, nd_seeds)?;
-        Ok(r)
+    let record_ordering = |g: &OrderingGraph| -> Result<(Vec<usize>, OrderingMethod), RslabError> {
+        crate::logging::timed(
+            || format!("analysis: ordering {method:?} seeds {nd_seeds:?}"),
+            || Ok((g.order(method, nd_seeds)?, method)),
+        )
     };
-    let (amd_perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {
+    let (perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {
         OrderingPreprocess::None => match &snode_params.given_perm {
             Some(p) => (checked_permutation(p, n)?, method),
-            None => record_ordering(full_pattern)?,
+            None => record_ordering(graph)?,
         },
         OrderingPreprocess::Auto => unreachable!("resolved above"),
         OrderingPreprocess::LdltCompress => {
@@ -1089,28 +970,67 @@ fn symbolic_prefix_with(
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
-                record_ordering(full_pattern)?
+                record_ordering(graph)?
             } else {
                 let cpat = compress_pattern(full_pattern, &map);
-                let (super_perm, resolved) = record_ordering(&cpat)?;
+                let (super_perm, resolved) = record_ordering(&OrderingGraph::new(&cpat))?;
                 let expanded = expand_permutation(&super_perm, &map);
                 (expanded, resolved)
             }
         }
     };
 
-    // Step 2: Build the etree of the ordering-permuted pattern. This etree is
-    // intermediate - we use it to compute the postorder and then discard it -
-    // so the permuted pattern is never materialized: the etree reads the
-    // original pattern through the permutation on the fly. The local name
-    // `amd_*` is kept from the AMD-only era; semantically this is "ordering
-    // output", regardless of method.
-    let mut amd_perm_inv = vec![0usize; n];
-    for (new, &old) in amd_perm.iter().enumerate() {
-        amd_perm_inv[old] = new;
+    // Step 2: The elimination tree and the column counts of the ordered
+    // pattern, read through the permutation (it is never materialized), and
+    // the exact factor nnz: everything the race decides on. Both are
+    // invariant under the postorder `symbolic_finish` applies to the winner
+    // (a relabelling of the tree), so the candidates skip it.
+    let t_tail = crate::clock::Instant::now();
+    let mut perm_inv = vec![0usize; n];
+    for (new, &old) in perm.iter().enumerate() {
+        perm_inv[old] = new;
     }
-    let amd_etree = EliminationTree::from_permuted_pattern(full_pattern, &amd_perm, &amd_perm_inv);
+    let etree = EliminationTree::from_permuted_pattern(full_pattern, &perm, &perm_inv);
+    // Gilbert-Ng-Peyton at O(nnz(A) + n*alpha(n)) (Phase 2.5.1; bit-exact
+    // against the elimination simulation on 169585 KKT matrices, see
+    // `dev/validation/phase-2.5.1-*`).
+    let col_counts = column_counts_permuted(full_pattern, &perm, &perm_inv, &etree);
+    let factor_nnz = total_factor_nnz(&col_counts);
+    if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+        crate::logging::debug(&format!(
+            "analysis: prefix tail {resolved_method:?} (etree, column counts): {:.1} ms",
+            t_tail.elapsed().as_secs_f64() * 1e3
+        ));
+    }
+    Ok(SymbolicPrefix {
+        n,
+        perm,
+        etree,
+        col_counts,
+        factor_nnz,
+        resolved_method,
+        resolved_preprocess,
+        params: snode_params.clone(),
+    })
+}
 
+/// The pipeline tail: supernode detection, small-leaf grouping, memory
+/// plan, and struct assembly. Runs once per *adopted* prefix - race losers
+/// never get here (feral #144 port).
+fn symbolic_finish(
+    prefix: SymbolicPrefix,
+    full_pattern: &CscPattern,
+) -> Result<SymbolicFactorization, RslabError> {
+    let SymbolicPrefix {
+        n,
+        perm: amd_perm,
+        etree: amd_etree,
+        col_counts: amd_col_counts,
+        factor_nnz,
+        resolved_method,
+        resolved_preprocess,
+        params: snode_params,
+    } = prefix;
     // Step 3: Postorder the etree (CHOLMOD-style composition).
     // Without this step, supernode amalgamation merges columns whose indices
     // are not consecutive in the column numbering, and downstream code that
@@ -1127,10 +1047,7 @@ fn symbolic_prefix_with(
         perm_inv[old] = new;
     }
 
-    // Step 5: Re-permute the matrix on the composed permutation.
-    let permuted_pattern = permute_pattern(full_pattern, &perm);
-
-    // Step 5b: Build the final elimination tree by renumbering `amd_etree`
+    // Step 5: Build the final elimination tree by renumbering `amd_etree`
     // through the postorder. Postorder is a topological relabeling of the
     // elimination tree nodes, so `etree(P*A*P^T) = post-renumbering of
     // etree(A)` when P is a postorder of etree(A) - the tree structure is
@@ -1149,15 +1066,12 @@ fn symbolic_prefix_with(
         n,
     };
 
-    // Step 6: Column counts on the final pattern + etree.
-    // Phase 2.5.1 switched this from the O(n^2) elimination simulation
-    // (still available as `column_counts`) to Gilbert-Ng-Peyton at
-    // O(nnz(A) + n*alpha(n)). Bit-exact equivalence verified on 169585
-    // KKT matrices - see `dev/validation/phase-2.5.1-*`.
-    let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
-    // Only the race winner needs the permuted pattern again; `symbolic_finish`
-    // rebuilds it for that one, so the candidates do not hold one each.
-    drop(permuted_pattern);
+    // Step 6: The column counts carry over relabelled, as the tree does.
+    let mut col_counts: Vec<usize> = post.iter().map(|&old| amd_col_counts[old]).collect();
+    debug_assert_eq!(
+        col_counts,
+        column_counts_permuted(full_pattern, &perm, &perm_inv, &etree)
+    );
 
     // Phase 2.12: optional SSIDS-style merge-biased postorder.
     // Predict desired merges using only the etree + column counts,
@@ -1182,7 +1096,7 @@ fn symbolic_prefix_with(
     // O(n) etree shape predicate. The downstream Renumber gate and
     // `find_supernodes` reverse-iteration check need a concrete
     // variant - `Auto` is a top-level dispatch sentinel only.
-    let mut effective_params = snode_params.clone();
+    let mut effective_params = snode_params;
     if matches!(
         effective_params.amalgamation_strategy,
         supernode::AmalgamationStrategy::Auto
@@ -1237,39 +1151,6 @@ fn symbolic_prefix_with(
             col_counts = new_col_counts;
         }
     }
-    let factor_nnz = total_factor_nnz(&col_counts);
-    Ok(SymbolicPrefix {
-        n,
-        perm,
-        perm_inv,
-        etree,
-        col_counts,
-        factor_nnz,
-        resolved_method,
-        resolved_preprocess,
-        effective_params,
-    })
-}
-
-/// The pipeline tail: supernode detection, small-leaf grouping, memory
-/// plan, and struct assembly. Runs once per *adopted* prefix - race losers
-/// never get here (feral #144 port).
-fn symbolic_finish(
-    prefix: SymbolicPrefix,
-    full_pattern: &CscPattern,
-) -> Result<SymbolicFactorization, RslabError> {
-    let SymbolicPrefix {
-        n,
-        perm,
-        perm_inv,
-        etree,
-        col_counts,
-        factor_nnz,
-        resolved_method,
-        resolved_preprocess,
-        effective_params,
-    } = prefix;
-    let snode_params: &SupernodeParams = &effective_params;
     let permuted_pattern = permute_pattern(full_pattern, &perm);
 
     // Step 7: Supernode detection on the postordered etree
