@@ -6,7 +6,7 @@ into ``docs/figures/``:
 * ``pardiso_classes.png`` - wall time divided by PARDISO's per matrix class
   (geomean), for factor, refactor, solve and one-shot,
 * ``pardiso_systems.png`` - factor time and peak memory per system,
-* ``wct_breakdown.png``   - where the wall time goes, per system and solver,
+* ``wct_breakdown.png``   - wall time per stage, per system and solver,
 * ``estimate_accuracy.png`` - RSLAB's memory estimate against the measurement,
 * ``*_social.png``        - share cards of the class and breakdown figures.
 
@@ -212,8 +212,6 @@ def main():
     table, handles = classes(data, ax)
     st.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles], fontsize=8)
     st.save(fig, OUT / "pardiso_classes.png")
-    ax.set_title(f"RSLAB (pure Rust) vs MKL PARDISO, {len(data)} real systems, "
-                 f"{next(iter(data.values()))['rslab']['threads']} threads each", fontsize=10)
     st.card(fig, OUT / "pardiso_classes_social.png")
 
     st.save(systems(data), OUT / "pardiso_systems.png")
@@ -225,7 +223,6 @@ def main():
         handles = breakdown(data, ax, subset)
         st.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles], fontsize=8)
         if out:
-            ax.set_title("Where the wall time goes: RSLAB (pure Rust) vs MKL PARDISO, 12 threads", fontsize=10)
             st.card(fig, OUT / "wct_breakdown_social.png")
         else:
             st.save(fig, OUT / "wct_breakdown.png")
