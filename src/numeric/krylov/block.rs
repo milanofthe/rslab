@@ -89,7 +89,7 @@ where
 /// preconditioner calls. Solves `A X = B` from the optional initial guess `x0`
 /// (column-major `nxs`, default `X_0 = 0`).
 ///
-/// **Warm start (issue #5):** `x0 = Some(prev)` seeds every column from a related
+/// **Warm start:** `x0 = Some(prev)` seeds every column from a related
 /// previous solution; on a slowly varying sequence this cuts the block iteration
 /// count. Each column's convergence is still relative to its own `||B[:,c]||`.
 ///
@@ -100,14 +100,14 @@ where
 /// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
 /// drive all right-hand sides through one block iteration.
 ///
-/// **Memory (issue #12):** the Arnoldi basis is a single up-front allocation of
+/// **Memory:** the Arnoldi basis is a single up-front allocation of
 /// `n*s*(restart+1)` scalars (plus a handful of `n*s` work panels), *independent*
 /// of how few iterations actually run - so a large `restart` on a big `n*s` can
 /// allocate many GB (`n=100k, s=10, Complex<f64>, restart=80` ~ 13 GB). Size
 /// `restart` to the memory budget; the Python binding caps an unspecified
 /// `restart` automatically (an explicit value is honoured exactly).
 ///
-/// **Threads (issue #9):** the parallel orthogonalization reductions run in a
+/// **Threads:** the parallel orthogonalization reductions run in a
 /// scoped pool derived from the preconditioner's [`Threads`](crate::Threads) policy
 /// ([`Preconditioner::solve_threads`], resolved at factor time), so factor and
 /// solve share **one** concurrency budget. A [`Threads::Ambient`](crate::Threads::Ambient) policy (or
@@ -118,7 +118,7 @@ where
 /// thread-count independent). The single-RHS [`gmres`] orthogonalizes serially, so
 /// it has no such pool.
 ///
-/// **Orthogonalization (issue #8):** the panel is orthogonalized by **block CGS2**
+/// **Orthogonalization:** the panel is orthogonalized by **block CGS2**
 /// (classical Gram-Schmidt with a conditional, now *per-column*, second pass), not
 /// the MGS+DGKS of the single-RHS [`gmres`]. The two summation orders differ, so a
 /// block solve with `s = 1` is **not** bit-identical to [`gmres`] and may differ by
@@ -177,11 +177,11 @@ where
     }
     const REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let m = restart.max(1);
-    // Solve-phase thread policy (issue #9): orthogonalize in a pool of the same
+    // Solve-phase thread policy: orthogonalize in a pool of the same
     // width the preconditioner was factored with, so factor and solve share one
     // concurrency budget. `None` (Ambient / no factor) keeps the caller's pool.
     let ortho_pool = solve_thread_pool(precond.solve_threads());
-    // Warm start (issue #5): seed every column from `x0` (column-major `nxs`).
+    // Warm start: seed every column from `x0` (column-major `nxs`).
     let mut x = match x0 {
         Some(g) => {
             if g.len() != n * s {
@@ -217,7 +217,7 @@ where
     let mut proj1 = vec![T::zero(); m * s];
     let mut proj2 = vec![T::zero(); m * s];
     let mut wnorm0 = vec![0.0f64; s]; // panel column norms before ortho (DGKS reorth test)
-    let mut reorth_col = vec![false; s]; // per-column DGKS second-pass flags (issue #8)
+    let mut reorth_col = vec![false; s]; // per-column DGKS second-pass flags
                                          // Reduction scratch for `block_project`: `nchunks * (m*s)`, reused every step
                                          // so the orthogonalization allocates nothing in the hot loop.
     let mut proj_scratch = vec![T::zero(); n.div_ceil(ORTHO_CHUNK) * m * s];
@@ -231,7 +231,7 @@ where
     let mut converged = vec![false; s];
     let mut final_res = vec![0.0f64; s];
     // Back-substitution buffer for the per-column restart update, hoisted out of
-    // the hot loop and reused (issue #10): each column's back-sub overwrites the
+    // the hot loop and reused: each column's back-sub overwrites the
     // `0..jd` prefix before reading it, so no per-column-per-cycle allocation.
     let mut y = vec![T::zero(); m];
     let mut total = 0usize;
@@ -336,7 +336,7 @@ where
             ortho_in_pool(&ortho_pool, || {
                 block_subtract(&vbas, &mut wblk, blocks, sa, n, &proj1)
             });
-            // **Per-column** DGKS second pass (issue #8): decide the reorth *per
+            // **Per-column** DGKS second pass: decide the reorth *per
             // column* from its own norm collapse, not panel-globally. Frozen
             // (converged-this-cycle) columns are excluded (they are compacted out at
             // each step boundary, so a stale/collapsed frozen column can never
@@ -517,7 +517,7 @@ where
         }
     }
 
-    // Final true residual per RHS (issue #10). A converged column was measured at
+    // Final true residual per RHS. A converged column was measured at
     // its top-of-cycle deflation checkpoint and frozen (never re-entered the active
     // set), so its recorded `final_res` is already the final true residual - reuse
     // it. Re-matvec **only** the columns still active at the iteration budget

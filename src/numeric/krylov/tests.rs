@@ -142,7 +142,7 @@ fn gmres_solves_unsymmetric_with_lu_preconditioner() {
 
 #[test]
 fn gmres_singular_operator_breaks_down_without_nan() {
-    // Rank-deficient operator (issue #11): A = diag(1, 1, 0) is singular and
+    // Rank-deficient operator: A = diag(1, 1, 0) is singular and
     // `b = (1,1,1)` has a component in the null space (e_2), so GMRES cannot
     // drive the residual to zero - it stagnates. The Krylov subspace is
     // A-invariant with a *singular* restriction (eigenvalue 0), so the upper-
@@ -234,7 +234,7 @@ impl<T: Scalar, M: Preconditioner<T> + ?Sized> Preconditioner<T> for CountingPc<
 
 #[test]
 fn fgmres_saves_one_precond_apply_per_restart_cycle() {
-    // FGMRES (issue #7): the preconditioned basis `Z` is kept, so the restart
+    // FGMRES: the preconditioned basis `Z` is kept, so the restart
     // update `x += Z y` costs **no** extra `M^-1` solve. The loop applies `M^-1`
     // exactly once per inner iteration and never at the restart, so over a
     // multi-cycle solve the total preconditioner-apply count equals the total
@@ -276,7 +276,7 @@ fn fgmres_saves_one_precond_apply_per_restart_cycle() {
 
 #[test]
 fn gmres_warm_start_cuts_total_iterations_on_related_sequence() {
-    // Warm start (issue #5): a sequence of related systems `A x = b_k` with a
+    // Warm start: a sequence of related systems `A x = b_k` with a
     // slowly rotating right-hand side. Cold-starting every solve from 0 pays
     // the full iteration count each time; seeding each solve with the previous
     // solution (which is close, because the RHS barely moved) collapses the
@@ -343,7 +343,7 @@ fn gmres_block_single_rhs_matches_scalar_gmres() {
     // The paths are NOT bit-identical - block uses CGS2, single uses MGS+DGKS,
     // so the projections sum in a different order and the true residual can
     // straddle `tol` by a rounding ULP. This is documented as a design point in
-    // the module-level "Orthogonalization" note (issue #8), not a defect.
+    // the module-level "Orthogonalization" note, not a defect.
     use crate::numeric::lu::factor_general_lu;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(8);
@@ -412,7 +412,7 @@ fn gmres_block_multi_rhs_solves_each_column() {
 
 #[test]
 fn gmres_block_within_cycle_deflation_shrinks_applies() {
-    // Different-convergence-rate regime (issue #4): a diagonal operator with
+    // Different-convergence-rate regime: a diagonal operator with
     // distinct eigenvalues, unpreconditioned, with RHS `k` supported on `k+1`
     // distinct eigenvalues. GMRES on such a RHS converges in exactly `k+1`
     // steps, so the columns finish at staggered steps within a *single* cycle.
@@ -596,7 +596,7 @@ fn with_threads_caps_block_gmres_pool_and_keeps_result() {
 
 #[test]
 fn block_gmres_orthogonalization_respects_factor_thread_cap() {
-    // Issue #9: the block-GMRES orthogonalization must run in a pool derived
+    // The block-GMRES orthogonalization must run in a pool derived
     // from the *factor's* Threads policy, not the ambient global pool. Factor
     // with a hard cap of 2 workers; the factor then reports `Fixed(2)` as its
     // solve-phase policy, and the pool built from it caps `current_num_threads`
@@ -872,7 +872,7 @@ fn convection_diffusion(n: usize, gamma: f64) -> crate::sparse::general::General
 }
 
 /// Wraps an operator and records the width `s` of every block apply - the
-/// deflation probe (issue #4 / #13): a shrinking width proves the batched
+/// deflation probe: a shrinking width proves the batched
 /// applies narrow as columns converge.
 struct WidthCountingOp<'a> {
     inner: &'a GeneralCsc<C>,
@@ -894,7 +894,7 @@ impl LinearOperator<C> for WidthCountingOp<'_> {
 
 #[test]
 fn gmres_unpreconditioned_nonnormal_needs_many_restarts() {
-    // (issue #13a) Unpreconditioned GMRES on a strongly non-normal operator:
+    // Unpreconditioned GMRES on a strongly non-normal operator:
     // it must survive the non-normal stagnation phase and multiple restart
     // cycles, then converge to the true solution. Exercises the restart /
     // outer-loop machinery that the diagonally dominant tests never stress.
@@ -923,7 +923,7 @@ fn gmres_unpreconditioned_nonnormal_needs_many_restarts() {
 
 #[test]
 fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
-    // (issue #13c) A near-defective, strongly non-normal operator (bidiagonal
+    // A near-defective, strongly non-normal operator (bidiagonal
     // Jordan-like block: clustered diagonal, dominant super-diagonal) drives
     // the Arnoldi vectors toward linear dependence, so a single MGS sweep
     // collapses the norm and the conditional DGKS second pass (`hn < eta*||w_0||`)
@@ -970,7 +970,7 @@ fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
 
 #[test]
 fn gmres_happy_breakdown_on_eigenvector_rhs() {
-    // (issue #13d) Happy breakdown: `b` is an eigenvector of the operator, so
+    // Happy breakdown: `b` is an eigenvector of the operator, so
     // the Krylov space `K_1 = span{b}` is already `A`-invariant. The Arnoldi
     // step-1 subdiagonal `h[1][0]` is exactly `0` (the invariant-subspace
     // branch), and GMRES must produce the exact solution in a single iteration.
@@ -1006,7 +1006,7 @@ fn gmres_happy_breakdown_on_eigenvector_rhs() {
 
 #[test]
 fn gmres_block_incomplete_factor_multirate_deflation() {
-    // (issue #13b) Multi-rate within-cycle deflation under a genuine
+    // Multi-rate within-cycle deflation under a genuine
     // **factor-based** (drop-tol) preconditioner. The operator is diagonal with
     // distinct entries `d_i`; the preconditioner is a `drop_tol` LU factor of a
     // *different* diagonal matrix `diag(p_i)` - a deliberately imperfect
@@ -1014,7 +1014,7 @@ fn gmres_block_incomplete_factor_multirate_deflation() {
     // still has distinct eigenvalues. Right-hand side `k` is supported on the
     // first `k+1` unit vectors, so its GMRES converges in **exactly** `k+1`
     // steps: the columns finish at staggered steps *within one cycle*. The
-    // within-cycle deflation (#4) must finalize each fast column and shrink the
+    // within-cycle deflation must finalize each fast column and shrink the
     // batched applies to the still-active width, draining the panel to 1 - while
     // every column still matches its single-RHS solve.
     use crate::numeric::lu::factor_general_lu;

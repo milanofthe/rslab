@@ -481,7 +481,7 @@ fn ll_bk_panel_step<T: Scalar>(
 
 /// cdiv + store + emit for supernode `s` on an already fully cmod-updated
 /// `panel` - the tail of [`ll_factor_node`], extracted so the spine
-/// pipeline executor (issue #20) can drive assembly/cmod itself and reuse
+/// pipeline executor can drive assembly/cmod itself and reuse
 /// the identical factor kernel. Takes `panel` and the global->local scratch
 /// `gloc` by value (`gloc` is returned to the thread-local scratch slot on
 /// every exit path).

@@ -242,7 +242,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
         });
     }
 
-    // Resolve the solve-phase thread policy (issue #9): `Ambient` stays ambient
+    // Resolve the solve-phase thread policy: `Ambient` stays ambient
     // (caller-installed pool); every other policy is pinned to the concrete worker
     // count the factorization itself used, so a preconditioned iterative solve
     // orthogonalizes in a pool of exactly that width.

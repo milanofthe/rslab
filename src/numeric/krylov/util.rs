@@ -82,7 +82,7 @@ pub(super) fn well_conditioned_dim<T: Scalar>(h: &[Vec<T>], jdim: usize) -> usiz
     jdim
 }
 
-/// [`well_conditioned_dim`] for a **flat** row-major Hessenberg buffer (issue #10):
+/// [`well_conditioned_dim`] for a **flat** row-major Hessenberg buffer:
 /// the single-RHS [`gmres`] stores `H` as one `(m+1)xm` `Vec<T>` (diagonal entry
 /// `i` at `h[i*stride + i]`) rather than a `Vec<Vec<T>>`, so this reads the same
 /// breakdown-guarded leading dimension off the flat layout. Identical logic.
@@ -110,8 +110,8 @@ pub(super) fn well_conditioned_dim_flat<T: Scalar>(h: &[T], stride: usize, jdim:
 /// determinism guarantee while spreading the reduction over all cores.
 pub(super) const ORTHO_CHUNK: usize = 2048;
 
-/// Build the scoped rayon pool the block-GMRES orthogonalization reductions should
-/// run in (issue #9), from the preconditioner's [`Threads`] policy. `Ambient`
+/// The scoped rayon pool for the block-GMRES orthogonalization reductions,
+/// from the preconditioner's [`Threads`] policy. `Ambient`
 /// returns `None` - the reductions then run on the caller's current pool (the
 /// solver-in-the-loop path, where the caller has already installed one bounded
 /// pool via [`with_threads`](crate::with_threads)). Any concrete policy builds a

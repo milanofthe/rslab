@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(dense.get(2, 0), 0.0); // not set
     }
 
-    /// X10 (dev/research/repo-review-2026-06-09.md): the entries Vec was
+    /// The entries Vec was
     /// reserved with `Vec::with_capacity(nnz)` straight from the untrusted
     /// MTX size line. A corrupt header declaring an enormous nnz turns that
     /// into a multi-exabyte allocation request; the allocator returns null
@@ -517,7 +517,7 @@ mod tests {
         );
     }
 
-    /// X11 (dev/research/repo-review-2026-06-09.md): the banner was compared
+    /// The banner was compared
     /// against the exact single-space string. A legal MTX banner separates
     /// its five fields with arbitrary whitespace; the NIST `mmio` reference
     /// tokenizes it. Pre-fix this multi-space banner failed the exact-string

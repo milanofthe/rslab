@@ -1,13 +1,10 @@
-//! Phase 2.12: column-renumbering amalgamation strategy tests.
+//! Column-renumbering amalgamation strategy tests.
 //!
 //! Each test constructs a structurally simple matrix where the
 //! current `Adjacency` strategy must under-merge (because the
 //! postorder ordering blocks sibling merges), and asserts that the
 //! `Renumber` strategy produces the SSIDS-correct number of
 //! supernodes.
-//!
-//! Plan: `dev/plans/phase-2.12-column-renumbering.md`.
-//! Research: `dev/research/phase-2.12-column-renumbering.md`.
 
 use rslab::symbolic::{
     symbolic_factorize_with_method, AmalgamationStrategy, OrderingMethod, SupernodeParams,

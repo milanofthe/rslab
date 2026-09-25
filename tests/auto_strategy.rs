@@ -1,11 +1,9 @@
-//! Phase 2.13a - `AmalgamationStrategy::Auto` dispatch tests.
+//! `AmalgamationStrategy::Auto` dispatch tests.
 //!
 //! Verifies the cheap O(n) etree shape predicate routes:
 //!   * pure path etree -> `Adjacency` (Renumber over-merging case)
 //!   * bushy etree -> `Renumber` (IPM-KKT amalgamation case)
 //!   * empty / leaf-only forest -> `Adjacency`
-//!
-//! See `dev/research/phase-2.13a-amalgamation-auto.md`.
 
 #![allow(clippy::assertions_on_constants, clippy::needless_range_loop)]
 use rslab::ordering::elimination_tree::EliminationTree;

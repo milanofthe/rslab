@@ -387,7 +387,7 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     Ok(out.into_any().unbind())
 }
 
-// GMRES restart / basis-memory policy (issue #12).
+// GMRES restart / basis-memory policy.
 //
 // The Arnoldi basis is allocated up front, so its size is fixed by `restart`,
 // not by how few iterations actually run: block GMRES holds one basis of

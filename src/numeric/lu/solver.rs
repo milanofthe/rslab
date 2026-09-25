@@ -516,7 +516,7 @@ pub struct LuSolver<T> {
 }
 
 impl<T: Scalar> LuSolver<T> {
-    /// Thread policy the solve phase should honour (issue #9): the resolved
+    /// Thread policy the solve phase should honour: the resolved
     /// [`Threads`](crate::Threads) budget the factorization used, carried on the
     /// stored [`LuFactors`]. An iterative solve using this factor as a
     /// preconditioner runs its parallel orthogonalization in a pool of this width.

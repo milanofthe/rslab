@@ -18,7 +18,7 @@
 //! ## Orthogonalization (GMRES paths)
 //!
 //! The two GMRES paths orthogonalize the Arnoldi basis by **different**, both
-//! backward-stable, schemes (issue #8):
+//! backward-stable, schemes:
 //!
 //! - **Single-RHS [`gmres`]:** *modified* Gram-Schmidt (each projection updates
 //!   `w` before the next is taken) with a conditional DGKS second pass, triggered

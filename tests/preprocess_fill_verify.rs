@@ -1,10 +1,10 @@
-//! `OrderingPreprocess::Auto` fill verification (feral #91/#92 port).
+//! `OrderingPreprocess::Auto` fill verification.
 //!
 //! `Auto` must resolve the structural `pick_ordering_preprocess` predicate
 //! by *verifying* fill: when the predicate recommends `LdltCompress`, the
 //! compressed prefix is adopted only if its exact factor nnz stays within
 //! `PREPROCESS_FILL_INFLATION_LIMIT` (2x) of the `None` baseline - the
-//! qap15-class misfire feral measured at 6.3x fill / 20x factor time. An
+//! qap15-class misfire measured at 6.3x fill / 20x factor time. An
 //! explicit (non-`Auto`) preprocess stays honoured unconditionally.
 
 use rslab::symbolic::{
