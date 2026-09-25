@@ -402,11 +402,8 @@ def test_klu_superlu_api_inspection():
     f = rslab.klu(A)
     # SuperLU-style properties
     assert hasattr(f, "L")
-    assert hasattr(f, "l")
     assert hasattr(f, "U")
-    assert hasattr(f, "u")
     assert hasattr(f, "F")
-    assert hasattr(f, "f")
     assert hasattr(f, "shape")
     assert hasattr(f, "nnz")
     assert hasattr(f, "perm_r")

@@ -3487,7 +3487,12 @@ mod tests {
 
             for k in 0..a.n {
                 let diff = (y_luf[k] - y_orig[k]).abs();
-                assert!(diff < 1e-12, "mismatch at {k}: {diff} (luf={}, orig={})", y_luf[k], y_orig[k]);
+                assert!(
+                    diff < 1e-12,
+                    "mismatch at {k}: {diff} (luf={}, orig={})",
+                    y_luf[k],
+                    y_orig[k]
+                );
             }
         }
     }

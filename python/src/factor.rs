@@ -782,10 +782,6 @@ handle! {
         dispatch!(KluAny, &self.inner, |p| p.l_matrix(py))
     }
 
-    #[getter(l)]
-    fn get_l_lower(&self, py: Python<'_>) -> PyResult<PyObject> {
-        dispatch!(KluAny, &self.inner, |p| p.l_matrix(py))
-    }
 
     /// Upper-triangular factor U of the block triangular form as a SciPy
     /// ``csc_matrix`` (diagonal pivots included).
@@ -794,10 +790,6 @@ handle! {
         dispatch!(KluAny, &self.inner, |p| p.u_matrix(py))
     }
 
-    #[getter(u)]
-    fn get_u_lower(&self, py: Python<'_>) -> PyResult<PyObject> {
-        dispatch!(KluAny, &self.inner, |p| p.u_matrix(py))
-    }
 
     /// Off-diagonal block entries F of the block triangular form as a
     /// SciPy ``csc_matrix``.
@@ -806,10 +798,6 @@ handle! {
         dispatch!(KluAny, &self.inner, |p| p.f_matrix(py))
     }
 
-    #[getter(f)]
-    fn get_f_lower(&self, py: Python<'_>) -> PyResult<PyObject> {
-        dispatch!(KluAny, &self.inner, |p| p.f_matrix(py))
-    }
 
     /// Row permutation vector (``P_r``): row ``k`` of the permuted system is
     /// row ``perm_r[k]`` of ``A``.

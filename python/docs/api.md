@@ -510,9 +510,7 @@ for fixed-pattern sweeps and `solve_transpose`.
 - `U`: Upper-triangular factor U of the block triangular form as a SciPy ``csc_matrix`` (diagonal pivots included).
 - `block_ptr`: Diagonal block boundaries of the block triangular form (BTF).
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
-- `f`
 - `factor_nnz`: Stored factor entries (the fill).
-- `l`
 - `n`: Matrix dimension ``n``.
 - `n_blocks`: Number of diagonal blocks of the block triangular form.
 - `n_perturbed`: Statically perturbed pivots (nonzero only in preconditioner mode).
@@ -522,7 +520,6 @@ for fixed-pattern sweeps and `solve_transpose`.
 - `row_scale`: Alias for :attr:`rs_inv`.
 - `rs_inv`: Per-original-row scale factor reciprocals (all 1.0 when row scaling is off).
 - `shape`: Shape of the factor ``(n, n)``, matching SuperLU.
-- `u`
 
 #### `Klu.cocg(b, tol=1e-08, maxit=400, operator=None)`
 

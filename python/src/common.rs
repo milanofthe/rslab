@@ -281,14 +281,8 @@ pub fn csc_to_py<T: Element + Clone>(
     m: &rslab::GeneralCsc<T>,
 ) -> PyResult<PyObject> {
     let data = array1(py, m.values.clone());
-    let indices = array1(
-        py,
-        m.row_idx.iter().map(|&r| r as i32).collect::<Vec<i32>>(),
-    );
-    let indptr = array1(
-        py,
-        m.col_ptr.iter().map(|&p| p as i32).collect::<Vec<i32>>(),
-    );
+    let indices = array1(py, m.row_idx.iter().map(|&r| r as i64).collect());
+    let indptr = array1(py, m.col_ptr.iter().map(|&p| p as i64).collect());
     let shape = (m.n, m.n);
     let sp = py.import_bound("scipy.sparse")?;
     let csc_cls = sp.getattr("csc_matrix")?;

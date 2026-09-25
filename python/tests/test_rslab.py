@@ -552,18 +552,10 @@ def test_klu_l_u_f_matrices(dtype, row_scaling):
     assert len(f.row_scale) == n
 
     # Matrix types and shapes
-    for L in (f.L, f.l):
-        assert isinstance(L, sp.csc_matrix)
-        assert L.shape == (n, n)
-        assert L.dtype == np.dtype(dtype)
-    for U in (f.U, f.u):
-        assert isinstance(U, sp.csc_matrix)
-        assert U.shape == (n, n)
-        assert U.dtype == np.dtype(dtype)
-    for F in (f.F, f.f):
-        assert isinstance(F, sp.csc_matrix)
-        assert F.shape == (n, n)
-        assert F.dtype == np.dtype(dtype)
+    for M in (f.L, f.U, f.F):
+        assert isinstance(M, sp.csc_matrix)
+        assert M.shape == (n, n)
+        assert M.dtype == np.dtype(dtype)
 
     # Structural properties:
     # L is unit lower triangular
