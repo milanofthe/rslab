@@ -31,7 +31,7 @@ use rayon::prelude::*;
 
 use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
-use crate::numeric::panel_factor::PanelFactor;
+use crate::numeric::supernodal::panel::PanelFactor;
 use crate::scalar::{fmadd, Scalar};
 
 const NONE: u32 = u32::MAX;

@@ -2,6 +2,8 @@
 //! analysis knobs of [`SolverSettings`], the static-pivot policy, and the
 //! worker-thread policy with the scoped pools the factorizations run in.
 
+use crate::diagnostics::MemoryEstimate;
+use crate::error::RslabError;
 use crate::symbolic::{OrderingMethod, RelaxAmalgamation, SymbolicFactorization};
 
 /// Action to take when a near-zero pivot is encountered during factorization.
@@ -593,4 +595,34 @@ impl SolverSettings {
         }
         out
     }
+}
+
+/// The deterministic heuristic settings pick shared by `LdltSolver::tuned` and
+/// `LuSolver::tuned`: default settings, an exact ND bakeoff on large systems,
+/// and (feature `tuning`, when the one-time install diagnosis has run) the
+/// calibrated cost-model worker count.
+pub(crate) fn tuned<A: ?Sized, S>(
+    a: &A,
+    base: &SolverSettings,
+    analyze_with: impl Fn(&A, &SolverSettings) -> Result<S, RslabError>,
+    estimate: impl Fn(&S) -> MemoryEstimate,
+) -> Result<(S, SolverSettings), RslabError> {
+    #[cfg(not(feature = "tuning"))]
+    let _ = &estimate;
+    // Ordering by the exact prefix race (`AutoRace`): every candidate's true
+    // factor nnz, computed concurrently, smallest wins - replacing the former
+    // Amd-pinned default plus flops-gated ND bakeoff with one exact
+    // measurement (the race is what the bakeoff approximated).
+    #[allow(unused_mut)]
+    let mut s = base.clone().with_ordering(OrderingMethod::AutoRace);
+    let sym = analyze_with(a, &s)?;
+    // Install-diagnosed worker count: only when a calibration cache exists
+    // (written once by `tuning::install_diagnose`); never measures here.
+    #[cfg(feature = "tuning")]
+    if let Some((cores, calib)) = crate::tuning::cached_calibration() {
+        let est = estimate(&sym);
+        let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
+        s.threads = Threads::Fixed(t);
+    }
+    Ok((sym, s))
 }

@@ -31,8 +31,8 @@
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::multifrontal_ldlt::{analyze_with, perturb_pivot};
-use crate::numeric::panel_factor::{finish_panel, PanelArena, PanelFactor, PanelOut};
 use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
+use crate::numeric::supernodal::panel::{finish_panel, PanelArena, PanelFactor, PanelOut};
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -585,12 +585,12 @@ impl LuSymbolic {
         // Solve layout: supernodal panels of `L` and `U^T` plus the tree
         // schedule; the CSC arrays are released so the factor is held once.
         let t = crate::clock::Instant::now();
-        let plan_l = crate::numeric::supernodal_solve::SolvePlan::from_panels(
+        let plan_l = crate::numeric::supernodal::solve::SolvePlan::from_panels(
             l,
             &factors.supernode_parent,
             true,
         );
-        let plan_u = crate::numeric::supernodal_solve::SolvePlan::from_panels(
+        let plan_u = crate::numeric::supernodal::solve::SolvePlan::from_panels(
             ut,
             &factors.supernode_parent,
             false,
@@ -745,10 +745,10 @@ impl LuSymbolic {
 pub struct LuSolver<T> {
     factors: LuFactors<T>,
     /// `L` and `U^T` (the panels, their only storage) with the tree schedule
-    /// of [`crate::numeric::supernodal_solve`]; `factors` carries the
+    /// of [`crate::numeric::supernodal::solve`]; `factors` carries the
     /// permutations, scalings and counters with empty CSC arrays.
-    plan_l: crate::numeric::supernodal_solve::SolvePlan<T>,
-    plan_u: crate::numeric::supernodal_solve::SolvePlan<T>,
+    plan_l: crate::numeric::supernodal::solve::SolvePlan<T>,
+    plan_u: crate::numeric::supernodal::solve::SolvePlan<T>,
     nnz: usize,
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
@@ -788,7 +788,7 @@ impl<T: Scalar> LuSolver<T> {
         a: &GeneralCsc<T>,
         base: &SolverSettings,
     ) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-        crate::numeric::ll_common::tuned(a, base, LuSymbolic::analyze_with, |sym: &LuSymbolic| {
+        crate::numeric::settings::tuned(a, base, LuSymbolic::analyze_with, |sym: &LuSymbolic| {
             sym.estimate_memory::<T>()
         })
     }
@@ -980,9 +980,9 @@ pub fn factor_general_lu<T: Scalar>(
 /// within-front row permutation from partial pivoting (`rperm[i]` is the
 /// row-structure index physically at panel position `i`; identity on the
 /// trailing rows, only read by the emit).
-type LuLlStore = crate::numeric::ll_common::SlotStore<Vec<usize>>;
+type LuLlStore = crate::numeric::supernodal::SlotStore<Vec<usize>>;
 
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, Li, LlSchedule, PanelPtr};
+use crate::numeric::supernodal::{emit_refcount_offsets, Cells, Li, LlSchedule, PanelPtr};
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -1163,7 +1163,7 @@ fn lu_ll_factor_node<T: Scalar>(
     let ut: &mut [T] = unsafe { emit.u_arena.slot_mut(s) };
     debug_assert_eq!(lbuf.len(), nrow * ncol);
 
-    let gloc = crate::numeric::ll_common::Gloc::new(n, sched.rows(s));
+    let gloc = crate::numeric::supernodal::Gloc::new(n, sched.rows(s));
     // Assemble columns of s (full) into lbuf, and the U12 rows into ut.
     for p in 0..ncol {
         let c = first + p;
@@ -1188,7 +1188,7 @@ fn lu_ll_factor_node<T: Scalar>(
     // only aggregation reaching those dominant updates carries an 11-15x zero-pad
     // blowup (each top-of-tree descendant touches a small, distinct row/col subset
     // of the large target). The `RLA_CMOD_DIST` histogram below documents this.
-    let plan = crate::numeric::ll_common::CmodPlan::new(sym, sched, s, true, ll_gemm_par);
+    let plan = crate::numeric::supernodal::CmodPlan::new(sym, sched, s, true, ll_gemm_par);
     let (spans, forks, tile_w, tiled) = (&plan.spans, plan.forks, plan.tile_w, plan.tiled);
     let tile_u = (cnrow.max(1) / 16).clamp(32, 256);
 
@@ -1767,7 +1767,7 @@ fn factor_lu_left_looking<T: Scalar>(
         )
     };
     let emit_free = |k: usize| emit_and_free(k, &store, &emit, sym, sched, drop_tol);
-    crate::numeric::ll_common::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
+    crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     drop(store); // panels moved into the emit cells; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();

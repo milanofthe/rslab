@@ -1365,7 +1365,7 @@ mod tests {
     /// where the two used to disagree, so the amalgamation is swept.
     #[test]
     fn supernode_nrow_matches_the_built_row_sets() {
-        use crate::numeric::ll_common::LlSchedule;
+        use crate::numeric::supernodal::LlSchedule;
         // 2D 5-point Laplacian, lower triangle.
         let k = 20usize;
         let n = k * k;

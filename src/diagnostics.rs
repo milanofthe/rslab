@@ -109,7 +109,7 @@ pub(crate) fn estimate_left_looking<'a>(
     nsuper: usize,
     panel_bytes: &dyn Fn(usize) -> u64,
     compact_bytes: &dyn Fn(usize) -> u64,
-    updaters: &dyn Fn(usize) -> &'a [crate::numeric::ll_common::Li],
+    updaters: &dyn Fn(usize) -> &'a [crate::numeric::supernodal::Li],
     value_bytes: usize,
     input_bytes: u64,
     zero_copy: bool,

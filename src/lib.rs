@@ -160,7 +160,7 @@ pub use numeric::settings::{
     with_threads, FactorPath, ReorderMode, SolverSettings, Threads, ZeroPivotAction,
 };
 // The supernodal panel form of a factor (`LdltNumeric::factor`).
-pub use numeric::panel_factor::PanelFactor;
+pub use numeric::supernodal::panel::PanelFactor;
 // High-level symmetric LDL^T solver: `LdltSymbolic::analyze -> .factor -> LdltSolver`.
 pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze -> .factor -> LuSolver`,

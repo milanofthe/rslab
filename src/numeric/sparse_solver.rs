@@ -18,7 +18,7 @@
 //!
 //! The numeric factorization produces the factor in supernodal panel form
 //! ([`crate::PanelFactor`]: dense column panels per front, one shared row
-//! list each), which the solve plan of [`crate::numeric::supernodal_solve`]
+//! list each), which the solve plan of [`crate::numeric::supernodal::solve`]
 //! takes as its storage; the `solve-layout` diagnostics stage is the tree
 //! schedule built over it. [`LdltSolver::solve`] and
 //! [`LdltSolver::solve_many`] then run tree-parallel sweeps whose result is
@@ -47,7 +47,7 @@ pub struct LdltSolver<T> {
     /// The factor `L` (the panels, its only storage) with the tree schedule;
     /// `factors` carries `D`, the permutation and the outcome with empty CSC
     /// arrays.
-    pub(crate) plan: crate::numeric::supernodal_solve::SolvePlan<T>,
+    pub(crate) plan: crate::numeric::supernodal::solve::SolvePlan<T>,
 }
 
 impl<T: Scalar> LdltSolver<T> {
@@ -139,7 +139,7 @@ impl<T: Scalar> LdltSolver<T> {
         a: &CscMatrix<T>,
         base: &SolverSettings,
     ) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-        crate::numeric::ll_common::tuned(
+        crate::numeric::settings::tuned(
             a,
             base,
             LdltSymbolic::analyze_with,
@@ -637,7 +637,7 @@ impl LdltSymbolic {
         // Solve layout: supernodal panels plus the tree schedule; the CSC
         // arrays are released so the factor is held once.
         let t = crate::clock::Instant::now();
-        let plan = crate::numeric::supernodal_solve::SolvePlan::from_panels(
+        let plan = crate::numeric::supernodal::solve::SolvePlan::from_panels(
             factor,
             &factors.supernode_parent,
             true,
