@@ -101,12 +101,9 @@ print(s.to_dict())
 | `preconditioner` | `None` | static-pivot floor: pivots below it are lifted, the factorization never fails (factor of a nearby `A + E`; recover with `solve(b, refine=k)`) | float, e.g. `1e-4` |
 | `force_accept` | `False` | accept tiny pivots in exact mode instead of raising on rank deficiency | bool |
 | `drop_tol` | `None` | incomplete factorization: fill below the threshold (relative to its column) is dropped, an ILU-style preconditioner | float, `None` keeps the complete factor |
-| `method` | `"left_looking"` | numeric schedule (same factor, different transient memory and parallel profile) | `"left_looking"`, `"multifrontal"` |
-| `memory` | `"low"` | when fronts are released | `"low"` each front freed as it is emitted, `"eager"` fronts stay resident |
 | `pivot_u` | 0.1 | threshold partial-pivoting tolerance of the LU path (`1.0` is full partial pivoting); ignored on LDL^T | float in `[0, 1]` |
 | `matching` | `True` | MC64 row matching and scaling before the LU analysis (bounded pivot growth); LU path only | bool |
 | `scaling` | `"one_pass"` | symmetric equilibration before LDL^T (the LU path scales its own way) | `"one_pass"`, `"inf_norm"`, `"mc64"`, `"auto"`, `"identity"` |
-| `blr` | off | block-low-rank compression of the contribution blocks with a relative tolerance | float tolerance, `False` exact dense fronts |
 | `panel_nb` | 64 | panel width (blocking factor) of the dense kernels | int |
 | `scalar_gate` | calibrated | flop count below which an update runs as a scalar loop | int |
 | `par_gemm` | calibrated | flop count at or above which the front GEMM runs in parallel | int |

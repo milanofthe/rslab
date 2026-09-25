@@ -157,8 +157,7 @@ pub use numeric::multifrontal_ldlt::{
 };
 // Settings shared by the LDL^T and LU paths.
 pub use numeric::settings::{
-    with_threads, BlrMode, FactorMethod, FactorPath, MemoryMode, ReorderMode, SolverSettings,
-    Threads, ZeroPivotAction,
+    with_threads, FactorPath, ReorderMode, SolverSettings, Threads, ZeroPivotAction,
 };
 // The supernodal panel form of a factor (`LdltNumeric::factor`).
 pub use numeric::panel_factor::PanelFactor;

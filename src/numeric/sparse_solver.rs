@@ -574,26 +574,6 @@ impl LdltSymbolic {
         }
         est.critical_path_flops = cp;
         est.max_tree_width = levels.iter().map(|l| l.len()).max().unwrap_or(1) as u64;
-        // Multifrontal transient: the contribution-block-stack model (the
-        // left-looking `transient_peak_bytes` does not capture the CB stack).
-        let children: Vec<Vec<usize>> = sym.supernodes.iter().map(|s| s.children.clone()).collect();
-        let mf_active = crate::diagnostics::estimate_multifrontal_active_peak(
-            levels,
-            &|s| sched.rows(s).len() as u64,
-            &|s| sym.supernodes[s].ncol as u64,
-            &children,
-            value_bytes as u64,
-        );
-        let mf_scratch = (mf_active + est.factor_bytes) / 4 + 32_000_000;
-        let mf_base = mf_active + est.factor_bytes + input_bytes + mf_scratch;
-        // Work-stealing overlap margin: the rayon scheduler does not run one tree
-        // level cleanly at a time - a deep subtree's leaves can be live while
-        // another subtree's mid-level fronts factor, so fronts of more than one
-        // level coexist, plus the per-front extract buffer. A fixed 1.4x margin
-        // keeps the bound above the measured 24-thread peak across the corpus
-        // (the structural / 3D matrices a single-level model under-predicted by up
-        // to ~25%), matching the left-looking estimate's conservatism.
-        est.mf_transient_peak_bytes = mf_base * 7 / 5;
         est
     }
 
@@ -627,7 +607,7 @@ impl LdltSymbolic {
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let mut decisions = self.symbolic.decisions(self.requested_ordering);
         decisions.scaling = format!("{:?}", opts.scaling);
-        decisions.method = format!("{:?}", opts.method);
+        decisions.method = "LeftLooking".to_string();
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
             n: a.n,

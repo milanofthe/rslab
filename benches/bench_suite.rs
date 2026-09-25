@@ -31,8 +31,8 @@ use faer::{c64, Mat as FaerMat};
 use num_complex::Complex;
 use rslab::matgen::{bem, fem, stencil};
 use rslab::{
-    gmres, parse_mtx_complex_general, CscMatrix, FactorMethod, GeneralCsc, KluSettings,
-    KluSymbolic, LdltSymbolic, LuSymbolic, SolverSettings,
+    gmres, parse_mtx_complex_general, CscMatrix, GeneralCsc, KluSettings, KluSymbolic,
+    LdltSymbolic, LuSymbolic, SolverSettings,
 };
 #[cfg(feature = "matgen-download")]
 use rslab::{read_mtx_any, MtxLoaded};
@@ -554,15 +554,11 @@ fn run_matrix(
         }
     }
 
-    // --- RLA untuned default + raw left-looking / multifrontal kernels ---
+    // --- RLA untuned default + the raw left-looking kernel ---
     // `default` is `SolverSettings::default()` through the high-level solver - the
-    // untuned baseline the learned tuner (`auto`) is measured against; `ll`/`mf`
-    // force a single kernel.
-    for (tag, o) in [
-        ("default", SolverSettings::default()),
-        ("ll", opts.clone().with_method(FactorMethod::LeftLooking)),
-        ("mf", opts.clone().with_method(FactorMethod::Multifrontal)),
-    ] {
+    // untuned baseline the learned tuner (`auto`) is measured against; `ll` runs
+    // the kernel on the benchmark's own options.
+    for (tag, o) in [("default", SolverSettings::default()), ("ll", opts.clone())] {
         if !has(tag) {
             continue;
         }
@@ -1366,9 +1362,9 @@ fn main() {
                     mb(e.transient_peak_bytes) - mb(e.panels_all_bytes) - mb(e.factor_bytes);
                 let _ = writeln!(
                     out,
-                    "{{\"name\":\"{name}\",\"n\":{},\"panels_mb\":{:.1},\"factor_mb\":{:.1},\"scratch_mb\":{:.1},\"transient_mb\":{:.1},\"mf_transient_mb\":{:.1},\"freed_floor_mb\":{:.1}}}",
+                    "{{\"name\":\"{name}\",\"n\":{},\"panels_mb\":{:.1},\"factor_mb\":{:.1},\"scratch_mb\":{:.1},\"transient_mb\":{:.1},\"freed_floor_mb\":{:.1}}}",
                     mat.n(), mb(e.panels_all_bytes), mb(e.factor_bytes), scratch.max(0.0),
-                    mb(e.transient_peak_bytes), mb(e.mf_transient_peak_bytes), mb(e.panel_live_peak_bytes),
+                    mb(e.transient_peak_bytes), mb(e.panel_live_peak_bytes),
                 );
             }
             continue;

@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 0.34.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 0.38.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -18,7 +18,7 @@ are factored by a supernodal Bunch-Kaufman method,
 ```math
 P^T A P = L D L^T,
 ```
-**general unsymmetric** matrices by a supernodal / multifrontal LU with
+**general unsymmetric** matrices by a supernodal left-looking LU with
 threshold partial pivoting,
 
 ```math
@@ -137,7 +137,7 @@ automatically), so `A` may be stored full or triangular.
 
 - `A` (scipy.sparse matrix or array-like): The symmetric `n x n` system matrix. Converted to CSC and its lower triangle taken; duplicate entries are summed.
 - `settings` (Settings, optional): A prepared `Settings` object.
-- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `drop_tol`, `method`, `memory`, `force_accept`, `ordering`, `scaling`, `pivot_u`, `nemin`, `relax`, `reorder`, `blr`, `panel_nb`, `interrupt` ...), overriding `settings`.
+- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `drop_tol`, `force_accept`, `ordering`, `scaling`, `pivot_u`, `nemin`, `relax`, `reorder`, `panel_nb`, `interrupt` ...), overriding `settings`.
 
 **Returns**
 
@@ -162,7 +162,7 @@ print(f.inertia, f.diagnostics()["summary"])
 
 Factor a **general** (unsymmetric) matrix as `P_r^T A P_c = L U`.
 
-A supernodal left-looking (default) or multifrontal LU with threshold
+A supernodal left-looking LU with threshold
 partial pivoting and two-sided equilibration, over the same four scalar
 fields as `ldlt`. The full matrix is read.
 
@@ -867,12 +867,9 @@ directly. Unknown keywords raise `TypeError`; invalid values `ValueError`.
 - `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. `1e-4` is a good start.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
 - `drop_tol` (float, optional): Incomplete-factorization threshold: fill below it (relative to the column) is discarded, turning the factor into an ILU-style preconditioner. `None` keeps the complete factor.
-- `method` ({'left_looking', 'multifrontal'}, default 'left_looking'): Numeric schedule; same factor, different transient memory and parallel profile.
-- `memory` ({'low', 'eager'}, default 'low'): Factor emit strategy: `'low'` frees each front as soon as it is emitted, `'eager'` keeps them resident.
 - `pivot_u` (float, optional): Threshold partial-pivoting tolerance of the LU path in `[0, 1]` (default 0.1; `1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
 - `scaling` ({'one_pass', 'inf_norm', 'mc64', 'auto', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
 - `matching` (bool, default True): Maximum-product row matching (MC64) before the LU analysis: rows are permuted so the matched entries form the diagonal and both sides are scaled to unit magnitude there, which keeps the element growth of the front-restricted pivoting bounded. LU path only.
-- `blr` (float or False or dict, optional): Block-low-rank compression of the contribution blocks. A float is the relative tolerance with the default block parameters; a dict `{'eps': tol, 'min_cnrow': 256, 'b': 256, 'adaptive': False}` sets the smallest contribution block that is compressed, the block size and adaptive per-vector precision; `False` (default) keeps exact dense fronts.
 - `panel_nb` (int, optional): Panel width (blocking factor) of the dense kernels, default 64.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 
