@@ -12,46 +12,14 @@ use super::column_counts::total_factor_nnz;
 use super::ordering_graph::{structure, OrderingGraph};
 use super::supernode::{
     find_supernodes, pick_amalgamation_strategy, predict_merges, AmalgamationStrategy,
-    SupernodeParams,
 };
 use super::{OrderingMethod, SymbolicFactorization};
 use crate::error::RslabError;
+use crate::numeric::settings::{AmalgamationSettings, OrderingSettings};
 use crate::ordering::amd::permute_pattern;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::{biased_postorder, postorder};
 use crate::sparse::csc::CscPattern;
-
-/// Seeds of the nested-dissection ensemble. Multilevel dissection is
-/// seed-sensitive, mostly in one direction (on a 40^3 grid seeds 1, 3 and 4
-/// give 11.2 M entries in `L`, seed 2 gives 13.2 M), so the race keeps the
-/// best of several seeds where the factorization is heavy enough to pay for
-/// them; the lowest seed breaks ties.
-pub(super) const ND_SEED_CANDIDATES: &[u64] = &[1, 2, 3];
-
-/// The seed of a single nested dissection: what an explicit `MetisND`
-/// request and the cheap race stage use.
-pub(super) const ND_SEED: u64 = 1;
-
-/// Predicted flops (sum of squared column counts of the cheap champion) from
-/// which the race runs the seed ensemble. The ensemble buys a few percent of
-/// fill (up to 15 percent on 3D meshes) for two more dissections.
-const ND_SEED_RACE_MIN_FLOPS: u64 = 50_000_000_000;
-
-/// The cheap candidates, always raced: minimum degree, minimum fill, and the
-/// band reducer (which wins on banded and structured patterns).
-const RACE_CHEAP: &[OrderingMethod] = &[
-    OrderingMethod::Amd,
-    OrderingMethod::Amf,
-    OrderingMethod::Rcm,
-];
-
-/// Predicted factor time (see [`prefix_work`]) from which nested dissection
-/// joins the race: below it the factorization is sub-second and a dissection
-/// cannot pay for itself.
-const ND_RACE_MIN_WORK: u64 = 1_250_000_000;
-
-/// Workers the time prediction assumes: the default thread cap.
-const RACE_WORKERS: u64 = 4;
 
 /// A candidate: its ordering (new-to-old, before the postorder) with the
 /// elimination tree, column counts and exact scalar factor size under it.
@@ -68,12 +36,12 @@ fn prefix_flops(px: &Prefix) -> u64 {
 }
 
 /// Predicted factor time of a candidate in flops: the work shared among
-/// [`RACE_WORKERS`], or the longest elimination chain where that is longer,
+/// `workers`, or the longest elimination chain where that is longer,
 /// since no worker count shortens it. Minimum-degree orderings of some 3D
 /// meshes leave most of the work on one chain (a 23k waveguide: 69 percent);
 /// judged by total flops alone they never met the dissection floor, although
 /// dissection halved their factor time.
-fn prefix_work(px: &Prefix) -> u64 {
+fn prefix_work(px: &Prefix, workers: usize) -> u64 {
     // Every child precedes its parent in an elimination tree.
     let mut chain = vec![0u64; px.col_counts.len()];
     let mut longest = 0;
@@ -85,18 +53,18 @@ fn prefix_work(px: &Prefix) -> u64 {
             chain[p] = chain[p].max(here);
         }
     }
-    (prefix_flops(px) / RACE_WORKERS).max(longest)
+    (prefix_flops(px) / workers.max(1) as u64).max(longest)
 }
 
 /// The candidate for the concrete `method` (or the given permutation where
-/// the parameters carry one).
+/// the settings carry one).
 pub(super) fn prefix(
     graph: &OrderingGraph,
-    params: &SupernodeParams,
+    ordering: &OrderingSettings,
     method: OrderingMethod,
     nd_seed: u64,
 ) -> Result<Prefix, RslabError> {
-    let s = match &params.given_perm {
+    let s = match &ordering.permutation {
         Some(p) => structure(graph.pattern, checked_permutation(p, graph.pattern.n)?),
         None => graph.order(method, nd_seed)?,
     };
@@ -127,7 +95,8 @@ fn checked_permutation(p: &[usize], n: usize) -> Result<Vec<usize>, RslabError> 
 /// Race the candidates and finish the one with the smallest exact factor.
 pub(super) fn race(
     full: &CscPattern,
-    params: &SupernodeParams,
+    ordering: &OrderingSettings,
+    amalgamation: &AmalgamationSettings,
 ) -> Result<SymbolicFactorization, RslabError> {
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -140,38 +109,48 @@ pub(super) fn race(
     // With more than one worker, the first nested-dissection seed starts
     // speculatively instead of after stage 1: the ND prefixes are the longest
     // part of the race, and stage 1 leaves most workers idle. On patterns
-    // with at least `EAGER_ND_MIN_NNZ` entries it starts at once; on smaller
-    // ones only once the AMD prefix predicts enough work to pass the ND gate,
-    // because a discarded ND run on a small pattern outlasts the whole stage 1
-    // (it doubled the race on a 128k power grid). The other ensemble seeds
-    // start as soon as stage 1 has decided that they count. Stage 2 decides
-    // from stage 1 alone which seeds count, exactly as it would have run them,
-    // so the result does not depend on the thread count or on whether
-    // anything was speculated.
-    const EAGER_ND_MIN_NNZ: usize = 2_000_000;
-    debug_assert_eq!(RACE_CHEAP[0], OrderingMethod::Amd);
+    // with at least `eager_nd_min_nnz` entries it starts at once; on smaller
+    // ones only once the first candidate predicts enough work to pass the ND
+    // gate, because a discarded ND run on a small pattern outlasts the whole
+    // stage 1 (it doubled the race on a 128k power grid). The other ensemble
+    // seeds start as soon as stage 1 has decided that they count. Stage 2
+    // decides from stage 1 alone which seeds count, exactly as it would have
+    // run them, so the result does not depend on the thread count or on
+    // whether anything was speculated.
+    let r = &ordering.race;
+    let Some((&first, rest)) = r.candidates.split_first() else {
+        return Err(RslabError::InvalidInput(
+            "ordering race without candidates".to_string(),
+        ));
+    };
+    if let Some(bad) = r
+        .candidates
+        .iter()
+        .find(|m| matches!(m, OrderingMethod::Auto | OrderingMethod::MetisND))
+    {
+        return Err(RslabError::InvalidInput(format!(
+            "{bad:?} is not a race candidate (nested dissection joins by its own gates)"
+        )));
+    }
+    let seed = ordering.nd.seed;
     let n = full.n;
-    let parallel = n > 10_000 && rayon::current_num_threads() > 1;
+    let parallel = n > r.nd_min_n && rayon::current_num_threads() > 1;
     // The lower triangle's entry count, as the gate was calibrated on it.
-    let eager = parallel && (full.row_idx.len() + n) / 2 >= EAGER_ND_MIN_NNZ;
+    let eager = parallel && (full.row_idx.len() + n) / 2 >= r.eager_nd_min_nnz;
     // One ordering graph for every candidate: built per candidate it cost as
     // much as a minimum-degree ordering.
-    let graph = &OrderingGraph::new(full);
+    let graph = &OrderingGraph::new(full, ordering);
     graph.prepare()?;
     // One slot per ensemble seed, filled by its (at most one) ND prefix.
-    let nd: [OnceLock<Option<Prefix>>; ND_SEED_CANDIDATES.len()] = Default::default();
-    let started: [AtomicBool; ND_SEED_CANDIDATES.len()] = Default::default();
+    let ensemble = r.ensemble_size.max(1);
+    let nd: Vec<OnceLock<Option<Prefix>>> = (0..ensemble).map(|_| OnceLock::new()).collect();
+    let started: Vec<AtomicBool> = (0..ensemble).map(|_| AtomicBool::new(false)).collect();
     let (mut best, last_err, seeds) = rayon::scope(|sc| {
         let start = |i: usize| {
             if !started[i].swap(true, Ordering::Relaxed) {
                 let nd = &nd;
                 sc.spawn(move |_| {
-                    let px = prefix(
-                        graph,
-                        params,
-                        OrderingMethod::MetisND,
-                        ND_SEED_CANDIDATES[i],
-                    );
+                    let px = prefix(graph, ordering, OrderingMethod::MetisND, seed + i as u64);
                     let _ = nd[i].set(px.ok());
                 });
             }
@@ -179,24 +158,25 @@ pub(super) fn race(
         if eager {
             start(0);
         }
-        let (amd, rest) = rayon::join(
+        let (head, tail) = rayon::join(
             || {
-                let amd = prefix(graph, params, RACE_CHEAP[0], ND_SEED);
-                if parallel && matches!(&amd, Ok(p) if prefix_work(p) >= ND_RACE_MIN_WORK) {
+                let px = prefix(graph, ordering, first, seed);
+                if parallel
+                    && matches!(&px, Ok(p) if prefix_work(p, r.assumed_workers) >= r.nd_min_work)
+                {
                     start(0);
                 }
-                amd
+                px
             },
             || {
-                RACE_CHEAP[1..]
-                    .par_iter()
-                    .map(|&cand| prefix(graph, params, cand, ND_SEED))
+                rest.par_iter()
+                    .map(|&cand| prefix(graph, ordering, cand, seed))
                     .collect::<Vec<_>>()
             },
         );
         let mut best: Option<Prefix> = None;
         let mut last_err: Option<RslabError> = None;
-        for r in std::iter::once(amd).chain(rest) {
+        for r in std::iter::once(head).chain(tail) {
             match r {
                 Ok(prefix) => {
                     if best
@@ -209,13 +189,14 @@ pub(super) fn race(
                 Err(e) => last_err = Some(e),
             }
         }
-        // Stage 2: the expensive ND candidate, only where its cost can
-        // amortize (see [`ND_RACE_MIN_WORK`]), with the seed ensemble above
-        // [`ND_SEED_RACE_MIN_FLOPS`].
+        // Stage 2: nested dissection, only where its cost can amortize, with
+        // the seed ensemble above `ensemble_min_flops`.
         let seeds = match &best {
-            Some(champ) if n > 10_000 && prefix_work(champ) >= ND_RACE_MIN_WORK => {
-                if params.nd_ensemble && prefix_flops(champ) >= ND_SEED_RACE_MIN_FLOPS {
-                    ND_SEED_CANDIDATES.len()
+            Some(champ)
+                if n > r.nd_min_n && prefix_work(champ, r.assumed_workers) >= r.nd_min_work =>
+            {
+                if r.ensemble && prefix_flops(champ) >= r.ensemble_min_flops {
+                    ensemble
                 } else {
                     1
                 }
@@ -246,7 +227,7 @@ pub(super) fn race(
     };
     crate::logging::timed(
         || "analysis: finish".into(),
-        || finish(winner, full, params),
+        || finish(winner, full, amalgamation),
     )
 }
 
@@ -257,7 +238,7 @@ pub(super) fn race(
 pub(super) fn finish(
     px: Prefix,
     full: &CscPattern,
-    params: &SupernodeParams,
+    params: &AmalgamationSettings,
 ) -> Result<SymbolicFactorization, RslabError> {
     let n = full.n;
     // The postorder relabels the tree; the counts carry over.
@@ -266,12 +247,12 @@ pub(super) fn finish(
     let mut etree = relabel(&px.etree, &post, &post_inv);
     let mut col_counts: Vec<usize> = post.iter().map(|&old| px.col_counts[old]).collect();
 
-    let strategy = match params.amalgamation_strategy {
-        AmalgamationStrategy::Auto => pick_amalgamation_strategy(&etree),
+    let strategy = match params.strategy {
+        AmalgamationStrategy::Auto => pick_amalgamation_strategy(&etree, params.path_like_fraction),
         concrete => concrete,
     };
-    let params = SupernodeParams {
-        amalgamation_strategy: strategy,
+    let params = AmalgamationSettings {
+        strategy,
         ..params.clone()
     };
     // Renumber: a second postorder placing the children the amalgamation

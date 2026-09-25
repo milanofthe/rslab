@@ -49,15 +49,15 @@ const KI_UNSET: Ki = Ki::MAX;
 const KI_FBIT: Ki = 1 << 31;
 
 /// Options for the KLU path. Defaults follow SuiteSparse KLU: threshold
-/// partial pivoting with strong diagonal preference (`pivot_tol = 1e-3`),
-/// row-max scaling on, BTF on.
+/// partial pivoting with strong diagonal preference (`pivot_threshold =
+/// 1e-3`), row-max scaling on, BTF on.
 #[derive(Debug, Clone)]
 pub struct KluSettings {
     /// Threshold for diagonal preference: the diagonal entry is taken as the
-    /// pivot when `|a_jj| >= pivot_tol * max_i |a_ij|` over the eligible
-    /// column. `1.0` is plain partial pivoting; small values keep the
-    /// BTF/AMD-chosen diagonal (less fill) unless it is numerically tiny.
-    pub pivot_tol: f64,
+    /// pivot when `|a_jj| >= pivot_threshold * max_i |a_ij|` over the
+    /// eligible column. `1.0` is plain partial pivoting; small values keep
+    /// the BTF/AMD-chosen diagonal (less fill) unless it is numerically tiny.
+    pub pivot_threshold: f64,
     /// Divide every row by its max-magnitude entry before factoring (and
     /// scale RHS/solution accordingly). Cheap and markedly more robust on
     /// badly row-equilibrated inputs.
@@ -73,10 +73,10 @@ pub struct KluSettings {
     /// sequentially by construction and blocks share no state, so the result
     /// does not depend on scheduling or thread count. The default `Auto`
     /// enables it through a deterministic structural gate (no implicit
-    /// measuring): at least 4 diagonal blocks, 8000 input nonzeros, and no
-    /// dominant block (largest block at most half of `n`) - real circuits
-    /// are often one giant irreducible block plus thousands of singletons,
-    /// where distributing blocks cannot help.
+    /// measuring): several diagonal blocks, `par_min_nnz` input nonzeros,
+    /// and no dominant block (largest block at most half of `n`) - real
+    /// circuits are often one giant irreducible block plus thousands of
+    /// singletons, where distributing blocks cannot help.
     /// Run inside a bounded rayon pool to cap it for solver-in-the-loop use,
     /// or force `Off` for strictly sequential execution.
     pub parallel: KluParallel,
@@ -89,7 +89,18 @@ pub struct KluSettings {
     /// estimate. Analysis-time (value dependent); a `refactor` keeps the
     /// matching. Default `true`; needs `btf`.
     pub matching: bool,
-
+    /// Nonzeros from which [`KluParallel::Auto`] factors blocks in parallel.
+    /// Default `8000`.
+    pub par_min_nnz: usize,
+    /// Replay work (fmadd count) a unit of parallel refactorization must
+    /// carry: below it the spawn and handoff overhead exceeds the overlap
+    /// (on the SuiteSparse circuits scircuit at about 3e7 gains nothing,
+    /// ASIC_100ks at 4e8 gains 2.7x). Default `5e7`.
+    pub par_min_work: u64,
+    /// Simultaneous work the structure must offer for a parallel refactor:
+    /// across blocks `sum work / max block work`, inside a block the mean
+    /// level width of its elimination DAG. Default `2`.
+    pub par_min_ratio: f64,
     /// Caller-owned cancellation flag for the numeric phase, read and never
     /// written, polled at block boundaries and inside the pipelined refactor at
     /// column boundaries. The flag armed for a factorization is carried into
@@ -102,8 +113,9 @@ pub struct KluSettings {
 /// (see [`KluSettings::parallel`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KluParallel {
-    /// Structural gate: parallel when the BTF structure has at least 4
-    /// diagonal blocks, the matrix at least 8000 nonzeros, and the largest
+    /// Structural gate: parallel when the BTF structure has several
+    /// diagonal blocks, the matrix at least
+    /// [`par_min_nnz`](KluSettings::par_min_nnz) nonzeros, and the largest
     /// block holds at most half of `n` (no dominant block).
     #[default]
     Auto,
@@ -116,11 +128,14 @@ pub enum KluParallel {
 impl Default for KluSettings {
     fn default() -> Self {
         Self {
-            pivot_tol: 1e-3,
+            pivot_threshold: 1e-3,
             row_scaling: true,
             btf: true,
             parallel: KluParallel::Auto,
             matching: true,
+            par_min_nnz: 8_000,
+            par_min_work: 50_000_000,
+            par_min_ratio: 2.0,
             interrupt: None,
         }
     }
@@ -139,10 +154,11 @@ impl KluSettings {
         interrupt_check(self.interrupt.as_deref())
     }
 
-    /// Composable override of the diagonal-preference threshold
-    /// (see [`pivot_tol`](Self::pivot_tol)). `1.0` is plain partial pivoting.
-    pub fn with_pivot_tol(mut self, tol: f64) -> Self {
-        self.pivot_tol = tol;
+    /// Set the diagonal-preference threshold (see
+    /// [`pivot_threshold`](Self::pivot_threshold)). `1.0` is plain partial
+    /// pivoting.
+    pub fn with_pivot_threshold(mut self, u: f64) -> Self {
+        self.pivot_threshold = u;
         self
     }
 
@@ -170,17 +186,6 @@ impl KluSettings {
     /// (see [`parallel`](Self::parallel)).
     pub fn with_parallel(mut self, p: KluParallel) -> Self {
         self.parallel = p;
-        self
-    }
-
-    /// Convenience toggle: `true` forces [`KluParallel::On`], `false`
-    /// [`KluParallel::Off`]. The default policy is [`KluParallel::Auto`].
-    pub fn with_parallel_factor(mut self, on: bool) -> Self {
-        self.parallel = if on {
-            KluParallel::On
-        } else {
-            KluParallel::Off
-        };
         self
     }
 }
@@ -214,7 +219,7 @@ pub struct KluSymbolic {
 
 /// Exact symbolic fill of the KLU factor under the diagonal-pivoting
 /// assumption (the default expectation: BTF guarantees a structurally nonzero
-/// diagonal and `pivot_tol` strongly prefers it). Threshold pivoting at factor
+/// diagonal and `pivot_threshold` strongly prefers it). Threshold pivoting at factor
 /// time can shift individual counts, not their order of magnitude.
 #[derive(Debug, Clone, Copy)]
 struct KluFill {
@@ -551,12 +556,10 @@ fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
 
 /// The two-parameter principle behind EVERY parallel decision on this path:
 ///
-/// 1. **Work floor** ([`KLU_PAR_MIN_WORK`]): a unit of parallel execution
-///    must carry at least this much replay work (fmadd count) - below it,
-///    spawn/handoff overhead exceeds the overlap (measured on the SuiteSparse
-///    circuit suite: scircuit at ~30 M gains nothing, ASIC_100ks at ~400 M
-///    gains 2.7x). The floor is overhead physics; no setting bypasses it.
-/// 2. **Concurrency ratio** ([`KLU_PAR_MIN_RATIO`]): parallelism engages only
+/// 1. **Work floor** ([`KluSettings::par_min_work`]): a unit of parallel
+///    execution must carry at least this much replay work (fmadd count) -
+///    below it, spawn/handoff overhead exceeds the overlap.
+/// 2. **Concurrency ratio** ([`KluSettings::par_min_ratio`]): parallelism engages only
 ///    where the structure offers at least this much simultaneous work.
 ///    Across BTF blocks that is the exact Amdahl bound `sum work / max block
 ///    work`; inside a block it is the mean level width of the frozen
@@ -564,9 +567,7 @@ fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
 ///    columns. (A chain-work critical-path bound would be the "exact" ratio
 ///    but systematically underestimates the pipeline's just-in-time overlap:
 ///    ASIC_100ks scores below 2 on it yet measures 2.7x.)
-const KLU_PAR_MIN_WORK: u64 = 50_000_000;
-const KLU_PAR_MIN_RATIO: f64 = 2.0;
-
+///
 /// The replay-parallelism plan, computed once at factor time from the
 /// pivot-final pattern: per-block replay work `W_b = sum_j sum_{p in U(:,j)}
 /// |L(:,p)|` and elimination-DAG level structure.
@@ -583,6 +584,8 @@ fn compute_replay_plan(
     u_colptr: &[usize],
     u_rowidx: &[Ki],
     force: bool,
+    min_work: u64,
+    min_ratio: f64,
 ) -> (Vec<(usize, usize)>, bool) {
     let mut pipelined = Vec::new();
     let mut level: Vec<Ki> = Vec::new();
@@ -607,12 +610,12 @@ fn compute_replay_plan(
         total += w_b;
         max_w = max_w.max(w_b);
         let width = (bn as f64) / (nlev as f64);
-        if w_b >= KLU_PAR_MIN_WORK && width >= KLU_PAR_MIN_RATIO {
+        if w_b >= min_work && width >= min_ratio {
             pipelined.push((b, (width as usize).max(2)));
         }
     }
-    let ratio_ok = (total as f64) >= KLU_PAR_MIN_RATIO * (max_w as f64);
-    let par_blocks = ratio_ok && (force || total >= KLU_PAR_MIN_WORK);
+    let ratio_ok = (total as f64) >= min_ratio * (max_w as f64);
+    let par_blocks = ratio_ok && (force || total >= min_work);
     (pipelined, par_blocks)
 }
 
@@ -1306,7 +1309,7 @@ fn factor_block<T: Scalar>(
         };
         if mark[d][0] == sj && mark[d][1] == KI_UNSET {
             let dm = x[d].magnitude();
-            if dm > 0.0 && dm >= settings.pivot_tol * maxmag {
+            if dm > 0.0 && dm >= settings.pivot_threshold * maxmag {
                 piv = d;
             }
         }
@@ -1439,7 +1442,7 @@ fn factor_impl<T: Scalar>(
     let parallel = match settings.parallel {
         KluParallel::On => true,
         KluParallel::Off => false,
-        KluParallel::Auto => sym.nnz >= 8_000 && sym.max_block_size() * 2 <= sym.n,
+        KluParallel::Auto => sym.nnz >= settings.par_min_nnz && sym.max_block_size() * 2 <= sym.n,
     } && nblocks > 1;
     let max_bn = sym.max_block_size();
 
@@ -1679,6 +1682,8 @@ fn factor_impl<T: Scalar>(
             &u_colptr,
             &u_rowidx,
             settings.parallel == KluParallel::On,
+            settings.par_min_work,
+            settings.par_min_ratio,
         )
     };
 
@@ -3276,10 +3281,10 @@ mod tests {
         let a = circuit_like(600, 7);
         let sym = KluSymbolic::analyze(&a).unwrap();
         let s1 = sym
-            .factor(&a, &KluSettings::default().with_parallel_factor(false))
+            .factor(&a, &KluSettings::default().with_parallel(KluParallel::Off))
             .unwrap();
         let s2 = sym
-            .factor(&a, &KluSettings::default().with_parallel_factor(true))
+            .factor(&a, &KluSettings::default().with_parallel(KluParallel::On))
             .unwrap();
         assert!(s2.factors.block_ptr.len() > 2, "needs a multi-block case");
         assert_eq!(s1.factors.l_rowidx, s2.factors.l_rowidx);
@@ -3331,10 +3336,10 @@ mod tests {
     #[test]
     fn klu_settings_compose() {
         let s = KluSettings::default()
-            .with_pivot_tol(1.0)
+            .with_pivot_threshold(1.0)
             .with_row_scaling(false)
             .with_btf(false);
-        assert_eq!(s.pivot_tol, 1.0);
+        assert_eq!(s.pivot_threshold, 1.0);
         assert!(!s.row_scaling);
         assert!(!s.btf);
         let a = circuit_like(80, 9);

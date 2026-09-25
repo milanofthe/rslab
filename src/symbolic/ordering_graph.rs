@@ -9,17 +9,16 @@
 use super::supervariables::Supervariables;
 use super::OrderingMethod;
 use crate::error::RslabError;
+use crate::numeric::settings::OrderingSettings;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::sparse::csc::CscPattern;
 use std::sync::OnceLock;
 
-/// Compress the ordering graph only when the groups of indistinguishable
-/// vertices shrink it to at most this share of its vertices.
-const COMPRESS_MAX_RATIO: f64 = 0.95;
-
 pub(super) struct OrderingGraph<'a> {
     /// The full symmetric pattern (both triangles, sorted rows).
     pub pattern: &'a CscPattern,
+    /// The options of the orderings and the compression.
+    settings: &'a OrderingSettings,
     /// The graph handed to the ordering crates, built on first use (a given
     /// permutation needs none). Build it with [`prepare`](Self::prepare)
     /// before orderings run concurrently: a worker waiting inside the build
@@ -38,9 +37,10 @@ struct Ordered {
 }
 
 impl<'a> OrderingGraph<'a> {
-    pub fn new(pattern: &'a CscPattern) -> Self {
+    pub fn new(pattern: &'a CscPattern, settings: &'a OrderingSettings) -> Self {
         OrderingGraph {
             pattern,
+            settings,
             ordered: OnceLock::new(),
         }
     }
@@ -51,16 +51,15 @@ impl<'a> OrderingGraph<'a> {
     }
 
     fn ordered(&self) -> Result<&Ordered, RslabError> {
-        let pattern = self.pattern;
+        let (pattern, ratio) = (self.pattern, self.settings.compress_max_ratio);
         self.ordered
             .get_or_init(|| {
                 crate::logging::timed(
                     || "analysis: ordering graph".into(),
                     || {
                         let groups = Supervariables::of(pattern);
-                        let groups = ((groups.len() as f64)
-                            <= COMPRESS_MAX_RATIO * pattern.n as f64)
-                            .then_some(groups);
+                        let groups =
+                            ((groups.len() as f64) <= ratio * pattern.n as f64).then_some(groups);
                         let (col_ptr, row_idx) = match &groups {
                             Some(g) => g.compress(pattern).ok_or_else(too_large)?,
                             None => to_i32(pattern)?,
@@ -91,12 +90,16 @@ impl<'a> OrderingGraph<'a> {
         let order = crate::logging::timed(
             || format!("analysis: ordering {method:?} seed {nd_seed}"),
             || match method {
-                OrderingMethod::Amd => rslab_amd::amd_order(&pat),
-                OrderingMethod::Amf => rslab_amf::amf_order(&pat),
+                OrderingMethod::Amd => {
+                    rslab_amd::amd_order_opts(&pat, &self.settings.amd).map(|(perm, _)| perm)
+                }
+                OrderingMethod::Amf => {
+                    rslab_amf::amf_order_opts(&pat, &self.settings.amf).map(|(perm, _)| perm)
+                }
                 OrderingMethod::MetisND => {
                     let opts = rslab_metis::MetisOptions {
                         seed: nd_seed,
-                        ..Default::default()
+                        ..self.settings.nd.clone()
                     };
                     match &g.weights {
                         Some(w) => rslab_metis::metis_order_weighted(&pat, w, &opts),

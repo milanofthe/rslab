@@ -112,15 +112,15 @@ fn klu_diagnostics_are_filled() {
 
 #[test]
 fn settings_ignored_by_a_path_are_reported() {
-    // pivot_u belongs to the LU: the LDL^T path reports it.
+    // the pivot threshold belongs to the LU: the LDL^T path reports it.
     let (sym, full) = (grid_lower(12), grid_full(12));
-    let ldlt = SolverSettings::exact().with_pivot_u(0.5);
+    let ldlt = SolverSettings::exact().with_pivot_threshold(0.5);
     let w = LdltSolver::factor_with(&sym, &ldlt)
         .unwrap()
         .diagnostics()
         .warnings;
     assert_eq!(w.len(), 1, "{w:?}");
-    assert!(w[0].contains("pivot_u"));
+    assert!(w[0].contains("pivoting.threshold"));
     assert!(LuSolver::factor(&full, &ldlt)
         .unwrap()
         .diagnostics()
@@ -158,7 +158,8 @@ fn factorizations_log_through_the_sink() {
     logging::set_sink(Box::new(Capture(got.clone())));
     logging::set_level(LogLevel::Info);
     let a = grid_lower(12);
-    let f = LdltSolver::factor_with(&a, &SolverSettings::exact().with_pivot_u(0.5)).unwrap();
+    let f =
+        LdltSolver::factor_with(&a, &SolverSettings::exact().with_pivot_threshold(0.5)).unwrap();
     let _ = f.solve(&vec![1.0; a.n]).unwrap();
     let records = got.lock().unwrap().clone();
     logging::reset_sink();
@@ -169,7 +170,7 @@ fn factorizations_log_through_the_sink() {
     assert!(
         records
             .iter()
-            .any(|(l, m)| *l == LogLevel::Warning && m.contains("pivot_u")),
+            .any(|(l, m)| *l == LogLevel::Warning && m.contains("pivoting.threshold")),
         "{text:?}"
     );
     // solves log at Debug only

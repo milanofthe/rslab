@@ -6,7 +6,7 @@
 use crate::error::RslabError;
 use crate::numeric::settings::{in_scoped_pool, stack_for_depth, SolverSettings};
 use crate::numeric::supernodal::LlSchedule;
-use crate::symbolic::{SupernodeParams, SymbolicFactorization};
+use crate::symbolic::SymbolicFactorization;
 
 /// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
 /// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
@@ -175,17 +175,9 @@ fn analyze_with_inner(
             nnz,
         });
     }
-    // Relaxed amalgamation rides `opts.relax` (see `SupernodeParams::relax`).
-    let snode_params = SupernodeParams {
-        nemin: opts.nemin,
-        relax: opts.relax,
-        given_perm: opts.permutation.clone(),
-        nd_ensemble: opts.nd_ensemble,
-        ..SupernodeParams::default()
-    };
     let sym = crate::logging::timed(
-        || format!("analysis: symbolic {:?}", opts.ordering),
-        || crate::symbolic::analyze(n, col_ptr, row_idx, &snode_params, opts.ordering),
+        || format!("analysis: symbolic {:?}", opts.ordering.method),
+        || crate::symbolic::analyze(n, col_ptr, row_idx, &opts.ordering, &opts.amalgamation),
     )?;
 
     // Assembly-tree levels: level(s) = 1 + max(level(children)); same-level

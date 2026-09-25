@@ -6,13 +6,17 @@
 //! `Renumber` strategy produces the SSIDS-correct number of
 //! supernodes.
 
-use rslab::symbolic::{
-    AmalgamationStrategy, OrderingMethod, SupernodeParams, SymbolicFactorization,
+use rslab::symbolic::SymbolicFactorization;
+use rslab::{
+    AmalgamationSettings, AmalgamationStrategy, CscMatrix, OrderingMethod, OrderingSettings,
 };
-use rslab::CscMatrix;
 
-fn analyze(m: &CscMatrix<f64>, params: &SupernodeParams) -> SymbolicFactorization {
-    rslab::symbolic::analyze(m.n, &m.col_ptr, &m.row_idx, params, OrderingMethod::Amd).unwrap()
+fn analyze(m: &CscMatrix<f64>, params: &AmalgamationSettings) -> SymbolicFactorization {
+    let ordering = OrderingSettings {
+        method: OrderingMethod::Amd,
+        ..Default::default()
+    };
+    rslab::symbolic::analyze(m.n, &m.col_ptr, &m.row_idx, &ordering, params).unwrap()
 }
 
 /// Arrow matrix: variables 0..n-2 are coupled only to variable n-1
@@ -76,9 +80,9 @@ fn arrow_matrix_collapses_under_renumber() {
 
     // Adjacency strategy: only one merge possible. Expect >=3
     // supernodes (specifically: many leaf singletons + the root).
-    let adj_params = SupernodeParams {
+    let adj_params = AmalgamationSettings {
         nemin: 32,
-        amalgamation_strategy: AmalgamationStrategy::Adjacency,
+        strategy: AmalgamationStrategy::Adjacency,
         ..Default::default()
     };
     let adj_sym = analyze(&m, &adj_params);
@@ -91,9 +95,9 @@ fn arrow_matrix_collapses_under_renumber() {
     // Renumber strategy: with nemin=32 >= n=8, every fundamental
     // supernode is a candidate to merge into its parent -> 1
     // supernode covering all 8 columns.
-    let renum_params = SupernodeParams {
+    let renum_params = AmalgamationSettings {
         nemin: 32,
-        amalgamation_strategy: AmalgamationStrategy::Renumber,
+        strategy: AmalgamationStrategy::Renumber,
         ..Default::default()
     };
     let renum_sym = analyze(&m, &renum_params);
@@ -111,9 +115,9 @@ fn bushy_fan_collapses_under_renumber() {
     // where the bias-emit-late traversal needs to handle multiple
     // (>=10) sibling subtrees correctly.
     let m = bushy_fan(33);
-    let params = SupernodeParams {
+    let params = AmalgamationSettings {
         nemin: 64,
-        amalgamation_strategy: AmalgamationStrategy::Renumber,
+        strategy: AmalgamationStrategy::Renumber,
         ..Default::default()
     };
     let sym = analyze(&m, &params);
@@ -131,14 +135,14 @@ fn tridiagonal_renumber_is_at_least_as_aggressive() {
     // Renumber is strictly more aggressive (reverse iteration +
     // bias) so its supernode count must be <= Adjacency's.
     let m = tridiagonal(8);
-    let adj_params = SupernodeParams {
+    let adj_params = AmalgamationSettings {
         nemin: 32,
-        amalgamation_strategy: AmalgamationStrategy::Adjacency,
+        strategy: AmalgamationStrategy::Adjacency,
         ..Default::default()
     };
-    let renum_params = SupernodeParams {
+    let renum_params = AmalgamationSettings {
         nemin: 32,
-        amalgamation_strategy: AmalgamationStrategy::Renumber,
+        strategy: AmalgamationStrategy::Renumber,
         ..Default::default()
     };
     let adj = analyze(&m, &adj_params);
@@ -161,9 +165,9 @@ fn perm_is_valid_bijection_under_renumber() {
     // bijection on 0..n.
     for n in [4, 8, 33, 64] {
         let m = arrow_matrix(n);
-        let params = SupernodeParams {
+        let params = AmalgamationSettings {
             nemin: 32,
-            amalgamation_strategy: AmalgamationStrategy::Renumber,
+            strategy: AmalgamationStrategy::Renumber,
             ..Default::default()
         };
         let sym = analyze(&m, &params);

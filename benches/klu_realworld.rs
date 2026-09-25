@@ -149,7 +149,7 @@ fn main() {
         a.matvec(&xt, &mut b);
 
         // --- RSLAB KLU, strictly sequential (default settings otherwise) ---
-        let seq = KluSettings::default().with_parallel_factor(false);
+        let seq = KluSettings::default().with_parallel(rslab::KluParallel::Off);
         let t = Instant::now();
         let sym = match KluSymbolic::analyze_with(&a, &seq) {
             Ok(s) => s,
@@ -206,7 +206,7 @@ fn main() {
         );
 
         // --- RSLAB KLU, opt-in parallel per-block factor/refactor ---
-        let par = KluSettings::default().with_parallel_factor(true);
+        let par = KluSettings::default().with_parallel(rslab::KluParallel::On);
         let t = Instant::now();
         let mut klu_p = sym.factor(&a, &par).unwrap();
         let t_fac_p = t.elapsed().as_secs_f64();

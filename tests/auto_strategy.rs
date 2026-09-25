@@ -7,9 +7,15 @@
 
 #![allow(clippy::assertions_on_constants, clippy::needless_range_loop)]
 use rslab::ordering::elimination_tree::EliminationTree;
-use rslab::symbolic::{
-    pick_amalgamation_strategy, AmalgamationStrategy, AUTO_MULTI_CHILD_FRAC_THRESHOLD,
-};
+use rslab::symbolic::{pick_amalgamation_strategy, AmalgamationStrategy};
+
+/// The default path-like fraction of `AmalgamationSettings`.
+fn pick(etree: &EliminationTree) -> AmalgamationStrategy {
+    pick_amalgamation_strategy(
+        etree,
+        rslab::AmalgamationSettings::default().path_like_fraction,
+    )
+}
 
 /// Build a path: 0 -> 1 -> 2 -> ... -> n-1 (root). Every internal
 /// node has exactly one child; multi_child_frac = 0.
@@ -73,7 +79,7 @@ fn binary_tree_etree(depth: usize) -> EliminationTree {
 fn path_dispatches_to_adjacency() {
     let etree = path_etree(100);
     assert_eq!(
-        pick_amalgamation_strategy(&etree),
+        pick(&etree),
         AmalgamationStrategy::Adjacency,
         "pure path must dispatch Adjacency"
     );
@@ -83,7 +89,7 @@ fn path_dispatches_to_adjacency() {
 fn complete_binary_tree_dispatches_to_renumber() {
     let etree = binary_tree_etree(5); // 2^6-1 = 63 nodes
     assert_eq!(
-        pick_amalgamation_strategy(&etree),
+        pick(&etree),
         AmalgamationStrategy::Renumber,
         "complete binary tree must dispatch Renumber"
     );
@@ -95,10 +101,7 @@ fn empty_etree_dispatches_to_adjacency() {
         parent: Vec::new(),
         n: 0,
     };
-    assert_eq!(
-        pick_amalgamation_strategy(&etree),
-        AmalgamationStrategy::Adjacency,
-    );
+    assert_eq!(pick(&etree), AmalgamationStrategy::Adjacency,);
 }
 
 #[test]
@@ -108,7 +111,7 @@ fn leaf_only_forest_dispatches_to_adjacency() {
         n: 10,
     };
     assert_eq!(
-        pick_amalgamation_strategy(&etree),
+        pick(&etree),
         AmalgamationStrategy::Adjacency,
         "no internal nodes means no merging opportunities; fall back"
     );
@@ -118,9 +121,8 @@ fn leaf_only_forest_dispatches_to_adjacency() {
 fn auto_default_resolves_under_threshold() {
     // Tiny path of 5 nodes; multi_child_frac = 0.0 < threshold.
     let etree = path_etree(5);
-    let strat = pick_amalgamation_strategy(&etree);
+    let strat = pick(&etree);
     assert_eq!(strat, AmalgamationStrategy::Adjacency);
-    assert!(0.0 < AUTO_MULTI_CHILD_FRAC_THRESHOLD);
 }
 
 #[test]
@@ -144,10 +146,7 @@ fn near_path_with_one_branch_still_adjacency() {
     // every other internal has 1. internal count = 99 + 1 (node 50
     // is still internal) -> 99. multi_child = 1.
     // multi_child_frac ~ 1/99 ~ 0.010 < 0.05 -> Adjacency.
-    assert_eq!(
-        pick_amalgamation_strategy(&etree),
-        AmalgamationStrategy::Adjacency,
-    );
+    assert_eq!(pick(&etree), AmalgamationStrategy::Adjacency,);
 }
 
 #[test]
@@ -162,8 +161,5 @@ fn fan_at_root_dispatches_to_renumber() {
         parent[i] = Some(n - 1);
     }
     let etree = EliminationTree { parent, n };
-    assert_eq!(
-        pick_amalgamation_strategy(&etree),
-        AmalgamationStrategy::Renumber,
-    );
+    assert_eq!(pick(&etree), AmalgamationStrategy::Renumber,);
 }

@@ -12,7 +12,7 @@
 //! per entry, and runs the inner loops over contiguous memory.
 //!
 //! Parallelism comes from the supernodal elimination tree. The tree is cut
-//! into a fixed number of independent leaf subtrees ([`LEAF_SUBTREES`], not a
+//! into a fixed number of independent leaf subtrees (`SolveSettings::leaf_subtrees`, not a
 //! function of the thread count) plus the ancestors above the cut. In the
 //! forward sweep the subtrees run in parallel; updates that leave a subtree
 //! (into ancestor rows) go to a per-subtree accumulator and are reduced in
@@ -35,24 +35,6 @@ use crate::numeric::supernodal::panel::PanelFactor;
 use crate::scalar::{fmadd, Scalar};
 
 const NONE: u32 = u32::MAX;
-
-/// Number of independent leaf subtrees the elimination tree is cut into (the
-/// summation order, and with it the result, does not depend on threads).
-const LEAF_SUBTREES: usize = 128;
-
-/// Column block of the ancestor-node sweeps: a block's triangle is one
-/// sequential task, its update of the rows below (the bulk of the work) is
-/// spread over row-range tasks.
-const TRI_NB: usize = 512;
-
-/// Columns per product / dot task of the ancestor sweeps.
-const ANCESTOR_COL_CHUNK: usize = 32;
-
-/// Panel entries from which an ancestor node uses the blocked, chunked
-/// sweep (with parallel sections when it runs alone); smaller ancestors use
-/// the plain node kernels. A size rule, so the arithmetic of a node never
-/// depends on the thread count.
-const APEX_MIN_WORK: usize = 1 << 18;
 
 /// One leaf subtree of the cut: its supernodes in elimination order and the
 /// ancestor columns its off-tree updates accumulate into.
@@ -91,6 +73,8 @@ pub(crate) struct SolvePlan<T> {
     top_paths: Vec<Vec<u32>>,
     /// Position of a supernode in `top` (`NONE` below the cut).
     top_index: Vec<u32>,
+    /// The blocking of the sweeps.
+    cfg: crate::SolveSettings,
 }
 
 /// Per-task scratch vectors, reused across nodes: the big nodes need
@@ -139,7 +123,12 @@ impl<T: Scalar> SolvePlan<T> {
     /// tree of the analysis (`usize::MAX` for a root); an empty or
     /// mismatched one is replaced by the parent implied by the first
     /// off-block row of every supernode.
-    pub fn from_panels(factor: PanelFactor<T>, supernode_parent: &[usize], unit: bool) -> Self {
+    pub fn from_panels(
+        factor: PanelFactor<T>,
+        supernode_parent: &[usize],
+        unit: bool,
+        cfg: crate::SolveSettings,
+    ) -> Self {
         let n = factor.n;
         let ns = factor.n_supernodes();
         let sn_col: Vec<u32> = factor.sn_col.clone();
@@ -209,7 +198,7 @@ impl<T: Scalar> SolvePlan<T> {
             .filter(|&s| parent[s] == NONE)
             .map(|s| work[s])
             .sum();
-        let leaf_cap = total / LEAF_SUBTREES as u64;
+        let leaf_cap = total / cfg.leaf_subtrees.max(1) as u64;
 
         // Cut: split the heaviest subtree until every leaf subtree is under
         // the cap (or a single supernode).
@@ -383,6 +372,11 @@ impl<T: Scalar> SolvePlan<T> {
             top_levels,
             top_paths,
             top_index,
+            cfg: crate::SolveSettings {
+                block: cfg.block.max(1),
+                ancestor_chunk: cfg.ancestor_chunk.max(1),
+                ..cfg
+            },
         }
     }
 
@@ -616,7 +610,7 @@ impl<T: Scalar> SolvePlan<T> {
                 let len = self.top_paths[self.top_index[s as usize] as usize].len() * nr;
                 // SAFETY: node `i` owns `acc_all[offsets[i]..offsets[i] + len]`.
                 let acc = unsafe { &mut accs.slice()[offsets[i]..offsets[i] + len] };
-                if self.work(s) >= APEX_MIN_WORK {
+                if self.work(s) >= self.cfg.apex_min_work {
                     self.apex_forward(s, nr, y, acc, par, sc);
                 } else if nr == 1 {
                     self.fwd_node(s, y, acc, &mut sc.t);
@@ -659,7 +653,7 @@ impl<T: Scalar> SolvePlan<T> {
         for level in &self.top_levels {
             let node_par = level.len() >= nt || nt == 1;
             let sweep = |s: u32, x: &mut [T], par: bool, sc: &mut Scratch<T>| {
-                if self.work(s) >= APEX_MIN_WORK {
+                if self.work(s) >= self.cfg.apex_min_work {
                     self.apex_backward(s, nr, x, par, sc);
                 } else if nr == 1 {
                     self.bwd_node(s, x, &mut sc.g);
@@ -684,7 +678,7 @@ impl<T: Scalar> SolvePlan<T> {
 
     /// Forward sweep through one large ancestor node: the extended vector
     /// `v = [y_block, t]` (`t` the negated off-block product) in column
-    /// blocks of `TRI_NB`; the block triangle sequential, the update of the
+    /// blocks of `block`; the block triangle sequential, the update of the
     /// rows below as column-chunk products into private slabs plus a
     /// reduction in fixed chunk order, both parallel when `par` (the same
     /// arithmetic either way). The off-block rows end up in `acc` (the
@@ -703,16 +697,16 @@ impl<T: Scalar> SolvePlan<T> {
         v.clear();
         v.extend_from_slice(&y[c0 * nr..(c0 + w) * nr]);
         v.resize(ld * nr, T::zero());
-        let gmax = TRI_NB.div_ceil(ANCESTOR_COL_CHUNK);
+        let gmax = self.cfg.block.div_ceil(self.cfg.ancestor_chunk);
         let partial = &mut sc.partial;
-        for (jb, je) in col_blocks(w) {
+        for (jb, je) in col_blocks(w, self.cfg.block) {
             tri_forward(v, panel, ld, nr, jb, je);
             if je == ld {
                 break;
             }
             let chunks: Vec<(usize, usize)> = (jb..je)
-                .step_by(ANCESTOR_COL_CHUNK)
-                .map(|k| (k, (k + ANCESTOR_COL_CHUNK).min(je)))
+                .step_by(self.cfg.ancestor_chunk)
+                .map(|k| (k, (k + self.cfg.ancestor_chunk).min(je)))
                 .collect();
             let rows = ld - je;
             let slab = rows * nr;
@@ -789,12 +783,12 @@ impl<T: Scalar> SolvePlan<T> {
         let accv = &mut sc.accv;
         accv.clear();
         accv.resize(w * nr, T::zero());
-        for (jb, je) in col_blocks(w).into_iter().rev() {
+        for (jb, je) in col_blocks(w, self.cfg.block).into_iter().rev() {
             if je < ld {
                 let tail: &[T] = &v[je * nr..ld * nr];
                 let dots = |c: usize, outs: &mut [T]| {
                     for (kk, out) in outs.chunks_exact_mut(nr).enumerate() {
-                        let k = jb + c * ANCESTOR_COL_CHUNK + kk;
+                        let k = jb + c * self.cfg.ancestor_chunk + kk;
                         let col = &panel[k * ld + je..(k + 1) * ld];
                         if nr == 1 {
                             out[0] = dot4(col, tail);
@@ -805,11 +799,11 @@ impl<T: Scalar> SolvePlan<T> {
                 };
                 let ab = &mut accv[jb * nr..je * nr];
                 if par {
-                    ab.par_chunks_mut(ANCESTOR_COL_CHUNK * nr)
+                    ab.par_chunks_mut(self.cfg.ancestor_chunk * nr)
                         .enumerate()
                         .for_each(|(c, outs)| dots(c, outs));
                 } else {
-                    for (c, outs) in ab.chunks_mut(ANCESTOR_COL_CHUNK * nr).enumerate() {
+                    for (c, outs) in ab.chunks_mut(self.cfg.ancestor_chunk * nr).enumerate() {
                         dots(c, outs);
                     }
                 }
@@ -1119,11 +1113,11 @@ fn tri_backward<T: Scalar>(
     }
 }
 
-/// Column blocks `[jb, je)` of width `TRI_NB` over `w` columns.
-fn col_blocks(w: usize) -> Vec<(usize, usize)> {
+/// Column blocks `[jb, je)` of width `nb` over `w` columns.
+fn col_blocks(w: usize, nb: usize) -> Vec<(usize, usize)> {
     (0..w)
-        .step_by(TRI_NB)
-        .map(|jb| (jb, (jb + TRI_NB).min(w)))
+        .step_by(nb)
+        .map(|jb| (jb, (jb + nb).min(w)))
         .collect()
 }
 

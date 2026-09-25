@@ -215,7 +215,7 @@ fn ldlt_no_free() -> bool {
 /// absolute floor, typically `eps_rel * ||A||inf`); `Fail` disables
 /// perturbation. `values` are the values being factored.
 fn static_pivot_floor<T: Scalar>(values: &[T], opts: &SolverSettings) -> Option<f64> {
-    match opts.on_zero_pivot {
+    match opts.pivoting.on_zero_pivot {
         ZeroPivotAction::Fail => None,
         ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
         ZeroPivotAction::ForceAccept => {

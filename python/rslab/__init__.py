@@ -232,8 +232,8 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
         A prepared :class:`Settings` object.
     **kwargs
         Any :class:`Settings` keyword (``threads``, ``preconditioner``,
-        ``drop_tol``, ``force_accept``, ``ordering``, ``scaling``, ``pivot_u``,
-        ``nemin``, ``relax``, ``panel_nb``, ``interrupt`` ...),
+        ``drop_tol``, ``force_accept``, ``ordering``, ``scaling``, ``nemin``,
+        ``relax``, ``panel_nb``, ``interrupt`` ...),
         overriding ``settings``.
 
     Returns
@@ -280,8 +280,8 @@ def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
     settings : Settings, optional
         A prepared :class:`Settings` object.
     **kwargs
-        Any :class:`Settings` keyword, overriding ``settings``. ``pivot_u``
-        (default 0.1) is the threshold-pivoting tolerance of this path;
+        Any :class:`Settings` keyword, overriding ``settings``.
+        ``pivot_threshold`` (default 0.1) is the threshold-pivoting tolerance of this path;
         ``scaling`` is ignored here (the LU path scales two-sided) and
         reported under ``diagnostics()['warnings']``.
 
@@ -327,7 +327,7 @@ def klu(A, *, settings: KluSettings | None = None, **kwargs) -> Klu:
     settings : KluSettings, optional
         A prepared :class:`KluSettings` object.
     **kwargs
-        Any :class:`KluSettings` keyword (``pivot_tol``, ``row_scaling``,
+        Any :class:`KluSettings` keyword (``pivot_threshold``, ``row_scaling``,
         ``btf``, ``parallel``, ``interrupt``), overriding ``settings``.
 
     Returns

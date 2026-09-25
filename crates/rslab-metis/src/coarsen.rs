@@ -53,6 +53,7 @@ pub fn coarsen_level(
     fine: &Graph,
     rng: &mut SplitMix,
     two_hop_threshold: f64,
+    parallel_min_edges: usize,
     counters: &mut CoarsenCounters,
 ) -> CoarseGraph {
     let n = fine.nvtxs as usize;
@@ -119,7 +120,7 @@ pub fn coarsen_level(
     }
 
     // --- Contract ---
-    let graph = contract(fine, &cmap, cnvtxs);
+    let graph = contract(fine, &cmap, cnvtxs, parallel_min_edges);
     CoarseGraph { graph, cmap }
 }
 
@@ -139,7 +140,13 @@ pub fn coarsen(
         if cur.nvtxs <= opts.coarsen_floor as i32 {
             break;
         }
-        let level = coarsen_level(cur, rng, opts.two_hop_ratio_threshold, counters);
+        let level = coarsen_level(
+            cur,
+            rng,
+            opts.two_hop_ratio_threshold,
+            opts.parallel_min_edges,
+            counters,
+        );
         let new_nvtxs = level.graph.nvtxs;
         if new_nvtxs == 0 || new_nvtxs as f64 > 0.95 * prev_nvtxs as f64 {
             // Stalled: this level made <5% progress, so stop. Keep it
@@ -214,7 +221,7 @@ fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
 }
 
 /// Build the coarse graph from a fine graph and a fine-to-coarse map.
-fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
+fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) -> Graph {
     let cn = cnvtxs as usize;
     let n = fine.nvtxs as usize;
     // Accumulate vertex weights.
@@ -279,8 +286,7 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
     // blocks whose outputs are concatenated in order: the coarse graph is the
     // same as the serial loop's, whatever the thread count. On the top levels
     // of a large nested dissection this was most of the coarsening time.
-    const PARALLEL_MIN_EDGES: usize = 200_000;
-    let blocks = if fine.adjncy.len() >= PARALLEL_MIN_EDGES && rayon::current_num_threads() > 1 {
+    let blocks = if fine.adjncy.len() >= parallel_min_edges && rayon::current_num_threads() > 1 {
         (8 * rayon::current_num_threads()).min(cn)
     } else {
         1
@@ -393,7 +399,7 @@ mod tests {
                 .unwrap();
             pool.install(|| {
                 let mut rng = SplitMix::new(3);
-                coarsen_level(&g, &mut rng, 0.95, &mut CoarsenCounters::default())
+                coarsen_level(&g, &mut rng, 0.95, 200_000, &mut CoarsenCounters::default())
             })
         };
         let (a, b) = (level(1), level(4));
@@ -478,7 +484,7 @@ mod tests {
         let g = grid(8, 8);
         let mut rng = SplitMix::new(1);
         let mut ctr = CoarsenCounters::default();
-        let cg = coarsen_level(&g, &mut rng, 0.85, &mut ctr);
+        let cg = coarsen_level(&g, &mut rng, 0.85, 200_000, &mut ctr);
         assert_valid_coarse(&g, &cg);
         // On a 2D grid SHEM should pair ~half the vertices.
         assert!(
@@ -522,7 +528,7 @@ mod tests {
         let g = Graph::from_csc_pattern(&pat).unwrap();
         let mut rng = SplitMix::new(1);
         let mut ctr = CoarsenCounters::default();
-        let cg = coarsen_level(&g, &mut rng, 0.85, &mut ctr);
+        let cg = coarsen_level(&g, &mut rng, 0.85, 200_000, &mut ctr);
         assert_valid_coarse(&g, &cg);
         assert_eq!(
             cg.graph.nvtxs, 2,
@@ -537,7 +543,7 @@ mod tests {
         let g = tridiag(10);
         let mut rng = SplitMix::new(1);
         let mut ctr = CoarsenCounters::default();
-        let cg = coarsen_level(&g, &mut rng, 0.85, &mut ctr);
+        let cg = coarsen_level(&g, &mut rng, 0.85, 200_000, &mut ctr);
         assert_valid_coarse(&g, &cg);
         assert!(cg.graph.nvtxs <= 6);
     }
@@ -549,8 +555,8 @@ mod tests {
         let mut r2 = SplitMix::new(42);
         let mut c1 = CoarsenCounters::default();
         let mut c2 = CoarsenCounters::default();
-        let a = coarsen_level(&g, &mut r1, 0.85, &mut c1);
-        let b = coarsen_level(&g, &mut r2, 0.85, &mut c2);
+        let a = coarsen_level(&g, &mut r1, 0.85, 200_000, &mut c1);
+        let b = coarsen_level(&g, &mut r2, 0.85, 200_000, &mut c2);
         assert_eq!(a.cmap, b.cmap);
         assert_eq!(a.graph.xadj, b.graph.xadj);
         assert_eq!(a.graph.adjncy, b.graph.adjncy);
@@ -642,7 +648,7 @@ mod tests {
         let fine = Graph::from_csc_pattern(&pat).unwrap();
         // Force a matching 0<->3 by custom cmap.
         let cmap: Vec<i32> = vec![0, 1, 2, 0];
-        let coarse = contract(&fine, &cmap, 3);
+        let coarse = contract(&fine, &cmap, 3, 200_000);
         // Coarse vertex 0 = {0,3}: weight 2 to coarse vertex 1 (via
         // 0-1 and 3-1), weight 2 to coarse vertex 2.
         let mut got: Vec<(i32, i32)> = Vec::new();

@@ -1,5 +1,5 @@
 use super::*;
-use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
+use crate::numeric::settings::SolverSettings;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::OrderingMethod;
@@ -399,11 +399,7 @@ fn perturb_rescues_singular_complex() {
         "exact mode should reject the singular pivot"
     );
 
-    let opts = SolverSettings {
-        on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
-        drop_tol: None,
-        ..Default::default()
-    };
+    let opts = SolverSettings::preconditioner(1e-8);
     let f = LdltSolver::factor_with(&a, &opts).unwrap();
     assert!(
         f.n_perturbed() >= 1,
@@ -438,11 +434,7 @@ fn exact_mode_never_perturbs_well_conditioned() {
         }
         CscMatrix::<Complex<f64>>::from_triplets(n, &r, &cc, &v).unwrap()
     };
-    let opts = SolverSettings {
-        on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-8 },
-        drop_tol: None,
-        ..Default::default()
-    };
+    let opts = SolverSettings::preconditioner(1e-8);
     let f = LdltSolver::factor_with(&a, &opts).unwrap();
     assert_eq!(
         f.n_perturbed(),

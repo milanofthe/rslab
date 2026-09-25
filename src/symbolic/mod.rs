@@ -13,13 +13,14 @@ pub mod supernode;
 pub(crate) mod supervariables;
 
 use crate::error::RslabError;
+use crate::numeric::settings::{AmalgamationSettings, OrderingSettings};
 use crate::sparse::csc::CscPattern;
 use ordering_graph::OrderingGraph;
 
 pub use column_counts::{column_counts_gnp, column_counts_permuted, total_factor_nnz};
 pub use supernode::{
     find_supernodes, pick_amalgamation_strategy, supernode_parents, AmalgamationStrategy,
-    RelaxAmalgamation, Supernode, SupernodeParams, AUTO_MULTI_CHILD_FRAC_THRESHOLD,
+    RelaxAmalgamation, Supernode,
 };
 
 /// The fill-reducing ordering of an analysis.
@@ -75,31 +76,46 @@ pub fn analyze(
     n: usize,
     col_ptr: &[usize],
     row_idx: &[usize],
-    params: &SupernodeParams,
-    method: OrderingMethod,
+    ordering: &OrderingSettings,
+    amalgamation: &AmalgamationSettings,
 ) -> Result<SymbolicFactorization, RslabError> {
+    let method = ordering.method;
     let full = &crate::logging::timed(
         || "analysis: symmetric pattern".into(),
         || crate::sparse::csc::symmetric_pattern(n, col_ptr, row_idx),
     );
-    if method == OrderingMethod::Auto && params.given_perm.is_none() {
-        return race::race(full, params);
+    if method == OrderingMethod::Auto && ordering.permutation.is_none() {
+        return race::race(full, ordering, amalgamation);
     }
-    let px = race::prefix(&OrderingGraph::new(full), params, method, race::ND_SEED)?;
-    race::finish(px, full, params)
+    let graph = OrderingGraph::new(full, ordering);
+    let px = race::prefix(&graph, ordering, method, ordering.nd.seed)?;
+    race::finish(px, full, amalgamation)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sparse::csc::CscMatrix;
+    use crate::SolverSettings;
+
+    fn try_run(
+        m: &CscMatrix<f64>,
+        s: &SolverSettings,
+        method: OrderingMethod,
+    ) -> Result<SymbolicFactorization, RslabError> {
+        let ordering = OrderingSettings {
+            method,
+            ..s.ordering.clone()
+        };
+        analyze(m.n, &m.col_ptr, &m.row_idx, &ordering, &s.amalgamation)
+    }
 
     fn run(
         m: &CscMatrix<f64>,
-        params: &SupernodeParams,
+        s: &SolverSettings,
         method: OrderingMethod,
     ) -> SymbolicFactorization {
-        analyze(m.n, &m.col_ptr, &m.row_idx, params, method).unwrap()
+        try_run(m, s, method).unwrap()
     }
 
     /// 2D 5-point Laplacian of `k x k`, lower triangle.
@@ -144,7 +160,7 @@ mod tests {
             OrderingMethod::MetisND,
             OrderingMethod::Rcm,
         ] {
-            let s = run(&a, &SupernodeParams::default(), method);
+            let s = run(&a, &SolverSettings::default(), method);
             assert_permutation(&s.perm, a.n);
             assert!((0..a.n).all(|k| s.perm_inv[s.perm[k]] == k));
             assert_eq!(s.supernodes.iter().map(|sn| sn.ncol).sum::<usize>(), a.n);
@@ -160,13 +176,13 @@ mod tests {
     #[test]
     fn the_race_is_never_worse_than_its_candidates() {
         let a = grid(40);
-        let raced = run(&a, &SupernodeParams::default(), OrderingMethod::Auto).factor_nnz;
+        let raced = run(&a, &SolverSettings::default(), OrderingMethod::Auto).factor_nnz;
         for method in [
             OrderingMethod::Amd,
             OrderingMethod::Amf,
             OrderingMethod::Rcm,
         ] {
-            assert!(raced <= run(&a, &SupernodeParams::default(), method).factor_nnz);
+            assert!(raced <= run(&a, &SolverSettings::default(), method).factor_nnz);
         }
     }
 
@@ -175,20 +191,14 @@ mod tests {
     fn a_given_permutation_is_honoured() {
         let a = grid(10);
         let rev: Vec<usize> = (0..a.n).rev().collect();
-        let params = SupernodeParams {
-            given_perm: Some(rev.clone().into()),
-            ..Default::default()
-        };
+        let params = SolverSettings::default().with_permutation(rev.clone().into());
         let s = run(&a, &params, OrderingMethod::Auto);
         // The postorder may reorder within the tree; the factor size is the
         // one of the given ordering.
         let direct = run(&a, &params, OrderingMethod::Amd);
         assert_eq!(s.factor_nnz, direct.factor_nnz);
-        let bad = SupernodeParams {
-            given_perm: Some(vec![0; a.n].into()),
-            ..Default::default()
-        };
-        assert!(analyze(a.n, &a.col_ptr, &a.row_idx, &bad, OrderingMethod::Amd).is_err());
+        let bad = SolverSettings::default().with_permutation(vec![0; a.n].into());
+        assert!(try_run(&a, &bad, OrderingMethod::Amd).is_err());
     }
 
     /// The frontal height reported by the analysis equals the row set the
@@ -199,10 +209,7 @@ mod tests {
         use crate::numeric::supernodal::LlSchedule;
         let a = grid(20);
         for nemin in [1usize, 16, 32] {
-            let params = SupernodeParams {
-                nemin,
-                ..Default::default()
-            };
+            let params = SolverSettings::default().with_nemin(nemin);
             let sym = run(&a, &params, OrderingMethod::Amd);
             let sched = LlSchedule::build(&sym);
             assert!(
@@ -249,7 +256,8 @@ mod tests {
         let n = k * k * d;
         let a = CscMatrix::from_triplets(n, &r, &c, &vec![1.0; r.len()]).unwrap();
         let full = crate::sparse::csc::symmetric_pattern(n, &a.col_ptr, &a.row_idx);
-        let graph = OrderingGraph::new(&full);
+        let settings = OrderingSettings::default();
+        let graph = OrderingGraph::new(&full, &settings);
         for method in [
             OrderingMethod::Amd,
             OrderingMethod::Amf,
@@ -275,7 +283,7 @@ mod tests {
             }
         }
         let a = CscMatrix::from_triplets(n, &r, &c, &vec![1.0; r.len()]).unwrap();
-        let s = run(&a, &SupernodeParams::default(), OrderingMethod::Amd);
+        let s = run(&a, &SolverSettings::default(), OrderingMethod::Amd);
         assert_eq!(s.supernodes.len(), 1);
         assert_eq!(s.factor_nnz, n * (n + 1) / 2);
     }

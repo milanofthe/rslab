@@ -49,7 +49,7 @@ fn main() {
         ("Rcm", OrderingMethod::Rcm),
     ] {
         let opts = SolverSettings::exact()
-            .with_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-6 })
+            .with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-6 })
             .with_ordering(ord);
         let t0 = Instant::now();
         let lu = match LuSolver::factor(&a, &opts) {

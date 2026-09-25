@@ -32,8 +32,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     kt.interrupted()?;
-    let ll_gemm_gate = kt.scalar_gate;
-    let ll_gemm_par = kt.par_gemm;
+    let ll_gemm_gate = kt.k.scalar_gate;
+    let ll_gemm_par = kt.k.par_gemm;
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
     let nrow = sched.rows(s).len();
@@ -61,6 +61,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
         |k| (sched.rows(k), sched.rows(k)),
         false,
         ll_gemm_par,
+        kt.k.fork_min_flops,
     );
     let (spans, tile_w, tiled) = (&plan.spans, plan.tile_w, plan.tiled);
     let seq_gemm_par = if plan.forks { ll_gemm_par } else { usize::MAX };
@@ -132,6 +133,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                             vd_buf.as_ptr(),
                             npk as isize,
                             usize::MAX,
+                            &kt.k,
                         )
                     };
                     for c in 0..npk {
@@ -252,6 +254,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     vd_buf.as_ptr(),
                     npk as isize,
                     seq_gemm_par,
+                    &kt.k,
                 )
             };
             for c in 0..npk {

@@ -4,15 +4,6 @@
 use super::Li;
 use crate::scalar::Scalar;
 
-/// Work above which a node forks inside its cmod. A small node that forks
-/// pays rayon's join-steal latency: while its join waits for a stolen slab,
-/// the waiting thread steals other work, often a whole sibling subtree, and
-/// this node (and every dependent on its chain) stalls for tens of ms doing
-/// almost no flops (measured: 74 ms of cmod at 0.03 Gflop on a 1046x170
-/// node). Below the gate the node's cmod runs strictly serially; the
-/// tree-level parallelism covers it.
-const CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
-
 /// How a node applies its descendants' updates (`cmod`), shared by the LDL^T
 /// and LU kernels. Every field is a pure function of the node and the
 /// kernel thresholds, never of the thread count or of timing: a
@@ -61,6 +52,7 @@ impl CmodPlan {
         lists: impl Fn(usize) -> (&'a [Li], &'a [Li]),
         count_u: bool,
         par_gemm: usize,
+        fork_min_flops: usize,
     ) -> Self {
         let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
         let landing = |v: &[Li]| {
@@ -92,7 +84,7 @@ impl CmodPlan {
             flops += lwork + uwork;
             spans.push(Span { k, l, u });
         }
-        let forks = flops >= CMOD_FORK_MIN_FLOPS.max(par_gemm);
+        let forks = flops >= fork_min_flops.max(par_gemm);
         let tile_w = (ncol / 16).clamp(32, 256);
         CmodPlan {
             spans,

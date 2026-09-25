@@ -215,8 +215,8 @@ fn main() {
             // KLU variants: pivot tolerance and BTF.
             for (label, settings) in [
                 ("klu", KluSettings::default()),
-                ("klu-p1", KluSettings::default().with_pivot_tol(1.0)),
-                ("klu-p.1", KluSettings::default().with_pivot_tol(0.1)),
+                ("klu-p1", KluSettings::default().with_pivot_threshold(1.0)),
+                ("klu-p.1", KluSettings::default().with_pivot_threshold(0.1)),
                 ("klu-nobtf", KluSettings::default().with_btf(false)),
                 ("klu-noscl", KluSettings::default().with_row_scaling(false)),
             ] {
@@ -293,7 +293,8 @@ fn main() {
             }
             // LU with full partial pivoting and refinement, for the accuracy picture.
             {
-                let s = LuSolver::factor(&a, &SolverSettings::default().with_pivot_u(1.0)).unwrap();
+                let s = LuSolver::factor(&a, &SolverSettings::default().with_pivot_threshold(1.0))
+                    .unwrap();
                 let x = s.solve(&b).unwrap();
                 let (xr, out) = s
                     .solve_refined_with(&a, &b, &rslab::RefinePolicy::steps(3))

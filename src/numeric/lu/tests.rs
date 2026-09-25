@@ -76,7 +76,7 @@ fn lu_matching_bounds_pivot_growth() {
     );
     // Without the matching the shifted rows leave the fully-summed
     // blocks without a usable pivot.
-    let s0 = LuSolver::factor(&a, &opts.with_lu_matching(false));
+    let s0 = LuSolver::factor(&a, &opts.with_matching(false));
     assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
 }
 use num_complex::Complex;
@@ -268,7 +268,7 @@ fn analysis_on_a_given_ordering() {
         }
     }
     let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
-    let o = SolverSettings::default().with_lu_matching(false);
+    let o = SolverSettings::default().with_matching(false);
     let s0 = LuSymbolic::analyze_with(&a, &o).unwrap();
     let f0 = s0.factor(&a, &o).unwrap();
     let o1 = o.clone().with_permutation(s0.permutation().into());
@@ -388,7 +388,7 @@ fn lu_pivot_u_knob_wired_and_solves() {
     let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     for u in [0.0f64, 0.1, 0.5, 1.0] {
-        let s = SolverSettings::default().with_pivot_u(u);
+        let s = SolverSettings::default().with_pivot_threshold(u);
         let f = LuSolver::factor(&a, &s).unwrap();
         let x = f.solve(&b).unwrap();
         let mut ax = vec![Complex::new(0.0, 0.0); n];
@@ -397,8 +397,20 @@ fn lu_pivot_u_knob_wired_and_solves() {
         assert!(res < 1e-9, "pivot_u={u} residual {res}");
     }
     // Out-of-range values clamp into [0, 1].
-    assert_eq!(SolverSettings::default().with_pivot_u(5.0).pivot_u, 1.0);
-    assert_eq!(SolverSettings::default().with_pivot_u(-2.0).pivot_u, 0.0);
+    assert_eq!(
+        SolverSettings::default()
+            .with_pivot_threshold(5.0)
+            .pivoting
+            .threshold,
+        1.0
+    );
+    assert_eq!(
+        SolverSettings::default()
+            .with_pivot_threshold(-2.0)
+            .pivoting
+            .threshold,
+        0.0
+    );
 }
 
 #[test]
@@ -437,7 +449,7 @@ fn static_pivot_reuse_across_value_sweep() {
             .unwrap();
     let analysis = LuSymbolic::analyze(&template).unwrap();
     let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 4.0, 0.7)).collect();
-    let static_opts = SolverSettings::default().with_pivot_u(0.0);
+    let static_opts = SolverSettings::default().with_pivot_threshold(0.0);
     for shift in [0.0, 1.5, -0.8, 3.0] {
         let vv: Vec<Complex<f64>> = rr
             .iter()
@@ -605,7 +617,6 @@ fn phased_general_lu_analyze_once_factor_many() {
 
 #[test]
 fn incomplete_lu_reduces_fill_and_still_solves() {
-    use crate::numeric::settings::ZeroPivotAction;
     // Unsymmetric grid: incomplete LU (drop_tol) must shrink nnz(L+U) yet
     // still drive iterative refinement to a small residual - the MoM
     // sparse-preconditioner configuration.
@@ -644,11 +655,7 @@ fn incomplete_lu_reduces_fill_and_still_solves() {
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
 
     let full = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
-    let opts = SolverSettings {
-        on_zero_pivot: ZeroPivotAction::Fail,
-        drop_tol: Some(5e-2),
-        ..Default::default()
-    };
+    let opts = SolverSettings::default().with_drop_tol(5e-2);
     let inc = LuSolver::factor(&a, &opts).unwrap();
     assert!(
         inc.factor_nnz() < full.factor_nnz(),
@@ -704,7 +711,7 @@ fn unsymmetric_holes(n: usize, per_col: usize, seed: u64, holes: bool) -> Genera
 fn exact_structure_bounds_the_factor() {
     for (seed, matching) in [(7u64, false), (11, true), (13, true)] {
         let a = unsymmetric_holes(600, 3, seed, matching);
-        let opts = SolverSettings::default().with_lu_matching(matching);
+        let opts = SolverSettings::default().with_matching(matching);
         let lusym = LuSymbolic::analyze_with(&a, &opts).unwrap();
         assert_eq!(lusym.has_matching(), matching);
         let num = factor_general_lu_numeric(&lusym, &a, &opts).unwrap();

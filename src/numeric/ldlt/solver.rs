@@ -423,11 +423,11 @@ impl LdltSymbolic {
             symbolic,
             nnz: a.row_idx.len(),
             analyze_ms,
-            requested_ordering: opts.ordering,
+            requested_ordering: opts.ordering.method,
             est_cache: std::sync::Mutex::new(Vec::new()),
         };
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
-            let d = sym.symbolic.decisions(opts.ordering);
+            let d = sym.symbolic.decisions(opts.ordering.method);
             crate::logging::info(&format!(
                 "ldlt analyze: n={} nnz(A)={} ordering={}{} supernodes={} \
                  max_front={} levels={} {analyze_ms:.1} ms",
@@ -645,6 +645,7 @@ impl LdltSymbolic {
             factor,
             &factors.supernode_parent,
             true,
+            opts.solve,
         );
         diagnostics.push(
             "solve-layout",
@@ -1037,7 +1038,10 @@ mod tests {
         let sym = LdltSymbolic::analyze(&a).unwrap();
         // Auto capped at 8: a tridiagonal is thin/narrow -> policy returns 2.
         let auto = sym
-            .factor(&a, &SolverSettings::default().with_auto_threads(8))
+            .factor(
+                &a,
+                &SolverSettings::default().with_threads(crate::Threads::Auto { max: 8 }),
+            )
             .unwrap();
         assert_eq!(
             auto.diagnostics().threads,
@@ -1051,7 +1055,10 @@ mod tests {
         assert_eq!(fixed.diagnostics().threads, 5);
         // The auto cap clamps the prediction.
         let cap1 = sym
-            .factor(&a, &SolverSettings::default().with_auto_threads(1))
+            .factor(
+                &a,
+                &SolverSettings::default().with_threads(crate::Threads::Auto { max: 1 }),
+            )
             .unwrap();
         assert_eq!(cap1.diagnostics().threads, 1);
         // All still solve correctly.
