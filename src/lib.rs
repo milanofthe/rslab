@@ -168,7 +168,7 @@ pub use io::mtx::{
     parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_any,
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
-pub use numeric::iterative::{
+pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_block_fn_mon, gmres_block_mon, gmres_fn,
     gmres_recycled, gmres_recycled_fn, BlockKrylovResult, Factorization, KrylovResult,
     LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,

@@ -3232,7 +3232,7 @@ mod tests {
 
     #[test]
     fn klu_composes_as_gmres_preconditioner() {
-        use crate::numeric::iterative::gmres;
+        use crate::numeric::krylov::gmres;
         let a = circuit_like(120, 55);
         let m = KluSolver::factor(&a, &KluSettings::default()).unwrap();
         let b: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();

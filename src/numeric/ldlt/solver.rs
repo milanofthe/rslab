@@ -108,8 +108,8 @@ impl<T: Scalar> LdltSolver<T> {
     /// Settings come from the deterministic heuristic pick ([`tuned`](Self::tuned)):
     /// the adaptive ordering heuristic, the measured-default kernel knobs, and the
     /// exact nested-dissection bakeoff on large systems. Hardware-agnostic; if the
-    /// one-time install diagnosis has run (feature `tuning`,
-    /// [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
+    /// one-time install diagnosis has run (`install_diagnose`, feature
+    /// `tuning`), the worker count
     /// additionally comes from this machine's cached calibration.
     pub fn factor(a: &CscMatrix<T>) -> Result<Self, RslabError> {
         let (sym, s) = Self::tuned(a)?;
@@ -126,7 +126,7 @@ impl<T: Scalar> LdltSolver<T> {
     ///    `MetisND` and adopt it only on a clear predicted-flops win with no
     ///    regression in exact fill or transient peak;
     /// 4. with a cached hardware calibration (feature `tuning`, written once by
-    ///    [`install_diagnose`](crate::tuning::install_diagnose)), the worker count
+    ///    `install_diagnose`, feature `tuning`), the worker count
     ///    from the calibrated cost model instead of the capped structural default.
     pub fn tuned(a: &CscMatrix<T>) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
         Self::tuned_with(a, &SolverSettings::default())
@@ -255,7 +255,7 @@ impl<T: Scalar> LdltSolver<T> {
             .0)
     }
 
-    /// Iterative refinement under an explicit [`RefinePolicy`], reporting the
+    /// Iterative refinement under an explicit [`RefinePolicy`](crate::RefinePolicy), reporting the
     /// achieved backward error. The default policy stops as soon as the
     /// componentwise backward error reaches the roundoff floor instead of
     /// spending the whole step budget.
