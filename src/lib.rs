@@ -69,8 +69,9 @@
 //! Static pivoting ([`SolverSettings::preconditioner`]) never fails, and a
 //! drop tolerance trades fill for iterations. [`gmres`], [`gmres_block`],
 //! [`cocg`] (complex symmetric) and [`cocr`] take any [`LinearOperator`] and
-//! [`Preconditioner`] with their [`KrylovSettings`]; a `Complex<f32>` factor preconditions an `f64`
-//! iteration through [`LowPrecisionPreconditioner`].
+//! [`Preconditioner`] with their [`KrylovSettings`]; a `Complex<f32>`
+//! factor preconditions an `f64` iteration through
+//! [`LowPrecisionPreconditioner`].
 //!
 //! ```
 //! # fn main() -> Result<(), rslab::RslabError> {
