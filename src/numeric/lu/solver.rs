@@ -78,6 +78,34 @@ fn symmetrized_lower_pattern<T: Scalar>(
     (col_ptr, row_idx)
 }
 
+/// Whether the row matching is needed: some column's diagonal entry is
+/// missing, zero, or negligible against the column (`|a_jj|` below
+/// [`NEGLIGIBLE_DIAGONAL`] times its largest entry). There the front-local
+/// pivot search has no usable diagonal and the element growth runs away;
+/// the circuit matrices of the KLU corpus all have such columns and factor to
+/// roundoff only with the matching. Where every diagonal entry can pivot the
+/// permutation buys nothing and costs: on the MoM near-field matrices it
+/// breaks the diagonal the pivoting would use, adding 5 to 20 percent fill,
+/// hundreds of perturbed pivots and residuals up to seven orders of
+/// magnitude worse, and the circuits with a full diagonal factor the same
+/// either way.
+fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>) -> bool {
+    use rayon::prelude::*;
+    (0..a.n).into_par_iter().with_min_len(1024).any(|j| {
+        let (rows, vals) = (
+            &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]],
+            &a.values[a.col_ptr[j]..a.col_ptr[j + 1]],
+        );
+        let top = vals.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+        let diag = rows.binary_search(&j).map_or(0.0, |p| vals[p].magnitude());
+        diag.is_nan() || diag <= NEGLIGIBLE_DIAGONAL * top
+    })
+}
+
+/// Relative size below which a diagonal entry counts as absent for the
+/// matching decision.
+const NEGLIGIBLE_DIAGONAL: f64 = 1e-10;
+
 /// Reusable symbolic analysis for the unsymmetric LU path - the symmetrized
 /// pattern `A union A^T` analyzed once. Pass to [`factor_general_lu_numeric`] for
 /// each value-set that shares the pattern (frequency sweep / Newton).
@@ -176,8 +204,9 @@ impl LuSymbolic {
         }
         let t = crate::clock::Instant::now();
         // MC64 row matching: analyze the row-permuted matrix `B` whose
-        // diagonal carries the matched entries.
-        let matching = if opts.lu_matching {
+        // diagonal carries the matched entries, where the diagonal of `A`
+        // cannot carry the pivots itself.
+        let matching = if opts.lu_matching && diagonal_needs_matching(a) {
             let cache = crate::logging::timed(
                 || "lu analyze: matching".into(),
                 || {
