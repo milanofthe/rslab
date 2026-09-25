@@ -32,6 +32,7 @@ mod factor;
 mod factors;
 mod node;
 mod solver;
+mod structure;
 #[cfg(test)]
 mod tests;
 

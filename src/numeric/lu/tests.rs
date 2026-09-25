@@ -2,6 +2,7 @@ use super::factor::factor_general_lu_numeric;
 use super::factors::*;
 use super::solver::*;
 use crate::numeric::settings::SolverSettings;
+use crate::numeric::supernodal::Li;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 
@@ -759,4 +760,79 @@ fn incomplete_lu_reduces_fill_and_still_solves() {
     // The incomplete factor + a few refinement steps still solves accurately.
     let x = solve_lu_refined(&inc, &a, &b, 10).unwrap();
     assert!(resid(&a, &x, &b) < 1e-6, "residual {}", resid(&a, &x, &b));
+}
+
+/// A strongly unsymmetric pattern: every column its diagonal plus a few rows
+/// drawn at random, so `A + A^T` is much larger than `A`.
+fn unsymmetric(n: usize, per_col: usize, seed: u64) -> GeneralCsc<f64> {
+    let mut x = seed;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..n {
+        r.push(j);
+        c.push(j);
+        v.push(4.0 + (j % 3) as f64);
+        for _ in 0..per_col {
+            let i = (next() % n as u64) as usize;
+            if i != j {
+                r.push(i);
+                c.push(j);
+                v.push(((next() % 200) as f64) / 100.0 - 1.0);
+            }
+        }
+    }
+    GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap()
+}
+
+/// The exact structure bounds the numeric factor: every `U12` column the
+/// factorization keeps is in `ucols(s)`, and no supernode keeps more `L` rows
+/// than `lrows(s)` has.
+#[test]
+fn exact_structure_bounds_the_factor() {
+    for (seed, matching) in [(7u64, false), (11, true), (13, true)] {
+        let a = unsymmetric(600, 3, seed);
+        let opts = SolverSettings::default().with_lu_matching(matching);
+        let lusym = LuSymbolic::analyze_with(&a, &opts).unwrap();
+        let num = factor_general_lu_numeric(&lusym, &a, &opts).unwrap();
+        let (sym, _) = lusym.symb.sym_and_levels().unwrap();
+        let sched = lusym.symb.ll_schedule().unwrap();
+        let st = &lusym.structure;
+        let (mut exact, mut symmetric, mut kept) = (0usize, 0usize, 0usize);
+        let mut k = 0;
+        for (s, sn) in sym.supernodes.iter().enumerate() {
+            if sn.ncol == 0 {
+                continue;
+            }
+            let (lk, uk) = (&num.l.rows[k], &num.ut.rows[k]);
+            let (lrows, ucols) = (&st.rows_l(s)[sn.ncol..], &st.cols_u(s)[sn.ncol..]);
+            assert!(
+                lk.len() <= lrows.len(),
+                "supernode {s}: {} L rows kept, {} predicted",
+                lk.len(),
+                lrows.len()
+            );
+            for &g in uk {
+                assert!(
+                    ucols.binary_search(&(g as Li)).is_ok(),
+                    "supernode {s}: U column {g} outside the exact structure"
+                );
+            }
+            exact += lrows.len() + ucols.len();
+            symmetric += 2 * (sched.rows(s).len() - sn.ncol);
+            kept += lk.len() + uk.len();
+            k += 1;
+        }
+        eprintln!(
+            "seed {seed} matching {matching}: off-block entries per column: symmetric {symmetric}, exact {exact}, kept {kept}"
+        );
+        assert!(
+            exact < symmetric,
+            "an unsymmetric pattern tightens the structure"
+        );
+    }
 }
