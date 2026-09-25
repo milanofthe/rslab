@@ -39,13 +39,30 @@ STAGES = [("analyze", "analysis", st.DARKGRAY), ("scale", "scaling", st.AMBER),
 
 
 def load(path):
-    """{system: {solver: row}} over the rows without errors, last row wins."""
+    """{system: {solver: row}} over the rows without errors, last row wins.
+    `pardiso` is the reference: the faster, by one-shot time, of PARDISO's
+    defaults and its two-level factorization (`pardiso-2l`) where measured."""
     out = {}
     for line in open(path):
         row = json.loads(line)
         if "error" not in row:
             out.setdefault(row["system"], {})[row["solver"]] = row
-    return {s: v for s, v in out.items() if {"rslab", "pardiso"} <= v.keys()}
+    data = {s: v for s, v in out.items() if {"rslab", "pardiso"} <= v.keys()}
+    for v in data.values():
+        v["pardiso"] = min((v[k] for k in ("pardiso", "pardiso-2l") if k in v),
+                           key=lambda row: med(row, "oneshot"))
+    return data
+
+
+PATHS = {"ldlt": "LDL^T", "lu": "LU", "klu": "KLU"}
+
+
+def pardiso_label(row):
+    """PARDISO with its matrix type, and the two-level factorization if used."""
+    real = not row["dtype"].startswith("complex")
+    mtype = (-2 if real else 6) if row["path"] == "ldlt" else (11 if real else 13)
+    two_level = row["solver"] == "pardiso-2l"
+    return f"PARDISO mtype {mtype}" + (", two-level" if two_level else "")
 
 
 def med(row, key):
@@ -101,7 +118,9 @@ def breakdown(data, ax, names):
                     left += pieces[key] / ref
             ax.text(left + 0.02, y, f"{left * ref:.2f} s", va="center", fontsize=6.5, color=st.GRAY)
     ax.set_yticks([v for i in range(len(names)) for v in (i - h / 2 - 0.02, i + h / 2 + 0.02)])
-    ax.set_yticklabels([f"{short(s)}  {lab}" for s in names for lab in ("RSLAB", "PARDISO")], fontsize=7)
+    ax.set_yticklabels([f"{short(s)}  {lab}" for s in names
+                        for lab in (f"RSLAB {PATHS[data[s]['rslab']['path']]}", pardiso_label(data[s]["pardiso"]))],
+                       fontsize=7)
     ax.invert_yaxis()
     ax.axvline(1.0, color=PARDISO, linewidth=1.0, alpha=0.6, zorder=0)
     ax.set_xlabel("wall time / PARDISO one-shot (analysis + factorization + solve)", fontsize=9)
