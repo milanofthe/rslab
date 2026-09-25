@@ -96,7 +96,7 @@ impl Default for GemmThresholds {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CscMatrix, FactorMethod, GemmThresholds, LdltSolver, SolverSettings};
+    use crate::{CscMatrix, GemmThresholds, LdltSolver, SolverSettings};
     use num_complex::Complex;
 
     fn helmholtz(m: usize) -> (CscMatrix<Complex<f64>>, Vec<Complex<f64>>) {
@@ -173,21 +173,17 @@ mod tests {
     #[test]
     fn panel_nb_preserves_correctness() {
         let (a, b) = helmholtz(9);
-        for method in [FactorMethod::LeftLooking, FactorMethod::Multifrontal] {
-            for nb in [16usize, 32, 64, 100, 200] {
-                let s = SolverSettings::default()
-                    .with_method(method)
-                    .with_panel_nb(nb);
-                let x = LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap();
-                let mut ax = vec![Complex::new(0.0, 0.0); a.n];
-                a.symv(&x, &mut ax);
-                let res: f64 = (0..a.n)
-                    .map(|i| (ax[i] - b[i]).norm_sqr())
-                    .sum::<f64>()
-                    .sqrt()
-                    / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-                assert!(res < 1e-9, "NB={nb} method={method:?} residual {res:.2e}");
-            }
+        for nb in [16usize, 32, 64, 100, 200] {
+            let s = SolverSettings::default().with_panel_nb(nb);
+            let x = LdltSolver::factor_with(&a, &s).unwrap().solve(&b).unwrap();
+            let mut ax = vec![Complex::new(0.0, 0.0); a.n];
+            a.symv(&x, &mut ax);
+            let res: f64 = (0..a.n)
+                .map(|i| (ax[i] - b[i]).norm_sqr())
+                .sum::<f64>()
+                .sqrt()
+                / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+            assert!(res < 1e-9, "NB={nb} residual {res:.2e}");
         }
     }
 }

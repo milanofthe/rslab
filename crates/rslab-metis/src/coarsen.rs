@@ -232,12 +232,13 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
     }
     // The adjacency of coarse vertices `c0..c1`, one coarse vertex at a time
     // with an edge-weight marker, appended to `adjncy`/`adjwgt` with each
-    // vertex's end offset pushed to `ends`. `marker` needs no reset between
-    // calls: its tags are coarse ids, and each is contracted exactly once.
+    // vertex's end offset pushed to `ends`. `slot[cu]` holds the tag (the
+    // coarse vertex being contracted) and the accumulated weight side by
+    // side; it needs no reset between calls: its tags are coarse ids, and
+    // each is contracted exactly once.
     let range = |c0: usize,
                  c1: usize,
-                 marker: &mut [i32],
-                 weight_to: &mut [i32],
+                 slot: &mut [[i32; 2]],
                  touched: &mut Vec<i32>,
                  ends: &mut Vec<usize>,
                  adjncy: &mut Vec<i32>,
@@ -256,20 +257,19 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
                         // self-loop after contraction - drop
                         continue;
                     }
-                    let cu = cn2 as usize;
-                    if marker[cu] != c as i32 {
-                        marker[cu] = c as i32;
-                        weight_to[cu] = fine.adjwgt[k];
+                    let sl = &mut slot[cn2 as usize];
+                    if sl[0] != c as i32 {
+                        *sl = [c as i32, fine.adjwgt[k]];
                         touched.push(cn2);
                     } else {
-                        weight_to[cu] = weight_to[cu].saturating_add(fine.adjwgt[k]);
+                        sl[1] = sl[1].saturating_add(fine.adjwgt[k]);
                     }
                 }
                 v = next[vu];
             }
             for &tgt in touched.iter() {
                 adjncy.push(tgt);
-                adjwgt.push(weight_to[tgt as usize]);
+                adjwgt.push(slot[tgt as usize][1]);
             }
             ends.push(adjncy.len());
         }
@@ -280,7 +280,7 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
     // same as the serial loop's, whatever the thread count. On the top levels
     // of a large nested dissection this was most of the coarsening time.
     const PARALLEL_MIN_EDGES: usize = 200_000;
-    let blocks = if fine.adjncy.len() >= PARALLEL_MIN_EDGES {
+    let blocks = if fine.adjncy.len() >= PARALLEL_MIN_EDGES && rayon::current_num_threads() > 1 {
         (8 * rayon::current_num_threads()).min(cn)
     } else {
         1
@@ -292,8 +292,7 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
         range(
             0,
             cn,
-            &mut vec![-1; cn],
-            &mut vec![0; cn],
+            &mut vec![[-1, 0]; cn],
             &mut Vec::new(),
             &mut ends,
             &mut adjncy,
@@ -305,20 +304,25 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32) -> Graph {
         let parts: Vec<(Vec<usize>, Vec<i32>, Vec<i32>)> = (0..blocks)
             .into_par_iter()
             .map_init(
-                || (vec![-1i32; cn], vec![0i32; cn], Vec::new()),
-                |(marker, weight_to, touched), b| {
+                || (vec![[-1i32, 0]; cn], Vec::new()),
+                |(slot, touched), b| {
                     let (c0, c1) = (b * cn / blocks, (b + 1) * cn / blocks);
-                    let mut part = (Vec::with_capacity(c1 - c0), Vec::new(), Vec::new());
-                    range(
-                        c0,
-                        c1,
-                        marker,
-                        weight_to,
-                        touched,
-                        &mut part.0,
-                        &mut part.1,
-                        &mut part.2,
+                    // The block's fine degree sum bounds its coarse edges.
+                    let mut bound = 0usize;
+                    for &first in &head[c0..c1] {
+                        let mut v = first;
+                        while v >= 0 {
+                            let vu = v as usize;
+                            bound += (fine.xadj[vu + 1] - fine.xadj[vu]) as usize;
+                            v = next[vu];
+                        }
+                    }
+                    let mut part = (
+                        Vec::with_capacity(c1 - c0),
+                        Vec::with_capacity(bound),
+                        Vec::with_capacity(bound),
                     );
+                    range(c0, c1, slot, touched, &mut part.0, &mut part.1, &mut part.2);
                     part
                 },
             )

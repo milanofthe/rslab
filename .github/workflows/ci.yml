@@ -44,11 +44,12 @@ jobs:
       - name: rustfmt
         run: cargo fmt --check
 
-      - name: clippy (all targets, matgen superset)
-        # matgen is additive: this single pass lints the default code plus the
-        # matgen-gated benches and integration test in one build.
-        run: cargo clippy --all-targets --features matgen -- -D warnings
+      - name: clippy (all targets, matgen and tuning)
+        # Both features are additive: this single pass lints the default code,
+        # the matgen-gated benches and tests, and the tuning planner.
+        run: cargo clippy --all-targets --features matgen,tuning -- -D warnings
 
       - name: test (matgen superset)
         # Runs the full lib test set plus the matgen-gated tests in one pass.
+        # The tuning tests time a calibration and stay local.
         run: cargo test --features matgen

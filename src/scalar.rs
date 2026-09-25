@@ -135,7 +135,7 @@ pub trait Scalar:
     /// `self * a + b`, using a fused multiply-add where the hardware offers
     /// one. Do **not** call this directly in hot loops: without the `fma`
     /// target feature it lowers to a slow libm software-fma call; go through
-    /// [`fmadd`] instead, which guards on the build's target features.
+    /// `fmadd` instead, which guards on the build's target features.
     fn mul_add(self, a: Self, b: Self) -> Self;
 
     /// Whether every component is finite (no `NaN`/`inf`) - used by pivot

@@ -98,13 +98,6 @@ fn main() {
                     if let Some(n) = std::env::var("MTX_NEMIN").ok().and_then(|v| v.parse().ok()) {
                         opts = opts.with_nemin(n);
                     }
-                    if let Ok(m) = std::env::var("MTX_METHOD") {
-                        opts = opts.with_method(if m == "multifrontal" {
-                            rslab::FactorMethod::Multifrontal
-                        } else {
-                            rslab::FactorMethod::LeftLooking
-                        });
-                    }
                     let (t_all, s) = best(reps, || {
                         if om.is_none() {
                             let (sym, mut pick) = LdltSolver::<f64>::tuned(&ar).unwrap();
@@ -325,19 +318,6 @@ fn main() {
                     out.steps,
                     resid(&a, &xr, &b)
                 );
-                let s = LuSolver::factor(
-                    &a,
-                    &SolverSettings::default().with_method(rslab::FactorMethod::Multifrontal),
-                )
-                .unwrap();
-                let x = s.solve(&b).unwrap();
-                println!(
-                    "{:>9} nnzLU={} perturbed={} res={:.1e}",
-                    "lu-mf",
-                    s.factor_nnz(),
-                    s.n_perturbed(),
-                    resid(&a, &x, &b)
-                );
             }
             // LU accuracy variants.
             for (label, opts) in [
@@ -391,12 +371,6 @@ fn main() {
                 (
                     "dbg-metis-u.1",
                     SolverSettings::default().with_ordering(OrderingMethod::MetisND),
-                ),
-                (
-                    "dbg-amd-u.1-mf",
-                    SolverSettings::default()
-                        .with_ordering(OrderingMethod::Amd)
-                        .with_method(rslab::FactorMethod::Multifrontal),
                 ),
             ] {
                 let f = rslab::factor_general_lu(&a, &opts).unwrap();
@@ -486,16 +460,10 @@ fn main() {
                 let xs = sv.solve(&b).unwrap();
                 println!("{label:>22} nnzLU={} max|U|={:.1e} max|L|={:.1e} dups={dup}/{dupc} row!=col={interchanges} diag-not-first U={u_bad} L={l_bad} unsorted L={unsorted_l} U={unsorted_u} res(csc)={:.1e} res(plan)={:.1e}", f.factor_nnz(), umax, lmax, resid(&a, &x, &b), resid(&a, &xs, &b));
             }
-            // Growth and pivot-free variants.
-            for (label, opts) in [
-                ("lu-u0", SolverSettings::default().with_pivot_u(0.0)),
-                (
-                    "lu-u1-mf",
-                    SolverSettings::default()
-                        .with_pivot_u(1.0)
-                        .with_method(rslab::FactorMethod::Multifrontal),
-                ),
-            ] {
+            // Growth of the pivot-free variant.
+            {
+                let label = "lu-u0";
+                let opts = SolverSettings::default().with_pivot_u(0.0);
                 let f = rslab::factor_general_lu(&a, &opts).unwrap();
                 let amax = a.values.iter().map(|v| v.norm()).fold(0.0, f64::max);
                 let umax = f.u_values.iter().map(|v| v.norm()).fold(0.0, f64::max);

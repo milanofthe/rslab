@@ -13,7 +13,7 @@ are factored by a supernodal Bunch-Kaufman method,
 
     P^T A P = L D L^T,
 
-**general unsymmetric** matrices by a supernodal / multifrontal LU with
+**general unsymmetric** matrices by a supernodal left-looking LU with
 threshold partial pivoting,
 
 .. math::
@@ -232,9 +232,9 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
         A prepared :class:`Settings` object.
     **kwargs
         Any :class:`Settings` keyword (``threads``, ``preconditioner``,
-        ``drop_tol``, ``method``, ``memory``, ``force_accept``, ``ordering``,
-        ``scaling``, ``pivot_u``, ``nemin``, ``relax``, ``reorder``, ``blr``,
-        ``panel_nb``, ``interrupt`` ...), overriding ``settings``.
+        ``drop_tol``, ``force_accept``, ``ordering``, ``scaling``, ``pivot_u``,
+        ``nemin``, ``relax``, ``reorder``, ``panel_nb``, ``interrupt`` ...),
+        overriding ``settings``.
 
     Returns
     -------
@@ -268,7 +268,7 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
 def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
     """Factor a **general** (unsymmetric) matrix as ``P_r^T A P_c = L U``.
 
-    A supernodal left-looking (default) or multifrontal LU with threshold
+    A supernodal left-looking LU with threshold
     partial pivoting and two-sided equilibration, over the same four scalar
     fields as :func:`ldlt`. The full matrix is read.
 
@@ -591,9 +591,15 @@ def _cast_operator(parts, dtype_name: str):
 def _is_symmetric(A, tol: float = 1e-12) -> bool:
     """Structural + value symmetry test (``A - A^T`` small relative to ``max|A|``)."""
     sp = _require_scipy()
-    A = sp.csc_matrix(A)
-    if A.shape[0] != A.shape[1]:
+    if not (sp.issparse(A) and A.format in ("csc", "csr")):
+        A = sp.csc_matrix(A)
+    n = A.shape[0]
+    if n != A.shape[1]:
         return False
+    if A.has_canonical_format and A.data.dtype.type in _SUPPORTED:
+        # The test reads the same on CSC and CSR arrays: a parallel pass that
+        # looks up each transposed entry, with no difference matrix built.
+        return _rslab.is_symmetric(n, A.indptr, A.indices, A.data, tol)
     d = (A - A.T).tocsc().data
     if d.size == 0:
         return True

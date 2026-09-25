@@ -16,7 +16,7 @@ use num_complex::Complex;
 use crate::diagnostics::MemoryEstimate;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
-use crate::{BlrMode, LdltSymbolic, SolverSettings};
+use crate::{LdltSymbolic, SolverSettings};
 
 /// Detected machine capabilities - for budgeting and the calibration key.
 #[derive(Debug, Clone)]
@@ -335,14 +335,12 @@ pub struct Budget {
     pub allow_mixed_precision: bool,
     /// When over budget, may it drop small fill (incomplete factor)? `Some(tau)`.
     pub allow_drop_tol: Option<f64>,
-    /// When over budget, may it BLR-compress the big fronts?
-    pub allow_blr: bool,
 }
 
 /// A concrete factorization plan: tuned options + predictions + decisions.
 #[derive(Debug, Clone)]
 pub struct FactorPlan {
-    /// Tuned options (thread count, plus drop_tol / BLR if chosen to fit budget).
+    /// Tuned options (thread count, plus drop_tol if chosen to fit budget).
     pub opts: SolverSettings,
     /// Recommendation to factor in single precision (the caller casts the matrix);
     /// not expressible in `opts` since it is a matrix-type choice.
@@ -475,11 +473,6 @@ pub fn plan(
                 notes.push(format!("incomplete factor (drop_tol={tau:.0e})"));
             }
         }
-        if peak > maxm && budget.allow_blr {
-            opts = opts.with_blr(BlrMode::contribution_blocks(1e-4));
-            peak = (peak as f64 * 0.7) as u64; // BLR ~ -30% on big fronts
-            notes.push("BLR compression".into());
-        }
         if peak > maxm {
             notes.push(format!(
                 "STILL over budget ({:.0}>{:.0} MB) - recommend fail-fast",
@@ -506,6 +499,52 @@ pub fn plan(
     }
 }
 
+/// 3D 7-point Laplacian (k^3 grid, Dirichlet, SPD, lower triangle), generic over
+/// the scalar type - the calibration's representative matrix. Complex-typed, it is
+/// real-valued but factors through the complex kernel, so it times the complex
+/// proxy-flops/s rate.
+fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
+    let n = k * k * k;
+    let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
+    for z in 0..k {
+        for y in 0..k {
+            for x in 0..k {
+                let p = idx(x, y, z);
+                rows.push(p);
+                cols.push(p);
+                vals.push(T::from_real(6.0));
+                let mut nb = |q: usize| {
+                    let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
+                    rows.push(hi);
+                    cols.push(lo);
+                    vals.push(T::from_real(-1.0));
+                };
+                if x + 1 < k {
+                    nb(idx(x + 1, y, z));
+                }
+                if y + 1 < k {
+                    nb(idx(x, y + 1, z));
+                }
+                if z + 1 < k {
+                    nb(idx(x, y, z + 1));
+                }
+            }
+        }
+    }
+    match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
+        Ok(m) => m,
+        Err(_) => CscMatrix {
+            n: 0,
+            col_ptr: vec![0],
+            row_idx: vec![],
+            values: vec![],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,7 +568,6 @@ mod tests {
             panels_all_bytes: 0,
             panel_live_peak_bytes: 0,
             transient_peak_bytes: 0,
-            mf_transient_peak_bytes: 0,
             factor_flops: 100_000_000_000, // 1e11 total work
             critical_path_flops: 0,
             max_tree_width: 256,
@@ -585,7 +623,7 @@ mod tests {
         // saturation dominates, so it may (correctly) choose fewer than all cores.
         // The contract is 1 <= threads <= physical_cores, not "always all cores".
         match plan_ok.opts.threads {
-            crate::numeric::multifrontal_ldlt::Threads::Fixed(t) => {
+            crate::numeric::settings::Threads::Fixed(t) => {
                 assert!(
                     t >= 1 && t <= hw.physical_cores.max(1),
                     "threads within core budget"
@@ -600,7 +638,6 @@ mod tests {
             max_threads: 0,
             allow_mixed_precision: true,
             allow_drop_tol: Some(1e-3),
-            allow_blr: true,
         };
         let plan_tight = plan(&est, &tight, &hw, &calib);
         assert!(
@@ -612,51 +649,5 @@ mod tests {
             plan_tight.est_peak_bytes < est.transient_peak_bytes,
             "approximations shrink the peak"
         );
-    }
-}
-
-/// 3D 7-point Laplacian (k^3 grid, Dirichlet, SPD, lower triangle), generic over
-/// the scalar type - the calibration's representative matrix. Complex-typed, it is
-/// real-valued but factors through the complex kernel, so it times the complex
-/// proxy-flops/s rate.
-fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
-    let n = k * k * k;
-    let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
-    let mut rows = Vec::new();
-    let mut cols = Vec::new();
-    let mut vals: Vec<T> = Vec::new();
-    for z in 0..k {
-        for y in 0..k {
-            for x in 0..k {
-                let p = idx(x, y, z);
-                rows.push(p);
-                cols.push(p);
-                vals.push(T::from_real(6.0));
-                let mut nb = |q: usize| {
-                    let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
-                    rows.push(hi);
-                    cols.push(lo);
-                    vals.push(T::from_real(-1.0));
-                };
-                if x + 1 < k {
-                    nb(idx(x + 1, y, z));
-                }
-                if y + 1 < k {
-                    nb(idx(x, y + 1, z));
-                }
-                if z + 1 < k {
-                    nb(idx(x, y, z + 1));
-                }
-            }
-        }
-    }
-    match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
-        Ok(m) => m,
-        Err(_) => CscMatrix {
-            n: 0,
-            col_ptr: vec![0],
-            row_idx: vec![],
-            values: vec![],
-        },
     }
 }

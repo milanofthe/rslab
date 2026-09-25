@@ -40,7 +40,6 @@ class Settings:
         nemin: int | None = ...,
         relax: bool | tuple[int, int] | None = ...,
         reorder: str | None = ...,
-        blr: float | bool | dict[str, Any] | None = ...,
         panel_nb: int | None = ...,
         scalar_gate: int | None = ...,
         par_gemm: int | None = ...,

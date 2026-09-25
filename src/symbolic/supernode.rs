@@ -65,6 +65,11 @@ pub struct SupernodeParams {
     /// that becomes column `k`), with `OrderingPreprocess::None`. The rest of the analysis
     /// (elimination tree, postorder, column counts, supernodes) runs as usual.
     pub given_perm: Option<std::sync::Arc<[usize]>>,
+    /// Let the ordering race run the nested-dissection seed ensemble on large
+    /// problems (see `AnalysisUse`): it buys a little fill for several
+    /// orderings' time, which pays only when the analysis serves many
+    /// factorizations.
+    pub nd_ensemble: bool,
 }
 
 /// Relaxed (fill-tolerant) amalgamation thresholds. See
@@ -137,6 +142,7 @@ impl Default for SupernodeParams {
             amalgamation_strategy: AmalgamationStrategy::default(),
             relax: None,
             given_perm: None,
+            nd_ensemble: true,
         }
     }
 }

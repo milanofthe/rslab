@@ -116,33 +116,64 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
     }
     // Cost graph in the column's own structure: `cmax[j] - log|a_ij|`
     // over the nonzero entries, so every column has a zero-cost minimum.
-    let mut col_ptr = vec![0usize; n + 1];
-    let mut row_idx = Vec::with_capacity(a.row_idx.len());
-    let mut cost = Vec::with_capacity(a.row_idx.len());
-    let mut cmax = vec![f64::NEG_INFINITY; n];
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            let m = a.values[k].magnitude();
+    // The logarithms and the per-column pass run in parallel; zero and
+    // non-finite entries (NaN marks) are dropped afterwards.
+    use rayon::prelude::*;
+    let mut cost: Vec<f64> = a
+        .values
+        .par_iter()
+        .with_min_len(4096)
+        .map(|v| {
+            let m = v.magnitude();
             if m == 0.0 || !m.is_finite() {
-                continue;
+                f64::NAN
+            } else {
+                m.ln()
             }
-            let l = m.ln();
-            row_idx.push(a.row_idx[k]);
-            cost.push(l);
-            if l > cmax[j] {
-                cmax[j] = l;
-            }
-        }
-        col_ptr[j + 1] = row_idx.len();
-    }
+        })
+        .collect();
+    let mut cols: Vec<&mut [f64]> = Vec::with_capacity(n);
+    let mut rest: &mut [f64] = &mut cost;
     for j in 0..n {
-        if !cmax[j].is_finite() {
-            cmax[j] = 0.0;
-        }
-        for c in &mut cost[col_ptr[j]..col_ptr[j + 1]] {
-            *c = cmax[j] - *c;
-        }
+        let (head, tail) = rest.split_at_mut(a.col_ptr[j + 1] - a.col_ptr[j]);
+        cols.push(head);
+        rest = tail;
     }
+    let cmax: Vec<f64> = cols
+        .into_par_iter()
+        .with_min_len(256)
+        .map(|col| {
+            let top = col
+                .iter()
+                .copied()
+                .filter(|l| !l.is_nan())
+                .fold(f64::NEG_INFINITY, f64::max);
+            let top = if top.is_finite() { top } else { 0.0 };
+            for c in col.iter_mut() {
+                *c = top - *c;
+            }
+            top
+        })
+        .collect();
+    let (col_ptr, row_idx) = if cost.iter().any(|c| c.is_nan()) {
+        let mut col_ptr = vec![0usize; n + 1];
+        let mut row_idx = Vec::with_capacity(a.row_idx.len());
+        let mut kept = 0;
+        for j in 0..n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                if !cost[k].is_nan() {
+                    row_idx.push(a.row_idx[k]);
+                    cost[kept] = cost[k];
+                    kept += 1;
+                }
+            }
+            col_ptr[j + 1] = kept;
+        }
+        cost.truncate(kept);
+        (col_ptr, row_idx)
+    } else {
+        (a.col_ptr.clone(), a.row_idx.clone())
+    };
     let graph = CostGraph {
         n,
         col_ptr,
@@ -154,7 +185,7 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
         u,
         v,
         n_matched,
-    } = hungarian_match(&graph);
+    } = crate::logging::timed(|| "mc64: hungarian".into(), || hungarian_match(&graph));
     Ok(Mc64Cache {
         perm,
         u,

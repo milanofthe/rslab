@@ -438,6 +438,104 @@ impl CscIndex for i64 {
     }
 }
 
+/// Whether a canonical compressed matrix (sorted indices, no duplicates) is
+/// symmetric: `max |a_ij - a_ji| <= tol * max |a_ij|`, a missing transposed
+/// entry counting as zero. The same for CSC and CSR arrays, as `A` and `A^T`
+/// are symmetric together. Parallel over the columns; `None` when the arrays
+/// are malformed.
+fn symmetric_within<I: CscIndex + Sync, T: Scalar>(
+    n: usize,
+    indptr: &[I],
+    indices: &[I],
+    data: &[T],
+    tol: f64,
+) -> Option<bool> {
+    use rayon::prelude::*;
+    if indptr.len() != n + 1 || indices.len() != data.len() {
+        return None;
+    }
+    let ptr: Vec<usize> = indptr
+        .iter()
+        .map(|&p| p.to_usize())
+        .collect::<Option<_>>()?;
+    if ptr[0] != 0 || ptr[n] != indices.len() || ptr.windows(2).any(|w| w[0] > w[1]) {
+        return None;
+    }
+    let amax = data
+        .par_iter()
+        .map(|v| v.magnitude_sq())
+        .reduce(|| 0.0, f64::max);
+    let worst = (0..n)
+        .into_par_iter()
+        .map(|j| {
+            let jj = I::from_usize(j)?;
+            let mut worst = 0.0f64;
+            for k in ptr[j]..ptr[j + 1] {
+                let i = indices[k].to_usize().filter(|&i| i < n)?;
+                let col = &indices[ptr[i]..ptr[i + 1]];
+                let t = match col.binary_search(&jj) {
+                    Ok(p) => data[ptr[i] + p],
+                    Err(_) => T::zero(),
+                };
+                worst = worst.max((data[k] - t).magnitude_sq());
+            }
+            Some(worst)
+        })
+        .try_reduce(|| 0.0, |a, b| Some(a.max(b)))?;
+    // Squared magnitudes throughout: no square root per entry.
+    Some(worst <= tol * tol * if amax > 0.0 { amax } else { 1.0 })
+}
+
+/// ``is_symmetric(n, indptr, indices, data, tol)``: the symmetry test of
+/// [`symmetric_within`] on the arrays of a canonical CSC or CSR matrix.
+#[pyfunction]
+pub fn is_symmetric(
+    n: usize,
+    indptr: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    data: &Bound<'_, PyAny>,
+    tol: f64,
+) -> PyResult<bool> {
+    fn by_value<I: CscIndex + Sync>(
+        n: usize,
+        ip: &[I],
+        ix: &[I],
+        data: &Bound<'_, PyAny>,
+        tol: f64,
+    ) -> PyResult<bool> {
+        let malformed = || PyValueError::new_err("is_symmetric: malformed compressed arrays");
+        macro_rules! try_value {
+            ($T:ty) => {
+                if let Ok(d) = data.extract::<PyReadonlyArray1<$T>>() {
+                    return symmetric_within(n, ip, ix, d.as_slice()?, tol).ok_or_else(malformed);
+                }
+            };
+        }
+        try_value!(f64);
+        try_value!(C64);
+        try_value!(f32);
+        try_value!(C32);
+        Err(PyValueError::new_err(
+            "is_symmetric: data must be float32, float64, complex64 or complex128",
+        ))
+    }
+    macro_rules! try_index {
+        ($I:ty) => {
+            if let (Ok(ip), Ok(ix)) = (
+                indptr.extract::<PyReadonlyArray1<$I>>(),
+                indices.extract::<PyReadonlyArray1<$I>>(),
+            ) {
+                return by_value::<$I>(n, ip.as_slice()?, ix.as_slice()?, data, tol);
+            }
+        };
+    }
+    try_index!(i32);
+    try_index!(i64);
+    Err(PyValueError::new_err(
+        "is_symmetric: indptr and indices must both be int32 or both int64",
+    ))
+}
+
 /// Lower triangle (rows at or below the diagonal) of an `n x n` CSC matrix in
 /// canonical format: sorted rows, no duplicates. Each column's lower part is a
 /// suffix of the column, found by binary search and copied as one slice.

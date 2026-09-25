@@ -31,7 +31,7 @@
 //! the determinism arbiter for the parallel multifrontal paths.
 
 use crate::error::RslabError;
-use crate::numeric::ll_common::PanelPtr;
+use crate::numeric::supernodal::PanelPtr;
 use crate::ordering::btf;
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
@@ -456,7 +456,6 @@ impl KluSymbolic {
             panels_all_bytes: 0,
             panel_live_peak_bytes: 0,
             transient_peak_bytes: factor_bytes + input_bytes + workspace_bytes,
-            mf_transient_peak_bytes: factor_bytes + input_bytes + workspace_bytes,
             factor_flops: fill.flops,
             critical_path_flops: fill.flops,
             max_tree_width: 1,
@@ -1717,8 +1716,8 @@ impl<T: Scalar> KluSolver<T> {
     /// Thread policy the solve phase should honour: the KLU path is strictly
     /// sequential (that is its determinism guarantee), so this is always a
     /// fixed single-worker budget.
-    pub fn solve_thread_policy(&self) -> crate::numeric::multifrontal_ldlt::Threads {
-        crate::numeric::multifrontal_ldlt::Threads::Fixed(1)
+    pub fn solve_thread_policy(&self) -> crate::numeric::settings::Threads {
+        crate::numeric::settings::Threads::Fixed(1)
     }
 
     /// Matrix dimension.
@@ -2595,8 +2594,8 @@ mod tests {
         );
     }
     use super::*;
-    use crate::numeric::multifrontal_ldlt::SolverSettings;
-    use crate::numeric::multifrontal_lu::{factor_general_lu, solve_lu};
+    use crate::numeric::lu::{factor_general_lu, solve_lu};
+    use crate::numeric::settings::SolverSettings;
     use num_complex::Complex;
 
     fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
@@ -3369,7 +3368,7 @@ mod tests {
 
     #[test]
     fn klu_composes_as_gmres_preconditioner() {
-        use crate::numeric::iterative::gmres;
+        use crate::numeric::krylov::gmres;
         let a = circuit_like(120, 55);
         let m = KluSolver::factor(&a, &KluSettings::default()).unwrap();
         let b: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();

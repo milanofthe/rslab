@@ -79,7 +79,6 @@
 // -------------------------------------------------------------------------
 
 /// Single-solve thread-count policy from the symbolic analysis.
-pub(crate) mod analysis;
 /// Monotonic clock shim: std Instant natively, inert on wasm32 (no OS clock).
 pub(crate) mod clock;
 pub(crate) mod dense;
@@ -132,7 +131,6 @@ pub mod tuning;
 // Flat public API re-exported at crate root - a single data-type-generic
 // (`Scalar`: f64, Complex<f64>, f32, Complex<f32>) sparse direct + iterative
 // stack. (The legacy f64-dedicated multifrontal path has been removed.)
-pub use analysis::recommend_threads_from;
 pub use dense::matrix::SymmetricMatrix;
 pub use diagnostics::{
     Decisions, Diagnostics, MemoryEstimate, NumericReport, Rates, SolveCounter, SolveStats,
@@ -143,6 +141,7 @@ pub use logging::{LogLevel, LogSink};
 pub use numeric::gemm_tuning::{
     GemmThresholds, DEFAULT_PANEL_NB, DEFAULT_PAR_CDIV, DEFAULT_PAR_GEMM, DEFAULT_SCALAR_GATE,
 };
+pub use numeric::supernodal::analysis::recommend_threads_from;
 pub use refine::{BackwardError, RefineOutcome, RefinePolicy};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
@@ -150,16 +149,19 @@ pub use scaling::ScalingStrategy;
 pub use dense::ldlt_generic::{
     factor_ldlt, solve_ldlt, solve_ldlt_many, CompressedLdltFactors, LdltFactors,
 };
-// Shared options + the low-level multifrontal symbolic/numeric building blocks.
-pub use numeric::multifrontal_ldlt::{
-    analyze, analyze_with, factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with,
-    with_threads, BlrMode, FactorMethod, FactorPath, LdltNumeric, MemoryMode, MultifrontalSymbolic,
-    ReorderMode, SolverSettings, Threads, ZeroPivotAction,
+// The low-level LDL^T symbolic/numeric building blocks.
+pub use numeric::ldlt::{factor_numeric, factor_sparse_ldlt, factor_sparse_ldlt_with, LdltNumeric};
+pub use numeric::supernodal::analysis::{
+    analyze, analyze_for, analyze_with, AnalysisUse, SupernodalAnalysis,
+};
+// Settings shared by the LDL^T and LU paths.
+pub use numeric::settings::{
+    with_threads, FactorPath, ReorderMode, SolverSettings, Threads, ZeroPivotAction,
 };
 // The supernodal panel form of a factor (`LdltNumeric::factor`).
-pub use numeric::panel_factor::PanelFactor;
+pub use numeric::supernodal::panel::PanelFactor;
 // High-level symmetric LDL^T solver: `LdltSymbolic::analyze -> .factor -> LdltSolver`.
-pub use numeric::sparse_solver::{LdltSolver, LdltSymbolic};
+pub use numeric::ldlt::{LdltSolver, LdltSymbolic};
 // High-level unsymmetric LU solver: `LuSymbolic::analyze -> .factor -> LuSolver`,
 // plus the raw factor type and free building blocks.
 pub use inertia::Inertia;
@@ -167,13 +169,13 @@ pub use io::mtx::{
     parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_any,
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
-pub use numeric::iterative::{
+pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_block_fn, gmres_block_fn_mon, gmres_block_mon, gmres_fn,
     gmres_recycled, gmres_recycled_fn, BlockKrylovResult, Factorization, KrylovResult,
     LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, NoPreconditioner, Preconditioner,
     Recycle, RecycleScalar, StopReason,
 };
-pub use numeric::multifrontal_lu::{
+pub use numeric::lu::{
     factor_general_lu, factor_general_lu_numeric, solve_lu, solve_lu_many, solve_lu_refined,
     solve_lu_transpose, LuFactors, LuNumeric, LuSolver, LuSymbolic,
 };
