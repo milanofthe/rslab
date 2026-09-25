@@ -31,7 +31,7 @@
 //! the determinism arbiter for the parallel multifrontal paths.
 
 use crate::error::RslabError;
-use crate::numeric::ll_common::PanelPtr;
+use crate::numeric::supernodal::PanelPtr;
 use crate::ordering::btf;
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;

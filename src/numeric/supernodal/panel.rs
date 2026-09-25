@@ -20,7 +20,7 @@
 //! [`PanelFactor::to_csc`] materializes the compressed-column form on demand
 //! for the reference solves and the public CSC factor types.
 
-use crate::numeric::ll_common::PanelPtr;
+use crate::numeric::supernodal::PanelPtr;
 use crate::scalar::Scalar;
 use rayon::prelude::*;
 

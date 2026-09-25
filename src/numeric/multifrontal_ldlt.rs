@@ -29,7 +29,7 @@
 use crate::dense::ldlt_generic::{bk_alpha, swap_sym_lower_bounded, LdltFactors};
 use crate::error::RslabError;
 use crate::inertia::Inertia;
-use crate::numeric::panel_factor::{finish_panel, PanelArena, PanelFactor, PanelOut};
+use crate::numeric::supernodal::panel::{finish_panel, PanelArena, PanelFactor, PanelOut};
 use crate::scalar::Scalar;
 
 /// Scale-invariant singularity floor for a 2x2 Bunch-Kaufman pivot: a block
@@ -150,8 +150,8 @@ unsafe fn lower_tile_gemm<T: Scalar>(
     }
 }
 
-use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, LlSchedule, PermScatter};
+use crate::numeric::supernodal::PanelPtr as LdltPanelPtr;
+use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule, PermScatter};
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -404,8 +404,8 @@ struct SymbolicInner {
     by_level: Vec<Vec<usize>>,
     /// Lazily built scatter program for `P^T A P` (lower fold): the permuted
     /// structure is fixed per pattern, so every (re)factorization reduces to
-    /// one linear values scatter. See [`crate::numeric::ll_common::PermScatter`].
-    lower_scatter: std::sync::OnceLock<crate::numeric::ll_common::PermScatter>,
+    /// one linear values scatter. See [`crate::numeric::supernodal::PermScatter`].
+    lower_scatter: std::sync::OnceLock<crate::numeric::supernodal::PermScatter>,
     /// Lazily built left-looking schedule (row structures + updater lists),
     /// pattern-only and shared by the numeric drivers and the estimators.
     ll_schedule: std::sync::OnceLock<LlSchedule>,
@@ -836,7 +836,7 @@ impl<T> Default for LdltSlot<T> {
         }
     }
 }
-type LlStore<T> = crate::numeric::ll_common::SlotStore<LdltSlot<T>>;
+type LlStore<T> = crate::numeric::supernodal::SlotStore<LdltSlot<T>>;
 
 /// Compact (CSC-fragment) form of one supernode's L factor, produced the moment
 /// its last consumer pulls from it so the dense panel can be freed during
@@ -961,7 +961,7 @@ fn ll_factor_node<T: Scalar>(
 
     // Global-to-local rows (narrow entries halve the table's random-access
     // footprint); restored when the node returns.
-    let gloc = crate::numeric::ll_common::Gloc::new(n, sched.rows(s));
+    let gloc = crate::numeric::supernodal::Gloc::new(n, sched.rows(s));
     // Assemble A's lower-triangle columns of this supernode.
     for p in 0..ncol {
         let c = first + p;
@@ -970,7 +970,7 @@ fn ll_factor_node<T: Scalar>(
             panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
         }
     }
-    let plan = crate::numeric::ll_common::CmodPlan::new(sym, sched, s, false, ll_gemm_par);
+    let plan = crate::numeric::supernodal::CmodPlan::new(sym, sched, s, false, ll_gemm_par);
     let (spans, tile_w, tiled) = (&plan.spans, plan.tile_w, plan.tiled);
     let seq_gemm_par = if plan.forks { ll_gemm_par } else { usize::MAX };
     if tiled {
@@ -1870,7 +1870,7 @@ fn factor_left_looking<T: Scalar>(
         )
     };
     let emit_free = |k: usize| ldlt_emit_and_free(k, &store, &emit, sym, sched, opts.drop_tol);
-    crate::numeric::ll_common::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
+    crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     drop(store); // panels moved into the emit cells; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
