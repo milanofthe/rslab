@@ -43,13 +43,12 @@ def _res(A, x, b):
 
 
 def test_settings_roundtrip_and_repr():
-    s = rslab.Settings(threads=2, ordering="metis", preconditioner=1e-4, relax=(128, 32), blr=1e-6)
+    s = rslab.Settings(threads=2, ordering="metis", preconditioner=1e-4, relax=(128, 32))
     d = s.to_dict()
     assert d["threads"] == 2
     assert d["ordering"] == "metis"
     assert d["preconditioner"] == 1e-4
     assert d["relax"] == (128, 32)
-    assert d["blr"] == 1e-6
     assert "Settings(" in repr(s) and "ordering='metis'" in repr(s)
     # Defaults: heuristic pick, no explicit ordering.
     assert rslab.Settings().to_dict()["ordering"] is None
@@ -59,9 +58,14 @@ def test_settings_roundtrip_and_repr():
 def test_lu_matching_setting():
     assert rslab.Settings().to_dict()["matching"] is True
     assert rslab.Settings(matching=False).to_dict()["matching"] is False
+    # The matching runs only where the diagonal cannot pivot: a full
+    # diagonal is analyzed as given, a row swap is matched back.
     A = _general(200)
-    assert rslab.lu(A).diagnostics()["decisions"]["scaling"] == "Mc64RowMatching"
-    assert rslab.lu(A, matching=False).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
+    assert rslab.lu(A).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
+    P = sp.eye(200, format="csc")[np.r_[1, 0, 2:200]]
+    B = (P @ A).tocsc()
+    assert rslab.lu(B).diagnostics()["decisions"]["scaling"] == "Mc64RowMatching"
+    assert rslab.lu(B, matching=False).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
 
 
 def test_klu_matching_setting():
@@ -80,7 +84,7 @@ def test_settings_reject_unknown_and_invalid():
     with pytest.raises(ValueError):
         rslab.Settings(ordering="banana")
     with pytest.raises(ValueError):
-        rslab.Settings(method="fast")
+        rslab.Settings(reorder="fast")
     with pytest.raises(TypeError):
         rslab.ldlt(_spd(50), no_such_option=1)
 
@@ -152,6 +156,24 @@ def test_analyze_auto_picks_path():
     assert isinstance(rslab.analyze(_spd(80)), rslab.LdltSymbolic)
     assert isinstance(rslab.analyze(_general(80)), rslab.LuSymbolic)
     assert "LdltSymbolic(" in repr(rslab.analyze(_spd(80)))
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
+@pytest.mark.parametrize("index", [np.int32, np.int64])
+def test_symmetry_check_matches_difference(dtype, index):
+    # The Rust test on canonical arrays against the explicit `A - A^T`.
+    def reference(A, tol=1e-12):
+        d = abs(A - A.T)
+        return d.max() <= tol * (abs(A).max() or 1.0)
+
+    S, G = _spd(60, dtype=dtype), _general(60, dtype=dtype)
+    near = (S + sp.csc_matrix(([1e-9 * abs(S).max()], ([3], [7])), shape=S.shape)).astype(dtype)
+    for M in (S, G, near, S.tocsr(), G.tocsr(), sp.csc_matrix((5, 5), dtype=dtype)):
+        M = M.copy()
+        M.indptr, M.indices = M.indptr.astype(index), M.indices.astype(index)
+        assert M.has_canonical_format
+        assert rslab._is_symmetric(M) == reference(M)
+    assert not rslab._is_symmetric(near)
 
 
 def test_symbolic_rejects_wrong_nnz():
@@ -344,8 +366,6 @@ def test_every_setting_round_trips():
         threads=("auto", 2),
         preconditioner=1e-6,
         drop_tol=1e-3,
-        method="multifrontal",
-        memory="eager",
         ordering="amf",
         scaling="mc64",
         pivot_u=0.5,
@@ -353,7 +373,6 @@ def test_every_setting_round_trips():
         nemin=8,
         relax=(4, 12),
         reorder="off",
-        blr={"eps": 1e-6, "min_cnrow": 128, "b": 64, "adaptive": True},
         panel_nb=32,
         scalar_gate=1000,
         par_gemm=100000,
@@ -362,10 +381,8 @@ def test_every_setting_round_trips():
     )
     d = s.to_dict()
     assert d["threads"] == ("auto", 2)
-    assert d["method"] == "multifrontal" and d["memory"] == "eager"
     assert d["ordering"] == "amf" and d["scaling"] == "mc64"
     assert d["relax"] == (4, 12) and d["reorder"] == "off"
-    assert d["blr"] == {"eps": 1e-6, "min_cnrow": 128, "b": 64, "adaptive": True}
     assert (d["panel_nb"], d["scalar_gate"], d["par_gemm"], d["par_cdiv"]) == (32, 1000, 100000, 200000)
     assert d["use_gemm_schur"] is False and d["matching"] is False
     # an external scaling vector
@@ -376,8 +393,8 @@ def test_every_setting_round_trips():
     assert kd["pivot_tol"] == 0.5 and kd["row_scaling"] is False and kd["parallel"] is True
     with pytest.raises(TypeError):
         rslab.Settings(no_such_option=1)
-    with pytest.raises(ValueError):
-        rslab.Settings(blr={"eps": 1e-6, "bogus": 1})
+    with pytest.raises(TypeError):
+        rslab.Settings(blr=1e-6)
 
 
 def test_klu_superlu_api_inspection():
