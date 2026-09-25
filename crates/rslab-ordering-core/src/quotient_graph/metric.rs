@@ -26,9 +26,9 @@
 //! `algo.rs` (AMD: `run_elimination`, AMF: `run_elimination_amf`).
 //! The trait stays light: keeping the inner loops as parallel
 //! concrete functions trades ~300 LoC duplication for zero risk to
-//! the AMD bit-parity contract.
+//! AMD's bit-identity with SuiteSparse.
 //!
-//! Reference: `dev/research/amf-clean-room.md` Section 6.
+//! Reference: Amestoy (1999) habilitation thesis; MUMPS HAMF4.
 
 use super::algo::{run_elimination as run_elimination_amd, run_elimination_amf, StepFlops};
 use super::workspace::Workspace;
@@ -129,8 +129,8 @@ impl Metric for MinDegree {
 ///
 /// AMF selects the next pivot to minimise the *fill* introduced by
 /// the elimination, rather than the candidate's degree. On bipartite-
-/// KKT graphs with a few "hub" rows AMF can be 47x better than AMD on
-/// final `nnz_L` (see `dev/research/amf-clean-room.md` Section 1).
+/// KKT graphs with a few "hub" rows AMF can give well over an order of
+/// magnitude less `nnz_L` than AMD.
 ///
 /// Score is a quantized `RMF = DEG*(DEG-1+2*DEGME) - WF(i)` value
 /// stored in `i32`. Buckets up to and including `NORIG = n` are one
@@ -140,7 +140,7 @@ impl Metric for MinDegree {
 /// the per-supervariable WF with `max`.
 ///
 /// **Inner loop**: [`MinFill::run_elimination`] dispatches to
-/// `run_elimination_amf` (Phase B.2 of `dev/plans/amf-clean-room.md`).
+/// `run_elimination_amf`.
 /// The lazy WF(e) cache, three-accumulator Pass-2, supervariable
 /// max-merge of `wf`, saturated/regular RMF branch, and coarse-bucket
 /// linear scan all live in `algo.rs`.
@@ -153,8 +153,8 @@ impl Metric for MinFill {
     /// AMF needs `2 * n + 2` slots: `0..=NORIG` for one-per-score
     /// fine buckets, `NORIG+1..=NBBUCK` (`NBBUCK = 2 * n`) for
     /// coarse-stride buckets, and one halo slot at `NBBUCK + 1`
-    /// reserved for V1 boundary variables (inert in our use case;
-    /// see Section 11 of `dev/research/amf-clean-room.md`).
+    /// reserved for HAMF4's boundary (halo) variables, inert here
+    /// because no halo is ever passed in.
     #[inline(always)]
     fn n_buckets(n: usize) -> usize {
         2 * n + 2
@@ -177,9 +177,7 @@ impl Metric for MinFill {
     /// truncation underflow on `RMF / (NVI + 1)`) clamp to bucket 0.
     ///
     /// Bucket layout follows the HAMF4 quantization described in
-    /// Amestoy's 1999 habilitation thesis; behavior is validated
-    /// against the MUMPS HAMF4 oracle corpus
-    /// (`tests/amf_corpus_oracle.rs`).
+    /// Amestoy's 1999 habilitation thesis and used by MUMPS HAMF4.
     #[inline]
     fn bucket(score: i32, n: usize) -> usize {
         if score <= 0 {

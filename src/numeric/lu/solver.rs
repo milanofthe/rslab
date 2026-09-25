@@ -170,8 +170,7 @@ impl LuSymbolic {
         Self::analyze_with(a, &SolverSettings::default())
     }
 
-    /// [`analyze`](Self::analyze) with explicit composable [`SolverSettings`]
-    /// (child-reordering strategy).
+    /// [`analyze`](Self::analyze) with explicit composable [`SolverSettings`].
     pub fn analyze_with<T: Scalar>(
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
@@ -541,7 +540,7 @@ impl<T: Scalar> LuSolver<T> {
     }
 
     /// [`tuned`](Self::tuned) on top of the caller's settings: the analysis
-    /// knobs (`nemin`, `relax`, `reorder`, `lu_matching`, ...) come from
+    /// knobs (`nemin`, `relax`, `lu_matching`, ...) come from
     /// `base`, the ordering is the heuristic race, the thread count the
     /// calibrated pick.
     pub fn tuned_with(
@@ -727,7 +726,7 @@ pub fn factor_general_lu<T: Scalar>(
     a: &GeneralCsc<T>,
     opts: &SolverSettings,
 ) -> Result<LuFactors<T>, RslabError> {
-    // The analysis honours the caller's symbolic settings (ordering, child reordering):
+    // The analysis honours the caller's symbolic settings (ordering, amalgamation):
     // `analyze` alone took the defaults and silently ignored `opts.ordering`.
     factor_general_lu_numeric(
         &LuSymbolic::analyze_for(a, opts, AnalysisUse::Once)?,

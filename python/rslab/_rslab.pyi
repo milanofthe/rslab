@@ -39,7 +39,6 @@ class Settings:
         matching: bool | None = ...,
         nemin: int | None = ...,
         relax: bool | tuple[int, int] | None = ...,
-        reorder: str | None = ...,
         panel_nb: int | None = ...,
         scalar_gate: int | None = ...,
         par_gemm: int | None = ...,

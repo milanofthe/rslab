@@ -34,7 +34,7 @@ fn deep_chain_tree_does_not_overflow_stack() {
 #[test]
 fn rcm_and_autorace_orderings_factor_and_solve() {
     // A 2D-grid SPD system must factor and solve correctly under the new RCM
-    // ordering and under AutoRace (which now includes RCM as a candidate).
+    // ordering and under the race (which includes RCM as a candidate).
     let m = 14;
     let n = m * m;
     let idx = |a: usize, b: usize| a * m + b;
@@ -59,7 +59,7 @@ fn rcm_and_autorace_orderings_factor_and_solve() {
     }
     let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
     let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
-    for ord in [OrderingMethod::Rcm, OrderingMethod::AutoRace] {
+    for ord in [OrderingMethod::Rcm, OrderingMethod::Auto] {
         let opts = SolverSettings::default().with_ordering(ord);
         let symb = analyze_with(a.n, &a.col_ptr, &a.row_idx, &opts).unwrap();
         let f = factor_numeric(&symb, &a, None, &opts)

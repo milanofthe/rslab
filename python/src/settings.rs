@@ -14,7 +14,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use rslab::{
-    GemmThresholds, KluParallel, OrderingMethod, RelaxAmalgamation, ReorderMode, ScalingStrategy,
+    GemmThresholds, KluParallel, OrderingMethod, RelaxAmalgamation, ScalingStrategy,
     SolverSettings, Threads, ZeroPivotAction,
 };
 
@@ -82,15 +82,14 @@ fn lower(key: &str, v: &Bound<'_, PyAny>) -> PyResult<String> {
 pub fn parse_ordering(s: &str) -> PyResult<OrderingMethod> {
     Ok(match s {
         "auto" => OrderingMethod::Auto,
-        "auto_race" | "autorace" | "race" => OrderingMethod::AutoRace,
         "amd" => OrderingMethod::Amd,
         "amf" => OrderingMethod::Amf,
         "metis" | "metisnd" | "metis_nd" | "nd" => OrderingMethod::MetisND,
         "rcm" => OrderingMethod::Rcm,
         other => {
             return Err(PyValueError::new_err(format!(
-            "ordering must be 'auto', 'auto_race', 'amd', 'amf', 'metis' or 'rcm', got '{other}'"
-        )))
+                "ordering must be 'auto', 'amd', 'amf', 'metis' or 'rcm', got '{other}'"
+            )))
         }
     })
 }
@@ -98,7 +97,6 @@ pub fn parse_ordering(s: &str) -> PyResult<OrderingMethod> {
 fn ordering_name(o: &OrderingMethod) -> &'static str {
     match o {
         OrderingMethod::Auto => "auto",
-        OrderingMethod::AutoRace => "auto_race",
         OrderingMethod::Amd => "amd",
         OrderingMethod::Amf => "amf",
         OrderingMethod::MetisND => "metis",
@@ -142,15 +140,14 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///
 /// Parameters
 /// ----------
-/// ordering : {'auto', 'auto_race', 'amd', 'amf', 'metis', 'rcm'}, optional
-///     Fill-reducing ordering. ``None`` (default) uses the heuristic pick,
-///     the adaptive ordering plus an exact nested-dissection bakeoff on large
-///     systems (with a small seed ensemble for :func:`rslab.analyze` once the
-///     factorization is heavy enough to pay for it over repeated
-///     factorizations; the one-shot functions run one seed); an explicit
-///     value analyzes with exactly that
-///     ordering, ``'metis'`` being one nested-dissection run. The ordering
-///     actually used is reported in ``diagnostics()['decisions']``.
+/// ordering : {'auto', 'amd', 'amf', 'metis', 'rcm'}, optional
+///     Fill-reducing ordering. ``'auto'`` (default) races the orderings on
+///     the exact size of their factors: minimum degree, minimum fill and the
+///     band reducer always, nested dissection on large systems, with a seed
+///     ensemble for :func:`rslab.analyze` when the factorization is heavy.
+///     An explicit value analyzes with exactly that ordering, ``'metis'``
+///     being one nested-dissection run. The ordering used is reported in
+///     ``diagnostics()['decisions']``.
 /// nemin : int, optional
 ///     Supernode amalgamation threshold (default 16). Smaller means finer
 ///     supernodes: less fill, more per-front overhead.
@@ -158,10 +155,6 @@ fn scaling_name(s: &ScalingStrategy) -> &'static str {
 ///     Relaxed (fill-tolerant) amalgamation. ``True`` (default) keeps the
 ///     built-in thresholds, ``False`` disables it, a pair
 ///     ``(max_width, max_extra_rows)`` sets them explicitly.
-/// reorder : {'hybrid_liu', 'off'}, optional
-///     Child reordering of the elimination tree: ``'hybrid_liu'`` (default)
-///     shrinks the contribution-stack peak, ``'off'`` keeps the natural leaf
-///     order for maximum leaf parallelism.
 /// threads : int or 'auto' or ('auto', int) or 'ambient', optional
 ///     Worker budget of the scoped factorization pool. ``None`` (default) is
 ///     the per-matrix predictor capped at 4 workers (or the calibrated pick
@@ -308,11 +301,6 @@ impl PySettings {
                     return Err(bad(key, "a bool or (max_width, max_extra_rows)", v));
                 }
             }
-            "reorder" => o.with_reorder(match lower(key, v)?.as_str() {
-                "hybrid_liu" | "liu" | "hybrid" => ReorderMode::HybridLiu,
-                "off" | "none" => ReorderMode::Off,
-                _ => return Err(bad(key, "'hybrid_liu' or 'off'", v)),
-            }),
             "panel_nb" => o.with_panel_nb(v.extract().map_err(|_| bad(key, "an int", v))?),
             "scalar_gate" | "par_gemm" | "par_cdiv" => {
                 let n: usize = v.extract().map_err(|_| bad(key, "an int", v))?;
@@ -402,13 +390,6 @@ impl PySettings {
                     .into_any()
                     .unbind(),
                 None => false.into_py(py),
-            },
-        )?;
-        d.set_item(
-            "reorder",
-            match o.reorder {
-                ReorderMode::HybridLiu => "hybrid_liu",
-                ReorderMode::Off => "off",
             },
         )?;
         d.set_item("panel_nb", o.panel_nb)?;

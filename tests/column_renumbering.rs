@@ -7,9 +7,13 @@
 //! supernodes.
 
 use rslab::symbolic::{
-    symbolic_factorize_with_method, AmalgamationStrategy, OrderingMethod, SupernodeParams,
+    AmalgamationStrategy, OrderingMethod, SupernodeParams, SymbolicFactorization,
 };
 use rslab::CscMatrix;
+
+fn analyze(m: &CscMatrix<f64>, params: &SupernodeParams) -> SymbolicFactorization {
+    rslab::symbolic::analyze(m.n, &m.col_ptr, &m.row_idx, params, OrderingMethod::Amd).unwrap()
+}
 
 /// Arrow matrix: variables 0..n-2 are coupled only to variable n-1
 /// (the "tip" of the arrow). With nemin=32, the SSIDS size rule
@@ -77,7 +81,7 @@ fn arrow_matrix_collapses_under_renumber() {
         amalgamation_strategy: AmalgamationStrategy::Adjacency,
         ..Default::default()
     };
-    let adj_sym = symbolic_factorize_with_method(&m, &adj_params, OrderingMethod::Amd).unwrap();
+    let adj_sym = analyze(&m, &adj_params);
     assert!(
         adj_sym.supernodes.len() >= 2,
         "adjacency strategy on arrow matrix should under-merge; got {} supernodes",
@@ -92,13 +96,13 @@ fn arrow_matrix_collapses_under_renumber() {
         amalgamation_strategy: AmalgamationStrategy::Renumber,
         ..Default::default()
     };
-    let renum_sym = symbolic_factorize_with_method(&m, &renum_params, OrderingMethod::Amd).unwrap();
+    let renum_sym = analyze(&m, &renum_params);
     assert_eq!(
         renum_sym.supernodes.len(),
         1,
         "renumber strategy on arrow matrix should collapse to 1 supernode"
     );
-    assert_eq!(renum_sym.supernodes[0].ncol(), 8);
+    assert_eq!(renum_sym.supernodes[0].ncol, 8);
 }
 
 #[test]
@@ -112,13 +116,13 @@ fn bushy_fan_collapses_under_renumber() {
         amalgamation_strategy: AmalgamationStrategy::Renumber,
         ..Default::default()
     };
-    let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
+    let sym = analyze(&m, &params);
     assert_eq!(
         sym.supernodes.len(),
         1,
         "bushy fan should collapse to 1 supernode under renumber"
     );
-    assert_eq!(sym.supernodes[0].ncol(), 33);
+    assert_eq!(sym.supernodes[0].ncol, 33);
 }
 
 #[test]
@@ -137,16 +141,16 @@ fn tridiagonal_renumber_is_at_least_as_aggressive() {
         amalgamation_strategy: AmalgamationStrategy::Renumber,
         ..Default::default()
     };
-    let adj = symbolic_factorize_with_method(&m, &adj_params, OrderingMethod::Amd).unwrap();
-    let renum = symbolic_factorize_with_method(&m, &renum_params, OrderingMethod::Amd).unwrap();
+    let adj = analyze(&m, &adj_params);
+    let renum = analyze(&m, &renum_params);
     assert!(
         renum.supernodes.len() <= adj.supernodes.len(),
         "Renumber must not produce more supernodes than Adjacency; got {} vs {}",
         renum.supernodes.len(),
         adj.supernodes.len()
     );
-    let adj_total: usize = adj.supernodes.iter().map(|s| s.ncol()).sum();
-    let renum_total: usize = renum.supernodes.iter().map(|s| s.ncol()).sum();
+    let adj_total: usize = adj.supernodes.iter().map(|s| s.ncol).sum();
+    let renum_total: usize = renum.supernodes.iter().map(|s| s.ncol).sum();
     assert_eq!(adj_total, 8);
     assert_eq!(renum_total, 8);
 }
@@ -162,7 +166,7 @@ fn perm_is_valid_bijection_under_renumber() {
             amalgamation_strategy: AmalgamationStrategy::Renumber,
             ..Default::default()
         };
-        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
+        let sym = analyze(&m, &params);
         let mut sorted = sym.perm.clone();
         sorted.sort();
         assert_eq!(

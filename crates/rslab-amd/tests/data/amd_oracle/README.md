@@ -2,15 +2,15 @@
 
 These files pin the output of an external, independently-maintained
 SuiteSparse AMD implementation against the inputs `rslab-amd` tests
-consume. They are the **external source of truth** referenced by
-tests T4 and T12 in `dev/plans/ordering-amd-upgrade.md`.
+consume. They are the **external source of truth** for
+`tests/oracle_match.rs`.
 
 ## What is here
 
 Each `*.txt` file records the result of running
 [`amd` crate v0.2.2](https://crates.io/crates/amd) - a Rust port of
 Timothy Davis's SuiteSparse AMD (BSD-3-Clause) - against one fixed
-input, captured during Commit 2 of the `rslab-amd` development plan:
+input:
 
 - `n`, `nz`, `nz_a_plus_at`, `n_dense`, `ncmpa`
 - `lnz` - nonzeros in L (excluding diagonal). This is the
@@ -32,25 +32,21 @@ and quote its provenance (generator spec or file SHA-256).
 | `diag_4`        | 4   | programmatic: diagonal (bandwidth 0)               |
 | `tridiag_10`    | 10  | programmatic: tridiagonal                          |
 | `grid_7x7`      | 49  | programmatic: 2D 5-point stencil                   |
-| `amd_demo_24`   | 24  | programmatic (6x4 grid) - SYNTHETIC SUBSTITUTE (section ) |
+| `amd_demo_24`   | 24  | programmatic (6x4 grid) - synthetic substitute, see below |
 | `gh_258`        | 52  | file: faer-rs regression matrix (SHA-256 below)    |
 
 ### Provenance of `gh_258`
 
-Input file: `../ripopt/ref/faer-rs/faer/test_data/sparse_cholesky/gh_258.txt`
+Input file: faer-rs `faer/test_data/sparse_cholesky/gh_258.txt`
 SHA-256: `9f70a3cfb1b068984cf76b8b11da1a786a39c8701a1cc48a909fd25aca282c40`
 
-### section   `amd_demo_24` is a synthetic substitute
+### `amd_demo_24` is a synthetic substitute
 
 The AMD algorithm's canonical worked example (Davis 2006, section 7.2) is
-shipped as `AMD/Demo/can_24.mtx` with SuiteSparse and requires a
-network fetch we did not perform here. `amd_demo_24.txt` is
-generated from a 6x4 2D grid as a same-sized stand-in. Replace in a
-follow-up commit once `can_24.mtx` is downloaded.
-
-Similarly, `HB/can_24` and `HB/bcsstk01` (referenced in the plan's
-section T4) are deferred. They are expected to land in a follow-up commit
-that also enables a CI job to fetch them.
+shipped as `AMD/Demo/can_24.mtx` with SuiteSparse and is not vendored
+here. `amd_demo_24.txt` is generated from a 6x4 2D grid as a
+same-sized stand-in. Matrix-collection inputs such as `HB/can_24` and
+`HB/bcsstk01` are not part of the fixture set.
 
 ## Reproducing
 
@@ -74,5 +70,4 @@ Harness file SHAs (for audit):
 
 The `amd` crate appears **only** in the harness (external, separate
 Cargo project). It is not in `crates/rslab-amd/Cargo.toml` and not
-in the rslab workspace's dependency graph. A CI grep enforces this
-invariant.
+in the rslab workspace's dependency graph.

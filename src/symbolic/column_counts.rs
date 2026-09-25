@@ -10,8 +10,8 @@ use crate::sparse::csc::CscPattern;
 /// - All fill entries propagated from earlier columns
 ///
 /// For indefinite factorization (LDL^T), the fill pattern is the same as
-/// Cholesky - pivoting changes values but not structure (ignoring delayed
-/// pivots, which are Phase 2).
+/// Cholesky: pivoting is confined to each supernode's fully-summed block
+/// (no delayed pivots), so it changes values but not structure.
 ///
 /// Input `pattern` should be the full symmetric pattern (both triangles).
 ///
@@ -19,9 +19,8 @@ use crate::sparse::csc::CscPattern;
 /// in column j of L (including the diagonal).
 ///
 /// Test-only reference oracle: the production pipeline uses
-/// [`column_counts_gnp`] exclusively (bit-exact equivalence verified on the
-/// 169585-matrix corpus, Phase 2.5.1); this O(n^2) simulation is kept solely so
-/// the tests here and in `supernode.rs` can cross-check GNP against a
+/// [`column_counts_gnp`] exclusively; this O(n^2) simulation is kept solely
+/// so the tests here and in `supernode.rs` can cross-check GNP against a
 /// first-principles implementation.
 #[cfg(test)]
 pub fn column_counts(pattern: &CscPattern, _etree: &EliminationTree) -> Vec<usize> {
@@ -305,7 +304,7 @@ mod tests {
         assert_eq!(total_factor_nnz(&counts), 6);
     }
 
-    // --- Phase 2.5.1: GNP column-count parity tests ---
+    // --- GNP column-count parity tests ---
     //
     // Each reuses the exact pattern from the reference tests above and
     // asserts column_counts_gnp returns the same vector as column_counts.

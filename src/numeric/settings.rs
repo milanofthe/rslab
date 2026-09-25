@@ -28,21 +28,6 @@ pub enum ZeroPivotAction {
     PerturbToEps { abs_floor: f64 },
 }
 
-/// Child-reordering strategy, selected per analysis via [`SolverSettings`] - the
-/// composable replacement for the old process-wide Liu toggle. A pure scheduling
-/// hint: it changes neither the factor, the fill, nor the e-numbering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReorderMode {
-    /// Hybrid Liu (1986) contribution-stack minimization (default): reorder
-    /// children to shrink the transient CB-stack peak where it is large, keep
-    /// the natural leaf order elsewhere. Memory-light, ~ throughput-neutral.
-    #[default]
-    HybridLiu,
-    /// No child reordering: maximum leaf parallelism, larger CB-stack peak - for
-    /// when memory is not the constraint.
-    Off,
-}
-
 /// The factor path a [`SolverSettings`] is applied to; each reads a different
 /// subset of the settings (see [`SolverSettings::ignored_on`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +75,8 @@ pub struct SolverSettings {
     pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 
     // ---- Analysis-phase knobs (read by `analyze_with`; ignored by `factor`) ----
-    /// Child-reordering strategy (CB-stack peak vs leaf parallelism). Analyze-time.
-    pub reorder: ReorderMode,
     /// Fill-reducing ordering (the cuDSS `REORDERING_ALG` analogue). Analyze-time.
-    /// Default [`OrderingMethod::Auto`] (adaptive per-matrix choice).
+    /// Default [`OrderingMethod::Auto`] (the race on exact fill).
     pub ordering: OrderingMethod,
     /// Supernode amalgamation `nemin` (merge-candidate column threshold). Default
     /// `16`. Smaller = finer supernodes (less fill, more per-front overhead).
@@ -360,7 +343,6 @@ impl Default for SolverSettings {
             threads: Threads::default(),
             interrupt: None,
             // Analysis-phase defaults (reproduce the historically-tuned analysis).
-            reorder: ReorderMode::default(),
             ordering: OrderingMethod::default(),
             nemin: 16,
             // Relaxed amalgamation OFF. It was tuned in June on the MoM and FEM
@@ -439,12 +421,6 @@ impl SolverSettings {
     /// Builder: set the worker-thread policy directly.
     pub fn with_thread_policy(mut self, threads: Threads) -> Self {
         self.threads = threads;
-        self
-    }
-
-    /// Builder: set the child-reordering strategy (analyze-time).
-    pub fn with_reorder(mut self, reorder: ReorderMode) -> Self {
-        self.reorder = reorder;
         self
     }
 
@@ -613,12 +589,9 @@ pub(crate) fn tuned<A: ?Sized, S>(
 ) -> Result<(S, SolverSettings), RslabError> {
     #[cfg(not(feature = "tuning"))]
     let _ = &estimate;
-    // Ordering by the exact prefix race (`AutoRace`): every candidate's true
-    // factor nnz, computed concurrently, smallest wins - replacing the former
-    // Amd-pinned default plus flops-gated ND bakeoff with one exact
-    // measurement (the race is what the bakeoff approximated).
+    // The ordering race, whatever `base` asks for.
     #[allow(unused_mut)]
-    let mut s = base.clone().with_ordering(OrderingMethod::AutoRace);
+    let mut s = base.clone().with_ordering(OrderingMethod::Auto);
     let sym = analyze_with(a, &s)?;
     // Install-diagnosed worker count: only when a calibration cache exists
     // (written once by `tuning::install_diagnose`); never measures here.

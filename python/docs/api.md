@@ -137,7 +137,7 @@ automatically), so `A` may be stored full or triangular.
 
 - `A` (scipy.sparse matrix or array-like): The symmetric `n x n` system matrix. Converted to CSC and its lower triangle taken; duplicate entries are summed.
 - `settings` (Settings, optional): A prepared `Settings` object.
-- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `drop_tol`, `force_accept`, `ordering`, `scaling`, `pivot_u`, `nemin`, `relax`, `reorder`, `panel_nb`, `interrupt` ...), overriding `settings`.
+- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `drop_tol`, `force_accept`, `ordering`, `scaling`, `pivot_u`, `nemin`, `relax`, `panel_nb`, `interrupt` ...), overriding `settings`.
 
 **Returns**
 
@@ -687,7 +687,7 @@ parameter studies) pays it once and factors each value set through
 
 - `A` (scipy.sparse matrix or array-like): The `n x n` matrix whose pattern (and, for the heuristic ordering pick, values) is analyzed.
 - `path` ({'auto', 'ldlt', 'lu', 'klu'}, default 'auto'): The factorization path: `'ldlt'` for symmetric matrices (the lower triangle is analyzed), `'lu'` for general ones, `'klu'` for circuit-shaped ones. `'auto'` picks `'ldlt'` when `A` is symmetric and `'lu'` otherwise.
-- `settings` (Settings or KluSettings, optional): Analysis-time settings (`ordering`, `nemin`, `relax`, `reorder` for LDL^T / LU; `btf` for KLU). Numeric settings given here become the defaults of `factor`.
+- `settings` (Settings or KluSettings, optional): Analysis-time settings (`ordering`, `nemin`, `relax` for LDL^T / LU; `btf` for KLU). Numeric settings given here become the defaults of `factor`.
 - `**kwargs`: The same keywords, overriding `settings`.
 
 **Returns**
@@ -869,10 +869,9 @@ directly. Unknown keywords raise `TypeError`; invalid values `ValueError`.
 
 **Parameters**
 
-- `ordering` ({'auto', 'auto_race', 'amd', 'amf', 'metis', 'rcm'}, optional): Fill-reducing ordering. `None` (default) uses the heuristic pick, the adaptive ordering plus an exact nested-dissection bakeoff on large systems (with a small seed ensemble for `rslab.analyze` once the factorization is heavy enough to pay for it over repeated factorizations; the one-shot functions run one seed); an explicit value analyzes with exactly that ordering, `'metis'` being one nested-dissection run. The ordering actually used is reported in `diagnostics()['decisions']`.
+- `ordering` ({'auto', 'amd', 'amf', 'metis', 'rcm'}, optional): Fill-reducing ordering. `'auto'` (default) races the orderings on the exact size of their factors: minimum degree, minimum fill and the band reducer always, nested dissection on large systems, with a seed ensemble for `rslab.analyze` when the factorization is heavy. An explicit value analyzes with exactly that ordering, `'metis'` being one nested-dissection run. The ordering used is reported in `diagnostics()['decisions']`.
 - `nemin` (int, optional): Supernode amalgamation threshold (default 16). Smaller means finer supernodes: less fill, more per-front overhead.
 - `relax` (bool or (int, int), optional): Relaxed (fill-tolerant) amalgamation. `True` (default) keeps the built-in thresholds, `False` disables it, a pair `(max_width, max_extra_rows)` sets them explicitly.
-- `reorder` ({'hybrid_liu', 'off'}, optional): Child reordering of the elimination tree: `'hybrid_liu'` (default) shrinks the contribution-stack peak, `'off'` keeps the natural leaf order for maximum leaf parallelism.
 - `threads` (int or 'auto' or ('auto', int) or 'ambient', optional): Worker budget of the scoped factorization pool. `None` (default) is the per-matrix predictor capped at 4 workers (or the calibrated pick after `rslab.install_diagnose`); an `int` pins the count (`0` = all logical cores); `'auto'` is the predictor without the cap, `('auto', max)` the predictor capped at `max`; `'ambient'` runs on the caller's rayon pool. The factor is bit-identical for every value.
 - `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. `1e-4` is a good start.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.

@@ -3,8 +3,9 @@
 //! This crate exists so that `rslab-amd`, `rslab-amf`, and `rslab-metis`
 //! all accept the same input type and emit the same
 //! stats / error types without a type-conversion layer at their
-//! boundary. The contract itself is documented in
-//! `dev/plans/ordering-crate-contract.md`.
+//! boundary. It also hosts the shared quotient-graph engine
+//! ([`quotient_graph`]) behind AMD and AMF, and an RCM ordering
+//! ([`rcm_order`]).
 //!
 //! The public surface is deliberately minimal:
 //!
@@ -113,10 +114,9 @@ impl<'a> CscPattern<'a> {
         // Row indices within each column must be sorted ascending. This is a
         // documented precondition that downstream consumers silently rely on:
         // rslab-metis's adjacency builder dedups only *adjacent* duplicates
-        // (graph.rs), and rslab-scotch's compress step inserts neighbours with
-        // `partition_point` assuming sorted runs. Unsorted rows would let a
-        // non-adjacent duplicate survive as a spurious edge, corrupting the
-        // graph. Enforce it here (O(nnz)) so every consumer can trust it.
+        // (graph.rs). Unsorted rows would let a non-adjacent duplicate survive
+        // as a spurious edge, corrupting the graph. Enforce it here (O(nnz))
+        // so every consumer can trust it.
         for w in col_ptr.windows(2) {
             let lo = w[0] as usize;
             let hi = w[1] as usize;

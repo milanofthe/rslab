@@ -6,26 +6,24 @@
 //! George, "Nested Dissection of a Regular Finite Element Mesh"
 //! (SIAM J. Numer. Anal., 1973).
 //!
-//! The public surface conforms to the RSLAB ordering-crate contract
-//! (`dev/plans/ordering-crate-contract.md`): `CscPattern`,
-//! `OrderingStats`, `OrderingError`, and `CONTRACT_VERSION` are
-//! re-exported from `rslab-ordering-core`.
+//! The public surface conforms to the ordering-crate contract of
+//! `rslab-ordering-core`: `CscPattern`, `OrderingStats`,
+//! `OrderingError`, and `CONTRACT_VERSION` are re-exported from it.
 //!
-//! **Status: M1-M7 complete.** `metis_order_full` coarsens the graph
-//! (SHEM + 2-hop), picks the best of `niparts` initial bisections
-//! scored on their post-FM cut, uncoarsens with FM refinement, turns
-//! the final edge bisection into a node separator via min vertex
-//! cover (König's theorem), and recursively orders the two sides -
+//! `metis_order_full` coarsens the graph (SHEM + 2-hop), picks the
+//! best of `niparts` initial bisections scored on their post-FM cut,
+//! turns the coarsest edge bisection into a node separator via min
+//! vertex cover (Konig's theorem), refines that node separator at
+//! every uncoarsening level, and recursively orders the two sides -
 //! handing off to AMD on subgraphs no larger than
-//! `nd_to_amd_switch`. M8 (integration into the main solver) is
-//! tracked separately in `dev/plans/ordering-metis.md`.
+//! `nd_to_amd_switch`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-// Modules are exercised only by `metis_order_full` once all
-// milestones land; until then, dead-code lint is suppressed at the
-// module root for internal helpers.
+// Internal modules are `pub` (hidden) for tests and examples; not
+// every helper is used by `metis_order_full`, so dead-code lint is
+// suppressed at the module root.
 #[doc(hidden)]
 #[allow(dead_code, missing_docs)]
 pub mod coarsen;
@@ -51,10 +49,9 @@ pub use rslab_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT
 
 /// Tunable parameters for METIS nested-dissection ordering.
 ///
-/// Defaults mirror METIS 5.2.0's `METIS_NodeND` defaults as documented
-/// in `dev/plans/ordering-metis.md` audit (MUMPS uses stock METIS
-/// defaults for KKT problems: `METIS_OPTION_NUMBERING = 1`, all other
-/// options at library default).
+/// Defaults mirror METIS 5.2.0's `METIS_NodeND` defaults (MUMPS uses
+/// stock METIS defaults for KKT problems: `METIS_OPTION_NUMBERING = 1`,
+/// all other options at library default).
 #[derive(Debug, Clone)]
 pub struct MetisOptions {
     /// Deterministic RNG seed. Defaults to 1. Two runs with the same
@@ -85,10 +82,9 @@ pub struct MetisOptions {
     /// bisection and append them at the *end* of the returned
     /// permutation.
     ///
-    /// **Default: `false`.** The technique was implemented to mimic
-    /// what we believed MUMPS's `ICNTL(6)` and SSIDS did, but expert
-    /// review of the MUMPS and SPRAL sources (2026-04-27) found:
-    /// (a) `ICNTL(6)` is MC64 matching, not dense-row removal;
+    /// **Default: `false`.** Neither MUMPS nor SSIDS pre-strips the
+    /// graph this way:
+    /// (a) MUMPS `ICNTL(6)` is MC64 matching, not dense-row removal;
     /// (b) MUMPS handles dense rows *inside* its AMD/AMF
     /// (`MUMPS_QAMD` in `ana_orderings.F:5226+` with the `THRESM`
     /// parameter and `HEAD(N)` quasi-dense list); and
@@ -97,11 +93,11 @@ pub struct MetisOptions {
     /// amalgamation collapsing the resulting chain into one dense
     /// BLAS-3 root frontal. Neither solver pre-strips the graph.
     /// Empirically, on ORBIT2_0000 (n=4795, one column of off-degree
-    /// 1794) Fix A *increased* `nnz_L` from 1.54M to 2.25M because
+    /// 1794) the quotient *increased* `nnz_L` from 1.54M to 2.25M because
     /// removing the dense column destroys the structural signal that
     /// makes it the natural top separator. The opt-in path is kept
-    /// for diagnostic experimentation; the correct fix lives in
-    /// `rslab-amd` (a QAMD-style deferral, future work).
+    /// for diagnostic experimentation; dense rows are better handled
+    /// by a QAMD-style deferral inside the minimum-degree ordering.
     ///
     /// References (kept for the opt-in code path):
     /// - Davis & Hager, "Dynamic supernodes in sparse Cholesky
@@ -170,7 +166,7 @@ pub fn metis_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> 
 /// Contract-conforming ordering producer.
 ///
 /// Signature matches the shape every RSLAB ordering crate must expose
-/// per `dev/plans/ordering-crate-contract.md`: input is a
+/// per the `rslab-ordering-core` contract: input is a
 /// full-symmetric [`CscPattern`] and options; output is a three-tuple
 /// of `(perm, OrderingStats, crate-stats)`, with errors in
 /// [`OrderingError`].
@@ -180,9 +176,10 @@ pub fn metis_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> 
 /// produce them at the ordering boundary; they belong to a downstream
 /// symbolic analysis.
 ///
-/// Runs the M1-M7 pipeline: coarsen, initial bisection, FM, separator
-/// construction, and recursive nested dissection with an AMD leaf
-/// fallback for subgraphs of at most `nd_to_amd_switch` vertices.
+/// Runs the full pipeline: coarsen, initial bisection, FM, separator
+/// construction and refinement, and recursive nested dissection with an
+/// AMD leaf fallback for subgraphs of at most `nd_to_amd_switch`
+/// vertices.
 /// The two sides of every bisection are ordered in parallel on the ambient
 /// rayon pool once a subproblem is large enough; child seeds are derived
 /// structurally, so the permutation depends on `opts.seed` only.
@@ -196,19 +193,14 @@ pub fn metis_order_full(
     let t0 = rslab_ordering_core::clock::Instant::now();
     let mut stats = MetisStats::default();
 
-    // Fix A - quasi-dense column quotient.
+    // Quasi-dense column quotient (opt-in, default off).
     //
     // Pull columns with off-diagonal degree above the
     // `dense_quotient_threshold` (default `max(40, 10*sqrt(n))`) out
-    // of the ND input graph, run M1-M7 ND on the *sparse-induced*
-    // subgraph, and append the dense columns at the end of the
-    // returned permutation. This was originally modelled on a belief
-    // that HSL_MC68 / MUMPS ICNTL(6) / SSIDS pre-strip dense rows, but
-    // a 2026-04-27 audit of the MUMPS and SPRAL sources found that
-    // belief wrong: ICNTL(6) is MC64 matching, MUMPS defers dense rows
-    // inside QAMD, and SSIDS does not special-case them - neither
-    // pre-strips the graph. See `MetisOptions::dense_quotient_enabled`
-    // for the full finding. The path is kept opt-in (default off) for
+    // of the ND input graph, run ND on the *sparse-induced* subgraph,
+    // and append the dense columns at the end of the returned
+    // permutation. Neither MUMPS nor SSIDS pre-strips the graph (see
+    // `MetisOptions::dense_quotient_enabled`); the path is kept for
     // diagnostic use only.
     let (sparse_pat_storage, dense_cols, sparse_to_orig) =
         if opts.dense_quotient_enabled && pattern.n > 0 {
@@ -288,8 +280,8 @@ pub fn metis_order_weighted(
 
 /// Resolve the dense-column threshold for an `n`-vertex graph.
 ///
-/// `max(40, ceil(10 * sqrt(n)))` per Davis & Hager 2009 section 3.2 and
-/// MUMPS `ICNTL(6)` defaults. Honours the caller's override when
+/// `max(40, ceil(10 * sqrt(n)))` per Davis & Hager 2009 section 3.2.
+/// Honours the caller's override when
 /// `opts.dense_quotient_threshold` is `Some(_)`.
 fn resolve_dense_threshold(n: usize, opts: &MetisOptions) -> usize {
     if let Some(t) = opts.dense_quotient_threshold {

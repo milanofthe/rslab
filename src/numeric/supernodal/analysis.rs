@@ -4,10 +4,9 @@
 //! left-looking schedule every factorization of the pattern reuses.
 
 use crate::error::RslabError;
-use crate::numeric::settings::{in_scoped_pool, stack_for_depth, ReorderMode, SolverSettings};
+use crate::numeric::settings::{in_scoped_pool, stack_for_depth, SolverSettings};
 use crate::numeric::supernodal::LlSchedule;
-use crate::sparse::csc::CscMatrix;
-use crate::symbolic::{symbolic_factorize_with_method, SupernodeParams, SymbolicFactorization};
+use crate::symbolic::{SupernodeParams, SymbolicFactorization};
 
 /// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
 /// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
@@ -114,7 +113,6 @@ impl SupernodalAnalysis {
         match &self.inner {
             Some(i) => {
                 d.ordering_used = format!("{:?}", i.sym.resolved_method);
-                d.preprocess = format!("{:?}", i.sym.resolved_preprocess);
                 d.amalgamation = format!("{:?}", i.sym.resolved_amalgamation);
             }
             None => d.ordering_used = d.ordering_requested.clone(),
@@ -165,8 +163,7 @@ pub fn analyze(
     analyze_with(n, col_ptr, row_idx, &SolverSettings::default())
 }
 
-/// [`analyze`] with explicit composable [`SolverSettings`] (child-reordering
-/// strategy). Reuse the result across many `factor` calls that share the pattern.
+/// [`analyze`] with explicit composable [`SolverSettings`]. Reuse the result across many `factor` calls that share the pattern.
 pub fn analyze_with(
     n: usize,
     col_ptr: &[usize],
@@ -215,100 +212,22 @@ fn analyze_with_inner(
             nnz,
         });
     }
-    // Symbolic analysis on the structure only; feed a unit-valued f64 pattern.
-    let pattern = CscMatrix::<f64> {
-        n,
-        col_ptr: col_ptr.to_vec(),
-        row_idx: row_idx.to_vec(),
-        values: vec![1.0; nnz],
-    };
-    // Disable LdltCompress: it transforms the pattern via a quotient-graph
-    // compression beyond a plain permutation, so `sym.perm` would no longer be
-    // consistent with the `A_perm` built in `factor_numeric`.
-    // Relaxed/fill-tolerant amalgamation - a standard sparse-direct technique
-    // (PARDISO/MUMPS apply it to every matrix): when fundamental supernodes are
-    // narrow the Schur-update GEMMs are low-rank and memory-bound, so trade a
-    // little explicit-zero fill for wider, higher-rank dense fronts. The width is
-    // a sweet spot: too narrow -> memory-bound BLAS-2; too wide -> flops wasted on
-    // explicit zeros. `<=256-wide, <=64 extra rows/merge` measured best across the
-    // EM FEM / MoM matrices (~ -15...-25 % factor time vs the previous 512/128). The lever is
-    // workload-agnostic; it rides the general `SupernodeParams.relax` knob and is
-    // gated to `n >= RELAX_MIN_N` inside `find_supernodes`.
+    // Relaxed amalgamation rides `opts.relax` (see `SupernodeParams::relax`).
     let snode_params = SupernodeParams {
-        // `preprocess: None` is a correctness requirement, not a tuning knob:
-        // LdltCompress rewrites the pattern beyond a permutation, breaking the
-        // `sym.perm` <-> `A_perm` consistency `factor_numeric` relies on. The
-        // tunable amalgamation knobs (`nemin`, `relax`) ride the composable
-        // `SolverSettings`; everything else stays at the tuned default.
-        preprocess: crate::symbolic::supernode::OrderingPreprocess::None,
         nemin: opts.nemin,
         relax: opts.relax,
         given_perm: opts.permutation.clone(),
         nd_ensemble: usage == AnalysisUse::Repeated,
         ..SupernodeParams::default()
     };
-    let mut sym = crate::logging::timed(
+    let sym = crate::logging::timed(
         || format!("analysis: symbolic {:?}", opts.ordering),
-        || symbolic_factorize_with_method(&pattern, &snode_params, opts.ordering),
+        || crate::symbolic::analyze(n, col_ptr, row_idx, &snode_params, opts.ordering),
     )?;
-
-    // Liu (1986) contribution-stack minimization. Reorder each supernode's
-    // children so the live contribution-block stack peak is minimized during
-    // factorization. This is a pure **scheduling hint**: supernode IDs, the
-    // e-numbering and the factor are unchanged (the global emit walks IDs, not
-    // children, and trailing rows are sorted), so it is correctness-, fill- and
-    // throughput-neutral - it only shrinks the transient CB-stack that drives
-    // factorization peak RSS.
-    //
-    // Each node leaves a contribution block of size `cb = (nrow-ncol)^2` for its
-    // parent and needs `peak` working-stack to factor its subtree. Processing
-    // children in order, the stack while doing child `i` is `sum_{j<i} cb_j +
-    // peak_i`; Liu's theorem minimizes `max_i(sum_{j<i} cb_j + peak_i)` by ordering
-    // children by `(peak - cb)` descending. Supernodes are in postorder, so a
-    // single forward sweep has every child's `(peak, cb)` ready.
-    //
-    // **Hybrid Liu**: reordering is only applied where the contribution stack is
-    // actually large (`sum children cb >= LIU_MIN_STACK`) - the upper/mid tree,
-    // which is a handful of nodes carrying the spike. The vast majority of small
-    // leaf nodes keep their natural order, whose rayon spawn pattern parallelizes
-    // better. This keeps almost all of Liu's memory win while shedding most of
-    // its throughput cost (the memory-optimal child order is not the
-    // parallel-load-optimal one). `peak[s]` is always computed against the order
-    // actually used, so the propagation stays exact.
-    let nsuper = sym.supernodes.len();
-    if opts.reorder == ReorderMode::HybridLiu {
-        // ~64 MB of `Complex<f64>` contribution blocks: below this the reorder
-        // saves little memory but can still disturb leaf parallelism.
-        const LIU_MIN_STACK: f64 = 4_000_000.0;
-        let mut cb = vec![0.0f64; nsuper];
-        let mut peak = vec![0.0f64; nsuper];
-        for s in 0..nsuper {
-            let cn = (sym.supernodes[s].nrow - sym.supernodes[s].ncol) as f64;
-            cb[s] = cn * cn;
-            let mut kids = std::mem::take(&mut sym.supernodes[s].children);
-            let stack_total: f64 = kids.iter().map(|&c| cb[c]).sum();
-            if stack_total >= LIU_MIN_STACK {
-                kids.sort_by(|&a, &b| {
-                    (peak[b] - cb[b])
-                        .partial_cmp(&(peak[a] - cb[a]))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            let mut acc = 0.0f64; // sum cb of already-processed children
-            let mut pk = 0.0f64;
-            for &ch in &kids {
-                pk = pk.max(acc + peak[ch]);
-                acc += cb[ch];
-            }
-            // Assembly step: all children CBs live at once (acc), then this
-            // node's own CB remains.
-            peak[s] = pk.max(acc).max(cb[s]);
-            sym.supernodes[s].children = kids;
-        }
-    }
 
     // Assembly-tree levels: level(s) = 1 + max(level(children)); same-level
     // supernodes are mutually independent.
+    let nsuper = sym.supernodes.len();
     let mut level = vec![0usize; nsuper];
     let mut max_level = 0usize;
     for s in 0..nsuper {

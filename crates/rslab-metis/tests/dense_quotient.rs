@@ -1,21 +1,19 @@
-//! Tests for Fix A - quasi-dense column quotient inside
+//! Tests for the opt-in quasi-dense column quotient inside
 //! `rslab-metis::metis_order_full`.
 //!
-//! Oracle: research note `dev/research/orbit2-cluster-regression.md`,
-//! section 6 ("Fix A"). The technique is published in Davis & Hager (2009)
-//! section 3.2 and AMD section 5; see the docstring on
+//! The technique is published in Davis & Hager (2009) section 3.2 and
+//! AMD section 5; see the docstring on
 //! `MetisOptions::dense_quotient_enabled`.
 //!
-//! These tests do NOT touch the ORBIT2_0000 fixture - that is an
-//! integration measurement that lives in the bench / diag harness.
-//! Here we only verify:
+//! These tests do not measure fill on real matrices. Here we only
+//! verify:
 //!
 //! 1. A synthetic pattern with one near-dense column places that
 //!    column at the LAST position(s) of the returned permutation.
 //! 2. A pattern with no near-dense column produces the same
-//!    permutation as the no-Fix-A baseline (byte-for-byte).
+//!    permutation as with the quotient disabled (byte-for-byte).
 //! 3. The permutation is a valid bijection on `[0, n)` in both cases.
-//! 4. Disabling the quotient reverts to the legacy path.
+//! 4. Disabling the quotient runs the plain ND path.
 
 use rslab_metis::{metis_order_full, MetisOptions};
 use rslab_ordering_core::CscPattern;
@@ -109,7 +107,7 @@ fn dense_column_lands_at_end_of_perm() {
     let (cp, ri) = csc_from_triples(N, &t);
     let pat = CscPattern::new(N, &cp, &ri).expect("valid CSC");
 
-    // Fix A is OFF by default per the 2026-04-27 expert review (see
+    // The quotient is OFF by default (see the
     // `MetisOptions::dense_quotient_enabled` doc comment). Enable it
     // explicitly to exercise the opt-in code path.
     let opts = MetisOptions {
@@ -132,9 +130,9 @@ fn dense_column_lands_at_end_of_perm() {
 
 #[test]
 fn no_dense_column_matches_legacy_baseline() {
-    // Banded pattern, no near-dense column. With Fix A enabled the
-    // quotient set is empty, so `metis_order_full` must produce the
-    // exact same permutation as with Fix A disabled.
+    // Banded pattern, no near-dense column. With the quotient enabled
+    // the quotient set is empty, so `metis_order_full` must produce the
+    // exact same permutation as with the quotient disabled.
     const N: usize = 600;
     let t = banded_triples(N, 11);
     let (cp, ri) = csc_from_triples(N, &t);
@@ -245,8 +243,7 @@ fn threshold_override_promotes_lower_degree_column() {
     assert_is_permutation(&perm_default, N);
 
     // Forced threshold 30: column degree 50 > 30 -> dense, must be
-    // last. Quotient is OFF by default (post-2026-04-27 expert review),
-    // so opt in explicitly.
+    // last. The quotient is OFF by default, so opt in explicitly.
     let opts_forced = MetisOptions {
         dense_quotient_enabled: true,
         dense_quotient_threshold: Some(30),
