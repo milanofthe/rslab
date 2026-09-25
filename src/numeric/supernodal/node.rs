@@ -2,6 +2,7 @@
 //! the global-to-local row map.
 
 use super::{Li, LlSchedule};
+use crate::scalar::Scalar;
 
 /// Work above which a node forks inside its cmod. A small node that forks
 /// pays rayon's join-steal latency: while its join waits for a stolen slab,
@@ -123,5 +124,21 @@ impl Drop for Gloc<'_> {
         }
         let map = std::mem::take(&mut self.map);
         GLOC_SCRATCH.with(|c| *c.borrow_mut() = map);
+    }
+}
+
+/// Static-pivot perturbation, the complex-symmetric analogue of rslab's f64
+/// `perturb_to_floor` (`dense::factor`): lift a pivot whose magnitude is below
+/// `abs_floor` up to that floor, preserving phase. For `T = f64` this reduces
+/// to `sign(d)*max(|d|, abs_floor)`, matching the real kernel.
+#[inline]
+pub(crate) fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
+    let mag = d.magnitude();
+    if mag >= abs_floor {
+        d
+    } else if mag == 0.0 {
+        T::from_real(abs_floor)
+    } else {
+        d * T::from_real(abs_floor / mag)
     }
 }

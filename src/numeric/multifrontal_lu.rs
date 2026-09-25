@@ -1,12 +1,12 @@
 //! Generic **unsymmetric** sparse LU factorization over any [`Scalar`] field -
 //! the general (non-symmetric) complex path, complementing the symmetric LDL^T
-//! path in [`crate::numeric::multifrontal_ldlt`].
+//! path in [`crate::numeric::ldlt`].
 //!
 //! It targets matrices whose *values* are unsymmetric (e.g. MoM A-EFIE
 //! near-field saddle preconditioners, where the symmetric and antisymmetric
 //! parts are comparable) but reuses the full symmetric machinery: the
 //! fill-reducing ordering, supernodes and assembly tree
-//! ([`analyze`](crate::numeric::multifrontal_ldlt::analyze)) and the SIMD
+//! ([`analyze`](crate::numeric::supernodal::analysis::analyze)) and the SIMD
 //! `gemm` Schur kernel. Only the dense panel kernel changes - an unsymmetric
 //! LU producing separate `L` and `U` - and the analysis runs on the
 //! **symmetrized pattern** `A union A^T` so the elimination structure carries
@@ -30,9 +30,10 @@
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
-use crate::numeric::multifrontal_ldlt::{analyze_with, perturb_pivot};
 use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
+use crate::numeric::supernodal::analysis::analyze_with;
 use crate::numeric::supernodal::panel::{finish_panel, PanelArena, PanelFactor, PanelOut};
+use crate::numeric::supernodal::perturb_pivot;
 use crate::scalar::{fmadd, Scalar};
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
@@ -376,7 +377,7 @@ impl<'a, T: Scalar> LuInput<'a, T> {
 }
 
 pub struct LuSymbolic {
-    symb: crate::numeric::multifrontal_ldlt::MultifrontalSymbolic,
+    symb: crate::numeric::supernodal::analysis::SupernodalAnalysis,
     n: usize,
     nnz: usize,
     matching: Option<LuMatching>,
@@ -408,7 +409,7 @@ impl LuSymbolic {
     /// result across many [`factor`](Self::factor) calls that share the pattern
     /// - the unsymmetric twin of [`LdltSymbolic::analyze`].
     ///
-    /// [`LdltSymbolic::analyze`]: crate::numeric::sparse_solver::LdltSymbolic::analyze
+    /// [`LdltSymbolic::analyze`]: crate::numeric::ldlt::LdltSymbolic::analyze
     pub fn analyze<T: Scalar>(a: &GeneralCsc<T>) -> Result<LuSymbolic, RslabError> {
         Self::analyze_with(a, &SolverSettings::default())
     }
@@ -534,7 +535,7 @@ impl LuSymbolic {
     /// analysis, into a ready-to-solve [`LuSolver`]. `a` must share the analyzed
     /// pattern. The unsymmetric twin of [`LdltSymbolic::factor`].
     ///
-    /// [`LdltSymbolic::factor`]: crate::numeric::sparse_solver::LdltSymbolic::factor
+    /// [`LdltSymbolic::factor`]: crate::numeric::ldlt::LdltSymbolic::factor
     pub fn factor<T: Scalar>(
         &self,
         a: &GeneralCsc<T>,
@@ -542,7 +543,7 @@ impl LuSymbolic {
     ) -> Result<LuSolver<T>, RslabError> {
         let estimate = self.estimate_memory::<T>();
         let resolved_threads = opts.threads.resolve(|cap| {
-            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symb, cap)
+            crate::numeric::supernodal::analysis::recommend_threads_for_sym(&self.symb, cap)
         });
         let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
         for w in &warnings {
@@ -618,7 +619,7 @@ impl LuSymbolic {
 
     /// Per-supernode frontal-matrix dimensions `(ncol, nrow)` of the symmetrized
     /// pattern - for factorization-cost diagnostics (front-size distribution and
-    /// a factor-flop estimate). See [`MultifrontalSymbolic::front_dims`](crate::MultifrontalSymbolic::front_dims).
+    /// a factor-flop estimate). See [`SupernodalAnalysis::front_dims`](crate::SupernodalAnalysis::front_dims).
     pub fn front_dims(&self) -> Vec<(usize, usize)> {
         self.symb.front_dims()
     }
@@ -629,7 +630,7 @@ impl LuSymbolic {
     }
 
     /// Supernode count per assembly-tree level (available tree-parallelism by
-    /// depth). See [`MultifrontalSymbolic::level_widths`](crate::MultifrontalSymbolic::level_widths).
+    /// depth). See [`SupernodalAnalysis::level_widths`](crate::SupernodalAnalysis::level_widths).
     pub fn level_widths(&self) -> Vec<usize> {
         self.symb.level_widths()
     }
@@ -739,7 +740,7 @@ impl LuSymbolic {
 
 /// A factored unsymmetric LU solver, ready to solve against many right-hand
 /// sides - the high-level, equilibrated counterpart of the raw [`LuFactors`]
-/// (and the unsymmetric twin of [`LdltSolver`](crate::numeric::sparse_solver::LdltSolver)).
+/// (and the unsymmetric twin of [`LdltSolver`](crate::numeric::ldlt::LdltSolver)).
 /// Build via [`LuSymbolic::factor`] (analyze once, factor many) or the one-shot
 /// [`LuSolver::factor`].
 pub struct LuSolver<T> {
@@ -1838,7 +1839,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     let solve_policy = match opts.threads {
         crate::numeric::settings::Threads::Ambient => crate::numeric::settings::Threads::Ambient,
         p => crate::numeric::settings::Threads::Fixed(p.resolve(|cap| {
-            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap)
+            crate::numeric::supernodal::analysis::recommend_threads_for_sym(&lusym.symb, cap)
         })),
     };
 
@@ -1926,7 +1927,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     // oversubscribe.
     let mut fac = opts.threads.run(
         stack,
-        |cap| crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&lusym.symb, cap),
+        |cap| crate::numeric::supernodal::analysis::recommend_threads_for_sym(&lusym.symb, cap),
         || {
             factor_lu_left_looking(
                 sym,

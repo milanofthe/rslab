@@ -1,7 +1,7 @@
 //! High-level generic sparse symmetric direct solver.
 //!
 //! [`LdltSolver`] wraps the generic multifrontal factorization
-//! ([`crate::numeric::multifrontal_ldlt`]) with symmetric equilibration and
+//! ([`crate::numeric::ldlt`]) with symmetric equilibration and
 //! a convenient factor-once / solve-many interface. It works for both `f64`
 //! (real symmetric) and `Complex<f64>` (complex symmetric, PARDISO `mtype 6`).
 //!
@@ -24,12 +24,13 @@
 //! [`LdltSolver::solve_many`] then run tree-parallel sweeps whose result is
 //! bit-identical for every thread count.
 
+use super::factor::factor_numeric;
 use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
-use crate::numeric::multifrontal_ldlt::{
-    analyze_with as analyze_pattern_with, factor_numeric, MultifrontalSymbolic,
-};
 use crate::numeric::settings::SolverSettings;
+use crate::numeric::supernodal::analysis::{
+    analyze_with as analyze_pattern_with, SupernodalAnalysis,
+};
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
@@ -386,7 +387,7 @@ fn equilibration<T: Scalar>(
 /// # Ok(()) }
 /// ```
 pub struct LdltSymbolic {
-    symbolic: MultifrontalSymbolic,
+    symbolic: SupernodalAnalysis,
     nnz: usize,
     /// Wall time of the analysis and the ordering it was asked for, carried
     /// into the diagnostics of every factorization reusing it.
@@ -453,7 +454,7 @@ impl LdltSymbolic {
     }
 
     /// Per-supernode frontal dimensions `(ncol, nrow)` of the analyzed pattern.
-    /// See [`MultifrontalSymbolic::front_dims`](crate::MultifrontalSymbolic::front_dims).
+    /// See [`SupernodalAnalysis::front_dims`](crate::SupernodalAnalysis::front_dims).
     pub fn front_dims(&self) -> Vec<(usize, usize)> {
         self.symbolic.front_dims()
     }
@@ -464,7 +465,7 @@ impl LdltSymbolic {
     }
 
     /// Supernode count per assembly-tree level (available tree-parallelism by
-    /// depth). See [`MultifrontalSymbolic::level_widths`](crate::MultifrontalSymbolic::level_widths).
+    /// depth). See [`SupernodalAnalysis::level_widths`](crate::SupernodalAnalysis::level_widths).
     pub fn level_widths(&self) -> Vec<usize> {
         self.symbolic.level_widths()
     }
@@ -589,7 +590,7 @@ impl LdltSymbolic {
         let estimate = self.estimate_memory::<T>();
         // The concrete worker count actually used (realizes Threads::Auto).
         let resolved_threads = opts.threads.resolve(|cap| {
-            crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symbolic, cap)
+            crate::numeric::supernodal::analysis::recommend_threads_for_sym(&self.symbolic, cap)
         });
         let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Ldlt);
         for w in &warnings {

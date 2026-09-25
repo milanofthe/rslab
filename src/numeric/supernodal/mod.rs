@@ -3,6 +3,7 @@
 //! cmod plan, the panel storage the factors live in, and the tree-parallel
 //! triangular solves.
 
+pub(crate) mod analysis;
 mod forest;
 mod node;
 pub(crate) mod panel;
@@ -12,7 +13,7 @@ pub(crate) mod solve;
 mod store;
 
 pub(crate) use forest::ll_forest;
-pub(crate) use node::{CmodPlan, Gloc};
+pub(crate) use node::{perturb_pivot, CmodPlan, Gloc};
 pub(crate) use scatter::PermScatter;
 pub(crate) use schedule::{emit_refcount_offsets, Li, LlSchedule};
 pub(crate) use store::{Cells, PanelPtr, SlotStore};
