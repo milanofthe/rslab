@@ -249,7 +249,7 @@ impl Preconditioner<Complex<f64>> for LowPrecisionPreconditioner {
 /// `c32`); the outer GMRES keeps full `f64` accuracy. The unsymmetric analogue
 /// of [`LowPrecisionPreconditioner`], for MoM/FEM general systems.
 pub struct LowPrecisionLu {
-    inner: crate::numeric::multifrontal_lu::LuFactors<Complex<f32>>,
+    inner: crate::numeric::lu::LuFactors<Complex<f32>>,
 }
 
 impl LowPrecisionLu {
@@ -267,13 +267,13 @@ impl LowPrecisionLu {
                 .collect(),
         };
         Ok(Self {
-            inner: crate::numeric::multifrontal_lu::factor_general_lu(&a32, opts)?,
+            inner: crate::numeric::lu::factor_general_lu(&a32, opts)?,
         })
     }
 
     /// Stored fill `nnz(L)+nnz(U)`, in single-precision entries.
     pub fn factor_nnz(&self) -> usize {
-        crate::numeric::multifrontal_lu::LuFactors::factor_nnz(&self.inner)
+        crate::numeric::lu::LuFactors::factor_nnz(&self.inner)
     }
 
     /// Number of statically perturbed pivots.
@@ -288,7 +288,7 @@ impl Preconditioner<Complex<f64>> for LowPrecisionLu {
             .iter()
             .map(|v| Complex::new(v.re as f32, v.im as f32))
             .collect();
-        let z32 = crate::numeric::multifrontal_lu::solve_lu(&self.inner, &r32)?;
+        let z32 = crate::numeric::lu::solve_lu(&self.inner, &r32)?;
         for (zi, v) in z.iter_mut().zip(z32) {
             *zi = Complex::new(v.re as f64, v.im as f64);
         }
@@ -803,7 +803,7 @@ fn block_subtract<T: Scalar>(
 /// Saad 1993) for a general (unsymmetric) operator - the natural Krylov method
 /// for unsymmetric MoM/FEM systems where COCG/COCR do not apply. `op` may be
 /// matrix-free; `precond` supplies `M^-1` (e.g. an RLA
-/// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors) near-field factor).
+/// [`LuFactors`](crate::numeric::lu::LuFactors) near-field factor).
 /// Solves `A x = b` from the optional initial guess `x0` (default `x_0 = 0`).
 ///
 /// **Warm start (issue #5):** pass `x0 = Some(prev)` to seed the iteration from a
@@ -2511,7 +2511,7 @@ fn apply_block_via_rowmajor<T: Scalar>(
 
 /// A factorization usable as both a **direct solver** and a [`Preconditioner`].
 /// Implemented by the symmetric [`LdltSolver`] and the general
-/// [`LuFactors`](crate::numeric::multifrontal_lu::LuFactors), so a caller's
+/// [`LuFactors`](crate::numeric::lu::LuFactors), so a caller's
 /// solver loop can hold `&dyn Factorization` and swap symmetric/general,
 /// exact/incomplete, or `f64`/`f32` factors freely.
 pub trait Factorization<T: Scalar>: Preconditioner<T> {
@@ -2535,9 +2535,9 @@ impl<T: Scalar> Factorization<T> for LdltSolver<T> {
     }
 }
 
-impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors<T> {
+impl<T: Scalar> Preconditioner<T> for crate::numeric::lu::LuFactors<T> {
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
-        let x = crate::numeric::multifrontal_lu::solve_lu(self, r)?;
+        let x = crate::numeric::lu::solve_lu(self, r)?;
         z.copy_from_slice(&x);
         Ok(())
     }
@@ -2548,27 +2548,27 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuFactors
     /// columns).
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
         apply_block_via_rowmajor(r, z, s, n, |b, s| {
-            crate::numeric::multifrontal_lu::solve_lu_many(self, b, s)
+            crate::numeric::lu::solve_lu_many(self, b, s)
         })
     }
 }
 
-impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuFactors<T> {
+impl<T: Scalar> Factorization<T> for crate::numeric::lu::LuFactors<T> {
     fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        crate::numeric::multifrontal_lu::solve_lu(self, b)
+        crate::numeric::lu::solve_lu(self, b)
     }
     fn factor_nnz(&self) -> usize {
-        crate::numeric::multifrontal_lu::LuFactors::factor_nnz(self)
+        crate::numeric::lu::LuFactors::factor_nnz(self)
     }
     fn n_perturbed(&self) -> usize {
         self.n_perturbed
     }
 }
 
-/// The high-level [`LuSolver`](crate::numeric::multifrontal_lu::LuSolver) is a
+/// The high-level [`LuSolver`](crate::numeric::lu::LuSolver) is a
 /// preconditioner / factorization too - the unsymmetric twin of the
 /// [`LdltSolver`] impls, so solver-in-the-loop code can be generic over either.
-impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<T> {
+impl<T: Scalar> Preconditioner<T> for crate::numeric::lu::LuSolver<T> {
     fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), RslabError> {
         let x = self.solve(r)?;
         z.copy_from_slice(&x);
@@ -2577,21 +2577,21 @@ impl<T: Scalar> Preconditioner<T> for crate::numeric::multifrontal_lu::LuSolver<
     fn solve_threads(&self) -> Threads {
         self.solve_thread_policy()
     }
-    /// Block apply via [`LuSolver::solve_many`](crate::numeric::multifrontal_lu::LuSolver::solve_many).
+    /// Block apply via [`LuSolver::solve_many`](crate::numeric::lu::LuSolver::solve_many).
     fn apply_block(&self, r: &[T], z: &mut [T], s: usize, n: usize) -> Result<(), RslabError> {
         apply_block_via_rowmajor(r, z, s, n, |b, s| self.solve_many(b, s))
     }
 }
 
-impl<T: Scalar> Factorization<T> for crate::numeric::multifrontal_lu::LuSolver<T> {
+impl<T: Scalar> Factorization<T> for crate::numeric::lu::LuSolver<T> {
     fn solve(&self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        crate::numeric::multifrontal_lu::LuSolver::solve(self, b)
+        crate::numeric::lu::LuSolver::solve(self, b)
     }
     fn factor_nnz(&self) -> usize {
-        crate::numeric::multifrontal_lu::LuSolver::factor_nnz(self)
+        crate::numeric::lu::LuSolver::factor_nnz(self)
     }
     fn n_perturbed(&self) -> usize {
-        crate::numeric::multifrontal_lu::LuSolver::n_perturbed(self)
+        crate::numeric::lu::LuSolver::n_perturbed(self)
     }
 }
 
@@ -2711,7 +2711,7 @@ mod tests {
 
     #[test]
     fn gmres_solves_unsymmetric_with_lu_preconditioner() {
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         use crate::sparse::general::GeneralCsc;
         // Genuinely unsymmetric complex 2D grid (right != left couplings).
         let c = |re, im| Complex::new(re, im);
@@ -2868,7 +2868,7 @@ mod tests {
         // multi-cycle solve the total preconditioner-apply count equals the total
         // iteration count. Plain right-preconditioned GMRES would spend one extra
         // `M^-1` per cycle (rebuilding `M^-1(V y)`), i.e. `iters + n_cycles`.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(10); // n = 100
         let n = a.n;
@@ -2972,7 +2972,7 @@ mod tests {
         // so the projections sum in a different order and the true residual can
         // straddle `tol` by a rounding ULP. This is documented as a design point in
         // the module-level "Orthogonalization" note (issue #8), not a defect.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(8);
         let n = a.n;
@@ -2997,7 +2997,7 @@ mod tests {
     fn gmres_block_multi_rhs_solves_each_column() {
         // Several distinct right-hand sides solved in one block iteration; every
         // column must reach its own system's true residual.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(10);
         let n = a.n;
@@ -3154,7 +3154,7 @@ mod tests {
         // chunk order, so the whole block solve is **bit-identical regardless of
         // the thread count** - the determinism guarantee. Solve the same block in
         // a 1-thread and an 8-thread rayon pool and require exact equality.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         let c = |re, im| Complex::new(re, im);
         // Wide enough that a chunked reduction actually spans several chunks.
         let a = unsym_grid(60);
@@ -3193,7 +3193,7 @@ mod tests {
         // `with_threads(p)` runs the block solve in a scoped pool of exactly `p`
         // workers (the embedded / solver-in-the-loop cap) and produces the same
         // result as the unbounded solve.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         use crate::numeric::settings::with_threads;
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(30);
@@ -3232,7 +3232,7 @@ mod tests {
         // stays bit-identical whether run bare or inside a wide ambient pool (the
         // chunk-order reduction is thread-count independent), so the cap changes
         // only the concurrency, never the numbers.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         use crate::numeric::settings::{with_threads, Threads};
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(30);
@@ -3281,7 +3281,7 @@ mod tests {
         // re-factor-in-loop path. Inside a `with_threads(2)` pool the factor must be
         // bit-identical to the normal (scoped-pool) factor: the numeric result is
         // independent of the thread policy.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         use crate::numeric::settings::{with_threads, Threads};
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(24);
@@ -3559,7 +3559,7 @@ mod tests {
         // an intrusive probe; instead we certify the *effect*: GMRES still drives
         // the true residual to `tol` and matches the exact (direct-LU) solution -
         // which it could not if the ill-conditioned basis went uncorrected.
-        use crate::numeric::multifrontal_lu::{factor_general_lu, solve_lu};
+        use crate::numeric::lu::{factor_general_lu, solve_lu};
         use crate::sparse::general::GeneralCsc;
         let c = |re: f64, im: f64| Complex::new(re, im);
         let n = 32;
@@ -3645,7 +3645,7 @@ mod tests {
         // within-cycle deflation (#4) must finalize each fast column and shrink the
         // batched applies to the still-active width, draining the panel to 1 - while
         // every column still matches its single-RHS solve.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         use crate::sparse::general::GeneralCsc;
         let c = |re: f64, im: f64| Complex::new(re, im);
         let n = 8;
@@ -3758,7 +3758,7 @@ mod tests {
         // Correctness: the recycled solve must reach the SAME solution as plain
         // FGMRES on a hard preconditioned system (weak incomplete LU factor, short
         // restart -> many cycles), to the same tolerance.
-        use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::lu::factor_general_lu;
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(12); // n = 144
         let n = a.n;

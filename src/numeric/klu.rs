@@ -2458,7 +2458,7 @@ mod tests {
         );
     }
     use super::*;
-    use crate::numeric::multifrontal_lu::{factor_general_lu, solve_lu};
+    use crate::numeric::lu::{factor_general_lu, solve_lu};
     use crate::numeric::settings::SolverSettings;
     use num_complex::Complex;
 

@@ -11,7 +11,7 @@ use crate::symbolic::{symbolic_factorize_with_method, SupernodeParams, SymbolicF
 
 /// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
 /// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
-/// and pass to [`factor_numeric`] for each set of numeric values sharing the
+/// and pass to [`factor_numeric`](crate::factor_numeric) for each set of numeric values sharing the
 /// pattern - the PARDISO phase-1 analysis.
 pub struct SupernodalAnalysis {
     pub(crate) inner: Option<SymbolicInner>,
@@ -130,7 +130,7 @@ impl SupernodalAnalysis {
 
 /// PARDISO phase 1: analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`,
 /// lower triangle). The result is value-independent and reusable across many
-/// [`factor_numeric`] calls that share the pattern.
+/// [`factor_numeric`](crate::factor_numeric) calls that share the pattern.
 pub fn analyze(
     n: usize,
     col_ptr: &[usize],
