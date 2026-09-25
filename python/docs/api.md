@@ -209,7 +209,7 @@ without symbolic work or pivot search.
 
 **Returns**
 
-- `Klu`: A reusable factor handle with factor matrices `Klu.L`, `Klu.U`, `Klu.F`, permutations `Klu.perm_r`, `Klu.perm_c`, `Klu.solve`, `Klu.solve_many`, `Klu.solve_transpose`, `Klu.refactor`, the Krylov methods and `Klu.diagnostics`.
+- `Klu`: A reusable factor handle with `Klu.solve`, `Klu.solve_many`, `Klu.solve_transpose`, `Klu.refactor`, the Krylov methods, `Klu.diagnostics`, and the factors `Klu.L`, `Klu.U`, `Klu.F` with their permutations and scaling.
 
 **Raises**
 
@@ -498,28 +498,25 @@ Solve `A X = B` for an `n x nrhs` block in one batched pass.
 
 A KLU-path factor (block triangular form plus per-block Gilbert-Peierls
 LU) for circuit-shaped matrices, from `rslab.klu` or
-`KluSymbolic.factor`. Exposes the factor matrices `L`,
-`U`, `F` and permutations `perm_r`, `perm_c`
-(inspired by SuperLU), and supports the numeric-only `refactor`
-for fixed-pattern sweeps and `solve_transpose`.
+`KluSymbolic.factor`. Supports the numeric-only `refactor`
+for fixed-pattern sweeps and `solve_transpose`, and exposes the
+factors `L`, `U`, `F` with the permutations
+`perm_r`, `perm_c` (as SciPy's `SuperLU`).
 
 **Attributes**
 
-- `F`: Off-diagonal block entries F of the block triangular form as a SciPy ``csc_matrix``.
-- `L`: Unit lower-triangular factor L of the block triangular form as a SciPy ``csc_matrix`` (implicit unit diagonal materialized).
-- `U`: Upper-triangular factor U of the block triangular form as a SciPy ``csc_matrix`` (diagonal pivots included).
-- `block_ptr`: Diagonal block boundaries of the block triangular form (BTF).
+- `F`: The entries ``F`` above the diagonal blocks as a SciPy ``csc_matrix``; see :attr:`L`.
+- `L`: The unit lower factor ``L`` as a SciPy ``csc_matrix``. With the row scaling ``R = diag(row_scale)`` and the permutations ``perm_r`` and ``perm_c``, ``(R A)[perm_r][:, perm_c] = L @ U + F``; ``L`` and ``U`` are block diagonal over the blocks ``block_ptr`` of the block triangular form, ``F`` holds the entries above them.
+- `U`: The upper factor ``U`` (pivots on the diagonal) as a SciPy ``csc_matrix``; see :attr:`L`.
+- `block_ptr`: Boundaries of the diagonal blocks: block ``b`` holds the rows and columns ``block_ptr[b]:block_ptr[b + 1]`` of the factored matrix.
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
 - `factor_nnz`: Stored factor entries (the fill).
 - `n`: Matrix dimension ``n``.
 - `n_blocks`: Number of diagonal blocks of the block triangular form.
 - `n_perturbed`: Statically perturbed pivots (nonzero only in preconditioner mode).
-- `nnz`: Total stored factor nonzeros in L, U, and F (alias for :attr:`factor_nnz`).
-- `perm_c`: Column permutation vector (``P_c``): column ``k`` of the permuted system is column ``perm_c[k]`` of ``A``.
-- `perm_r`: Row permutation vector (``P_r``): row ``k`` of the permuted system is row ``perm_r[k]`` of ``A``.
-- `row_scale`: Alias for :attr:`rs_inv`.
-- `rs_inv`: Per-original-row scale factor reciprocals (all 1.0 when row scaling is off).
-- `shape`: Shape of the factor ``(n, n)``, matching SuperLU.
+- `perm_c`: Column permutation: column ``k`` of the factored matrix is column ``perm_c[k]`` of ``A``; see :attr:`L`.
+- `perm_r`: Row permutation: row ``k`` of the factored matrix is row ``perm_r[k]`` of ``A``; see :attr:`L`.
+- `row_scale`: Row scaling: row ``i`` of ``A`` is multiplied by ``row_scale[i]`` before the factorization (all ones without scaling); see :attr:`L`.
 
 #### `Klu.cocg(b, tol=1e-08, maxit=400, operator=None)`
 

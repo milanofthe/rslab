@@ -396,27 +396,3 @@ def test_every_setting_round_trips():
     with pytest.raises(TypeError):
         rslab.Settings(blr=1e-6)
 
-
-def test_klu_superlu_api_inspection():
-    A = _circuit(100)
-    f = rslab.klu(A)
-    # SuperLU-style properties
-    assert hasattr(f, "L")
-    assert hasattr(f, "U")
-    assert hasattr(f, "F")
-    assert hasattr(f, "shape")
-    assert hasattr(f, "nnz")
-    assert hasattr(f, "perm_r")
-    assert hasattr(f, "perm_c")
-    assert hasattr(f, "block_ptr")
-    assert hasattr(f, "rs_inv")
-    assert hasattr(f, "row_scale")
-    assert f.shape == (100, 100)
-    assert f.nnz == f.factor_nnz
-    assert isinstance(f.L, sp.csc_matrix)
-    assert isinstance(f.U, sp.csc_matrix)
-    assert isinstance(f.F, sp.csc_matrix)
-    assert isinstance(f.perm_r, np.ndarray)
-    assert isinstance(f.perm_c, np.ndarray)
-    assert f.perm_r.shape == (100,)
-    assert f.perm_c.shape == (100,)

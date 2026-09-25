@@ -275,19 +275,24 @@ pub fn array1<T: Element>(py: Python<'_>, v: Vec<T>) -> PyObject {
     v.into_pyarray_bound(py).into_any().unbind()
 }
 
-/// Wrap a GeneralCsc matrix as a SciPy `csc_matrix`.
-pub fn csc_to_py<T: Element + Clone>(
+/// Indices (a permutation, block boundaries) as an int64 NumPy array.
+pub fn index_array(py: Python<'_>, v: &[usize]) -> PyObject {
+    array1(py, v.iter().map(|&i| i as i64).collect::<Vec<i64>>())
+}
+
+/// A square compressed-column matrix as a SciPy `csc_matrix` (int64
+/// indices).
+pub fn csc_matrix<T: Element + Clone>(
     py: Python<'_>,
     m: &rslab::GeneralCsc<T>,
 ) -> PyResult<PyObject> {
-    let data = array1(py, m.values.clone());
-    let indices = array1(py, m.row_idx.iter().map(|&r| r as i64).collect());
-    let indptr = array1(py, m.col_ptr.iter().map(|&p| p as i64).collect());
-    let shape = (m.n, m.n);
-    let sp = py.import_bound("scipy.sparse")?;
-    let csc_cls = sp.getattr("csc_matrix")?;
-    let mat = csc_cls.call1(((data, indices, indptr), shape))?;
-    Ok(mat.into_any().unbind())
+    let parts = (
+        array1(py, m.values.clone()),
+        index_array(py, &m.row_idx),
+        index_array(py, &m.col_ptr),
+    );
+    let csc = py.import_bound("scipy.sparse")?.getattr("csc_matrix")?;
+    Ok(csc.call1((parts, (m.n, m.n)))?.unbind())
 }
 
 /// A column-major `n x nrhs` block as a row-major NumPy array.
