@@ -715,16 +715,40 @@ const RACE_CHEAP: &[OrderingMethod] = &[
 
 /// Amortization floor for the expensive `MetisND` race candidate: a
 /// multilevel ND ordering costs hundreds of milliseconds at mid sizes, so it
-/// only joins the race when the best cheap candidate's EXACT predicted factor
-/// work is large enough that an ND-class fill win can pay it back (below the
-/// floor the whole numeric factor is sub-second and the ordering time cannot
-/// amortize - the same work-floor principle as the KLU parallel gates), and
-/// above the [`pick_default_method`] size boundary (tiny-n/high-flop shapes
-/// are dense-ish, where dissection has nothing to separate).
-const ND_RACE_MIN_FLOPS: u64 = 5_000_000_000;
+/// only joins the race when the best cheap candidate's predicted factor time
+/// ([`prefix_work`]) is large enough that an ND-class win can pay it back
+/// (below the floor the whole numeric factor is sub-second and the ordering
+/// time cannot amortize - the same work-floor principle as the KLU parallel
+/// gates), and above the [`pick_default_method`] size boundary (tiny-n/high-flop
+/// shapes are dense-ish, where dissection has nothing to separate).
+const ND_RACE_MIN_WORK: u64 = 1_250_000_000;
+
+/// Workers the race's time prediction assumes: the default thread cap.
+const RACE_WORKERS: u64 = 4;
 
 fn prefix_flops(px: &SymbolicPrefix) -> u64 {
     px.col_counts.iter().map(|&c| (c * c) as u64).sum()
+}
+
+/// Predicted factor time of a prefix in flops: the work shared among
+/// [`RACE_WORKERS`], or the longest elimination chain where that is longer,
+/// since no worker count shortens it. Minimum-degree orderings of some 3D
+/// meshes leave most of the work on one chain (a 23k waveguide: 69 percent);
+/// judged by total flops alone they never met the ND floor, although ND
+/// halved the factor time there.
+fn prefix_work(px: &SymbolicPrefix) -> u64 {
+    // The etree is postordered, so every child precedes its parent.
+    let mut chain = vec![0u64; px.n];
+    let mut longest = 0;
+    for (j, &c) in px.col_counts.iter().enumerate() {
+        let here = chain[j] + (c * c) as u64;
+        longest = longest.max(here);
+        if let Some(p) = px.etree.parent[j] {
+            debug_assert!(p > j, "prefix etree not postordered");
+            chain[p] = chain[p].max(here);
+        }
+    }
+    (prefix_flops(px) / RACE_WORKERS).max(longest)
 }
 
 /// Race the [`race_candidates`] orderings at symbolic time and return the
@@ -783,7 +807,7 @@ fn symbolic_factorize_race(
         || {
             let amd = symbolic_prefix(matrix, full, snode_params, RACE_CHEAP[0], ND_SINGLE_SEED);
             let gated =
-                parallel && !eager && matches!(&amd, Ok(p) if prefix_flops(p) >= ND_RACE_MIN_FLOPS);
+                parallel && !eager && matches!(&amd, Ok(p) if prefix_work(p) >= ND_RACE_MIN_WORK);
             (amd, if gated { nd_candidates() } else { Vec::new() })
         },
         || {
@@ -825,14 +849,14 @@ fn symbolic_factorize_race(
         }
     }
     // Stage 2: the expensive ND candidate, only where its cost can amortize
-    // (see [`ND_RACE_MIN_FLOPS`]), with the seed ensemble above
+    // (see [`ND_RACE_MIN_WORK`]), with the seed ensemble above
     // [`ND_SEED_RACE_MIN_FLOPS`]. The ensemble's pick is the smallest exact
     // factor nnz with the lowest seed breaking ties, which is the same choice
     // `metis_seed_race` makes (its fill score is invariant under the
     // postorders the prefix applies).
     if let Some(champ) = &best {
         let flops = prefix_flops(champ);
-        if matrix.n > 10_000 && flops >= ND_RACE_MIN_FLOPS {
+        if matrix.n > 10_000 && prefix_work(champ) >= ND_RACE_MIN_WORK {
             let seeds = if flops >= ND_SEED_RACE_MIN_FLOPS {
                 ND_SEED_CANDIDATES
             } else {
