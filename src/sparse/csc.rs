@@ -235,9 +235,56 @@ impl<T: Scalar> CscMatrix<T> {
 
     /// Expand the lower-triangle CSC to a full symmetric sparsity pattern.
     ///
-    /// The result contains both (i,j) and (j,i) for every off-diagonal entry.
-    /// Used for AMD ordering and elimination tree construction.
+    /// The result contains both (i,j) and (j,i) for every off-diagonal entry,
+    /// rows sorted within each column. Used for the orderings and the
+    /// elimination tree.
+    ///
+    /// Column `c` of the result is the transposed entries above the diagonal
+    /// followed by `c`'s own lower column. Walking the columns in order
+    /// delivers the transposed entries of every column in ascending order and
+    /// the lower columns are sorted already, so no column is sorted.
     pub fn symmetric_pattern(&self) -> CscPattern {
+        let n = self.n;
+        // `above[c]`: entries of row `c` left of the diagonal.
+        let mut above = vec![0usize; n];
+        for j in 0..n {
+            for &i in &self.row_idx[self.col_ptr[j]..self.col_ptr[j + 1]] {
+                if i < j {
+                    // Not a lower triangle: place and sort.
+                    return self.symmetric_pattern_sorted();
+                }
+                if i != j {
+                    above[i] += 1;
+                }
+            }
+        }
+        let mut col_ptr = vec![0usize; n + 1];
+        for c in 0..n {
+            col_ptr[c + 1] = col_ptr[c] + above[c] + (self.col_ptr[c + 1] - self.col_ptr[c]);
+        }
+        let mut row_idx = vec![0usize; col_ptr[n]];
+        let mut next = col_ptr[..n].to_vec();
+        for j in 0..n {
+            let own = &self.row_idx[self.col_ptr[j]..self.col_ptr[j + 1]];
+            let at = col_ptr[j] + above[j];
+            row_idx[at..at + own.len()].copy_from_slice(own);
+            for &i in own {
+                if i != j {
+                    row_idx[next[i]] = j;
+                    next[i] += 1;
+                }
+            }
+        }
+        CscPattern {
+            n,
+            col_ptr,
+            row_idx,
+        }
+    }
+
+    /// [`symmetric_pattern`](Self::symmetric_pattern) of any pattern, by
+    /// placing both entries of each pair and sorting every column.
+    fn symmetric_pattern_sorted(&self) -> CscPattern {
         // Count entries per column in the full pattern
         let mut col_counts = vec![0usize; self.n];
         for j in 0..self.n {
