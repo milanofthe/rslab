@@ -36,7 +36,7 @@
 //! not a bug; see the `gmres_block_single_rhs_matches_scalar_gmres` test.
 
 use crate::error::RslabError;
-use crate::numeric::multifrontal_ldlt::{SolverSettings, Threads};
+use crate::numeric::settings::{SolverSettings, Threads};
 use crate::numeric::sparse_solver::LdltSolver;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -2633,7 +2633,7 @@ impl<T: Scalar> Factorization<T> for crate::numeric::klu::KluSolver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numeric::multifrontal_ldlt::{SolverSettings, ZeroPivotAction};
+    use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
     use num_complex::Complex;
 
     type C = Complex<f64>;
@@ -3193,8 +3193,8 @@ mod tests {
         // `with_threads(p)` runs the block solve in a scoped pool of exactly `p`
         // workers (the embedded / solver-in-the-loop cap) and produces the same
         // result as the unbounded solve.
-        use crate::numeric::multifrontal_ldlt::with_threads;
         use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::settings::with_threads;
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(30);
         let n = a.n;
@@ -3232,8 +3232,8 @@ mod tests {
         // stays bit-identical whether run bare or inside a wide ambient pool (the
         // chunk-order reduction is thread-count independent), so the cap changes
         // only the concurrency, never the numbers.
-        use crate::numeric::multifrontal_ldlt::{with_threads, Threads};
         use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::settings::{with_threads, Threads};
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(30);
         let n = a.n;
@@ -3281,8 +3281,8 @@ mod tests {
         // re-factor-in-loop path. Inside a `with_threads(2)` pool the factor must be
         // bit-identical to the normal (scoped-pool) factor: the numeric result is
         // independent of the thread policy.
-        use crate::numeric::multifrontal_ldlt::{with_threads, Threads};
         use crate::numeric::multifrontal_lu::factor_general_lu;
+        use crate::numeric::settings::{with_threads, Threads};
         let c = |re, im| Complex::new(re, im);
         let a = unsym_grid(24);
         let n = a.n;
@@ -3304,7 +3304,7 @@ mod tests {
     #[test]
     fn default_thread_policy_caps_at_four() {
         // The pareto-optimal embedded default: predict per matrix, never exceed 4.
-        use crate::numeric::multifrontal_ldlt::Threads;
+        use crate::numeric::settings::Threads;
         assert_eq!(SolverSettings::default().threads, Threads::Auto { max: 4 });
     }
 

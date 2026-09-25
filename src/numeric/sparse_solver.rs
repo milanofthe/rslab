@@ -27,8 +27,9 @@
 use crate::dense::ldlt_generic::LdltFactors;
 use crate::error::RslabError;
 use crate::numeric::multifrontal_ldlt::{
-    analyze_with as analyze_pattern_with, factor_numeric, MultifrontalSymbolic, SolverSettings,
+    analyze_with as analyze_pattern_with, factor_numeric, MultifrontalSymbolic,
 };
+use crate::numeric::settings::SolverSettings;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
@@ -610,7 +611,7 @@ impl LdltSymbolic {
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::multifrontal_ldlt::recommend_threads_for_sym(&self.symbolic, cap)
         });
-        let warnings = opts.ignored_on(crate::numeric::multifrontal_ldlt::FactorPath::Ldlt);
+        let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Ldlt);
         for w in &warnings {
             crate::logging::warn(&format!("ldlt settings: {w}"));
         }

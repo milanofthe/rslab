@@ -5,7 +5,7 @@
 
 use crate::diagnostics::MemoryEstimate;
 use crate::error::RslabError;
-use crate::numeric::multifrontal_ldlt::SolverSettings;
+use crate::numeric::settings::SolverSettings;
 use crate::symbolic::OrderingMethod;
 
 /// One `UnsafeCell` payload per supernode, written exactly once by the
@@ -95,7 +95,7 @@ pub(crate) fn tuned<A: ?Sized, S>(
     if let Some((cores, calib)) = crate::tuning::cached_calibration() {
         let est = estimate(&sym);
         let t = crate::tuning::recommend_threads_cost_model(&est, &calib, 0, cores);
-        s.threads = crate::numeric::multifrontal_ldlt::Threads::Fixed(t);
+        s.threads = crate::numeric::settings::Threads::Fixed(t);
     }
     Ok((sym, s))
 }

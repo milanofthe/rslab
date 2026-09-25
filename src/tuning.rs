@@ -585,7 +585,7 @@ mod tests {
         // saturation dominates, so it may (correctly) choose fewer than all cores.
         // The contract is 1 <= threads <= physical_cores, not "always all cores".
         match plan_ok.opts.threads {
-            crate::numeric::multifrontal_ldlt::Threads::Fixed(t) => {
+            crate::numeric::settings::Threads::Fixed(t) => {
                 assert!(
                     t >= 1 && t <= hw.physical_cores.max(1),
                     "threads within core budget"
