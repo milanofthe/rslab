@@ -1,5 +1,5 @@
-//! Left-looking factorization bit-identity across thread counts and across
-//! repeated runs at the same thread count.
+//! Bit-identity of the analysis, the factorizations and the solves across
+//! thread counts and across repeated runs at the same thread count.
 //!
 //! Regression test for the racy tiled-cmod mode pick: the `chain_phase`
 //! signal (nodes currently in flight, a timing artifact) must never select
@@ -13,7 +13,10 @@
 //! threads and a few hundred entries run-to-run at 8 threads.
 
 use num_complex::Complex;
-use rslab::{CscMatrix, GeneralCsc, LdltSolver, LuSolver, SolverSettings};
+use rslab::{
+    CscMatrix, GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSolver, LdltSymbolic, LuSolver,
+    OrderingMethod, SolverSettings,
+};
 
 /// 3D 7-point Laplacian (k^3 grid, SPD, lower triangle).
 fn grid3d(k: usize) -> CscMatrix<f64> {
@@ -213,4 +216,90 @@ fn ll_lu_complex_bit_identical_across_threads_and_runs() {
             "LL complex LU solution differs between 1 and 8 threads or run to run"
         );
     }
+}
+
+/// A random unsymmetric matrix with a dominant diagonal; with `holes` every
+/// seventh diagonal entry is left out, its column carrying the pivot of the
+/// next row instead (a 2x2 swap the row matching has to find).
+fn unsymmetric(n: usize, holes: bool) -> GeneralCsc<f64> {
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..n {
+        if holes && j % 7 == 0 && j + 1 < n {
+            r.extend([j + 1, j]);
+            c.extend([j, j + 1]);
+            v.extend([4.0, 4.0]);
+        } else {
+            r.push(j);
+            c.push(j);
+            v.push(4.0 + (j % 3) as f64);
+        }
+        for _ in 0..3 {
+            let i = (next() % n as u64) as usize;
+            if i != j {
+                r.push(i);
+                c.push(j);
+                v.push(((next() % 200) as f64) / 100.0 - 1.0);
+            }
+        }
+    }
+    GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
+}
+
+fn in_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(f)
+}
+
+/// The ordering race, with nested dissection and its seed ensemble forced in
+/// and the dissection started speculatively, picks the same ordering whatever
+/// the analysis pool: the factors under one and eight analysis workers solve
+/// bit-identically.
+#[test]
+fn the_race_is_thread_count_invariant() {
+    let a = grid3d(16);
+    let b: Vec<f64> = (0..a.n).map(|i| ((i % 13) as f64) - 6.0).collect();
+    let mut open = SolverSettings::default().with_nd_ensemble(true);
+    let race = &mut open.ordering.race;
+    (race.nd_min_n, race.nd_min_work, race.ensemble_min_flops) = (0, 0, 0);
+    race.eager_nd_min_nnz = 0;
+    let solve = |t: usize| -> Vec<f64> {
+        let sym = LdltSymbolic::analyze(&a, &open.clone().with_threads(t)).unwrap();
+        sym.factor(&a, &SolverSettings::default().with_threads(4))
+            .unwrap()
+            .solve(&b)
+            .unwrap()
+    };
+    assert_eq!(bits_f64(&solve(1)), bits_f64(&solve(8)));
+}
+
+/// The LU path with the row matching and the KLU path with parallel blocks
+/// are bit-identical at one and eight workers.
+#[test]
+fn lu_with_matching_and_klu_are_bit_identical_across_threads() {
+    let a = unsymmetric(if cfg!(debug_assertions) { 2000 } else { 20_000 }, true);
+    let b: Vec<f64> = (0..a.n).map(|i| ((i % 11) as f64) - 5.0).collect();
+    let lu = |t: usize| {
+        let s = SolverSettings::default()
+            .with_threads(t)
+            .with_ordering(OrderingMethod::Amd);
+        let f = LuSolver::factor(&a, &s).unwrap();
+        assert!(f.diagnostics().decisions.scaling.contains("Mc64"));
+        f.solve(&b).unwrap()
+    };
+    assert_eq!(bits_f64(&lu(1)), bits_f64(&lu(8)));
+    let klu = |t: usize| {
+        let s = KluSettings::default().with_parallel(KluParallel::On);
+        in_pool(t, || KluSolver::factor(&a, &s).unwrap().solve(&b).unwrap())
+    };
+    assert_eq!(bits_f64(&klu(1)), bits_f64(&klu(8)));
 }

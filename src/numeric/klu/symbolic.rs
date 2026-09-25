@@ -258,10 +258,11 @@ impl KluSymbolic {
     }
 
     /// Numeric factorization of `a`, which must share the analyzed pattern.
-    /// Populates the solver's [`diagnostics`](KluSolver::diagnostics) with the
-    /// a-priori estimate and the measured factor stage (like
-    /// [`LuSymbolic::factor`](crate::LuSymbolic::factor)); the one-shot
-    /// [`KluSolver::factor`] skips both for minimum latency.
+    /// Records the measured factor stage in the solver's
+    /// [`diagnostics`](KluSolver::diagnostics), and the a-priori estimate when
+    /// [`estimate_memory`](Self::estimate_memory) computed it (the estimate
+    /// costs about as much as the factorization, so it is never computed
+    /// implicitly).
     pub fn factor<T: Scalar>(
         &self,
         a: &GeneralCsc<T>,
