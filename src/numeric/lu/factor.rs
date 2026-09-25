@@ -5,6 +5,7 @@
 use super::factors::LuNumeric;
 use super::node::lu_ll_factor_node;
 use super::solver::LuSymbolic;
+use super::structure::LuStructure;
 use crate::numeric::supernodal::{Input, InputProgram};
 
 use crate::error::RslabError;
@@ -55,16 +56,16 @@ pub(super) struct LlEmit<T> {
 }
 
 impl<T: Scalar> LlEmit<T> {
-    fn new(sym: &SymbolicFactorization, sched: &LlSchedule) -> Self {
+    fn new(sym: &SymbolicFactorization, sched: &LlSchedule, st: &LuStructure) -> Self {
         let n = sym.n;
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
-        let sizes =
-            || (0..sym.supernodes.len()).map(|s| sched.rows(s).len() * sym.supernodes[s].ncol);
+        let ns = sym.supernodes.len();
+        let ncol = |s: usize| sym.supernodes[s].ncol;
         LlEmit {
             refcount,
             e_offset,
-            l_arena: PanelArena::new(sizes()),
-            u_arena: PanelArena::new(sizes()),
+            l_arena: PanelArena::new((0..ns).map(|s| st.rows_l(s).len() * ncol(s))),
+            u_arena: PanelArena::new((0..ns).map(|s| st.cols_u(s).len() * ncol(s))),
             panels: Cells::new_default(sym.supernodes.len()),
             e_of_g: Cells::new(n, usize::MAX),
             row_pos_of_g: Cells::new(n, usize::MAX),
@@ -92,38 +93,38 @@ fn emit_and_free<T: Scalar>(
     store: &LuLlStore,
     emit: &LlEmit<T>,
     sym: &SymbolicFactorization,
-    sched: &LlSchedule,
+    st: &LuStructure,
     drop_tol: Option<f64>,
 ) {
     let snode = &sym.supernodes[k];
     let (first, ncol) = (snode.first_col, snode.ncol);
-    let nrow = sched.rows(k).len();
-    let cnrow = nrow - ncol;
+    let (rows_l, cols_u) = (st.rows_l(k), st.cols_u(k));
+    let (nrow_l, nrow_u) = (rows_l.len(), cols_u.len());
     // SAFETY: the owner of supernode `k` emits it exactly once, after its last
     // updater has read the slots (refcount zero); nobody reads them afterwards.
     let rperm = unsafe { store.take(k) };
     let eoff = emit.e_offset[k];
     debug_assert!(
         (0..ncol).all(|p| unsafe { emit.eg(first + p) } == eoff + p)
-            && (0..ncol).all(|i| unsafe { emit.rg(sched.rows(k)[rperm[i]] as usize) } == eoff + i),
+            && (0..ncol).all(|i| unsafe { emit.rg(rows_l[rperm[i]] as usize) } == eoff + i),
         "the diagonal block is in elimination order"
     );
     // `U^T`'s diagonal block from the upper triangle of the `L` slot.
     {
         let lbuf: &[T] = unsafe { emit.l_arena.slot(k) };
         let ut = unsafe { emit.u_arena.slot_mut(k) };
-        debug_assert_eq!(ut.len(), nrow * ncol);
+        debug_assert_eq!(ut.len(), nrow_u * ncol);
         for p in 0..ncol {
             for i in p..ncol {
-                ut[p * nrow + i] = lbuf[i * nrow + p];
+                ut[p * nrow_u + i] = lbuf[i * nrow_l + p];
             }
         }
     }
-    let l_rows: Vec<u32> = (ncol..nrow)
-        .map(|i| unsafe { emit.rg(sched.rows(k)[rperm[i]] as usize) } as u32)
+    let l_rows: Vec<u32> = (ncol..nrow_l)
+        .map(|i| unsafe { emit.rg(rows_l[rperm[i]] as usize) } as u32)
         .collect();
-    let u_rows: Vec<u32> = (0..cnrow)
-        .map(|t| unsafe { emit.eg(sched.rows(k)[ncol + t] as usize) } as u32)
+    let u_rows: Vec<u32> = (ncol..nrow_u)
+        .map(|t| unsafe { emit.eg(cols_u[t] as usize) } as u32)
         .collect();
     let l_out = finish_panel(
         unsafe { emit.l_arena.slot_mut(k) },
@@ -149,6 +150,7 @@ fn emit_and_free<T: Scalar>(
 fn factor_lu_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
+    st: &LuStructure,
     inp: Input<T>,
     d_row: &[f64],
     d_col: &[f64],
@@ -159,7 +161,7 @@ fn factor_lu_left_looking<T: Scalar>(
     let n = sym.n;
     let nsuper = sym.supernodes.len();
     let store = LuLlStore::new(nsuper);
-    let emit = LlEmit::<T>::new(sym, sched);
+    let emit = LlEmit::<T>::new(sym, sched, st);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let factor_node = |s: usize| {
         lu_ll_factor_node(
@@ -167,6 +169,7 @@ fn factor_lu_left_looking<T: Scalar>(
             sym,
             inp,
             sched,
+            st,
             &store,
             &emit,
             perturb_floor,
@@ -174,7 +177,7 @@ fn factor_lu_left_looking<T: Scalar>(
             kt,
         )
     };
-    let emit_free = |k: usize| emit_and_free(k, &store, &emit, sym, sched, drop_tol);
+    let emit_free = |k: usize| emit_and_free(k, &store, &emit, sym, st, drop_tol);
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     drop(store); // panels moved into the emit cells; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
@@ -303,13 +306,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
     };
 
     // `A`'s row `r` is `B`'s row `b_row[r]`, scaled by `d_row[b_row[r]]`.
-    let b_row: Option<Vec<usize>> = lusym.matching.as_ref().map(|m| {
-        let mut b = vec![0usize; n];
-        for (i, &r) in m.row_of.iter().enumerate() {
-            b[r] = i;
-        }
-        b
-    });
+    let b_row: Option<Vec<usize>> = lusym.matching.as_ref().map(|m| m.row_map());
     let prog = lusym
         .input
         .get_or_init(|| InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym));
@@ -334,6 +331,7 @@ pub fn factor_general_lu_numeric<T: Scalar>(
                 lusym.symb.ll_schedule().ok_or_else(|| {
                     RslabError::InvalidInput("internal: empty symbolic".to_string())
                 })?,
+                &lusym.structure,
                 inp,
                 &d_row,
                 &d_col,

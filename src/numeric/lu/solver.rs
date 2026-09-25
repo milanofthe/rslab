@@ -3,6 +3,7 @@
 
 use super::factor::factor_general_lu_numeric;
 use super::factors::{LuFactors, LuNumeric};
+use super::structure::LuStructure;
 
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
@@ -72,6 +73,17 @@ pub(super) struct LuMatching {
     pub(super) c: Vec<f64>,
 }
 
+impl LuMatching {
+    /// `map[r]`: the row of `B` that row `r` of `A` becomes.
+    pub(super) fn row_map(&self) -> Vec<usize> {
+        let mut map = vec![0usize; self.row_of.len()];
+        for (i, &r) in self.row_of.iter().enumerate() {
+            map[r] = i;
+        }
+        map
+    }
+}
+
 pub struct LuSymbolic {
     pub(super) symb: crate::numeric::supernodal::analysis::SupernodalAnalysis,
     pub(super) n: usize,
@@ -89,6 +101,9 @@ pub struct LuSymbolic {
     /// factorization: every (re)factorization reduces to one linear values
     /// scatter (row matching and equilibration applied on the way).
     pub(super) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
+    /// The exact structures of `L` and `U`, tighter than the analysis's
+    /// symmetric one on an unsymmetric pattern.
+    pub(super) structure: LuStructure,
 }
 
 impl LuSymbolic {
@@ -129,6 +144,7 @@ impl LuSymbolic {
                 requested_ordering: opts.ordering,
                 est_cache: Mutex::new(Vec::new()),
                 input: std::sync::OnceLock::new(),
+                structure: LuStructure::empty(),
             });
         }
         let t = crate::clock::Instant::now();
@@ -160,6 +176,13 @@ impl LuSymbolic {
             None => symmetrized_lower_pattern(a),
         };
         let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
+        let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
+            (Some((sym, _)), Some(sched)) => {
+                let row_map = matching.as_ref().map(LuMatching::row_map);
+                LuStructure::build(&a.col_ptr, &a.row_idx, row_map.as_deref(), sym, sched)
+            }
+            _ => LuStructure::empty(),
+        };
         let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             let d = symb.decisions(opts.ordering);
@@ -186,6 +209,7 @@ impl LuSymbolic {
             requested_ordering: opts.ordering,
             est_cache: Mutex::new(Vec::new()),
             input: std::sync::OnceLock::new(),
+            structure,
         })
     }
 
@@ -404,12 +428,13 @@ impl LuSymbolic {
                 false,
             );
         };
-        // The `L` and `U^T` panels of a supernode, `(w + m) x w` each; they are
-        // the stored factor (no compact copy, see `PanelFactor`).
+        // The `L` and `U^T` panels of a supernode, `(w + m_l) x w` and
+        // `(w + m_u) x w` on the exact structure; they are the stored factor
+        // (no compact copy, see `PanelFactor`).
+        let st = &self.structure;
         let panel_bytes = |s: usize| -> u64 {
             let nc = sym.supernodes[s].ncol;
-            let nr = sched.rows(s).len();
-            (2 * nr * nc * value_bytes) as u64
+            ((st.rows_l(s).len() + st.cols_u(s).len()) * nc * value_bytes) as u64
         };
         let compact_bytes = panel_bytes;
         // The split permuted input: its values (per factorization) and structure
@@ -426,8 +451,8 @@ impl LuSymbolic {
         );
         est.factor_flops = (0..nsuper)
             .map(|s| {
-                let (nc, nr) = (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
-                nr * nr * nc
+                let nc = sym.supernodes[s].ncol as u64;
+                (st.rows_l(s).len() * st.cols_u(s).len()) as u64 * nc
             })
             .sum();
         est

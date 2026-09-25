@@ -5,7 +5,7 @@
 use super::bunch_kaufman::ll_cdiv_emit;
 use super::factor::{LlEmitLdlt, LlStore};
 use super::gemm::{grow_scratch, lower_tile_gemm};
-use crate::numeric::supernodal::Input;
+use crate::numeric::supernodal::{Input, Span};
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
@@ -54,7 +54,14 @@ pub(super) fn ll_factor_node<T: Scalar>(
             panel[li + p * nrow] = panel[li + p * nrow] + v;
         }
     }
-    let plan = crate::numeric::supernodal::CmodPlan::new(sym, sched, s, false, ll_gemm_par);
+    let plan = crate::numeric::supernodal::CmodPlan::new(
+        sym,
+        s,
+        sched.updaters(s),
+        |k| (sched.rows(k), sched.rows(k)),
+        false,
+        ll_gemm_par,
+    );
     let (spans, tile_w, tiled) = (&plan.spans, plan.tile_w, plan.tiled);
     let seq_gemm_par = if plan.forks { ll_gemm_par } else { usize::MAX };
     if tiled {
@@ -68,7 +75,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 let c1 = (c0 + tile_w).min(ncol);
                 let mut vd_buf: Vec<T> = Vec::new();
                 let mut u_buf: Vec<T> = Vec::new();
-                for &(kk, p0, p1) in spans_ref {
+                for &Span {
+                    k: kk, l: (p0, p1), ..
+                } in spans_ref
+                {
                     let nck = sym.supernodes[kk].ncol;
                     let nrk = sched.rows(kk).len();
                     let ok = &sched.rows(kk)[nck..];
@@ -141,7 +151,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
     let mut vc: Vec<T> = Vec::new();
     let mut vd_buf: Vec<T> = Vec::new();
     let mut u_buf: Vec<T> = Vec::new();
-    for &(kk, p0, p1) in spans.iter().filter(|_| !tiled) {
+    for &Span {
+        k: kk, l: (p0, p1), ..
+    } in spans.iter().filter(|_| !tiled)
+    {
         let nck = sym.supernodes[kk].ncol;
         let nrk = sched.rows(kk).len();
         let ok = &sched.rows(kk)[nck..];

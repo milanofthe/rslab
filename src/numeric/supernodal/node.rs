@@ -1,7 +1,7 @@
 //! Per-node machinery shared by the LDL^T and LU kernels: the cmod plan and
 //! the global-to-local row map.
 
-use super::{Li, LlSchedule};
+use super::Li;
 use crate::scalar::Scalar;
 
 /// Work above which a node forks inside its cmod. A small node that forks
@@ -21,9 +21,8 @@ const CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
 /// switched GEMMs between serial and parallel mode, not bit-identical for
 /// complex scalars); see `tests/ll_thread_determinism.rs`.
 pub(crate) struct CmodPlan {
-    /// `(updater, p0, p1)`: the updater's off-diagonal rows `[p0, p1)` land in
-    /// this node's columns.
-    pub spans: Vec<(usize, usize, usize)>,
+    /// The updaters with work for this node, in updater order.
+    pub spans: Vec<Span>,
     /// The node's update work is large enough to fork (see
     /// [`CMOD_FORK_MIN_FLOPS`], raised to the parallel-GEMM threshold).
     pub forks: bool,
@@ -41,35 +40,57 @@ pub(crate) struct CmodPlan {
     pub tiled: bool,
 }
 
+/// One updater of a node: `l` is the landing range of its off-block `L` rows
+/// (`[p0, p1)` within the node's columns), `u` the same for its off-block `U`
+/// columns. The symmetric path has one structure, so `l == u` there.
+#[derive(Clone, Copy)]
+pub(crate) struct Span {
+    pub k: usize,
+    pub l: (usize, usize),
+    pub u: (usize, usize),
+}
+
 impl CmodPlan {
-    /// The plan of supernode `s`. With `count_u` the U-side rows beyond each
-    /// landing range count as work too (the LU kernel also updates `U12`).
-    pub fn new(
+    /// The plan of supernode `s` over its `updaters`; `lists(k)` gives an
+    /// updater's full `L` row and `U` column lists (own columns first). With
+    /// `count_u` the `U12` updates count as work too (the LU kernel).
+    pub fn new<'a>(
         sym: &crate::symbolic::SymbolicFactorization,
-        sched: &LlSchedule,
         s: usize,
+        updaters: &[Li],
+        lists: impl Fn(usize) -> (&'a [Li], &'a [Li]),
         count_u: bool,
         par_gemm: usize,
     ) -> Self {
         let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
-        let mut spans = Vec::with_capacity(sched.updaters(s).len());
+        let landing = |v: &[Li]| {
+            let p0 = v.partition_point(|&g| (g as usize) < first);
+            (
+                p0,
+                p0 + v[p0..].partition_point(|&g| (g as usize) < first + ncol),
+            )
+        };
+        let mut spans = Vec::with_capacity(updaters.len());
         let mut flops: usize = 0;
-        for &kk in sched.updaters(s) {
-            let kk = kk as usize;
-            let nck = sym.supernodes[kk].ncol;
-            let ok = &sched.rows(kk)[nck..];
-            let nok = ok.len();
-            let p0 = ok.partition_point(|&g| (g as usize) < first);
-            let p1 = ok.partition_point(|&g| (g as usize) < first + ncol);
-            let npk = p1 - p0;
-            if npk == 0 {
+        for &k in updaters {
+            let k = k as usize;
+            let nck = sym.supernodes[k].ncol;
+            let (lk, uk) = lists(k);
+            let (ol, ou) = (&lk[nck..], &uk[nck..]);
+            let (l, u) = (landing(ol), landing(ou));
+            // `L` rows from the landing range down times the `U` columns landing
+            // here, and (LU) the landing `L` rows times the `U` columns past here.
+            let lwork = (ol.len() - l.0) * (u.1 - u.0) * nck;
+            let uwork = if count_u {
+                (l.1 - l.0) * (ou.len() - u.1) * nck
+            } else {
+                0
+            };
+            if lwork + uwork == 0 {
                 continue;
             }
-            flops += (nok - p0) * npk * nck;
-            if count_u {
-                flops += npk * (nok - p1) * nck;
-            }
-            spans.push((kk, p0, p1));
+            flops += lwork + uwork;
+            spans.push(Span { k, l, u });
         }
         let forks = flops >= CMOD_FORK_MIN_FLOPS.max(par_gemm);
         let tile_w = (ncol / 16).clamp(32, 256);
@@ -83,9 +104,10 @@ impl CmodPlan {
 }
 
 thread_local! {
-    /// Per-worker global-to-local row map, held at all-`Li::MAX` between nodes.
-    static GLOC_SCRATCH: std::cell::RefCell<Vec<Li>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    /// Per-worker global-to-local maps, held at all-`Li::MAX` between nodes;
+    /// two, so a node can map its `L` rows and its `U` columns at once.
+    static GLOC_SCRATCH: [std::cell::RefCell<Vec<Li>>; 2] =
+        const { [std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new())] };
 }
 
 /// Global-to-local row map of one supernode: `map[rows[li]] == li`, every other
@@ -95,18 +117,28 @@ thread_local! {
 pub(crate) struct Gloc<'a> {
     map: Vec<Li>,
     rows: &'a [Li],
+    slot: usize,
 }
 
 impl<'a> Gloc<'a> {
     pub fn new(n: usize, rows: &'a [Li]) -> Self {
-        let mut map = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+        Self::in_slot(0, n, rows)
+    }
+
+    /// A second map alongside [`new`](Self::new)'s, on its own scratch.
+    pub fn second(n: usize, rows: &'a [Li]) -> Self {
+        Self::in_slot(1, n, rows)
+    }
+
+    fn in_slot(slot: usize, n: usize, rows: &'a [Li]) -> Self {
+        let mut map = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c[slot].borrow_mut()));
         if map.len() < n {
             map.resize(n, Li::MAX);
         }
         for (li, &g) in rows.iter().enumerate() {
             map[g as usize] = li as Li;
         }
-        Gloc { map, rows }
+        Gloc { map, rows, slot }
     }
 }
 
@@ -123,7 +155,7 @@ impl Drop for Gloc<'_> {
             self.map[g as usize] = Li::MAX;
         }
         let map = std::mem::take(&mut self.map);
-        GLOC_SCRATCH.with(|c| *c.borrow_mut() = map);
+        GLOC_SCRATCH.with(|c| *c[self.slot].borrow_mut() = map);
     }
 }
 
