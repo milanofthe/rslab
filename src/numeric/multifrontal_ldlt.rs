@@ -150,17 +150,8 @@ unsafe fn lower_tile_gemm<T: Scalar>(
     }
 }
 
-thread_local! {
-    /// Per-worker global->front-local index scratch (`usize`, scalar-independent),
-    /// reused across every front a thread factors and held at the all-`usize::MAX`
-    /// invariant between uses. Replaces the old `map_init` workspace now that the
-    /// driver is a work-stealing tree recursion rather than a level `par_iter`.
-    static GLOC_SCRATCH: std::cell::RefCell<Vec<Li>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
 use crate::numeric::ll_common::PanelPtr as LdltPanelPtr;
-use crate::numeric::ll_common::{emit_refcount_offsets, Cells, Li, LlSchedule, PermScatter};
+use crate::numeric::ll_common::{emit_refcount_offsets, Cells, LlSchedule, PermScatter};
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -968,15 +959,9 @@ fn ll_factor_node<T: Scalar>(
     let panel: &mut [T] = unsafe { emit.arena.slot_mut(s) };
     debug_assert_eq!(panel.len(), nrow * ncol);
 
-    // Thread-local global->local scratch (held at all-`Li::MAX`; narrow
-    // entries halve the table's random-access footprint).
-    let mut gloc = GLOC_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
-    if gloc.len() < n {
-        gloc.resize(n, Li::MAX);
-    }
-    for (li, &g) in sched.rows(s).iter().enumerate() {
-        gloc[g as usize] = li as Li;
-    }
+    // Global-to-local rows (narrow entries halve the table's random-access
+    // footprint); restored when the node returns.
+    let gloc = crate::numeric::ll_common::Gloc::new(n, sched.rows(s));
     // Assemble A's lower-triangle columns of this supernode.
     for p in 0..ncol {
         let c = first + p;
@@ -985,53 +970,12 @@ fn ll_factor_node<T: Scalar>(
             panel[li + p * nrow] = panel[li + p * nrow] + a_perm.values[k];
         }
     }
-    // Pre-pass over the updaters: landing ranges + update flops, the
-    // fork/tiling dispatch input (see `ll_common::cmod_spans`).
-    let (spans, cmod_flops) =
-        crate::numeric::ll_common::cmod_spans(sym, sched, s, first, ncol, false);
-
-    // Column-tiled parallel cmod: partition THIS panel into column slabs
-    // (disjoint `&mut` chunks) and apply, per slab, every updater's
-    // contribution to the slab's columns in updater order. One rayon
-    // fan-out per node instead of one per update, the slab stays cache-hot
-    // across all updaters, and - decisive at the top of the tree, where a
-    // root separator runs alone with hundreds of updaters - the node's cmod
-    // parallelizes even though each per-slab GEMM is serial. Every panel
-    // entry lies in exactly one slab and receives its contributions in the
-    // same updater order; the slab width is a pure function of `ncol`
-    // (never of the thread count).
-    //
-    // NOT bit-identical to the sequential path, on two counts: (1) the
-    // sequential path routes sub-`scalar_gate` updates through the scalar
-    // kernel (plain mul+add) while this path runs everything through FMA
-    // GEMM micro-kernels; (2) even for GEMM-path updates, splitting an
-    // update's span at slab boundaries changes the GEMM output shape, and
-    // the gemm crate's per-element bits are shape-dependent (measured:
-    // last-ulp drift persisted with a slab-replayed scalar gate). The MODE
-    // pick below is therefore a pure function of the node.
-    let tile_w = (ncol / 16).clamp(32, 256);
-    // Fork inside cmod only when the node's update work is genuinely large.
-    // A small node that forks pays rayon's join-steal latency: while its
-    // join waits for a stolen slab, the waiting thread steals OTHER work -
-    // often a whole sibling subtree - and this node (and every dependent on
-    // its chain) stalls for tens of ms doing ~zero flops (measured: 74 ms
-    // cmod at 0.03 Gflop on a 1046x170 node). Below the gate the node runs
-    // its cmod strictly serially - it never blocks on foreign work, and the
-    // tree-level parallelism covers it.
-    const LL_CMOD_FORK_MIN_FLOPS: usize = 100_000_000;
-    let fork_gate = LL_CMOD_FORK_MIN_FLOPS.max(ll_gemm_par);
-    // Every dispatch below is a pure function of the node (see
-    // tests/ll_thread_determinism.rs). A timing-dependent one broke bit-identity twice:
-    // a chain-phase-dependent `tiled` (the sequential and the tiled path differ, see the
-    // note above), and the chain phase's fork below the gate (`<= 2` nodes in flight),
-    // which switched GEMMs between the serial and the parallel mode - not bit-identical
-    // for complex scalars.
-    let forks = cmod_flops >= fork_gate;
-    let tiled = ncol >= 2 * tile_w && cmod_flops >= fork_gate;
-    let seq_gemm_par = if forks { ll_gemm_par } else { usize::MAX };
+    let plan = crate::numeric::ll_common::CmodPlan::new(sym, sched, s, false, ll_gemm_par);
+    let (spans, tile_w, tiled) = (&plan.spans, plan.tile_w, plan.tiled);
+    let seq_gemm_par = if plan.forks { ll_gemm_par } else { usize::MAX };
     if tiled {
         let gloc_ref = &gloc;
-        let spans_ref = &spans;
+        let spans_ref = spans;
         panel
             .par_chunks_mut(nrow * tile_w)
             .enumerate()
@@ -1233,7 +1177,6 @@ fn ll_factor_node<T: Scalar>(
         n_perturbed,
         kt,
         panel,
-        gloc,
     )
 }
 
@@ -1508,7 +1451,6 @@ fn ll_cdiv_emit<T: Scalar>(
     n_perturbed: &AtomicUsize,
     kt: KernelTuning,
     panel: &mut [T],
-    mut gloc: Vec<Li>,
 ) -> Result<(), RslabError> {
     let snode = &sym.supernodes[s];
     let ncol = snode.ncol;
@@ -1567,15 +1509,6 @@ fn ll_cdiv_emit<T: Scalar>(
     // multiplier rows, so the finals cannot be read back).
     let mut mult_snap = vec![T::zero(); nb * nb];
     let mut local_perturbed = 0usize;
-    // Helper to restore the `gloc` scratch invariant before an early return.
-    macro_rules! restore_gloc {
-        () => {{
-            for &g in sched.rows(s) {
-                gloc[g as usize] = Li::MAX;
-            }
-            GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
-        }};
-    }
     // Panel-lookahead state: a second scratch set for the joined next-panel
     // step, the wide-Schur staging buffer, and the high-water mark of columns
     // already factored ahead by the lookahead join.
@@ -1610,7 +1543,6 @@ fn ll_cdiv_emit<T: Scalar>(
             match r {
                 Ok(np) => local_perturbed += np,
                 Err(e) => {
-                    restore_gloc!();
                     return Err(e);
                 }
             }
@@ -1747,7 +1679,6 @@ fn ll_cdiv_emit<T: Scalar>(
                 match step_res {
                     Ok(np) => local_perturbed += np,
                     Err(e) => {
-                        restore_gloc!();
                         return Err(e);
                     }
                 }
@@ -1803,10 +1734,6 @@ fn ll_cdiv_emit<T: Scalar>(
     if local_perturbed > 0 {
         n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
     }
-    for &g in sched.rows(s) {
-        gloc[g as usize] = Li::MAX;
-    }
-    GLOC_SCRATCH.with(|c| *c.borrow_mut() = gloc);
     // Populate the O(n) emit maps + inertia for `s` (block-aware over its 1x1/2x2
     // Bunch-Kaufman D), mirroring the legacy pass-1 emit. The `e`-numbering is one
     // position per column, so `e_offset[s] + p` is column `p`'s elimination index.
@@ -1928,7 +1855,6 @@ fn factor_left_looking<T: Scalar>(
     let store = LlStore::<T>::new(nsuper);
     let emit = LlEmitLdlt::<T>::new(sym, sched);
     let n_perturbed_atomic = AtomicUsize::new(0);
-    let roots = crate::numeric::ll_common::forest_roots(sym);
     let kt = opts.kernel();
     let factor_node = |s: usize| {
         ll_factor_node(
@@ -1944,14 +1870,7 @@ fn factor_left_looking<T: Scalar>(
         )
     };
     let emit_free = |k: usize| ldlt_emit_and_free(k, &store, &emit, sym, sched, opts.drop_tol);
-    crate::numeric::ll_common::ll_forest(
-        &roots,
-        sym,
-        sched,
-        &emit.refcount,
-        &factor_node,
-        &emit_free,
-    )?;
+    crate::numeric::ll_common::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     drop(store); // panels moved into the emit cells; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
