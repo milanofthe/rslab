@@ -300,7 +300,7 @@ fn analyze_with_inner(
 /// from. Honours static pivoting and incomplete-factor dropping via `opts`.
 /// Realize a [`Threads::Auto`] policy from a symbolic analysis: compute the three
 /// predictive features (factor-flops, max front height, max tree width) and apply
-/// the [`recommend_threads_from`](crate::analysis::recommend_threads_from) policy,
+/// the [`recommend_threads_from`](recommend_threads_from) policy,
 /// capped at `max_cores`. Value-independent, so it is the same for every scalar.
 pub(crate) fn recommend_threads_for_sym(symb: &SupernodalAnalysis, max_cores: usize) -> usize {
     let fd = symb.front_dims();
@@ -310,5 +310,27 @@ pub(crate) fn recommend_threads_for_sym(symb: &SupernodalAnalysis, max_cores: us
         .sum();
     let front_nrow_max = fd.iter().map(|&(_, nr)| nr).max().unwrap_or(0);
     let tree_width_max = symb.level_widths().into_iter().max().unwrap_or(0);
-    crate::analysis::recommend_threads_from(flops, front_nrow_max, tree_width_max, max_cores)
+    recommend_threads_from(flops, front_nrow_max, tree_width_max, max_cores)
+}
+
+/// The data-driven single-solve thread-count policy, as a free function over the
+/// three predictive features, so the factor path can apply it straight from the
+/// symbolic analysis. Returns a worker count in `1..=max_cores`.
+pub fn recommend_threads_from(
+    factor_flops: u64,
+    front_nrow_max: usize,
+    tree_width_max: usize,
+    max_cores: usize,
+) -> usize {
+    let cores = max_cores.max(1);
+    // Thin fronts + narrow tree: no node-parallelism (tiny fronts) and no
+    // tree-parallelism (path-like) to exploit - oversubscription only hurts.
+    if front_nrow_max < 512 && tree_width_max < 128 {
+        return cores.min(2);
+    }
+    // Tiny total work: parallel scheduling overhead dominates the factorization.
+    if factor_flops < 300_000_000 {
+        return cores.min(4);
+    }
+    cores
 }
