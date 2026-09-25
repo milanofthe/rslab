@@ -15,6 +15,9 @@ values to that answer). It records the peak working
 set above the loaded matrix, PARDISO's own memory report and RSLAB's
 diagnostics (stage times, memory estimate). Both solvers run with the same
 thread count. Results append to `benches/bench_out/pardiso_corpus.jsonl`.
+
+PARDISO comes from the MKL runtime of `pip install mkl` in the running
+environment, or from the library `MKL_RT` names.
 """
 import argparse
 import ctypes
@@ -89,10 +92,24 @@ class Rslab:
                 'estimate': est}
 
 
+def load_mkl():
+    """The MKL runtime: `MKL_RT` if set, else the one `pip install mkl` put
+    into this environment, else the system's."""
+    names = [os.environ['MKL_RT']] if os.environ.get('MKL_RT') else []
+    names += glob.glob(str(Path(sys.prefix) / 'Library' / 'bin' / 'mkl_rt*.dll'))
+    names += glob.glob(str(Path(sys.prefix) / 'lib' / 'libmkl_rt.so*')) + ['libmkl_rt.so.2']
+    for name in names:
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            pass
+    raise OSError('MKL runtime not found: `pip install mkl` into this environment '
+                  'or set MKL_RT to the mkl_rt library')
+
+
 class Pardiso:
     def __init__(self, path, settings, threads):
-        names = glob.glob(str(Path(sys.prefix) / 'Library' / 'bin' / 'mkl_rt*.dll')) or ['libmkl_rt.so.2']
-        self.mkl = ctypes.CDLL(names[0])
+        self.mkl = load_mkl()
         self.kind, self.settings = ('ldlt' if path == 'ldlt' else 'lu'), settings
         self.pt, self.iparm, self.mtype = np.zeros(64, np.int64), np.zeros(64, np.int32), None
 
