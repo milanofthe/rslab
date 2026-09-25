@@ -61,18 +61,18 @@ diagnostics, estimates and logging; the Python reference is
 
 ## Performance
 
-<!-- Filled in from the fresh corpus run (benches/pardiso_corpus.py). -->
-
 Against MKL PARDISO on 28 systems exported from production codes (FEM,
-power grids, MoM near field, SuiteSparse circuits), wall time relative to
-PARDISO, geomean per class:
+power grids, MoM near field, SuiteSparse circuits), 12 threads each, wall
+time relative to PARDISO (below 1 is faster), geomean per class:
 
 | class | factor | refactor | solve | one-shot |
 |---|:-:|:-:|:-:|:-:|
-| FEM curl-curl | | | | |
-| power grid | | | | |
-| MoM near field | | | | |
-| circuit (KLU path) | | | | |
+| FEM curl-curl (6) | 1.35 | 1.38 | 0.34 | 1.05 |
+| power grid (2) | 3.97 | 4.28 | 0.43 | 1.06 |
+| MoM near field (7) | 0.91 | 0.85 | 0.36 | 0.70 |
+| circuit, KLU path (13) | 4.14 | 1.65 | 0.25 | 0.97 |
+
+One-shot is analysis, factorization and solve.
 
 ![per class](docs/figures/pardiso_classes.png)
 
