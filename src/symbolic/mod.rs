@@ -768,17 +768,20 @@ fn symbolic_factorize_race(
     debug_assert_eq!(RACE_CHEAP[0], OrderingMethod::Amd);
     let parallel = matrix.n > 10_000 && rayon::current_num_threads() > 1;
     let eager = parallel && matrix.row_idx.len() >= EAGER_ND_MIN_NNZ;
+    // One symmetric pattern for every candidate: built per candidate it was
+    // the largest allocation of the race (seven copies at once).
+    let full = &matrix.symmetric_pattern();
     let nd_candidates = || -> Vec<Option<SymbolicPrefix>> {
         ND_SEED_CANDIDATES
             .par_iter()
             .map(|&seed| {
-                symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, &[seed]).ok()
+                symbolic_prefix(matrix, full, snode_params, OrderingMethod::MetisND, &[seed]).ok()
             })
             .collect()
     };
     let ((amd, nd_late), (rest, nd_eager)) = rayon::join(
         || {
-            let amd = symbolic_prefix(matrix, snode_params, RACE_CHEAP[0], ND_SINGLE_SEED);
+            let amd = symbolic_prefix(matrix, full, snode_params, RACE_CHEAP[0], ND_SINGLE_SEED);
             let gated =
                 parallel && !eager && matches!(&amd, Ok(p) if prefix_flops(p) >= ND_RACE_MIN_FLOPS);
             (amd, if gated { nd_candidates() } else { Vec::new() })
@@ -788,7 +791,9 @@ fn symbolic_factorize_race(
                 || {
                     RACE_CHEAP[1..]
                         .par_iter()
-                        .map(|&cand| symbolic_prefix(matrix, snode_params, cand, ND_SINGLE_SEED))
+                        .map(|&cand| {
+                            symbolic_prefix(matrix, full, snode_params, cand, ND_SINGLE_SEED)
+                        })
                         .collect::<Vec<_>>()
                 },
                 || if eager { nd_candidates() } else { Vec::new() },
@@ -841,7 +846,7 @@ fn symbolic_factorize_race(
                     .filter_map(|(prefix, _)| prefix)
                     .reduce(|a, b| if b.factor_nnz < a.factor_nnz { b } else { a })
             } else {
-                symbolic_prefix(matrix, snode_params, OrderingMethod::MetisND, seeds).ok()
+                symbolic_prefix(matrix, full, snode_params, OrderingMethod::MetisND, seeds).ok()
             };
             if let Some(nd) = nd {
                 if nd.factor_nnz < champ.factor_nnz {
@@ -855,7 +860,7 @@ fn symbolic_factorize_race(
             RslabError::InvalidInput("AutoRace: no candidates available".to_string())
         }));
     };
-    symbolic_finish(winner)
+    symbolic_finish(winner, full)
 }
 
 /// Like [`symbolic_factorize`] but lets the caller pick the
@@ -875,12 +880,11 @@ pub fn symbolic_factorize_with_method(
     if method == OrderingMethod::AutoRace {
         return symbolic_factorize_race(matrix, snode_params);
     }
-    symbolic_finish(symbolic_prefix(
-        matrix,
-        snode_params,
-        method,
-        ND_SINGLE_SEED,
-    )?)
+    let full = &matrix.symmetric_pattern();
+    symbolic_finish(
+        symbolic_prefix(matrix, full, snode_params, method, ND_SINGLE_SEED)?,
+        full,
+    )
 }
 
 /// Everything the cheap pipeline *prefix* produces: ordering (incl.
@@ -893,7 +897,6 @@ struct SymbolicPrefix {
     n: usize,
     perm: Vec<usize>,
     perm_inv: Vec<usize>,
-    permuted_pattern: CscPattern,
     etree: EliminationTree,
     col_counts: Vec<usize>,
     factor_nnz: usize,
@@ -927,6 +930,7 @@ const PREPROCESS_FILL_INFLATION_LIMIT: f64 = 2.0;
 /// unconditionally, exactly as before.
 fn symbolic_prefix(
     matrix: &CscMatrix,
+    full_pattern: &CscPattern,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
     nd_seeds: &[u64],
@@ -938,7 +942,14 @@ fn symbolic_prefix(
     let verify = matches!(snode_params.preprocess, OrderingPreprocess::Auto)
         && matches!(resolved_preprocess, OrderingPreprocess::LdltCompress);
     if !verify {
-        return symbolic_prefix_with(matrix, snode_params, method, resolved_preprocess, nd_seeds);
+        return symbolic_prefix_with(
+            matrix,
+            full_pattern,
+            snode_params,
+            method,
+            resolved_preprocess,
+            nd_seeds,
+        );
     }
     // Verify the predicate's LdltCompress pick against the `None` baseline.
     let variant_params = |pre: OrderingPreprocess| SupernodeParams {
@@ -946,10 +957,18 @@ fn symbolic_prefix(
         ..snode_params.clone()
     };
     let p_none = variant_params(OrderingPreprocess::None);
-    let none = symbolic_prefix_with(matrix, &p_none, method, OrderingPreprocess::None, nd_seeds);
+    let none = symbolic_prefix_with(
+        matrix,
+        full_pattern,
+        &p_none,
+        method,
+        OrderingPreprocess::None,
+        nd_seeds,
+    );
     let p_comp = variant_params(OrderingPreprocess::LdltCompress);
     let comp = symbolic_prefix_with(
         matrix,
+        full_pattern,
         &p_comp,
         method,
         OrderingPreprocess::LdltCompress,
@@ -976,6 +995,7 @@ fn symbolic_prefix(
 /// [`symbolic_prefix`] once the `Auto` resolution/verification is done.
 fn symbolic_prefix_with(
     matrix: &CscMatrix,
+    full_pattern: &CscPattern,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
     resolved_preprocess: OrderingPreprocess,
@@ -1001,15 +1021,13 @@ fn symbolic_prefix_with(
     // length `n` before handing it to the rest of the pipeline. See
     // `src/symbolic/ldlt_compress.rs` and
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
-    let full_pattern = matrix.symmetric_pattern();
-
     // Resolve `OrderingMethod::Auto` against the original matrix's
     // pattern *before* preprocessing. If we resolved against the
     // compressed pattern below, Auto would see a different `n` /
     // `avg_deg` and reach a different conclusion than
     // `symbolic_factorize` (which uses `pick_default_method` on the
     // matrix directly). Issue #3.
-    let method = choose_adaptive(&full_pattern, method);
+    let method = choose_adaptive(full_pattern, method);
 
     // `resolved_preprocess` arrives concrete from the dispatcher
     // ([`symbolic_prefix`] resolves and - for `Auto` -> `LdltCompress` -
@@ -1029,7 +1047,7 @@ fn symbolic_prefix_with(
     let (amd_perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {
         OrderingPreprocess::None => match &snode_params.given_perm {
             Some(p) => (checked_permutation(p, n)?, method),
-            None => record_ordering(&full_pattern)?,
+            None => record_ordering(full_pattern)?,
         },
         OrderingPreprocess::Auto => unreachable!("resolved above"),
         OrderingPreprocess::LdltCompress => {
@@ -1047,9 +1065,9 @@ fn symbolic_prefix_with(
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
-                record_ordering(&full_pattern)?
+                record_ordering(full_pattern)?
             } else {
-                let cpat = compress_pattern(&full_pattern, &map);
+                let cpat = compress_pattern(full_pattern, &map);
                 let (super_perm, resolved) = record_ordering(&cpat)?;
                 let expanded = expand_permutation(&super_perm, &map);
                 (expanded, resolved)
@@ -1067,7 +1085,7 @@ fn symbolic_prefix_with(
     for (new, &old) in amd_perm.iter().enumerate() {
         amd_perm_inv[old] = new;
     }
-    let amd_etree = EliminationTree::from_permuted_pattern(&full_pattern, &amd_perm, &amd_perm_inv);
+    let amd_etree = EliminationTree::from_permuted_pattern(full_pattern, &amd_perm, &amd_perm_inv);
 
     // Step 3: Postorder the etree (CHOLMOD-style composition).
     // Without this step, supernode amalgamation merges columns whose indices
@@ -1086,7 +1104,7 @@ fn symbolic_prefix_with(
     }
 
     // Step 5: Re-permute the matrix on the composed permutation.
-    let permuted_pattern = permute_pattern(&full_pattern, &perm);
+    let permuted_pattern = permute_pattern(full_pattern, &perm);
 
     // Step 5b: Build the final elimination tree by renumbering `amd_etree`
     // through the postorder. Postorder is a topological relabeling of the
@@ -1113,6 +1131,9 @@ fn symbolic_prefix_with(
     // O(nnz(A) + n*alpha(n)). Bit-exact equivalence verified on 169585
     // KKT matrices - see `dev/validation/phase-2.5.1-*`.
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
+    // Only the race winner needs the permuted pattern again; `symbolic_finish`
+    // rebuilds it for that one, so the candidates do not hold one each.
+    drop(permuted_pattern);
 
     // Phase 2.12: optional SSIDS-style merge-biased postorder.
     // Predict desired merges using only the etree + column counts,
@@ -1130,7 +1151,6 @@ fn symbolic_prefix_with(
     // Fast-path: when no bias is requested (no desired merges, OR
     // the strategy is `Adjacency`), the second pass is skipped and
     // the pipeline behaves identically to pre-Phase-2.12.
-    let mut permuted_pattern = permuted_pattern;
     let mut perm = perm;
     let mut etree = etree;
 
@@ -1161,7 +1181,6 @@ fn symbolic_prefix_with(
             for (new, &old) in new_perm.iter().enumerate() {
                 new_perm_inv[old] = new;
             }
-            let new_permuted_pattern = permute_pattern(&full_pattern, &new_perm);
             // `post2` is a postorder of `etree`, so the tree and the column
             // counts carry over relabelled (every topological order of the
             // elimination tree gives the same filled graph). Recomputing both
@@ -1175,18 +1194,21 @@ fn symbolic_prefix_with(
                 n,
             };
             let new_col_counts: Vec<usize> = post2.iter().map(|&old| col_counts[old]).collect();
-            debug_assert_eq!(
-                new_etree.parent,
-                EliminationTree::from_pattern(&new_permuted_pattern).parent
-            );
-            debug_assert_eq!(
-                new_col_counts,
-                column_counts_gnp(&new_permuted_pattern, &new_etree)
-            );
+            #[cfg(debug_assertions)]
+            {
+                let new_permuted_pattern = permute_pattern(full_pattern, &new_perm);
+                debug_assert_eq!(
+                    new_etree.parent,
+                    EliminationTree::from_pattern(&new_permuted_pattern).parent
+                );
+                debug_assert_eq!(
+                    new_col_counts,
+                    column_counts_gnp(&new_permuted_pattern, &new_etree)
+                );
+            }
 
             perm = new_perm;
             perm_inv = new_perm_inv;
-            permuted_pattern = new_permuted_pattern;
             etree = new_etree;
             col_counts = new_col_counts;
         }
@@ -1196,7 +1218,6 @@ fn symbolic_prefix_with(
         n,
         perm,
         perm_inv,
-        permuted_pattern,
         etree,
         col_counts,
         factor_nnz,
@@ -1209,12 +1230,14 @@ fn symbolic_prefix_with(
 /// The pipeline tail: supernode detection, small-leaf grouping, memory
 /// plan, and struct assembly. Runs once per *adopted* prefix - race losers
 /// never get here (feral #144 port).
-fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, RslabError> {
+fn symbolic_finish(
+    prefix: SymbolicPrefix,
+    full_pattern: &CscPattern,
+) -> Result<SymbolicFactorization, RslabError> {
     let SymbolicPrefix {
         n,
         perm,
         perm_inv,
-        permuted_pattern,
         etree,
         col_counts,
         factor_nnz,
@@ -1223,6 +1246,7 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> Result<SymbolicFactorization, Rsla
         effective_params,
     } = prefix;
     let snode_params: &SupernodeParams = &effective_params;
+    let permuted_pattern = permute_pattern(full_pattern, &perm);
 
     // Step 7: Supernode detection on the postordered etree
     let mut supernodes = find_supernodes(&etree, &col_counts, snode_params);
