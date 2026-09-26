@@ -69,12 +69,21 @@ time relative to PARDISO (below 1 is faster), geomean per class:
 |---|:-:|:-:|:-:|:-:|
 | FEM curl-curl (6) | 1.35 | 1.38 | 0.34 | 1.05 |
 | power grid (2) | 3.97 | 4.28 | 0.43 | 1.06 |
-| MoM near field (7) | 0.91 | 0.85 | 0.36 | 0.70 |
-| circuit, KLU path (13) | 4.14 | 1.65 | 0.25 | 0.97 |
+| MoM near field (7) | 0.95 | 0.90 | 0.37 | 0.74 |
+| circuit, KLU path (13) | 4.76 | 1.83 | 0.30 | 1.12 |
 
-One-shot is analysis, factorization and solve.
+One-shot is analysis, factorization and solve. PARDISO runs `pardisoinit`'s
+defaults for its matrix type (parallel METIS), per system the faster of its
+classic and two-level factorization (`iparm(24)`). On MoM both perturb small
+pivots, PARDISO with `iparm(10) = 6` and RSLAB in preconditioner mode at
+1e-6.
 
-![per class](docs/figures/pardiso_classes.png)
+![wall time per stage](docs/figures/wct_breakdown.png)
+
+The analysis predicts the factor storage and the peak memory before any
+numeric work:
+
+![memory estimate against the measurement](docs/figures/estimate_accuracy.png)
 
 Reproduce with `python benches/pardiso_corpus.py <corpus>` and
 `python benches/pardiso_corpus_plot.py`.

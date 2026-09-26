@@ -14,7 +14,9 @@ iterative refinement, the same for both solvers; `to_target` runs from new
 values to that answer). It records the peak working
 set above the loaded matrix, PARDISO's own memory report and RSLAB's
 diagnostics (stage times, memory estimate). Both solvers run with the same
-thread count. Results append to `benches/bench_out/pardiso_corpus.jsonl`.
+thread count. `pardiso` runs `pardisoinit`'s defaults for the matrix type,
+`pardiso-2l` adds the two-level factorization (`iparm(24) = 1`). Results append
+to `benches/bench_out/pardiso_corpus.jsonl`.
 
 PARDISO comes from the MKL runtime of `pip install mkl` in the running
 environment, or from the library `MKL_RT` names.
@@ -108,7 +110,8 @@ def load_mkl():
 
 
 class Pardiso:
-    def __init__(self, path, settings, threads):
+    def __init__(self, path, settings, threads, two_level=False):
+        self.two_level = two_level
         self.mkl = load_mkl()
         self.kind, self.settings = ('ldlt' if path == 'ldlt' else 'lu'), settings
         self.pt, self.iparm, self.mtype = np.zeros(64, np.int64), np.zeros(64, np.int32), None
@@ -138,6 +141,8 @@ class Pardiso:
         self.mkl.pardisoinit(self.pt.ctypes, ctypes.byref(ctypes.c_int32(self.mtype)), self.iparm.ctypes)
         for index, value in self.settings.get('iparm', {}).items():
             self.iparm[int(index)] = value  # zero-based overrides from the corpus
+        if self.two_level:
+            self.iparm[23] = 1  # iparm(24): the two-level factorization, Intel's advice for many threads
         self.n = stored.shape[0]
         self.ia = (stored.indptr + 1).astype(np.int32)
         self.ja = (stored.indices + 1).astype(np.int32)
@@ -157,13 +162,15 @@ class Pardiso:
         # iparm(15..18), one-based: peak analysis, permanent and factor memory in KB, nnz of the factors.
         return {'peak_analysis_kb': int(self.iparm[14]), 'permanent_kb': int(self.iparm[15]),
                 'factor_kb': int(self.iparm[16]), 'factor_nnz': int(self.iparm[17]),
-                'mkl_threads': int(self.mkl.mkl_get_max_threads())}
+                'mkl_threads': int(self.mkl.mkl_get_max_threads()), 'mtype': self.mtype,
+                'iparm24': int(self.iparm[23])}
 
     def close(self):
         self._call(-1, np.zeros(1, self.dtype))
 
 
-SOLVERS = {'rslab': Rslab, 'pardiso': Pardiso}
+SOLVERS = {'rslab': Rslab, 'pardiso': Pardiso,
+           'pardiso-2l': lambda path, settings, threads: Pardiso(path, settings, threads, two_level=True)}
 
 
 def working_set_mb():
@@ -180,7 +187,8 @@ def measure(name, first, second, repeats, warmup, threads):
     runs, report = [], {}
     base_mb = working_set_mb()[0]
     for round_ in range(warmup + repeats):
-        solver = SOLVERS[name](path, meta.get('settings', {}).get(name, {}), threads)
+        # A variant takes the production settings of its family (`pardiso-2l`: `pardiso`).
+        solver = SOLVERS[name](path, meta.get('settings', {}).get(name.split('-')[0], {}), threads)
         solver.dtype = a.dtype
         prep = getattr(solver, 'prepare', lambda m: m)
         native, native2 = prep(a), prep(a2)

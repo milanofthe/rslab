@@ -104,7 +104,7 @@ def main():
     p.add_argument("dest", type=pathlib.Path)
     p.add_argument("--rev", default="HEAD")
     a = p.parse_args()
-    rev = git("rev-parse", "--short", a.rev).decode().strip()
+    rev = git("rev-parse", "--short", f"{a.rev}^{{commit}}").decode().strip()
     subject = git("log", "-1", "--format=%s", rev).decode().strip()
     upstream = git("show", f"{rev}:Cargo.toml").decode()
     dest = a.dest.resolve()
