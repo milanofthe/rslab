@@ -208,6 +208,9 @@ class LdltSymbolic(_Symbolic):
     @property
     def settings(self) -> Settings: ...
     def factor(self, data: NDArray[Any] | Any, settings: Settings | None = ..., **kwargs: Any) -> Ldlt: ...
+    def memory_plan(
+        self, dtype: str = ..., nrhs: int = ..., settings: Settings | None = ..., **kwargs: Any
+    ) -> dict[str, int]: ...
 
 class LuSymbolic(_Symbolic):
     @property
@@ -219,6 +222,9 @@ class LuSymbolic(_Symbolic):
     @property
     def settings(self) -> Settings: ...
     def factor(self, data: NDArray[Any] | Any, settings: Settings | None = ..., **kwargs: Any) -> Lu: ...
+    def memory_plan(
+        self, dtype: str = ..., nrhs: int = ..., settings: Settings | None = ..., **kwargs: Any
+    ) -> dict[str, int]: ...
 
 class KluSymbolic(_Symbolic):
     @property
@@ -230,6 +236,9 @@ class KluSymbolic(_Symbolic):
     @property
     def settings(self) -> KluSettings: ...
     def factor(self, data: NDArray[Any] | Any, settings: KluSettings | None = ..., **kwargs: Any) -> Klu: ...
+    def memory_plan(
+        self, dtype: str = ..., nrhs: int = ..., settings: KluSettings | None = ..., **kwargs: Any
+    ) -> dict[str, int]: ...
 
 def ldlt_factor(
     n: int, indptr: NDArray[np.int64], indices: NDArray[np.int64], data: NDArray[Any],

@@ -6,22 +6,15 @@ use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rslab::{
-    CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSymbolic, LuSymbolic, MemoryEstimate,
-    RslabError, SolverSettings,
+    CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSymbolic, LuSymbolic, RslabError,
+    SolverSettings,
 };
 
-use crate::common::{heavy, map_err, memory_estimate_dict, scalar_bytes, with_dtype, Pattern};
+use crate::common::{
+    heavy, map_err, memory_estimate_dict, memory_plan_dict, with_dtype, with_dtype_name, Pattern,
+};
 use crate::factor::{Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
-
-/// The a-priori estimate for a value size: the core's estimator only depends
-/// on `size_of::<T>()`, so dispatch on the byte width.
-fn estimate_for<F>(bytes: usize, est: F) -> MemoryEstimate
-where
-    F: Fn(usize) -> MemoryEstimate,
-{
-    est(bytes)
-}
 
 // ---------------------------------------------------------------------------
 // LDL^T
@@ -65,6 +58,14 @@ impl PyLdltSymbolic {
         self.sym.symbolic_factor_nnz()
     }
 
+    /// Heap bytes this analysis holds on the Rust side, the stored pattern
+    /// included.
+    #[getter]
+    fn heap_bytes(&self) -> u64 {
+        let p = &self.pattern;
+        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
+    }
+
     /// Levels of the supernodal elimination tree.
     #[getter]
     fn n_levels(&self) -> usize {
@@ -105,12 +106,57 @@ impl PyLdltSymbolic {
     ///     ``factor_flops``, ``critical_path_flops``.
     #[pyo3(signature = (dtype = "float64"))]
     fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
-        let e = estimate_for(scalar_bytes(dtype)?, |b| match b {
-            4 => self.sym.estimate_memory::<f32>(),
-            16 => self.sym.estimate_memory::<crate::common::C64>(),
-            _ => self.sym.estimate_memory::<f64>(),
-        });
+        let e = with_dtype_name!(dtype, |T| self.sym.estimate_memory::<T>())?;
         memory_estimate_dict(py, &e)
+    }
+
+    /// The heap a factorization needs, predicted from the analysis before
+    /// any numeric work: for a preflight check against the memory available
+    /// and for scheduling factorizations side by side.
+    ///
+    /// Parameters
+    /// ----------
+    /// dtype : str, default 'float64'
+    ///     The value type the factor will use.
+    /// nrhs : int, default 1
+    ///     Right-hand sides per solve.
+    /// settings : Settings, optional
+    ///     The settings :meth:`factor` will run with (the threads matter: the kernels' scratch grows with them); the
+    ///     analysis settings by default.
+    /// **kwargs
+    ///     Any settings keyword, overriding ``settings``.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``peak_bytes``, the heap peak from here through a factorization
+    ///     and a solve (the number to compare against the memory available),
+    ///     ``resident_bytes``, what stays held while the factor is kept, and
+    ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
+    ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
+    ///     the factorization began) and ``solve_bytes``, with ``threads``
+    ///     and ``nrhs``. The copies this binding keeps (the pattern, the
+    ///     matrix in the factor, a solve's right-hand sides) are included;
+    ///     NumPy's own arrays are not.
+    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+    fn memory_plan(
+        &self,
+        py: Python<'_>,
+        dtype: &str,
+        nrhs: usize,
+        settings: Option<PySettings>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
+        let st = settings_from(
+            Some(settings.unwrap_or_else(|| self.settings.clone())),
+            kwargs,
+        )?;
+        let opts = st.resolved();
+        let (plan, vb) = with_dtype_name!(dtype, |T| (
+            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+            std::mem::size_of::<T>()
+        ))?;
+        memory_plan_dict(py, plan, &self.pattern, vb)
     }
 
     /// Numeric factorization of ``data`` (the CSC value array of the lower
@@ -266,6 +312,14 @@ impl PyLuSymbolic {
         self.sym.symbolic_factor_nnz()
     }
 
+    /// Heap bytes this analysis holds on the Rust side, the stored pattern
+    /// included.
+    #[getter]
+    fn heap_bytes(&self) -> u64 {
+        let p = &self.pattern;
+        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
+    }
+
     /// Levels of the supernodal elimination tree.
     #[getter]
     fn n_levels(&self) -> usize {
@@ -306,12 +360,57 @@ impl PyLuSymbolic {
     ///     ``factor_flops``, ``critical_path_flops``.
     #[pyo3(signature = (dtype = "float64"))]
     fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
-        let e = estimate_for(scalar_bytes(dtype)?, |b| match b {
-            4 => self.sym.estimate_memory::<f32>(),
-            16 => self.sym.estimate_memory::<crate::common::C64>(),
-            _ => self.sym.estimate_memory::<f64>(),
-        });
+        let e = with_dtype_name!(dtype, |T| self.sym.estimate_memory::<T>())?;
         memory_estimate_dict(py, &e)
+    }
+
+    /// The heap a factorization needs, predicted from the analysis before
+    /// any numeric work: for a preflight check against the memory available
+    /// and for scheduling factorizations side by side.
+    ///
+    /// Parameters
+    /// ----------
+    /// dtype : str, default 'float64'
+    ///     The value type the factor will use.
+    /// nrhs : int, default 1
+    ///     Right-hand sides per solve.
+    /// settings : Settings, optional
+    ///     The settings :meth:`factor` will run with (the threads matter: the kernels' scratch grows with them); the
+    ///     analysis settings by default.
+    /// **kwargs
+    ///     Any settings keyword, overriding ``settings``.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``peak_bytes``, the heap peak from here through a factorization
+    ///     and a solve (the number to compare against the memory available),
+    ///     ``resident_bytes``, what stays held while the factor is kept, and
+    ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
+    ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
+    ///     the factorization began) and ``solve_bytes``, with ``threads``
+    ///     and ``nrhs``. The copies this binding keeps (the pattern, the
+    ///     matrix in the factor, a solve's right-hand sides) are included;
+    ///     NumPy's own arrays are not.
+    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+    fn memory_plan(
+        &self,
+        py: Python<'_>,
+        dtype: &str,
+        nrhs: usize,
+        settings: Option<PySettings>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
+        let st = settings_from(
+            Some(settings.unwrap_or_else(|| self.settings.clone())),
+            kwargs,
+        )?;
+        let opts = st.resolved();
+        let (plan, vb) = with_dtype_name!(dtype, |T| (
+            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+            std::mem::size_of::<T>()
+        ))?;
+        memory_plan_dict(py, plan, &self.pattern, vb)
     }
 
     /// Numeric factorization of ``data`` (the full CSC value array in the
@@ -474,6 +573,14 @@ impl PyKluSymbolic {
         self.sym.symbolic_factor_nnz()
     }
 
+    /// Heap bytes this analysis holds on the Rust side, the stored pattern
+    /// included.
+    #[getter]
+    fn heap_bytes(&self) -> u64 {
+        let p = &self.pattern;
+        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
+    }
+
     /// The settings the analysis adopted; the defaults for :meth:`factor`.
     #[getter]
     fn settings(&self) -> PyKluSettings {
@@ -496,12 +603,57 @@ impl PyKluSymbolic {
     ///     ``factor_flops``, ``critical_path_flops``.
     #[pyo3(signature = (dtype = "float64"))]
     fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
-        let e = estimate_for(scalar_bytes(dtype)?, |b| match b {
-            4 => self.sym.estimate_memory::<f32>(),
-            16 => self.sym.estimate_memory::<crate::common::C64>(),
-            _ => self.sym.estimate_memory::<f64>(),
-        });
+        let e = with_dtype_name!(dtype, |T| self.sym.estimate_memory::<T>())?;
         memory_estimate_dict(py, &e)
+    }
+
+    /// The heap a factorization needs, predicted from the analysis before
+    /// any numeric work: for a preflight check against the memory available
+    /// and for scheduling factorizations side by side.
+    ///
+    /// Parameters
+    /// ----------
+    /// dtype : str, default 'float64'
+    ///     The value type the factor will use.
+    /// nrhs : int, default 1
+    ///     Right-hand sides per solve.
+    /// settings : KluSettings, optional
+    ///     The settings :meth:`factor` will run with (``parallel`` decides the block buffers); the
+    ///     analysis settings by default.
+    /// **kwargs
+    ///     Any settings keyword, overriding ``settings``.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``peak_bytes``, the heap peak from here through a factorization
+    ///     and a solve (the number to compare against the memory available),
+    ///     ``resident_bytes``, what stays held while the factor is kept, and
+    ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
+    ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
+    ///     the factorization began) and ``solve_bytes``, with ``threads``
+    ///     and ``nrhs``. The copies this binding keeps (the pattern, the
+    ///     matrix in the factor, a solve's right-hand sides) are included;
+    ///     NumPy's own arrays are not.
+    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+    fn memory_plan(
+        &self,
+        py: Python<'_>,
+        dtype: &str,
+        nrhs: usize,
+        settings: Option<PyKluSettings>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
+        let st = klu_settings_from(
+            Some(settings.unwrap_or_else(|| self.settings.clone())),
+            kwargs,
+        )?;
+        let opts = st.inner.clone();
+        let (plan, vb) = with_dtype_name!(dtype, |T| (
+            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+            std::mem::size_of::<T>()
+        ))?;
+        memory_plan_dict(py, plan, &self.pattern, vb)
     }
 
     /// Numeric factorization of ``data`` (the full CSC value array in the

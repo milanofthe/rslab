@@ -134,6 +134,12 @@ def test_analyze_then_factor_sweep(path):
     assert sym.factor_nnz > 0
     est = sym.estimate_memory()
     assert est["factor_bytes"] > 0 and est["factor_mb"] >= 0
+    plan = sym.memory_plan("complex128", nrhs=4)
+    assert plan["nrhs"] == 4
+    assert plan["peak_bytes"] >= plan["resident_bytes"] >= plan["factor_bytes"] > 0
+    if path != "klu":
+        assert sym.memory_plan(threads=2)["threads"] == 2
+        assert sym.memory_plan("complex64")["factor_bytes"] < plan["factor_bytes"]
     if path != "klu":
         assert sym.n_levels >= 1
         assert len(sym.level_widths) == sym.n_levels

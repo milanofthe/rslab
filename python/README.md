@@ -45,7 +45,8 @@ The analysis depends on the pattern only; pay it once per sweep:
 
 ```python
 sym = rslab.analyze(A)               # LdltSymbolic, LuSymbolic or KluSymbolic
-print(sym.estimate_memory()["factor_mb"])
+plan = sym.memory_plan(A.dtype.name, threads=8)  # heap before any numeric work
+assert plan["peak_bytes"] < available_bytes
 for omega in frequencies:
     f = sym.factor(K + 1j * omega * C)   # the matrix or its data array
     x = f.solve(b)

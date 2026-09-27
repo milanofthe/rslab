@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 0.38.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 1.0.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -239,6 +239,7 @@ many solves.
 
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
 - `factor_nnz`: Stored factor entries (the fill).
+- `heap_bytes`: Heap bytes this factor holds on the Rust side: the factor and the copy of the matrix kept for residuals and refinement.
 - `inertia`: Inertia ``(n_pos, n_neg, n_zero)``: the eigenvalue sign counts of ``A`` read off ``D`` (Sylvester's law).
 - `n`: Matrix dimension ``n``.
 - `n_perturbed`: Statically perturbed pivots (nonzero only in preconditioner mode).
@@ -386,6 +387,7 @@ left-looking LU with threshold pivoting), from
 
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
 - `factor_nnz`: Stored factor entries (the fill).
+- `heap_bytes`: Heap bytes this factor holds on the Rust side: the factor and the copy of the matrix kept for residuals and refinement.
 - `n`: Matrix dimension ``n``.
 - `n_perturbed`: Statically perturbed pivots (nonzero only in preconditioner mode).
 
@@ -539,6 +541,7 @@ factors `L`, `U`, `F` with the permutations
 - `block_ptr`: Boundaries of the diagonal blocks: block ``b`` holds the rows and columns ``block_ptr[b]:block_ptr[b + 1]`` of the factored matrix.
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
 - `factor_nnz`: Stored factor entries (the fill).
+- `heap_bytes`: Heap bytes this factor holds on the Rust side: the factor and the copy of the matrix kept for residuals and refinement.
 - `n`: Matrix dimension ``n``.
 - `n_blocks`: Number of diagonal blocks of the block triangular form.
 - `n_perturbed`: Statically perturbed pivots (nonzero only in preconditioner mode).
@@ -747,6 +750,7 @@ the same pattern with `factor`; the analysis is paid once.
 
 - `factor_nnz`: Predicted factor entries (the fill of ``L``).
 - `front_dims`: ``(columns, rows)`` of every front.
+- `heap_bytes`: Heap bytes this analysis holds on the Rust side, the stored pattern included.
 - `level_widths`: Supernodes per tree level, root level first.
 - `n`: Matrix dimension ``n``.
 - `n_levels`: Levels of the supernodal elimination tree.
@@ -787,6 +791,23 @@ Numeric factorization of new values on the analyzed pattern.
 - `ValueError`: If the pattern or the value count differs from the analysis.
 - `RuntimeError`: If a pivot is numerically zero in exact mode.
 
+#### `LdltSymbolic.memory_plan(dtype='float64', nrhs=1, settings=None, **kwargs)`
+
+The heap a factorization needs, predicted from the analysis before
+any numeric work: for a preflight check against the memory available
+and for scheduling factorizations side by side.
+
+**Parameters**
+
+- `dtype` (str, default 'float64'): The value type the factor will use.
+- `nrhs` (int, default 1): Right-hand sides per solve.
+- `settings` (Settings, optional): The settings `factor` will run with (the threads matter: the kernels' scratch grows with them); the analysis settings by default.
+- `**kwargs`: Any settings keyword, overriding `settings`.
+
+**Returns**
+
+- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began) and `solve_bytes`, with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
+
 ### class `LuSymbolic`
 
 Analysis of a general pattern for the supernodal LU path, from
@@ -797,6 +818,7 @@ same pattern with `factor`.
 
 - `factor_nnz`: Predicted factor entries, ``nnz(L) + nnz(U)``.
 - `front_dims`: ``(columns, rows)`` of every front.
+- `heap_bytes`: Heap bytes this analysis holds on the Rust side, the stored pattern included.
 - `level_widths`: Supernodes per tree level, root level first.
 - `n`: Matrix dimension ``n``.
 - `n_levels`: Levels of the supernodal elimination tree.
@@ -835,6 +857,23 @@ Numeric factorization of new values on the analyzed pattern.
 - `ValueError`: If the pattern or the value count differs from the analysis.
 - `RuntimeError`: If a pivot is numerically zero in exact mode.
 
+#### `LuSymbolic.memory_plan(dtype='float64', nrhs=1, settings=None, **kwargs)`
+
+The heap a factorization needs, predicted from the analysis before
+any numeric work: for a preflight check against the memory available
+and for scheduling factorizations side by side.
+
+**Parameters**
+
+- `dtype` (str, default 'float64'): The value type the factor will use.
+- `nrhs` (int, default 1): Right-hand sides per solve.
+- `settings` (Settings, optional): The settings `factor` will run with (the threads matter: the kernels' scratch grows with them); the analysis settings by default.
+- `**kwargs`: Any settings keyword, overriding `settings`.
+
+**Returns**
+
+- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began) and `solve_bytes`, with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
+
 ### class `KluSymbolic`
 
 Analysis of a general pattern for the KLU path (block triangular form,
@@ -845,6 +884,7 @@ value set on the same pattern with `factor`.
 
 - `block_ptr`: Block boundaries in the permuted order (``n_blocks + 1`` entries).
 - `factor_nnz`: Predicted factor entries.
+- `heap_bytes`: Heap bytes this analysis holds on the Rust side, the stored pattern included.
 - `max_block_size`: Dimension of the largest diagonal block.
 - `n`: Matrix dimension ``n``.
 - `n_blocks`: Number of diagonal blocks of the block triangular form.
@@ -882,6 +922,23 @@ Numeric factorization of new values on the analyzed pattern.
 
 - `ValueError`: If the pattern or the value count differs from the analysis.
 - `RuntimeError`: If a pivot is numerically zero in exact mode.
+
+#### `KluSymbolic.memory_plan(dtype='float64', nrhs=1, settings=None, **kwargs)`
+
+The heap a factorization needs, predicted from the analysis before
+any numeric work: for a preflight check against the memory available
+and for scheduling factorizations side by side.
+
+**Parameters**
+
+- `dtype` (str, default 'float64'): The value type the factor will use.
+- `nrhs` (int, default 1): Right-hand sides per solve.
+- `settings` (KluSettings, optional): The settings `factor` will run with (`parallel` decides the block buffers); the analysis settings by default.
+- `**kwargs`: Any settings keyword, overriding `settings`.
+
+**Returns**
+
+- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began) and `solve_bytes`, with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
 
 ## Configuration
 

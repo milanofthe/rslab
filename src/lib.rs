@@ -108,9 +108,13 @@
 //!
 //! ## Diagnostics and estimates
 //!
-//! Before any numeric work, [`LdltSymbolic::estimate_memory`] (and its LU and
-//! KLU twins) predicts the factor storage, the transient peak and the flops
-//! from the structure alone ([`MemoryEstimate`]). After it, every factor
+//! Before any numeric work, [`LdltSymbolic::memory_plan`] (and its LU and KLU
+//! twins) predicts the heap a factorization under given settings needs: what
+//! the analysis and the factor will hold, the peak while factoring and a
+//! solve's work vectors ([`MemoryPlan`]), for a preflight check against the
+//! memory available and for scheduling factorizations side by side.
+//! [`LdltSymbolic::estimate_memory`] condenses it with the flops
+//! ([`MemoryEstimate`]). After it, every factor
 //! answers `diagnostics()` ([`Diagnostics`]): stage times, fill, threads, the
 //! decisions taken (ordering, scaling, pivoting), and the settings the chosen
 //! path did not read. [`logging`] has one level (`RLA_LOG`, default
@@ -135,6 +139,7 @@ pub(crate) mod error;
 pub(crate) mod inertia;
 pub(crate) mod io;
 pub mod logging;
+pub(crate) mod memory;
 // Test-matrix generators (feature `matgen`) for the benches and tests;
 // `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
 #[cfg(feature = "matgen")]
@@ -167,6 +172,7 @@ pub use io::mtx::{
     read_mtx_complex, MtxLoaded, MtxMatrix,
 };
 pub use logging::{LogLevel, LogSink};
+pub use memory::MemoryPlan;
 pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;

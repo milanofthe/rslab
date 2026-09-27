@@ -30,6 +30,32 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
 crate::numeric::direct::direct_solver!(KluSolver);
 
 impl<T: Scalar> KluSolver<T> {
+    /// Heap bytes this factor holds: `L`, `U` and the off-block entries of
+    /// every block, the permutations and scalings, and the refactorization's
+    /// scatter program.
+    pub fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes;
+        let f = &self.factors;
+        vec_bytes(&f.block_ptr)
+            + vec_bytes(&f.row_perm)
+            + vec_bytes(&f.pinv)
+            + vec_bytes(&f.col_perm)
+            + vec_bytes(&f.rs_inv)
+            + vec_bytes(&f.l_colptr)
+            + vec_bytes(&f.l_rowidx)
+            + vec_bytes(&f.l_val)
+            + vec_bytes(&f.u_colptr)
+            + vec_bytes(&f.u_rowidx)
+            + vec_bytes(&f.u_val)
+            + vec_bytes(&f.udiag)
+            + vec_bytes(&f.f_colptr)
+            + vec_bytes(&f.f_rowidx)
+            + vec_bytes(&f.f_val)
+            + vec_bytes(&f.scatter_expect)
+            + vec_bytes(&f.scatter_target)
+            + vec_bytes(&f.pipelined)
+    }
+
     /// One-shot analyze + factor with the given settings. Skips the a-priori
     /// estimate and stage timing (empty [`diagnostics`](Self::diagnostics)),
     /// like [`LuSolver::factor`](crate::LuSolver::factor); use the phased

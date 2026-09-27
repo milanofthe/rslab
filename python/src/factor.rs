@@ -150,16 +150,27 @@ pub trait Direct<T: Field>: Factorization<T> + Send + Sync + Sized {
     /// The matrix the solver factors: the default Krylov operator and the
     /// reference of the iterative refinement.
     type Matrix: LinearOperator<T> + RefineOperator<T> + Send + Sync;
+    /// Heap bytes of the factor and of the matrix copy `a` the handle keeps.
+    fn held_bytes(&self, a: &Self::Matrix) -> u64;
 }
 
 impl<T: Field> Direct<T> for LdltSolver<T> {
     type Matrix = CscMatrix<T>;
+    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
+        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
+    }
 }
 impl<T: Field> Direct<T> for LuSolver<T> {
     type Matrix = GeneralCsc<T>;
+    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
+        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
+    }
 }
 impl<T: Field> Direct<T> for KluSolver<T> {
     type Matrix = GeneralCsc<T>;
+    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
+        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
+    }
 }
 
 /// A factor together with the matrix it was computed from (kept for iterative
@@ -414,6 +425,13 @@ macro_rules! handle {
             #[getter]
             fn n_perturbed(&self) -> usize {
                 dispatch!($any, &self.inner, |p| p.s.n_perturbed())
+            }
+
+            /// Heap bytes this factor holds on the Rust side: the factor and
+            /// the copy of the matrix kept for residuals and refinement.
+            #[getter]
+            fn heap_bytes(&self) -> u64 {
+                dispatch!($any, &self.inner, |p| p.s.held_bytes(&p.a))
             }
 
             /// NumPy dtype name of the factor (``'float64'``, ``'float32'``,

@@ -48,6 +48,15 @@ pub(crate) struct LlSchedule {
 }
 
 impl LlSchedule {
+    /// Heap bytes held by the row structures and the updater lists.
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes;
+        vec_bytes(&self.rs_off)
+            + vec_bytes(&self.rs)
+            + vec_bytes(&self.ul_off)
+            + vec_bytes(&self.ul)
+    }
+
     /// Rows of supernode `s`: `rows(s)[0..ncol]` are its eliminated columns
     /// `first_col..first_col+ncol`; `rows(s)[ncol..]` the sorted
     /// below-diagonal rows of the panel.
