@@ -69,9 +69,9 @@
 //! Static pivoting ([`SolverSettings::preconditioner`]) never fails, and a
 //! drop tolerance trades fill for iterations. [`gmres`], [`gmres_block`],
 //! [`cocg`] (complex symmetric) and [`cocr`] take any [`LinearOperator`] and
-//! [`Preconditioner`] with their [`KrylovSettings`]; a `Complex<f32>`
-//! factor preconditions an `f64` iteration through
-//! [`LowPrecisionPreconditioner`].
+//! [`Preconditioner`] with their [`KrylovSettings`]; a factor of the
+//! [`demoted`](GeneralCsc::demoted) matrix preconditions an iteration in the
+//! full precision through [`MixedPrecision`], at half the factor memory.
 //!
 //! ```
 //! # fn main() -> Result<(), rslab::RslabError> {
@@ -174,7 +174,7 @@ pub use io::mtx::{
 pub use logging::{LogLevel, LogSink};
 pub use memory::MemoryPlan;
 pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
-pub use scalar::Scalar;
+pub use scalar::{Demote, Scalar};
 pub use scaling::ScalingStrategy;
 // The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`.
 pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
@@ -189,8 +189,8 @@ pub use numeric::settings::{
 pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_recycled, BlockKrylovResult, Factorization, FnOperator,
     FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator, LowPrecisionLu,
-    LowPrecisionPreconditioner, NoPreconditioner, Preconditioner, Recycle, RecycleScalar,
-    StopReason,
+    LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner, Preconditioner, Recycle,
+    RecycleScalar, StopReason,
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
@@ -229,6 +229,7 @@ pub mod prelude {
         LowPrecisionPreconditioner,
         LuSolver,
         LuSymbolic,
+        MixedPrecision,
         MtxMatrix,
         NoPreconditioner,
         Preconditioner,

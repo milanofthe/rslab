@@ -22,6 +22,39 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// A scalar field element supporting the operations the numeric kernels
 /// require.
+/// A field with a lower-precision twin: `f64` over `f32`, `Complex<f64>`
+/// over `Complex<f32>`. A factor computed in the twin takes half the memory
+/// and preconditions an iteration in this field
+/// ([`MixedPrecision`](crate::MixedPrecision)).
+pub trait Demote: Scalar {
+    /// The lower-precision twin.
+    type Low: Scalar;
+    /// Round to the twin.
+    fn demote(self) -> Self::Low;
+    /// Widen from the twin (exact).
+    fn promote(low: Self::Low) -> Self;
+}
+
+impl Demote for f64 {
+    type Low = f32;
+    fn demote(self) -> f32 {
+        self as f32
+    }
+    fn promote(low: f32) -> f64 {
+        low as f64
+    }
+}
+
+impl Demote for Complex<f64> {
+    type Low = Complex<f32>;
+    fn demote(self) -> Complex<f32> {
+        Complex::new(self.re as f32, self.im as f32)
+    }
+    fn promote(low: Complex<f32>) -> Complex<f64> {
+        Complex::new(low.re as f64, low.im as f64)
+    }
+}
+
 pub trait Scalar:
     'static
     + Copy
