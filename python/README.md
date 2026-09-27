@@ -62,8 +62,9 @@ preconditioner:
 f = rslab.ldlt(A, preconditioner=1e-4)
 x = f.solve(b, refine=20)
 
-M = rslab.lu(A, drop_tol=1e-3)       # incomplete factor
+M = rslab.lu(A, factor_dtype="complex64")  # complex128 A, half the factor memory
 x, converged, iters, res, stop = rslab.gmres(A, b, M, tol=1e-10)
+x = M.solve(b, refine=5)             # mixed-precision refinement, full accuracy
 ```
 
 ## Settings

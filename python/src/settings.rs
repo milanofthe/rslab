@@ -262,9 +262,18 @@ plain_knobs! {
 ///     In exact mode, accept tiny pivots instead of raising on rank
 ///     deficiency. Ignored when ``preconditioner`` is set.
 /// drop_tol : float, optional
-///     Incomplete-factorization threshold: fill below it (relative to the
-///     column) is discarded, turning the factor into an ILU-style
-///     preconditioner. ``None`` keeps the complete factor.
+///     Sparsification of the finished factor: entries below it (relative to
+///     the column maximum) are zeroed, and rows that end up empty in every
+///     column of a supernode are dropped from the stored factor. The
+///     factorization itself runs complete, so it saves neither time nor peak
+///     memory. ``None`` keeps the factor as computed.
+/// factor_dtype : str or dtype, optional
+///     Store the factor in the lower-precision twin of the matrix's dtype
+///     (``'float32'`` for float64, ``'complex64'`` for complex128): half the
+///     factor memory, single-precision kernels. The handle keeps the matrix
+///     in its own precision, so ``solve(b, refine=k)`` and the Krylov
+///     methods reach its accuracy. LDL^T and LU paths; ``None`` factors in
+///     the matrix's dtype.
 /// pivot_threshold : float, default 0.1
 ///     Threshold partial pivoting of the LU path in ``[0, 1]`` (``1.0`` is
 ///     full partial pivoting). Ignored, and reported in the diagnostics, on
@@ -347,6 +356,8 @@ pub struct PySettings {
     preconditioner: Option<f64>,
     force_accept: bool,
     interrupt: Option<PyInterrupt>,
+    /// The field the factor is stored in, when not the matrix's own.
+    pub factor_dtype: Option<String>,
 }
 
 impl PySettings {
@@ -396,6 +407,17 @@ impl PySettings {
                 self.force_accept = v.extract().map_err(|_| bad(key, "a bool", v))?;
             }
             "drop_tol" => o.drop_tol = Some(v.extract().map_err(|_| bad(key, "a float", v))?),
+            "factor_dtype" => {
+                let name: String = v
+                    .py()
+                    .import_bound("numpy")?
+                    .call_method1("dtype", (v,))
+                    .and_then(|d| d.getattr("name"))
+                    .and_then(|n| n.extract())
+                    .map_err(|_| bad(key, "a dtype ('float32', 'complex64', ...)", v))?;
+                crate::common::scalar_kind(&name)?;
+                self.factor_dtype = Some(name);
+            }
             "ordering" => o.ordering.method = parse_ordering(&lower(key, v)?)?,
             "race_candidates" => {
                 let names: Vec<String> = v
@@ -486,6 +508,7 @@ impl PySettings {
         d.set_item("preconditioner", self.preconditioner)?;
         d.set_item("force_accept", self.force_accept)?;
         d.set_item("drop_tol", o.drop_tol)?;
+        d.set_item("factor_dtype", self.factor_dtype.as_deref())?;
         d.set_item("ordering", ordering_name(&o.ordering.method))?;
         d.set_item(
             "race_candidates",

@@ -206,9 +206,8 @@ impl PyLdltSymbolic {
         let data = &self.pattern.values_of(py, data, true)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.csc::<T>(d)?;
-            let s = heavy(py, || self.sym.factor(&a, &opts)).map_err(map_err)?;
             Ok(Ldlt {
-                inner: T::ldlt(Pair::new(s, a)),
+                inner: T::ldlt_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
             })
         })
     }
@@ -265,13 +264,9 @@ pub fn ldlt_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.csc::<T>(d)?;
-        let s = heavy(py, || {
-            let (sym, opts) = analyze_ldlt_core(&a, &st)?;
-            sym.factor(&a, &opts)
-        })
-        .map_err(map_err)?;
+        let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
         Ok(Ldlt {
-            inner: T::ldlt(Pair::new(s, a)),
+            inner: T::ldlt_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
         })
     })
 }
@@ -458,9 +453,8 @@ impl PyLuSymbolic {
         let data = &self.pattern.values_of(py, data, false)?;
         with_dtype!(data, |d: T| {
             let a = self.pattern.general::<T>(d)?;
-            let s = heavy(py, || self.sym.factor(&a, &opts)).map_err(map_err)?;
             Ok(Lu {
-                inner: T::lu(Pair::new(s, a)),
+                inner: T::lu_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
             })
         })
     }
@@ -516,13 +510,9 @@ pub fn lu_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |d: T| {
         let a = pattern.general::<T>(d)?;
-        let s = heavy(py, || {
-            let (sym, opts) = analyze_lu_core(&a, &st)?;
-            sym.factor(&a, &opts)
-        })
-        .map_err(map_err)?;
+        let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
         Ok(Lu {
-            inner: T::lu(Pair::new(s, a)),
+            inner: T::lu_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
         })
     })
 }

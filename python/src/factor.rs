@@ -8,13 +8,14 @@ use std::marker::PhantomData;
 use numpy::Element;
 use pyo3::prelude::*;
 use rslab::{
-    BackwardError, CscMatrix, Factorization, GeneralCsc, KluSolver, LdltSolver, LinearOperator,
-    LuSolver, Recycle, RecycleScalar, RefineOperator, RefinePolicy, Scalar,
+    BackwardError, CscMatrix, Factorization, GeneralCsc, KluSolver, LdltSolver, LdltSymbolic,
+    LinearOperator, LuSolver, LuSymbolic, MixedPrecision, Recycle, RecycleScalar, RefineOperator,
+    RefinePolicy, Scalar, SolverSettings,
 };
 
 use crate::common::{
-    array1, array2, block, csc_matrix, diagnostics_dict, index_array, map_err, vector, Pattern,
-    Release, C32, C64,
+    array1, array2, block, csc_matrix, diagnostics_dict, heavy, index_array, map_err, vector,
+    Pattern, Release, C32, C64,
 };
 use crate::krylov::{self, Operator};
 
@@ -110,10 +111,39 @@ pub trait Field: Scalar + Element + RecycleScalar + Default + Send + Sync + 'sta
     fn ldlt(p: Pair<Self, LdltSolver<Self>>) -> LdltAny;
     fn lu(p: Pair<Self, LuSolver<Self>>) -> LuAny;
     fn klu(p: Pair<Self, KluSolver<Self>>) -> KluAny;
+    /// Factor `a` on the analysis `sym` in `factor_dtype`: this field (the
+    /// default), or its lower-precision twin under a handle that keeps `a`
+    /// and iterates in this field (mixed precision).
+    fn ldlt_factor(
+        py: Python<'_>,
+        sym: &LdltSymbolic,
+        a: CscMatrix<Self>,
+        opts: &SolverSettings,
+        factor_dtype: Option<&str>,
+    ) -> PyResult<LdltAny>;
+    /// [`ldlt_factor`](Self::ldlt_factor) for the LU path.
+    fn lu_factor(
+        py: Python<'_>,
+        sym: &LuSymbolic,
+        a: GeneralCsc<Self>,
+        opts: &SolverSettings,
+        factor_dtype: Option<&str>,
+    ) -> PyResult<LuAny>;
+}
+
+/// `factor_dtype` asked for a field this one cannot factor in.
+fn no_twin(dtype: &str, asked: &str, twin: Option<&str>) -> PyErr {
+    let hint = match twin {
+        Some(t) => format!("'{dtype}' or '{t}'"),
+        None => format!("'{dtype}' (it has no lower-precision twin)"),
+    };
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "factor_dtype '{asked}' does not fit a {dtype} matrix: use {hint}"
+    ))
 }
 
 macro_rules! field {
-    ($T:ty, $name:literal, $variant:ident) => {
+    ($T:ty, $name:literal, $variant:ident $(, $low:ty, $mixed:ident)?) => {
         impl Field for $T {
             const DTYPE: &'static str = $name;
             fn recycle_new(k: usize) -> RecycleAny {
@@ -134,12 +164,50 @@ macro_rules! field {
             fn klu(p: Pair<Self, KluSolver<Self>>) -> KluAny {
                 KluAny::$variant(p)
             }
+            fn ldlt_factor(
+                py: Python<'_>,
+                sym: &LdltSymbolic,
+                a: CscMatrix<Self>,
+                opts: &SolverSettings,
+                factor_dtype: Option<&str>,
+            ) -> PyResult<LdltAny> {
+                match factor_dtype {
+                    None | Some($name) => {
+                        let s = heavy(py, || sym.factor(&a, opts)).map_err(map_err)?;
+                        Ok(LdltAny::$variant(Pair::new(s, a)))
+                    }
+                    $(Some(d) if d == <$low as Field>::DTYPE => {
+                        let s = heavy(py, || sym.factor(&a.demoted(), opts)).map_err(map_err)?;
+                        Ok(LdltAny::$mixed(Pair::new(MixedPrecision::new(s), a)))
+                    })?
+                    Some(d) => Err(no_twin($name, d, None $(.or(Some(<$low as Field>::DTYPE)))?)),
+                }
+            }
+            fn lu_factor(
+                py: Python<'_>,
+                sym: &LuSymbolic,
+                a: GeneralCsc<Self>,
+                opts: &SolverSettings,
+                factor_dtype: Option<&str>,
+            ) -> PyResult<LuAny> {
+                match factor_dtype {
+                    None | Some($name) => {
+                        let s = heavy(py, || sym.factor(&a, opts)).map_err(map_err)?;
+                        Ok(LuAny::$variant(Pair::new(s, a)))
+                    }
+                    $(Some(d) if d == <$low as Field>::DTYPE => {
+                        let s = heavy(py, || sym.factor(&a.demoted(), opts)).map_err(map_err)?;
+                        Ok(LuAny::$mixed(Pair::new(MixedPrecision::new(s), a)))
+                    })?
+                    Some(d) => Err(no_twin($name, d, None $(.or(Some(<$low as Field>::DTYPE)))?)),
+                }
+            }
         }
     };
 }
-field!(f64, "float64", F64);
+field!(f64, "float64", F64, f32, F64Mixed);
 field!(f32, "float32", F32);
-field!(C64, "complex128", C64);
+field!(C64, "complex128", C64, C32, C64Mixed);
 field!(C32, "complex64", C32);
 
 // ---------------------------------------------------------------------------
@@ -152,6 +220,10 @@ pub trait Direct<T: Field>: Factorization<T> + Send + Sync + Sized {
     type Matrix: LinearOperator<T> + RefineOperator<T> + Send + Sync;
     /// Heap bytes of the factor and of the matrix copy `a` the handle keeps.
     fn held_bytes(&self, a: &Self::Matrix) -> u64;
+    /// The field the factor is stored in.
+    fn factor_dtype(&self) -> &'static str {
+        T::DTYPE
+    }
 }
 
 impl<T: Field> Direct<T> for LdltSolver<T> {
@@ -172,6 +244,30 @@ impl<T: Field> Direct<T> for KluSolver<T> {
         self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
     }
 }
+
+/// A factor in the lower-precision twin under a full-precision handle: the
+/// handle keeps the full-precision matrix, so refinement and the Krylov
+/// methods run in `T`.
+macro_rules! mixed_direct {
+    ($solver:ident, $matrix:ident) => {
+        impl<T> Direct<T> for MixedPrecision<$solver<T::Low>>
+        where
+            T: Field + rslab::Demote,
+            T::Low: Field,
+        {
+            type Matrix = $matrix<T>;
+            fn held_bytes(&self, a: &Self::Matrix) -> u64 {
+                self.inner().heap_bytes()
+                    + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
+            }
+            fn factor_dtype(&self) -> &'static str {
+                <T::Low as Field>::DTYPE
+            }
+        }
+    };
+}
+mixed_direct!(LdltSolver, CscMatrix);
+mixed_direct!(LuSolver, GeneralCsc);
 
 /// A factor together with the matrix it was computed from (kept for iterative
 /// refinement and as the default Krylov operator).
@@ -211,7 +307,29 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
     }
 
     pub fn diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
-        diagnostics_dict(py, &self.s.diagnostics())
+        diagnostics_dict(py, &Factorization::<T>::diagnostics(&self.s))
+    }
+
+    // The factor's own queries, resolved in `T` (a mixed-precision factor
+    // answers them for every field it could precondition).
+    pub fn n(&self) -> usize {
+        Factorization::<T>::n(&self.s)
+    }
+
+    pub fn factor_nnz(&self) -> usize {
+        Factorization::<T>::factor_nnz(&self.s)
+    }
+
+    pub fn n_perturbed(&self) -> usize {
+        Factorization::<T>::n_perturbed(&self.s)
+    }
+
+    pub fn factor_dtype(&self) -> &'static str {
+        Direct::<T>::factor_dtype(&self.s)
+    }
+
+    pub fn held_bytes(&self) -> u64 {
+        Direct::<T>::held_bytes(&self.s, &self.a)
     }
 
     pub fn solve(
@@ -350,6 +468,16 @@ impl<T: Field> Pair<T, LdltSolver<T>> {
     }
 }
 
+impl<T: Field + rslab::Demote> Pair<T, MixedPrecision<LdltSolver<T::Low>>>
+where
+    T::Low: Field,
+{
+    pub fn inertia(&self) -> (usize, usize, usize) {
+        let i = self.s.inner().inertia();
+        (i.positive, i.negative, i.zero)
+    }
+}
+
 impl<T: Field> Pair<T, KluSolver<T>> {
     pub fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let pattern = crate::common::Pattern {
@@ -378,12 +506,9 @@ impl<T: Field> Pair<T, KluSolver<T>> {
 
 /// Run `$body` with `$p` bound to the typed `Pair` inside a per-field enum.
 macro_rules! dispatch {
-    ($any:ident, $inner:expr, |$p:ident| $body:expr) => {
+    ($any:ident [$($v:ident),*], $inner:expr, |$p:ident| $body:expr) => {
         match $inner {
-            $any::F64($p) => $body,
-            $any::F32($p) => $body,
-            $any::C64($p) => $body,
-            $any::C32($p) => $body,
+            $($any::$v($p) => $body,)*
         }
     };
 }
@@ -391,7 +516,7 @@ macro_rules! dispatch {
 macro_rules! handle {
     (
         $(#[$meta:meta])*
-        $name:ident, $any:ident, $solver:ident;
+        $name:ident, $any:ident, $solver:ident, [$($mixed:ident($T:ty, $L:ty)),*];
         $($extra:tt)*
     ) => {
         pub enum $any {
@@ -399,6 +524,7 @@ macro_rules! handle {
             F32(Pair<f32, $solver<f32>>),
             C64(Pair<C64, $solver<C64>>),
             C32(Pair<C32, $solver<C32>>),
+            $($mixed(Pair<$T, MixedPrecision<$solver<$L>>>),)*
         }
 
         $(#[$meta])*
@@ -412,26 +538,26 @@ macro_rules! handle {
             /// Matrix dimension ``n``.
             #[getter]
             fn n(&self) -> usize {
-                dispatch!($any, &self.inner, |p| p.s.n())
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.n())
             }
 
             /// Stored factor entries (the fill).
             #[getter]
             fn factor_nnz(&self) -> usize {
-                dispatch!($any, &self.inner, |p| p.s.factor_nnz())
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.factor_nnz())
             }
 
             /// Statically perturbed pivots (nonzero only in preconditioner mode).
             #[getter]
             fn n_perturbed(&self) -> usize {
-                dispatch!($any, &self.inner, |p| p.s.n_perturbed())
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.n_perturbed())
             }
 
             /// Heap bytes this factor holds on the Rust side: the factor and
             /// the copy of the matrix kept for residuals and refinement.
             #[getter]
             fn heap_bytes(&self) -> u64 {
-                dispatch!($any, &self.inner, |p| p.s.held_bytes(&p.a))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.held_bytes())
             }
 
             /// NumPy dtype name of the factor (``'float64'``, ``'float32'``,
@@ -443,7 +569,17 @@ macro_rules! handle {
                     $any::F32(_) => f32::DTYPE,
                     $any::C64(_) => C64::DTYPE,
                     $any::C32(_) => C32::DTYPE,
+                    $($any::$mixed(_) => <$T as Field>::DTYPE,)*
                 }
+            }
+
+            /// NumPy dtype name the factor is stored in: :attr:`dtype`, or
+            /// its lower-precision twin for a mixed-precision factor
+            /// (``factor_dtype`` setting), which the solves and Krylov
+            /// methods apply in :attr:`dtype`.
+            #[getter]
+            fn factor_dtype(&self) -> &'static str {
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.factor_dtype())
             }
 
             /// The factorization report as a dictionary: ``stages`` (name,
@@ -457,7 +593,7 @@ macro_rules! handle {
             /// ``solve_mdof_s``; million unknowns per second and GFlop/s),
             /// the a-priori ``estimate`` and a one-line ``summary``.
             fn diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.diagnostics(py))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.diagnostics(py))
             }
 
             /// Solve ``A x = b`` for one right-hand side.
@@ -482,7 +618,7 @@ macro_rules! handle {
                 target: Option<f64>,
                 measure: &str,
             ) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.solve(py, b, refine, target, measure))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.solve(py, b, refine, target, measure))
             }
 
             /// Solve ``A^T y = b`` on the same factors (plain transpose, not the
@@ -499,7 +635,7 @@ macro_rules! handle {
             /// ndarray, shape (n,)
             ///     The solution ``y``.
             fn solve_transpose(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.solve_transpose(py, b))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.solve_transpose(py, b))
             }
 
             /// Solve ``A X = B`` for an ``n x nrhs`` block in one batched pass.
@@ -514,7 +650,7 @@ macro_rules! handle {
             /// ndarray, shape (n, nrhs)
             ///     The solutions, one column per right-hand side.
             fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.solve_many(py, b))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.solve_many(py, b))
             }
 
             /// Flexible restarted GMRES with this factor as the preconditioner.
@@ -558,7 +694,7 @@ macro_rules! handle {
                 recycle: Option<Bound<'_, PyRecycle>>,
                 operator: Option<Operator<'_>>,
             ) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.gmres(
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.gmres(
                     py, b, tol, maxit, restart, x0.as_ref(), recycle.as_ref(), operator
                 ))
             }
@@ -598,7 +734,7 @@ macro_rules! handle {
                 x0: Option<Bound<'_, PyAny>>,
                 operator: Option<Operator<'_>>,
             ) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.gmres_block(
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.gmres_block(
                     py, b, tol, maxit, restart, x0.as_ref(), operator
                 ))
             }
@@ -631,7 +767,7 @@ macro_rules! handle {
                 maxit: usize,
                 operator: Option<Operator<'_>>,
             ) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.cocg(py, b, tol, maxit, operator))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.cocg(py, b, tol, maxit, operator))
             }
 
             /// Conjugate orthogonal conjugate residual (COCR) with this factor
@@ -662,7 +798,7 @@ macro_rules! handle {
                 maxit: usize,
                 operator: Option<Operator<'_>>,
             ) -> PyResult<PyObject> {
-                dispatch!($any, &self.inner, |p| p.cocr(py, b, tol, maxit, operator))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.cocr(py, b, tol, maxit, operator))
             }
 
             /// A :class:`Recycle` workspace holding up to ``k`` deflation
@@ -678,7 +814,7 @@ macro_rules! handle {
             /// Recycle
             ///     The workspace to pass as ``recycle=`` to :meth:`gmres`.
             fn recycle(&self, k: usize) -> PyRecycle {
-                dispatch!($any, &self.inner, |p| p.recycle(k))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.recycle(k))
             }
 
             $($extra)*
@@ -694,17 +830,17 @@ handle! {
     /// copy of the original lower triangle (for refinement and as the default
     /// Krylov operator), so the factorization is paid once and amortized over
     /// many solves.
-    Ldlt, LdltAny, LdltSolver;
+    Ldlt, LdltAny, LdltSolver, [F64Mixed(f64, f32), C64Mixed(C64, C32)];
 
     /// Inertia ``(n_pos, n_neg, n_zero)``: the eigenvalue sign counts of ``A``
     /// read off ``D`` (Sylvester's law).
     #[getter]
     fn inertia(&self) -> (usize, usize, usize) {
-        dispatch!(LdltAny, &self.inner, |p| p.inertia())
+        dispatch!(LdltAny [F64, F32, C64, C32, F64Mixed, C64Mixed], &self.inner, |p| p.inertia())
     }
 
     fn __repr__(&self) -> String {
-        format!("Ldlt(n={}, factor_nnz={}, dtype='{}')", self.n(), self.factor_nnz(), self.dtype())
+        format!("Ldlt(n={}, factor_nnz={}, dtype='{}', factor_dtype='{}')", self.n(), self.factor_nnz(), self.dtype(), self.factor_dtype())
     }
 }
 
@@ -712,10 +848,10 @@ handle! {
     /// A general (unsymmetric) factor ``P_r^T A P_c = L U`` (supernodal
     /// left-looking LU with threshold pivoting), from
     /// :func:`rslab.lu` or :meth:`LuSymbolic.factor`.
-    Lu, LuAny, LuSolver;
+    Lu, LuAny, LuSolver, [F64Mixed(f64, f32), C64Mixed(C64, C32)];
 
     fn __repr__(&self) -> String {
-        format!("Lu(n={}, factor_nnz={}, dtype='{}')", self.n(), self.factor_nnz(), self.dtype())
+        format!("Lu(n={}, factor_nnz={}, dtype='{}', factor_dtype='{}')", self.n(), self.factor_nnz(), self.dtype(), self.factor_dtype())
     }
 }
 
@@ -726,12 +862,12 @@ handle! {
     /// for fixed-pattern sweeps and :meth:`solve_transpose`, and exposes the
     /// factors :attr:`L`, :attr:`U`, :attr:`F` with the permutations
     /// :attr:`perm_r`, :attr:`perm_c` (as SciPy's ``SuperLU``).
-    Klu, KluAny, KluSolver;
+    Klu, KluAny, KluSolver, [];
 
     /// Number of diagonal blocks of the block triangular form.
     #[getter]
     fn n_blocks(&self) -> usize {
-        dispatch!(KluAny, &self.inner, |p| p.s.n_blocks())
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| p.s.n_blocks())
     }
 
     /// The unit lower factor ``L`` as a SciPy ``csc_matrix``. With the row
@@ -741,49 +877,49 @@ handle! {
     /// triangular form, ``F`` holds the entries above them.
     #[getter(L)]
     fn l_factor(&self, py: Python<'_>) -> PyResult<PyObject> {
-        dispatch!(KluAny, &self.inner, |p| csc_matrix(py, &p.s.l_matrix()))
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| csc_matrix(py, &p.s.l_matrix()))
     }
 
     /// The upper factor ``U`` (pivots on the diagonal) as a SciPy
     /// ``csc_matrix``; see :attr:`L`.
     #[getter(U)]
     fn u_factor(&self, py: Python<'_>) -> PyResult<PyObject> {
-        dispatch!(KluAny, &self.inner, |p| csc_matrix(py, &p.s.u_matrix()))
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| csc_matrix(py, &p.s.u_matrix()))
     }
 
     /// The entries ``F`` above the diagonal blocks as a SciPy
     /// ``csc_matrix``; see :attr:`L`.
     #[getter(F)]
     fn f_part(&self, py: Python<'_>) -> PyResult<PyObject> {
-        dispatch!(KluAny, &self.inner, |p| csc_matrix(py, &p.s.f_matrix()))
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| csc_matrix(py, &p.s.f_matrix()))
     }
 
     /// Row permutation: row ``k`` of the factored matrix is row
     /// ``perm_r[k]`` of ``A``; see :attr:`L`.
     #[getter]
     fn perm_r(&self, py: Python<'_>) -> PyObject {
-        dispatch!(KluAny, &self.inner, |p| index_array(py, p.s.row_perm()))
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| index_array(py, p.s.row_perm()))
     }
 
     /// Column permutation: column ``k`` of the factored matrix is column
     /// ``perm_c[k]`` of ``A``; see :attr:`L`.
     #[getter]
     fn perm_c(&self, py: Python<'_>) -> PyObject {
-        dispatch!(KluAny, &self.inner, |p| index_array(py, p.s.col_perm()))
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| index_array(py, p.s.col_perm()))
     }
 
     /// Boundaries of the diagonal blocks: block ``b`` holds the rows and
     /// columns ``block_ptr[b]:block_ptr[b + 1]`` of the factored matrix.
     #[getter]
     fn block_ptr(&self, py: Python<'_>) -> PyObject {
-        dispatch!(KluAny, &self.inner, |p| index_array(py, p.s.block_ptr()))
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| index_array(py, p.s.block_ptr()))
     }
 
     /// Row scaling: row ``i`` of ``A`` is multiplied by ``row_scale[i]``
     /// before the factorization (all ones without scaling); see :attr:`L`.
     #[getter]
     fn row_scale(&self, py: Python<'_>) -> PyObject {
-        dispatch!(KluAny, &self.inner, |p| array1(py, p.s.row_scale().to_vec()))
+        dispatch!(KluAny [F64, F32, C64, C32], &self.inner, |p| array1(py, p.s.row_scale().to_vec()))
     }
 
 
@@ -808,7 +944,7 @@ handle! {
     /// RuntimeError
     ///     If a pivot is numerically zero.
     fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        dispatch!(KluAny, &mut self.inner, |p| p.refactor(py, data))
+        dispatch!(KluAny [F64, F32, C64, C32], &mut self.inner, |p| p.refactor(py, data))
     }
 
     fn __repr__(&self) -> String {
