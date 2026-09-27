@@ -461,3 +461,28 @@ def test_solve_transpose_on_every_handle(path):
     B = np.stack([b, b[::-1]], axis=1)
     X = f.solve_many(B)
     assert np.allclose(X[:, 0], f.solve(b)) and np.allclose(X[:, 1], f.solve(b[::-1]))
+
+
+@pytest.mark.parametrize("path", ["ldlt", "lu"])
+@pytest.mark.parametrize("dtype, low", [(np.float64, "float32"), (np.complex128, "complex64")])
+def test_mixed_precision_factor(path, dtype, low):
+    n = 400
+    A = (_spd(n) if path == "ldlt" else _general(n)).astype(dtype)
+    b = np.arange(n, dtype=dtype) + 1
+    full = getattr(rslab, path)(A)
+    f = getattr(rslab, path)(A, factor_dtype=low)
+    assert f.dtype == np.dtype(dtype).name and f.factor_dtype == low
+    assert f.heap_bytes < full.heap_bytes
+
+    def res(x):
+        return np.linalg.norm(A @ x - b) / np.linalg.norm(b)
+
+    x = f.solve(b)
+    assert x.dtype == dtype and res(x) < 1e-4
+    assert res(f.solve(b, refine=5)) < 1e-13
+    assert res(f.gmres(b, tol=1e-12).x) < 1e-11
+    # The analysis is shared across precisions.
+    sym = rslab.analyze(A, path=path)
+    assert sym.factor(A, factor_dtype=low).factor_dtype == low
+    with pytest.raises(ValueError):
+        getattr(rslab, path)(_spd(n).astype(np.float32), factor_dtype="complex64")

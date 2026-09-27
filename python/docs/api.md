@@ -238,6 +238,7 @@ many solves.
 **Attributes**
 
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
+- `factor_dtype`: NumPy dtype name the factor is stored in: :attr:`dtype`, or its lower-precision twin for a mixed-precision factor (``factor_dtype`` setting), which the solves and Krylov methods apply in :attr:`dtype`.
 - `factor_nnz`: Stored factor entries (the fill).
 - `heap_bytes`: Heap bytes this factor holds on the Rust side: the factor and the copy of the matrix kept for residuals and refinement.
 - `inertia`: Inertia ``(n_pos, n_neg, n_zero)``: the eigenvalue sign counts of ``A`` read off ``D`` (Sylvester's law).
@@ -386,6 +387,7 @@ left-looking LU with threshold pivoting), from
 **Attributes**
 
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
+- `factor_dtype`: NumPy dtype name the factor is stored in: :attr:`dtype`, or its lower-precision twin for a mixed-precision factor (``factor_dtype`` setting), which the solves and Krylov methods apply in :attr:`dtype`.
 - `factor_nnz`: Stored factor entries (the fill).
 - `heap_bytes`: Heap bytes this factor holds on the Rust side: the factor and the copy of the matrix kept for residuals and refinement.
 - `n`: Matrix dimension ``n``.
@@ -540,6 +542,7 @@ factors `L`, `U`, `F` with the permutations
 - `U`: The upper factor ``U`` (pivots on the diagonal) as a SciPy ``csc_matrix``; see :attr:`L`.
 - `block_ptr`: Boundaries of the diagonal blocks: block ``b`` holds the rows and columns ``block_ptr[b]:block_ptr[b + 1]`` of the factored matrix.
 - `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
+- `factor_dtype`: NumPy dtype name the factor is stored in: :attr:`dtype`, or its lower-precision twin for a mixed-precision factor (``factor_dtype`` setting), which the solves and Krylov methods apply in :attr:`dtype`.
 - `factor_nnz`: Stored factor entries (the fill).
 - `heap_bytes`: Heap bytes this factor holds on the Rust side: the factor and the copy of the matrix kept for residuals and refinement.
 - `n`: Matrix dimension ``n``.
@@ -963,7 +966,8 @@ tuned values, listed by `to_dict`.
 - `threads` (int or 'auto' or ('auto', int) or 'ambient', optional): Worker budget of the scoped factorization pool. `None` (default) is the per-matrix predictor capped at 4 workers (or the calibrated pick after `rslab.install_diagnose`); an `int` pins the count (`0` = all logical cores); `'auto'` is the predictor without the cap, `('auto', max)` the predictor capped at `max`; `'ambient'` runs on the caller's rayon pool. The factor is bit-identical for every value.
 - `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. `1e-4` is a good start.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
-- `drop_tol` (float, optional): Incomplete-factorization threshold: fill below it (relative to the column) is discarded, turning the factor into an ILU-style preconditioner. `None` keeps the complete factor.
+- `drop_tol` (float, optional): Sparsification of the finished factor: entries below it (relative to the column maximum) are zeroed, and rows that end up empty in every column of a supernode are dropped from the stored factor. The factorization itself runs complete, so it saves neither time nor peak memory. `None` keeps the factor as computed.
+- `factor_dtype` (str or dtype, optional): Store the factor in the lower-precision twin of the matrix's dtype (`'float32'` for float64, `'complex64'` for complex128): half the factor memory, single-precision kernels. The handle keeps the matrix in its own precision, so `solve(b, refine=k)` and the Krylov methods reach its accuracy. LDL^T and LU paths; `None` factors in the matrix's dtype.
 - `pivot_threshold` (float, default 0.1): Threshold partial pivoting of the LU path in `[0, 1]` (`1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
 - `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
 - `matching` (bool, default True): Maximum-product row matching (MC64) before the LU analysis, applied where a diagonal entry is below `matching_negligible_diagonal` (default `1e-10`) times its column's largest entry. LU path only.
