@@ -209,6 +209,8 @@ plain_knobs! {
     "complex_split_min_ratio": usize => kernels.complex_split_min_ratio;
     "complex_split_tile": usize => kernels.complex_split_tile;
     "use_gemm_schur": bool => kernels.use_gemm_schur;
+    "blas_min_flops": usize => kernels.blas_min_flops;
+    "blas_par_block": usize => kernels.blas_par_block;
     "solve_leaf_subtrees": usize => solve.leaf_subtrees;
     "solve_block": usize => solve.block;
     "solve_ancestor_chunk": usize => solve.ancestor_chunk;

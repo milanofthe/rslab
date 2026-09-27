@@ -157,6 +157,18 @@ pub mod symbolic;
 #[doc(hidden)]
 pub mod tuning;
 
+/// The system BLAS the large dense products run on (`"Accelerate"`, or the
+/// library `RSLAB_BLAS_LIB` named at build time), or `None` when every
+/// product runs on the portable kernels: no library linked, or its threading
+/// cannot be held to the calling thread.
+pub fn dense_library() -> Option<&'static str> {
+    #[cfg(rslab_blas)]
+    if dense::blas::available() {
+        return Some(env!("RSLAB_DENSE_LIBRARY"));
+    }
+    None
+}
+
 pub use diagnostics::{
     Decisions, Diagnostics, MemoryEstimate, NumericReport, Rates, SolveStats, StageReport,
 };

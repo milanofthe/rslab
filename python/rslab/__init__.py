@@ -100,6 +100,7 @@ from ._rslab import (
     LuSymbolic,
     Recycle,
     Settings,
+    dense_library,
     install_diagnose,
     log_level,
     set_log_level,
@@ -133,6 +134,7 @@ __all__ = [
     "KrylovResult",
     "Recycle",
     # machine and logging
+    "dense_library",
     "install_diagnose",
     "set_log_level",
     "log_level",

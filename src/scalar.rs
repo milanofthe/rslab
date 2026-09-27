@@ -38,6 +38,34 @@ pub trait Scalar:
     /// The additive identity `0`.
     fn zero() -> Self;
 
+    /// Whether [`cblas_gemm`](Self::cblas_gemm) reaches a linked system BLAS.
+    #[doc(hidden)]
+    const HAS_CBLAS: bool = false;
+
+    /// Column-major `cblas_?gemm` of this scalar (arguments of CBLAS after
+    /// the layout); only called where [`HAS_CBLAS`](Self::HAS_CBLAS) holds.
+    ///
+    /// # Safety
+    /// The arguments must describe valid matrices, as CBLAS requires.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    unsafe fn cblas_gemm(
+        ta: i32,
+        tb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: Self,
+        a: *const Self,
+        lda: i32,
+        b: *const Self,
+        ldb: i32,
+        beta: Self,
+        c: *mut Self,
+        ldc: i32,
+    ) {
+    }
+
     /// The multiplicative identity `1`.
     fn one() -> Self;
 
@@ -151,6 +179,31 @@ pub(crate) fn fmadd<T: Scalar>(a: T, b: T, c: T) -> T {
 }
 
 impl Scalar for f64 {
+    #[cfg(rslab_blas)]
+    const HAS_CBLAS: bool = true;
+
+    #[cfg(rslab_blas)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn cblas_gemm(
+        ta: i32,
+        tb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: Self,
+        a: *const Self,
+        lda: i32,
+        b: *const Self,
+        ldb: i32,
+        beta: Self,
+        c: *mut Self,
+        ldc: i32,
+    ) {
+        use crate::dense::blas::{ffi, COL_MAJOR};
+        ffi::cblas_dgemm(
+            COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
+        );
+    }
     #[inline]
     fn zero() -> Self {
         0.0
@@ -203,6 +256,44 @@ impl Scalar for f64 {
 }
 
 impl Scalar for Complex<f64> {
+    #[cfg(rslab_blas)]
+    const HAS_CBLAS: bool = true;
+
+    #[cfg(rslab_blas)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn cblas_gemm(
+        ta: i32,
+        tb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: Self,
+        a: *const Self,
+        lda: i32,
+        b: *const Self,
+        ldb: i32,
+        beta: Self,
+        c: *mut Self,
+        ldc: i32,
+    ) {
+        use crate::dense::blas::{ffi, COL_MAJOR};
+        ffi::cblas_zgemm(
+            COL_MAJOR,
+            ta,
+            tb,
+            m,
+            n,
+            k,
+            (&alpha as *const Self).cast(),
+            a.cast(),
+            lda,
+            b.cast(),
+            ldb,
+            (&beta as *const Self).cast(),
+            c.cast(),
+            ldc,
+        );
+    }
     unsafe fn gemm(
         m: usize,
         n: usize,
@@ -291,6 +382,31 @@ impl Scalar for Complex<f64> {
 }
 
 impl Scalar for f32 {
+    #[cfg(rslab_blas)]
+    const HAS_CBLAS: bool = true;
+
+    #[cfg(rslab_blas)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn cblas_gemm(
+        ta: i32,
+        tb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: Self,
+        a: *const Self,
+        lda: i32,
+        b: *const Self,
+        ldb: i32,
+        beta: Self,
+        c: *mut Self,
+        ldc: i32,
+    ) {
+        use crate::dense::blas::{ffi, COL_MAJOR};
+        ffi::cblas_sgemm(
+            COL_MAJOR, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
+        );
+    }
     #[inline]
     fn zero() -> Self {
         0.0
@@ -344,6 +460,44 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex<f32> {
+    #[cfg(rslab_blas)]
+    const HAS_CBLAS: bool = true;
+
+    #[cfg(rslab_blas)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn cblas_gemm(
+        ta: i32,
+        tb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: Self,
+        a: *const Self,
+        lda: i32,
+        b: *const Self,
+        ldb: i32,
+        beta: Self,
+        c: *mut Self,
+        ldc: i32,
+    ) {
+        use crate::dense::blas::{ffi, COL_MAJOR};
+        ffi::cblas_cgemm(
+            COL_MAJOR,
+            ta,
+            tb,
+            m,
+            n,
+            k,
+            (&alpha as *const Self).cast(),
+            a.cast(),
+            lda,
+            b.cast(),
+            ldb,
+            (&beta as *const Self).cast(),
+            c.cast(),
+            ldc,
+        );
+    }
     unsafe fn gemm(
         m: usize,
         n: usize,

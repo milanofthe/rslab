@@ -2,8 +2,10 @@
 //!
 //! Every trailing update goes through [`gemm`], which has the signature and
 //! semantics of the `gemm` crate (`dst := alpha * dst + beta * lhs * rhs`,
-//! arbitrary strides): the pure-Rust SIMD kernels, the same on every
-//! platform, so a factorization is bit-identical wherever it runs.
+//! arbitrary strides). A product from
+//! [`blas_min_flops`](crate::KernelSettings::blas_min_flops) on runs on the
+//! system BLAS where one is linked (Accelerate on macOS, see `dense::blas`),
+//! every other on the pure-Rust SIMD kernels of the `gemm` crate.
 //!
 //! Sequential complex products do not run on the crate's complex kernel:
 //! its interleaved complex microkernel reaches about 80% of the real
@@ -54,6 +56,13 @@ pub unsafe fn gemm<T: Scalar>(
     conj_rhs: bool,
     mode: GemmMode,
 ) {
+    #[cfg(rslab_blas)]
+    if crate::dense::blas::gemm(
+        m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs, alpha,
+        beta, conj_dst, conj_lhs, conj_rhs, mode,
+    ) {
+        return;
+    }
     T::gemm(
         m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs, alpha,
         beta, conj_dst, conj_lhs, conj_rhs, mode,
@@ -76,6 +85,11 @@ pub struct GemmMode {
     /// Tile edge of the split: the planes of one tile of the product
     /// (`3 (2 tile k + tile^2)` reals) are the whole scratch.
     pub split_tile: usize,
+    /// Products of at least this many flops go to the system BLAS when one
+    /// is linked (`dense::blas`).
+    pub blas_min_flops: usize,
+    /// Rows or columns per block of a product on the system BLAS.
+    pub blas_par_block: usize,
 }
 
 impl GemmMode {
@@ -84,6 +98,8 @@ impl GemmMode {
             parallelism,
             split_min_ratio: k.complex_split_min_ratio,
             split_tile: k.complex_split_tile.max(1),
+            blas_min_flops: k.blas_min_flops,
+            blas_par_block: k.blas_par_block.max(1),
         }
     }
 }
