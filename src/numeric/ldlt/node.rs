@@ -279,3 +279,87 @@ pub(super) fn ll_factor_node<T: Scalar>(
         panel,
     )
 }
+
+/// Heap bytes [`ll_factor_node`] allocates for supernode `s` while it runs,
+/// for the memory plan: the tiled cmod's per-slab buffers on up to
+/// `workers` threads at once, or the sequential cmod's buffers, which stay
+/// allocated through the cdiv ([`ll_cdiv_scratch`](super::bunch_kaufman::ll_cdiv_scratch));
+/// the largest split planes its GEMMs take on a worker (complex fields)
+/// and how many workers may take them at once. Replays the kernel's plan
+/// and growth of its buffers.
+pub(super) fn ll_node_scratch<T: Scalar>(
+    s: usize,
+    sym: &SymbolicFactorization,
+    sched: &LlSchedule,
+    k: &crate::KernelSettings,
+    workers: usize,
+) -> (u64, usize, usize) {
+    use super::gemm::lower_tile_planes;
+    use crate::memory::grown;
+    let vb = std::mem::size_of::<T>();
+    let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
+    let (cdiv, mut planes) =
+        super::bunch_kaufman::ll_cdiv_scratch::<T>(ncol, sched.rows(s).len(), k);
+    let plan = crate::numeric::supernodal::CmodPlan::new(
+        sym,
+        s,
+        sched.updaters(s),
+        |k| (sched.rows(k), sched.rows(k)),
+        false,
+        k.par_gemm,
+        k.fork_min_flops,
+    );
+    let updater = |kk: usize| {
+        let nck = sym.supernodes[kk].ncol;
+        (nck, &sched.rows(kk)[nck..])
+    };
+    if plan.tiled {
+        let tw = plan.tile_w;
+        let slabs = ncol.div_ceil(tw);
+        let (mut worst, mut slab_planes) = (0, 0);
+        for ti in 0..slabs {
+            let (c0, c1) = (ti * tw, (ti * tw + tw).min(ncol));
+            let (mut vd, mut u) = (0, 0);
+            for sp in &plan.spans {
+                let (nck, ok) = updater(sp.k);
+                let (p0, p1) = sp.l;
+                let q0 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c0);
+                let q1 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c1);
+                if q1 > q0 {
+                    vd = grown(vd, (q1 - q0) * nck);
+                    u = grown(u, (ok.len() - q0) * (q1 - q0));
+                    if T::COMPLEX {
+                        let p = lower_tile_planes(ok.len() - q0, q1 - q0, nck, usize::MAX, k);
+                        slab_planes = slab_planes.max(p);
+                    }
+                }
+            }
+            worst = worst.max(vd + u);
+        }
+        let copies = if slab_planes > planes {
+            slabs.min(workers.max(1))
+        } else {
+            1
+        };
+        let bytes = ((worst * slabs.min(workers.max(1)) * vb) as u64).max(cdiv);
+        (bytes, planes.max(slab_planes), copies)
+    } else {
+        let (mut vc, mut vd, mut u) = (0, 0, 0);
+        for sp in &plan.spans {
+            let (nck, ok) = updater(sp.k);
+            let (p0, p1) = sp.l;
+            let npk = p1 - p0;
+            if (ok.len() - p0) * npk * nck < k.scalar_gate {
+                vc = grown(vc, nck);
+            } else {
+                vd = grown(vd, npk * nck);
+                u = grown(u, (ok.len() - p0) * npk);
+                if T::COMPLEX {
+                    let par = if plan.forks { k.par_gemm } else { usize::MAX };
+                    planes = planes.max(lower_tile_planes(ok.len() - p0, npk, nck, par, k));
+                }
+            }
+        }
+        (((vc + vd + u) * vb) as u64 + cdiv, planes, 1)
+    }
+}

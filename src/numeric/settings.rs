@@ -604,7 +604,7 @@ impl From<usize> for Threads {
 }
 
 /// All logical cores (the `0` sentinel resolution).
-fn all_cores() -> usize {
+pub(crate) fn all_cores() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(1)

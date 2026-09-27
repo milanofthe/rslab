@@ -55,6 +55,12 @@ pub struct LdltSolver<T> {
 }
 
 impl<T: Scalar> LdltSolver<T> {
+    /// Heap bytes this factor holds: its values in solve layout, the pivots,
+    /// the permutations and the solve schedule.
+    pub fn heap_bytes(&self) -> u64 {
+        self.plan.heap_bytes() + self.factors.heap_bytes() + crate::memory::vec_bytes(&self.scale)
+    }
+
     /// The matrix dimension.
     pub fn n(&self) -> usize {
         self.factors.n
@@ -236,13 +242,22 @@ pub struct LdltSymbolic {
     analyze_ms: f64,
     requested_ordering: crate::symbolic::OrderingMethod,
     /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
-    /// size. The estimate is a pure function of the structure and
-    /// `size_of::<T>()`, but computing it rebuilds the supernode row
-    /// structures, expensive enough to pay only once per scalar type.
-    est_cache: std::sync::Mutex<Vec<(usize, crate::diagnostics::MemoryEstimate)>>,
+    /// size and complexity. The estimate is a pure function of the
+    /// structure and the scalar type, but computing it walks every node's
+    /// updaters, expensive enough to pay only once per scalar type.
+    est_cache: std::sync::Mutex<Vec<((usize, bool), crate::diagnostics::MemoryEstimate)>>,
 }
 
 impl LdltSymbolic {
+    /// Heap bytes this analysis holds: the ordering, the supernodes, the
+    /// permuted pattern and, once a factorization has built them, the
+    /// schedule and the input program every later factorization reuses.
+    /// The analysis stays alive while it is factored, so these bytes are part
+    /// of every factorization's footprint.
+    pub fn heap_bytes(&self) -> u64 {
+        self.symbolic.heap_bytes()
+    }
+
     /// Phase 1: analyze the sparsity pattern of `a` under the ordering and
     /// amalgamation settings. The values are ignored, so any matrix with the
     /// target pattern (even a zero-valued template) works.
@@ -319,80 +334,61 @@ impl LdltSymbolic {
     }
 
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
-        let value_bytes = std::mem::size_of::<T>();
-        // The estimate depends on `T` only through `size_of::<T>()`, so cache
-        // per scalar size: the row-structure rebuild below is expensive and
-        // the auto-tune pipeline asks for the same estimate repeatedly.
+        // The estimate depends on `T` only through its size and whether it is
+        // complex, so cache per kind: the auto-tune pipeline asks for the
+        // same estimate repeatedly.
+        let key = (std::mem::size_of::<T>(), T::COMPLEX);
         if let Ok(cache) = self.est_cache.lock() {
-            if let Some(&(_, est)) = cache.iter().find(|&&(vb, _)| vb == value_bytes) {
+            if let Some(&(_, est)) = cache.iter().find(|&&(k, _)| k == key) {
                 return est;
             }
         }
-        let est = self.estimate_memory_for(value_bytes);
+        let est = self.estimate_memory_for::<T>();
         if let Ok(mut cache) = self.est_cache.lock() {
-            if !cache.iter().any(|&(vb, _)| vb == value_bytes) {
-                cache.push((value_bytes, est));
+            if !cache.iter().any(|&(k, _)| k == key) {
+                cache.push((key, est));
             }
         }
         est
     }
 
     /// The uncached estimate body, a pure function of the symbolic structure
-    /// and the scalar size.
-    fn estimate_memory_for(&self, value_bytes: usize) -> crate::diagnostics::MemoryEstimate {
-        let Some((sym, levels)) = self.symbolic.sym_and_levels() else {
-            return crate::diagnostics::estimate_left_looking(
-                0,
-                &|_| 0,
-                &|_| 0,
-                &|_| &[],
+    /// and the scalar type. Its peak is the [`memory_plan`](Self::memory_plan)
+    /// on all cores, the most scratch the kernels can hold.
+    fn estimate_memory_for<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
+        let value_bytes = std::mem::size_of::<T>();
+        let (Some((sym, levels)), Some(sched)) =
+            (self.symbolic.sym_and_levels(), self.symbolic.ll_schedule())
+        else {
+            return crate::diagnostics::MemoryEstimate {
                 value_bytes,
-                0,
-                true,
-            );
+                ..Default::default()
+            };
         };
         let nsuper = sym.supernodes.len();
-        let Some(sched) = self.symbolic.ll_schedule() else {
-            return crate::diagnostics::estimate_left_looking(
-                0,
-                &|_| 0,
-                &|_| 0,
-                &|_| &[],
-                value_bytes,
-                0,
-                true,
-            );
-        };
-        // LDL^T: one dense panel per supernode (no separate U), and the panel
-        // *is* the stored factor (no compact copy, see `PanelFactor`); the
-        // input copy is a single lower triangle.
-        let panel_bytes = |s: usize| -> u64 {
-            (sched.rows(s).len() * sym.supernodes[s].ncol * value_bytes) as u64
-        };
-        let input_bytes = (self.nnz * (value_bytes + 8)) as u64;
-        let mut est = crate::diagnostics::estimate_left_looking(
-            nsuper,
-            &panel_bytes,
-            &panel_bytes,
-            &|s| sched.updaters(s),
-            value_bytes,
-            input_bytes,
-            true,
-        );
-        est.factor_flops = (0..nsuper)
+        let dims = |s: usize| (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
+        // One dense panel per supernode, which is the stored factor.
+        let panels: u64 = (0..nsuper)
             .map(|s| {
-                let (nc, nr) = (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
-                nr * nr * nc
+                let (nc, nr) = dims(s);
+                nr * nc
             })
             .sum();
+        let settings = SolverSettings {
+            threads: crate::numeric::settings::Threads::Fixed(0),
+            ..SolverSettings::default()
+        };
+        let plan = self.memory_plan::<T>(&settings, 1);
         // Critical path (Amdahl bound) + tree width for the thread-aware v2 model.
         // Supernodes are in elimination (postorder) order, so children precede their
         // parent and a single forward pass computes the longest leaf-to-root chain.
         let mut crit = vec![0u64; nsuper];
         let mut cp = 0u64;
+        let mut flops = 0u64;
         for s in 0..nsuper {
-            let (nc, nr) = (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
+            let (nc, nr) = dims(s);
             let ff = nr * nr * nc;
+            flops += ff;
             let cmax = sym.supernodes[s]
                 .children
                 .iter()
@@ -400,13 +396,99 @@ impl LdltSymbolic {
                 .max()
                 .unwrap_or(0);
             crit[s] = ff + cmax;
-            if crit[s] > cp {
-                cp = crit[s];
-            }
+            cp = cp.max(crit[s]);
         }
-        est.critical_path_flops = cp;
-        est.max_tree_width = levels.iter().map(|l| l.len()).max().unwrap_or(1) as u64;
-        est
+        crate::diagnostics::MemoryEstimate {
+            value_bytes,
+            factor_nnz: panels,
+            factor_bytes: plan.factor_bytes,
+            panels_all_bytes: panels * value_bytes as u64,
+            panel_live_peak_bytes: panels * value_bytes as u64,
+            transient_peak_bytes: plan.peak_bytes(),
+            factor_flops: flops,
+            critical_path_flops: cp,
+            max_tree_width: levels.iter().map(|l| l.len()).max().unwrap_or(1) as u64,
+        }
+    }
+
+    /// The heap a factorization of scalar type `T` under `opts` needs, and a
+    /// solve of `nrhs` right-hand sides after it, predicted from this
+    /// analysis before any numeric work: for a preflight check
+    /// ([`MemoryPlan::fits_in`](crate::MemoryPlan::fits_in)) and for
+    /// scheduling factorizations side by side. The kernels' scratch grows
+    /// with the worker count, so plan with the threads the factorization
+    /// will run on.
+    pub fn memory_plan<T: Scalar>(&self, opts: &SolverSettings, nrhs: usize) -> crate::MemoryPlan {
+        let threads = opts.resolved_threads();
+        let mut plan = crate::MemoryPlan {
+            threads,
+            nrhs,
+            ..Default::default()
+        };
+        let (Some((sym, _)), Some(inner), Some(sched)) = (
+            self.symbolic.sym_and_levels(),
+            self.symbolic.inner.as_ref(),
+            self.symbolic.ll_schedule(),
+        ) else {
+            return plan;
+        };
+        // After the schedule above is built: it is part of the analysis.
+        plan.analysis_bytes = self.heap_bytes();
+        let vb = std::mem::size_of::<T>();
+        let k = opts.kernel().k;
+        let (n, nnz, ns) = (sym.n, self.nnz, sym.supernodes.len());
+        let w = |s: usize| sym.supernodes[s].ncol;
+        let r = |s: usize| sched.rows(s).len();
+        let widths: Vec<usize> = (0..ns).map(w).collect();
+        let off: Vec<usize> = (0..ns).map(|s| r(s) - w(s)).collect();
+        let panels: usize = (0..ns).map(|s| r(s) * w(s)).sum();
+        let rows: usize = off.iter().sum();
+        let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
+        let parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
+        let layout = crate::numeric::supernodal::solve::layout_size(
+            &parent,
+            &widths,
+            &off,
+            &opts.solve,
+            crate::numeric::settings::all_cores(),
+        );
+        // The input program the first factorization keeps (two index arrays
+        // and the positions, two pointer arrays), and the peak of its build.
+        let (growth, growth_build) = if inner.input.get().is_some() {
+            (0, 0)
+        } else {
+            (12 * nnz + 16 * (n + 1), 28 * nnz + 32 * n)
+        };
+        // Held by the factor: the panels and their schedule, D, the 2x2
+        // flags, the permutation, the supernode tree and the scaling.
+        let factor = vb * panels + layout.held as usize + n * (2 * vb + 1 + 8 + 8) + 8 * ns;
+        // While the forest is factored: the permuted values and the scaling,
+        // the arena, the emit cells (refcounts, offsets, panel records, the
+        // pivots by column) and the forest's own lists, every node's slot (D,
+        // the flags and the row permutation) and emitted rows until the end,
+        // the workers' scratch and the heaviest set of nodes running at once.
+        let cells = ns * (8 + 8 + 40 + 96 + 8 + 8 + 8) + n * (8 + 8 + 2 * vb + 1);
+        let slots: usize = (0..ns)
+            .map(|s| w(s) * (2 * vb + 1) + 8 * r(s))
+            .sum::<usize>()
+            + 4 * rows;
+        let scratch: Vec<(u64, usize, usize)> = (0..ns)
+            .map(|s| super::node::ll_node_scratch::<T>(s, sym, sched, &k, threads))
+            .collect();
+        let mut planes: Vec<(usize, usize)> = scratch.iter().map(|&(_, p, c)| (p, c)).collect();
+        let workers = crate::memory::worker_bytes::<T>(n, 1, threads, &mut planes);
+        let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
+        let during = (vb * nnz + 8 * n + vb * panels + cells + slots) as u64 + workers + nodes;
+        // After it: the factor, with the emitted row lists until the plan
+        // has copied them, and the plan's build.
+        let after = factor as u64 + (4 * rows + 24 * ns) as u64 + layout.build;
+        plan.analysis_growth_bytes = growth as u64;
+        plan.factor_bytes = factor as u64;
+        plan.factor_peak_bytes = (growth_build as u64).max(growth as u64 + during.max(after))
+            + crate::memory::BOOKKEEPING;
+        // The permuted right-hand sides, the solution and the sweeps' scratch.
+        plan.solve_bytes = (nrhs * vb) as u64 * (2 * n as u64 + layout.solve_per_rhs);
+        plan
     }
 
     /// Phases 2-3: equilibrate and factor `a`, reusing this analysis. `a` must

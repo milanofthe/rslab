@@ -117,7 +117,174 @@ impl<T> Shared<T> {
     }
 }
 
+/// The cut of the tree ([`SolvePlan::from_panels`]): split the heaviest
+/// subtree until every leaf subtree holds at most `1 / leaf_subtrees` of the
+/// work (or is a single supernode). `own(s)` is the work of supernode `s`,
+/// its panel entries. Returns which supernodes lie above the cut and the
+/// leaf subtree roots, ascending.
+fn cut(
+    parent: &[u32],
+    children: &[Vec<u32>],
+    leaf_subtrees: usize,
+    own: impl Fn(usize) -> u64,
+) -> (Vec<bool>, Vec<u32>) {
+    let ns = parent.len();
+    let mut work = vec![0u64; ns];
+    for s in 0..ns {
+        work[s] += own(s);
+        if parent[s] != NONE {
+            let w = work[s];
+            work[parent[s] as usize] += w;
+        }
+    }
+    let roots = || (0..ns).filter(|&s| parent[s] == NONE);
+    let leaf_cap = roots().map(|s| work[s]).sum::<u64>() / leaf_subtrees.max(1) as u64;
+    let mut heap: std::collections::BinaryHeap<(u64, std::cmp::Reverse<u32>)> = roots()
+        .map(|s| (work[s], std::cmp::Reverse(s as u32)))
+        .collect();
+    let mut is_top = vec![false; ns];
+    let mut leaf_roots: Vec<u32> = Vec::new();
+    while let Some((wk, std::cmp::Reverse(s))) = heap.pop() {
+        if wk <= leaf_cap || children[s as usize].is_empty() {
+            leaf_roots.push(s);
+        } else {
+            is_top[s as usize] = true;
+            for &c in &children[s as usize] {
+                heap.push((work[c as usize], std::cmp::Reverse(c)));
+            }
+        }
+    }
+    leaf_roots.sort_unstable();
+    (is_top, leaf_roots)
+}
+
+/// Columns of every supernode's strict ancestors, the length of its
+/// accumulator path. Parents carry larger indices than their children.
+fn columns_above(parent: &[u32], width: impl Fn(usize) -> usize) -> Vec<usize> {
+    let mut above = vec![0usize; parent.len()];
+    for s in (0..parent.len()).rev() {
+        let p = parent[s];
+        if p != NONE {
+            above[s] = above[p as usize] + width(p as usize);
+        }
+    }
+    above
+}
+
+/// The heap of a [`SolvePlan`] not built yet, for the memory plan: the
+/// schedule around the panels, its build and a solve's work vectors.
+pub(crate) struct LayoutSize {
+    /// Bytes of the schedule (all but the values and the reciprocal diagonal).
+    pub held: u64,
+    /// Peak bytes of the build's temporaries.
+    pub build: u64,
+    /// Entries of `T` per right-hand side a solve allocates besides the
+    /// right-hand side itself: the accumulators, the apex buffers and each
+    /// thread's node scratch.
+    pub solve_per_rhs: u64,
+}
+
+/// The [`LayoutSize`] of the plan [`SolvePlan::from_panels`] builds on the
+/// supernode tree (`parent`, `usize::MAX` for a root) with each supernode's
+/// width `w` and off-block row count `m`, solved on `threads` threads.
+/// Mirrors `from_panels` on a tree-nested structure.
+pub(crate) fn layout_size(
+    parent: &[usize],
+    w: &[usize],
+    m: &[usize],
+    cfg: &crate::SolveSettings,
+    threads: usize,
+) -> LayoutSize {
+    use crate::memory::pushed;
+    let ns = parent.len();
+    let n: usize = w.iter().sum();
+    let rows: usize = m.iter().sum();
+    let parent: Vec<u32> = (0..ns)
+        .map(|s| match parent[s] {
+            p if p != usize::MAX && p < ns && p > s => p as u32,
+            _ => NONE,
+        })
+        .collect();
+    let mut children: Vec<Vec<u32>> = vec![Vec::new(); ns];
+    for s in 0..ns {
+        if parent[s] != NONE {
+            children[parent[s] as usize].push(s as u32);
+        }
+    }
+    let (is_top, leaf_roots) = cut(&parent, &children, cfg.leaf_subtrees, |s| {
+        (w[s] * (w[s] + m[s])) as u64
+    });
+    let above = columns_above(&parent, |s| w[s]);
+    let mut size = vec![1usize; ns];
+    for s in 0..ns {
+        if parent[s] != NONE {
+            size[parent[s] as usize] += size[s];
+        }
+    }
+    let mut depth = vec![0usize; ns];
+    let mut level_len: Vec<usize> = Vec::new();
+    for s in (0..ns).rev().filter(|&s| is_top[s]) {
+        let p = parent[s];
+        depth[s] = if p == NONE { 0 } else { depth[p as usize] + 1 };
+        if level_len.len() <= depth[s] {
+            level_len.resize(depth[s] + 1, 0);
+        }
+        level_len[depth[s]] += 1;
+    }
+    let top: Vec<usize> = (0..ns).filter(|&s| is_top[s]).collect();
+    // sn_col, row_ptr, val_ptr (pushed by the arena), rows, ext_slot, top_index.
+    let fixed = 4 * (ns + 1) + 8 * (ns + 1) + 8 * pushed(ns + 1) + 8 * rows + 4 * ns;
+    let subtrees = leaf_roots.len() * std::mem::size_of::<Subtree>()
+        + leaf_roots
+            .iter()
+            .map(|&r| 4 * pushed(size[r as usize]) + 4 * above[r as usize])
+            .sum::<usize>();
+    let levels = level_len.len() * 24 + level_len.iter().map(|&l| 4 * pushed(l)).sum::<usize>();
+    let paths = top.len() * 24 + top.iter().map(|&t| 4 * above[t]).sum::<usize>();
+    // sn_of, the tree (parent, children), work, heap, flags and slots.
+    let build = 4 * n + ns * (4 + 24 + 4 + 8 + 16 + 1 + 4 + 4 + 4);
+    // Accumulators of the subtrees and of the widest ancestor level, the
+    // apex node's extended vector and partial slabs, and per thread the
+    // node scratch of a subtree sweep.
+    let max_ld = (0..ns).map(|s| w[s] + m[s]).max().unwrap_or(0);
+    let mut level_acc = vec![0usize; level_len.len()];
+    for &t in &top {
+        level_acc[depth[t]] += above[t];
+    }
+    let gmax = cfg.block.max(1).div_ceil(cfg.ancestor_chunk.max(1));
+    let solve_per_rhs = leaf_roots.iter().map(|&r| above[r as usize]).sum::<usize>()
+        + level_acc.iter().copied().max().unwrap_or(0)
+        + (2 + gmax) * max_ld
+        + threads.max(1) * 2 * max_ld;
+    LayoutSize {
+        held: (fixed + subtrees + levels + paths) as u64,
+        build: build as u64,
+        solve_per_rhs: solve_per_rhs as u64,
+    }
+}
+
 impl<T: Scalar> SolvePlan<T> {
+    /// Heap bytes held: the panels (the factor's values) and the schedule.
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        use crate::memory::{nested_bytes, vec_bytes};
+        vec_bytes(&self.sn_col)
+            + vec_bytes(&self.row_ptr)
+            + vec_bytes(&self.rows)
+            + vec_bytes(&self.ext_slot)
+            + vec_bytes(&self.val_ptr)
+            + vec_bytes(&self.vals)
+            + vec_bytes(&self.diag_inv)
+            + vec_bytes(&self.subtrees)
+            + self
+                .subtrees
+                .iter()
+                .map(|t| vec_bytes(&t.nodes) + vec_bytes(&t.path_cols))
+                .sum::<u64>()
+            + nested_bytes(&self.top_levels)
+            + nested_bytes(&self.top_paths)
+            + vec_bytes(&self.top_index)
+    }
+
     /// Build the schedule over a factor in panel form, taking the panels as
     /// the plan's storage (no copy). `supernode_parent` is the supernode
     /// tree of the analysis (`usize::MAX` for a root); an empty or
@@ -184,41 +351,12 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
         }
-        let mut work = vec![0u64; ns];
-        for s in 0..ns {
-            let w = (sn_col[s + 1] - sn_col[s]) as u64;
-            let m = (row_ptr[s + 1] - row_ptr[s]) as u64;
-            work[s] += w * (w + m);
-            if parent[s] != NONE {
-                let own = work[s];
-                work[parent[s] as usize] += own;
-            }
-        }
-        let total: u64 = (0..ns)
-            .filter(|&s| parent[s] == NONE)
-            .map(|s| work[s])
-            .sum();
-        let leaf_cap = total / cfg.leaf_subtrees.max(1) as u64;
-
-        // Cut: split the heaviest subtree until every leaf subtree is under
-        // the cap (or a single supernode).
-        let mut heap: std::collections::BinaryHeap<(u64, std::cmp::Reverse<u32>)> = (0..ns)
-            .filter(|&s| parent[s] == NONE)
-            .map(|s| (work[s], std::cmp::Reverse(s as u32)))
-            .collect();
-        let mut is_top = vec![false; ns];
-        let mut leaf_roots: Vec<u32> = Vec::new();
-        while let Some((wk, std::cmp::Reverse(s))) = heap.pop() {
-            if wk <= leaf_cap || children[s as usize].is_empty() {
-                leaf_roots.push(s);
-            } else {
-                is_top[s as usize] = true;
-                for &c in &children[s as usize] {
-                    heap.push((work[c as usize], std::cmp::Reverse(c)));
-                }
-            }
-        }
-        leaf_roots.sort_unstable();
+        let width = |s: usize| (sn_col[s + 1] - sn_col[s]) as usize;
+        let (is_top, leaf_roots) = cut(&parent, &children, cfg.leaf_subtrees, |s| {
+            let w = width(s) as u64;
+            w * (w + (row_ptr[s + 1] - row_ptr[s]) as u64)
+        });
+        let above = columns_above(&parent, width);
 
         // Subtree membership and node lists (ascending = elimination order).
         let mut subtree_of = vec![NONE; ns];
@@ -236,7 +374,7 @@ impl<T: Scalar> SolvePlan<T> {
             for &s in &nodes {
                 subtree_of[s as usize] = t as u32;
             }
-            let mut path_cols = Vec::new();
+            let mut path_cols = Vec::with_capacity(above[r as usize]);
             let mut a = parent[r as usize];
             while a != NONE {
                 path_cols.extend(sn_col[a as usize]..sn_col[a as usize + 1]);
@@ -262,7 +400,7 @@ impl<T: Scalar> SolvePlan<T> {
         let top_paths: Vec<Vec<u32>> = top
             .iter()
             .map(|&t| {
-                let mut path_cols = Vec::new();
+                let mut path_cols = Vec::with_capacity(above[t as usize]);
                 let mut a = parent[t as usize];
                 while a != NONE {
                     path_cols.extend(sn_col[a as usize]..sn_col[a as usize + 1]);

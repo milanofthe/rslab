@@ -480,6 +480,62 @@ fn ll_bk_panel_step<T: Scalar>(
     Ok(perturbed)
 }
 
+/// Heap bytes [`ll_cdiv_emit`] allocates for an `nrow x ncol` panel besides
+/// what it keeps in the node's slot (`D`, the 2x2 flags and the row
+/// permutation): the pivot and multiplier scratch, the deferred-GEMM buffers
+/// as they grow panel by panel, and the deep-row replay's sub-block buffers;
+/// and the largest split planes its Schur GEMMs take (complex fields).
+/// Replays the kernel's panel loop, for the memory plan.
+pub(super) fn ll_cdiv_scratch<T: Scalar>(
+    ncol: usize,
+    nrow: usize,
+    k: &crate::KernelSettings,
+) -> (u64, usize) {
+    use super::gemm::lower_tile_planes;
+    use crate::memory::grown;
+    let par = if nrow * ncol * ncol >= 100_000_000 {
+        k.par_cdiv
+    } else {
+        usize::MAX
+    };
+    let mut planes = 0;
+    let nb = if ncol >= 512 {
+        k.panel_nb.max(128)
+    } else {
+        k.panel_nb
+    };
+    let (mut l21, mut tmp, mut tmp_w) = (0, 0, 0);
+    let mut kb = 0;
+    while kb < ncol {
+        let ke = (kb + nb).min(ncol);
+        let (pw, cw, mt) = (ke - kb, ncol - ke, nrow - ke);
+        if pw > 0 && cw > 0 && mt > 0 {
+            l21 = grown(l21, mt * pw);
+            let cw_n = (ke + nb).min(ncol) - ke;
+            let wide = cw - cw_n;
+            if k.use_gemm_schur && wide > 0 && mt * wide * pw >= k.par_cdiv {
+                tmp = grown(tmp, mt * cw_n);
+                tmp_w = grown(tmp_w, mt * wide);
+                planes = planes
+                    .max(lower_tile_planes(mt, cw_n, pw, par, k))
+                    .max(lower_tile_planes(mt, wide, pw, par, k));
+            } else {
+                tmp = grown(tmp, mt * cw);
+                if k.use_gemm_schur {
+                    planes = planes.max(lower_tile_planes(mt, cw, pw, par, k));
+                }
+            }
+        }
+        kb = ke;
+    }
+    // l1, l2 and their lookahead twins, both multiplier snapshots, `l21buf`
+    // and `gbuf`, and the replay's sub-blocks over all deep rows.
+    let entries =
+        4 * nrow + 2 * nb * nb + 2 * l21 + tmp + tmp_w + nrow * (k.trailing_block.max(1) + 1);
+    let bytes = entries * std::mem::size_of::<T>() + 2 * nb * std::mem::size_of::<usize>();
+    (bytes as u64, if T::COMPLEX { planes } else { 0 })
+}
+
 /// cdiv + store + emit for supernode `s` on an already fully cmod-updated
 /// `panel` - the tail of [`ll_factor_node`], extracted so the spine
 /// pipeline executor can drive assembly/cmod itself and reuse

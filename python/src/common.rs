@@ -50,13 +50,14 @@ pub fn unsupported_dtype() -> PyErr {
     PyValueError::new_err("unsupported dtype: expected float64, float32, complex128, or complex64")
 }
 
-/// The four scalar fields the core supports, by NumPy dtype name.
-pub fn scalar_bytes(dtype: &str) -> PyResult<usize> {
+/// The four scalar fields the core supports, by NumPy dtype name: the size
+/// in bytes and whether the field is complex.
+pub fn scalar_kind(dtype: &str) -> PyResult<(usize, bool)> {
     Ok(match dtype {
-        "float64" | "f8" | "d" => 8,
-        "float32" | "f4" | "f" => 4,
-        "complex128" | "c16" | "D" => 16,
-        "complex64" | "c8" | "F" => 8,
+        "float64" | "f8" | "d" => (8, false),
+        "float32" | "f4" | "f" => (4, false),
+        "complex128" | "c16" | "D" => (16, true),
+        "complex64" | "c8" | "F" => (8, true),
         other => {
             return Err(PyValueError::new_err(format!(
                 "dtype must be 'float64', 'float32', 'complex128' or 'complex64', got '{other}'"
@@ -64,6 +65,33 @@ pub fn scalar_bytes(dtype: &str) -> PyResult<usize> {
         }
     })
 }
+
+/// Evaluate `$body` with `$T` bound to the scalar type named by the dtype
+/// string `$dtype`; a `PyResult` of the body's value.
+macro_rules! with_dtype_name {
+    ($dtype:expr, |$T:ident| $body:expr) => {{
+        match $crate::common::scalar_kind($dtype) {
+            Ok((8, false)) => {
+                type $T = f64;
+                Ok($body)
+            }
+            Ok((4, _)) => {
+                type $T = f32;
+                Ok($body)
+            }
+            Ok((16, _)) => {
+                type $T = $crate::common::C64;
+                Ok($body)
+            }
+            Ok(_) => {
+                type $T = $crate::common::C32;
+                Ok($body)
+            }
+            Err(e) => Err(e),
+        }
+    }};
+}
+pub(crate) use with_dtype_name;
 
 /// Run `$body` with `$T` bound to the scalar type of the 1-D NumPy array
 /// `$data` and `$d` to its contents (copied into a Rust-owned `Vec`, so the
@@ -100,6 +128,12 @@ pub struct Pattern {
     pub n: usize,
     pub col_ptr: Vec<usize>,
     pub row_idx: Vec<usize>,
+}
+
+/// Heap bytes of a CSC matrix's three arrays (their capacities).
+pub fn csc_bytes<T>(col_ptr: &Vec<usize>, row_idx: &Vec<usize>, values: &Vec<T>) -> u64 {
+    ((col_ptr.capacity() + row_idx.capacity()) * std::mem::size_of::<usize>()
+        + values.capacity() * std::mem::size_of::<T>()) as u64
 }
 
 impl Pattern {
@@ -285,6 +319,39 @@ pub fn array2<T: Element + Copy + Default>(
         .reshape([n, nrhs])?
         .into_any()
         .unbind())
+}
+
+/// A memory plan as a dict, with the copies this binding keeps on top of
+/// the core's: the analyzed pattern, the matrix a factor handle holds for
+/// residuals and refinement (copied during the factorization), and the
+/// right-hand sides a solve copies in.
+pub fn memory_plan_dict(
+    py: Python<'_>,
+    mut p: rslab::MemoryPlan,
+    pattern: &Pattern,
+    value_bytes: usize,
+) -> PyResult<PyObject> {
+    let (n, nnz, vb) = (
+        pattern.n as u64,
+        pattern.row_idx.len() as u64,
+        value_bytes as u64,
+    );
+    let matrix = 8 * (n + 1) + (8 + vb) * nnz;
+    p.analysis_bytes += csc_bytes(&pattern.col_ptr, &pattern.row_idx, &Vec::<u8>::new());
+    p.factor_bytes += matrix;
+    p.factor_peak_bytes += matrix;
+    p.solve_bytes += n * p.nrhs as u64 * vb;
+    let d = PyDict::new_bound(py);
+    d.set_item("threads", p.threads)?;
+    d.set_item("nrhs", p.nrhs)?;
+    d.set_item("peak_bytes", p.peak_bytes())?;
+    d.set_item("resident_bytes", p.resident_bytes())?;
+    d.set_item("analysis_bytes", p.analysis_bytes)?;
+    d.set_item("analysis_growth_bytes", p.analysis_growth_bytes)?;
+    d.set_item("factor_bytes", p.factor_bytes)?;
+    d.set_item("factor_peak_bytes", p.factor_peak_bytes)?;
+    d.set_item("solve_bytes", p.solve_bytes)?;
+    Ok(d.into_any().unbind())
 }
 
 pub fn memory_estimate_dict(py: Python<'_>, e: &MemoryEstimate) -> PyResult<PyObject> {

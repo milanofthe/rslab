@@ -35,6 +35,10 @@ pub trait Scalar:
     + Div<Output = Self>
     + Neg<Output = Self>
 {
+    /// Complex field: its GEMMs may run on split real planes (see
+    /// `dense::gemm_backend`), which the memory plan counts.
+    const COMPLEX: bool = false;
+
     /// The additive identity `0`.
     fn zero() -> Self;
 
@@ -203,6 +207,8 @@ impl Scalar for f64 {
 }
 
 impl Scalar for Complex<f64> {
+    const COMPLEX: bool = true;
+
     unsafe fn gemm(
         m: usize,
         n: usize,
@@ -344,6 +350,8 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex<f32> {
+    const COMPLEX: bool = true;
+
     unsafe fn gemm(
         m: usize,
         n: usize,

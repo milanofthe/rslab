@@ -627,11 +627,7 @@ pub(super) fn factor_impl<T: Scalar>(
     // floor, `no block holds half the matrix` as the block-level Amdahl
     // ratio. The refactor decision is replaced by the exact plan
     // ([`compute_replay_plan`]) once the pattern is frozen.
-    let parallel = match settings.parallel {
-        KluParallel::On => true,
-        KluParallel::Off => false,
-        KluParallel::Auto => sym.nnz >= settings.par_min_nnz && sym.max_block_size() * 2 <= sym.n,
-    } && nblocks > 1;
+    let parallel = sym.parallel_blocks(settings);
     let max_bn = sym.max_block_size();
 
     // Numeric output buffers, filled either incrementally block-by-block

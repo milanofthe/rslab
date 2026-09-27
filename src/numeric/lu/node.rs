@@ -668,3 +668,151 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     unsafe { store.set(s, rperm) };
     Ok(())
 }
+
+/// Heap bytes [`lu_ll_factor_node`] allocates for supernode `s` while it
+/// runs, for the memory plan: the tiled cmod's per-slab buffers (the `L`
+/// slabs, then the `U12` runs) on up to `workers` threads at once, or the
+/// sequential cmod's buffers, which stay allocated through the cdiv, and
+/// the cdiv's pivot reciprocals (the row permutation is the node's slot);
+/// the largest split planes its GEMMs take on a worker (complex fields) and
+/// how many workers may take them at once. Replays the kernel's plan and
+/// growth of its buffers.
+pub(super) fn lu_node_scratch<T: Scalar>(
+    s: usize,
+    sym: &SymbolicFactorization,
+    sched: &LlSchedule,
+    st: &LuStructure,
+    k: &crate::KernelSettings,
+    workers: usize,
+) -> (u64, usize, usize) {
+    use crate::dense::gemm_backend::split_plane_entries;
+    use crate::memory::grown;
+    let vb = std::mem::size_of::<T>();
+    let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
+    let cols_u = st.cols_u(s);
+    let (nrow_l, cn_u) = (st.rows_l(s).len(), cols_u.len() - ncol);
+    let nb = if ncol >= 512 { 128 } else { 32 };
+    let cdiv = nb * vb;
+    // The cdiv's two GEMMs per panel: the trailing `L` update and the `U12` rows.
+    let mut planes = 0;
+    if T::COMPLEX {
+        let par_cdiv = if nrow_l * ncol * ncol >= 100_000_000 {
+            k.par_cdiv
+        } else {
+            usize::MAX
+        };
+        let mut kb = 0;
+        while kb < ncol {
+            let ke = (kb + nb).min(ncol);
+            let (pw, mt, nt) = (ke - kb, nrow_l - ke, ncol - ke);
+            if mt > 0 && nt > 0 {
+                planes = planes.max(split_plane_entries(mt, nt, pw, mt * nt * pw >= par_cdiv, k));
+            }
+            if cn_u > 0 && nt > 0 {
+                planes = planes.max(split_plane_entries(
+                    nt,
+                    cn_u,
+                    pw,
+                    nt * cn_u * pw >= par_cdiv,
+                    k,
+                ));
+            }
+            kb = ke;
+        }
+    }
+    let plan = crate::numeric::supernodal::CmodPlan::new(
+        sym,
+        s,
+        sched.updaters(s),
+        |k| (st.rows_l(k), st.cols_u(k)),
+        true,
+        k.par_gemm,
+        k.fork_min_flops,
+    );
+    let updater = |kk: usize| {
+        let nck = sym.supernodes[kk].ncol;
+        (nck, &st.rows_l(kk)[nck..], &st.cols_u(kk)[nck..])
+    };
+    let workers = workers.max(1);
+    if plan.tiled {
+        let tw = plan.tile_w;
+        let slabs = ncol.div_ceil(tw);
+        let (mut worst_l, mut slab_planes) = (0, 0);
+        for ti in 0..slabs {
+            let (c0, c1) = (ti * tw, (ti * tw + tw).min(ncol));
+            let mut lupd = 0;
+            for sp in &plan.spans {
+                let (nck, ol, ou) = updater(sp.k);
+                let (p0l, (p0u, p1u)) = (sp.l.0, sp.u);
+                let q0 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c0);
+                let q1 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c1);
+                lupd = grown(lupd, (ol.len() - p0l) * (q1 - q0));
+                if T::COMPLEX && q1 > q0 && ol.len() > p0l {
+                    let p = split_plane_entries(ol.len() - p0l, q1 - q0, nck, false, k);
+                    slab_planes = slab_planes.max(p);
+                }
+            }
+            worst_l = worst_l.max(lupd);
+        }
+        let tile_u = (cn_u.max(1) / 16).clamp(32, 256);
+        let runs = cn_u.div_ceil(tile_u);
+        let mut worst_u = 0;
+        for ti in 0..runs {
+            let (u0, u1) = (ti * tile_u, (ti * tile_u + tile_u).min(cn_u));
+            let g0 = cols_u[ncol + u0];
+            let g1 = cols_u.get(ncol + u1).copied().unwrap_or(Li::MAX);
+            let mut uupd = 0;
+            for sp in &plan.spans {
+                let (nck, _, ou) = updater(sp.k);
+                let ((p0l, p1l), p1u) = (sp.l, sp.u.1);
+                let t0 = p1u + ou[p1u..].partition_point(|&g| g < g0);
+                let t1 = p1u + ou[p1u..].partition_point(|&g| g < g1);
+                uupd = grown(uupd, (p1l - p0l) * (t1 - t0));
+                if T::COMPLEX && t1 > t0 && p1l > p0l {
+                    let p = split_plane_entries(p1l - p0l, t1 - t0, nck, false, k);
+                    slab_planes = slab_planes.max(p);
+                }
+            }
+            worst_u = worst_u.max(uupd);
+        }
+        let slabs_l = slabs;
+        let slabs = (worst_l * slabs.min(workers)).max(worst_u * runs.min(workers));
+        let copies = if slab_planes > planes {
+            slabs_l.max(runs).min(workers)
+        } else {
+            1
+        };
+        (
+            (slabs * vb) as u64 + cdiv as u64,
+            planes.max(slab_planes),
+            copies,
+        )
+    } else {
+        let (mut lupd, mut uupd) = (0, 0);
+        for sp in &plan.spans {
+            let (nck, ol, ou) = updater(sp.k);
+            let ((p0l, p1l), (p0u, p1u)) = (sp.l, sp.u);
+            let (mrows, npk_u) = (ol.len() - p0l, p1u - p0u);
+            let (npk_l, ntrail) = (p1l - p0l, ou.len() - p1u);
+            if (mrows * npk_u + npk_l * ntrail) * nck < k.scalar_gate {
+                continue;
+            }
+            let par = |work: usize| plan.forks && work >= k.par_gemm;
+            if mrows > 0 && npk_u > 0 {
+                lupd = grown(lupd, mrows * npk_u);
+                if T::COMPLEX {
+                    let p = split_plane_entries(mrows, npk_u, nck, par(mrows * npk_u * nck), k);
+                    planes = planes.max(p);
+                }
+            }
+            if npk_l > 0 && ntrail > 0 {
+                uupd = grown(uupd, npk_l * ntrail);
+                if T::COMPLEX {
+                    let p = split_plane_entries(npk_l, ntrail, nck, par(npk_l * ntrail * nck), k);
+                    planes = planes.max(p);
+                }
+            }
+        }
+        (((lupd + uupd) * vb + cdiv) as u64, planes, 1)
+    }
+}
