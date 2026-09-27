@@ -319,6 +319,15 @@ pub struct KernelSettings {
     /// Use the SIMD GEMM for the LDL^T Schur update (vs the scalar loop).
     /// Default `true`.
     pub use_gemm_schur: bool,
+    /// From this many flops `m n k` a product runs on the system BLAS where
+    /// one is linked (see [`dense_library`](crate::dense_library));
+    /// `usize::MAX` keeps every product on the portable kernels. Default
+    /// `262144` (`64^3`).
+    pub blas_min_flops: usize,
+    /// Rows or columns per block of a product on the system BLAS, the unit
+    /// its parallel products spread over. Fixed, so the result does not
+    /// depend on the thread count. Default `256`.
+    pub blas_par_block: usize,
 }
 
 impl Default for KernelSettings {
@@ -334,6 +343,8 @@ impl Default for KernelSettings {
             complex_split_min_ratio: 64,
             complex_split_tile: 256,
             use_gemm_schur: true,
+            blas_min_flops: 262_144,
+            blas_par_block: 256,
         }
     }
 }

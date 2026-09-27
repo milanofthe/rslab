@@ -33,6 +33,13 @@ fn install_diagnose(py: Python<'_>) -> PyResult<PyObject> {
     Ok(d.into())
 }
 
+/// The system BLAS the large dense products run on (``"Accelerate"``, or
+/// the library named at build time), or ``None`` for the portable kernels.
+#[pyfunction]
+fn dense_library() -> Option<&'static str> {
+    rslab::dense_library()
+}
+
 #[pymodule]
 fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<settings::PySettings>()?;
@@ -59,6 +66,7 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(krylov::cocg_plain, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::cocr_plain, m)?)?;
     m.add_function(wrap_pyfunction!(install_diagnose, m)?)?;
+    m.add_function(wrap_pyfunction!(dense_library, m)?)?;
     m.add_function(wrap_pyfunction!(logging::set_log_level, m)?)?;
     m.add_function(wrap_pyfunction!(logging::log_level, m)?)?;
     m.add_function(wrap_pyfunction!(logging::set_log_sink, m)?)?;

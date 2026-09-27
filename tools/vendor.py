@@ -82,8 +82,8 @@ Library copy of the rslab sparse direct solver
 (https://github.com/milanofthe/rslab).
 
 - Vendored from: commit `{rev}` (rslab {version}), "{subject}"
-- Contents: `src/` (library only) plus the ordering crates
-  `crates/{{{','.join(CRATES)}}}`, the license files, and a manifest trimmed
+- Contents: `src/` (library only), `build.rs`, the ordering crates
+  `crates/{{{','.join(CRATES)}}}`, the license files and a manifest trimmed
   to the library.
 - Local changes: none. Do not patch this tree; fix upstream and resync.
 
@@ -109,13 +109,16 @@ def main():
     upstream = git("show", f"{rev}:Cargo.toml").decode()
     dest = a.dest.resolve()
     dest.mkdir(parents=True, exist_ok=True)
-    for old in ["src", "crates", "README.md", *LICENSES]:
+    # build.rs links the system BLAS (Accelerate on macOS); older revisions have none.
+    build = ["build.rs"] if subprocess.run(["git", "cat-file", "-e", f"{rev}:build.rs"], cwd=ROOT,
+                                           capture_output=True).returncode == 0 else []
+    for old in ["src", "crates", "README.md", "build.rs", *LICENSES]:
         target = dest / old
         if target.is_dir():
             shutil.rmtree(target)
         elif target.exists():
             target.unlink()
-    tar = git("archive", "--format=tar", rev, "src", *[f"crates/{c}" for c in CRATES], *LICENSES)
+    tar = git("archive", "--format=tar", rev, "src", *build, *[f"crates/{c}" for c in CRATES], *LICENSES)
     with tarfile.open(fileobj=io.BytesIO(tar)) as t:
         t.extractall(dest, filter="data")
     for d in DROP:
