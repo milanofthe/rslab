@@ -353,6 +353,13 @@ pub struct SolveSettings {
     /// Panel entries from which an ancestor node uses the blocked sweep.
     /// Default `262_144`.
     pub apex_min_work: usize,
+    /// Work of a triangular sweep from which it runs on the thread pool: the
+    /// factor's panel entries times the right-hand sides, up to four. A
+    /// smaller sweep runs on the calling thread, where handing it to the
+    /// pool costs more than it saves (several times the solve at a few
+    /// thousand unknowns). The same bits either way. Default `1_048_576`,
+    /// about where the two meet.
+    pub par_min_work: usize,
 }
 
 impl Default for SolveSettings {
@@ -362,6 +369,7 @@ impl Default for SolveSettings {
             block: 512,
             ancestor_chunk: 32,
             apex_min_work: 1 << 18,
+            par_min_work: 1 << 20,
         }
     }
 }

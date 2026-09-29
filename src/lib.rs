@@ -177,6 +177,7 @@ pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
 pub use scalar::{Demote, Scalar};
 pub use scaling::ScalingStrategy;
 // The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`.
+pub use numeric::direct::SolveWork;
 pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
 pub use numeric::ldlt::{LdltSolver, LdltSymbolic};
 pub use numeric::lu::{LuSolver, LuSymbolic};
@@ -235,6 +236,7 @@ pub mod prelude {
         Preconditioner,
         RslabError,
         Scalar,
+        SolveWork,
         SolverSettings,
         ZeroPivotAction,
     };

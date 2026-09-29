@@ -122,10 +122,19 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
     /// `x = D P (A_hat^-1 (P^T D b))`: the equilibration is fused into the
     /// permutation gather and scatter around the triangular sweeps. `A` is
     /// symmetric, so the transpose is the same solve.
-    fn solve_raw(&self, b: &[T], nrhs: usize, _transpose: bool) -> Result<Vec<T>, RslabError> {
+    fn solve_raw_into(
+        &self,
+        b: &[T],
+        nrhs: usize,
+        _transpose: bool,
+        x: &mut [T],
+        work: &mut crate::SolveWork<T>,
+    ) -> Result<(), RslabError> {
         let n = self.factors.n;
         // The sweeps take the block row-major: y[i * nrhs + c].
-        let mut y = vec![T::zero(); n * nrhs];
+        let y = &mut work.y;
+        y.clear();
+        y.resize(n * nrhs, T::zero());
         for (i, &p) in self.factors.perm.iter().enumerate() {
             let sp = T::from_real(self.scale[p]);
             for c in 0..nrhs {
@@ -133,19 +142,18 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
             }
         }
         if nrhs == 1 {
-            self.plan.solve_in_place(&self.factors, &mut y)?;
+            self.plan.solve_in_place(&self.factors, y, &mut work.plan)?;
         } else {
             self.plan
-                .solve_block_in_place(&self.factors, &mut y, nrhs)?;
+                .solve_block_in_place(&self.factors, y, nrhs, &mut work.plan)?;
         }
-        let mut x = vec![T::zero(); n * nrhs];
         for (i, &p) in self.factors.perm.iter().enumerate() {
             let sp = T::from_real(self.scale[p]);
             for c in 0..nrhs {
                 x[c * n + p] = y[i * nrhs + c] * sp;
             }
         }
-        Ok(x)
+        Ok(())
     }
 }
 
