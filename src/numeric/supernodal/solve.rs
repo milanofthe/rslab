@@ -578,6 +578,55 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
+    /// The panels' buffer, taken out for the next factorization of the same
+    /// analysis to fill; [`refill`](Self::refill) puts the result back. The
+    /// plan cannot solve until then.
+    pub fn take_vals(&mut self) -> Vec<T> {
+        std::mem::take(&mut self.vals)
+    }
+
+    /// Take `factor`, the next factorization of this plan's analysis, as
+    /// [`from_panels`](Self::from_panels) would. When its supernodes and rows
+    /// are the plan's and `cfg` is unchanged, only the panels and the
+    /// reciprocal diagonal change and the schedule stays; a factorization
+    /// whose pivoting or cancellation changed the rows gets a new plan.
+    pub fn refill(
+        &mut self,
+        factor: PanelFactor<T>,
+        supernode_parent: &[usize],
+        unit: bool,
+        cfg: crate::SolveSettings,
+    ) {
+        let cfg_now = crate::SolveSettings {
+            block: cfg.block.max(1),
+            ancestor_chunk: cfg.ancestor_chunk.max(1),
+            ..cfg
+        };
+        let ns = factor.n_supernodes();
+        let same = cfg_now == self.cfg
+            && factor.n == self.n
+            && unit == self.diag_inv.is_empty()
+            && factor.sn_col == self.sn_col
+            && factor.val_ptr == self.val_ptr
+            && (0..ns).all(|s| factor.rows[s] == self.rows[self.row_ptr[s]..self.row_ptr[s + 1]]);
+        if !same {
+            *self = Self::from_panels(factor, supernode_parent, unit, cfg);
+            return;
+        }
+        let PanelFactor { vals, .. } = factor;
+        self.vals = vals;
+        if !unit {
+            for s in 0..ns {
+                let (c0, c1) = (self.sn_col[s] as usize, self.sn_col[s + 1] as usize);
+                let ld = c1 - c0 + self.row_ptr[s + 1] - self.row_ptr[s];
+                let panel = &self.vals[self.val_ptr[s]..];
+                for k in 0..c1 - c0 {
+                    self.diag_inv[c0 + k] = panel[k * ld + k].recip();
+                }
+            }
+        }
+    }
+
     /// Bytes of the panel storage (values plus row indices).
     pub fn bytes(&self) -> usize {
         self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * 4

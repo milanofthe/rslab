@@ -131,6 +131,9 @@ pub(crate) struct PanelArena<T> {
     slot_ptr: Vec<usize>,
     vals: Vec<T>,
     base: PanelPtr<T>,
+    /// A buffer handed in for reuse keeps its capacity through
+    /// [`finish`](Self::finish), for the next factorization to fill again.
+    reused: bool,
 }
 
 // SAFETY: slots are disjoint and each has a single writer before any reader
@@ -142,6 +145,17 @@ impl<T: Scalar> PanelArena<T> {
     /// empty supernode). The buffer is zero-initialized, so a slot starts as
     /// the zero panel the assembly expects.
     pub fn new(sizes: impl Iterator<Item = usize>) -> Self {
+        Self::new_in(Vec::new(), sizes, false)
+    }
+
+    /// [`new`](Self::new) in `storage`, the buffer of an earlier factor of
+    /// this analysis: no allocation where its capacity suffices, and the
+    /// capacity kept through [`finish`](Self::finish).
+    pub fn reuse(storage: Vec<T>, sizes: impl Iterator<Item = usize>) -> Self {
+        Self::new_in(storage, sizes, true)
+    }
+
+    fn new_in(mut vals: Vec<T>, sizes: impl Iterator<Item = usize>, reused: bool) -> Self {
         let mut slot_ptr = vec![0usize];
         for len in sizes {
             slot_ptr.push(slot_ptr.last().copied().unwrap_or(0) + len);
@@ -149,8 +163,9 @@ impl<T: Scalar> PanelArena<T> {
         let total = slot_ptr.last().copied().unwrap_or(0);
         // The whole factor, often hundreds of MB: zero it across the calling
         // pool rather than on one thread (41 ms serial on a 465 MB factor).
-        let mut vals: Vec<T> = Vec::with_capacity(total);
-        vals.spare_capacity_mut()
+        vals.clear();
+        vals.reserve(total);
+        vals.spare_capacity_mut()[..total]
             .par_chunks_mut(1 << 16)
             .for_each(|chunk| {
                 chunk.iter_mut().for_each(|v| {
@@ -164,6 +179,7 @@ impl<T: Scalar> PanelArena<T> {
             slot_ptr,
             vals,
             base,
+            reused,
         }
     }
 
@@ -233,7 +249,9 @@ impl<T: Scalar> PanelArena<T> {
         let mut vals = self.vals;
         if moved || dst < vals.len() {
             vals.truncate(dst);
-            vals.shrink_to_fit();
+            if !self.reused {
+                vals.shrink_to_fit();
+            }
         }
         (
             PanelFactor {
