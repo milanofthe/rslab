@@ -381,6 +381,13 @@ pub(crate) struct PanelScratch<T> {
     row_nz: Vec<bool>,
 }
 
+impl<T> crate::memory::HeapBytes for PanelScratch<T> {
+    fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes as b;
+        b(&self.order) + b(&self.full) + b(&self.sorted) + b(&self.tmp) + b(&self.row_nz)
+    }
+}
+
 impl<T> Default for PanelScratch<T> {
     fn default() -> Self {
         PanelScratch {

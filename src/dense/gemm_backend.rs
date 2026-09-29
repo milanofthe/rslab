@@ -141,7 +141,9 @@ pub trait SplitReal:
 /// thread-local for the duration (not borrowed): a parallel real product
 /// inside `f` lets rayon's work stealing run another split on this same
 /// thread, which then gets an empty buffer of its own instead of a
-/// re-entrant borrow. The larger of the two is kept afterwards.
+/// re-entrant borrow. The larger of the two is kept afterwards, up to
+/// [`SCRATCH_KEEP`](crate::memory::SCRATCH_KEEP): the thread outlives the
+/// factorization in the pool its caller keeps.
 fn with_taken<R: SplitReal, Ret>(
     cell: &'static std::thread::LocalKey<RefCell<Planes<R>>>,
     f: impl FnOnce(&mut Vec<R>) -> Ret,
@@ -150,7 +152,8 @@ fn with_taken<R: SplitReal, Ret>(
     let out = f(&mut buf);
     cell.with(|p| {
         let mut planes = p.borrow_mut();
-        if planes.buf.capacity() < buf.capacity() {
+        let bytes = (buf.capacity() * std::mem::size_of::<R>()) as u64;
+        if planes.buf.capacity() < buf.capacity() && bytes <= crate::memory::SCRATCH_KEEP {
             planes.buf = buf;
         }
     });

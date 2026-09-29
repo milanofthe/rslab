@@ -809,7 +809,7 @@ and for scheduling factorizations side by side.
 
 **Returns**
 
-- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began) and `solve_bytes`, with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
+- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began), `solve_bytes` and `kept_bytes` (what the worker threads, and a refactorized factor's scratch, keep for the next factorization), with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
 
 ### class `LuSymbolic`
 
@@ -875,7 +875,7 @@ and for scheduling factorizations side by side.
 
 **Returns**
 
-- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began) and `solve_bytes`, with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
+- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began), `solve_bytes` and `kept_bytes` (what the worker threads, and a refactorized factor's scratch, keep for the next factorization), with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
 
 ### class `KluSymbolic`
 
@@ -941,7 +941,7 @@ and for scheduling factorizations side by side.
 
 **Returns**
 
-- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began) and `solve_bytes`, with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
+- `dict`: `peak_bytes`, the heap peak from here through a factorization and a solve (the number to compare against the memory available), `resident_bytes`, what stays held while the factor is kept, and their parts: `analysis_bytes`, `analysis_growth_bytes`, `factor_bytes`, `factor_peak_bytes` (above what was live when the factorization began), `solve_bytes` and `kept_bytes` (what the worker threads, and a refactorized factor's scratch, keep for the next factorization), with `threads` and `nrhs`. The copies this binding keeps (the pattern, the matrix in the factor, a solve's right-hand sides) are included; NumPy's own arrays are not.
 
 ## Configuration
 
@@ -992,7 +992,7 @@ tuned values, listed by `to_dict`.
 - `scalar_gate, par_gemm, par_cdiv, fork_min_flops` (int): Update flops below which the scalar loop runs (4096), from which an update GEMM (1e6) and a panel's trailing update (8e6) run in parallel, and from which a supernode's updates fork (1e8).
 - `complex_split_min_ratio, complex_split_tile` (int): Complex products run as real products when their flops are this many times their plane copies (64), in tiles of this edge (256).
 - `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
-- `solve_leaf_subtrees, solve_block, solve_ancestor_chunk, solve_apex_min_work` (int): Triangular solves: leaf subtrees of the parallel sweeps (128), column block (512) and columns per task (32) of the ancestor sweeps, panel entries from which an ancestor uses the blocked sweep (262 144).
+- `solve_leaf_subtrees, solve_block, solve_ancestor_chunk, solve_apex_min_work, solve_par_min_work` (int): Triangular solves: leaf subtrees of the parallel sweeps (128), column block (512) and columns per task (32) of the ancestor sweeps, panel entries from which an ancestor uses the blocked sweep (262 144), and the work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all (1 048 576).
 
 #### `Settings.to_dict()`
 

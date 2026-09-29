@@ -26,6 +26,13 @@ pub(super) struct LuScratch<T> {
     uupd: Vec<T>,
 }
 
+impl<T> crate::memory::HeapBytes for LuScratch<T> {
+    fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes as b;
+        b(&self.rperm) + b(&self.pinv_blk) + b(&self.lupd) + b(&self.uupd)
+    }
+}
+
 impl<T> Default for LuScratch<T> {
     fn default() -> Self {
         LuScratch {

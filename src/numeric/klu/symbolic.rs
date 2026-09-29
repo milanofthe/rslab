@@ -351,6 +351,8 @@ impl KluSymbolic {
             factor_peak_bytes: during.max(factor + 8 * n) + crate::memory::BOOKKEEPING,
             // The solution and the permuted work vector.
             solve_bytes: 2 * n * nrhs as u64 * vb,
+            // Its buffers belong to the factor.
+            kept_bytes: 0,
         }
     }
 

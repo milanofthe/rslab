@@ -84,13 +84,15 @@ pivots, PARDISO with `iparm(10) = 6` and RSLAB in preconditioner mode at
 
 ![wall time per stage](docs/figures/wct_breakdown.png)
 
-The analysis predicts the factor storage and the peak memory before any
-numeric work:
+Before any numeric work, the memory plan predicts the heap the
+factorization will hold and its peak, here against a counting allocator at
+12 threads:
 
-![memory estimate against the measurement](docs/figures/estimate_accuracy.png)
+![memory plan against the measurement](docs/figures/estimate_accuracy.png)
 
-Reproduce with `python benches/pardiso_corpus.py <corpus>` and
-`python benches/pardiso_corpus_plot.py`.
+Reproduce with `python benches/pardiso_corpus.py <corpus>`,
+`python benches/memory_peak.py <corpus>` (extension built with the
+`alloc-stats` feature) and `python benches/pardiso_corpus_plot.py`.
 
 ## Design
 

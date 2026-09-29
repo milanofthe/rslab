@@ -91,7 +91,7 @@ def main():
         peak = row['analyzed_held'] + max(row['factor_peak'], row['factor_live'] + row['solve_peak'])
         pairs = [(peak, plan['peak_bytes']),
                  (row['factor_peak'], plan['factor_peak_bytes']),
-                 (row['factor_live'], plan['analysis_growth_bytes'] + plan['factor_bytes']),
+                 (row['factor_live'], plan['analysis_growth_bytes'] + plan['factor_bytes'] + plan['kept_bytes']),
                  (row['solve_peak'], plan['solve_bytes'])]
         cols = ' '.join(f"{m / mb:8.1f} {p / max(m, 1):6.2f}" for m, p in pairs)
         print(f"{f.stem:26s} {row['path']:4s} {cols}", flush=True)
