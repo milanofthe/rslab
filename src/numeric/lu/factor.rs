@@ -11,7 +11,7 @@ use crate::numeric::supernodal::{Input, InputProgram};
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
-use crate::numeric::supernodal::panel::{finish_panel, PanelArena, PanelFactor, PanelOut};
+use crate::numeric::supernodal::panel::{PanelArena, PanelFactor, PanelOut, PanelStorage};
 use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
@@ -62,14 +62,14 @@ impl<T: Scalar> LlEmit<T> {
         sym: &SymbolicFactorization,
         sched: &LlSchedule,
         st: &LuStructure,
-        storage: Option<(Vec<T>, Vec<T>)>,
+        storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
     ) -> Self {
         let n = sym.n;
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
         let ns = sym.supernodes.len();
         let ncol = |s: usize| sym.supernodes[s].ncol;
-        let l_sizes = (0..ns).map(|s| st.rows_l(s).len() * ncol(s));
-        let u_sizes = (0..ns).map(|s| st.cols_u(s).len() * ncol(s));
+        let l_sizes = (0..ns).map(|s| (ncol(s), st.rows_l(s).len() - ncol(s)));
+        let u_sizes = (0..ns).map(|s| (ncol(s), st.cols_u(s).len() - ncol(s)));
         let (l_arena, u_arena) = match storage {
             Some((l, u)) => (PanelArena::reuse(l, l_sizes), PanelArena::reuse(u, u_sizes)),
             None => (PanelArena::new(l_sizes), PanelArena::new(u_sizes)),
@@ -133,26 +133,17 @@ fn emit_and_free<T: Scalar>(
             }
         }
     }
-    let l_rows: Vec<u32> = (ncol..nrow_l)
-        .map(|i| unsafe { emit.rg(rows_l[rperm[i]] as usize) } as u32)
-        .collect();
-    let u_rows: Vec<u32> = (ncol..nrow_u)
-        .map(|t| unsafe { emit.eg(cols_u[t] as usize) } as u32)
-        .collect();
-    let l_out = finish_panel(
-        unsafe { emit.l_arena.slot_mut(k) },
-        ncol,
-        l_rows,
-        None,
-        drop_tol,
-    );
-    let u_out = finish_panel(
-        unsafe { emit.u_arena.slot_mut(k) },
-        ncol,
-        u_rows,
-        None,
-        drop_tol,
-    );
+    // The off-block rows in elimination indices, into the arenas' row slots.
+    let l_rows = unsafe { emit.l_arena.rows_mut(k) };
+    for (r, i) in l_rows.iter_mut().zip(ncol..nrow_l) {
+        *r = unsafe { emit.rg(rows_l[rperm[i]] as usize) } as u32;
+    }
+    let u_rows = unsafe { emit.u_arena.rows_mut(k) };
+    for (r, &g) in u_rows.iter_mut().zip(&cols_u[ncol..nrow_u]) {
+        *r = unsafe { emit.eg(g as usize) } as u32;
+    }
+    let l_out = unsafe { emit.l_arena.finish_slot(k, ncol, None, drop_tol) };
+    let u_out = unsafe { emit.u_arena.finish_slot(k, ncol, None, drop_tol) };
     unsafe { emit.panels.set(k, (l_out, u_out)) };
 }
 
@@ -169,7 +160,7 @@ fn factor_lu_left_looking<T: Scalar>(
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
     kt: KernelTuning,
-    storage: Option<(Vec<T>, Vec<T>)>,
+    storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
 ) -> Result<LuNumeric<T>, RslabError> {
     let n = sym.n;
     let nsuper = sym.supernodes.len();
@@ -232,7 +223,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
     opts: &SolverSettings,
-    storage: Option<(Vec<T>, Vec<T>)>,
+    storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
 ) -> Result<LuNumeric<T>, RslabError> {
     a.validate()?;
     let n = lusym.n;

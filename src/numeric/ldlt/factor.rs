@@ -11,7 +11,7 @@ use crate::inertia::Inertia;
 use crate::numeric::settings::{
     stack_for_depth, supernode_tree_depth, SolverSettings, ZeroPivotAction,
 };
-use crate::numeric::supernodal::panel::{finish_panel, PanelArena, PanelFactor, PanelOut};
+use crate::numeric::supernodal::panel::{PanelArena, PanelFactor, PanelOut, PanelStorage};
 use crate::numeric::supernodal::{emit_refcount_offsets, Cells, Input, InputProgram, LlSchedule};
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
@@ -37,7 +37,7 @@ pub(crate) fn factor_numeric<T: Scalar>(
     a: &CscMatrix<T>,
     scale: Option<&[f64]>,
     opts: &SolverSettings,
-    storage: Option<Vec<T>>,
+    storage: Option<PanelStorage<T>>,
 ) -> Result<LdltNumeric<T>, RslabError> {
     a.validate()?;
     let n = symb.n;
@@ -121,14 +121,21 @@ pub(super) struct LlEmitLdlt<T> {
 impl<T: Scalar> LlEmitLdlt<T> {
     /// The emit state, the arena in `storage` (the buffer of an earlier
     /// factor of this analysis) when given.
-    fn new(sym: &SymbolicFactorization, sched: &LlSchedule, storage: Option<Vec<T>>) -> Self {
+    fn new(
+        sym: &SymbolicFactorization,
+        sched: &LlSchedule,
+        storage: Option<PanelStorage<T>>,
+    ) -> Self {
         let nsuper = sym.supernodes.len();
         let n = sym.n;
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
-        let sizes = (0..nsuper).map(|s| sched.rows(s).len() * sym.supernodes[s].ncol);
+        let shapes = (0..nsuper).map(|s| {
+            let w = sym.supernodes[s].ncol;
+            (w, sched.rows(s).len() - w)
+        });
         let arena = match storage {
-            Some(v) => PanelArena::reuse(v, sizes),
-            None => PanelArena::new(sizes),
+            Some(v) => PanelArena::reuse(v, shapes),
+            None => PanelArena::new(shapes),
         };
         LlEmitLdlt {
             refcount,
@@ -179,18 +186,18 @@ fn ldlt_emit_and_free<T: Scalar>(
 ) {
     let ncol = sym.supernodes[k].ncol;
     let nrow = sched.rows(k).len();
-    // SAFETY: the owner of supernode `k` emits it exactly once, after its last
-    // updater has read the panel (refcount zero); nobody reads it afterwards.
-    let panel = unsafe { emit.arena.slot_mut(k) };
-    debug_assert_eq!(panel.len(), nrow * ncol);
+    // SAFETY (the slot accesses below): the owner of supernode `k` emits it
+    // exactly once, after its last updater has read the panel (refcount
+    // zero); nobody reads it afterwards.
+    debug_assert_eq!(emit.arena.slot_len(k), nrow * ncol);
     // The pivoting stays inside the diagonal block, so the off-diagonal rows
     // are in the schedule's order; the 2x2 flags are in the emit cells.
-    let e_rows: Vec<u32> = sched.rows(k)[ncol..nrow]
-        .iter()
-        .map(|&g| unsafe { emit.eg(g as usize) } as u32)
-        .collect();
+    let rows = unsafe { emit.arena.rows_mut(k) };
+    for (r, &g) in rows.iter_mut().zip(&sched.rows(k)[ncol..nrow]) {
+        *r = unsafe { emit.eg(g as usize) } as u32;
+    }
     let (_, _, two) = unsafe { emit.d_of(k, ncol) };
-    let out = finish_panel(panel, ncol, e_rows, Some(two), drop_tol);
+    let out = unsafe { emit.arena.finish_slot(k, ncol, Some(two), drop_tol) };
     unsafe { emit.panels.set(k, out) };
 }
 
@@ -225,7 +232,7 @@ fn factor_left_looking<T: Scalar>(
     sched: &LlSchedule,
     inp: Input<T>,
     opts: &SolverSettings,
-    storage: Option<Vec<T>>,
+    storage: Option<PanelStorage<T>>,
 ) -> Result<LdltNumeric<T>, RslabError> {
     let n = sym.n;
     let perturb_floor = static_pivot_floor(inp.values(), opts);

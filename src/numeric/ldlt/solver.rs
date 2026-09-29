@@ -556,7 +556,7 @@ impl LdltSymbolic {
         ldlt: &mut LdltSolver<T>,
     ) -> Result<(), RslabError> {
         ldlt.factored = false;
-        let storage = ldlt.plan.take_vals();
+        let storage = ldlt.plan.take_storage();
         let (factor, factors, scale, mut diagnostics, opts) =
             self.numeric(a, opts, Some(storage))?;
         let t = crate::clock::Instant::now();
@@ -585,7 +585,7 @@ impl LdltSymbolic {
         &self,
         a: &CscMatrix<T>,
         opts: &SolverSettings,
-        storage: Option<Vec<T>>,
+        storage: Option<crate::numeric::supernodal::panel::PanelStorage<T>>,
     ) -> Result<
         (
             PanelFactor<T>,

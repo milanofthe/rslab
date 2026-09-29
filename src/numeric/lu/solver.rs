@@ -8,7 +8,7 @@ use super::structure::LuStructure;
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::analysis::analyze_with;
-use crate::numeric::supernodal::panel::PanelFactor;
+use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use std::sync::Mutex;
@@ -339,7 +339,7 @@ impl LuSymbolic {
         lu: &mut LuSolver<T>,
     ) -> Result<(), RslabError> {
         lu.factored = false;
-        let storage = (lu.plan_l.take_vals(), lu.plan_u.take_vals());
+        let storage = (lu.plan_l.take_storage(), lu.plan_u.take_storage());
         let (l, ut, factors, nnz, mut diagnostics, opts) = self.numeric(a, opts, Some(storage))?;
         let t = crate::clock::Instant::now();
         lu.plan_l
@@ -369,7 +369,7 @@ impl LuSymbolic {
         &self,
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
-        storage: Option<(Vec<T>, Vec<T>)>,
+        storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
     ) -> Result<
         (
             PanelFactor<T>,

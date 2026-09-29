@@ -727,7 +727,10 @@ fn exact_structure_bounds_the_factor() {
             if sn.ncol == 0 {
                 continue;
             }
-            let (lk, uk) = (&num.l.rows[k], &num.ut.rows[k]);
+            let rows = |f: &crate::numeric::supernodal::panel::PanelFactor<f64>| {
+                f.rows[f.row_ptr[k]..f.row_ptr[k + 1]].to_vec()
+            };
+            let (lk, uk) = (&rows(&num.l), &rows(&num.ut));
             let (lrows, ucols) = (&st.rows_l(s)[sn.ncol..], &st.cols_u(s)[sn.ncol..]);
             assert!(
                 lk.len() <= lrows.len(),
