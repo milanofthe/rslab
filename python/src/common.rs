@@ -351,6 +351,7 @@ pub fn memory_plan_dict(
     d.set_item("factor_bytes", p.factor_bytes)?;
     d.set_item("factor_peak_bytes", p.factor_peak_bytes)?;
     d.set_item("solve_bytes", p.solve_bytes)?;
+    d.set_item("kept_bytes", p.kept_bytes)?;
     Ok(d.into_any().unbind())
 }
 

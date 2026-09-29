@@ -497,14 +497,20 @@ impl LdltSymbolic {
             .map(|s| super::node::ll_node_scratch::<T>(s, sym, sched, &k, threads))
             .collect();
         let mut planes: Vec<(usize, usize)> = scratch.iter().map(|&(_, p, c)| (p, c)).collect();
-        let workers = crate::memory::worker_bytes::<T>(n, 1, threads, &mut planes);
+        let (workers, kept) = crate::memory::worker_bytes::<T>(n, 1, threads, &mut planes);
+        // The panel kernel's, the deep-row replay's, the `cmod`'s and the
+        // arena's pools.
+        let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
+        let pooled = crate::memory::pooled_bytes(4, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during = (vb * nnz + 8 * n + vb * panels + cells + slots) as u64 + workers + nodes;
+        let during =
+            (vb * nnz + 8 * n + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
         // After it: the factor, with the emitted row lists until the plan
         // has copied them, and the plan's build.
         let after = factor as u64 + (4 * rows + 24 * ns) as u64 + layout.build;
         plan.analysis_growth_bytes = growth as u64;
         plan.factor_bytes = factor as u64;
+        plan.kept_bytes = kept + pooled;
         plan.factor_peak_bytes = (growth_build as u64).max(growth as u64 + during.max(after))
             + crate::memory::BOOKKEEPING;
         // The permuted right-hand sides, the solution and the sweeps' scratch.

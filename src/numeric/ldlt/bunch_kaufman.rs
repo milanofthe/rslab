@@ -37,6 +37,28 @@ pub(super) struct BkScratch<T> {
     tmp_w: Vec<T>,
 }
 
+impl<T> crate::memory::HeapBytes for BkScratch<T> {
+    fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes as b;
+        b(&self.d)
+            + b(&self.d_subdiag)
+            + b(&self.two_by_two)
+            + b(&self.lperm)
+            + b(&self.l1)
+            + b(&self.l2)
+            + b(&self.l21buf)
+            + b(&self.gbuf)
+            + b(&self.tmp)
+            + b(&self.deep_swaps)
+            + b(&self.mult_snap)
+            + b(&self.l1b)
+            + b(&self.l2b)
+            + b(&self.deep_swaps_b)
+            + b(&self.mult_snap_b)
+            + b(&self.tmp_w)
+    }
+}
+
 impl<T> Default for BkScratch<T> {
     fn default() -> Self {
         BkScratch {

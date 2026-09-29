@@ -32,6 +32,11 @@ benches/bench_out/*
 # block_gmres_plot overlays against the current build.
 !benches/bench_out/block_gmres_mgs_ref.jsonl
 
+# Exception: the corpus runs behind the README figures. The corpus itself is
+# not in the repository, so the measurements are.
+!benches/bench_out/pardiso_corpus.jsonl
+!benches/bench_out/memory_peak.jsonl
+
 # Exception: the release-history head-to-head needs one bench binary per release
 # tag, so it is not regeneratable from HEAD either (benches/run_accel_history.sh
 # rebuilds the tags; the aggregate is committed so the figures stay reproducible).

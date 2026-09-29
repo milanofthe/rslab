@@ -1,16 +1,17 @@
 """Figures for RSLAB against MKL PARDISO on the real-system corpus.
 
-Reads ``bench_out/pardiso_corpus.jsonl`` (``benches/pardiso_corpus.py``) and writes
-into ``docs/figures/``:
+Reads ``bench_out/pardiso_corpus.jsonl`` (``benches/pardiso_corpus.py``) and
+``bench_out/memory_peak.jsonl`` (``benches/memory_peak.py``) and writes into
+``docs/figures/``:
 
 * ``wct_breakdown.png``   - wall time per stage, per system and solver,
 * ``wct_breakdown_social.png`` - its share card on a few systems,
-* ``estimate_accuracy.png`` - RSLAB's memory estimate against the measurement,
+* ``estimate_accuracy.png`` - RSLAB's memory plan against the measured heap,
 
 and prints the per-class table of the README: wall time divided by PARDISO's,
 geomean per matrix class, for factor, refactor, solve and one-shot.
 
-Usage: ``python benches/pardiso_corpus_plot.py [bench_out/pardiso_corpus.jsonl]``
+Usage: ``python benches/pardiso_corpus_plot.py [pardiso_corpus.jsonl [memory_peak.jsonl]]``
 """
 import json
 import statistics
@@ -129,24 +130,26 @@ def breakdown(data, ax, names):
     return [Patch(facecolor=c, label=l) for _, l, c in STAGES]
 
 
-def estimates(data):
-    """RSLAB's analysis-time memory estimate against the measurement."""
-    fig, (ax_f, ax_p) = st.two_panel(figsize=(10.0, 4.2))
-    ratios = {"factor": [], "peak": []}
+def estimates(rows):
+    """RSLAB's memory plan, made before any numeric work, against the heap a
+    counting allocator measured: what stays held after the factorization, and
+    the peak from the analysis on (the factorization, then a solve)."""
+    fig, (ax_h, ax_p) = st.two_panel(figsize=(10.0, 4.2))
+    colors = [RSLAB, st.CYAN, st.AMBER, st.GREEN]
+    ratios = {"held": [], "peak": []}
     seen, lo, hi = set(), np.inf, 0.0
-    for s in ordered(data):
-        rep = data[s]["rslab"]["report"]
-        est = rep.get("estimate")
-        if not est or not rep.get("factor_bytes"):
-            continue
-        color = [RSLAB, st.CYAN, st.AMBER, st.GREEN][cls(s)]
-        for ax, key, e, m in ((ax_f, "factor", est["factor_bytes"], rep["factor_bytes"]),
-                              (ax_p, "peak", est["transient_peak_bytes"], data[s]["rslab"]["peak_mb"] * 2**20)):
+    for r in sorted(rows, key=lambda r: (cls(r["system"]), r["n"])):
+        plan = r["plan"]
+        held = r["factor_live"]
+        peak = r["analyzed_held"] + max(r["factor_peak"], r["factor_live"] + r["solve_peak"])
+        color = colors[cls(r["system"])]
+        planned_held = plan["analysis_growth_bytes"] + plan["factor_bytes"] + plan.get("kept_bytes", 0)
+        for ax, key, m, e in ((ax_h, "held", held, planned_held), (ax_p, "peak", peak, plan["peak_bytes"])):
             ax.scatter(m / 1e9, e / 1e9, color=color, s=22, zorder=3)
             ratios[key].append(e / m)
             lo, hi = min(lo, m / 1e9, e / 1e9), max(hi, m / 1e9, e / 1e9)
-        seen.add(cls(s))
-    for ax, key, what in ((ax_f, "factor", "factor storage"), (ax_p, "peak", "peak memory")):
+        seen.add(cls(r["system"]))
+    for ax, key, what in ((ax_h, "held", "heap held after the factorization"), (ax_p, "peak", "peak heap")):
         lo, hi = lo / 2, hi * 2
         ax.plot([lo, hi], [lo, hi], color=st.GRAY, linewidth=0.8)
         ax.set_xscale("log")
@@ -154,22 +157,23 @@ def estimates(data):
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
         ax.set_xlabel(f"measured {what} [GB]", fontsize=9)
-        ax.set_ylabel(f"estimated {what} [GB]", fontsize=9)
+        ax.set_ylabel(f"planned {what} [GB]", fontsize=9)
         r = ratios[key]
         if r:
-            ax.text(0.04, 0.94, f"estimate / measured: geomean {geomean(r):.2f}, range {min(r):.2f} to {max(r):.2f}",
+            ax.text(0.04, 0.94, f"plan / measured: median {statistics.median(r):.2f}, "
+                    f"range {min(r):.2f} to {max(r):.2f}",
                     transform=ax.transAxes, fontsize=8, color=st.GRAY, va="top")
         ax.grid(alpha=0.3, linewidth=0.5)
         st.despine(ax)
     handles = [plt.Line2D([], [], marker="o", linestyle="", color=c, label=CLASSES[i][1])
-               for i, c in enumerate([RSLAB, st.CYAN, st.AMBER, st.GREEN])
-               if i in seen]
+               for i, c in enumerate(colors) if i in seen]
     st.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])
     return fig, ratios
 
 
 def main():
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "bench_out" / "pardiso_corpus.jsonl"
+    mem_path = Path(sys.argv[2]) if len(sys.argv) > 2 else HERE / "bench_out" / "memory_peak.jsonl"
     data = load(path)
     st.setup()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -185,7 +189,7 @@ def main():
         else:
             st.save(fig, OUT / "wct_breakdown.png")
 
-    fig, ratios = estimates(data)
+    fig, ratios = estimates([json.loads(line) for line in open(mem_path)])
     st.save(fig, OUT / "estimate_accuracy.png")
 
     table = class_table(data)
@@ -195,7 +199,7 @@ def main():
         print(f"| {CLASSES[c][1]} | " + " | ".join(f"{table[(c, k)]:.2f}" for k, _ in METRICS) + " |")
     for key, r in ratios.items():
         if r:
-            print(f"estimate/measured {key}: geomean {geomean(r):.2f}, min {min(r):.2f}, max {max(r):.2f}")
+            print(f"plan/measured {key}: median {statistics.median(r):.2f}, min {min(r):.2f}, max {max(r):.2f}")
 
 
 if __name__ == "__main__":

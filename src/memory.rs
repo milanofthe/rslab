@@ -22,6 +22,35 @@ pub(crate) fn nested_bytes<T>(v: &Vec<Vec<T>>) -> u64 {
     vec_bytes(v) + v.iter().map(vec_bytes).sum::<u64>()
 }
 
+/// Heap bytes of a scratch object: what a [`ScratchPool`] weighs before it
+/// keeps one.
+///
+/// [`ScratchPool`]: crate::numeric::supernodal::ScratchPool
+pub(crate) trait HeapBytes {
+    fn heap_bytes(&self) -> u64;
+}
+
+impl<T> HeapBytes for Vec<T> {
+    fn heap_bytes(&self) -> u64 {
+        vec_bytes(self)
+    }
+}
+
+impl<A: HeapBytes, B: HeapBytes, C: HeapBytes> HeapBytes for (A, B, C) {
+    fn heap_bytes(&self) -> u64 {
+        self.0.heap_bytes() + self.1.heap_bytes() + self.2.heap_bytes()
+    }
+}
+
+/// The most heap one scratch object, and one worker's buffer of split
+/// planes, keep between the kernels that borrow them; larger ones are
+/// freed when given back. Small factorizations (Newton loops up to some
+/// thousand unknowns) keep all their scratch and refactor without
+/// allocating; on large ones a node that needs more allocates its own, which
+/// its flops dwarf, and what the pools and threads hold on to stays bounded
+/// by the worker count instead of growing to the largest nodes.
+pub(crate) const SCRATCH_KEEP: u64 = 256 << 10;
+
 /// The capacity of a `Vec` of capacity `cap` after it is resized or
 /// reserved to hold `need` entries: unchanged if it fits, else the larger of
 /// `need` and twice the old capacity (the standard library's amortized
@@ -74,13 +103,18 @@ pub struct MemoryPlan {
     /// Heap peak of one solve of `nrhs` right-hand sides, the returned
     /// solution included.
     pub solve_bytes: u64,
+    /// Heap kept after the factorization for the next one: the workers'
+    /// global-to-local maps and split planes, which live on in the threads
+    /// of the pool the calling thread keeps, and the kernels' scratch pools
+    /// a refactorized solver holds.
+    pub kept_bytes: u64,
 }
 
 impl MemoryPlan {
     /// Heap held while the factor is kept for solves: the analysis (grown by
-    /// the first factorization) and the factor.
+    /// the first factorization), the factor and what the workers keep.
     pub fn resident_bytes(&self) -> u64 {
-        self.analysis_bytes + self.analysis_growth_bytes + self.factor_bytes
+        self.analysis_bytes + self.analysis_growth_bytes + self.factor_bytes + self.kept_bytes
     }
 
     /// Heap peak from here on: the factorization with the analysis held,
@@ -102,11 +136,12 @@ impl fmt::Display for MemoryPlan {
         write!(
             f,
             "peak {:.0} MB at {} threads (analysis {:.0} MB, factor {:.0} MB, \
-             factorization +{:.0} MB, solve of {} rhs +{:.0} MB)",
+             kept {:.0} MB, factorization +{:.0} MB, solve of {} rhs +{:.0} MB)",
             mb(self.peak_bytes()),
             self.threads,
             mb(self.analysis_bytes + self.analysis_growth_bytes),
             mb(self.factor_bytes),
+            mb(self.kept_bytes),
             mb(self.factor_peak_bytes),
             self.nrhs,
             mb(self.solve_bytes),
@@ -124,18 +159,21 @@ pub(crate) const BOOKKEEPING: u64 = 512 << 10;
 pub(crate) const NODES_PER_WORKER: usize = 2;
 
 /// Heap the `workers` of a supernodal factorization hold whatever nodes they
-/// run: per worker `maps` global-to-local maps of `n` entries and the GEMM
-/// crate's packing slab, and the buffers of split real planes. A buffer
-/// grows to at most twice the largest product run on it, and the nodes in
-/// flight on different workers are different nodes, so the buffers are
-/// bounded by the largest needs of `planes` (one `(entries, workers running
-/// them)` per node) over the nodes in flight.
+/// run, and what they keep after it: per node in flight `maps`
+/// global-to-local maps of `n` entries (a node stolen by a waiting worker
+/// takes fresh ones), per worker the GEMM crate's packing slab, and the
+/// buffers of split real planes. A buffer grows to at most twice the largest
+/// product run on it, and the nodes in flight on different workers are
+/// different nodes, so the buffers are bounded by the largest needs of
+/// `planes` (one `(entries, workers running them)` per node) over the nodes
+/// in flight. Afterwards each worker keeps one set of maps and its planes up
+/// to [`SCRATCH_KEEP`]. Returns `(during, kept)`.
 pub(crate) fn worker_bytes<T: crate::Scalar>(
     n: usize,
     maps: usize,
     workers: usize,
     planes: &mut [(usize, usize)],
-) -> u64 {
+) -> (u64, u64) {
     const GEMM_SLAB: usize = 1 << 20;
     let real = std::mem::size_of::<T>() / if T::COMPLEX { 2 } else { 1 };
     planes.sort_unstable_by_key(|&(p, _)| std::cmp::Reverse(p));
@@ -148,7 +186,19 @@ pub(crate) fn worker_bytes<T: crate::Scalar>(
             break;
         }
     }
-    (workers * (maps * 4 * n + GEMM_SLAB) + 2 * entries * real) as u64
+    let largest = planes.first().map_or(0, |&(p, _)| 2 * p * real) as u64;
+    let during = workers * (NODES_PER_WORKER * maps * 4 * n + GEMM_SLAB) + 2 * entries * real;
+    let kept = workers as u64 * ((maps * 4 * n) as u64 + largest.min(SCRATCH_KEEP));
+    (during as u64, kept)
+}
+
+/// Heap `pools` scratch pools of a factorization on `workers` hold on top of
+/// what their running nodes need: each object, in its pool or lent to a
+/// node, carries at most [`SCRATCH_KEEP`] from earlier nodes, and no more
+/// than the `largest` scratch of any node, and a pool has no more objects
+/// than nodes can be in flight.
+pub(crate) fn pooled_bytes(pools: usize, workers: usize, largest: u64) -> u64 {
+    (pools * NODES_PER_WORKER * workers.max(1)) as u64 * largest.min(SCRATCH_KEEP)
 }
 
 /// The heaviest set of at most `workers` x [`NODES_PER_WORKER`] supernodes

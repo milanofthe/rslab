@@ -134,7 +134,9 @@ impl PyLdltSymbolic {
     ///     ``resident_bytes``, what stays held while the factor is kept, and
     ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
     ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
-    ///     the factorization began) and ``solve_bytes``, with ``threads``
+    ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
+    ///     (what the worker threads, and a refactorized factor's scratch,
+    ///     keep for the next factorization), with ``threads``
     ///     and ``nrhs``. The copies this binding keeps (the pattern, the
     ///     matrix in the factor, a solve's right-hand sides) are included;
     ///     NumPy's own arrays are not.
@@ -383,7 +385,9 @@ impl PyLuSymbolic {
     ///     ``resident_bytes``, what stays held while the factor is kept, and
     ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
     ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
-    ///     the factorization began) and ``solve_bytes``, with ``threads``
+    ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
+    ///     (what the worker threads, and a refactorized factor's scratch,
+    ///     keep for the next factorization), with ``threads``
     ///     and ``nrhs``. The copies this binding keeps (the pattern, the
     ///     matrix in the factor, a solve's right-hand sides) are included;
     ///     NumPy's own arrays are not.
@@ -621,7 +625,9 @@ impl PyKluSymbolic {
     ///     ``resident_bytes``, what stays held while the factor is kept, and
     ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
     ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
-    ///     the factorization began) and ``solve_bytes``, with ``threads``
+    ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
+    ///     (what the worker threads, and a refactorized factor's scratch,
+    ///     keep for the next factorization), with ``threads``
     ///     and ``nrhs``. The copies this binding keeps (the pattern, the
     ///     matrix in the factor, a solve's right-hand sides) are included;
     ///     NumPy's own arrays are not.

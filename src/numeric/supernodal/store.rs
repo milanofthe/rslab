@@ -2,6 +2,8 @@
 //! cells of the emit state, the raw panel pointer for disjoint parallel
 //! writes, and the scratch pool the node kernels borrow from.
 
+use crate::memory::{HeapBytes, SCRATCH_KEEP};
+
 /// Raw base pointer of a panel buffer, smuggled across rayon workers so each
 /// task can write its own **disjoint row range** of a column-major panel. Safe
 /// only because callers partition the rows so no two tasks touch the same cell.
@@ -90,10 +92,11 @@ impl<V> Cells<V> {
 /// Scratch the node kernels borrow, one object per running kernel: taken on
 /// entry and given back on exit, so the kernels of one factorization share
 /// a handful of objects (about one per worker) whose buffers stay grown,
-/// instead of allocating their own per supernode.
+/// instead of allocating their own per supernode. An object heavier than
+/// [`SCRATCH_KEEP`](crate::memory::SCRATCH_KEEP) is freed instead of kept.
 pub(crate) struct ScratchPool<S>(std::sync::Mutex<Vec<S>>);
 
-impl<S: Default> ScratchPool<S> {
+impl<S: Default + HeapBytes> ScratchPool<S> {
     pub fn new() -> Self {
         ScratchPool(std::sync::Mutex::new(Vec::new()))
     }
@@ -114,28 +117,31 @@ impl<S: Default> ScratchPool<S> {
 }
 
 /// A [`ScratchPool`] object on loan, returned when dropped.
-pub(crate) struct Lent<'p, S> {
+pub(crate) struct Lent<'p, S: HeapBytes> {
     pool: &'p ScratchPool<S>,
     s: std::mem::ManuallyDrop<S>,
 }
 
-impl<S> std::ops::Deref for Lent<'_, S> {
+impl<S: HeapBytes> std::ops::Deref for Lent<'_, S> {
     type Target = S;
     fn deref(&self) -> &S {
         &self.s
     }
 }
 
-impl<S> std::ops::DerefMut for Lent<'_, S> {
+impl<S: HeapBytes> std::ops::DerefMut for Lent<'_, S> {
     fn deref_mut(&mut self) -> &mut S {
         &mut self.s
     }
 }
 
-impl<S> Drop for Lent<'_, S> {
+impl<S: HeapBytes> Drop for Lent<'_, S> {
     fn drop(&mut self) {
         // SAFETY: the object is taken once, here, and never touched again.
         let s = unsafe { std::mem::ManuallyDrop::take(&mut self.s) };
+        if s.heap_bytes() > SCRATCH_KEEP {
+            return;
+        }
         if let Ok(mut v) = self.pool.0.lock() {
             v.push(s);
         }
