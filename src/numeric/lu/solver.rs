@@ -8,6 +8,7 @@ use super::structure::LuStructure;
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::analysis::analyze_with;
+use crate::numeric::supernodal::panel::PanelFactor;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use std::sync::Mutex;
@@ -291,17 +292,106 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
     ) -> Result<LuSolver<T>, RslabError> {
+        let (l, ut, factors, nnz, mut diagnostics, opts) = self.numeric(a, opts, None)?;
+        // Solve layout: supernodal panels of `L` and `U^T` plus the tree
+        // schedule; the CSC arrays are released so the factor is held once.
+        let t = crate::clock::Instant::now();
+        let plan_l = crate::numeric::supernodal::solve::SolvePlan::from_panels(
+            l,
+            &factors.supernode_parent,
+            true,
+            opts.solve,
+        );
+        let plan_u = crate::numeric::supernodal::solve::SolvePlan::from_panels(
+            ut,
+            &factors.supernode_parent,
+            false,
+            opts.solve,
+        );
+        diagnostics.push(
+            "solve-layout",
+            t.elapsed().as_secs_f64() * 1e3,
+            0,
+            (plan_l.bytes() + plan_u.bytes()) as u64,
+        );
+        Ok(LuSolver {
+            solve_threads: opts.threads,
+            factors,
+            plan_l,
+            plan_u,
+            nnz,
+            diagnostics,
+            solves: Default::default(),
+            factored: true,
+        })
+    }
+
+    /// Factor `a` again into `lu`, a factor of this analysis (the next
+    /// Newton step): the numeric factorization of [`factor`](Self::factor),
+    /// its panels written into `lu`'s buffers and `lu`'s solve schedule kept
+    /// where pivoting left the rows unchanged. The same bits as a fresh
+    /// [`factor`](Self::factor). After an error `lu` holds no factor and
+    /// refuses to solve until a refactorization succeeds.
+    pub fn refactor<T: Scalar>(
+        &self,
+        a: &GeneralCsc<T>,
+        opts: &SolverSettings,
+        lu: &mut LuSolver<T>,
+    ) -> Result<(), RslabError> {
+        lu.factored = false;
+        let storage = (lu.plan_l.take_vals(), lu.plan_u.take_vals());
+        let (l, ut, factors, nnz, mut diagnostics, opts) = self.numeric(a, opts, Some(storage))?;
+        let t = crate::clock::Instant::now();
+        lu.plan_l
+            .refill(l, &factors.supernode_parent, true, opts.solve);
+        lu.plan_u
+            .refill(ut, &factors.supernode_parent, false, opts.solve);
+        diagnostics.push(
+            "solve-layout",
+            t.elapsed().as_secs_f64() * 1e3,
+            0,
+            (lu.plan_l.bytes() + lu.plan_u.bytes()) as u64,
+        );
+        lu.factors = factors;
+        lu.nnz = nnz;
+        lu.diagnostics = diagnostics;
+        lu.solve_threads = opts.threads;
+        lu.factored = true;
+        Ok(())
+    }
+
+    /// The numeric factorization both [`factor`](Self::factor) and
+    /// [`refactor`](Self::refactor) run: the panels of `L` and `U^T` (in
+    /// `storage` when given), the pivots, the fill, the diagnostics and the
+    /// settings pinned to the resolved thread count.
+    #[allow(clippy::type_complexity)]
+    fn numeric<T: Scalar>(
+        &self,
+        a: &GeneralCsc<T>,
+        opts: &SolverSettings,
+        storage: Option<(Vec<T>, Vec<T>)>,
+    ) -> Result<
+        (
+            PanelFactor<T>,
+            PanelFactor<T>,
+            LuPivots,
+            usize,
+            crate::diagnostics::Diagnostics,
+            SolverSettings,
+        ),
+        RslabError,
+    > {
         let estimate = self.estimate_memory::<T>();
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::supernodal::analysis::auto_threads(&self.symb, &estimate, cap)
         });
-        let opts = &opts.pinned(resolved_threads);
+        let opts = opts.pinned(resolved_threads);
         let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
         for w in &warnings {
             crate::logging::warn(&format!("lu settings: {w}"));
         }
         let t = crate::clock::Instant::now();
-        let numeric = factor_general_lu_numeric(self, a, opts)?;
+        let numeric = factor_general_lu_numeric(self, a, &opts, storage)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
@@ -334,36 +424,7 @@ impl LuSymbolic {
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             crate::logging::info(&format!("lu factor: {}", diagnostics.summary()));
         }
-        // Solve layout: supernodal panels of `L` and `U^T` plus the tree
-        // schedule; the CSC arrays are released so the factor is held once.
-        let t = crate::clock::Instant::now();
-        let plan_l = crate::numeric::supernodal::solve::SolvePlan::from_panels(
-            l,
-            &factors.supernode_parent,
-            true,
-            opts.solve,
-        );
-        let plan_u = crate::numeric::supernodal::solve::SolvePlan::from_panels(
-            ut,
-            &factors.supernode_parent,
-            false,
-            opts.solve,
-        );
-        diagnostics.push(
-            "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
-            0,
-            (plan_l.bytes() + plan_u.bytes()) as u64,
-        );
-        Ok(LuSolver {
-            solve_threads: opts.threads,
-            factors,
-            plan_l,
-            plan_u,
-            nnz: nnz as usize,
-            diagnostics,
-            solves: Default::default(),
-        })
+        Ok((l, ut, factors, nnz as usize, diagnostics, opts))
     }
 
     /// The analyzed dimension.
@@ -580,6 +641,9 @@ pub struct LuSolver<T> {
     /// The worker policy the factorization ran with, which a Krylov solve
     /// preconditioned by this factor orthogonalizes under.
     solve_threads: crate::numeric::settings::Threads,
+    /// Whether it holds a factor: a failed [`LuSymbolic::refactor`] leaves
+    /// it without one.
+    factored: bool,
 }
 
 impl<T: Scalar> LuSolver<T> {
@@ -644,6 +708,11 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         x: &mut [T],
         work: &mut crate::SolveWork<T>,
     ) -> Result<(), RslabError> {
+        if !self.factored {
+            return Err(RslabError::InvalidInput(
+                "the last refactorization failed; refactor before solving".to_string(),
+            ));
+        }
         let f = &self.factors;
         let n = f.n;
         let (gather, g_scale, scatter, s_scale) = if transpose {

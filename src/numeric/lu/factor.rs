@@ -56,16 +56,29 @@ pub(super) struct LlEmit<T> {
 }
 
 impl<T: Scalar> LlEmit<T> {
-    fn new(sym: &SymbolicFactorization, sched: &LlSchedule, st: &LuStructure) -> Self {
+    /// The emit state, the arenas in `storage` (the buffers of an earlier
+    /// factor of this analysis) when given.
+    fn new(
+        sym: &SymbolicFactorization,
+        sched: &LlSchedule,
+        st: &LuStructure,
+        storage: Option<(Vec<T>, Vec<T>)>,
+    ) -> Self {
         let n = sym.n;
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
         let ns = sym.supernodes.len();
         let ncol = |s: usize| sym.supernodes[s].ncol;
+        let l_sizes = (0..ns).map(|s| st.rows_l(s).len() * ncol(s));
+        let u_sizes = (0..ns).map(|s| st.cols_u(s).len() * ncol(s));
+        let (l_arena, u_arena) = match storage {
+            Some((l, u)) => (PanelArena::reuse(l, l_sizes), PanelArena::reuse(u, u_sizes)),
+            None => (PanelArena::new(l_sizes), PanelArena::new(u_sizes)),
+        };
         LlEmit {
             refcount,
             e_offset,
-            l_arena: PanelArena::new((0..ns).map(|s| st.rows_l(s).len() * ncol(s))),
-            u_arena: PanelArena::new((0..ns).map(|s| st.cols_u(s).len() * ncol(s))),
+            l_arena,
+            u_arena,
             panels: Cells::new_default(sym.supernodes.len()),
             e_of_g: Cells::new(n, usize::MAX),
             row_pos_of_g: Cells::new(n, usize::MAX),
@@ -156,11 +169,12 @@ fn factor_lu_left_looking<T: Scalar>(
     perturb_floor: Option<f64>,
     drop_tol: Option<f64>,
     kt: KernelTuning,
+    storage: Option<(Vec<T>, Vec<T>)>,
 ) -> Result<LuNumeric<T>, RslabError> {
     let n = sym.n;
     let nsuper = sym.supernodes.len();
     let store = LuLlStore::new(nsuper);
-    let emit = LlEmit::<T>::new(sym, sched, st);
+    let emit = LlEmit::<T>::new(sym, sched, st, storage);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let factor_node = |s: usize| {
         lu_ll_factor_node(
@@ -211,12 +225,14 @@ fn factor_lu_left_looking<T: Scalar>(
 }
 
 /// PARDISO phases 2-3 for the general path: numeric LU reusing a [`LuSymbolic`].
-/// `a` must share the analyzed pattern (`n`, `nnz`).
+/// `a` must share the analyzed pattern (`n`, `nnz`). `storage` holds the panel
+/// buffers of an earlier factor of the same analysis, filled again in place.
 #[allow(clippy::needless_range_loop)] // CSC column loops index col_ptr + scaling
 pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
     opts: &SolverSettings,
+    storage: Option<(Vec<T>, Vec<T>)>,
 ) -> Result<LuNumeric<T>, RslabError> {
     a.validate()?;
     let n = lusym.n;
@@ -327,6 +343,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
                 perturb_floor,
                 opts.drop_tol,
                 opts.kernel(),
+                storage,
             )
         },
     )?;
