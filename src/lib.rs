@@ -236,6 +236,7 @@ pub mod prelude {
         Preconditioner,
         RslabError,
         Scalar,
+        SolveWork,
         SolverSettings,
         ZeroPivotAction,
     };

@@ -43,6 +43,10 @@ let ks = KluSettings::default();
 let mut k = KluSymbolic::analyze(&g, &ks)?.factor(&g, &ks)?;
 k.refactor(&g_next)?;                                        // no pivot search
 
+// A Newton loop: work lent once, then no allocation per solve.
+let mut work = SolveWork::new();
+k.solve_into(&rhs, &mut dx, &mut work)?;
+
 // A never-failing factor as a preconditioner.
 let m = LdltSolver::factor(&a, &SolverSettings::preconditioner(1e-8))?;
 let res = cocg(&a, &b, &m, 1e-10, 100)?;
