@@ -31,7 +31,7 @@ use rayon::prelude::*;
 
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
-use crate::numeric::supernodal::panel::PanelFactor;
+use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::scalar::{fmadd, Scalar};
 
 const NONE: u32 = u32::MAX;
@@ -62,6 +62,9 @@ pub(crate) struct SolvePlan<T> {
     /// [`PanelFactor`]).
     val_ptr: Vec<usize>,
     vals: Vec<T>,
+    /// A row list of the factor's size, the buffer the next refactorization
+    /// emits its rows into (see [`take_storage`](Self::take_storage)).
+    spare_rows: Vec<u32>,
     /// Reciprocal diagonal per column for a non-unit triangular factor (the
     /// `U^T` of an LU); empty for a unit-diagonal factor.
     diag_inv: Vec<T>,
@@ -318,6 +321,7 @@ impl<T: Scalar> SolvePlan<T> {
             + vec_bytes(&self.ext_slot)
             + vec_bytes(&self.val_ptr)
             + vec_bytes(&self.vals)
+            + vec_bytes(&self.spare_rows)
             + vec_bytes(&self.diag_inv)
             + vec_bytes(&self.subtrees)
             + self
@@ -351,17 +355,6 @@ impl<T: Scalar> SolvePlan<T> {
                 sn_of[c] = s as u32;
             }
         }
-        let mut row_ptr = Vec::with_capacity(ns + 1);
-        row_ptr.push(0usize);
-        let mut rows: Vec<u32> = Vec::with_capacity(factor.rows.iter().map(|r| r.len()).sum());
-        for r in &factor.rows {
-            debug_assert!(
-                r.windows(2).all(|p| p[0] < p[1]),
-                "off-block rows ascending"
-            );
-            rows.extend_from_slice(r);
-            row_ptr.push(rows.len());
-        }
         let diag_inv: Vec<T> = if unit {
             Vec::new()
         } else {
@@ -375,7 +368,19 @@ impl<T: Scalar> SolvePlan<T> {
             }
             d
         };
-        let PanelFactor { val_ptr, vals, .. } = factor;
+        let PanelFactor {
+            rows,
+            row_ptr,
+            val_ptr,
+            vals,
+            ..
+        } = factor;
+        debug_assert!(
+            (0..ns).all(|s| rows[row_ptr[s]..row_ptr[s + 1]]
+                .windows(2)
+                .all(|p| p[0] < p[1])),
+            "off-block rows ascending"
+        );
         let known = supernode_parent.len() == ns;
 
         let mut parent = vec![NONE; ns];
@@ -570,6 +575,7 @@ impl<T: Scalar> SolvePlan<T> {
             top_paths,
             top_index,
             top_acc_ptr,
+            spare_rows: Vec::new(),
             cfg: crate::SolveSettings {
                 block: cfg.block.max(1),
                 ancestor_chunk: cfg.ancestor_chunk.max(1),
@@ -578,11 +584,14 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// The panels' buffer, taken out for the next factorization of the same
-    /// analysis to fill; [`refill`](Self::refill) puts the result back. The
-    /// plan cannot solve until then.
-    pub fn take_vals(&mut self) -> Vec<T> {
-        std::mem::take(&mut self.vals)
+    /// The panels' buffer and a spare row list, taken out for the next
+    /// factorization of the same analysis to fill; [`refill`](Self::refill)
+    /// puts the result back. The plan cannot solve until then.
+    pub(crate) fn take_storage(&mut self) -> PanelStorage<T> {
+        PanelStorage {
+            vals: std::mem::take(&mut self.vals),
+            rows: std::mem::take(&mut self.spare_rows),
+        }
     }
 
     /// Take `factor`, the next factorization of this plan's analysis, as
@@ -608,13 +617,16 @@ impl<T: Scalar> SolvePlan<T> {
             && unit == self.diag_inv.is_empty()
             && factor.sn_col == self.sn_col
             && factor.val_ptr == self.val_ptr
-            && (0..ns).all(|s| factor.rows[s] == self.rows[self.row_ptr[s]..self.row_ptr[s + 1]]);
+            && factor.row_ptr == self.row_ptr
+            && factor.rows == self.rows;
         if !same {
             *self = Self::from_panels(factor, supernode_parent, unit, cfg);
             return;
         }
-        let PanelFactor { vals, .. } = factor;
+        // The new row list equals the plan's: kept as the next spare.
+        let PanelFactor { vals, rows, .. } = factor;
         self.vals = vals;
+        self.spare_rows = rows;
         if !unit {
             for s in 0..ns {
                 let (c0, c1) = (self.sn_col[s] as usize, self.sn_col[s + 1] as usize);

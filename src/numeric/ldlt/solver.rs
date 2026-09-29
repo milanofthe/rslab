@@ -56,6 +56,10 @@ pub struct LdltSolver<T> {
     /// Whether it holds a factor: a failed [`LdltSymbolic::refactor`] leaves
     /// it without one.
     factored: bool,
+    /// The kernels' scratch: empty after [`LdltSymbolic::factor`], grown by
+    /// the first refactorization and kept for the next ones, which then
+    /// allocate nothing of their own.
+    pools: super::bunch_kaufman::BkPools<T>,
 }
 
 impl<T: Scalar> LdltSolver<T> {
@@ -516,7 +520,9 @@ impl LdltSymbolic {
         a: &CscMatrix<T>,
         opts: &SolverSettings,
     ) -> Result<LdltSolver<T>, RslabError> {
-        let (factor, factors, scale, mut diagnostics, opts) = self.numeric(a, opts, None)?;
+        let pools = super::bunch_kaufman::BkPools::new();
+        let (factor, factors, scale, mut diagnostics, opts) =
+            self.numeric(a, opts, None, &pools)?;
         // Solve layout: supernodal panels plus the tree schedule; the CSC
         // arrays are released so the factor is held once.
         let t = crate::clock::Instant::now();
@@ -540,6 +546,9 @@ impl LdltSymbolic {
             solve_threads: opts.threads,
             plan,
             factored: true,
+            // A one-time factor does not hold on to the scratch; the first
+            // refactorization grows its own and keeps it.
+            pools: super::bunch_kaufman::BkPools::new(),
         })
     }
 
@@ -556,9 +565,9 @@ impl LdltSymbolic {
         ldlt: &mut LdltSolver<T>,
     ) -> Result<(), RslabError> {
         ldlt.factored = false;
-        let storage = ldlt.plan.take_vals();
+        let storage = ldlt.plan.take_storage();
         let (factor, factors, scale, mut diagnostics, opts) =
-            self.numeric(a, opts, Some(storage))?;
+            self.numeric(a, opts, Some(storage), &ldlt.pools)?;
         let t = crate::clock::Instant::now();
         ldlt.plan
             .refill(factor, &factors.supernode_parent, true, opts.solve);
@@ -585,7 +594,8 @@ impl LdltSymbolic {
         &self,
         a: &CscMatrix<T>,
         opts: &SolverSettings,
-        storage: Option<Vec<T>>,
+        storage: Option<crate::numeric::supernodal::panel::PanelStorage<T>>,
+        pools: &super::bunch_kaufman::BkPools<T>,
     ) -> Result<
         (
             PanelFactor<T>,
@@ -611,7 +621,7 @@ impl LdltSymbolic {
         let scale = equilibration(a, &opts.scaling)?;
         let scale_ms = t.elapsed().as_secs_f64() * 1e3;
         let t = crate::clock::Instant::now();
-        let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), &opts, storage)?;
+        let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), &opts, storage, pools)?;
         let scale = scale.unwrap_or_else(|| vec![1.0; a.n]);
         let factor_nnz = (numeric.factor.nnz() - numeric.n_zeros) as u64;
         let factor_bytes = numeric.factor.bytes() as u64;

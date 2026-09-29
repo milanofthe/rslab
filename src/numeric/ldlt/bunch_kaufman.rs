@@ -3,7 +3,7 @@
 //! fully-summed block, the row-parallel replay of each panel's transform on
 //! the deep rows, and the deferred trailing update with panel lookahead.
 
-use super::factor::{LdltSlot, LlEmitLdlt, LlStore};
+use super::factor::LlEmitLdlt;
 use super::gemm::lower_tile_gemm;
 use crate::numeric::supernodal::perturb_pivot;
 
@@ -11,10 +11,80 @@ use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::LlSchedule;
 use crate::numeric::supernodal::PanelPtr as LdltPanelPtr;
+use crate::numeric::supernodal::ScratchPool;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// One running [`ll_cdiv_emit`]'s buffers (see there).
+pub(super) struct BkScratch<T> {
+    d: Vec<T>,
+    d_subdiag: Vec<T>,
+    two_by_two: Vec<bool>,
+    lperm: Vec<usize>,
+    l1: Vec<T>,
+    l2: Vec<T>,
+    l21buf: Vec<T>,
+    gbuf: Vec<T>,
+    tmp: Vec<T>,
+    deep_swaps: Vec<usize>,
+    mult_snap: Vec<T>,
+    l1b: Vec<T>,
+    l2b: Vec<T>,
+    deep_swaps_b: Vec<usize>,
+    mult_snap_b: Vec<T>,
+    tmp_w: Vec<T>,
+}
+
+impl<T> Default for BkScratch<T> {
+    fn default() -> Self {
+        BkScratch {
+            d: Vec::new(),
+            d_subdiag: Vec::new(),
+            two_by_two: Vec::new(),
+            lperm: Vec::new(),
+            l1: Vec::new(),
+            l2: Vec::new(),
+            l21buf: Vec::new(),
+            gbuf: Vec::new(),
+            tmp: Vec::new(),
+            deep_swaps: Vec::new(),
+            mult_snap: Vec::new(),
+            l1b: Vec::new(),
+            l2b: Vec::new(),
+            deep_swaps_b: Vec::new(),
+            mult_snap_b: Vec::new(),
+            tmp_w: Vec::new(),
+        }
+    }
+}
+
+/// The scratch pools of one LDL^T factorization: the panel kernel's buffers
+/// per running node, the deep-row replay's per row chunk, and the `cmod`
+/// update's (`D` times a column, `D` times a block, the product) per node
+/// or column slab.
+pub(super) struct BkPools<T> {
+    pub(super) node: ScratchPool<BkScratch<T>>,
+    pub(super) w: ScratchPool<Vec<T>>,
+    pub(super) cmod: ScratchPool<(Vec<T>, Vec<T>, Vec<T>)>,
+}
+
+impl<T> BkPools<T> {
+    pub(super) fn new() -> Self {
+        BkPools {
+            node: ScratchPool::new(),
+            w: ScratchPool::new(),
+            cmod: ScratchPool::new(),
+        }
+    }
+}
+
+/// `v` as `len` copies of `x`, in its storage.
+fn reset<V: Clone>(v: &mut Vec<V>, len: usize, x: V) {
+    v.clear();
+    v.resize(len, x);
+}
 
 /// Scale-invariant singularity floor for a 2x2 Bunch-Kaufman pivot: a block
 /// whose `|det|` falls below `GROWTH_EPS * scale^2` (scale = the largest block
@@ -64,6 +134,7 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     r0: usize,
     r1: usize,
     sb: usize,
+    w: &mut Vec<T>,
 ) {
     // Blocked form of the per-pivot sweep. Pivots are taken in sub-blocks of
     // `sb` columns ([`KernelSettings::trailing_block`](crate::KernelSettings::trailing_block);
@@ -84,7 +155,7 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     // One spare column: a 2x2 pivot that starts on a sub-block's last
     // column extends the sub-block by one, the pair is never split.
     let sb = sb.max(1);
-    let mut w: Vec<T> = vec![T::zero(); deep * (sb + 1)];
+    reset(w, deep * (sb + 1), T::zero());
     let mut kb2 = kb;
     while kb2 < ke {
         let mut ke2 = (kb2 + sb).min(ke);
@@ -99,7 +170,7 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
             if kp != usize::MAX {
                 if kp >= ke2 {
                     flush_trailing(
-                        base, nrow, kb, ke, kb2, ke2, pend0, k, &w, deep, mult_snap, nb, r0,
+                        base, nrow, kb, ke, kb2, ke2, pend0, k, w, deep, mult_snap, nb, r0,
                     );
                     pend0 = k;
                 }
@@ -158,7 +229,7 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
             }
         }
         flush_trailing(
-            base, nrow, kb, ke, kb2, ke2, pend0, ke2, &w, deep, mult_snap, nb, r0,
+            base, nrow, kb, ke, kb2, ke2, pend0, ke2, w, deep, mult_snap, nb, r0,
         );
         kb2 = ke2;
     }
@@ -249,6 +320,7 @@ fn ll_bk_panel_step<T: Scalar>(
     l2: &mut [T],
     deep_swaps: &mut [usize],
     mult_snap: &mut [T],
+    wpool: &ScratchPool<Vec<T>>,
 ) -> Result<usize, RslabError> {
     let mut perturbed = 0usize;
     // getf2: unblocked Bunch-Kaufman over the panel columns [kb, ke), with
@@ -423,14 +495,13 @@ fn ll_bk_panel_step<T: Scalar>(
             let pp = LdltPanelPtr(panel.as_mut_ptr());
             let nthreads = rayon::current_num_threads().max(1);
             let cs = deep.div_ceil(nthreads).max(1);
-            let ranges: Vec<(usize, usize)> = (0..nthreads)
-                .map(|c| {
-                    let r0 = ke + c * cs;
-                    (r0.min(nrow), (r0 + cs).min(nrow))
-                })
-                .filter(|(a, b)| a < b)
-                .collect();
-            ranges.par_iter().for_each(|&(r0, r1)| {
+            (0..nthreads).into_par_iter().for_each(|c| {
+                let r0 = (ke + c * cs).min(nrow);
+                let r1 = (r0 + cs).min(nrow);
+                if r0 >= r1 {
+                    return;
+                }
+                let mut w = wpool.take();
                 // SAFETY: disjoint row chunk; see `apply_bk_panel_trailing`.
                 unsafe {
                     apply_bk_panel_trailing(
@@ -447,6 +518,7 @@ fn ll_bk_panel_step<T: Scalar>(
                         r0,
                         r1,
                         trailing_block,
+                        &mut w,
                     )
                 };
             });
@@ -456,6 +528,7 @@ fn ll_bk_panel_step<T: Scalar>(
             // pivot; unchunked, a deep panel is re-read from L2 `pw` times).
             // Rows are independent, so every row's arithmetic is unchanged:
             // bit-identical to one call over all rows.
+            let mut w = wpool.take();
             // SAFETY: single task over all deep rows.
             unsafe {
                 apply_bk_panel_trailing(
@@ -472,6 +545,7 @@ fn ll_bk_panel_step<T: Scalar>(
                     ke,
                     nrow,
                     trailing_block,
+                    &mut w,
                 )
             };
         }
@@ -550,7 +624,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
-    store: &LlStore<T>,
+    pools: &BkPools<T>,
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
@@ -598,33 +672,56 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
         usize::MAX
     };
     let alpha = bk_alpha();
-    let mut d = vec![T::zero(); ncol];
-    let mut d_subdiag = vec![T::zero(); ncol];
-    let mut two_by_two = vec![false; ncol];
-    let mut lperm: Vec<usize> = (0..nrow).collect();
-    // 2x2 multiplier scratch (reused; only `[k+2, nrow)` is ever read each step).
-    let mut l1 = vec![T::zero(); nrow];
-    let mut l2 = vec![T::zero(); nrow];
-    // Per-panel deferred-GEMM scratch (reused across panels).
-    let mut l21buf: Vec<T> = Vec::new();
-    let mut gbuf: Vec<T> = Vec::new();
-    let mut tmp: Vec<T> = Vec::new();
-    // Per-step pivot-interchange partners of the current panel (`usize::MAX`
-    // = no interchange), consumed by the deep-row replay.
-    let mut deep_swaps = vec![usize::MAX; nb];
-    // Time-of-step in-panel multipliers (`nb x nb`, column = step), consumed
-    // by the deep-row replay (later interchanges permute the final panel's
-    // multiplier rows, so the finals cannot be read back).
-    let mut mult_snap = vec![T::zero(); nb * nb];
+    // The node's buffers, on loan from the factorization's pool and reset
+    // to the values they start from: the pivot outputs (`D`, the 2x2 flags,
+    // the row permutation; read back through the emit cells), the 2x2
+    // multiplier scratch (only `[k+2, nrow)` is read each step), the
+    // deferred-GEMM buffers, the per-step interchange partners
+    // (`usize::MAX` = none) and the time-of-step multipliers (`nb x nb`,
+    // column = step) the deep-row replay consumes, and the same set again
+    // for the lookahead's next-panel step.
+    let mut lent = pools.node.take();
+    let BkScratch {
+        d,
+        d_subdiag,
+        two_by_two,
+        lperm,
+        l1,
+        l2,
+        l21buf,
+        gbuf,
+        tmp,
+        deep_swaps,
+        mult_snap,
+        l1b,
+        l2b,
+        deep_swaps_b,
+        mult_snap_b,
+        tmp_w,
+    } = &mut *lent;
+    reset(d, ncol, T::zero());
+    reset(d_subdiag, ncol, T::zero());
+    reset(two_by_two, ncol, false);
+    lperm.clear();
+    lperm.extend(0..nrow);
+    for (v, len) in [
+        (&mut *l1, nrow),
+        (&mut *l2, nrow),
+        (&mut *l1b, nrow),
+        (&mut *l2b, nrow),
+    ] {
+        reset(v, len, T::zero());
+    }
+    reset(mult_snap, nb * nb, T::zero());
+    reset(mult_snap_b, nb * nb, T::zero());
+    reset(deep_swaps, nb, usize::MAX);
+    reset(deep_swaps_b, nb, usize::MAX);
+    for v in [&mut *l21buf, &mut *gbuf, &mut *tmp, &mut *tmp_w] {
+        v.clear();
+    }
     let mut local_perturbed = 0usize;
-    // Panel-lookahead state: a second scratch set for the joined next-panel
-    // step, the wide-Schur staging buffer, and the high-water mark of columns
-    // already factored ahead by the lookahead join.
-    let mut l1b = vec![T::zero(); nrow];
-    let mut l2b = vec![T::zero(); nrow];
-    let mut deep_swaps_b = vec![usize::MAX; nb];
-    let mut mult_snap_b = vec![T::zero(); nb * nb];
-    let mut tmp_w: Vec<T> = Vec::new();
+    // The high-water mark of columns already factored ahead by the lookahead
+    // join.
     let mut done_through = 0usize;
     let mut kb = 0;
     while kb < ncol {
@@ -640,14 +737,15 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 perturb_floor,
                 ll_cdiv_par,
                 kt.k.trailing_block,
-                &mut d,
-                &mut d_subdiag,
-                &mut two_by_two,
-                &mut lperm,
-                &mut l1,
-                &mut l2,
-                &mut deep_swaps,
-                &mut mult_snap,
+                &mut *d,
+                &mut *d_subdiag,
+                &mut *two_by_two,
+                &mut *lperm,
+                &mut *l1,
+                &mut *l2,
+                &mut *deep_swaps,
+                &mut *mult_snap,
+                &pools.w,
             );
             match r {
                 Ok(np) => local_perturbed += np,
@@ -714,7 +812,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 // sized for the (mt, cw_n, pw) strides.
                 unsafe {
                     lower_tile_gemm(
-                        &mut tmp,
+                        &mut *tmp,
                         mt,
                         cw_n,
                         pw,
@@ -738,7 +836,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 tmp_w.clear();
                 tmp_w.resize(mt * wide, T::zero());
                 let (left, right) = panel.split_at_mut(ke2 * nrow);
-                let (gbuf_ref, l21_ref, tw_ref) = (&gbuf, &l21buf, &mut tmp_w);
+                let (gbuf_ref, l21_ref, tw_ref) = (&gbuf, &l21buf, &mut *tmp_w);
                 let (step_res, ()) = rayon::join(
                     || {
                         ll_bk_panel_step(
@@ -751,14 +849,15 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                             perturb_floor,
                             ll_cdiv_par,
                             kt.k.trailing_block,
-                            &mut d,
-                            &mut d_subdiag,
-                            &mut two_by_two,
-                            &mut lperm,
-                            &mut l1b,
-                            &mut l2b,
-                            &mut deep_swaps_b,
-                            &mut mult_snap_b,
+                            &mut *d,
+                            &mut *d_subdiag,
+                            &mut *two_by_two,
+                            &mut *lperm,
+                            &mut *l1b,
+                            &mut *l2b,
+                            &mut *deep_swaps_b,
+                            &mut *mult_snap_b,
+                            &pools.w,
                         )
                     },
                     || {
@@ -809,7 +908,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                     // for the (mt, cw, pw) strides.
                     unsafe {
                         lower_tile_gemm(
-                            &mut tmp,
+                            &mut *tmp,
                             mt,
                             cw,
                             pw,
@@ -906,18 +1005,13 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     emit.inertia_pos.fetch_add(ipos, Ordering::Relaxed);
     emit.inertia_neg.fetch_add(ineg, Ordering::Relaxed);
     emit.inertia_zero.fetch_add(izero, Ordering::Relaxed);
-    // SAFETY: this thread owns supernode `s` and writes its cell exactly once.
-    unsafe {
-        store.set(
-            s,
-            LdltSlot {
-                d,
-                dsub: d_subdiag,
-                two: two_by_two,
-                lperm,
-            },
-        )
-    };
+    debug_assert!(
+        lperm[ncol..]
+            .iter()
+            .enumerate()
+            .all(|(i, &p)| p == ncol + i),
+        "the off-diagonal rows keep their order"
+    );
     Ok(())
 }
 
