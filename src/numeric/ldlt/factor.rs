@@ -36,6 +36,7 @@ pub(crate) fn factor_numeric<T: Scalar>(
     a: &CscMatrix<T>,
     scale: Option<&[f64]>,
     opts: &SolverSettings,
+    storage: Option<Vec<T>>,
 ) -> Result<LdltNumeric<T>, RslabError> {
     a.validate()?;
     let n = symb.n;
@@ -92,7 +93,7 @@ pub(crate) fn factor_numeric<T: Scalar>(
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),
-        || factor_left_looking(sym, sched, inp, opts),
+        || factor_left_looking(sym, sched, inp, opts, storage),
     )
 }
 
@@ -138,12 +139,17 @@ pub(super) struct LlEmitLdlt<T> {
 }
 
 impl<T: Scalar> LlEmitLdlt<T> {
-    fn new(sym: &SymbolicFactorization, sched: &LlSchedule) -> Self {
+    /// The emit state, the arena in `storage` (the buffer of an earlier
+    /// factor of this analysis) when given.
+    fn new(sym: &SymbolicFactorization, sched: &LlSchedule, storage: Option<Vec<T>>) -> Self {
         let nsuper = sym.supernodes.len();
         let n = sym.n;
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
-        let arena =
-            PanelArena::new((0..nsuper).map(|s| sched.rows(s).len() * sym.supernodes[s].ncol));
+        let sizes = (0..nsuper).map(|s| sched.rows(s).len() * sym.supernodes[s].ncol);
+        let arena = match storage {
+            Some(v) => PanelArena::reuse(v, sizes),
+            None => PanelArena::new(sizes),
+        };
         LlEmitLdlt {
             refcount,
             e_offset,
@@ -241,6 +247,7 @@ fn factor_left_looking<T: Scalar>(
     sched: &LlSchedule,
     inp: Input<T>,
     opts: &SolverSettings,
+    storage: Option<Vec<T>>,
 ) -> Result<LdltNumeric<T>, RslabError> {
     let n = sym.n;
     let perturb_floor = static_pivot_floor(inp.values(), opts);
@@ -251,7 +258,7 @@ fn factor_left_looking<T: Scalar>(
     // written once and read only by ancestors -> no synchronization needed beyond
     // the recursion structure (see `LlStore`).
     let store = LlStore::<T>::new(nsuper);
-    let emit = LlEmitLdlt::<T>::new(sym, sched);
+    let emit = LlEmitLdlt::<T>::new(sym, sched, storage);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let kt = opts.kernel();
     let factor_node = |s: usize| {

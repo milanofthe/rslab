@@ -31,6 +31,7 @@ use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::analysis::{
     analyze_with as analyze_pattern_with, SupernodalAnalysis,
 };
+use crate::numeric::supernodal::panel::PanelFactor;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
@@ -52,6 +53,9 @@ pub struct LdltSolver<T> {
     /// `factors` carries `D`, the permutation and the outcome with empty CSC
     /// arrays.
     pub(crate) plan: crate::numeric::supernodal::solve::SolvePlan<T>,
+    /// Whether it holds a factor: a failed [`LdltSymbolic::refactor`] leaves
+    /// it without one.
+    factored: bool,
 }
 
 impl<T: Scalar> LdltSolver<T> {
@@ -130,6 +134,11 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
         x: &mut [T],
         work: &mut crate::SolveWork<T>,
     ) -> Result<(), RslabError> {
+        if !self.factored {
+            return Err(RslabError::InvalidInput(
+                "the last refactorization failed; refactor before solving".to_string(),
+            ));
+        }
         let n = self.factors.n;
         // The sweeps take the block row-major: y[i * nrhs + c].
         let y = &mut work.y;
@@ -507,13 +516,93 @@ impl LdltSymbolic {
         a: &CscMatrix<T>,
         opts: &SolverSettings,
     ) -> Result<LdltSolver<T>, RslabError> {
+        let (factor, factors, scale, mut diagnostics, opts) = self.numeric(a, opts, None)?;
+        // Solve layout: supernodal panels plus the tree schedule; the CSC
+        // arrays are released so the factor is held once.
+        let t = crate::clock::Instant::now();
+        let plan = crate::numeric::supernodal::solve::SolvePlan::from_panels(
+            factor,
+            &factors.supernode_parent,
+            true,
+            opts.solve,
+        );
+        diagnostics.push(
+            "solve-layout",
+            t.elapsed().as_secs_f64() * 1e3,
+            0,
+            plan.bytes() as u64,
+        );
+        Ok(LdltSolver {
+            factors,
+            scale,
+            diagnostics,
+            solves: Default::default(),
+            solve_threads: opts.threads,
+            plan,
+            factored: true,
+        })
+    }
+
+    /// Factor `a` again into `ldlt`, a factor of this analysis (the next
+    /// Newton step): the numeric factorization of [`factor`](Self::factor),
+    /// its panels written into `ldlt`'s buffer and `ldlt`'s solve schedule
+    /// kept where pivoting left the rows unchanged. The same bits as a fresh
+    /// [`factor`](Self::factor). After an error `ldlt` holds no factor and
+    /// refuses to solve until a refactorization succeeds.
+    pub fn refactor<T: Scalar>(
+        &self,
+        a: &CscMatrix<T>,
+        opts: &SolverSettings,
+        ldlt: &mut LdltSolver<T>,
+    ) -> Result<(), RslabError> {
+        ldlt.factored = false;
+        let storage = ldlt.plan.take_vals();
+        let (factor, factors, scale, mut diagnostics, opts) =
+            self.numeric(a, opts, Some(storage))?;
+        let t = crate::clock::Instant::now();
+        ldlt.plan
+            .refill(factor, &factors.supernode_parent, true, opts.solve);
+        diagnostics.push(
+            "solve-layout",
+            t.elapsed().as_secs_f64() * 1e3,
+            0,
+            ldlt.plan.bytes() as u64,
+        );
+        ldlt.factors = factors;
+        ldlt.scale = scale;
+        ldlt.diagnostics = diagnostics;
+        ldlt.solve_threads = opts.threads;
+        ldlt.factored = true;
+        Ok(())
+    }
+
+    /// The numeric factorization both [`factor`](Self::factor) and
+    /// [`refactor`](Self::refactor) run: the panels of `L` (in `storage`
+    /// when given), `D` and the pivots, the equilibration, the diagnostics
+    /// and the settings pinned to the resolved thread count.
+    #[allow(clippy::type_complexity)]
+    fn numeric<T: Scalar>(
+        &self,
+        a: &CscMatrix<T>,
+        opts: &SolverSettings,
+        storage: Option<Vec<T>>,
+    ) -> Result<
+        (
+            PanelFactor<T>,
+            LdltPivots<T>,
+            Vec<f64>,
+            crate::diagnostics::Diagnostics,
+            SolverSettings,
+        ),
+        RslabError,
+    > {
         a.validate()?;
         let estimate = self.estimate_memory::<T>();
         // The concrete worker count actually used (realizes Threads::Auto).
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::supernodal::analysis::auto_threads(&self.symbolic, &estimate, cap)
         });
-        let opts = &opts.pinned(resolved_threads);
+        let opts = opts.pinned(resolved_threads);
         let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Ldlt);
         for w in &warnings {
             crate::logging::warn(&format!("ldlt settings: {w}"));
@@ -522,7 +611,7 @@ impl LdltSymbolic {
         let scale = equilibration(a, &opts.scaling)?;
         let scale_ms = t.elapsed().as_secs_f64() * 1e3;
         let t = crate::clock::Instant::now();
-        let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), opts)?;
+        let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), &opts, storage)?;
         let scale = scale.unwrap_or_else(|| vec![1.0; a.n]);
         let factor_nnz = (numeric.factor.nnz() - numeric.n_zeros) as u64;
         let factor_bytes = numeric.factor.bytes() as u64;
@@ -561,29 +650,7 @@ impl LdltSymbolic {
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             crate::logging::info(&format!("ldlt factor: {}", diagnostics.summary()));
         }
-        // Solve layout: supernodal panels plus the tree schedule; the CSC
-        // arrays are released so the factor is held once.
-        let t = crate::clock::Instant::now();
-        let plan = crate::numeric::supernodal::solve::SolvePlan::from_panels(
-            factor,
-            &factors.supernode_parent,
-            true,
-            opts.solve,
-        );
-        diagnostics.push(
-            "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
-            0,
-            plan.bytes() as u64,
-        );
-        Ok(LdltSolver {
-            factors,
-            scale,
-            diagnostics,
-            solves: Default::default(),
-            solve_threads: opts.threads,
-            plan,
-        })
+        Ok((factor, factors, scale, diagnostics, opts))
     }
 }
 
