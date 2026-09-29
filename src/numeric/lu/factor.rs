@@ -3,7 +3,7 @@
 //! finished panel into `L` and `U^T`.
 
 use super::factors::LuNumeric;
-use super::node::lu_ll_factor_node;
+use super::node::{lu_ll_factor_node, LuPools};
 use super::solver::LuSymbolic;
 use super::structure::LuStructure;
 use crate::numeric::supernodal::{Input, InputProgram};
@@ -28,12 +28,6 @@ fn finish_matching<T: Scalar>(fac: &mut LuNumeric<T>, lusym: &LuSymbolic) {
         fac.d_row = m.r.clone();
     }
 }
-
-/// One factored supernode's left-looking payload besides its arena slots: the
-/// within-front row permutation from partial pivoting (`rperm[i]` is the
-/// row-structure index physically at panel position `i`; identity on the
-/// trailing rows, only read by the emit).
-pub(super) type LuLlStore = crate::numeric::supernodal::SlotStore<Vec<usize>>;
 
 pub(super) struct LlEmit<T> {
     /// Number of consumers (ancestors that pull) still to come; freed at 0.
@@ -103,7 +97,6 @@ impl<T: Scalar> LlEmit<T> {
 /// upper triangle. Both get their off-block rows in elimination order.
 fn emit_and_free<T: Scalar>(
     k: usize,
-    store: &LuLlStore,
     emit: &LlEmit<T>,
     sym: &SymbolicFactorization,
     st: &LuStructure,
@@ -113,13 +106,12 @@ fn emit_and_free<T: Scalar>(
     let (first, ncol) = (snode.first_col, snode.ncol);
     let (rows_l, cols_u) = (st.rows_l(k), st.cols_u(k));
     let (nrow_l, nrow_u) = (rows_l.len(), cols_u.len());
-    // SAFETY: the owner of supernode `k` emits it exactly once, after its last
-    // updater has read the slots (refcount zero); nobody reads them afterwards.
-    let rperm = unsafe { store.take(k) };
+    // SAFETY (the slot accesses below): the owner of supernode `k` emits it
+    // exactly once, after its last updater has read the slots (refcount
+    // zero); nobody reads them afterwards.
     let eoff = emit.e_offset[k];
     debug_assert!(
-        (0..ncol).all(|p| unsafe { emit.eg(first + p) } == eoff + p)
-            && (0..ncol).all(|i| unsafe { emit.rg(rows_l[rperm[i]] as usize) } == eoff + i),
+        (0..ncol).all(|p| unsafe { emit.eg(first + p) } == eoff + p),
         "the diagonal block is in elimination order"
     );
     // `U^T`'s diagonal block from the upper triangle of the `L` slot.
@@ -136,7 +128,7 @@ fn emit_and_free<T: Scalar>(
     // The off-block rows in elimination indices, into the arenas' row slots.
     let l_rows = unsafe { emit.l_arena.rows_mut(k) };
     for (r, i) in l_rows.iter_mut().zip(ncol..nrow_l) {
-        *r = unsafe { emit.rg(rows_l[rperm[i]] as usize) } as u32;
+        *r = unsafe { emit.rg(rows_l[i] as usize) } as u32;
     }
     let u_rows = unsafe { emit.u_arena.rows_mut(k) };
     for (r, &g) in u_rows.iter_mut().zip(&cols_u[ncol..nrow_u]) {
@@ -163,8 +155,7 @@ fn factor_lu_left_looking<T: Scalar>(
     storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
 ) -> Result<LuNumeric<T>, RslabError> {
     let n = sym.n;
-    let nsuper = sym.supernodes.len();
-    let store = LuLlStore::new(nsuper);
+    let pools = LuPools::<T>::new();
     let emit = LlEmit::<T>::new(sym, sched, st, storage);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let factor_node = |s: usize| {
@@ -174,16 +165,15 @@ fn factor_lu_left_looking<T: Scalar>(
             inp,
             sched,
             st,
-            &store,
+            &pools,
             &emit,
             perturb_floor,
             &n_perturbed_atomic,
             kt,
         )
     };
-    let emit_free = |k: usize| emit_and_free(k, &store, &emit, sym, st, drop_tol);
+    let emit_free = |k: usize| emit_and_free(k, &emit, sym, st, drop_tol);
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
-    drop(store); // panels moved into the emit cells; release the shells
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);

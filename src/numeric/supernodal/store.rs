@@ -1,40 +1,6 @@
-//! Per-supernode storage of the left-looking factorizations: the slot store
-//! written once by a node's owner and read by its ancestors, the per-index
-//! cells of the emit state, and the raw panel pointer for disjoint parallel
-//! writes.
-
-/// One `UnsafeCell` payload per supernode, written exactly once by the
-/// supernode's owner and read only by nodes that are (transitively) its
-/// assembly-tree ancestors - the single-writer-before-readers discipline the
-/// left-looking schedule guarantees. `free` resets a slot once its last
-/// consumer is done.
-pub(crate) struct SlotStore<P> {
-    slots: Vec<std::cell::UnsafeCell<P>>,
-}
-
-// SAFETY: single-writer-before-readers, disjoint indices (see the type doc).
-unsafe impl<P: Send> Sync for SlotStore<P> {}
-
-impl<P: Default> SlotStore<P> {
-    pub fn new(nsuper: usize) -> Self {
-        SlotStore {
-            slots: (0..nsuper)
-                .map(|_| std::cell::UnsafeCell::new(P::default()))
-                .collect(),
-        }
-    }
-
-    /// SAFETY: only the owner of supernode `s` calls this, exactly once.
-    pub unsafe fn set(&self, s: usize, p: P) {
-        *self.slots[s].get() = p;
-    }
-
-    /// Move the panel out, leaving the default in its place. SAFETY: the
-    /// owner of supernode `k`, after its last reader is done.
-    pub unsafe fn take(&self, k: usize) -> P {
-        std::mem::take(&mut *self.slots[k].get())
-    }
-}
+//! Per-supernode storage of the left-looking factorizations: the per-index
+//! cells of the emit state, the raw panel pointer for disjoint parallel
+//! writes, and the scratch pool the node kernels borrow from.
 
 /// Raw base pointer of a panel buffer, smuggled across rayon workers so each
 /// task can write its own **disjoint row range** of a column-major panel. Safe

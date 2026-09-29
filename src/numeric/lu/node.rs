@@ -2,18 +2,56 @@
 //! of its factored descendants (`cmod`, into both `L` and `U12`), then the
 //! blocked panel LU with threshold partial pivoting.
 
-use super::factor::{LlEmit, LuLlStore};
+use super::factor::LlEmit;
 use super::structure::LuStructure;
 use crate::numeric::supernodal::Input;
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::perturb_pivot;
+use crate::numeric::supernodal::ScratchPool;
 use crate::numeric::supernodal::{Li, LlSchedule, PanelPtr};
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// One running [`lu_ll_factor_node`]'s buffers: the within-front row
+/// permutation, the panel's pivot reciprocals and the sequential `cmod`'s
+/// update blocks.
+pub(super) struct LuScratch<T> {
+    rperm: Vec<usize>,
+    pinv_blk: Vec<T>,
+    lupd: Vec<T>,
+    uupd: Vec<T>,
+}
+
+impl<T> Default for LuScratch<T> {
+    fn default() -> Self {
+        LuScratch {
+            rperm: Vec::new(),
+            pinv_blk: Vec::new(),
+            lupd: Vec::new(),
+            uupd: Vec::new(),
+        }
+    }
+}
+
+/// The scratch pools of one LU factorization: the node kernel's buffers per
+/// running node and the tiled `cmod`'s update block per slab.
+pub(super) struct LuPools<T> {
+    pub(super) node: ScratchPool<LuScratch<T>>,
+    pub(super) slab: ScratchPool<Vec<T>>,
+}
+
+impl<T> LuPools<T> {
+    pub(super) fn new() -> Self {
+        LuPools {
+            node: ScratchPool::new(),
+            slab: ScratchPool::new(),
+        }
+    }
+}
 
 /// Apply a factored NB-wide panel transform (column scale by `pinv`, within-panel
 /// rank-1 against the stored `U11`) to rows `[r0, r1)` of a column-major buffer
@@ -63,7 +101,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     inp: Input<T>,
     sched: &LlSchedule,
     st: &LuStructure,
-    store: &LuLlStore,
+    pools: &LuPools<T>,
     emit: &LlEmit<T>,
     perturb_floor: Option<f64>,
     n_perturbed: &AtomicUsize,
@@ -83,8 +121,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // `nrow_u x ncol`; the factorization writes its off-block rows, `U12[p, t]`
     // at `ut[p * nrow_u + ncol + t]` (row `p` of `U` is column `p` of the
     // panel), and the emit fills the diagonal block.
-    // SAFETY: this task owns supernode `s`; nobody reads the slots before they
-    // are published by `store.set` at the end of the node.
+    // SAFETY: this task owns supernode `s`; nobody reads its slots before the
+    // node is done (its ancestors start after it).
     let lbuf: &mut [T] = unsafe { emit.l_arena.slot_mut(s) };
     let ut: &mut [T] = unsafe { emit.u_arena.slot_mut(s) };
     debug_assert_eq!(lbuf.len(), nrow_l * ncol);
@@ -148,7 +186,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             .for_each(|(ti, slab)| {
                 let c0 = ti * tile_w;
                 let c1 = (c0 + tile_w).min(ncol);
-                let mut lupd: Vec<T> = Vec::new();
+                let mut lupd = pools.slab.take();
                 for sp in spans {
                     let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
                     let (p0l, (p0u, p1u)) = (sp.l.0, sp.u);
@@ -211,7 +249,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 } else {
                     Li::MAX
                 };
-                let mut uupd: Vec<T> = Vec::new();
+                let mut uupd = pools.slab.take();
                 for sp in spans {
                     let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
                     let ((p0l, p1l), p1u) = (sp.l, sp.u.1);
@@ -267,8 +305,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     }
 
     // Sequential per-update cmod (small nodes / narrow panels).
-    let mut lupd: Vec<T> = Vec::new();
-    let mut uupd: Vec<T> = Vec::new();
+    let mut lent = pools.node.take();
+    let LuScratch {
+        rperm,
+        pinv_blk,
+        lupd,
+        uupd,
+    } = &mut *lent;
     for sp in spans.iter().filter(|_| !tiled) {
         let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
         let ((p0l, p1l), (p0u, p1u)) = (sp.l, sp.u);
@@ -413,9 +456,11 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // row-structure index physically at position `i`; the trailing rows are never
     // interchanged, so the contribution rows `Ok` ancestors pull are unaffected
     // and `cmod` needs no permutation awareness.
-    let mut rperm: Vec<usize> = (0..nrow_l).collect();
+    rperm.clear();
+    rperm.extend(0..nrow_l);
     // Pivot reciprocals of the current panel, reused by the parallel trailing apply.
-    let mut pinv_blk: Vec<T> = vec![T::zero(); nb_cdiv];
+    pinv_blk.clear();
+    pinv_blk.resize(nb_cdiv, T::zero());
     let mut kb = 0;
     while kb < ncol {
         kt.interrupted()?;
@@ -498,23 +543,31 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 let pp = PanelPtr(lbuf.as_mut_ptr());
                 let nthreads = rayon::current_num_threads().max(1);
                 let cs = cn_l.div_ceil(nthreads).max(1);
-                let ranges: Vec<(usize, usize)> = (0..nthreads)
-                    .map(|c| {
-                        let r0 = ncol + c * cs;
-                        (r0.min(nrow_l), (r0 + cs).min(nrow_l))
-                    })
-                    .filter(|(a, b)| a < b)
-                    .collect();
                 // Capture the whole `pp` (Send+Sync) - destructure inside so Rust
                 // does not disjoint-capture the bare `*mut T`.
-                ranges.par_iter().for_each(|&(r0, r1)| {
+                (0..nthreads).into_par_iter().for_each(|c| {
+                    let r0 = (ncol + c * cs).min(nrow_l);
+                    let r1 = (r0 + cs).min(nrow_l);
+                    if r0 >= r1 {
+                        return;
+                    }
                     // SAFETY: disjoint row chunk; see `apply_panel_trailing`.
-                    unsafe { apply_panel_trailing(pp.get(), nrow_l, kb, pw, &pinv_blk, r0, r1) };
+                    unsafe {
+                        apply_panel_trailing(pp.get(), nrow_l, kb, pw, &pinv_blk[..], r0, r1)
+                    };
                 });
             } else {
                 // SAFETY: single-threaded over all trailing rows.
                 unsafe {
-                    apply_panel_trailing(lbuf.as_mut_ptr(), nrow_l, kb, pw, &pinv_blk, ncol, nrow_l)
+                    apply_panel_trailing(
+                        lbuf.as_mut_ptr(),
+                        nrow_l,
+                        kb,
+                        pw,
+                        &pinv_blk[..],
+                        ncol,
+                        nrow_l,
+                    )
                 };
             }
         }
@@ -664,8 +717,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             emit.perm_row.set(eoff + p, sym.perm[g_row]);
         }
     }
-    // SAFETY: this thread owns `s`, writes its cells exactly once.
-    unsafe { store.set(s, rperm) };
+    debug_assert!(
+        rperm[ncol..]
+            .iter()
+            .enumerate()
+            .all(|(i, &p)| p == ncol + i),
+        "the trailing rows are never interchanged"
+    );
     Ok(())
 }
 
