@@ -44,7 +44,7 @@ mod symbolic;
 #[cfg(test)]
 mod tests;
 
-use factor::{diagnostics_flops, factor_csc, factor_impl, row_scale_inv};
+use factor::{diagnostics_flops, factor_csc, factor_impl, row_scale_inv_into};
 pub use settings::{KluParallel, KluSettings};
 
 const UNSET: usize = usize::MAX;
@@ -209,6 +209,11 @@ struct KluFactors<T> {
     /// exact work/critical-path plan of [`compute_replay_plan`].
     pipelined: Vec<(usize, usize)>,
     par_refactor: bool,
+    /// The next refactor's row scaling, swapped with `rs_inv` once it
+    /// succeeds, and the sequential replay's work vector: kept so a
+    /// refactor allocates nothing.
+    rs_next: Vec<f64>,
+    replay_x: Vec<T>,
 }
 
 /// KLU solver handle: factor (or analyze+factor), then solve / refactor.

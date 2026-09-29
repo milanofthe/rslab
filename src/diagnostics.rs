@@ -312,6 +312,21 @@ impl Diagnostics {
             bytes,
         });
     }
+    /// Record a stage that repeats (a refactorization per Newton step): its
+    /// latest run replaces the one before, so the record stays one entry
+    /// however often the stage runs.
+    pub fn set_latest(&mut self, name: &'static str, wall_ms: f64, flops: u64, bytes: u64) {
+        let stage = StageReport {
+            name,
+            wall_ms,
+            flops,
+            bytes,
+        };
+        match self.stages.iter_mut().find(|s| s.name == name) {
+            Some(s) => *s = stage,
+            None => self.stages.push(stage),
+        }
+    }
     /// The one-line account the `Info` log carries per factorization.
     pub fn summary(&self) -> String {
         let mut s = format!(

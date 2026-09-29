@@ -213,6 +213,7 @@ plain_knobs! {
     "solve_block": usize => solve.block;
     "solve_ancestor_chunk": usize => solve.ancestor_chunk;
     "solve_apex_min_work": usize => solve.apex_min_work;
+    "solve_par_min_work": usize => solve.par_min_work;
 }
 
 /// Settings of the symmetric LDL^T and the unsymmetric LU factorizations.
@@ -342,10 +343,12 @@ plain_knobs! {
 ///     times their plane copies (64), in tiles of this edge (256).
 /// use_gemm_schur : bool, default True
 ///     SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
-/// solve_leaf_subtrees, solve_block, solve_ancestor_chunk, solve_apex_min_work : int
+/// solve_leaf_subtrees, solve_block, solve_ancestor_chunk, solve_apex_min_work, solve_par_min_work : int
 ///     Triangular solves: leaf subtrees of the parallel sweeps (128), column
 ///     block (512) and columns per task (32) of the ancestor sweeps, panel
-///     entries from which an ancestor uses the blocked sweep (262 144).
+///     entries from which an ancestor uses the blocked sweep (262 144), and
+///     the work (panel entries times right-hand sides, up to four) from which
+///     a sweep runs on the thread pool at all (1 048 576).
 #[pyclass(name = "Settings", module = "rslab")]
 #[derive(Clone, Default)]
 pub struct PySettings {

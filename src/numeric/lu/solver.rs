@@ -636,7 +636,14 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
     /// gathers through the row side, sweeps `L` forward and `U` backward and
     /// scatters through the column side; `A^T x = b` is the mirror image,
     /// `U^T` forward and `L^T` backward.
-    fn solve_raw(&self, b: &[T], nrhs: usize, transpose: bool) -> Result<Vec<T>, RslabError> {
+    fn solve_raw_into(
+        &self,
+        b: &[T],
+        nrhs: usize,
+        transpose: bool,
+        x: &mut [T],
+        work: &mut crate::SolveWork<T>,
+    ) -> Result<(), RslabError> {
         let f = &self.factors;
         let n = f.n;
         let (gather, g_scale, scatter, s_scale) = if transpose {
@@ -645,28 +652,30 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
             (&f.perm_row, &f.d_row, &f.perm, &f.d_col)
         };
         // The sweeps take the block row-major: y[e * nrhs + c].
-        let mut y = vec![T::zero(); n * nrhs];
+        let y = &mut work.y;
+        y.clear();
+        y.resize(n * nrhs, T::zero());
         for (e, &orig) in gather.iter().enumerate() {
             let s = T::from_real(g_scale[orig]);
             for c in 0..nrhs {
                 y[e * nrhs + c] = b[c * n + orig] * s;
             }
         }
+        let plan = &mut work.plan;
         if transpose {
-            self.plan_u.forward(nrhs, &mut y);
-            self.plan_l.backward(nrhs, &mut y);
+            self.plan_u.forward(nrhs, y, plan);
+            self.plan_l.backward(nrhs, y, plan);
         } else {
-            self.plan_l.forward(nrhs, &mut y);
-            self.plan_u.backward(nrhs, &mut y);
+            self.plan_l.forward(nrhs, y, plan);
+            self.plan_u.backward(nrhs, y, plan);
         }
-        let mut out = vec![T::zero(); n * nrhs];
         for (e, &orig) in scatter.iter().enumerate() {
             let s = T::from_real(s_scale[orig]);
             for c in 0..nrhs {
-                out[c * n + orig] = y[e * nrhs + c] * s;
+                x[c * n + orig] = y[e * nrhs + c] * s;
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
