@@ -45,6 +45,10 @@ pub(crate) struct LlSchedule {
     rs: Vec<Li>,
     ul_off: Vec<usize>,
     ul: Vec<Li>,
+    /// The assembly forest for the driver: each supernode's parent
+    /// (`usize::MAX` for a root) and the leaves, depth first from the roots.
+    pub(crate) parent: Vec<usize>,
+    pub(crate) leaves: Vec<usize>,
 }
 
 impl LlSchedule {
@@ -55,6 +59,8 @@ impl LlSchedule {
             + vec_bytes(&self.rs)
             + vec_bytes(&self.ul_off)
             + vec_bytes(&self.ul)
+            + vec_bytes(&self.parent)
+            + vec_bytes(&self.leaves)
     }
 
     /// Rows of supernode `s`: `rows(s)[0..ncol]` are its eliminated columns
@@ -141,11 +147,40 @@ impl LlSchedule {
             ul[cursor[s]] = k as Li;
             cursor[s] += 1;
         }));
+        let (parent, leaves) = forest(sym);
         LlSchedule {
             rs_off,
             rs,
             ul_off,
             ul,
+            parent,
+            leaves,
         }
     }
+}
+
+/// Parents (`usize::MAX` for a root) and leaves of the assembly forest, the
+/// leaves depth first from the roots.
+fn forest(sym: &crate::symbolic::SymbolicFactorization) -> (Vec<usize>, Vec<usize>) {
+    let nodes = &sym.supernodes;
+    let mut is_child = vec![false; nodes.len()];
+    for sn in nodes {
+        for &c in &sn.children {
+            is_child[c] = true;
+        }
+    }
+    let mut parent = vec![usize::MAX; nodes.len()];
+    let mut leaves = Vec::new();
+    let mut stack: Vec<usize> = (0..nodes.len()).filter(|&s| !is_child[s]).collect();
+    while let Some(s) = stack.pop() {
+        if nodes[s].children.is_empty() {
+            leaves.push(s);
+        }
+        for &c in &nodes[s].children {
+            debug_assert!(c < s, "children come before their parent");
+            parent[c] = s;
+            stack.push(c);
+        }
+    }
+    (parent, leaves)
 }
