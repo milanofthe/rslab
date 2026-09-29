@@ -184,7 +184,10 @@ impl<T: Scalar> PanelArena<T> {
         reused: bool,
     ) -> Self {
         let PanelStorage { mut vals, mut rows } = storage;
-        let (mut slot_ptr, mut row_slot_ptr) = (vec![0usize], vec![0usize]);
+        let cap = shapes.size_hint().0 + 1;
+        let (mut slot_ptr, mut row_slot_ptr) = (Vec::with_capacity(cap), Vec::with_capacity(cap));
+        slot_ptr.push(0usize);
+        row_slot_ptr.push(0usize);
         for (w, m) in shapes {
             let (m, v) = if w == 0 { (0, 0) } else { (m, (w + m) * w) };
             slot_ptr.push(slot_ptr.last().copied().unwrap_or(0) + v);
@@ -295,8 +298,12 @@ impl<T: Scalar> PanelArena<T> {
         ncols: impl Iterator<Item = usize>,
         mut outs: impl FnMut(usize) -> PanelOut,
     ) -> (PanelFactor<T>, usize) {
-        let mut sn_col: Vec<u32> = vec![0];
-        let (mut val_ptr, mut row_ptr) = (vec![0usize], vec![0usize]);
+        let cap = ncols.size_hint().0 + 1;
+        let mut sn_col: Vec<u32> = Vec::with_capacity(cap);
+        let (mut val_ptr, mut row_ptr) = (Vec::with_capacity(cap), Vec::with_capacity(cap));
+        sn_col.push(0);
+        val_ptr.push(0usize);
+        row_ptr.push(0usize);
         let mut zeros = 0usize;
         let (mut dst, mut rdst) = (0usize, 0usize);
         let mut moved = false;

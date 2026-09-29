@@ -717,7 +717,8 @@ fn exact_structure_bounds_the_factor() {
         let opts = SolverSettings::default().with_matching(matching);
         let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
         assert_eq!(lusym.has_matching(), matching);
-        let num = factor_general_lu_numeric(&lusym, &a, &opts, None).unwrap();
+        let num = factor_general_lu_numeric(&lusym, &a, &opts, None, &super::node::LuPools::new())
+            .unwrap();
         let (sym, _) = lusym.symb.sym_and_levels().unwrap();
         let sched = lusym.symb.ll_schedule().unwrap();
         let st = &lusym.structure;

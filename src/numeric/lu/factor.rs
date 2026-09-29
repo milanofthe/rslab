@@ -153,9 +153,9 @@ fn factor_lu_left_looking<T: Scalar>(
     drop_tol: Option<f64>,
     kt: KernelTuning,
     storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
+    pools: &LuPools<T>,
 ) -> Result<LuNumeric<T>, RslabError> {
     let n = sym.n;
-    let pools = LuPools::<T>::new();
     let emit = LlEmit::<T>::new(sym, sched, st, storage);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let factor_node = |s: usize| {
@@ -165,7 +165,7 @@ fn factor_lu_left_looking<T: Scalar>(
             inp,
             sched,
             st,
-            &pools,
+            pools,
             &emit,
             perturb_floor,
             &n_perturbed_atomic,
@@ -214,6 +214,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     a: &GeneralCsc<T>,
     opts: &SolverSettings,
     storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
+    pools: &LuPools<T>,
 ) -> Result<LuNumeric<T>, RslabError> {
     a.validate()?;
     let n = lusym.n;
@@ -325,6 +326,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
                 opts.drop_tol,
                 opts.kernel(),
                 storage,
+                pools,
             )
         },
     )?;

@@ -6,7 +6,7 @@
 //! the thread pool adds only what the pool's own work queues allocate, now
 //! and then.
 //!
-//! One test in this binary, so no other test allocates alongside.
+//! The strict counts are per thread, so the tests here run side by side.
 
 use rslab::prelude::*;
 use rslab::{GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSymbolic, LuSymbolic, SolveWork};
@@ -195,5 +195,37 @@ fn a_warm_newton_loop_allocates_nothing() {
         let b: Vec<f64> = (0..n).map(|i| 1.0 - (i % 5) as f64).collect();
         assert_eq!(lu_par.solve(&b).unwrap(), lu.solve(&b).unwrap());
         assert_eq!(ldlt_par.solve(&b).unwrap(), ldlt.solve(&b).unwrap());
+    }
+}
+
+/// A warm supernodal refactor allocates a fixed handful per call (its
+/// result tables, the pivot vectors, the diagnostics), however many
+/// supernodes it walks: the kernels' scratch lives in the solver.
+#[test]
+fn a_warm_supernodal_refactor_allocates_a_fixed_handful() {
+    let opts = SolverSettings {
+        threads: rslab::Threads::Fixed(1),
+        ..SolverSettings::default()
+    };
+    for m in [6, 12] {
+        let (n, r, c, v) = grid(m, false);
+        let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
+        let sym = LuSymbolic::analyze(&a, &opts).unwrap();
+        let mut lu = sym.factor(&a, &opts).unwrap();
+        let lu_count = allocs(mine, || sym.refactor(&a, &opts, &mut lu).unwrap());
+        let (n, r, c, v) = grid(m, true);
+        let s = CscMatrix::from_triplets(n, &r, &c, &v).unwrap();
+        let dsym = LdltSymbolic::analyze(&s, &opts).unwrap();
+        let mut ldlt = dsym.factor(&s, &opts).unwrap();
+        let ldlt_count = allocs(mine, || dsym.refactor(&s, &opts, &mut ldlt).unwrap());
+        // 16 and 14 per call today, the same at both sizes.
+        assert!(
+            lu_count <= 20 * 100,
+            "LU n={n}: {lu_count} per 100 refactors"
+        );
+        assert!(
+            ldlt_count <= 20 * 100,
+            "LDLT n={n}: {ldlt_count} per 100 refactors"
+        );
     }
 }

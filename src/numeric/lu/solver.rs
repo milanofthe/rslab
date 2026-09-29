@@ -292,7 +292,8 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
     ) -> Result<LuSolver<T>, RslabError> {
-        let (l, ut, factors, nnz, mut diagnostics, opts) = self.numeric(a, opts, None)?;
+        let pools = super::node::LuPools::new();
+        let (l, ut, factors, nnz, mut diagnostics, opts) = self.numeric(a, opts, None, &pools)?;
         // Solve layout: supernodal panels of `L` and `U^T` plus the tree
         // schedule; the CSC arrays are released so the factor is held once.
         let t = crate::clock::Instant::now();
@@ -323,6 +324,9 @@ impl LuSymbolic {
             diagnostics,
             solves: Default::default(),
             factored: true,
+            // A one-time factor does not hold on to the scratch; the first
+            // refactorization grows its own and keeps it.
+            pools: super::node::LuPools::new(),
         })
     }
 
@@ -340,7 +344,8 @@ impl LuSymbolic {
     ) -> Result<(), RslabError> {
         lu.factored = false;
         let storage = (lu.plan_l.take_storage(), lu.plan_u.take_storage());
-        let (l, ut, factors, nnz, mut diagnostics, opts) = self.numeric(a, opts, Some(storage))?;
+        let (l, ut, factors, nnz, mut diagnostics, opts) =
+            self.numeric(a, opts, Some(storage), &lu.pools)?;
         let t = crate::clock::Instant::now();
         lu.plan_l
             .refill(l, &factors.supernode_parent, true, opts.solve);
@@ -370,6 +375,7 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
         storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
+        pools: &super::node::LuPools<T>,
     ) -> Result<
         (
             PanelFactor<T>,
@@ -391,7 +397,7 @@ impl LuSymbolic {
             crate::logging::warn(&format!("lu settings: {w}"));
         }
         let t = crate::clock::Instant::now();
-        let numeric = factor_general_lu_numeric(self, a, &opts, storage)?;
+        let numeric = factor_general_lu_numeric(self, a, &opts, storage, pools)?;
         let factor_ms = t.elapsed().as_secs_f64() * 1e3;
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
@@ -644,6 +650,10 @@ pub struct LuSolver<T> {
     /// Whether it holds a factor: a failed [`LuSymbolic::refactor`] leaves
     /// it without one.
     factored: bool,
+    /// The kernels' scratch: empty after [`LuSymbolic::factor`], grown by
+    /// the first refactorization and kept for the next ones, which then
+    /// allocate nothing of their own.
+    pools: super::node::LuPools<T>,
 }
 
 impl<T: Scalar> LuSolver<T> {

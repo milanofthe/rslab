@@ -38,6 +38,7 @@ pub(crate) fn factor_numeric<T: Scalar>(
     scale: Option<&[f64]>,
     opts: &SolverSettings,
     storage: Option<PanelStorage<T>>,
+    pools: &BkPools<T>,
 ) -> Result<LdltNumeric<T>, RslabError> {
     a.validate()?;
     let n = symb.n;
@@ -94,7 +95,7 @@ pub(crate) fn factor_numeric<T: Scalar>(
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),
-        || factor_left_looking(sym, sched, inp, opts, storage),
+        || factor_left_looking(sym, sched, inp, opts, storage, pools),
     )
 }
 
@@ -233,6 +234,7 @@ fn factor_left_looking<T: Scalar>(
     inp: Input<T>,
     opts: &SolverSettings,
     storage: Option<PanelStorage<T>>,
+    pools: &BkPools<T>,
 ) -> Result<LdltNumeric<T>, RslabError> {
     let n = sym.n;
     let perturb_floor = static_pivot_floor(inp.values(), opts);
@@ -241,7 +243,6 @@ fn factor_left_looking<T: Scalar>(
     // each node after its subtree (whose panels are its only updaters). Panels are
     // written once and read only by ancestors -> no synchronization needed beyond
     // the forest's dependency order.
-    let pools = BkPools::<T>::new();
     let emit = LlEmitLdlt::<T>::new(sym, sched, storage);
     let n_perturbed_atomic = AtomicUsize::new(0);
     let kt = opts.kernel();
@@ -251,7 +252,7 @@ fn factor_left_looking<T: Scalar>(
             sym,
             inp,
             sched,
-            &pools,
+            pools,
             &emit,
             perturb_floor,
             &n_perturbed_atomic,
