@@ -504,6 +504,9 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
     } else {
         k.panel_nb
     };
+    // A node narrower than a panel is one panel: its scratch (the `nb x nb`
+    // multiplier snapshots) sized to its width, the same blocking.
+    let nb = nb.min(ncol.max(1));
     let (mut l21, mut tmp, mut tmp_w) = (0, 0, 0);
     let mut kb = 0;
     while kb < ncol {
@@ -582,6 +585,9 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     } else {
         kt.k.panel_nb
     };
+    // A node narrower than a panel is one panel: its scratch (the `nb x nb`
+    // multiplier snapshots) sized to its width, the same blocking.
+    let nb = nb.min(ncol.max(1));
     // Same join-steal guard as cmod: a small node must not fork inside its
     // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
     // foreign subtree work and stalls this node's dependents. Total cdiv
