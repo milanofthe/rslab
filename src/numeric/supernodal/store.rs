@@ -24,12 +24,6 @@ impl<P: Default> SlotStore<P> {
         }
     }
 
-    /// SAFETY: `k` must be a fully-factored descendant of the current node
-    /// (its owner's write happened-before this read).
-    pub unsafe fn get(&self, k: usize) -> &P {
-        &*self.slots[k].get()
-    }
-
     /// SAFETY: only the owner of supernode `s` calls this, exactly once.
     pub unsafe fn set(&self, s: usize, p: P) {
         *self.slots[s].get() = p;
@@ -112,5 +106,72 @@ impl<V> Cells<V> {
     #[inline]
     pub unsafe fn get_mut(&self, i: usize) -> &mut V {
         &mut *self.0[i].get()
+    }
+}
+
+impl<V> Cells<V> {
+    /// The cells `r` as one slice (`UnsafeCell<V>` is laid out as `V`).
+    ///
+    /// # Safety
+    /// Every write to `r` happened-before this read, and none follows while
+    /// the slice lives.
+    #[inline]
+    pub unsafe fn slice(&self, r: std::ops::Range<usize>) -> &[V] {
+        std::slice::from_raw_parts(self.0[r.clone()].as_ptr() as *const V, r.len())
+    }
+}
+
+/// Scratch the node kernels borrow, one object per running kernel: taken on
+/// entry and given back on exit, so the kernels of one factorization share
+/// a handful of objects (about one per worker) whose buffers stay grown,
+/// instead of allocating their own per supernode.
+pub(crate) struct ScratchPool<S>(std::sync::Mutex<Vec<S>>);
+
+impl<S: Default> ScratchPool<S> {
+    pub fn new() -> Self {
+        ScratchPool(std::sync::Mutex::new(Vec::new()))
+    }
+
+    /// A scratch object for the caller until the guard drops.
+    pub fn take(&self) -> Lent<'_, S> {
+        let s = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|mut v| v.pop())
+            .unwrap_or_default();
+        Lent {
+            pool: self,
+            s: std::mem::ManuallyDrop::new(s),
+        }
+    }
+}
+
+/// A [`ScratchPool`] object on loan, returned when dropped.
+pub(crate) struct Lent<'p, S> {
+    pool: &'p ScratchPool<S>,
+    s: std::mem::ManuallyDrop<S>,
+}
+
+impl<S> std::ops::Deref for Lent<'_, S> {
+    type Target = S;
+    fn deref(&self) -> &S {
+        &self.s
+    }
+}
+
+impl<S> std::ops::DerefMut for Lent<'_, S> {
+    fn deref_mut(&mut self) -> &mut S {
+        &mut self.s
+    }
+}
+
+impl<S> Drop for Lent<'_, S> {
+    fn drop(&mut self) {
+        // SAFETY: the object is taken once, here, and never touched again.
+        let s = unsafe { std::mem::ManuallyDrop::take(&mut self.s) };
+        if let Ok(mut v) = self.pool.0.lock() {
+            v.push(s);
+        }
     }
 }
