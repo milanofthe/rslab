@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 1.0.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 1.1.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
