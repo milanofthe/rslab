@@ -915,9 +915,13 @@ impl<T: Scalar> SolvePlan<T> {
             if node_par {
                 Self::each(par, level, &mut work.level[..level.len()], |i, &s, sc| {
                     // SAFETY: see `Shared`; the node writes only its own
-                    // columns, its off-block rows go to its accumulator.
+                    // columns, its off-block rows go to its accumulator. A
+                    // large node keeps its row tasks inside the level's
+                    // (the same arithmetic either way): one large node per
+                    // level otherwise ran on one thread while the others
+                    // finished their small ones.
                     let yv = unsafe { shared.slice() };
-                    sweep(i, s, yv, false, sc);
+                    sweep(i, s, yv, par, sc);
                 });
             } else {
                 for (i, &s) in level.iter().enumerate() {
@@ -949,15 +953,16 @@ impl<T: Scalar> SolvePlan<T> {
                 } else if nr == 1 {
                     self.bwd_node(s, x, &mut sc.g);
                 } else {
-                    self.bwd_node_block(s, nr, x, &mut sc.g, &mut sc.accv);
+                    self.bwd_node_block(s, nr, x, &mut sc.g);
                 }
             };
             if node_par {
                 Self::each(par, level, &mut work.level[..level.len()], |_, &s, sc| {
                     // SAFETY: see `Shared`; the node writes only its own
-                    // columns and reads final ancestor columns.
+                    // columns and reads final ancestor columns. Its row
+                    // tasks nest as in the forward sweep.
                     let xv = unsafe { shared.slice() };
-                    sweep(s, xv, false, sc);
+                    sweep(s, xv, par, sc);
                 });
             } else {
                 for &s in level {
@@ -1006,23 +1011,8 @@ impl<T: Scalar> SolvePlan<T> {
             let (vhead, vtail) = v.split_at_mut(je * nr);
             let vhead: &[T] = vhead;
             let product = |g: usize, out: &mut [T]| {
-                for k in jb + g * chunk..(jb + (g + 1) * chunk).min(je) {
-                    let vk = &vhead[k * nr..(k + 1) * nr];
-                    let col = &panel[k * ld + je..(k + 1) * ld];
-                    if nr == 1 {
-                        // `col[i] * vk`, the block branch's operand order: the fused complex
-                        // multiply-add is not symmetric in its factors (the imaginary part
-                        // nests the two cross products in operand order), so the other order
-                        // made a one-column solve differ from a block column under FMA.
-                        for (o, &l) in out.iter_mut().zip(col) {
-                            *o = fmadd(l, vk[0], *o);
-                        }
-                    } else {
-                        for (row, &l) in out.chunks_exact_mut(nr).zip(col) {
-                            axpy(row, l, vk);
-                        }
-                    }
-                }
+                let ks = jb + g * chunk..(jb + (g + 1) * chunk).min(je);
+                panel_product(out, panel, ld, je, vhead, nr, ks);
             };
             let rchunk = (rows / (4 * rayon::current_num_threads().max(1))).max(64) * nr;
             let reduce = |ci: usize, vr: &mut [T], partial: &[T]| {
@@ -1110,33 +1100,14 @@ impl<T: Scalar> SolvePlan<T> {
 
     fn fwd_node_block(&self, s: u32, nr: usize, y: &mut [T], acc: &mut [T], t: &mut Vec<T>) {
         let (c0, w, r0, m, ld, panel) = self.node(s);
-        for k in 0..w {
-            let (head, tail) = y.split_at_mut((c0 + k + 1) * nr);
-            if let Some(&d) = self.diag_inv.get(c0 + k) {
-                for v in &mut head[(c0 + k) * nr..] {
-                    *v = *v * d;
-                }
-            }
-            let yk = &head[(c0 + k) * nr..];
-            let col = &panel[k * ld..k * ld + w];
-            for i in k + 1..w {
-                let l = col[i];
-                let row = &mut tail[(i - k - 1) * nr..(i - k) * nr];
-                axpy_neg(row, l, yk);
-            }
-        }
+        let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
+        tri_rows(&mut y[c0 * nr..(c0 + w) * nr], panel, dinv, ld, nr, 0, w);
         if m == 0 {
             return;
         }
         t.clear();
         t.resize(m * nr, T::zero());
-        for k in 0..w {
-            let yk = &y[(c0 + k) * nr..(c0 + k + 1) * nr];
-            let col = &panel[k * ld + w..(k + 1) * ld];
-            for (ti, &l) in t.chunks_exact_mut(nr).zip(col) {
-                axpy(ti, l, yk);
-            }
-        }
+        panel_product(t, panel, ld, w, &y[c0 * nr..(c0 + w) * nr], nr, 0..w);
         let rows = &self.rows[r0..r0 + m];
         let slots = &self.ext_slot[r0..r0 + m];
         for (i, ti) in t.chunks_exact(nr).enumerate() {
@@ -1150,28 +1121,24 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    fn bwd_node_block(&self, s: u32, nr: usize, x: &mut [T], g: &mut Vec<T>, accv: &mut Vec<T>) {
+    fn bwd_node_block(&self, s: u32, nr: usize, x: &mut [T], g: &mut Vec<T>) {
         let (c0, w, r0, m, ld, panel) = self.node(s);
         g.clear();
         for &r in &self.rows[r0..r0 + m] {
             g.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
         }
-        accv.clear();
-        accv.resize(nr, T::zero());
-        for k in (0..w).rev() {
-            let col = &panel[k * ld..(k + 1) * ld];
-            dot4_block(accv, &col[w..], g, nr);
-            for i in k + 1..w {
-                let l = col[i];
-                let xi = &x[(c0 + i) * nr..(c0 + i + 1) * nr];
-                axpy(accv, l, xi);
+        let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
+        let xb = &mut x[c0 * nr..(c0 + w) * nr];
+        let mut q0 = 0;
+        while q0 < nr {
+            let cw = (nr - q0).min(4);
+            match cw {
+                4 => bwd_tile::<T, 4>(xb, g, panel, dinv, ld, w, m, nr, q0),
+                3 => bwd_tile::<T, 3>(xb, g, panel, dinv, ld, w, m, nr, q0),
+                2 => bwd_tile::<T, 2>(xb, g, panel, dinv, ld, w, m, nr, q0),
+                _ => bwd_tile::<T, 1>(xb, g, panel, dinv, ld, w, m, nr, q0),
             }
-            let xk = &mut x[(c0 + k) * nr..(c0 + k + 1) * nr];
-            sub_assign(xk, accv);
-            if !self.diag_inv.is_empty() {
-                let d = self.diag_inv[c0 + k];
-                xk.iter_mut().for_each(|v| *v = *v * d);
-            }
+            q0 += cw;
         }
     }
 
@@ -1244,7 +1211,7 @@ impl<T: Scalar> SolvePlan<T> {
             // SAFETY: see `Shared`.
             let xv = unsafe { shared.slice() };
             for &s in st.nodes.iter().rev() {
-                self.bwd_node_block(s, nr, xv, &mut sc.g, &mut sc.accv);
+                self.bwd_node_block(s, nr, xv, &mut sc.g);
             }
         });
         phases.lap("bwd-subtrees");
@@ -1252,12 +1219,133 @@ impl<T: Scalar> SolvePlan<T> {
     }
 }
 
-/// `y += a * x` over equal-length slices (bounds checks hoisted, vectorizable).
+/// `out[i, c] += sum over k of panel[k * ld + r0 + i] * v[k * nr + c]` for the `ks` columns of
+/// a column-major panel (leading dimension `ld`, its rows from `r0`) against the row-major
+/// right-hand sides `v` (`nr` wide, row `k` the factor column `k`), `out` row-major
+/// `rows x nr`. Every entry takes its terms in ascending `k`, one fused multiply-add each
+/// onto the running value, as the column-by-column `axpy` did; the work goes in tiles of
+/// [`TILE_ROWS`] rows by up to four right-hand sides held in registers across all of `ks`,
+/// so the slab is read and written once per call instead of once per column. A column of
+/// a block therefore equals the single solve of that column bit for bit, whatever `nr`.
+/// The factor goes first in every product, `l * x`: the fused complex multiply-add is not
+/// symmetric in its factors (the imaginary part nests the two cross products in operand
+/// order), so the other order made a one-column solve differ from a block column under FMA.
 #[inline(always)]
-fn axpy<T: Scalar>(y: &mut [T], a: T, x: &[T]) {
-    let n = y.len().min(x.len());
-    for (yi, &xi) in y[..n].iter_mut().zip(&x[..n]) {
-        *yi = fmadd(a, xi, *yi);
+fn panel_product<T: Scalar>(
+    out: &mut [T],
+    panel: &[T],
+    ld: usize,
+    r0: usize,
+    v: &[T],
+    nr: usize,
+    ks: std::ops::Range<usize>,
+) {
+    let rows = out.len() / nr.max(1);
+    let mut c0 = 0;
+    while c0 < nr {
+        let w = (nr - c0).min(4);
+        match w {
+            4 => product_tile::<T, 4>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
+            3 => product_tile::<T, 3>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
+            2 => product_tile::<T, 2>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
+            _ => product_tile::<T, 1>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
+        }
+        c0 += w;
+    }
+}
+
+/// The backward sweep of one supernode for the right-hand sides `q0..q0 + W`: column `k`
+/// last to first takes the dot of its off-block part with the gathered rows `g` (four
+/// partial sums, the association of [`dot4`]), then `l_ik x_i` for `i` ascending above it,
+/// subtracts that from `x_k` and scales it, exactly as the column-at-a-time sweep and the
+/// single right-hand side ([`SolvePlan::bwd_node`]) do; here the sums of the `W`
+/// right-hand sides stay in registers instead of a row of the accumulator per term.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn bwd_tile<T: Scalar, const W: usize>(
+    xb: &mut [T],
+    g: &[T],
+    panel: &[T],
+    dinv: &[T],
+    ld: usize,
+    w: usize,
+    m: usize,
+    nr: usize,
+    q0: usize,
+) {
+    for k in (0..w).rev() {
+        let col = &panel[k * ld..(k + 1) * ld];
+        let mut acc = dot4_tile::<T, W>(&col[w..w + m], g, nr, q0);
+        for i in k + 1..w {
+            let l = col[i];
+            for (a, &x) in acc.iter_mut().zip(&xb[i * nr + q0..i * nr + q0 + W]) {
+                *a = fmadd(l, x, *a);
+            }
+        }
+        let xk = &mut xb[k * nr + q0..k * nr + q0 + W];
+        for (v, &a) in xk.iter_mut().zip(&acc) {
+            *v = *v - a;
+        }
+        if let Some(&d) = dinv.get(k) {
+            for v in xk.iter_mut() {
+                *v = *v * d;
+            }
+        }
+    }
+}
+
+/// Rows per register tile of [`panel_product`].
+const TILE_ROWS: usize = 4;
+
+/// [`panel_product`] for the right-hand sides `c0..c0 + W`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn product_tile<T: Scalar, const W: usize>(
+    out: &mut [T],
+    panel: &[T],
+    ld: usize,
+    r0: usize,
+    v: &[T],
+    nr: usize,
+    c0: usize,
+    rows: usize,
+    ks: std::ops::Range<usize>,
+) {
+    let mut i = 0;
+    while i + TILE_ROWS <= rows {
+        let mut acc = [[T::zero(); W]; TILE_ROWS];
+        for (r, ar) in acc.iter_mut().enumerate() {
+            for (q, a) in ar.iter_mut().enumerate() {
+                *a = out[(i + r) * nr + c0 + q];
+            }
+        }
+        for k in ks.clone() {
+            let col = &panel[k * ld + r0 + i..k * ld + r0 + i + TILE_ROWS];
+            let vk = &v[k * nr + c0..k * nr + c0 + W];
+            for (ar, &l) in acc.iter_mut().zip(col) {
+                for (a, &x) in ar.iter_mut().zip(vk) {
+                    *a = fmadd(l, x, *a);
+                }
+            }
+        }
+        for (r, ar) in acc.iter().enumerate() {
+            out[(i + r) * nr + c0..(i + r) * nr + c0 + W].copy_from_slice(ar);
+        }
+        i += TILE_ROWS;
+    }
+    while i < rows {
+        let mut acc = [T::zero(); W];
+        for (q, a) in acc.iter_mut().enumerate() {
+            *a = out[i * nr + c0 + q];
+        }
+        for k in ks.clone() {
+            let l = panel[k * ld + r0 + i];
+            for (a, &x) in acc.iter_mut().zip(&v[k * nr + c0..k * nr + c0 + W]) {
+                *a = fmadd(l, x, *a);
+            }
+        }
+        out[i * nr + c0..i * nr + c0 + W].copy_from_slice(&acc);
+        i += 1;
     }
 }
 
@@ -1268,40 +1356,59 @@ fn axpy<T: Scalar>(y: &mut [T], a: T, x: &[T]) {
 /// method needs (its update applies the solve to one column, its Arnoldi
 /// steps to a block; any difference breaks the Arnoldi relation).
 ///
-/// The columns go in groups of [`DOT_COLS`] ([`dot4_cols`]), their partial
-/// sums on the stack: every column is summed alike whatever its group.
+/// The columns go in groups of up to four ([`dot4_tile`]), their partial sums
+/// in registers: every column is summed alike whatever its group.
 #[inline(always)]
 fn dot4_block<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize) {
-    for c0 in (0..nr).step_by(DOT_COLS) {
-        let w = DOT_COLS.min(nr - c0);
-        dot4_cols(&mut out[c0..c0 + w], col, g, nr, c0);
+    let mut q0 = 0;
+    while q0 < nr {
+        let w = (nr - q0).min(4);
+        dot4_cols(&mut out[q0..q0 + w], col, g, nr, q0);
+        q0 += w;
     }
 }
 
-/// Columns per group of [`dot4_block`].
-const DOT_COLS: usize = 8;
-
-/// [`dot4_block`] for the columns `c0..c0 + out.len()` of `g`, at most
-/// [`DOT_COLS`] of them.
+/// [`dot4_block`] for the columns `q0..q0 + out.len()` of `g`, at most four of them.
 #[inline(always)]
-fn dot4_cols<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize, c0: usize) {
-    let (m, w) = (col.len().min(g.len() / nr.max(1)), out.len());
-    let mut s = [[T::zero(); DOT_COLS]; 4];
-    let at = |i: usize| &g[i * nr + c0..i * nr + c0 + w];
+fn dot4_cols<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize, q0: usize) {
+    match out.len() {
+        4 => out.copy_from_slice(&dot4_tile::<T, 4>(col, g, nr, q0)),
+        3 => out.copy_from_slice(&dot4_tile::<T, 3>(col, g, nr, q0)),
+        2 => out.copy_from_slice(&dot4_tile::<T, 2>(col, g, nr, q0)),
+        _ => out.copy_from_slice(&dot4_tile::<T, 1>(col, g, nr, q0)),
+    }
+}
+
+/// [`dot4`] of `col` with the columns `q0..q0 + W` of the row-major `g` (`nr` wide, its
+/// first `col.len()` rows).
+#[inline(always)]
+fn dot4_tile<T: Scalar, const W: usize>(col: &[T], g: &[T], nr: usize, q0: usize) -> [T; W] {
+    let z = T::zero();
+    let m = col.len().min(g.len() / nr.max(1));
+    let mut s = [[z; W]; 4];
     let mut i = 0;
     while i + 4 <= m {
         for (q, sq) in s.iter_mut().enumerate() {
-            axpy(&mut sq[..w], col[i + q], at(i + q));
+            let l = col[i + q];
+            let gi = &g[(i + q) * nr + q0..(i + q) * nr + q0 + W];
+            for (a, &x) in sq.iter_mut().zip(gi) {
+                *a = fmadd(l, x, *a);
+            }
         }
         i += 4;
     }
-    for (c, oc) in out.iter_mut().enumerate() {
-        *oc = (s[0][c] + s[1][c]) + (s[2][c] + s[3][c]);
+    let mut acc = [z; W];
+    for (c, a) in acc.iter_mut().enumerate() {
+        *a = (s[0][c] + s[1][c]) + (s[2][c] + s[3][c]);
     }
     while i < m {
-        axpy(out, col[i], at(i));
+        let l = col[i];
+        for (a, &x) in acc.iter_mut().zip(&g[i * nr + q0..i * nr + q0 + W]) {
+            *a = fmadd(l, x, *a);
+        }
         i += 1;
     }
+    acc
 }
 
 /// `y -= a * x`.
@@ -1383,6 +1490,10 @@ fn tri_forward<T: Scalar>(
     jb: usize,
     je: usize,
 ) {
+    if nr > 1 {
+        tri_rows(v, panel, diag_inv, ld, nr, jb, je);
+        return;
+    }
     for k in jb..je {
         let (head, tail) = v.split_at_mut((k + 1) * nr);
         if let Some(&d) = diag_inv.get(k) {
@@ -1392,13 +1503,89 @@ fn tri_forward<T: Scalar>(
         }
         let vk = &head[k * nr..];
         let col = &panel[k * ld + k + 1..k * ld + je];
-        if nr == 1 {
-            axpy_neg(&mut tail[..je - k - 1], vk[0], col);
-        } else {
-            for (row, &l) in tail[..(je - k - 1) * nr].chunks_exact_mut(nr).zip(col) {
-                axpy_neg(row, l, vk);
+        axpy_neg(&mut tail[..je - k - 1], vk[0], col);
+    }
+}
+
+/// The unit-lower triangle of the columns `jb..je` (scaled by `diag_inv` where it is given,
+/// the `U^T` of an LU) on the row-major right-hand sides `v` (`nr` wide), ROW by row: row
+/// `i` takes `- l_ik v_k` for `k` ascending from `jb`, then its scale. That is the very
+/// sequence of operations the column-oriented sweep applies to it (column `k` subtracts its
+/// multiple from every later row, in ascending `k`), so the result is the same to the bit;
+/// the row form keeps a tile of [`TILE_ROWS`] rows by up to four right-hand sides in
+/// registers across all columns above it, where the column form read and wrote a row of
+/// `nr` values per entry.
+fn tri_rows<T: Scalar>(
+    v: &mut [T],
+    panel: &[T],
+    diag_inv: &[T],
+    ld: usize,
+    nr: usize,
+    jb: usize,
+    je: usize,
+) {
+    let mut c0 = 0;
+    while c0 < nr {
+        let w = (nr - c0).min(4);
+        match w {
+            4 => tri_tile::<T, 4>(v, panel, diag_inv, ld, nr, c0, jb, je),
+            3 => tri_tile::<T, 3>(v, panel, diag_inv, ld, nr, c0, jb, je),
+            2 => tri_tile::<T, 2>(v, panel, diag_inv, ld, nr, c0, jb, je),
+            _ => tri_tile::<T, 1>(v, panel, diag_inv, ld, nr, c0, jb, je),
+        }
+        c0 += w;
+    }
+}
+
+/// [`tri_rows`] for the right-hand sides `c0..c0 + W`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn tri_tile<T: Scalar, const W: usize>(
+    v: &mut [T],
+    panel: &[T],
+    diag_inv: &[T],
+    ld: usize,
+    nr: usize,
+    c0: usize,
+    jb: usize,
+    je: usize,
+) {
+    let mut i = jb;
+    while i < je {
+        let rn = TILE_ROWS.min(je - i);
+        let mut acc = [[T::zero(); W]; TILE_ROWS];
+        for r in 0..rn {
+            acc[r].copy_from_slice(&v[(i + r) * nr + c0..(i + r) * nr + c0 + W]);
+        }
+        // the rows above the tile are final
+        for k in jb..i {
+            let vk = &v[k * nr + c0..k * nr + c0 + W];
+            let col = &panel[k * ld + i..k * ld + i + rn];
+            for (ar, &l) in acc.iter_mut().zip(col) {
+                for (a, &x) in ar.iter_mut().zip(vk) {
+                    *a = *a - l * x;
+                }
             }
         }
+        // inside the tile, each row once the rows before it are final
+        for r in 0..rn {
+            for k in i..i + r {
+                let l = panel[k * ld + i + r];
+                let xk = acc[k - i];
+                for (a, x) in acc[r].iter_mut().zip(xk) {
+                    *a = *a - l * x;
+                }
+            }
+            if let Some(&d) = diag_inv.get(i + r) {
+                for a in acc[r].iter_mut() {
+                    *a = *a * d;
+                }
+            }
+        }
+        for r in 0..rn {
+            v[(i + r) * nr + c0..(i + r) * nr + c0 + W].copy_from_slice(&acc[r]);
+        }
+        i += rn;
     }
 }
 
@@ -1423,9 +1610,9 @@ fn tri_backward<T: Scalar>(
             ak[0] = ak[0] + dot4(col, &tail[..je - k - 1]);
         } else {
             // as the single column: the dot first, then onto the accumulator
-            for c0 in (0..nr).step_by(DOT_COLS) {
-                let w = DOT_COLS.min(nr - c0);
-                let mut d = [T::zero(); DOT_COLS];
+            let mut d = [T::zero(); 4];
+            for c0 in (0..nr).step_by(4) {
+                let w = 4.min(nr - c0);
                 dot4_cols(&mut d[..w], col, &tail[..(je - k - 1) * nr], nr, c0);
                 add_assign(&mut ak[c0..c0 + w], &d[..w]);
             }
