@@ -112,4 +112,7 @@ name = "metis_timing"
 name = "solve_timing"
 
 [[example]]
+name = "lu_solve_timing"
+
+[[example]]
 name = "ordering_bakeoff"
