@@ -19,7 +19,7 @@ for the built-in Krylov solvers (GMRES, block GMRES, COCG, COCR).
 
 ```toml
 [dependencies]
-rslab = { git = "https://github.com/milanofthe/rslab", tag = "v1.1.1" }
+rslab = { git = "https://github.com/milanofthe/rslab", tag = "v1.1.2" }
 ```
 
 ```bash
