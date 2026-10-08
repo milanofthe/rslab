@@ -590,7 +590,7 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
 name = "rslab"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "gemm",
  "num-complex",
@@ -606,21 +606,21 @@ dependencies = [
 
 [[package]]
 name = "rslab-amd"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "rslab-ordering-core",
 ]
 
 [[package]]
 name = "rslab-amf"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "rslab-ordering-core",
 ]
 
 [[package]]
 name = "rslab-metis"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "rayon",
  "rslab-amd",
@@ -629,11 +629,11 @@ dependencies = [
 
 [[package]]
 name = "rslab-ordering-core"
-version = "1.1.1"
+version = "1.1.2"
 
 [[package]]
 name = "rslab-py"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "libmimalloc-sys",
  "mimalloc",
