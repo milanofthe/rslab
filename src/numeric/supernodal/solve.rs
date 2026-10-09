@@ -31,6 +31,7 @@ use rayon::prelude::*;
 
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
+use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::scalar::{fmadd, Scalar};
 
@@ -720,14 +721,23 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// Run `f` inside the rayon pool when `par`: every parallel section is
-    /// cheap to start from a worker and expensive to inject from outside, so
-    /// a solve enters the pool once.
-    fn in_pool<R: Send>(par: bool, f: impl FnOnce() -> R + Send) -> R {
-        if par && rayon::current_thread_index().is_none() && rayon::current_num_threads() > 1 {
-            rayon::join(f, || ()).0
-        } else {
-            f()
+    /// Run `f` inside a pool when `par`: the factor's scoped pool of its
+    /// worker budget, or under [`Threads::Ambient`] the current one. Every
+    /// parallel section is cheap to start from a worker and expensive to
+    /// inject from outside, so a solve enters the pool once.
+    fn in_pool<R: Send>(par: bool, threads: Threads, f: impl FnOnce() -> R + Send) -> R {
+        if !par {
+            return f();
+        }
+        match threads {
+            Threads::Ambient => {
+                if rayon::current_thread_index().is_none() && rayon::current_num_threads() > 1 {
+                    rayon::join(f, || ()).0
+                } else {
+                    f()
+                }
+            }
+            budget => budget.run(0, |cap| cap, f),
         }
     }
 
@@ -752,22 +762,30 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// `work` fitted to a sweep of `nr` right-hand sides: a scratch per
-    /// subtree and per node of the widest ancestor level, and the decision
-    /// to run on the pool, taken on the sweep's work (panel entries times
-    /// right-hand sides up to four: a wider block gains no more from the
-    /// pool than four columns do).
-    fn fit<'w>(&self, work: &'w mut PlanWork<T>, nr: usize) -> &'w mut PlanWork<T> {
+    /// `work` fitted to a sweep of `nr` right-hand sides under the thread
+    /// budget `threads`: a scratch per subtree and per node of the widest
+    /// ancestor level, and the decision to run on the pool, taken on the
+    /// budget and the sweep's work (panel entries times right-hand sides up
+    /// to four: a wider block gains no more from the pool than four columns
+    /// do).
+    fn fit<'w>(
+        &self,
+        work: &'w mut PlanWork<T>,
+        nr: usize,
+        threads: Threads,
+    ) -> &'w mut PlanWork<T> {
         let widest = self.top_levels.iter().map(Vec::len).max().unwrap_or(0);
         work.fit(self.subtrees.len(), widest);
-        work.parallel = self.vals.len().saturating_mul(nr.min(4)) >= self.cfg.par_min_work;
+        work.parallel = threads.resolve(|cap| cap) > 1
+            && self.vals.len().saturating_mul(nr.min(4)) >= self.cfg.par_min_work;
         work
     }
 
-    /// Forward sweep `L y = y` in place on `nr` row-major right-hand sides.
-    pub fn forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
-        let work = self.fit(work, nr);
-        Self::in_pool(work.parallel, || {
+    /// Forward sweep `L y = y` in place on `nr` row-major right-hand sides,
+    /// on at most `threads` workers.
+    pub fn forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
+        let work = self.fit(work, nr, threads);
+        Self::in_pool(work.parallel, threads, || {
             if nr == 1 {
                 self.forward_single(y, work);
             } else {
@@ -777,10 +795,11 @@ impl<T: Scalar> SolvePlan<T> {
     }
 
     /// Backward sweep `L^T x = x` (or `U x = x` for a non-unit factor) in
-    /// place on `nr` row-major right-hand sides.
-    pub fn backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
-        let work = self.fit(work, nr);
-        Self::in_pool(work.parallel, || {
+    /// place on `nr` row-major right-hand sides, on at most `threads`
+    /// workers.
+    pub fn backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
+        let work = self.fit(work, nr, threads);
+        Self::in_pool(work.parallel, threads, || {
             if nr == 1 {
                 self.backward_single(x, work);
             } else {
@@ -789,15 +808,19 @@ impl<T: Scalar> SolvePlan<T> {
         })
     }
 
-    /// Solve `L D L^T y = y` in place on the permuted, scaled right-hand side.
+    /// Solve `L D L^T y = y` in place on the permuted, scaled right-hand
+    /// side, on at most `threads` workers.
     pub fn solve_in_place(
         &self,
         f: &LdltPivots<T>,
         y: &mut [T],
         work: &mut PlanWork<T>,
+        threads: Threads,
     ) -> Result<(), RslabError> {
-        let work = self.fit(work, 1);
-        Self::in_pool(work.parallel, || self.solve_in_place_inner(f, y, work))
+        let work = self.fit(work, 1, threads);
+        Self::in_pool(work.parallel, threads, || {
+            self.solve_in_place_inner(f, y, work)
+        })
     }
 
     fn solve_in_place_inner(
@@ -1142,16 +1165,20 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// Solve `L D L^T Y = Y` in place on a row-major `n x nrhs` block.
+    /// Solve `L D L^T Y = Y` in place on a row-major `n x nrhs` block, on at
+    /// most `threads` workers.
     pub fn solve_block_in_place(
         &self,
         f: &LdltPivots<T>,
         y: &mut [T],
         nr: usize,
         work: &mut PlanWork<T>,
+        threads: Threads,
     ) -> Result<(), RslabError> {
-        let work = self.fit(work, nr);
-        Self::in_pool(work.parallel, || self.solve_block_inner(f, y, nr, work))
+        let work = self.fit(work, nr, threads);
+        Self::in_pool(work.parallel, threads, || {
+            self.solve_block_inner(f, y, nr, work)
+        })
     }
 
     fn solve_block_inner(
@@ -1797,16 +1824,26 @@ mod tests {
                     assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
                 }
             }
-            // Bit-identical for every thread count.
+            // Bit-identical for every thread budget: the factor's own, and
+            // the ambient pool's.
             for threads in [1usize, 2, 5] {
+                let st = LdltSolver::factor(a, &opts.clone().with_threads(threads)).unwrap();
+                assert_eq!(st.solve(&b).unwrap(), x1, "threads={threads}");
+                assert_eq!(
+                    st.solve_many(&bb, nrhs).unwrap(),
+                    xb,
+                    "block threads={threads}"
+                );
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
                     .unwrap();
-                let xt = pool.install(|| s.solve(&b).unwrap());
-                assert_eq!(xt, x1, "threads={threads}");
-                let xbt = pool.install(|| s.solve_many(&bb, nrhs).unwrap());
-                assert_eq!(xbt, xb, "block threads={threads}");
+                let ambient = opts.clone().with_threads(crate::Threads::Ambient);
+                let sa = pool.install(|| LdltSolver::factor(a, &ambient).unwrap());
+                let xt = pool.install(|| sa.solve(&b).unwrap());
+                assert_eq!(xt, x1, "ambient threads={threads}");
+                let xbt = pool.install(|| sa.solve_many(&bb, nrhs).unwrap());
+                assert_eq!(xbt, xb, "ambient block threads={threads}");
             }
         }
     }
@@ -1907,14 +1944,23 @@ mod tests {
             assert!(out.steps <= 2);
             assert!(residual_general(&a, &xr, &b) < 1e-12);
             for threads in [1usize, 2, 5] {
+                let st = LuSolver::factor(&a, &opts.clone().with_threads(threads)).unwrap();
+                assert_eq!(st.solve(&b).unwrap(), x1, "threads={threads}");
+                assert_eq!(
+                    st.solve_many(&bb, nrhs).unwrap(),
+                    xb,
+                    "block threads={threads}"
+                );
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
                     .unwrap();
-                let xt = pool.install(|| s.solve(&b).unwrap());
-                assert_eq!(xt, x1, "threads={threads}");
-                let xbt = pool.install(|| s.solve_many(&bb, nrhs).unwrap());
-                assert_eq!(xbt, xb, "block threads={threads}");
+                let ambient = opts.clone().with_threads(crate::Threads::Ambient);
+                let sa = pool.install(|| LuSolver::factor(&a, &ambient).unwrap());
+                let xt = pool.install(|| sa.solve(&b).unwrap());
+                assert_eq!(xt, x1, "ambient threads={threads}");
+                let xbt = pool.install(|| sa.solve_many(&bb, nrhs).unwrap());
+                assert_eq!(xbt, xb, "ambient block threads={threads}");
             }
         }
     }

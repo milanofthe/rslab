@@ -155,10 +155,16 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
             }
         }
         if nrhs == 1 {
-            self.plan.solve_in_place(&self.factors, y, &mut work.plan)?;
-        } else {
             self.plan
-                .solve_block_in_place(&self.factors, y, nrhs, &mut work.plan)?;
+                .solve_in_place(&self.factors, y, &mut work.plan, self.solve_threads)?;
+        } else {
+            self.plan.solve_block_in_place(
+                &self.factors,
+                y,
+                nrhs,
+                &mut work.plan,
+                self.solve_threads,
+            )?;
         }
         for (i, &p) in self.factors.perm.iter().enumerate() {
             let sp = T::from_real(self.scale[p]);
