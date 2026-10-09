@@ -49,20 +49,18 @@ impl KluSymbolic {
         } else {
             None
         };
-        let (pre_row_perm, col_perm, block_ptr) = if let Some(m) = weighted {
+        let ordered = if let Some(m) = weighted {
             // The weighted matching decides the transversal; the blocks are
             // its strongly connected components.
             let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
-            let of = order_blocks(a, form, false)?;
-            (of.pre_row_perm, of.col_perm, of.block_ptr)
+            order_blocks(a, form)?
         } else if settings.btf {
             let cands = btf::matching_candidates(n, &a.col_ptr, &a.row_idx)
                 .ok_or(RslabError::StructurallySingular)?;
-            let score_it = cands.len() > 1;
             let mut best: Option<OrderedForm> = None;
             for m in cands {
                 let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
-                let of = order_blocks(a, form, score_it)?;
+                let of = order_blocks(a, form)?;
                 best = match best {
                     Some(b) if b.score <= of.score => Some(b),
                     _ => Some(of),
@@ -75,7 +73,7 @@ impl KluSymbolic {
                     "klu: no matching candidate".to_string(),
                 ));
             };
-            (of.pre_row_perm, of.col_perm, of.block_ptr)
+            of
         } else {
             let ident: Vec<usize> = (0..n).collect();
             let bp = if n == 0 { vec![0] } else { vec![0, n] };
@@ -84,9 +82,15 @@ impl KluSymbolic {
                 col_perm: ident,
                 block_ptr: bp,
             };
-            let of = order_blocks(a, form, false)?;
-            (of.pre_row_perm, of.col_perm, of.block_ptr)
+            order_blocks(a, form)?
         };
+        let OrderedForm {
+            pre_row_perm,
+            col_perm,
+            block_ptr,
+            estimate: mut predicted,
+            ..
+        } = ordered;
 
         // Freeze the analyzed pattern in the (final) pre-pivot space for the
         // a-priori estimators. Narrow inverse permutation: the gather is
@@ -104,6 +108,15 @@ impl KluSymbolic {
             }
             pat_col_ptr.push(pat_row_idx.len());
         }
+        // The off-block entries (rows of earlier blocks) join the predicted
+        // factor as they are: they take no part in the elimination.
+        for b in 0..block_ptr.len() - 1 {
+            let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
+            for k in bs..be {
+                let rows = &pat_row_idx[pat_col_ptr[k]..pat_col_ptr[k + 1]];
+                predicted.factor_nnz += rows.iter().filter(|&&r| r < bs).count() as u64;
+            }
+        }
 
         Ok(Self {
             n,
@@ -113,6 +126,7 @@ impl KluSymbolic {
             block_ptr,
             pat_col_ptr,
             pat_row_idx,
+            predicted,
             fill: std::sync::OnceLock::new(),
         })
     }
@@ -264,6 +278,26 @@ impl KluSymbolic {
                 self.nnz >= settings.par_min_nnz && self.max_block_size() * 2 <= self.n
             }
         }) && nblocks > 1
+    }
+
+    /// **A-priori** factor fill (`L` + `U` + diagonal + off-block entries),
+    /// from the analysis alone: each block's `L` as the Cholesky factor of
+    /// its symmetrized, AMD-ordered pattern predicts it (Gilbert-Ng-Peyton
+    /// column counts, computed with the ordering at near-linear cost), `U`
+    /// as its transpose. Under diagonal pivoting an upper bound on
+    /// [`symbolic_factor_nnz`](Self::symbolic_factor_nnz) (George and Ng),
+    /// tight on a structurally symmetric block; without its cost, which is
+    /// about that of a numeric factor. The fill estimate to route on.
+    pub fn estimated_factor_nnz(&self) -> usize {
+        self.predicted.factor_nnz as usize
+    }
+
+    /// **A-priori** flop count of the factorization on the same prediction
+    /// as [`estimated_factor_nnz`](Self::estimated_factor_nnz): per column
+    /// with `c` entries below the diagonal, `c` divisions and `c^2`
+    /// multiply-subtract pairs.
+    pub fn estimated_flops(&self) -> u64 {
+        self.predicted.flops
     }
 
     /// Exact symbolic factor fill (`L` + `U` + diagonal + off-block entries)
@@ -448,20 +482,25 @@ struct OrderedForm {
     pre_row_perm: Vec<usize>,
     col_perm: Vec<usize>,
     block_ptr: Vec<usize>,
+    /// The matching bakeoff's score: the nontrivial blocks' Cholesky lnz.
     score: u64,
+    /// The factor the ordered blocks predict (see
+    /// [`KluSymbolic::estimated_factor_nnz`]), the off-block entries not yet
+    /// counted.
+    estimate: KluEstimate,
 }
 
 /// Per-block AMD on the symmetrized block pattern (B + B^T, with diagonal,
 /// as the supernodal paths feed rslab-amd), applied
 /// symmetrically to the form's permutations. Blocks of size <= 2 have
-/// nothing to reorder. With `score_it`, additionally accumulates the exact
-/// Cholesky lnz of each AMD-ordered block pattern (Gilbert-Ng-Peyton column
-/// counts, near-linear) as the bakeoff score - the trivial blocks are
-/// identical across candidates and are skipped consistently.
+/// nothing to reorder. Accumulates the exact Cholesky lnz of each
+/// AMD-ordered block pattern (Gilbert-Ng-Peyton column counts,
+/// near-linear): over the nontrivial blocks the bakeoff score - the trivial
+/// blocks are identical across candidates and are skipped consistently -
+/// and with them, taken dense, the predicted factor.
 fn order_blocks<T: Scalar>(
     a: &GeneralCsc<T>,
     form: btf::BtfForm,
-    score_it: bool,
 ) -> Result<OrderedForm, RslabError> {
     let n = a.n;
     let btf::BtfForm {
@@ -478,10 +517,15 @@ fn order_blocks<T: Scalar>(
         pinv0[r] = k as Ki;
     }
     let mut score = 0u64;
+    let mut estimate = KluEstimate::default();
     for b in 0..block_ptr.len() - 1 {
         let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
         let bn = be - bs;
         if bn <= 2 {
+            // dense: a 2 x 2 block's one division and multiply-subtract
+            let c = (bn - 1) as u64;
+            estimate.factor_nnz += (bn * bn) as u64;
+            estimate.flops += c + c * c;
             continue;
         }
         // Symmetrized block adjacency (B + B^T + diagonal), canonical form
@@ -580,7 +624,7 @@ fn order_blocks<T: Scalar>(
             .ok_or_else(|| RslabError::InvalidInput("klu: malformed block pattern".to_string()))?;
         let lperm = rslab_amd::amd_order(&pat)
             .map_err(|e| RslabError::InvalidInput(format!("klu: AMD ordering failed: {e:?}")))?;
-        if score_it {
+        {
             // Exact Cholesky lnz of the AMD-ordered block: permute the full
             // symmetric pattern, then etree + GNP column counts. Both accept
             // a full symmetric pattern with unsorted columns (etree uses the
@@ -606,7 +650,14 @@ fn order_blocks<T: Scalar>(
             };
             let etree = crate::ordering::elimination_tree::EliminationTree::from_pattern(&pat_p);
             let cc = crate::symbolic::column_counts_gnp(&pat_p, &etree);
-            score += crate::symbolic::total_factor_nnz(&cc) as u64;
+            let lnz = crate::symbolic::total_factor_nnz(&cc) as u64;
+            score += lnz;
+            // `L` and its transpose `U`, the diagonal once.
+            estimate.factor_nnz += 2 * lnz - bn as u64;
+            for &count in &cc {
+                let c = count.saturating_sub(1) as u64;
+                estimate.flops += c + c * c;
+            }
         }
         // Apply the local (new-to-old) perm symmetrically to the block's
         // segment of both permutations.
@@ -622,5 +673,6 @@ fn order_blocks<T: Scalar>(
         col_perm,
         block_ptr,
         score,
+        estimate,
     })
 }
