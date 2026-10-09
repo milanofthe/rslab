@@ -408,6 +408,37 @@ fn grid_cd(m: usize) -> (GeneralCsc<f64>, Vec<f64>) {
     (a, b)
 }
 
+/// The a-priori estimate is the exact symbolic fill on a structurally
+/// symmetric pattern and an upper bound on an unsymmetric one; on a chain,
+/// which eliminates without fill, it is the factor itself: `3n - 2` entries,
+/// one division and one multiply-subtract per column but the last.
+#[test]
+fn klu_estimate_bounds_the_symbolic_fill() {
+    let settings = KluSettings::default();
+    let (grid, _) = grid_cd(30);
+    let g = KluSymbolic::analyze(&grid, &settings).unwrap();
+    assert_eq!(g.estimated_factor_nnz(), g.symbolic_factor_nnz());
+    let circuit = circuit_like(400, 7);
+    let c = KluSymbolic::analyze(&circuit, &settings).unwrap();
+    assert!(c.estimated_factor_nnz() >= c.symbolic_factor_nnz());
+    let n = 50;
+    let (mut r, mut cl, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..n {
+        r.push(i);
+        cl.push(i);
+        v.push(4.0);
+        if i + 1 < n {
+            r.extend([i, i + 1]);
+            cl.extend([i + 1, i]);
+            v.extend([-1.0, -1.0]);
+        }
+    }
+    let chain = GeneralCsc::from_triplets(n, &r, &cl, &v).unwrap();
+    let s = KluSymbolic::analyze(&chain, &settings).unwrap();
+    assert_eq!(s.estimated_factor_nnz(), 3 * n - 2);
+    assert_eq!(s.estimated_flops(), 2 * (n as u64 - 1));
+}
+
 #[test]
 fn klu_pipelined_refactor_is_bit_identical_to_sequential() {
     // One irreducible 1024-column block: the level schedule must engage

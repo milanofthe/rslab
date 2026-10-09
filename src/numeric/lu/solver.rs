@@ -747,11 +747,11 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         }
         let plan = &mut work.plan;
         if transpose {
-            self.plan_u.forward(nrhs, y, plan);
-            self.plan_l.backward(nrhs, y, plan);
+            self.plan_u.forward(nrhs, y, plan, self.solve_threads);
+            self.plan_l.backward(nrhs, y, plan, self.solve_threads);
         } else {
-            self.plan_l.forward(nrhs, y, plan);
-            self.plan_u.backward(nrhs, y, plan);
+            self.plan_l.forward(nrhs, y, plan, self.solve_threads);
+            self.plan_u.backward(nrhs, y, plan, self.solve_threads);
         }
         for (e, &orig) in scatter.iter().enumerate() {
             let s = T::from_real(s_scale[orig]);

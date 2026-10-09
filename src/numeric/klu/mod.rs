@@ -80,10 +80,21 @@ pub struct KluSymbolic {
     /// [`LuSymbolic`](crate::LuSymbolic)'s stored symbolic structure.
     pat_col_ptr: Vec<usize>,
     pat_row_idx: Vec<usize>,
+    /// The factor the analysis predicts, computed with the ordering (see
+    /// [`KluSymbolic::estimated_factor_nnz`]).
+    predicted: KluEstimate,
     /// Lazily computed, cached symbolic fill (the estimator pass costs about
     /// as much as a numeric factor, so the phased `factor` must not pay it
     /// again on every call).
     fill: std::sync::OnceLock<KluFill>,
+}
+
+/// The KLU factor as the analysis predicts it a priori, from the blocks'
+/// symmetrized Cholesky structure (see [`KluSymbolic::estimated_factor_nnz`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct KluEstimate {
+    factor_nnz: u64,
+    flops: u64,
 }
 
 /// Exact symbolic fill of the KLU factor under the diagonal-pivoting
