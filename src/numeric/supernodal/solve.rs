@@ -837,7 +837,7 @@ impl<T: Scalar> SolvePlan<T> {
         phases.lap("diag");
         self.backward_single(y, work);
         phases.lap("backward");
-        phases.finish("solve");
+        phases.finish("solve", work.parallel);
         Ok(())
     }
 
@@ -866,7 +866,7 @@ impl<T: Scalar> SolvePlan<T> {
         phases.lap("fwd-reduce");
         self.top_forward(1, y, work);
         phases.lap("fwd-top");
-        phases.finish("forward");
+        phases.finish("forward", work.parallel);
     }
 
     fn backward_single(&self, y: &mut [T], work: &mut PlanWork<T>) {
@@ -887,7 +887,7 @@ impl<T: Scalar> SolvePlan<T> {
             }
         });
         phases.lap("bwd-subtrees");
-        phases.finish("backward");
+        phases.finish("backward", work.parallel);
     }
 
     // -----------------------------------------------------------------------
@@ -1196,7 +1196,7 @@ impl<T: Scalar> SolvePlan<T> {
         phases.lap("diag");
         self.backward_block(nr, y, work);
         phases.lap("backward");
-        phases.finish("solve-block");
+        phases.finish("solve-block", work.parallel);
         Ok(())
     }
 
@@ -1224,7 +1224,7 @@ impl<T: Scalar> SolvePlan<T> {
         phases.lap("fwd-reduce");
         self.top_forward(nr, y, work);
         phases.lap("fwd-top");
-        phases.finish("forward-block");
+        phases.finish("forward-block", work.parallel);
     }
 
     fn backward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
@@ -1242,7 +1242,7 @@ impl<T: Scalar> SolvePlan<T> {
             }
         });
         phases.lap("bwd-subtrees");
-        phases.finish("backward-block");
+        phases.finish("backward-block", work.parallel);
     }
 }
 
@@ -1488,7 +1488,8 @@ impl PhaseTrace {
         }
     }
 
-    fn finish(&self, what: &str) {
+    /// Log the laps of a sweep, run on the pool when `parallel`.
+    fn finish(&self, what: &str, parallel: bool) {
         if self.t0.is_some() {
             let total: f64 = self.laps.iter().map(|l| l.1).sum();
             let parts: Vec<String> = self
@@ -1498,7 +1499,11 @@ impl PhaseTrace {
                 .collect();
             crate::logging::debug(&format!(
                 "{what}: {total:.2}ms threads={} {}",
-                rayon::current_num_threads(),
+                if parallel {
+                    rayon::current_num_threads()
+                } else {
+                    1
+                },
                 parts.join(" ")
             ));
         }
