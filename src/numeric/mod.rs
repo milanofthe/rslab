@@ -1,3 +1,4 @@
+pub(crate) mod auto;
 pub mod dense_eig;
 pub(crate) mod direct;
 pub mod gemm_tuning;

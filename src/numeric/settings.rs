@@ -658,11 +658,19 @@ impl Threads {
 /// The pool is the calling thread's own, built on its first use and kept (see
 /// [`POOLS`]): a factorization per Newton step would otherwise start and join
 /// its workers every time, tens of microseconds per worker.
+///
+/// Work that needs no stack of its own (`stack_bytes == 0`, the solves)
+/// called from a worker of a rayon pool runs on that pool instead: entering
+/// a pool of its own would make the worker wait, and wait it must not (see
+/// [`enter`]).
 pub(crate) fn in_scoped_pool<R: Send>(
     threads: usize,
     stack_bytes: usize,
     f: impl FnOnce() -> R + Send,
 ) -> R {
+    if stack_bytes == 0 && rayon::current_thread_index().is_some() {
+        return f();
+    }
     let n = if threads == 0 {
         std::thread::available_parallelism()
             .map(|p| p.get())
@@ -671,8 +679,39 @@ pub(crate) fn in_scoped_pool<R: Send>(
         threads
     };
     match scoped_pool(n, stack_bytes) {
-        Some(pool) => pool.install(f),
+        Some(pool) => enter(&pool, f),
         None => f(),
+    }
+}
+
+/// The stack of the thread a foreign rayon worker enters a pool through; it
+/// only waits.
+const HOP_STACK: usize = 256 * 1024;
+
+/// Run `f` on `pool`, the calling thread waiting for it. A worker of another
+/// rayon pool waiting in `install` keeps taking its own pool's jobs (rayon's
+/// cross-pool wait), and each of those may enter here again: a parallel
+/// sweep of factorizations then nests without bound and overflows the
+/// worker's stack. Such a caller enters through a thread of its own, which
+/// waits without taking work.
+fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
+    if rayon::current_thread_index().is_none() || pool.current_thread_index().is_some() {
+        return pool.install(f);
+    }
+    let mut f = Some(f);
+    let job = &mut f;
+    let hop = std::thread::scope(|s| {
+        (std::thread::Builder::new().stack_size(HOP_STACK))
+            .spawn_scoped(s, move || job.take().map(|f| pool.install(f)))
+            .ok()
+            .map(|h| h.join())
+    });
+    match (hop, f) {
+        (Some(Ok(Some(r))), _) => r,
+        (Some(Err(panic)), _) => std::panic::resume_unwind(panic),
+        // No thread to enter through: the waiting worker may take work.
+        (_, Some(f)) => pool.install(f),
+        (_, None) => unreachable!("a joined hop either returned or panicked"),
     }
 }
 

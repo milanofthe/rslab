@@ -17,7 +17,7 @@ import numpy as np
 import scipy.sparse as sp
 import rslab
 
-x = rslab.spsolve(A, b)              # one-shot, picks LDL^T or LU by symmetry
+x = rslab.spsolve(A, b)              # one-shot, on the automatic path
 
 f = rslab.ldlt(A)                    # symmetric or complex-symmetric
 x = f.solve(b)
@@ -39,12 +39,21 @@ y = f.solve_transpose(b)             # A.T @ y = b (conjugate b and y for A^H)
 L, U, F = f.L, f.U, f.F              # (R A)[perm_r][:, perm_c] = L @ U + F
 ```
 
+The automatic path picks among the three by the work the analysis predicts:
+KLU for sparse work, LDL^T for symmetric values or LU for dense work.
+
+```python
+f = rslab.auto(A)
+print(f.backend)                     # 'klu', 'ldlt' or 'lu'
+f.refactor(A_next.data)              # in place, on the path the values take
+```
+
 ## Symbolic reuse
 
 The analysis depends on the pattern only; pay it once per sweep:
 
 ```python
-sym = rslab.analyze(A)               # LdltSymbolic, LuSymbolic or KluSymbolic
+sym = rslab.analyze(A)               # AutoSymbolic; path='ldlt', 'lu' or 'klu' for one path
 plan = sym.memory_plan(A.dtype.name, threads=8)  # heap before any numeric work
 assert plan["peak_bytes"] < available_bytes
 for omega in frequencies:
@@ -69,7 +78,7 @@ x = M.solve(b, refine=5)             # mixed-precision refinement, full accuracy
 
 ## Settings
 
-Factor knobs are keyword arguments of `ldlt`, `lu`, `spsolve` and `analyze`,
+Factor knobs are keyword arguments of `auto`, `ldlt`, `lu`, `spsolve` and `analyze`,
 or a `rslab.Settings` object (`rslab.KluSettings` for `klu`). Every tuning
 constant of the solver is one (`nd_fm_passes`, `race_candidates`,
 `solve_block`, ...), with the tuned value as default;

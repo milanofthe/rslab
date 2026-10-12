@@ -23,7 +23,10 @@ threshold partial pivoting,
 and **circuit-shaped** matrices (MNA / SPICE class: extremely sparse,
 unsymmetric, near-triangularizable) by a KLU-style path - block triangular
 form plus a per-block Gilbert-Peierls LU - whose numeric-only ``refactor``
-makes fixed-pattern sweeps cheap.
+makes fixed-pattern sweeps cheap. The **automatic** path (:func:`auto`)
+picks among the three by the work the analysis predicts: KLU for sparse
+work, the supernodal ``L D L^T`` for symmetric values or ``L U`` for dense
+work; :func:`spsolve` and :func:`analyze` take it by default.
 
 The solver is **type-agnostic**: the matrix ``dtype`` selects the arithmetic
 field, so ``float64`` / ``float32`` run the real path and ``complex128`` /
@@ -33,11 +36,12 @@ for the 32-bit fields.
 The API has four layers, each a thin step below the previous one:
 
 1. :func:`spsolve` - one-shot factor, solve, discard.
-2. :func:`ldlt` / :func:`lu` / :func:`klu` - factor once into a handle
-   (:class:`Ldlt`, :class:`Lu`, :class:`Klu`), solve many.
-3. :func:`analyze` - the symbolic analysis alone (:class:`LdltSymbolic`,
-   :class:`LuSymbolic`, :class:`KluSymbolic`); factor many value sets on one
-   pattern.
+2. :func:`auto` / :func:`ldlt` / :func:`lu` / :func:`klu` - factor once into
+   a handle (:class:`Auto`, :class:`Ldlt`, :class:`Lu`, :class:`Klu`), solve
+   many.
+3. :func:`analyze` - the symbolic analysis alone (:class:`AutoSymbolic`,
+   :class:`LdltSymbolic`, :class:`LuSymbolic`, :class:`KluSymbolic`); factor
+   many value sets on one pattern.
 4. :func:`gmres` / :func:`gmres_block` / :func:`cocg` / :func:`cocr` -
    Krylov solvers, optionally preconditioned by any factor handle.
 
@@ -89,6 +93,8 @@ import numpy as np
 
 from . import _rslab
 from ._rslab import (
+    Auto,
+    AutoSymbolic,
     Interrupt,
     Klu,
     KluSettings,
@@ -110,14 +116,17 @@ __all__ = [
     # one-shot
     "spsolve",
     # factor handles
+    "auto",
     "ldlt",
     "lu",
     "klu",
+    "Auto",
     "Ldlt",
     "Lu",
     "Klu",
     # symbolic analysis
     "analyze",
+    "AutoSymbolic",
     "LdltSymbolic",
     "LuSymbolic",
     "KluSymbolic",
@@ -357,6 +366,62 @@ def klu(A, *, settings: KluSettings | None = None, **kwargs) -> Klu:
     return _rslab.klu_factor(*_csc_parts(A, "klu"), settings=settings, **kwargs)
 
 
+def auto(A, *, settings: Settings | None = None, klu_settings: KluSettings | None = None,
+         supernodal_flops_per_entry: float | None = None, symmetry_tol: float | None = None,
+         **kwargs) -> Auto:
+    """Factor a matrix on the **automatic** path: the path its work calls for.
+
+    KLU's analysis predicts the factorization's flops per factor entry. Below
+    ``supernodal_flops_per_entry`` the matrix is sparse work and KLU factors
+    it; above it (large fronts: meshes, power grids) the supernodal paths do,
+    ``L D L^T`` when the matrix is structurally symmetric and its values are
+    symmetric (within ``symmetry_tol``), ``L U`` otherwise.
+    :meth:`Auto.refactor` factors new values of the same pattern in place, on
+    the path they take.
+
+    Parameters
+    ----------
+    A : scipy.sparse matrix or array-like
+        The ``n x n`` system matrix (full, CSC after conversion).
+    settings : Settings, optional
+        The supernodal paths' settings.
+    klu_settings : KluSettings, optional
+        The KLU path's settings.
+    supernodal_flops_per_entry : float, optional
+        The routing threshold (default 25).
+    symmetry_tol : float, optional
+        Relative tolerance of the value-symmetry test for ``L D L^T``
+        (default 0, exact). Above zero, ``L D L^T`` factors the lower triangle
+        of a matrix symmetric only within the tolerance.
+    **kwargs
+        Any :class:`Settings` keyword, overriding ``settings``.
+
+    Returns
+    -------
+    Auto
+        A reusable factor handle with :attr:`Auto.backend`, the solve methods,
+        :meth:`Auto.refactor`, the Krylov methods and :meth:`Auto.diagnostics`.
+
+    Raises
+    ------
+    RuntimeError
+        If the matrix is structurally or numerically singular.
+
+    Example
+    -------
+    .. code-block:: python
+
+        f = rslab.auto(A)                       # KLU, LDL^T or LU
+        print(f.backend)
+        x = f.solve(b)
+        f.refactor(A2.data)                     # same pattern, new values
+    """
+    return _rslab.auto_factor(*_csc_parts(A, "auto"), settings=settings,
+                              klu_settings=klu_settings,
+                              supernodal_flops_per_entry=supernodal_flops_per_entry,
+                              symmetry_tol=symmetry_tol, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Symbolic analysis
 # ---------------------------------------------------------------------------
@@ -379,19 +444,22 @@ def analyze(A, path: str = "auto", *, settings=None, **kwargs):
     path : {'auto', 'ldlt', 'lu', 'klu'}, default 'auto'
         The factorization path: ``'ldlt'`` for symmetric matrices (the lower
         triangle is analyzed), ``'lu'`` for general ones, ``'klu'`` for
-        circuit-shaped ones. ``'auto'`` picks ``'ldlt'`` when ``A`` is
-        symmetric and ``'lu'`` otherwise.
+        circuit-shaped ones. ``'auto'`` is the automatic path (see
+        :func:`auto`): the analysis routes the pattern by its predicted work,
+        and each factorization takes ``L D L^T`` or ``L U`` by its values.
     settings : Settings or KluSettings, optional
         Analysis-time settings (``ordering``, ``nemin``, ``relax`` for
-        LDL^T / LU; ``btf`` for KLU). Numeric settings given
-        here become the defaults of ``factor``.
+        LDL^T / LU and the supernodal side of ``'auto'``; ``btf`` for KLU).
+        Numeric settings given here become the defaults of ``factor``.
     **kwargs
-        The same keywords, overriding ``settings``.
+        The same keywords, overriding ``settings``; for ``'auto'`` also
+        ``klu_settings``, ``supernodal_flops_per_entry`` and
+        ``symmetry_tol`` (see :func:`auto`).
 
     Returns
     -------
-    LdltSymbolic or LuSymbolic or KluSymbolic
-        The analysis handle: fill and memory estimates, and ``factor(data)``.
+    AutoSymbolic or LdltSymbolic or LuSymbolic or KluSymbolic
+        The analysis handle: memory estimates and ``factor(data)``.
 
     Example
     -------
@@ -410,7 +478,7 @@ def analyze(A, path: str = "auto", *, settings=None, **kwargs):
     duplicates). Build the sweep matrices from one pattern to guarantee it.
     """
     if path == "auto":
-        path = "ldlt" if _is_symmetric(A) else "lu"
+        return _rslab.analyze_auto(*_csc_parts(A, "auto"), settings=settings, **kwargs)
     if path == "ldlt":
         return _rslab.analyze_ldlt(*_csc_parts(A, "ldlt"), settings=settings, **kwargs)
     if path == "lu":
@@ -588,24 +656,6 @@ def _cast_operator(parts, dtype_name: str):
 # ---------------------------------------------------------------------------
 
 
-def _is_symmetric(A, tol: float = 1e-12) -> bool:
-    """Structural + value symmetry test (``A - A^T`` small relative to ``max|A|``)."""
-    sp = _require_scipy()
-    if not (sp.issparse(A) and A.format in ("csc", "csr")):
-        A = sp.csc_matrix(A)
-    n = A.shape[0]
-    if n != A.shape[1]:
-        return False
-    if A.has_canonical_format and A.data.dtype.type in _SUPPORTED:
-        # The test reads the same on CSC and CSR arrays: a parallel pass that
-        # looks up each transposed entry, with no difference matrix built.
-        return _rslab.is_symmetric(n, A.indptr, A.indices, A.data, tol)
-    d = (A - A.T).tocsc().data
-    if d.size == 0:
-        return True
-    return float(abs(d).max()) <= tol * (float(abs(A).max()) or 1.0)
-
-
 def _match_dtype(b: np.ndarray, dtype_name: str) -> np.ndarray:
     """``b`` as a contiguous array in the factor's dtype."""
     return np.ascontiguousarray(b, dtype=np.dtype(dtype_name))
@@ -614,9 +664,12 @@ def _match_dtype(b: np.ndarray, dtype_name: str) -> np.ndarray:
 def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
     """One-shot solve of ``A x = b`` (factor, solve, discard).
 
-    Detects symmetry, factors through :func:`ldlt` or :func:`lu`, solves,
-    and drops the factor. For repeated solves against one matrix keep the
-    handle instead (:func:`ldlt` / :func:`lu` / :func:`klu`).
+    Factors on the automatic path (:func:`auto`): KLU for sparse work, the
+    supernodal ``L D L^T`` (values symmetric within ``1e-12`` relative) or
+    ``L U`` for dense work. Given :class:`Settings` keywords configure the
+    supernodal paths, so they take the matrix whatever its work. For repeated
+    solves against one matrix keep the handle instead (:func:`auto` /
+    :func:`ldlt` / :func:`lu` / :func:`klu`).
 
     Parameters
     ----------
@@ -627,14 +680,14 @@ def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
         block. Cast to the factor's dtype automatically.
     symmetric : bool, optional
         Force the symmetric ``L D L^T`` path (``True``) or the
-        unsymmetric ``L U`` path (``False``). When omitted, symmetry is
-        auto-detected from ``A`` (a structural + value test).
+        unsymmetric ``L U`` path (``False``). When omitted, the automatic
+        path decides.
     refine : int, default 0
         Steps of iterative refinement against the original matrix, per
         right-hand side. Meaningful with ``preconditioner=...`` /
         ``drop_tol=...``, where the factor is inexact.
     **kwargs
-        Forwarded to :func:`ldlt` / :func:`lu` (any :class:`Settings` keyword).
+        Any :class:`Settings` keyword, for the supernodal paths.
 
     Returns
     -------
@@ -653,13 +706,17 @@ def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
     -------
     .. code-block:: python
 
-        x = rslab.spsolve(A, b)                          # auto-detects symmetry
+        x = rslab.spsolve(A, b)                          # the automatic path
         X = rslab.spsolve(A, np.random.rand(n, 5))       # 5 right-hand sides
         x = rslab.spsolve(A, b, preconditioner=1e-4, refine=2)
     """
-    if symmetric is None:
-        symmetric = _is_symmetric(A)
-    f = ldlt(A, **kwargs) if symmetric else lu(A, **kwargs)
+    if symmetric is True:
+        f = ldlt(A, **kwargs)
+    elif symmetric is False:
+        f = lu(A, **kwargs)
+    else:
+        route = {"supernodal_flops_per_entry": 0.0} if kwargs else {}
+        f = auto(A, symmetry_tol=1e-12, **route, **kwargs)
     rhs = _match_dtype(b, f.dtype)
     if rhs.ndim == 1:
         return f.solve(rhs, refine)

@@ -1,5 +1,7 @@
 use crate::error::RslabError;
 use crate::scalar::Scalar;
+use crate::sparse::general::GeneralCsc;
+use crate::sparse::layout::CscLayout;
 
 /// Compressed Sparse Column (CSC) matrix storage for symmetric matrices.
 ///
@@ -63,35 +65,10 @@ impl<T: Scalar> CscMatrix<T> {
             ));
         }
 
-        // Count entries per column
-        let mut col_counts = vec![0usize; n];
-        for &c in cols {
-            if c >= n {
+        for (k, (&r, &c)) in rows.iter().zip(cols).enumerate() {
+            if r >= n || c >= n {
                 return Err(RslabError::InvalidInput(format!(
-                    "column index {} out of bounds for n={}",
-                    c, n
-                )));
-            }
-            col_counts[c] += 1;
-        }
-
-        // Build col_ptr
-        let mut col_ptr = vec![0usize; n + 1];
-        for j in 0..n {
-            col_ptr[j + 1] = col_ptr[j] + col_counts[j];
-        }
-        let nnz = col_ptr[n];
-
-        // Place entries
-        let mut row_idx = vec![0usize; nnz];
-        let mut values = vec![T::zero(); nnz];
-        let mut offsets = col_ptr[..n].to_vec();
-        for k in 0..rows.len() {
-            let (r, c) = (rows[k], cols[k]);
-            if r >= n {
-                return Err(RslabError::InvalidInput(format!(
-                    "row index {} out of bounds for n={}",
-                    r, n
+                    "triplet {k} ({r}, {c}) out of bounds for n={n}"
                 )));
             }
             if r < c {
@@ -101,69 +78,19 @@ impl<T: Scalar> CscMatrix<T> {
                     k, r, c
                 )));
             }
-            let pos = offsets[c];
-            row_idx[pos] = r;
-            values[pos] = vals[k];
-            offsets[c] += 1;
         }
-
-        // Sort each column by row index, summing duplicates
-        let mut result = CscMatrix {
+        let GeneralCsc {
+            col_ptr,
+            row_idx,
+            values,
+            ..
+        } = CscLayout::new(n, rows, cols)?.assemble(vals);
+        Ok(CscMatrix {
             n,
             col_ptr,
             row_idx,
             values,
-        };
-        result.sort_and_sum_duplicates();
-        Ok(result)
-    }
-
-    /// Sort row indices within each column and sum duplicate entries.
-    fn sort_and_sum_duplicates(&mut self) {
-        // Two-pass approach: first sort and deduplicate into a compact representation,
-        // then rebuild the arrays.
-        let mut new_row_idx = Vec::with_capacity(self.row_idx.len());
-        let mut new_values = Vec::with_capacity(self.values.len());
-        let mut new_col_ptr = vec![0usize; self.n + 1];
-
-        for j in 0..self.n {
-            let start = self.col_ptr[j];
-            let end = self.col_ptr[j + 1];
-            let col_start = new_row_idx.len();
-
-            if start == end {
-                new_col_ptr[j + 1] = col_start;
-                continue;
-            }
-
-            // Collect (row, val) pairs for this column and sort by row
-            let mut pairs: Vec<(usize, T)> = (start..end)
-                .map(|k| (self.row_idx[k], self.values[k]))
-                .collect();
-            pairs.sort_unstable_by_key(|&(r, _)| r);
-
-            // Deduplicate by summing
-            let mut prev_row = pairs[0].0;
-            let mut prev_val = pairs[0].1;
-            for &(r, v) in &pairs[1..] {
-                if r == prev_row {
-                    prev_val = prev_val + v;
-                } else {
-                    new_row_idx.push(prev_row);
-                    new_values.push(prev_val);
-                    prev_row = r;
-                    prev_val = v;
-                }
-            }
-            new_row_idx.push(prev_row);
-            new_values.push(prev_val);
-
-            new_col_ptr[j + 1] = new_row_idx.len();
-        }
-
-        self.col_ptr = new_col_ptr;
-        self.row_idx = new_row_idx;
-        self.values = new_values;
+        })
     }
 
     /// Validate the CSC structure.

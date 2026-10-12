@@ -111,6 +111,7 @@ pub trait Field: Scalar + Element + RecycleScalar + Default + Send + Sync + 'sta
     fn ldlt(p: Pair<Self, LdltSolver<Self>>) -> LdltAny;
     fn lu(p: Pair<Self, LuSolver<Self>>) -> LuAny;
     fn klu(p: Pair<Self, KluSolver<Self>>) -> KluAny;
+    fn auto(p: Pair<Self, AutoFactor<Self>>) -> AutoAny;
     /// Factor `a` on the analysis `sym` in `factor_dtype`: this field (the
     /// default), or its lower-precision twin under a handle that keeps `a`
     /// and iterates in this field (mixed precision).
@@ -163,6 +164,9 @@ macro_rules! field {
             }
             fn klu(p: Pair<Self, KluSolver<Self>>) -> KluAny {
                 KluAny::$variant(p)
+            }
+            fn auto(p: Pair<Self, AutoFactor<Self>>) -> AutoAny {
+                AutoAny::$variant(p)
             }
             fn ldlt_factor(
                 py: Python<'_>,
@@ -239,6 +243,16 @@ impl<T: Field> Direct<T> for LuSolver<T> {
     }
 }
 impl<T: Field> Direct<T> for KluSolver<T> {
+    type Matrix = GeneralCsc<T>;
+    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
+        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
+    }
+}
+
+/// The automatic path's factor, holding (a share of) its analysis.
+pub type AutoFactor<T> = rslab::AutoSolver<'static, T>;
+
+impl<T: Field> Direct<T> for AutoFactor<T> {
     type Matrix = GeneralCsc<T>;
     fn held_bytes(&self, a: &Self::Matrix) -> u64 {
         self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
@@ -500,6 +514,47 @@ impl<T: Field> Pair<T, KluSolver<T>> {
     }
 }
 
+impl<T: Field> Pair<T, AutoFactor<T>> {
+    /// Factor `data` (the CSC values in the factored pattern's order) in
+    /// place, on the path its work and symmetry select.
+    pub fn refactor(
+        &mut self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        settings: &rslab::AutoSettings,
+    ) -> PyResult<()> {
+        let pattern = crate::common::Pattern {
+            n: self.a.n,
+            col_ptr: self.a.col_ptr.clone(),
+            row_idx: self.a.row_idx.clone(),
+        };
+        let data = &pattern.values_of(py, data, false)?;
+        let d = vector::<T>(data, "data")?;
+        if d.len() != self.a.values.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "data length {} does not match the factored pattern nnz {}",
+                d.len(),
+                self.a.values.len()
+            )));
+        }
+        self.a.values.copy_from_slice(&d);
+        self.s.values_mut().copy_from_slice(&d);
+        let s = &mut self.s;
+        py.allow_threads(|| s.refactor(settings)).map_err(map_err)?;
+        Ok(())
+    }
+
+    /// The path of the last factorization: ``'klu'``, ``'ldlt'`` or ``'lu'``.
+    pub fn backend(&self) -> &'static str {
+        match self.s.backend() {
+            Some(rslab::AutoBackend::Klu) => "klu",
+            Some(rslab::AutoBackend::Ldlt) => "ldlt",
+            Some(rslab::AutoBackend::Lu) => "lu",
+            None => "none",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The Python classes
 // ---------------------------------------------------------------------------
@@ -516,7 +571,8 @@ macro_rules! dispatch {
 macro_rules! handle {
     (
         $(#[$meta:meta])*
-        $name:ident, $any:ident, $solver:ident, [$($mixed:ident($T:ty, $L:ty)),*];
+        $name:ident $({ $($field:ident: $fty:ty),* })?, $any:ident, $solver:ident,
+        [$($mixed:ident($T:ty, $L:ty)),*];
         $($extra:tt)*
     ) => {
         pub enum $any {
@@ -531,6 +587,7 @@ macro_rules! handle {
         #[pyclass(module = "rslab")]
         pub struct $name {
             pub inner: $any,
+            $($(pub $field: $fty,)*)?
         }
 
         #[pymethods]
@@ -951,6 +1008,47 @@ handle! {
         format!(
             "Klu(n={}, factor_nnz={}, n_blocks={}, dtype='{}')",
             self.n(), self.factor_nnz(), self.n_blocks(), self.dtype()
+        )
+    }
+}
+
+handle! {
+    /// A factor on the automatic path, from :func:`rslab.auto` or
+    /// :meth:`AutoSymbolic.factor`: KLU for sparse work, the supernodal
+    /// ``L D L^T`` for symmetric values or ``L U`` for dense work, as the
+    /// analysis predicts it. :meth:`refactor` factors new values of the same
+    /// pattern in place on the path they take.
+    Auto { settings: rslab::AutoSettings }, AutoAny, AutoFactor, [];
+
+    /// The path of the last factorization: ``'klu'``, ``'ldlt'`` or ``'lu'``.
+    #[getter]
+    fn backend(&self) -> &'static str {
+        dispatch!(AutoAny [F64, F32, C64, C32], &self.inner, |p| p.backend())
+    }
+
+    /// Factor new values on the same pattern, in place.
+    ///
+    /// Parameters
+    /// ----------
+    /// data : scipy.sparse matrix or ndarray
+    ///     The matrix itself (with the factored pattern) or its CSC value
+    ///     array in the factored pattern's order.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the pattern differs or the value count does not match.
+    /// RuntimeError
+    ///     If the matrix is numerically singular.
+    fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let settings = &self.settings;
+        dispatch!(AutoAny [F64, F32, C64, C32], &mut self.inner, |p| p.refactor(py, data, settings))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Auto(n={}, backend='{}', factor_nnz={}, dtype='{}')",
+            self.n(), self.backend(), self.factor_nnz(), self.dtype()
         )
     }
 }

@@ -2,9 +2,9 @@
 //!
 //! The module is organised by concern: `settings` (the configuration
 //! objects), `symbolic` (analysis handles and the one-shot factor functions),
-//! `factor` (the `Ldlt` / `Lu` / `Klu` handles), `krylov` (iterative solvers)
+//! `factor` (the `Ldlt` / `Lu` / `Klu` / `Auto` handles), `krylov` (iterative solvers)
 //! and `logging`. The Python package `rslab/__init__.py` adds the SciPy-facing
-//! wrappers (matrix conversion, symmetry detection, `spsolve`).
+//! wrappers (matrix conversion, `spsolve`).
 
 #![allow(clippy::useless_conversion)]
 
@@ -41,19 +41,22 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<factor::Ldlt>()?;
     m.add_class::<factor::Lu>()?;
     m.add_class::<factor::Klu>()?;
+    m.add_class::<factor::Auto>()?;
     m.add_class::<factor::PyRecycle>()?;
     m.add_class::<symbolic::PyLdltSymbolic>()?;
     m.add_class::<symbolic::PyLuSymbolic>()?;
     m.add_class::<symbolic::PyKluSymbolic>()?;
+    m.add_class::<symbolic::PyAutoSymbolic>()?;
     m.add_class::<krylov::PyKrylovResult>()?;
     m.add_function(wrap_pyfunction!(symbolic::ldlt_factor, m)?)?;
     m.add_function(wrap_pyfunction!(symbolic::lu_factor, m)?)?;
     m.add_function(wrap_pyfunction!(symbolic::klu_factor, m)?)?;
+    m.add_function(wrap_pyfunction!(symbolic::auto_factor, m)?)?;
     m.add_function(wrap_pyfunction!(symbolic::analyze_ldlt, m)?)?;
     m.add_function(wrap_pyfunction!(symbolic::analyze_lu, m)?)?;
     m.add_function(wrap_pyfunction!(symbolic::analyze_klu, m)?)?;
+    m.add_function(wrap_pyfunction!(symbolic::analyze_auto, m)?)?;
     m.add_function(wrap_pyfunction!(common::lower_triangle, m)?)?;
-    m.add_function(wrap_pyfunction!(common::is_symmetric, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::gmres_plain, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::gmres_block_plain, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::cocg_plain, m)?)?;

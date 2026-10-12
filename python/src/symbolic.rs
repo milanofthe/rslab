@@ -13,7 +13,7 @@ use rslab::{
 use crate::common::{
     heavy, map_err, memory_estimate_dict, memory_plan_dict, with_dtype, with_dtype_name, Pattern,
 };
-use crate::factor::{Field, Klu, Ldlt, Lu, Pair};
+use crate::factor::{Auto, Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
 
 // ---------------------------------------------------------------------------
@@ -757,6 +757,228 @@ pub fn klu_factor(
         let s = heavy(py, || KluSolver::<T>::factor(&a, &st.inner)).map_err(map_err)?;
         Ok(Klu {
             inner: T::klu(Pair::new(s, a)),
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The automatic path
+// ---------------------------------------------------------------------------
+
+/// The automatic path's settings: the supernodal paths' (``settings`` and
+/// the keywords, also returned as given), KLU's, and the routing between
+/// them.
+pub fn auto_settings(
+    settings: Option<PySettings>,
+    klu_settings: Option<PyKluSettings>,
+    supernodal_flops_per_entry: Option<f64>,
+    symmetry_tol: Option<f64>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(rslab::AutoSettings, PySettings)> {
+    let supernodal = settings_from(settings, kwargs)?;
+    let mut s = rslab::AutoSettings::default()
+        .with_supernodal(supernodal.inner.clone())
+        .with_klu(klu_settings_from(klu_settings, None)?.inner);
+    if let Some(f) = supernodal_flops_per_entry {
+        s = s.with_supernodal_flops_per_entry(f);
+    }
+    if let Some(t) = symmetry_tol {
+        s = s.with_symmetry_tol(t);
+    }
+    Ok((s, supernodal))
+}
+
+/// A pattern analyzed for the automatic path, from :func:`rslab.analyze`
+/// with ``path='auto'``: KLU's analysis predicts the work, and a pattern of
+/// dense work is analyzed for the supernodal paths. Factor any value set on
+/// the same pattern with :meth:`factor`; every factor shares the analysis.
+#[pyclass(name = "AutoSymbolic", module = "rslab")]
+pub struct PyAutoSymbolic {
+    sym: std::sync::Arc<rslab::AutoSymbolic>,
+    pattern: Pattern,
+    settings: rslab::AutoSettings,
+    /// The supernodal settings as given, the defaults of :meth:`memory_plan`.
+    supernodal: PySettings,
+}
+
+#[pymethods]
+impl PyAutoSymbolic {
+    /// Matrix dimension ``n``.
+    #[getter]
+    fn n(&self) -> usize {
+        self.sym.n()
+    }
+
+    /// The path family the pattern's work selected: ``'klu'`` or
+    /// ``'supernodal'`` (whose factors are ``'ldlt'`` or ``'lu'`` by the
+    /// values).
+    #[getter]
+    fn route(&self) -> &'static str {
+        match self.sym.is_supernodal() {
+            Some(true) => "supernodal",
+            _ => "klu",
+        }
+    }
+
+    /// Heap bytes this analysis holds on the Rust side, the stored pattern
+    /// included.
+    #[getter]
+    fn heap_bytes(&self) -> u64 {
+        let p = &self.pattern;
+        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
+    }
+
+    /// The heap a factorization needs, predicted from the analysis (see
+    /// :meth:`LuSymbolic.memory_plan`). On the supernodal paths a factor
+    /// keeps the ``L D L^T`` and the ``L U`` side by side once value sets of
+    /// both kinds came, and the plan counts both.
+    ///
+    /// Parameters
+    /// ----------
+    /// dtype : str, default 'float64'
+    ///     The value type the factor will use.
+    /// nrhs : int, default 1
+    ///     Right-hand sides per solve.
+    /// settings : Settings, optional
+    ///     The supernodal settings the factorization will run with; the
+    ///     analysis settings by default.
+    /// **kwargs
+    ///     Any settings keyword, overriding ``settings``.
+    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+    fn memory_plan(
+        &self,
+        py: Python<'_>,
+        dtype: &str,
+        nrhs: usize,
+        settings: Option<PySettings>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
+        let st = settings_from(
+            Some(settings.unwrap_or_else(|| self.supernodal.clone())),
+            kwargs,
+        )?;
+        let opts = self.settings.clone().with_supernodal(st.inner);
+        let (plan, vb) = with_dtype_name!(dtype, |T| (
+            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+            std::mem::size_of::<T>()
+        ))?;
+        let plan = plan.ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("the pattern is not analyzed yet")
+        })?;
+        memory_plan_dict(py, plan, &self.pattern, vb)
+    }
+
+    /// Numeric factorization of ``data`` on the analyzed pattern.
+    ///
+    /// Parameters
+    /// ----------
+    /// data : scipy.sparse matrix or ndarray
+    ///     The matrix itself (with the analyzed pattern) or its CSC value
+    ///     array in the order of the analysis.
+    ///
+    /// Returns
+    /// -------
+    /// Auto
+    ///     The factor, sharing this analysis.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the pattern or the value count differs from the analysis.
+    /// RuntimeError
+    ///     If the matrix is numerically singular.
+    fn factor(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Auto> {
+        let data = &self.pattern.values_of(py, data, false)?;
+        with_dtype!(data, |d: T| {
+            let a = self.pattern.general::<T>(d)?;
+            let mut s = rslab::AutoSolver::<T>::new(self.sym.clone());
+            s.values_mut().copy_from_slice(&a.values);
+            heavy(py, || s.refactor(&self.settings)).map_err(map_err)?;
+            Ok(Auto {
+                inner: T::auto(Pair::new(s, a)),
+                settings: self.settings.clone(),
+            })
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("AutoSymbolic(n={}, route='{}')", self.n(), self.route())
+    }
+}
+
+/// Analyze the CSC pattern ``(n, indptr, indices, data)`` for the automatic
+/// path, on the values ``data``.
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, data, settings = None, klu_settings = None,
+                    supernodal_flops_per_entry = None, symmetry_tol = None, **kwargs))]
+#[allow(clippy::too_many_arguments)]
+pub fn analyze_auto(
+    py: Python<'_>,
+    n: usize,
+    indptr: PyReadonlyArray1<i64>,
+    indices: PyReadonlyArray1<i64>,
+    data: &Bound<'_, PyAny>,
+    settings: Option<PySettings>,
+    klu_settings: Option<PyKluSettings>,
+    supernodal_flops_per_entry: Option<f64>,
+    symmetry_tol: Option<f64>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyAutoSymbolic> {
+    let (st, supernodal) = auto_settings(
+        settings,
+        klu_settings,
+        supernodal_flops_per_entry,
+        symmetry_tol,
+        kwargs,
+    )?;
+    let pattern = Pattern::from_py(n, &indptr, &indices)?;
+    with_dtype!(data, |d: T| {
+        let a = pattern.general::<T>(d)?;
+        let sym = heavy(py, || {
+            rslab::AutoSymbolic::analyze(rslab::CscLayout::of(&a)?, &a.values, &st)
+        })
+        .map_err(map_err)?;
+        Ok(PyAutoSymbolic {
+            sym: std::sync::Arc::new(sym),
+            pattern: pattern.clone(),
+            settings: st.clone(),
+            supernodal: supernodal.clone(),
+        })
+    })
+}
+
+/// One-shot factorization of ``(n, indptr, indices, data)`` on the automatic
+/// path.
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, data, settings = None, klu_settings = None,
+                    supernodal_flops_per_entry = None, symmetry_tol = None, **kwargs))]
+#[allow(clippy::too_many_arguments)]
+pub fn auto_factor(
+    py: Python<'_>,
+    n: usize,
+    indptr: PyReadonlyArray1<i64>,
+    indices: PyReadonlyArray1<i64>,
+    data: &Bound<'_, PyAny>,
+    settings: Option<PySettings>,
+    klu_settings: Option<PyKluSettings>,
+    supernodal_flops_per_entry: Option<f64>,
+    symmetry_tol: Option<f64>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Auto> {
+    let (st, _) = auto_settings(
+        settings,
+        klu_settings,
+        supernodal_flops_per_entry,
+        symmetry_tol,
+        kwargs,
+    )?;
+    let pattern = Pattern::from_py(n, &indptr, &indices)?;
+    with_dtype!(data, |d: T| {
+        let a = pattern.general::<T>(d)?;
+        let s = heavy(py, || rslab::AutoSolver::<T>::factor(&a, &st)).map_err(map_err)?;
+        Ok(Auto {
+            inner: T::auto(Pair::new(s, a)),
+            settings: st.clone(),
         })
     })
 }

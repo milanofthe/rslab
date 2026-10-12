@@ -156,28 +156,67 @@ def test_analyze_then_factor_sweep(path):
     assert _res(A, f.solve(b), b) < 1e-10
 
 
-def test_analyze_auto_picks_path():
-    assert isinstance(rslab.analyze(_spd(80)), rslab.LdltSymbolic)
-    assert isinstance(rslab.analyze(_general(80)), rslab.LuSymbolic)
-    assert "LdltSymbolic(" in repr(rslab.analyze(_spd(80)))
+def _grid(m, dtype=np.float64):
+    """An ``m x m`` grid Laplacian: supernodal work from ``m`` near 70 on."""
+    t = sp.diags([-1.0, 4.0, -1.0], [-1, 0, 1], shape=(m, m))
+    s = sp.diags([-1.0, -1.0], [-1, 1], shape=(m, m))
+    return (sp.kron(sp.eye(m), t) + sp.kron(s, sp.eye(m))).astype(dtype).tocsc()
+
+
+def test_analyze_auto_routes_by_work():
+    small = rslab.analyze(_spd(80))
+    assert isinstance(small, rslab.AutoSymbolic) and small.route == "klu"
+    assert "AutoSymbolic(" in repr(small)
+    A = _grid(100)
+    big = rslab.analyze(A)
+    assert big.route == "supernodal"
+    assert big.memory_plan()["factor_bytes"] > 0 and big.heap_bytes > 0
+    b = np.ones(A.shape[0])
+    f = big.factor(A)
+    assert f.backend == "ldlt"
+    assert _res(A, f.solve(b), b) < 1e-10
+    # The same pattern with one mirror pair broken: the LU takes it, in place.
+    A2 = A.tolil()
+    A2[0, 1] = -0.5
+    A2 = A2.tocsc()
+    f.refactor(A2)
+    assert f.backend == "lu"
+    assert _res(A2, f.solve(b), b) < 1e-10
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
-@pytest.mark.parametrize("index", [np.int32, np.int64])
-def test_symmetry_check_matches_difference(dtype, index):
-    # The Rust test on canonical arrays against the explicit `A - A^T`.
-    def reference(A, tol=1e-12):
-        d = abs(A - A.T)
-        return d.max() <= tol * (abs(A).max() or 1.0)
+def test_auto_factor_every_field(dtype):
+    # Circuit-shaped: sparse work, KLU; a random matrix of this density
+    # fills in to supernodal work, LU.
+    assert rslab.auto(_general(200, dtype=dtype)).backend == "lu"
+    A = _circuit(200).astype(dtype).tocsc()
+    f = rslab.auto(A)
+    assert f.backend == "klu" and f.dtype == np.dtype(dtype).name
+    b = np.arange(200).astype(dtype)
+    tol = 1e-4 if dtype in (np.float32, np.complex64) else 1e-10
+    assert _res(A, f.solve(b), b) < tol
+    assert _res(A.T, f.solve_transpose(b), b) < tol
+    assert _res(A, f.solve_many(np.stack([b, 2 * b], axis=1))[:, 1], 2 * b) < tol
+    assert "Auto(" in repr(f) and f.diagnostics()["solves"]["rhs"] == 4
 
-    S, G = _spd(60, dtype=dtype), _general(60, dtype=dtype)
-    near = (S + sp.csc_matrix(([1e-9 * abs(S).max()], ([3], [7])), shape=S.shape)).astype(dtype)
-    for M in (S, G, near, S.tocsr(), G.tocsr(), sp.csc_matrix((5, 5), dtype=dtype)):
-        M = M.copy()
-        M.indptr, M.indices = M.indptr.astype(index), M.indices.astype(index)
-        assert M.has_canonical_format
-        assert rslab._is_symmetric(M) == reference(M)
-    assert not rslab._is_symmetric(near)
+
+def test_auto_symmetry_tolerance():
+    A = _grid(100).tolil()
+    A[0, 1] = A[0, 1] * (1 + 1e-14)
+    A = A.tocsc()
+    assert rslab.auto(A).backend == "lu"
+    assert rslab.auto(A, symmetry_tol=1e-12).backend == "ldlt"
+
+
+def test_spsolve_takes_the_automatic_path():
+    A = _grid(100)
+    b = np.ones(A.shape[0])
+    assert _res(A, rslab.spsolve(A, b), b) < 1e-10
+    G = _general(150)
+    assert _res(G, rslab.spsolve(G, np.ones(150)), np.ones(150)) < 1e-10
+    # Settings keywords configure the supernodal paths, which then take it.
+    x = rslab.spsolve(G, np.ones(150), preconditioner=1e-8, refine=2)
+    assert _res(G, x, np.ones(150)) < 1e-8
 
 
 def test_symbolic_rejects_wrong_nnz():
