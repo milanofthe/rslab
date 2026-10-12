@@ -41,8 +41,9 @@
 //!
 //! [`LuSymbolic`] and [`KluSymbolic`] take a [`GeneralCsc`] the same way,
 //! and the one-shot forms ([`LdltSolver::factor`], [`LuSolver::factor`],
-//! [`KluSolver::factor`]) analyze and factor in one call. All three solvers
-//! implement [`Factorization`]: `solve`, `solve_many`, `solve_transpose`,
+//! [`KluSolver::factor`], and [`AutoSolver::factor`] of the automatic path
+//! below) analyze and factor in one call. Every solver implements
+//! [`Factorization`]: `solve`, `solve_many`, `solve_transpose`,
 //! `solve_refined` and the diagnostics behind one trait object.
 //!
 //! ## Circuit-shaped matrices
@@ -84,7 +85,7 @@
 //! let mut f = sym.factorizer::<f64>();
 //! for g in [1.0, 2.0, 3.0] {
 //!     f.assemble(&[g, 1.0, 3.0, 1.0]);
-//!     f.factor(&settings)?;
+//!     f.refactor(&settings)?;
 //!     let x = f.solve(&[1.0, 1.0])?;
 //! #   let _ = x;
 //! }

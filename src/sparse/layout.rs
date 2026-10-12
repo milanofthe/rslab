@@ -147,6 +147,25 @@ impl CscLayout {
         })
     }
 
+    /// The layout of `a`'s pattern, each stored entry its own slot (the
+    /// entry order is `a`'s storage order). Fails if `a` is not canonical
+    /// (see [`GeneralCsc::validate`]).
+    pub fn of<T: Scalar>(a: &GeneralCsc<T>) -> Result<Self, RslabError> {
+        a.validate()?;
+        Ok(CscLayout {
+            n: a.n,
+            col_ptr: a.col_ptr.clone(),
+            row_idx: a.row_idx.clone(),
+            slot: (0..a.row_idx.len()).collect(),
+        })
+    }
+
+    /// Heap bytes the layout holds.
+    pub fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes;
+        vec_bytes(&self.col_ptr) + vec_bytes(&self.row_idx) + vec_bytes(&self.slot)
+    }
+
     /// The dimension `n`.
     pub fn n(&self) -> usize {
         self.n
@@ -278,6 +297,17 @@ mod tests {
         let mut plain = vec![0.0; l.nnz()];
         l.scatter(&[2.0, 4.0, -3.0, 0.25, 0.25], &mut plain);
         assert_eq!(scaled, plain);
+    }
+
+    #[test]
+    fn layout_of_a_matrix_is_its_pattern() {
+        let a = GeneralCsc::from_triplets(2, &[1, 0, 0], &[0, 0, 1], &[1.0, 2.0, 3.0]).unwrap();
+        let l = CscLayout::of(&a).unwrap();
+        assert_eq!(
+            (l.col_ptr(), l.row_idx(), l.slot()),
+            (&a.col_ptr[..], &a.row_idx[..], &[0, 1, 2][..])
+        );
+        assert_eq!(l.assemble(&a.values).values, a.values);
     }
 
     #[test]

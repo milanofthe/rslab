@@ -178,11 +178,12 @@ where
     Ok(outcome)
 }
 
-/// The shared entry points of a direct solver `$solver<T>`: the solves, the
+/// The shared entry points of a direct solver `$solver<T>` (or
+/// `$solver<'a, T>` for one that borrows its analysis): the solves, the
 /// refinement, and the `Preconditioner` / `Factorization` impls.
 macro_rules! direct_solver {
-    ($solver:ident) => {
-        impl<T: $crate::scalar::Scalar> $solver<T> {
+    ($solver:ident $(<$lt:lifetime>)?) => {
+        impl<$($lt,)? T: $crate::scalar::Scalar> $solver<$($lt,)? T> {
             /// Solve `A x = b`.
             pub fn solve(&self, b: &[T]) -> Result<Vec<T>, $crate::RslabError> {
                 $crate::numeric::direct::solve(self, b, 1, false)
@@ -261,7 +262,9 @@ macro_rules! direct_solver {
             }
         }
 
-        impl<T: $crate::scalar::Scalar> $crate::Preconditioner<T> for $solver<T> {
+        impl<$($lt,)? T: $crate::scalar::Scalar> $crate::Preconditioner<T>
+            for $solver<$($lt,)? T>
+        {
             fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), $crate::RslabError> {
                 z.copy_from_slice(&$solver::solve(self, r)?);
                 Ok(())
@@ -281,7 +284,9 @@ macro_rules! direct_solver {
             }
         }
 
-        impl<T: $crate::scalar::Scalar> $crate::Factorization<T> for $solver<T> {
+        impl<$($lt,)? T: $crate::scalar::Scalar> $crate::Factorization<T>
+            for $solver<$($lt,)? T>
+        {
             fn n(&self) -> usize {
                 $solver::n(self)
             }

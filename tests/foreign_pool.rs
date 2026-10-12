@@ -51,7 +51,7 @@ fn sweep_on_a_foreign_pool_does_not_nest() {
                 |f, k| {
                     f.values_mut().copy_from_slice(&vals);
                     f.values_mut()[0] = 4.0 + k as f64 * 1e-6;
-                    assert_eq!(f.factor(&settings).unwrap(), AutoBackend::Ldlt);
+                    assert_eq!(f.refactor(&settings).unwrap(), AutoBackend::Ldlt);
                     f.solve(&vec![1.0; n]).unwrap()[0]
                 },
             )

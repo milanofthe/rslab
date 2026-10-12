@@ -17,18 +17,20 @@
 //! * [`LuSolver`] otherwise, and whenever the LDL^T factorization fails.
 //!
 //! Every factorization after a path's first refactors into that path's
-//! factor in place, and a value set bitwise equal to the last factored one
-//! keeps its factor without any numeric work. The solves run in work the
-//! solver keeps, so a warm loop allocates nothing.
+//! factor in place, and a value set equal to the last factored one keeps its
+//! factor without any numeric work. The solves are those of the three
+//! solvers ([`solve_into`](AutoSolver::solve_into) in lent work allocates
+//! nothing), and an [`AutoSolver`] is a [`Factorization`](crate::Factorization)
+//! and a [`Preconditioner`](crate::Preconditioner) like them.
 
 use std::sync::OnceLock;
 
 use crate::error::RslabError;
-use crate::numeric::direct::SolveWork;
+use crate::numeric::direct::{SolveCore, SolveWork};
 use crate::numeric::klu::{KluSettings, KluSolver, KluSymbolic};
 use crate::numeric::ldlt::{LdltSolver, LdltSymbolic};
 use crate::numeric::lu::{LuSolver, LuSymbolic};
-use crate::numeric::settings::SolverSettings;
+use crate::numeric::settings::{SolverSettings, Threads};
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
@@ -148,6 +150,15 @@ impl LdltCandidate {
             *v = vals[k];
         }
     }
+
+    fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes;
+        vec_bytes(&self.tpair)
+            + vec_bytes(&self.lower_from)
+            + vec_bytes(&self.col_ptr)
+            + vec_bytes(&self.row_idx)
+            + self.sym.heap_bytes()
+    }
 }
 
 /// The analysis of the path the pattern's work selected. Boxed: the analyses
@@ -208,6 +219,11 @@ impl AutoSymbolic {
         &self.layout
     }
 
+    /// The matrix dimension.
+    pub fn n(&self) -> usize {
+        self.layout.n()
+    }
+
     /// Whether the pattern routed to the supernodal paths; `None` before its
     /// analysis.
     pub fn is_supernodal(&self) -> Option<bool> {
@@ -216,19 +232,56 @@ impl AutoSymbolic {
             .map(|r| matches!(r, Route::Supernodal { .. }))
     }
 
+    /// Heap bytes the layout and the analyses made so far hold.
+    pub fn heap_bytes(&self) -> u64 {
+        self.layout.heap_bytes()
+            + match self.route.get() {
+                None => 0,
+                Some(Route::Klu(k)) => k.heap_bytes(),
+                Some(Route::Supernodal { ldlt, lu }) => {
+                    ldlt.as_ref().map_or(0, |c| c.heap_bytes())
+                        + lu.get().map_or(0, |s| s.heap_bytes())
+                }
+            }
+    }
+
+    /// The heap a solver over this pattern needs (see
+    /// [`MemoryPlan`](crate::MemoryPlan)), for `nrhs` right-hand sides per
+    /// solve; `None` before the analysis. On the supernodal paths a solver
+    /// keeps the LDL^T and the LU factor side by side once value sets of both
+    /// kinds came, so their footprints add (the LU's where it is analyzed),
+    /// and the peaks are the larger one's.
+    pub fn memory_plan<T: Scalar>(
+        &self,
+        settings: &AutoSettings,
+        nrhs: usize,
+    ) -> Option<crate::MemoryPlan> {
+        match self.route.get()? {
+            Route::Klu(k) => Some(k.memory_plan::<T>(&settings.klu, nrhs)),
+            Route::Supernodal { ldlt, lu } => {
+                let opts = &settings.supernodal;
+                let a = ldlt.as_ref().map(|c| c.sym.memory_plan::<T>(opts, nrhs));
+                let b = lu.get().map(|s| s.memory_plan::<T>(opts, nrhs));
+                match (a, b) {
+                    (Some(a), Some(b)) => Some(crate::MemoryPlan {
+                        threads: a.threads.max(b.threads),
+                        nrhs,
+                        analysis_bytes: a.analysis_bytes + b.analysis_bytes,
+                        analysis_growth_bytes: a.analysis_growth_bytes + b.analysis_growth_bytes,
+                        factor_bytes: a.factor_bytes + b.factor_bytes,
+                        factor_peak_bytes: a.factor_peak_bytes.max(b.factor_peak_bytes),
+                        solve_bytes: a.solve_bytes.max(b.solve_bytes),
+                        kept_bytes: a.kept_bytes + b.kept_bytes,
+                    }),
+                    (a, b) => a.or(b),
+                }
+            }
+        }
+    }
+
     /// A solver over this pattern, for one solve loop or one sweep worker.
     pub fn factorizer<T: Scalar>(&self) -> AutoSolver<'_, T> {
-        AutoSolver {
-            sym: self,
-            csc: self.layout.matrix(vec![T::zero(); self.layout.nnz()]),
-            lower: None,
-            klu: None,
-            ldlt: None,
-            lu: None,
-            active: None,
-            prev: Vec::new(),
-            work: SolveWork::new(),
-        }
+        AutoSolver::over(Analysis::Shared(self))
     }
 
     /// The analysis of `a`'s pattern in the path its work selects.
@@ -261,6 +314,22 @@ impl AutoSymbolic {
     }
 }
 
+/// The analysis an [`AutoSolver`] factors over: a shared one, or its own
+/// (a one-shot [`AutoSolver::factor`]).
+enum Analysis<'s> {
+    Shared(&'s AutoSymbolic),
+    Own(Box<AutoSymbolic>),
+}
+
+impl Analysis<'_> {
+    fn get(&self) -> &AutoSymbolic {
+        match self {
+            Analysis::Shared(s) => s,
+            Analysis::Own(s) => s,
+        }
+    }
+}
+
 /// Factor into `slot` in place when it holds a factor of the same analysis,
 /// fresh otherwise.
 fn in_place<S>(
@@ -277,12 +346,20 @@ fn in_place<S>(
     }
 }
 
-/// The numeric state over an [`AutoSymbolic`] for one solve loop: the
-/// values to factor (one per slot of the layout), each path's factor, kept
-/// while another path serves a value set so that its next factorization is
-/// again in place, and the solves' work.
+/// A factorization on the automatic path: the values to factor (one per
+/// slot of the layout), each path's factor, kept while another path serves
+/// a value set so that its next factorization is again in place, and the
+/// path the last successful factorization took.
+///
+/// [`AutoSymbolic::factorizer`] makes one over a shared analysis for a
+/// solve loop ([`assemble`](Self::assemble) or
+/// [`values_mut`](Self::values_mut), then [`refactor`](Self::refactor));
+/// [`AutoSolver::factor`] analyzes and factors one matrix, like the
+/// one-shot forms of the other solvers. The solves are theirs: `solve`,
+/// `solve_many`, `solve_transpose`, the `_into` forms in lent
+/// [`SolveWork`], and the refined ones.
 pub struct AutoSolver<'s, T> {
-    sym: &'s AutoSymbolic,
+    sym: Analysis<'s>,
     csc: GeneralCsc<T>,
     lower: Option<CscMatrix<T>>,
     klu: Option<KluSolver<T>>,
@@ -292,16 +369,49 @@ pub struct AutoSolver<'s, T> {
     active: Option<AutoBackend>,
     /// The values of the last successful factorization; empty without one.
     prev: Vec<T>,
-    work: SolveWork<T>,
+    /// The worker policy of the active factor, which a Krylov solve
+    /// preconditioned by it orthogonalizes under.
+    solve_threads: Threads,
+    solves: crate::diagnostics::SolveCounter,
 }
 
-impl<T: Scalar> AutoSolver<'_, T> {
-    /// The values the next [`factor`](Self::factor) factors, one per slot.
+impl<T: Scalar> AutoSolver<'static, T> {
+    /// Analyze and factor `a` on the path its work selects, the solver owning
+    /// its analysis: the one-shot form.
+    pub fn factor(a: &GeneralCsc<T>, settings: &AutoSettings) -> Result<Self, RslabError> {
+        let sym = AutoSymbolic::new(CscLayout::of(a)?)?;
+        let mut s = AutoSolver::over(Analysis::Own(Box::new(sym)));
+        s.values_mut().copy_from_slice(&a.values);
+        s.refactor(settings)?;
+        Ok(s)
+    }
+}
+
+impl<'s, T: Scalar> AutoSolver<'s, T> {
+    fn over(sym: Analysis<'s>) -> Self {
+        let layout = sym.get().layout();
+        let csc = layout.matrix(vec![T::zero(); layout.nnz()]);
+        Self {
+            sym,
+            csc,
+            lower: None,
+            klu: None,
+            ldlt: None,
+            lu: None,
+            active: None,
+            prev: Vec::new(),
+            solve_threads: Threads::Ambient,
+            solves: Default::default(),
+        }
+    }
+
+    /// The values the next [`refactor`](Self::refactor) factors, one per
+    /// slot of the layout.
     pub fn values_mut(&mut self) -> &mut [T] {
         &mut self.csc.values
     }
 
-    /// The matrix the next (or the last) [`factor`](Self::factor) factors.
+    /// The matrix the next (or the last) factorization factors.
     pub fn matrix(&self) -> &GeneralCsc<T> {
         &self.csc
     }
@@ -309,12 +419,14 @@ impl<T: Scalar> AutoSolver<'_, T> {
     /// Load the entry values `entries` (the layout's entry order,
     /// duplicates summed), see [`CscLayout::scatter`].
     pub fn assemble(&mut self, entries: &[T]) {
-        self.sym.layout.scatter(entries, &mut self.csc.values);
+        let layout = self.sym.get().layout();
+        layout.scatter(entries, &mut self.csc.values);
     }
 
     /// Load scaled runs of entry values, see [`CscLayout::scatter_scaled`].
     pub fn assemble_scaled(&mut self, parts: &[(&[T], T)], rest: T) {
-        (self.sym.layout).scatter_scaled(parts, rest, &mut self.csc.values);
+        let layout = self.sym.get().layout();
+        layout.scatter_scaled(parts, rest, &mut self.csc.values);
     }
 
     /// The path of the last successful factorization; `None` without one.
@@ -322,9 +434,10 @@ impl<T: Scalar> AutoSolver<'_, T> {
         self.active
     }
 
-    /// Factor the loaded values. A value set bitwise equal to the last
-    /// factored one keeps its factor; after an error no factor is held.
-    pub fn factor(&mut self, settings: &AutoSettings) -> Result<AutoBackend, RslabError> {
+    /// Factor the loaded values, in place of the last factor of the path
+    /// they take. A value set equal to the last factored one keeps its
+    /// factor; after an error no factor is held.
+    pub fn refactor(&mut self, settings: &AutoSettings) -> Result<AutoBackend, RslabError> {
         if let Some(b) = self.active {
             // NaN never compares equal, so a poisoned value set re-factors.
             if self.prev == self.csc.values {
@@ -335,12 +448,27 @@ impl<T: Scalar> AutoSolver<'_, T> {
         self.prev.clear();
         let b = self.factor_values(settings)?;
         self.active = Some(b);
+        self.solve_threads = match b {
+            AutoBackend::Klu => self
+                .klu
+                .as_ref()
+                .map(crate::Preconditioner::<T>::solve_threads),
+            AutoBackend::Ldlt => self
+                .ldlt
+                .as_ref()
+                .map(crate::Preconditioner::<T>::solve_threads),
+            AutoBackend::Lu => self
+                .lu
+                .as_ref()
+                .map(crate::Preconditioner::<T>::solve_threads),
+        }
+        .unwrap_or(Threads::Ambient);
         self.prev.extend_from_slice(&self.csc.values);
         Ok(b)
     }
 
     fn factor_values(&mut self, settings: &AutoSettings) -> Result<AutoBackend, RslabError> {
-        let sym = self.sym;
+        let sym = self.sym.get();
         let route = match sym.route.get() {
             Some(r) => r,
             None => {
@@ -395,48 +523,109 @@ impl<T: Scalar> AutoSolver<'_, T> {
         }
     }
 
-    /// Solve `A x = b` on the last successful factorization, in the work the
-    /// solver keeps: no allocation once it has served a solve.
-    pub fn solve_into(&mut self, b: &[T], x: &mut [T]) -> Result<(), RslabError> {
-        self.solve_with(b, x, false)
+    /// The matrix dimension.
+    pub fn n(&self) -> usize {
+        self.csc.n
     }
 
-    /// Solve `A^T x = b` (the plain transpose) on the last successful
-    /// factorization, see [`solve_into`](Self::solve_into).
-    pub fn solve_transpose_into(&mut self, b: &[T], x: &mut [T]) -> Result<(), RslabError> {
-        self.solve_with(b, x, true)
-    }
-
-    /// [`solve_into`](Self::solve_into) into a fresh vector.
-    pub fn solve(&mut self, b: &[T]) -> Result<Vec<T>, RslabError> {
-        let mut x = vec![T::zero(); b.len()];
-        self.solve_into(b, &mut x)?;
-        Ok(x)
-    }
-
-    fn solve_with(&mut self, b: &[T], x: &mut [T], transpose: bool) -> Result<(), RslabError> {
-        let w = &mut self.work;
-        macro_rules! go {
-            ($s:expr) => {
-                match &$s {
-                    Some(s) if transpose => s.solve_transpose_into(b, x, w),
-                    Some(s) => s.solve_into(b, x, w),
-                    None => Err(not_factored()),
-                }
-            };
-        }
+    /// Stored entries of the active factor; `0` without one.
+    pub fn factor_nnz(&self) -> usize {
         match self.active {
-            Some(AutoBackend::Klu) => go!(self.klu),
-            Some(AutoBackend::Ldlt) => go!(self.ldlt),
-            Some(AutoBackend::Lu) => go!(self.lu),
-            None => Err(not_factored()),
+            Some(AutoBackend::Klu) => self.klu.as_ref().map_or(0, |s| s.factor_nnz()),
+            Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map_or(0, |s| s.factor_nnz()),
+            Some(AutoBackend::Lu) => self.lu.as_ref().map_or(0, |s| s.factor_nnz()),
+            None => 0,
         }
+    }
+
+    /// Pivots the active factor's static regularization lifted.
+    pub fn n_perturbed(&self) -> usize {
+        match self.active {
+            Some(AutoBackend::Klu) => self.klu.as_ref().map_or(0, |s| s.n_perturbed()),
+            Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map_or(0, |s| s.n_perturbed()),
+            Some(AutoBackend::Lu) => self.lu.as_ref().map_or(0, |s| s.n_perturbed()),
+            None => 0,
+        }
+    }
+
+    /// The active factor's [`Diagnostics`](crate::Diagnostics) with this
+    /// solver's solve accounts; empty without a factor.
+    pub fn diagnostics(&self) -> crate::Diagnostics {
+        let mut d = match self.active {
+            Some(AutoBackend::Klu) => self.klu.as_ref().map(|s| s.diagnostics()),
+            Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map(|s| s.diagnostics()),
+            Some(AutoBackend::Lu) => self.lu.as_ref().map(|s| s.diagnostics()),
+            None => None,
+        }
+        .unwrap_or_default();
+        d.solves = self.solves.snapshot();
+        d
+    }
+
+    /// Heap bytes this solver holds: its values, every factor it keeps, and
+    /// an analysis it owns.
+    pub fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes;
+        let own = match &self.sym {
+            Analysis::Own(s) => s.heap_bytes(),
+            Analysis::Shared(_) => 0,
+        };
+        own + vec_bytes(&self.csc.col_ptr)
+            + vec_bytes(&self.csc.row_idx)
+            + vec_bytes(&self.csc.values)
+            + vec_bytes(&self.prev)
+            + self.lower.as_ref().map_or(0, |m| {
+                vec_bytes(&m.col_ptr) + vec_bytes(&m.row_idx) + vec_bytes(&m.values)
+            })
+            + self.klu.as_ref().map_or(0, |s| s.heap_bytes())
+            + self.ldlt.as_ref().map_or(0, |s| s.heap_bytes())
+            + self.lu.as_ref().map_or(0, |s| s.heap_bytes())
     }
 }
 
-fn not_factored() -> RslabError {
-    RslabError::InvalidInput("auto: no successful factorization to solve with".to_string())
+impl<T: Scalar> SolveCore<T> for AutoSolver<'_, T> {
+    const NAME: &'static str = "auto";
+
+    fn dim(&self) -> usize {
+        self.csc.n
+    }
+
+    fn solve_raw_into(
+        &self,
+        b: &[T],
+        nrhs: usize,
+        transpose: bool,
+        x: &mut [T],
+        work: &mut SolveWork<T>,
+    ) -> Result<(), RslabError> {
+        match self.active {
+            Some(AutoBackend::Klu) => self
+                .klu
+                .as_ref()
+                .map(|s| s.solve_raw_into(b, nrhs, transpose, x, work)),
+            Some(AutoBackend::Ldlt) => self
+                .ldlt
+                .as_ref()
+                .map(|s| s.solve_raw_into(b, nrhs, transpose, x, work)),
+            Some(AutoBackend::Lu) => self
+                .lu
+                .as_ref()
+                .map(|s| s.solve_raw_into(b, nrhs, transpose, x, work)),
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            Err(RslabError::InvalidInput(
+                "auto: no successful factorization to solve with".to_string(),
+            ))
+        })
+    }
+
+    fn counter(&self) -> &crate::diagnostics::SolveCounter {
+        &self.solves
+    }
 }
+
+crate::numeric::direct::direct_solver!(AutoSolver<'s>);
 
 #[cfg(test)]
 mod tests {
@@ -452,19 +641,24 @@ mod tests {
     }
 
     #[test]
-    fn sums_duplicates_and_solves_both_ways() {
+    fn sums_duplicates_and_solves_every_way() {
         // A = [[2, 1], [0, 3]] with (0, 0) given as 1.5 + 0.5.
         let sym = layout(2, &[0, 0, 0, 1], &[0, 0, 1, 1]);
         let mut f = sym.factorizer::<f64>();
         f.assemble(&[1.5, 0.5, 1.0, 3.0]);
         assert_eq!(
-            f.factor(&AutoSettings::default()).unwrap(),
+            f.refactor(&AutoSettings::default()).unwrap(),
             AutoBackend::Klu
         );
         assert!(close(&f.solve(&[5.0, 6.0]).unwrap(), &[1.5, 2.0]));
-        let mut xt = [0.0; 2];
-        f.solve_transpose_into(&[2.0, 7.0], &mut xt).unwrap();
-        assert!(close(&xt, &[1.0, 2.0]));
+        assert!(close(&f.solve_transpose(&[2.0, 7.0]).unwrap(), &[1.0, 2.0]));
+        let mut x = [0.0; 4];
+        let mut w = SolveWork::new();
+        f.solve_many_into(&[5.0, 6.0, 2.0, 3.0], 2, &mut x, &mut w)
+            .unwrap();
+        assert!(close(&x, &[1.5, 2.0, 0.5, 1.0]));
+        assert_eq!(f.diagnostics().solves.rhs, 4);
+        assert!(f.heap_bytes() > 0 && f.factor_nnz() >= 3);
     }
 
     #[test]
@@ -473,17 +667,17 @@ mod tests {
         let s = AutoSettings::default();
         let mut f = sym.factorizer::<f64>();
         f.assemble(&[2.0, 1.0, 0.0, 3.0]);
-        f.factor(&s).unwrap();
+        f.refactor(&s).unwrap();
         assert!(close(&f.solve(&[5.0, 6.0]).unwrap(), &[1.5, 2.0]));
         f.assemble(&[4.0, 2.0, 0.0, 6.0]);
-        f.factor(&s).unwrap();
+        f.refactor(&s).unwrap();
         assert!(close(&f.solve(&[10.0, 12.0]).unwrap(), &[1.5, 2.0]));
         f.assemble(&[1.0, 2.0, 2.0, 4.0]);
-        assert!(f.factor(&s).is_err());
+        assert!(f.refactor(&s).is_err());
         assert_eq!(f.backend(), None);
         assert!(f.solve(&[1.0, 1.0]).is_err());
         f.assemble(&[1.0, 2.0, 2.0, 5.0]);
-        f.factor(&s).unwrap();
+        f.refactor(&s).unwrap();
     }
 
     #[test]
@@ -543,7 +737,7 @@ mod tests {
         let mut f = sym.factorizer::<f64>();
         f.assemble(&laplacian(&rows, &cols));
         assert_eq!(
-            f.factor(&AutoSettings::default()).unwrap(),
+            f.refactor(&AutoSettings::default()).unwrap(),
             AutoBackend::Klu
         );
         assert_eq!(sym.is_supernodal(), Some(false));
@@ -560,23 +754,49 @@ mod tests {
         let b = row_sums(n, &rows, &vals);
         let mut f = sym.factorizer::<f64>();
         f.assemble(&vals);
-        assert_eq!(f.factor(&s).unwrap(), AutoBackend::Ldlt);
+        assert_eq!(f.refactor(&s).unwrap(), AutoBackend::Ldlt);
         let x = f.solve(&b).unwrap();
         assert!(close(&x, &vec![1.0; n]));
 
-        // One off-diagonal broken from its mirror: the LU takes it.
+        // One off-diagonal broken from its mirror: the LU takes it, forward
+        // and transposed.
         let mut asym = vals.clone();
         asym[1] = -0.5;
         f.assemble(&asym);
-        assert_eq!(f.factor(&s).unwrap(), AutoBackend::Lu);
+        assert_eq!(f.refactor(&s).unwrap(), AutoBackend::Lu);
         let x2 = f.solve(&row_sums(n, &rows, &asym)).unwrap();
         assert!(close(&x2, &vec![1.0; n]));
+        let col_sums = row_sums(n, &cols, &asym);
+        assert!(close(&f.solve_transpose(&col_sums).unwrap(), &vec![1.0; n]));
+        let plan = sym.memory_plan::<f64>(&s, 1).unwrap();
+        assert!(plan.factor_bytes > 0 && plan.analysis_bytes > 0);
 
         // Symmetric again: LDL^T in place, the same bits as at first.
         f.assemble(&vals);
-        assert_eq!(f.factor(&s).unwrap(), AutoBackend::Ldlt);
+        assert_eq!(f.refactor(&s).unwrap(), AutoBackend::Ldlt);
         let xr = f.solve(&b).unwrap();
         assert!(x.iter().zip(&xr).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    #[test]
+    fn one_shot_owns_its_analysis_and_matches_the_shared_one() {
+        let (rows, cols) = grid(130);
+        let n = 130 * 130;
+        let vals = laplacian(&rows, &cols);
+        let a = GeneralCsc::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let s = AutoSettings::default();
+        let one = AutoSolver::factor(&a, &s).unwrap();
+        let sym = layout(n, &rows, &cols);
+        let mut shared = sym.factorizer::<f64>();
+        shared.assemble(&vals);
+        shared.refactor(&s).unwrap();
+        assert_eq!(one.backend(), shared.backend());
+        let b = row_sums(n, &rows, &vals);
+        let (x1, x2) = (one.solve(&b).unwrap(), shared.solve(&b).unwrap());
+        assert!(x1.iter().zip(&x2).all(|(a, b)| a.to_bits() == b.to_bits()));
+        // A factorization like the others: a preconditioner behind the trait.
+        let f: &dyn crate::Factorization<f64> = &one;
+        assert_eq!((f.n(), f.n_perturbed()), (n, 0));
     }
 
     #[test]
@@ -591,13 +811,13 @@ mod tests {
         let sym = layout(2, &[0, 1], &[0, 1]);
         let mut f = sym.factorizer::<f64>();
         f.assemble(&[2.0, 4.0]);
-        f.factor(&s).unwrap();
+        f.refactor(&s).unwrap();
         flag.store(true, Ordering::Relaxed);
         f.assemble(&[2.0, 4.0]);
-        assert_eq!(f.factor(&s).unwrap(), AutoBackend::Klu);
+        assert_eq!(f.refactor(&s).unwrap(), AutoBackend::Klu);
         assert!(close(&f.solve(&[2.0, 4.0]).unwrap(), &[1.0, 1.0]));
         f.assemble(&[2.0, 5.0]);
-        assert!(f.factor(&s).is_err());
+        assert!(f.refactor(&s).is_err());
     }
 
     #[test]
@@ -616,7 +836,7 @@ mod tests {
         let mut f = sym.factorizer::<Complex<f64>>();
         f.values_mut().copy_from_slice(&ref_vals);
         assert_eq!(
-            f.factor(&AutoSettings::default()).unwrap(),
+            f.refactor(&AutoSettings::default()).unwrap(),
             AutoBackend::Ldlt
         );
         let x = f.solve(&row_sums(n, &rows, &vals)).unwrap();

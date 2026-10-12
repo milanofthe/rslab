@@ -55,8 +55,8 @@ k.solve_into(&rhs, &mut dx, &mut work)?;
 let sym = AutoSymbolic::new(CscLayout::new(n, &rows, &cols)?)?;
 let mut f = sym.factorizer::<f64>();
 f.assemble(&entries);
-f.factor(&AutoSettings::default())?;
-f.solve_into(&rhs, &mut dx)?;
+f.refactor(&AutoSettings::default())?;
+f.solve_into(&rhs, &mut dx, &mut work)?;
 
 // A never-failing factor as a preconditioner.
 let m = LdltSolver::factor(&a, &SolverSettings::preconditioner(1e-8))?;
