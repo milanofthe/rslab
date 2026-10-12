@@ -658,11 +658,19 @@ impl Threads {
 /// The pool is the calling thread's own, built on its first use and kept (see
 /// [`POOLS`]): a factorization per Newton step would otherwise start and join
 /// its workers every time, tens of microseconds per worker.
+///
+/// Work that needs no stack of its own (`stack_bytes == 0`, the solves)
+/// called from a worker of a rayon pool runs on that pool instead: entering
+/// a pool of its own would make the worker wait, and wait it must not (see
+/// [`enter`]).
 pub(crate) fn in_scoped_pool<R: Send>(
     threads: usize,
     stack_bytes: usize,
     f: impl FnOnce() -> R + Send,
 ) -> R {
+    if stack_bytes == 0 && rayon::current_thread_index().is_some() {
+        return f();
+    }
     let n = if threads == 0 {
         std::thread::available_parallelism()
             .map(|p| p.get())
