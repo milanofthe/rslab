@@ -193,6 +193,11 @@ class Klu(_Factor):
     def row_scale(self) -> NDArray[np.float64]: ...
     def refactor(self, data: NDArray[Any] | Any) -> None: ...
 
+class Auto(_Factor):
+    @property
+    def backend(self) -> str: ...
+    def refactor(self, data: NDArray[Any] | Any) -> None: ...
+
 class _Symbolic:
     @property
     def n(self) -> int: ...
@@ -242,6 +247,18 @@ class KluSymbolic(_Symbolic):
         self, dtype: str = ..., nrhs: int = ..., settings: KluSettings | None = ..., **kwargs: Any
     ) -> dict[str, int]: ...
 
+class AutoSymbolic:
+    @property
+    def n(self) -> int: ...
+    @property
+    def route(self) -> str: ...
+    @property
+    def heap_bytes(self) -> int: ...
+    def factor(self, data: NDArray[Any] | Any) -> Auto: ...
+    def memory_plan(
+        self, dtype: str = ..., nrhs: int = ..., settings: Settings | None = ..., **kwargs: Any
+    ) -> dict[str, int]: ...
+
 def ldlt_factor(
     n: int, indptr: NDArray[np.int64], indices: NDArray[np.int64], data: NDArray[Any],
     settings: Settings | None = ..., **kwargs: Any,
@@ -254,6 +271,18 @@ def klu_factor(
     n: int, indptr: NDArray[np.int64], indices: NDArray[np.int64], data: NDArray[Any],
     settings: KluSettings | None = ..., **kwargs: Any,
 ) -> Klu: ...
+def auto_factor(
+    n: int, indptr: NDArray[np.int64], indices: NDArray[np.int64], data: NDArray[Any],
+    settings: Settings | None = ..., klu_settings: KluSettings | None = ...,
+    supernodal_flops_per_entry: float | None = ..., symmetry_tol: float | None = ...,
+    **kwargs: Any,
+) -> Auto: ...
+def analyze_auto(
+    n: int, indptr: NDArray[np.int64], indices: NDArray[np.int64], data: NDArray[Any],
+    settings: Settings | None = ..., klu_settings: KluSettings | None = ...,
+    supernodal_flops_per_entry: float | None = ..., symmetry_tol: float | None = ...,
+    **kwargs: Any,
+) -> AutoSymbolic: ...
 def analyze_ldlt(
     n: int, indptr: NDArray[np.int64], indices: NDArray[np.int64], data: NDArray[Any],
     settings: Settings | None = ..., **kwargs: Any,

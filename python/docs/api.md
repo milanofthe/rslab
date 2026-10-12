@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 1.1.2 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 1.2.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -27,7 +27,10 @@ P_r^T A P_c = L U,
 and **circuit-shaped** matrices (MNA / SPICE class: extremely sparse,
 unsymmetric, near-triangularizable) by a KLU-style path - block triangular
 form plus a per-block Gilbert-Peierls LU - whose numeric-only `refactor`
-makes fixed-pattern sweeps cheap.
+makes fixed-pattern sweeps cheap. The **automatic** path (`auto`)
+picks among the three by the work the analysis predicts: KLU for sparse
+work, the supernodal `L D L^T` for symmetric values or `L U` for dense
+work; `spsolve` and `analyze` take it by default.
 
 The solver is **type-agnostic**: the matrix `dtype` selects the arithmetic
 field, so `float64` / `float32` run the real path and `complex128` /
@@ -37,11 +40,12 @@ for the 32-bit fields.
 The API has four layers, each a thin step below the previous one:
 
 1. `spsolve` - one-shot factor, solve, discard.
-2. `ldlt` / `lu` / `klu` - factor once into a handle
-   (`Ldlt`, `Lu`, `Klu`), solve many.
-3. `analyze` - the symbolic analysis alone (`LdltSymbolic`,
-   `LuSymbolic`, `KluSymbolic`); factor many value sets on one
-   pattern.
+2. `auto` / `ldlt` / `lu` / `klu` - factor once into
+   a handle (`Auto`, `Ldlt`, `Lu`, `Klu`), solve
+   many.
+3. `analyze` - the symbolic analysis alone (`AutoSymbolic`,
+   `LdltSymbolic`, `LuSymbolic`, `KluSymbolic`); factor
+   many value sets on one pattern.
 4. `gmres` / `gmres_block` / `cocg` / `cocr` -
    Krylov solvers, optionally preconditioned by any factor handle.
 
@@ -91,17 +95,20 @@ throughput-per-core point on typical sparse factorizations); pass an explicit
 
 One-shot solve of `A x = b` (factor, solve, discard).
 
-Detects symmetry, factors through `ldlt` or `lu`, solves,
-and drops the factor. For repeated solves against one matrix keep the
-handle instead (`ldlt` / `lu` / `klu`).
+Factors on the automatic path (`auto`): KLU for sparse work, the
+supernodal `L D L^T` (values symmetric within `1e-12` relative) or
+`L U` for dense work. Given `Settings` keywords configure the
+supernodal paths, so they take the matrix whatever its work. For repeated
+solves against one matrix keep the handle instead (`auto` /
+`ldlt` / `lu` / `klu`).
 
 **Parameters**
 
 - `A` (scipy.sparse matrix or array-like): The `n x n` system matrix.
 - `b` (ndarray): Right-hand side: a 1-D vector of length `n` or a 2-D `n x nrhs` block. Cast to the factor's dtype automatically.
-- `symmetric` (bool, optional): Force the symmetric `L D L^T` path (`True`) or the unsymmetric `L U` path (`False`). When omitted, symmetry is auto-detected from `A` (a structural + value test).
+- `symmetric` (bool, optional): Force the symmetric `L D L^T` path (`True`) or the unsymmetric `L U` path (`False`). When omitted, the automatic path decides.
 - `refine` (int, default 0): Steps of iterative refinement against the original matrix, per right-hand side. Meaningful with `preconditioner=...` / `drop_tol=...`, where the factor is inexact.
-- `**kwargs`: Forwarded to `ldlt` / `lu` (any `Settings` keyword).
+- `**kwargs`: Any `Settings` keyword, for the supernodal paths.
 
 **Returns**
 
@@ -115,12 +122,50 @@ handle instead (`ldlt` / `lu` / `klu`).
 **Example**
 
 ```python
-x = rslab.spsolve(A, b)                          # auto-detects symmetry
+x = rslab.spsolve(A, b)                          # the automatic path
 X = rslab.spsolve(A, np.random.rand(n, 5))       # 5 right-hand sides
 x = rslab.spsolve(A, b, preconditioner=1e-4, refine=2)
 ```
 
 ## Factor handles
+
+### `auto(A, *, settings: 'Settings | None' = None, klu_settings: 'KluSettings | None' = None, supernodal_flops_per_entry: 'float | None' = None, symmetry_tol: 'float | None' = None, **kwargs) -> 'Auto'`
+
+Factor a matrix on the **automatic** path: the path its work calls for.
+
+KLU's analysis predicts the factorization's flops per factor entry. Below
+`supernodal_flops_per_entry` the matrix is sparse work and KLU factors
+it; above it (large fronts: meshes, power grids) the supernodal paths do,
+`L D L^T` when the matrix is structurally symmetric and its values are
+symmetric (within `symmetry_tol`), `L U` otherwise.
+`Auto.refactor` factors new values of the same pattern in place, on
+the path they take.
+
+**Parameters**
+
+- `A` (scipy.sparse matrix or array-like): The `n x n` system matrix (full, CSC after conversion).
+- `settings` (Settings, optional): The supernodal paths' settings.
+- `klu_settings` (KluSettings, optional): The KLU path's settings.
+- `supernodal_flops_per_entry` (float, optional): The routing threshold (default 25).
+- `symmetry_tol` (float, optional): Relative tolerance of the value-symmetry test for `L D L^T` (default 0, exact). Above zero, `L D L^T` factors the lower triangle of a matrix symmetric only within the tolerance.
+- `**kwargs`: Any `Settings` keyword, overriding `settings`.
+
+**Returns**
+
+- `Auto`: A reusable factor handle with `Auto.backend`, the solve methods, `Auto.refactor`, the Krylov methods and `Auto.diagnostics`.
+
+**Raises**
+
+- `RuntimeError`: If the matrix is structurally or numerically singular.
+
+**Example**
+
+```python
+f = rslab.auto(A)                       # KLU, LDL^T or LU
+print(f.backend)
+x = f.solve(b)
+f.refactor(A2.data)                     # same pattern, new values
+```
 
 ### `ldlt(A, *, settings: 'Settings | None' = None, **kwargs) -> 'Ldlt'`
 
@@ -224,6 +269,170 @@ f.refactor(A2.data)                     # same pattern, new values
 x2 = f.solve(b)
 y = f.solve_transpose(b)                # A^T y = b on the same factors
 ```
+
+### class `Auto`
+
+A factor on the automatic path, from `rslab.auto` or
+`AutoSymbolic.factor`: KLU for sparse work, the supernodal
+`L D L^T` for symmetric values or `L U` for dense work, as the
+analysis predicts it. `refactor` factors new values of the same
+pattern in place on the path they take.
+
+**Attributes**
+
+- `backend`: The path of the last factorization: ``'klu'``, ``'ldlt'`` or ``'lu'``.
+- `dtype`: NumPy dtype name of the factor (``'float64'``, ``'float32'``, ``'complex128'`` or ``'complex64'``).
+- `factor_dtype`: NumPy dtype name the factor is stored in: :attr:`dtype`, or its lower-precision twin for a mixed-precision factor (``factor_dtype`` setting), which the solves and Krylov methods apply in :attr:`dtype`.
+- `factor_nnz`: Stored factor entries (the fill).
+- `heap_bytes`: Heap bytes this factor holds on the Rust side: the factor and the copy of the matrix kept for residuals and refinement.
+- `n`: Matrix dimension ``n``.
+- `n_perturbed`: Statically perturbed pivots (nonzero only in preconditioner mode).
+
+#### `Auto.cocg(b, tol=1e-08, maxit=400, operator=None)`
+
+Conjugate orthogonal conjugate gradient (COCG) with this factor
+as the preconditioner: the short-recurrence method for
+complex-symmetric (`A = A^T`) and real symmetric operators.
+
+**Parameters**
+
+- `b` (ndarray, shape (n,)): Right-hand side.
+- `tol` (float, default 1e-8): Relative residual target.
+- `maxit` (int, default 400): Iteration budget.
+- `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
+
+**Returns**
+
+- `KrylovResult`: `x`, `converged`, `iters`, `final_res`, `stop`.
+
+#### `Auto.cocr(b, tol=1e-08, maxit=400, operator=None)`
+
+Conjugate orthogonal conjugate residual (COCR) with this factor
+as the preconditioner; the minimal-residual sibling of
+`cocg` for complex-symmetric operators.
+
+**Parameters**
+
+- `b` (ndarray, shape (n,)): Right-hand side.
+- `tol` (float, default 1e-8): Relative residual target.
+- `maxit` (int, default 400): Iteration budget.
+- `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
+
+**Returns**
+
+- `KrylovResult`: `x`, `converged`, `iters`, `final_res`, `stop`.
+
+#### `Auto.diagnostics()`
+
+The factorization report as a dictionary: `stages` (name,
+wall_ms, flops, bytes per phase), `decisions` (ordering,
+scaling, method, supernode counts), `numeric` (perturbed
+pivots, 2x2 pivots, inertia), `solves` (accumulated solve
+calls, right-hand sides, wall time, refinement steps),
+`warnings` (settings that were ignored on this path), the
+throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
+`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
+`solve_mdof_s`; million unknowns per second and GFlop/s),
+the a-priori `estimate` and a one-line `summary`.
+
+#### `Auto.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
+
+Flexible restarted GMRES with this factor as the preconditioner.
+
+**Parameters**
+
+- `b` (ndarray, shape (n,)): Right-hand side.
+- `tol` (float, default 1e-8): Relative residual target `||b - A x|| <= tol * ||b||`.
+- `maxit` (int, default 400): Iteration budget.
+- `restart` (int, optional): Arnoldi basis size; by default chosen so the basis stays under 1 GiB (between 20 and 80).
+- `x0` (ndarray, optional): Initial guess (warm start).
+- `recycle` (Recycle, optional): Deflation subspace carried across calls; see `recycle`.
+- `operator` (tuple, optional): `(n, indptr, indices, data)` of a different CSC matrix to iterate on, with this factor as the preconditioner (the Python wrapper `rslab.gmres` builds it from a SciPy matrix). By default the factored matrix is the operator.
+
+**Returns**
+
+- `KrylovResult`: `x`, `converged`, `iters`, `final_res`, `stop`; unpacks as a 5-tuple.
+
+#### `Auto.gmres_block(b, tol=1e-08, maxit=400, restart=None, x0=None, operator=None)`
+
+Block GMRES for an `n x nrhs` right-hand side block with this
+factor as the preconditioner.
+
+**Parameters**
+
+- `b` (ndarray, shape (n, nrhs)): Right-hand side block.
+- `tol` (float, default 1e-8): Relative residual target per column.
+- `maxit` (int, default 400): Iteration budget.
+- `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
+- `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
+- `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
+
+**Returns**
+
+- `KrylovResult`: `x` of shape `(n, nrhs)`, `converged`, `iters`, `final_res` (one value per column), `stop`.
+
+#### `Auto.recycle(k)`
+
+A `Recycle` workspace holding up to `k` deflation
+vectors for a sequence of `gmres` calls.
+
+**Parameters**
+
+- `k` (int): Maximum number of deflation vectors kept.
+
+**Returns**
+
+- `Recycle`: The workspace to pass as `recycle=` to `gmres`.
+
+#### `Auto.refactor(data)`
+
+Factor new values on the same pattern, in place.
+
+**Parameters**
+
+- `data` (scipy.sparse matrix or ndarray): The matrix itself (with the factored pattern) or its CSC value array in the factored pattern's order.
+
+**Raises**
+
+- `ValueError`: If the pattern differs or the value count does not match.
+- `RuntimeError`: If the matrix is numerically singular.
+
+#### `Auto.solve(b, refine=0, target=None, measure='normwise')`
+
+Solve `A x = b` for one right-hand side.
+
+**Parameters**
+
+- `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
+- `refine` (int, default 0): Steps of iterative refinement against the original matrix.
+- `target` (float, optional): Stop refining once the backward error is below this value (by default all `refine` steps run).
+- `measure` ({'normwise', 'componentwise'}, default 'normwise'): The backward-error measure `target` refers to.
+
+#### `Auto.solve_many(b)`
+
+Solve `A X = B` for an `n x nrhs` block in one batched pass.
+
+**Parameters**
+
+- `b` (ndarray, shape (n, nrhs)): Right-hand side block in the factor's dtype.
+
+**Returns**
+
+- `ndarray, shape (n, nrhs)`: The solutions, one column per right-hand side.
+
+#### `Auto.solve_transpose(b)`
+
+Solve `A^T y = b` on the same factors (plain transpose, not the
+conjugate transpose; conjugate the right-hand side and the result for
+`A^H`).
+
+**Parameters**
+
+- `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
+
+**Returns**
+
+- `ndarray, shape (n,)`: The solution `y`.
 
 ### class `Ldlt`
 
@@ -720,13 +929,13 @@ parameter studies) pays it once and factors each value set through
 **Parameters**
 
 - `A` (scipy.sparse matrix or array-like): The `n x n` matrix whose pattern (and, for the LU and KLU row matching, values) is analyzed.
-- `path` ({'auto', 'ldlt', 'lu', 'klu'}, default 'auto'): The factorization path: `'ldlt'` for symmetric matrices (the lower triangle is analyzed), `'lu'` for general ones, `'klu'` for circuit-shaped ones. `'auto'` picks `'ldlt'` when `A` is symmetric and `'lu'` otherwise.
-- `settings` (Settings or KluSettings, optional): Analysis-time settings (`ordering`, `nemin`, `relax` for LDL^T / LU; `btf` for KLU). Numeric settings given here become the defaults of `factor`.
-- `**kwargs`: The same keywords, overriding `settings`.
+- `path` ({'auto', 'ldlt', 'lu', 'klu'}, default 'auto'): The factorization path: `'ldlt'` for symmetric matrices (the lower triangle is analyzed), `'lu'` for general ones, `'klu'` for circuit-shaped ones. `'auto'` is the automatic path (see `auto`): the analysis routes the pattern by its predicted work, and each factorization takes `L D L^T` or `L U` by its values.
+- `settings` (Settings or KluSettings, optional): Analysis-time settings (`ordering`, `nemin`, `relax` for LDL^T / LU and the supernodal side of `'auto'`; `btf` for KLU). Numeric settings given here become the defaults of `factor`.
+- `**kwargs`: The same keywords, overriding `settings`; for `'auto'` also `klu_settings`, `supernodal_flops_per_entry` and `symmetry_tol` (see `auto`).
 
 **Returns**
 
-- `LdltSymbolic or LuSymbolic or KluSymbolic`: The analysis handle: fill and memory estimates, and `factor(data)`.
+- `AutoSymbolic or LdltSymbolic or LuSymbolic or KluSymbolic`: The analysis handle: memory estimates and `factor(data)`.
 
 **Example**
 
@@ -742,6 +951,50 @@ for omega in frequencies:
 `factor(data)` takes the CSC value array in the analyzed pattern's
 order, i.e. of a matrix prepared the same way (sorted indices, summed
 duplicates). Build the sweep matrices from one pattern to guarantee it.
+
+### class `AutoSymbolic`
+
+A pattern analyzed for the automatic path, from `rslab.analyze`
+with `path='auto'`: KLU's analysis predicts the work, and a pattern of
+dense work is analyzed for the supernodal paths. Factor any value set on
+the same pattern with `factor`; every factor shares the analysis.
+
+**Attributes**
+
+- `heap_bytes`: Heap bytes this analysis holds on the Rust side, the stored pattern included.
+- `n`: Matrix dimension ``n``.
+- `route`: The path family the pattern's work selected: ``'klu'`` or ``'supernodal'`` (whose factors are ``'ldlt'`` or ``'lu'`` by the values).
+
+#### `AutoSymbolic.factor(data)`
+
+Numeric factorization of `data` on the analyzed pattern.
+
+**Parameters**
+
+- `data` (scipy.sparse matrix or ndarray): The matrix itself (with the analyzed pattern) or its CSC value array in the order of the analysis.
+
+**Returns**
+
+- `Auto`: The factor, sharing this analysis.
+
+**Raises**
+
+- `ValueError`: If the pattern or the value count differs from the analysis.
+- `RuntimeError`: If the matrix is numerically singular.
+
+#### `AutoSymbolic.memory_plan(dtype='float64', nrhs=1, settings=None, **kwargs)`
+
+The heap a factorization needs, predicted from the analysis (see
+`LuSymbolic.memory_plan`). On the supernodal paths a factor
+keeps the `L D L^T` and the `L U` side by side once value sets of
+both kinds came, and the plan counts both.
+
+**Parameters**
+
+- `dtype` (str, default 'float64'): The value type the factor will use.
+- `nrhs` (int, default 1): Right-hand sides per solve.
+- `settings` (Settings, optional): The supernodal settings the factorization will run with; the analysis settings by default.
+- `**kwargs`: Any settings keyword, overriding `settings`.
 
 ### class `LdltSymbolic`
 

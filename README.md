@@ -65,7 +65,7 @@ let res = cocg(&a, &b, &m, 1e-10, 100)?;
 
 ```python
 import rslab
-x = rslab.spsolve(A, b)          # one-shot, LDL^T or LU by symmetry
+x = rslab.spsolve(A, b)          # one-shot, on the automatic path
 f = rslab.lu(A); x = f.solve(b)  # factor once, solve many
 sym = rslab.analyze(A)           # analysis alone, then sym.factor(A_k) per sweep point
 ```

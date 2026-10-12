@@ -23,8 +23,8 @@ import rslab  # noqa: E402
 
 SECTIONS = [
     ("One-shot solve", ["spsolve"]),
-    ("Factor handles", ["ldlt", "lu", "klu", "Ldlt", "Lu", "Klu"]),
-    ("Symbolic analysis", ["analyze", "LdltSymbolic", "LuSymbolic", "KluSymbolic"]),
+    ("Factor handles", ["auto", "ldlt", "lu", "klu", "Auto", "Ldlt", "Lu", "Klu"]),
+    ("Symbolic analysis", ["analyze", "AutoSymbolic", "LdltSymbolic", "LuSymbolic", "KluSymbolic"]),
     ("Configuration", ["Settings", "KluSettings", "Interrupt"]),
     ("Krylov solvers", ["gmres", "gmres_block", "cocg", "cocr", "KrylovResult", "Recycle"]),
     ("Machine calibration and logging", ["install_diagnose", "set_log_level", "log_level", "set_log_sink"]),
