@@ -8,6 +8,9 @@ LAPACK or MKL. Three paths:
 - **KLU** (block triangular form, per-block Gilbert-Peierls LU) for
   circuit-shaped matrices, with a numeric-only refactor for sweeps.
 
+An automatic path over them factors one pattern for many value sets (Newton
+loops, sweeps) in the path its predicted work calls for, refactoring in place.
+
 Generic over `f64`, `f32`, `Complex<f64>` and `Complex<f32>`. The factor is
 bit-identical for every thread count, memory and flops are estimated from the
 analysis before any numeric work, and every factor doubles as a preconditioner
@@ -46,6 +49,14 @@ k.refactor(&g_next)?;                                        // no pivot search
 // A Newton loop: work lent once, then no allocation per solve.
 let mut work = SolveWork::new();
 k.solve_into(&rhs, &mut dx, &mut work)?;
+
+// The automatic path: entries in assembly order (duplicates sum), KLU for
+// sparse work, LDL^T or LU for dense work, each refactored in place.
+let sym = AutoSymbolic::new(CscLayout::new(n, &rows, &cols)?)?;
+let mut f = sym.factorizer::<f64>();
+f.assemble(&entries);
+f.factor(&AutoSettings::default())?;
+f.solve_into(&rhs, &mut dx)?;
 
 // A never-failing factor as a preconditioner.
 let m = LdltSolver::factor(&a, &SolverSettings::preconditioner(1e-8))?;

@@ -146,6 +146,12 @@ pub trait Scalar:
     /// which is exact for real symmetric matrices and advisory for complex.
     fn real(self) -> f64;
 
+    /// The imaginary part as an `f64`: `0` for real fields, `im` for complex
+    /// ones.
+    fn imag(self) -> f64 {
+        0.0
+    }
+
     /// Complex conjugate. The identity for `f64` and for the
     /// complex-*symmetric* factorization path; meaningful only for a future
     /// Hermitian path.
@@ -302,6 +308,11 @@ impl Scalar for Complex<f64> {
     }
 
     #[inline]
+    fn imag(self) -> f64 {
+        self.im
+    }
+
+    #[inline]
     fn conj(self) -> Self {
         Complex::conj(&self)
     }
@@ -444,6 +455,11 @@ impl Scalar for Complex<f32> {
     #[inline]
     fn real(self) -> f64 {
         self.re as f64
+    }
+
+    #[inline]
+    fn imag(self) -> f64 {
+        self.im as f64
     }
 
     #[inline]

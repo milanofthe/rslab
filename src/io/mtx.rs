@@ -3,6 +3,7 @@ use crate::dense::matrix::SymmetricMatrix;
 use crate::error::RslabError;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
+use crate::sparse::general::GeneralCsc;
 use num_complex::Complex;
 use std::path::Path;
 
@@ -42,11 +43,11 @@ impl<T: Scalar> MtxMatrix<T> {
 
     /// Convert to a general (full, unsymmetric) CSC matrix, keeping every entry
     /// as given - the form the unsymmetric LU path / a `LinearOperator` uses.
-    pub fn to_general_csc(&self) -> Result<crate::sparse::general::GeneralCsc<T>, RslabError> {
+    pub fn to_general_csc(&self) -> Result<GeneralCsc<T>, RslabError> {
         let rows: Vec<usize> = self.entries.iter().map(|&(r, _, _)| r).collect();
         let cols: Vec<usize> = self.entries.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<T> = self.entries.iter().map(|&(_, _, v)| v).collect();
-        crate::sparse::general::GeneralCsc::from_triplets(self.n, &rows, &cols, &vals)
+        GeneralCsc::from_triplets(self.n, &rows, &cols, &vals)
     }
 }
 
@@ -79,7 +80,7 @@ pub enum MtxLoaded {
     /// `symmetric` file: lower triangle, for the LDL^T path.
     Symmetric(CscMatrix<Complex<f64>>),
     /// `general` file: full pattern, for the LU path.
-    General(crate::sparse::general::GeneralCsc<Complex<f64>>),
+    General(GeneralCsc<Complex<f64>>),
 }
 
 /// Read any `real`/`complex`/`integer` x `symmetric`/`general` Matrix Market
@@ -167,6 +168,95 @@ pub fn parse_mtx_complex_general(
         let im = toks[1].parse::<f64>().ok()?;
         Some(Complex::new(re, im))
     })
+}
+
+/// `a` as a Matrix Market `coordinate general` file: `real` or `complex` by
+/// the scalar field, 1-based indices, values in round-trip exponent form
+/// (the format [`read_mtx_any`] reads back).
+pub fn format_mtx<T: Scalar>(a: &GeneralCsc<T>) -> String {
+    format_coordinate(a.n, &a.col_ptr, &a.row_idx, &a.values, "general")
+}
+
+/// The lower triangle `a` as a Matrix Market `coordinate symmetric` file (see
+/// [`format_mtx`]).
+pub fn format_mtx_symmetric<T: Scalar>(a: &CscMatrix<T>) -> String {
+    format_coordinate(a.n, &a.col_ptr, &a.row_idx, &a.values, "symmetric")
+}
+
+/// The vector `v` as a Matrix Market `array general` file with one column
+/// (a right-hand side), values as in [`format_mtx`].
+pub fn format_mtx_array<T: Scalar>(v: &[T]) -> String {
+    let mut out = format!(
+        "%%MatrixMarket matrix array {} general\n{} 1\n",
+        field_of::<T>(),
+        v.len()
+    );
+    for &x in v {
+        push_value(&mut out, x);
+        out.push('\n');
+    }
+    out
+}
+
+/// Write [`format_mtx`] of `a` to `path`.
+pub fn write_mtx<T: Scalar>(path: &Path, a: &GeneralCsc<T>) -> Result<(), RslabError> {
+    write_text(path, format_mtx(a))
+}
+
+/// Write [`format_mtx_symmetric`] of `a` to `path`.
+pub fn write_mtx_symmetric<T: Scalar>(path: &Path, a: &CscMatrix<T>) -> Result<(), RslabError> {
+    write_text(path, format_mtx_symmetric(a))
+}
+
+/// Write [`format_mtx_array`] of `v` to `path`.
+pub fn write_mtx_array<T: Scalar>(path: &Path, v: &[T]) -> Result<(), RslabError> {
+    write_text(path, format_mtx_array(v))
+}
+
+fn write_text(path: &Path, text: String) -> Result<(), RslabError> {
+    std::fs::write(path, text)
+        .map_err(|e| RslabError::IoError(format!("{}: {}", path.display(), e)))
+}
+
+fn field_of<T: Scalar>() -> &'static str {
+    if T::COMPLEX {
+        "complex"
+    } else {
+        "real"
+    }
+}
+
+fn push_value<T: Scalar>(out: &mut String, x: T) {
+    use std::fmt::Write;
+    // Writing into a String cannot fail.
+    let _ = if T::COMPLEX {
+        write!(out, "{:e} {:e}", x.real(), x.imag())
+    } else {
+        write!(out, "{:e}", x.real())
+    };
+}
+
+fn format_coordinate<T: Scalar>(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    values: &[T],
+    symmetry: &str,
+) -> String {
+    use std::fmt::Write;
+    let mut out = format!(
+        "%%MatrixMarket matrix coordinate {} {symmetry}\n{n} {n} {}\n",
+        field_of::<T>(),
+        row_idx.len()
+    );
+    for j in 0..n {
+        for p in col_ptr[j]..col_ptr[j + 1] {
+            let _ = write!(out, "{} {} ", row_idx[p] + 1, j + 1);
+            push_value(&mut out, values[p]);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Generic Matrix Market coordinate parser. `field` is the expected header
@@ -388,6 +478,48 @@ fn parse_mtx_with<T: Scalar>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_matrices_read_back() {
+        let dir = std::env::temp_dir();
+        let g =
+            GeneralCsc::from_triplets(3, &[0, 2, 1, 0], &[0, 0, 1, 2], &[1.5, -2.0, 1e-300, 3.25])
+                .unwrap();
+        let path = dir.join(format!("rslab_write_{}.mtx", std::process::id()));
+        write_mtx(&path, &g).unwrap();
+        let back = read_mtx_any(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let MtxLoaded::General(b) = back else {
+            panic!("general file read as symmetric");
+        };
+        assert_eq!(
+            (b.col_ptr, b.row_idx),
+            (g.col_ptr.clone(), g.row_idx.clone())
+        );
+        assert!(b
+            .values
+            .iter()
+            .zip(&g.values)
+            .all(|(x, &y)| x.re == y && x.im == 0.0));
+
+        let c = |re, im| Complex::new(re, im);
+        let s = CscMatrix::from_triplets(
+            2,
+            &[0, 1, 1],
+            &[0, 0, 1],
+            &[c(1.0, 0.5), c(-0.1, 2.0), c(3.0, 0.0)],
+        )
+        .unwrap();
+        let text = format_mtx_symmetric(&s);
+        let back = parse_mtx_complex(&text, "mem").unwrap().to_csc().unwrap();
+        assert_eq!(back.values, s.values);
+
+        let b = format_mtx_array(&[1.0f64, -0.5]);
+        assert_eq!(
+            b,
+            "%%MatrixMarket matrix array real general\n2 1\n1e0\n-5e-1\n"
+        );
+    }
 
     #[test]
     fn test_parse_symmetric_3x3() {

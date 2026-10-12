@@ -64,6 +64,33 @@
 //! # let _ = (x, xt); Ok(()) }
 //! ```
 //!
+//! ## One pattern, many value sets
+//!
+//! A matrix assembled over the same entry positions again and again (a
+//! Newton loop, a sweep) has one [`CscLayout`]: the compressed-column pattern
+//! and the slot each entry sums into, so a value set is a scatter. The
+//! automatic path ([`AutoSymbolic`], [`AutoSolver`]) factors it in the path
+//! its work calls for: KLU for sparse work, the supernodal LDL^T or LU for
+//! dense work (LDL^T whenever the values are symmetric), each refactoring in
+//! place, and an unchanged value set keeping its factor.
+//!
+//! ```
+//! # fn main() -> Result<(), rslab::RslabError> {
+//! use rslab::prelude::*;
+//! // Entries in assembly order; (0, 0) is stamped twice.
+//! let layout = CscLayout::new(2, &[0, 0, 1, 0], &[0, 1, 1, 0])?;
+//! let sym = AutoSymbolic::new(layout)?;
+//! let settings = AutoSettings::default();
+//! let mut f = sym.factorizer::<f64>();
+//! for g in [1.0, 2.0, 3.0] {
+//!     f.assemble(&[g, 1.0, 3.0, 1.0]);
+//!     f.factor(&settings)?;
+//!     let x = f.solve(&[1.0, 1.0])?;
+//! #   let _ = x;
+//! }
+//! # Ok(()) }
+//! ```
+//!
 //! ## Preconditioners
 //!
 //! Static pivoting ([`SolverSettings::preconditioner`]) never fails, and a
@@ -168,15 +195,18 @@ pub use diagnostics::{
 pub use error::RslabError;
 pub use inertia::Inertia;
 pub use io::mtx::{
-    parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx, read_mtx_any,
-    read_mtx_complex, MtxLoaded, MtxMatrix,
+    format_mtx, format_mtx_array, format_mtx_symmetric, parse_mtx, parse_mtx_complex,
+    parse_mtx_complex_general, read_mtx, read_mtx_any, read_mtx_complex, write_mtx,
+    write_mtx_array, write_mtx_symmetric, MtxLoaded, MtxMatrix,
 };
 pub use logging::{LogLevel, LogSink};
 pub use memory::MemoryPlan;
 pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
 pub use scalar::{Demote, Scalar};
 pub use scaling::ScalingStrategy;
-// The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`.
+// The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`,
+// and the automatic path over them.
+pub use numeric::auto::{AutoBackend, AutoSettings, AutoSolver, AutoSymbolic};
 pub use numeric::direct::SolveWork;
 pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
 pub use numeric::ldlt::{LdltSolver, LdltSymbolic};
@@ -195,6 +225,7 @@ pub use numeric::krylov::{
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
+pub use sparse::layout::{CscLayout, Triplets};
 pub use symbolic::{AmalgamationStrategy, OrderingMethod, RelaxAmalgamation};
 
 /// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /
@@ -213,11 +244,14 @@ pub mod prelude {
         parse_mtx_complex_general,
         read_mtx,
         read_mtx_complex,
+        // high-level phased solvers: `XSymbolic::analyze -> .factor -> XSolver`
+        AutoSettings,
+        AutoSymbolic,
+        CscLayout,
         // matrices, options, scalar field
         CscMatrix,
         Factorization,
         GeneralCsc,
-        // high-level phased solvers: `XSymbolic::analyze -> .factor -> XSolver`
         KluSettings,
         KluSolver,
         KluSymbolic,
@@ -238,6 +272,7 @@ pub mod prelude {
         Scalar,
         SolveWork,
         SolverSettings,
+        Triplets,
         ZeroPivotAction,
     };
 }
