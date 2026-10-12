@@ -23,7 +23,7 @@
 //! nothing), and an [`AutoSolver`] is a [`Factorization`](crate::Factorization)
 //! and a [`Preconditioner`](crate::Preconditioner) like them.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::error::RslabError;
 use crate::numeric::direct::{SolveCore, SolveWork};
@@ -49,6 +49,11 @@ pub struct AutoSettings {
     /// refactor is faster on every matrix class measured, above it the
     /// supernodal kernels win by a growing factor.
     pub supernodal_flops_per_entry: f64,
+    /// The tolerance of the value-symmetry test that selects LDL^T on a
+    /// structurally symmetric supernodal pattern: `|a_ij - a_ji| <= tol *
+    /// max|a|`. Default `0`, exact symmetry; above it LDL^T factors the
+    /// lower triangle of a matrix symmetric only within `tol`.
+    pub symmetry_tol: f64,
 }
 
 impl Default for AutoSettings {
@@ -57,6 +62,7 @@ impl Default for AutoSettings {
             klu: KluSettings::default(),
             supernodal: SolverSettings::default(),
             supernodal_flops_per_entry: 25.0,
+            symmetry_tol: 0.0,
         }
     }
 }
@@ -74,6 +80,11 @@ impl AutoSettings {
 
     pub fn with_supernodal_flops_per_entry(mut self, flops: f64) -> Self {
         self.supernodal_flops_per_entry = flops;
+        self
+    }
+
+    pub fn with_symmetry_tol(mut self, tol: f64) -> Self {
+        self.symmetry_tol = tol;
         self
     }
 }
@@ -132,10 +143,15 @@ impl LdltCandidate {
         })
     }
 
-    /// Whether the slot values are symmetric (`a_ij == a_ji`; the transpose
-    /// for complex fields, not the adjoint).
-    fn symmetric<T: Scalar>(&self, vals: &[T]) -> bool {
-        (vals.iter().zip(&self.tpair)).all(|(&v, &t)| v == vals[t])
+    /// Whether the slot values are symmetric within `tol` (see
+    /// [`AutoSettings::symmetry_tol`]; the transpose for complex fields, not
+    /// the adjoint).
+    fn symmetric<T: Scalar>(&self, vals: &[T], tol: f64) -> bool {
+        if tol == 0.0 {
+            return (vals.iter().zip(&self.tpair)).all(|(&v, &t)| v == vals[t]);
+        }
+        let bound = tol * vals.iter().fold(0.0f64, |m, v| m.max(v.magnitude()));
+        (vals.iter().zip(&self.tpair)).all(|(&v, &t)| (v - vals[t]).magnitude() <= bound)
     }
 
     /// The lower triangle of the slot values `vals`, into `lower`.
@@ -281,7 +297,7 @@ impl AutoSymbolic {
 
     /// A solver over this pattern, for one solve loop or one sweep worker.
     pub fn factorizer<T: Scalar>(&self) -> AutoSolver<'_, T> {
-        AutoSolver::over(Analysis::Shared(self))
+        AutoSolver::over(Analysis::Borrowed(self))
     }
 
     /// The analysis of `a`'s pattern in the path its work selects.
@@ -314,18 +330,18 @@ impl AutoSymbolic {
     }
 }
 
-/// The analysis an [`AutoSolver`] factors over: a shared one, or its own
-/// (a one-shot [`AutoSolver::factor`]).
+/// The analysis an [`AutoSolver`] factors over: borrowed, or held (shared
+/// with other solvers, or its own after a one-shot [`AutoSolver::factor`]).
 enum Analysis<'s> {
-    Shared(&'s AutoSymbolic),
-    Own(Box<AutoSymbolic>),
+    Borrowed(&'s AutoSymbolic),
+    Held(Arc<AutoSymbolic>),
 }
 
 impl Analysis<'_> {
     fn get(&self) -> &AutoSymbolic {
         match self {
-            Analysis::Shared(s) => s,
-            Analysis::Own(s) => s,
+            Analysis::Borrowed(s) => s,
+            Analysis::Held(s) => s,
         }
     }
 }
@@ -376,11 +392,17 @@ pub struct AutoSolver<'s, T> {
 }
 
 impl<T: Scalar> AutoSolver<'static, T> {
-    /// Analyze and factor `a` on the path its work selects, the solver owning
+    /// A solver holding a share of `sym`, so it outlives any borrow (the
+    /// [`factorizer`](AutoSymbolic::factorizer) of a held analysis).
+    pub fn new(sym: Arc<AutoSymbolic>) -> Self {
+        AutoSolver::over(Analysis::Held(sym))
+    }
+
+    /// Analyze and factor `a` on the path its work selects, the solver holding
     /// its analysis: the one-shot form.
     pub fn factor(a: &GeneralCsc<T>, settings: &AutoSettings) -> Result<Self, RslabError> {
         let sym = AutoSymbolic::new(CscLayout::of(a)?)?;
-        let mut s = AutoSolver::over(Analysis::Own(Box::new(sym)));
+        let mut s = AutoSolver::new(Arc::new(sym));
         s.values_mut().copy_from_slice(&a.values);
         s.refactor(settings)?;
         Ok(s)
@@ -492,7 +514,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
             Route::Supernodal { ldlt, lu } => {
                 let opts = &settings.supernodal;
                 if let Some(cand) = ldlt {
-                    if cand.symmetric(&csc.values) {
+                    if cand.symmetric(&csc.values, settings.symmetry_tol) {
                         cand.lower(&csc.values, &mut self.lower);
                         if let Some(lower) = &self.lower {
                             let done = in_place(
@@ -563,12 +585,13 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     }
 
     /// Heap bytes this solver holds: its values, every factor it keeps, and
-    /// an analysis it owns.
+    /// an analysis no other holds.
     pub fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
+        // A held analysis counts once, with its only holder.
         let own = match &self.sym {
-            Analysis::Own(s) => s.heap_bytes(),
-            Analysis::Shared(_) => 0,
+            Analysis::Held(s) if Arc::strong_count(s) == 1 => s.heap_bytes(),
+            _ => 0,
         };
         own + vec_bytes(&self.csc.col_ptr)
             + vec_bytes(&self.csc.row_idx)
@@ -797,6 +820,28 @@ mod tests {
         // A factorization like the others: a preconditioner behind the trait.
         let f: &dyn crate::Factorization<f64> = &one;
         assert_eq!((f.n(), f.n_perturbed()), (n, 0));
+    }
+
+    #[test]
+    fn symmetry_within_tolerance_takes_ldlt() {
+        let (rows, cols) = grid(130);
+        let n = 130 * 130;
+        let mut vals = laplacian(&rows, &cols);
+        vals[1] *= 1.0 + 1e-14; // one mirror pair off by a rounding
+        let sym = Arc::new(layout(n, &rows, &cols));
+        let mut exact = AutoSolver::<f64>::new(sym.clone());
+        exact.assemble(&vals);
+        assert_eq!(
+            exact.refactor(&AutoSettings::default()).unwrap(),
+            AutoBackend::Lu
+        );
+        let mut within = AutoSolver::<f64>::new(sym);
+        within.assemble(&vals);
+        let s = AutoSettings::default().with_symmetry_tol(1e-12);
+        assert_eq!(within.refactor(&s).unwrap(), AutoBackend::Ldlt);
+        let b = row_sums(n, &rows, &vals);
+        let (x1, x2) = (exact.solve(&b).unwrap(), within.solve(&b).unwrap());
+        assert!(x1.iter().zip(&x2).all(|(a, b)| (a - b).abs() < 1e-10));
     }
 
     #[test]
