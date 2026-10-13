@@ -161,6 +161,10 @@
 
 // Monotonic clock shim: std Instant natively, inert on wasm32.
 pub(crate) mod clock;
+// The numbers the solver is tuned and defined by; reached by the bindings
+// and the contract tests.
+#[doc(hidden)]
+pub mod constants;
 pub(crate) mod dense;
 pub(crate) mod diagnostics;
 pub(crate) mod error;

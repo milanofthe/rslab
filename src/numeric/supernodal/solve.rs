@@ -27,6 +27,7 @@
 // linear algebra than zipped iterators would.
 #![allow(clippy::needless_range_loop)]
 
+use crate::constants::TILE_ROWS;
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
@@ -1305,9 +1306,6 @@ fn bwd_tile<T: Scalar, const W: usize>(
         }
     }
 }
-
-/// Rows per register tile of [`panel_product`].
-const TILE_ROWS: usize = 4;
 
 /// [`panel_product`] for the right-hand sides `c0..c0 + W`.
 #[allow(clippy::too_many_arguments)]

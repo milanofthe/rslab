@@ -1,6 +1,7 @@
 //! The numeric-only refactorization on a frozen pattern and pivot order.
 
 use super::*;
+use crate::constants::{LEVEL_PIECE, PIPE_RUN};
 
 impl<T: Scalar> KluSolver<T> {
     /// Numeric-only refactorization: replay the stored pattern and pivot
@@ -199,7 +200,6 @@ impl<T: Scalar> KluSolver<T> {
         // still releases its dependants, and the lowest failing column is
         // reported, as by the sequential replay; an interrupt stops the
         // pieces between runs.
-        const PIPE_RUN: usize = 1;
         let (pipelined, xs_ref, ready_ref) = (&f.pipelined, &xs, &ready);
         // A work vector of this worker's: a free kept one, else a fresh one.
         let with_work = |k: usize, run: &mut dyn FnMut(&mut Vec<T>)| {
@@ -213,7 +213,6 @@ impl<T: Scalar> KluSolver<T> {
         // Level by level: a level's columns side by side, at least
         // `LEVEL_PIECE` to a piece, a level of fewer on the calling thread;
         // on an error the level's lowest failing column is reported.
-        const LEVEL_PIECE: usize = 8;
         let replay_levels = |ptr: &[u32],
                              cols: &[Ki],
                              bs: usize,

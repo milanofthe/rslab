@@ -5,6 +5,7 @@
 
 use super::factor::LlEmitLdlt;
 use super::gemm::lower_tile_gemm;
+use crate::constants::GROWTH_EPS;
 use crate::numeric::supernodal::perturb_pivot;
 
 use crate::error::RslabError;
@@ -106,13 +107,6 @@ fn reset<V: Clone>(v: &mut Vec<V>, len: usize, x: V) {
     v.clear();
     v.resize(len, x);
 }
-
-/// Scale-invariant singularity floor for a 2x2 Bunch-Kaufman pivot: a block
-/// whose `|det|` falls below `GROWTH_EPS * scale^2` (scale = the largest block
-/// entry magnitude) is numerically singular - rejected in exact mode and lifted
-/// in static-pivot mode. Bounds the element growth `1/|det|` can otherwise
-/// inject into the trailing update.
-const GROWTH_EPS: f64 = 1e-14;
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps

@@ -39,12 +39,9 @@
 
 use super::hungarian::{hungarian_match, CostGraph, Matching};
 use super::ScalingInfo;
+use crate::constants::LOG_HUGE;
 use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
-
-/// Upper bound on the argument to `exp` before overflow.
-/// `ln(f64::MAX) ~ 709.78`. We use 709.0 as a safe ceiling.
-const LOG_HUGE: f64 = 709.0;
 
 /// MC64 output: the full Hungarian matching (`perm[j]` is the row
 /// matched to column `j`, `usize::MAX` if unmatched), the row and column

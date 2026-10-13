@@ -99,15 +99,10 @@ src/logging.rs :: timestamp :: 3600
 src/logging.rs :: timestamp :: 60
 src/logging.rs :: timestamp :: 60
 src/logging.rs :: timestamp :: 86400
-src/memory.rs :: BOOKKEEPING :: 10
-src/memory.rs :: BOOKKEEPING :: 512
 src/memory.rs :: MemoryPlan::fmt :: 1e6
-src/memory.rs :: SCRATCH_KEEP :: 10
-src/memory.rs :: SCRATCH_KEEP :: 256
 src/memory.rs :: pushed :: 4
 src/memory.rs :: worker_bytes :: 4
 src/memory.rs :: worker_bytes :: 4
-src/memory.rs :: worker_bytes::GEMM_SLAB :: 20
 src/numeric/auto.rs :: AutoSettings::default :: 25.0
 src/numeric/dense_eig.rs :: eigenvalues :: 1e-300
 src/numeric/dense_eig.rs :: eigenvalues :: 30
@@ -120,8 +115,6 @@ src/numeric/dense_eig.rs :: wilkinson_shift :: 4.0
 src/numeric/direct.rs :: record :: 1e3
 src/numeric/klu/factor.rs :: BlockOut::reset :: 4
 src/numeric/klu/factor.rs :: BlockOut::reset :: 4
-src/numeric/klu/factor.rs :: COL_WORK :: 32
-src/numeric/klu/factor.rs :: PIPE_COL_WORK :: 512
 src/numeric/klu/factor.rs :: factor_impl :: 4
 src/numeric/klu/factor.rs :: factor_impl :: 4
 src/numeric/klu/factor.rs :: factor_impl :: 4
@@ -135,7 +128,6 @@ src/numeric/klu/mod.rs :: BlockCaps::fill :: 4
 src/numeric/klu/mod.rs :: KI_FBIT :: 31
 src/numeric/klu/refactor.rs :: KluSolver::refactor :: 0x3FF
 src/numeric/klu/refactor.rs :: KluSolver::refactor :: 1e3
-src/numeric/klu/refactor.rs :: KluSolver::refactor::LEVEL_PIECE :: 8
 src/numeric/klu/settings.rs :: KluSettings::default :: 1e-3
 src/numeric/klu/settings.rs :: KluSettings::default :: 200_000
 src/numeric/klu/settings.rs :: KluSettings::default :: 8_000
@@ -180,7 +172,6 @@ src/numeric/krylov/settings.rs :: KrylovSettings::default :: 2048
 src/numeric/krylov/settings.rs :: KrylovSettings::default :: 30
 src/numeric/krylov/settings.rs :: KrylovSettings::default :: 400
 src/numeric/krylov/settings.rs :: KrylovSettings::default :: 80
-src/numeric/ldlt/bunch_kaufman.rs :: GROWTH_EPS :: 1e-14
 src/numeric/ldlt/bunch_kaufman.rs :: ll_cdiv_emit :: 100_000_000
 src/numeric/ldlt/bunch_kaufman.rs :: ll_cdiv_emit :: 128
 src/numeric/ldlt/bunch_kaufman.rs :: ll_cdiv_emit :: 512
@@ -264,8 +255,6 @@ src/numeric/settings.rs :: AmalgamationSettings::default :: 1024
 src/numeric/settings.rs :: AmalgamationSettings::default :: 1024
 src/numeric/settings.rs :: AmalgamationSettings::default :: 16
 src/numeric/settings.rs :: AmalgamationSettings::default :: 2048
-src/numeric/settings.rs :: HOP_STACK :: 1024
-src/numeric/settings.rs :: HOP_STACK :: 256
 src/numeric/settings.rs :: KernelSettings::default :: 100_000_000
 src/numeric/settings.rs :: KernelSettings::default :: 16
 src/numeric/settings.rs :: KernelSettings::default :: 1_000_000
@@ -277,7 +266,6 @@ src/numeric/settings.rs :: KernelSettings::default :: 64
 src/numeric/settings.rs :: KernelSettings::default :: 8_000_000
 src/numeric/settings.rs :: MatchingSettings::default :: 1e-10
 src/numeric/settings.rs :: OrderingSettings::default :: 0.95
-src/numeric/settings.rs :: POOLS_KEPT :: 4
 src/numeric/settings.rs :: PivotSettings::default :: 0.1
 src/numeric/settings.rs :: RaceSettings::default :: 10_000
 src/numeric/settings.rs :: RaceSettings::default :: 1_250_000_000
@@ -292,20 +280,10 @@ src/numeric/settings.rs :: SolveSettings::default :: 32
 src/numeric/settings.rs :: SolveSettings::default :: 512
 src/numeric/settings.rs :: SolverSettings::kernel :: 8
 src/numeric/settings.rs :: Threads::default :: 4
-src/numeric/settings.rs :: stack_for_depth::FRAME :: 1024
-src/numeric/settings.rs :: stack_for_depth::FRAME :: 32
-src/numeric/settings.rs :: stack_for_depth::MAX :: 30
-src/numeric/settings.rs :: stack_for_depth::MAX :: 30
-src/numeric/settings.rs :: stack_for_depth::MAX :: 64
-src/numeric/settings.rs :: stack_for_depth::MAX :: 8
-src/numeric/settings.rs :: stack_for_depth::MIN :: 1024
-src/numeric/settings.rs :: stack_for_depth::MIN :: 1024
-src/numeric/settings.rs :: stack_for_depth::MIN :: 16
 src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 128
 src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 300_000_000
 src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 4
 src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 512
-src/numeric/supernodal/forest.rs :: ll_forest::FREE_PAR :: 64
 src/numeric/supernodal/node.rs :: CmodPlan::new :: 16
 src/numeric/supernodal/node.rs :: CmodPlan::new :: 256
 src/numeric/supernodal/node.rs :: CmodPlan::new :: 32
@@ -317,7 +295,6 @@ src/numeric/supernodal/solve.rs :: SolvePlan::apex_forward :: 64
 src/numeric/supernodal/solve.rs :: SolvePlan::bwd_node_block :: 4
 src/numeric/supernodal/solve.rs :: SolvePlan::bytes :: 4
 src/numeric/supernodal/solve.rs :: SolvePlan::fit :: 4
-src/numeric/supernodal/solve.rs :: TILE_ROWS :: 4
 src/numeric/supernodal/solve.rs :: dot4 :: 4
 src/numeric/supernodal/solve.rs :: dot4 :: 4
 src/numeric/supernodal/solve.rs :: dot4 :: 4
@@ -351,7 +328,6 @@ src/numeric/supernodal/solve.rs :: tri_backward :: 4
 src/numeric/supernodal/solve.rs :: tri_backward :: 4
 src/numeric/supernodal/solve.rs :: tri_rows :: 4
 src/ordering/amd.rs :: permute_pattern :: 8
-src/ordering/amd.rs :: permute_pattern::PARALLEL_MIN_NNZ :: 16
 src/ordering/btf.rs :: matching_candidates :: 128
 src/ordering/btf.rs :: matching_candidates :: 50_000_000
 src/parallel.rs :: piece_len :: 4
@@ -360,7 +336,6 @@ src/scaling/hungarian.rs :: hungarian_init_heuristic :: 10
 src/scaling/hungarian.rs :: hungarian_init_heuristic :: 50
 src/scaling/infnorm.rs :: compute_infnorm :: 10
 src/scaling/infnorm.rs :: compute_infnorm :: 1e-8
-src/scaling/mc64.rs :: LOG_HUGE :: 709.0
 src/scaling/mc64.rs :: compute_matching_general :: 256
 src/scaling/mc64.rs :: compute_matching_general :: 4096
 src/symbolic/ordering_graph.rs :: OrderingGraph::order :: 1e3

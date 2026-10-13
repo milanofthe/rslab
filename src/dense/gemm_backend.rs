@@ -184,7 +184,7 @@ pub trait SplitReal:
 /// inside `f` lets rayon's work stealing run another split on this same
 /// thread, which then gets an empty buffer of its own instead of a
 /// re-entrant borrow. The larger of the two is kept afterwards, up to
-/// [`SCRATCH_KEEP`](crate::memory::SCRATCH_KEEP): the thread outlives the
+/// [`SCRATCH_KEEP`](crate::constants::SCRATCH_KEEP): the thread outlives the
 /// factorization in the pool its caller keeps.
 fn with_taken<R: SplitReal, Ret>(
     cell: &'static std::thread::LocalKey<RefCell<Planes<R>>>,
@@ -195,7 +195,7 @@ fn with_taken<R: SplitReal, Ret>(
     cell.with(|p| {
         let mut planes = p.borrow_mut();
         let bytes = (buf.capacity() * std::mem::size_of::<R>()) as u64;
-        if planes.buf.capacity() < buf.capacity() && bytes <= crate::memory::SCRATCH_KEEP {
+        if planes.buf.capacity() < buf.capacity() && bytes <= crate::constants::SCRATCH_KEEP {
             planes.buf = buf;
         }
     });

@@ -168,7 +168,7 @@ impl KluSymbolic {
             for j in bs..be {
                 let sj = j + 1;
                 let mut lj = 0usize;
-                w_b += super::factor::COL_WORK;
+                w_b += crate::constants::COL_WORK;
                 leaves.clear();
                 for k in self.pat_col_ptr[j]..self.pat_col_ptr[j + 1] {
                     let pre = self.pat_row_idx[k];
@@ -409,7 +409,7 @@ impl KluSymbolic {
             analysis_bytes: self.heap_bytes(),
             analysis_growth_bytes: 0,
             factor_bytes: factor,
-            factor_peak_bytes: during.max(factor + 8 * n) + crate::memory::BOOKKEEPING,
+            factor_peak_bytes: during.max(factor + 8 * n) + crate::constants::BOOKKEEPING,
             // The solution and the permuted work vector.
             solve_bytes: 2 * n * nrhs as u64 * vb,
             // Its buffers belong to the factor.

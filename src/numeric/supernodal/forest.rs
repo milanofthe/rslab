@@ -45,13 +45,12 @@ pub(crate) fn ll_forest(
             return false;
         }
         // Disjoint `k`, so the wide top-of-tree free runs in parallel.
-        const FREE_PAR: usize = 64;
         let free = |k: usize| {
             if refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
                 emit_free(k);
             }
         };
-        if sched.updaters(s).len() >= FREE_PAR {
+        if sched.updaters(s).len() >= crate::constants::FREE_PAR_MIN_UPDATERS {
             let up = sched.updaters(s);
             crate::parallel::for_each(up.len(), 1, |i| free(up[i] as usize));
         } else {

@@ -14,6 +14,7 @@
 //! s.kernels = KernelSettings { panel_nb: 32, ..Default::default() };
 //! ```
 
+use crate::constants::{HOP_STACK, POOLS_KEPT, STACK_MAX, STACK_MIN, STACK_PER_LEVEL};
 use crate::scaling::ScalingStrategy;
 use crate::symbolic::{
     AmalgamationStrategy, OrderingMethod, RelaxAmalgamation, SymbolicFactorization,
@@ -691,10 +692,6 @@ pub(crate) fn in_scoped_pool<R: Send>(
     }
 }
 
-/// The stack of the thread a foreign rayon worker enters a pool through; it
-/// only waits.
-const HOP_STACK: usize = 256 * 1024;
-
 /// Run `f` on `pool`, the calling thread waiting for it. A worker of another
 /// rayon pool waiting in `install` keeps taking its own pool's jobs (rayon's
 /// cross-pool wait), and each of those may enter here again: a parallel
@@ -721,9 +718,6 @@ fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
         (_, None) => unreachable!("a joined hop either returned or panicked"),
     }
 }
-
-/// Pools a thread keeps, at most this many (the least recently used goes).
-const POOLS_KEPT: usize = 4;
 
 thread_local! {
     /// The scoped pools of this thread by worker count and stack size, most
@@ -818,13 +812,10 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
 /// committed only as the recursion descends), instead of a fixed guess that a
 /// deep enough chain overflows. `0` (shallow trees) keeps the rayon default.
 pub(crate) fn stack_for_depth(depth: usize) -> usize {
-    const FRAME: usize = 32 * 1024; // per-frame budget (~6.7 KB measured)
-    const MIN: usize = 16 * 1024 * 1024; // floor (>= the rayon default; covers ~depth 500)
-                                         // 8 GB cap (depth ~256k) on 64-bit; 1 GB on 32-bit targets (wasm32), where
-                                         // the 64-bit literal would overflow usize at const evaluation.
-    const MAX: usize = if usize::BITS >= 64 { 8 << 30 } else { 1 << 30 };
     // Always set an explicit, depth-proportional stack - never fall back to the
     // small rayon default, which a moderate depth (a few hundred supernodes, as a
     // banded matrix amalgamates to) already overflows.
-    depth.saturating_mul(FRAME).clamp(MIN, MAX)
+    depth
+        .saturating_mul(STACK_PER_LEVEL)
+        .clamp(STACK_MIN, STACK_MAX)
 }

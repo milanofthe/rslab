@@ -61,8 +61,7 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
             dst.sort_unstable();
         }
     };
-    const PARALLEL_MIN_NNZ: usize = 1 << 16;
-    if nnz < PARALLEL_MIN_NNZ || crate::parallel::threads() == 1 {
+    if nnz < crate::constants::AMD_TRANSPOSE_PAR_MIN_NNZ || crate::parallel::threads() == 1 {
         fill(0, n, &mut row_idx);
     } else {
         let target = nnz.div_ceil(8 * crate::parallel::threads());

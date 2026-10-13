@@ -619,7 +619,7 @@ impl LuSymbolic {
         plan.factor_bytes = factor as u64;
         plan.kept_bytes = kept + pooled;
         plan.factor_peak_bytes = (growth_build as u64).max(growth as u64 + during.max(after))
-            + crate::memory::BOOKKEEPING;
+            + crate::constants::BOOKKEEPING;
         // The permuted right-hand sides, the solution and the larger of the
         // two sweeps' scratch.
         plan.solve_bytes = (nrhs * vb) as u64

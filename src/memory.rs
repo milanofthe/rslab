@@ -9,6 +9,7 @@
 //! to the kernels). Buffers grown by `Vec`'s amortized doubling are counted
 //! at the capacity the allocator hands out ([`grown`]).
 
+use crate::constants::{GEMM_SLAB, NODES_PER_WORKER, SCRATCH_KEEP};
 use crate::symbolic::SymbolicFactorization;
 use std::fmt;
 
@@ -41,15 +42,6 @@ impl<A: HeapBytes, B: HeapBytes, C: HeapBytes> HeapBytes for (A, B, C) {
         self.0.heap_bytes() + self.1.heap_bytes() + self.2.heap_bytes()
     }
 }
-
-/// The most heap one scratch object, and one worker's buffer of split
-/// planes, keep between the kernels that borrow them; larger ones are
-/// freed when given back. Small factorizations (Newton loops up to some
-/// thousand unknowns) keep all their scratch and refactor without
-/// allocating; on large ones a node that needs more allocates its own, which
-/// its flops dwarf, and what the pools and threads hold on to stays bounded
-/// by the worker count instead of growing to the largest nodes.
-pub(crate) const SCRATCH_KEEP: u64 = 256 << 10;
 
 /// The capacity of a `Vec` of capacity `cap` after it is resized or
 /// reserved to hold `need` entries: unchanged if it fits, else the larger of
@@ -149,15 +141,6 @@ impl fmt::Display for MemoryPlan {
     }
 }
 
-/// Heap every factorization allocates besides its data: the diagnostics and
-/// log records, the thread pool's registry and the per-call small vectors.
-pub(crate) const BOOKKEEPING: u64 = 512 << 10;
-
-/// Nodes one worker can have in flight: a worker waiting inside a parallel
-/// product of its node runs other ready work meanwhile (rayon's work
-/// stealing), which can be another node.
-pub(crate) const NODES_PER_WORKER: usize = 2;
-
 /// Heap the `workers` of a supernodal factorization hold whatever nodes they
 /// run, and what they keep after it: per node in flight `maps`
 /// global-to-local maps of `n` entries (a node stolen by a waiting worker
@@ -174,7 +157,6 @@ pub(crate) fn worker_bytes<T: crate::Scalar>(
     workers: usize,
     planes: &mut [(usize, usize)],
 ) -> (u64, u64) {
-    const GEMM_SLAB: usize = 1 << 20;
     let real = std::mem::size_of::<T>() / if T::COMPLEX { 2 } else { 1 };
     planes.sort_unstable_by_key(|&(p, _)| std::cmp::Reverse(p));
     let (mut left, mut entries) = (NODES_PER_WORKER * workers, 0);
