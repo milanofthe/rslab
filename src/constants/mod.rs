@@ -9,11 +9,16 @@
 //! its contract:
 //!
 //! - **results**: changing it changes the computed bits (a different factor,
-//!   ordering or iterate); `tests/contract_snapshot.rs` pins the value.
+//!   ordering or iterate).
 //! - **rounding**: changes the rounding of the result, not its accuracy.
+//! - **definition**: part of an algorithm's definition.
 //! - **timing**: scheduling or memory only, the result is bit-identical.
 //! - **estimate**: feeds a prediction or a report, never the numerics.
 //! - **format**: a unit, a file format or an API value.
+//!
+//! `tests/contract_snapshot.rs` pins the exact value of every results,
+//! rounding and definition constant, so changing one takes an explicit edit
+//! there.
 //!
 //! The submodules are re-exported flat, so a value is
 //! `crate::constants::NAME` wherever in this tree it is defined.
