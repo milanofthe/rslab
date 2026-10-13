@@ -116,3 +116,6 @@ name = "lu_solve_timing"
 
 [[example]]
 name = "ordering_bakeoff"
+
+[[example]]
+name = "klu_refactor"
