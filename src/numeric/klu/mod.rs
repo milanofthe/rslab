@@ -30,6 +30,7 @@
 //! parallel ([`KluParallel`]); the results are bit-identical across runs and
 //! thread counts.
 
+use crate::constants::{IDX32_BYTES, KLU_L_RESERVE, KLU_U_RESERVE, VEC_MIN_CAP, WORD_BYTES};
 use crate::error::RslabError;
 use crate::numeric::supernodal::PanelPtr;
 use crate::ordering::btf;
@@ -57,7 +58,7 @@ type Ki = u32;
 const KI_UNSET: Ki = Ki::MAX;
 /// Tag bit in the refactor scatter program: the entry lands in an F slot
 /// (off-block value) rather than the elimination work vector.
-const KI_FBIT: Ki = 1 << 31;
+const KI_FBIT: Ki = 1 << (Ki::BITS - 1);
 
 /// Symbolic analysis for the KLU path: the BTF block structure plus the
 /// per-block fill-reducing ordering. Analyze once, then factor any number of
@@ -141,14 +142,14 @@ impl BlockCaps {
         let push = |cap: usize, len: usize| {
             let mut c = cap;
             while c < len {
-                c = (2 * c).max(4);
+                c = (2 * c).max(VEC_MIN_CAP);
             }
             c
         };
         let reserve = if bn == 1 { 0 } else { annz };
         self.fin = grown(self.fin, bn);
-        self.l = push(grown(self.l, 4 * reserve), l);
-        self.u = push(grown(self.u, 2 * reserve), u);
+        self.l = push(grown(self.l, KLU_L_RESERVE * reserve), l);
+        self.u = push(grown(self.u, KLU_U_RESERVE * reserve), u);
         self.f = push(self.f, f);
         self.diag = push(grown(self.diag, bn), bn);
         self.prog = push(grown(self.prog, reserve), annz - f);
@@ -162,10 +163,10 @@ impl BlockCaps {
     /// the diagonal; the scatter pairs, final positions and column pointers.
     fn bytes(&self) -> (u64, u64) {
         let vals = self.l + self.u + self.f + self.diag;
-        let other = 4 * (self.l + self.u + 2 * self.f)
-            + 8 * self.prog
-            + 4 * self.fin
-            + 8 * self.colptr.iter().sum::<usize>();
+        let other = IDX32_BYTES * (self.l + self.u + 2 * self.f)
+            + WORD_BYTES * self.prog
+            + IDX32_BYTES * self.fin
+            + WORD_BYTES * self.colptr.iter().sum::<usize>();
         (vals as u64, other as u64)
     }
 }

@@ -614,8 +614,12 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
     }
     // l1, l2 and their lookahead twins, both multiplier snapshots, `l21buf`
     // and `gbuf`, and the replay's sub-blocks over all deep rows.
-    let entries =
-        4 * nrow + 2 * nb * nb + 2 * l21 + tmp + tmp_w + nrow * (k.trailing_block.max(1) + 1);
+    let entries = crate::constants::BK_ROW_BUFFERS * nrow
+        + 2 * nb * nb
+        + 2 * l21
+        + tmp
+        + tmp_w
+        + nrow * (k.trailing_block.max(1) + 1);
     let bytes = entries * std::mem::size_of::<T>() + 2 * nb * std::mem::size_of::<usize>();
     (bytes as u64, if T::COMPLEX { planes } else { 0 })
 }

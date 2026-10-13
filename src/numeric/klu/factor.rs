@@ -2,7 +2,7 @@
 //! pivoting, and the replay plan of the refactorization.
 
 use super::*;
-use crate::constants::{COL_WORK, PIPE_COL_WORK};
+use crate::constants::{COL_WORK, KLU_F_RESERVE_DIV, KLU_L_RESERVE, KLU_U_RESERVE, PIPE_COL_WORK};
 
 /// The GP flop count carried on the attached estimate (0 when absent).
 pub(super) fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
@@ -237,15 +237,15 @@ impl<T: Scalar> BlockOut<T> {
         self.l_colptr.clear();
         self.l_colptr.push(0);
         self.l_rowidx.clear();
-        self.l_rowidx.reserve(annz * 4);
+        self.l_rowidx.reserve(annz * KLU_L_RESERVE);
         self.l_val.clear();
-        self.l_val.reserve(annz * 4);
+        self.l_val.reserve(annz * KLU_L_RESERVE);
         self.u_colptr.clear();
         self.u_colptr.push(0);
         self.u_rowidx.clear();
-        self.u_rowidx.reserve(annz * 2);
+        self.u_rowidx.reserve(annz * KLU_U_RESERVE);
         self.u_val.clear();
-        self.u_val.reserve(annz * 2);
+        self.u_val.reserve(annz * KLU_U_RESERVE);
         self.udiag.clear();
         self.udiag.reserve(bn);
         self.f_colptr.clear();
@@ -710,12 +710,12 @@ pub(super) fn factor_impl<T: Scalar>(
         // moved out of the block buffer instead of copied, so nothing is
         // reserved for it.
         if nblocks > 1 {
-            l_rowidx.reserve(sym.nnz * 4);
-            l_val.reserve(sym.nnz * 4);
-            u_rowidx.reserve(sym.nnz * 2);
-            u_val.reserve(sym.nnz * 2);
-            f_rowidx.reserve(sym.nnz / 4);
-            f_val.reserve(sym.nnz / 4);
+            l_rowidx.reserve(sym.nnz * KLU_L_RESERVE);
+            l_val.reserve(sym.nnz * KLU_L_RESERVE);
+            u_rowidx.reserve(sym.nnz * KLU_U_RESERVE);
+            u_val.reserve(sym.nnz * KLU_U_RESERVE);
+            f_rowidx.reserve(sym.nnz / KLU_F_RESERVE_DIV);
+            f_val.reserve(sym.nnz / KLU_F_RESERVE_DIV);
         }
         let mut scratch = KluScratch::<T>::new(max_bn);
         let mut out = BlockOut::<T>::default();

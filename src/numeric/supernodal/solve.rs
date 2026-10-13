@@ -28,7 +28,8 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    FOLD_LANES, PIECES_PER_WORKER, SOLVE_REDUCE_MIN_ROWS, SOLVE_RHS_TILE, TILE_ROWS,
+    FOLD_LANES, IDX32_BYTES, PIECES_PER_WORKER, SOLVE_BUILD_NODE_BYTES, SOLVE_REDUCE_MIN_ROWS,
+    SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
@@ -283,16 +284,17 @@ pub(crate) fn layout_size(
     }
     let top: Vec<usize> = (0..ns).filter(|&s| is_top[s]).collect();
     // sn_col, row_ptr, val_ptr (pushed by the arena), rows, ext_slot, top_index.
-    let fixed = 4 * (ns + 1) + 8 * (ns + 1) + 8 * pushed(ns + 1) + 8 * rows + 4 * ns;
+    let (idx, word, vec) = (IDX32_BYTES, WORD_BYTES, VEC_HEADER_BYTES);
+    let fixed = idx * (ns + 1) + word * (ns + 1) + word * pushed(ns + 1) + word * rows + idx * ns;
     let subtrees = leaf_roots.len() * std::mem::size_of::<Subtree>()
         + leaf_roots
             .iter()
-            .map(|&r| 4 * pushed(size[r as usize]) + 4 * above[r as usize])
+            .map(|&r| idx * pushed(size[r as usize]) + idx * above[r as usize])
             .sum::<usize>();
-    let levels = level_len.len() * 24 + level_len.iter().map(|&l| 4 * pushed(l)).sum::<usize>();
-    let paths = top.len() * 24 + top.iter().map(|&t| 4 * above[t]).sum::<usize>();
+    let levels = level_len.len() * vec + level_len.iter().map(|&l| idx * pushed(l)).sum::<usize>();
+    let paths = top.len() * vec + top.iter().map(|&t| idx * above[t]).sum::<usize>();
     // sn_of, the tree (parent, children), work, heap, flags and slots.
-    let build = 4 * n + ns * (4 + 24 + 4 + 8 + 16 + 1 + 4 + 4 + 4);
+    let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
     // Accumulators of the subtrees and of the widest ancestor level, the
     // apex node's extended vector and partial slabs, and per thread the
     // node scratch of a subtree sweep.
@@ -643,7 +645,7 @@ impl<T: Scalar> SolvePlan<T> {
 
     /// Bytes of the panel storage (values plus row indices).
     pub fn bytes(&self) -> usize {
-        self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * 4
+        self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * IDX32_BYTES
     }
 
     #[inline]

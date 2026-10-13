@@ -153,7 +153,7 @@ pub(crate) fn split_plane_entries(
     }
     let t = ks.complex_split_tile.max(1);
     let (mt, nt) = (m.min(t), n.min(t));
-    3 * (mt * k + k * nt + mt * nt)
+    crate::constants::SPLIT_PLANES * (mt * k + k * nt + mt * nt)
 }
 
 /// Real plane scratch of one thread (grows to the largest tile seen).
@@ -452,13 +452,14 @@ pub unsafe fn complex_gemm_3m<R: SplitReal>(
 ) {
     R::with_planes(|buf| {
         let (mt, nt) = (m.min(tile), n.min(tile));
-        let need = 3 * (mt * k + k * nt + mt * nt);
+        let planes = crate::constants::SPLIT_PLANES;
+        let need = planes * (mt * k + k * nt + mt * nt);
         // every plane is written in full before it is read: no clearing
         if buf.len() < need {
             buf.resize(need, R::zero());
         }
-        let (a_planes, rest) = buf.split_at_mut(3 * mt * k);
-        let (b_planes, c_planes) = rest.split_at_mut(3 * k * nt);
+        let (a_planes, rest) = buf.split_at_mut(planes * mt * k);
+        let (b_planes, c_planes) = rest.split_at_mut(planes * k * nt);
         for j0 in (0..n).step_by(tile) {
             let nb = (n - j0).min(tile);
             let (br, rest) = b_planes.split_at_mut(k * nb);

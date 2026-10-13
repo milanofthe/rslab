@@ -44,8 +44,13 @@ const EXEMPT_FILES: &[(&str, &str)] = &[
 const EXEMPT_ITEMS: &[(&str, &str, &str)] = &[
     (
         "src/symbolic/supervariables.rs",
-        "fnv1a",
-        "FNV-1a 64: published hash constants",
+        "FNV_OFFSET",
+        "FNV-1a 64: published hash constant",
+    ),
+    (
+        "src/symbolic/supervariables.rs",
+        "FNV_PRIME",
+        "FNV-1a 64: published hash constant",
     ),
     (
         "src/numeric/ldlt/bunch_kaufman.rs",

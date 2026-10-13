@@ -4,6 +4,11 @@
 use super::factor::factor_general_lu_numeric;
 use super::factors::LuPivots;
 use super::structure::LuStructure;
+use crate::constants::{
+    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY,
+    LU_INPUT_BUILD_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
+    LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
+};
 
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
@@ -588,19 +593,26 @@ impl LuSymbolic {
         let (growth, growth_build) = if self.input.get().is_some() {
             (0, 0)
         } else {
-            (12 * nnz + 16 * (n + 1), 28 * nnz + 48 * n)
+            (
+                INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + 2 * WORD_BYTES * (n + 1),
+                INPUT_BUILD_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
+            )
         };
         // Held by the factor: the `L` and `U^T` panels with their schedules,
         // `U`'s reciprocal diagonal, both permutations and scalings, and the
         // supernode tree.
-        let factor = vb * (panels + n) + (layout_l.held + layout_u.held) as usize + 32 * n + 8 * ns;
+        let factor = vb * (panels + n)
+            + (layout_l.held + layout_u.held) as usize
+            + LU_PERM_SCALE_BYTES_PER_COL * n
+            + WORD_BYTES * ns;
         // While the forest is factored: the scalings, the permuted values,
         // both arenas, the emit cells (refcounts, offsets, panel records,
         // positions and permutations) and the forest's lists, every node's
         // row permutation and emitted rows until the end, the workers'
         // scratch and the heaviest set of nodes running at once.
-        let cells = ns * (8 + 8 + 80 + 24 + 8 + 8 + 8) + 32 * n;
-        let slots = 8 * (0..ns).map(|s| st.rows_l(s).len()).sum::<usize>() + 4 * rows;
+        let cells = ns * LU_NODE_CELL_BYTES + LU_NODE_CELL_BYTES_PER_COL * n;
+        let slots =
+            WORD_BYTES * (0..ns).map(|s| st.rows_l(s).len()).sum::<usize>() + IDX32_BYTES * rows;
         let scratch: Vec<(u64, usize, usize)> = (0..ns)
             .map(|s| super::node::lu_node_scratch::<T>(s, sym, sched, st, &k, threads))
             .collect();
@@ -608,14 +620,17 @@ impl LuSymbolic {
         let (workers, kept) = crate::memory::worker_bytes::<T>(n, 2, threads, &mut planes);
         // The node kernel's, the tiled `cmod`'s and the arena's pools.
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
-        let pooled = crate::memory::pooled_bytes(3, threads, largest);
+        let pooled = crate::memory::pooled_bytes(LU_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during =
-            (16 * n + vb * nnz + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
+        let during = (2 * WORD_BYTES * n + vb * nnz + vb * panels + cells + slots) as u64
+            + workers
+            + pooled
+            + nodes;
         // After it: the factor, with the emitted row lists until the plans
         // have copied them, and a plan's build.
-        let after =
-            factor as u64 + (4 * rows + 48 * ns) as u64 + layout_l.build.max(layout_u.build);
+        let after = factor as u64
+            + (IDX32_BYTES * rows + 2 * VEC_HEADER_BYTES * ns) as u64
+            + layout_l.build.max(layout_u.build);
         plan.analysis_growth_bytes = growth as u64;
         plan.factor_bytes = factor as u64;
         plan.kept_bytes = kept + pooled;

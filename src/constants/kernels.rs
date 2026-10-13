@@ -131,3 +131,19 @@ pub const CMOD_TILE_MAX: usize = 256;
 /// Why: tuned default; the rows are independent.
 /// Contract: timing (each row is solved alike in any blocking).
 pub const TRSM_ROWS: usize = 256;
+
+/// Real planes per complex operand of a split product: the real part, the
+/// imaginary part and their sum, the three products of the 3M method
+/// (planes).
+/// Used by: `dense::gemm_backend::complex_gemm_3m`,
+/// `dense::gemm_backend::split_plane_entries`.
+/// Why: the method's definition.
+/// Contract: definition.
+pub const SPLIT_PLANES: usize = 3;
+
+/// Row-length buffers of the LDL^T panel kernel: the two pivot columns and
+/// their lookahead twins (buffers).
+/// Used by: `ldlt::bunch_kaufman::ll_cdiv_scratch`.
+/// Why: a 2x2 pivot reads two columns, the lookahead holds the next two.
+/// Contract: estimate.
+pub const BK_ROW_BUFFERS: usize = 4;

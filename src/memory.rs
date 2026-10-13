@@ -9,7 +9,7 @@
 //! to the kernels). Buffers grown by `Vec`'s amortized doubling are counted
 //! at the capacity the allocator hands out ([`grown`]).
 
-use crate::constants::{GEMM_SLAB, NODES_PER_WORKER, SCRATCH_KEEP};
+use crate::constants::{GEMM_SLAB, IDX32_BYTES, NODES_PER_WORKER, SCRATCH_KEEP};
 use crate::symbolic::SymbolicFactorization;
 use std::fmt;
 
@@ -61,7 +61,7 @@ pub(crate) fn pushed(len: usize) -> usize {
     if len == 0 {
         0
     } else {
-        len.next_power_of_two().max(4)
+        len.next_power_of_two().max(crate::constants::VEC_MIN_CAP)
     }
 }
 
@@ -169,8 +169,9 @@ pub(crate) fn worker_bytes<T: crate::Scalar>(
         }
     }
     let largest = planes.first().map_or(0, |&(p, _)| 2 * p * real) as u64;
-    let during = workers * (NODES_PER_WORKER * maps * 4 * n + GEMM_SLAB) + 2 * entries * real;
-    let kept = workers as u64 * ((maps * 4 * n) as u64 + largest.min(SCRATCH_KEEP));
+    let during =
+        workers * (NODES_PER_WORKER * maps * IDX32_BYTES * n + GEMM_SLAB) + 2 * entries * real;
+    let kept = workers as u64 * ((maps * IDX32_BYTES * n) as u64 + largest.min(SCRATCH_KEEP));
     (during as u64, kept)
 }
 

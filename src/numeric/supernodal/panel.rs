@@ -90,7 +90,7 @@ impl<T: Scalar> PanelFactor<T> {
 
     /// Bytes of the panel storage (values plus row indices).
     pub fn bytes(&self) -> usize {
-        self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * 4
+        self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * crate::constants::IDX32_BYTES
     }
 }
 
