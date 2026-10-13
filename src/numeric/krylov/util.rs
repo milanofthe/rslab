@@ -4,7 +4,6 @@
 
 use crate::numeric::settings::Threads;
 use crate::scalar::Scalar;
-use rayon::prelude::*;
 
 /// Unconjugated bilinear inner product `x^T y = sum x_i y_i` (no complex conjugation -
 /// the defining choice of the COCG geometry for `A = A^T`).
@@ -115,6 +114,8 @@ pub(super) fn well_conditioned_dim_flat<T: Scalar>(h: &[T], stride: usize, jdim:
 /// perturbs the bit-identical-across-thread-counts guarantee.
 pub(super) fn solve_thread_pool(policy: Threads) -> Option<rayon::ThreadPool> {
     match policy {
+        // A lent pool serves every section (see `crate::parallel`).
+        _ if crate::parallel::lent().is_some() => None,
         Threads::Ambient => None,
         // `Fixed(k)` (the resolved factor budget): a `k`-worker pool (`0` = all
         // cores). `Auto` never reaches here - factors resolve it to `Fixed` up
@@ -181,23 +182,21 @@ pub(super) fn block_project<T: Scalar>(
     }
     let nchunks = n.div_ceil(chunk);
     let part = &mut scratch[..nchunks * width];
-    part.par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(ci, out)| {
-            let r0 = ci * chunk;
-            let r1 = (r0 + chunk).min(n);
-            for i in 0..blocks {
-                for ap in 0..sa {
-                    let vb = (i * sa + ap) * n;
-                    let wb = ap * n;
-                    let mut sdot = T::zero();
-                    for k in r0..r1 {
-                        sdot = sdot + vbas[vb + k].conj() * w[wb + k];
-                    }
-                    out[i * sa + ap] = sdot;
+    crate::parallel::chunks_mut(part, width, |ci, out| {
+        let r0 = ci * chunk;
+        let r1 = (r0 + chunk).min(n);
+        for i in 0..blocks {
+            for ap in 0..sa {
+                let vb = (i * sa + ap) * n;
+                let wb = ap * n;
+                let mut sdot = T::zero();
+                for k in r0..r1 {
+                    sdot = sdot + vbas[vb + k].conj() * w[wb + k];
                 }
+                out[i * sa + ap] = sdot;
             }
-        });
+        }
+    });
     // Fold partials in chunk order: the summation order is fixed by the chunk
     // layout, so the result does not depend on how many threads ran.
     for ci in 0..nchunks {
@@ -224,7 +223,7 @@ pub(super) fn block_subtract<T: Scalar>(
 ) {
     for ap in 0..sa {
         let wcol = &mut w[ap * n..ap * n + n];
-        wcol.par_chunks_mut(chunk).enumerate().for_each(|(ci, wc)| {
+        crate::parallel::chunks_mut(wcol, chunk, |ci, wc| {
             let r0 = ci * chunk;
             for i in 0..blocks {
                 let hij = proj[i * sa + ap];

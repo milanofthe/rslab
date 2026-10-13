@@ -196,7 +196,7 @@ impl<T: Scalar> KluSolver<T> {
                 ud: PanelPtr(job.ud.as_mut_ptr()),
                 f_v: PanelPtr(job.f_v.as_mut_ptr()),
             };
-            let nthreads = rayon::current_num_threads().max(1);
+            let nthreads = crate::parallel::threads();
             let pipe_nw = pipelined
                 .iter()
                 .find(|&&(pb, _)| pb == b)
@@ -301,16 +301,13 @@ impl<T: Scalar> KluSolver<T> {
             Ok(())
         };
         if f.par_refactor && nblocks > 1 {
-            use rayon::prelude::*;
             let mut jobs = Vec::with_capacity(nblocks);
             for b in 0..nblocks {
                 interrupt_check(int_flag)?;
                 jobs.push(next_job(b));
             }
-            let results: Vec<Result<(), RslabError>> = jobs
-                .into_par_iter()
-                .map(|job| replay_block(job, &mut Vec::new()))
-                .collect();
+            let results: Vec<Result<(), RslabError>> =
+                crate::parallel::map_owned(jobs, 1, |job| replay_block(job, &mut Vec::new()));
             for r in results {
                 r?;
             }

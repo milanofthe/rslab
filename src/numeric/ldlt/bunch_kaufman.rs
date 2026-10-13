@@ -14,7 +14,6 @@ use crate::numeric::supernodal::PanelPtr as LdltPanelPtr;
 use crate::numeric::supernodal::ScratchPool;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
-use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// One running [`ll_cdiv_emit`]'s buffers (see there).
@@ -515,9 +514,9 @@ fn ll_bk_panel_step<T: Scalar>(
         let par = deep * pw * pw >= ll_cdiv_par;
         if par {
             let pp = LdltPanelPtr(panel.as_mut_ptr());
-            let nthreads = rayon::current_num_threads().max(1);
+            let nthreads = crate::parallel::threads();
             let cs = deep.div_ceil(nthreads).max(1);
-            (0..nthreads).into_par_iter().for_each(|c| {
+            crate::parallel::for_each(nthreads, 1, |c| {
                 let r0 = (ke + c * cs).min(nrow);
                 let r1 = (r0 + cs).min(nrow);
                 if r0 >= r1 {
@@ -859,7 +858,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 tmp_w.resize(mt * wide, T::zero());
                 let (left, right) = panel.split_at_mut(ke2 * nrow);
                 let (gbuf_ref, l21_ref, tw_ref) = (&gbuf, &l21buf, &mut *tmp_w);
-                let (step_res, ()) = rayon::join(
+                let (step_res, ()) = crate::parallel::join(
                     || {
                         ll_bk_panel_step(
                             left,

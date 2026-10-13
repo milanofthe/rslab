@@ -22,7 +22,6 @@ fn symmetrized_lower_pattern<T: Scalar>(
     a: &GeneralCsc<T>,
     row_map: Option<&[usize]>,
 ) -> (Vec<usize>, Vec<usize>) {
-    use rayon::prelude::*;
     let n = a.n;
     let row = |k: usize| row_map.map_or(a.row_idx[k], |m| m[a.row_idx[k]]);
     // Counting-scatter: each entry contributes a lower-triangle pair
@@ -54,21 +53,17 @@ fn symmetrized_lower_pattern<T: Scalar>(
         buckets.push(head);
         rest = tail;
     }
-    let kept: Vec<usize> = buckets
-        .into_par_iter()
-        .with_min_len(256)
-        .map(|seg| {
-            seg.sort_unstable();
-            let mut len = 0;
-            for p in 0..seg.len() {
-                if len == 0 || seg[p] != seg[len - 1] {
-                    seg[len] = seg[p];
-                    len += 1;
-                }
+    let kept: Vec<usize> = crate::parallel::map_owned(buckets, 256, |seg| {
+        seg.sort_unstable();
+        let mut len = 0;
+        for p in 0..seg.len() {
+            if len == 0 || seg[p] != seg[len - 1] {
+                seg[len] = seg[p];
+                len += 1;
             }
-            len
-        })
-        .collect();
+        }
+        len
+    });
     let mut col_ptr = Vec::with_capacity(n + 1);
     col_ptr.push(0);
     let mut row_idx = Vec::with_capacity(start[n]);
@@ -91,8 +86,7 @@ fn symmetrized_lower_pattern<T: Scalar>(
 /// magnitude worse, and the circuits with a full diagonal factor the same
 /// either way.
 fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> bool {
-    use rayon::prelude::*;
-    (0..a.n).into_par_iter().with_min_len(1024).any(|j| {
+    crate::parallel::any(a.n, 1024, |j| {
         let (rows, vals) = (
             &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]],
             &a.values[a.col_ptr[j]..a.col_ptr[j + 1]],

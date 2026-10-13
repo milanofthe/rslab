@@ -8,8 +8,6 @@
 //! nested dissection has to partition. METIS applies the same compression
 //! (`METIS_OPTION_COMPRESS`); weighting each compressed vertex by its group
 //! size keeps the bisections balanced as on the full graph.
-use rayon::prelude::*;
-
 use crate::sparse::csc::CscPattern;
 
 /// Groups of indistinguishable vertices of a symmetric pattern.
@@ -64,9 +62,9 @@ impl Supervariables {
             merged(a).eq(merged(b))
         };
 
-        let keys: Vec<(usize, u64)> = (0..n).into_par_iter().map(key).collect();
+        let keys: Vec<(usize, u64)> = crate::parallel::map(n, 1, key);
         let mut by_key: Vec<usize> = (0..n).collect();
-        by_key.par_sort_unstable_by_key(|&v| (keys[v], v));
+        crate::parallel::sort_unstable_by_key(&mut by_key, |&v| (keys[v], v));
 
         // Within a run of equal keys, split into exact-equality classes
         // (hash collisions are rare; the leader is the smallest member).
@@ -93,23 +91,21 @@ impl Supervariables {
             offsets.push(at);
             at += r.len();
         }
-        runs.into_par_iter()
-            .zip(offsets)
-            .with_min_len(64)
-            .for_each(|(lead, start)| {
-                let members = &by_key[start..start + lead.len()];
-                for i in 0..members.len() {
-                    if lead[i] != NONE {
-                        continue;
-                    }
-                    lead[i] = members[i];
-                    for k in i + 1..members.len() {
-                        if lead[k] == NONE && same(members[i], members[k]) {
-                            lead[k] = members[i];
-                        }
+        let runs: Vec<(&mut [usize], usize)> = runs.into_iter().zip(offsets).collect();
+        crate::parallel::for_each_owned(runs, 64, |(lead, start)| {
+            let members = &by_key[start..start + lead.len()];
+            for i in 0..members.len() {
+                if lead[i] != NONE {
+                    continue;
+                }
+                lead[i] = members[i];
+                for k in i + 1..members.len() {
+                    if lead[k] == NONE && same(members[i], members[k]) {
+                        lead[k] = members[i];
                     }
                 }
-            });
+            }
+        });
         let mut leader = vec![NONE; n];
         for (i, &v) in by_key.iter().enumerate() {
             leader[v] = lead[i];
@@ -170,31 +166,28 @@ impl Supervariables {
     pub fn compress(&self, pattern: &CscPattern) -> Option<(Vec<i32>, Vec<i32>)> {
         let n_groups = self.len();
         i32::try_from(pattern.row_idx.len()).ok()?;
-        let blocks = (8 * rayon::current_num_threads()).clamp(1, n_groups.max(1));
-        let parts: Vec<(Vec<i32>, Vec<i32>)> = (0..blocks)
-            .into_par_iter()
-            .map(|b| {
-                let (g0, g1) = (b * n_groups / blocks, (b + 1) * n_groups / blocks);
-                let (mut lens, mut rows) = (Vec::with_capacity(g1 - g0), Vec::new());
-                let mut col: Vec<i32> = Vec::new();
-                for g in g0..g1 {
-                    let v = self.members[self.ptr[g]];
-                    col.clear();
-                    col.extend(
-                        pattern.row_idx[pattern.col_ptr[v]..pattern.col_ptr[v + 1]]
-                            .iter()
-                            .map(|&r| self.group_of[r])
-                            .filter(|&h| h != g)
-                            .map(|h| h as i32),
-                    );
-                    col.sort_unstable();
-                    col.dedup();
-                    lens.push(col.len() as i32);
-                    rows.extend_from_slice(&col);
-                }
-                (lens, rows)
-            })
-            .collect();
+        let blocks = (8 * crate::parallel::threads()).clamp(1, n_groups.max(1));
+        let parts: Vec<(Vec<i32>, Vec<i32>)> = crate::parallel::map(blocks, 1, |b| {
+            let (g0, g1) = (b * n_groups / blocks, (b + 1) * n_groups / blocks);
+            let (mut lens, mut rows) = (Vec::with_capacity(g1 - g0), Vec::new());
+            let mut col: Vec<i32> = Vec::new();
+            for g in g0..g1 {
+                let v = self.members[self.ptr[g]];
+                col.clear();
+                col.extend(
+                    pattern.row_idx[pattern.col_ptr[v]..pattern.col_ptr[v + 1]]
+                        .iter()
+                        .map(|&r| self.group_of[r])
+                        .filter(|&h| h != g)
+                        .map(|h| h as i32),
+                );
+                col.sort_unstable();
+                col.dedup();
+                lens.push(col.len() as i32);
+                rows.extend_from_slice(&col);
+            }
+            (lens, rows)
+        });
         let mut col_ptr = Vec::with_capacity(n_groups + 1);
         col_ptr.push(0i32);
         let mut row_idx = Vec::with_capacity(parts.iter().map(|p| p.1.len()).sum());

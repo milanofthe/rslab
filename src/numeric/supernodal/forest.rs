@@ -26,7 +26,6 @@ pub(crate) fn ll_forest(
     factor_node: &(dyn Fn(usize) -> Result<(), RslabError> + Sync),
     emit_free: &(dyn Fn(usize) + Sync),
 ) -> Result<(), RslabError> {
-    use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     const NONE: usize = usize::MAX;
     let failed = AtomicBool::new(false);
@@ -53,7 +52,8 @@ pub(crate) fn ll_forest(
             }
         };
         if sched.updaters(s).len() >= FREE_PAR {
-            sched.updaters(s).par_iter().for_each(|&k| free(k as usize));
+            let up = sched.updaters(s);
+            crate::parallel::for_each(up.len(), 1, |i| free(up[i] as usize));
         } else {
             for &k in sched.updaters(s) {
                 free(k as usize);
@@ -64,7 +64,7 @@ pub(crate) fn ll_forest(
         }
         true
     };
-    if rayon::current_num_threads() == 1 {
+    if crate::parallel::threads() == 1 {
         // One worker: the supernodes in index order, children before their
         // parents, with no task per node.
         for s in 0..sym.supernodes.len() {
@@ -74,7 +74,7 @@ pub(crate) fn ll_forest(
         }
     } else {
         fn run<'s>(
-            scope: &rayon::Scope<'s>,
+            scope: &crate::parallel::Scope<'_, 's>,
             s: usize,
             node: &'s (dyn Fn(usize) -> bool + Sync),
             parent: &'s [usize],
@@ -95,7 +95,7 @@ pub(crate) fn ll_forest(
             .collect();
         let node: &(dyn Fn(usize) -> bool + Sync) = &node;
         let (parent, pending) = (&sched.parent[..], &pending[..]);
-        rayon::scope(|sc| {
+        crate::parallel::scope(|sc| {
             for &leaf in &sched.leaves {
                 sc.spawn(move |sc| run(sc, leaf, node, parent, pending));
             }

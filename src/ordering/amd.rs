@@ -62,11 +62,10 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
         }
     };
     const PARALLEL_MIN_NNZ: usize = 1 << 16;
-    if nnz < PARALLEL_MIN_NNZ || rayon::current_num_threads() == 1 {
+    if nnz < PARALLEL_MIN_NNZ || crate::parallel::threads() == 1 {
         fill(0, n, &mut row_idx);
     } else {
-        use rayon::prelude::*;
-        let target = nnz.div_ceil(8 * rayon::current_num_threads());
+        let target = nnz.div_ceil(8 * crate::parallel::threads());
         let mut blocks: Vec<(usize, usize, &mut [usize])> = Vec::new();
         let mut rest: &mut [usize] = &mut row_idx;
         let mut j0 = 0;
@@ -80,9 +79,7 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
             rest = tail;
             j0 = j1;
         }
-        blocks
-            .into_par_iter()
-            .for_each(|(j0, j1, out)| fill(j0, j1, out));
+        crate::parallel::for_each_owned(blocks, 1, |(j0, j1, out)| fill(j0, j1, out));
     }
 
     CscPattern {

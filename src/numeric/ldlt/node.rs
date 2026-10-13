@@ -13,7 +13,6 @@ use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::LlSchedule;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
-use rayon::prelude::*;
 use std::sync::atomic::AtomicUsize;
 
 /// Factor one supernode's panel: assemble `A`, apply every descendant's `cmod`
@@ -70,84 +69,81 @@ pub(super) fn ll_factor_node<T: Scalar>(
     if tiled {
         let gloc_ref = &gloc;
         let spans_ref = spans;
-        panel
-            .par_chunks_mut(nrow * tile_w)
-            .enumerate()
-            .for_each(|(ti, tile)| {
-                let c0 = ti * tile_w;
-                let c1 = (c0 + tile_w).min(ncol);
-                let mut bufs = pools.cmod.take();
-                let (_, vd_buf, u_buf) = &mut *bufs;
-                for &Span {
-                    k: kk, l: (p0, p1), ..
-                } in spans_ref
-                {
-                    let nck = sym.supernodes[kk].ncol;
-                    let nrk = sched.rows(kk).len();
-                    let ok = &sched.rows(kk)[nck..];
-                    let nok = ok.len();
-                    // Updater columns landing in this slab.
-                    let q0 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c0);
-                    let q1 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c1);
-                    let npk = q1 - q0;
-                    if npk == 0 {
-                        continue;
-                    }
-                    // SAFETY: `kk` is a factored descendant of `s`, its cells
-                    // are written and never mutated again.
-                    let pk: &[T] = unsafe { emit.arena.slot(kk) };
-                    let (dk, dsub_k, two_k) = unsafe { emit.d_of(kk, nck) };
-                    // G = (kk's block rows q0..q1) * D, column-major npk x nck.
-                    grow_scratch(vd_buf, npk * nck);
-                    let mut ck = 0;
-                    while ck < nck {
-                        if two_k[ck] {
-                            let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
-                            for i in 0..npk {
-                                let a = pk[(nck + q0 + i) + ck * nrk];
-                                let b = pk[(nck + q0 + i) + (ck + 1) * nrk];
-                                vd_buf[i + ck * npk] = d11 * a + d21 * b;
-                                vd_buf[i + (ck + 1) * npk] = d21 * a + d22 * b;
-                            }
-                            ck += 2;
-                        } else {
-                            let dkc = dk[ck];
-                            for i in 0..npk {
-                                vd_buf[i + ck * npk] = pk[(nck + q0 + i) + ck * nrk] * dkc;
-                            }
-                            ck += 1;
+        crate::parallel::chunks_mut(&mut *panel, nrow * tile_w, |ti, tile| {
+            let c0 = ti * tile_w;
+            let c1 = (c0 + tile_w).min(ncol);
+            let mut bufs = pools.cmod.take();
+            let (_, vd_buf, u_buf) = &mut *bufs;
+            for &Span {
+                k: kk, l: (p0, p1), ..
+            } in spans_ref
+            {
+                let nck = sym.supernodes[kk].ncol;
+                let nrk = sched.rows(kk).len();
+                let ok = &sched.rows(kk)[nck..];
+                let nok = ok.len();
+                // Updater columns landing in this slab.
+                let q0 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c0);
+                let q1 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c1);
+                let npk = q1 - q0;
+                if npk == 0 {
+                    continue;
+                }
+                // SAFETY: `kk` is a factored descendant of `s`, its cells
+                // are written and never mutated again.
+                let pk: &[T] = unsafe { emit.arena.slot(kk) };
+                let (dk, dsub_k, two_k) = unsafe { emit.d_of(kk, nck) };
+                // G = (kk's block rows q0..q1) * D, column-major npk x nck.
+                grow_scratch(vd_buf, npk * nck);
+                let mut ck = 0;
+                while ck < nck {
+                    if two_k[ck] {
+                        let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
+                        for i in 0..npk {
+                            let a = pk[(nck + q0 + i) + ck * nrk];
+                            let b = pk[(nck + q0 + i) + (ck + 1) * nrk];
+                            vd_buf[i + ck * npk] = d11 * a + d21 * b;
+                            vd_buf[i + (ck + 1) * npk] = d21 * a + d22 * b;
                         }
-                    }
-                    let mrows = nok - q0;
-                    grow_scratch(u_buf, mrows * npk);
-                    // Serial per slab - the parallelism is across slabs.
-                    // SAFETY: lhs (read), rhs (read), dst (write) pairwise
-                    // disjoint; strides in bounds.
-                    unsafe {
-                        lower_tile_gemm(
-                            &mut *u_buf,
-                            mrows,
-                            npk,
-                            nck,
-                            pk.as_ptr().add(nck + q0),
-                            nrk as isize,
-                            vd_buf.as_ptr(),
-                            npk as isize,
-                            usize::MAX,
-                            &kt.k,
-                        )
-                    };
-                    for c in 0..npk {
-                        let tcol = ok[q0 + c] as usize - first;
-                        let ucol = &u_buf[c * mrows..c * mrows + mrows];
-                        let dst_col = &mut tile[(tcol - c0) * nrow..(tcol - c0 + 1) * nrow];
-                        for r in (q0 + c)..nok {
-                            let dst = gloc_ref[ok[r] as usize] as usize;
-                            dst_col[dst] = dst_col[dst] - ucol[r - q0];
+                        ck += 2;
+                    } else {
+                        let dkc = dk[ck];
+                        for i in 0..npk {
+                            vd_buf[i + ck * npk] = pk[(nck + q0 + i) + ck * nrk] * dkc;
                         }
+                        ck += 1;
                     }
                 }
-            });
+                let mrows = nok - q0;
+                grow_scratch(u_buf, mrows * npk);
+                // Serial per slab - the parallelism is across slabs.
+                // SAFETY: lhs (read), rhs (read), dst (write) pairwise
+                // disjoint; strides in bounds.
+                unsafe {
+                    lower_tile_gemm(
+                        &mut *u_buf,
+                        mrows,
+                        npk,
+                        nck,
+                        pk.as_ptr().add(nck + q0),
+                        nrk as isize,
+                        vd_buf.as_ptr(),
+                        npk as isize,
+                        usize::MAX,
+                        &kt.k,
+                    )
+                };
+                for c in 0..npk {
+                    let tcol = ok[q0 + c] as usize - first;
+                    let ucol = &u_buf[c * mrows..c * mrows + mrows];
+                    let dst_col = &mut tile[(tcol - c0) * nrow..(tcol - c0 + 1) * nrow];
+                    for r in (q0 + c)..nok {
+                        let dst = gloc_ref[ok[r] as usize] as usize;
+                        dst_col[dst] = dst_col[dst] - ucol[r - q0];
+                    }
+                }
+            }
+        });
     }
 
     // Sequential per-update cmod (small nodes / small total update work).

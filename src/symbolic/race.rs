@@ -98,7 +98,6 @@ pub(super) fn race(
     ordering: &OrderingSettings,
     amalgamation: &AmalgamationSettings,
 ) -> Result<SymbolicFactorization, RslabError> {
-    use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
     // Stage 1: the cheap candidates run concurrently (each prefix is itself
@@ -134,7 +133,7 @@ pub(super) fn race(
     }
     let seed = ordering.nd.seed;
     let n = full.n;
-    let parallel = n > r.nd_min_n && rayon::current_num_threads() > 1;
+    let parallel = n > r.nd_min_n && crate::parallel::threads() > 1;
     // The lower triangle's entry count, as the gate was calibrated on it.
     let eager = parallel && (full.row_idx.len() + n) / 2 >= r.eager_nd_min_nnz;
     // One ordering graph for every candidate: built per candidate it cost as
@@ -145,7 +144,7 @@ pub(super) fn race(
     let ensemble = r.ensemble_size.max(1);
     let nd: Vec<OnceLock<Option<Prefix>>> = (0..ensemble).map(|_| OnceLock::new()).collect();
     let started: Vec<AtomicBool> = (0..ensemble).map(|_| AtomicBool::new(false)).collect();
-    let (mut best, last_err, seeds) = rayon::scope(|sc| {
+    let (mut best, last_err, seeds) = crate::parallel::scope(|sc| {
         let start = |i: usize| {
             if !started[i].swap(true, Ordering::Relaxed) {
                 let nd = &nd;
@@ -158,7 +157,7 @@ pub(super) fn race(
         if eager {
             start(0);
         }
-        let (head, tail) = rayon::join(
+        let (head, tail) = crate::parallel::join(
             || {
                 let px = prefix(graph, ordering, first, seed);
                 if parallel
@@ -168,11 +167,7 @@ pub(super) fn race(
                 }
                 px
             },
-            || {
-                rest.par_iter()
-                    .map(|&cand| prefix(graph, ordering, cand, seed))
-                    .collect::<Vec<_>>()
-            },
+            || crate::parallel::map(rest.len(), 1, |i| prefix(graph, ordering, rest[i], seed)),
         );
         let mut best: Option<Prefix> = None;
         let mut last_err: Option<RslabError> = None;

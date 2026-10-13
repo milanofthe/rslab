@@ -725,29 +725,26 @@ pub(super) fn factor_impl<T: Scalar>(
             }
         }
     } else {
-        use rayon::prelude::*;
-        let blocks: Vec<Result<BlockOut<T>, RslabError>> = (0..nblocks)
-            .into_par_iter()
-            .map_init(
-                || KluScratch::<T>::new(max_bn),
-                |scratch, b| {
-                    settings.interrupted()?;
-                    let mut out = BlockOut::<T>::default();
-                    factor_block(
-                        sym,
-                        a,
-                        settings,
-                        &rs_inv,
-                        &pinv_pre,
-                        sym.block_ptr[b],
-                        sym.block_ptr[b + 1],
-                        scratch,
-                        &mut out,
-                    )?;
-                    Ok(out)
-                },
-            )
-            .collect();
+        let blocks: Vec<Result<BlockOut<T>, RslabError>> = crate::parallel::map_init(
+            nblocks,
+            || KluScratch::<T>::new(max_bn),
+            |scratch, b| {
+                settings.interrupted()?;
+                let mut out = BlockOut::<T>::default();
+                factor_block(
+                    sym,
+                    a,
+                    settings,
+                    &rs_inv,
+                    &pinv_pre,
+                    sym.block_ptr[b],
+                    sym.block_ptr[b + 1],
+                    scratch,
+                    &mut out,
+                )?;
+                Ok(out)
+            },
+        );
 
         // Splice the per-block outputs. Two phases: exact-size global arrays are
         // carved into disjoint per-block chunks (offsets by prefix sums) and the
@@ -831,7 +828,7 @@ pub(super) fn factor_impl<T: Scalar>(
                 }
                 c.f_v.copy_from_slice(&out.f_val);
             };
-            jobs.into_par_iter().for_each(copy_one);
+            crate::parallel::for_each_owned(jobs, 1, copy_one);
         }
 
         for (b, out) in outs.iter().enumerate() {

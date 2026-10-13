@@ -54,6 +54,48 @@ pub unsafe fn gemm<T: Scalar>(
     conj_rhs: bool,
     mode: GemmMode,
 ) {
+    // A parallel product on a lent pool: its columns in blocks, each the
+    // crate's parallel path on one thread (the per-entry sums do not depend
+    // on the column blocking, so the result is the rayon path's).
+    if !matches!(mode.parallelism, gemm::Parallelism::None) && n >= 2 {
+        if let Some(pool) = crate::parallel::lent() {
+            let per = n.div_ceil(4 * pool.threads().max(1)).max(16);
+            let one = GemmMode {
+                parallelism: gemm::Parallelism::Rayon(1),
+                ..mode
+            };
+            let (dst, lhs, rhs) = (Ptr(dst), Ptr(lhs as *mut T), Ptr(rhs as *mut T));
+            crate::parallel::for_each(n.div_ceil(per), 1, |b| {
+                let (j0, j1) = (b * per, ((b + 1) * per).min(n));
+                // SAFETY: the blocks write disjoint columns of `dst`, within
+                // the caller's bounds.
+                unsafe {
+                    T::gemm(
+                        m,
+                        j1 - j0,
+                        k,
+                        dst.get().offset(j0 as isize * dst_cs),
+                        dst_cs,
+                        dst_rs,
+                        read_dst,
+                        lhs.get(),
+                        lhs_cs,
+                        lhs_rs,
+                        rhs.get().offset(j0 as isize * rhs_cs),
+                        rhs_cs,
+                        rhs_rs,
+                        alpha,
+                        beta,
+                        conj_dst,
+                        conj_lhs,
+                        conj_rhs,
+                        one,
+                    )
+                }
+            });
+            return;
+        }
+    }
     T::gemm(
         m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs, alpha,
         beta, conj_dst, conj_lhs, conj_rhs, mode,
@@ -555,6 +597,24 @@ pub unsafe fn complex_gemm<R: SplitReal>(
         conj_rhs,
         parallelism,
     )
+}
+
+/// A pointer the column blocks of a split product share, each to its own
+/// columns.
+struct Ptr<T>(*mut T);
+impl<T> Clone for Ptr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Ptr<T> {}
+// SAFETY: the blocks of a product write disjoint columns.
+unsafe impl<T> Send for Ptr<T> {}
+unsafe impl<T> Sync for Ptr<T> {}
+impl<T> Ptr<T> {
+    fn get(self) -> *mut T {
+        self.0
+    }
 }
 
 #[cfg(test)]

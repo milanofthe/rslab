@@ -27,8 +27,6 @@
 // linear algebra than zipped iterators would.
 #![allow(clippy::needless_range_loop)]
 
-use rayon::prelude::*;
-
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
@@ -730,13 +728,8 @@ impl<T: Scalar> SolvePlan<T> {
             return f();
         }
         match threads {
-            Threads::Ambient => {
-                if rayon::current_thread_index().is_none() && rayon::current_num_threads() > 1 {
-                    rayon::join(f, || ()).0
-                } else {
-                    f()
-                }
-            }
+            _ if crate::parallel::lent().is_some() => crate::parallel::enter(f),
+            Threads::Ambient => crate::parallel::enter(f),
             budget => budget.run(0, |cap| cap, f),
         }
     }
@@ -750,11 +743,7 @@ impl<T: Scalar> SolvePlan<T> {
         f: impl Fn(usize, &A, &mut S) + Sync + Send,
     ) {
         if par {
-            items
-                .par_iter()
-                .zip(scratch.par_iter_mut())
-                .enumerate()
-                .for_each(|(i, (a, s))| f(i, a, s));
+            crate::parallel::zip_mut(items, scratch, f);
         } else {
             for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
                 f(i, a, s);
@@ -915,7 +904,7 @@ impl<T: Scalar> SolvePlan<T> {
 
     fn top_forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let par = work.parallel;
-        let nt = rayon::current_num_threads().max(1);
+        let nt = crate::parallel::threads();
         let shared = Shared(y.as_mut_ptr(), y.len());
         for (li, level) in self.top_levels.iter().enumerate().rev() {
             let node_par = !par || level.len() >= nt || nt == 1;
@@ -966,7 +955,7 @@ impl<T: Scalar> SolvePlan<T> {
 
     fn top_backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
         let par = work.parallel;
-        let nt = rayon::current_num_threads().max(1);
+        let nt = crate::parallel::threads();
         let shared = Shared(x.as_mut_ptr(), x.len());
         for level in &self.top_levels {
             let node_par = !par || level.len() >= nt || nt == 1;
@@ -1037,7 +1026,7 @@ impl<T: Scalar> SolvePlan<T> {
                 let ks = jb + g * chunk..(jb + (g + 1) * chunk).min(je);
                 panel_product(out, panel, ld, je, vhead, nr, ks);
             };
-            let rchunk = (rows / (4 * rayon::current_num_threads().max(1))).max(64) * nr;
+            let rchunk = (rows / (4 * crate::parallel::threads())).max(64) * nr;
             let reduce = |ci: usize, vr: &mut [T], partial: &[T]| {
                 let o = ci * rchunk;
                 for g in 0..used {
@@ -1045,15 +1034,11 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             };
             if par {
-                partial[..used * slab]
-                    .par_chunks_mut(slab)
-                    .enumerate()
-                    .for_each(|(g, out)| product(g, out));
+                crate::parallel::chunks_mut(&mut partial[..used * slab], slab, |g, out| {
+                    product(g, out)
+                });
                 let partial: &[T] = partial;
-                vtail
-                    .par_chunks_mut(rchunk)
-                    .enumerate()
-                    .for_each(|(ci, vr)| reduce(ci, vr, partial));
+                crate::parallel::chunks_mut(vtail, rchunk, |ci, vr| reduce(ci, vr, partial));
             } else {
                 for (g, out) in partial[..used * slab].chunks_mut(slab).enumerate() {
                     product(g, out);
@@ -1102,9 +1087,9 @@ impl<T: Scalar> SolvePlan<T> {
                 };
                 let ab = &mut accv[jb * nr..je * nr];
                 if par {
-                    ab.par_chunks_mut(self.cfg.ancestor_chunk * nr)
-                        .enumerate()
-                        .for_each(|(c, outs)| dots(c, outs));
+                    crate::parallel::chunks_mut(ab, self.cfg.ancestor_chunk * nr, |c, outs| {
+                        dots(c, outs)
+                    });
                 } else {
                     for (c, outs) in ab.chunks_mut(self.cfg.ancestor_chunk * nr).enumerate() {
                         dots(c, outs);
@@ -1500,7 +1485,7 @@ impl PhaseTrace {
             crate::logging::debug(&format!(
                 "{what}: {total:.2}ms threads={} {}",
                 if parallel {
-                    rayon::current_num_threads()
+                    crate::parallel::threads()
                 } else {
                     1
                 },

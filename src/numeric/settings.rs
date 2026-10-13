@@ -516,6 +516,7 @@ impl SolverSettings {
     /// the [`Diagnostics`](crate::Diagnostics).
     pub fn resolved_threads(&self) -> usize {
         match self.threads {
+            _ if crate::parallel::lent().is_some() => crate::parallel::threads(),
             Threads::Fixed(0) | Threads::Auto { max: 0 } => all_cores(),
             Threads::Fixed(n) | Threads::Auto { max: n } => n,
             Threads::Ambient => rayon::current_num_threads().max(1),
@@ -625,6 +626,8 @@ impl Threads {
     /// [`Auto`]: Threads::Auto
     pub(crate) fn resolve(self, recommend: impl FnOnce(usize) -> usize) -> usize {
         match self {
+            // A lent pool's workers, whatever the policy asked for.
+            _ if crate::parallel::lent().is_some() => crate::parallel::threads(),
             Threads::Fixed(0) => all_cores(),
             Threads::Fixed(n) => n,
             Threads::Auto { max } => recommend(if max == 0 { all_cores() } else { max }),
@@ -644,6 +647,8 @@ impl Threads {
         f: impl FnOnce() -> R + Send,
     ) -> R {
         match self {
+            // On a lent pool (see `crate::parallel`), or the caller's rayon pool.
+            _ if crate::parallel::lent().is_some() => f(),
             Threads::Ambient => f(),
             policy => in_scoped_pool(policy.resolve(recommend), stack_bytes, f),
         }
@@ -668,7 +673,9 @@ pub(crate) fn in_scoped_pool<R: Send>(
     stack_bytes: usize,
     f: impl FnOnce() -> R + Send,
 ) -> R {
-    if stack_bytes == 0 && rayon::current_thread_index().is_some() {
+    if crate::parallel::lent().is_some()
+        || (stack_bytes == 0 && rayon::current_thread_index().is_some())
+    {
         return f();
     }
     let n = if threads == 0 {

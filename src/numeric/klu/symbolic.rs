@@ -347,7 +347,7 @@ impl KluSymbolic {
         let price = |(v, o): (u64, u64)| v * vb + o;
         let parallel = self.parallel_blocks(settings);
         let threads = if parallel {
-            rayon::current_num_threads()
+            crate::parallel::threads()
         } else {
             1
         };
