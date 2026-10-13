@@ -106,7 +106,7 @@ fn pseudo_peripheral(
     let mut u = seed;
     let (mut ecc, mut last) = level_structure(u, col_ptr, row_idx, dist, touched);
     // Bounded: George-Liu terminates in a handful of hops; cap for safety.
-    for _ in 0..16 {
+    for _ in 0..crate::constants::RCM_PERIPHERAL_MAX_HOPS {
         // Candidate: minimum-degree vertex in the last (deepest) level.
         let cand = *last
             .iter()

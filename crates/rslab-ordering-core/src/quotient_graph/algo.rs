@@ -620,7 +620,7 @@ pub fn finalize_step(
     let f = nvpiv as f64;
     let r = degme_i32 as f64 + ws.ndense as f64;
     let lnzme = f * r + (f - 1.0) * f / 2.0;
-    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
 
     StepFlops {
         ndiv: lnzme,
@@ -643,7 +643,7 @@ fn amf_bucket_of(score: i64, n: usize) -> usize {
     if s <= n {
         return s;
     }
-    let pas = (n / 8).max(1);
+    let pas = (n / crate::constants::BUCKET_STEP_DIV).max(1);
     let nbbuck = 2 * n;
     ((s - n) / pas + n).min(nbbuck)
 }
@@ -1253,7 +1253,7 @@ pub fn finalize_step_amf(
     let f = nvpiv as f64;
     let r = degme_i32 as f64 + ws.ndense as f64;
     let lnzme = f * r + (f - 1.0) * f / 2.0;
-    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
 
     StepFlops {
         ndiv: lnzme,
@@ -1281,7 +1281,7 @@ pub fn run_elimination_amf(
     }
     let f = ws.ndense as f64;
     let lnzme = (f - 1.0) * f / 2.0;
-    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
     flops.ndiv += lnzme;
     flops.nms_lu += s;
     flops.nms_ldl += (s + lnzme) / 2.0;
@@ -1317,7 +1317,7 @@ pub fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops
     // Dense-phase flop contribution (amd.rs:559-566).
     let f = ws.ndense as f64;
     let lnzme = (f - 1.0) * f / 2.0;
-    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
     flops.ndiv += lnzme;
     flops.nms_lu += s;
     flops.nms_ldl += (s + lnzme) / 2.0;

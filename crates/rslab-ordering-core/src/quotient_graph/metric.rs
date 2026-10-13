@@ -187,7 +187,7 @@ impl Metric for MinFill {
         if s <= n {
             return s;
         }
-        let pas = (n / 8).max(1);
+        let pas = (n / crate::constants::BUCKET_STEP_DIV).max(1);
         let nbbuck = 2 * n;
         let coarse = (s - n) / pas + n;
         coarse.min(nbbuck)

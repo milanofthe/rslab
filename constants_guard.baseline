@@ -1,21 +1,5 @@
 # Numeric literals that predate tests/constants_guard.rs. The list may only
 # shrink: name a value in the crate's constants.rs and delete its line.
-crates/rslab-metis/src/coarsen.rs :: coarsen :: 0.95
-crates/rslab-metis/src/coarsen.rs :: coarsen_level :: 4
-crates/rslab-metis/src/fm_refine.rs :: refine_bisection :: 50
-crates/rslab-metis/src/node_nd.rs :: child_seed :: 0x9E37_79B9_7F4A_7C15
-crates/rslab-metis/src/node_nd.rs :: nd_subproblem :: 0.9
-crates/rslab-metis/src/node_nd.rs :: nd_subproblem :: 7
-crates/rslab-metis/src/sep_refine.rs :: class_weights :: 3
-crates/rslab-ordering-core/src/quotient_graph/algo.rs :: amf_bucket_of :: 8
-crates/rslab-ordering-core/src/quotient_graph/algo.rs :: finalize_step :: 6.0
-crates/rslab-ordering-core/src/quotient_graph/algo.rs :: finalize_step_amf :: 6.0
-crates/rslab-ordering-core/src/quotient_graph/algo.rs :: run_elimination :: 6.0
-crates/rslab-ordering-core/src/quotient_graph/algo.rs :: run_elimination_amf :: 6.0
-crates/rslab-ordering-core/src/quotient_graph/metric.rs :: MinFill::bucket :: 8
-crates/rslab-ordering-core/src/quotient_graph/workspace.rs :: Workspace::new_with_n_buckets :: 16
-crates/rslab-ordering-core/src/quotient_graph/workspace.rs :: Workspace::new_with_n_buckets :: 5
-crates/rslab-ordering-core/src/rcm.rs :: pseudo_peripheral :: 16
 python/src/common.rs :: memory_plan_dict :: 8
 python/src/common.rs :: memory_plan_dict :: 8
 python/src/common.rs :: scalar_kind :: 16

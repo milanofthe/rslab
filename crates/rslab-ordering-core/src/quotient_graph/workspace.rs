@@ -175,7 +175,7 @@ impl Workspace {
 
         // iwlen = nzaat + nzaat/5 + n  (faer amd.rs:921-924).
         let iwlen = nzaat
-            .checked_add(nzaat / 5)
+            .checked_add(nzaat / crate::constants::ELBOW_DIV)
             .and_then(|s| s.checked_add(n))
             .ok_or(OrderingError::IndexOverflow)?;
         if iwlen > i32::MAX as usize {
@@ -210,7 +210,7 @@ impl Workspace {
         } else {
             (opts.dense_alpha * (n as f64).sqrt()) as usize
         };
-        let dense = dense.max(16).min(n);
+        let dense = dense.max(crate::constants::DENSE_DEGREE_MIN).min(n);
 
         // Fixed-value arrays.
         let mut nv: Vec<i32> = vec![1; n];
