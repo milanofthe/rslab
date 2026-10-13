@@ -26,6 +26,8 @@ struct Shared {
     done: AtomicUsize,
     active: AtomicUsize,
     stop: AtomicBool,
+    /// A section in progress: one opened meanwhile runs on its thread.
+    busy: AtomicBool,
 }
 
 impl Shared {
@@ -76,6 +78,10 @@ impl rslab::parallel::Pool for Spin {
     }
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         let sh = &*self.shared;
+        if n < 2 || sh.busy.swap(true, SeqCst) {
+            (0..n).for_each(f);
+            return;
+        }
         // SAFETY: `f` outlives the section; the workers drop it before return.
         let f_static: &'static (dyn Fn(usize) + Sync) = unsafe { std::mem::transmute(f) };
         let cell = f_static;
@@ -92,6 +98,7 @@ impl rslab::parallel::Pool for Spin {
         while sh.active.load(SeqCst) != 0 {
             std::hint::spin_loop();
         }
+        sh.busy.store(false, SeqCst);
     }
 }
 
