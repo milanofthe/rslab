@@ -493,8 +493,8 @@ def analyze(A, path: str = "auto", *, settings=None, **kwargs):
 # ---------------------------------------------------------------------------
 
 
-def gmres(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400, restart: int | None = None,
-          x0=None, recycle: Recycle | None = None) -> KrylovResult:
+def gmres(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _rslab.KRYLOV_MAX_ITER,
+          restart: int | None = None, x0=None, recycle: Recycle | None = None) -> KrylovResult:
     """Flexible restarted GMRES on ``A x = b``, optionally preconditioned.
 
     Parameters
@@ -543,7 +543,7 @@ def gmres(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400, restart: int | N
                    operator=_cast_operator(parts, M.dtype))
 
 
-def gmres_block(A, B, M=None, *, tol: float = 1e-8, maxit: int = 400,
+def gmres_block(A, B, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _rslab.KRYLOV_MAX_ITER,
                 restart: int | None = None, x0=None) -> KrylovResult:
     """Block GMRES on ``A X = B`` for an ``n x nrhs`` block, optionally preconditioned.
 
@@ -579,7 +579,8 @@ def gmres_block(A, B, M=None, *, tol: float = 1e-8, maxit: int = 400,
                          operator=_cast_operator(parts, M.dtype))
 
 
-def cocg(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
+def cocg(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
+         maxit: int = _rslab.KRYLOV_MAX_ITER) -> KrylovResult:
     """Conjugate orthogonal conjugate gradient (COCG) on ``A x = b``.
 
     The short-recurrence Krylov method for **complex-symmetric**
@@ -613,7 +614,8 @@ def cocg(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
     return M.cocg(b, tol=tol, maxit=maxit, operator=_cast_operator(parts, M.dtype))
 
 
-def cocr(A, b, M=None, *, tol: float = 1e-8, maxit: int = 400) -> KrylovResult:
+def cocr(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
+         maxit: int = _rslab.KRYLOV_MAX_ITER) -> KrylovResult:
     """Conjugate orthogonal conjugate residual (COCR) on ``A x = b``.
 
     The minimal-residual sibling of :func:`cocg` for complex-symmetric

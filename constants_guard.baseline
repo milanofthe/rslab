@@ -1,32 +1,5 @@
 # Numeric literals that predate tests/constants_guard.rs. The list may only
 # shrink: name a value in the crate's constants.rs and delete its line.
-python/src/common.rs :: memory_plan_dict :: 8
-python/src/common.rs :: memory_plan_dict :: 8
-python/src/common.rs :: scalar_kind :: 16
-python/src/common.rs :: scalar_kind :: 4
-python/src/common.rs :: scalar_kind :: 8
-python/src/common.rs :: scalar_kind :: 8
-python/src/common.rs :: with_dtype_name :: 16
-python/src/common.rs :: with_dtype_name :: 4
-python/src/common.rs :: with_dtype_name :: 8
-python/src/factor.rs :: handle :: 1e-8
-python/src/factor.rs :: handle :: 1e-8
-python/src/factor.rs :: handle :: 1e-8
-python/src/factor.rs :: handle :: 1e-8
-python/src/factor.rs :: handle :: 400
-python/src/factor.rs :: handle :: 400
-python/src/factor.rs :: handle :: 400
-python/src/factor.rs :: handle :: 400
-python/src/krylov.rs :: PyKrylovResult::__getitem__ :: 5
-python/src/krylov.rs :: PyKrylovResult::__len__ :: 5
-python/src/krylov.rs :: cocg_plain :: 1e-8
-python/src/krylov.rs :: cocg_plain :: 400
-python/src/krylov.rs :: cocr_plain :: 1e-8
-python/src/krylov.rs :: cocr_plain :: 400
-python/src/krylov.rs :: gmres_block_plain :: 1e-8
-python/src/krylov.rs :: gmres_block_plain :: 400
-python/src/krylov.rs :: gmres_plain :: 1e-8
-python/src/krylov.rs :: gmres_plain :: 400
 src/dense/gemm_backend.rs :: complex_gemm_3m :: 3
 src/dense/gemm_backend.rs :: complex_gemm_3m :: 3
 src/dense/gemm_backend.rs :: complex_gemm_3m :: 3

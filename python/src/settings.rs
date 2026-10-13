@@ -586,8 +586,9 @@ impl PySettings {
 ///     force it. The result is bit-identical in every mode.
 /// par_min_nnz : int, default 8000
 ///     Nonzeros from which the auto gate factors blocks in parallel.
-/// par_min_work : int, default 5e7
-///     Replay work a unit of parallel refactorization must carry.
+/// par_min_work : int, default 2e5
+///     Replay work a unit of parallel refactorization must carry, in fmadds
+///     (not the unit of ``Settings(solve_par_min_work=...)``).
 /// par_min_ratio : float, default 2.0
 ///     Simultaneous work the structure must offer for a parallel refactor.
 /// interrupt : Interrupt, optional

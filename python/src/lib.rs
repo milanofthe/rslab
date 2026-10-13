@@ -9,6 +9,7 @@
 #![allow(clippy::useless_conversion)]
 
 mod common;
+mod constants;
 mod factor;
 mod krylov;
 mod logging;
@@ -35,6 +36,8 @@ fn install_diagnose(py: Python<'_>) -> PyResult<PyObject> {
 
 #[pymodule]
 fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("KRYLOV_TOL", rslab::constants::KRYLOV_TOL)?;
+    m.add("KRYLOV_MAX_ITER", rslab::constants::KRYLOV_MAX_ITER)?;
     m.add_class::<settings::PySettings>()?;
     m.add_class::<settings::PyKluSettings>()?;
     m.add_class::<settings::PyInterrupt>()?;

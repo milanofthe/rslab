@@ -10,7 +10,9 @@ use rslab::{
 };
 
 use crate::common::{array1, array2, block, map_err, vector, with_dtype, Pattern};
+use crate::constants::KRYLOV_RESULT_FIELDS;
 use crate::factor::{Field, PyRecycle};
+use rslab::constants::{KRYLOV_MAX_ITER, KRYLOV_TOL};
 
 /// An explicit CSC operator handed in from Python: `(n, indptr, indices, data)`.
 pub type Operator<'py> = (
@@ -53,11 +55,15 @@ pub struct PyKrylovResult {
 #[pymethods]
 impl PyKrylovResult {
     fn __len__(&self) -> usize {
-        5
+        KRYLOV_RESULT_FIELDS
     }
 
     fn __getitem__(&self, py: Python<'_>, i: isize) -> PyResult<PyObject> {
-        let i = if i < 0 { i + 5 } else { i };
+        let i = if i < 0 {
+            i + KRYLOV_RESULT_FIELDS as isize
+        } else {
+            i
+        };
         Ok(match i {
             0 => self.x.clone_ref(py),
             1 => self.converged.into_py(py),
@@ -243,7 +249,10 @@ pub fn cocr<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
 
 /// Unpreconditioned flexible GMRES on the CSC matrix ``(n, indptr, indices, data)``.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
+#[pyo3(
+    signature = (n, indptr, indices, data, b, tol = KRYLOV_TOL, maxit = KRYLOV_MAX_ITER, restart = None, x0 = None),
+    text_signature = "(n, indptr, indices, data, b, tol=1e-8, maxit=400, restart=None, x0=None)"
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn gmres_plain(
     py: Python<'_>,
@@ -276,7 +285,10 @@ pub fn gmres_plain(
 
 /// Unpreconditioned block GMRES on the CSC matrix ``(n, indptr, indices, data)``.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, b, tol = 1e-8, maxit = 400, restart = None, x0 = None))]
+#[pyo3(
+    signature = (n, indptr, indices, data, b, tol = KRYLOV_TOL, maxit = KRYLOV_MAX_ITER, restart = None, x0 = None),
+    text_signature = "(n, indptr, indices, data, b, tol=1e-8, maxit=400, restart=None, x0=None)"
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn gmres_block_plain(
     py: Python<'_>,
@@ -308,7 +320,10 @@ pub fn gmres_block_plain(
 
 /// Unpreconditioned COCG on the CSC matrix ``(n, indptr, indices, data)``.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, b, tol = 1e-8, maxit = 400))]
+#[pyo3(
+    signature = (n, indptr, indices, data, b, tol = KRYLOV_TOL, maxit = KRYLOV_MAX_ITER),
+    text_signature = "(n, indptr, indices, data, b, tol=1e-8, maxit=400)"
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn cocg_plain(
     py: Python<'_>,
@@ -329,7 +344,10 @@ pub fn cocg_plain(
 
 /// Unpreconditioned COCR on the CSC matrix ``(n, indptr, indices, data)``.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, b, tol = 1e-8, maxit = 400))]
+#[pyo3(
+    signature = (n, indptr, indices, data, b, tol = KRYLOV_TOL, maxit = KRYLOV_MAX_ITER),
+    text_signature = "(n, indptr, indices, data, b, tol=1e-8, maxit=400)"
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn cocr_plain(
     py: Python<'_>,
