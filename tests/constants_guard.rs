@@ -1,5 +1,7 @@
 //! Guard against unnamed numbers: every tuning value, threshold, limit,
-//! tolerance and semantic constant lives in a `constants.rs` of its crate.
+//! tolerance and semantic constant lives in the constants module of its
+//! crate (`src/constants/`, `crates/*/src/constants.rs`,
+//! `python/src/constants.rs`).
 //!
 //! The test parses every library source of the workspace and of the Python
 //! bindings (`src`, `crates/*/src`, `python/src`; test code excluded) and
@@ -9,11 +11,10 @@
 //! - it sits in a structural position: a type (`[f64; 3]`), a generic
 //!   argument, a pattern (`3 => ..`) or the index of an index expression
 //!   (`v[3]`, `v[..4]`, `v[i + 3]`),
-//! - its line carries a `// lit: <reason>` comment,
+//! - its line carries a `// lit: <reason>` comment (a formula's own
+//!   number, such as the 6 of a sum of squares), or
 //! - its file or item is in the exemption table below (algorithm-defined
-//!   constants that belong next to their code), or
-//! - it is listed in `constants_guard.baseline` (violations predating the
-//!   guard; the list may only shrink, a stale entry fails too).
+//!   constants that belong next to their code).
 //!
 //! Attributes are skipped except `#[pyo3(signature = ...)]`, whose defaults
 //! are what Python callers see and must reference constants. Literals inside
@@ -36,7 +37,7 @@ const EXEMPT_FILES: &[(&str, &str)] = &[
     ),
     (
         "crates/rslab-metis/src/rng.rs",
-        "splitmix64 / xorshift: published algorithm constants",
+        "SplitMix64: published algorithm constants",
     ),
 ];
 
@@ -62,20 +63,12 @@ const EXEMPT_ITEMS: &[(&str, &str, &str)] = &[
 /// Roots scanned, relative to the workspace root. `crates/*/src` expands.
 const ROOTS: &[&str] = &["src", "crates/*/src", "python/src"];
 
-const BASELINE: &str = "constants_guard.baseline";
-
 #[derive(Debug, Clone)]
 struct Hit {
     file: String,
     line: usize,
     item: String,
     lit: String,
-}
-
-impl Hit {
-    fn key(&self) -> String {
-        format!("{} :: {} :: {}", self.file, self.item, self.lit)
-    }
 }
 
 #[test]
@@ -136,50 +129,16 @@ fn numeric_literals_are_named() {
         }
     }
 
-    let baseline_path = root.join(BASELINE);
-    let baseline = std::fs::read_to_string(&baseline_path).unwrap_or_default();
-    let mut allowed: BTreeMap<String, usize> = BTreeMap::new();
-    for l in baseline
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
-        *allowed.entry(l.to_string()).or_default() += 1;
-    }
-
-    if std::env::var_os("RSLAB_GUARD_WRITE_BASELINE").is_some() {
-        let mut keys: Vec<String> = hits.iter().map(Hit::key).collect();
-        keys.sort();
-        let mut out = String::from(
-            "# Numeric literals that predate tests/constants_guard.rs. The list may only\n\
-             # shrink: name a value in the crate's constants.rs and delete its line.\n",
-        );
-        for k in keys {
-            out.push_str(&k);
-            out.push('\n');
-        }
-        std::fs::write(&baseline_path, out).unwrap();
-        return;
-    }
-
-    let mut errors = Vec::new();
-    for h in &hits {
-        match allowed.get_mut(&h.key()) {
-            Some(n) if *n > 0 => *n -= 1,
-            _ => errors.push(format!(
-                "{}:{}: literal {} in {} is not named (move it to constants.rs, or mark \
-                 '// lit: <reason>')",
+    let errors: Vec<String> = hits
+        .iter()
+        .map(|h| {
+            format!(
+                "{}:{}: literal {} in {} is not named (move it to the crate's constants \
+                 module, or mark '// lit: <reason>')",
                 h.file, h.line, h.lit, h.item
-            )),
-        }
-    }
-    for (k, n) in &allowed {
-        for _ in 0..*n {
-            errors.push(format!(
-                "{BASELINE}: stale entry '{k}' (the literal is gone: delete the line)"
-            ));
-        }
-    }
+            )
+        })
+        .collect();
     assert!(
         errors.is_empty(),
         "{} constants guard violation(s):\n{}",

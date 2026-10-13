@@ -1,2 +1,0 @@
-# Numeric literals that predate tests/constants_guard.rs. The list may only
-# shrink: name a value in the crate's constants.rs and delete its line.
