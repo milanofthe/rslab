@@ -156,11 +156,11 @@ impl Calibration {
     fn fallback(hw: &HardwareInfo) -> Self {
         let speedup = (hw.physical_cores as f64).sqrt().max(1.0);
         Calibration {
-            geom_gflops: 2.0,
-            geom_gflops_cplx: 2.0 / CPLX_RATE_DIV,
+            geom_gflops: FALLBACK_GEOM_GFLOPS,
+            geom_gflops_cplx: FALLBACK_GEOM_GFLOPS / CPLX_RATE_DIV,
             speedup,
             speedup_threads: hw.physical_cores,
-            speedup4: speedup.min(2.0),
+            speedup4: speedup.min(FALLBACK_SPEEDUP_ANCHOR_MAX),
             time_cv: FALLBACK_TIME_CV,
             fingerprint: hw.fingerprint(),
         }

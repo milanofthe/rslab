@@ -101,3 +101,18 @@ pub const THREAD_LADDER: [usize; 9] = [2, 4, 6, 8, 12, 16, 20, 24, 32];
 /// Why: a 3 % gain is worth the extra workers, less is noise.
 /// Contract: timing.
 pub const THREAD_GAIN_MARGIN: f64 = 0.97;
+
+/// One-thread rate the cost model assumes when no calibration can run
+/// (Gflop/s of the geometric flop proxy).
+/// Used by: `tuning::Calibration::fallback`.
+/// Why: a conservative fallback for a current desktop core.
+/// Contract: timing.
+pub const FALLBACK_GEOM_GFLOPS: f64 = 2.0;
+
+/// Cap of the speedup at [`SPEEDUP_ANCHOR_THREADS`] the fallback assumes
+/// (1).
+/// Used by: `tuning::Calibration::fallback`.
+/// Why: a conservative fallback; the square-root speedup it caps grows
+/// past what four workers reach on sparse factorizations.
+/// Contract: timing.
+pub const FALLBACK_SPEEDUP_ANCHOR_MAX: f64 = 2.0;
