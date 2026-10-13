@@ -361,13 +361,10 @@ pub(crate) fn matching_candidates(
     if k2 == n && !out.contains(&m2) {
         out.push(m2);
     }
-    // Budget in adjacency steps: sized so the class where MC21's matching
-    // wins (onetone: ~34M steps) completes, while its degenerate class
-    // (twotone: >300M) is cut off after a hard-capped prefix (~150ms)
-    // instead of burning seconds. MC21 is an opportunistic extra candidate;
-    // losing it to the budget only removes one bakeoff entrant.
+    // Budget in adjacency steps (see `MC21_STEPS_PER_ENTRY`).
     let nnz = col_ptr[n];
-    let budget = (128 * (nnz + n)).min(50_000_000);
+    let budget =
+        (crate::constants::MC21_STEPS_PER_ENTRY * (nnz + n)).min(crate::constants::MC21_MAX_STEPS);
     if let Some((m3, k3)) = mc21_transversal(n, col_ptr, row_idx, budget) {
         if k3 == n && !out.contains(&m3) {
             out.push(m3);

@@ -19,6 +19,7 @@
 //! (capped iterations, singular-pivot fallbacks) and returns "best effort" rather
 //! than erroring.
 
+use crate::constants::{DENSE_SINGULAR_TOL, INVERSE_ITERATION_SHIFT, QR_ITER_PER_DIM, TINY};
 use num_complex::Complex;
 
 type C = Complex<f64>;
@@ -43,7 +44,7 @@ pub fn lu_solve(a: &[C], d: usize, b: &[C], nrhs: usize) -> Option<Vec<C>> {
         }
         anorm = anorm.max(s);
     }
-    let thresh = 1e-14 * anorm.max(1.0);
+    let thresh = DENSE_SINGULAR_TOL * anorm.max(1.0);
     for col in 0..d {
         // Partial pivot: largest magnitude in the active column.
         let mut piv = col;
@@ -98,7 +99,8 @@ pub fn lu_solve(a: &[C], d: usize, b: &[C], nrhs: usize) -> Option<Vec<C>> {
 /// eigenvalues are needed downstream, so the accumulating transform is not formed.
 #[allow(clippy::needless_range_loop)]
 fn to_hessenberg(a: &mut [C], d: usize) {
-    if d < 3 {
+    // A matrix up to 2x2 is Hessenberg already.
+    if d <= 2 {
         return;
     }
     for col in 0..(d - 2) {
@@ -216,7 +218,7 @@ fn wilkinson_shift(h: &[C], d: usize, p: usize) -> C {
     let c = h[(p - 1) * d + (p - 2)];
     let dd = h[(p - 1) * d + (p - 1)];
     let tr = a + dd;
-    let disc = ((a - dd) * (a - dd) + b * c * 4.0).sqrt();
+    let disc = ((a - dd) * (a - dd) + b * c * 4.0).sqrt(); // lit: quadratic formula
     let l1 = (tr + disc) / 2.0;
     let l2 = (tr - disc) / 2.0;
     if (l1 - dd).norm() <= (l2 - dd).norm() {
@@ -235,7 +237,7 @@ pub fn eigenvalues(a: &[C], d: usize) -> Vec<C> {
     to_hessenberg(&mut h, d);
     let mut eigs = vec![C::new(0.0, 0.0); d];
     let mut p = d;
-    let mut budget = 30 * d + 30;
+    let mut budget = QR_ITER_PER_DIM * d + QR_ITER_PER_DIM;
     while p > 0 {
         if p == 1 {
             eigs[0] = h[0];
@@ -244,7 +246,7 @@ pub fn eigenvalues(a: &[C], d: usize) -> Vec<C> {
         // Deflate a negligible bottom subdiagonal.
         let sub = h[(p - 1) * d + (p - 2)].norm();
         let dg = h[(p - 2) * d + (p - 2)].norm() + h[(p - 1) * d + (p - 1)].norm();
-        if sub <= f64::EPSILON * dg.max(1e-300) {
+        if sub <= f64::EPSILON * dg.max(TINY) {
             eigs[p - 1] = h[(p - 1) * d + (p - 1)];
             p -= 1;
             continue;
@@ -276,7 +278,10 @@ fn inverse_iteration(a: &[C], d: usize, mu: C) -> Option<Vec<C>> {
         }
         s.max(1.0)
     };
-    let eps = C::new(1e-10 * scale, 1e-10 * scale);
+    let eps = C::new(
+        INVERSE_ITERATION_SHIFT * scale,
+        INVERSE_ITERATION_SHIFT * scale,
+    );
     let mut shifted = a.to_vec();
     let shift = mu + eps;
     for i in 0..d {

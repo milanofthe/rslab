@@ -108,3 +108,19 @@ pub const RELAX_MAX_WIDTH: usize = 256;
 /// Why: tuned default (relaxed amalgamation is off by default).
 /// Contract: results (with relaxed amalgamation on).
 pub const RELAX_MAX_EXTRA_ROWS: usize = 64;
+
+/// Step budget of the MC21 transversal candidate of the BTF matching, per
+/// entry and column (adjacency steps).
+/// Used by: `ordering::btf::matching_candidates`.
+/// Why: the class where MC21's matching wins (onetone: about 34M steps)
+/// completes, while its degenerate class (twotone: over 300M) is cut off.
+/// Contract: results (whether the MC21 candidate competes).
+pub const MC21_STEPS_PER_ENTRY: usize = 128;
+
+/// ... and in total at most (adjacency steps).
+/// Used by: `ordering::btf::matching_candidates`.
+/// Why: caps the degenerate class at about 150 ms; MC21 is an
+/// opportunistic extra candidate, losing it to the budget only removes one
+/// entrant.
+/// Contract: results.
+pub const MC21_MAX_STEPS: usize = 50_000_000;
