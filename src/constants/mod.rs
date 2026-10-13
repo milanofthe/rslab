@@ -13,6 +13,7 @@
 //! - **rounding**: changes the rounding of the result, not its accuracy.
 //! - **timing**: scheduling or memory only, the result is bit-identical.
 //! - **estimate**: feeds a prediction or a report, never the numerics.
+//! - **format**: a unit, a file format or an API value.
 //!
 //! The submodules are re-exported flat, so a value is
 //! `crate::constants::NAME` wherever in this tree it is defined.
@@ -20,6 +21,7 @@
 //! Published algorithm coefficients (the Bunch-Kaufman `alpha`, the FNV-1a
 //! hash) stay next to their algorithm; the guard lists them as exemptions.
 
+mod format;
 mod kernels;
 mod klu;
 mod krylov;
@@ -30,7 +32,9 @@ mod parallel;
 mod pivoting;
 mod scaling;
 mod solve;
+mod tuning;
 
+pub use format::*;
 pub use kernels::*;
 pub use klu::*;
 pub use krylov::*;
@@ -41,3 +45,4 @@ pub use parallel::*;
 pub use pivoting::*;
 pub use scaling::*;
 pub use solve::*;
+pub use tuning::*;

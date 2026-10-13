@@ -13,6 +13,9 @@
 //! place. The level comes from `RLA_LOG` (`debug`, `info`, `warning`, `error`,
 //! `off`) on first use and from [`set_level`] at run time.
 
+use crate::constants::{
+    LOG_DEBUG, LOG_ERROR, LOG_INFO, LOG_OFF, LOG_WARNING, SECS_PER_DAY, SECS_PER_HOUR, SECS_PER_MIN,
+};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{OnceLock, RwLock};
 
@@ -21,12 +24,12 @@ use std::sync::{OnceLock, RwLock};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(u8)]
 pub enum LogLevel {
-    Debug = 10,
-    Info = 20,
-    Warning = 30,
-    Error = 40,
+    Debug = LOG_DEBUG,
+    Info = LOG_INFO,
+    Warning = LOG_WARNING,
+    Error = LOG_ERROR,
     /// Nothing is emitted, errors included.
-    Off = 100,
+    Off = LOG_OFF,
 }
 
 impl LogLevel {
@@ -56,10 +59,10 @@ impl LogLevel {
 
     fn from_u8(v: u8) -> LogLevel {
         match v {
-            10 => LogLevel::Debug,
-            20 => LogLevel::Info,
-            30 => LogLevel::Warning,
-            40 => LogLevel::Error,
+            LOG_DEBUG => LogLevel::Debug,
+            LOG_INFO => LogLevel::Info,
+            LOG_WARNING => LogLevel::Warning,
+            LOG_ERROR => LogLevel::Error,
             _ => LogLevel::Off,
         }
     }
@@ -139,12 +142,12 @@ fn timestamp() -> String {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = now.as_secs() % 86400;
+    let secs = now.as_secs() % SECS_PER_DAY;
     format!(
         "{:02}:{:02}:{:02}",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
+        secs / SECS_PER_HOUR,
+        (secs % SECS_PER_HOUR) / SECS_PER_MIN,
+        secs % SECS_PER_MIN
     )
 }
 
@@ -170,7 +173,7 @@ pub(crate) fn timed<R>(what: impl FnOnce() -> String, f: impl FnOnce() -> R) -> 
     }
     let t = crate::clock::Instant::now();
     let r = f();
-    let ms = t.elapsed().as_secs_f64() * 1e3;
+    let ms = crate::clock::ms(t.elapsed());
     debug(&format!("{}: {ms:.1} ms", what()));
     r
 }

@@ -242,7 +242,7 @@ impl LuSymbolic {
             }
             _ => LuStructure::empty(),
         };
-        let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
+        let analyze_ms = crate::clock::ms(t.elapsed());
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             let d = symb.decisions(opts.ordering.method);
             crate::logging::info(&format!(
@@ -306,7 +306,7 @@ impl LuSymbolic {
         );
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             (plan_l.bytes() + plan_u.bytes()) as u64,
         );
@@ -348,7 +348,7 @@ impl LuSymbolic {
             .refill(ut, &factors.supernode_parent, false, opts.solve);
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             (lu.plan_l.bytes() + lu.plan_u.bytes()) as u64,
         );
@@ -393,7 +393,7 @@ impl LuSymbolic {
         }
         let t = crate::clock::Instant::now();
         let numeric = factor_general_lu_numeric(self, a, &opts, storage, pools)?;
-        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let factor_ms = crate::clock::ms(t.elapsed());
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
         let (l, ut, factors) = numeric.into_parts();

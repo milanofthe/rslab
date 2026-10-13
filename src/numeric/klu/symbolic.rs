@@ -459,7 +459,7 @@ impl KluSymbolic {
         let estimate = self.fill.get().map(|_| self.estimate_memory::<T>());
         let t = crate::clock::Instant::now();
         let factors = factor_impl(self, a, settings)?;
-        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let factor_ms = crate::clock::ms(t.elapsed());
         let nnz =
             (factors.l_val.len() + factors.u_val.len() + factors.udiag.len() + factors.f_val.len())
                 as u64;

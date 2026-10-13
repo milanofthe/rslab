@@ -1470,7 +1470,7 @@ impl PhaseTrace {
 
     fn lap(&mut self, name: &'static str) {
         if let Some(t0) = self.t0 {
-            self.laps.push((name, t0.elapsed().as_secs_f64() * 1e3));
+            self.laps.push((name, crate::clock::ms(t0.elapsed())));
             self.t0 = Some(crate::clock::Instant::now());
         }
     }

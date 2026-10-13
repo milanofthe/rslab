@@ -124,7 +124,7 @@ impl MemoryPlan {
 
 impl fmt::Display for MemoryPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mb = |b: u64| b as f64 / 1e6;
+        let mb = |b: u64| b as f64 / crate::constants::MEGA;
         write!(
             f,
             "peak {:.0} MB at {} threads (analysis {:.0} MB, factor {:.0} MB, \

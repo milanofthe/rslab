@@ -390,7 +390,7 @@ impl<T: Scalar> KluSolver<T> {
         let nnz = self.diagnostics.factor_nnz;
         self.diagnostics.set_latest(
             "klu-refactor",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             diagnostics_flops(&self.diagnostics),
             nnz * entry,
         );

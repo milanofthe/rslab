@@ -6,6 +6,7 @@
 //! reproducible and lets a solver-in-the-loop scheduler decide *before* allocating
 //! whether a factorization fits the memory budget (fail-fast / pick approximation).
 
+use crate::constants::{GIGA, MEGA, MEGA_U64, MS_PER_S, PERCENT, RATE_FLOOR, S_PER_MS, TIME_FLOOR};
 use std::fmt;
 
 /// A-priori estimate of the memory a factorization will use, in bytes. All fields
@@ -50,10 +51,10 @@ pub struct MemoryEstimate {
 
 impl MemoryEstimate {
     pub fn transient_peak_mb(&self) -> f64 {
-        self.transient_peak_bytes as f64 / 1e6
+        self.transient_peak_bytes as f64 / MEGA
     }
     pub fn factor_mb(&self) -> f64 {
-        self.factor_bytes as f64 / 1e6
+        self.factor_bytes as f64 / MEGA
     }
     /// Does the estimated transient peak fit in `available` bytes?
     pub fn fits_in(&self, available_bytes: u64) -> bool {
@@ -65,8 +66,8 @@ impl MemoryEstimate {
     /// the measured `parallel_speedup` at the chosen thread count. Both come from
     /// the calibration (`tuning` feature); pass machine defaults otherwise.
     pub fn est_runtime_ms(&self, gflops: f64, parallel_speedup: f64) -> f64 {
-        let rate = (gflops.max(1e-6) * parallel_speedup.max(1e-6)) * 1e9;
-        (self.factor_flops as f64 / rate) * 1e3
+        let rate = (gflops.max(RATE_FLOOR) * parallel_speedup.max(RATE_FLOOR)) * GIGA;
+        (self.factor_flops as f64 / rate) * MS_PER_S
     }
 
     /// Thread-aware runtime estimate (the v2 model): the parallel time cannot fall
@@ -79,10 +80,10 @@ impl MemoryEstimate {
     /// argmin over the worker count correctly stops adding threads once the
     /// critical path (or, in the full v2 model, memory bandwidth) dominates.
     pub fn est_runtime_ms_threaded(&self, gflops: f64, parallel_speedup: f64) -> f64 {
-        let rate1 = gflops.max(1e-6) * 1e9; // one-thread geom-flops/s
+        let rate1 = gflops.max(RATE_FLOOR) * GIGA; // one-thread geom-flops/s
         let serial_floor = self.critical_path_flops as f64 / rate1;
-        let parallel = self.factor_flops as f64 / (rate1 * parallel_speedup.max(1e-6));
-        serial_floor.max(parallel) * 1e3
+        let parallel = self.factor_flops as f64 / (rate1 * parallel_speedup.max(RATE_FLOOR));
+        serial_floor.max(parallel) * MS_PER_S
     }
 }
 
@@ -91,8 +92,8 @@ impl fmt::Display for MemoryEstimate {
         write!(
             f,
             "peak <= {:.0} MB (factor {:.0} MB, ~{} nnz)",
-            self.transient_peak_bytes as f64 / 1e6,
-            self.factor_bytes as f64 / 1e6,
+            self.transient_peak_bytes as f64 / MEGA,
+            self.factor_bytes as f64 / MEGA,
             self.factor_nnz,
         )
     }
@@ -272,7 +273,7 @@ impl Diagnostics {
     pub fn rates(&self) -> Rates {
         let mdof = |wall_ms: f64| {
             if wall_ms > 0.0 {
-                self.n as f64 / (wall_ms * 1e-3) / 1e6
+                self.n as f64 / (wall_ms * S_PER_MS) / MEGA
             } else {
                 0.0
             }
@@ -284,15 +285,15 @@ impl Diagnostics {
         };
         if let Some(st) = self.numeric_stage() {
             if st.wall_ms > 0.0 {
-                let secs = st.wall_ms * 1e-3;
+                let secs = st.wall_ms * S_PER_MS;
                 r.factor_mdof_s = mdof(st.wall_ms);
-                r.factor_gflops = st.flops as f64 / secs / 1e9;
-                r.factor_mnnz_s = self.factor_nnz as f64 / secs / 1e6;
+                r.factor_gflops = st.flops as f64 / secs / GIGA;
+                r.factor_mnnz_s = self.factor_nnz as f64 / secs / MEGA;
             }
         }
         if self.solves.wall_ms > 0.0 && self.solves.rhs > 0 {
             r.solve_mdof_s =
-                (self.solves.rhs as f64 * self.n as f64) / (self.solves.wall_ms * 1e-3) / 1e6;
+                (self.solves.rhs as f64 * self.n as f64) / (self.solves.wall_ms * S_PER_MS) / MEGA;
         }
         r
     }
@@ -390,16 +391,16 @@ impl fmt::Display for Diagnostics {
         if let Some((p, n, z)) = self.numeric.inertia {
             writeln!(f, "  inertia: +{p} -{n} 0:{z}")?;
         }
-        let tot = self.total_ms().max(1e-9);
+        let tot = self.total_ms().max(TIME_FLOOR);
         for s in &self.stages {
             writeln!(
                 f,
                 "  {:<10} {:8.1} ms ({:4.0}%)  {:>10} Mflop  {:>8.0} MB",
                 s.name,
                 s.wall_ms,
-                100.0 * s.wall_ms / tot,
-                s.flops / 1_000_000,
-                s.bytes as f64 / 1e6,
+                PERCENT * s.wall_ms / tot,
+                s.flops / MEGA_U64,
+                s.bytes as f64 / MEGA,
             )?;
         }
         let r = self.rates();

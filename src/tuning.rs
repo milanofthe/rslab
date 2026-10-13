@@ -7,6 +7,7 @@
 //! fingerprint. The worker-count cost model reads it; the pick is
 //! deterministic given the calibration.
 
+use crate::constants::*;
 use std::path::PathBuf;
 
 use num_complex::Complex;
@@ -43,8 +44,10 @@ impl HardwareInfo {
     }
     /// Stable key for the calibration cache (cores + RAM size bucket).
     pub fn fingerprint(&self) -> u64 {
-        let gb = self.total_ram_bytes / (1 << 30);
-        ((self.physical_cores as u64) << 40) ^ ((self.logical_cores as u64) << 20) ^ gb.min(0xFFFFF)
+        let gb = self.total_ram_bytes / FINGERPRINT_RAM_UNIT;
+        ((self.physical_cores as u64) << FINGERPRINT_PHYSICAL_SHIFT)
+            ^ ((self.logical_cores as u64) << FINGERPRINT_LOGICAL_SHIFT)
+            ^ gb.min(FINGERPRINT_RAM_MASK)
     }
 }
 
@@ -104,13 +107,17 @@ impl Calibration {
         let geom_gflops_cplx = it
             .next()
             .and_then(|t| t.parse().ok())
-            .unwrap_or(geom_gflops / 3.0);
-        let time_cv = it.next().and_then(|t| t.parse().ok()).unwrap_or(0.1);
+            .unwrap_or(geom_gflops / CPLX_RATE_DIV);
+        let time_cv = it
+            .next()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(FALLBACK_TIME_CV);
         // Later field; an older cache lacks it - fall back to the linear
         // interpolation the pre-speedup4 model used.
         let speedup4 = it.next().and_then(|t| t.parse().ok()).unwrap_or_else(|| {
             if speedup_threads > 1 {
-                1.0 + (speedup - 1.0) * 3.0 / (speedup_threads - 1) as f64
+                1.0 + (speedup - 1.0) * (SPEEDUP_ANCHOR_THREADS - 1) as f64
+                    / (speedup_threads - 1) as f64
             } else {
                 1.0
             }
@@ -150,11 +157,11 @@ impl Calibration {
         let speedup = (hw.physical_cores as f64).sqrt().max(1.0);
         Calibration {
             geom_gflops: 2.0,
-            geom_gflops_cplx: 2.0 / 3.0,
+            geom_gflops_cplx: 2.0 / CPLX_RATE_DIV,
             speedup,
             speedup_threads: hw.physical_cores,
             speedup4: speedup.min(2.0),
-            time_cv: 0.1,
+            time_cv: FALLBACK_TIME_CV,
             fingerprint: hw.fingerprint(),
         }
     }
@@ -162,7 +169,7 @@ impl Calibration {
     /// The one-thread proxy-flops/s rate for a scalar of `value_bytes` (real `f64`
     /// = 8, `Complex<f64>` = 16): picks the complex rate for the wider type.
     pub fn rate_for(&self, value_bytes: usize) -> f64 {
-        if value_bytes >= 16 {
+        if value_bytes >= CPLX_RATE_MIN_BYTES {
             self.geom_gflops_cplx
         } else {
             self.geom_gflops
@@ -177,7 +184,7 @@ impl Calibration {
     /// workers busy), which made the cost model pick far too few workers for
     /// production-size systems.
     pub fn measure(hw: &HardwareInfo) -> Self {
-        let a = grid3d_spd::<f64>(24); // ~ 13 800 DOFs, a few hundred ms
+        let a = grid3d_spd::<f64>(CALIB_GRID_SMALL);
         let Ok(sym) = LdltSymbolic::analyze(&a, &SolverSettings::default()) else {
             return Self::fallback(hw);
         };
@@ -191,7 +198,7 @@ impl Calibration {
         // Repeat the single-thread factor a few times for the timing noise floor
         // (coefficient of variation), which sets the tuner's deviate guard.
         let mut samples = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..CALIB_REPEATS {
             match time_at(1) {
                 Some(t) => samples.push(t),
                 None => return Self::fallback(hw),
@@ -201,7 +208,7 @@ impl Calibration {
         let var = samples.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / samples.len() as f64;
         let time_cv = if mean > 0.0 { var.sqrt() / mean } else { 0.0 };
         let t1 = mean;
-        let geom_gflops = (flops / t1.max(1e-9)) / 1e9;
+        let geom_gflops = (flops / t1.max(TIME_FLOOR)) / GIGA;
 
         // Parallel speedup on a larger, **complex** grid (~ 33k DOFs). Complex
         // arithmetic is the flop-dense regime where the thread choice matters
@@ -216,7 +223,7 @@ impl Calibration {
         // path); per-matrix structure is the cost model's job (critical-path
         // floor + residual), not the calibration's. A minimum-degree ordering
         // here confounds machine capability with tree shape.
-        let ab = grid3d_spd::<Complex<f64>>(32);
+        let ab = grid3d_spd::<Complex<f64>>(CALIB_GRID_LARGE);
         let opts_nd =
             SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::MetisND);
         let Ok(symb) = LdltSymbolic::analyze(&ab, &opts_nd) else {
@@ -235,32 +242,32 @@ impl Calibration {
         }
         let (Some(t1b), Some(t4b), Some(tn)) = (
             time_b(1),
-            time_b(4.min(hw.physical_cores.max(1))),
+            time_b(SPEEDUP_ANCHOR_THREADS.min(hw.physical_cores.max(1))),
             time_b(hw.physical_cores.max(1)),
         ) else {
             return Self::fallback(hw);
         };
         // Complex rate: same grid, complex-typed, factored once at one thread. The
         // structure (fill, flops proxy) is identical; only the per-flop cost differs.
-        let ac = grid3d_spd::<Complex<f64>>(24);
+        let ac = grid3d_spd::<Complex<f64>>(CALIB_GRID_SMALL);
         let geom_gflops_cplx = match LdltSymbolic::analyze(&ac, &SolverSettings::default()) {
             Ok(symc) => {
                 let fc = symc.estimate_memory::<Complex<f64>>().factor_flops as f64;
                 let start = crate::clock::Instant::now();
                 match symc.factor(&ac, &SolverSettings::default().with_threads(1)) {
-                    Ok(_) => (fc / start.elapsed().as_secs_f64().max(1e-9)) / 1e9,
-                    Err(_) => geom_gflops / 3.0,
+                    Ok(_) => (fc / start.elapsed().as_secs_f64().max(TIME_FLOOR)) / GIGA,
+                    Err(_) => geom_gflops / CPLX_RATE_DIV,
                 }
             }
-            Err(_) => geom_gflops / 3.0,
+            Err(_) => geom_gflops / CPLX_RATE_DIV,
         };
-        let speedup = (t1b / tn.max(1e-9)).max(1.0);
+        let speedup = (t1b / tn.max(TIME_FLOOR)).max(1.0);
         Calibration {
             geom_gflops,
             geom_gflops_cplx,
             speedup,
             speedup_threads: hw.physical_cores.max(1),
-            speedup4: (t1b / t4b.max(1e-9)).max(1.0),
+            speedup4: (t1b / t4b.max(TIME_FLOOR)).max(1.0),
             time_cv,
             fingerprint: hw.fingerprint(),
         }
@@ -276,11 +283,12 @@ impl Calibration {
             1.0
         } else if threads >= self.speedup_threads {
             self.speedup
-        } else if threads <= 4 {
-            1.0 + (self.speedup4 - 1.0) * (threads - 1) as f64 / 3.0
+        } else if threads <= SPEEDUP_ANCHOR_THREADS {
+            1.0 + (self.speedup4 - 1.0) * (threads - 1) as f64 / (SPEEDUP_ANCHOR_THREADS - 1) as f64
         } else {
-            let span = (self.speedup_threads - 4).max(1) as f64;
-            self.speedup4 + (self.speedup - self.speedup4) * (threads - 4) as f64 / span
+            let span = (self.speedup_threads - SPEEDUP_ANCHOR_THREADS).max(1) as f64;
+            self.speedup4
+                + (self.speedup - self.speedup4) * (threads - SPEEDUP_ANCHOR_THREADS) as f64 / span
         }
     }
 }
@@ -309,13 +317,6 @@ pub(crate) fn cached_calibration() -> Option<(usize, Calibration)> {
         Calibration::load(hw.fingerprint()).map(|c| (hw.physical_cores, c))
     })
 }
-
-/// Learned additive-residual weights `[intercept, amdahl_frac, ln(threads),
-/// ln(tree_width)]` correcting `log(measured / analytical speedup)`, fit offline by
-/// `benches/fit_residual.py` on the generated thread-scaling corpus (54 matrices).
-/// It is a small, dimensionless, hardware-agnostic correction: the absolute rate
-/// comes from the calibration, this only reshapes the speedup curve by structure.
-const TIME_RESIDUAL: [f64; 4] = [-0.4621, 0.7550, -0.0791, 0.0358];
 
 /// Cost-model worker-count selection: the fewest workers that reach (within a
 /// small margin) the minimum predicted time. Because
@@ -359,7 +360,7 @@ pub fn recommend_threads_cost_model(
             + TIME_RESIDUAL[1] * amdahl
             + TIME_RESIDUAL[2] * (t as f64).ln()
             + TIME_RESIDUAL[3] * width.ln();
-        r.clamp(-0.7, 0.7) // exp factor in [0.50, 2.01]
+        r.clamp(-TIME_RESIDUAL_CLAMP, TIME_RESIDUAL_CLAMP) // exp factor in [0.50, 2.01]
     };
     // Corrected time: predicted speedup s -> s * exp(residual), so time /= that,
     // but never below the hard critical-path floor. The residual is linear, so at
@@ -378,12 +379,9 @@ pub fn recommend_threads_cost_model(
     // 8 still wins), which made the model under-provision by 2-4x.
     let mut best_t = 1;
     let mut best = time(1);
-    for t in [2usize, 4, 6, 8, 12, 16, 20, 24, 32]
-        .into_iter()
-        .filter(|&t| t <= cap)
-    {
+    for t in THREAD_LADDER.into_iter().filter(|&t| t <= cap) {
         let tt = time(t);
-        if tt < best * 0.97 {
+        if tt < best * THREAD_GAIN_MARGIN {
             // >3% faster: worth the extra workers.
             best = tt;
             best_t = t;
@@ -408,7 +406,7 @@ fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
                 let p = idx(x, y, z);
                 rows.push(p);
                 cols.push(p);
-                vals.push(T::from_real(6.0));
+                vals.push(T::from_real(6.0)); // lit: 7-point stencil diagonal
                 let mut nb = |q: usize| {
                     let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
                     rows.push(hi);

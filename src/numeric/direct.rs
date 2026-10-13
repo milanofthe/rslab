@@ -68,7 +68,7 @@ pub(crate) trait SolveCore<T: Scalar> {
 }
 
 fn record<T: Scalar, S: SolveCore<T>>(s: &S, rhs: usize, t: crate::clock::Instant, steps: usize) {
-    let ms = t.elapsed().as_secs_f64() * 1e3;
+    let ms = crate::clock::ms(t.elapsed());
     s.counter().record(rhs, ms, steps);
     if crate::logging::enabled(crate::logging::LogLevel::Debug) {
         crate::logging::debug(&format!(

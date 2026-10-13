@@ -292,7 +292,7 @@ impl LdltSymbolic {
         a.validate()?;
         let t = crate::clock::Instant::now();
         let symbolic = analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?;
-        let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
+        let analyze_ms = crate::clock::ms(t.elapsed());
         let sym = Self {
             symbolic,
             nnz: a.row_idx.len(),
@@ -546,7 +546,7 @@ impl LdltSymbolic {
         );
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             plan.bytes() as u64,
         );
@@ -585,7 +585,7 @@ impl LdltSymbolic {
             .refill(factor, &factors.supernode_parent, true, opts.solve);
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             ldlt.plan.bytes() as u64,
         );
@@ -631,7 +631,7 @@ impl LdltSymbolic {
         }
         let t = crate::clock::Instant::now();
         let scale = equilibration(a, &opts.scaling)?;
-        let scale_ms = t.elapsed().as_secs_f64() * 1e3;
+        let scale_ms = crate::clock::ms(t.elapsed());
         let t = crate::clock::Instant::now();
         let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), &opts, storage, pools)?;
         let scale = scale.unwrap_or_else(|| vec![1.0; a.n]);
@@ -642,7 +642,7 @@ impl LdltSymbolic {
             pivots: factors,
             ..
         } = numeric;
-        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let factor_ms = crate::clock::ms(t.elapsed());
         let mut decisions = self.symbolic.decisions(self.requested_ordering);
         decisions.scaling = format!("{:?}", opts.scaling);
         decisions.method = "LeftLooking".to_string();
