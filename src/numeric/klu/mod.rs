@@ -101,7 +101,7 @@ struct KluEstimate {
 /// assumption (the default expectation: BTF guarantees a structurally nonzero
 /// diagonal and `pivot_threshold` strongly prefers it). Threshold pivoting at factor
 /// time can shift individual counts, not their order of magnitude.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct KluFill {
     l_nnz: u64,
     u_nnz: u64,
@@ -115,6 +115,9 @@ struct KluFill {
     seq_arrays: (u64, u64),
     seq_block: (u64, u64),
     par_blocks: (u64, u64),
+    /// Per block its replay work and the levels of its elimination DAG, as
+    /// the refactorization's plan reads them (`factor::replay_choice`).
+    replay: Vec<(u64, usize)>,
 }
 
 /// Entry capacities of one block's output buffer after the driver factored
@@ -214,17 +217,62 @@ struct KluFactors<T> {
     /// destination: F slot `i` as `KI_FBIT | i`, else work-vector position.
     scatter_expect: Vec<Ki>,
     scatter_target: Vec<Ki>,
-    /// Blocks admitted to the pipelined parallel refactor replay, with their
-    /// Amdahl-bounded worker counts (empty when none qualifies or parallelism
-    /// is off), plus the block-parallel refactor decision. Both come from the
-    /// exact work/critical-path plan of [`compute_replay_plan`].
-    pipelined: Vec<(usize, usize)>,
+    /// The blocks whose refactor replays columns side by side, and how
+    /// (empty when none qualifies or parallelism is off), plus the
+    /// block-parallel refactor decision. Both come from the exact
+    /// work/critical-path plan of [`compute_replay_plan`].
+    pipelined: Vec<(usize, Replay)>,
     par_refactor: bool,
     /// The next refactor's row scaling, swapped with `rs_inv` once it
     /// succeeds, and the sequential replay's work vector: kept so a
     /// refactor allocates nothing.
     rs_next: Vec<f64>,
     replay_x: Vec<T>,
+    /// The pipelined replays' work vectors, one per worker, all-zero.
+    replay_xs: Vec<Vec<T>>,
+    /// Which columns the current pipelined replay has done.
+    ready: Ready,
+}
+
+/// How a block's refactor replays its columns side by side.
+#[derive(Debug, Clone)]
+enum Replay {
+    /// Level by level of its elimination DAG, a parallel section per level:
+    /// level `l` is the columns `cols[ptr[l]..ptr[l + 1]]`, each reading only
+    /// `L` columns of earlier levels.
+    Levels { ptr: Vec<u32>, cols: Vec<Ki> },
+    /// Pipelined: every column taken in order by the next free piece, waiting
+    /// for each `L` column it reads just before it reads it.
+    Pipelined,
+}
+
+/// Per column the number of the refactor that last replayed it: a column
+/// of the current one is done when it carries its number, so nothing is
+/// cleared between refactors.
+#[derive(Debug, Default)]
+struct Ready {
+    epoch: u32,
+    done: Vec<std::sync::atomic::AtomicU32>,
+}
+
+impl Clone for Ready {
+    /// A fresh one: no column of a refactor yet to come is done.
+    fn clone(&self) -> Self {
+        Ready::default()
+    }
+}
+
+impl Ready {
+    /// The next refactor's number, over `n` columns.
+    fn next(&mut self, n: usize) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.done.clear();
+            self.epoch = 1;
+        }
+        self.done
+            .resize_with(n, || std::sync::atomic::AtomicU32::new(0));
+    }
 }
 
 /// KLU solver handle: factor (or analyze+factor), then solve / refactor.

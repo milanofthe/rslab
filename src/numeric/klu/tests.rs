@@ -439,41 +439,84 @@ fn klu_estimate_bounds_the_symbolic_fill() {
     assert_eq!(s.estimated_flops(), 2 * (n as u64 - 1));
 }
 
+/// Pieces on threads of their own per run, each taking the next one.
+struct Threaded(usize);
+
+impl crate::parallel::Pool for Threaded {
+    fn threads(&self) -> usize {
+        self.0
+    }
+    fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..self.0.min(n) {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    f(i);
+                });
+            }
+        });
+    }
+}
+
 #[test]
-fn klu_pipelined_refactor_is_bit_identical_to_sequential() {
-    // One irreducible 1024-column block: the level schedule must engage
-    // (parallel != Off) and its refactor replay must be bit-identical to
-    // the strictly sequential one - same values, not just same residual.
+fn klu_parallel_replays_are_bit_identical_to_sequential() {
+    // One irreducible 1024-column block, forced into a parallel replay (the
+    // gates only decide when it pays, not whether it is correct): level by
+    // level on a lent pool, then pipelined on rayon, each twice (the second
+    // pipelined replay reuses the column numbers). The values must be the
+    // sequential replay's, not just the residual.
     let (a, b) = grid_cd(32);
     let seq = KluSettings::default().with_parallel(KluParallel::Off);
     let par = KluSettings::default().with_parallel(KluParallel::On);
 
     let mut s_seq = KluSolver::factor(&a, &seq).unwrap();
     let mut s_par = KluSolver::factor(&a, &par).unwrap();
+    assert!(s_seq.factors.pipelined.is_empty(), "Off must plan nothing");
     assert!(
-        s_seq.factors.pipelined.is_empty(),
-        "Off must not admit pipeline blocks"
+        matches!(s_par.factors.pipelined[..], [(0, Replay::Levels { .. })]),
+        "On must plan its light columns level by level"
     );
-    // The 1024-column test block is far below the work gate; force the
-    // admission so the pipelined executor itself is exercised (the gates
-    // only decide when it pays, not whether it is correct).
-    s_par.factors.pipelined = vec![(0, 4)];
-
-    // Fresh values on the frozen pattern, refactor both ways.
     let mut a2 = a.clone();
     for (k, v) in a2.values.iter_mut().enumerate() {
         *v += 1e-3 * ((k % 11) as f64 - 5.0);
     }
     s_seq.refactor(&a2).unwrap();
-    s_par.refactor(&a2).unwrap();
-    assert_eq!(s_seq.factors.l_val, s_par.factors.l_val, "L values differ");
-    assert_eq!(s_seq.factors.u_val, s_par.factors.u_val, "U values differ");
-    assert_eq!(s_seq.factors.udiag, s_par.factors.udiag, "diag differs");
+    let same = |s: &KluSolver<f64>, what: &str| {
+        assert_eq!(
+            s_seq.factors.l_val, s.factors.l_val,
+            "{what}: L values differ"
+        );
+        assert_eq!(
+            s_seq.factors.u_val, s.factors.u_val,
+            "{what}: U values differ"
+        );
+        assert_eq!(s_seq.factors.udiag, s.factors.udiag, "{what}: diag differs");
+    };
+    let lent: std::sync::Arc<dyn crate::parallel::Pool> = std::sync::Arc::new(Threaded(4));
+    for _ in 0..2 {
+        crate::parallel::install(lent.clone(), || s_par.refactor(&a2)).unwrap();
+        same(&s_par, "level by level");
+    }
+    s_par.factors.pipelined = vec![(0, Replay::Pipelined)];
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    for _ in 0..2 {
+        pool.install(|| s_par.refactor(&a2)).unwrap();
+        same(&s_par, "pipelined");
+    }
+    crate::parallel::install(lent, || s_par.refactor(&a2)).unwrap();
+    same(&s_par, "pipelined on a lent pool");
 
     let x = s_par.solve(&b).unwrap();
     assert!(
         resid(&a2, &x, &b) < 1e-10,
-        "pipelined refactor solve residual"
+        "parallel refactor solve residual"
     );
 }
 

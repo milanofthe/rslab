@@ -135,8 +135,8 @@ impl KluSymbolic {
     /// diagonal pivots: exact per-path fill and flop counts, no values.
     /// Computed once and cached, the pass costs about as much as a numeric
     /// factor, so repeated `factor`/`estimate_memory` calls must not repay it.
-    fn symbolic_fill(&self) -> KluFill {
-        *self.fill.get_or_init(|| self.symbolic_fill_uncached())
+    fn symbolic_fill(&self) -> &KluFill {
+        self.fill.get_or_init(|| self.symbolic_fill_uncached())
     }
 
     fn symbolic_fill_uncached(&self) -> KluFill {
@@ -148,6 +148,10 @@ impl KluSymbolic {
         let mut l_rowidx: Vec<usize> = Vec::new();
         let mut leaves: Vec<usize> = Vec::new();
         let (mut u_nnz, mut f_nnz, mut flops) = (0u64, 0u64, 0u64);
+        // Each column's level in its block's elimination DAG, and per block
+        // its replay work and levels.
+        let mut level = vec![0usize; n];
+        let mut replay = Vec::new();
         // The drivers' buffers, block by block (see `BlockCaps`): the
         // sequential driver appends to arrays reserved at 4, 2 and 1/4 times
         // the input and reuses one block buffer; the parallel one gives
@@ -160,8 +164,11 @@ impl KluSymbolic {
         for b in 0..nblocks {
             let (bs, be) = (self.block_ptr[b], self.block_ptr[b + 1]);
             let before = (l_rowidx.len(), u_nnz as usize, f_nnz as usize);
+            let (mut w_b, mut nlev) = (0u64, 1usize);
             for j in bs..be {
                 let sj = j + 1;
+                let mut lj = 0usize;
+                w_b += super::factor::COL_WORK;
                 leaves.clear();
                 for k in self.pat_col_ptr[j]..self.pat_col_ptr[j + 1] {
                     let pre = self.pat_row_idx[k];
@@ -207,6 +214,8 @@ impl KluSymbolic {
                         // u finished: one U entry, applying its L column.
                         u_nnz += 1;
                         flops += 2 * (l_colptr[u + 1] - l_colptr[u]) as u64;
+                        w_b += (l_colptr[u + 1] - l_colptr[u]) as u64;
+                        lj = lj.max(level[u] + 1);
                         if d == 0 {
                             break;
                         }
@@ -220,7 +229,10 @@ impl KluSymbolic {
                 }
                 flops += (l_rowidx.len() - l_colptr[j]) as u64; // divisions
                 l_colptr.push(l_rowidx.len());
+                level[j] = lj;
+                nlev = nlev.max(lj + 1);
             }
+            replay.push((w_b, nlev));
             let annz = self.pat_col_ptr[be] - self.pat_col_ptr[bs];
             let got = [
                 l_rowidx.len() - before.0,
@@ -262,6 +274,7 @@ impl KluSymbolic {
             seq_arrays,
             seq_block,
             par_blocks: par,
+            replay,
         }
     }
 
@@ -362,8 +375,22 @@ impl KluSymbolic {
         };
         // Held besides: the row scaling, the final row permutation and its
         // inverse, copies of the column permutation and the block pointers,
-        // the refactorization's scatter program and its pipelined blocks.
+        // the refactorization's scatter program and its replay plan (a
+        // level-by-level block's columns and level bounds).
         let around = 8 * n + 16 * n + 8 * n + 8 * (nblocks + 1) + 8 * nnz + 16 * nblocks;
+        let force = settings.parallel == KluParallel::On;
+        let (mut planned, mut levels) = (0usize, 0u64);
+        for (b, &(w_b, nlev)) in fill.replay.iter().enumerate() {
+            let bn = self.block_ptr[b + 1] - self.block_ptr[b];
+            if let Some(pipelined) = super::factor::replay_choice(bn, nlev, w_b, force, settings) {
+                planned += 1;
+                if !pipelined {
+                    levels += (std::mem::size_of::<Ki>() * bn + 4 * (nlev + 1)) as u64;
+                }
+            }
+        }
+        let entry = std::mem::size_of::<(usize, Replay)>();
+        let around = around + (crate::memory::pushed(planned) * entry) as u64 + levels;
         let factor = arrays + around;
         // While the blocks are factored: the scaling, the scatter program,
         // the pre-pivot inverse and final positions, the arrays, the block
