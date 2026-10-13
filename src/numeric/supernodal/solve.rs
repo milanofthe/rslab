@@ -27,7 +27,9 @@
 // linear algebra than zipped iterators would.
 #![allow(clippy::needless_range_loop)]
 
-use crate::constants::{PIECES_PER_WORKER, SOLVE_REDUCE_MIN_ROWS, TILE_ROWS};
+use crate::constants::{
+    FOLD_LANES, PIECES_PER_WORKER, SOLVE_REDUCE_MIN_ROWS, SOLVE_RHS_TILE, TILE_ROWS,
+};
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
@@ -767,7 +769,7 @@ impl<T: Scalar> SolvePlan<T> {
         let widest = self.top_levels.iter().map(Vec::len).max().unwrap_or(0);
         work.fit(self.subtrees.len(), widest);
         work.parallel = threads.resolve(|cap| cap) > 1
-            && self.vals.len().saturating_mul(nr.min(4)) >= self.cfg.par_min_work;
+            && self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE)) >= self.cfg.par_min_work;
         work
     }
 
@@ -1142,7 +1144,7 @@ impl<T: Scalar> SolvePlan<T> {
         let xb = &mut x[c0 * nr..(c0 + w) * nr];
         let mut q0 = 0;
         while q0 < nr {
-            let cw = (nr - q0).min(4);
+            let cw = (nr - q0).min(SOLVE_RHS_TILE);
             match cw {
                 4 => bwd_tile::<T, 4>(xb, g, panel, dinv, ld, w, m, nr, q0),
                 3 => bwd_tile::<T, 3>(xb, g, panel, dinv, ld, w, m, nr, q0),
@@ -1258,7 +1260,7 @@ fn panel_product<T: Scalar>(
     let rows = out.len() / nr.max(1);
     let mut c0 = 0;
     while c0 < nr {
-        let w = (nr - c0).min(4);
+        let w = (nr - c0).min(SOLVE_RHS_TILE);
         match w {
             4 => product_tile::<T, 4>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
             3 => product_tile::<T, 3>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
@@ -1374,7 +1376,7 @@ fn product_tile<T: Scalar, const W: usize>(
 fn dot4_block<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize) {
     let mut q0 = 0;
     while q0 < nr {
-        let w = (nr - q0).min(4);
+        let w = (nr - q0).min(SOLVE_RHS_TILE);
         dot4_cols(&mut out[q0..q0 + w], col, g, nr, q0);
         q0 += w;
     }
@@ -1397,9 +1399,9 @@ fn dot4_cols<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize, q0: usize)
 fn dot4_tile<T: Scalar, const W: usize>(col: &[T], g: &[T], nr: usize, q0: usize) -> [T; W] {
     let z = T::zero();
     let m = col.len().min(g.len() / nr.max(1));
-    let mut s = [[z; W]; 4];
+    let mut s = [[z; W]; FOLD_LANES];
     let mut i = 0;
-    while i + 4 <= m {
+    while i + FOLD_LANES <= m {
         for (q, sq) in s.iter_mut().enumerate() {
             let l = col[i + q];
             let gi = &g[(i + q) * nr + q0..(i + q) * nr + q0 + W];
@@ -1407,7 +1409,7 @@ fn dot4_tile<T: Scalar, const W: usize>(col: &[T], g: &[T], nr: usize, q0: usize
                 *a = fmadd(l, x, *a);
             }
         }
-        i += 4;
+        i += FOLD_LANES;
     }
     let mut acc = [z; W];
     for (c, a) in acc.iter_mut().enumerate() {
@@ -1543,7 +1545,7 @@ fn tri_rows<T: Scalar>(
 ) {
     let mut c0 = 0;
     while c0 < nr {
-        let w = (nr - c0).min(4);
+        let w = (nr - c0).min(SOLVE_RHS_TILE);
         match w {
             4 => tri_tile::<T, 4>(v, panel, diag_inv, ld, nr, c0, jb, je),
             3 => tri_tile::<T, 3>(v, panel, diag_inv, ld, nr, c0, jb, je),
@@ -1627,9 +1629,9 @@ fn tri_backward<T: Scalar>(
             ak[0] = ak[0] + dot4(col, &tail[..je - k - 1]);
         } else {
             // as the single column: the dot first, then onto the accumulator
-            let mut d = [T::zero(); 4];
-            for c0 in (0..nr).step_by(4) {
-                let w = 4.min(nr - c0);
+            let mut d = [T::zero(); SOLVE_RHS_TILE];
+            for c0 in (0..nr).step_by(SOLVE_RHS_TILE) {
+                let w = SOLVE_RHS_TILE.min(nr - c0);
                 dot4_cols(&mut d[..w], col, &tail[..(je - k - 1) * nr], nr, c0);
                 add_assign(&mut ak[c0..c0 + w], &d[..w]);
             }
@@ -1652,14 +1654,14 @@ fn col_blocks(w: usize, nb: usize) -> impl DoubleEndedIterator<Item = (usize, us
 #[inline]
 fn dot4<T: Scalar>(a: &[T], b: &[T]) -> T {
     debug_assert_eq!(a.len(), b.len());
-    let mut s = [T::zero(); 4];
+    let mut s = [T::zero(); FOLD_LANES];
     let mut i = 0;
-    while i + 4 <= a.len() {
+    while i + FOLD_LANES <= a.len() {
         s[0] = fmadd(a[i], b[i], s[0]);
         s[1] = fmadd(a[i + 1], b[i + 1], s[1]);
         s[2] = fmadd(a[i + 2], b[i + 2], s[2]);
         s[3] = fmadd(a[i + 3], b[i + 3], s[3]);
-        i += 4;
+        i += FOLD_LANES;
     }
     let mut acc = (s[0] + s[1]) + (s[2] + s[3]);
     while i < a.len() {

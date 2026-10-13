@@ -41,3 +41,22 @@ pub const SOLVE_APEX_MIN_ENTRIES: usize = 1 << 18;
 /// one costs several times the solve there at a few thousand unknowns.
 /// Contract: timing (the same bits either way).
 pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
+
+/// Right-hand sides per register tile of the solve kernels, and how many of
+/// them count toward the parallel gate
+/// [`SOLVE_PAR_MIN_ENTRY_RHS`] (right-hand sides).
+/// Used by: `supernodal::solve` (`bwd_node_block`, `panel_product`,
+/// `dot4_block`, `tri_rows`, `tri_backward`, `SolvePlan::fit`).
+/// Why: a tile of [`TILE_ROWS`] rows by four right-hand sides stays in
+/// registers; the kernels are instantiated for tiles of 1 to 4.
+/// Contract: rounding (each right-hand side is summed alike in any tile;
+/// the tile width only groups them).
+pub const SOLVE_RHS_TILE: usize = 4;
+
+/// Independent accumulators of the solve's dot products, summed as
+/// `(s0 + s1) + (s2 + s3)` at the end (accumulators).
+/// Used by: `supernodal::solve::dot4`, `supernodal::solve::dot4_tile`.
+/// Why: four lanes hide the FMA latency; the fixed lane count and fold
+/// tree make the sums independent of the thread count.
+/// Contract: results (the summation order; the fold tree assumes four).
+pub const FOLD_LANES: usize = 4;
