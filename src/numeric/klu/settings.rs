@@ -21,8 +21,9 @@ pub struct KluSettings {
     /// singularity surfaces as a numeric zero pivot, and the diagonal
     /// preference loses its zero-free guarantee.
     pub btf: bool,
-    /// Parallel per-block execution of factor and refactor over the
-    /// (independent) BTF diagonal blocks, on the ambient rayon pool.
+    /// Parallel execution of factor and refactor over the (independent) BTF
+    /// diagonal blocks, and of a refactor inside a block (pipelined), on the
+    /// current workers ([`crate::parallel`]).
     /// **Bit-identical to sequential in every mode**: each block is factored
     /// sequentially by construction and blocks share no state, so the result
     /// does not depend on scheduling or thread count. The default `Auto`
@@ -46,10 +47,9 @@ pub struct KluSettings {
     /// Nonzeros from which [`KluParallel::Auto`] factors blocks in parallel.
     /// Default `8000`.
     pub par_min_nnz: usize,
-    /// Replay work (fmadd count) a unit of parallel refactorization must
-    /// carry: below it the spawn and handoff overhead exceeds the overlap
-    /// (on the SuiteSparse circuits scircuit at about 3e7 gains nothing,
-    /// ASIC_100ks at 4e8 gains 2.7x). Default `5e7`.
+    /// Replay work (fmadds, and 32 a column) a unit of parallel
+    /// refactorization must carry: below it starting the section costs more
+    /// than the overlap gains. Default `2e5`.
     pub par_min_work: u64,
     /// Simultaneous work the structure must offer for a parallel refactor:
     /// across blocks `sum work / max block work`, inside a block the mean
@@ -88,7 +88,7 @@ impl Default for KluSettings {
             parallel: KluParallel::Auto,
             matching: true,
             par_min_nnz: 8_000,
-            par_min_work: 50_000_000,
+            par_min_work: 200_000,
             par_min_ratio: 2.0,
             interrupt: None,
         }

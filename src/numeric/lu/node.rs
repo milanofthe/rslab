@@ -13,7 +13,6 @@ use crate::numeric::supernodal::ScratchPool;
 use crate::numeric::supernodal::{Li, LlSchedule, PanelPtr};
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
-use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// One running [`lu_ll_factor_node`]'s buffers: the within-front row
@@ -188,66 +187,61 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // then runs of `U12` columns in `ut`.
     if tiled {
         let (gloc_ref, gloc_u_ref) = (&gloc, &gloc_u);
-        lbuf.par_chunks_mut(nrow_l * tile_w)
-            .enumerate()
-            .for_each(|(ti, slab)| {
-                let c0 = ti * tile_w;
-                let c1 = (c0 + tile_w).min(ncol);
-                let mut lupd = pools.slab.take();
-                for sp in spans {
-                    let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
-                    let (p0l, (p0u, p1u)) = (sp.l.0, sp.u);
-                    let q0 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c0);
-                    let q1 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c1);
-                    let npk = q1 - q0;
-                    let mrows = ol.len() - p0l;
-                    if npk == 0 || mrows == 0 {
-                        continue;
-                    }
-                    lupd.clear();
-                    lupd.resize(mrows * npk, T::zero());
-                    // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
-                    unsafe {
-                        crate::dense::gemm_backend::gemm(
-                            mrows,
-                            npk,
-                            nck,
-                            lupd.as_mut_ptr(),
-                            mrows as isize,
-                            1,
-                            false,
-                            lk.as_ptr().add(nck + p0l),
-                            nrk_l as isize,
-                            1,
-                            uk.as_ptr().add(nck + q0),
-                            1,
-                            nrk_u as isize,
-                            T::zero(),
-                            T::one(),
-                            false,
-                            false,
-                            false,
-                            crate::dense::gemm_backend::GemmMode::new(
-                                gemm::Parallelism::None,
-                                &kt.k,
-                            ),
-                        );
-                    }
-                    for jj in 0..npk {
-                        let cbase = (ou[q0 + jj] as usize - first - c0) * nrow_l;
-                        let ucol = &lupd[jj * mrows..jj * mrows + mrows];
-                        for i in 0..mrows {
-                            let dst = cbase + gloc_ref[ol[p0l + i] as usize] as usize;
-                            slab[dst] = slab[dst] - ucol[i];
-                        }
+        crate::parallel::chunks_mut(&mut *lbuf, nrow_l * tile_w, |ti, slab| {
+            let c0 = ti * tile_w;
+            let c1 = (c0 + tile_w).min(ncol);
+            let mut lupd = pools.slab.take();
+            for sp in spans {
+                let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
+                let (p0l, (p0u, p1u)) = (sp.l.0, sp.u);
+                let q0 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c0);
+                let q1 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c1);
+                let npk = q1 - q0;
+                let mrows = ol.len() - p0l;
+                if npk == 0 || mrows == 0 {
+                    continue;
+                }
+                lupd.clear();
+                lupd.resize(mrows * npk, T::zero());
+                // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
+                unsafe {
+                    crate::dense::gemm_backend::gemm(
+                        mrows,
+                        npk,
+                        nck,
+                        lupd.as_mut_ptr(),
+                        mrows as isize,
+                        1,
+                        false,
+                        lk.as_ptr().add(nck + p0l),
+                        nrk_l as isize,
+                        1,
+                        uk.as_ptr().add(nck + q0),
+                        1,
+                        nrk_u as isize,
+                        T::zero(),
+                        T::one(),
+                        false,
+                        false,
+                        false,
+                        crate::dense::gemm_backend::GemmMode::new(gemm::Parallelism::None, &kt.k),
+                    );
+                }
+                for jj in 0..npk {
+                    let cbase = (ou[q0 + jj] as usize - first - c0) * nrow_l;
+                    let ucol = &lupd[jj * mrows..jj * mrows + mrows];
+                    for i in 0..mrows {
+                        let dst = cbase + gloc_ref[ol[p0l + i] as usize] as usize;
+                        slab[dst] = slab[dst] - ucol[i];
                     }
                 }
-            });
+            }
+        });
         if cn_u > 0 {
             // A slab is the run `[u0, u1)` of U12's columns: rows `ncol + u0..ncol + u1`
             // of every `ut` column, disjoint between slabs.
             let up = PanelPtr(ut.as_mut_ptr());
-            (0..cn_u.div_ceil(tile_u)).into_par_iter().for_each(|ti| {
+            crate::parallel::for_each(cn_u.div_ceil(tile_u), 1, |ti| {
                 let u0 = ti * tile_u;
                 let u1 = (u0 + tile_u).min(cn_u);
                 let g0 = cols_u[ncol + u0];
@@ -548,11 +542,11 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             let par = cn_l * pw * pw >= ll_cdiv_par;
             if par {
                 let pp = PanelPtr(lbuf.as_mut_ptr());
-                let nthreads = rayon::current_num_threads().max(1);
+                let nthreads = crate::parallel::threads();
                 let cs = cn_l.div_ceil(nthreads).max(1);
                 // Capture the whole `pp` (Send+Sync) - destructure inside so Rust
                 // does not disjoint-capture the bare `*mut T`.
-                (0..nthreads).into_par_iter().for_each(|c| {
+                crate::parallel::for_each(nthreads, 1, |c| {
                     let r0 = (ncol + c * cs).min(nrow_l);
                     let r1 = (r0 + cs).min(nrow_l);
                     if r0 >= r1 {
@@ -585,7 +579,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         // Profiled at 22% of cdiv CPU when serial (MoM fronts).
         if (ncol - ke) * pw * pw >= ll_cdiv_par {
             let (head, tail) = lbuf.split_at_mut(ke * nrow_l);
-            tail.par_chunks_mut(nrow_l).for_each(|col| {
+            crate::parallel::chunks_mut(tail, nrow_l, |_, col| {
                 for r in (kb + 1)..ke {
                     let mut acc = col[r];
                     for i in kb..r {
@@ -627,10 +621,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         let up = PanelPtr(ut.as_mut_ptr());
         if cn_u * pw * pw >= ll_cdiv_par {
             let lref: &[T] = lbuf;
-            (ncol..nrow_u)
-                .into_par_iter()
-                .step_by(256)
-                .for_each(|t0| trsm_u(t0, (t0 + 256).min(nrow_u), up, lref));
+            crate::parallel::for_each((nrow_u - ncol).div_ceil(256), 1, |b| {
+                let t0 = ncol + b * 256;
+                trsm_u(t0, (t0 + 256).min(nrow_u), up, lref)
+            });
         } else {
             trsm_u(ncol, nrow_u, up, lbuf);
         }

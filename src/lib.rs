@@ -174,6 +174,7 @@ pub(crate) mod memory;
 #[doc(hidden)]
 pub mod matgen;
 pub(crate) mod numeric;
+pub mod parallel;
 // Ordering internals the benches and tests reach by path.
 #[doc(hidden)]
 pub mod ordering;

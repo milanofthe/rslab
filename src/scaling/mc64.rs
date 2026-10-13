@@ -114,20 +114,14 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
     // over the nonzero entries, so every column has a zero-cost minimum.
     // The logarithms and the per-column pass run in parallel; zero and
     // non-finite entries (NaN marks) are dropped afterwards.
-    use rayon::prelude::*;
-    let mut cost: Vec<f64> = a
-        .values
-        .par_iter()
-        .with_min_len(4096)
-        .map(|v| {
-            let m = v.magnitude();
-            if m == 0.0 || !m.is_finite() {
-                f64::NAN
-            } else {
-                m.ln()
-            }
-        })
-        .collect();
+    let mut cost: Vec<f64> = crate::parallel::map(a.values.len(), 4096, |k| {
+        let m = a.values[k].magnitude();
+        if m == 0.0 || !m.is_finite() {
+            f64::NAN
+        } else {
+            m.ln()
+        }
+    });
     let mut cols: Vec<&mut [f64]> = Vec::with_capacity(n);
     let mut rest: &mut [f64] = &mut cost;
     for j in 0..n {
@@ -135,22 +129,18 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
         cols.push(head);
         rest = tail;
     }
-    let cmax: Vec<f64> = cols
-        .into_par_iter()
-        .with_min_len(256)
-        .map(|col| {
-            let top = col
-                .iter()
-                .copied()
-                .filter(|l| !l.is_nan())
-                .fold(f64::NEG_INFINITY, f64::max);
-            let top = if top.is_finite() { top } else { 0.0 };
-            for c in col.iter_mut() {
-                *c = top - *c;
-            }
-            top
-        })
-        .collect();
+    let cmax: Vec<f64> = crate::parallel::map_owned(cols, 256, |col| {
+        let top = col
+            .iter()
+            .copied()
+            .filter(|l| !l.is_nan())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let top = if top.is_finite() { top } else { 0.0 };
+        for c in col.iter_mut() {
+            *c = top - *c;
+        }
+        top
+    });
     let (col_ptr, row_idx) = if cost.iter().any(|c| c.is_nan()) {
         let mut col_ptr = vec![0usize; n + 1];
         let mut row_idx = Vec::with_capacity(a.row_idx.len());

@@ -22,7 +22,6 @@
 
 use crate::numeric::supernodal::{PanelPtr, ScratchPool};
 use crate::scalar::Scalar;
-use rayon::prelude::*;
 
 /// A lower triangular factor in supernodal panel form (see the module docs).
 #[derive(Clone, Debug)]
@@ -198,13 +197,15 @@ impl<T: Scalar> PanelArena<T> {
         // pool rather than on one thread (41 ms serial on a 465 MB factor).
         vals.clear();
         vals.reserve(total);
-        vals.spare_capacity_mut()[..total]
-            .par_chunks_mut(1 << 16)
-            .for_each(|chunk| {
+        crate::parallel::chunks_mut(
+            &mut vals.spare_capacity_mut()[..total],
+            1 << 16,
+            |_, chunk| {
                 chunk.iter_mut().for_each(|v| {
                     v.write(T::zero());
                 })
-            });
+            },
+        );
         // SAFETY: every element of the first `total` was written above.
         unsafe { vals.set_len(total) };
         rows.clear();

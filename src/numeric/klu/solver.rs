@@ -63,6 +63,13 @@ impl<T: Scalar> KluSolver<T> {
             + vec_bytes(&f.scatter_expect)
             + vec_bytes(&f.scatter_target)
             + vec_bytes(&f.pipelined)
+            + (f.pipelined.iter())
+                .map(|(_, r)| match r {
+                    Replay::Levels { ptr, cols } => vec_bytes(ptr) + vec_bytes(cols),
+                    Replay::Pipelined => 0,
+                })
+                .sum::<u64>()
+            + vec_bytes(&f.ready.done)
     }
 
     /// One-shot analyze + factor with the given settings. Skips the a-priori
