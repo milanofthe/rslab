@@ -35,3 +35,36 @@ pub const PIPE_RUN: usize = 1;
 /// Why: below it a parallel section costs more than the columns.
 /// Contract: timing.
 pub const LEVEL_PIECE: usize = 8;
+
+/// KLU's diagonal-preference pivot threshold (1): the diagonal is the pivot
+/// while `|a_jj| >= KLU_PIVOT_THRESHOLD * max_i |a_ij|`. Not the LU path's
+/// [`LU_PIVOT_THRESHOLD`](super::LU_PIVOT_THRESHOLD): KLU keeps the
+/// BTF/AMD-chosen diagonal unless it is numerically tiny.
+/// Used by: `KluSettings::pivot_threshold`.
+/// Why: SuiteSparse KLU's default.
+/// Contract: results.
+pub const KLU_PIVOT_THRESHOLD: f64 = 1e-3;
+
+/// Nonzeros from which `KluParallel::Auto` factors blocks in parallel
+/// (nonzeros).
+/// Used by: `KluSettings::par_min_nnz`.
+/// Why: tuned default.
+/// Contract: timing (bit-identical in every mode).
+pub const KLU_PAR_MIN_NNZ: usize = 8_000;
+
+/// Replay work a unit of parallel refactorization must carry, in fmadds
+/// plus [`COL_WORK`] a column (fmadds). Not the unit of the solves'
+/// [`SOLVE_PAR_MIN_ENTRY_RHS`](super::SOLVE_PAR_MIN_ENTRY_RHS).
+/// Used by: `KluSettings::par_min_work`.
+/// Why: tuned default; below it starting the parallel section costs more
+/// than the overlap gains.
+/// Contract: timing.
+pub const KLU_PAR_MIN_FMADDS: u64 = 200_000;
+
+/// Simultaneous work the structure must offer for a parallel refactor:
+/// across blocks `sum work / max block work`, inside a block the mean level
+/// width of its elimination DAG (1).
+/// Used by: `KluSettings::par_min_ratio`.
+/// Why: at least two units of work side by side.
+/// Contract: timing.
+pub const KLU_PAR_MIN_RATIO: f64 = 2.0;

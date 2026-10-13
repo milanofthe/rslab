@@ -61,8 +61,8 @@ impl Default for AutoSettings {
         Self {
             klu: KluSettings::default(),
             supernodal: SolverSettings::default(),
-            supernodal_flops_per_entry: 25.0,
-            symmetry_tol: 0.0,
+            supernodal_flops_per_entry: crate::constants::AUTO_SUPERNODAL_FLOPS_PER_ENTRY,
+            symmetry_tol: crate::constants::AUTO_SYMMETRY_TOL,
         }
     }
 }

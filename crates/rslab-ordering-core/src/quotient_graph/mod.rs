@@ -59,7 +59,9 @@ pub struct WorkspaceOptions {
 
 impl Default for WorkspaceOptions {
     fn default() -> Self {
-        Self { dense_alpha: 10.0 }
+        Self {
+            dense_alpha: crate::constants::DENSE_ALPHA,
+        }
     }
 }
 

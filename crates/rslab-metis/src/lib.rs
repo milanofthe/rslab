@@ -27,6 +27,10 @@
 #[doc(hidden)]
 #[allow(dead_code, missing_docs)]
 pub mod coarsen;
+// The numbers nested dissection is tuned and defined by; reached by the
+// contract tests.
+#[doc(hidden)]
+pub mod constants;
 #[doc(hidden)]
 #[allow(dead_code, missing_docs)]
 pub mod fm_refine;
@@ -97,17 +101,17 @@ pub struct MetisOptions {
 impl Default for MetisOptions {
     fn default() -> Self {
         Self {
-            seed: 1,
-            niparts: 7,
-            coarsen_floor: 120,
-            nd_to_amd_switch: 200,
-            two_hop_ratio_threshold: 0.85,
-            max_imbalance: 0.20,
-            fm_passes: 10,
-            move_limit: 1 << 20,
-            max_overshoot: 4.0,
-            parallel_min_vertices: 4096,
-            parallel_min_edges: 200_000,
+            seed: constants::SEED,
+            niparts: constants::NIPARTS,
+            coarsen_floor: constants::COARSEN_FLOOR,
+            nd_to_amd_switch: constants::ND_TO_AMD_SWITCH,
+            two_hop_ratio_threshold: constants::TWO_HOP_RATIO_THRESHOLD,
+            max_imbalance: constants::MAX_IMBALANCE,
+            fm_passes: constants::FM_PASSES,
+            move_limit: constants::MOVE_LIMIT,
+            max_overshoot: constants::MAX_OVERSHOOT,
+            parallel_min_vertices: constants::PAR_MIN_VERTICES,
+            parallel_min_edges: constants::PAR_MIN_EDGES,
         }
     }
 }

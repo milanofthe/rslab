@@ -14,7 +14,7 @@
 //! s.kernels = KernelSettings { panel_nb: 32, ..Default::default() };
 //! ```
 
-use crate::constants::{HOP_STACK, POOLS_KEPT, STACK_MAX, STACK_MIN, STACK_PER_LEVEL};
+use crate::constants::*;
 use crate::scaling::ScalingStrategy;
 use crate::symbolic::{
     AmalgamationStrategy, OrderingMethod, RelaxAmalgamation, SymbolicFactorization,
@@ -112,7 +112,7 @@ pub struct PivotSettings {
 impl Default for PivotSettings {
     fn default() -> Self {
         Self {
-            threshold: 0.1,
+            threshold: LU_PIVOT_THRESHOLD,
             on_zero_pivot: ZeroPivotAction::Fail,
         }
     }
@@ -138,7 +138,7 @@ impl Default for MatchingSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            negligible_diagonal: 1e-10,
+            negligible_diagonal: MATCHING_NEGLIGIBLE_DIAGONAL,
         }
     }
 }
@@ -175,7 +175,7 @@ impl Default for OrderingSettings {
         Self {
             method: OrderingMethod::Auto,
             permutation: None,
-            compress_max_ratio: 0.95,
+            compress_max_ratio: COMPRESS_MAX_RATIO,
             race: RaceSettings::default(),
             nd: MetisOptions::default(),
             amd: AmdOptions::default(),
@@ -227,13 +227,13 @@ impl Default for RaceSettings {
                 OrderingMethod::Amf,
                 OrderingMethod::Rcm,
             ],
-            nd_min_n: 10_000,
-            nd_min_work: 1_250_000_000,
-            assumed_workers: 4,
-            eager_nd_min_nnz: 2_000_000,
+            nd_min_n: RACE_ND_MIN_N,
+            nd_min_work: RACE_ND_MIN_WORK,
+            assumed_workers: RACE_ASSUMED_WORKERS,
+            eager_nd_min_nnz: RACE_EAGER_ND_MIN_NNZ,
             ensemble: false,
-            ensemble_size: 3,
-            ensemble_min_flops: 50_000_000_000,
+            ensemble_size: RACE_ENSEMBLE_SIZE,
+            ensemble_min_flops: RACE_ENSEMBLE_MIN_FLOPS,
         }
     }
 }
@@ -273,14 +273,14 @@ pub struct AmalgamationSettings {
 impl Default for AmalgamationSettings {
     fn default() -> Self {
         Self {
-            nemin: 16,
+            nemin: NEMIN,
             relax: None,
-            relax_min_n: 1024,
+            relax_min_n: RELAX_MIN_N,
             strategy: AmalgamationStrategy::Auto,
-            path_like_fraction: 0.05,
-            root_cap_min_n: 1024,
-            root_cap_fraction: 0.05,
-            root_cap_max: 2048,
+            path_like_fraction: PATH_LIKE_FRACTION,
+            root_cap_min_n: ROOT_CAP_MIN_N,
+            root_cap_fraction: ROOT_CAP_FRACTION,
+            root_cap_max: ROOT_CAP_MAX,
         }
     }
 }
@@ -325,15 +325,15 @@ pub struct KernelSettings {
 impl Default for KernelSettings {
     fn default() -> Self {
         Self {
-            panel_nb: 64,
-            scalar_gate: 4096,
-            par_gemm: 1_000_000,
-            par_cdiv: 8_000_000,
-            fork_min_flops: 100_000_000,
-            schur_tile: 256,
-            trailing_block: 16,
-            complex_split_min_ratio: 64,
-            complex_split_tile: 256,
+            panel_nb: PANEL_NB,
+            scalar_gate: SCALAR_GATE,
+            par_gemm: PAR_GEMM_MIN_FLOPS,
+            par_cdiv: PAR_CDIV_MIN_FLOPS,
+            fork_min_flops: FORK_MIN_FLOPS,
+            schur_tile: SCHUR_TILE,
+            trailing_block: TRAILING_BLOCK,
+            complex_split_min_ratio: COMPLEX_SPLIT_MIN_RATIO,
+            complex_split_tile: COMPLEX_SPLIT_TILE,
             use_gemm_schur: true,
         }
     }
@@ -354,8 +354,10 @@ pub struct SolveSettings {
     /// Panel entries from which an ancestor node uses the blocked sweep.
     /// Default `262_144`.
     pub apex_min_work: usize,
-    /// Work of a triangular sweep from which it runs on the thread pool: the
-    /// factor's panel entries times the right-hand sides, up to four. A
+    /// Work of a triangular sweep from which it runs on the thread pool, in
+    /// the factor's panel entries times the right-hand sides, up to four
+    /// (not the fmadds of
+    /// [`KluSettings::par_min_work`](crate::KluSettings::par_min_work)). A
     /// smaller sweep runs on the calling thread, where handing it to the
     /// pool costs more than it saves (several times the solve at a few
     /// thousand unknowns). The same bits either way. Default `1_048_576`,
@@ -366,11 +368,11 @@ pub struct SolveSettings {
 impl Default for SolveSettings {
     fn default() -> Self {
         Self {
-            leaf_subtrees: 128,
-            block: 512,
-            ancestor_chunk: 32,
-            apex_min_work: 1 << 18,
-            par_min_work: 1 << 20,
+            leaf_subtrees: SOLVE_LEAF_SUBTREES,
+            block: SOLVE_BLOCK,
+            ancestor_chunk: SOLVE_ANCESTOR_CHUNK,
+            apex_min_work: SOLVE_APEX_MIN_ENTRIES,
+            par_min_work: SOLVE_PAR_MIN_ENTRY_RHS,
         }
     }
 }
@@ -502,7 +504,7 @@ impl SolverSettings {
     pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning<'_> {
         crate::numeric::gemm_tuning::KernelTuning {
             k: KernelSettings {
-                panel_nb: self.kernels.panel_nb.max(8),
+                panel_nb: self.kernels.panel_nb.max(PANEL_NB_MIN),
                 ..self.kernels
             },
             pivot_threshold: self.pivoting.threshold.clamp(0.0, 1.0),
@@ -598,11 +600,9 @@ pub enum Threads {
 
 impl Default for Threads {
     fn default() -> Self {
-        // Cap at 4 workers by default: our strong-scaling data puts the efficiency
-        // knee at ~4-6 threads, so 4 is the pareto-optimal throughput-per-core point
-        // and the safe default for concurrent / embedded (solver-in-the-loop) use.
-        // `Auto` still predicts a smaller count per matrix where more would regress.
-        Threads::Auto { max: 4 }
+        Threads::Auto {
+            max: DEFAULT_MAX_THREADS,
+        }
     }
 }
 

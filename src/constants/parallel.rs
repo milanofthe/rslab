@@ -52,3 +52,14 @@ pub const FREE_PAR_MIN_UPDATERS: usize = 64;
 /// Why: below it the parallel section costs more than the transpose.
 /// Contract: timing.
 pub const AMD_TRANSPOSE_PAR_MIN_NNZ: usize = 1 << 16;
+
+/// Default cap of the predicted worker count, `Threads::Auto { max }`
+/// (workers).
+/// Used by: `Threads::default`.
+/// Why: the strong-scaling efficiency knee is at about 4 to 6 threads, so 4
+/// is the best throughput per core and leaves room for concurrent solves
+/// (solver-in-the-loop). `Auto` still predicts fewer where more would
+/// regress. The ordering race assumes the same count
+/// ([`RACE_ASSUMED_WORKERS`](super::RACE_ASSUMED_WORKERS)).
+/// Contract: timing.
+pub const DEFAULT_MAX_THREADS: usize = 4;

@@ -22,14 +22,20 @@
 
 mod kernels;
 mod klu;
+mod krylov;
 mod memory;
+mod ordering;
 mod parallel;
+mod pivoting;
 mod scaling;
 mod solve;
 
 pub use kernels::*;
 pub use klu::*;
+pub use krylov::*;
 pub use memory::*;
+pub use ordering::*;
 pub use parallel::*;
+pub use pivoting::*;
 pub use scaling::*;
 pub use solve::*;
