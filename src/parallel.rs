@@ -53,18 +53,20 @@ pub trait Pool: Send + Sync {
     }
 }
 
+/// A task of a scope (see [`Pool::scope`]).
+pub type Task<'s> = Box<dyn FnOnce(&dyn Spawn<'s>) + Send + 's>;
+
 /// What a scope's tasks are started through (see [`Pool::scope`]).
 pub trait Spawn<'s>: Sync {
     /// Start `task`; its scope returns once it ran.
-    fn spawn(&self, task: Box<dyn FnOnce(&dyn Spawn<'s>) + Send + 's>);
+    fn spawn(&self, task: Task<'s>);
 }
 
 /// The tasks of a scope run one after the other.
-type SerialTask<'s> = Box<dyn FnOnce(&dyn Spawn<'s>) + Send + 's>;
-struct Serial<'s>(std::sync::Mutex<std::collections::VecDeque<SerialTask<'s>>>);
+struct Serial<'s>(std::sync::Mutex<std::collections::VecDeque<Task<'s>>>);
 
 impl<'s> Spawn<'s> for Serial<'s> {
-    fn spawn(&self, task: Box<dyn FnOnce(&dyn Spawn<'s>) + Send + 's>) {
+    fn spawn(&self, task: Task<'s>) {
         lock(&self.0).push_back(task);
     }
 }
