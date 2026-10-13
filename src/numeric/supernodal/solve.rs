@@ -27,7 +27,7 @@
 // linear algebra than zipped iterators would.
 #![allow(clippy::needless_range_loop)]
 
-use crate::constants::TILE_ROWS;
+use crate::constants::{PIECES_PER_WORKER, SOLVE_REDUCE_MIN_ROWS, TILE_ROWS};
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
@@ -1027,7 +1027,9 @@ impl<T: Scalar> SolvePlan<T> {
                 let ks = jb + g * chunk..(jb + (g + 1) * chunk).min(je);
                 panel_product(out, panel, ld, je, vhead, nr, ks);
             };
-            let rchunk = (rows / (4 * crate::parallel::threads())).max(64) * nr;
+            let rchunk = (rows / (PIECES_PER_WORKER * crate::parallel::threads()))
+                .max(SOLVE_REDUCE_MIN_ROWS)
+                * nr;
             let reduce = |ci: usize, vr: &mut [T], partial: &[T]| {
                 let o = ci * rchunk;
                 for g in 0..used {

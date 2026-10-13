@@ -158,7 +158,7 @@ impl<T: Scalar> KluSolver<T> {
                         let mut spins = 0u32;
                         while done[pr].load(std::sync::atomic::Ordering::Acquire) != epoch {
                             spins += 1;
-                            if spins & 0x3FF == 0 {
+                            if spins & crate::constants::SPIN_YIELD_MASK == 0 {
                                 std::thread::yield_now();
                             } else {
                                 std::hint::spin_loop();

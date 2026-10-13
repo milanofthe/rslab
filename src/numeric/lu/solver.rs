@@ -53,7 +53,8 @@ fn symmetrized_lower_pattern<T: Scalar>(
         buckets.push(head);
         rest = tail;
     }
-    let kept: Vec<usize> = crate::parallel::map_owned(buckets, 256, |seg| {
+    let min_cols = crate::constants::SYMMETRIZE_PIECE_MIN_COLS;
+    let kept: Vec<usize> = crate::parallel::map_owned(buckets, min_cols, |seg| {
         seg.sort_unstable();
         let mut len = 0;
         for p in 0..seg.len() {
@@ -86,7 +87,7 @@ fn symmetrized_lower_pattern<T: Scalar>(
 /// magnitude worse, and the circuits with a full diagonal factor the same
 /// either way.
 fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> bool {
-    crate::parallel::any(a.n, 1024, |j| {
+    crate::parallel::any(a.n, crate::constants::DIAGONAL_CHECK_PIECE_MIN_COLS, |j| {
         let (rows, vals) = (
             &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]],
             &a.values[a.col_ptr[j]..a.col_ptr[j + 1]],

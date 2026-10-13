@@ -59,7 +59,9 @@ pub unsafe fn gemm<T: Scalar>(
     // on the column blocking, so the result is the rayon path's).
     if !matches!(mode.parallelism, gemm::Parallelism::None) && n >= 2 {
         if let Some(pool) = crate::parallel::lent() {
-            let per = n.div_ceil(4 * pool.threads().max(1)).max(16);
+            let per = n
+                .div_ceil(crate::constants::PIECES_PER_WORKER * pool.threads().max(1))
+                .max(crate::constants::GEMM_PIECE_MIN_COLS);
             let one = GemmMode {
                 parallelism: gemm::Parallelism::Rayon(1),
                 ..mode

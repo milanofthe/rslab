@@ -287,7 +287,7 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
     // same as the serial loop's, whatever the thread count. On the top levels
     // of a large nested dissection this was most of the coarsening time.
     let blocks = if fine.adjncy.len() >= parallel_min_edges && rayon::current_num_threads() > 1 {
-        (8 * rayon::current_num_threads()).min(cn)
+        (crate::constants::FINE_PIECES_PER_WORKER * rayon::current_num_threads()).min(cn)
     } else {
         1
     };

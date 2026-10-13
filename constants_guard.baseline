@@ -2,7 +2,6 @@
 # shrink: name a value in the crate's constants.rs and delete its line.
 crates/rslab-metis/src/coarsen.rs :: coarsen :: 0.95
 crates/rslab-metis/src/coarsen.rs :: coarsen_level :: 4
-crates/rslab-metis/src/coarsen.rs :: contract :: 8
 crates/rslab-metis/src/fm_refine.rs :: refine_bisection :: 50
 crates/rslab-metis/src/node_nd.rs :: child_seed :: 0x9E37_79B9_7F4A_7C15
 crates/rslab-metis/src/node_nd.rs :: nd_subproblem :: 0.9
@@ -47,8 +46,6 @@ python/src/krylov.rs :: gmres_plain :: 400
 src/dense/gemm_backend.rs :: complex_gemm_3m :: 3
 src/dense/gemm_backend.rs :: complex_gemm_3m :: 3
 src/dense/gemm_backend.rs :: complex_gemm_3m :: 3
-src/dense/gemm_backend.rs :: gemm :: 16
-src/dense/gemm_backend.rs :: gemm :: 4
 src/dense/gemm_backend.rs :: split_plane_entries :: 3
 src/diagnostics.rs :: Diagnostics::fmt :: 100.0
 src/diagnostics.rs :: Diagnostics::fmt :: 1_000_000
@@ -104,7 +101,6 @@ src/numeric/klu/mod.rs :: BlockCaps::bytes :: 8
 src/numeric/klu/mod.rs :: BlockCaps::fill :: 4
 src/numeric/klu/mod.rs :: BlockCaps::fill :: 4
 src/numeric/klu/mod.rs :: KI_FBIT :: 31
-src/numeric/klu/refactor.rs :: KluSolver::refactor :: 0x3FF
 src/numeric/klu/refactor.rs :: KluSolver::refactor :: 1e3
 src/numeric/klu/symbolic.rs :: KluSymbolic::factor :: 1e3
 src/numeric/klu/symbolic.rs :: KluSymbolic::memory_plan :: 16
@@ -189,17 +185,8 @@ src/numeric/lu/solver.rs :: LuSymbolic::memory_plan :: 8
 src/numeric/lu/solver.rs :: LuSymbolic::memory_plan :: 80
 src/numeric/lu/solver.rs :: LuSymbolic::numeric :: 1e3
 src/numeric/lu/solver.rs :: LuSymbolic::refactor :: 1e3
-src/numeric/lu/solver.rs :: diagonal_needs_matching :: 1024
-src/numeric/lu/solver.rs :: symmetrized_lower_pattern :: 256
-src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 128
-src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 300_000_000
-src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 4
-src/numeric/supernodal/analysis.rs :: recommend_threads_from :: 512
-src/numeric/supernodal/panel.rs :: PanelArena::new_in :: 16
 src/numeric/supernodal/panel.rs :: PanelFactor::bytes :: 4
 src/numeric/supernodal/solve.rs :: PhaseTrace::lap :: 1e3
-src/numeric/supernodal/solve.rs :: SolvePlan::apex_forward :: 4
-src/numeric/supernodal/solve.rs :: SolvePlan::apex_forward :: 64
 src/numeric/supernodal/solve.rs :: SolvePlan::bwd_node_block :: 4
 src/numeric/supernodal/solve.rs :: SolvePlan::bytes :: 4
 src/numeric/supernodal/solve.rs :: SolvePlan::fit :: 4
@@ -235,15 +222,9 @@ src/numeric/supernodal/solve.rs :: tri_backward :: 4
 src/numeric/supernodal/solve.rs :: tri_backward :: 4
 src/numeric/supernodal/solve.rs :: tri_backward :: 4
 src/numeric/supernodal/solve.rs :: tri_rows :: 4
-src/ordering/amd.rs :: permute_pattern :: 8
-src/parallel.rs :: piece_len :: 4
-src/scaling/mc64.rs :: compute_matching_general :: 256
-src/scaling/mc64.rs :: compute_matching_general :: 4096
 src/symbolic/ordering_graph.rs :: OrderingGraph::order :: 1e3
-src/symbolic/supervariables.rs :: Supervariables::compress :: 8
 src/symbolic/supervariables.rs :: Supervariables::of :: 0x0000_0100_0000_01b3
 src/symbolic/supervariables.rs :: Supervariables::of :: 0xcbf2_9ce4_8422_2325
-src/symbolic/supervariables.rs :: Supervariables::of :: 64
 src/tuning.rs :: Calibration::fallback :: 0.1
 src/tuning.rs :: Calibration::fallback :: 3.0
 src/tuning.rs :: Calibration::load :: 0.1

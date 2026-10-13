@@ -79,3 +79,12 @@ pub const PAR_MIN_VERTICES: usize = 4096;
 /// Why: tuned default.
 /// Contract: timing.
 pub const PAR_MIN_EDGES: usize = 200_000;
+
+/// Blocks per worker of a parallel coarse-graph contraction (blocks per
+/// worker).
+/// Used by: `coarsen::contract`.
+/// Why: the coarse vertices carry uneven work; several blocks per worker
+/// balance it.
+/// Contract: timing (the blocks are concatenated in order, the coarse graph
+/// is the serial one).
+pub const FINE_PIECES_PER_WORKER: usize = 8;

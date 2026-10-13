@@ -3,6 +3,10 @@
 //! once per pattern, with the lazily built permutation program and
 //! left-looking schedule every factorization of the pattern reuses.
 
+use crate::constants::{
+    NARROW_TREE_MAX_WIDTH, SMALL_WORK_MAX_FLOPS, SMALL_WORK_THREADS, THIN_FRONT_MAX_ROWS,
+    THIN_PATTERN_THREADS,
+};
 use crate::error::RslabError;
 use crate::numeric::settings::{in_scoped_pool, stack_for_depth, SolverSettings};
 use crate::numeric::supernodal::LlSchedule;
@@ -264,12 +268,12 @@ fn recommend_threads_from(
     let cores = max_cores.max(1);
     // Thin fronts + narrow tree: no node-parallelism (tiny fronts) and no
     // tree-parallelism (path-like) to exploit - oversubscription only hurts.
-    if front_nrow_max < 512 && tree_width_max < 128 {
-        return cores.min(2);
+    if front_nrow_max < THIN_FRONT_MAX_ROWS && tree_width_max < NARROW_TREE_MAX_WIDTH {
+        return cores.min(THIN_PATTERN_THREADS);
     }
     // Tiny total work: parallel scheduling overhead dominates the factorization.
-    if factor_flops < 300_000_000 {
-        return cores.min(4);
+    if factor_flops < SMALL_WORK_MAX_FLOPS {
+        return cores.min(SMALL_WORK_THREADS);
     }
     cores
 }

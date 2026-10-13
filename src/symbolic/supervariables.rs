@@ -92,7 +92,8 @@ impl Supervariables {
             at += r.len();
         }
         let runs: Vec<(&mut [usize], usize)> = runs.into_iter().zip(offsets).collect();
-        crate::parallel::for_each_owned(runs, 64, |(lead, start)| {
+        let min_runs = crate::constants::SUPERVARIABLE_PIECE_MIN_RUNS;
+        crate::parallel::for_each_owned(runs, min_runs, |(lead, start)| {
             let members = &by_key[start..start + lead.len()];
             for i in 0..members.len() {
                 if lead[i] != NONE {
@@ -166,7 +167,8 @@ impl Supervariables {
     pub fn compress(&self, pattern: &CscPattern) -> Option<(Vec<i32>, Vec<i32>)> {
         let n_groups = self.len();
         i32::try_from(pattern.row_idx.len()).ok()?;
-        let blocks = (8 * crate::parallel::threads()).clamp(1, n_groups.max(1));
+        let blocks = (crate::constants::FINE_PIECES_PER_WORKER * crate::parallel::threads())
+            .clamp(1, n_groups.max(1));
         let parts: Vec<(Vec<i32>, Vec<i32>)> = crate::parallel::map(blocks, 1, |b| {
             let (g0, g1) = (b * n_groups / blocks, (b + 1) * n_groups / blocks);
             let (mut lens, mut rows) = (Vec::with_capacity(g1 - g0), Vec::new());

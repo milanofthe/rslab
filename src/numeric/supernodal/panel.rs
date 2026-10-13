@@ -199,7 +199,7 @@ impl<T: Scalar> PanelArena<T> {
         vals.reserve(total);
         crate::parallel::chunks_mut(
             &mut vals.spare_capacity_mut()[..total],
-            1 << 16,
+            crate::constants::ZERO_FILL_CHUNK,
             |_, chunk| {
                 chunk.iter_mut().for_each(|v| {
                     v.write(T::zero());
