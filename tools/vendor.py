@@ -8,9 +8,12 @@ without `src/bin`, the four ordering crates without their tests and
 examples, the license files, a manifest trimmed to the library (the
 upstream features and dependencies, no benches, tests, examples or
 dev-dependencies) with its own `[workspace]` so the consumer's workspace
-does not build rslab's, and `VENDOR.md` with the provenance. Files of an
-earlier vendoring are replaced; `<dest>/Cargo.lock` is kept for cargo to
-update.
+does not build rslab's, `VENDOR.md` with the provenance, and a
+`Cargo.lock` that matches the trimmed manifest: upstream's lock at REV,
+pruned by cargo to the library's dependencies, so the pinned versions are
+the ones tested upstream and no later cargo run in <dest> (a consumer's
+`maturin sdist` runs `cargo metadata` there) rewrites it. Files of an
+earlier vendoring are replaced.
 """
 
 import argparse
@@ -95,8 +98,18 @@ From a checkout of rslab next to this repository:
 python ../rslab/tools/vendor.py {dest_rel} --rev <commit>
 ```
 
-then build and test this repository (cargo updates `Cargo.lock`).
+then build and test this repository. The vendored `Cargo.lock` is upstream's,
+pruned to the library; the consumer's own `Cargo.lock` is updated by cargo.
 """
+
+
+def lock(dest, rev):
+    """`<dest>/Cargo.lock`: upstream's lock at `rev`, pruned by cargo to the
+    trimmed manifest (the dev-dependencies, benches and binaries are gone).
+    Pruning resolves nothing new, so the versions stay upstream's."""
+    (dest / "Cargo.lock").write_bytes(git("show", f"{rev}:Cargo.lock"))
+    subprocess.run(["cargo", "metadata", "--format-version", "1", "--offline"],
+                   cwd=dest, check=True, stdout=subprocess.DEVNULL)
 
 
 def main():
@@ -131,6 +144,7 @@ def main():
     except ValueError:
         dest_rel = "vendor/rslab"
     (dest / "VENDOR.md").write_text(vendor_md(rev, subject, version, dest_rel), encoding="utf-8")
+    lock(dest, rev)
     print(f"vendored rslab {version} ({rev}) into {dest}")
 
 
