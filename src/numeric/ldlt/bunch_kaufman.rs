@@ -582,17 +582,9 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
 ) -> (u64, usize) {
     use super::gemm::lower_tile_planes;
     use crate::memory::grown;
-    let par = if nrow * ncol * ncol >= 100_000_000 {
-        k.par_cdiv
-    } else {
-        usize::MAX
-    };
+    let par = k.cdiv_par(nrow, ncol);
     let mut planes = 0;
-    let nb = if ncol >= 512 {
-        k.panel_nb.max(128)
-    } else {
-        k.panel_nb
-    };
+    let nb = k.panel_width(k.panel_nb, ncol);
     // A node narrower than a panel is one panel: its scratch (the `nb x nb`
     // multiplier snapshots) sized to its width, the same blocking.
     let nb = nb.min(ncol.max(1));
@@ -667,13 +659,10 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     // to reach peak on root-class panels (measured ~79 Gflop/s-eq). The
     // extra serial getf2 work is O(nb^3) per panel - negligible against the
     // GEMM gain at this size. The global nb sweep said 128 loses overall
-    // because SMALL panels pay; widening only above `ncol >= 512` (a pure
-    // function of the node, thread-count independent) keeps them at default.
-    let nb = if ncol >= 512 {
-        kt.k.panel_nb.max(128)
-    } else {
-        kt.k.panel_nb
-    };
+    // because SMALL panels pay; widening only from `wide_panel_min_ncol` (a
+    // pure function of the node, thread-count independent) keeps them at
+    // default.
+    let nb = kt.k.panel_width(kt.k.panel_nb, ncol);
     // A node narrower than a panel is one panel: its scratch (the `nb x nb`
     // multiplier snapshots) sized to its width, the same blocking.
     let nb = nb.min(ncol.max(1));
@@ -681,11 +670,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
     // foreign subtree work and stalls this node's dependents. Total cdiv
     // work ~ nrow*ncol^2 (panel + trailing updates).
-    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 {
-        kt.k.par_cdiv
-    } else {
-        usize::MAX
-    };
+    let ll_cdiv_par = kt.k.cdiv_par(nrow, ncol);
     let alpha = bk_alpha();
     // The node's buffers, on loan from the factorization's pool and reset
     // to the values they start from: the pivot outputs (`D`, the 2x2 flags,

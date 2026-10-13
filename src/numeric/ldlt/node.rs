@@ -61,8 +61,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
         sched.updaters(s),
         |k| (sched.rows(k), sched.rows(k)),
         false,
-        ll_gemm_par,
-        kt.k.fork_min_flops,
+        &kt.k,
     );
     let (spans, tile_w, tiled) = (&plan.spans, plan.tile_w, plan.tiled);
     let seq_gemm_par = if plan.forks { ll_gemm_par } else { usize::MAX };
@@ -300,8 +299,7 @@ pub(super) fn ll_node_scratch<T: Scalar>(
         sched.updaters(s),
         |k| (sched.rows(k), sched.rows(k)),
         false,
-        k.par_gemm,
-        k.fork_min_flops,
+        k,
     );
     let updater = |kk: usize| {
         let nck = sym.supernodes[kk].ncol;

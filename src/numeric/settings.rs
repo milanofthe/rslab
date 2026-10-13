@@ -300,11 +300,12 @@ pub struct KernelSettings {
     /// From this a panel's trailing update runs rayon-parallel. Default
     /// `8e6`.
     pub par_cdiv: usize,
-    /// From this the updates of one supernode fork across workers. A small
-    /// node that forks pays the join-steal latency: its waiting thread steals
-    /// other work, often a whole sibling subtree, and the node's chain stalls
-    /// (74 ms of cmod at 0.03 Gflop measured on a 1046x170 node). Default
-    /// `1e8`.
+    /// From this the work of one supernode forks across workers: its updates
+    /// (cmod flops) and its panel factorization (cdiv work `nrow * ncol^2`).
+    /// A small node that forks pays the join-steal latency: its waiting
+    /// thread steals other work, often a whole sibling subtree, and the
+    /// node's chain stalls (74 ms of cmod at 0.03 Gflop measured on a
+    /// 1046x170 node). Default `1e8`.
     pub fork_min_flops: usize,
     /// Column tile of the lower-triangular Schur GEMM. Default `256`.
     pub schur_tile: usize,
@@ -320,6 +321,61 @@ pub struct KernelSettings {
     /// Use the SIMD GEMM for the LDL^T Schur update (vs the scalar loop).
     /// Default `true`.
     pub use_gemm_schur: bool,
+    /// Nodes with at least this many columns factor in panels of at least
+    /// [`wide_panel_nb`](Self::wide_panel_nb) columns, on both paths: the
+    /// deferred Schur GEMM's inner dimension is the panel width, too thin
+    /// at the default width to reach peak on root-class panels. Changes the
+    /// pivot window of those nodes. Default `512`.
+    pub wide_panel_min_ncol: usize,
+    /// The least panel width of those wide nodes. Default `128`.
+    pub wide_panel_nb: usize,
+    /// Panel width of the LU path's panel factorization (the LDL^T path's
+    /// is [`panel_nb`](Self::panel_nb)). Changes the pivot window. Default
+    /// `32`, at least 1.
+    pub lu_panel_nb: usize,
+    /// A parallel update of a node splits its columns into about this many
+    /// tiles of [`cmod_tile_min`](Self::cmod_tile_min) to
+    /// [`cmod_tile_max`](Self::cmod_tile_max) columns. Default `16`.
+    pub cmod_tiles: usize,
+    /// The narrowest such tile. Default `32`, at least 1.
+    pub cmod_tile_min: usize,
+    /// The widest such tile. Default `256`.
+    pub cmod_tile_max: usize,
+    /// Rows per task of the parallel `U12` triangular solve in the LU
+    /// panel factorization. Default `256`.
+    pub trsm_rows: usize,
+}
+
+impl KernelSettings {
+    /// The panel width of a node of `ncol` columns whose kernel's own width
+    /// is `base`: at least [`wide_panel_nb`](Self::wide_panel_nb) from
+    /// [`wide_panel_min_ncol`](Self::wide_panel_min_ncol) columns.
+    pub(crate) fn panel_width(&self, base: usize, ncol: usize) -> usize {
+        if ncol >= self.wide_panel_min_ncol {
+            base.max(self.wide_panel_nb)
+        } else {
+            base
+        }
+    }
+
+    /// The parallel threshold of the panel factorization of an `nrow x ncol`
+    /// node: [`par_cdiv`](Self::par_cdiv) from
+    /// [`fork_min_flops`](Self::fork_min_flops) of work `nrow * ncol^2`,
+    /// else never, so a small node does not fork inside its cdiv either.
+    pub(crate) fn cdiv_par(&self, nrow: usize, ncol: usize) -> usize {
+        if nrow * ncol * ncol >= self.fork_min_flops {
+            self.par_cdiv
+        } else {
+            usize::MAX
+        }
+    }
+
+    /// The column tile of a parallel update over `width` columns.
+    pub(crate) fn cmod_tile(&self, width: usize) -> usize {
+        (width / self.cmod_tiles.max(1))
+            .max(self.cmod_tile_min)
+            .min(self.cmod_tile_max)
+    }
 }
 
 impl Default for KernelSettings {
@@ -335,6 +391,13 @@ impl Default for KernelSettings {
             complex_split_min_ratio: COMPLEX_SPLIT_MIN_RATIO,
             complex_split_tile: COMPLEX_SPLIT_TILE,
             use_gemm_schur: true,
+            wide_panel_min_ncol: WIDE_PANEL_MIN_NCOL,
+            wide_panel_nb: WIDE_PANEL_NB,
+            lu_panel_nb: LU_PANEL_NB,
+            cmod_tiles: CMOD_TILES,
+            cmod_tile_min: CMOD_TILE_MIN,
+            cmod_tile_max: CMOD_TILE_MAX,
+            trsm_rows: TRSM_ROWS,
         }
     }
 }
@@ -505,6 +568,10 @@ impl SolverSettings {
         crate::numeric::gemm_tuning::KernelTuning {
             k: KernelSettings {
                 panel_nb: self.kernels.panel_nb.max(PANEL_NB_MIN),
+                lu_panel_nb: self.kernels.lu_panel_nb.max(1),
+                cmod_tile_min: self.kernels.cmod_tile_min.max(1),
+                cmod_tile_max: self.kernels.cmod_tile_max.max(1),
+                trsm_rows: self.kernels.trsm_rows.max(1),
                 ..self.kernels
             },
             pivot_threshold: self.pivoting.threshold.clamp(0.0, 1.0),
@@ -545,6 +612,18 @@ impl SolverSettings {
                 }
                 if self.matching != d.matching {
                     out.push("matching is ignored by the LDL^T path (an LU setting)".to_string());
+                }
+                if self.kernels.lu_panel_nb != d.kernels.lu_panel_nb {
+                    out.push(format!(
+                        "kernels.lu_panel_nb = {} is ignored by the LDL^T path (an LU kernel knob)",
+                        self.kernels.lu_panel_nb
+                    ));
+                }
+                if self.kernels.trsm_rows != d.kernels.trsm_rows {
+                    out.push(format!(
+                        "kernels.trsm_rows = {} is ignored by the LDL^T path (an LU kernel knob)",
+                        self.kernels.trsm_rows
+                    ));
                 }
             }
             FactorPath::Lu => {

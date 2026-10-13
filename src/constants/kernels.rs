@@ -80,3 +80,54 @@ pub const COMPLEX_SPLIT_MIN_RATIO: usize = 64;
 /// Why: tuned default.
 /// Contract: rounding.
 pub const COMPLEX_SPLIT_TILE: usize = 256;
+
+/// Nodes with at least this many columns take wide cdiv panels of at least
+/// [`WIDE_PANEL_NB`] columns, LDL^T and LU alike (columns).
+/// Used by: `KernelSettings::wide_panel_min_ncol`.
+/// Why: the deferred Schur GEMM's inner dimension is the panel width, and
+/// 64 is too thin to reach peak on root-class panels (about 79 Gflop/s
+/// measured); a global wider width loses because small panels pay, so only
+/// nodes from this width widen. A function of the node alone, never of the
+/// thread count.
+/// Contract: results (the pivot window of the wide nodes).
+pub const WIDE_PANEL_MIN_NCOL: usize = 512;
+
+/// Least cdiv panel width of a wide node (columns).
+/// Used by: `KernelSettings::wide_panel_nb`.
+/// Why: see [`WIDE_PANEL_MIN_NCOL`]; the extra serial panel work is
+/// `O(nb^3)`, negligible against the GEMM gain at this size.
+/// Contract: results.
+pub const WIDE_PANEL_NB: usize = 128;
+
+/// cdiv panel width of the LU path below [`WIDE_PANEL_MIN_NCOL`] (columns).
+/// Used by: `KernelSettings::lu_panel_nb`.
+/// Why: swept 32/48/64/96 on the MoM fronts, 32 is best for typical panels.
+/// Contract: results (the pivot window).
+pub const LU_PANEL_NB: usize = 32;
+
+/// A tiled cmod splits the target's columns into about this many tiles,
+/// within [`CMOD_TILE_MIN`] and [`CMOD_TILE_MAX`] columns each (tiles).
+/// Used by: `KernelSettings::cmod_tiles` (the `L` tiles of both paths and
+/// the `U` tiles of LU).
+/// Why: tuned default; enough tiles to spread a wide node over the workers.
+/// Contract: rounding (the tile fixes the per-tile GEMM shapes).
+pub const CMOD_TILES: usize = 16;
+
+/// Narrowest cmod tile (columns).
+/// Used by: `KernelSettings::cmod_tile_min`.
+/// Why: tuned default; narrower tiles lose GEMM rate.
+/// Contract: rounding.
+pub const CMOD_TILE_MIN: usize = 32;
+
+/// Widest cmod tile (columns).
+/// Used by: `KernelSettings::cmod_tile_max`.
+/// Why: tuned default.
+/// Contract: rounding.
+pub const CMOD_TILE_MAX: usize = 256;
+
+/// Rows per task of the parallel `U12` triangular solve in the LU cdiv
+/// (rows).
+/// Used by: `KernelSettings::trsm_rows`.
+/// Why: tuned default; the rows are independent.
+/// Contract: timing (each row is solved alike in any blocking).
+pub const TRSM_ROWS: usize = 256;

@@ -209,6 +209,13 @@ plain_knobs! {
     "complex_split_min_ratio": usize => kernels.complex_split_min_ratio;
     "complex_split_tile": usize => kernels.complex_split_tile;
     "use_gemm_schur": bool => kernels.use_gemm_schur;
+    "wide_panel_min_ncol": usize => kernels.wide_panel_min_ncol;
+    "wide_panel_nb": usize => kernels.wide_panel_nb;
+    "lu_panel_nb": usize => kernels.lu_panel_nb;
+    "cmod_tiles": usize => kernels.cmod_tiles;
+    "cmod_tile_min": usize => kernels.cmod_tile_min;
+    "cmod_tile_max": usize => kernels.cmod_tile_max;
+    "trsm_rows": usize => kernels.trsm_rows;
     "solve_leaf_subtrees": usize => solve.leaf_subtrees;
     "solve_block": usize => solve.block;
     "solve_ancestor_chunk": usize => solve.ancestor_chunk;
@@ -337,7 +344,14 @@ plain_knobs! {
 /// scalar_gate, par_gemm, par_cdiv, fork_min_flops : int
 ///     Update flops below which the scalar loop runs (4096), from which an
 ///     update GEMM (1e6) and a panel's trailing update (8e6) run in
-///     parallel, and from which a supernode's updates fork (1e8).
+///     parallel, and from which a supernode's updates and panel
+///     factorization fork (1e8).
+/// wide_panel_min_ncol, wide_panel_nb, lu_panel_nb : int
+///     Nodes from 512 columns factor in panels of at least 128 columns; the
+///     LU panel width below that (32).
+/// cmod_tiles, cmod_tile_min, cmod_tile_max, trsm_rows : int
+///     A parallel update splits a node into about 16 column tiles of 32 to
+///     256 columns; rows per task of the LU panel's triangular solve (256).
 /// complex_split_min_ratio, complex_split_tile : int
 ///     Complex products run as real products when their flops are this many
 ///     times their plane copies (64), in tiles of this edge (256).
