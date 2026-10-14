@@ -50,6 +50,14 @@ pub(super) struct LuPools<T> {
     pub(super) slab: ScratchPool<Vec<T>>,
 }
 
+/// A copy of a factor starts with scratch of its own, grown by its first
+/// refactorization.
+impl<T> Clone for LuPools<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl<T> LuPools<T> {
     pub(super) fn new() -> Self {
         LuPools {

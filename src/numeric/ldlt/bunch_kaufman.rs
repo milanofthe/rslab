@@ -92,6 +92,14 @@ pub(super) struct BkPools<T> {
     pub(super) cmod: ScratchPool<(Vec<T>, Vec<T>, Vec<T>)>,
 }
 
+/// A copy of a factor starts with scratch of its own, grown by its first
+/// refactorization.
+impl<T> Clone for BkPools<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl<T> BkPools<T> {
     pub(super) fn new() -> Self {
         BkPools {

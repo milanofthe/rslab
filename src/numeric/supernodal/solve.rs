@@ -41,6 +41,7 @@ const NONE: u32 = u32::MAX;
 
 /// One leaf subtree of the cut: its supernodes in elimination order and the
 /// ancestor columns its off-tree updates accumulate into.
+#[derive(Clone)]
 pub(crate) struct Subtree {
     nodes: Vec<u32>,
     /// `y` indices of the accumulator slots (the columns of the ancestors
@@ -49,6 +50,7 @@ pub(crate) struct Subtree {
 }
 
 /// The factor in solve layout plus the tree schedule.
+#[derive(Clone)]
 pub(crate) struct SolvePlan<T> {
     n: usize,
     /// Supernode column ranges, `ns + 1`.
