@@ -632,6 +632,7 @@ impl LuSymbolic {
 /// sides, the unsymmetric twin of [`LdltSolver`](crate::numeric::ldlt::LdltSolver).
 /// Build via [`LuSymbolic::factor`] (analyze once, factor many) or the one-shot
 /// [`LuSolver::factor`].
+#[derive(Clone)]
 pub struct LuSolver<T> {
     factors: LuPivots,
     /// `L` and `U^T` (the panels, their only storage) with the tree schedule

@@ -7,6 +7,7 @@ use crate::scalar::Scalar;
 /// Everything of `P_r^T A P = L U` except the panels: the permutations, the
 /// equilibration and the outcome, `perm[e]` mapping factorization position
 /// `e` to the original index.
+#[derive(Clone)]
 pub(crate) struct LuPivots {
     pub n: usize,
     /// Column permutation: factorization position -> original column index

@@ -332,6 +332,7 @@ impl AutoSymbolic {
 
 /// The analysis an [`AutoSolver`] factors over: borrowed, or held (shared
 /// with other solvers, or its own after a one-shot [`AutoSolver::factor`]).
+#[derive(Clone)]
 enum Analysis<'s> {
     Borrowed(&'s AutoSymbolic),
     Held(Arc<AutoSymbolic>),
@@ -374,6 +375,7 @@ fn in_place<S>(
 /// one-shot forms of the other solvers. The solves are theirs: `solve`,
 /// `solve_many`, `solve_transpose`, the `_into` forms in lent
 /// [`SolveWork`], and the refined ones.
+#[derive(Clone)]
 pub struct AutoSolver<'s, T> {
     sym: Analysis<'s>,
     csc: GeneralCsc<T>,
@@ -389,6 +391,10 @@ pub struct AutoSolver<'s, T> {
     /// preconditioned by it orthogonalizes under.
     solve_threads: Threads,
     solves: crate::diagnostics::SolveCounter,
+    /// A [`fork`](Self::fork): the KLU pivot order stays its origin's.
+    pinned: bool,
+    /// A fork's factor of the value set its origin's order failed on.
+    own: Option<KluSolver<T>>,
 }
 
 impl<T: Scalar> AutoSolver<'static, T> {
@@ -424,7 +430,34 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
             prev: Vec::new(),
             solve_threads: Threads::Ambient,
             solves: Default::default(),
+            pinned: false,
+            own: None,
         }
+    }
+
+    /// The factorization this solver holds as the origin of independent
+    /// points (the frequencies of a sweep): a copy that factors every value
+    /// set from it. The fork replays the origin's pivot order; where a pivot
+    /// vanishes it factors that value set afresh without adopting the new
+    /// order. So what a fork makes of a value set depends on the value set
+    /// and the origin alone, never on what the fork factored before: forks
+    /// of one origin factor the points in any grouping, on any threads, to
+    /// the same bits. (The supernodal paths factor every value set as a
+    /// fresh factorization would, a fork or not.)
+    pub fn fork(&self) -> Self {
+        let mut f = self.clone();
+        f.pinned = true;
+        if f.own.take().is_some() {
+            // the origin's last factor was its own: the fork holds the order
+            f.active = None;
+            f.prev.clear();
+        }
+        f
+    }
+
+    /// The active KLU factor: a fork's own where its origin's order failed.
+    fn klu_factor(&self) -> Option<&KluSolver<T>> {
+        self.own.as_ref().or(self.klu.as_ref())
     }
 
     /// The values the next [`refactor`](Self::refactor) factors, one per
@@ -472,8 +505,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
         self.active = Some(b);
         self.solve_threads = match b {
             AutoBackend::Klu => self
-                .klu
-                .as_ref()
+                .klu_factor()
                 .map(crate::Preconditioner::<T>::solve_threads),
             AutoBackend::Ldlt => self
                 .ldlt
@@ -504,6 +536,14 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                 // A replay that meets a vanished pivot factors afresh.
                 if let Some(s) = &mut self.klu {
                     if s.refactor(csc).is_ok() {
+                        self.own = None;
+                        return Ok(AutoBackend::Klu);
+                    }
+                    if self.pinned {
+                        // a fork keeps the order (a failed replay leaves it
+                        // in place), the fresh factor for this value set only
+                        self.own = None;
+                        self.own = Some(ks.factor(csc, &settings.klu)?);
                         return Ok(AutoBackend::Klu);
                     }
                 }
@@ -553,7 +593,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// Stored entries of the active factor; `0` without one.
     pub fn factor_nnz(&self) -> usize {
         match self.active {
-            Some(AutoBackend::Klu) => self.klu.as_ref().map_or(0, |s| s.factor_nnz()),
+            Some(AutoBackend::Klu) => self.klu_factor().map_or(0, |s| s.factor_nnz()),
             Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map_or(0, |s| s.factor_nnz()),
             Some(AutoBackend::Lu) => self.lu.as_ref().map_or(0, |s| s.factor_nnz()),
             None => 0,
@@ -563,7 +603,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// Pivots the active factor's static regularization lifted.
     pub fn n_perturbed(&self) -> usize {
         match self.active {
-            Some(AutoBackend::Klu) => self.klu.as_ref().map_or(0, |s| s.n_perturbed()),
+            Some(AutoBackend::Klu) => self.klu_factor().map_or(0, |s| s.n_perturbed()),
             Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map_or(0, |s| s.n_perturbed()),
             Some(AutoBackend::Lu) => self.lu.as_ref().map_or(0, |s| s.n_perturbed()),
             None => 0,
@@ -574,7 +614,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// solver's solve accounts; empty without a factor.
     pub fn diagnostics(&self) -> crate::Diagnostics {
         let mut d = match self.active {
-            Some(AutoBackend::Klu) => self.klu.as_ref().map(|s| s.diagnostics()),
+            Some(AutoBackend::Klu) => self.klu_factor().map(|s| s.diagnostics()),
             Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map(|s| s.diagnostics()),
             Some(AutoBackend::Lu) => self.lu.as_ref().map(|s| s.diagnostics()),
             None => None,
@@ -601,6 +641,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                 vec_bytes(&m.col_ptr) + vec_bytes(&m.row_idx) + vec_bytes(&m.values)
             })
             + self.klu.as_ref().map_or(0, |s| s.heap_bytes())
+            + self.own.as_ref().map_or(0, |s| s.heap_bytes())
             + self.ldlt.as_ref().map_or(0, |s| s.heap_bytes())
             + self.lu.as_ref().map_or(0, |s| s.heap_bytes())
     }
@@ -623,8 +664,7 @@ impl<T: Scalar> SolveCore<T> for AutoSolver<'_, T> {
     ) -> Result<(), RslabError> {
         match self.active {
             Some(AutoBackend::Klu) => self
-                .klu
-                .as_ref()
+                .klu_factor()
                 .map(|s| s.solve_raw_into(b, nrhs, transpose, x, work)),
             Some(AutoBackend::Ldlt) => self
                 .ldlt
@@ -682,6 +722,33 @@ mod tests {
         assert!(close(&x, &[1.5, 2.0, 0.5, 1.0]));
         assert_eq!(f.diagnostics().solves.rhs, 4);
         assert!(f.heap_bytes() > 0 && f.factor_nnz() >= 3);
+    }
+
+    #[test]
+    fn forks_factor_a_value_set_whatever_they_factored_before() {
+        // [[a, b], [c, d]] in entry order (0,0), (0,1), (1,0), (1,1)
+        let sym = layout(2, &[0, 0, 1, 1], &[0, 1, 0, 1]);
+        let s = AutoSettings::default();
+        let mut origin = sym.factorizer::<f64>();
+        origin.assemble(&[4.0, 1.0, 1.0, 3.0]);
+        origin.refactor(&s).unwrap();
+        let point = [2.0, 1.0, 1.0, 3.0];
+        let b = [1.0, 2.0];
+        // one fork first meets a value set whose (0, 0) pivot vanishes
+        let mut a = origin.fork();
+        a.assemble(&[0.0, 1.0, 1.0, 3.0]);
+        a.refactor(&s).unwrap();
+        assert!(a.own.is_some(), "the vanished pivot factored afresh");
+        assert!(close(&a.solve(&[1.0, 3.0]).unwrap(), &[0.0, 1.0]));
+        a.assemble(&point);
+        a.refactor(&s).unwrap();
+        let mut fresh = origin.fork();
+        fresh.assemble(&point);
+        fresh.refactor(&s).unwrap();
+        let (xa, xf) = (a.solve(&b).unwrap(), fresh.solve(&b).unwrap());
+        let bits = |x: &[f64]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&xa), bits(&xf));
+        assert!(close(&xa, &[0.2, 0.6]));
     }
 
     #[test]

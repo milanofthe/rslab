@@ -37,6 +37,7 @@ use crate::sparse::csc::CscMatrix;
 
 /// A factored sparse symmetric matrix, ready to solve against many right-hand
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
+#[derive(Clone)]
 pub struct LdltSolver<T> {
     /// Factors of the equilibrated matrix `A_hat = D A D`, in factorization order.
     factors: LdltPivots<T>,
