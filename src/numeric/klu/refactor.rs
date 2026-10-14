@@ -86,9 +86,9 @@ impl Decide {
 
     /// How block `bp` of `bn` columns replays: the shortest of the
     /// sequential replay, level by level (each level on as many threads as
-    /// it is worth) and pipelined (its replay plus its hand-offs, over as
-    /// many threads as its longest chain leaves room for), a parallel one
-    /// only where it saves its share.
+    /// it is worth) and pipelined (its replay plus its hand-offs, the waits
+    /// on the columns it reads included), a parallel one only where it saves
+    /// its share.
     fn mode(&self, plan: &ReplayPlan, bp: &BlockPlan, bn: usize) -> Mode {
         if plan.policy != KluParallel::On && plan.floors() && !plan.block_pays(bp, bn) {
             return Mode::Serial;
@@ -105,7 +105,9 @@ impl Decide {
         };
         let piped = {
             let work = serial + bp.handoffs as f64 * self.hand;
-            let pieces = ((bp.work / bp.path.max(1)) as usize).clamp(1, bn);
+            // Its columns as the pieces: how much the dependencies stall
+            // the pipeline is what the hand-off rate learns.
+            let pieces = bn;
             match self.width(work, pieces) {
                 k if k >= 2 => (
                     work * pieces.div_ceil(k) as f64 / pieces as f64 + self.dispatch.cost(k),
@@ -464,12 +466,12 @@ impl<T: Scalar> KluSolver<T> {
             let stop = AtomicBool::new(false);
             let failed: std::sync::Mutex<Option<RslabError>> = std::sync::Mutex::new(None);
             let pieces = k.min(bn.div_ceil(PIPE_RUN)).max(1);
-            // Measured now and then: the threads' time beyond the replay is
-            // what the hand-offs cost.
-            let sampled = HANDOFF_RATE.sample(bp.handoffs as f64);
+            // Measured every time (a few clock reads against a parallel
+            // replay): the threads' time beyond the replay is what the
+            // hand-offs cost.
             let busy = AtomicU64::new(0);
             crate::parallel::run_width(pieces, pieces, &|q| {
-                let start = sampled.then(crate::clock::Instant::now);
+                let start = crate::clock::Instant::now();
                 with_work(q, &mut |w: &mut Vec<T>| {
                     if w.len() < bn {
                         w.resize(bn, T::zero());
@@ -496,14 +498,10 @@ impl<T: Scalar> KluSolver<T> {
                         }
                     }
                 });
-                if let Some(s) = start {
-                    busy.fetch_add(s.elapsed().as_nanos() as u64, AOrd::Relaxed);
-                }
+                busy.fetch_add(start.elapsed().as_nanos() as u64, AOrd::Relaxed);
             });
-            if sampled {
-                let beyond = busy.into_inner() as f64 - bp.work as f64 * decide_ref.seq;
-                HANDOFF_RATE.learn(beyond.max(1.0), bp.handoffs as f64);
-            }
+            let beyond = busy.into_inner() as f64 - bp.work as f64 * decide_ref.seq;
+            HANDOFF_RATE.learn(beyond.max(1.0), bp.handoffs as f64);
             match failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
                 Some(e) => Err(e),
                 None => Ok(()),
@@ -593,10 +591,13 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 Ok(())
             };
-            if wide {
+            if wide || plan.total == 0 {
                 all()?;
             } else {
-                rate.time(plan.total as f64, all)?;
+                // Measured every time: a refactor is coarse enough.
+                let start = crate::clock::Instant::now();
+                all()?;
+                rate.learn(start.elapsed().as_nanos() as f64, plan.total as f64);
             }
         }
         f.rs_next = std::mem::replace(&mut f.rs_inv, rs_inv);

@@ -278,9 +278,8 @@ struct ReplayPlan {
 struct BlockPlan {
     /// The block.
     b: usize,
-    /// Its replay work, and the work of its longest dependency chain.
+    /// Its replay work.
     work: u64,
-    path: u64,
     /// What a pipelined replay hands between threads: its columns and the
     /// `L` columns they read.
     handoffs: u64,

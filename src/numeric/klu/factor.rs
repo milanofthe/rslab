@@ -31,14 +31,7 @@ impl BlockPlan {
     /// Block `b` from column `bs` on, its columns' levels `level` (`nlev`
     /// of them) and replay work `colw`: the columns grouped by level,
     /// ascending within each, with the work of every level.
-    fn new(
-        b: usize,
-        bs: usize,
-        level: &[Ki],
-        colw: &[u64],
-        nlev: usize,
-        (path, handoffs): (u64, u64),
-    ) -> Self {
+    fn new(b: usize, bs: usize, level: &[Ki], colw: &[u64], nlev: usize, handoffs: u64) -> Self {
         let mut ptr = vec![0u32; nlev + 1];
         let mut level_work = vec![0u64; nlev];
         for (&l, &w) in level.iter().zip(colw) {
@@ -62,7 +55,6 @@ impl BlockPlan {
         BlockPlan {
             b,
             work: colw.iter().sum(),
-            path,
             handoffs,
             widest,
             ptr,
@@ -95,29 +87,24 @@ fn compute_replay_plan(
     if settings.parallel == KluParallel::Off {
         return plan;
     }
-    let (mut level, mut colw, mut chain): (Vec<Ki>, Vec<u64>, Vec<u64>) = Default::default();
+    let (mut level, mut colw): (Vec<Ki>, Vec<u64>) = Default::default();
     for b in 0..block_ptr.len() - 1 {
         let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
         let bn = be - bs;
-        for v in [&mut colw, &mut chain] {
-            v.clear();
-            v.resize(bn, 0);
-        }
+        colw.clear();
+        colw.resize(bn, 0);
         level.clear();
         level.resize(bn, 0);
-        let (mut nlev, mut path) = (1usize, 0u64);
+        let mut nlev = 1usize;
         for j in bs..be {
-            let (mut l, mut w, mut before): (Ki, u64, u64) = (0, COL_WORK, 0);
+            let (mut l, mut w): (Ki, u64) = (0, COL_WORK);
             for &pk in &u_rowidx[u_colptr[j]..u_colptr[j + 1]] {
                 let p = pk as usize;
                 w += (l_colptr[p + 1] - l_colptr[p]) as u64;
                 l = l.max(level[p - bs] + 1);
-                before = before.max(chain[p - bs]);
             }
             level[j - bs] = l;
             colw[j - bs] = w;
-            chain[j - bs] = before + w;
-            path = path.max(before + w);
             nlev = nlev.max(l as usize + 1);
         }
         let w_b: u64 = colw.iter().sum();
@@ -125,9 +112,8 @@ fn compute_replay_plan(
         plan.largest = plan.largest.max(w_b);
         if planned(bn, nlev, settings.parallel) {
             let handoffs = (bn + u_colptr[be] - u_colptr[bs]) as u64;
-            let chain = (path, handoffs);
             plan.blocks
-                .push(BlockPlan::new(b, bs, &level, &colw, nlev, chain));
+                .push(BlockPlan::new(b, bs, &level, &colw, nlev, handoffs));
         }
     }
     plan

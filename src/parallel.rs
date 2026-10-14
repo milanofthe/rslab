@@ -211,6 +211,11 @@ impl Dispatch {
         if !has_work(work) || pieces < 2 || work < self.least {
             return 1;
         }
+        if work.is_infinite() {
+            // Worth any section: as wide as the pieces and the costed
+            // threads go.
+            return pieces.min(self.threads());
+        }
         let p = pieces as f64;
         let mut best = (1, work);
         for k in 2..=pieces.min(self.threads()) {
@@ -1055,6 +1060,9 @@ mod tests {
         let mid = d.width(2e4, 64);
         assert!(mid > 1 && mid < 8, "{mid}");
         assert_eq!(d.width(f64::NAN, 64), 1);
+        // work worth any section: every costed thread
+        assert_eq!(d.width(f64::INFINITY, 64), 8);
+        assert_eq!(d.width(f64::INFINITY, 3), 3);
         // below the break-even nothing goes wide, at any piece count
         assert!(d.break_even() > 0.0);
         assert_eq!(d.width(d.break_even() * 0.99, usize::MAX), 1);
