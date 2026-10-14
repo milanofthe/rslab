@@ -14,6 +14,23 @@ use crate::ordering::elimination_tree::EliminationTree;
 use crate::sparse::csc::CscPattern;
 use std::sync::OnceLock;
 
+/// What a minimum-degree ordering costs per entry of the graph it orders,
+/// learned from the orderings: the candidates of the race decide on it
+/// whether they run side by side.
+pub(super) static ORDER_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::ORDER_NS_PER_ENTRY);
+
+/// The least count of a unit of `ns_per_unit` ns from which work goes wide
+/// at `least` ns ([`crate::parallel::Dispatch::least`]).
+fn units(least: f64, ns_per_unit: f32) -> usize {
+    let n = (least / ns_per_unit as f64).ceil();
+    if n.is_finite() && n < usize::MAX as f64 {
+        n as usize
+    } else {
+        usize::MAX
+    }
+}
+
 pub(super) struct OrderingGraph<'a> {
     /// The full symmetric pattern (both triangles, sorted rows).
     pub pattern: &'a CscPattern,
@@ -87,20 +104,31 @@ impl<'a> OrderingGraph<'a> {
         let nv = g.col_ptr.len() - 1;
         let pat = rslab_ordering_core::CscPattern::new(nv, &g.col_ptr, &g.row_idx)
             .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
+        let entries = g.row_idx.len() as f64;
         let order = crate::logging::timed(
             || format!("analysis: ordering {method:?} seed {nd_seed}"),
             || match method {
-                OrderingMethod::Amd => {
+                OrderingMethod::Amd => ORDER_RATE.time(entries, || {
                     rslab_amd::amd_order_opts(&pat, &self.settings.amd).map(|(perm, _)| perm)
-                }
-                OrderingMethod::Amf => {
+                }),
+                OrderingMethod::Amf => ORDER_RATE.time(entries, || {
                     rslab_amf::amf_order_opts(&pat, &self.settings.amf).map(|(perm, _)| perm)
-                }
+                }),
                 OrderingMethod::MetisND => {
-                    let opts = rslab_metis::MetisOptions {
+                    let mut opts = rslab_metis::MetisOptions {
                         seed: nd_seed,
                         ..self.settings.nd.clone()
                     };
+                    // Where unset, its sections go wide from where they are
+                    // worth it on the rayon pool it runs on.
+                    let d = crate::parallel::rayon_dispatch();
+                    let blocks = crate::constants::FINE_PIECES_PER_WORKER * d.threads();
+                    opts.parallel_min_vertices.get_or_insert_with(|| {
+                        units(d.least(2), crate::constants::ND_NS_PER_VERTEX)
+                    });
+                    opts.parallel_min_edges.get_or_insert_with(|| {
+                        units(d.least(blocks), crate::constants::CONTRACT_NS_PER_ENTRY)
+                    });
                     match &g.weights {
                         Some(w) => rslab_metis::metis_order_weighted(&pat, w, &opts),
                         None => rslab_metis::metis_order_full(&pat, &opts),

@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use num_complex::Complex;
-use rslab::parallel::{install, Pool};
+use rslab::parallel::{install, Dispatch, Pool};
 use rslab::{CscMatrix, GeneralCsc, KluSettings, KluSolver, LdltSolver, LuSolver, SolverSettings};
 
-/// Pieces one after the other on the calling thread, forwards or backwards.
+/// Pieces one after the other on the calling thread, forwards or backwards;
+/// every section free, so every section worth anything goes to the pool.
 struct Serial {
     reverse: bool,
 }
@@ -18,6 +19,9 @@ struct Serial {
 impl Pool for Serial {
     fn threads(&self) -> usize {
         4
+    }
+    fn dispatch(&self) -> Dispatch {
+        Dispatch::free(4)
     }
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         if self.reverse {
@@ -34,6 +38,9 @@ struct Threaded(usize);
 impl Pool for Threaded {
     fn threads(&self) -> usize {
         self.0
+    }
+    fn dispatch(&self) -> Dispatch {
+        Dispatch::free(self.0)
     }
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         let next = AtomicUsize::new(0);

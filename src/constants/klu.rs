@@ -1,26 +1,12 @@
-//! The KLU path: replay planning of the parallel refactorization.
+//! The KLU path: the work of the parallel factorization and refactorization.
 
 /// Replay work of a column beyond its fmadds (its scatter, pivot and
 /// emitted `L` column) (fmadds).
 /// Used by: `klu::factor::compute_replay_plan`, `KluSymbolic::memory_plan`.
 /// Why: the fixed per-column cost of the replay loop relative to one fmadd.
-/// Contract: timing (decides parallel vs sequential replay, same bits).
+/// Contract: timing (the work a refactor decides its parallel replay on,
+/// same bits).
 pub const COL_WORK: u64 = 32;
-
-/// Mean replay work of a block's columns from which it replays pipelined
-/// rather than level by level (fmadds per column): a pipelined column costs
-/// a claim and a wait per `L` column it reads, which lighter columns do not
-/// repay, while a level costs a parallel section, which a deep elimination
-/// DAG of heavy columns pays far too often.
-/// Used by: `klu::factor::replay_choice`.
-/// Why: on the SuiteSparse circuits and SANE's c7552 stage matrix at 12
-/// workers the columns carry either at most about 200 (c7552, circuit_4,
-/// scircuit: level by level 1.5 to 2x the sequential replay, pipelined
-/// slower than it) or at least about 1700 (rajat15, the ASICs, onetone2,
-/// twotone: pipelined 3 to 7x, level by level barely faster than
-/// sequential); 512 separates the two classes.
-/// Contract: timing.
-pub const PIPE_COL_WORK: u64 = 512;
 
 /// Columns one worker claims at a time in the pipelined replay (columns).
 /// Used by: `KluSolver::refactor` (pipelined replay).
@@ -29,12 +15,32 @@ pub const PIPE_COL_WORK: u64 = 512;
 /// Contract: timing.
 pub const PIPE_RUN: usize = 1;
 
-/// Fewest columns per piece of a level in the level-by-level replay; a
-/// level of fewer than two pieces runs on the calling thread (columns).
-/// Used by: `KluSolver::refactor` (level replay).
-/// Why: below it a parallel section costs more than the columns.
+/// ns per unit of replay work (an fmadd, [`COL_WORK`] a column) of a real
+/// refactorization, before any is measured (ns per fmadd).
+/// Used by: `KluSolver::refactor`.
+/// Why: a scattered multiply-add with its index load.
+/// Machine: a prior, replaced by what the replays measure.
 /// Contract: timing.
-pub const LEVEL_PIECE: usize = 8;
+pub const KLU_REPLAY_NS_PER_WORK: f32 = 0.5;
+
+/// ns a pipelined replay spends per column and per `L` column a column
+/// reads beyond the replay itself (the claim, the wait for the column it
+/// reads, the line it moves between cores), before any is measured (ns per
+/// hand-off).
+/// Used by: `KluSolver::refactor` (whether a block replays pipelined).
+/// Why: about a cache line moved between cores; it is what makes light
+/// columns slower pipelined than sequentially.
+/// Machine: a prior, replaced by what the pipelined replays measure.
+/// Contract: timing.
+pub const KLU_HANDOFF_NS: f32 = 100.0;
+
+/// ns per input entry of a block's first factorization (the reach, the
+/// pivot search, the fill), before any is measured (ns per entry).
+/// Used by: `KluSymbolic::factor` (whether its blocks factor side by side).
+/// Why: a few fmadds of fill and a depth-first reach per entry.
+/// Machine: a prior, replaced by what the factorizations measure.
+/// Contract: timing.
+pub const KLU_FACTOR_NS_PER_ENTRY: f32 = 25.0;
 
 /// KLU's diagonal-preference pivot threshold (1): the diagonal is the pivot
 /// while `|a_jj| >= KLU_PIVOT_THRESHOLD * max_i |a_ij|`. Not the LU path's
@@ -44,27 +50,3 @@ pub const LEVEL_PIECE: usize = 8;
 /// Why: SuiteSparse KLU's default.
 /// Contract: results.
 pub const KLU_PIVOT_THRESHOLD: f64 = 1e-3;
-
-/// Nonzeros from which `KluParallel::Auto` factors blocks in parallel
-/// (nonzeros).
-/// Used by: `KluSettings::par_min_nnz`.
-/// Why: tuned default.
-/// Contract: timing (bit-identical in every mode).
-pub const KLU_PAR_MIN_NNZ: usize = 8_000;
-
-/// Replay work a unit of parallel refactorization must carry, in fmadds
-/// plus [`COL_WORK`] a column (fmadds). Not the unit of the solves'
-/// [`SOLVE_PAR_MIN_ENTRY_RHS`](super::SOLVE_PAR_MIN_ENTRY_RHS).
-/// Used by: `KluSettings::par_min_work`.
-/// Why: tuned default; below it starting the parallel section costs more
-/// than the overlap gains.
-/// Contract: timing.
-pub const KLU_PAR_MIN_FMADDS: u64 = 200_000;
-
-/// Simultaneous work the structure must offer for a parallel refactor:
-/// across blocks `sum work / max block work`, inside a block the mean level
-/// width of its elimination DAG (1).
-/// Used by: `KluSettings::par_min_ratio`.
-/// Why: at least two units of work side by side.
-/// Contract: timing.
-pub const KLU_PAR_MIN_RATIO: f64 = 2.0;

@@ -68,15 +68,19 @@ pub const MAX_OVERSHOOT: f64 = 4.0;
 
 /// Subproblems with at least this many vertices order their two sides in
 /// parallel (vertices).
-/// Used by: `MetisOptions::parallel_min_vertices`.
+/// Used by: `MetisOptions::parallel_min_vertices` (where unset).
 /// Why: tuned default.
+/// Machine: a standalone default; rslab sets its own from what a section
+/// costs on its pool.
 /// Contract: timing.
 pub const PAR_MIN_VERTICES: usize = 4096;
 
 /// Levels with at least this many adjacency entries contract in parallel
 /// blocks (entries).
-/// Used by: `MetisOptions::parallel_min_edges`.
+/// Used by: `MetisOptions::parallel_min_edges` (where unset).
 /// Why: tuned default.
+/// Machine: a standalone default; rslab sets its own from what a section
+/// costs on its pool.
 /// Contract: timing.
 pub const PAR_MIN_EDGES: usize = 200_000;
 

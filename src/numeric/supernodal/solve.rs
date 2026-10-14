@@ -48,6 +48,10 @@ use std::sync::atomic::Ordering;
 
 const NONE: u32 = u32::MAX;
 
+/// What a panel entry costs a sweep per right-hand side, learned from the
+/// sweeps.
+static SOLVE_RATE: ScalarRates = ScalarRates::new(SOLVE_NS_PER_ENTRY);
+
 /// One leaf subtree of the cut: its supernodes in elimination order and the
 /// rows outside it its updates accumulate into.
 #[derive(Clone)]
@@ -876,35 +880,56 @@ impl<T: Scalar> SolvePlan<T> {
             return f();
         }
         match threads {
-            _ if crate::parallel::lent().is_some() => crate::parallel::enter(f),
-            Threads::Ambient => crate::parallel::enter(f),
+            _ if crate::parallel::lent().is_some() => crate::parallel::enter(f64::INFINITY, f),
+            Threads::Ambient => crate::parallel::enter(f64::INFINITY, f),
             budget => budget.run(0, |cap| cap, f),
         }
     }
 
-    /// `f` over the items with their scratch, on the pool when `par`, in
-    /// order on the calling thread otherwise: the same sums either way.
+    /// `f` over the items with their scratch, `ops` panel entries times
+    /// right-hand sides all of them: on as many threads as that is worth
+    /// when `par`, in order on the calling thread otherwise; the same sums
+    /// either way.
     fn each<A: Sync, S: Send>(
         par: bool,
         items: &[A],
         scratch: &mut [S],
+        ops: usize,
         f: impl Fn(usize, &A, &mut S) + Sync + Send,
     ) {
+        let rate = SOLVE_RATE.of::<T>();
         if par {
-            crate::parallel::zip_mut(items, scratch, f);
+            crate::parallel::zip_mut(items, scratch, Work::of(ops as f64, rate), f);
         } else {
-            for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
-                f(i, a, s);
-            }
+            rate.time(ops as f64, || {
+                for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
+                    f(i, a, s);
+                }
+            });
         }
+    }
+
+    /// The panel entries of the supernodes `nodes`.
+    fn nodes_work(&self, nodes: &[u32]) -> usize {
+        nodes.iter().map(|&s| self.work(s)).sum()
+    }
+
+    /// The panel entries of the leaf subtrees.
+    fn subtrees_work(&self) -> usize {
+        self.subtrees
+            .iter()
+            .map(|st| self.nodes_work(&st.nodes))
+            .sum()
     }
 
     /// `work` fitted to a sweep of `nr` right-hand sides under the thread
     /// budget `threads`: a scratch per subtree and per node of the widest
-    /// ancestor level, and the decision to run on the pool, taken on the
-    /// budget and the sweep's work (panel entries times right-hand sides up
-    /// to four: a wider block gains no more from the pool than four columns
-    /// do).
+    /// ancestor level, and the decision to run on the pool: where the
+    /// sweep's work (panel entries times right-hand sides up to four: a
+    /// wider block gains no more from the pool than four columns do) is
+    /// worth more than one of the budget's threads across the leaf subtrees,
+    /// or clears [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work)
+    /// where that is set.
     fn fit<'w>(
         &self,
         work: &'w mut PlanWork<T>,
@@ -913,8 +938,16 @@ impl<T: Scalar> SolvePlan<T> {
     ) -> &'w mut PlanWork<T> {
         let widest = self.top_levels.iter().map(Vec::len).max().unwrap_or(0);
         work.fit(self.subtrees.len(), widest, self.top.len());
-        work.parallel = threads.resolve(|cap| cap) > 1
-            && self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE)) >= self.cfg.par_min_work;
+        let budget = threads.resolve(|cap| cap);
+        let ops = self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE));
+        work.parallel = budget > 1
+            && match self.cfg.par_min_work {
+                Some(min) => ops >= min,
+                None => {
+                    let ns = ops as f64 * SOLVE_RATE.of::<T>().ns_per_op();
+                    crate::parallel::width_on(budget, ns, self.subtrees.len()) > 1
+                }
+            };
         work
     }
 
@@ -1138,16 +1171,23 @@ impl<T: Scalar> SolvePlan<T> {
                 self.fwd_node_gemm(s, nr, y, acc, par, &mut sc.t);
             };
             if node_par {
-                Self::each(par, level, &mut work.level[..level.len()], |i, &s, sc| {
-                    // SAFETY: see `Shared`; the node writes only its own
-                    // columns, its off-block rows go to its accumulator. A
-                    // large node keeps its row tasks inside the level's
-                    // (the same arithmetic either way): one large node per
-                    // level otherwise ran on one thread while the others
-                    // finished their small ones.
-                    let yv = unsafe { shared.slice() };
-                    sweep(i, s, yv, par, sc);
-                });
+                let ops = self.nodes_work(level) * nr;
+                Self::each(
+                    par,
+                    level,
+                    &mut work.level[..level.len()],
+                    ops,
+                    |i, &s, sc| {
+                        // SAFETY: see `Shared`; the node writes only its own
+                        // columns, its off-block rows go to its accumulator. A
+                        // large node keeps its row tasks inside the level's
+                        // (the same arithmetic either way): one large node per
+                        // level otherwise ran on one thread while the others
+                        // finished their small ones.
+                        let yv = unsafe { shared.slice() };
+                        sweep(i, s, yv, par, sc);
+                    },
+                );
             } else {
                 for (i, &s) in level.iter().enumerate() {
                     sweep(i, s, y, true, &mut work.apex);
@@ -1176,13 +1216,20 @@ impl<T: Scalar> SolvePlan<T> {
                 self.bwd_node_gemm(s, nr, x, par, &mut sc.g);
             };
             if node_par {
-                Self::each(par, level, &mut work.level[..level.len()], |_, &s, sc| {
-                    // SAFETY: see `Shared`; the node writes only its own
-                    // columns and reads final ancestor columns. Its row
-                    // tasks nest as in the forward sweep.
-                    let xv = unsafe { shared.slice() };
-                    sweep(s, xv, par, sc);
-                });
+                let ops = self.nodes_work(level) * nr;
+                Self::each(
+                    par,
+                    level,
+                    &mut work.level[..level.len()],
+                    ops,
+                    |_, &s, sc| {
+                        // SAFETY: see `Shared`; the node writes only its own
+                        // columns and reads final ancestor columns. Its row
+                        // tasks nest as in the forward sweep.
+                        let xv = unsafe { shared.slice() };
+                        sweep(s, xv, par, sc);
+                    },
+                );
             } else {
                 for &s in level {
                     sweep(s, x, true, &mut work.apex);
@@ -1473,7 +1520,8 @@ impl<T: Scalar> SolvePlan<T> {
         let mut phases = PhaseTrace::start();
         let par = work.parallel;
         let scratch = &mut work.subtrees[..self.subtrees.len()];
-        Self::each(par, &self.subtrees, scratch, |_, st, sc| {
+        let ops = self.subtrees_work() * nr;
+        Self::each(par, &self.subtrees, scratch, ops, |_, st, sc| {
             sc.acc.clear();
             sc.acc.resize(st.ext.len() * nr, T::zero());
             // SAFETY: see `Shared`.
@@ -1511,7 +1559,8 @@ impl<T: Scalar> SolvePlan<T> {
         let shared = Shared(y.as_mut_ptr(), y.len());
         let par = work.parallel;
         let scratch = &mut work.subtrees[..self.subtrees.len()];
-        Self::each(par, &self.subtrees, scratch, |_, st, sc| {
+        let ops = self.subtrees_work() * nr;
+        Self::each(par, &self.subtrees, scratch, ops, |_, st, sc| {
             // SAFETY: see `Shared`.
             let xv = unsafe { shared.slice() };
             for &s in st.nodes.iter().rev() {

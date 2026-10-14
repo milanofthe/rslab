@@ -68,7 +68,9 @@ pub(super) fn ll_factor_node<T: Scalar>(
     if tiled {
         let gloc_ref = &gloc;
         let spans_ref = spans;
-        crate::parallel::chunks_mut(&mut *panel, nrow * tile_w, |ti, tile| {
+        let rate = crate::numeric::supernodal::CMOD_RATE.of::<T>();
+        let work = crate::parallel::Work::of(plan.lwork as f64, rate);
+        crate::parallel::chunks_mut(&mut *panel, nrow * tile_w, work, |ti, tile| {
             let c0 = ti * tile_w;
             let c1 = (c0 + tile_w).min(ncol);
             let mut bufs = pools.cmod.take();

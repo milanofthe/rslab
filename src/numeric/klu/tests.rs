@@ -439,12 +439,16 @@ fn klu_estimate_bounds_the_symbolic_fill() {
     assert_eq!(s.estimated_flops(), 2 * (n as u64 - 1));
 }
 
-/// Pieces on threads of their own per run, each taking the next one.
+/// Pieces on threads of their own per run, each taking the next one; every
+/// section free, so every one worth anything goes wide.
 struct Threaded(usize);
 
 impl crate::parallel::Pool for Threaded {
     fn threads(&self) -> usize {
         self.0
+    }
+    fn dispatch(&self) -> crate::parallel::Dispatch {
+        crate::parallel::Dispatch::free(self.0)
     }
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -475,10 +479,13 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
 
     let mut s_seq = KluSolver::factor(&a, &seq).unwrap();
     let mut s_par = KluSolver::factor(&a, &par).unwrap();
-    assert!(s_seq.factors.pipelined.is_empty(), "Off must plan nothing");
     assert!(
-        matches!(s_par.factors.pipelined[..], [(0, Replay::Levels { .. })]),
-        "On must plan its light columns level by level"
+        s_seq.factors.plan.blocks.is_empty(),
+        "Off must plan nothing"
+    );
+    assert!(
+        matches!(&s_par.factors.plan.blocks[..], [bp] if bp.b == 0),
+        "On must plan its one block"
     );
     let mut a2 = a.clone();
     for (k, v) in a2.values.iter_mut().enumerate() {
@@ -497,11 +504,20 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
         assert_eq!(s_seq.factors.udiag, s.factors.udiag, "{what}: diag differs");
     };
     let lent: std::sync::Arc<dyn crate::parallel::Pool> = std::sync::Arc::new(Threaded(4));
+    // On: the time only picks how, never whether.
+    crate::parallel::install(lent.clone(), || s_par.refactor(&a2)).unwrap();
+    assert_ne!(
+        s_par.factors.modes[..],
+        [Mode::Serial],
+        "On replays side by side"
+    );
+    same(&s_par, "as decided");
+    s_par.factors.plan.forced = Some(Mode::Levels);
     for _ in 0..2 {
         crate::parallel::install(lent.clone(), || s_par.refactor(&a2)).unwrap();
         same(&s_par, "level by level");
     }
-    s_par.factors.pipelined = vec![(0, Replay::Pipelined)];
+    s_par.factors.plan.forced = Some(Mode::Pipelined(4));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
@@ -851,24 +867,79 @@ fn cascaded(n: usize, stages: usize, seed: u64) -> GeneralCsc<f64> {
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
+/// [`Threaded`] at a given section cost.
+struct Costed(usize, crate::parallel::Dispatch);
+
+impl crate::parallel::Pool for Costed {
+    fn threads(&self) -> usize {
+        self.0
+    }
+    fn dispatch(&self) -> crate::parallel::Dispatch {
+        self.1.clone()
+    }
+    fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        crate::parallel::Pool::run(&Threaded(self.0), n, f)
+    }
+}
+
 #[test]
-fn klu_parallel_auto_gate_resolves_from_structure() {
-    // Small: below the nnz floor, Auto stays sequential.
-    let a = cascaded(400, 6, 3);
-    let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
-    assert!(!s.factors.parallel, "small case must stay sequential");
-    // Multi-block and over the floor: Auto goes parallel.
+fn klu_parallel_auto_gate_decides_on_the_pool() {
+    use crate::parallel::{install, Dispatch};
+    let on = |d: Dispatch| -> std::sync::Arc<dyn crate::parallel::Pool> {
+        std::sync::Arc::new(Costed(4, d))
+    };
+    // Many blocks: wide where sections are free, serial where they cost
+    // more than any work, and Off always wins.
     let a = cascaded(4000, 6, 9);
-    let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
-    assert!(s.factors.block_ptr.len() > 4);
-    assert!(a.nnz() >= 8_000);
+    let factor = |s: &KluSettings| KluSolver::factor(&a, s).unwrap();
+    let free = install(on(Dispatch::free(4)), || factor(&KluSettings::default()));
+    assert!(free.factors.block_ptr.len() > 4);
+    assert!(free.factors.parallel, "free sections: the blocks go wide");
+    let never = install(on(Dispatch::never()), || factor(&KluSettings::default()));
+    assert!(!never.factors.parallel, "no pool to go wide on");
+    let costly = install(on(Dispatch::new(vec![1e12; 5])), || {
+        factor(&KluSettings::default())
+    });
+    assert!(
+        !costly.factors.parallel,
+        "sections costing more than the work"
+    );
+    let off = install(on(Dispatch::free(4)), || {
+        factor(&KluSettings::default().with_parallel(KluParallel::Off))
+    });
+    assert!(!off.factors.parallel);
+    // The user's structural floor in place of the time: the old gate.
+    let floor = KluSettings {
+        par_min_nnz: Some(usize::MAX),
+        ..KluSettings::default()
+    };
+    let s = install(on(Dispatch::free(4)), || factor(&floor));
+    assert!(
+        !s.factors.parallel,
+        "a floor above the matrix keeps it serial"
+    );
+    let floor = KluSettings {
+        par_min_nnz: Some(0),
+        ..KluSettings::default()
+    };
+    let s = install(on(Dispatch::never()), || factor(&floor));
     assert!(
         s.factors.parallel,
-        "large multi-block case must parallelize"
+        "a floor below it goes wide whatever the cost"
     );
-    // Off always wins.
-    let s = KluSolver::factor(&a, &KluSettings::default().with_parallel(KluParallel::Off)).unwrap();
-    assert!(!s.factors.parallel);
+
+    // A refactor decides on the pool it runs on, every time: one block of
+    // 1024 columns whose DAG offers wide levels.
+    let (a, _) = grid_cd(32);
+    let mut s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
+    install(on(Dispatch::new(vec![1e12; 5])), || s.refactor(&a)).unwrap();
+    assert_eq!(
+        s.factors.modes[..],
+        [Mode::Serial],
+        "sections costing more than the work"
+    );
+    install(on(Dispatch::free(4)), || s.refactor(&a)).unwrap();
+    assert_ne!(s.factors.modes[..], [Mode::Serial], "free sections go wide");
 }
 
 #[test]

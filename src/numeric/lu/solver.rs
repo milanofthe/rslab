@@ -10,6 +10,15 @@ use crate::constants::{
     LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 
+/// What the symmetrized pattern costs per entry (its bucket sorts), learned
+/// from the analyses.
+static SYMMETRIZE_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
+
+/// What the diagonal check costs per entry, learned from the analyses.
+static DIAGONAL_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
+
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::analysis::analyze_with;
@@ -58,8 +67,8 @@ fn symmetrized_lower_pattern<T: Scalar>(
         buckets.push(head);
         rest = tail;
     }
-    let min_cols = crate::constants::SYMMETRIZE_PIECE_MIN_COLS;
-    let kept: Vec<usize> = crate::parallel::map_owned(buckets, min_cols, |seg| {
+    let sorts = crate::parallel::Work::of(start[n] as f64, &SYMMETRIZE_RATE);
+    let kept: Vec<usize> = crate::parallel::map_owned(buckets, sorts, |seg| {
         seg.sort_unstable();
         let mut len = 0;
         for p in 0..seg.len() {
@@ -92,7 +101,8 @@ fn symmetrized_lower_pattern<T: Scalar>(
 /// magnitude worse, and the circuits with a full diagonal factor the same
 /// either way.
 fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> bool {
-    crate::parallel::any(a.n, crate::constants::DIAGONAL_CHECK_PIECE_MIN_COLS, |j| {
+    let scan = crate::parallel::Work::of(a.nnz() as f64, &DIAGONAL_RATE);
+    crate::parallel::any(a.n, scan, |j| {
         let (rows, vals) = (
             &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]],
             &a.values[a.col_ptr[j]..a.col_ptr[j + 1]],

@@ -144,7 +144,8 @@ pub fn coarsen(
             cur,
             rng,
             opts.two_hop_ratio_threshold,
-            opts.parallel_min_edges,
+            opts.parallel_min_edges
+                .unwrap_or(crate::constants::PAR_MIN_EDGES),
             counters,
         );
         let new_nvtxs = level.graph.nvtxs;

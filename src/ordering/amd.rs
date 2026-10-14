@@ -1,5 +1,10 @@
 use crate::sparse::csc::CscPattern;
 
+/// What a permuted pattern costs per entry (its gather and its column
+/// sorts), learned from the permutations.
+static PERMUTE_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
+
 /// Apply a permutation to row/column indices: compute P*A*P^T pattern.
 ///
 /// Given a symmetric CscPattern (both triangles stored, the form produced
@@ -61,11 +66,12 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
             dst.sort_unstable();
         }
     };
-    if nnz < crate::constants::AMD_TRANSPOSE_PAR_MIN_NNZ || crate::parallel::threads() == 1 {
-        fill(0, n, &mut row_idx);
+    let work = crate::parallel::Work::of(nnz as f64, &PERMUTE_RATE);
+    let k = crate::parallel::width(work.time(), n);
+    if k < 2 {
+        PERMUTE_RATE.time(nnz as f64, || fill(0, n, &mut row_idx));
     } else {
-        let target =
-            nnz.div_ceil(crate::constants::FINE_PIECES_PER_WORKER * crate::parallel::threads());
+        let target = nnz.div_ceil(crate::constants::FINE_PIECES_PER_WORKER * k);
         let mut blocks: Vec<(usize, usize, &mut [usize])> = Vec::new();
         let mut rest: &mut [usize] = &mut row_idx;
         let mut j0 = 0;
@@ -79,7 +85,7 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
             rest = tail;
             j0 = j1;
         }
-        crate::parallel::for_each_owned(blocks, 1, |(j0, j1, out)| fill(j0, j1, out));
+        crate::parallel::for_each_owned(blocks, work, |(j0, j1, out)| fill(j0, j1, out));
     }
 
     CscPattern {

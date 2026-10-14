@@ -1,9 +1,7 @@
 //! The options of the KLU path.
 
 use super::*;
-use crate::constants::{
-    KLU_PAR_MIN_FMADDS, KLU_PAR_MIN_NNZ, KLU_PAR_MIN_RATIO, KLU_PIVOT_THRESHOLD,
-};
+use crate::constants::KLU_PIVOT_THRESHOLD;
 
 /// Options for the KLU path. Defaults follow SuiteSparse KLU: threshold
 /// partial pivoting with strong diagonal preference (`pivot_threshold =
@@ -25,18 +23,22 @@ pub struct KluSettings {
     /// preference loses its zero-free guarantee.
     pub btf: bool,
     /// Parallel execution of factor and refactor over the (independent) BTF
-    /// diagonal blocks, and of a refactor inside a block (pipelined), on the
-    /// current workers ([`crate::parallel`]).
-    /// **Bit-identical to sequential in every mode**: each block is factored
-    /// sequentially by construction and blocks share no state, so the result
-    /// does not depend on scheduling or thread count. The default `Auto`
-    /// enables it through a deterministic structural gate (no implicit
-    /// measuring): several diagonal blocks, `par_min_nnz` input nonzeros,
-    /// and no dominant block (largest block at most half of `n`) - real
-    /// circuits are often one giant irreducible block plus thousands of
-    /// singletons, where distributing blocks cannot help.
-    /// Run inside a bounded rayon pool to cap it for solver-in-the-loop use,
-    /// or force `Off` for strictly sequential execution.
+    /// diagonal blocks, and of a refactor inside a block (level by level or
+    /// pipelined), on the current workers ([`crate::parallel`]).
+    /// **Bit-identical to sequential in every mode**: each column is
+    /// replayed and each block factored sequentially by construction, so the
+    /// result does not depend on scheduling or thread count. The default
+    /// `Auto` goes side by side, and on as many threads, as the work is
+    /// worth on the pool it runs on: the work (input entries for a factor,
+    /// the exact replay work of the pivot-final pattern for a refactor) at
+    /// the rates measured on earlier runs, against what a section costs on
+    /// the pool ([`crate::parallel::Dispatch`]), decided anew by every
+    /// refactor with the pool it is given. Real circuits are often one
+    /// giant irreducible block plus thousands of singletons, where
+    /// distributing blocks cannot help, and small systems refactor faster
+    /// on one thread than on any pool. Run inside a bounded rayon pool to
+    /// cap it for solver-in-the-loop use, or force `Off` for strictly
+    /// sequential execution.
     pub parallel: KluParallel,
     /// Maximum-product row matching (MC64) as the transversal of the block
     /// triangular form: the matched, largest-product entries become the
@@ -47,19 +49,25 @@ pub struct KluSettings {
     /// estimate. Analysis-time (value dependent); a `refactor` keeps the
     /// matching. Default `true`; needs `btf`.
     pub matching: bool,
-    /// Nonzeros from which [`KluParallel::Auto`] factors blocks in parallel.
-    /// Default `8000`.
-    pub par_min_nnz: usize,
-    /// Replay work a unit of parallel refactorization must carry, in fmadds
-    /// and 32 a column (not the panel entries of
-    /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work)):
-    /// below it starting the section costs more than the overlap gains.
-    /// Default `2e5`.
-    pub par_min_work: u64,
-    /// Simultaneous work the structure must offer for a parallel refactor:
-    /// across blocks `sum work / max block work`, inside a block the mean
-    /// level width of its elimination DAG. Default `2`.
-    pub par_min_ratio: f64,
+    /// A fixed structural gate for the first factor in place of the time
+    /// gate of [`KluParallel::Auto`]: blocks factor side by side from this
+    /// many input nonzeros on, where no block holds more than half the
+    /// columns. Default `None`: as the work is worth on the pool.
+    pub par_min_nnz: Option<usize>,
+    /// A fixed structural gate for the refactor in place of the time gate of
+    /// [`KluParallel::Auto`] (with [`par_min_ratio`](Self::par_min_ratio)):
+    /// the replay work, in fmadds and 32 a column, a block must carry to
+    /// replay its columns side by side, and all blocks together to replay
+    /// side by side (not the panel entries of
+    /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work)).
+    /// Where it passes, the replay goes as wide as the pool. Default
+    /// `None`: as the work is worth on the pool.
+    pub par_min_work: Option<u64>,
+    /// With [`par_min_work`](Self::par_min_work), the simultaneous work the
+    /// structure must offer for a parallel refactor: across blocks `sum
+    /// work / max block work`, inside a block the mean level width of its
+    /// elimination DAG. Default `None`: as the work is worth on the pool.
+    pub par_min_ratio: Option<f64>,
     /// Caller-owned cancellation flag for the numeric phase, read and never
     /// written, polled at block boundaries and inside the pipelined refactor at
     /// column boundaries. The flag armed for a factorization is carried into
@@ -72,13 +80,15 @@ pub struct KluSettings {
 /// (see [`KluSettings::parallel`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KluParallel {
-    /// Structural gate: parallel when the BTF structure has several
-    /// diagonal blocks, the matrix at least
-    /// [`par_min_nnz`](KluSettings::par_min_nnz) nonzeros, and the largest
-    /// block holds at most half of `n` (no dominant block).
+    /// Side by side, and on as many threads, as the work is worth on the
+    /// pool it runs on (or as the structural gates
+    /// [`par_min_nnz`](KluSettings::par_min_nnz),
+    /// [`par_min_work`](KluSettings::par_min_work) and
+    /// [`par_min_ratio`](KluSettings::par_min_ratio) decide, where set).
     #[default]
     Auto,
-    /// Always parallel (still bit-identical; blocks are independent).
+    /// Always parallel where the structure allows it, on every thread of
+    /// the pool (still bit-identical).
     On,
     /// Strictly sequential.
     Off,
@@ -92,9 +102,9 @@ impl Default for KluSettings {
             btf: true,
             parallel: KluParallel::Auto,
             matching: true,
-            par_min_nnz: KLU_PAR_MIN_NNZ,
-            par_min_work: KLU_PAR_MIN_FMADDS,
-            par_min_ratio: KLU_PAR_MIN_RATIO,
+            par_min_nnz: None,
+            par_min_work: None,
+            par_min_ratio: None,
             interrupt: None,
         }
     }

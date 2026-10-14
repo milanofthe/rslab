@@ -91,6 +91,15 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabErr
     })
 }
 
+/// What the cost graph's logarithm costs per entry, learned from the passes.
+static LOG_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
+
+/// What the column maxima of the cost graph cost per entry, learned from the
+/// passes.
+static COLMAX_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
+
 /// MC64 on a general (unsymmetric) matrix: the maximum-product matching of
 /// rows to columns plus the row and column duals, for the LU path's
 /// row permutation and two-sided scaling (SPRAL `hungarian_scale_unsym`).
@@ -111,8 +120,9 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
     // over the nonzero entries, so every column has a zero-cost minimum.
     // The logarithms and the per-column pass run in parallel; zero and
     // non-finite entries (NaN marks) are dropped afterwards.
-    let min_entries = crate::constants::MC64_LOG_PIECE_MIN_ENTRIES;
-    let mut cost: Vec<f64> = crate::parallel::map(a.values.len(), min_entries, |k| {
+    let entries = a.values.len() as f64;
+    let logs = crate::parallel::Work::of(entries, &LOG_RATE);
+    let mut cost: Vec<f64> = crate::parallel::map(a.values.len(), logs, |k| {
         let m = a.values[k].magnitude();
         if m == 0.0 || !m.is_finite() {
             f64::NAN
@@ -127,8 +137,8 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
         cols.push(head);
         rest = tail;
     }
-    let min_cols = crate::constants::MC64_COLMAX_PIECE_MIN_COLS;
-    let cmax: Vec<f64> = crate::parallel::map_owned(cols, min_cols, |col| {
+    let scan = crate::parallel::Work::of(entries, &COLMAX_RATE);
+    let cmax: Vec<f64> = crate::parallel::map_owned(cols, scan, |col| {
         let top = col
             .iter()
             .copied()

@@ -2,38 +2,48 @@
 //! pivoting, and the replay plan of the refactorization.
 
 use super::*;
-use crate::constants::{COL_WORK, KLU_F_RESERVE_DIV, KLU_L_RESERVE, KLU_U_RESERVE, PIPE_COL_WORK};
+use crate::constants::{
+    COL_WORK, KLU_FACTOR_NS_PER_ENTRY, KLU_F_RESERVE_DIV, KLU_L_RESERVE, KLU_U_RESERVE,
+    SCAN_NS_PER_ENTRY,
+};
+use crate::parallel::{Rate, ScalarRates, Work};
+
+/// What a block's first factorization costs per input entry, learned from
+/// the factorizations.
+pub(super) static FACTOR_RATE: ScalarRates = ScalarRates::new(KLU_FACTOR_NS_PER_ENTRY);
+
+/// What the parallel driver's splice costs per factor entry copied.
+static SPLICE_RATE: Rate = Rate::new(SCAN_NS_PER_ENTRY);
 
 /// The GP flop count carried on the attached estimate (0 when absent).
 pub(super) fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
     d.estimate.as_ref().map_or(0, |e| e.factor_flops)
 }
 
-/// How a block of `bn` columns, `nlev` levels and replay work `w_b`
-/// replays side by side, if it does (see [`compute_replay_plan`]): `true`
-/// pipelined, `false` level by level. The plan and the memory plan decide
-/// alike.
-pub(super) fn replay_choice(
-    bn: usize,
-    nlev: usize,
-    w_b: u64,
-    force: bool,
-    settings: &KluSettings,
-) -> Option<bool> {
-    let width = bn as f64 / nlev.max(1) as f64;
-    let pays = w_b >= settings.par_min_work && width >= settings.par_min_ratio;
-    (settings.parallel != KluParallel::Off && nlev >= 2 && (force || pays))
-        .then(|| w_b / bn.max(1) as u64 >= PIPE_COL_WORK)
+/// Whether a block of `bn` columns whose elimination DAG has `nlev` levels
+/// gets a [`BlockPlan`] under `parallel`: one that can replay columns side
+/// by side. The plan and the memory plan decide alike.
+pub(super) fn planned(bn: usize, nlev: usize, parallel: KluParallel) -> bool {
+    parallel != KluParallel::Off && bn >= 2 && nlev >= 2
 }
 
-impl Replay {
-    /// Level by level, block from column `bs` on, its columns' levels
-    /// `level`, `nlev` of them: the columns grouped by level, ascending
-    /// within each.
-    fn levels(bs: usize, level: &[Ki], nlev: usize) -> Self {
+impl BlockPlan {
+    /// Block `b` from column `bs` on, its columns' levels `level` (`nlev`
+    /// of them) and replay work `colw`: the columns grouped by level,
+    /// ascending within each, with the work of every level.
+    fn new(
+        b: usize,
+        bs: usize,
+        level: &[Ki],
+        colw: &[u64],
+        nlev: usize,
+        (path, handoffs): (u64, u64),
+    ) -> Self {
         let mut ptr = vec![0u32; nlev + 1];
-        for &l in level {
+        let mut level_work = vec![0u64; nlev];
+        for (&l, &w) in level.iter().zip(colw) {
             ptr[l as usize + 1] += 1;
+            level_work[l as usize] += w;
         }
         for l in 0..nlev {
             ptr[l + 1] += ptr[l];
@@ -44,76 +54,83 @@ impl Replay {
             cols[fill[l as usize] as usize] = (bs + k) as Ki;
             fill[l as usize] += 1;
         }
-        Replay::Levels { ptr, cols }
+        let widest = (0..nlev)
+            .filter(|&l| ptr[l + 1] - ptr[l] >= 2)
+            .map(|l| level_work[l])
+            .max()
+            .unwrap_or(0);
+        BlockPlan {
+            b,
+            work: colw.iter().sum(),
+            path,
+            handoffs,
+            widest,
+            ptr,
+            cols,
+            level_work,
+        }
     }
 }
 
-/// The two-parameter principle behind EVERY parallel decision on this path:
-///
-/// 1. **Work floor** ([`KluSettings::par_min_work`]): a unit of parallel
-///    execution must carry at least this much replay work - below it,
-///    starting the section costs more than the overlap gains.
-/// 2. **Concurrency ratio** ([`KluSettings::par_min_ratio`]): parallelism engages only
-///    where the structure offers at least this much simultaneous work.
-///    Across BTF blocks that is the exact Amdahl bound `sum work / max block
-///    work`; inside a block it is the mean level width of the frozen
-///    elimination DAG - the average number of simultaneously replayable
-///    columns. (A chain-work critical-path bound would be the "exact" ratio
-///    but systematically underestimates the pipeline's just-in-time overlap:
-///    ASIC_100ks scores below 2 on it yet gains over 3x.)
-///
-/// The replay-parallelism plan, computed once at factor time from the
-/// pivot-final pattern: per-block replay work `W_b = sum_j (COL_WORK +
-/// sum_{p in U(:,j)} |L(:,p)|)` and elimination-DAG level structure.
-///
-/// A block replays its columns **side by side** iff `W_b` clears the work
-/// floor and its mean level width clears the concurrency ratio, or the user
-/// forced [`KluParallel::On`]: pipelined (NICSLU's pipeline mode,
-/// Chen/Wang/Yang TCAD 2013) where its columns carry [`PIPE_COL_WORK`] or
-/// more on average, level by level where they are lighter (see [`Replay`];
-/// on a lent pool only, [`crate::parallel`]).
-/// The refactor runs blocks **in parallel** iff the total clears the work
-/// floor (or the user forced it) and no single block dominates.
+/// The replay plan of a factorization ([`ReplayPlan`]), computed once at
+/// factor time from the pivot-final pattern: per block its replay work
+/// `W_b = sum_j (COL_WORK + sum_{p in U(:,j)} |L(:,p)|)`, and for a block
+/// whose columns can replay side by side the levels of its elimination DAG
+/// with their work and the work of its longest dependency chain. Every
+/// refactor decides on it how its blocks replay, with the pool and the
+/// rates it finds.
 fn compute_replay_plan(
     block_ptr: &[usize],
     l_colptr: &[usize],
     u_colptr: &[usize],
     u_rowidx: &[Ki],
-    force: bool,
     settings: &KluSettings,
-) -> (Vec<(usize, Replay)>, bool) {
-    let (min_work, min_ratio) = (settings.par_min_work, settings.par_min_ratio);
-    let mut pipelined = Vec::new();
-    let mut level: Vec<Ki> = Vec::new();
-    let (mut total, mut max_w): (u64, u64) = (0, 0);
+) -> ReplayPlan {
+    let mut plan = ReplayPlan {
+        policy: settings.parallel,
+        min_work: settings.par_min_work,
+        min_ratio: settings.par_min_ratio,
+        ..ReplayPlan::default()
+    };
+    if settings.parallel == KluParallel::Off {
+        return plan;
+    }
+    let (mut level, mut colw, mut chain): (Vec<Ki>, Vec<u64>, Vec<u64>) = Default::default();
     for b in 0..block_ptr.len() - 1 {
         let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
         let bn = be - bs;
+        for v in [&mut colw, &mut chain] {
+            v.clear();
+            v.resize(bn, 0);
+        }
         level.clear();
         level.resize(bn, 0);
-        let mut nlev: usize = 1;
-        let mut w_b: u64 = COL_WORK * bn as u64;
+        let (mut nlev, mut path) = (1usize, 0u64);
         for j in bs..be {
-            let mut l: Ki = 0;
+            let (mut l, mut w, mut before): (Ki, u64, u64) = (0, COL_WORK, 0);
             for &pk in &u_rowidx[u_colptr[j]..u_colptr[j + 1]] {
                 let p = pk as usize;
-                w_b += (l_colptr[p + 1] - l_colptr[p]) as u64;
+                w += (l_colptr[p + 1] - l_colptr[p]) as u64;
                 l = l.max(level[p - bs] + 1);
+                before = before.max(chain[p - bs]);
             }
             level[j - bs] = l;
+            colw[j - bs] = w;
+            chain[j - bs] = before + w;
+            path = path.max(before + w);
             nlev = nlev.max(l as usize + 1);
         }
-        total += w_b;
-        max_w = max_w.max(w_b);
-        match replay_choice(bn, nlev, w_b, force, settings) {
-            Some(true) => pipelined.push((b, Replay::Pipelined)),
-            Some(false) => pipelined.push((b, Replay::levels(bs, &level[..bn], nlev))),
-            None => {}
+        let w_b: u64 = colw.iter().sum();
+        plan.total += w_b;
+        plan.largest = plan.largest.max(w_b);
+        if planned(bn, nlev, settings.parallel) {
+            let handoffs = (bn + u_colptr[be] - u_colptr[bs]) as u64;
+            let chain = (path, handoffs);
+            plan.blocks
+                .push(BlockPlan::new(b, bs, &level, &colw, nlev, chain));
         }
     }
-    let ratio_ok = (total as f64) >= min_ratio * (max_w as f64);
-    let par_blocks = ratio_ok && (force || total >= min_work);
-    (pipelined, par_blocks)
+    plan
 }
 
 /// The columns of a factor array (`colptr`, `rowidx`, `val`) as a matrix with
@@ -666,18 +683,19 @@ pub(super) fn factor_impl<T: Scalar>(
 
     // Factor the diagonal blocks: independent by construction, so the
     // parallel driver is bit-identical to the sequential one (each worker is
-    // sequential inside; nothing is shared across blocks). Parallelism is
-    // opt-in and runs on the ambient rayon pool, so callers cap it with
+    // sequential inside; nothing is shared across blocks). It runs on the
+    // current workers ([`crate::parallel`]), so callers cap it with
     // `with_threads` scoping, matching the solver-in-the-loop contract.
     let nblocks = sym.block_ptr.len() - 1;
-    // Resolve the FIRST-factor parallel policy from a-priori structure. The
-    // exact work plan needs the pivot-final pattern, so this is the same
-    // work-floor/Amdahl principle on its a-priori proxies: `nnz` as the work
-    // floor, `no block holds half the matrix` as the block-level Amdahl
-    // ratio. The refactor decision is replaced by the exact plan
-    // ([`compute_replay_plan`]) once the pattern is frozen.
-    let parallel = sym.parallel_blocks(settings);
+    // The first factor decides on the blocks' input entries, the work it
+    // knows before the pivot-final pattern; a refactor on the exact replay
+    // work ([`compute_replay_plan`]) once the pattern is frozen.
+    let parallel = sym.parallel_blocks::<T>(settings);
     let max_bn = sym.max_block_size();
+    let rate = FACTOR_RATE.of::<T>();
+    let entries = sym.nnz as f64;
+    let sampled = !parallel && rate.sample(entries);
+    let started = crate::clock::Instant::now();
 
     // Numeric output buffers, filled either incrementally block-by-block
     // (sequential: one reused scratch + one reused block buffer, no
@@ -767,9 +785,13 @@ pub(super) fn factor_impl<T: Scalar>(
                 scatter_target[k as usize] = fin;
             }
         }
+        if sampled {
+            rate.learn(started.elapsed().as_nanos() as f64, entries);
+        }
     } else {
         let blocks: Vec<Result<BlockOut<T>, RslabError>> = crate::parallel::map_init(
             nblocks,
+            Work::of(entries, rate),
             || KluScratch::<T>::new(max_bn),
             |scratch, b| {
                 settings.interrupted()?;
@@ -871,7 +893,8 @@ pub(super) fn factor_impl<T: Scalar>(
                 }
                 c.f_v.copy_from_slice(&out.f_val);
             };
-            crate::parallel::for_each_owned(jobs, 1, copy_one);
+            let copied = (l_off[nblocks] + u_off[nblocks] + f_off[nblocks]) as f64;
+            crate::parallel::for_each_owned(jobs, Work::of(copied, &SPLICE_RATE), copy_one);
         }
 
         for (b, out) in outs.iter().enumerate() {
@@ -898,22 +921,9 @@ pub(super) fn factor_impl<T: Scalar>(
         pinv[orig] = fin as usize;
     }
 
-    // Exact replay-parallelism plan from the now-frozen pattern: which blocks
-    // pipeline internally (and with how many workers), and whether the blocks
-    // themselves run in parallel. One work/Amdahl principle for both, see
-    // [`compute_replay_plan`].
-    let (pipelined, par_refactor) = if settings.parallel == KluParallel::Off {
-        (Vec::new(), false)
-    } else {
-        compute_replay_plan(
-            &sym.block_ptr,
-            &l_colptr,
-            &u_colptr,
-            &u_rowidx,
-            settings.parallel == KluParallel::On,
-            settings,
-        )
-    };
+    // The exact replay work from the now-frozen pattern, which every
+    // refactor decides its parallel replay on ([`compute_replay_plan`]).
+    let plan = compute_replay_plan(&sym.block_ptr, &l_colptr, &u_colptr, &u_rowidx, settings);
 
     Ok(KluFactors {
         interrupt: settings.interrupt.clone(),
@@ -938,11 +948,11 @@ pub(super) fn factor_impl<T: Scalar>(
         f_val,
         scatter_expect,
         scatter_target,
-        pipelined,
-        par_refactor,
+        plan,
         rs_next: Vec::new(),
         replay_x: Vec::new(),
         replay_xs: Vec::new(),
         ready: Ready::default(),
+        modes: Vec::new(),
     })
 }

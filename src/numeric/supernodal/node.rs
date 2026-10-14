@@ -2,7 +2,17 @@
 //! the global-to-local row map.
 
 use super::Li;
+use crate::parallel::ScalarRates;
 use crate::scalar::Scalar;
+
+/// What a multiply-add of a node's tiled update costs a thread (the slabs'
+/// products and scatters), learned from the slabs.
+pub(crate) static CMOD_RATE: ScalarRates = ScalarRates::new(crate::constants::GEMM_NS_PER_FLOP);
+
+/// What a multiply-add of the dense kernels' scalar row and column sweeps
+/// costs a thread (a panel's deep rows, the triangular solves of its
+/// trailing columns), learned from the sweeps.
+pub(crate) static LOOP_RATE: ScalarRates = ScalarRates::new(crate::constants::LOOP_NS_PER_FLOP);
 
 /// How a node applies its descendants' updates (`cmod`), shared by the LDL^T
 /// and LU kernels. Every field is a pure function of the node and the
@@ -19,6 +29,11 @@ pub(crate) struct CmodPlan {
     pub forks: bool,
     /// Width of the column slabs of the tiled mode.
     pub tile_w: usize,
+    /// The update work in multiply-adds: into the node's `L` columns (and
+    /// `U11`), and (LU) into its `U12` columns. What a section of the
+    /// update is worth ([`crate::parallel`]); never which path it takes.
+    pub lwork: usize,
+    pub uwork: usize,
     /// Tiled mode: the panel is cut into column slabs (disjoint `&mut`
     /// chunks) and each slab receives every updater's contribution in updater
     /// order with a serial GEMM. One fan-out per node instead of one per
@@ -68,7 +83,7 @@ impl CmodPlan {
             .flatten()
             .unwrap_or_default();
         spans.clear();
-        let mut flops: usize = 0;
+        let (mut flops, mut lsum, mut usum): (usize, usize, usize) = (0, 0, 0);
         for &k in updaters {
             let k = k as usize;
             let nck = sym.supernodes[k].ncol;
@@ -87,6 +102,7 @@ impl CmodPlan {
                 continue;
             }
             flops += lwork + uwork;
+            (lsum, usum) = (lsum + lwork, usum + uwork);
             spans.push(Span { k, l, u });
         }
         let forks = flops >= k.fork_min_flops.max(k.par_gemm);
@@ -94,6 +110,8 @@ impl CmodPlan {
         CmodPlan {
             spans,
             forks,
+            lwork: lsum,
+            uwork: usum,
             tile_w,
             tiled: forks && ncol >= 2 * tile_w,
         }

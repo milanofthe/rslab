@@ -16,6 +16,20 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a 64 prime (published constant of the hash).
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+/// What the adjacency hash costs per entry, learned from the detections.
+static KEY_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
+
+/// What sorting and splitting the vertices by key costs per vertex, learned
+/// from the detections.
+static SORT_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
+
+/// What the compressed graph costs per entry of the pattern, learned from
+/// the compressions.
+static COMPRESS_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
+
 /// Groups of indistinguishable vertices of a symmetric pattern.
 ///
 /// Group `g` holds the original vertices `members[ptr[g]..ptr[g + 1]]` in
@@ -68,9 +82,12 @@ impl Supervariables {
             merged(a).eq(merged(b))
         };
 
-        let keys: Vec<(usize, u64)> = crate::parallel::map(n, 1, key);
+        let entries = pattern.row_idx.len() as f64;
+        let hashes = crate::parallel::Work::of(entries, &KEY_RATE);
+        let keys: Vec<(usize, u64)> = crate::parallel::map(n, hashes, key);
         let mut by_key: Vec<usize> = (0..n).collect();
-        crate::parallel::sort_unstable_by_key(&mut by_key, |&v| (keys[v], v));
+        let sort = crate::parallel::Work::of(n as f64, &SORT_RATE);
+        crate::parallel::sort_unstable_by_key(&mut by_key, sort, |&v| (keys[v], v));
 
         // Within a run of equal keys, split into exact-equality classes
         // (hash collisions are rare; the leader is the smallest member).
@@ -98,8 +115,8 @@ impl Supervariables {
             at += r.len();
         }
         let runs: Vec<(&mut [usize], usize)> = runs.into_iter().zip(offsets).collect();
-        let min_runs = crate::constants::SUPERVARIABLE_PIECE_MIN_RUNS;
-        crate::parallel::for_each_owned(runs, min_runs, |(lead, start)| {
+        let splits = crate::parallel::Work::of(n as f64, &SORT_RATE);
+        crate::parallel::for_each_owned(runs, splits, |(lead, start)| {
             let members = &by_key[start..start + lead.len()];
             for i in 0..members.len() {
                 if lead[i] != NONE {
@@ -173,9 +190,10 @@ impl Supervariables {
     pub fn compress(&self, pattern: &CscPattern) -> Option<(Vec<i32>, Vec<i32>)> {
         let n_groups = self.len();
         i32::try_from(pattern.row_idx.len()).ok()?;
-        let blocks = (crate::constants::FINE_PIECES_PER_WORKER * crate::parallel::threads())
-            .clamp(1, n_groups.max(1));
-        let parts: Vec<(Vec<i32>, Vec<i32>)> = crate::parallel::map(blocks, 1, |b| {
+        let work = crate::parallel::Work::of(pattern.row_idx.len() as f64, &COMPRESS_RATE);
+        let k = crate::parallel::width(work.time(), n_groups);
+        let blocks = (crate::constants::FINE_PIECES_PER_WORKER * k).clamp(1, n_groups.max(1));
+        let parts: Vec<(Vec<i32>, Vec<i32>)> = crate::parallel::map(blocks, work, |b| {
             let (g0, g1) = (b * n_groups / blocks, (b + 1) * n_groups / blocks);
             let (mut lens, mut rows) = (Vec::with_capacity(g1 - g0), Vec::new());
             let mut col: Vec<i32> = Vec::new();

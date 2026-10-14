@@ -225,7 +225,10 @@ fn nd_subproblem(
     acc.add(&local);
 
     let (seed_a, seed_b) = (child_seed(seed, 1), child_seed(seed, 2));
-    if n >= opts.parallel_min_vertices && rayon::current_num_threads() > 1 {
+    let min_vertices = opts
+        .parallel_min_vertices
+        .unwrap_or(crate::constants::PAR_MIN_VERTICES);
+    if n >= min_vertices && rayon::current_num_threads() > 1 {
         let (ra, rb) = rayon::join(
             || nd_subproblem(sub_a, map_a, offset, seed_a, opts, writer, acc),
             || nd_subproblem(sub_b, map_b, offset + na, seed_b, opts, writer, acc),

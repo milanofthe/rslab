@@ -296,15 +296,31 @@ impl KluSymbolic {
     /// by the setting, or under `Auto` when the input is large enough and no
     /// block holds half the matrix (the a-priori work floor and Amdahl ratio;
     /// the refactorization decides from the exact plan instead).
-    pub(super) fn parallel_blocks(&self, settings: &KluSettings) -> bool {
+    pub(super) fn parallel_blocks<T: Scalar>(&self, settings: &KluSettings) -> bool {
         let nblocks = self.block_ptr.len() - 1;
-        (match settings.parallel {
-            KluParallel::On => true,
-            KluParallel::Off => false,
-            KluParallel::Auto => {
-                self.nnz >= settings.par_min_nnz && self.max_block_size() * 2 <= self.n
+        if nblocks < 2 {
+            return false;
+        }
+        match (settings.parallel, settings.par_min_nnz) {
+            (KluParallel::On, _) => true,
+            (KluParallel::Off, _) => false,
+            (KluParallel::Auto, Some(min)) => {
+                self.nnz >= min && self.max_block_size() * 2 <= self.n
             }
-        }) && nblocks > 1
+            // The blocks' input entries at what an entry has cost, in as
+            // many equal pieces as the largest block leaves room for.
+            (KluParallel::Auto, None) => {
+                let entries = |b: usize| {
+                    (self.pat_col_ptr[self.block_ptr[b + 1]] - self.pat_col_ptr[self.block_ptr[b]])
+                        as f64
+                };
+                let largest = (0..nblocks).map(entries).fold(0.0, f64::max).max(1.0);
+                let total = self.nnz as f64;
+                let pieces = ((total / largest) as usize).min(nblocks);
+                let rate = super::factor::FACTOR_RATE.of::<T>().ns_per_op();
+                crate::parallel::width(total * rate, pieces) > 1
+            }
+        }
     }
 
     /// **A-priori** factor fill (`L` + `U` + diagonal + off-block entries),
@@ -373,7 +389,7 @@ impl KluSymbolic {
         let nblocks = (self.block_ptr.len() - 1) as u64;
         let price = |(v, o): (u64, u64)| v * vb + o;
         let (idx, word) = (IDX32_BYTES as u64, WORD_BYTES as u64);
-        let parallel = self.parallel_blocks(settings);
+        let parallel = self.parallel_blocks::<T>(settings);
         let threads = if parallel {
             crate::parallel::threads()
         } else {
@@ -391,26 +407,26 @@ impl KluSymbolic {
         };
         // Held besides: the row scaling, the final row permutation and its
         // inverse, copies of the column permutation and the block pointers,
-        // the refactorization's scatter program and its replay plan (a
-        // level-by-level block's columns and level bounds).
+        // the refactorization's scatter program and its replay plan (per
+        // block whose columns can replay side by side, its columns, level
+        // bounds and level work).
         let around = word * n
             + 2 * word * n
             + word * n
             + word * (nblocks + 1)
             + word * nnz
             + 2 * word * nblocks;
-        let force = settings.parallel == KluParallel::On;
         let (mut planned, mut levels) = (0usize, 0u64);
-        for (b, &(w_b, nlev)) in fill.replay.iter().enumerate() {
+        for (b, &(_, nlev)) in fill.replay.iter().enumerate() {
             let bn = self.block_ptr[b + 1] - self.block_ptr[b];
-            if let Some(pipelined) = super::factor::replay_choice(bn, nlev, w_b, force, settings) {
+            if super::factor::planned(bn, nlev, settings.parallel) {
                 planned += 1;
-                if !pipelined {
-                    levels += (std::mem::size_of::<Ki>() * bn + IDX32_BYTES * (nlev + 1)) as u64;
-                }
+                levels += (std::mem::size_of::<Ki>() * bn
+                    + IDX32_BYTES * (nlev + 1)
+                    + std::mem::size_of::<u64>() * nlev) as u64;
             }
         }
-        let entry = std::mem::size_of::<(usize, Replay)>();
+        let entry = std::mem::size_of::<BlockPlan>();
         let around = around + (crate::memory::pushed(planned) * entry) as u64 + levels;
         let factor = arrays + around;
         // While the blocks are factored: the scaling, the scatter program,

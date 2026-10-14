@@ -259,7 +259,14 @@ fn factor_left_looking<T: Scalar>(
         )
     };
     let emit_free = |k: usize| ldlt_emit_and_free(k, &emit, sym, sched);
-    crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
+    crate::numeric::supernodal::ll_forest(
+        sym,
+        sched,
+        &emit.refcount,
+        &factor_node,
+        &emit_free,
+        crate::dense::gemm_backend::ns_per_flop::<T>(),
+    )?;
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);

@@ -194,7 +194,9 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // then runs of `U12` columns in `ut`.
     if tiled {
         let (gloc_ref, gloc_u_ref) = (&gloc, &gloc_u);
-        crate::parallel::chunks_mut(&mut *lbuf, nrow_l * tile_w, |ti, slab| {
+        let rate = crate::numeric::supernodal::CMOD_RATE.of::<T>();
+        let work = crate::parallel::Work::of(plan.lwork as f64, rate);
+        crate::parallel::chunks_mut(&mut *lbuf, nrow_l * tile_w, work, |ti, slab| {
             let c0 = ti * tile_w;
             let c1 = (c0 + tile_w).min(ncol);
             let mut lupd = pools.slab.take();
@@ -248,7 +250,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             // A slab is the run `[u0, u1)` of U12's columns: rows `ncol + u0..ncol + u1`
             // of every `ut` column, disjoint between slabs.
             let up = PanelPtr(ut.as_mut_ptr());
-            crate::parallel::for_each(cn_u.div_ceil(tile_u), 1, |ti| {
+            let work = crate::parallel::Work::of(plan.uwork as f64, rate);
+            crate::parallel::for_each(cn_u.div_ceil(tile_u), work, |ti| {
                 let u0 = ti * tile_u;
                 let u1 = (u0 + tile_u).min(cn_u);
                 let g0 = cols_u[ncol + u0];
@@ -549,7 +552,9 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 let cs = cn_l.div_ceil(nthreads).max(1);
                 // Capture the whole `pp` (Send+Sync) - destructure inside so Rust
                 // does not disjoint-capture the bare `*mut T`.
-                crate::parallel::for_each(nthreads, 1, |c| {
+                let rate = crate::numeric::supernodal::LOOP_RATE.of::<T>();
+                let work = crate::parallel::Work::of((cn_l * pw * pw) as f64, rate);
+                crate::parallel::for_each(nthreads, work, |c| {
                     let r0 = (ncol + c * cs).min(nrow_l);
                     let r1 = (r0 + cs).min(nrow_l);
                     if r0 >= r1 {
@@ -582,7 +587,9 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         // Profiled at 22% of cdiv CPU when serial (MoM fronts).
         if (ncol - ke) * pw * pw >= ll_cdiv_par {
             let (head, tail) = lbuf.split_at_mut(ke * nrow_l);
-            crate::parallel::chunks_mut(tail, nrow_l, |_, col| {
+            let rate = crate::numeric::supernodal::LOOP_RATE.of::<T>();
+            let work = crate::parallel::Work::of(((ncol - ke) * pw * pw) as f64, rate);
+            crate::parallel::chunks_mut(tail, nrow_l, work, |_, col| {
                 for r in (kb + 1)..ke {
                     let mut acc = col[r];
                     for i in kb..r {
@@ -625,7 +632,9 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         if cn_u * pw * pw >= ll_cdiv_par {
             let lref: &[T] = lbuf;
             let rows = kt.k.trsm_rows;
-            crate::parallel::for_each((nrow_u - ncol).div_ceil(rows), 1, |b| {
+            let rate = crate::numeric::supernodal::LOOP_RATE.of::<T>();
+            let work = crate::parallel::Work::of((cn_u * pw * pw) as f64, rate);
+            crate::parallel::for_each((nrow_u - ncol).div_ceil(rows), work, |b| {
                 let t0 = ncol + b * rows;
                 trsm_u(t0, (t0 + rows).min(nrow_u), up, lref)
             });

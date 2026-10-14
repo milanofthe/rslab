@@ -297,17 +297,22 @@ pub struct KernelSettings {
     /// Below this an update runs as a scalar loop instead of a SIMD GEMM.
     /// Default `4096`.
     pub scalar_gate: usize,
-    /// From this an update GEMM runs rayon-parallel. Default `1e6`.
+    /// From this an update GEMM takes the parallel path (its kernel and
+    /// blocking, which fix the rounding of complex products), on as many
+    /// threads as its work is worth there, one included
+    /// ([`crate::parallel`]). Default `1e6`.
     pub par_gemm: usize,
-    /// From this a panel's trailing update runs rayon-parallel. Default
-    /// `8e6`.
+    /// From this a panel's trailing update takes the parallel path, on as
+    /// many threads as it is worth. Default `8e6`.
     pub par_cdiv: usize,
-    /// From this the work of one supernode forks across workers: its updates
-    /// (cmod flops) and its panel factorization (cdiv work `nrow * ncol^2`).
-    /// A small node that forks pays the join-steal latency: its waiting
-    /// thread steals other work, often a whole sibling subtree, and the
-    /// node's chain stalls (74 ms of cmod at 0.03 Gflop measured on a
-    /// 1046x170 node). Default `1e8`.
+    /// From this the work of one supernode takes the forking path: its
+    /// updates (cmod flops) in column slabs and its panel factorization
+    /// (cdiv work `nrow * ncol^2`) in parallel sections, each on as many
+    /// threads as it is worth. A small node that forks pays the join-steal
+    /// latency: its waiting thread steals other work, often a whole sibling
+    /// subtree, and the node's chain stalls (74 ms of cmod at 0.03 Gflop
+    /// measured on a 1046x170 node). The path fixes the rounding, so this
+    /// is a structural gate, never one of time. Default `1e8`.
     pub fork_min_flops: usize,
     /// Column tile of the lower-triangular Schur GEMM. Default `256`.
     pub schur_tile: usize,
@@ -413,22 +418,23 @@ pub struct SolveSettings {
     /// Independent leaf subtrees the tree is cut into for the parallel
     /// sweeps. Default `128`.
     pub leaf_subtrees: usize,
-    /// Work of a triangular sweep from which it runs on the thread pool, in
-    /// the factor's panel entries times the right-hand sides, up to four
-    /// (not the fmadds of
-    /// [`KluSettings::par_min_work`](crate::KluSettings::par_min_work)). A
-    /// smaller sweep runs on the calling thread, where handing it to the
-    /// pool costs more than it saves (several times the solve at a few
-    /// thousand unknowns). The same bits either way. Default `1_048_576`,
-    /// about where the two meet.
-    pub par_min_work: usize,
+    /// A fixed gate in place of the time gate: the work of a triangular
+    /// sweep from which it runs on the thread pool, in the factor's panel
+    /// entries times the right-hand sides, up to four (not the fmadds of
+    /// [`KluSettings::par_min_work`](crate::KluSettings::par_min_work)).
+    /// Default `None`: a sweep runs on the pool where its work, at the
+    /// rate the sweeps have measured, is worth more than one thread there
+    /// ([`crate::parallel`]); a smaller one on the calling thread, where
+    /// handing it to the pool costs more than it saves. The same bits
+    /// either way.
+    pub par_min_work: Option<usize>,
 }
 
 impl Default for SolveSettings {
     fn default() -> Self {
         Self {
             leaf_subtrees: SOLVE_LEAF_SUBTREES,
-            par_min_work: SOLVE_PAR_MIN_ENTRY_RHS,
+            par_min_work: None,
         }
     }
 }
@@ -755,7 +761,12 @@ pub(crate) fn in_scoped_pool<R: Send>(
         threads
     };
     match scoped_pool(n, stack_bytes) {
-        Some(pool) => enter(&pool, f),
+        // The pool's section cost is measured on its first use, before any
+        // work keeps its workers busy.
+        Some(pool) => enter(&pool, || {
+            crate::parallel::prepare();
+            f()
+        }),
         None => f(),
     }
 }

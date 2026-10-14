@@ -3,6 +3,10 @@
 use super::LlSchedule;
 use crate::error::RslabError;
 
+/// What releasing one updater costs, learned from the releases.
+static FREE_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::FREE_NS_PER_UPDATER);
+
 /// The left-looking factorization of the whole assembly forest, shared
 /// by the LDLT/LU twins and scheduled by dependency counts instead of fork-join:
 /// every node is one task, started by whichever thread finishes its last child.
@@ -19,12 +23,18 @@ use crate::error::RslabError;
 /// last consumer it was, emit itself if nothing above reads it), and what a
 /// node computes does not depend on the thread running it. There is no
 /// recursion either, so deep chain trees need no large worker stacks here.
+///
+/// The nodes run as tasks only where the forest's work (its fronts'
+/// multiply-adds at `ns_per_flop`) is worth more than one thread across its
+/// leaves; else in index order on the calling thread, each node still as
+/// wide inside as its own work is worth.
 pub(crate) fn ll_forest(
     sym: &crate::symbolic::SymbolicFactorization,
     sched: &LlSchedule,
     refcount: &[std::sync::atomic::AtomicUsize],
     factor_node: &(dyn Fn(usize) -> Result<(), RslabError> + Sync),
     emit_free: &(dyn Fn(usize) + Sync),
+    ns_per_flop: f64,
 ) -> Result<(), RslabError> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     const NONE: usize = usize::MAX;
@@ -50,21 +60,22 @@ pub(crate) fn ll_forest(
                 emit_free(k);
             }
         };
-        if sched.updaters(s).len() >= crate::constants::FREE_PAR_MIN_UPDATERS {
-            let up = sched.updaters(s);
-            crate::parallel::for_each(up.len(), 1, |i| free(up[i] as usize));
-        } else {
-            for &k in sched.updaters(s) {
-                free(k as usize);
-            }
-        }
+        let up = sched.updaters(s);
+        let work = crate::parallel::Work::of(up.len() as f64, &FREE_RATE);
+        crate::parallel::for_each(up.len(), work, |i| free(up[i] as usize));
         if refcount[s].load(Ordering::Relaxed) == 0 {
             emit_free(s);
         }
         true
     };
-    if crate::parallel::threads() == 1 {
-        // One worker: the supernodes in index order, children before their
+    let flops: f64 = (0..sym.supernodes.len())
+        .map(|s| {
+            let nrow = sched.rows(s).len() as f64;
+            nrow * nrow * sym.supernodes[s].ncol as f64
+        })
+        .sum();
+    if crate::parallel::width(flops * ns_per_flop, sched.leaves.len()) < 2 {
+        // Not worth tasks: the supernodes in index order, children before their
         // parents, with no task per node.
         for s in 0..sym.supernodes.len() {
             if !node(s) {
@@ -94,7 +105,7 @@ pub(crate) fn ll_forest(
             .collect();
         let node: &(dyn Fn(usize) -> bool + Sync) = &node;
         let (parent, pending) = (&sched.parent[..], &pending[..]);
-        crate::parallel::scope(|sc| {
+        crate::parallel::scope(crate::parallel::Work::ns(f64::INFINITY), |sc| {
             for &leaf in &sched.leaves {
                 sc.spawn(move |sc| run(sc, leaf, node, parent, pending));
             }

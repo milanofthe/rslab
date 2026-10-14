@@ -149,7 +149,10 @@ macro_rules! check_solves {
 
 #[test]
 fn a_warm_newton_loop_allocates_nothing() {
-    let opts = SolverSettings::default();
+    // The calling thread's path: sweeps pinned to it (a sweep worth the
+    // pool enters it, and the pool's queues allocate now and then).
+    let mut opts = SolverSettings::default();
+    opts.solve.par_min_work = Some(usize::MAX);
     for m in [6, 40] {
         // KLU: the refactor and the solves.
         let (n, r, c, v) = grid(m, false);
@@ -180,7 +183,7 @@ fn a_warm_newton_loop_allocates_nothing() {
         // the pool's own allocations, and the bits of the calling thread's
         // path.
         let mut par = opts.clone();
-        par.solve.par_min_work = 0;
+        par.solve.par_min_work = Some(0);
         let lu_par = LuSymbolic::analyze(&a, &par)
             .unwrap()
             .factor(&a, &par)

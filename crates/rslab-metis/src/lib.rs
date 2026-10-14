@@ -91,11 +91,14 @@ pub struct MetisOptions {
     /// multiple of the best one seen.
     pub max_overshoot: f64,
     /// Subproblems with at least this many vertices order their two sides
-    /// in parallel. Affects time only, not the permutation.
-    pub parallel_min_vertices: usize,
+    /// in parallel. Affects time only, not the permutation. `None` (default)
+    /// is [`constants::PAR_MIN_VERTICES`]; a caller that knows what a
+    /// section costs on its pool sets its own.
+    pub parallel_min_vertices: Option<usize>,
     /// Levels with at least this many adjacency entries contract in
-    /// parallel blocks. Affects time only, not the permutation.
-    pub parallel_min_edges: usize,
+    /// parallel blocks. Affects time only, not the permutation. `None`
+    /// (default) is [`constants::PAR_MIN_EDGES`].
+    pub parallel_min_edges: Option<usize>,
 }
 
 impl Default for MetisOptions {
@@ -110,8 +113,8 @@ impl Default for MetisOptions {
             fm_passes: constants::FM_PASSES,
             move_limit: constants::MOVE_LIMIT,
             max_overshoot: constants::MAX_OVERSHOOT,
-            parallel_min_vertices: constants::PAR_MIN_VERTICES,
-            parallel_min_edges: constants::PAR_MIN_EDGES,
+            parallel_min_vertices: None,
+            parallel_min_edges: None,
         }
     }
 }

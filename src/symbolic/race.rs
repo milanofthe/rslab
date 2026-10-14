@@ -133,7 +133,13 @@ pub(super) fn race(
     }
     let seed = ordering.nd.seed;
     let n = full.n;
-    let parallel = n > r.nd_min_n && crate::parallel::threads() > 1;
+    // The candidates side by side where their orderings are worth more
+    // than one thread; nested dissection is speculated on only then.
+    let entries = full.row_idx.len() as f64;
+    let rate = &super::ordering_graph::ORDER_RATE;
+    let all = crate::parallel::Work::of(entries * r.candidates.len() as f64, rate);
+    let side = crate::parallel::width(all.time(), r.candidates.len()) > 1;
+    let parallel = n > r.nd_min_n && side;
     // The lower triangle's entry count, as the gate was calibrated on it.
     let eager = parallel && (full.row_idx.len() + n) / 2 >= r.eager_nd_min_nnz;
     // One ordering graph for every candidate: built per candidate it cost as
@@ -144,7 +150,13 @@ pub(super) fn race(
     let ensemble = r.ensemble_size.max(1);
     let nd: Vec<OnceLock<Option<Prefix>>> = (0..ensemble).map(|_| OnceLock::new()).collect();
     let started: Vec<AtomicBool> = (0..ensemble).map(|_| AtomicBool::new(false)).collect();
-    let (mut best, last_err, seeds) = crate::parallel::scope(|sc| {
+    // Nested dissection, where it may run, is worth a scope on its own.
+    let scoped = if n > r.nd_min_n {
+        crate::parallel::Work::ns(f64::INFINITY)
+    } else {
+        all
+    };
+    let (mut best, last_err, seeds) = crate::parallel::scope(scoped, |sc| {
         let start = |i: usize| {
             if !started[i].swap(true, Ordering::Relaxed) {
                 let nd = &nd;
@@ -158,6 +170,7 @@ pub(super) fn race(
             start(0);
         }
         let (head, tail) = crate::parallel::join(
+            all,
             || {
                 let px = prefix(graph, ordering, first, seed);
                 if parallel
@@ -167,7 +180,10 @@ pub(super) fn race(
                 }
                 px
             },
-            || crate::parallel::map(rest.len(), 1, |i| prefix(graph, ordering, rest[i], seed)),
+            || {
+                let work = crate::parallel::Work::of(entries * rest.len() as f64, rate);
+                crate::parallel::map(rest.len(), work, |i| prefix(graph, ordering, rest[i], seed))
+            },
         );
         let mut best: Option<Prefix> = None;
         let mut last_err: Option<RslabError> = None;

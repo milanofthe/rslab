@@ -23,6 +23,10 @@
 use crate::numeric::supernodal::{PanelPtr, ScratchPool};
 use crate::scalar::Scalar;
 
+/// What zeroing one entry of a new factor costs, learned from the fills.
+static ZERO_RATE: crate::parallel::ScalarRates =
+    crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
+
 /// A lower triangular factor in supernodal panel form (see the module docs).
 #[derive(Clone, Debug)]
 pub struct PanelFactor<T> {
@@ -200,6 +204,7 @@ impl<T: Scalar> PanelArena<T> {
         crate::parallel::chunks_mut(
             &mut vals.spare_capacity_mut()[..total],
             crate::constants::ZERO_FILL_CHUNK,
+            crate::parallel::Work::of(total as f64, ZERO_RATE.of::<T>()),
             |_, chunk| {
                 chunk.iter_mut().for_each(|v| {
                     v.write(T::zero());

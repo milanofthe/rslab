@@ -117,7 +117,7 @@ struct KluFill {
     seq_block: (u64, u64),
     par_blocks: (u64, u64),
     /// Per block its replay work and the levels of its elimination DAG, as
-    /// the refactorization's plan reads them (`factor::replay_choice`).
+    /// the refactorization's plan reads them (`factor::planned`).
     replay: Vec<(u64, usize)>,
 }
 
@@ -188,9 +188,9 @@ struct KluFactors<T> {
     /// Per-original-row reciprocal scale factor (all 1 when scaling is off).
     rs_inv: Vec<f64>,
     scaled: bool,
-    /// Parallel per-block execution resolved for the FIRST factor (a-priori
-    /// proxies of the work/concurrency principle; the refactor uses the exact
-    /// plan in `par_refactor`/`pipelined` instead). Read by tests only.
+    /// Whether the first factor ran its blocks side by side (decided on the
+    /// blocks' input entries; a refactor decides on the exact replay work
+    /// in `plan` instead). Read by tests only.
     #[cfg_attr(not(test), allow(dead_code))]
     parallel: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
@@ -218,33 +218,80 @@ struct KluFactors<T> {
     /// destination: F slot `i` as `KI_FBIT | i`, else work-vector position.
     scatter_expect: Vec<Ki>,
     scatter_target: Vec<Ki>,
-    /// The blocks whose refactor replays columns side by side, and how
-    /// (empty when none qualifies or parallelism is off), plus the
-    /// block-parallel refactor decision. Both come from the exact
-    /// work/critical-path plan of [`compute_replay_plan`].
-    pipelined: Vec<(usize, Replay)>,
-    par_refactor: bool,
+    /// The work of the refactorization's replay, from the pivot-final
+    /// pattern, which every refactor decides its parallel replay on with the
+    /// pool it runs on ([`ReplayPlan`]).
+    plan: ReplayPlan,
     /// The next refactor's row scaling, swapped with `rs_inv` once it
     /// succeeds, and the sequential replay's work vector: kept so a
     /// refactor allocates nothing.
     rs_next: Vec<f64>,
     replay_x: Vec<T>,
-    /// The pipelined replays' work vectors, one per worker, all-zero.
+    /// The parallel replays' work vectors, one per worker, all-zero.
     replay_xs: Vec<Vec<T>>,
     /// Which columns the current pipelined replay has done.
     ready: Ready,
+    /// How the current refactor replays each block of `plan.blocks`.
+    modes: Vec<Mode>,
 }
 
-/// How a block's refactor replays its columns side by side.
+/// How a refactor replays a block of the [`ReplayPlan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Column after column on the calling thread.
+    Serial,
+    /// Level by level, each level on as many threads as it is worth.
+    Levels,
+    /// Pipelined on this many threads.
+    Pipelined(usize),
+}
+
+/// The work of a refactorization's replay, in fmadds plus
+/// [`COL_WORK`](crate::constants::COL_WORK) a column, as a refactor decides
+/// on it: per block that can replay its columns side by side its
+/// elimination DAG ([`BlockPlan`]), and the total and largest block work
+/// for replaying the blocks side by side. Empty under
+/// [`KluParallel::Off`].
+#[derive(Debug, Clone, Default)]
+struct ReplayPlan {
+    /// The policy and the user's structural floors the factorization was
+    /// made under ([`KluSettings::parallel`], [`KluSettings::par_min_work`],
+    /// [`KluSettings::par_min_ratio`]).
+    policy: KluParallel,
+    min_work: Option<u64>,
+    min_ratio: Option<f64>,
+    /// The blocks of two columns or more whose DAG has two levels or more.
+    blocks: Vec<BlockPlan>,
+    /// The replay work of all blocks, and of the largest.
+    total: u64,
+    largest: u64,
+    /// Every planned block replays so, whatever it is worth (tests).
+    #[cfg(test)]
+    forced: Option<Mode>,
+}
+
+/// A block's elimination DAG as its replay runs side by side: level by
+/// level (a section per level of two columns or more), or pipelined (every
+/// column taken in order by the next free thread, waiting for each `L`
+/// column it reads just before it reads it).
 #[derive(Debug, Clone)]
-enum Replay {
-    /// Level by level of its elimination DAG, a parallel section per level:
-    /// level `l` is the columns `cols[ptr[l]..ptr[l + 1]]`, each reading only
-    /// `L` columns of earlier levels.
-    Levels { ptr: Vec<u32>, cols: Vec<Ki> },
-    /// Pipelined: every column taken in order by the next free piece, waiting
-    /// for each `L` column it reads just before it reads it.
-    Pipelined,
+struct BlockPlan {
+    /// The block.
+    b: usize,
+    /// Its replay work, and the work of its longest dependency chain.
+    work: u64,
+    path: u64,
+    /// What a pipelined replay hands between threads: its columns and the
+    /// `L` columns they read.
+    handoffs: u64,
+    /// The most work of a level of two columns or more (none below it).
+    widest: u64,
+    /// Level `l` is the columns `cols[ptr[l]..ptr[l + 1]]`, ascending, each
+    /// reading only `L` columns of earlier levels; `level_work[l]` their
+    /// replay work.
+    ptr: Vec<u32>,
+    cols: Vec<Ki>,
+    level_work: Vec<u64>,
 }
 
 /// Per column the number of the refactor that last replayed it: a column

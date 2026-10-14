@@ -38,21 +38,6 @@ pub const STACK_MIN: usize = 16 * 1024 * 1024;
 /// Contract: timing.
 pub const STACK_MAX: usize = if usize::BITS >= 64 { 8 << 30 } else { 1 << 30 };
 
-/// Updaters of a supernode from which their release after its
-/// factorization runs on the pool (updaters).
-/// Used by: `supernodal::forest::ll_forest`.
-/// Why: the wide top-of-tree frees are disjoint and worth spreading; a
-/// short list is cheaper on the calling thread.
-/// Contract: timing.
-pub const FREE_PAR_MIN_UPDATERS: usize = 64;
-
-/// Entries from which the AMD input pattern is transposed in parallel
-/// blocks (nonzeros).
-/// Used by: `ordering::amd`.
-/// Why: below it the parallel section costs more than the transpose.
-/// Contract: timing.
-pub const AMD_TRANSPOSE_PAR_MIN_NNZ: usize = 1 << 16;
-
 /// Default cap of the predicted worker count, `Threads::Auto { max }`
 /// (workers).
 /// Used by: `Threads::default`.
@@ -65,10 +50,11 @@ pub const AMD_TRANSPOSE_PAR_MIN_NNZ: usize = 1 << 16;
 pub const DEFAULT_MAX_THREADS: usize = 4;
 
 /// Pieces a parallel loop is cut into per worker (pieces per worker).
-/// Used by: `parallel::piece_len` (every `crate::parallel` loop), the
-/// column blocks of a GEMM on a lent pool (`dense::gemm_backend::gemm`),
-/// the row chunks of the blocked ancestor sweep
-/// (`supernodal::solve::SolvePlan::apex_forward`).
+/// Used by: `parallel::piece_len` (every `crate::parallel` loop, per
+/// thread it runs on), the column blocks of a GEMM on a lent pool
+/// (`dense::gemm_backend::gemm`), the row chunks of the blocked ancestor
+/// sweep (`supernodal::solve::SolvePlan::apex_forward`), the pieces of a
+/// KLU refactor's levels and blocks (`KluSolver::refactor`).
 /// Why: a few pieces per worker balance uneven pieces while keeping the
 /// per-piece overhead small.
 /// Contract: timing.
@@ -88,36 +74,161 @@ pub const FINE_PIECES_PER_WORKER: usize = 8;
 /// Contract: timing (the per-entry sums do not depend on the blocking).
 pub const GEMM_PIECE_MIN_COLS: usize = 16;
 
-/// Fewest columns per piece of the LU analysis's symmetrization sort
-/// (columns).
-/// Used by: `lu::solver::symmetrized_lower_pattern`.
-/// Why: a column's sort is short; pieces must carry many.
+/// A section goes wide only if that saves at least this fraction of its
+/// serial time (1).
+/// Used by: `parallel::Dispatch::width`.
+/// Why: margin for the scatter of the measured costs and the learned
+/// rates, so a section near break-even stays serial instead of flipping
+/// between the two.
 /// Contract: timing.
-pub const SYMMETRIZE_PIECE_MIN_COLS: usize = 256;
+pub const GAIN: f64 = 0.2;
 
-/// Fewest columns per piece of the LU analysis's diagonal check (columns).
-/// Used by: `lu::solver::diagonal_needs_matching`.
-/// Why: one column's check is a few comparisons.
+/// What a section costs a lent pool that measures nothing
+/// (`parallel::Dispatch::assumed`): this, plus [`ASSUMED_HELPER_NS`] per
+/// thread beyond the calling one (ns).
+/// Used by: `parallel::Pool::dispatch` (its default).
+/// Why: the wake and hand-off of a desktop CPU's pool; a pool that knows
+/// better says so through `Pool::dispatch`.
+/// Machine: a prior for pools that do not measure themselves.
 /// Contract: timing.
-pub const DIAGONAL_CHECK_PIECE_MIN_COLS: usize = 1024;
+pub const ASSUMED_SECTION_NS: f64 = 2_000.0;
 
-/// Fewest entries per piece of the MC64 logarithm pass (entries).
-/// Used by: `scaling::mc64::compute_matching_general`.
-/// Why: one entry is one logarithm.
+/// See [`ASSUMED_SECTION_NS`] (ns per helper thread).
+/// Used by: `parallel::Dispatch::assumed`.
+/// Why: each helper is one more hand-off and one more cache to fill.
+/// Machine: a prior, as [`ASSUMED_SECTION_NS`].
 /// Contract: timing.
-pub const MC64_LOG_PIECE_MIN_ENTRIES: usize = 4096;
+pub const ASSUMED_HELPER_NS: f64 = 1_000.0;
 
-/// Fewest columns per piece of the MC64 column-maximum pass (columns).
-/// Used by: `scaling::mc64::compute_matching_general`.
-/// Why: a column is a short scan.
+/// Sections timed per thread count when a pool's section cost is measured
+/// (`parallel::Dispatch::measure`, the median taken), after as many to wake
+/// the workers (sections).
+/// Used by: `parallel::Dispatch::measure`.
+/// Why: enough for a stable median, about a millisecond per thread count.
 /// Contract: timing.
-pub const MC64_COLMAX_PIECE_MIN_COLS: usize = 256;
+pub const CALIBRATION_ROUNDS: usize = 64;
 
-/// Fewest runs per piece of the supervariable detection (runs).
-/// Used by: `symbolic::supervariables::Supervariables::of`.
-/// Why: a run of equal keys is a short comparison.
+/// How long each piece of a calibration section is busy (ns).
+/// Used by: `parallel::Dispatch::measure`.
+/// Why: long enough for an awake pool's threads to take their pieces before
+/// the caller has run them all (a work-stealing pool runs a piece nobody
+/// took on the caller, and instant pieces would make every section look
+/// free), and about the least work a section is ever worth.
 /// Contract: timing.
-pub const SUPERVARIABLE_PIECE_MIN_RUNS: usize = 64;
+pub const CALIBRATION_PIECE_NS: u64 = 5_000;
+
+/// Cache lines each piece of a calibration section writes (lines).
+/// Used by: `parallel::Dispatch::measure`.
+/// Why: the calibration pays the hand-over of a piece's output a real
+/// section pays, not only the queue's.
+/// Contract: timing.
+pub const CALIBRATION_LINES: usize = 8;
+
+/// A thread measures one in this many of the runs a
+/// [`Rate`](crate::parallel::Rate) could learn from (runs).
+/// Used by: `parallel::Rate::sample`.
+/// Why: two clock reads per sampled run, too few to show.
+/// Contract: timing.
+pub const RATE_SAMPLE_EVERY: u32 = 16;
+
+/// A [`Rate`](crate::parallel::Rate) learns only from runs it estimates at
+/// this many ns or more (ns).
+/// Used by: `parallel::Rate::sample`.
+/// Why: two clock reads do not show against it, and the rate is updated
+/// rarely enough that the threads do not contend for it.
+/// Contract: timing.
+pub const RATE_MIN_NS: f64 = 2_000.0;
+
+/// The weight of a new measurement in a rate's running mean (1).
+/// Used by: `parallel::Rate::learn`.
+/// Why: a few runs move it, one outlier does not.
+/// Contract: timing.
+pub const RATE_WEIGHT: f32 = 0.25;
+
+/// What a complex multiply-add costs against a real one, the factor
+/// between the real and the complex prior of every rate (1).
+/// Used by: `parallel::ScalarRates`.
+/// Why: four real multiply-adds make one complex one.
+/// Contract: timing.
+pub const COMPLEX_OPS: f32 = 4.0;
+
+/// ns per multiply-add of a dense product (`m n k` of a GEMM), before any
+/// is measured (ns per multiply-add).
+/// Used by: `dense::gemm_backend::gemm`, `numeric::supernodal::node`.
+/// Why: a SIMD kernel's rate with its packing.
+/// Machine: a prior, replaced by what the sequential products measure.
+/// Contract: timing.
+pub const GEMM_NS_PER_FLOP: f32 = 0.05;
+
+/// ns per multiply-add of the scalar loops of the dense kernels (a panel's
+/// deep rows, a triangular solve's columns, a slab's updates), before any is
+/// measured (ns per multiply-add).
+/// Used by: `numeric::ldlt`, `numeric::lu` (their row and column sweeps).
+/// Why: a scalar loop over strided columns.
+/// Machine: a prior, replaced by what the runs measure.
+/// Contract: timing.
+pub const LOOP_NS_PER_FLOP: f32 = 0.5;
+
+/// ns per panel entry and right-hand side of a supernodal triangular sweep,
+/// before any is measured (ns per entry).
+/// Used by: `supernodal::solve`.
+/// Why: one multiply-add on a streamed panel entry.
+/// Machine: a prior, replaced by what the sweeps measure.
+/// Contract: timing.
+pub const SOLVE_NS_PER_ENTRY: f32 = 0.5;
+
+/// ns per entry of a pass over a pattern or a vector (a scan, a copy, a
+/// transpose, a fill, a comparison), before any is measured (ns per entry).
+/// Used by: the analysis passes (`ordering::amd`, `scaling::mc64`,
+/// `lu::solver`, `symbolic::supervariables`), the zero fill of a factor,
+/// the Krylov reductions.
+/// Why: a streamed entry and a random access.
+/// Machine: a prior, replaced by what the passes measure.
+/// Contract: timing.
+pub const SCAN_NS_PER_ENTRY: f32 = 1.0;
+
+/// ns per entry of a pass that sorts, hashes or takes a logarithm per
+/// entry, before any is measured (ns per entry).
+/// Used by: `scaling::mc64`, `lu::solver`, `symbolic::supervariables`.
+/// Why: a comparison sort's few passes, a hash, a `ln`.
+/// Machine: a prior, replaced by what the passes measure.
+/// Contract: timing.
+pub const SORT_NS_PER_ENTRY: f32 = 10.0;
+
+/// ns per updater released after a supernode's factorization, before any
+/// is measured (ns per updater).
+/// Used by: `supernodal::forest::ll_forest`.
+/// Why: a shared counter, and for the last consumer a panel freed.
+/// Machine: a prior, replaced by what the releases measure.
+/// Contract: timing.
+pub const FREE_NS_PER_UPDATER: f32 = 100.0;
+
+/// ns per entry of the symmetrized pattern a fill-reducing ordering takes,
+/// before any is measured (ns per entry).
+/// Used by: `symbolic::race` (whether the candidates run side by side),
+/// `symbolic::ordering_graph` (what it learns from).
+/// Why: a minimum-degree ordering's quotient-graph updates.
+/// Machine: a prior, replaced by what the orderings measure.
+/// Contract: timing.
+pub const ORDER_NS_PER_ENTRY: f32 = 50.0;
+
+/// ns per vertex of a nested-dissection subproblem, from which its two
+/// sides are ordered side by side (ns per vertex).
+/// Used by: `symbolic::ordering_graph` (`MetisOptions::parallel_min_vertices`
+/// left unset).
+/// Why: a multilevel bisection with refinement and the recursion below it.
+/// Machine: a prior; the section cost it is set against is measured.
+/// Contract: timing.
+pub const ND_NS_PER_VERTEX: f32 = 1_000.0;
+
+/// ns per adjacency entry of a coarse-graph contraction, from which a level
+/// contracts in parallel blocks (ns per entry).
+/// Used by: `symbolic::ordering_graph` (`MetisOptions::parallel_min_edges`
+/// left unset).
+/// Why: a hash-merge of the matched vertices' adjacencies.
+/// Machine: a prior; the section cost it is set against is measured.
+/// Contract: timing.
+pub const CONTRACT_NS_PER_ENTRY: f32 = 10.0;
 
 /// Entries per chunk of the parallel zero fill of a new factor (entries).
 /// Used by: `supernodal::panel::PanelArena::new_in`.
