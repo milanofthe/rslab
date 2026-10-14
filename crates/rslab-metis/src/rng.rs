@@ -5,6 +5,9 @@
 //! match METIS byte-for-byte by design, so a cryptographic PRNG
 //! would be overkill.
 
+/// SplitMix64's increment, `2^64 / phi` (the golden-ratio gamma).
+pub const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
 #[derive(Debug, Clone)]
 pub struct SplitMix {
     state: u64,
@@ -13,12 +16,12 @@ pub struct SplitMix {
 impl SplitMix {
     pub fn new(seed: u64) -> Self {
         Self {
-            state: seed.wrapping_add(0x9E37_79B9_7F4A_7C15),
+            state: seed.wrapping_add(GOLDEN_GAMMA),
         }
     }
 
     pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.state = self.state.wrapping_add(GOLDEN_GAMMA);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

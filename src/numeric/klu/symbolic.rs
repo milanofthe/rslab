@@ -1,6 +1,10 @@
 //! The analysis: the block triangular form and the per-block orderings.
 
 use super::*;
+use crate::constants::{
+    IDX32_BYTES, KLU_DFS_BYTES_PER_COL, KLU_FACTOR_ARRAYS, KLU_F_RESERVE_DIV, KLU_L_RESERVE,
+    KLU_PAR_BLOCK_BYTES, KLU_U_RESERVE, WORD_BYTES,
+};
 
 impl KluSymbolic {
     /// Heap bytes this analysis holds: the block permutations and the stored
@@ -158,8 +162,12 @@ impl KluSymbolic {
         // every block a fresh buffer.
         let nblocks = self.block_ptr.len() - 1;
         let (mut seq, mut par) = (BlockCaps::default(), (0u64, 0u64));
-        let mut cap = [4 * self.nnz, 2 * self.nnz, self.nnz / 4];
-        let mut len = [0usize; 3];
+        let mut cap = [
+            KLU_L_RESERVE * self.nnz,
+            KLU_U_RESERVE * self.nnz,
+            self.nnz / KLU_F_RESERVE_DIV,
+        ];
+        let mut len = [0usize; KLU_FACTOR_ARRAYS];
 
         for b in 0..nblocks {
             let (bs, be) = (self.block_ptr[b], self.block_ptr[b + 1]);
@@ -168,7 +176,7 @@ impl KluSymbolic {
             for j in bs..be {
                 let sj = j + 1;
                 let mut lj = 0usize;
-                w_b += super::factor::COL_WORK;
+                w_b += crate::constants::COL_WORK;
                 leaves.clear();
                 for k in self.pat_col_ptr[j]..self.pat_col_ptr[j + 1] {
                     let pre = self.pat_row_idx[k];
@@ -244,27 +252,33 @@ impl KluSymbolic {
             fresh.fill(be - bs, annz, got[0], got[1], got[2]);
             let (v, o) = fresh.bytes();
             par = (par.0 + v, par.1 + o);
-            for i in 0..3 {
+            for i in 0..KLU_FACTOR_ARRAYS {
                 cap[i] = crate::memory::grown(cap[i], len[i] + got[i]);
                 len[i] += got[i];
             }
         }
         let n1 = (n + 1) as u64;
+        let (idx, word) = (IDX32_BYTES as u64, WORD_BYTES as u64);
         let (seq_arrays, seq_block) = if nblocks == 1 {
             // The one block's `L`, `U`, diagonal and their column pointers
             // move out of the block buffer into the factor.
             let moved = (
                 (seq.l + seq.u + seq.diag) as u64,
-                (4 * (seq.l + seq.u) + 8 * (seq.colptr[0] + seq.colptr[1])) as u64,
+                (IDX32_BYTES * (seq.l + seq.u) + WORD_BYTES * (seq.colptr[0] + seq.colptr[1]))
+                    as u64,
             );
             let all = seq.bytes();
             (
-                (moved.0, moved.1 + 8 * n1),
+                (moved.0, moved.1 + word * n1),
                 (all.0 - moved.0, all.1 - moved.1),
             )
         } else {
             let entries = cap.iter().sum::<usize>() as u64;
-            ((entries + n as u64, 4 * entries + 24 * n1), seq.bytes())
+            let colptrs = (KLU_FACTOR_ARRAYS * WORD_BYTES) as u64;
+            (
+                (entries + n as u64, idx * entries + colptrs * n1),
+                seq.bytes(),
+            )
         };
         KluFill {
             l_nnz: l_rowidx.len() as u64,
@@ -358,6 +372,7 @@ impl KluSymbolic {
         let (n, nnz) = (self.n as u64, self.nnz as u64);
         let nblocks = (self.block_ptr.len() - 1) as u64;
         let price = |(v, o): (u64, u64)| v * vb + o;
+        let (idx, word) = (IDX32_BYTES as u64, WORD_BYTES as u64);
         let parallel = self.parallel_blocks(settings);
         let threads = if parallel {
             crate::parallel::threads()
@@ -367,7 +382,8 @@ impl KluSymbolic {
         // `L`, `U` and the off-block entries at their exact sizes (the
         // parallel splice), the diagonal and the three column pointers.
         let entries = fill.l_nnz + fill.u_nnz + fill.f_nnz;
-        let exact = (entries + n) * vb + 4 * entries + 24 * (n + 1);
+        let colptrs = (KLU_FACTOR_ARRAYS * WORD_BYTES) as u64;
+        let exact = (entries + n) * vb + idx * entries + colptrs * (n + 1);
         let arrays = if parallel {
             exact
         } else {
@@ -377,7 +393,12 @@ impl KluSymbolic {
         // inverse, copies of the column permutation and the block pointers,
         // the refactorization's scatter program and its replay plan (a
         // level-by-level block's columns and level bounds).
-        let around = 8 * n + 16 * n + 8 * n + 8 * (nblocks + 1) + 8 * nnz + 16 * nblocks;
+        let around = word * n
+            + 2 * word * n
+            + word * n
+            + word * (nblocks + 1)
+            + word * nnz
+            + 2 * word * nblocks;
         let force = settings.parallel == KluParallel::On;
         let (mut planned, mut levels) = (0usize, 0u64);
         for (b, &(w_b, nlev)) in fill.replay.iter().enumerate() {
@@ -385,7 +406,7 @@ impl KluSymbolic {
             if let Some(pipelined) = super::factor::replay_choice(bn, nlev, w_b, force, settings) {
                 planned += 1;
                 if !pipelined {
-                    levels += (std::mem::size_of::<Ki>() * bn + 4 * (nlev + 1)) as u64;
+                    levels += (std::mem::size_of::<Ki>() * bn + IDX32_BYTES * (nlev + 1)) as u64;
                 }
             }
         }
@@ -396,10 +417,13 @@ impl KluSymbolic {
         // the pre-pivot inverse and final positions, the arrays, the block
         // buffers and each worker's DFS scratch (sized to the largest block).
         let max_bn = self.max_block_size() as u64;
-        let scratch = max_bn * (8 + 4 + vb + 4 + 8 + 4 + 4 + 8);
-        let base = 8 * n + 8 * nnz + 8 * n;
+        let scratch = max_bn * (KLU_DFS_BYTES_PER_COL + vb);
+        let base = word * n + word * nnz + word * n;
         let during = if parallel {
-            base + price(fill.par_blocks) + exact + threads as u64 * scratch + 64 * nblocks
+            base + price(fill.par_blocks)
+                + exact
+                + threads as u64 * scratch
+                + KLU_PAR_BLOCK_BYTES * nblocks
         } else {
             base + arrays + price(fill.seq_block) + scratch
         };
@@ -409,7 +433,7 @@ impl KluSymbolic {
             analysis_bytes: self.heap_bytes(),
             analysis_growth_bytes: 0,
             factor_bytes: factor,
-            factor_peak_bytes: during.max(factor + 8 * n) + crate::memory::BOOKKEEPING,
+            factor_peak_bytes: during.max(factor + word * n) + crate::constants::BOOKKEEPING,
             // The solution and the permuted work vector.
             solve_bytes: 2 * n * nrhs as u64 * vb,
             // Its buffers belong to the factor.
@@ -459,7 +483,7 @@ impl KluSymbolic {
         let estimate = self.fill.get().map(|_| self.estimate_memory::<T>());
         let t = crate::clock::Instant::now();
         let factors = factor_impl(self, a, settings)?;
-        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let factor_ms = crate::clock::ms(t.elapsed());
         let nnz =
             (factors.l_val.len() + factors.u_val.len() + factors.udiag.len() + factors.f_val.len())
                 as u64;

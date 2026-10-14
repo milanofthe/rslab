@@ -5,6 +5,7 @@
 
 use super::factor::LlEmitLdlt;
 use super::gemm::lower_tile_gemm;
+use crate::constants::GROWTH_EPS;
 use crate::numeric::supernodal::perturb_pivot;
 
 use crate::error::RslabError;
@@ -106,13 +107,6 @@ fn reset<V: Clone>(v: &mut Vec<V>, len: usize, x: V) {
     v.clear();
     v.resize(len, x);
 }
-
-/// Scale-invariant singularity floor for a 2x2 Bunch-Kaufman pivot: a block
-/// whose `|det|` falls below `GROWTH_EPS * scale^2` (scale = the largest block
-/// entry magnitude) is numerically singular - rejected in exact mode and lifted
-/// in static-pivot mode. Bounds the element growth `1/|det|` can otherwise
-/// inject into the trailing update.
-const GROWTH_EPS: f64 = 1e-14;
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
 /// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
@@ -588,17 +582,9 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
 ) -> (u64, usize) {
     use super::gemm::lower_tile_planes;
     use crate::memory::grown;
-    let par = if nrow * ncol * ncol >= 100_000_000 {
-        k.par_cdiv
-    } else {
-        usize::MAX
-    };
+    let par = k.cdiv_par(nrow, ncol);
     let mut planes = 0;
-    let nb = if ncol >= 512 {
-        k.panel_nb.max(128)
-    } else {
-        k.panel_nb
-    };
+    let nb = k.panel_width(k.panel_nb, ncol);
     // A node narrower than a panel is one panel: its scratch (the `nb x nb`
     // multiplier snapshots) sized to its width, the same blocking.
     let nb = nb.min(ncol.max(1));
@@ -628,8 +614,12 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
     }
     // l1, l2 and their lookahead twins, both multiplier snapshots, `l21buf`
     // and `gbuf`, and the replay's sub-blocks over all deep rows.
-    let entries =
-        4 * nrow + 2 * nb * nb + 2 * l21 + tmp + tmp_w + nrow * (k.trailing_block.max(1) + 1);
+    let entries = crate::constants::BK_ROW_BUFFERS * nrow
+        + 2 * nb * nb
+        + 2 * l21
+        + tmp
+        + tmp_w
+        + nrow * (k.trailing_block.max(1) + 1);
     let bytes = entries * std::mem::size_of::<T>() + 2 * nb * std::mem::size_of::<usize>();
     (bytes as u64, if T::COMPLEX { planes } else { 0 })
 }
@@ -673,13 +663,10 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     // to reach peak on root-class panels (measured ~79 Gflop/s-eq). The
     // extra serial getf2 work is O(nb^3) per panel - negligible against the
     // GEMM gain at this size. The global nb sweep said 128 loses overall
-    // because SMALL panels pay; widening only above `ncol >= 512` (a pure
-    // function of the node, thread-count independent) keeps them at default.
-    let nb = if ncol >= 512 {
-        kt.k.panel_nb.max(128)
-    } else {
-        kt.k.panel_nb
-    };
+    // because SMALL panels pay; widening only from `wide_panel_min_ncol` (a
+    // pure function of the node, thread-count independent) keeps them at
+    // default.
+    let nb = kt.k.panel_width(kt.k.panel_nb, ncol);
     // A node narrower than a panel is one panel: its scratch (the `nb x nb`
     // multiplier snapshots) sized to its width, the same blocking.
     let nb = nb.min(ncol.max(1));
@@ -687,11 +674,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
     // foreign subtree work and stalls this node's dependents. Total cdiv
     // work ~ nrow*ncol^2 (panel + trailing updates).
-    let ll_cdiv_par = if nrow * ncol * ncol >= 100_000_000 {
-        kt.k.par_cdiv
-    } else {
-        usize::MAX
-    };
+    let ll_cdiv_par = kt.k.cdiv_par(nrow, ncol);
     let alpha = bk_alpha();
     // The node's buffers, on loan from the factorization's pool and reset
     // to the values they start from: the pivot outputs (`D`, the 2x2 flags,

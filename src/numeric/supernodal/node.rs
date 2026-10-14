@@ -51,8 +51,7 @@ impl CmodPlan {
         updaters: &[Li],
         lists: impl Fn(usize) -> (&'a [Li], &'a [Li]),
         count_u: bool,
-        par_gemm: usize,
-        fork_min_flops: usize,
+        k: &crate::KernelSettings,
     ) -> Self {
         let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
         let landing = |v: &[Li]| {
@@ -90,8 +89,8 @@ impl CmodPlan {
             flops += lwork + uwork;
             spans.push(Span { k, l, u });
         }
-        let forks = flops >= fork_min_flops.max(par_gemm);
-        let tile_w = (ncol / 16).clamp(32, 256);
+        let forks = flops >= k.fork_min_flops.max(k.par_gemm);
+        let tile_w = k.cmod_tile(ncol);
         CmodPlan {
             spans,
             forks,

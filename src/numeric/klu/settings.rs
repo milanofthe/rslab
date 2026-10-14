@@ -1,6 +1,9 @@
 //! The options of the KLU path.
 
 use super::*;
+use crate::constants::{
+    KLU_PAR_MIN_FMADDS, KLU_PAR_MIN_NNZ, KLU_PAR_MIN_RATIO, KLU_PIVOT_THRESHOLD,
+};
 
 /// Options for the KLU path. Defaults follow SuiteSparse KLU: threshold
 /// partial pivoting with strong diagonal preference (`pivot_threshold =
@@ -47,9 +50,11 @@ pub struct KluSettings {
     /// Nonzeros from which [`KluParallel::Auto`] factors blocks in parallel.
     /// Default `8000`.
     pub par_min_nnz: usize,
-    /// Replay work (fmadds, and 32 a column) a unit of parallel
-    /// refactorization must carry: below it starting the section costs more
-    /// than the overlap gains. Default `2e5`.
+    /// Replay work a unit of parallel refactorization must carry, in fmadds
+    /// and 32 a column (not the panel entries of
+    /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work)):
+    /// below it starting the section costs more than the overlap gains.
+    /// Default `2e5`.
     pub par_min_work: u64,
     /// Simultaneous work the structure must offer for a parallel refactor:
     /// across blocks `sum work / max block work`, inside a block the mean
@@ -82,14 +87,14 @@ pub enum KluParallel {
 impl Default for KluSettings {
     fn default() -> Self {
         Self {
-            pivot_threshold: 1e-3,
+            pivot_threshold: KLU_PIVOT_THRESHOLD,
             row_scaling: true,
             btf: true,
             parallel: KluParallel::Auto,
             matching: true,
-            par_min_nnz: 8_000,
-            par_min_work: 200_000,
-            par_min_ratio: 2.0,
+            par_min_nnz: KLU_PAR_MIN_NNZ,
+            par_min_work: KLU_PAR_MIN_FMADDS,
+            par_min_ratio: KLU_PAR_MIN_RATIO,
             interrupt: None,
         }
     }

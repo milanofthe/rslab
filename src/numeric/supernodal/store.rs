@@ -2,7 +2,8 @@
 //! cells of the emit state, the raw panel pointer for disjoint parallel
 //! writes, and the scratch pool the node kernels borrow from.
 
-use crate::memory::{HeapBytes, SCRATCH_KEEP};
+use crate::constants::SCRATCH_KEEP;
+use crate::memory::HeapBytes;
 
 /// Raw base pointer of a panel buffer, smuggled across rayon workers so each
 /// task can write its own **disjoint row range** of a column-major panel. Safe
@@ -93,7 +94,7 @@ impl<V> Cells<V> {
 /// entry and given back on exit, so the kernels of one factorization share
 /// a handful of objects (about one per worker) whose buffers stay grown,
 /// instead of allocating their own per supernode. An object heavier than
-/// [`SCRATCH_KEEP`](crate::memory::SCRATCH_KEEP) is freed instead of kept.
+/// [`SCRATCH_KEEP`](crate::constants::SCRATCH_KEEP) is freed instead of kept.
 pub(crate) struct ScratchPool<S>(std::sync::Mutex<Vec<S>>);
 
 impl<S: Default + HeapBytes> ScratchPool<S> {

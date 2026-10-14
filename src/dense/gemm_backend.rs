@@ -59,7 +59,9 @@ pub unsafe fn gemm<T: Scalar>(
     // on the column blocking, so the result is the rayon path's).
     if !matches!(mode.parallelism, gemm::Parallelism::None) && n >= 2 {
         if let Some(pool) = crate::parallel::lent() {
-            let per = n.div_ceil(4 * pool.threads().max(1)).max(16);
+            let per = n
+                .div_ceil(crate::constants::PIECES_PER_WORKER * pool.threads().max(1))
+                .max(crate::constants::GEMM_PIECE_MIN_COLS);
             let one = GemmMode {
                 parallelism: gemm::Parallelism::Rayon(1),
                 ..mode
@@ -151,7 +153,7 @@ pub(crate) fn split_plane_entries(
     }
     let t = ks.complex_split_tile.max(1);
     let (mt, nt) = (m.min(t), n.min(t));
-    3 * (mt * k + k * nt + mt * nt)
+    crate::constants::SPLIT_PLANES * (mt * k + k * nt + mt * nt)
 }
 
 /// Real plane scratch of one thread (grows to the largest tile seen).
@@ -184,7 +186,7 @@ pub trait SplitReal:
 /// inside `f` lets rayon's work stealing run another split on this same
 /// thread, which then gets an empty buffer of its own instead of a
 /// re-entrant borrow. The larger of the two is kept afterwards, up to
-/// [`SCRATCH_KEEP`](crate::memory::SCRATCH_KEEP): the thread outlives the
+/// [`SCRATCH_KEEP`](crate::constants::SCRATCH_KEEP): the thread outlives the
 /// factorization in the pool its caller keeps.
 fn with_taken<R: SplitReal, Ret>(
     cell: &'static std::thread::LocalKey<RefCell<Planes<R>>>,
@@ -195,7 +197,7 @@ fn with_taken<R: SplitReal, Ret>(
     cell.with(|p| {
         let mut planes = p.borrow_mut();
         let bytes = (buf.capacity() * std::mem::size_of::<R>()) as u64;
-        if planes.buf.capacity() < buf.capacity() && bytes <= crate::memory::SCRATCH_KEEP {
+        if planes.buf.capacity() < buf.capacity() && bytes <= crate::constants::SCRATCH_KEEP {
             planes.buf = buf;
         }
     });
@@ -450,13 +452,14 @@ pub unsafe fn complex_gemm_3m<R: SplitReal>(
 ) {
     R::with_planes(|buf| {
         let (mt, nt) = (m.min(tile), n.min(tile));
-        let need = 3 * (mt * k + k * nt + mt * nt);
+        let planes = crate::constants::SPLIT_PLANES;
+        let need = planes * (mt * k + k * nt + mt * nt);
         // every plane is written in full before it is read: no clearing
         if buf.len() < need {
             buf.resize(need, R::zero());
         }
-        let (a_planes, rest) = buf.split_at_mut(3 * mt * k);
-        let (b_planes, c_planes) = rest.split_at_mut(3 * k * nt);
+        let (a_planes, rest) = buf.split_at_mut(planes * mt * k);
+        let (b_planes, c_planes) = rest.split_at_mut(planes * k * nt);
         for j0 in (0..n).step_by(tile) {
             let nb = (n - j0).min(tile);
             let (br, rest) = b_planes.split_at_mut(k * nb);

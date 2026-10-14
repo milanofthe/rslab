@@ -76,7 +76,7 @@ impl AtomicStats {
 /// the ordering is a function of the seed alone, however the subproblems
 /// are scheduled.
 fn child_seed(seed: u64, which: u64) -> u64 {
-    SplitMix::new(seed ^ which.wrapping_mul(0x9E37_79B9_7F4A_7C15)).next_u64()
+    SplitMix::new(seed ^ which.wrapping_mul(crate::rng::GOLDEN_GAMMA)).next_u64()
 }
 
 pub(crate) fn nd_order(
@@ -163,7 +163,7 @@ fn nd_subproblem(
                     sub,
                     map_to_orig,
                     off,
-                    child_seed(seed, 7 + c as u64),
+                    child_seed(seed, crate::constants::CHILD_SEED_OFFSET + c as u64),
                     opts,
                     writer,
                     acc,
@@ -194,7 +194,10 @@ fn nd_subproblem(
     }
 
     let big = a_verts.len().max(b_verts.len());
-    if a_verts.is_empty() || b_verts.is_empty() || big as f64 >= 0.9 * n as f64 {
+    if a_verts.is_empty()
+        || b_verts.is_empty()
+        || big as f64 >= crate::constants::UNBALANCED_SPLIT_FRACTION * n as f64
+    {
         amd_leaf(&subgraph, &vtx_map, offset, writer, &mut local)?;
         acc.add(&local);
         return Ok(());

@@ -525,3 +525,20 @@ def test_mixed_precision_factor(path, dtype, low):
     assert sym.factor(A, factor_dtype=low).factor_dtype == low
     with pytest.raises(ValueError):
         getattr(rslab, path)(_spd(n).astype(np.float32), factor_dtype="complex64")
+
+
+def test_krylov_defaults_are_the_core_constants():
+    """The Python Krylov defaults are the core's, exported by the extension."""
+    import inspect
+
+    ext = rslab._rslab
+    # The wrappers, and the extension functions and handle methods, whose
+    # displayed signatures spell the values out.
+    funcs = [rslab.gmres, rslab.gmres_block, rslab.cocg, rslab.cocr]
+    funcs += [ext.gmres_plain, ext.gmres_block_plain, ext.cocg_plain, ext.cocr_plain]
+    for cls in (rslab.Ldlt, rslab.Lu, rslab.Klu, rslab.Auto):
+        funcs += [cls.gmres, cls.gmres_block, cls.cocg, cls.cocr]
+    for f in funcs:
+        p = inspect.signature(f).parameters
+        assert p["tol"].default == ext.KRYLOV_TOL, f.__qualname__
+        assert p["maxit"].default == ext.KRYLOV_MAX_ITER, f.__qualname__

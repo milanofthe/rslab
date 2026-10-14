@@ -164,11 +164,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         sched.updaters(s),
         |k| (st.rows_l(k), st.cols_u(k)),
         true,
-        ll_gemm_par,
-        kt.k.fork_min_flops,
+        &kt.k,
     );
     let (spans, forks, tile_w, tiled) = (&plan.spans, plan.forks, plan.tile_w, plan.tiled);
-    let tile_u = (cn_u.max(1) / 16).clamp(32, 256);
+    let tile_u = kt.k.cmod_tile(cn_u);
     // Updater `k`'s column count, off-block `L` rows and `U` columns, panels
     // and their heights.
     let updater = |k: usize| {
@@ -443,14 +442,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // panels - but root-class WIDE panels want a fatter deferred-GEMM inner
     // dimension (k = nb), the same lever as the LDLT twin's adaptive nb. Pure
     // function of `ncol`, never of the thread count.
-    let nb_cdiv = if ncol >= 512 { 128 } else { 32 };
+    let nb_cdiv = kt.k.panel_width(kt.k.lu_panel_nb, ncol);
     // Join-steal guard (see the cmod fork gate above): a small node must not
     // fork inside its cdiv either.
-    let ll_cdiv_par = if nrow_l * ncol * ncol >= 100_000_000 {
-        kt.k.par_cdiv
-    } else {
-        usize::MAX
-    };
+    let ll_cdiv_par = kt.k.cdiv_par(nrow_l, ncol);
     let mut local_perturbed = 0usize;
     // Restricted partial pivoting: row interchanges within the fully-summed block
     // `[0, ncol)` only (the standard sparse-direct choice). `rperm[i]` is the
@@ -621,9 +616,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         let up = PanelPtr(ut.as_mut_ptr());
         if cn_u * pw * pw >= ll_cdiv_par {
             let lref: &[T] = lbuf;
-            crate::parallel::for_each((nrow_u - ncol).div_ceil(256), 1, |b| {
-                let t0 = ncol + b * 256;
-                trsm_u(t0, (t0 + 256).min(nrow_u), up, lref)
+            let rows = kt.k.trsm_rows;
+            crate::parallel::for_each((nrow_u - ncol).div_ceil(rows), 1, |b| {
+                let t0 = ncol + b * rows;
+                trsm_u(t0, (t0 + rows).min(nrow_u), up, lref)
             });
         } else {
             trsm_u(ncol, nrow_u, up, lbuf);
@@ -750,16 +746,12 @@ pub(super) fn lu_node_scratch<T: Scalar>(
     let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
     let cols_u = st.cols_u(s);
     let (nrow_l, cn_u) = (st.rows_l(s).len(), cols_u.len() - ncol);
-    let nb = if ncol >= 512 { 128 } else { 32 };
+    let nb = k.panel_width(k.lu_panel_nb, ncol);
     let cdiv = nb * vb;
     // The cdiv's two GEMMs per panel: the trailing `L` update and the `U12` rows.
     let mut planes = 0;
     if T::COMPLEX {
-        let par_cdiv = if nrow_l * ncol * ncol >= 100_000_000 {
-            k.par_cdiv
-        } else {
-            usize::MAX
-        };
+        let par_cdiv = k.cdiv_par(nrow_l, ncol);
         let mut kb = 0;
         while kb < ncol {
             let ke = (kb + nb).min(ncol);
@@ -785,8 +777,7 @@ pub(super) fn lu_node_scratch<T: Scalar>(
         sched.updaters(s),
         |k| (st.rows_l(k), st.cols_u(k)),
         true,
-        k.par_gemm,
-        k.fork_min_flops,
+        k,
     );
     let updater = |kk: usize| {
         let nck = sym.supernodes[kk].ncol;
@@ -813,7 +804,7 @@ pub(super) fn lu_node_scratch<T: Scalar>(
             }
             worst_l = worst_l.max(lupd);
         }
-        let tile_u = (cn_u.max(1) / 16).clamp(32, 256);
+        let tile_u = k.cmod_tile(cn_u);
         let runs = cn_u.div_ceil(tile_u);
         let mut worst_u = 0;
         for ti in 0..runs {

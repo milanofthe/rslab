@@ -33,10 +33,8 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     }
     let mut d = vec![1.0f64; n];
 
-    // Most matrices converge in 2-4 iterations; a few pathological ones
-    // need all 10.
-    let max_iter = 10;
-    let tol = 1e-8;
+    let max_iter = crate::constants::INFNORM_MAX_ITER;
+    let tol = crate::constants::INFNORM_TOL;
 
     // Work buffer for the row inf-norms.
     let mut row_max = vec![0.0f64; n];

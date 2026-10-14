@@ -36,6 +36,9 @@
 
 /// Monotonic clock shim: std Instant natively, inert on wasm32 (no OS clock).
 pub mod clock;
+/// The numbers the minimum-degree orderings are defined by.
+#[doc(hidden)]
+pub mod constants;
 pub mod quotient_graph;
 pub mod rcm;
 

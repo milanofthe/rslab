@@ -15,8 +15,8 @@ pub struct RelaxAmalgamation {
 impl Default for RelaxAmalgamation {
     fn default() -> Self {
         Self {
-            max_width: 256,
-            max_extra_rows: 64,
+            max_width: crate::constants::RELAX_MAX_WIDTH,
+            max_extra_rows: crate::constants::RELAX_MAX_EXTRA_ROWS,
         }
     }
 }

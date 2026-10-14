@@ -26,6 +26,11 @@
 
 use super::factor::{factor_numeric, LdltNumeric};
 use super::pivots::LdltPivots;
+use crate::constants::{
+    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY,
+    LDLT_INPUT_BUILD_BYTES_PER_COL, LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, VEC_HEADER_BYTES,
+    WORD_BYTES,
+};
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::analysis::{
@@ -292,7 +297,7 @@ impl LdltSymbolic {
         a.validate()?;
         let t = crate::clock::Instant::now();
         let symbolic = analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?;
-        let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
+        let analyze_ms = crate::clock::ms(t.elapsed());
         let sym = Self {
             symbolic,
             nnz: a.row_idx.len(),
@@ -484,21 +489,27 @@ impl LdltSymbolic {
         let (growth, growth_build) = if inner.input.get().is_some() {
             (0, 0)
         } else {
-            (12 * nnz + 16 * (n + 1), 28 * nnz + 32 * n)
+            (
+                INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + 2 * WORD_BYTES * (n + 1),
+                INPUT_BUILD_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
+            )
         };
         // Held by the factor: the panels and their schedule, D, the 2x2
         // flags, the permutation, the supernode tree and the scaling.
-        let factor = vb * panels + layout.held as usize + n * (2 * vb + 1 + 8 + 8) + 8 * ns;
+        let factor = vb * panels
+            + layout.held as usize
+            + n * (2 * vb + 1 + WORD_BYTES + WORD_BYTES)
+            + WORD_BYTES * ns;
         // While the forest is factored: the permuted values and the scaling,
         // the arena, the emit cells (refcounts, offsets, panel records, the
         // pivots by column) and the forest's own lists, every node's slot (D,
         // the flags and the row permutation) and emitted rows until the end,
         // the workers' scratch and the heaviest set of nodes running at once.
-        let cells = ns * (8 + 8 + 40 + 96 + 8 + 8 + 8) + n * (8 + 8 + 2 * vb + 1);
+        let cells = ns * LDLT_NODE_CELL_BYTES + n * (WORD_BYTES + WORD_BYTES + 2 * vb + 1);
         let slots: usize = (0..ns)
-            .map(|s| w(s) * (2 * vb + 1) + 8 * r(s))
+            .map(|s| w(s) * (2 * vb + 1) + WORD_BYTES * r(s))
             .sum::<usize>()
-            + 4 * rows;
+            + IDX32_BYTES * rows;
         let scratch: Vec<(u64, usize, usize)> = (0..ns)
             .map(|s| super::node::ll_node_scratch::<T>(s, sym, sched, &k, threads))
             .collect();
@@ -507,18 +518,21 @@ impl LdltSymbolic {
         // The panel kernel's, the deep-row replay's, the `cmod`'s and the
         // arena's pools.
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
-        let pooled = crate::memory::pooled_bytes(4, threads, largest);
+        let pooled = crate::memory::pooled_bytes(LDLT_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during =
-            (vb * nnz + 8 * n + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
+        let during = (vb * nnz + WORD_BYTES * n + vb * panels + cells + slots) as u64
+            + workers
+            + pooled
+            + nodes;
         // After it: the factor, with the emitted row lists until the plan
         // has copied them, and the plan's build.
-        let after = factor as u64 + (4 * rows + 24 * ns) as u64 + layout.build;
+        let after =
+            factor as u64 + (IDX32_BYTES * rows + VEC_HEADER_BYTES * ns) as u64 + layout.build;
         plan.analysis_growth_bytes = growth as u64;
         plan.factor_bytes = factor as u64;
         plan.kept_bytes = kept + pooled;
         plan.factor_peak_bytes = (growth_build as u64).max(growth as u64 + during.max(after))
-            + crate::memory::BOOKKEEPING;
+            + crate::constants::BOOKKEEPING;
         // The permuted right-hand sides, the solution and the sweeps' scratch.
         plan.solve_bytes = (nrhs * vb) as u64 * (2 * n as u64 + layout.solve_per_rhs);
         plan
@@ -546,7 +560,7 @@ impl LdltSymbolic {
         );
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             plan.bytes() as u64,
         );
@@ -585,7 +599,7 @@ impl LdltSymbolic {
             .refill(factor, &factors.supernode_parent, true, opts.solve);
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             ldlt.plan.bytes() as u64,
         );
@@ -631,7 +645,7 @@ impl LdltSymbolic {
         }
         let t = crate::clock::Instant::now();
         let scale = equilibration(a, &opts.scaling)?;
-        let scale_ms = t.elapsed().as_secs_f64() * 1e3;
+        let scale_ms = crate::clock::ms(t.elapsed());
         let t = crate::clock::Instant::now();
         let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), &opts, storage, pools)?;
         let scale = scale.unwrap_or_else(|| vec![1.0; a.n]);
@@ -642,7 +656,7 @@ impl LdltSymbolic {
             pivots: factors,
             ..
         } = numeric;
-        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let factor_ms = crate::clock::ms(t.elapsed());
         let mut decisions = self.symbolic.decisions(self.requested_ordering);
         decisions.scaling = format!("{:?}", opts.scaling);
         decisions.method = "LeftLooking".to_string();

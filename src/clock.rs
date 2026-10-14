@@ -10,6 +10,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time::Instant;
 
+/// A duration in milliseconds, as every stage time is reported.
+pub(crate) fn ms(d: std::time::Duration) -> f64 {
+    d.as_secs_f64() * crate::constants::MS_PER_S
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug)]
 pub struct Instant;

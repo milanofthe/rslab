@@ -4,6 +4,11 @@
 use super::factor::factor_general_lu_numeric;
 use super::factors::LuPivots;
 use super::structure::LuStructure;
+use crate::constants::{
+    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY,
+    LU_INPUT_BUILD_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
+    LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
+};
 
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
@@ -53,7 +58,8 @@ fn symmetrized_lower_pattern<T: Scalar>(
         buckets.push(head);
         rest = tail;
     }
-    let kept: Vec<usize> = crate::parallel::map_owned(buckets, 256, |seg| {
+    let min_cols = crate::constants::SYMMETRIZE_PIECE_MIN_COLS;
+    let kept: Vec<usize> = crate::parallel::map_owned(buckets, min_cols, |seg| {
         seg.sort_unstable();
         let mut len = 0;
         for p in 0..seg.len() {
@@ -86,7 +92,7 @@ fn symmetrized_lower_pattern<T: Scalar>(
 /// magnitude worse, and the circuits with a full diagonal factor the same
 /// either way.
 fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> bool {
-    crate::parallel::any(a.n, 1024, |j| {
+    crate::parallel::any(a.n, crate::constants::DIAGONAL_CHECK_PIECE_MIN_COLS, |j| {
         let (rows, vals) = (
             &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]],
             &a.values[a.col_ptr[j]..a.col_ptr[j + 1]],
@@ -241,7 +247,7 @@ impl LuSymbolic {
             }
             _ => LuStructure::empty(),
         };
-        let analyze_ms = t.elapsed().as_secs_f64() * 1e3;
+        let analyze_ms = crate::clock::ms(t.elapsed());
         if crate::logging::enabled(crate::logging::LogLevel::Info) {
             let d = symb.decisions(opts.ordering.method);
             crate::logging::info(&format!(
@@ -305,7 +311,7 @@ impl LuSymbolic {
         );
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             (plan_l.bytes() + plan_u.bytes()) as u64,
         );
@@ -347,7 +353,7 @@ impl LuSymbolic {
             .refill(ut, &factors.supernode_parent, false, opts.solve);
         diagnostics.push(
             "solve-layout",
-            t.elapsed().as_secs_f64() * 1e3,
+            crate::clock::ms(t.elapsed()),
             0,
             (lu.plan_l.bytes() + lu.plan_u.bytes()) as u64,
         );
@@ -392,7 +398,7 @@ impl LuSymbolic {
         }
         let t = crate::clock::Instant::now();
         let numeric = factor_general_lu_numeric(self, a, &opts, storage, pools)?;
-        let factor_ms = t.elapsed().as_secs_f64() * 1e3;
+        let factor_ms = crate::clock::ms(t.elapsed());
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
         let (l, ut, factors) = numeric.into_parts();
@@ -587,19 +593,26 @@ impl LuSymbolic {
         let (growth, growth_build) = if self.input.get().is_some() {
             (0, 0)
         } else {
-            (12 * nnz + 16 * (n + 1), 28 * nnz + 48 * n)
+            (
+                INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + 2 * WORD_BYTES * (n + 1),
+                INPUT_BUILD_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
+            )
         };
         // Held by the factor: the `L` and `U^T` panels with their schedules,
         // `U`'s reciprocal diagonal, both permutations and scalings, and the
         // supernode tree.
-        let factor = vb * (panels + n) + (layout_l.held + layout_u.held) as usize + 32 * n + 8 * ns;
+        let factor = vb * (panels + n)
+            + (layout_l.held + layout_u.held) as usize
+            + LU_PERM_SCALE_BYTES_PER_COL * n
+            + WORD_BYTES * ns;
         // While the forest is factored: the scalings, the permuted values,
         // both arenas, the emit cells (refcounts, offsets, panel records,
         // positions and permutations) and the forest's lists, every node's
         // row permutation and emitted rows until the end, the workers'
         // scratch and the heaviest set of nodes running at once.
-        let cells = ns * (8 + 8 + 80 + 24 + 8 + 8 + 8) + 32 * n;
-        let slots = 8 * (0..ns).map(|s| st.rows_l(s).len()).sum::<usize>() + 4 * rows;
+        let cells = ns * LU_NODE_CELL_BYTES + LU_NODE_CELL_BYTES_PER_COL * n;
+        let slots =
+            WORD_BYTES * (0..ns).map(|s| st.rows_l(s).len()).sum::<usize>() + IDX32_BYTES * rows;
         let scratch: Vec<(u64, usize, usize)> = (0..ns)
             .map(|s| super::node::lu_node_scratch::<T>(s, sym, sched, st, &k, threads))
             .collect();
@@ -607,19 +620,22 @@ impl LuSymbolic {
         let (workers, kept) = crate::memory::worker_bytes::<T>(n, 2, threads, &mut planes);
         // The node kernel's, the tiled `cmod`'s and the arena's pools.
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
-        let pooled = crate::memory::pooled_bytes(3, threads, largest);
+        let pooled = crate::memory::pooled_bytes(LU_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during =
-            (16 * n + vb * nnz + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
+        let during = (2 * WORD_BYTES * n + vb * nnz + vb * panels + cells + slots) as u64
+            + workers
+            + pooled
+            + nodes;
         // After it: the factor, with the emitted row lists until the plans
         // have copied them, and a plan's build.
-        let after =
-            factor as u64 + (4 * rows + 48 * ns) as u64 + layout_l.build.max(layout_u.build);
+        let after = factor as u64
+            + (IDX32_BYTES * rows + 2 * VEC_HEADER_BYTES * ns) as u64
+            + layout_l.build.max(layout_u.build);
         plan.analysis_growth_bytes = growth as u64;
         plan.factor_bytes = factor as u64;
         plan.kept_bytes = kept + pooled;
         plan.factor_peak_bytes = (growth_build as u64).max(growth as u64 + during.max(after))
-            + crate::memory::BOOKKEEPING;
+            + crate::constants::BOOKKEEPING;
         // The permuted right-hand sides, the solution and the larger of the
         // two sweeps' scratch.
         plan.solve_bytes = (nrhs * vb) as u64

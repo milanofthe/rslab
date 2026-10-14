@@ -337,7 +337,9 @@ fn hungarian_init_heuristic(
             continue;
         }
         let col_len = cost.col_ptr[j + 1] - cost.col_ptr[j];
-        if col_len > m / 10 && m > 50 {
+        if col_len > m / crate::constants::HUNGARIAN_DENSE_COL_DIV
+            && m > crate::constants::HUNGARIAN_DENSE_MIN_ROWS
+        {
             continue;
         }
         num += 1;

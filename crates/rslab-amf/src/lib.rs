@@ -55,7 +55,9 @@ pub struct AmfOptions {
 
 impl Default for AmfOptions {
     fn default() -> Self {
-        Self { dense_alpha: 10.0 }
+        Self {
+            dense_alpha: rslab_ordering_core::constants::DENSE_ALPHA,
+        }
     }
 }
 

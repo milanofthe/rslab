@@ -114,7 +114,7 @@ pub fn coarsen_level(
 
     // --- Pass 2: 2-hop fallback, only if reduction is poor ---
     let reduction_ratio = cnvtxs as f64 / fine.nvtxs.max(1) as f64;
-    if reduction_ratio > two_hop_threshold && fine.nvtxs >= 4 {
+    if reduction_ratio > two_hop_threshold && fine.nvtxs >= crate::constants::TWO_HOP_MIN_VERTICES {
         counters.n_two_hop_fallbacks += 1;
         cnvtxs = two_hop_pass(fine, &mut match_, &mut cmap);
     }
@@ -148,7 +148,9 @@ pub fn coarsen(
             counters,
         );
         let new_nvtxs = level.graph.nvtxs;
-        if new_nvtxs == 0 || new_nvtxs as f64 > 0.95 * prev_nvtxs as f64 {
+        if new_nvtxs == 0
+            || new_nvtxs as f64 > crate::constants::COARSEN_STALL_RATIO * prev_nvtxs as f64
+        {
             // Stalled: this level made <5% progress, so stop. Keep it
             // only if it actually shrank, independent of whether earlier
             // levels exist: a first level that genuinely shrank must not
@@ -287,7 +289,7 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
     // same as the serial loop's, whatever the thread count. On the top levels
     // of a large nested dissection this was most of the coarsening time.
     let blocks = if fine.adjncy.len() >= parallel_min_edges && rayon::current_num_threads() > 1 {
-        (8 * rayon::current_num_threads()).min(cn)
+        (crate::constants::FINE_PIECES_PER_WORKER * rayon::current_num_threads()).min(cn)
     } else {
         1
     };

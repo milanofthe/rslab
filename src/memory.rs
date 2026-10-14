@@ -9,6 +9,7 @@
 //! to the kernels). Buffers grown by `Vec`'s amortized doubling are counted
 //! at the capacity the allocator hands out ([`grown`]).
 
+use crate::constants::{GEMM_SLAB, IDX32_BYTES, NODES_PER_WORKER, SCRATCH_KEEP};
 use crate::symbolic::SymbolicFactorization;
 use std::fmt;
 
@@ -42,15 +43,6 @@ impl<A: HeapBytes, B: HeapBytes, C: HeapBytes> HeapBytes for (A, B, C) {
     }
 }
 
-/// The most heap one scratch object, and one worker's buffer of split
-/// planes, keep between the kernels that borrow them; larger ones are
-/// freed when given back. Small factorizations (Newton loops up to some
-/// thousand unknowns) keep all their scratch and refactor without
-/// allocating; on large ones a node that needs more allocates its own, which
-/// its flops dwarf, and what the pools and threads hold on to stays bounded
-/// by the worker count instead of growing to the largest nodes.
-pub(crate) const SCRATCH_KEEP: u64 = 256 << 10;
-
 /// The capacity of a `Vec` of capacity `cap` after it is resized or
 /// reserved to hold `need` entries: unchanged if it fits, else the larger of
 /// `need` and twice the old capacity (the standard library's amortized
@@ -69,7 +61,7 @@ pub(crate) fn pushed(len: usize) -> usize {
     if len == 0 {
         0
     } else {
-        len.next_power_of_two().max(4)
+        len.next_power_of_two().max(crate::constants::VEC_MIN_CAP)
     }
 }
 
@@ -132,7 +124,7 @@ impl MemoryPlan {
 
 impl fmt::Display for MemoryPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mb = |b: u64| b as f64 / 1e6;
+        let mb = |b: u64| b as f64 / crate::constants::MEGA;
         write!(
             f,
             "peak {:.0} MB at {} threads (analysis {:.0} MB, factor {:.0} MB, \
@@ -148,15 +140,6 @@ impl fmt::Display for MemoryPlan {
         )
     }
 }
-
-/// Heap every factorization allocates besides its data: the diagnostics and
-/// log records, the thread pool's registry and the per-call small vectors.
-pub(crate) const BOOKKEEPING: u64 = 512 << 10;
-
-/// Nodes one worker can have in flight: a worker waiting inside a parallel
-/// product of its node runs other ready work meanwhile (rayon's work
-/// stealing), which can be another node.
-pub(crate) const NODES_PER_WORKER: usize = 2;
 
 /// Heap the `workers` of a supernodal factorization hold whatever nodes they
 /// run, and what they keep after it: per node in flight `maps`
@@ -174,7 +157,6 @@ pub(crate) fn worker_bytes<T: crate::Scalar>(
     workers: usize,
     planes: &mut [(usize, usize)],
 ) -> (u64, u64) {
-    const GEMM_SLAB: usize = 1 << 20;
     let real = std::mem::size_of::<T>() / if T::COMPLEX { 2 } else { 1 };
     planes.sort_unstable_by_key(|&(p, _)| std::cmp::Reverse(p));
     let (mut left, mut entries) = (NODES_PER_WORKER * workers, 0);
@@ -187,8 +169,9 @@ pub(crate) fn worker_bytes<T: crate::Scalar>(
         }
     }
     let largest = planes.first().map_or(0, |&(p, _)| 2 * p * real) as u64;
-    let during = workers * (NODES_PER_WORKER * maps * 4 * n + GEMM_SLAB) + 2 * entries * real;
-    let kept = workers as u64 * ((maps * 4 * n) as u64 + largest.min(SCRATCH_KEEP));
+    let during =
+        workers * (NODES_PER_WORKER * maps * IDX32_BYTES * n + GEMM_SLAB) + 2 * entries * real;
+    let kept = workers as u64 * ((maps * IDX32_BYTES * n) as u64 + largest.min(SCRATCH_KEEP));
     (during as u64, kept)
 }
 

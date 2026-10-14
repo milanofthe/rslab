@@ -150,7 +150,9 @@ pub(crate) fn enter<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 /// Indices per piece for `n` items, at least `min_len`: about four pieces
 /// per worker.
 fn piece_len(n: usize, min_len: usize, threads: usize) -> usize {
-    n.div_ceil(4 * threads).max(min_len).max(1)
+    n.div_ceil(crate::constants::PIECES_PER_WORKER * threads)
+        .max(min_len)
+        .max(1)
 }
 
 /// `f(i)` for every `i` in `0..n`, `min_len` or more consecutive indices

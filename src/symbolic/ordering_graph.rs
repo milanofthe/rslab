@@ -121,7 +121,7 @@ impl<'a> OrderingGraph<'a> {
         if crate::logging::enabled(crate::logging::LogLevel::Debug) {
             crate::logging::debug(&format!(
                 "analysis: prefix tail {method:?} (etree, column counts): {:.1} ms",
-                t.elapsed().as_secs_f64() * 1e3
+                crate::clock::ms(t.elapsed())
             ));
         }
         Ok(s)

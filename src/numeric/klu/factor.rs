@@ -2,15 +2,12 @@
 //! pivoting, and the replay plan of the refactorization.
 
 use super::*;
+use crate::constants::{COL_WORK, KLU_F_RESERVE_DIV, KLU_L_RESERVE, KLU_U_RESERVE, PIPE_COL_WORK};
 
 /// The GP flop count carried on the attached estimate (0 when absent).
 pub(super) fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
     d.estimate.as_ref().map_or(0, |e| e.factor_flops)
 }
-
-/// Replay work of a column beyond its fmadds (its scatter, pivot and
-/// emitted `L` column), in fmadds.
-pub(super) const COL_WORK: u64 = 32;
 
 /// How a block of `bn` columns, `nlev` levels and replay work `w_b`
 /// replays side by side, if it does (see [`compute_replay_plan`]): `true`
@@ -28,19 +25,6 @@ pub(super) fn replay_choice(
     (settings.parallel != KluParallel::Off && nlev >= 2 && (force || pays))
         .then(|| w_b / bn.max(1) as u64 >= PIPE_COL_WORK)
 }
-
-/// Mean replay work of a block's columns from which it replays pipelined
-/// rather than level by level: a pipelined column costs a claim and a wait
-/// per `L` column it reads, which lighter columns do not repay, while a
-/// level costs a parallel section, which a deep elimination DAG of heavy
-/// columns pays far too often.
-///
-/// On the SuiteSparse circuits and SANE's c7552 stage matrix at 12 workers
-/// the columns carry either at most about 200 (c7552, circuit_4, scircuit:
-/// level by level 1.5 to 2x the sequential replay, pipelined slower than
-/// it) or at least about 1700 (rajat15, the ASICs, onetone2, twotone:
-/// pipelined 3 to 7x, level by level barely faster than sequential).
-const PIPE_COL_WORK: u64 = 512;
 
 impl Replay {
     /// Level by level, block from column `bs` on, its columns' levels
@@ -253,15 +237,15 @@ impl<T: Scalar> BlockOut<T> {
         self.l_colptr.clear();
         self.l_colptr.push(0);
         self.l_rowidx.clear();
-        self.l_rowidx.reserve(annz * 4);
+        self.l_rowidx.reserve(annz * KLU_L_RESERVE);
         self.l_val.clear();
-        self.l_val.reserve(annz * 4);
+        self.l_val.reserve(annz * KLU_L_RESERVE);
         self.u_colptr.clear();
         self.u_colptr.push(0);
         self.u_rowidx.clear();
-        self.u_rowidx.reserve(annz * 2);
+        self.u_rowidx.reserve(annz * KLU_U_RESERVE);
         self.u_val.clear();
-        self.u_val.reserve(annz * 2);
+        self.u_val.reserve(annz * KLU_U_RESERVE);
         self.udiag.clear();
         self.udiag.reserve(bn);
         self.f_colptr.clear();
@@ -726,12 +710,12 @@ pub(super) fn factor_impl<T: Scalar>(
         // moved out of the block buffer instead of copied, so nothing is
         // reserved for it.
         if nblocks > 1 {
-            l_rowidx.reserve(sym.nnz * 4);
-            l_val.reserve(sym.nnz * 4);
-            u_rowidx.reserve(sym.nnz * 2);
-            u_val.reserve(sym.nnz * 2);
-            f_rowidx.reserve(sym.nnz / 4);
-            f_val.reserve(sym.nnz / 4);
+            l_rowidx.reserve(sym.nnz * KLU_L_RESERVE);
+            l_val.reserve(sym.nnz * KLU_L_RESERVE);
+            u_rowidx.reserve(sym.nnz * KLU_U_RESERVE);
+            u_val.reserve(sym.nnz * KLU_U_RESERVE);
+            f_rowidx.reserve(sym.nnz / KLU_F_RESERVE_DIV);
+            f_val.reserve(sym.nnz / KLU_F_RESERVE_DIV);
         }
         let mut scratch = KluScratch::<T>::new(max_bn);
         let mut out = BlockOut::<T>::default();

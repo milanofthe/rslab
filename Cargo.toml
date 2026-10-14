@@ -79,6 +79,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 faer = "0.22"
 # Loads MKL PARDISO at run time for the benchmark suite (bench-only FFI).
 libloading = "0.8"
+# The constants guard (tests/constants_guard.rs) parses the sources; both are
+# in the dependency graph already through the derive macros.
+syn = { version = "2", default-features = false, features = ["full", "visit", "parsing", "printing"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [[bench]]
 name = "klu_circuit"

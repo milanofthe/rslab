@@ -14,6 +14,7 @@
 //! s.kernels = KernelSettings { panel_nb: 32, ..Default::default() };
 //! ```
 
+use crate::constants::*;
 use crate::scaling::ScalingStrategy;
 use crate::symbolic::{
     AmalgamationStrategy, OrderingMethod, RelaxAmalgamation, SymbolicFactorization,
@@ -111,7 +112,7 @@ pub struct PivotSettings {
 impl Default for PivotSettings {
     fn default() -> Self {
         Self {
-            threshold: 0.1,
+            threshold: LU_PIVOT_THRESHOLD,
             on_zero_pivot: ZeroPivotAction::Fail,
         }
     }
@@ -137,7 +138,7 @@ impl Default for MatchingSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            negligible_diagonal: 1e-10,
+            negligible_diagonal: MATCHING_NEGLIGIBLE_DIAGONAL,
         }
     }
 }
@@ -174,7 +175,7 @@ impl Default for OrderingSettings {
         Self {
             method: OrderingMethod::Auto,
             permutation: None,
-            compress_max_ratio: 0.95,
+            compress_max_ratio: COMPRESS_MAX_RATIO,
             race: RaceSettings::default(),
             nd: MetisOptions::default(),
             amd: AmdOptions::default(),
@@ -226,13 +227,13 @@ impl Default for RaceSettings {
                 OrderingMethod::Amf,
                 OrderingMethod::Rcm,
             ],
-            nd_min_n: 10_000,
-            nd_min_work: 1_250_000_000,
-            assumed_workers: 4,
-            eager_nd_min_nnz: 2_000_000,
+            nd_min_n: RACE_ND_MIN_N,
+            nd_min_work: RACE_ND_MIN_WORK,
+            assumed_workers: RACE_ASSUMED_WORKERS,
+            eager_nd_min_nnz: RACE_EAGER_ND_MIN_NNZ,
             ensemble: false,
-            ensemble_size: 3,
-            ensemble_min_flops: 50_000_000_000,
+            ensemble_size: RACE_ENSEMBLE_SIZE,
+            ensemble_min_flops: RACE_ENSEMBLE_MIN_FLOPS,
         }
     }
 }
@@ -272,14 +273,14 @@ pub struct AmalgamationSettings {
 impl Default for AmalgamationSettings {
     fn default() -> Self {
         Self {
-            nemin: 16,
+            nemin: NEMIN,
             relax: None,
-            relax_min_n: 1024,
+            relax_min_n: RELAX_MIN_N,
             strategy: AmalgamationStrategy::Auto,
-            path_like_fraction: 0.05,
-            root_cap_min_n: 1024,
-            root_cap_fraction: 0.05,
-            root_cap_max: 2048,
+            path_like_fraction: PATH_LIKE_FRACTION,
+            root_cap_min_n: ROOT_CAP_MIN_N,
+            root_cap_fraction: ROOT_CAP_FRACTION,
+            root_cap_max: ROOT_CAP_MAX,
         }
     }
 }
@@ -299,11 +300,12 @@ pub struct KernelSettings {
     /// From this a panel's trailing update runs rayon-parallel. Default
     /// `8e6`.
     pub par_cdiv: usize,
-    /// From this the updates of one supernode fork across workers. A small
-    /// node that forks pays the join-steal latency: its waiting thread steals
-    /// other work, often a whole sibling subtree, and the node's chain stalls
-    /// (74 ms of cmod at 0.03 Gflop measured on a 1046x170 node). Default
-    /// `1e8`.
+    /// From this the work of one supernode forks across workers: its updates
+    /// (cmod flops) and its panel factorization (cdiv work `nrow * ncol^2`).
+    /// A small node that forks pays the join-steal latency: its waiting
+    /// thread steals other work, often a whole sibling subtree, and the
+    /// node's chain stalls (74 ms of cmod at 0.03 Gflop measured on a
+    /// 1046x170 node). Default `1e8`.
     pub fork_min_flops: usize,
     /// Column tile of the lower-triangular Schur GEMM. Default `256`.
     pub schur_tile: usize,
@@ -319,21 +321,83 @@ pub struct KernelSettings {
     /// Use the SIMD GEMM for the LDL^T Schur update (vs the scalar loop).
     /// Default `true`.
     pub use_gemm_schur: bool,
+    /// Nodes with at least this many columns factor in panels of at least
+    /// [`wide_panel_nb`](Self::wide_panel_nb) columns, on both paths: the
+    /// deferred Schur GEMM's inner dimension is the panel width, too thin
+    /// at the default width to reach peak on root-class panels. Changes the
+    /// pivot window of those nodes. Default `512`.
+    pub wide_panel_min_ncol: usize,
+    /// The least panel width of those wide nodes. Default `128`.
+    pub wide_panel_nb: usize,
+    /// Panel width of the LU path's panel factorization (the LDL^T path's
+    /// is [`panel_nb`](Self::panel_nb)). Changes the pivot window. Default
+    /// `32`, at least 1.
+    pub lu_panel_nb: usize,
+    /// A parallel update of a node splits its columns into about this many
+    /// tiles of [`cmod_tile_min`](Self::cmod_tile_min) to
+    /// [`cmod_tile_max`](Self::cmod_tile_max) columns. Default `16`.
+    pub cmod_tiles: usize,
+    /// The narrowest such tile. Default `32`, at least 1.
+    pub cmod_tile_min: usize,
+    /// The widest such tile. Default `256`.
+    pub cmod_tile_max: usize,
+    /// Rows per task of the parallel `U12` triangular solve in the LU
+    /// panel factorization. Default `256`.
+    pub trsm_rows: usize,
+}
+
+impl KernelSettings {
+    /// The panel width of a node of `ncol` columns whose kernel's own width
+    /// is `base`: at least [`wide_panel_nb`](Self::wide_panel_nb) from
+    /// [`wide_panel_min_ncol`](Self::wide_panel_min_ncol) columns.
+    pub(crate) fn panel_width(&self, base: usize, ncol: usize) -> usize {
+        if ncol >= self.wide_panel_min_ncol {
+            base.max(self.wide_panel_nb)
+        } else {
+            base
+        }
+    }
+
+    /// The parallel threshold of the panel factorization of an `nrow x ncol`
+    /// node: [`par_cdiv`](Self::par_cdiv) from
+    /// [`fork_min_flops`](Self::fork_min_flops) of work `nrow * ncol^2`,
+    /// else never, so a small node does not fork inside its cdiv either.
+    pub(crate) fn cdiv_par(&self, nrow: usize, ncol: usize) -> usize {
+        if nrow * ncol * ncol >= self.fork_min_flops {
+            self.par_cdiv
+        } else {
+            usize::MAX
+        }
+    }
+
+    /// The column tile of a parallel update over `width` columns.
+    pub(crate) fn cmod_tile(&self, width: usize) -> usize {
+        (width / self.cmod_tiles.max(1))
+            .max(self.cmod_tile_min)
+            .min(self.cmod_tile_max)
+    }
 }
 
 impl Default for KernelSettings {
     fn default() -> Self {
         Self {
-            panel_nb: 64,
-            scalar_gate: 4096,
-            par_gemm: 1_000_000,
-            par_cdiv: 8_000_000,
-            fork_min_flops: 100_000_000,
-            schur_tile: 256,
-            trailing_block: 16,
-            complex_split_min_ratio: 64,
-            complex_split_tile: 256,
+            panel_nb: PANEL_NB,
+            scalar_gate: SCALAR_GATE,
+            par_gemm: PAR_GEMM_MIN_FLOPS,
+            par_cdiv: PAR_CDIV_MIN_FLOPS,
+            fork_min_flops: FORK_MIN_FLOPS,
+            schur_tile: SCHUR_TILE,
+            trailing_block: TRAILING_BLOCK,
+            complex_split_min_ratio: COMPLEX_SPLIT_MIN_RATIO,
+            complex_split_tile: COMPLEX_SPLIT_TILE,
             use_gemm_schur: true,
+            wide_panel_min_ncol: WIDE_PANEL_MIN_NCOL,
+            wide_panel_nb: WIDE_PANEL_NB,
+            lu_panel_nb: LU_PANEL_NB,
+            cmod_tiles: CMOD_TILES,
+            cmod_tile_min: CMOD_TILE_MIN,
+            cmod_tile_max: CMOD_TILE_MAX,
+            trsm_rows: TRSM_ROWS,
         }
     }
 }
@@ -353,8 +417,10 @@ pub struct SolveSettings {
     /// Panel entries from which an ancestor node uses the blocked sweep.
     /// Default `262_144`.
     pub apex_min_work: usize,
-    /// Work of a triangular sweep from which it runs on the thread pool: the
-    /// factor's panel entries times the right-hand sides, up to four. A
+    /// Work of a triangular sweep from which it runs on the thread pool, in
+    /// the factor's panel entries times the right-hand sides, up to four
+    /// (not the fmadds of
+    /// [`KluSettings::par_min_work`](crate::KluSettings::par_min_work)). A
     /// smaller sweep runs on the calling thread, where handing it to the
     /// pool costs more than it saves (several times the solve at a few
     /// thousand unknowns). The same bits either way. Default `1_048_576`,
@@ -365,11 +431,11 @@ pub struct SolveSettings {
 impl Default for SolveSettings {
     fn default() -> Self {
         Self {
-            leaf_subtrees: 128,
-            block: 512,
-            ancestor_chunk: 32,
-            apex_min_work: 1 << 18,
-            par_min_work: 1 << 20,
+            leaf_subtrees: SOLVE_LEAF_SUBTREES,
+            block: SOLVE_BLOCK,
+            ancestor_chunk: SOLVE_ANCESTOR_CHUNK,
+            apex_min_work: SOLVE_APEX_MIN_ENTRIES,
+            par_min_work: SOLVE_PAR_MIN_ENTRY_RHS,
         }
     }
 }
@@ -501,7 +567,11 @@ impl SolverSettings {
     pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning<'_> {
         crate::numeric::gemm_tuning::KernelTuning {
             k: KernelSettings {
-                panel_nb: self.kernels.panel_nb.max(8),
+                panel_nb: self.kernels.panel_nb.max(PANEL_NB_MIN),
+                lu_panel_nb: self.kernels.lu_panel_nb.max(1),
+                cmod_tile_min: self.kernels.cmod_tile_min.max(1),
+                cmod_tile_max: self.kernels.cmod_tile_max.max(1),
+                trsm_rows: self.kernels.trsm_rows.max(1),
                 ..self.kernels
             },
             pivot_threshold: self.pivoting.threshold.clamp(0.0, 1.0),
@@ -542,6 +612,18 @@ impl SolverSettings {
                 }
                 if self.matching != d.matching {
                     out.push("matching is ignored by the LDL^T path (an LU setting)".to_string());
+                }
+                if self.kernels.lu_panel_nb != d.kernels.lu_panel_nb {
+                    out.push(format!(
+                        "kernels.lu_panel_nb = {} is ignored by the LDL^T path (an LU kernel knob)",
+                        self.kernels.lu_panel_nb
+                    ));
+                }
+                if self.kernels.trsm_rows != d.kernels.trsm_rows {
+                    out.push(format!(
+                        "kernels.trsm_rows = {} is ignored by the LDL^T path (an LU kernel knob)",
+                        self.kernels.trsm_rows
+                    ));
                 }
             }
             FactorPath::Lu => {
@@ -597,11 +679,9 @@ pub enum Threads {
 
 impl Default for Threads {
     fn default() -> Self {
-        // Cap at 4 workers by default: our strong-scaling data puts the efficiency
-        // knee at ~4-6 threads, so 4 is the pareto-optimal throughput-per-core point
-        // and the safe default for concurrent / embedded (solver-in-the-loop) use.
-        // `Auto` still predicts a smaller count per matrix where more would regress.
-        Threads::Auto { max: 4 }
+        Threads::Auto {
+            max: DEFAULT_MAX_THREADS,
+        }
     }
 }
 
@@ -691,10 +771,6 @@ pub(crate) fn in_scoped_pool<R: Send>(
     }
 }
 
-/// The stack of the thread a foreign rayon worker enters a pool through; it
-/// only waits.
-const HOP_STACK: usize = 256 * 1024;
-
 /// Run `f` on `pool`, the calling thread waiting for it. A worker of another
 /// rayon pool waiting in `install` keeps taking its own pool's jobs (rayon's
 /// cross-pool wait), and each of those may enter here again: a parallel
@@ -721,9 +797,6 @@ fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
         (_, None) => unreachable!("a joined hop either returned or panicked"),
     }
 }
-
-/// Pools a thread keeps, at most this many (the least recently used goes).
-const POOLS_KEPT: usize = 4;
 
 thread_local! {
     /// The scoped pools of this thread by worker count and stack size, most
@@ -818,13 +891,10 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
 /// committed only as the recursion descends), instead of a fixed guess that a
 /// deep enough chain overflows. `0` (shallow trees) keeps the rayon default.
 pub(crate) fn stack_for_depth(depth: usize) -> usize {
-    const FRAME: usize = 32 * 1024; // per-frame budget (~6.7 KB measured)
-    const MIN: usize = 16 * 1024 * 1024; // floor (>= the rayon default; covers ~depth 500)
-                                         // 8 GB cap (depth ~256k) on 64-bit; 1 GB on 32-bit targets (wasm32), where
-                                         // the 64-bit literal would overflow usize at const evaluation.
-    const MAX: usize = if usize::BITS >= 64 { 8 << 30 } else { 1 << 30 };
     // Always set an explicit, depth-proportional stack - never fall back to the
     // small rayon default, which a moderate depth (a few hundred supernodes, as a
     // banded matrix amalgamates to) already overflows.
-    depth.saturating_mul(FRAME).clamp(MIN, MAX)
+    depth
+        .saturating_mul(STACK_PER_LEVEL)
+        .clamp(STACK_MIN, STACK_MAX)
 }

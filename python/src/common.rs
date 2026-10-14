@@ -2,6 +2,7 @@
 //! NumPy <-> Rust buffer conversion, and the dict renderings of the core's
 //! report types.
 
+use crate::constants::{C32_BYTES, C64_BYTES, F32_BYTES, F64_BYTES};
 use num_complex::Complex;
 use numpy::{Element, IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -54,10 +55,10 @@ pub fn unsupported_dtype() -> PyErr {
 /// in bytes and whether the field is complex.
 pub fn scalar_kind(dtype: &str) -> PyResult<(usize, bool)> {
     Ok(match dtype {
-        "float64" | "f8" | "d" => (8, false),
-        "float32" | "f4" | "f" => (4, false),
-        "complex128" | "c16" | "D" => (16, true),
-        "complex64" | "c8" | "F" => (8, true),
+        "float64" | "f8" | "d" => (F64_BYTES, false),
+        "float32" | "f4" | "f" => (F32_BYTES, false),
+        "complex128" | "c16" | "D" => (C64_BYTES, true),
+        "complex64" | "c8" | "F" => (C32_BYTES, true),
         other => {
             return Err(PyValueError::new_err(format!(
                 "dtype must be 'float64', 'float32', 'complex128' or 'complex64', got '{other}'"
@@ -71,15 +72,15 @@ pub fn scalar_kind(dtype: &str) -> PyResult<(usize, bool)> {
 macro_rules! with_dtype_name {
     ($dtype:expr, |$T:ident| $body:expr) => {{
         match $crate::common::scalar_kind($dtype) {
-            Ok((8, false)) => {
+            Ok(($crate::constants::F64_BYTES, false)) => {
                 type $T = f64;
                 Ok($body)
             }
-            Ok((4, _)) => {
+            Ok(($crate::constants::F32_BYTES, _)) => {
                 type $T = f32;
                 Ok($body)
             }
-            Ok((16, _)) => {
+            Ok(($crate::constants::C64_BYTES, _)) => {
                 type $T = $crate::common::C64;
                 Ok($body)
             }
@@ -336,7 +337,8 @@ pub fn memory_plan_dict(
         pattern.row_idx.len() as u64,
         value_bytes as u64,
     );
-    let matrix = 8 * (n + 1) + (8 + vb) * nnz;
+    let idx = crate::constants::INDEX_BYTES;
+    let matrix = idx * (n + 1) + (idx + vb) * nnz;
     p.analysis_bytes += csc_bytes(&pattern.col_ptr, &pattern.row_idx, &Vec::<u8>::new());
     p.factor_bytes += matrix;
     p.factor_peak_bytes += matrix;

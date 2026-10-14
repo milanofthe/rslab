@@ -1,5 +1,10 @@
 //! The settings of the Krylov solvers.
 
+use crate::constants::{
+    KRYLOV_BASIS_BUDGET_BYTES, KRYLOV_MAX_ITER, KRYLOV_ORTHO_CHUNK, KRYLOV_REORTH_ETA,
+    KRYLOV_RESTART_MAX, KRYLOV_RESTART_MIN, KRYLOV_TOL,
+};
+
 /// Settings of [`gmres`](super::gmres), [`gmres_block`](super::gmres_block),
 /// [`gmres_recycled`](super::gmres_recycled), [`cocg`](super::cocg) and
 /// [`cocr`](super::cocr).
@@ -40,14 +45,14 @@ pub struct KrylovSettings {
 impl Default for KrylovSettings {
     fn default() -> Self {
         Self {
-            tol: 1e-8,
-            max_iter: 400,
+            tol: KRYLOV_TOL,
+            max_iter: KRYLOV_MAX_ITER,
             restart: None,
-            basis_budget_bytes: 1 << 30,
-            restart_min: 20,
-            restart_max: 80,
-            reorth_eta: std::f64::consts::FRAC_1_SQRT_2,
-            ortho_chunk: 2048,
+            basis_budget_bytes: KRYLOV_BASIS_BUDGET_BYTES,
+            restart_min: KRYLOV_RESTART_MIN,
+            restart_max: KRYLOV_RESTART_MAX,
+            reorth_eta: KRYLOV_REORTH_ETA,
+            ortho_chunk: KRYLOV_ORTHO_CHUNK,
         }
     }
 }

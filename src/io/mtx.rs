@@ -96,7 +96,11 @@ pub fn read_mtx_any(path: &Path) -> Result<MtxLoaded, RslabError> {
         .split_whitespace()
         .map(|s| s.to_ascii_lowercase())
         .collect();
-    if t.len() != 5 || t[0] != "%%matrixmarket" || t[1] != "matrix" || t[2] != "coordinate" {
+    if t.len() != crate::constants::MTX_BANNER_WORDS
+        || t[0] != "%%matrixmarket"
+        || t[1] != "matrix"
+        || t[2] != "coordinate"
+    {
         return Err(RslabError::IoError(format!(
             "{source}: unsupported header '{}'",
             header.trim()
@@ -319,7 +323,7 @@ fn parse_mtx_with<T: Scalar>(
 
     // Parse "rows cols nnz"
     let parts: Vec<&str> = size_text.split_whitespace().collect();
-    if parts.len() != 3 {
+    if parts.len() != crate::constants::MTX_SIZE_FIELDS {
         return Err(RslabError::IoError(format!(
             "{}: line {}: expected 'rows cols nnz', got '{}'",
             source,

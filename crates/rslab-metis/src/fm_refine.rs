@@ -150,7 +150,7 @@ pub fn refine_bisection(
             } else {
                 no_improve += 1;
             }
-            if no_improve >= 50 {
+            if no_improve >= crate::constants::FM_NO_IMPROVE_MAX {
                 break;
             }
         }

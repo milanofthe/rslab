@@ -31,7 +31,7 @@ fn far_weight(graph: &Graph, labels: &[u8], v: usize, s: usize) -> i64 {
 
 /// Total vertex weight per label class `[A, B, SEP]`.
 fn class_weights(graph: &Graph, labels: &[u8]) -> [i64; 3] {
-    let mut w = [0i64; 3];
+    let mut w = [0i64; crate::constants::LABEL_CLASSES];
     for v in 0..graph.nvtxs as usize {
         w[labels[v] as usize] += graph.vwgt[v] as i64;
     }

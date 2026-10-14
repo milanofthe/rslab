@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 1.2.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 1.3.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -1242,7 +1242,9 @@ tuned values, listed by `to_dict`.
 - `relax_min_n` (int, default 1024): Relaxed amalgamation applies from this many unknowns.
 - `root_cap_min_n, root_cap_fraction, root_cap_max`: Merges into a root stop at `root_cap_fraction * n` columns (0.05), at most `root_cap_max` (2048), from `root_cap_min_n` unknowns (1024).
 - `panel_nb, trailing_block, schur_tile` (int): Bunch-Kaufman panel width (64), its trailing sub-block (16) and the Schur tile (256).
-- `scalar_gate, par_gemm, par_cdiv, fork_min_flops` (int): Update flops below which the scalar loop runs (4096), from which an update GEMM (1e6) and a panel's trailing update (8e6) run in parallel, and from which a supernode's updates fork (1e8).
+- `scalar_gate, par_gemm, par_cdiv, fork_min_flops` (int): Update flops below which the scalar loop runs (4096), from which an update GEMM (1e6) and a panel's trailing update (8e6) run in parallel, and from which a supernode's updates and panel factorization fork (1e8).
+- `wide_panel_min_ncol, wide_panel_nb, lu_panel_nb` (int): Nodes from 512 columns factor in panels of at least 128 columns; the LU panel width below that (32).
+- `cmod_tiles, cmod_tile_min, cmod_tile_max, trsm_rows` (int): A parallel update splits a node into about 16 column tiles of 32 to 256 columns; rows per task of the LU panel's triangular solve (256).
 - `complex_split_min_ratio, complex_split_tile` (int): Complex products run as real products when their flops are this many times their plane copies (64), in tiles of this edge (256).
 - `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
 - `solve_leaf_subtrees, solve_block, solve_ancestor_chunk, solve_apex_min_work, solve_par_min_work` (int): Triangular solves: leaf subtrees of the parallel sweeps (128), column block (512) and columns per task (32) of the ancestor sweeps, panel entries from which an ancestor uses the blocked sweep (262 144), and the work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all (1 048 576).
@@ -1263,7 +1265,7 @@ Settings of the KLU (circuit) path.
 - `matching` (bool, default True): Maximum-product row matching (MC64) as the transversal of the block triangular form, so the diagonal-preference pivoting rarely leaves the diagonal; needs `btf`.
 - `parallel` (bool, optional): Per-block parallel factor / refactor over the BTF blocks. `None` (default) is the structural auto gate (several blocks, `par_min_nnz` nonzeros, no dominant block); `True` / `False` force it. The result is bit-identical in every mode.
 - `par_min_nnz` (int, default 8000): Nonzeros from which the auto gate factors blocks in parallel.
-- `par_min_work` (int, default 5e7): Replay work a unit of parallel refactorization must carry.
+- `par_min_work` (int, default 2e5): Replay work a unit of parallel refactorization must carry, in fmadds (not the unit of `Settings(solve_par_min_work=...)`).
 - `par_min_ratio` (float, default 2.0): Simultaneous work the structure must offer for a parallel refactor.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 

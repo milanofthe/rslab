@@ -51,12 +51,9 @@ pub struct RefinePolicy {
 
 impl Default for RefinePolicy {
     fn default() -> Self {
-        // Two steps is what a well-conditioned system needs to reach the
-        // roundoff floor; the target is a few units of double roundoff, below
-        // which the measure itself is noise.
         Self {
-            max_steps: 2,
-            target: 4.0 * f64::EPSILON,
+            max_steps: crate::constants::REFINE_MAX_STEPS,
+            target: crate::constants::REFINE_TARGET,
             measure: BackwardError::default(),
         }
     }

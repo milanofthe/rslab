@@ -52,7 +52,7 @@ impl Default for AmdOptions {
     fn default() -> Self {
         Self {
             aggressive: true,
-            dense_alpha: 10.0,
+            dense_alpha: rslab_ordering_core::constants::DENSE_ALPHA,
         }
     }
 }

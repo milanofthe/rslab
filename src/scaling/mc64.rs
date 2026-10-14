@@ -39,12 +39,9 @@
 
 use super::hungarian::{hungarian_match, CostGraph, Matching};
 use super::ScalingInfo;
+use crate::constants::LOG_HUGE;
 use crate::error::RslabError;
 use crate::sparse::csc::CscMatrix;
-
-/// Upper bound on the argument to `exp` before overflow.
-/// `ln(f64::MAX) ~ 709.78`. We use 709.0 as a safe ceiling.
-const LOG_HUGE: f64 = 709.0;
 
 /// MC64 output: the full Hungarian matching (`perm[j]` is the row
 /// matched to column `j`, `usize::MAX` if unmatched), the row and column
@@ -114,7 +111,8 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
     // over the nonzero entries, so every column has a zero-cost minimum.
     // The logarithms and the per-column pass run in parallel; zero and
     // non-finite entries (NaN marks) are dropped afterwards.
-    let mut cost: Vec<f64> = crate::parallel::map(a.values.len(), 4096, |k| {
+    let min_entries = crate::constants::MC64_LOG_PIECE_MIN_ENTRIES;
+    let mut cost: Vec<f64> = crate::parallel::map(a.values.len(), min_entries, |k| {
         let m = a.values[k].magnitude();
         if m == 0.0 || !m.is_finite() {
             f64::NAN
@@ -129,7 +127,8 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
         cols.push(head);
         rest = tail;
     }
-    let cmax: Vec<f64> = crate::parallel::map_owned(cols, 256, |col| {
+    let min_cols = crate::constants::MC64_COLMAX_PIECE_MIN_COLS;
+    let cmax: Vec<f64> = crate::parallel::map_owned(cols, min_cols, |col| {
         let top = col
             .iter()
             .copied()

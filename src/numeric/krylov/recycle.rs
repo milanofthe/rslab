@@ -106,8 +106,8 @@ fn combine_ritz_real<T: Scalar>(
         if out.len() / n >= kmax {
             break;
         }
-        let mag = theta.norm().max(1e-300);
-        if theta.im.abs() <= 1e-8 * mag {
+        let mag = theta.norm().max(crate::constants::TINY);
+        if theta.im.abs() <= crate::constants::RITZ_REAL_TOL * mag {
             let mut v = vec![T::zero(); n];
             for j in 0..d {
                 let re = T::from_real(g[j].re);
@@ -328,7 +328,7 @@ fn orthonormalize_recycle<T: Scalar>(
             }
         }
         let nrm = norm2(&ccol);
-        if nrm <= 1e-12 * orig {
+        if nrm <= crate::constants::RECYCLE_RANK_TOL * orig {
             continue; // rank-deficient direction: drop it
         }
         let inv = T::from_real(1.0 / nrm);
@@ -360,7 +360,7 @@ fn orthonormalize_columns<T: Scalar>(v: &mut [T], n: usize, nc: usize) -> usize 
             }
         }
         let nrm = norm2(&col);
-        if nrm <= 1e-12 * orig {
+        if nrm <= crate::constants::RECYCLE_RANK_TOL * orig {
             continue;
         }
         let inv = T::from_real(1.0 / nrm);
