@@ -12,6 +12,12 @@ static REPLAY_RATE: ScalarRates = ScalarRates::new(KLU_REPLAY_NS_PER_WORK);
 /// ([`BlockPlan::handoffs`]), learned from the pipelined replays.
 static HANDOFF_RATE: Rate = Rate::new(KLU_HANDOFF_NS);
 
+/// What a level replayed side by side costs beyond the pool's section cost,
+/// learned from the level-by-level replays: sections far apart find a
+/// pool's workers asleep, which the measured cost of back-to-back sections
+/// does not hold.
+static LEVEL_RATE: Rate = Rate::new(0.0);
+
 impl ReplayPlan {
     /// Whether the user's structural floors decide in place of the time.
     fn floors(&self) -> bool {
@@ -44,9 +50,11 @@ struct Decide {
     /// `1 - GAIN`, or `1` where the policy or the user's floors want it
     /// parallel and the time only picks the way.
     bar: f64,
-    /// ns per unit of replay work, and per hand-off of a pipelined replay.
+    /// ns per unit of replay work, per hand-off of a pipelined replay, and
+    /// per level replayed side by side beyond its section cost.
     seq: f64,
     hand: f64,
+    level: f64,
 }
 
 impl Decide {
@@ -65,6 +73,7 @@ impl Decide {
             bar: if forced { 1.0 } else { 1.0 - GAIN },
             seq: REPLAY_RATE.of::<T>().ns_per_op(),
             hand: HANDOFF_RATE.ns_per_op(),
+            level: if forced { 0.0 } else { LEVEL_RATE.ns_per_op() },
         }
     }
 
@@ -72,16 +81,20 @@ impl Decide {
         self.dispatch.width(work, pieces).min(self.threads).max(1)
     }
 
-    /// The threads level `l` of `bp` replays on, and its time on them.
-    fn level(&self, bp: &BlockPlan, l: usize) -> (usize, f64) {
+    /// The threads level `l` of `bp` replays on, and its time on them
+    /// (without the learned surcharge of a wide level, with it).
+    fn level(&self, bp: &BlockPlan, l: usize) -> (usize, f64, f64) {
         let work = bp.level_work[l] as f64 * self.seq;
         let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
-        let k = self.width(work, p);
+        let k = (self.dispatch)
+            .width_after(work, p, self.level)
+            .min(self.threads)
+            .max(1);
         if k < 2 {
-            return (1, work);
+            return (1, work, work);
         }
         let t = work * p.div_ceil(k) as f64 / p as f64 + self.dispatch.cost(k);
-        (k, t)
+        (k, t, t + self.level)
     }
 
     /// How block `bp` of `bn` columns replays: the shortest of the
@@ -101,7 +114,7 @@ impl Decide {
         let levels = if bp.widest == 0 || (bp.widest as f64 * self.seq) < breakeven {
             f64::INFINITY
         } else {
-            (0..bp.level_work.len()).map(|l| self.level(bp, l).1).sum()
+            (0..bp.level_work.len()).map(|l| self.level(bp, l).2).sum()
         };
         let piped = {
             let work = serial + bp.handoffs as f64 * self.hand;
@@ -403,10 +416,12 @@ impl<T: Scalar> KluSolver<T> {
                              x: &mut [T]|
          -> Result<(), RslabError> {
             let bn = x.len();
+            // The wide levels' time against what they were costed at.
+            let (mut wide, mut costed, mut took) = (0usize, 0.0f64, 0.0f64);
             for l in 0..bp.level_work.len() {
                 interrupt_check(int_flag)?;
                 let cols = &bp.cols[bp.ptr[l] as usize..bp.ptr[l + 1] as usize];
-                let (k, _) = decide_ref.level(bp, l);
+                let (k, t, _) = decide_ref.level(bp, l);
                 if k < 2 {
                     for &j in cols {
                         if let Err(e) = replay_col(j as usize, bs, bases, p, x, None) {
@@ -418,7 +433,10 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 let per = cols.len().div_ceil(cols.len().min(k * PIECES_PER_WORKER));
                 let failed: std::sync::Mutex<Option<RslabError>> = std::sync::Mutex::new(None);
-                let work = Work::of(bp.level_work[l] as f64, rate);
+                // Not learned from: pieces side by side pay for each other's
+                // cache traffic, which a sequential replay does not.
+                let work = Work::ns(t);
+                let start = crate::clock::Instant::now();
                 crate::parallel::run_work(cols.len().div_ceil(per), k, work, &|q| {
                     with_work(q, &mut |w: &mut Vec<T>| {
                         if w.len() < bn {
@@ -438,9 +456,14 @@ impl<T: Scalar> KluSolver<T> {
                         }
                     });
                 });
+                (wide, costed) = (wide + 1, costed + t);
+                took += start.elapsed().as_nanos() as f64;
                 if let Some(e) = failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
                     return Err(e);
                 }
+            }
+            if wide > 0 {
+                LEVEL_RATE.learn((took - costed).max(1.0), wide as f64);
             }
             Ok(())
         };
@@ -507,42 +530,56 @@ impl<T: Scalar> KluSolver<T> {
                 None => Ok(()),
             }
         };
-        // One block, as decided; a sequential replay of a planned block is
-        // measured for the rate where `timed`.
+        // The plan of block `b`, if it has one, the plans before `*cursor`
+        // passed: blocks replay in order, so a cursor finds every plan in
+        // one walk (most blocks of a circuit are singletons without one).
+        let plan_at = |cursor: &mut usize, b: usize| -> Option<usize> {
+            while plan.blocks.get(*cursor).is_some_and(|p| p.b < b) {
+                *cursor += 1;
+            }
+            plan.blocks
+                .get(*cursor)
+                .is_some_and(|p| p.b == b)
+                .then_some(*cursor)
+        };
+        // One block, as decided (`at` its plan); a sequential replay of a
+        // planned block is measured for the rate where `timed`.
         let modes_ref = &modes;
-        let replay_block =
-            |job: RJob<'_, T>, x: &mut Vec<T>, timed: bool| -> Result<(), RslabError> {
-                let b = job.b;
-                let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
-                let bases = (l_colptr[bs], u_colptr[bs], f_colptr[bs]);
-                let ptrs = BlockPtrs {
-                    l_v: PanelPtr(job.l_v.as_mut_ptr()),
-                    u_v: PanelPtr(job.u_v.as_mut_ptr()),
-                    ud: PanelPtr(job.ud.as_mut_ptr()),
-                    f_v: PanelPtr(job.f_v.as_mut_ptr()),
-                };
-                let at = plan.blocks.binary_search_by_key(&b, |p| p.b).ok();
-                let mode = at.map(|i| (&plan.blocks[i], modes_ref[i]));
-                if let Some((bp, Mode::Pipelined(k))) = mode {
-                    return replay_pipelined(bp, (bs, be), bases, ptrs, k);
-                }
-                x.clear();
-                x.resize(be - bs, T::zero());
-                if let Some((bp, Mode::Levels)) = mode {
-                    return replay_levels(bp, bs, bases, ptrs, x);
-                }
-                let mut run = || -> Result<(), RslabError> {
-                    for j in bs..be {
-                        // SAFETY: this closure exclusively owns the whole block.
-                        replay_col(j, bs, bases, ptrs, x, None)?;
-                    }
-                    Ok(())
-                };
-                match at {
-                    Some(i) if timed => rate.time(plan.blocks[i].work as f64, run),
-                    _ => run(),
-                }
+        let replay_block = |job: RJob<'_, T>,
+                            x: &mut Vec<T>,
+                            timed: bool,
+                            at: Option<usize>|
+         -> Result<(), RslabError> {
+            let b = job.b;
+            let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
+            let bases = (l_colptr[bs], u_colptr[bs], f_colptr[bs]);
+            let ptrs = BlockPtrs {
+                l_v: PanelPtr(job.l_v.as_mut_ptr()),
+                u_v: PanelPtr(job.u_v.as_mut_ptr()),
+                ud: PanelPtr(job.ud.as_mut_ptr()),
+                f_v: PanelPtr(job.f_v.as_mut_ptr()),
             };
+            let mode = at.map(|i| (&plan.blocks[i], modes_ref[i]));
+            if let Some((bp, Mode::Pipelined(k))) = mode {
+                return replay_pipelined(bp, (bs, be), bases, ptrs, k);
+            }
+            x.clear();
+            x.resize(be - bs, T::zero());
+            if let Some((bp, Mode::Levels)) = mode {
+                return replay_levels(bp, bs, bases, ptrs, x);
+            }
+            let mut run = || -> Result<(), RslabError> {
+                for j in bs..be {
+                    // SAFETY: this closure exclusively owns the whole block.
+                    replay_col(j, bs, bases, ptrs, x, None)?;
+                }
+                Ok(())
+            };
+            match at {
+                Some(i) if timed => rate.time(plan.blocks[i].work as f64, run),
+                _ => run(),
+            }
+        };
         if width_blocks > 1 {
             // Runs of consecutive blocks of about equal columns, a few per
             // thread, each replayed in order over one work vector.
@@ -566,10 +603,12 @@ impl<T: Scalar> KluSolver<T> {
                 let jobs =
                     std::mem::take(&mut *pieces[q].lock().unwrap_or_else(|e| e.into_inner()));
                 let mut x = Vec::new();
+                let mut cursor = 0;
                 for job in jobs {
                     let b = job.b;
-                    let r =
-                        interrupt_check(int_flag).and_then(|()| replay_block(job, &mut x, true));
+                    let at = plan_at(&mut cursor, b);
+                    let r = interrupt_check(int_flag)
+                        .and_then(|()| replay_block(job, &mut x, true, at));
                     if let Err(e) = r {
                         let mut slot = failed.lock().unwrap_or_else(|e| e.into_inner());
                         if slot.as_ref().is_none_or(|(b0, _)| b < *b0) {
@@ -585,9 +624,11 @@ impl<T: Scalar> KluSolver<T> {
         } else {
             // All sequential: measured as a whole, now and then.
             let mut all = || -> Result<(), RslabError> {
+                let mut cursor = 0;
                 for b in 0..nblocks {
                     interrupt_check(int_flag)?;
-                    replay_block(next_job(b), &mut x, wide)?;
+                    let at = plan_at(&mut cursor, b);
+                    replay_block(next_job(b), &mut x, wide, at)?;
                 }
                 Ok(())
             };
