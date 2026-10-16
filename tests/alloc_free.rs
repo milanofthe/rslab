@@ -229,3 +229,36 @@ fn a_warm_supernodal_refactor_allocates_a_fixed_handful() {
         );
     }
 }
+
+/// A block Arnoldi step writes into the basis it reserved at its start and
+/// allocates nothing (the operator here neither).
+#[test]
+fn block_arnoldi_steps_allocate_nothing() {
+    use num_complex::Complex;
+    use rslab::{BlockArnoldi, FnOperator, KrylovSettings};
+    let n = 64;
+    let a: Vec<Complex<f64>> = (0..n * n)
+        .map(|q| Complex::new(((q * 7 + 3) % 11) as f64, ((q * 5 + 1) % 13) as f64))
+        .collect();
+    let op = FnOperator::new(n, |x: &[Complex<f64>], y: &mut [Complex<f64>], s: usize| {
+        for c in 0..s {
+            for i in 0..n {
+                let mut acc = Complex::new(0.0, 0.0);
+                for j in 0..n {
+                    acc += a[i * n + j] * x[c * n + j];
+                }
+                y[c * n + i] = acc;
+            }
+        }
+    });
+    let r: Vec<Complex<f64>> = (0..2 * n)
+        .map(|i| Complex::new(1.0 + i as f64, 0.5))
+        .collect();
+    let mut ar = BlockArnoldi::new(&r, n, 2, 24, &KrylovSettings::default()).unwrap();
+    ar.step(&op).unwrap();
+    let before = mine();
+    for _ in 0..20 {
+        ar.step(&op).unwrap();
+    }
+    assert_eq!(mine() - before, 0, "allocations in 20 steps");
+}

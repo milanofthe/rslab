@@ -40,6 +40,8 @@ fn rslab_contract_constants() {
     assert_eq!(c::TINY.to_bits(), 0x01a56e1fc2f8f359);
     assert_eq!(c::DENSE_SINGULAR_TOL.to_bits(), 0x3d06849b86a12b9b);
     assert_eq!(c::QR_ITER_PER_DIM, 30);
+    assert_eq!(c::QR_EXCEPTIONAL_PERIOD, 10);
+    assert_eq!(c::QR_EXCEPTIONAL_SHIFT.to_bits(), 0.75f64.to_bits());
     assert_eq!(c::INVERSE_ITERATION_SHIFT.to_bits(), 0x3ddb7cdfd9d7bdbb);
     assert_eq!(c::RITZ_REAL_TOL.to_bits(), 0x3e45798ee2308c3a);
     assert_eq!(c::RECYCLE_RANK_TOL.to_bits(), 0x3d719799812dea11);

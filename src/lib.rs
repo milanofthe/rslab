@@ -165,7 +165,8 @@ pub(crate) mod clock;
 // and the contract tests.
 #[doc(hidden)]
 pub mod constants;
-pub(crate) mod dense;
+// Small dense complex linear algebra for the projected matrices of Krylov methods.
+pub mod dense;
 pub(crate) mod diagnostics;
 pub(crate) mod error;
 pub(crate) mod inertia;
@@ -224,8 +225,8 @@ pub use numeric::settings::{
 };
 // The Krylov solvers and their operator and preconditioner traits.
 pub use numeric::krylov::{
-    cocg, cocr, gmres, gmres_block, gmres_recycled, BlockKrylovResult, Factorization, FnOperator,
-    FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator, LowPrecisionLu,
+    cocg, cocr, gmres, gmres_block, gmres_recycled, BlockArnoldi, BlockKrylovResult, Factorization,
+    FnOperator, FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator, LowPrecisionLu,
     LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner, Preconditioner, Recycle,
     RecycleScalar, StopReason,
 };

@@ -9,8 +9,10 @@ pub enum RslabError {
     Interrupted,
 
     /// The matrix is numerically rank-deficient: a pivot was exactly or
-    /// near-zero and `ZeroPivotAction::Fail` was specified. The factorization
-    /// is incomplete.
+    /// near-zero and `ZeroPivotAction::Fail` was specified, so the factorization
+    /// is incomplete; or a small dense routine met a singular matrix
+    /// ([`crate::dense::lu_solve`], [`crate::dense::Schur::solve_shifted`]) or an
+    /// eigenvector that overflows ([`crate::dense::eigen`]).
     NumericallyRankDeficient,
 
     /// Input matrix dimensions are inconsistent or the matrix is not square.
@@ -36,6 +38,10 @@ pub enum RslabError {
     /// for *every* value assignment. Detected by the KLU path's maximum
     /// transversal before any numeric work.
     StructurallySingular,
+
+    /// An iteration with a fixed budget did not converge within it (the QR
+    /// iteration of [`crate::dense::Schur`]); `iterations` is the budget.
+    NotConverged { iterations: usize },
 }
 
 impl std::fmt::Display for RslabError {
@@ -60,6 +66,9 @@ impl std::fmt::Display for RslabError {
                     f,
                     "matrix is structurally singular (incomplete column-row matching)"
                 )
+            }
+            RslabError::NotConverged { iterations } => {
+                write!(f, "no convergence within {} iterations", iterations)
             }
         }
     }

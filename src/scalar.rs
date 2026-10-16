@@ -71,6 +71,9 @@ pub trait Scalar:
     /// Complex field: its GEMMs may run on split real planes (see
     /// `dense::gemm_backend`), which the memory plan counts.
     const COMPLEX: bool = false;
+    /// The unit roundoff of the working precision (`f64::EPSILON` for the
+    /// double types, `f32::EPSILON` for the single ones), as an `f64`.
+    const EPSILON: f64 = f64::EPSILON;
 
     /// The additive identity `0`.
     fn zero() -> Self;
@@ -341,6 +344,7 @@ impl Scalar for Complex<f64> {
 }
 
 impl Scalar for f32 {
+    const EPSILON: f64 = f32::EPSILON as f64;
     #[inline]
     fn zero() -> Self {
         0.0
@@ -394,6 +398,7 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex<f32> {
+    const EPSILON: f64 = f32::EPSILON as f64;
     const COMPLEX: bool = true;
 
     unsafe fn gemm(

@@ -7,7 +7,8 @@ use crate::constants::{
 
 /// Settings of [`gmres`](super::gmres), [`gmres_block`](super::gmres_block),
 /// [`gmres_recycled`](super::gmres_recycled), [`cocg`](super::cocg) and
-/// [`cocr`](super::cocr).
+/// [`cocr`](super::cocr). [`BlockArnoldi`](super::BlockArnoldi) reads
+/// [`reorth_eta`](Self::reorth_eta) and [`ortho_chunk`](Self::ortho_chunk) only.
 ///
 /// ```
 /// use rslab::KrylovSettings;
@@ -36,7 +37,8 @@ pub struct KrylovSettings {
     /// pass keeps less than this fraction of its norm (the DGKS criterion).
     /// Default `1/sqrt(2)`.
     pub reorth_eta: f64,
-    /// Rows per chunk of the parallel orthogonalization sums of block GMRES.
+    /// Rows per chunk of the parallel orthogonalization sums of block GMRES and
+    /// block Arnoldi.
     /// The chunks are summed in a fixed order, so the result depends on this
     /// value but not on the thread count. Default `2048`.
     pub ortho_chunk: usize,
