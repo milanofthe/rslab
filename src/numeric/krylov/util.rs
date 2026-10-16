@@ -237,3 +237,94 @@ pub(super) fn block_subtract<T: Scalar>(
         });
     }
 }
+
+/// The panel product `proj[j * q + c] = <V_j, W_c>` of the first `cols` columns
+/// of the basis `v` (column-major, `n` rows) and the `q` columns of the panel
+/// `w`: the basis read once for the whole panel. Row chunks of `chunk` rows are
+/// summed in parallel into `scratch` (`>= ceil(n / chunk) * cols * q`) and folded
+/// in chunk order, so the result does not depend on the thread count.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn panel_project<T: Scalar>(
+    v: &[T],
+    cols: usize,
+    w: &[T],
+    q: usize,
+    n: usize,
+    chunk: usize,
+    proj: &mut [T],
+    scratch: &mut [T],
+) {
+    let width = cols * q;
+    for p in proj[..width].iter_mut() {
+        *p = T::zero();
+    }
+    if width == 0 || n == 0 {
+        return;
+    }
+    let nchunks = n.div_ceil(chunk);
+    let part = &mut scratch[..nchunks * width];
+    let sums = |ci: usize, out: &mut [T]| {
+        let r0 = ci * chunk;
+        let r1 = (r0 + chunk).min(n);
+        for j in 0..cols {
+            let vj = &v[j * n + r0..j * n + r1];
+            for c in 0..q {
+                let wc = &w[c * n + r0..c * n + r1];
+                let mut s = T::zero();
+                for (a, b) in vj.iter().zip(wc) {
+                    s = s + a.conj() * *b;
+                }
+                out[j * q + c] = s;
+            }
+        }
+    };
+    // one chunk: no parallel section (nothing to spread, nothing to allocate)
+    if nchunks == 1 {
+        sums(0, part);
+    } else {
+        crate::parallel::chunks_mut(part, width, sums);
+    }
+    for ci in 0..nchunks {
+        let base = ci * width;
+        for t in 0..width {
+            proj[t] = proj[t] + part[base + t];
+        }
+    }
+}
+
+/// `W_c -= sum_j coef[j * q + c] V_j` over the first `cols` basis columns, in
+/// parallel over row chunks, the sum in column order at every entry (thread-count
+/// independent).
+#[inline]
+pub(super) fn panel_subtract<T: Scalar>(
+    v: &[T],
+    cols: usize,
+    w: &mut [T],
+    q: usize,
+    n: usize,
+    chunk: usize,
+    coef: &[T],
+) {
+    for c in 0..q {
+        let wc = &mut w[c * n..(c + 1) * n];
+        let update = |ci: usize, part: &mut [T]| {
+            let r0 = ci * chunk;
+            for j in 0..cols {
+                let h = coef[j * q + c];
+                if h == T::zero() {
+                    continue;
+                }
+                let vj = &v[j * n + r0..j * n + r0 + part.len()];
+                for (x, &y) in part.iter_mut().zip(vj) {
+                    *x = *x - h * y;
+                }
+            }
+        };
+        if n <= chunk {
+            update(0, wc);
+        } else {
+            crate::parallel::chunks_mut(wc, chunk, update);
+        }
+    }
+}

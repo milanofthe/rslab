@@ -169,6 +169,11 @@ pub trait Scalar:
     /// Whether every component is finite (no `NaN`/`inf`) - used by pivot
     /// health checks.
     fn is_finite(self) -> bool;
+    /// The unit roundoff of the working precision (`f64::EPSILON` for the
+    /// double types, `f32::EPSILON` for the single ones).
+    fn epsilon() -> f64 {
+        f64::EPSILON
+    }
 }
 
 /// `a*b + c` through the hardware FMA **when the build enables it**
@@ -341,6 +346,9 @@ impl Scalar for Complex<f64> {
 }
 
 impl Scalar for f32 {
+    fn epsilon() -> f64 {
+        f32::EPSILON as f64
+    }
     #[inline]
     fn zero() -> Self {
         0.0
@@ -394,6 +402,9 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex<f32> {
+    fn epsilon() -> f64 {
+        f32::EPSILON as f64
+    }
     const COMPLEX: bool = true;
 
     unsafe fn gemm(

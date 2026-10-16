@@ -165,7 +165,8 @@ pub(crate) mod clock;
 // and the contract tests.
 #[doc(hidden)]
 pub mod constants;
-pub(crate) mod dense;
+// Small dense complex linear algebra for the projected matrices of Krylov methods.
+pub mod dense;
 pub(crate) mod diagnostics;
 pub(crate) mod error;
 pub(crate) mod inertia;
@@ -229,8 +230,6 @@ pub use numeric::krylov::{
     LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner, Preconditioner, Recycle,
     RecycleScalar, StopReason,
 };
-// Small dense complex linear algebra for the projected matrices of Krylov methods.
-pub use numeric::dense_eig::{eigen, lu_solve, schur, Eigen};
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
 pub use sparse::layout::{CscLayout, Triplets};

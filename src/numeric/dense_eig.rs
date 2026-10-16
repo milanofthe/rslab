@@ -1,27 +1,29 @@
 //! Small **dense** complex linear algebra: the projected matrices of Krylov
-//! methods (GCRO-DR's harmonic-Ritz extraction, the Ritz values of a caller's
+//! methods (GCRO-DR's harmonic-Ritz extraction, the Ritz values of a
 //! [`BlockArnoldi`](crate::BlockArnoldi)). These routines operate on small
 //! matrices (a restart length, a few hundred at most), never in the Krylov hot
 //! loop, so they are written for clarity and robustness, not peak speed, and
-//! everything runs in `Complex<f64>` regardless of the outer solve's scalar field.
+//! everything runs in `Complex<f64>` regardless of the outer solve's scalar
+//! field.
 //!
-//! * [`lu_solve`]: a partial-pivot complex **LU solve** (`A X = B`).
-//! * [`schur`] and [`eigen`]: the complex **Schur decomposition** `A = Q T Q^H`
-//!   (Householder Hessenberg reduction, Wilkinson-shifted Givens QR with the
-//!   transform accumulated) and from it the eigenvalues with their right
-//!   eigenvectors (back substitution on `T`). Both report a QR that does not
-//!   converge within its budget as `None`.
-//! * `eigenvalues`: the eigenvalues alone, best effort, for GCRO-DR.
+//! * `lu`: a partial-pivot complex LU solve (`A X = B`).
+//! * `qr_iterate`: the Hessenberg QR iteration (Wilkinson shifts, LAPACK's
+//!   exceptional shifts, deflation at the bottom), optionally accumulating the
+//!   transform: the eigenvalues of `eigenvalues`, the Schur form of
+//!   [`Schur`](crate::dense::Schur).
+//! * the Schur form's eigenvectors: back and forward substitution on `T` with a
+//!   per-eigenvalue floor and overflow rescaling.
 //!
-//! **Why approximate is safe for GCRO-DR.** The harmonic-Ritz vectors only seed
-//! the recycle subspace `U`, which *accelerates* convergence; the outer GMRES
-//! true-residual test is authoritative, so a defective / inaccurate `U` can only
-//! make the solve slower, never wrong. Accordingly `eigenvalues` and
-//! `harmonic_ritz_smallest` are guarded (capped iterations, singular-pivot
-//! fallbacks) and return "best effort" rather than erroring. A caller whose
-//! result is the spectrum itself takes [`eigen`], which says when it failed.
+//! The public, checked entry points are [`crate::dense`]'s. `eigenvalues` and
+//! `harmonic_ritz_smallest` serve GCRO-DR and are best effort: the
+//! harmonic-Ritz vectors only seed the recycle subspace, which *accelerates*
+//! convergence, and the outer GMRES true-residual test is authoritative, so a
+//! defective or inaccurate subspace can only make the solve slower, never wrong.
 
-use crate::constants::{DENSE_SINGULAR_TOL, INVERSE_ITERATION_SHIFT, QR_ITER_PER_DIM, TINY};
+use crate::constants::{
+    DENSE_SINGULAR_TOL, INVERSE_ITERATION_SHIFT, QR_EXCEPTIONAL_PERIOD, QR_EXCEPTIONAL_SHIFT,
+    QR_ITER_PER_DIM, TINY,
+};
 use num_complex::Complex;
 
 type C = Complex<f64>;
@@ -29,9 +31,8 @@ type C = Complex<f64>;
 /// Solve the dense complex system `A X = B` by partial-pivot LU. `a` is `dxd`
 /// row-major (consumed as a working copy), `b` is `dxnrhs` row-major. Returns the
 /// solution `X` (`dxnrhs` row-major), or `None` if `A` is numerically singular
-/// (a pivot below `tol*||A||inf`), so the caller can skip the recycle update rather
-/// than divide by ~0.
-pub fn lu_solve(a: &[C], d: usize, b: &[C], nrhs: usize) -> Option<Vec<C>> {
+/// (a pivot below `DENSE_SINGULAR_TOL * ||A||inf`, the norm at least 1).
+pub(crate) fn lu(a: &[C], d: usize, b: &[C], nrhs: usize) -> Option<Vec<C>> {
     if d == 0 {
         return Some(Vec::new());
     }
@@ -221,7 +222,7 @@ fn qr_step(h: &mut [C], d: usize, p: usize, mu: C, mut q: Option<&mut [C]>) {
 }
 
 /// Columns `i, i+1` of the `dxd` row-major `m` across rows `0..rows` times the
-/// transposed rotation `(c, s)` of [`qr_step`].
+/// transposed rotation `(c, s)` of `qr_step`.
 fn rotate_columns(m: &mut [C], d: usize, i: usize, rows: usize, c: C, s: C) {
     for row in 0..rows {
         let hi = m[row * d + i];
@@ -249,49 +250,70 @@ fn wilkinson_shift(h: &[C], d: usize, p: usize) -> C {
     }
 }
 
-/// Eigenvalues of a general dense complex matrix `a` (`dxd`, row-major).
-/// Hessenberg reduction followed by shifted-QR with bottom-right deflation.
-/// Iterations are capped; any non-converged tail is reported as its current
-/// diagonal (safe - see the module note on why approximate spectra are fine).
-pub fn eigenvalues(a: &[C], d: usize) -> Vec<C> {
-    let mut h = a.to_vec();
-    to_hessenberg(&mut h, d, None);
-    let mut eigs = vec![C::new(0.0, 0.0); d];
+/// The QR iteration on the upper Hessenberg `h` (`dxd` row-major, in place) with
+/// deflation at the bottom of the active leading block, at most `budget` steps.
+/// Each step takes the Wilkinson shift, except every `QR_EXCEPTIONAL_PERIOD`
+/// steps without a deflation, where LAPACK's `zlahqr` exceptional shift (the top
+/// corner, then the bottom one, alternating, plus `QR_EXCEPTIONAL_SHIFT` times
+/// the real part's magnitude of the subdiagonal next to it) breaks the cycles a
+/// fixed strategy can fall into. With `q` the transform is accumulated
+/// (`qr_step`) and a deflated subdiagonal is set to zero, so `h` ends as the
+/// Schur form. Returns the size of the active block that did not deflate (0 when
+/// it converged).
+fn qr_iterate(h: &mut [C], d: usize, mut q: Option<&mut [C]>, budget: usize) -> usize {
     let mut p = d;
-    let mut budget = QR_ITER_PER_DIM * d + QR_ITER_PER_DIM;
-    while p > 0 {
-        if p == 1 {
-            eigs[0] = h[0];
-            break;
-        }
-        // Deflate a negligible bottom subdiagonal.
+    let mut left = budget;
+    let mut since = 0usize;
+    while p > 1 {
         let sub = h[(p - 1) * d + (p - 2)].norm();
         let dg = h[(p - 2) * d + (p - 2)].norm() + h[(p - 1) * d + (p - 1)].norm();
         if sub <= f64::EPSILON * dg.max(TINY) {
-            eigs[p - 1] = h[(p - 1) * d + (p - 1)];
+            if q.is_some() {
+                h[(p - 1) * d + (p - 2)] = C::new(0.0, 0.0);
+            }
             p -= 1;
+            since = 0;
             continue;
         }
-        if budget == 0 {
-            // Give up: report the remaining diagonal as-is.
-            for i in 0..p {
-                eigs[i] = h[i * d + i];
-            }
-            break;
+        if left == 0 {
+            return p;
         }
-        budget -= 1;
-        let mu = wilkinson_shift(&h, d, p);
-        qr_step(&mut h, d, p, mu, None);
+        left -= 1;
+        since += 1;
+        let mu = if since.is_multiple_of(QR_EXCEPTIONAL_PERIOD) {
+            if !(since / QR_EXCEPTIONAL_PERIOD).is_multiple_of(2) {
+                h[0] + QR_EXCEPTIONAL_SHIFT * h[d].re.abs()
+            } else {
+                h[(p - 1) * d + (p - 1)] + QR_EXCEPTIONAL_SHIFT * h[(p - 1) * d + (p - 2)].re.abs()
+            }
+        } else {
+            wilkinson_shift(h, d, p)
+        };
+        qr_step(h, d, p, mu, q.as_deref_mut());
     }
-    eigs
+    0
 }
 
-/// The complex Schur decomposition `A = Q T Q^H` of a general dense matrix `a`
-/// (`dxd`, row-major): `T` upper triangular with the eigenvalues on its diagonal,
-/// `Q` unitary, both `dxd` row-major. The QR iteration of `eigenvalues` with the
-/// transform accumulated; `None` where it does not converge within the same
-/// budget (`QR_ITER_PER_DIM` per dimension), rather than a partial result.
-pub fn schur(a: &[C], d: usize) -> Option<(Vec<C>, Vec<C>)> {
+/// The QR budget of a `dxd` matrix: `QR_ITER_PER_DIM` steps per dimension and
+/// once more.
+pub(crate) fn qr_budget(d: usize) -> usize {
+    QR_ITER_PER_DIM * d + QR_ITER_PER_DIM
+}
+
+/// Eigenvalues of a general dense complex matrix `a` (`dxd`, row-major), best
+/// effort: Hessenberg reduction and the QR iteration of `qr_iterate`; a block
+/// that does not deflate within the budget is reported as its current diagonal
+/// (safe for GCRO-DR, see the module note).
+pub fn eigenvalues(a: &[C], d: usize) -> Vec<C> {
+    let mut h = a.to_vec();
+    to_hessenberg(&mut h, d, None);
+    qr_iterate(&mut h, d, None, qr_budget(d));
+    (0..d).map(|i| h[i * d + i]).collect()
+}
+
+/// The complex Schur form `A = Q T Q^H` of `a` (`dxd` row-major): `(T, Q)`, or
+/// the size of the block that did not converge within `budget` QR steps.
+pub(crate) fn schur_form(a: &[C], d: usize, budget: usize) -> Result<(Vec<C>, Vec<C>), usize> {
     let zero = C::new(0.0, 0.0);
     let mut t = a.to_vec();
     let mut q = vec![zero; d * d];
@@ -305,77 +327,52 @@ pub fn schur(a: &[C], d: usize) -> Option<(Vec<C>, Vec<C>)> {
             t[i * d + j] = zero;
         }
     }
-    let mut p = d;
-    let mut budget = QR_ITER_PER_DIM * d + QR_ITER_PER_DIM;
-    while p > 1 {
-        let sub = t[(p - 1) * d + (p - 2)].norm();
-        let dg = t[(p - 2) * d + (p - 2)].norm() + t[(p - 1) * d + (p - 1)].norm();
-        if sub <= f64::EPSILON * dg.max(TINY) {
-            t[(p - 1) * d + (p - 2)] = zero;
-            p -= 1;
-            continue;
+    match qr_iterate(&mut t, d, Some(&mut q), budget) {
+        0 => Ok((t, q)),
+        p => Err(p),
+    }
+}
+
+/// `y[k..]` of the substitution `y^T (T - lambda I) = 0` (`left`) or `(T -
+/// lambda I) y = 0` (right) on the upper triangular `t` (`dxd` row-major) with
+/// `y_k = 1`, `lambda = t[k][k]`, zero elsewhere. A denominator `T_ii - lambda`
+/// below the precision of `lambda` (`f64::EPSILON |lambda|`, at least `TINY`, the
+/// floor of LAPACK's `ztrevc`) is replaced by that floor; whenever an entry
+/// exceeds `sqrt(f64::MAX)` the vector is rescaled so its largest entry is 1, so
+/// the next products of an entry and a matrix entry stay finite (a Jordan block's
+/// vectors grow geometrically). `None` where an entry is not finite.
+pub(crate) fn triangular_eigenvector(t: &[C], d: usize, k: usize, left: bool) -> Option<Vec<C>> {
+    let zero = C::new(0.0, 0.0);
+    let lam = t[k * d + k];
+    let floor = (f64::EPSILON * lam.norm()).max(TINY);
+    let big = f64::MAX.sqrt();
+    let mut y = vec![zero; d];
+    y[k] = C::new(1.0, 0.0);
+    let order: Vec<usize> = if left {
+        ((k + 1)..d).collect()
+    } else {
+        (0..k).rev().collect()
+    };
+    for i in order {
+        let s: C = if left {
+            (k..i).map(|l| y[l] * t[l * d + i]).sum()
+        } else {
+            ((i + 1)..=k).map(|j| t[i * d + j] * y[j]).sum()
+        };
+        let mut den = t[i * d + i] - lam;
+        if den.norm() < floor {
+            den = C::new(floor, 0.0);
         }
-        if budget == 0 {
+        y[i] = -s / den;
+        if !(y[i].re.is_finite() && y[i].im.is_finite()) {
             return None;
         }
-        budget -= 1;
-        let mu = wilkinson_shift(&t, d, p);
-        qr_step(&mut t, d, p, mu, Some(&mut q));
-    }
-    Some((t, q))
-}
-
-/// The eigenvalues of a small dense matrix with their right eigenvectors
-/// ([`eigen`]).
-#[derive(Debug, Clone)]
-pub struct Eigen {
-    /// The eigenvalues, in the order of the Schur form's diagonal.
-    pub values: Vec<C>,
-    /// The right eigenvectors, `dxd` row-major: column `k` belongs to
-    /// `values[k]`, unit Euclidean norm.
-    pub vectors: Vec<C>,
-}
-
-/// The eigenvalues and right eigenvectors of a general dense complex matrix `a`
-/// (`dxd`, row-major), `A x_k = lambda_k x_k`: the Schur form ([`schur`]) and per
-/// eigenvalue the back substitution `(T - lambda_k I) y = 0`, `y_k = 1`, then
-/// `x_k = Q y` normalized. A denominator `T_ii - lambda_k` below the working
-/// precision of `T` (`f64::EPSILON` times its largest entry: a repeated
-/// eigenvalue) is replaced by that floor, as LAPACK's `ztrevc` does, so a
-/// defective matrix gives nearly parallel vectors instead of a division by zero.
-/// `None` where the Schur form does not converge.
-pub fn eigen(a: &[C], d: usize) -> Option<Eigen> {
-    let zero = C::new(0.0, 0.0);
-    let (t, q) = schur(a, d)?;
-    let tmax = t.iter().map(|v| v.norm()).fold(0.0f64, f64::max);
-    let floor = f64::EPSILON * tmax.max(TINY);
-    let mut vectors = vec![zero; d * d];
-    let mut y = vec![zero; d];
-    for k in 0..d {
-        let lam = t[k * d + k];
-        y.iter_mut().for_each(|v| *v = zero);
-        y[k] = C::new(1.0, 0.0);
-        for i in (0..k).rev() {
-            let mut s = zero;
-            for j in (i + 1)..=k {
-                s += t[i * d + j] * y[j];
-            }
-            let mut den = t[i * d + i] - lam;
-            if den.norm() < floor {
-                den = C::new(floor, 0.0);
-            }
-            y[i] = -s / den;
-        }
-        let mut x: Vec<C> = (0..d)
-            .map(|i| (0..=k).map(|j| q[i * d + j] * y[j]).sum())
-            .collect();
-        normalize(&mut x);
-        for i in 0..d {
-            vectors[i * d + k] = x[i];
+        if y[i].norm() > big {
+            let inv = 1.0 / y[i].norm();
+            y.iter_mut().for_each(|v| *v *= inv);
         }
     }
-    let values = (0..d).map(|i| t[i * d + i]).collect();
-    Some(Eigen { values, vectors })
+    Some(y)
 }
 
 /// One-vector inverse iteration for the eigenvector of `a` (`dxd` row-major)
@@ -404,7 +401,7 @@ fn inverse_iteration(a: &[C], d: usize, mu: C) -> Option<Vec<C>> {
     let mut w = vec![C::new(1.0, 0.0); d];
     normalize(&mut w);
     for _ in 0..2 {
-        let sol = lu_solve(&shifted, d, &w, 1)?;
+        let sol = lu(&shifted, d, &w, 1)?;
         w = sol;
         normalize(&mut w);
     }
@@ -412,7 +409,7 @@ fn inverse_iteration(a: &[C], d: usize, mu: C) -> Option<Vec<C>> {
 }
 
 /// Scale a complex vector to unit Euclidean norm (no-op on a zero vector).
-fn normalize(w: &mut [C]) {
+pub(crate) fn normalize(w: &mut [C]) {
     let mut nrm = 0.0f64;
     for v in w.iter() {
         nrm += v.norm_sqr();
@@ -438,7 +435,7 @@ pub fn harmonic_ritz_smallest(m1: &[C], m2: &[C], d: usize, k: usize) -> Vec<(C,
         return Vec::new();
     }
     // T = M_2^-1 M_1 (solve M_2 T = M_1).
-    let t = match lu_solve(m2, d, m1, d) {
+    let t = match lu(m2, d, m1, d) {
         Some(t) => t,
         None => return Vec::new(),
     };
@@ -475,133 +472,6 @@ mod tests {
         got.sort_by(|a, b| a.re.partial_cmp(&b.re).unwrap());
         for (g, w) in got.iter().zip(want.iter()) {
             assert!((g - w).norm() < tol, "eig {g} vs {w}");
-        }
-    }
-
-    /// `A x = A_dense x` for a row-major `dxd` matrix.
-    fn matvec(a: &[C], d: usize, x: &[C]) -> Vec<C> {
-        (0..d)
-            .map(|i| (0..d).map(|j| a[i * d + j] * x[j]).sum())
-            .collect()
-    }
-
-    /// A deterministic dense complex test matrix of dimension `d`.
-    fn random(d: usize, seed: u64) -> Vec<C> {
-        let mut state = seed;
-        let mut next = move || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-        };
-        (0..d * d).map(|_| C::new(next(), next())).collect()
-    }
-
-    /// The Schur form reproduces the matrix (`Q T Q^H = A`), `Q` is unitary and `T`
-    /// upper triangular with the eigenvalues of [`eigenvalues`] on its diagonal.
-    #[test]
-    fn schur_reproduces_the_matrix() {
-        for (d, seed) in [(1, 1), (2, 2), (7, 3), (40, 4), (120, 5)] {
-            let a = random(d, seed);
-            let (t, q) = schur(&a, d).expect("converges");
-            let anorm = a.iter().map(|v| v.norm()).fold(0.0f64, f64::max);
-            for i in 0..d {
-                for j in 0..i {
-                    assert_eq!(t[i * d + j], C::new(0.0, 0.0), "T below the diagonal");
-                }
-                for j in 0..d {
-                    // (Q T Q^H)_ij and (Q^H Q)_ij
-                    let qtq: C = (0..d)
-                        .map(|k| {
-                            (0..d)
-                                .map(|l| q[i * d + k] * t[k * d + l] * q[j * d + l].conj())
-                                .sum::<C>()
-                        })
-                        .sum();
-                    assert!((qtq - a[i * d + j]).norm() < 1e-12 * anorm * d as f64);
-                    let qhq: C = (0..d).map(|k| q[k * d + i].conj() * q[k * d + j]).sum();
-                    let id = if i == j { 1.0 } else { 0.0 };
-                    assert!((qhq - id).norm() < 1e-12 * d as f64);
-                }
-            }
-            let diag: Vec<C> = (0..d).map(|i| t[i * d + i]).collect();
-            approx_set(diag, eigenvalues(&a, d), 1e-9 * anorm.max(1.0));
-        }
-    }
-
-    /// Every eigenpair satisfies `A x = lambda x` to the working precision, the
-    /// vectors are unit, and a matrix with known eigenvalues (`W diag W^-1`) gives
-    /// them.
-    #[test]
-    fn eigen_pairs_satisfy_the_eigenproblem() {
-        for (d, seed) in [(3, 11), (30, 12), (90, 13)] {
-            let a = random(d, seed);
-            let e = eigen(&a, d).expect("converges");
-            let anorm = a.iter().map(|v| v.norm()).fold(0.0f64, f64::max);
-            for k in 0..d {
-                let x: Vec<C> = (0..d).map(|i| e.vectors[i * d + k]).collect();
-                let nx = x.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-                assert!((nx - 1.0).abs() < 1e-12);
-                let ax = matvec(&a, d, &x);
-                let r = ax
-                    .iter()
-                    .zip(&x)
-                    .map(|(u, v)| (u - e.values[k] * v).norm_sqr())
-                    .sum::<f64>()
-                    .sqrt();
-                assert!(
-                    r < 1e-11 * anorm * d as f64,
-                    "d {d} pair {k}: residual {r:e}"
-                );
-            }
-        }
-        // known spectrum
-        let d = 12;
-        let w = random(d, 21);
-        let lam: Vec<C> = (0..d).map(|k| C::new(k as f64, -0.1 * k as f64)).collect();
-        let winv = {
-            let mut id = vec![C::new(0.0, 0.0); d * d];
-            for i in 0..d {
-                id[i * d + i] = C::new(1.0, 0.0);
-            }
-            lu_solve(&w, d, &id, d).expect("invertible")
-        };
-        let a: Vec<C> = (0..d * d)
-            .map(|q| {
-                let (i, j) = (q / d, q % d);
-                (0..d)
-                    .map(|k| w[i * d + k] * lam[k] * winv[k * d + j])
-                    .sum()
-            })
-            .collect();
-        let e = eigen(&a, d).expect("converges");
-        approx_set(e.values, lam, 1e-9);
-    }
-
-    /// A Jordan block (one defective eigenvalue) gives finite vectors along its
-    /// one eigenvector, not a division by zero.
-    #[test]
-    fn eigen_of_a_defective_matrix_is_finite() {
-        let d = 4;
-        let mut a = vec![C::new(0.0, 0.0); d * d];
-        for i in 0..d {
-            a[i * d + i] = C::new(2.0, 1.0);
-            if i + 1 < d {
-                a[i * d + i + 1] = C::new(1.0, 0.0);
-            }
-        }
-        let e = eigen(&a, d).expect("converges");
-        for k in 0..d {
-            assert!((e.values[k] - C::new(2.0, 1.0)).norm() < 1e-12);
-            assert!(
-                e.vectors[k].norm() > 1.0 - 1e-6,
-                "along e_1: {}",
-                e.vectors[k]
-            );
-            assert!(e
-                .vectors
-                .iter()
-                .all(|v| v.re.is_finite() && v.im.is_finite()));
         }
     }
 
@@ -698,7 +568,7 @@ mod tests {
                 b[i] += a[i * d + j] * x[j];
             }
         }
-        let sol = lu_solve(&a, d, &b, 1).unwrap();
+        let sol = lu(&a, d, &b, 1).unwrap();
         for i in 0..d {
             assert!(
                 (sol[i] - x[i]).norm() < 1e-12,

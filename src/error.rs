@@ -36,6 +36,10 @@ pub enum RslabError {
     /// for *every* value assignment. Detected by the KLU path's maximum
     /// transversal before any numeric work.
     StructurallySingular,
+
+    /// An iteration with a fixed budget did not converge within it (the QR
+    /// iteration of [`crate::dense::Schur`]); `iterations` is the budget.
+    NotConverged { iterations: usize },
 }
 
 impl std::fmt::Display for RslabError {
@@ -60,6 +64,9 @@ impl std::fmt::Display for RslabError {
                     f,
                     "matrix is structurally singular (incomplete column-row matching)"
                 )
+            }
+            RslabError::NotConverged { iterations } => {
+                write!(f, "no convergence within {} iterations", iterations)
             }
         }
     }
