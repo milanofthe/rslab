@@ -119,7 +119,6 @@ pub(crate) struct Scratch<T> {
     t: Vec<T>,
     g: Vec<T>,
     v: Vec<T>,
-    partial: Vec<T>,
     accv: Vec<T>,
     /// A leaf subtree's accumulator of its off-tree updates.
     acc: Vec<T>,
@@ -131,7 +130,6 @@ impl<T> Default for Scratch<T> {
             t: Vec::new(),
             g: Vec::new(),
             v: Vec::new(),
-            partial: Vec::new(),
             accv: Vec::new(),
             acc: Vec::new(),
         }
@@ -328,19 +326,17 @@ pub(crate) fn layout_size(
     let paths = top.len() * vec + top.iter().map(|&t| idx * above[t]).sum::<usize>();
     // sn_of, the tree (parent, children), work, heap, flags and slots.
     let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
-    // Accumulators of the subtrees and of the widest ancestor level, the
-    // apex node's extended vector and partial slabs, and per thread the
-    // node scratch of a subtree sweep.
+    // Accumulators of the subtrees and of every ancestor (the task sweep
+    // keeps them all to its end), every ancestor's scratch (its extended
+    // vector and its node vector, each ancestor a task of its own), and per
+    // thread the node scratch of a subtree sweep and an update tile.
     let max_ld = (0..ns).map(|s| w[s] + m[s]).max().unwrap_or(0);
-    let mut level_acc = vec![0usize; level_len.len()];
-    for &t in &top {
-        level_acc[depth[t]] += above[t];
-    }
-    let gmax = cfg.block.max(1).div_ceil(cfg.ancestor_chunk.max(1));
     let solve_per_rhs = leaf_roots.iter().map(|&r| above[r as usize]).sum::<usize>()
-        + level_acc.iter().copied().max().unwrap_or(0)
-        + (2 + gmax) * max_ld
-        + threads.max(1) * 2 * max_ld;
+        + top
+            .iter()
+            .map(|&t| above[t] + 2 * (w[t] + m[t]))
+            .sum::<usize>()
+        + threads.max(1) * (2 * max_ld + PRODUCT_ROWS);
     LayoutSize {
         held: (fixed + subtrees + levels + paths) as u64,
         build: build as u64,
@@ -1360,48 +1356,28 @@ impl<T: Scalar> SolvePlan<T> {
         v.clear();
         v.extend_from_slice(&y[c0 * nr..(c0 + w) * nr]);
         v.resize(ld * nr, T::zero());
-        let gmax = self.cfg.block.div_ceil(self.cfg.ancestor_chunk);
-        let partial = &mut sc.partial;
+        let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         for (jb, je) in col_blocks(w, self.cfg.block) {
-            let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
-            tri_forward(v, panel, dinv, ld, nr, jb, je);
+            tri_forward_split(v, panel, dinv, ld, nr, jb, je, par);
             if je == ld {
                 break;
             }
-            // Column chunk `g` of the block: `[jb + g * chunk, ...)`.
-            let chunk = self.cfg.ancestor_chunk;
-            let used = (je - jb).div_ceil(chunk);
-            let rows = ld - je;
-            let slab = rows * nr;
-            partial.clear();
-            partial.resize(gmax * slab, T::zero());
+            // The rows below the block, in chunks of `PRODUCT_ROWS`: each
+            // row takes the block's columns in ascending order into a
+            // zeroed tile, then subtracts it, whatever the chunk and the
+            // thread.
             let (vhead, vtail) = v.split_at_mut(je * nr);
             let vhead: &[T] = vhead;
-            let product = |g: usize, out: &mut [T]| {
-                let ks = jb + g * chunk..(jb + (g + 1) * chunk).min(je);
-                panel_product(out, panel, ld, je, vhead, nr, ks);
-            };
-            let rchunk = (rows / (PIECES_PER_WORKER * crate::parallel::threads()))
-                .max(SOLVE_REDUCE_MIN_ROWS)
-                * nr;
-            let reduce = |ci: usize, vr: &mut [T], partial: &[T]| {
-                let o = ci * rchunk;
-                for g in 0..used {
-                    sub_assign(vr, &partial[g * slab + o..g * slab + o + vr.len()]);
-                }
+            let update = |ci: usize, vr: &mut [T]| {
+                let mut t = vec![T::zero(); vr.len()];
+                panel_product(&mut t, panel, ld, je + ci * PRODUCT_ROWS, vhead, nr, jb..je);
+                sub_assign(vr, &t);
             };
             if par {
-                crate::parallel::chunks_mut(&mut partial[..used * slab], slab, |g, out| {
-                    product(g, out)
-                });
-                let partial: &[T] = partial;
-                crate::parallel::chunks_mut(vtail, rchunk, |ci, vr| reduce(ci, vr, partial));
+                crate::parallel::chunks_mut(vtail, PRODUCT_ROWS * nr, update);
             } else {
-                for (g, out) in partial[..used * slab].chunks_mut(slab).enumerate() {
-                    product(g, out);
-                }
-                for (ci, vr) in vtail.chunks_mut(rchunk).enumerate() {
-                    reduce(ci, vr, partial);
+                for (ci, vr) in vtail.chunks_mut(PRODUCT_ROWS * nr).enumerate() {
+                    update(ci, vr);
                 }
             }
         }
@@ -1861,6 +1837,44 @@ impl PhaseTrace {
 /// Unit-lower triangular solve of column block `[jb, je)` on `v` (row-major
 /// `nr` wide), in place.
 #[allow(clippy::too_many_arguments)]
+/// Rows of a large node's update below a column block per task
+/// ([`SolvePlan::apex_forward`]): fixed, so a row's arithmetic does not depend
+/// on the thread count. 128 rows of a 512-column block are 64 k multiply-adds
+/// per right-hand side, well above a task's start.
+const PRODUCT_ROWS: usize = 128;
+
+/// [`tri_forward`] with the right-hand sides' register tiles side by side
+/// when `par`: the columns of `v` are independent, and each tile's arithmetic
+/// is the one [`tri_rows`] does.
+#[allow(clippy::too_many_arguments)]
+fn tri_forward_split<T: Scalar>(
+    v: &mut [T],
+    panel: &[T],
+    diag_inv: &[T],
+    ld: usize,
+    nr: usize,
+    jb: usize,
+    je: usize,
+    par: bool,
+) {
+    if !par || nr <= 4 {
+        return tri_forward(v, panel, diag_inv, ld, nr, jb, je);
+    }
+    let shared = Shared(v.as_mut_ptr(), v.len());
+    let tiles = nr.div_ceil(4);
+    crate::parallel::map(tiles, 1, |q| {
+        // SAFETY: see `Shared`; tile `q` writes only its own columns.
+        let v = unsafe { shared.slice() };
+        let c0 = q * 4;
+        match (nr - c0).min(4) {
+            4 => tri_tile::<T, 4>(v, panel, diag_inv, ld, nr, c0, jb, je),
+            3 => tri_tile::<T, 3>(v, panel, diag_inv, ld, nr, c0, jb, je),
+            2 => tri_tile::<T, 2>(v, panel, diag_inv, ld, nr, c0, jb, je),
+            _ => tri_tile::<T, 1>(v, panel, diag_inv, ld, nr, c0, jb, je),
+        }
+    });
+}
+
 fn tri_forward<T: Scalar>(
     v: &mut [T],
     panel: &[T],
@@ -2272,11 +2286,22 @@ mod tests {
     /// sides.
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
+        // as planned, and with every ancestor a large node in small column
+        // blocks (the large nodes' sections: tiles side by side, row chunks)
+        for (apex_min_work, block) in [(crate::SolveSettings::default().apex_min_work, 512), (0, 8)]
+        {
+            ancestor_tasks_case(apex_min_work, block);
+        }
+    }
+
+    fn ancestor_tasks_case(apex_min_work: usize, block: usize) {
         use crate::{LuSolver, OrderingMethod};
         let opts = SolverSettings {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: 0,
+                apex_min_work,
+                block,
                 ..Default::default()
             },
             ..SolverSettings::default()
@@ -2289,7 +2314,7 @@ mod tests {
                 .build()
                 .unwrap()
         };
-        let nrhs = 3;
+        let nrhs = 6;
         let a = convdiff(40);
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
