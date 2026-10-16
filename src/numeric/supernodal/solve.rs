@@ -1089,7 +1089,20 @@ impl<T: Scalar> SolvePlan<T> {
         let pending: Vec<AtomicUsize> = (0..nt)
             .map(|i| AtomicUsize::new(self.top_kids_ptr[i + 1] - self.top_kids_ptr[i]))
             .collect();
-        let node: &(dyn Fn(usize) + Sync) = &node;
+        let probe = crate::logging::enabled(crate::logging::LogLevel::Debug);
+        let took: Vec<std::sync::atomic::AtomicU64> = (0..nt)
+            .map(|_| std::sync::atomic::AtomicU64::new(0))
+            .collect();
+        let timed = |ti: usize| {
+            if probe {
+                let t = crate::clock::Instant::now();
+                node(ti);
+                took[ti].store(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            } else {
+                node(ti);
+            }
+        };
+        let node: &(dyn Fn(usize) + Sync) = &timed;
         let (parent, pending) = (&self.top_parent[..], &pending[..]);
         crate::parallel::scope(|sc| {
             for ti in 0..nt {
@@ -1098,6 +1111,43 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
         });
+        if probe {
+            // critical path: the longest leaf-to-root chain of node times
+            let t: Vec<f64> = took
+                .iter()
+                .map(|x| x.load(Ordering::Relaxed) as f64 * 1e-6)
+                .collect();
+            let mut upto = vec![0.0f64; nt];
+            let mut order: Vec<usize> = (0..nt).collect();
+            order.sort_by_key(|&i| self.top[i]);
+            for &i in &order {
+                let kids = &self.top_kids[self.top_kids_ptr[i]..self.top_kids_ptr[i + 1]];
+                upto[i] = t[i] + kids.iter().map(|&k| upto[k as usize]).fold(0.0, f64::max);
+            }
+            let crit = upto.iter().copied().fold(0.0, f64::max);
+            let total: f64 = t.iter().sum();
+            let mut big: Vec<(f64, usize)> = t.iter().copied().zip(0..).collect();
+            big.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let big: Vec<String> = big
+                .iter()
+                .take(6)
+                .map(|&(ms, i)| {
+                    let (_, w, _, m, _, _) = self.node(self.top[i]);
+                    format!(
+                        "{ms:.2}ms w{w} m{m}{}",
+                        if self.work(self.top[i]) >= self.cfg.apex_min_work {
+                            " apex"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect();
+            crate::logging::debug(&format!(
+                "top-forward flow: critical path {crit:.2}ms, node time {total:.2}ms; longest {}",
+                big.join(", ")
+            ));
+        }
     }
 
     /// The backward sweep of the ancestors as a task tree: an ancestor
