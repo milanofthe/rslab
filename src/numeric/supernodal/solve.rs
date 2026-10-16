@@ -15,12 +15,14 @@
 //! into a fixed number of independent leaf subtrees (`SolveSettings::leaf_subtrees`, not a
 //! function of the thread count) plus the ancestors above the cut. In the
 //! forward sweep the subtrees run in parallel; updates that leave a subtree
-//! (into ancestor rows) go to a per-subtree accumulator and are reduced in
-//! subtree order before the ancestors are processed sequentially, their
-//! large panels row-parallel. In the backward sweep the ancestors go first
-//! and the subtrees then run in parallel reading only final values. Every
-//! sum is formed in the same order for every thread count, so the solution
-//! is bit-identical from one thread to many.
+//! (into ancestor rows) go to a per-subtree accumulator. The ancestors then
+//! run as a task tree: in the forward sweep an ancestor starts when its
+//! children are done and first takes in the accumulations for its columns,
+//! in the order a level-by-level sweep reduces them; in the backward sweep it
+//! starts when its parent is done, and the subtrees follow in parallel
+//! reading only final values. A large ancestor's sweep has parallel sections
+//! of its own. Every sum is formed in the same order for every thread count,
+//! so the solution is bit-identical from one thread to many.
 
 // The kernels index several parallel arrays (panels, row lists, slots,
 // right-hand sides) at offset positions; index loops read closer to the
@@ -28,8 +30,8 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    FOLD_LANES, IDX32_BYTES, PIECES_PER_WORKER, SOLVE_BUILD_NODE_BYTES, SOLVE_REDUCE_MIN_ROWS,
-    SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
+    FOLD_LANES, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_PRODUCT_ROWS, SOLVE_RHS_TILE, TILE_ROWS,
+    VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
@@ -336,7 +338,7 @@ pub(crate) fn layout_size(
             .iter()
             .map(|&t| above[t] + 2 * (w[t] + m[t]))
             .sum::<usize>()
-        + threads.max(1) * (2 * max_ld + PRODUCT_ROWS);
+        + threads.max(1) * (2 * max_ld + SOLVE_PRODUCT_ROWS);
     LayoutSize {
         held: (fixed + subtrees + levels + paths) as u64,
         build: build as u64,
@@ -997,20 +999,19 @@ impl<T: Scalar> SolvePlan<T> {
     }
 
     // -----------------------------------------------------------------------
-    // Ancestor supernodes: level parallelism, node sections at the apex
+    // Ancestor supernodes: a task tree, sections inside the large nodes
     // -----------------------------------------------------------------------
     //
     // The supernodes above the cut form the top of the elimination tree.
-    // Siblings of one depth are independent: a level with at least as many
-    // nodes as threads runs node-parallel, each node swept sequentially with
-    // its off-block product accumulated on the node's own ancestor path
-    // (the same slot machinery as the leaf subtrees) and reduced afterwards
-    // in node order. The apex levels (fewer nodes than threads: the root and
-    // the top separators, which hold much of the factor) run node by node
-    // with parallel sections inside the node: column-chunk products into
-    // private slabs, a row-parallel reduction in fixed chunk order, and the
-    // block triangles sequentially. Every sum keeps a fixed association, so
-    // the result does not depend on the thread count.
+    // On the pool they run as a task tree (`top_forward_flow`,
+    // `top_backward_flow`), with no level waiting for its slowest node: on a
+    // 32 k near-field LU the level sweeps ran most levels (fewer nodes than
+    // threads) one node after another, 16 threads slower than 4. A node from
+    // `apex_min_work` on sweeps with sections inside it: the block triangle's
+    // right-hand-side tiles side by side, the update of the rows below in row
+    // chunks of fixed size. On one thread, or on a factor whose structure is
+    // no elimination tree, the levels run in order (`top_forward`,
+    // `top_backward`), with the same arithmetic per node and per column.
 
     /// Whether the ancestors run as tasks (`top_forward_flow`,
     /// `top_backward_flow`) rather than level by level.
@@ -1085,20 +1086,7 @@ impl<T: Scalar> SolvePlan<T> {
         let pending: Vec<AtomicUsize> = (0..nt)
             .map(|i| AtomicUsize::new(self.top_kids_ptr[i + 1] - self.top_kids_ptr[i]))
             .collect();
-        let probe = crate::logging::enabled(crate::logging::LogLevel::Debug);
-        let took: Vec<std::sync::atomic::AtomicU64> = (0..nt)
-            .map(|_| std::sync::atomic::AtomicU64::new(0))
-            .collect();
-        let timed = |ti: usize| {
-            if probe {
-                let t = crate::clock::Instant::now();
-                node(ti);
-                took[ti].store(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            } else {
-                node(ti);
-            }
-        };
-        let node: &(dyn Fn(usize) + Sync) = &timed;
+        let node: &(dyn Fn(usize) + Sync) = &node;
         let (parent, pending) = (&self.top_parent[..], &pending[..]);
         crate::parallel::scope(|sc| {
             for ti in 0..nt {
@@ -1107,43 +1095,6 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
         });
-        if probe {
-            // critical path: the longest leaf-to-root chain of node times
-            let t: Vec<f64> = took
-                .iter()
-                .map(|x| x.load(Ordering::Relaxed) as f64 * 1e-6)
-                .collect();
-            let mut upto = vec![0.0f64; nt];
-            let mut order: Vec<usize> = (0..nt).collect();
-            order.sort_by_key(|&i| self.top[i]);
-            for &i in &order {
-                let kids = &self.top_kids[self.top_kids_ptr[i]..self.top_kids_ptr[i + 1]];
-                upto[i] = t[i] + kids.iter().map(|&k| upto[k as usize]).fold(0.0, f64::max);
-            }
-            let crit = upto.iter().copied().fold(0.0, f64::max);
-            let total: f64 = t.iter().sum();
-            let mut big: Vec<(f64, usize)> = t.iter().copied().zip(0..).collect();
-            big.sort_by(|a, b| b.0.total_cmp(&a.0));
-            let big: Vec<String> = big
-                .iter()
-                .take(6)
-                .map(|&(ms, i)| {
-                    let (_, w, _, m, _, _) = self.node(self.top[i]);
-                    format!(
-                        "{ms:.2}ms w{w} m{m}{}",
-                        if self.work(self.top[i]) >= self.cfg.apex_min_work {
-                            " apex"
-                        } else {
-                            ""
-                        }
-                    )
-                })
-                .collect();
-            crate::logging::debug(&format!(
-                "top-forward flow: critical path {crit:.2}ms, node time {total:.2}ms; longest {}",
-                big.join(", ")
-            ));
-        }
     }
 
     /// The backward sweep of the ancestors as a task tree: an ancestor
@@ -1205,49 +1156,8 @@ impl<T: Scalar> SolvePlan<T> {
         let par = work.parallel;
         let nt = crate::parallel::threads();
         let shared = Shared(y.as_mut_ptr(), y.len());
-        let probe = crate::logging::enabled(crate::logging::LogLevel::Debug);
-        let mut tt = [0.0f64; 4]; // node-parallel levels, node-sequential levels, accumulators, zeroing
-        if probe {
-            let mut lines = Vec::new();
-            for (li, level) in self.top_levels.iter().enumerate() {
-                let apex = level
-                    .iter()
-                    .filter(|&&s| self.work(s) >= self.cfg.apex_min_work)
-                    .count();
-                let wk: usize = level.iter().map(|&s| self.work(s)).sum();
-                let ws: Vec<usize> = level
-                    .iter()
-                    .take(4)
-                    .map(|&s| {
-                        let (_, w, _, m, _, _) = self.node(s);
-                        w * 100000 + m
-                    })
-                    .collect();
-                let path: usize = level
-                    .iter()
-                    .map(|&s| self.top_paths[self.top_index[s as usize] as usize].len())
-                    .sum();
-                lines.push(format!(
-                    "L{li}: {} nodes ({apex} apex) work {wk} path {path} w/m {:?}",
-                    level.len(),
-                    ws
-                ));
-            }
-            let sub: usize = self
-                .subtrees
-                .iter()
-                .flat_map(|st| st.nodes.iter())
-                .map(|&s| self.work(s))
-                .sum();
-            let red: usize = self.subtrees.iter().map(|st| st.path_cols.len()).sum();
-            crate::logging::debug(&format!(
-                "top plan: subtree work {sub} reduce slots {red}; {}",
-                lines.join(" | ")
-            ));
-        }
         for (li, level) in self.top_levels.iter().enumerate().rev() {
             let node_par = !par || level.len() >= nt || nt == 1;
-            let t_lvl = probe.then(crate::clock::Instant::now);
             // One accumulator block for the level, a disjoint slice per node.
             let ptr = &self.top_acc_ptr[li];
             work.top_acc.clear();
@@ -1280,7 +1190,6 @@ impl<T: Scalar> SolvePlan<T> {
                     sweep(i, s, y, true, &mut work.apex);
                 }
             }
-            let t_acc = probe.then(crate::clock::Instant::now);
             for (i, &s) in level.iter().enumerate() {
                 let path = &self.top_paths[self.top_index[s as usize] as usize];
                 let acc = &work.top_acc[ptr[i] * nr..ptr[i + 1] * nr];
@@ -1291,16 +1200,6 @@ impl<T: Scalar> SolvePlan<T> {
                     );
                 }
             }
-            if let (Some(a), Some(b)) = (t_lvl, t_acc) {
-                tt[if node_par { 0 } else { 1 }] += (b - a).as_secs_f64() * 1e3;
-                tt[2] += b.elapsed().as_secs_f64() * 1e3;
-            }
-        }
-        if probe {
-            crate::logging::debug(&format!(
-                "top-forward split: node-parallel levels {:.2}ms, node-sequential levels {:.2}ms, accumulate {:.2}ms",
-                tt[0], tt[1], tt[2]
-            ));
         }
     }
 
@@ -1362,7 +1261,7 @@ impl<T: Scalar> SolvePlan<T> {
             if je == ld {
                 break;
             }
-            // The rows below the block, in chunks of `PRODUCT_ROWS`: each
+            // The rows below the block, in chunks of `SOLVE_PRODUCT_ROWS`: each
             // row takes the block's columns in ascending order into a
             // zeroed tile, then subtracts it, whatever the chunk and the
             // thread.
@@ -1370,13 +1269,21 @@ impl<T: Scalar> SolvePlan<T> {
             let vhead: &[T] = vhead;
             let update = |ci: usize, vr: &mut [T]| {
                 let mut t = vec![T::zero(); vr.len()];
-                panel_product(&mut t, panel, ld, je + ci * PRODUCT_ROWS, vhead, nr, jb..je);
+                panel_product(
+                    &mut t,
+                    panel,
+                    ld,
+                    je + ci * SOLVE_PRODUCT_ROWS,
+                    vhead,
+                    nr,
+                    jb..je,
+                );
                 sub_assign(vr, &t);
             };
             if par {
-                crate::parallel::chunks_mut(vtail, PRODUCT_ROWS * nr, update);
+                crate::parallel::chunks_mut(vtail, SOLVE_PRODUCT_ROWS * nr, update);
             } else {
-                for (ci, vr) in vtail.chunks_mut(PRODUCT_ROWS * nr).enumerate() {
+                for (ci, vr) in vtail.chunks_mut(SOLVE_PRODUCT_ROWS * nr).enumerate() {
                     update(ci, vr);
                 }
             }
@@ -1837,12 +1744,6 @@ impl PhaseTrace {
 /// Unit-lower triangular solve of column block `[jb, je)` on `v` (row-major
 /// `nr` wide), in place.
 #[allow(clippy::too_many_arguments)]
-/// Rows of a large node's update below a column block per task
-/// ([`SolvePlan::apex_forward`]): fixed, so a row's arithmetic does not depend
-/// on the thread count. 128 rows of a 512-column block are 64 k multiply-adds
-/// per right-hand side, well above a task's start.
-const PRODUCT_ROWS: usize = 128;
-
 /// [`tri_forward`] with the right-hand sides' register tiles side by side
 /// when `par`: the columns of `v` are independent, and each tile's arithmetic
 /// is the one [`tri_rows`] does.
@@ -1857,16 +1758,15 @@ fn tri_forward_split<T: Scalar>(
     je: usize,
     par: bool,
 ) {
-    if !par || nr <= 4 {
+    if !par || nr <= SOLVE_RHS_TILE {
         return tri_forward(v, panel, diag_inv, ld, nr, jb, je);
     }
     let shared = Shared(v.as_mut_ptr(), v.len());
-    let tiles = nr.div_ceil(4);
-    crate::parallel::map(tiles, 1, |q| {
+    crate::parallel::map(nr.div_ceil(SOLVE_RHS_TILE), 1, |q| {
         // SAFETY: see `Shared`; tile `q` writes only its own columns.
         let v = unsafe { shared.slice() };
-        let c0 = q * 4;
-        match (nr - c0).min(4) {
+        let c0 = q * SOLVE_RHS_TILE;
+        match (nr - c0).min(SOLVE_RHS_TILE) {
             4 => tri_tile::<T, 4>(v, panel, diag_inv, ld, nr, c0, jb, je),
             3 => tri_tile::<T, 3>(v, panel, diag_inv, ld, nr, c0, jb, je),
             2 => tri_tile::<T, 2>(v, panel, diag_inv, ld, nr, c0, jb, je),
@@ -2035,18 +1935,19 @@ fn tri_backward_split<T: Scalar>(
     dinv: Option<&[T]>,
     par: bool,
 ) {
-    if !par || nr <= 4 {
+    if !par || nr <= SOLVE_RHS_TILE {
         return tri_backward(v, accv, panel, ld, nr, jb, je, dinv);
     }
     let (vs, accs) = (
         Shared(v.as_mut_ptr(), v.len()),
         Shared(accv.as_mut_ptr(), accv.len()),
     );
-    crate::parallel::map(nr.div_ceil(4), 1, |q| {
+    crate::parallel::map(nr.div_ceil(SOLVE_RHS_TILE), 1, |q| {
         // SAFETY: see `Shared`; tile `q` touches only its own columns.
         let (v, accv) = unsafe { (vs.slice(), accs.slice()) };
-        let (c0, w) = (q * 4, 4.min(nr - q * 4));
-        let mut d = [T::zero(); 4];
+        let c0 = q * SOLVE_RHS_TILE;
+        let w = SOLVE_RHS_TILE.min(nr - c0);
+        let mut d = [T::zero(); SOLVE_RHS_TILE];
         for k in (jb..je).rev() {
             let col = &panel[k * ld + k + 1..k * ld + je];
             dot4_cols(&mut d[..w], col, &v[(k + 1) * nr..je * nr], nr, c0);

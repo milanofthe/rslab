@@ -88,13 +88,6 @@ pub const FINE_PIECES_PER_WORKER: usize = 8;
 /// Contract: timing (the per-entry sums do not depend on the blocking).
 pub const GEMM_PIECE_MIN_COLS: usize = 16;
 
-/// Fewest rows per chunk of the reduction of the blocked ancestor sweep
-/// (rows).
-/// Used by: `supernodal::solve::SolvePlan::apex_forward`.
-/// Why: below it a chunk costs more to schedule than to add.
-/// Contract: timing (each row is reduced in the same order).
-pub const SOLVE_REDUCE_MIN_ROWS: usize = 64;
-
 /// Fewest columns per piece of the LU analysis's symmetrization sort
 /// (columns).
 /// Used by: `lu::solver::symmetrized_lower_pattern`.

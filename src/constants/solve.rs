@@ -13,24 +13,41 @@ pub const TILE_ROWS: usize = 4;
 /// Contract: timing (the solves are thread-count independent).
 pub const SOLVE_LEAF_SUBTREES: usize = 128;
 
-/// Column block of the ancestor sweeps (columns).
+/// Column block of a large ancestor's sweep (columns): the block's triangle
+/// runs its right-hand-side tiles side by side, its update of the rows below
+/// in row chunks of [`SOLVE_PRODUCT_ROWS`].
 /// Used by: `SolveSettings::block`.
 /// Why: tuned default.
 /// Contract: rounding (the blocking orders the sums).
 pub const SOLVE_BLOCK: usize = 512;
 
-/// Columns per product or dot task of the ancestor sweeps (columns).
+/// Columns per dot task of a large ancestor's backward sweep (columns).
 /// Used by: `SolveSettings::ancestor_chunk`.
 /// Why: tuned default.
 /// Contract: rounding.
 pub const SOLVE_ANCESTOR_CHUNK: usize = 32;
 
-/// Panel entries from which an ancestor node uses the blocked sweep
-/// (entries).
+/// Panel entries from which an ancestor node uses the blocked sweep with
+/// parallel sections inside the node (entries).
 /// Used by: `SolveSettings::apex_min_work`.
-/// Why: tuned default.
+/// Why: the ancestors run as a task tree, and a node on its critical path
+/// that sweeps alone holds the rest up. Measured on a 32 k near-field LU
+/// (36.6 M factor entries, 13 right-hand sides, 8 cores): 83 / 57 / 57 ms on
+/// 4 / 8 / 16 threads, against 117 / 67 / 64 ms at `1 << 18` and
+/// 86 / 61 / 57 ms at `0`. For a node of at most [`SOLVE_BLOCK`] columns
+/// the blocked sweep is the plain one's arithmetic.
 /// Contract: rounding.
-pub const SOLVE_APEX_MIN_ENTRIES: usize = 1 << 18;
+pub const SOLVE_APEX_MIN_ENTRIES: usize = 1 << 14;
+
+/// Rows per task of a large ancestor's forward update of the rows below a
+/// column block (rows): fixed, so no row's arithmetic depends on the thread
+/// count, and a multiple of [`TILE_ROWS`].
+/// Used by: `supernodal::solve::SolvePlan::apex_forward`.
+/// Why: 128 rows of a 512-column block are 64 k multiply-adds per
+/// right-hand side, well above the cost of starting a task.
+/// Contract: timing (each row takes its terms in the same order in any
+/// chunk).
+pub const SOLVE_PRODUCT_ROWS: usize = 128;
 
 /// Work of a triangular sweep from which it runs on the thread pool, in
 /// factor panel entries times right-hand sides, the latter counted up to
