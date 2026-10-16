@@ -326,6 +326,19 @@ pub(crate) fn layout_size(
             .sum::<usize>();
     let levels = level_len.len() * vec + level_len.iter().map(|&l| idx * pushed(l)).sum::<usize>();
     let paths = top.len() * vec + top.iter().map(|&t| idx * above[t]).sum::<usize>();
+    // The task schedule: the ancestors, their roots and children, the
+    // accumulator offsets and the pulls (one per source and ancestor on its
+    // chain: every leaf subtree's and every ancestor's ancestors).
+    let roots = top.iter().filter(|&&t| parent[t] == NONE).count();
+    let chain = |p: u32| if p == NONE { 0 } else { depth[p as usize] + 1 };
+    let pulls = leaf_roots
+        .iter()
+        .map(|&r| chain(parent[r as usize]))
+        .sum::<usize>()
+        + top.iter().map(|&t| chain(parent[t])).sum::<usize>();
+    let schedule = idx * (top.len() + roots + top.len() - roots)
+        + 3 * word * (top.len() + 1)
+        + 2 * idx * pulls;
     // sn_of, the tree (parent, children), work, heap, flags and slots.
     let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
     // Accumulators of the subtrees and of every ancestor (the task sweep
@@ -340,7 +353,7 @@ pub(crate) fn layout_size(
             .sum::<usize>()
         + threads.max(1) * (2 * max_ld + SOLVE_PRODUCT_ROWS);
     LayoutSize {
-        held: (fixed + subtrees + levels + paths) as u64,
+        held: (fixed + subtrees + levels + paths + schedule) as u64,
         build: build as u64,
         solve_per_rhs: solve_per_rhs as u64,
     }
@@ -629,9 +642,10 @@ impl<T: Scalar> SolvePlan<T> {
                 fill[p as usize] += 1;
             }
         }
-        let top_roots: Vec<u32> = (0..top.len() as u32)
+        let mut top_roots: Vec<u32> = (0..top.len() as u32)
             .filter(|&i| top_parent[i as usize] == NONE)
             .collect();
+        top_roots.shrink_to_fit();
         let mut top_acc_off = vec![0usize; top.len() + 1];
         for i in 0..top.len() {
             top_acc_off[i + 1] = top_acc_off[i] + top_paths[i].len();
@@ -664,7 +678,8 @@ impl<T: Scalar> SolvePlan<T> {
         for i in 0..top.len() {
             pull_ptr[i + 1] = pull_ptr[i] + pulls[i].len();
         }
-        let pull: Vec<(u32, u32)> = pulls.into_iter().flatten().collect();
+        let mut pull: Vec<(u32, u32)> = Vec::with_capacity(pull_ptr[top.len()]);
+        pull.extend(pulls.into_iter().flatten());
         Self {
             n,
             sn_col,
@@ -679,7 +694,11 @@ impl<T: Scalar> SolvePlan<T> {
             top_paths,
             top_index,
             top_acc_ptr,
-            top,
+            top: {
+                let mut top = top;
+                top.shrink_to_fit();
+                top
+            },
             top_roots,
             top_kids_ptr,
             top_kids,
