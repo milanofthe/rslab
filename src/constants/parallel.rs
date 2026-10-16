@@ -4,7 +4,7 @@
 
 /// Stack of the thread a foreign rayon worker enters a pool through; it only
 /// waits (bytes).
-/// Used by: `numeric::settings::enter`.
+/// Used by: `numeric::settings::HopShared::start`.
 /// Why: the thread runs no solver code, so a small stack suffices.
 /// Contract: timing.
 pub const HOP_STACK: usize = 256 * 1024;

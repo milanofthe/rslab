@@ -677,6 +677,12 @@ pub enum Threads {
     /// and run the factorization *and* every
     /// iterative solve inside it, so both phases share the same capped pool with no
     /// per-call thread spawn. The numeric factor is unchanged.
+    ///
+    /// Called from the tasks of a parallel sweep on that pool, the sections
+    /// share the sweep's workers, and a worker waiting in one takes the
+    /// sweep's other tasks meanwhile, as rayon's nested parallelism does. The
+    /// other policies run in pools of their own, entered from such a worker
+    /// through a thread that waits for it, so a sweep's tasks never nest.
     Ambient,
 }
 
@@ -748,17 +754,17 @@ impl Threads {
 /// its workers every time, tens of microseconds per worker.
 ///
 /// Work that needs no stack of its own (`stack_bytes == 0`, the solves)
-/// called from a worker of a rayon pool runs on that pool instead: entering
-/// a pool of its own would make the worker wait, and wait it must not (see
-/// [`enter`]).
+/// called on a worker of one of these pools runs there: it is part of the
+/// work the pool was entered for. Called on a worker of any other rayon
+/// pool, it enters a pool of its own like the factorizations do (see
+/// [`enter`]): run on the caller's pool, its sections would make the worker
+/// wait inside the caller's task and take the caller's other tasks meanwhile.
 pub(crate) fn in_scoped_pool<R: Send>(
     threads: usize,
     stack_bytes: usize,
     f: impl FnOnce() -> R + Send,
 ) -> R {
-    if crate::parallel::lent().is_some()
-        || (stack_bytes == 0 && rayon::current_thread_index().is_some())
-    {
+    if crate::parallel::lent().is_some() || (stack_bytes == 0 && on_own_worker()) {
         return f();
     }
     let n = if threads == 0 {
@@ -774,31 +780,159 @@ pub(crate) fn in_scoped_pool<R: Send>(
     }
 }
 
+thread_local! {
+    /// Whether this thread is a worker of a pool of rslab's own
+    /// ([`scoped_pool`]).
+    static OWN_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the calling thread is a worker of a pool of rslab's own.
+fn on_own_worker() -> bool {
+    OWN_WORKER.with(std::cell::Cell::get)
+}
+
 /// Run `f` on `pool`, the calling thread waiting for it. A worker of another
 /// rayon pool waiting in `install` keeps taking its own pool's jobs (rayon's
 /// cross-pool wait), and each of those may enter here again: a parallel
 /// sweep of factorizations then nests without bound and overflows the
-/// worker's stack. Such a caller enters through a thread of its own, which
-/// waits without taking work.
-fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
+/// worker's stack. Such a caller enters through a thread of its own
+/// ([`Hop`]), which waits without taking work, while the caller blocks.
+pub(crate) fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
     if rayon::current_thread_index().is_none() || pool.current_thread_index().is_some() {
         return pool.install(f);
     }
-    let mut f = Some(f);
-    let job = &mut f;
-    let hop = std::thread::scope(|s| {
-        (std::thread::Builder::new().stack_size(HOP_STACK))
-            .spawn_scoped(s, move || job.take().map(|f| pool.install(f)))
-            .ok()
-            .map(|h| h.join())
+    let (mut f, mut r) = (Some(f), None);
+    let entered = HOP.with(|h| {
+        h.run(&mut || {
+            if let Some(f) = f.take() {
+                r = Some(pool.install(f));
+            }
+        })
     });
-    match (hop, f) {
-        (Some(Ok(Some(r))), _) => r,
-        (Some(Err(panic)), _) => std::panic::resume_unwind(panic),
+    match (entered, r, f) {
+        (true, Some(r), _) => r,
         // No thread to enter through: the waiting worker may take work.
-        (_, Some(f)) => pool.install(f),
-        (_, None) => unreachable!("a joined hop either returned or panicked"),
+        (false, _, Some(f)) => pool.install(f),
+        _ => unreachable!("a hop runs the job it takes, or panics"),
     }
+}
+
+thread_local! {
+    /// The calling thread's [`Hop`], its thread started on the first entry.
+    static HOP: Hop = const { Hop { shared: std::cell::OnceCell::new() } };
+}
+
+/// A thread a worker of a foreign rayon pool enters rslab's pools through:
+/// it takes one job at a time from its worker and runs it, the worker
+/// blocked until it is done. Kept for the worker's life, so an entry costs
+/// a hand-over and back, no thread start and no allocation.
+struct Hop {
+    shared: std::cell::OnceCell<Option<Arc<HopShared>>>,
+}
+
+/// What a worker and its hop thread share: the slot of the job in hand and
+/// the signal both wait on.
+struct HopShared {
+    slot: std::sync::Mutex<HopSlot>,
+    signal: std::sync::Condvar,
+}
+
+/// A job handed to a hop thread: the worker's closure, valid until the
+/// worker sees [`HopSlot::Done`] (it blocks until then).
+struct HopJob(*mut (dyn FnMut() + Send + 'static));
+// SAFETY: the closure is `Send`; the worker blocks while the hop runs it.
+unsafe impl Send for HopJob {}
+
+/// The state of a hop's slot.
+enum HopSlot {
+    Empty,
+    Job(HopJob),
+    Done(std::thread::Result<()>),
+    Quit,
+}
+
+impl Hop {
+    /// Run `job` on this thread's hop, blocking until it ran (its panic
+    /// resumed here); `false` if no hop thread could be started.
+    fn run(&self, job: &mut (dyn FnMut() + Send)) -> bool {
+        let Some(shared) = self.shared.get_or_init(HopShared::start) else {
+            return false;
+        };
+        // SAFETY: only the lifetime is erased. This thread blocks below
+        // until the hop reports the job done, so the closure outlives every
+        // use the hop makes of it.
+        let job: *mut (dyn FnMut() + Send + 'static) = unsafe { std::mem::transmute(job) };
+        let mut slot = lock(&shared.slot);
+        *slot = HopSlot::Job(HopJob(job));
+        shared.signal.notify_all();
+        loop {
+            match std::mem::replace(&mut *slot, HopSlot::Empty) {
+                HopSlot::Done(Ok(())) => return true,
+                HopSlot::Done(Err(panic)) => {
+                    drop(slot);
+                    std::panic::resume_unwind(panic)
+                }
+                other => *slot = other,
+            }
+            slot = shared.signal.wait(slot).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+impl Drop for Hop {
+    fn drop(&mut self) {
+        if let Some(Some(shared)) = self.shared.get() {
+            *lock(&shared.slot) = HopSlot::Quit;
+            shared.signal.notify_all();
+        }
+    }
+}
+
+impl HopShared {
+    /// The shared slot with its hop thread running; `None` if the thread
+    /// does not start.
+    fn start() -> Option<Arc<HopShared>> {
+        let shared = Arc::new(HopShared {
+            slot: std::sync::Mutex::new(HopSlot::Empty),
+            signal: std::sync::Condvar::new(),
+        });
+        let hop = shared.clone();
+        std::thread::Builder::new()
+            .name("rslab-hop".into())
+            .stack_size(HOP_STACK)
+            .spawn(move || hop.serve())
+            .ok()?;
+        Some(shared)
+    }
+
+    /// The hop thread: run each job handed over and report it done, until
+    /// told to quit.
+    fn serve(&self) {
+        let mut slot = lock(&self.slot);
+        loop {
+            match std::mem::replace(&mut *slot, HopSlot::Empty) {
+                HopSlot::Job(HopJob(job)) => {
+                    drop(slot);
+                    // SAFETY: see `Hop::run`; the worker waits for `Done`.
+                    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                        (*job)()
+                    }));
+                    slot = lock(&self.slot);
+                    *slot = HopSlot::Done(done);
+                    self.signal.notify_all();
+                }
+                HopSlot::Quit => return,
+                other => *slot = other,
+            }
+            slot = self.signal.wait(slot).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// `m` locked: a lock is poisoned only by a panic, which its holder carries
+/// on.
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 thread_local! {
@@ -811,8 +945,11 @@ thread_local! {
 
 /// This thread's pool of `n` workers with at least `stack_bytes` of stack
 /// (`0` for rayon's default), built when it has none; `None` if the build
-/// fails.
-fn scoped_pool(n: usize, stack_bytes: usize) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+/// fails. Its workers know they are rslab's ([`on_own_worker`]).
+pub(crate) fn scoped_pool(
+    n: usize,
+    stack_bytes: usize,
+) -> Option<std::sync::Arc<rayon::ThreadPool>> {
     // Stacks by powers of two, so a few pools serve every depth.
     let stack = if stack_bytes == 0 {
         0
@@ -831,7 +968,9 @@ fn scoped_pool(n: usize, stack_bytes: usize) -> Option<std::sync::Arc<rayon::Thr
             pools.push(entry);
             return Some(pool);
         }
-        let mut builder = rayon::ThreadPoolBuilder::new().num_threads(n);
+        let mut builder = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .start_handler(|_| OWN_WORKER.with(|w| w.set(true)));
         if stack > 0 {
             builder = builder.stack_size(stack);
         }
