@@ -1741,9 +1741,6 @@ impl PhaseTrace {
     }
 }
 
-/// Unit-lower triangular solve of column block `[jb, je)` on `v` (row-major
-/// `nr` wide), in place.
-#[allow(clippy::too_many_arguments)]
 /// [`tri_forward`] with the right-hand sides' register tiles side by side
 /// when `par`: the columns of `v` are independent, and each tile's arithmetic
 /// is the one [`tri_rows`] does.
@@ -1775,6 +1772,9 @@ fn tri_forward_split<T: Scalar>(
     });
 }
 
+/// Unit-lower triangular solve of column block `[jb, je)` on `v` (row-major
+/// `nr` wide), in place.
+#[allow(clippy::too_many_arguments)]
 fn tri_forward<T: Scalar>(
     v: &mut [T],
     panel: &[T],
