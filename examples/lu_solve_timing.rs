@@ -2,7 +2,7 @@
 //! check that a column of a block solve equals the single solve of that column bit for bit.
 //! `cargo run --release --example lu_solve_timing -- <matrix.mtx> [reps] [nrhs,..]`.
 use num_complex::Complex;
-use rslab::{LuSolver, OrderingMethod, SolverSettings, ZeroPivotAction};
+use rslab::{LuSolver, OrderingMethod, SolverSettings, Threads, ZeroPivotAction};
 use std::time::Instant;
 
 type C = Complex<f64>;
@@ -21,7 +21,9 @@ fn main() {
     let opts = SolverSettings::exact()
         .with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-6 })
         .with_matching(false)
-        .with_ordering(OrderingMethod::MetisND);
+        .with_ordering(OrderingMethod::MetisND)
+        // the pool it runs on (RAYON_NUM_THREADS), as a host that lends its workers does
+        .with_threads(Threads::Ambient);
     let t = Instant::now();
     let s = LuSolver::factor(&a, &opts).unwrap();
     println!(
