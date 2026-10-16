@@ -336,8 +336,11 @@ pub(crate) fn layout_size(
         .map(|&r| chain(parent[r as usize]))
         .sum::<usize>()
         + top.iter().map(|&t| chain(parent[t])).sum::<usize>();
+    let offsets = word * (top.len() + 1); // the children's, the accumulators', the pulls'
     let schedule = idx * (top.len() + roots + top.len() - roots)
-        + 3 * word * (top.len() + 1)
+        + offsets
+        + offsets
+        + offsets
         + 2 * idx * pulls;
     // sn_of, the tree (parent, children), work, heap, flags and slots.
     let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
