@@ -24,6 +24,14 @@ fn main() {
         .with_ordering(OrderingMethod::MetisND)
         // the pool it runs on (RAYON_NUM_THREADS), as a host that lends its workers does
         .with_threads(Threads::Ambient);
+    // RSLAB_APEX: the solve's large-node threshold, for measuring it
+    let mut opts = opts;
+    if let Some(a) = std::env::var("RSLAB_APEX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        opts.solve.apex_min_work = a;
+    }
     let t = Instant::now();
     let s = LuSolver::factor(&a, &opts).unwrap();
     println!(

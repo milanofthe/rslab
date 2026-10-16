@@ -1430,7 +1430,7 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
             let dinv = (!self.diag_inv.is_empty()).then(|| &self.diag_inv[c0..c0 + w]);
-            tri_backward(v, accv, panel, ld, nr, jb, je, dinv);
+            tri_backward_split(v, accv, panel, ld, nr, jb, je, dinv, par);
         }
         x[c0 * nr..(c0 + w) * nr].copy_from_slice(&v[..w * nr]);
     }
@@ -2018,6 +2018,48 @@ fn tri_backward<T: Scalar>(
             xk.iter_mut().for_each(|x| *x = *x * d);
         }
     }
+}
+
+/// [`tri_backward`] with the right-hand sides' tiles of four side by side
+/// when `par`: a tile reads and writes only its own columns of `v` and
+/// `accv`, with the arithmetic [`tri_backward`] does for them.
+#[allow(clippy::too_many_arguments)]
+fn tri_backward_split<T: Scalar>(
+    v: &mut [T],
+    accv: &mut [T],
+    panel: &[T],
+    ld: usize,
+    nr: usize,
+    jb: usize,
+    je: usize,
+    dinv: Option<&[T]>,
+    par: bool,
+) {
+    if !par || nr <= 4 {
+        return tri_backward(v, accv, panel, ld, nr, jb, je, dinv);
+    }
+    let (vs, accs) = (
+        Shared(v.as_mut_ptr(), v.len()),
+        Shared(accv.as_mut_ptr(), accv.len()),
+    );
+    crate::parallel::map(nr.div_ceil(4), 1, |q| {
+        // SAFETY: see `Shared`; tile `q` touches only its own columns.
+        let (v, accv) = unsafe { (vs.slice(), accs.slice()) };
+        let (c0, w) = (q * 4, 4.min(nr - q * 4));
+        let mut d = [T::zero(); 4];
+        for k in (jb..je).rev() {
+            let col = &panel[k * ld + k + 1..k * ld + je];
+            dot4_cols(&mut d[..w], col, &v[(k + 1) * nr..je * nr], nr, c0);
+            let ak = &mut accv[k * nr + c0..k * nr + c0 + w];
+            add_assign(ak, &d[..w]);
+            let xk = &mut v[k * nr + c0..k * nr + c0 + w];
+            sub_assign(xk, ak);
+            if let Some(dv) = dinv {
+                let dk = dv[k];
+                xk.iter_mut().for_each(|x| *x = *x * dk);
+            }
+        }
+    });
 }
 
 /// Column blocks `[jb, je)` of width `nb` over `w` columns.
