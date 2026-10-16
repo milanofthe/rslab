@@ -913,8 +913,49 @@ impl<T: Scalar> SolvePlan<T> {
         let par = work.parallel;
         let nt = crate::parallel::threads();
         let shared = Shared(y.as_mut_ptr(), y.len());
+        let probe = crate::logging::enabled(crate::logging::LogLevel::Debug);
+        let mut tt = [0.0f64; 4]; // node-parallel levels, node-sequential levels, accumulators, zeroing
+        if probe {
+            let mut lines = Vec::new();
+            for (li, level) in self.top_levels.iter().enumerate() {
+                let apex = level
+                    .iter()
+                    .filter(|&&s| self.work(s) >= self.cfg.apex_min_work)
+                    .count();
+                let wk: usize = level.iter().map(|&s| self.work(s)).sum();
+                let ws: Vec<usize> = level
+                    .iter()
+                    .take(4)
+                    .map(|&s| {
+                        let (_, w, _, m, _, _) = self.node(s);
+                        w * 100000 + m
+                    })
+                    .collect();
+                let path: usize = level
+                    .iter()
+                    .map(|&s| self.top_paths[self.top_index[s as usize] as usize].len())
+                    .sum();
+                lines.push(format!(
+                    "L{li}: {} nodes ({apex} apex) work {wk} path {path} w/m {:?}",
+                    level.len(),
+                    ws
+                ));
+            }
+            let sub: usize = self
+                .subtrees
+                .iter()
+                .flat_map(|st| st.nodes.iter())
+                .map(|&s| self.work(s))
+                .sum();
+            let red: usize = self.subtrees.iter().map(|st| st.path_cols.len()).sum();
+            crate::logging::debug(&format!(
+                "top plan: subtree work {sub} reduce slots {red}; {}",
+                lines.join(" | ")
+            ));
+        }
         for (li, level) in self.top_levels.iter().enumerate().rev() {
             let node_par = !par || level.len() >= nt || nt == 1;
+            let t_lvl = probe.then(crate::clock::Instant::now);
             // One accumulator block for the level, a disjoint slice per node.
             let ptr = &self.top_acc_ptr[li];
             work.top_acc.clear();
@@ -947,6 +988,7 @@ impl<T: Scalar> SolvePlan<T> {
                     sweep(i, s, y, true, &mut work.apex);
                 }
             }
+            let t_acc = probe.then(crate::clock::Instant::now);
             for (i, &s) in level.iter().enumerate() {
                 let path = &self.top_paths[self.top_index[s as usize] as usize];
                 let acc = &work.top_acc[ptr[i] * nr..ptr[i + 1] * nr];
@@ -957,6 +999,16 @@ impl<T: Scalar> SolvePlan<T> {
                     );
                 }
             }
+            if let (Some(a), Some(b)) = (t_lvl, t_acc) {
+                tt[if node_par { 0 } else { 1 }] += (b - a).as_secs_f64() * 1e3;
+                tt[2] += b.elapsed().as_secs_f64() * 1e3;
+            }
+        }
+        if probe {
+            crate::logging::debug(&format!(
+                "top-forward split: node-parallel levels {:.2}ms, node-sequential levels {:.2}ms, accumulate {:.2}ms",
+                tt[0], tt[1], tt[2]
+            ));
         }
     }
 
