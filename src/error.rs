@@ -9,8 +9,10 @@ pub enum RslabError {
     Interrupted,
 
     /// The matrix is numerically rank-deficient: a pivot was exactly or
-    /// near-zero and `ZeroPivotAction::Fail` was specified. The factorization
-    /// is incomplete.
+    /// near-zero and `ZeroPivotAction::Fail` was specified, so the factorization
+    /// is incomplete; or a small dense routine met a singular matrix
+    /// ([`crate::dense::lu_solve`], [`crate::dense::Schur::solve_shifted`]) or an
+    /// eigenvector that overflows ([`crate::dense::eigen`]).
     NumericallyRankDeficient,
 
     /// Input matrix dimensions are inconsistent or the matrix is not square.

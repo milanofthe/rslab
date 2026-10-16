@@ -31,7 +31,8 @@ use crate::error::RslabError;
 use crate::scalar::Scalar;
 
 /// The state of a block Arnoldi iteration ([`BlockArnoldi::new`], [`BlockArnoldi::step`]).
-#[derive(Debug, Clone)]
+/// A clone reserves the same capacity, so its steps allocate nothing either.
+#[derive(Debug)]
 pub struct BlockArnoldi<T> {
     n: usize,
     p: usize,
@@ -61,6 +62,38 @@ pub struct BlockArnoldi<T> {
     sub: Vec<T>,
     norms: Vec<f64>,
     scratch: Vec<T>,
+}
+
+/// A vector with the contents and the capacity of `v`.
+fn with_capacity_of<U: Clone>(v: &Vec<U>) -> Vec<U> {
+    let mut out = Vec::with_capacity(v.capacity());
+    out.extend_from_slice(v);
+    out
+}
+
+impl<T: Scalar> Clone for BlockArnoldi<T> {
+    fn clone(&self) -> Self {
+        BlockArnoldi {
+            n: self.n,
+            p: self.p,
+            max_steps: self.max_steps,
+            chunk: self.chunk,
+            reorth_eta: self.reorth_eta,
+            basis: with_capacity_of(&self.basis),
+            h: with_capacity_of(&self.h),
+            start: self.start.clone(),
+            start_rank: self.start_rank,
+            ranks: with_capacity_of(&self.ranks),
+            steps: self.steps,
+            invariant: self.invariant,
+            proj: self.proj.clone(),
+            again: self.again.clone(),
+            own: self.own.clone(),
+            sub: self.sub.clone(),
+            norms: self.norms.clone(),
+            scratch: self.scratch.clone(),
+        }
+    }
 }
 
 impl<T: Scalar> BlockArnoldi<T> {
@@ -198,7 +231,7 @@ impl<T: Scalar> BlockArnoldi<T> {
             }
             let nrm = norm2(wc);
             // dependent: within the rounding of its k projections
-            if nrm.is_nan() || nrm <= T::epsilon() * k.max(1) as f64 * self.norms[c] {
+            if nrm.is_nan() || nrm <= T::EPSILON * k.max(1) as f64 * self.norms[c] {
                 let again = &mut self.again[..k];
                 replace(
                     vq,
@@ -643,5 +676,54 @@ mod tests {
                 got: 5
             })
         ));
+    }
+
+    /// Two new columns of a block nearly parallel (their images under the
+    /// operator differ by 1e-9): the second is orthogonalized against the first
+    /// twice (the in-block DGKS pass) and comes out orthonormal to it and to the
+    /// basis; a clone keeps the reserved capacity.
+    #[test]
+    fn nearly_parallel_columns_of_a_block_stay_orthogonal() {
+        let n = 70;
+        let r = random(n * 2, 31);
+        let (u, w) = (random(n, 32), random(n, 33));
+        let mut ar = BlockArnoldi::new(&r, n, 2, 3, &KrylovSettings::default()).unwrap();
+        let op = FnOperator::new(n, |_x: &[C], y: &mut [C], _p: usize| {
+            for i in 0..n {
+                y[i] = u[i];
+                y[n + i] = u[i] + w[i] * 1e-9;
+            }
+        });
+        assert_eq!(ar.step(&op).unwrap(), 2);
+        orthonormal(ar.basis(), n, 1e-13);
+        let c = ar.clone();
+        assert_eq!(c.held_bytes(), ar.held_bytes());
+        assert_eq!(c.basis(), ar.basis());
+    }
+
+    /// In single precision an invariant space is detected as in double: the ranks
+    /// of a diagonal operator with 4 distinct values are 1, 1, 1, 0.
+    #[test]
+    fn single_precision_detects_an_invariant_space() {
+        let n = 40;
+        let vals = [1.0f32, 2.0, 3.0, 4.0];
+        let r: Vec<Complex<f32>> = random(n, 41)
+            .iter()
+            .map(|z| Complex::new(z.re as f32, z.im as f32))
+            .collect();
+        let mut ar = BlockArnoldi::new(&r, n, 1, 8, &KrylovSettings::default()).unwrap();
+        let op = FnOperator::new(
+            n,
+            |x: &[Complex<f32>], y: &mut [Complex<f32>], _p: usize| {
+                for i in 0..n {
+                    y[i] = x[i] * vals[i % 4];
+                }
+            },
+        );
+        let mut ranks = Vec::new();
+        while !ar.is_invariant() {
+            ranks.push(ar.step(&op).unwrap());
+        }
+        assert_eq!(ranks, vec![1, 1, 1, 0]);
     }
 }

@@ -101,7 +101,9 @@ impl Schur {
             .map(|i| (k..d).map(|j| u[j] * self.q[i * d + j].conj()).sum())
             .collect();
         let lx: C = l.iter().zip(&x).map(|(a, b)| a * b).sum();
-        if lx.norm() == 0.0 || !(lx.re.is_finite() && lx.im.is_finite()) {
+        let lnorm = l.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+        // `x` has unit norm: `l^T x` below the precision of `l` is zero
+        if !(lx.re.is_finite() && lx.im.is_finite()) || lx.norm() <= f64::EPSILON * lnorm {
             return None;
         }
         l.iter_mut().for_each(|v| *v /= lx);
@@ -187,8 +189,9 @@ pub struct Eigen {
 
 /// The eigenvalues and right eigenvectors of a general dense complex matrix `a`
 /// (`d x d` row-major), `A x_k = lambda_k x_k`, from its [`Schur`] form
-/// ([`Schur::eigenvectors`]). `NotConverged` as [`Schur::new`];
-/// `NumericallyRankDeficient` where an eigenvector overflows.
+/// ([`Schur::right_eigenvector`]: a defective eigenvalue has one too).
+/// `NotConverged` as [`Schur::new`]; `NumericallyRankDeficient` where an
+/// eigenvector overflows.
 pub fn eigen(a: &[C], d: usize) -> Result<Eigen, RslabError> {
     let s = Schur::new(a, d)?;
     let mut vectors = vec![C::new(0.0, 0.0); d * d];
