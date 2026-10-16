@@ -30,14 +30,15 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    FOLD_LANES, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_PRODUCT_ROWS, SOLVE_RHS_TILE,
-    SOLVE_TASK_TREE_MAX_DEPTH, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
+    FOLD_LANES, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_PRODUCT_ROWS, SOLVE_RHS_TILE, TILE_ROWS,
+    VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::scalar::{fmadd, Scalar};
+use std::sync::atomic::Ordering;
 
 const NONE: u32 = u32::MAX;
 
@@ -92,6 +93,8 @@ pub(crate) struct SolvePlan<T> {
     top: Vec<u32>,
     /// The roots among the ancestors, by `top_index`.
     top_roots: Vec<u32>,
+    /// Each ancestor's parent, by `top_index` (`NONE` for a root).
+    top_parent: Vec<u32>,
     /// Each ancestor's children above the cut, by `top_index` (CSR over
     /// `top_kids`, `top.len() + 1`).
     top_kids_ptr: Vec<usize>,
@@ -148,6 +151,9 @@ pub(crate) struct PlanWork<T> {
     level: Vec<Scratch<T>>,
     apex: Scratch<T>,
     top_acc: Vec<T>,
+    /// Per ancestor, the children whose forward sweep is still to finish
+    /// (`top_forward_flow`).
+    pending: Vec<std::sync::atomic::AtomicU32>,
     /// This sweep's decision: on the pool, or on the calling thread.
     parallel: bool,
 }
@@ -159,6 +165,7 @@ impl<T> Default for PlanWork<T> {
             level: Vec::new(),
             apex: Scratch::default(),
             top_acc: Vec::new(),
+            pending: Vec::new(),
             parallel: false,
         }
     }
@@ -166,8 +173,13 @@ impl<T> Default for PlanWork<T> {
 
 impl<T> PlanWork<T> {
     /// At least a scratch per subtree and per node of the widest level of
-    /// `plan`; never shrinks, so one work serves several plans.
-    fn fit(&mut self, subtrees: usize, widest: usize) {
+    /// `plan`, and a count per ancestor (`top` of them); never shrinks, so
+    /// one work serves several plans.
+    fn fit(&mut self, subtrees: usize, widest: usize, top: usize) {
+        if self.pending.len() < top {
+            self.pending
+                .resize_with(top, || std::sync::atomic::AtomicU32::new(0));
+        }
         if self.subtrees.len() < subtrees {
             self.subtrees.resize_with(subtrees, Scratch::default);
         }
@@ -326,9 +338,9 @@ pub(crate) fn layout_size(
             .sum::<usize>();
     let levels = level_len.len() * vec + level_len.iter().map(|&l| idx * pushed(l)).sum::<usize>();
     let paths = top.len() * vec + top.iter().map(|&t| idx * above[t]).sum::<usize>();
-    // The task schedule: the ancestors, their roots and children, the
-    // accumulator offsets and the pulls (one per source and ancestor on its
-    // chain: every leaf subtree's and every ancestor's ancestors).
+    // The task schedule: the ancestors, their roots, parents and children,
+    // the accumulator offsets and the pulls (one per source and ancestor on
+    // its chain: every leaf subtree's and every ancestor's ancestors).
     let roots = top.iter().filter(|&&t| parent[t] == NONE).count();
     let chain = |p: u32| if p == NONE { 0 } else { depth[p as usize] + 1 };
     let pulls = leaf_roots
@@ -337,7 +349,7 @@ pub(crate) fn layout_size(
         .sum::<usize>()
         + top.iter().map(|&t| chain(parent[t])).sum::<usize>();
     let offsets = word * (top.len() + 1); // the children's, the accumulators', the pulls'
-    let schedule = idx * (top.len() + roots + top.len() - roots)
+    let schedule = idx * (top.len() + roots + top.len() + top.len() - roots)
         + offsets
         + offsets
         + offsets
@@ -386,6 +398,7 @@ impl<T: Scalar> SolvePlan<T> {
             + nested_bytes(&self.top_acc_ptr)
             + vec_bytes(&self.top)
             + vec_bytes(&self.top_roots)
+            + vec_bytes(&self.top_parent)
             + vec_bytes(&self.top_kids_ptr)
             + vec_bytes(&self.top_kids)
             + vec_bytes(&self.top_acc_off)
@@ -703,6 +716,11 @@ impl<T: Scalar> SolvePlan<T> {
                 top
             },
             top_roots,
+            top_parent: {
+                let mut p = top_parent;
+                p.shrink_to_fit();
+                p
+            },
             top_kids_ptr,
             top_kids,
             top_acc_off,
@@ -899,7 +917,7 @@ impl<T: Scalar> SolvePlan<T> {
         threads: Threads,
     ) -> &'w mut PlanWork<T> {
         let widest = self.top_levels.iter().map(Vec::len).max().unwrap_or(0);
-        work.fit(self.subtrees.len(), widest);
+        work.fit(self.subtrees.len(), widest, self.top.len());
         work.parallel = threads.resolve(|cap| cap) > 1
             && self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE)) >= self.cfg.par_min_work;
         work
@@ -1029,7 +1047,8 @@ impl<T: Scalar> SolvePlan<T> {
     //
     // The supernodes above the cut form the top of the elimination tree.
     // On the pool they run as a task tree (`top_forward_flow`,
-    // `top_backward_flow`), with no level waiting for its slowest node: on a
+    // `top_backward_flow`), with no level waiting for its slowest node and
+    // no recursion along the tree's height: on a
     // 32 k near-field LU the level sweeps ran most levels (fewer nodes than
     // threads) one node after another, 16 threads slower than 4. A node from
     // `apex_min_work` on sweeps with sections inside it: the block triangle's
@@ -1041,17 +1060,17 @@ impl<T: Scalar> SolvePlan<T> {
     /// Whether the ancestors run as tasks (`top_forward_flow`,
     /// `top_backward_flow`) rather than level by level.
     fn flows(&self, work: &PlanWork<T>) -> bool {
-        work.parallel
-            && !self.chain
-            && !self.top.is_empty()
-            && self.top_levels.len() <= SOLVE_TASK_TREE_MAX_DEPTH
+        work.parallel && !self.chain && !self.top.is_empty()
     }
 
     /// The forward sweep of the ancestors as a task tree: an ancestor runs
-    /// once its children's trees, run side by side, are done, with no level
-    /// waiting for its slowest node. Fork-join on the stack (no task is
-    /// allocated), the recursion as deep as the ancestors' tree
-    /// ([`SOLVE_TASK_TREE_MAX_DEPTH`] bounds it, `flows`). Before its sweep it takes into its columns what the
+    /// once its children are done, with no level waiting for its slowest
+    /// node. Every leaf of the tree starts a walk toward the root; a walk
+    /// goes on to the parent when it finished the parent's last child to
+    /// finish (the pending counts' acquire-release orders the children's
+    /// writes before the parent), and ends otherwise. No task is allocated
+    /// and nothing recurses: a walk is a loop. Before its sweep an ancestor
+    /// takes into its columns what the
     /// leaf subtrees and its descendants above the cut accumulated for them
     /// (`pull`), in the order the level sweeps reduce them, so every column
     /// takes its terms in the same order and the result is the level
@@ -1098,26 +1117,37 @@ impl<T: Scalar> SolvePlan<T> {
                 self.fwd_node_block(s, nr, y, acc, &mut sc.t);
             }
         };
-        fn tree(ti: usize, node: &(dyn Fn(usize) + Sync), kids_ptr: &[usize], kids: &[u32]) {
-            let k = &kids[kids_ptr[ti]..kids_ptr[ti + 1]];
-            crate::parallel::for_each(k.len(), 1, |c| tree(k[c] as usize, node, kids_ptr, kids));
-            node(ti);
+        let kids_ptr = &self.top_kids_ptr;
+        let pending = &work.pending[..nt];
+        for (t, p) in pending.iter().enumerate() {
+            p.store((kids_ptr[t + 1] - kids_ptr[t]) as u32, Ordering::Relaxed);
         }
-        let node: &(dyn Fn(usize) + Sync) = &node;
-        crate::parallel::for_each(self.top_roots.len(), 1, |r| {
-            tree(
-                self.top_roots[r] as usize,
-                node,
-                &self.top_kids_ptr,
-                &self.top_kids,
-            )
+        crate::parallel::for_each(nt, 1, |leaf| {
+            if kids_ptr[leaf + 1] > kids_ptr[leaf] {
+                return;
+            }
+            let mut t = leaf;
+            loop {
+                node(t);
+                match self.top_parent[t] {
+                    NONE => return,
+                    p if pending[p as usize].fetch_sub(1, Ordering::AcqRel) == 1 => t = p as usize,
+                    _ => return,
+                }
+            }
         });
     }
 
     /// The backward sweep of the ancestors as a task tree: an ancestor runs
     /// when its parent is done (every column it reads is then final), then
     /// its children's trees side by side. Each node's
-    /// arithmetic is the level sweep's.
+    /// arithmetic is the level sweep's. A chain of single children runs in
+    /// a loop; the fork-join on the stack (no task is allocated) nests only
+    /// where the tree branches, fewer than
+    /// [`leaf_subtrees`](crate::SolveSettings::leaf_subtrees) times on any
+    /// path whatever the tree's height: every ancestor holds more than that
+    /// share of the work (`cut`), so each branch passed leaves more than it
+    /// behind.
     fn top_backward_flow(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
         let nt = self.top.len();
         if work.level.len() < nt {
@@ -1140,9 +1170,19 @@ impl<T: Scalar> SolvePlan<T> {
             }
         };
         fn tree(ti: usize, node: &(dyn Fn(usize) + Sync), kids_ptr: &[usize], kids: &[u32]) {
-            node(ti);
-            let k = &kids[kids_ptr[ti]..kids_ptr[ti + 1]];
-            crate::parallel::for_each(k.len(), 1, |c| tree(k[c] as usize, node, kids_ptr, kids));
+            let mut t = ti;
+            loop {
+                node(t);
+                match &kids[kids_ptr[t]..kids_ptr[t + 1]] {
+                    [] => return,
+                    [only] => t = *only as usize,
+                    k => {
+                        return crate::parallel::for_each(k.len(), 1, |c| {
+                            tree(k[c] as usize, node, kids_ptr, kids)
+                        })
+                    }
+                }
+            }
         }
         let node: &(dyn Fn(usize) + Sync) = &node;
         crate::parallel::for_each(self.top_roots.len(), 1, |r| {

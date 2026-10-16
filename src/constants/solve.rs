@@ -77,13 +77,3 @@ pub const SOLVE_RHS_TILE: usize = 4;
 /// tree make the sums independent of the thread count.
 /// Contract: results (the summation order; the fold tree assumes four).
 pub const FOLD_LANES: usize = 4;
-
-/// Height of the ancestors' tree up to which the parallel sweeps run it as a
-/// fork-join tree (levels).
-/// Used by: `supernodal::solve::SolvePlan::flows`.
-/// Why: the fork-join recurses once per level on one worker's stack at
-/// worst, a few hundred bytes a level, so 256 stay far inside a worker's
-/// 2 MiB stack. A deeper top is a chain of mostly single nodes, which the
-/// level sweeps run as fast.
-/// Contract: timing (the task tree and the level sweeps give the same bits).
-pub const SOLVE_TASK_TREE_MAX_DEPTH: usize = 256;
