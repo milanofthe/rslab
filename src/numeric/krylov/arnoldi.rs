@@ -122,7 +122,7 @@ impl<T: Scalar> BlockArnoldi<T> {
 
     /// `H`'s packed length for `max_steps` steps: `p^2 m (m + 3) / 2`.
     fn h_len(p: usize, max_steps: usize) -> usize {
-        p * p * max_steps * (max_steps + 3) / 2
+        p * p * max_steps * (max_steps + 3) / 2 // lit: the sum of s + 2 over the steps
     }
 
     /// The bytes the iteration takes for `max_steps` steps of `n x p` blocks

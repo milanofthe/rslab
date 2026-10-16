@@ -89,29 +89,41 @@ impl Schur {
     /// eigenvector matrix, which is ill-conditioned where eigenvalues cluster);
     /// a repeated eigenvalue's denominators are floored at its own precision, so a
     /// defective one gives a large condition number, not a division by zero.
-    /// `None` where the substitution overflows even with rescaling, or `k` is not
-    /// below the dimension.
+    /// `None` where the substitution overflows even with rescaling, where `l^T x`
+    /// vanishes to the working precision (a defective eigenvalue: no projector),
+    /// or where `k` is not below the dimension.
     pub fn eigenvectors(&self, k: usize) -> Option<(Vec<C>, Vec<C>)> {
         let d = self.d;
-        if k >= d {
-            return None;
-        }
-        let z = triangular_eigenvector(&self.t, d, k, false)?;
+        let x = self.right_eigenvector(k)?;
         let u = triangular_eigenvector(&self.t, d, k, true)?;
-        // x = Q z, l^T = u^T Q^H
-        let mut x: Vec<C> = (0..d)
-            .map(|i| (0..=k).map(|j| self.q[i * d + j] * z[j]).sum())
-            .collect();
+        // l^T = u^T Q^H
         let mut l: Vec<C> = (0..d)
             .map(|i| (k..d).map(|j| u[j] * self.q[i * d + j].conj()).sum())
             .collect();
-        normalize(&mut x);
         let lx: C = l.iter().zip(&x).map(|(a, b)| a * b).sum();
         if lx.norm() == 0.0 || !(lx.re.is_finite() && lx.im.is_finite()) {
             return None;
         }
         l.iter_mut().for_each(|v| *v /= lx);
         Some((x, l))
+    }
+
+    /// The eigenvalue `T_kk`'s right eigenvector `x` (`A x = lambda x`, unit
+    /// norm), the back substitution of [`Schur::eigenvectors`] alone: defined for
+    /// a defective eigenvalue too, whose left and right vectors are orthogonal.
+    /// `None` where it overflows even with rescaling, or `k` is not below the
+    /// dimension.
+    pub fn right_eigenvector(&self, k: usize) -> Option<Vec<C>> {
+        let d = self.d;
+        if k >= d {
+            return None;
+        }
+        let z = triangular_eigenvector(&self.t, d, k, false)?;
+        let mut x: Vec<C> = (0..d)
+            .map(|i| (0..=k).map(|j| self.q[i * d + j] * z[j]).sum())
+            .collect();
+        normalize(&mut x);
+        Some(x)
     }
 
     /// `X = (alpha I + beta A)^-1 B` (`b` `d x nrhs` row-major, so is the
@@ -181,8 +193,8 @@ pub fn eigen(a: &[C], d: usize) -> Result<Eigen, RslabError> {
     let s = Schur::new(a, d)?;
     let mut vectors = vec![C::new(0.0, 0.0); d * d];
     for k in 0..d {
-        let (x, _) = s
-            .eigenvectors(k)
+        let x = s
+            .right_eigenvector(k)
             .ok_or(RslabError::NumericallyRankDeficient)?;
         for i in 0..d {
             vectors[i * d + k] = x[i];
