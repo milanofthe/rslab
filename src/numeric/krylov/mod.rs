@@ -35,6 +35,7 @@
 //! reductions are what make the multi-RHS path fast and thread-count deterministic),
 //! not a bug; see the `gmres_block_single_rhs_matches_scalar_gmres` test.
 
+mod arnoldi;
 mod block;
 mod cg;
 mod closures;
@@ -49,6 +50,7 @@ mod util;
 #[cfg(test)]
 mod warmstart_tests;
 
+pub use arnoldi::BlockArnoldi;
 pub use block::{gmres_block, BlockKrylovResult};
 pub use cg::{cocg, cocr};
 pub use closures::{FnOperator, FnPreconditioner};

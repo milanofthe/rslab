@@ -5,7 +5,8 @@
 
 /// A positive floor for magnitudes that are divided by or compared
 /// relatively, so a zero never divides (1).
-/// Used by: `dense_eig::eigenvalues` (deflation test),
+/// Used by: `dense_eig::eigenvalues` and `dense_eig::schur` (deflation
+/// test), `dense_eig::eigen` (the back substitution's floor),
 /// `krylov::recycle::combine_ritz_real` (Ritz value magnitude).
 /// Why: far below any meaningful magnitude, far above the subnormals.
 /// Contract: results (only where a magnitude would be zero).
@@ -22,7 +23,8 @@ pub const DENSE_SINGULAR_TOL: f64 = 1e-14;
 /// QR iterations the eigenvalue routine may spend per dimension, and once
 /// more on top: the budget is `QR_ITER_PER_DIM * d + QR_ITER_PER_DIM`
 /// (iterations).
-/// Used by: `dense_eig::eigenvalues`.
+/// Used by: `dense_eig::eigenvalues`, `dense_eig::schur` (which reports a QR
+/// that does not converge within it as `None`).
 /// Why: LAPACK's 30 iterations per eigenvalue.
 /// Contract: results (only where the QR iteration does not converge).
 pub const QR_ITER_PER_DIM: usize = 30;
