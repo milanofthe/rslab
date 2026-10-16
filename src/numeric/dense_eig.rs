@@ -11,13 +11,13 @@
 //!   transform accumulated) and from it the eigenvalues with their right
 //!   eigenvectors (back substitution on `T`). Both report a QR that does not
 //!   converge within its budget as `None`.
-//! * [`eigenvalues`]: the eigenvalues alone, best effort, for GCRO-DR.
+//! * `eigenvalues`: the eigenvalues alone, best effort, for GCRO-DR.
 //!
 //! **Why approximate is safe for GCRO-DR.** The harmonic-Ritz vectors only seed
 //! the recycle subspace `U`, which *accelerates* convergence; the outer GMRES
 //! true-residual test is authoritative, so a defective / inaccurate `U` can only
-//! make the solve slower, never wrong. Accordingly [`eigenvalues`] and
-//! [`harmonic_ritz_smallest`] are guarded (capped iterations, singular-pivot
+//! make the solve slower, never wrong. Accordingly `eigenvalues` and
+//! `harmonic_ritz_smallest` are guarded (capped iterations, singular-pivot
 //! fallbacks) and return "best effort" rather than erroring. A caller whose
 //! result is the spectrum itself takes [`eigen`], which says when it failed.
 
@@ -288,7 +288,7 @@ pub fn eigenvalues(a: &[C], d: usize) -> Vec<C> {
 
 /// The complex Schur decomposition `A = Q T Q^H` of a general dense matrix `a`
 /// (`dxd`, row-major): `T` upper triangular with the eigenvalues on its diagonal,
-/// `Q` unitary, both `dxd` row-major. The QR iteration of [`eigenvalues`] with the
+/// `Q` unitary, both `dxd` row-major. The QR iteration of `eigenvalues` with the
 /// transform accumulated; `None` where it does not converge within the same
 /// budget (`QR_ITER_PER_DIM` per dimension), rather than a partial result.
 pub fn schur(a: &[C], d: usize) -> Option<(Vec<C>, Vec<C>)> {

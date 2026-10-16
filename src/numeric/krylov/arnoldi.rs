@@ -205,7 +205,8 @@ fn thin_qr<T: Scalar>(z: &mut [T], n: usize, q: usize, norms: &[f64]) -> (Vec<T>
         }
         let zb = &mut z[b * n..(b + 1) * n];
         let nrm = norm2(zb);
-        if !(nrm > f64::EPSILON * n as f64 * before) {
+        // (`<=` and a NaN norm both count as dependent)
+        if nrm.is_nan() || nrm <= f64::EPSILON * n as f64 * before {
             dependent = true;
             zb.iter_mut().for_each(|v| *v = T::zero());
             continue;
