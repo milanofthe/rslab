@@ -654,7 +654,7 @@ pub struct LuSolver<T> {
     /// `L` and `U^T` (the panels, their only storage) with the tree schedule
     /// of [`crate::numeric::supernodal::solve`]; `factors` carries the
     /// permutations, scalings and counters with empty CSC arrays.
-    plan_l: crate::numeric::supernodal::solve::SolvePlan<T>,
+    pub(crate) plan_l: crate::numeric::supernodal::solve::SolvePlan<T>,
     plan_u: crate::numeric::supernodal::solve::SolvePlan<T>,
     nnz: usize,
     diagnostics: crate::diagnostics::Diagnostics,

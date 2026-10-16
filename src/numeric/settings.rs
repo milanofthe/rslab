@@ -409,13 +409,16 @@ pub struct SolveSettings {
     /// Independent leaf subtrees the tree is cut into for the parallel
     /// sweeps. Default `128`.
     pub leaf_subtrees: usize,
-    /// Column block of the ancestor sweeps: a block's triangle is one task,
-    /// its update of the rows below is spread over row tasks. Default `512`.
+    /// Column block of a large ancestor's sweep: the block's triangle runs
+    /// its right-hand sides' tiles of four side by side, its update of the
+    /// rows below in row tasks. Default `512`.
     pub block: usize,
-    /// Columns per product or dot task of the ancestor sweeps. Default `32`.
+    /// Columns per dot task of a large ancestor's backward sweep. Default
+    /// `32`.
     pub ancestor_chunk: usize,
-    /// Panel entries from which an ancestor node uses the blocked sweep.
-    /// Default `262_144`.
+    /// Panel entries from which an ancestor node uses the blocked sweep with
+    /// parallel sections inside the node. Default `16_384`
+    /// ([`SOLVE_APEX_MIN_ENTRIES`](crate::constants::SOLVE_APEX_MIN_ENTRIES)).
     pub apex_min_work: usize,
     /// Work of a triangular sweep from which it runs on the thread pool, in
     /// the factor's panel entries times the right-hand sides, up to four
