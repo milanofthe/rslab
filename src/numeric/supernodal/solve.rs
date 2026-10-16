@@ -954,7 +954,7 @@ impl<T: Scalar> SolvePlan<T> {
             ));
         }
         for (li, level) in self.top_levels.iter().enumerate().rev() {
-            let node_par = !par || level.len() >= nt || nt == 1;
+            let node_par = !par || level.len() > 1 || nt == 1;
             let t_lvl = probe.then(crate::clock::Instant::now);
             // One accumulator block for the level, a disjoint slice per node.
             let ptr = &self.top_acc_ptr[li];
@@ -1017,7 +1017,7 @@ impl<T: Scalar> SolvePlan<T> {
         let nt = crate::parallel::threads();
         let shared = Shared(x.as_mut_ptr(), x.len());
         for level in &self.top_levels {
-            let node_par = !par || level.len() >= nt || nt == 1;
+            let node_par = !par || level.len() > 1 || nt == 1;
             let sweep = |s: u32, x: &mut [T], par: bool, sc: &mut Scratch<T>| {
                 if self.work(s) >= self.cfg.apex_min_work {
                     self.apex_backward(s, nr, x, par, sc);
