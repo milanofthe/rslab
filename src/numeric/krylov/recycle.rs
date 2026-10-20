@@ -679,7 +679,7 @@ where
         }
 
         // Least-squares solve on the well-conditioned leading block.
-        let jd = well_conditioned_dim_flat(&rmat, p_arn, jdim);
+        let jd = well_conditioned_dim(&rmat, p_arn, jdim);
         for i in (0..jd).rev() {
             let mut s = g[i];
             for kk in (i + 1)..jd {

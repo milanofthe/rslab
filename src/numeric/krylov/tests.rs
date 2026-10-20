@@ -1750,3 +1750,128 @@ fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
         .unwrap()
         .install(f)
 }
+
+/// The right-hand sides of the continuation tests: `s` distinct columns.
+fn ladder_rhs(n: usize, s: usize) -> Vec<C> {
+    let mut b = vec![C::default(); n * s];
+    for k in 0..s {
+        for i in 0..n {
+            b[k * n + i] = Complex::new(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
+        }
+    }
+    b
+}
+
+/// A solve continued to a tighter tolerance carries on in its Krylov space:
+/// one column's ladder `1e-4 -> 1e-10` is the straight solve to `1e-10`, step
+/// for step and bit for bit, and every rung hands out solutions that meet it.
+#[test]
+fn block_gmres_continued_is_the_straight_solve() {
+    let a = unsym_grid(20);
+    let n = a.n;
+    let b = ladder_rhs(n, 1);
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(2000)
+        .with_restart(600);
+    let straight = gmres_block(
+        &a,
+        &b,
+        1,
+        &NoPreconditioner,
+        &set.clone().with_tol(1e-10),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut g = BlockGmres::new(&a, &b, 1, &NoPreconditioner, &set, None).unwrap();
+    let r1 = g.solve(1e-4, None).unwrap();
+    assert!(
+        r1.converged && r1.final_res[0] <= 1e-4,
+        "{:?}",
+        r1.final_res
+    );
+    let r2 = g.solve(1e-10, None).unwrap();
+    assert!(
+        r2.converged && r2.final_res[0] <= 1e-10,
+        "{:?}",
+        r2.final_res
+    );
+    assert!(straight.iters > r1.iters, "the first rung stops early");
+    assert_eq!(r1.iters + r2.iters, straight.iters);
+    assert!(
+        r2.x == straight.x,
+        "the continued solve is the straight one"
+    );
+}
+
+/// Continuing beats restarting: the rung `1e-6 -> 1e-10` of several columns
+/// takes fewer iterations continued than a fresh solve from the first rung's
+/// solutions, and the solutions meet the rung's tolerance.
+#[test]
+fn block_gmres_continued_rung_beats_a_restart() {
+    let a = unsym_grid(20);
+    let n = a.n;
+    let s = 3;
+    let b = ladder_rhs(n, s);
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(2000)
+        .with_restart(600);
+    let mut g = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None).unwrap();
+    let r1 = g.solve(1e-6, None).unwrap();
+    let r2 = g.solve(1e-10, None).unwrap();
+    let fresh = gmres_block(
+        &a,
+        &b,
+        s,
+        &NoPreconditioner,
+        &set.clone().with_tol(1e-10),
+        Some(&r1.x),
+        None,
+    )
+    .unwrap();
+    assert!(r2.converged && fresh.converged);
+    assert!(
+        r2.iters < fresh.iters,
+        "continued {} against restarted {}",
+        r2.iters,
+        fresh.iters
+    );
+    for k in 0..s {
+        let mut y = vec![C::default(); n];
+        a.matvec(&r2.x[k * n..(k + 1) * n], &mut y);
+        let rn = (0..n)
+            .map(|i| (y[i] - b[k * n + i]).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        let bn = b[k * n..(k + 1) * n]
+            .iter()
+            .map(|v| v.norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(rn <= 1e-10 * bn * (1.0 + 1e-6), "column {k}: {}", rn / bn);
+    }
+}
+
+/// The memory plan of a block GMRES ([`KrylovSettings::block_bytes`]) is what a
+/// solve holds at the depth it reached: exactly for one column, a bound for
+/// several (they stop at different depths).
+#[test]
+fn block_gmres_memory_plan_matches_the_solve() {
+    let a = unsym_grid(16);
+    let n = a.n;
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(2000)
+        .with_restart(300);
+    for s in [1usize, 4] {
+        let b = ladder_rhs(n, s);
+        let mut g = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None).unwrap();
+        g.solve(1e-9, None).unwrap();
+        let plan = set.block_bytes::<C>(n, s, g.deepest());
+        let held = g.resident_bytes();
+        if s == 1 {
+            assert_eq!(plan, held);
+        } else {
+            assert!(plan >= held && held > 0, "plan {plan} held {held}");
+        }
+    }
+}

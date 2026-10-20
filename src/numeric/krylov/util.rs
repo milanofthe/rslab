@@ -79,31 +79,11 @@ pub(super) fn givens<T: Scalar>(f: T, g: T) -> (T, T) {
 /// tail is dropped, and the outer true-residual check reports non-convergence. In
 /// the well-conditioned case every diagonal clears the threshold and `jdim` is
 /// returned unchanged, so the normal path is unaffected.
+///
+/// The Hessenberg matrix is one row-major `(m+1) x m` buffer, diagonal entry `i`
+/// at `h[i*stride + i]`.
 #[inline]
-#[allow(clippy::needless_range_loop)]
-pub(super) fn well_conditioned_dim<T: Scalar>(h: &[Vec<T>], jdim: usize) -> usize {
-    if jdim == 0 {
-        return 0;
-    }
-    let mut hmax = 0.0f64;
-    for i in 0..jdim {
-        hmax = hmax.max(h[i][i].magnitude());
-    }
-    let thresh = f64::EPSILON * hmax;
-    for i in 0..jdim {
-        if h[i][i].magnitude() <= thresh {
-            return i;
-        }
-    }
-    jdim
-}
-
-/// [`well_conditioned_dim`] for a **flat** row-major Hessenberg buffer:
-/// the single-RHS [`gmres`] stores `H` as one `(m+1)xm` `Vec<T>` (diagonal entry
-/// `i` at `h[i*stride + i]`) rather than a `Vec<Vec<T>>`, so this reads the same
-/// breakdown-guarded leading dimension off the flat layout. Identical logic.
-#[inline]
-pub(super) fn well_conditioned_dim_flat<T: Scalar>(h: &[T], stride: usize, jdim: usize) -> usize {
+pub(super) fn well_conditioned_dim<T: Scalar>(h: &[T], stride: usize, jdim: usize) -> usize {
     if jdim == 0 {
         return 0;
     }
@@ -127,7 +107,7 @@ pub(super) fn well_conditioned_dim_flat<T: Scalar>(h: &[T], stride: usize, jdim:
 /// rayon pool). Any concrete policy takes the calling thread's pool of that
 /// width (the one the factorizations and solves of that width run in, see
 /// [`scoped_pool`](crate::numeric::settings::scoped_pool)) **once** per
-/// solve; the four `block_project` / `block_subtract` calls per step enter
+/// solve; the projection and subtraction calls of every step enter
 /// it, so factor and solve share one concurrency budget instead of the solve
 /// fanning out over the global pool. The chunk-order reduction fold is
 /// thread-count independent, so the pool never perturbs the
@@ -162,60 +142,48 @@ pub(super) fn ortho_in_pool<R: Send>(
     }
 }
 
-/// Column-wise projection of a panel `W` (`nxsa`) onto each column's **own**
-/// Arnoldi basis: `proj[i*sa + ap] = <V_i[:,ap], W[:,ap]>` for block `i` in
-/// `0..blocks` and active column `ap` in `0..sa`. The basis is blocks-major -
-/// block `i` is the contiguous slice `vbas[i*sa*n .. (i+1)*sa*n]`, its column `ap`
-/// at offset `+ap*n`; `W` column `ap` is `w[ap*n .. ap*n+n]`.
+/// Each panel column projected onto its **own** basis: `proj[off[a] + i] =
+/// <V_a[:, i], W[:, a]>` for the `off[a+1] - off[a]` vectors of column `a`'s
+/// basis `layers(a)` (vector `i` the slice `[i*n, (i+1)*n)`), `W` column `a` the
+/// slice `w[a*n..(a+1)*n]`.
 ///
-/// This is the classical (block) Gram-Schmidt projection: **all** projections are
-/// taken against the same `W`, so the `blocks*sa` inner products are independent
-/// and computed as one panel sweep instead of the `O(blocks*sa)` sequential,
-/// latency-bound BLAS-1 reductions of modified Gram-Schmidt. The reduction is a
-/// fixed row-chunk sum folded in chunk order -> deterministic regardless of the
-/// thread count.
-/// `scratch` is a caller-owned reduction buffer of length `>= nchunks * width`
-/// (`nchunks = ceil(n / chunk)`, `width = blocks*sa`), reused across steps so the
-/// hot loop allocates nothing. Each chunk writes its `width` partial sums into its
-/// own slice; the slices are then folded in chunk order.
+/// The classical (block) Gram-Schmidt projection: all projections are taken
+/// against the same `W`, so the inner products are independent and computed in
+/// one sweep over row chunks instead of sequential, latency-bound BLAS-1
+/// reductions. Each chunk writes its partial sums into its own slice of
+/// `scratch` (`>= ceil(n / chunk) * off[last]`), folded in chunk order: the
+/// result does not depend on the thread count.
 #[inline]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn block_project<T: Scalar>(
-    vbas: &[T],
+pub(super) fn column_project<'v, T: Scalar>(
+    layers: &(dyn Fn(usize) -> &'v [T] + Sync),
+    off: &[usize],
     w: &[T],
-    blocks: usize,
-    sa: usize,
     n: usize,
     chunk: usize,
     proj: &mut [T],
     scratch: &mut [T],
 ) {
-    let width = blocks * sa;
-    for p in proj[..width].iter_mut() {
-        *p = T::zero();
-    }
+    let width = off[off.len() - 1];
+    proj[..width].iter_mut().for_each(|p| *p = T::zero());
     if width == 0 || n == 0 {
         return;
     }
     let nchunks = n.div_ceil(chunk);
     let part = &mut scratch[..nchunks * width];
     crate::parallel::chunks_mut(part, width, |ci, out| {
-        let r0 = ci * chunk;
-        let r1 = (r0 + chunk).min(n);
-        for i in 0..blocks {
-            for ap in 0..sa {
-                let vb = (i * sa + ap) * n;
-                let wb = ap * n;
+        let (r0, r1) = (ci * chunk, ((ci + 1) * chunk).min(n));
+        for a in 0..off.len() - 1 {
+            let v = layers(a);
+            let wa = &w[a * n + r0..a * n + r1];
+            for i in 0..off[a + 1] - off[a] {
                 let mut sdot = T::zero();
-                for k in r0..r1 {
-                    sdot = sdot + vbas[vb + k].conj() * w[wb + k];
+                for (x, &y) in v[i * n + r0..i * n + r1].iter().zip(wa) {
+                    sdot = sdot + x.conj() * y;
                 }
-                out[i * sa + ap] = sdot;
+                out[off[a] + i] = sdot;
             }
         }
     });
-    // Fold partials in chunk order: the summation order is fixed by the chunk
-    // layout, so the result does not depend on how many threads ran.
     for ci in 0..nchunks {
         let base = ci * width;
         for t in 0..width {
@@ -224,32 +192,32 @@ pub(super) fn block_project<T: Scalar>(
     }
 }
 
-/// Subtract the projected components from the panel in place, per column:
-/// `W[:,ap] -= sum_i proj[i*sa+ap] * V_i[:,ap]`, accumulated in block order (`i`
-/// ascending) at every element. Parallel over fixed row-chunks within each column
-/// -> the element-wise order is fixed, so the update is deterministic.
+/// Subtract the projected components from each panel column in place:
+/// `W[:, a] -= sum_i proj[off[a] + i] * V_a[:, i]` (see [`column_project`]),
+/// accumulated in basis order at every entry. Parallel over fixed row chunks
+/// within each column, so the update is thread-count independent.
 #[inline]
-pub(super) fn block_subtract<T: Scalar>(
-    vbas: &[T],
+pub(super) fn column_subtract<'v, T: Scalar>(
+    layers: &(dyn Fn(usize) -> &'v [T] + Sync),
+    off: &[usize],
     w: &mut [T],
-    blocks: usize,
-    sa: usize,
     n: usize,
     chunk: usize,
     proj: &[T],
 ) {
-    for ap in 0..sa {
-        let wcol = &mut w[ap * n..ap * n + n];
-        crate::parallel::chunks_mut(wcol, chunk, |ci, wc| {
+    for a in 0..off.len() - 1 {
+        let v = layers(a);
+        let coef = &proj[off[a]..off[a + 1]];
+        let wa = &mut w[a * n..(a + 1) * n];
+        crate::parallel::chunks_mut(wa, chunk, |ci, part| {
             let r0 = ci * chunk;
-            for i in 0..blocks {
-                let hij = proj[i * sa + ap];
-                if hij == T::zero() {
+            for (i, &h) in coef.iter().enumerate() {
+                if h == T::zero() {
                     continue;
                 }
-                let vb = (i * sa + ap) * n + r0;
-                for k in 0..wc.len() {
-                    wc[k] = wc[k] - hij * vbas[vb + k];
+                let vi = &v[i * n + r0..i * n + r0 + part.len()];
+                for (x, &y) in part.iter_mut().zip(vi) {
+                    *x = *x - h * y;
                 }
             }
         });
