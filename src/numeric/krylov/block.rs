@@ -597,13 +597,16 @@ pub(super) fn block_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, depth: 
     let sz = std::mem::size_of::<T>();
     // per column: the basis, the Hessenberg matrix, the two rotations, `g`
     let column = n * depth + (m + 1) * m + 2 * m + (m + 1);
-    // `x`, `out`, `panel`, `z`, `w`, `vy`; the two projections and their partial
-    // sums; `y`
-    let shared = 6 * n * s + 2 * s * (m + 1) + n.div_ceil(chunk.max(1)) * s * (m + 1) + m;
+    // the panels `x`, `out`, `panel`, `z`, `w`, `vy`; the two projections and their
+    // partial sums; `y`
+    let panels = 6 * n * s; // lit: the six n x s panels of `BlockGmres::new`
+    let shared = panels + 2 * s * (m + 1) + n.div_ceil(chunk.max(1)) * s * (m + 1) + m;
+    // `bnorm`, `wnorm0`, `res`, `reorth`, `off` (one more), `act`, `chk`
     let per_rhs = 2 * std::mem::size_of::<f64>()
         + std::mem::size_of::<Option<f64>>()
         + std::mem::size_of::<bool>()
-        + 3 * std::mem::size_of::<usize>();
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<(usize, usize)>();
     ((s * column + shared) * sz + s * per_rhs + std::mem::size_of::<usize>()) as u64
 }
 

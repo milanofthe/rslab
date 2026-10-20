@@ -1804,12 +1804,15 @@ fn block_gmres_continued_is_the_straight_solve() {
     );
 }
 
-/// Continuing beats restarting: the rung `1e-6 -> 1e-10` of several columns
-/// takes fewer iterations continued than a fresh solve from the first rung's
-/// solutions, and the solutions meet the rung's tolerance.
+/// Continuing beats restarting: on an indefinite Helmholtz grid (GMRES
+/// converges superlinearly once its space resolves the eigenvalues near zero)
+/// the rung `1e-6 -> 1e-10` of several columns takes fewer iterations continued
+/// than a fresh solve from the first rung's solutions, and the solutions meet
+/// the rung's tolerance.
 #[test]
 fn block_gmres_continued_rung_beats_a_restart() {
-    let a = unsym_grid(20);
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(20, c(0.6, 0.02), c(-1.0, 0.0));
     let n = a.n;
     let s = 3;
     let b = ladder_rhs(n, s);
@@ -1838,7 +1841,7 @@ fn block_gmres_continued_rung_beats_a_restart() {
     );
     for k in 0..s {
         let mut y = vec![C::default(); n];
-        a.matvec(&r2.x[k * n..(k + 1) * n], &mut y);
+        a.symv(&r2.x[k * n..(k + 1) * n], &mut y);
         let rn = (0..n)
             .map(|i| (y[i] - b[k * n + i]).norm_sqr())
             .sum::<f64>()
