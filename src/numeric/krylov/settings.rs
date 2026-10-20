@@ -82,10 +82,10 @@ impl KrylovSettings {
     /// [`BlockGmres`](super::BlockGmres)) of `s` right-hand sides of length `n`
     /// in scalars `T` holds once its bases are `depth` vectors deep (a solve of
     /// `k` iterations without a restart: `k + 1`), at the restart these settings
-    /// give: the bases as written, the Hessenberg matrices, the panels and the
-    /// reduction scratch.
+    /// give: the bases `V` and `Z` as written, the Hessenberg matrices, the panels
+    /// and the reduction scratch.
     pub fn block_bytes<T>(&self, n: usize, s: usize, depth: usize) -> u64 {
-        let m = self.restart_for(n, s, std::mem::size_of::<T>(), 1);
+        let m = self.restart_for(n, s, std::mem::size_of::<T>(), 2);
         super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, depth.min(m + 1))
     }
 

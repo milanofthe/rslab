@@ -30,6 +30,9 @@ struct Column<T> {
     /// The basis, layer `i` the slice `v[i*n..(i+1)*n]`: the restart's layers
     /// reserved, the ones the cycle has written resident ([`basis`], [`grow`]).
     v: Vec<T>,
+    /// The preconditioned basis `z_i = M^-1 v_i` of the steps taken, laid out as
+    /// `v`: the solution is formed from the vectors the Arnoldi relation holds.
+    zb: Vec<T>,
     /// Row-major `(m+1) x m`, entry `(i, j)` at `h[i*m + j]`.
     h: Vec<T>,
     cs: Vec<T>,
@@ -43,6 +46,7 @@ impl<T: Scalar> Column<T> {
     fn new(n: usize, m: usize) -> Self {
         Column {
             v: basis(n * (m + 1)),
+            zb: basis(n * m),
             h: vec![T::zero(); (m + 1) * m],
             cs: vec![T::zero(); m],
             sn: vec![T::zero(); m],
@@ -74,11 +78,12 @@ impl<T: Scalar> Column<T> {
 
     /// The open cycle's coefficients `y` (back substitution on the leading
     /// well-conditioned block, so a rank-deficient Hessenberg breaks down
-    /// deterministically instead of dividing by about zero) and `V y` into `vy`.
+    /// deterministically instead of dividing by about zero) and the solution
+    /// `x0 + Z y` into `out`.
     #[allow(clippy::needless_range_loop)]
-    fn correction(&self, m: usize, y: &mut [T], vy: &mut [T]) {
-        let n = vy.len();
-        vy.iter_mut().for_each(|e| *e = T::zero());
+    fn correction(&self, m: usize, y: &mut [T], x0: &[T], out: &mut [T]) {
+        let n = out.len();
+        out.copy_from_slice(x0);
         let jd = well_conditioned_dim(&self.h, m, self.steps.unwrap_or(0));
         for i in (0..jd).rev() {
             let mut acc = self.g[i];
@@ -89,8 +94,8 @@ impl<T: Scalar> Column<T> {
         }
         for i in 0..jd {
             let yi = y[i];
-            for (o, &v) in vy.iter_mut().zip(&self.v[i * n..(i + 1) * n]) {
-                *o = *o + v * yi;
+            for (o, &z) in out.iter_mut().zip(&self.zb[i * n..(i + 1) * n]) {
+                *o = *o + z * yi;
             }
         }
     }
@@ -108,12 +113,23 @@ impl<T: Scalar> Column<T> {
 /// Each right-hand side keeps its own basis, Hessenberg matrix and Givens
 /// rotations, so a column converges as the single-RHS [`gmres`] does; the
 /// columns share the batched operator and preconditioner applies of every step.
+///
+/// **Flexible:** like [`gmres`], every column keeps its preconditioned basis
+/// `Z = M^-1 V` next to `V` and forms its solution as `x0 + Z y` from the vectors
+/// the Arnoldi relation `A Z = V H` holds, so the least-squares residual is the
+/// true one up to rounding of `A` alone, and the preconditioner may change from
+/// step to step. Applying `M^-1` once more to `V y` instead breaks that
+/// relation by the preconditioner's own rounding: a static-pivoted near-field LU
+/// of a 79 k unknown MoM system (backward error 2e-3) left the true residuals at
+/// 1e-5 to 2e-5 where the least squares said 1e-6, and every column restarted.
+/// The price is the second basis in memory.
+///
 /// A column whose least-squares residual reaches the tolerance pauses: it leaves
-/// the batched applies, keeps its cycle open, and its solution is formed with the
-/// other paused columns' in one batched preconditioner apply once no column can
-/// step. The true residuals `||b - A x||` of those solutions decide (one batched
-/// operator apply): a column above the tolerance closes its cycle and restarts
-/// from its true residual, as does a column whose cycle reached the restart.
+/// the batched applies and keeps its cycle open. Once no column can step, the
+/// paused columns' solutions are formed and their true residuals `||b - A x||`
+/// checked in one batched operator apply: a column above the tolerance closes
+/// its cycle and restarts from its true residual, as does a column whose cycle
+/// reached the restart.
 pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     op: &'a A,
     precond: &'a M,
@@ -147,8 +163,6 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     z: Vec<T>,
     /// `A M^-1` of the panel, orthogonalized in place; `b - A x` in a check.
     w: Vec<T>,
-    /// `V y` of the columns whose solution is formed.
-    vy: Vec<T>,
     /// The two Gram-Schmidt passes' projections, `off[a]..off[a+1]` column `a`'s.
     proj1: Vec<T>,
     proj2: Vec<T>,
@@ -201,7 +215,8 @@ where
             Some(g) => g.to_vec(),
             None => vec![T::zero(); n * s],
         };
-        let m = settings.restart_for(n, s, std::mem::size_of::<T>(), 1);
+        // two bases a column: `V` and `Z`
+        let m = settings.restart_for(n, s, std::mem::size_of::<T>(), 2);
         let chunk = settings.ortho_chunk.max(1);
         let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
         let mut res = vec![None; s];
@@ -236,7 +251,6 @@ where
             panel: vec![T::zero(); n * s],
             z: vec![T::zero(); n * s],
             w: vec![T::zero(); n * s],
-            vy: vec![T::zero(); n * s],
             proj1: vec![T::zero(); s * (m + 1)],
             proj2: vec![T::zero(); s * (m + 1)],
             proj_scratch: vec![T::zero(); n.div_ceil(chunk) * s * (m + 1)],
@@ -260,7 +274,7 @@ where
             .cols
             .iter()
             .map(|c| {
-                c.v.len() as u64 * sz
+                (c.v.len() + c.zb.len()) as u64 * sz
                     + vec_bytes(&c.h)
                     + vec_bytes(&c.cs)
                     + vec_bytes(&c.sn)
@@ -273,7 +287,6 @@ where
             &self.panel,
             &self.z,
             &self.w,
-            &self.vy,
             &self.proj1,
             &self.proj2,
             &self.proj_scratch,
@@ -334,7 +347,7 @@ where
             // The residual check: with columns stepping, only the full cycles
             // (they restart from their true residual); else every column that
             // stepped since its last check.
-            let checked = self.check(!stepping)?;
+            let checked = self.check(!stepping);
             if checked {
                 if let Some(mo) = mon.as_mut() {
                     // NaN-honest: a non-finite residual is the worst one
@@ -363,7 +376,7 @@ where
             self.step()?;
         }
         // A cancel leaves the columns stepped since their last check unformed.
-        self.check(true)?;
+        self.check(true);
         let final_res: Vec<f64> = self
             .res
             .iter()
@@ -403,7 +416,7 @@ where
     /// those whose cycle reached the restart) and their true residuals; the
     /// residual vectors stay in `w` (compact, in the order of `chk`).
     /// Whether any column was checked.
-    fn check(&mut self, all: bool) -> Result<bool, RslabError> {
+    fn check(&mut self, all: bool) -> bool {
         let (n, m) = (self.n, self.m);
         self.chk.clear();
         for c in 0..self.s {
@@ -413,36 +426,17 @@ where
         }
         let k = self.chk.len();
         if k == 0 {
-            return Ok(false);
+            return false;
         }
-        // The open cycles' corrections, one batched preconditioner apply.
-        let mut formed = 0;
-        for &c in &self.chk {
-            if matches!(self.cols[c].steps, Some(j) if j > 0) {
-                let vy = &mut self.vy[formed * n..(formed + 1) * n];
-                self.cols[c].correction(m, &mut self.y, vy);
-                formed += 1;
-            }
-        }
-        if formed > 0 {
-            self.precond.apply_block(
-                &self.vy[..formed * n],
-                &mut self.z[..formed * n],
-                formed,
-                n,
-            )?;
-        }
-        let mut f = 0;
+        // The open cycles' solutions `x + Z y`, from the stored preconditioned basis.
         for (a, &c) in self.chk.iter().enumerate() {
             let (cb, pb) = (c * n, a * n);
-            if matches!(self.cols[c].steps, Some(j) if j > 0) {
-                for i in 0..n {
-                    self.out[cb + i] = self.x[cb + i] + self.z[f * n + i];
-                }
-                f += 1;
-            } else {
-                self.out[cb..cb + n].copy_from_slice(&self.x[cb..cb + n]);
-            }
+            self.cols[c].correction(
+                m,
+                &mut self.y,
+                &self.x[cb..cb + n],
+                &mut self.out[cb..cb + n],
+            );
             self.panel[pb..pb + n].copy_from_slice(&self.out[cb..cb + n]);
         }
         // Their true residuals, one batched operator apply.
@@ -458,7 +452,7 @@ where
             }
             self.res[c] = Some(rn.sqrt() / self.bnorm[c]);
         }
-        Ok(true)
+        true
     }
 
     /// Restart every column the last check left above `tol`: its cycle closes
@@ -554,6 +548,8 @@ where
                     self.proj1[p]
                 };
             }
+            grow(&mut col.zb, (j + 1) * n);
+            col.zb[j * n..(j + 1) * n].copy_from_slice(&self.z[a * n..(a + 1) * n]);
             let wa = &self.w[a * n..(a + 1) * n];
             let hn = norm2(wa);
             col.h[(j + 1) * m + j] = T::from_real(hn);
@@ -595,11 +591,12 @@ where
 /// ([`BlockGmres::resident_bytes`] of a solve at that depth in every column).
 pub(super) fn block_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, depth: usize) -> u64 {
     let sz = std::mem::size_of::<T>();
-    // per column: the basis, the Hessenberg matrix, the two rotations, `g`
-    let column = n * depth + (m + 1) * m + 2 * m + (m + 1);
-    // the panels `x`, `out`, `panel`, `z`, `w`, `vy`; the two projections and their
-    // partial sums; `y`
-    let panels = 6 * n * s; // lit: the six n x s panels of `BlockGmres::new`
+    // per column: the basis, its preconditioned steps, the Hessenberg matrix, the two
+    // rotations, `g`
+    let column = n * depth + n * depth.saturating_sub(1) + (m + 1) * m + 2 * m + (m + 1);
+    // the panels `x`, `out`, `panel`, `z`, `w`; the two projections and their partial
+    // sums; `y`
+    let panels = 5 * n * s; // lit: the five n x s panels of `BlockGmres::new`
     let shared = panels + 2 * s * (m + 1) + n.div_ceil(chunk.max(1)) * s * (m + 1) + m;
     // `bnorm`, `wnorm0`, `res`, `reorth`, `off` (one more), `act`, `chk`
     let per_rhs = 2 * std::mem::size_of::<f64>()
@@ -628,8 +625,8 @@ pub(super) fn block_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, depth: 
 /// **Deflation:** a RHS whose least-squares residual reaches `tol` leaves the
 /// batched applies, so they shrink to the active width as columns converge.
 ///
-/// **Memory:** every column's basis reserves `n*(restart+1)` scalars of address
-/// space and holds what its cycle has written; the solve holds about
+/// **Memory:** every column's bases `V` and `Z` reserve `n*(2*restart+1)`
+/// scalars of address space and hold what its cycle has written; the solve holds about
 /// [`KrylovSettings::block_bytes`] for the depth it reaches. An unset
 /// [`KrylovSettings::restart`] is capped to
 /// [`KrylovSettings::basis_budget_bytes`]; an explicit value is honoured exactly.
