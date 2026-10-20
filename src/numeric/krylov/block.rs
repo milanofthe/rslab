@@ -397,6 +397,12 @@ where
             + vec_bytes(&self.chk)
     }
 
+    /// The operator the solve runs on, for the caller's own products between
+    /// [`solve`](Self::solve) calls (a diagnosis of an unconverged rung).
+    pub fn operator(&self) -> &'a A {
+        self.op
+    }
+
     /// The dimension of the subspace deflated (`0` without one).
     pub fn rec_dim(&self) -> usize {
         self.rec.map_or(0, |r| r.k)
