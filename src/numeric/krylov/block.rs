@@ -100,13 +100,13 @@ where
 /// This is the MoM/FEM many-excitations path: factor (or `f32`-factor) once, then
 /// drive all right-hand sides through one block iteration.
 ///
-/// **Memory:** the Arnoldi basis is a single up-front allocation of
-/// `n*s*(restart+1)` scalars (plus a handful of `n*s` work panels), *independent*
-/// of how few iterations actually run - so a large `restart` on a big `n*s` can
-/// allocate many GB (`n=100k, s=10, Complex<f64>, restart=80` ~ 13 GB). An
-/// unset [`KrylovSettings::restart`] is capped to
-/// [`KrylovSettings::basis_budget_bytes`]; an explicit value is honoured
-/// exactly.
+/// **Memory:** the Arnoldi basis reserves `n*s*(restart+1)` scalars of address
+/// space up front and holds what the iteration has written: a solve that stops
+/// after `k` steps holds about `n*s*(k+1)` scalars (plus a handful of `n*s` work
+/// panels), the full basis only when a cycle runs to the restart (`n=100k, s=10,
+/// Complex<f64>, restart=80` ~ 13 GB). An unset [`KrylovSettings::restart`] is
+/// capped to [`KrylovSettings::basis_budget_bytes`]; an explicit value is
+/// honoured exactly.
 ///
 /// **Threads:** the parallel orthogonalization reductions run in a
 /// scoped pool derived from the preconditioner's [`Threads`](crate::Threads) policy
@@ -183,7 +183,7 @@ where
     // The basis stride is therefore `sa` (recomputed per cycle): block `j`, active
     // column `a` lives at `vbas[(j*sa + a)*n ..]`, so block `j` (the `nxsa` input
     // to one block apply) is the contiguous prefix `vbas[j*sa*n .. (j+1)*sa*n]`.
-    let mut vbas = vec![T::zero(); n * s * (m + 1)];
+    let mut vbas = basis(n * s * (m + 1));
     let mut zblk = vec![T::zero(); n * s]; // M^-1 * (block j)
     let mut wblk = vec![T::zero(); n * s]; // A * zblk
     let mut axblk = vec![T::zero(); n * s];
@@ -239,6 +239,7 @@ where
         op.apply_block(&xc[..lw * n], &mut axblk[..lw * n], lw);
         // Active set = live RHS whose true residual still exceeds `tol`.
         let mut act: Vec<usize> = Vec::new();
+        grow(&mut vbas, live.len() * n);
         for (a, &c) in live.iter().enumerate() {
             let cb = c * n;
             let ab = a * n;
@@ -385,6 +386,7 @@ where
                 let hn = norm2(&wblk[wb..wb + n]);
                 h[ap][j + 1][j] = T::from_real(hn);
                 let v1 = ((j + 1) * sa + ap) * n;
+                grow(&mut vbas, v1 + n);
                 if hn > 0.0 {
                     let inv = T::from_real(1.0 / hn);
                     for k in 0..n {

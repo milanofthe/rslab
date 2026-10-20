@@ -83,11 +83,11 @@ where
     // Arnoldi basis as one **flat** `n x (m+1)` buffer (column `i` is
     // `v[i*n .. (i+1)*n]`) - contiguous, no per-iteration vector allocation, and
     // cache-friendly for the Gram-Schmidt sweeps.
-    let mut v = vec![T::zero(); n * (m + 1)];
+    let mut v = basis(n * (m + 1));
     // FGMRES preconditioned basis `Z = [z_0 ... z_{m-1}]`, `z_j = M^-1 v_j` (issue
     // #7): stored as it is computed so the restart update is `x += Z y` with no
     // second preconditioner solve, and so a *variable* `M` is honoured exactly.
-    let mut zb = vec![T::zero(); n * m];
+    let mut zb = basis(n * m);
     // Per-restart Krylov scalars hoisted out of the outer loop and cleared/reused
     // each cycle: the Hessenberg `h` as one **flat** `(m+1)xm` buffer
     // (row `i`, col `j` at `h[i*m + j]` - cache-friendlier than a `Vec<Vec<T>>`),
@@ -120,6 +120,7 @@ where
         // Column 0 of the basis = r / ||r||. Reset the reused Hessenberg / Givens /
         // LS state to the fresh-zero semantics of the old per-cycle allocation.
         let inv_beta = T::from_real(1.0 / beta);
+        grow(&mut v, n);
         for k in 0..n {
             v[k] = r[k] * inv_beta;
         }
@@ -143,6 +144,7 @@ where
             }
             // Flexible right preconditioning: z_j = M^-1 v[j] (stored into the Z
             // basis for the restart update), then w = A z_j.
+            grow(&mut zb, (j + 1) * n);
             precond.apply(&v[j * n..j * n + n], &mut zb[j * n..j * n + n])?;
             op.apply(&zb[j * n..j * n + n], &mut w);
             // Modified Gram-Schmidt against the existing basis, with **conditional**
@@ -172,6 +174,7 @@ where
                 hn = norm2(&w);
             }
             h[(j + 1) * m + j] = T::from_real(hn);
+            grow(&mut v, (j + 2) * n);
             if hn > 0.0 {
                 let inv = T::from_real(1.0 / hn);
                 for k in 0..n {
