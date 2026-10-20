@@ -214,7 +214,7 @@ where
         // Back-substitute the upper-triangular H for y on the well-conditioned
         // leading block (breakdown guard), then (FGMRES) x += Z*y directly from the
         // stored preconditioned basis - no second `M^-1` solve.
-        let jd = well_conditioned_dim_flat(&h, m, jdim);
+        let jd = well_conditioned_dim(&h, m, jdim);
         for i in (0..jd).rev() {
             let mut s = g[i];
             for k in (i + 1)..jd {
