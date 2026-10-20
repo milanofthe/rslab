@@ -881,3 +881,27 @@ fn every_direct_solver_is_a_factorization() {
         assert_eq!(f.diagnostics().solves.calls, if k == 0 { 3 } else { 2 });
     }
 }
+
+/// The analysis keeps no permuted pattern once its schedule is built (a word
+/// per entry of `A + A^T`, the largest part of an analysis), and its
+/// factorizations still solve.
+#[test]
+fn analysis_drops_the_permuted_pattern() {
+    let a = unsymmetric_holes(600, 3, 7, false);
+    let opts = SolverSettings::default();
+    let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
+    let (sym, _) = lusym.symb.sym_and_levels().unwrap();
+    assert!(sym.permuted_pattern.col_ptr.is_empty() && sym.permuted_pattern.row_idx.is_empty());
+    let b: Vec<f64> = (0..a.n).map(|i| 1.0 + i as f64 / a.n as f64).collect();
+    let x = lusym.factor(&a, &opts).unwrap().solve(&b).unwrap();
+    let mut ax = vec![0.0f64; a.n];
+    a.matvec(&x, &mut ax);
+    let rn = ax
+        .iter()
+        .zip(&b)
+        .map(|(p, q)| (p - q) * (p - q))
+        .sum::<f64>()
+        .sqrt();
+    let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(rn < 1e-10 * bn, "residual {rn} against {bn}");
+}

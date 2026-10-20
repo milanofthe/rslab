@@ -62,7 +62,8 @@ pub struct SymbolicFactorization {
     /// Entries of the scalar factor `L`, diagonal included (before the
     /// amalgamation adds explicit zeros).
     pub factor_nnz: usize,
-    /// The full symmetric pattern under the ordering.
+    /// The full symmetric pattern under the ordering. The supernodal analysis
+    /// empties it once its schedule is built (the pattern's last reader).
     pub permuted_pattern: CscPattern,
     /// The ordering used (the race winner under `Auto`).
     pub resolved_method: OrderingMethod,
