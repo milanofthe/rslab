@@ -49,13 +49,16 @@ use std::sync::atomic::Ordering;
 const NONE: u32 = u32::MAX;
 
 /// One leaf subtree of the cut: its supernodes in elimination order and the
-/// ancestor columns its off-tree updates accumulate into.
+/// rows outside it its updates accumulate into.
 #[derive(Clone)]
 pub(crate) struct Subtree {
     nodes: Vec<u32>,
-    /// `y` indices of the accumulator slots (the columns of the ancestors
-    /// above the cut, in chain order).
-    path_cols: Vec<u32>,
+    /// The accumulator's slots: the rows outside the subtree its nodes' off-block
+    /// rows reach, ascending (they lie in the ancestors above the cut). An
+    /// accumulator of the ancestor columns alone would hold every column of
+    /// the subtree's ancestor path, most of them never written (a 79 k
+    /// near-field LU: 128 MB a right-hand side over all accumulators).
+    ext: Vec<u32>,
 }
 
 /// The factor in solve layout plus the tree schedule.
@@ -86,12 +89,10 @@ pub(crate) struct SolvePlan<T> {
     /// The ancestors (supernodes above the cut) by depth from the roots;
     /// siblings of a level are independent.
     pub(crate) top_levels: Vec<Vec<u32>>,
-    /// Accumulator path (`y` indices) of every ancestor, by `top_index`.
-    top_paths: Vec<Vec<u32>>,
     /// Position of a supernode in `top` (`NONE` below the cut).
     top_index: Vec<u32>,
-    /// Per ancestor level, the start of each node's accumulator in the
-    /// level's block, in slots (`level.len() + 1`).
+    /// Per ancestor level, the start of each node's accumulator (its own
+    /// off-block rows) in the level's block, in slots (`level.len() + 1`).
     top_acc_ptr: Vec<Vec<usize>>,
     /// The ancestors by `top_index` (ascending), the schedule of the
     /// parallel sweeps: every ancestor a task that starts when the nodes it
@@ -109,13 +110,15 @@ pub(crate) struct SolvePlan<T> {
     /// them, in slots (`top.len() + 1`).
     top_acc_off: Vec<usize>,
     /// What each ancestor takes into its columns before its sweep (CSR over
-    /// `pull`, `top.len() + 1`): `(source, slot)`, a leaf subtree's
-    /// accumulator (`source < subtrees.len()`) or an ancestor's (`source -
-    /// subtrees.len()` its `top_index`), its columns from `slot` on. In the
-    /// order the level sweeps reduce them: the subtrees in order, then the
-    /// ancestors from the deepest level up, a level in node order.
+    /// `pull`, `top.len() + 1`): `(source, lo, hi)`, the slots `lo..hi` of a
+    /// leaf subtree's accumulator (`source < subtrees.len()`, the rows its
+    /// `ext` lists there) or of an ancestor's (`source - subtrees.len()` its
+    /// `top_index`, the rows of its own off-block list there), the ones that
+    /// lie in this ancestor's columns. In the order the level sweeps reduce
+    /// them: the subtrees in order, then the ancestors from the deepest level
+    /// up, a level in node order.
     pull_ptr: Vec<usize>,
-    pull: Vec<(u32, u32)>,
+    pull: Vec<(u32, u32, u32)>,
     /// The structure is no elimination tree (see `from_panels`): the level
     /// sweeps alone, one node after another.
     chain: bool,
@@ -288,19 +291,6 @@ fn cut(
     (is_top, leaf_roots)
 }
 
-/// Columns of every supernode's strict ancestors, the length of its
-/// accumulator path. Parents carry larger indices than their children.
-fn columns_above(parent: &[u32], width: impl Fn(usize) -> usize) -> Vec<usize> {
-    let mut above = vec![0usize; parent.len()];
-    for s in (0..parent.len()).rev() {
-        let p = parent[s];
-        if p != NONE {
-            above[s] = above[p as usize] + width(p as usize);
-        }
-    }
-    above
-}
-
 /// The heap of a [`SolvePlan`] not built yet, for the memory plan: the
 /// schedule around the panels, its build and a solve's work vectors.
 pub(crate) struct LayoutSize {
@@ -316,18 +306,21 @@ pub(crate) struct LayoutSize {
 
 /// The [`LayoutSize`] of the plan [`SolvePlan::from_panels`] builds on the
 /// supernode tree (`parent`, `usize::MAX` for a root) with each supernode's
-/// width `w` and off-block row count `m`, solved on `threads` threads.
-/// Mirrors `from_panels` on a tree-nested structure.
-pub(crate) fn layout_size(
+/// width `w` and off-block rows `off_rows(s)` (ascending), solved on `threads`
+/// threads. Mirrors `from_panels` on a tree-nested structure; where a
+/// factorization keeps fewer rows than its structure has (cancellation), an
+/// upper bound.
+pub(crate) fn layout_size<'r>(
     parent: &[usize],
     w: &[usize],
-    m: &[usize],
+    off_rows: &dyn Fn(usize) -> &'r [u32],
     cfg: &crate::SolveSettings,
     threads: usize,
 ) -> LayoutSize {
     use crate::memory::pushed;
     let ns = parent.len();
     let n: usize = w.iter().sum();
+    let m: Vec<usize> = (0..ns).map(|s| off_rows(s).len()).collect();
     let rows: usize = m.iter().sum();
     let parent: Vec<u32> = (0..ns)
         .map(|s| match parent[s] {
@@ -344,12 +337,42 @@ pub(crate) fn layout_size(
     let (is_top, leaf_roots) = cut(&parent, &children, cfg.leaf_subtrees, |s| {
         (w[s] * (w[s] + m[s])) as u64
     });
-    let above = columns_above(&parent, |s| w[s]);
-    let mut size = vec![1usize; ns];
+    let mut sn_of = vec![0u32; n];
+    let mut c = 0;
     for s in 0..ns {
-        if parent[s] != NONE {
-            size[parent[s] as usize] += size[s];
+        sn_of[c..c + w[s]].fill(s as u32);
+        c += w[s];
+    }
+    // per leaf subtree its nodes, and its rows outside it (`ext`) and their
+    // runs by ancestor (its pulls)
+    let mut subtree_of = vec![NONE; ns];
+    let (mut ext, mut ext_runs, mut sizes) = (Vec::new(), Vec::new(), Vec::new());
+    let mut list: Vec<u32> = Vec::new();
+    for (t, &r) in leaf_roots.iter().enumerate() {
+        let mut nodes = vec![r];
+        let mut stack = vec![r];
+        while let Some(s) = stack.pop() {
+            for &k in &children[s as usize] {
+                nodes.push(k);
+                stack.push(k);
+            }
         }
+        for &s in &nodes {
+            subtree_of[s as usize] = t as u32;
+        }
+        list.clear();
+        for &s in &nodes {
+            list.extend(
+                off_rows(s as usize)
+                    .iter()
+                    .filter(|&&r| subtree_of[sn_of[r as usize] as usize] != t as u32),
+            );
+        }
+        list.sort_unstable();
+        list.dedup();
+        ext.push(list.len());
+        ext_runs.push(runs(&list, &sn_of));
+        sizes.push(nodes.len());
     }
     let mut depth = vec![0usize; ns];
     let mut level_len: Vec<usize> = Vec::new();
@@ -366,43 +389,54 @@ pub(crate) fn layout_size(
     let (idx, word, vec) = (IDX32_BYTES, WORD_BYTES, VEC_HEADER_BYTES);
     let fixed = idx * (ns + 1) + word * (ns + 1) + word * pushed(ns + 1) + word * rows + idx * ns;
     let subtrees = leaf_roots.len() * std::mem::size_of::<Subtree>()
-        + leaf_roots
-            .iter()
-            .map(|&r| idx * pushed(size[r as usize]) + idx * above[r as usize])
+        + (0..leaf_roots.len())
+            .map(|t| idx * pushed(sizes[t]) + idx * ext[t])
             .sum::<usize>();
     let levels = level_len.len() * vec + level_len.iter().map(|&l| idx * pushed(l)).sum::<usize>();
-    let paths = top.len() * vec + top.iter().map(|&t| idx * above[t]).sum::<usize>();
     // The task schedule: the ancestors, their roots, parents and children,
-    // the accumulator offsets and the pulls (one per source and ancestor on
-    // its chain: every leaf subtree's and every ancestor's ancestors).
+    // the accumulator offsets and the pulls (a run of a source's rows per
+    // ancestor they lie in: every leaf subtree's and every ancestor's).
     let roots = top.iter().filter(|&&t| parent[t] == NONE).count();
-    let chain = |p: u32| if p == NONE { 0 } else { depth[p as usize] + 1 };
-    let pulls = leaf_roots
-        .iter()
-        .map(|&r| chain(parent[r as usize]))
-        .sum::<usize>()
-        + top.iter().map(|&t| chain(parent[t])).sum::<usize>();
+    let pulls = ext_runs.iter().sum::<usize>()
+        + top
+            .iter()
+            .map(|&t| runs(off_rows(t), &sn_of))
+            .sum::<usize>();
     let offsets = word * (top.len() + 1); // the children's, the accumulators', the pulls'
     let schedule = idx * (top.len() + roots + top.len() + top.len() - roots)
         + offsets
         + offsets
         + offsets
-        + 2 * idx * pulls;
+        + std::mem::size_of::<(u32, u32, u32)>() * pulls;
     // sn_of, the tree (parent, children), work, heap, flags and slots.
     let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
-    // Accumulators of the subtrees and of every ancestor (the task sweep
-    // keeps them all to its end), and per thread a node's product and
-    // gathered rows twice: a subtree sweep's, and the pooled scratch of the
-    // ancestor tasks running at once.
+    // Accumulators of the subtrees (their `ext`) and of every ancestor (its
+    // own off-block rows; the task sweep keeps them all to its end), and per
+    // thread a node's product and gathered rows twice: a subtree sweep's, and
+    // the pooled scratch of the ancestor tasks running at once.
     let max_ld = (0..ns).map(|s| w[s] + m[s]).max().unwrap_or(0);
-    let solve_per_rhs = leaf_roots.iter().map(|&r| above[r as usize]).sum::<usize>()
-        + top.iter().map(|&t| above[t]).sum::<usize>()
+    let solve_per_rhs = ext.iter().sum::<usize>()
+        + top.iter().map(|&t| m[t]).sum::<usize>()
         + threads.max(1) * 2 * (2 * max_ld);
     LayoutSize {
-        held: (fixed + subtrees + levels + paths + schedule) as u64,
+        held: (fixed + subtrees + levels + schedule) as u64,
         build: build as u64,
         solve_per_rhs: solve_per_rhs as u64,
     }
+}
+
+/// The runs of an ascending row list by the supernode its rows lie in.
+fn runs(list: &[u32], sn_of: &[u32]) -> usize {
+    let mut k = 0;
+    let mut last = NONE;
+    for &r in list {
+        let a = sn_of[r as usize];
+        if a != last {
+            k += 1;
+            last = a;
+        }
+    }
+    k
 }
 
 impl<T: Scalar> SolvePlan<T> {
@@ -421,10 +455,9 @@ impl<T: Scalar> SolvePlan<T> {
             + self
                 .subtrees
                 .iter()
-                .map(|t| vec_bytes(&t.nodes) + vec_bytes(&t.path_cols))
+                .map(|t| vec_bytes(&t.nodes) + vec_bytes(&t.ext))
                 .sum::<u64>()
             + nested_bytes(&self.top_levels)
-            + nested_bytes(&self.top_paths)
             + vec_bytes(&self.top_index)
             + nested_bytes(&self.top_acc_ptr)
             + vec_bytes(&self.top)
@@ -510,7 +543,6 @@ impl<T: Scalar> SolvePlan<T> {
             let w = width(s) as u64;
             w * (w + (row_ptr[s + 1] - row_ptr[s]) as u64)
         });
-        let above = columns_above(&parent, width);
 
         // Subtree membership and node lists (ascending = elimination order).
         let mut subtree_of = vec![NONE; ns];
@@ -528,17 +560,30 @@ impl<T: Scalar> SolvePlan<T> {
             for &s in &nodes {
                 subtree_of[s as usize] = t as u32;
             }
-            let mut path_cols = Vec::with_capacity(above[r as usize]);
-            let mut a = parent[r as usize];
-            while a != NONE {
-                path_cols.extend(sn_col[a as usize]..sn_col[a as usize + 1]);
-                a = parent[a as usize];
-            }
-            subtrees.push(Subtree { nodes, path_cols });
+            subtrees.push(Subtree {
+                nodes,
+                ext: Vec::new(),
+            });
+        }
+        for (t, st) in subtrees.iter_mut().enumerate() {
+            let mut ext: Vec<u32> = st
+                .nodes
+                .iter()
+                .flat_map(|&s| {
+                    rows[row_ptr[s as usize]..row_ptr[s as usize + 1]]
+                        .iter()
+                        .copied()
+                })
+                .filter(|&r| subtree_of[sn_of[r as usize] as usize] != t as u32)
+                .collect();
+            ext.sort_unstable();
+            ext.dedup();
+            ext.shrink_to_fit();
+            st.ext = ext;
         }
         let top: Vec<u32> = (0..ns as u32).filter(|&s| is_top[s as usize]).collect();
-        // Ancestors by depth from the roots (level 0 = roots) and each
-        // ancestor's accumulator path.
+        // Ancestors by depth from the roots (level 0 = roots); an ancestor's
+        // accumulator is its own off-block rows.
         let mut depth = vec![0u32; ns];
         for &t in top.iter().rev() {
             // Parents carry larger indices: descending order sets them first.
@@ -551,85 +596,59 @@ impl<T: Scalar> SolvePlan<T> {
         for &t in &top {
             top_levels[depth[t as usize] as usize].push(t);
         }
-        let top_paths: Vec<Vec<u32>> = top
-            .iter()
-            .map(|&t| {
-                let mut path_cols = Vec::with_capacity(above[t as usize]);
-                let mut a = parent[t as usize];
-                while a != NONE {
-                    path_cols.extend(sn_col[a as usize]..sn_col[a as usize + 1]);
-                    a = parent[a as usize];
-                }
-                path_cols
-            })
-            .collect();
 
-        // Accumulator slots of the off-tree rows. A row whose supernode is
-        // not an ancestor of the writer (possible only for a pruned,
-        // `drop_tol` factor, whose structure no longer follows an elimination
-        // tree) has no slot; such a factor is solved without the subtree
+        // Accumulator slots of the off-tree rows: a subtree's row its position
+        // in the subtree's `ext`, an ancestor's off-block row its position in
+        // the ancestor's own rows. A row whose supernode is not an ancestor of
+        // the writer (possible only for a pruned, `drop_tol` factor, whose
+        // structure no longer follows an elimination tree) makes the
+        // structure degenerate; such a factor is solved without the subtree
         // phase (everything above the cut, sequential in the tree phases).
         let mut ext_slot = vec![NONE; rows.len()];
-        let mut slot_base = vec![NONE; ns];
+        let mut on_path = vec![false; ns];
         let mut degenerate = false;
+        let mark = |from: u32, on: bool, on_path: &mut [bool]| {
+            let mut a = from;
+            while a != NONE {
+                on_path[a as usize] = on;
+                a = parent[a as usize];
+            }
+        };
         for st in &subtrees {
             let Some(&root) = st.nodes.last() else {
                 continue;
             };
-            let mut a = parent[root as usize];
-            let mut off = 0u32;
-            while a != NONE {
-                slot_base[a as usize] = off;
-                off += sn_col[a as usize + 1] - sn_col[a as usize];
-                a = parent[a as usize];
-            }
+            mark(parent[root as usize], true, &mut on_path);
             for &s in &st.nodes {
                 for e in row_ptr[s as usize]..row_ptr[s as usize + 1] {
                     let r = rows[e];
                     let a = sn_of[r as usize];
                     if subtree_of[a as usize] != subtree_of[s as usize] {
-                        if slot_base[a as usize] == NONE {
-                            degenerate = true;
+                        if on_path[a as usize] {
+                            // `ext` holds every such row
+                            ext_slot[e] = st.ext.partition_point(|&x| x < r) as u32;
                         } else {
-                            ext_slot[e] = slot_base[a as usize] + (r - sn_col[a as usize]);
+                            degenerate = true;
                         }
                     }
                 }
             }
-            let mut a = parent[root as usize];
-            while a != NONE {
-                slot_base[a as usize] = NONE;
-                a = parent[a as usize];
-            }
+            mark(parent[root as usize], false, &mut on_path);
         }
-
-        // Ancestor rows: every off-block row lies in an ancestor above, so
-        // it gets a slot on the node's own path.
         for &t in &top {
-            let mut a = parent[t as usize];
-            let mut off = 0u32;
-            while a != NONE {
-                slot_base[a as usize] = off;
-                off += sn_col[a as usize + 1] - sn_col[a as usize];
-                a = parent[a as usize];
-            }
-            for e in row_ptr[t as usize]..row_ptr[t as usize + 1] {
-                let r = rows[e];
-                let a = sn_of[r as usize];
-                if slot_base[a as usize] == NONE {
-                    degenerate = true;
+            mark(parent[t as usize], true, &mut on_path);
+            let r0 = row_ptr[t as usize];
+            for e in r0..row_ptr[t as usize + 1] {
+                if on_path[sn_of[rows[e] as usize] as usize] {
+                    ext_slot[e] = (e - r0) as u32;
                 } else {
-                    ext_slot[e] = slot_base[a as usize] + (r - sn_col[a as usize]);
+                    degenerate = true;
                 }
             }
-            let mut a = parent[t as usize];
-            while a != NONE {
-                slot_base[a as usize] = NONE;
-                a = parent[a as usize];
-            }
+            mark(parent[t as usize], false, &mut on_path);
         }
         let chain = degenerate;
-        let (subtrees, top, top_levels, top_paths, ext_slot) = if degenerate {
+        let (subtrees, top, top_levels, ext_slot) = if degenerate {
             // The structure does not follow an elimination tree (a pruned
             // factor, or an LU whose row pivoting moved rows across
             // subtrees): one sequential chain, every node an ancestor
@@ -640,10 +659,9 @@ impl<T: Scalar> SolvePlan<T> {
             }
             let all: Vec<u32> = (0..ns as u32).collect();
             let levels: Vec<Vec<u32>> = all.iter().rev().map(|&s| vec![s]).collect();
-            let paths = vec![Vec::new(); ns];
-            (Vec::new(), all, levels, paths, vec![NONE; rows.len()])
+            (Vec::new(), all, levels, vec![NONE; rows.len()])
         } else {
-            (subtrees, top, top_levels, top_paths, ext_slot)
+            (subtrees, top, top_levels, ext_slot)
         };
         let top_index = {
             let mut ix = vec![NONE; ns];
@@ -659,7 +677,7 @@ impl<T: Scalar> SolvePlan<T> {
             .map(|level| {
                 std::iter::once(0)
                     .chain(level.iter().scan(0usize, |o, &s| {
-                        *o += top_paths[top_index[s as usize] as usize].len();
+                        *o += row_ptr[s as usize + 1] - row_ptr[s as usize];
                         Some(*o)
                     }))
                     .collect()
@@ -695,30 +713,34 @@ impl<T: Scalar> SolvePlan<T> {
             .collect();
         top_roots.shrink_to_fit();
         let mut top_acc_off = vec![0usize; top.len() + 1];
-        for i in 0..top.len() {
-            top_acc_off[i + 1] = top_acc_off[i] + top_paths[i].len();
+        for (i, &t) in top.iter().enumerate() {
+            top_acc_off[i + 1] = top_acc_off[i] + row_ptr[t as usize + 1] - row_ptr[t as usize];
         }
-        // The pulls, in the level sweeps' order of reduction: per source its
-        // accumulator walks its ancestors' columns in chain order.
-        let mut pulls: Vec<Vec<(u32, u32)>> = vec![Vec::new(); top.len()];
+        // The pulls, in the level sweeps' order of reduction: per source the
+        // runs of its accumulator rows by the ancestor they lie in (`ext` and
+        // an ancestor's rows are ascending, an ancestor's columns contiguous).
+        let mut pulls: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); top.len()];
         if !chain {
-            let chain_of = |src: u32, from: u32, pulls: &mut Vec<Vec<(u32, u32)>>| {
-                let (mut a, mut off) = (from, 0u32);
-                while a != NONE {
-                    pulls[top_index[a as usize] as usize].push((src, off));
-                    off += sn_col[a as usize + 1] - sn_col[a as usize];
-                    a = parent[a as usize];
+            let runs = |src: u32, list: &[u32], pulls: &mut Vec<Vec<(u32, u32, u32)>>| {
+                let mut lo = 0;
+                while lo < list.len() {
+                    let a = sn_of[list[lo] as usize];
+                    let hi = lo + list[lo..].partition_point(|&r| sn_of[r as usize] == a);
+                    pulls[top_index[a as usize] as usize].push((src, lo as u32, hi as u32));
+                    lo = hi;
                 }
             };
             for (t, st) in subtrees.iter().enumerate() {
-                if let Some(&root) = st.nodes.last() {
-                    chain_of(t as u32, parent[root as usize], &mut pulls);
-                }
+                runs(t as u32, &st.ext, &mut pulls);
             }
             for level in top_levels.iter().rev() {
                 for &d in level {
                     let src = (subtrees.len() + top_index[d as usize] as usize) as u32;
-                    chain_of(src, parent[d as usize], &mut pulls);
+                    runs(
+                        src,
+                        &rows[row_ptr[d as usize]..row_ptr[d as usize + 1]],
+                        &mut pulls,
+                    );
                 }
             }
         }
@@ -726,7 +748,7 @@ impl<T: Scalar> SolvePlan<T> {
         for i in 0..top.len() {
             pull_ptr[i + 1] = pull_ptr[i] + pulls[i].len();
         }
-        let mut pull: Vec<(u32, u32)> = Vec::with_capacity(pull_ptr[top.len()]);
+        let mut pull: Vec<(u32, u32, u32)> = Vec::with_capacity(pull_ptr[top.len()]);
         pull.extend(pulls.into_iter().flatten());
         Self {
             n,
@@ -739,7 +761,6 @@ impl<T: Scalar> SolvePlan<T> {
             diag_inv,
             subtrees,
             top_levels,
-            top_paths,
             top_index,
             top_acc_ptr,
             top: {
@@ -980,18 +1001,33 @@ impl<T: Scalar> SolvePlan<T> {
             // the pending counts' acquire-release).
             let y = unsafe { ys.slice() };
             let pulls = &self.pull[self.pull_ptr[ti]..self.pull_ptr[ti + 1]];
-            // the columns `j0..` of this node take every source's terms for them
+            // the columns `j0..` of this node take every source's terms for them:
+            // of a source's run, the slots whose rows lie in those columns
             let take = |j0: usize, yc: &mut [T]| {
-                let cols = yc.len() / nr;
-                for &(src, off) in pulls {
-                    let (src, off) = (src as usize, off as usize + j0);
-                    let from = if src < nsub {
-                        &subs[src].acc[off * nr..(off + cols) * nr]
+                let (lo_r, hi_r) = ((c0 + j0) as u32, (c0 + j0 + yc.len() / nr) as u32);
+                for &(src, lo, hi) in pulls {
+                    let (src, lo, hi) = (src as usize, lo as usize, hi as usize);
+                    let list = if src < nsub {
+                        &self.subtrees[src].ext[lo..hi]
                     } else {
-                        let o = (self.top_acc_off[src - nsub] + off) * nr;
-                        unsafe { std::slice::from_raw_parts(accs.ptr().add(o), cols * nr) }
+                        let d = self.top[src - nsub] as usize;
+                        &self.rows[self.row_ptr[d] + lo..self.row_ptr[d] + hi]
                     };
-                    sub_assign(yc, from);
+                    let a = list.partition_point(|&r| r < lo_r);
+                    let b = list.partition_point(|&r| r < hi_r);
+                    if a == b {
+                        continue;
+                    }
+                    let from = if src < nsub {
+                        &subs[src].acc[(lo + a) * nr..(lo + b) * nr]
+                    } else {
+                        let o = (self.top_acc_off[src - nsub] + lo + a) * nr;
+                        unsafe { std::slice::from_raw_parts(accs.ptr().add(o), (b - a) * nr) }
+                    };
+                    for (k, &r) in list[a..b].iter().enumerate() {
+                        let i = (r - lo_r) as usize;
+                        sub_assign(&mut yc[i * nr..(i + 1) * nr], &from[k * nr..(k + 1) * nr]);
+                    }
                 }
             };
             let yc = &mut y[c0 * nr..(c0 + w) * nr];
@@ -1113,9 +1149,9 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
             for (i, &s) in level.iter().enumerate() {
-                let path = &self.top_paths[self.top_index[s as usize] as usize];
+                let own = &self.rows[self.row_ptr[s as usize]..self.row_ptr[s as usize + 1]];
                 let acc = &work.top_acc[ptr[i] * nr..ptr[i + 1] * nr];
-                for (k, &c) in path.iter().enumerate() {
+                for (k, &c) in own.iter().enumerate() {
                     sub_assign(
                         &mut y[c as usize * nr..(c as usize + 1) * nr],
                         &acc[k * nr..(k + 1) * nr],
@@ -1434,7 +1470,7 @@ impl<T: Scalar> SolvePlan<T> {
         let scratch = &mut work.subtrees[..self.subtrees.len()];
         Self::each(par, &self.subtrees, scratch, |_, st, sc| {
             sc.acc.clear();
-            sc.acc.resize(st.path_cols.len() * nr, T::zero());
+            sc.acc.resize(st.ext.len() * nr, T::zero());
             // SAFETY: see `Shared`.
             let yv = unsafe { shared.slice() };
             for &s in &st.nodes {
@@ -1447,7 +1483,7 @@ impl<T: Scalar> SolvePlan<T> {
             phases.lap("fwd-top");
         } else {
             for (st, sc) in self.subtrees.iter().zip(&work.subtrees) {
-                for (i, &c) in st.path_cols.iter().enumerate() {
+                for (i, &c) in st.ext.iter().enumerate() {
                     let yr = &mut y[c as usize * nr..(c as usize + 1) * nr];
                     sub_assign(yr, &sc.acc[i * nr..(i + 1) * nr]);
                 }

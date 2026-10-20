@@ -586,16 +586,22 @@ impl LuSymbolic {
         let rows: usize = off_l.iter().sum::<usize>() + off_u.iter().sum::<usize>();
         let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
         let parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
-        let layout = |off: &[usize]| {
-            crate::numeric::supernodal::solve::layout_size(
-                &parent,
-                &widths,
-                off,
-                &opts.solve,
-                crate::numeric::settings::all_cores(),
-            )
-        };
-        let (layout_l, layout_u) = (layout(&off_l), layout(&off_u));
+        use crate::numeric::supernodal::solve::layout_size;
+        let cores = crate::numeric::settings::all_cores();
+        let layout_l = layout_size(
+            &parent,
+            &widths,
+            &|s| &st.rows_l(s)[w(s)..],
+            &opts.solve,
+            cores,
+        );
+        let layout_u = layout_size(
+            &parent,
+            &widths,
+            &|s| &st.cols_u(s)[w(s)..],
+            &opts.solve,
+            cores,
+        );
         // The input program the first factorization keeps (two index arrays
         // and the positions, two pointer arrays), and the peak of its build.
         let (growth, growth_build) = if self.input.get().is_some() {
