@@ -5,6 +5,24 @@
 use crate::numeric::settings::Threads;
 use crate::scalar::Scalar;
 
+/// A Krylov basis of up to `cap` scalars: the capacity reserved (address space alone), its
+/// length grown by [`grow`] as the iteration writes it, so a solve that stops after `k` steps
+/// holds `k` basis vectors rather than the restart's `m`. `vec![T::zero(); cap]` writes every
+/// scalar up front and makes the whole budgeted basis resident (a 79 k unknown, 23 column MoM
+/// block solve: about 8 GB of its 26 GB peak, where 89 steps used 2.6 GB).
+pub(super) fn basis<T: Scalar>(cap: usize) -> Vec<T> {
+    Vec::with_capacity(cap)
+}
+
+/// Grow the basis `v` ([`basis`]) to at least `len` scalars, zero filled; inside the reserved
+/// capacity nothing moves.
+#[inline]
+pub(super) fn grow<T: Scalar>(v: &mut Vec<T>, len: usize) {
+    if v.len() < len {
+        v.resize(len, T::zero());
+    }
+}
+
 /// Unconjugated bilinear inner product `x^T y = sum x_i y_i` (no complex conjugation -
 /// the defining choice of the COCG geometry for `A = A^T`).
 #[inline]
