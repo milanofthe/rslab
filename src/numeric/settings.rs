@@ -403,23 +403,14 @@ impl Default for KernelSettings {
 }
 
 /// Scheduling of the supernodal triangular solves. The result does not
-/// depend on the thread count; these change at most the rounding.
+/// depend on the thread count; these change at most the rounding. The nodes'
+/// products run as GEMMs, the large ones in row chunks on the pool
+/// ([`SOLVE_GEMM_PAR_MIN`](crate::constants::SOLVE_GEMM_PAR_MIN)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolveSettings {
     /// Independent leaf subtrees the tree is cut into for the parallel
     /// sweeps. Default `128`.
     pub leaf_subtrees: usize,
-    /// Column block of a large ancestor's sweep: the block's triangle runs
-    /// its right-hand sides' tiles of four side by side, its update of the
-    /// rows below in row tasks. Default `512`.
-    pub block: usize,
-    /// Columns per dot task of a large ancestor's backward sweep. Default
-    /// `32`.
-    pub ancestor_chunk: usize,
-    /// Panel entries from which an ancestor node uses the blocked sweep with
-    /// parallel sections inside the node. Default `16_384`
-    /// ([`SOLVE_APEX_MIN_ENTRIES`](crate::constants::SOLVE_APEX_MIN_ENTRIES)).
-    pub apex_min_work: usize,
     /// Work of a triangular sweep from which it runs on the thread pool, in
     /// the factor's panel entries times the right-hand sides, up to four
     /// (not the fmadds of
@@ -435,9 +426,6 @@ impl Default for SolveSettings {
     fn default() -> Self {
         Self {
             leaf_subtrees: SOLVE_LEAF_SUBTREES,
-            block: SOLVE_BLOCK,
-            ancestor_chunk: SOLVE_ANCESTOR_CHUNK,
-            apex_min_work: SOLVE_APEX_MIN_ENTRIES,
             par_min_work: SOLVE_PAR_MIN_ENTRY_RHS,
         }
     }

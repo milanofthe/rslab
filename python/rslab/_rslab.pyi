@@ -81,9 +81,6 @@ class Settings:
         complex_split_min_ratio: int | None = ...,
         complex_split_tile: int | None = ...,
         solve_leaf_subtrees: int | None = ...,
-        solve_block: int | None = ...,
-        solve_ancestor_chunk: int | None = ...,
-        solve_apex_min_work: int | None = ...,
         interrupt: Interrupt | None = ...,
     ) -> None: ...
     def to_dict(self) -> dict[str, Any]: ...

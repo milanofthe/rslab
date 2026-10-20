@@ -83,11 +83,12 @@ fn rslab_contract_constants() {
     assert_eq!(c::HUNGARIAN_DENSE_MIN_ROWS, 50);
     // solve
     assert_eq!(c::TILE_ROWS, 4);
-    assert_eq!(c::SOLVE_BLOCK, 512);
-    assert_eq!(c::SOLVE_ANCESTOR_CHUNK, 32);
-    assert_eq!(c::SOLVE_APEX_MIN_ENTRIES, 16_384);
     assert_eq!(c::SOLVE_RHS_TILE, 4);
-    assert_eq!(c::FOLD_LANES, 4);
+    assert_eq!(c::SOLVE_DIAG_BLOCK, 64);
+    assert_eq!(c::SOLVE_GEMM_ROWS, 256);
+    assert_eq!(c::SOLVE_GEMM_PAR_MIN, 1 << 22);
+    assert_eq!(c::SOLVE_PULL_COLS, 32);
+    assert_eq!(c::SOLVE_PULL_PAR_MIN, 1 << 20);
 }
 
 #[test]

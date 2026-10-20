@@ -1,6 +1,9 @@
 //! Time the LU solves of a complex Matrix Market matrix over right-hand-side counts, and
-//! check that a column of a block solve equals the single solve of that column bit for bit.
-//! `cargo run --release --example lu_solve_timing -- <matrix.mtx> [reps] [nrhs,..]`.
+//! how far a column of a block solve is from the single solve of that column (relative to
+//! its largest entry; the block solve's products sum in their own order).
+//! `cargo run --release --example lu_solve_timing -- <matrix.mtx> [reps] [nrhs,..]`, with
+//! `RSLAB_RELAX=width,rows` a relaxed amalgamation and `RSLAB_NEMIN` the amalgamation's
+//! width, for measuring them.
 use num_complex::Complex;
 use rslab::{LuSolver, OrderingMethod, SolverSettings, Threads, ZeroPivotAction};
 use std::time::Instant;
@@ -24,13 +27,21 @@ fn main() {
         .with_ordering(OrderingMethod::MetisND)
         // the pool it runs on (RAYON_NUM_THREADS), as a host that lends its workers does
         .with_threads(Threads::Ambient);
-    // RSLAB_APEX: the solve's large-node threshold, for measuring it
     let mut opts = opts;
-    if let Some(a) = std::env::var("RSLAB_APEX")
+    // RSLAB_RELAX=width,rows: relaxed amalgamation; RSLAB_NEMIN: the amalgamation's
+    // fundamental width (experiments on the analysis)
+    if let Ok(r) = std::env::var("RSLAB_RELAX") {
+        let v: Vec<usize> = r.split(',').map(|x| x.parse().unwrap()).collect();
+        opts = opts.with_relax(Some(rslab::RelaxAmalgamation {
+            max_width: v[0],
+            max_extra_rows: v[1],
+        }));
+    }
+    if let Some(n) = std::env::var("RSLAB_NEMIN")
         .ok()
         .and_then(|s| s.parse().ok())
     {
-        opts.solve.apex_min_work = a;
+        opts = opts.with_nemin(n);
     }
     let t = Instant::now();
     let s = LuSolver::factor(&a, &opts).unwrap();
@@ -56,13 +67,19 @@ fn main() {
             x = s.solve_many(&bb, nrhs).unwrap();
             best = best.min(t.elapsed().as_secs_f64());
         }
-        let same = x[..n] == x1[..];
+        let scale = x1.iter().map(|v| v.norm()).fold(0.0, f64::max);
+        let dev = x[..n]
+            .iter()
+            .zip(&x1)
+            .map(|(a, b)| (a - b).norm())
+            .fold(0.0, f64::max)
+            / scale;
         println!(
-            "nrhs={nrhs:2}: {:7.2} ms, {:6.2} ms per column, {:5.1} GB/s of factor, column 0 {}",
+            "nrhs={nrhs:2}: {:7.2} ms, {:6.2} ms per column, {:5.1} GB/s of factor, column 0 against the single solve {:.1e}",
             best * 1e3,
             best * 1e3 / nrhs as f64,
             s.factor_nnz() as f64 * 16.0 / best / 1e9,
-            if same { "bit-identical" } else { "DIFFERS" }
+            dev
         );
     }
 }

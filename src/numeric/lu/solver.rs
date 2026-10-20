@@ -323,6 +323,7 @@ impl LuSymbolic {
             nnz,
             diagnostics,
             solves: Default::default(),
+            works: Default::default(),
             factored: true,
             // A one-time factor does not hold on to the scratch; the first
             // refactorization grows its own and keeps it.
@@ -660,6 +661,8 @@ pub struct LuSolver<T> {
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
+    /// The works of its own `solve*` calls.
+    works: crate::numeric::direct::WorkPool<T>,
     /// The worker policy the factorization ran with, which a Krylov solve
     /// preconditioned by this factor orthogonalizes under.
     solve_threads: crate::numeric::settings::Threads,
@@ -720,6 +723,9 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
 
     fn counter(&self) -> &crate::diagnostics::SolveCounter {
         &self.solves
+    }
+    fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
+        &self.works
     }
 
     /// The factored matrix is `(P_r D_r) A (D_c P_c^T) = L U`. `A x = b`

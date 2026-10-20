@@ -391,6 +391,8 @@ pub struct AutoSolver<'s, T> {
     /// preconditioned by it orthogonalizes under.
     solve_threads: Threads,
     solves: crate::diagnostics::SolveCounter,
+    /// The works of its own `solve*` calls.
+    works: crate::numeric::direct::WorkPool<T>,
     /// A [`fork`](Self::fork): the KLU pivot order stays its origin's.
     pinned: bool,
     /// A fork's factor of the value set its origin's order failed on.
@@ -430,6 +432,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
             prev: Vec::new(),
             solve_threads: Threads::Ambient,
             solves: Default::default(),
+            works: Default::default(),
             pinned: false,
             own: None,
         }
@@ -685,6 +688,9 @@ impl<T: Scalar> SolveCore<T> for AutoSolver<'_, T> {
 
     fn counter(&self) -> &crate::diagnostics::SolveCounter {
         &self.solves
+    }
+    fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
+        &self.works
     }
 }
 

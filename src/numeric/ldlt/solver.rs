@@ -52,6 +52,8 @@ pub struct LdltSolver<T> {
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
+    /// The works of its own `solve*` calls.
+    works: crate::numeric::direct::WorkPool<T>,
     /// The worker policy the factorization ran with, which a Krylov solve
     /// preconditioned by this factor orthogonalizes under.
     solve_threads: crate::numeric::settings::Threads,
@@ -131,6 +133,9 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
 
     fn counter(&self) -> &crate::diagnostics::SolveCounter {
         &self.solves
+    }
+    fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
+        &self.works
     }
 
     /// `x = D P (A_hat^-1 (P^T D b))`: the equilibration is fused into the
@@ -570,6 +575,7 @@ impl LdltSymbolic {
             scale,
             diagnostics,
             solves: Default::default(),
+            works: Default::default(),
             solve_threads: opts.threads,
             plan,
             factored: true,

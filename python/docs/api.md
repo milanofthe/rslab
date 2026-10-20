@@ -1247,7 +1247,7 @@ tuned values, listed by `to_dict`.
 - `cmod_tiles, cmod_tile_min, cmod_tile_max, trsm_rows` (int): A parallel update splits a node into about 16 column tiles of 32 to 256 columns; rows per task of the LU panel's triangular solve (256).
 - `complex_split_min_ratio, complex_split_tile` (int): Complex products run as real products when their flops are this many times their plane copies (64), in tiles of this edge (256).
 - `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
-- `solve_leaf_subtrees, solve_block, solve_ancestor_chunk, solve_apex_min_work, solve_par_min_work` (int): Triangular solves: leaf subtrees of the parallel sweeps (128), column block (512) and columns per task (32) of the ancestor sweeps, panel entries from which an ancestor uses the blocked sweep (262 144), and the work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all (1 048 576).
+- `solve_leaf_subtrees, solve_par_min_work` (int): Triangular solves: leaf subtrees of the parallel sweeps (128), and the work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all (1 048 576).
 
 #### `Settings.to_dict()`
 

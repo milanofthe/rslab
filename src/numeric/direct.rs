@@ -42,6 +42,46 @@ impl<T> SolveWork<T> {
     }
 }
 
+/// The solve works a solver keeps for its own `solve*` calls: a call takes
+/// one and gives it back, so every solve after the first allocates nothing
+/// and touches no fresh memory (a near-field LU's multi right-hand side
+/// solve spent about a fifth of its time setting up a fresh work). As many
+/// as calls run at once; held as long as the solver, empty in a clone.
+pub(crate) struct WorkPool<T>(std::sync::Mutex<Vec<SolveWork<T>>>);
+
+impl<T> Default for WorkPool<T> {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+}
+
+impl<T> Clone for WorkPool<T> {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl<T> std::fmt::Debug for WorkPool<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkPool")
+    }
+}
+
+impl<T> WorkPool<T> {
+    /// `f` on a work of the pool, given back after.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut SolveWork<T>) -> R) -> R {
+        let mut w = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_default();
+        let r = f(&mut w);
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(w);
+        r
+    }
+}
+
 /// The part of a direct solver the shared entry points build on.
 pub(crate) trait SolveCore<T: Scalar> {
     /// The path's name in log records.
@@ -61,10 +101,13 @@ pub(crate) trait SolveCore<T: Scalar> {
     /// [`solve_raw_into`](Self::solve_raw_into) into a fresh vector.
     fn solve_raw(&self, b: &[T], nrhs: usize, transpose: bool) -> Result<Vec<T>, RslabError> {
         let mut x = vec![T::zero(); b.len()];
-        self.solve_raw_into(b, nrhs, transpose, &mut x, &mut SolveWork::new())?;
+        self.works()
+            .with(|w| self.solve_raw_into(b, nrhs, transpose, &mut x, w))?;
         Ok(x)
     }
     fn counter(&self) -> &SolveCounter;
+    /// The works of its own `solve*` calls ([`WorkPool`]).
+    fn works(&self) -> &WorkPool<T>;
 }
 
 fn record<T: Scalar, S: SolveCore<T>>(s: &S, rhs: usize, t: crate::clock::Instant, steps: usize) {
@@ -113,7 +156,8 @@ pub(crate) fn solve<T: Scalar, S: SolveCore<T>>(
 ) -> Result<Vec<T>, RslabError> {
     check(s.dim(), b.len(), nrhs)?;
     let mut x = vec![T::zero(); b.len()];
-    solve_into(s, b, nrhs, transpose, &mut x, &mut SolveWork::new())?;
+    s.works()
+        .with(|w| solve_into(s, b, nrhs, transpose, &mut x, w))?;
     Ok(x)
 }
 
