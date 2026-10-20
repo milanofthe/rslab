@@ -23,14 +23,14 @@ pub(crate) struct SupernodalAnalysis {
 }
 
 impl SupernodalAnalysis {
-    /// Heap bytes held: the symbolic factorization, the levels, and the input
-    /// program and schedule once built.
+    /// Heap bytes held: the symbolic factorization, the levels, the schedule,
+    /// and the input program once built.
     pub(crate) fn heap_bytes(&self) -> u64 {
         self.inner.as_ref().map_or(0, |i| {
             i.sym.heap_bytes()
                 + crate::memory::nested_bytes(&i.by_level)
                 + i.input.get().map_or(0, |p| p.heap_bytes())
-                + i.ll_schedule.get().map_or(0, |s| s.heap_bytes())
+                + i.ll_schedule.heap_bytes()
         })
     }
 
@@ -51,20 +51,17 @@ pub(crate) struct SymbolicInner {
     /// reduces to one linear values pass. See
     /// [`crate::numeric::supernodal::InputProgram`].
     pub(crate) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
-    /// Lazily built left-looking schedule (row structures + updater lists),
+    /// The left-looking schedule (row structures + updater lists),
     /// pattern-only and shared by the numeric drivers and the estimators.
-    pub(crate) ll_schedule: std::sync::OnceLock<LlSchedule>,
+    /// Built with the analysis: it is the last reader of the symbolic
+    /// factorization's permuted pattern, which the analysis then drops.
+    pub(crate) ll_schedule: LlSchedule,
 }
 
 impl SymbolicInner {
-    /// The left-looking schedule, built on first use.
+    /// The left-looking schedule.
     pub(crate) fn schedule(&self) -> &LlSchedule {
-        self.ll_schedule.get_or_init(|| {
-            crate::logging::timed(
-                || "analysis: schedule".into(),
-                || LlSchedule::build(&self.sym),
-            )
-        })
+        &self.ll_schedule
     }
 }
 
@@ -81,9 +78,9 @@ impl SupernodalAnalysis {
         self.inner.as_ref().map(|i| (&i.sym, i.by_level.as_slice()))
     }
 
-    /// The cached pattern-only left-looking schedule (row structures + updater
-    /// lists), built on first use and shared by the numeric drivers and the
-    /// a-priori estimators. `None` for the empty analysis.
+    /// The pattern-only left-looking schedule (row structures + updater
+    /// lists), shared by the numeric drivers and the a-priori estimators.
+    /// `None` for the empty analysis.
     pub(crate) fn ll_schedule(&self) -> Option<&LlSchedule> {
         self.inner.as_ref().map(SymbolicInner::schedule)
     }
@@ -190,10 +187,20 @@ fn analyze_with_inner(
             nnz,
         });
     }
-    let sym = crate::logging::timed(
+    let mut sym = crate::logging::timed(
         || format!("analysis: symbolic {:?}", opts.ordering.method),
         || crate::symbolic::analyze(n, col_ptr, row_idx, &opts.ordering, &opts.amalgamation),
     )?;
+    // The schedule reads the permuted pattern for the last time: past it the
+    // pattern (a word per entry of `A + A^T`, the largest part of the
+    // analysis) is dead weight every factorization of the pattern would carry.
+    let ll_schedule =
+        crate::logging::timed(|| "analysis: schedule".into(), || LlSchedule::build(&sym));
+    sym.permuted_pattern = crate::sparse::csc::CscPattern {
+        n,
+        col_ptr: Vec::new(),
+        row_idx: Vec::new(),
+    };
 
     // Assembly-tree levels: level(s) = 1 + max(level(children)); same-level
     // supernodes are mutually independent.
@@ -218,7 +225,7 @@ fn analyze_with_inner(
             sym,
             by_level,
             input: std::sync::OnceLock::new(),
-            ll_schedule: std::sync::OnceLock::new(),
+            ll_schedule,
         }),
         n,
         nnz,

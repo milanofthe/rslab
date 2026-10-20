@@ -66,11 +66,12 @@ pub const VEC_HEADER_BYTES: usize = 24;
 pub const VEC_MIN_CAP: usize = 4;
 
 /// The input program a factorization builds once per analysis keeps, per
-/// entry, two index arrays and the positions (bytes per entry).
+/// entry, its index (in the column or the row part) and its position (bytes
+/// per entry).
 /// Used by: `LdltSymbolic::memory_plan`, `LuSymbolic::memory_plan`.
-/// Why: three `u32` arrays.
+/// Why: two `u32` per entry.
 /// Contract: estimate.
-pub const INPUT_PROGRAM_BYTES_PER_ENTRY: usize = 3 * IDX32_BYTES;
+pub const INPUT_PROGRAM_BYTES_PER_ENTRY: usize = 2 * IDX32_BYTES;
 
 /// The peak of building that input program, per entry (bytes per entry).
 /// Used by: `LdltSymbolic::memory_plan`, `LuSymbolic::memory_plan`.

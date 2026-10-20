@@ -23,7 +23,7 @@ pub(crate) struct InputProgram {
     row_ptr: Vec<usize>,
     col_idx: Vec<Li>,
     /// `pos[k]`: the slot of entry `k` of `A` in the program's value array.
-    pos: Vec<usize>,
+    pos: Vec<Li>,
 }
 
 impl InputProgram {
@@ -104,7 +104,11 @@ impl InputProgram {
                 }
             }
         }
-        let mut pos = vec![0usize; pairs.len()];
+        assert!(
+            pairs.len() <= Li::MAX as usize,
+            "the input program requires fewer than 2^32 entries"
+        );
+        let mut pos = vec![0 as Li; pairs.len()];
         let mut index = |ptr: &[usize], base: usize| -> Vec<Li> {
             let mut out = vec![0 as Li; ptr[n]];
             for c in 0..n {
@@ -112,7 +116,7 @@ impl InputProgram {
                 run.sort_unstable_by_key(|&(g, _)| g);
                 for (p, &(g, k)) in (ptr[c]..ptr[c + 1]).zip(run.iter()) {
                     out[p] = g;
-                    pos[k] = base + p;
+                    pos[k] = (base + p) as Li;
                 }
             }
             out
@@ -145,13 +149,13 @@ impl InputProgram {
         match weight {
             None => {
                 for (k, &p) in self.pos.iter().enumerate() {
-                    out[p] = values[k];
+                    out[p as usize] = values[k];
                 }
             }
             Some(w) => {
                 for j in 0..self.n {
                     for k in col_ptr[j]..col_ptr[j + 1] {
-                        out[self.pos[k]] = values[k] * T::from_real(w(row_idx[k], j));
+                        out[self.pos[k] as usize] = values[k] * T::from_real(w(row_idx[k], j));
                     }
                 }
             }
