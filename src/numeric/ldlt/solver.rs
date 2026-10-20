@@ -480,6 +480,10 @@ impl LdltSymbolic {
         let widths: Vec<usize> = (0..ns).map(w).collect();
         let off: Vec<usize> = (0..ns).map(|s| r(s) - w(s)).collect();
         let panels: usize = (0..ns).map(|s| r(s) * w(s)).sum();
+        // the same panels packed as the solve plan holds them
+        let packed: usize = (0..ns)
+            .map(|s| crate::numeric::supernodal::solve::packed_len(w(s), off[s]))
+            .sum();
         let rows: usize = off.iter().sum();
         let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
         let parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
@@ -500,12 +504,16 @@ impl LdltSymbolic {
                 INPUT_BUILD_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
-        // Held by the factor: the panels and their schedule, D, the 2x2
-        // flags, the permutation, the supernode tree and the scaling.
-        let factor = vb * panels
-            + layout.held as usize
-            + n * (2 * vb + 1 + WORD_BYTES + WORD_BYTES)
-            + WORD_BYTES * ns;
+        // Held by the factor: the panels (packed by the solve plan) and their
+        // schedule, D, the 2x2 flags, the permutation, the supernode tree and
+        // the scaling.
+        let factor_with = |panels: usize| {
+            vb * panels
+                + layout.held as usize
+                + n * (2 * vb + 1 + WORD_BYTES + WORD_BYTES)
+                + WORD_BYTES * ns
+        };
+        let factor = factor_with(packed);
         // While the forest is factored: the permuted values and the scaling,
         // the arena, the emit cells (refcounts, offsets, panel records, the
         // pivots by column) and the forest's own lists, every node's slot (D,
@@ -530,10 +538,12 @@ impl LdltSymbolic {
             + workers
             + pooled
             + nodes;
-        // After it: the factor, with the emitted row lists until the plan
-        // has copied them, and the plan's build.
-        let after =
-            factor as u64 + (IDX32_BYTES * rows + VEC_HEADER_BYTES * ns) as u64 + layout.build;
+        // After it: the factor with its panels as factored (the plan packs
+        // them in place), the emitted row lists until the plan has copied
+        // them, and the plan's build.
+        let after = factor_with(panels) as u64
+            + (IDX32_BYTES * rows + VEC_HEADER_BYTES * ns) as u64
+            + layout.build;
         plan.analysis_growth_bytes = growth as u64;
         plan.factor_bytes = factor as u64;
         plan.kept_bytes = kept + pooled;

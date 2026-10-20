@@ -71,9 +71,9 @@ pub(crate) struct SolvePlan<T> {
     /// Per off-block row: accumulator slot when the row lies outside the
     /// supernode's leaf subtree, `NONE` when it is written directly.
     ext_slot: Vec<u32>,
-    /// The panels, one `(w + m) x w` column-major block per supernode with
-    /// leading dimension `w + m` (the factor's own storage, see
-    /// [`PanelFactor`]).
+    /// The panels in the factor's own storage ([`PanelFactor`]), packed in
+    /// place by column blocks ([`packed_blocks`]): supernode `s` from
+    /// `val_ptr[s]`.
     val_ptr: Vec<usize>,
     vals: Vec<T>,
     /// A row list of the factor's size, the buffer the next refactorization
@@ -474,7 +474,7 @@ impl<T: Scalar> SolvePlan<T> {
             rows,
             row_ptr,
             val_ptr,
-            vals,
+            mut vals,
             ..
         } = factor;
         debug_assert!(
@@ -483,6 +483,7 @@ impl<T: Scalar> SolvePlan<T> {
                 .all(|p| p[0] < p[1])),
             "off-block rows ascending"
         );
+        let val_ptr = pack_panels(&mut vals, &sn_col, &row_ptr, &val_ptr);
         let known = supernode_parent.len() == ns;
 
         let mut parent = vec![NONE; ns];
@@ -787,11 +788,11 @@ impl<T: Scalar> SolvePlan<T> {
     ) {
         let cfg_now = cfg;
         let ns = factor.n_supernodes();
+        // (the supernodes and their rows fix the panels' shapes, packed or not)
         let same = cfg_now == self.cfg
             && factor.n == self.n
             && unit == self.diag_inv.is_empty()
             && factor.sn_col == self.sn_col
-            && factor.val_ptr == self.val_ptr
             && factor.row_ptr == self.row_ptr
             && factor.rows == self.rows;
         if !same {
@@ -799,19 +800,25 @@ impl<T: Scalar> SolvePlan<T> {
             return;
         }
         // The new row list equals the plan's: kept as the next spare.
-        let PanelFactor { vals, rows, .. } = factor;
-        self.vals = vals;
-        self.spare_rows = rows;
+        let PanelFactor {
+            mut vals,
+            rows,
+            val_ptr,
+            ..
+        } = factor;
         if !unit {
             for s in 0..ns {
                 let (c0, c1) = (self.sn_col[s] as usize, self.sn_col[s + 1] as usize);
                 let ld = c1 - c0 + self.row_ptr[s + 1] - self.row_ptr[s];
-                let panel = &self.vals[self.val_ptr[s]..];
+                let panel = &vals[val_ptr[s]..];
                 for k in 0..c1 - c0 {
                     self.diag_inv[c0 + k] = panel[k * ld + k].recip();
                 }
             }
         }
+        self.val_ptr = pack_panels(&mut vals, &self.sn_col, &self.row_ptr, &val_ptr);
+        self.vals = vals;
+        self.spare_rows = rows;
     }
 
     /// Bytes of the panel storage (values plus row indices).
@@ -1148,10 +1155,10 @@ impl<T: Scalar> SolvePlan<T> {
     // -----------------------------------------------------------------------
 
     /// The forward sweep of node `s` for `nr` right-hand sides with its dense
-    /// products as GEMMs: the diagonal triangle in column blocks of
-    /// [`SOLVE_DIAG_BLOCK`] (each block's triangle on the register tiles, the
-    /// rows below it in the triangle updated by one product), then the rows
-    /// below the node as one product `L_off X` (in row chunks of
+    /// products as GEMMs, block by block of the packed panel ([`packed_blocks`]):
+    /// each block's triangle on the register tiles, the rows below it in the
+    /// node's triangle updated by one product, then the rows below the node as
+    /// `L_off X`, the blocks' products summed into `t` (in row chunks of
     /// [`SOLVE_GEMM_ROWS`] on the pool when `par` and it is at least
     /// [`SOLVE_GEMM_PAR_MIN`]), each row taken off `y` where the node writes it
     /// directly and into the accumulator `acc` at its slot otherwise. A row's
@@ -1166,7 +1173,7 @@ impl<T: Scalar> SolvePlan<T> {
         par: bool,
         t: &mut Vec<T>,
     ) {
-        let (c0, w, r0, m, ld, panel) = self.node(s);
+        let (c0, w, r0, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         let mode = crate::dense::gemm_backend::GemmMode::new(
             gemm::Parallelism::None,
@@ -1174,11 +1181,13 @@ impl<T: Scalar> SolvePlan<T> {
         );
         let (one, minus) = (T::one(), T::from_real(-1.0));
         let yb = &mut y[c0 * nr..(c0 + w) * nr];
-        for (jb, je) in col_blocks(w, SOLVE_DIAG_BLOCK) {
-            tri_rows(yb, panel, dinv, ld, nr, jb, je);
+        for (jb, je, off, ld) in packed_blocks(w, m) {
+            let block = &panel[off..];
+            let d = dinv.get(jb..je).unwrap_or(&[]);
+            tri_rows(&mut yb[jb * nr..je * nr], block, d, ld, nr, 0, je - jb);
             if je < w {
                 // SAFETY: rows `je..w` of `yb` are written, rows `jb..je` read: disjoint;
-                // the panel's rows `je..w` of the columns `jb..je` lie in it.
+                // the block's rows `je..w` lie in it.
                 unsafe {
                     crate::dense::gemm_backend::gemm(
                         w - je,
@@ -1188,7 +1197,7 @@ impl<T: Scalar> SolvePlan<T> {
                         1,
                         nr as isize,
                         true,
-                        panel.as_ptr().add(jb * ld + je),
+                        block.as_ptr().add(je - jb),
                         ld as isize,
                         1,
                         yb.as_ptr().add(jb * nr),
@@ -1207,7 +1216,7 @@ impl<T: Scalar> SolvePlan<T> {
         if m == 0 {
             return;
         }
-        // the product overwrites every entry: no zeroing, only growth
+        // the first block's product overwrites every entry: no zeroing, only growth
         if t.len() < m * nr {
             t.resize(m * nr, T::zero());
         }
@@ -1218,30 +1227,32 @@ impl<T: Scalar> SolvePlan<T> {
         );
         let product = |i0: usize, out: &mut [T]| {
             let rows = out.len() / nr;
-            // SAFETY: `out` is this chunk's own rows of `t`; the panel and the
-            // node's solved rows are only read.
-            unsafe {
-                crate::dense::gemm_backend::gemm(
-                    rows,
-                    nr,
-                    w,
-                    out.as_mut_ptr(),
-                    1,
-                    nr as isize,
-                    false,
-                    pp.ptr().add(w + i0) as *const T,
-                    ld as isize,
-                    1,
-                    yp.ptr() as *const T,
-                    1,
-                    nr as isize,
-                    T::zero(),
-                    one,
-                    false,
-                    false,
-                    false,
-                    mode,
-                );
+            for (b, (jb, je, off, ld)) in packed_blocks(w, m).enumerate() {
+                // SAFETY: `out` is this chunk's own rows of `t`; the panel and the
+                // node's solved rows are only read.
+                unsafe {
+                    crate::dense::gemm_backend::gemm(
+                        rows,
+                        nr,
+                        je - jb,
+                        out.as_mut_ptr(),
+                        1,
+                        nr as isize,
+                        b > 0,
+                        pp.ptr().add(off + w - jb + i0) as *const T,
+                        ld as isize,
+                        1,
+                        yp.ptr().add(jb * nr) as *const T,
+                        1,
+                        nr as isize,
+                        one,
+                        one,
+                        false,
+                        false,
+                        false,
+                        mode,
+                    );
+                }
             }
         };
         if par && m * w * nr >= SOLVE_GEMM_PAR_MIN {
@@ -1265,15 +1276,15 @@ impl<T: Scalar> SolvePlan<T> {
     }
 
     /// The backward sweep of node `s` for `nr` right-hand sides with its dense
-    /// products as GEMMs: the final values of the rows below the node gathered
-    /// and taken off as one product `L_off^T G` (in chunks of the node's rows
-    /// on the pool when `par` and it is at least [`SOLVE_GEMM_PAR_MIN`]), then
-    /// the triangle from the last column block of [`SOLVE_DIAG_BLOCK`] up: each
-    /// block takes off the blocks below it by one product and solves its own
-    /// triangle column by column, last to first, each column scaled after its
-    /// terms.
+    /// products as GEMMs, block by block of the packed panel ([`packed_blocks`]):
+    /// the final values of the rows below the node gathered and taken off each
+    /// block's rows as one product `L_off^T G` (the blocks on the pool when `par`
+    /// and it is at least [`SOLVE_GEMM_PAR_MIN`]), then the triangle from the
+    /// last block up: each block takes off the rows below it in the node by one
+    /// product and solves its own triangle column by column, last to first, each
+    /// column scaled after its terms.
     fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
-        let (c0, w, r0, m, ld, panel) = self.node(s);
+        let (c0, w, r0, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         let mode = crate::dense::gemm_backend::GemmMode::new(
             gemm::Parallelism::None,
@@ -1292,21 +1303,24 @@ impl<T: Scalar> SolvePlan<T> {
                 Shared(panel.as_ptr() as *mut T, panel.len()),
                 Shared(g.as_mut_ptr(), g.len()),
             );
-            // rows `i0..` of the node: `X[i] -= sum_r L[r, i] G[r]`
-            let product = |i0: usize, out: &mut [T]| {
-                let rows = out.len() / nr;
-                // SAFETY: `out` is this chunk's own rows of the node; the panel
-                // and the gathered rows are only read.
+            // the block's rows of the node: `X[i] -= sum_r L[r, i] G[r]`
+            let product = |b: usize, out: &mut [T]| {
+                let Some((jb, je, off, ld)) = packed_blocks(w, m).nth(b) else {
+                    return;
+                };
+
+                // SAFETY: `out` is this block's own rows of the node; the panel and
+                // the gathered rows are only read.
                 unsafe {
                     crate::dense::gemm_backend::gemm(
-                        rows,
+                        je - jb,
                         nr,
                         m,
                         out.as_mut_ptr(),
                         1,
                         nr as isize,
                         true,
-                        pp.ptr().add(i0 * ld + w) as *const T,
+                        pp.ptr().add(off + w - jb) as *const T,
                         1,
                         ld as isize,
                         gp.ptr() as *const T,
@@ -1322,17 +1336,18 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             };
             if par && m * w * nr >= SOLVE_GEMM_PAR_MIN {
-                crate::parallel::chunks_mut(xb, SOLVE_GEMM_ROWS * nr, |ci, out| {
-                    product(ci * SOLVE_GEMM_ROWS, out)
-                });
+                crate::parallel::chunks_mut(xb, SOLVE_DIAG_BLOCK * nr, product);
             } else {
-                product(0, xb);
+                for (b, out) in xb.chunks_mut(SOLVE_DIAG_BLOCK * nr).enumerate() {
+                    product(b, out);
+                }
             }
         }
-        for (jb, je) in col_blocks(w, SOLVE_DIAG_BLOCK).rev() {
+        for (jb, je, off, ld) in packed_blocks(w, m).rev() {
+            let block = &panel[off..];
             if je < w {
                 // SAFETY: rows `jb..je` of `xb` are written, rows `je..w` read:
-                // disjoint; the panel's rows `je..w` of the columns `jb..je` lie in it.
+                // disjoint; the block's rows `je..w` lie in it.
                 unsafe {
                     crate::dense::gemm_backend::gemm(
                         je - jb,
@@ -1342,7 +1357,7 @@ impl<T: Scalar> SolvePlan<T> {
                         1,
                         nr as isize,
                         true,
-                        panel.as_ptr().add(jb * ld + je),
+                        block.as_ptr().add(je - jb),
                         1,
                         ld as isize,
                         xb.as_ptr().add(je * nr),
@@ -1358,11 +1373,11 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
             for k in (jb..je).rev() {
-                let col = &panel[k * ld..(k + 1) * ld];
+                let col = &block[(k - jb) * ld..(k - jb + 1) * ld];
                 let (head, tail) = xb.split_at_mut((k + 1) * nr);
                 let xk = &mut head[k * nr..];
                 for i in k + 1..je {
-                    let l = col[i];
+                    let l = col[i - jb];
                     let xi = &tail[(i - k - 1) * nr..(i - k) * nr];
                     for (a, &v) in xk.iter_mut().zip(xi) {
                         *a = *a - l * v;
@@ -1612,9 +1627,63 @@ fn tri_tile<T: Scalar, const W: usize>(
     }
 }
 
-/// Column blocks `[jb, je)` of width `nb` over `w` columns.
-fn col_blocks(w: usize, nb: usize) -> impl DoubleEndedIterator<Item = (usize, usize)> {
-    (0..w).step_by(nb).map(move |jb| (jb, (jb + nb).min(w)))
+/// The column blocks of a node of width `w` with `m` off-block rows in the plan's packed
+/// panel: `(jb, je, offset, ld)`, block `jb..je` the dense column-major `ld x (je - jb)`
+/// block at `offset` from the node's start, holding rows `jb..w + m` of its columns (`ld = w +
+/// m - jb`). A sweep reads no entry above a block's rows (the triangle in column blocks, the
+/// rows below in products), so those are not stored: of the diagonal block's unused upper
+/// triangle only the part inside each block's own square remains.
+fn packed_blocks(
+    w: usize,
+    m: usize,
+) -> impl DoubleEndedIterator<Item = (usize, usize, usize, usize)> + ExactSizeIterator {
+    let nb = SOLVE_DIAG_BLOCK;
+    // `k` full blocks before block `k`: `sum_{i < k} nb (w + m - i nb)`
+    let before = move |k: usize| k * nb * (w + m) - nb * nb * (k * k.saturating_sub(1) / 2);
+    (0..w.div_ceil(nb)).map(move |k| {
+        let (jb, je) = (k * nb, ((k + 1) * nb).min(w));
+        (jb, je, before(k), w + m - jb)
+    })
+}
+
+/// Entries of a node's packed panel ([`packed_blocks`]).
+pub(crate) fn packed_len(w: usize, m: usize) -> usize {
+    packed_blocks(w, m)
+        .map(|(jb, je, _, ld)| ld * (je - jb))
+        .sum()
+}
+
+/// Pack the panels of `vals` (supernode `s` the column-major `(w + m) x w` block at
+/// `full_ptr[s]`, `sn_col` and `row_ptr` giving `w` and `m`) in place into the plan's layout
+/// ([`packed_blocks`]) and return the packed starts (`ns + 1`). Every column moves to an
+/// offset no larger than its own and the columns go in order, so no source is overwritten
+/// before it is read; the buffer then shrinks to the packed size.
+fn pack_panels<T: Copy>(
+    vals: &mut Vec<T>,
+    sn_col: &[u32],
+    row_ptr: &[usize],
+    full_ptr: &[usize],
+) -> Vec<usize> {
+    let ns = sn_col.len() - 1;
+    let mut ptr = Vec::with_capacity(ns + 1);
+    let mut at = 0usize;
+    for s in 0..ns {
+        ptr.push(at);
+        let w = (sn_col[s + 1] - sn_col[s]) as usize;
+        let m = row_ptr[s + 1] - row_ptr[s];
+        let ld = w + m;
+        for (jb, je, off, ldb) in packed_blocks(w, m) {
+            for k in jb..je {
+                let src = full_ptr[s] + k * ld + jb;
+                vals.copy_within(src..src + ldb, at + off + (k - jb) * ldb);
+            }
+        }
+        at += packed_len(w, m);
+    }
+    ptr.push(at);
+    vals.truncate(at);
+    vals.shrink_to_fit();
+    ptr
 }
 
 /// `D z = y` for the block diagonal (1x1 and 2x2 pivots), on `nr` right-hand
