@@ -576,6 +576,13 @@ impl LuSymbolic {
         let panels: usize = (0..ns)
             .map(|s| (2 * w(s) + off_l[s] + off_u[s]) * w(s))
             .sum();
+        // the same panels packed as the solve plans hold them
+        let packed: usize = (0..ns)
+            .map(|s| {
+                use crate::numeric::supernodal::solve::packed_len;
+                packed_len(w(s), off_l[s]) + packed_len(w(s), off_u[s])
+            })
+            .sum();
         let rows: usize = off_l.iter().sum::<usize>() + off_u.iter().sum::<usize>();
         let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
         let parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
@@ -599,13 +606,16 @@ impl LuSymbolic {
                 INPUT_BUILD_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
-        // Held by the factor: the `L` and `U^T` panels with their schedules,
-        // `U`'s reciprocal diagonal, both permutations and scalings, and the
-        // supernode tree.
-        let factor = vb * (panels + n)
-            + (layout_l.held + layout_u.held) as usize
-            + LU_PERM_SCALE_BYTES_PER_COL * n
-            + WORD_BYTES * ns;
+        // Held by the factor: the `L` and `U^T` panels (packed by the solve
+        // plans) with their schedules, `U`'s reciprocal diagonal, both
+        // permutations and scalings, and the supernode tree.
+        let factor_with = |panels: usize| {
+            vb * (panels + n)
+                + (layout_l.held + layout_u.held) as usize
+                + LU_PERM_SCALE_BYTES_PER_COL * n
+                + WORD_BYTES * ns
+        };
+        let factor = factor_with(packed);
         // While the forest is factored: the scalings, the permuted values,
         // both arenas, the emit cells (refcounts, offsets, panel records,
         // positions and permutations) and the forest's lists, every node's
@@ -627,9 +637,10 @@ impl LuSymbolic {
             + workers
             + pooled
             + nodes;
-        // After it: the factor, with the emitted row lists until the plans
-        // have copied them, and a plan's build.
-        let after = factor as u64
+        // After it: the factor with its panels as factored (the plans pack
+        // them in place), the emitted row lists until the plans have copied
+        // them, and a plan's build.
+        let after = factor_with(panels) as u64
             + (IDX32_BYTES * rows + 2 * VEC_HEADER_BYTES * ns) as u64
             + layout_l.build.max(layout_u.build);
         plan.analysis_growth_bytes = growth as u64;
