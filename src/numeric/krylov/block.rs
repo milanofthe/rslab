@@ -291,6 +291,12 @@ where
             + vec_bytes(&self.chk)
     }
 
+    /// The operator the solve runs on, for the caller's own products between
+    /// [`solve`](Self::solve) calls (a diagnosis of an unconverged rung).
+    pub fn operator(&self) -> &'a A {
+        self.op
+    }
+
     /// Block iterations over all [`solve`](Self::solve) calls so far.
     pub fn iterations(&self) -> usize {
         self.iters
