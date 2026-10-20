@@ -490,7 +490,7 @@ impl LdltSymbolic {
         let layout = crate::numeric::supernodal::solve::layout_size(
             &parent,
             &widths,
-            &off,
+            &|s| &sched.rows(s)[w(s)..],
             &opts.solve,
             crate::numeric::settings::all_cores(),
         );
