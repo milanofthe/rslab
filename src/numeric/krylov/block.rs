@@ -240,7 +240,7 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     chk: Vec<usize>,
     /// The subspace deflated ([`deflating`](Self::deflating)), with its
     /// projections of a panel and their partial sums.
-    rec: Option<BlockRecycle<T>>,
+    rec: Option<&'a BlockRecycle<T>>,
     rproj: Vec<T>,
     rscratch: Vec<T>,
 }
@@ -336,7 +336,7 @@ where
     /// solve of the same operator): every cycle starts from the residual's part
     /// outside `range(C)` with its correction inside, and every Krylov vector is
     /// kept orthogonal to `C`. Before the first [`solve`](Self::solve).
-    pub fn deflating(mut self, rec: BlockRecycle<T>) -> Result<Self, RslabError> {
+    pub fn deflating(mut self, rec: &'a BlockRecycle<T>) -> Result<Self, RslabError> {
         if rec.n != self.n {
             return Err(RslabError::DimensionMismatch {
                 expected: self.n,
@@ -387,7 +387,7 @@ where
         .into_iter()
         .map(vec_bytes)
         .sum::<u64>()
-            + self.rec.as_ref().map_or(0, BlockRecycle::heap_bytes)
+            + self.rec.map_or(0, BlockRecycle::heap_bytes)
             + vec_bytes(&self.bnorm)
             + vec_bytes(&self.res)
             + vec_bytes(&self.wnorm0)
@@ -399,7 +399,7 @@ where
 
     /// The dimension of the subspace deflated (`0` without one).
     pub fn rec_dim(&self) -> usize {
-        self.rec.as_ref().map_or(0, |r| r.k)
+        self.rec.map_or(0, |r| r.k)
     }
 
     /// Block iterations over all [`solve`](Self::solve) calls so far.
@@ -525,7 +525,7 @@ where
             let (cb, pb) = (c * n, a * n);
             self.cols[c].correction(
                 m,
-                self.rec.as_ref(),
+                self.rec,
                 &mut self.y,
                 &self.x[cb..cb + n],
                 &mut self.out[cb..cb + n],

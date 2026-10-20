@@ -1929,7 +1929,7 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
     .unwrap();
     let mut d = BlockGmres::new(&a, &second, s, &NoPreconditioner, &set, None)
         .unwrap()
-        .deflating(rec)
+        .deflating(&rec)
         .unwrap();
     let r = d.solve(1e-10, None).unwrap();
     assert!(r.converged && plain.converged);
