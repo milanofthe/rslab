@@ -521,6 +521,7 @@ impl KluSymbolic {
             factors,
             diagnostics,
             solves: Default::default(),
+            works: Default::default(),
             solve_threads: crate::numeric::settings::Threads::Fixed(1),
         })
     }

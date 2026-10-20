@@ -1,10 +1,12 @@
 //! The Newton loop's contract: once a factorization exists and a
 //! `SolveWork` has served one solve, refactoring (KLU) and solving into the
-//! caller's buffers (all three direct solvers, one or several right-hand
-//! sides, plain and transposed) allocate nothing on the calling thread and
-//! give the bits of the allocating entry points. A factor large enough for
-//! the thread pool adds only what the pool's own work queues allocate, now
-//! and then.
+//! caller's buffers (all three direct solvers, one right-hand side plain and
+//! transposed; KLU also several) allocate nothing on the calling thread and
+//! give the bits of the allocating entry points. The supernodal solvers' block
+//! solves of several right-hand sides take their nodes' products as GEMMs,
+//! whose packing buffers the `gemm` crate allocates per product. A factor
+//! large enough for the thread pool adds only what the pool's own work queues
+//! allocate, now and then.
 //!
 //! The strict counts are per thread, so the tests here run side by side.
 
@@ -101,7 +103,7 @@ fn grid(m: usize, lower_only: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<f64>)
 /// Every `*_into` entry point of one solver: at most `$limit` allocations
 /// over a hundred warm solves, and the bits of the allocating twin.
 macro_rules! check_solves {
-    ($what:expr, $s:expr, $n:expr, $count:expr, $limit:expr) => {{
+    ($what:expr, $s:expr, $n:expr, $count:expr, $limit:expr, $many_free:expr) => {{
         let (s, n) = (&$s, $n);
         let nrhs = 3;
         let b: Vec<f64> = (0..n * nrhs).map(|i| 1.0 + (i % 7) as f64).collect();
@@ -131,7 +133,11 @@ macro_rules! check_solves {
         let many = allocs($count, || {
             s.solve_many_into(&b, nrhs, &mut x, &mut work).unwrap()
         });
-        assert!(many <= $limit, "{}: solve_many_into allocates", $what);
+        assert!(
+            !$many_free || many <= $limit,
+            "{}: solve_many_into allocates",
+            $what
+        );
         assert_eq!(
             x,
             s.solve_many(&b, nrhs).unwrap(),
@@ -152,14 +158,14 @@ fn a_warm_newton_loop_allocates_nothing() {
         let mut klu = KluSolver::factor(&a, &settings).unwrap();
         let refactor = allocs(mine, || klu.refactor(&a).unwrap());
         assert_eq!(refactor, 0, "KLU refactor allocates (n = {n})");
-        check_solves!(format!("KLU n={n}"), klu, n, mine, 0);
+        check_solves!(format!("KLU n={n}"), klu, n, mine, 0, true);
 
         // Supernodal LU on the same pattern, its analysis kept.
         let lu = LuSymbolic::analyze(&a, &opts)
             .unwrap()
             .factor(&a, &opts)
             .unwrap();
-        check_solves!(format!("LU n={n}"), lu, n, mine, 0);
+        check_solves!(format!("LU n={n}"), lu, n, mine, 0, false);
 
         // Supernodal LDL^T on the symmetric stencil.
         let (n, r, c, v) = grid(m, true);
@@ -168,7 +174,7 @@ fn a_warm_newton_loop_allocates_nothing() {
             .unwrap()
             .factor(&s, &opts)
             .unwrap();
-        check_solves!(format!("LDLT n={n}"), ldlt, n, mine, 0);
+        check_solves!(format!("LDLT n={n}"), ldlt, n, mine, 0, false);
 
         // The pool's path, forced, entered from a worker of the pool: only
         // the pool's own allocations, and the bits of the calling thread's
@@ -189,8 +195,15 @@ fn a_warm_newton_loop_allocates_nothing() {
             .build()
             .unwrap();
         pool.install(|| {
-            check_solves!(format!("LU n={n}, pool"), lu_par, n, pooled, POOL);
-            check_solves!(format!("LDLT n={n}, pool"), ldlt_par, n, pooled, POOL);
+            check_solves!(format!("LU n={n}, pool"), lu_par, n, pooled, POOL, false);
+            check_solves!(
+                format!("LDLT n={n}, pool"),
+                ldlt_par,
+                n,
+                pooled,
+                POOL,
+                false
+            );
         });
         let b: Vec<f64> = (0..n).map(|i| 1.0 - (i % 5) as f64).collect();
         assert_eq!(lu_par.solve(&b).unwrap(), lu.solve(&b).unwrap());

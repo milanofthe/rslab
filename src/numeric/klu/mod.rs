@@ -283,6 +283,8 @@ pub struct KluSolver<T> {
     diagnostics: crate::diagnostics::Diagnostics,
     /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
+    /// The works of its own `solve*` calls.
+    works: crate::numeric::direct::WorkPool<T>,
     /// The solves are sequential (the determinism guarantee), so a Krylov
     /// solve preconditioned by this factor orthogonalizes on one worker.
     solve_threads: crate::numeric::settings::Threads,

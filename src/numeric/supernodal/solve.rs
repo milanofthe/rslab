@@ -9,7 +9,12 @@
 //! so the plan takes the panels as its storage without a copy; a CSC factor
 //! (the LU path) is converted once. A forward or backward sweep then streams
 //! contiguous panels, touches each row index once per panel instead of once
-//! per entry, and runs the inner loops over contiguous memory.
+//! per entry, and runs the inner loops over contiguous memory. Every node
+//! takes all right-hand sides at once, its dense parts as GEMMs: its
+//! triangle in column blocks, the rows below it in one product. A column of
+//! a block solve therefore agrees with the solve of that column alone to
+//! rounding, the products summing in their own order (on a 95 k near-field
+//! LU about 4e-10 relative), not to the bit.
 //!
 //! Parallelism comes from the supernodal elimination tree. The tree is cut
 //! into a fixed number of independent leaf subtrees (`SolveSettings::leaf_subtrees`, not a
@@ -20,9 +25,10 @@
 //! children are done and first takes in the accumulations for its columns,
 //! in the order a level-by-level sweep reduces them; in the backward sweep it
 //! starts when its parent is done, and the subtrees follow in parallel
-//! reading only final values. A large ancestor's sweep has parallel sections
-//! of its own. Every sum is formed in the same order for every thread count,
-//! so the solution is bit-identical from one thread to many.
+//! reading only final values. A large ancestor runs its products in row
+//! chunks on the pool, and a wide one takes the subtrees' terms in column
+//! chunks. Every sum is formed in the same order for every thread count, so
+//! the solution is bit-identical from one thread to many.
 
 // The kernels index several parallel arrays (panels, row lists, slots,
 // right-hand sides) at offset positions; index loops read closer to the
@@ -30,14 +36,14 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    FOLD_LANES, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_PRODUCT_ROWS, SOLVE_RHS_TILE, TILE_ROWS,
-    VEC_HEADER_BYTES, WORD_BYTES,
+    IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMM_PAR_MIN, SOLVE_GEMM_ROWS,
+    SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN, SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
-use crate::scalar::{fmadd, Scalar};
+use crate::scalar::Scalar;
 use std::sync::atomic::Ordering;
 
 const NONE: u32 = u32::MAX;
@@ -121,12 +127,39 @@ pub(crate) struct SolvePlan<T> {
 /// buffers of tens to hundreds of kilobytes, and allocating those per node
 /// (page faults under the allocator lock) serialises the parallel phases.
 pub(crate) struct Scratch<T> {
+    /// A node's product of its rows below the diagonal block (forward).
     t: Vec<T>,
+    /// The final values of a node's rows below it, gathered (backward).
     g: Vec<T>,
-    v: Vec<T>,
-    accv: Vec<T>,
     /// A leaf subtree's accumulator of its off-tree updates.
     acc: Vec<T>,
+}
+
+/// Scratch for the ancestor tasks, taken by a node for its sweep and given
+/// back after it: as many as nodes run at once rather than one per ancestor
+/// (a near-field LU's 440 ancestors held about 250 MB for 23 right-hand
+/// sides). Not per worker: a node waiting inside its sections may run
+/// another node on its thread meanwhile.
+pub(crate) struct ScratchPool<T>(std::sync::Mutex<Vec<Scratch<T>>>);
+
+impl<T> Default for ScratchPool<T> {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+}
+
+impl<T> ScratchPool<T> {
+    fn take(&self) -> Scratch<T> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_default()
+    }
+
+    fn give(&self, sc: Scratch<T>) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(sc);
+    }
 }
 
 impl<T> Default for Scratch<T> {
@@ -134,8 +167,6 @@ impl<T> Default for Scratch<T> {
         Self {
             t: Vec::new(),
             g: Vec::new(),
-            v: Vec::new(),
-            accv: Vec::new(),
             acc: Vec::new(),
         }
     }
@@ -150,6 +181,8 @@ pub(crate) struct PlanWork<T> {
     subtrees: Vec<Scratch<T>>,
     level: Vec<Scratch<T>>,
     apex: Scratch<T>,
+    /// The ancestor tasks' scratch ([`ScratchPool`]).
+    pool: ScratchPool<T>,
     top_acc: Vec<T>,
     /// Per ancestor, the children whose forward sweep is still to finish
     /// (`top_forward_flow`).
@@ -164,6 +197,7 @@ impl<T> Default for PlanWork<T> {
             subtrees: Vec::new(),
             level: Vec::new(),
             apex: Scratch::default(),
+            pool: ScratchPool::default(),
             top_acc: Vec::new(),
             pending: Vec::new(),
             parallel: false,
@@ -357,16 +391,13 @@ pub(crate) fn layout_size(
     // sn_of, the tree (parent, children), work, heap, flags and slots.
     let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
     // Accumulators of the subtrees and of every ancestor (the task sweep
-    // keeps them all to its end), every ancestor's scratch (its extended
-    // vector and its node vector, each ancestor a task of its own), and per
-    // thread the node scratch of a subtree sweep and an update tile.
+    // keeps them all to its end), and per thread a node's product and
+    // gathered rows twice: a subtree sweep's, and the pooled scratch of the
+    // ancestor tasks running at once.
     let max_ld = (0..ns).map(|s| w[s] + m[s]).max().unwrap_or(0);
     let solve_per_rhs = leaf_roots.iter().map(|&r| above[r as usize]).sum::<usize>()
-        + top
-            .iter()
-            .map(|&t| above[t] + 2 * (w[t] + m[t]))
-            .sum::<usize>()
-        + threads.max(1) * (2 * max_ld + SOLVE_PRODUCT_ROWS);
+        + top.iter().map(|&t| above[t]).sum::<usize>()
+        + threads.max(1) * 2 * (2 * max_ld);
     LayoutSize {
         held: (fixed + subtrees + levels + paths + schedule) as u64,
         build: build as u64,
@@ -728,11 +759,7 @@ impl<T: Scalar> SolvePlan<T> {
             pull,
             chain,
             spare_rows: Vec::new(),
-            cfg: crate::SolveSettings {
-                block: cfg.block.max(1),
-                ancestor_chunk: cfg.ancestor_chunk.max(1),
-                ..cfg
-            },
+            cfg,
         }
     }
 
@@ -758,11 +785,7 @@ impl<T: Scalar> SolvePlan<T> {
         unit: bool,
         cfg: crate::SolveSettings,
     ) {
-        let cfg_now = crate::SolveSettings {
-            block: cfg.block.max(1),
-            ancestor_chunk: cfg.ancestor_chunk.max(1),
-            ..cfg
-        };
+        let cfg_now = cfg;
         let ns = factor.n_supernodes();
         let same = cfg_now == self.cfg
             && factor.n == self.n
@@ -810,67 +833,6 @@ impl<T: Scalar> SolvePlan<T> {
     // -----------------------------------------------------------------------
     // Single right-hand side
     // -----------------------------------------------------------------------
-
-    /// Forward sweep through one supernode: unit-lower block solve on
-    /// `y[c0..c0+w]`, then the off-block update into `y` (direct rows) or
-    /// `acc` (rows outside the subtree).
-    fn fwd_node(&self, s: u32, y: &mut [T], acc: &mut [T], t: &mut Vec<T>) {
-        let (c0, w, r0, m, ld, panel) = self.node(s);
-        let unit = self.diag_inv.is_empty();
-        for k in 0..w {
-            if !unit {
-                y[c0 + k] = y[c0 + k] * self.diag_inv[c0 + k];
-            }
-            let yk = y[c0 + k];
-            let col = &panel[k * ld..k * ld + w];
-            for i in k + 1..w {
-                y[c0 + i] = y[c0 + i] - col[i] * yk;
-            }
-        }
-        if m == 0 {
-            return;
-        }
-        t.clear();
-        t.resize(m, T::zero());
-        for k in 0..w {
-            let yk = y[c0 + k];
-            let col = &panel[k * ld + w..(k + 1) * ld];
-            for (ti, &l) in t.iter_mut().zip(col) {
-                *ti = fmadd(l, yk, *ti);
-            }
-        }
-        let rows = &self.rows[r0..r0 + m];
-        let slots = &self.ext_slot[r0..r0 + m];
-        for i in 0..m {
-            if slots[i] == NONE {
-                let r = rows[i] as usize;
-                y[r] = y[r] - t[i];
-            } else {
-                let sl = slots[i] as usize;
-                acc[sl] = acc[sl] + t[i];
-            }
-        }
-    }
-
-    /// Backward sweep through one supernode: `x[c0..c0+w] -= L_off^T x[rows]`
-    /// then the unit-upper block solve (plain transpose, no conjugation).
-    fn bwd_node(&self, s: u32, x: &mut [T], g: &mut Vec<T>) {
-        let (c0, w, r0, m, ld, panel) = self.node(s);
-        g.clear();
-        g.extend(self.rows[r0..r0 + m].iter().map(|&r| x[r as usize]));
-        let unit = self.diag_inv.is_empty();
-        for k in (0..w).rev() {
-            let col = &panel[k * ld..(k + 1) * ld];
-            let mut acc = dot4(&col[w..], g);
-            for i in k + 1..w {
-                acc = fmadd(col[i], x[c0 + i], acc);
-            }
-            x[c0 + k] = x[c0 + k] - acc;
-            if !unit {
-                x[c0 + k] = x[c0 + k] * self.diag_inv[c0 + k];
-            }
-        }
-    }
 
     /// Run `f` inside a pool when `par`: the factor's scoped pool of its
     /// worker budget, or under [`Threads::Ambient`] the current one. Every
@@ -928,11 +890,7 @@ impl<T: Scalar> SolvePlan<T> {
     pub fn forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
         let work = self.fit(work, nr, threads);
         Self::in_pool(work.parallel, threads, || {
-            if nr == 1 {
-                self.forward_single(y, work);
-            } else {
-                self.forward_block(nr, y, work);
-            }
+            self.forward_block(nr, y, work);
         })
     }
 
@@ -942,11 +900,7 @@ impl<T: Scalar> SolvePlan<T> {
     pub fn backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
         let work = self.fit(work, nr, threads);
         Self::in_pool(work.parallel, threads, || {
-            if nr == 1 {
-                self.backward_single(x, work);
-            } else {
-                self.backward_block(nr, x, work);
-            }
+            self.backward_block(nr, x, work);
         })
     }
 
@@ -961,84 +915,8 @@ impl<T: Scalar> SolvePlan<T> {
     ) -> Result<(), RslabError> {
         let work = self.fit(work, 1, threads);
         Self::in_pool(work.parallel, threads, || {
-            self.solve_in_place_inner(f, y, work)
+            self.solve_block_inner(f, y, 1, work)
         })
-    }
-
-    fn solve_in_place_inner(
-        &self,
-        f: &LdltPivots<T>,
-        y: &mut [T],
-        work: &mut PlanWork<T>,
-    ) -> Result<(), RslabError> {
-        debug_assert_eq!(y.len(), self.n);
-        let mut phases = PhaseTrace::start();
-        self.forward_single(y, work);
-        phases.lap("forward");
-        solve_diagonal(f, y, 1)?;
-        phases.lap("diag");
-        self.backward_single(y, work);
-        phases.lap("backward");
-        phases.finish("solve", work.parallel);
-        Ok(())
-    }
-
-    fn forward_single(&self, y: &mut [T], work: &mut PlanWork<T>) {
-        let shared = Shared(y.as_mut_ptr(), y.len());
-        let mut phases = PhaseTrace::start();
-        // Forward: leaf subtrees in parallel, off-tree updates accumulated.
-        let par = work.parallel;
-        let scratch = &mut work.subtrees[..self.subtrees.len()];
-        Self::each(par, &self.subtrees, scratch, |_, st, sc| {
-            sc.acc.clear();
-            sc.acc.resize(st.path_cols.len(), T::zero());
-            // SAFETY: see `Shared`; this subtree writes only its own
-            // columns and reads only them.
-            let yv = unsafe { shared.slice() };
-            for &s in &st.nodes {
-                self.fwd_node(s, yv, &mut sc.acc, &mut sc.t);
-            }
-        });
-        phases.lap("fwd-subtrees");
-        if self.flows(work) {
-            self.top_forward_flow(1, y, work);
-            phases.lap("fwd-top");
-        } else {
-            for (st, sc) in self.subtrees.iter().zip(&work.subtrees) {
-                for (&c, &a) in st.path_cols.iter().zip(&sc.acc) {
-                    y[c as usize] = y[c as usize] - a;
-                }
-            }
-            phases.lap("fwd-reduce");
-            self.top_forward(1, y, work);
-            phases.lap("fwd-top");
-        }
-        phases.finish("forward", work.parallel);
-    }
-
-    fn backward_single(&self, y: &mut [T], work: &mut PlanWork<T>) {
-        let mut phases = PhaseTrace::start();
-        // Backward: ancestors first, then the subtrees in parallel.
-        if self.flows(work) {
-            self.top_backward_flow(1, y, work);
-        } else {
-            self.top_backward(1, y, work);
-        }
-        phases.lap("bwd-top");
-        let shared = Shared(y.as_mut_ptr(), y.len());
-        let par = work.parallel;
-        let scratch = &mut work.subtrees[..self.subtrees.len()];
-        Self::each(par, &self.subtrees, scratch, |_, st, sc| {
-            // SAFETY: see `Shared`; this subtree writes only its own
-            // columns and reads its own plus ancestor columns, which
-            // are final.
-            let xv = unsafe { shared.slice() };
-            for &s in st.nodes.iter().rev() {
-                self.bwd_node(s, xv, &mut sc.g);
-            }
-        });
-        phases.lap("bwd-subtrees");
-        phases.finish("backward", work.parallel);
     }
 
     // -----------------------------------------------------------------------
@@ -1050,12 +928,13 @@ impl<T: Scalar> SolvePlan<T> {
     // `top_backward_flow`), with no level waiting for its slowest node and
     // no recursion along the tree's height: on a
     // 32 k near-field LU the level sweeps ran most levels (fewer nodes than
-    // threads) one node after another, 16 threads slower than 4. A node from
-    // `apex_min_work` on sweeps with sections inside it: the block triangle's
-    // right-hand-side tiles side by side, the update of the rows below in row
-    // chunks of fixed size. On one thread, or on a factor whose structure is
-    // no elimination tree, the levels run in order (`top_forward`,
-    // `top_backward`), with the same arithmetic per node and per column.
+    // threads) one node after another, 16 threads slower than 4. A node's
+    // products run as GEMMs ([`fwd_node_gemm`](Self::fwd_node_gemm),
+    // [`bwd_node_gemm`](Self::bwd_node_gemm)), a large one's in row chunks on
+    // the pool, and a wide node takes the leaf subtrees' terms in column
+    // chunks. On one thread, or on a factor whose structure is no elimination
+    // tree, the levels run in order (`top_forward`, `top_backward`), with the
+    // same arithmetic per node and per column.
 
     /// Whether the ancestors run as tasks (`top_forward_flow`,
     /// `top_backward_flow`) rather than level by level.
@@ -1081,12 +960,9 @@ impl<T: Scalar> SolvePlan<T> {
         let nsub = self.subtrees.len();
         work.top_acc.clear();
         work.top_acc.resize(self.top_acc_off[nt] * nr, T::zero());
-        if work.level.len() < nt {
-            work.level.resize_with(nt, Scratch::default);
-        }
         let ys = Shared(y.as_mut_ptr(), y.len());
         let accs = Shared(work.top_acc.as_mut_ptr(), work.top_acc.len());
-        let scratch = Shared(work.level.as_mut_ptr(), nt);
+        let pool = &work.pool;
         let subs = &work.subtrees;
         let node = |ti: usize| {
             let s = self.top[ti];
@@ -1096,26 +972,37 @@ impl<T: Scalar> SolvePlan<T> {
             // to nodes that are done (its descendants, ordered before it by
             // the pending counts' acquire-release).
             let y = unsafe { ys.slice() };
-            for &(src, off) in &self.pull[self.pull_ptr[ti]..self.pull_ptr[ti + 1]] {
-                let (src, off) = (src as usize, off as usize);
-                let from = if src < nsub {
-                    &subs[src].acc[off * nr..(off + w) * nr]
-                } else {
-                    let o = (self.top_acc_off[src - nsub] + off) * nr;
-                    unsafe { std::slice::from_raw_parts(accs.ptr().add(o), w * nr) }
-                };
-                sub_assign(&mut y[c0 * nr..(c0 + w) * nr], from);
+            let pulls = &self.pull[self.pull_ptr[ti]..self.pull_ptr[ti + 1]];
+            // the columns `j0..` of this node take every source's terms for them
+            let take = |j0: usize, yc: &mut [T]| {
+                let cols = yc.len() / nr;
+                for &(src, off) in pulls {
+                    let (src, off) = (src as usize, off as usize + j0);
+                    let from = if src < nsub {
+                        &subs[src].acc[off * nr..(off + cols) * nr]
+                    } else {
+                        let o = (self.top_acc_off[src - nsub] + off) * nr;
+                        unsafe { std::slice::from_raw_parts(accs.ptr().add(o), cols * nr) }
+                    };
+                    sub_assign(yc, from);
+                }
+            };
+            let yc = &mut y[c0 * nr..(c0 + w) * nr];
+            if pulls.len() * w * nr >= SOLVE_PULL_PAR_MIN {
+                // a wide node near the root takes the terms of every leaf
+                // subtree: its columns in chunks on the pool, each column
+                // summing its sources in order
+                crate::parallel::chunks_mut(yc, SOLVE_PULL_COLS * nr, |ci, c| {
+                    take(ci * SOLVE_PULL_COLS, c)
+                });
+            } else {
+                take(0, yc);
             }
             let (a0, a1) = (self.top_acc_off[ti] * nr, self.top_acc_off[ti + 1] * nr);
             let acc = unsafe { std::slice::from_raw_parts_mut(accs.ptr().add(a0), a1 - a0) };
-            let sc = unsafe { &mut *scratch.ptr().add(ti) };
-            if self.work(s) >= self.cfg.apex_min_work {
-                self.apex_forward(s, nr, y, acc, true, sc);
-            } else if nr == 1 {
-                self.fwd_node(s, y, acc, &mut sc.t);
-            } else {
-                self.fwd_node_block(s, nr, y, acc, &mut sc.t);
-            }
+            let mut sc = pool.take();
+            self.fwd_node_gemm(s, nr, y, acc, true, &mut sc.t);
+            pool.give(sc);
         };
         let kids_ptr = &self.top_kids_ptr;
         let pending = &work.pending[..nt];
@@ -1149,25 +1036,16 @@ impl<T: Scalar> SolvePlan<T> {
     /// share of the work (`cut`), so each branch passed leaves more than it
     /// behind.
     fn top_backward_flow(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
-        let nt = self.top.len();
-        if work.level.len() < nt {
-            work.level.resize_with(nt, Scratch::default);
-        }
         let xs = Shared(x.as_mut_ptr(), x.len());
-        let scratch = Shared(work.level.as_mut_ptr(), nt);
+        let pool = &work.pool;
         let node = |ti: usize| {
             let s = self.top[ti];
             // SAFETY: see `Shared`; this task alone writes the columns of
             // `s`, and the ancestors' columns it reads are final.
             let x = unsafe { xs.slice() };
-            let sc = unsafe { &mut *scratch.ptr().add(ti) };
-            if self.work(s) >= self.cfg.apex_min_work {
-                self.apex_backward(s, nr, x, true, sc);
-            } else if nr == 1 {
-                self.bwd_node(s, x, &mut sc.g);
-            } else {
-                self.bwd_node_block(s, nr, x, &mut sc.g);
-            }
+            let mut sc = pool.take();
+            self.bwd_node_gemm(s, nr, x, true, &mut sc.g);
+            pool.give(sc);
         };
         fn tree(ti: usize, node: &(dyn Fn(usize) + Sync), kids_ptr: &[usize], kids: &[u32]) {
             let mut t = ti;
@@ -1195,13 +1073,6 @@ impl<T: Scalar> SolvePlan<T> {
         });
     }
 
-    /// Work of a supernode's sweep: its panel entries.
-    #[inline]
-    fn work(&self, s: u32) -> usize {
-        let (_, w, _, m, _, _) = self.node(s);
-        w * (w + m)
-    }
-
     fn top_forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let par = work.parallel;
         let nt = crate::parallel::threads();
@@ -1216,13 +1087,7 @@ impl<T: Scalar> SolvePlan<T> {
             let sweep = |i: usize, s: u32, y: &mut [T], par: bool, sc: &mut Scratch<T>| {
                 // SAFETY: node `i` owns its range of the level's block.
                 let acc = unsafe { &mut accs.slice()[ptr[i] * nr..ptr[i + 1] * nr] };
-                if self.work(s) >= self.cfg.apex_min_work {
-                    self.apex_forward(s, nr, y, acc, par, sc);
-                } else if nr == 1 {
-                    self.fwd_node(s, y, acc, &mut sc.t);
-                } else {
-                    self.fwd_node_block(s, nr, y, acc, &mut sc.t);
-                }
+                self.fwd_node_gemm(s, nr, y, acc, par, &mut sc.t);
             };
             if node_par {
                 Self::each(par, level, &mut work.level[..level.len()], |i, &s, sc| {
@@ -1260,13 +1125,7 @@ impl<T: Scalar> SolvePlan<T> {
         for level in &self.top_levels {
             let node_par = !par || level.len() >= nt || nt == 1;
             let sweep = |s: u32, x: &mut [T], par: bool, sc: &mut Scratch<T>| {
-                if self.work(s) >= self.cfg.apex_min_work {
-                    self.apex_backward(s, nr, x, par, sc);
-                } else if nr == 1 {
-                    self.bwd_node(s, x, &mut sc.g);
-                } else {
-                    self.bwd_node_block(s, nr, x, &mut sc.g);
-                }
+                self.bwd_node_gemm(s, nr, x, par, &mut sc.g);
             };
             if node_par {
                 Self::each(par, level, &mut work.level[..level.len()], |_, &s, sc| {
@@ -1284,125 +1143,114 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// Forward sweep through one large ancestor node: the extended vector
-    /// `v = [y_block, t]` (`t` the negated off-block product) in column
-    /// blocks of `block`; the block triangle sequential, the update of the
-    /// rows below as column-chunk products into private slabs plus a
-    /// reduction in fixed chunk order, both parallel when `par` (the same
-    /// arithmetic either way). The off-block rows end up in `acc` (the
-    /// node's ancestor-path slots).
-    fn apex_forward(
+    // -----------------------------------------------------------------------
+    // Blocked right-hand sides (row-major `n x nrhs`)
+    // -----------------------------------------------------------------------
+
+    /// The forward sweep of node `s` for `nr` right-hand sides with its dense
+    /// products as GEMMs: the diagonal triangle in column blocks of
+    /// [`SOLVE_DIAG_BLOCK`] (each block's triangle on the register tiles, the
+    /// rows below it in the triangle updated by one product), then the rows
+    /// below the node as one product `L_off X` (in row chunks of
+    /// [`SOLVE_GEMM_ROWS`] on the pool when `par` and it is at least
+    /// [`SOLVE_GEMM_PAR_MIN`]), each row taken off `y` where the node writes it
+    /// directly and into the accumulator `acc` at its slot otherwise. A row's
+    /// sums run in the products' order, so a column of a block agrees with its
+    /// single solve to rounding, not to the bit.
+    fn fwd_node_gemm(
         &self,
         s: u32,
         nr: usize,
         y: &mut [T],
         acc: &mut [T],
         par: bool,
-        sc: &mut Scratch<T>,
+        t: &mut Vec<T>,
     ) {
         let (c0, w, r0, m, ld, panel) = self.node(s);
-        let v = &mut sc.v;
-        v.clear();
-        v.extend_from_slice(&y[c0 * nr..(c0 + w) * nr]);
-        v.resize(ld * nr, T::zero());
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
-        for (jb, je) in col_blocks(w, self.cfg.block) {
-            tri_forward_split(v, panel, dinv, ld, nr, jb, je, par);
-            if je == ld {
-                break;
-            }
-            // The rows below the block, in chunks of `SOLVE_PRODUCT_ROWS`: each
-            // row sums the block's columns in ascending order from zero and
-            // subtracts the sum, whatever the chunk and the thread.
-            let (vhead, vtail) = v.split_at_mut(je * nr);
-            let vhead: &[T] = vhead;
-            let update = |ci: usize, vr: &mut [T]| {
-                panel_update(
-                    vr,
-                    panel,
-                    ld,
-                    je + ci * SOLVE_PRODUCT_ROWS,
-                    vhead,
-                    nr,
-                    jb..je,
-                );
-            };
-            if par {
-                crate::parallel::chunks_mut(vtail, SOLVE_PRODUCT_ROWS * nr, update);
-            } else {
-                for (ci, vr) in vtail.chunks_mut(SOLVE_PRODUCT_ROWS * nr).enumerate() {
-                    update(ci, vr);
+        let mode = crate::dense::gemm_backend::GemmMode::new(
+            gemm::Parallelism::None,
+            &crate::KernelSettings::default(),
+        );
+        let (one, minus) = (T::one(), T::from_real(-1.0));
+        let yb = &mut y[c0 * nr..(c0 + w) * nr];
+        for (jb, je) in col_blocks(w, SOLVE_DIAG_BLOCK) {
+            tri_rows(yb, panel, dinv, ld, nr, jb, je);
+            if je < w {
+                // SAFETY: rows `je..w` of `yb` are written, rows `jb..je` read: disjoint;
+                // the panel's rows `je..w` of the columns `jb..je` lie in it.
+                unsafe {
+                    crate::dense::gemm_backend::gemm(
+                        w - je,
+                        nr,
+                        je - jb,
+                        yb.as_mut_ptr().add(je * nr),
+                        1,
+                        nr as isize,
+                        true,
+                        panel.as_ptr().add(jb * ld + je),
+                        ld as isize,
+                        1,
+                        yb.as_ptr().add(jb * nr),
+                        1,
+                        nr as isize,
+                        one,
+                        minus,
+                        false,
+                        false,
+                        false,
+                        mode,
+                    );
                 }
             }
         }
-        y[c0 * nr..(c0 + w) * nr].copy_from_slice(&v[..w * nr]);
-        let slots = &self.ext_slot[r0..r0 + m];
-        for (i, vi) in v[w * nr..].chunks_exact(nr).enumerate() {
-            let sl = slots[i] as usize;
-            // `v` holds the negated product; `acc` collects the product.
-            sub_assign(&mut acc[sl * nr..(sl + 1) * nr], vi);
-        }
-    }
-
-    /// Backward sweep through one large ancestor node: column blocks last
-    /// to first; the dots of a block's columns against the rows below in
-    /// column chunks (parallel when `par`), the triangle sequentially.
-    fn apex_backward(&self, s: u32, nr: usize, x: &mut [T], par: bool, sc: &mut Scratch<T>) {
-        let (c0, w, r0, m, ld, panel) = self.node(s);
-        let v = &mut sc.v;
-        v.clear();
-        v.extend_from_slice(&x[c0 * nr..(c0 + w) * nr]);
-        for &r in &self.rows[r0..r0 + m] {
-            v.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
-        }
-        let accv = &mut sc.accv;
-        accv.clear();
-        accv.resize(w * nr, T::zero());
-        for (jb, je) in col_blocks(w, self.cfg.block).rev() {
-            if je < ld {
-                let tail: &[T] = &v[je * nr..ld * nr];
-                let dots = |c: usize, outs: &mut [T]| {
-                    for (kk, out) in outs.chunks_exact_mut(nr).enumerate() {
-                        let k = jb + c * self.cfg.ancestor_chunk + kk;
-                        let col = &panel[k * ld + je..(k + 1) * ld];
-                        if nr == 1 {
-                            out[0] = dot4(col, tail);
-                        } else {
-                            dot4_block(out, col, tail, nr);
-                        }
-                    }
-                };
-                let ab = &mut accv[jb * nr..je * nr];
-                if par {
-                    crate::parallel::chunks_mut(ab, self.cfg.ancestor_chunk * nr, |c, outs| {
-                        dots(c, outs)
-                    });
-                } else {
-                    for (c, outs) in ab.chunks_mut(self.cfg.ancestor_chunk * nr).enumerate() {
-                        dots(c, outs);
-                    }
-                }
-            }
-            let dinv = (!self.diag_inv.is_empty()).then(|| &self.diag_inv[c0..c0 + w]);
-            tri_backward_split(v, accv, panel, ld, nr, jb, je, dinv, par);
-        }
-        x[c0 * nr..(c0 + w) * nr].copy_from_slice(&v[..w * nr]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Blocked right-hand sides (row-major `n x nrhs`)
-    // -----------------------------------------------------------------------
-
-    fn fwd_node_block(&self, s: u32, nr: usize, y: &mut [T], acc: &mut [T], t: &mut Vec<T>) {
-        let (c0, w, r0, m, ld, panel) = self.node(s);
-        let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
-        tri_rows(&mut y[c0 * nr..(c0 + w) * nr], panel, dinv, ld, nr, 0, w);
         if m == 0 {
             return;
         }
-        t.clear();
-        t.resize(m * nr, T::zero());
-        panel_product(t, panel, ld, w, &y[c0 * nr..(c0 + w) * nr], nr, 0..w);
+        // the product overwrites every entry: no zeroing, only growth
+        if t.len() < m * nr {
+            t.resize(m * nr, T::zero());
+        }
+        let t = &mut t[..m * nr];
+        let (pp, yp) = (
+            Shared(panel.as_ptr() as *mut T, panel.len()),
+            Shared(yb.as_mut_ptr(), yb.len()),
+        );
+        let product = |i0: usize, out: &mut [T]| {
+            let rows = out.len() / nr;
+            // SAFETY: `out` is this chunk's own rows of `t`; the panel and the
+            // node's solved rows are only read.
+            unsafe {
+                crate::dense::gemm_backend::gemm(
+                    rows,
+                    nr,
+                    w,
+                    out.as_mut_ptr(),
+                    1,
+                    nr as isize,
+                    false,
+                    pp.ptr().add(w + i0) as *const T,
+                    ld as isize,
+                    1,
+                    yp.ptr() as *const T,
+                    1,
+                    nr as isize,
+                    T::zero(),
+                    one,
+                    false,
+                    false,
+                    false,
+                    mode,
+                );
+            }
+        };
+        if par && m * w * nr >= SOLVE_GEMM_PAR_MIN {
+            crate::parallel::chunks_mut(t, SOLVE_GEMM_ROWS * nr, |ci, out| {
+                product(ci * SOLVE_GEMM_ROWS, out)
+            });
+        } else {
+            product(0, t);
+        }
         let rows = &self.rows[r0..r0 + m];
         let slots = &self.ext_slot[r0..r0 + m];
         for (i, ti) in t.chunks_exact(nr).enumerate() {
@@ -1416,24 +1264,116 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    fn bwd_node_block(&self, s: u32, nr: usize, x: &mut [T], g: &mut Vec<T>) {
+    /// The backward sweep of node `s` for `nr` right-hand sides with its dense
+    /// products as GEMMs: the final values of the rows below the node gathered
+    /// and taken off as one product `L_off^T G` (in chunks of the node's rows
+    /// on the pool when `par` and it is at least [`SOLVE_GEMM_PAR_MIN`]), then
+    /// the triangle from the last column block of [`SOLVE_DIAG_BLOCK`] up: each
+    /// block takes off the blocks below it by one product and solves its own
+    /// triangle column by column, last to first, each column scaled after its
+    /// terms.
+    fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
         let (c0, w, r0, m, ld, panel) = self.node(s);
-        g.clear();
-        for &r in &self.rows[r0..r0 + m] {
-            g.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
-        }
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
-        let xb = &mut x[c0 * nr..(c0 + w) * nr];
-        let mut q0 = 0;
-        while q0 < nr {
-            let cw = (nr - q0).min(SOLVE_RHS_TILE);
-            match cw {
-                4 => bwd_tile::<T, 4>(xb, g, panel, dinv, ld, w, m, nr, q0),
-                3 => bwd_tile::<T, 3>(xb, g, panel, dinv, ld, w, m, nr, q0),
-                2 => bwd_tile::<T, 2>(xb, g, panel, dinv, ld, w, m, nr, q0),
-                _ => bwd_tile::<T, 1>(xb, g, panel, dinv, ld, w, m, nr, q0),
+        let mode = crate::dense::gemm_backend::GemmMode::new(
+            gemm::Parallelism::None,
+            &crate::KernelSettings::default(),
+        );
+        let (one, minus) = (T::one(), T::from_real(-1.0));
+        if m > 0 {
+            g.clear();
+            for &r in &self.rows[r0..r0 + m] {
+                g.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
             }
-            q0 += cw;
+        }
+        let xb = &mut x[c0 * nr..(c0 + w) * nr];
+        if m > 0 {
+            let (pp, gp) = (
+                Shared(panel.as_ptr() as *mut T, panel.len()),
+                Shared(g.as_mut_ptr(), g.len()),
+            );
+            // rows `i0..` of the node: `X[i] -= sum_r L[r, i] G[r]`
+            let product = |i0: usize, out: &mut [T]| {
+                let rows = out.len() / nr;
+                // SAFETY: `out` is this chunk's own rows of the node; the panel
+                // and the gathered rows are only read.
+                unsafe {
+                    crate::dense::gemm_backend::gemm(
+                        rows,
+                        nr,
+                        m,
+                        out.as_mut_ptr(),
+                        1,
+                        nr as isize,
+                        true,
+                        pp.ptr().add(i0 * ld + w) as *const T,
+                        1,
+                        ld as isize,
+                        gp.ptr() as *const T,
+                        1,
+                        nr as isize,
+                        one,
+                        minus,
+                        false,
+                        false,
+                        false,
+                        mode,
+                    );
+                }
+            };
+            if par && m * w * nr >= SOLVE_GEMM_PAR_MIN {
+                crate::parallel::chunks_mut(xb, SOLVE_GEMM_ROWS * nr, |ci, out| {
+                    product(ci * SOLVE_GEMM_ROWS, out)
+                });
+            } else {
+                product(0, xb);
+            }
+        }
+        for (jb, je) in col_blocks(w, SOLVE_DIAG_BLOCK).rev() {
+            if je < w {
+                // SAFETY: rows `jb..je` of `xb` are written, rows `je..w` read:
+                // disjoint; the panel's rows `je..w` of the columns `jb..je` lie in it.
+                unsafe {
+                    crate::dense::gemm_backend::gemm(
+                        je - jb,
+                        nr,
+                        w - je,
+                        xb.as_mut_ptr().add(jb * nr),
+                        1,
+                        nr as isize,
+                        true,
+                        panel.as_ptr().add(jb * ld + je),
+                        1,
+                        ld as isize,
+                        xb.as_ptr().add(je * nr),
+                        1,
+                        nr as isize,
+                        one,
+                        minus,
+                        false,
+                        false,
+                        false,
+                        mode,
+                    );
+                }
+            }
+            for k in (jb..je).rev() {
+                let col = &panel[k * ld..(k + 1) * ld];
+                let (head, tail) = xb.split_at_mut((k + 1) * nr);
+                let xk = &mut head[k * nr..];
+                for i in k + 1..je {
+                    let l = col[i];
+                    let xi = &tail[(i - k - 1) * nr..(i - k) * nr];
+                    for (a, &v) in xk.iter_mut().zip(xi) {
+                        *a = *a - l * v;
+                    }
+                }
+                if let Some(&d) = dinv.get(k) {
+                    for a in xk.iter_mut() {
+                        *a = *a * d;
+                    }
+                }
+            }
         }
     }
 
@@ -1483,7 +1423,7 @@ impl<T: Scalar> SolvePlan<T> {
             // SAFETY: see `Shared`.
             let yv = unsafe { shared.slice() };
             for &s in &st.nodes {
-                self.fwd_node_block(s, nr, yv, &mut sc.acc, &mut sc.t);
+                self.fwd_node_gemm(s, nr, yv, &mut sc.acc, false, &mut sc.t);
             }
         });
         phases.lap("fwd-subtrees");
@@ -1519,252 +1459,11 @@ impl<T: Scalar> SolvePlan<T> {
             // SAFETY: see `Shared`.
             let xv = unsafe { shared.slice() };
             for &s in st.nodes.iter().rev() {
-                self.bwd_node_block(s, nr, xv, &mut sc.g);
+                self.bwd_node_gemm(s, nr, xv, false, &mut sc.g);
             }
         });
         phases.lap("bwd-subtrees");
         phases.finish("backward-block", work.parallel);
-    }
-}
-
-/// `out[i, c] += sum over k of panel[k * ld + r0 + i] * v[k * nr + c]` for the `ks` columns of
-/// a column-major panel (leading dimension `ld`, its rows from `r0`) against the row-major
-/// right-hand sides `v` (`nr` wide, row `k` the factor column `k`), `out` row-major
-/// `rows x nr`. Every entry takes its terms in ascending `k`, one fused multiply-add each
-/// onto the running value, as the column-by-column `axpy` did; the work goes in tiles of
-/// [`TILE_ROWS`] rows by up to four right-hand sides held in registers across all of `ks`,
-/// so the slab is read and written once per call instead of once per column. A column of
-/// a block therefore equals the single solve of that column bit for bit, whatever `nr`.
-/// The factor goes first in every product, `l * x`: the fused complex multiply-add is not
-/// symmetric in its factors (the imaginary part nests the two cross products in operand
-/// order), so the other order made a one-column solve differ from a block column under FMA.
-#[inline(always)]
-fn panel_product<T: Scalar>(
-    out: &mut [T],
-    panel: &[T],
-    ld: usize,
-    r0: usize,
-    v: &[T],
-    nr: usize,
-    ks: std::ops::Range<usize>,
-) {
-    panel_tiles::<T, false>(out, panel, ld, r0, v, nr, ks);
-}
-
-/// `out[i, c] -= sum over k of panel[k * ld + r0 + i] * v[k * nr + c]`: the
-/// sum taken as [`panel_product`] takes it onto a zero, then subtracted, the
-/// bits of a product into a zeroed buffer subtracted after, with no buffer.
-fn panel_update<T: Scalar>(
-    out: &mut [T],
-    panel: &[T],
-    ld: usize,
-    r0: usize,
-    v: &[T],
-    nr: usize,
-    ks: std::ops::Range<usize>,
-) {
-    panel_tiles::<T, true>(out, panel, ld, r0, v, nr, ks);
-}
-
-/// [`panel_product`] (`SUB` false) or [`panel_update`] (`SUB` true) over the
-/// right-hand sides' tiles.
-fn panel_tiles<T: Scalar, const SUB: bool>(
-    out: &mut [T],
-    panel: &[T],
-    ld: usize,
-    r0: usize,
-    v: &[T],
-    nr: usize,
-    ks: std::ops::Range<usize>,
-) {
-    let rows = out.len() / nr.max(1);
-    let mut c0 = 0;
-    while c0 < nr {
-        let w = (nr - c0).min(SOLVE_RHS_TILE);
-        match w {
-            4 => product_tile::<T, 4, SUB>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
-            3 => product_tile::<T, 3, SUB>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
-            2 => product_tile::<T, 2, SUB>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
-            _ => product_tile::<T, 1, SUB>(out, panel, ld, r0, v, nr, c0, rows, ks.clone()),
-        }
-        c0 += w;
-    }
-}
-
-/// The backward sweep of one supernode for the right-hand sides `q0..q0 + W`: column `k`
-/// last to first takes the dot of its off-block part with the gathered rows `g` (four
-/// partial sums, the association of [`dot4`]), then `l_ik x_i` for `i` ascending above it,
-/// subtracts that from `x_k` and scales it, exactly as the column-at-a-time sweep and the
-/// single right-hand side ([`SolvePlan::bwd_node`]) do; here the sums of the `W`
-/// right-hand sides stay in registers instead of a row of the accumulator per term.
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-fn bwd_tile<T: Scalar, const W: usize>(
-    xb: &mut [T],
-    g: &[T],
-    panel: &[T],
-    dinv: &[T],
-    ld: usize,
-    w: usize,
-    m: usize,
-    nr: usize,
-    q0: usize,
-) {
-    for k in (0..w).rev() {
-        let col = &panel[k * ld..(k + 1) * ld];
-        let mut acc = dot4_tile::<T, W>(&col[w..w + m], g, nr, q0);
-        for i in k + 1..w {
-            let l = col[i];
-            for (a, &x) in acc.iter_mut().zip(&xb[i * nr + q0..i * nr + q0 + W]) {
-                *a = fmadd(l, x, *a);
-            }
-        }
-        let xk = &mut xb[k * nr + q0..k * nr + q0 + W];
-        for (v, &a) in xk.iter_mut().zip(&acc) {
-            *v = *v - a;
-        }
-        if let Some(&d) = dinv.get(k) {
-            for v in xk.iter_mut() {
-                *v = *v * d;
-            }
-        }
-    }
-}
-
-/// [`panel_product`] for the right-hand sides `c0..c0 + W`.
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-fn product_tile<T: Scalar, const W: usize, const SUB: bool>(
-    out: &mut [T],
-    panel: &[T],
-    ld: usize,
-    r0: usize,
-    v: &[T],
-    nr: usize,
-    c0: usize,
-    rows: usize,
-    ks: std::ops::Range<usize>,
-) {
-    let mut i = 0;
-    while i + TILE_ROWS <= rows {
-        let mut acc = [[T::zero(); W]; TILE_ROWS];
-        if !SUB {
-            for (r, ar) in acc.iter_mut().enumerate() {
-                for (q, a) in ar.iter_mut().enumerate() {
-                    *a = out[(i + r) * nr + c0 + q];
-                }
-            }
-        }
-        for k in ks.clone() {
-            let col = &panel[k * ld + r0 + i..k * ld + r0 + i + TILE_ROWS];
-            let vk = &v[k * nr + c0..k * nr + c0 + W];
-            for (ar, &l) in acc.iter_mut().zip(col) {
-                for (a, &x) in ar.iter_mut().zip(vk) {
-                    *a = fmadd(l, x, *a);
-                }
-            }
-        }
-        for (r, ar) in acc.iter().enumerate() {
-            let o = &mut out[(i + r) * nr + c0..(i + r) * nr + c0 + W];
-            if SUB {
-                sub_assign(o, ar);
-            } else {
-                o.copy_from_slice(ar);
-            }
-        }
-        i += TILE_ROWS;
-    }
-    while i < rows {
-        let mut acc = [T::zero(); W];
-        if !SUB {
-            for (q, a) in acc.iter_mut().enumerate() {
-                *a = out[i * nr + c0 + q];
-            }
-        }
-        for k in ks.clone() {
-            let l = panel[k * ld + r0 + i];
-            for (a, &x) in acc.iter_mut().zip(&v[k * nr + c0..k * nr + c0 + W]) {
-                *a = fmadd(l, x, *a);
-            }
-        }
-        let o = &mut out[i * nr + c0..i * nr + c0 + W];
-        if SUB {
-            sub_assign(o, &acc);
-        } else {
-            o.copy_from_slice(&acc);
-        }
-        i += 1;
-    }
-}
-
-/// `out[c] = dot4(col, g[:, c])` for every column of the row-major `g` (`nr`
-/// wide): four independent partial sums to hide the FMA latency, in exactly
-/// the association of [`dot4`]. A column's value therefore does not depend on
-/// how many right-hand sides share the sweep, which a non-flexible Krylov
-/// method needs (its update applies the solve to one column, its Arnoldi
-/// steps to a block; any difference breaks the Arnoldi relation).
-///
-/// The columns go in groups of up to four ([`dot4_tile`]), their partial sums
-/// in registers: every column is summed alike whatever its group.
-#[inline(always)]
-fn dot4_block<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize) {
-    let mut q0 = 0;
-    while q0 < nr {
-        let w = (nr - q0).min(SOLVE_RHS_TILE);
-        dot4_cols(&mut out[q0..q0 + w], col, g, nr, q0);
-        q0 += w;
-    }
-}
-
-/// [`dot4_block`] for the columns `q0..q0 + out.len()` of `g`, at most four of them.
-#[inline(always)]
-fn dot4_cols<T: Scalar>(out: &mut [T], col: &[T], g: &[T], nr: usize, q0: usize) {
-    match out.len() {
-        4 => out.copy_from_slice(&dot4_tile::<T, 4>(col, g, nr, q0)),
-        3 => out.copy_from_slice(&dot4_tile::<T, 3>(col, g, nr, q0)),
-        2 => out.copy_from_slice(&dot4_tile::<T, 2>(col, g, nr, q0)),
-        _ => out.copy_from_slice(&dot4_tile::<T, 1>(col, g, nr, q0)),
-    }
-}
-
-/// [`dot4`] of `col` with the columns `q0..q0 + W` of the row-major `g` (`nr` wide, its
-/// first `col.len()` rows).
-#[inline(always)]
-fn dot4_tile<T: Scalar, const W: usize>(col: &[T], g: &[T], nr: usize, q0: usize) -> [T; W] {
-    let z = T::zero();
-    let m = col.len().min(g.len() / nr.max(1));
-    let mut s = [[z; W]; FOLD_LANES];
-    let mut i = 0;
-    while i + FOLD_LANES <= m {
-        for (q, sq) in s.iter_mut().enumerate() {
-            let l = col[i + q];
-            let gi = &g[(i + q) * nr + q0..(i + q) * nr + q0 + W];
-            for (a, &x) in sq.iter_mut().zip(gi) {
-                *a = fmadd(l, x, *a);
-            }
-        }
-        i += FOLD_LANES;
-    }
-    let mut acc = [z; W];
-    for (c, a) in acc.iter_mut().enumerate() {
-        *a = (s[0][c] + s[1][c]) + (s[2][c] + s[3][c]);
-    }
-    while i < m {
-        let l = col[i];
-        for (a, &x) in acc.iter_mut().zip(&g[i * nr + q0..i * nr + q0 + W]) {
-            *a = fmadd(l, x, *a);
-        }
-        i += 1;
-    }
-    acc
-}
-
-/// `y -= a * x`.
-#[inline(always)]
-fn axpy_neg<T: Scalar>(y: &mut [T], a: T, x: &[T]) {
-    let n = y.len().min(x.len());
-    for (yi, &xi) in y[..n].iter_mut().zip(&x[..n]) {
-        *yi = *yi - a * xi;
     }
 }
 
@@ -1828,66 +1527,6 @@ impl PhaseTrace {
                 parts.join(" ")
             ));
         }
-    }
-}
-
-/// [`tri_forward`] with the right-hand sides' register tiles side by side
-/// when `par`: the columns of `v` are independent, and each tile's arithmetic
-/// is the one [`tri_rows`] does.
-#[allow(clippy::too_many_arguments)]
-fn tri_forward_split<T: Scalar>(
-    v: &mut [T],
-    panel: &[T],
-    diag_inv: &[T],
-    ld: usize,
-    nr: usize,
-    jb: usize,
-    je: usize,
-    par: bool,
-) {
-    if !par || nr <= SOLVE_RHS_TILE {
-        return tri_forward(v, panel, diag_inv, ld, nr, jb, je);
-    }
-    let shared = Shared(v.as_mut_ptr(), v.len());
-    crate::parallel::for_each(nr.div_ceil(SOLVE_RHS_TILE), 1, |q| {
-        // SAFETY: see `Shared`; tile `q` writes only its own columns.
-        let v = unsafe { shared.slice() };
-        let c0 = q * SOLVE_RHS_TILE;
-        match (nr - c0).min(SOLVE_RHS_TILE) {
-            4 => tri_tile::<T, 4>(v, panel, diag_inv, ld, nr, c0, jb, je),
-            3 => tri_tile::<T, 3>(v, panel, diag_inv, ld, nr, c0, jb, je),
-            2 => tri_tile::<T, 2>(v, panel, diag_inv, ld, nr, c0, jb, je),
-            _ => tri_tile::<T, 1>(v, panel, diag_inv, ld, nr, c0, jb, je),
-        }
-    });
-}
-
-/// Unit-lower triangular solve of column block `[jb, je)` on `v` (row-major
-/// `nr` wide), in place.
-#[allow(clippy::too_many_arguments)]
-fn tri_forward<T: Scalar>(
-    v: &mut [T],
-    panel: &[T],
-    diag_inv: &[T],
-    ld: usize,
-    nr: usize,
-    jb: usize,
-    je: usize,
-) {
-    if nr > 1 {
-        tri_rows(v, panel, diag_inv, ld, nr, jb, je);
-        return;
-    }
-    for k in jb..je {
-        let (head, tail) = v.split_at_mut((k + 1) * nr);
-        if let Some(&d) = diag_inv.get(k) {
-            for x in &mut head[k * nr..] {
-                *x = *x * d;
-            }
-        }
-        let vk = &head[k * nr..];
-        let col = &panel[k * ld + k + 1..k * ld + je];
-        axpy_neg(&mut tail[..je - k - 1], vk[0], col);
     }
 }
 
@@ -1973,110 +1612,9 @@ fn tri_tile<T: Scalar, const W: usize>(
     }
 }
 
-/// Unit-upper (`L^T`) solve of column block `[jb, je)` on `v`, given in
-/// `accv[k]` the dots of column `k` against the rows below the block.
-#[allow(clippy::too_many_arguments)]
-fn tri_backward<T: Scalar>(
-    v: &mut [T],
-    accv: &mut [T],
-    panel: &[T],
-    ld: usize,
-    nr: usize,
-    jb: usize,
-    je: usize,
-    dinv: Option<&[T]>,
-) {
-    for k in (jb..je).rev() {
-        let col = &panel[k * ld + k + 1..k * ld + je];
-        let (head, tail) = v.split_at_mut((k + 1) * nr);
-        let ak = &mut accv[k * nr..(k + 1) * nr];
-        if nr == 1 {
-            ak[0] = ak[0] + dot4(col, &tail[..je - k - 1]);
-        } else {
-            // as the single column: the dot first, then onto the accumulator
-            let mut d = [T::zero(); SOLVE_RHS_TILE];
-            for c0 in (0..nr).step_by(SOLVE_RHS_TILE) {
-                let w = SOLVE_RHS_TILE.min(nr - c0);
-                dot4_cols(&mut d[..w], col, &tail[..(je - k - 1) * nr], nr, c0);
-                add_assign(&mut ak[c0..c0 + w], &d[..w]);
-            }
-        }
-        let xk = &mut head[k * nr..];
-        sub_assign(xk, ak);
-        if let Some(d) = dinv {
-            let d = d[k];
-            xk.iter_mut().for_each(|x| *x = *x * d);
-        }
-    }
-}
-
-/// [`tri_backward`] with the right-hand sides' tiles of four side by side
-/// when `par`: a tile reads and writes only its own columns of `v` and
-/// `accv`, with the arithmetic [`tri_backward`] does for them.
-#[allow(clippy::too_many_arguments)]
-fn tri_backward_split<T: Scalar>(
-    v: &mut [T],
-    accv: &mut [T],
-    panel: &[T],
-    ld: usize,
-    nr: usize,
-    jb: usize,
-    je: usize,
-    dinv: Option<&[T]>,
-    par: bool,
-) {
-    if !par || nr <= SOLVE_RHS_TILE {
-        return tri_backward(v, accv, panel, ld, nr, jb, je, dinv);
-    }
-    let (vs, accs) = (
-        Shared(v.as_mut_ptr(), v.len()),
-        Shared(accv.as_mut_ptr(), accv.len()),
-    );
-    crate::parallel::for_each(nr.div_ceil(SOLVE_RHS_TILE), 1, |q| {
-        // SAFETY: see `Shared`; tile `q` touches only its own columns.
-        let (v, accv) = unsafe { (vs.slice(), accs.slice()) };
-        let c0 = q * SOLVE_RHS_TILE;
-        let w = SOLVE_RHS_TILE.min(nr - c0);
-        let mut d = [T::zero(); SOLVE_RHS_TILE];
-        for k in (jb..je).rev() {
-            let col = &panel[k * ld + k + 1..k * ld + je];
-            dot4_cols(&mut d[..w], col, &v[(k + 1) * nr..je * nr], nr, c0);
-            let ak = &mut accv[k * nr + c0..k * nr + c0 + w];
-            add_assign(ak, &d[..w]);
-            let xk = &mut v[k * nr + c0..k * nr + c0 + w];
-            sub_assign(xk, ak);
-            if let Some(dv) = dinv {
-                let dk = dv[k];
-                xk.iter_mut().for_each(|x| *x = *x * dk);
-            }
-        }
-    });
-}
-
 /// Column blocks `[jb, je)` of width `nb` over `w` columns.
 fn col_blocks(w: usize, nb: usize) -> impl DoubleEndedIterator<Item = (usize, usize)> {
     (0..w).step_by(nb).map(move |jb| (jb, (jb + nb).min(w)))
-}
-
-/// Dot product with four independent accumulators (fixed summation order).
-#[inline]
-fn dot4<T: Scalar>(a: &[T], b: &[T]) -> T {
-    debug_assert_eq!(a.len(), b.len());
-    let mut s = [T::zero(); FOLD_LANES];
-    let mut i = 0;
-    while i + FOLD_LANES <= a.len() {
-        s[0] = fmadd(a[i], b[i], s[0]);
-        s[1] = fmadd(a[i + 1], b[i + 1], s[1]);
-        s[2] = fmadd(a[i + 2], b[i + 2], s[2]);
-        s[3] = fmadd(a[i + 3], b[i + 3], s[3]);
-        i += FOLD_LANES;
-    }
-    let mut acc = (s[0] + s[1]) + (s[2] + s[3]);
-    while i < a.len() {
-        acc = fmadd(a[i], b[i], acc);
-        i += 1;
-    }
-    acc
 }
 
 /// `D z = y` for the block diagonal (1x1 and 2x2 pivots), on `nr` right-hand
@@ -2319,23 +1857,11 @@ mod tests {
     /// sides.
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
-        // as planned, and with every ancestor a large node in small column
-        // blocks (the large nodes' sections: tiles side by side, row chunks)
-        for (apex_min_work, block) in [(crate::SolveSettings::default().apex_min_work, 512), (0, 8)]
-        {
-            ancestor_tasks_case(apex_min_work, block);
-        }
-    }
-
-    fn ancestor_tasks_case(apex_min_work: usize, block: usize) {
         use crate::{LuSolver, OrderingMethod};
         let opts = SolverSettings {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: 0,
-                apex_min_work,
-                block,
-                ..Default::default()
             },
             ..SolverSettings::default()
         }

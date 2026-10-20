@@ -12,6 +12,9 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
     fn counter(&self) -> &crate::diagnostics::SolveCounter {
         &self.solves
     }
+    fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
+        &self.works
+    }
 
     fn solve_raw_into(
         &self,

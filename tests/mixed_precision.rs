@@ -76,12 +76,16 @@ fn block_gmres_with_a_single_precision_lu_reaches_double_accuracy() {
         .map(|i| c((i % 7) as f64 - 3.0, 0.5))
         .collect();
 
-    // The block apply solves the columns together and equals the column loop.
+    // The block apply solves the columns together and agrees with the column
+    // loop to single precision (its products sum in their own order).
     let mut z = vec![Complex64::default(); n * nrhs];
     m.apply_block(&b, &mut z, nrhs, n).unwrap();
     for col in 0..nrhs {
         let zc = Factorization::solve(&m, &b[col * n..(col + 1) * n]).unwrap();
-        assert_eq!(&z[col * n..(col + 1) * n], &zc[..]);
+        let scale = zc.iter().map(|v| v.norm()).fold(0.0, f64::max);
+        for (a, b) in z[col * n..(col + 1) * n].iter().zip(&zc) {
+            assert!((a - b).norm() <= 1e-5 * scale);
+        }
     }
 
     let settings = KrylovSettings::default().with_tol(1e-10);
