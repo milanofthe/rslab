@@ -51,7 +51,7 @@ mod util;
 mod warmstart_tests;
 
 pub use arnoldi::BlockArnoldi;
-pub use block::{gmres_block, BlockGmres, BlockKrylovResult};
+pub use block::{gmres_block, BlockGmres, BlockKrylovResult, BlockRecycle};
 pub use cg::{cocg, cocr};
 pub use closures::{FnOperator, FnPreconditioner};
 pub use gmres::gmres;

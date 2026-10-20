@@ -89,6 +89,15 @@ impl KrylovSettings {
         super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, depth.min(m + 1))
     }
 
+    /// What deflating a subspace of dimension `k`
+    /// ([`BlockGmres::deflating`](super::BlockGmres::deflating)) adds to
+    /// [`block_bytes`](Self::block_bytes): the subspace, every column's
+    /// components on it per step, and a panel's projections.
+    pub fn deflation_bytes<T>(&self, n: usize, s: usize, k: usize) -> u64 {
+        let m = self.restart_for(n, s, std::mem::size_of::<T>(), 2);
+        super::block::deflation_bytes::<T>(n, s, m, self.ortho_chunk, k)
+    }
+
     /// The restart length for `n` unknowns, `columns` right-hand sides of
     /// `scalar_bytes` each and `bases` stored bases (two for flexible GMRES).
     pub(crate) fn restart_for(

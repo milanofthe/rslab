@@ -226,9 +226,9 @@ pub use numeric::settings::{
 // The Krylov solvers and their operator and preconditioner traits.
 pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_recycled, BlockArnoldi, BlockGmres, BlockKrylovResult,
-    Factorization, FnOperator, FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator,
-    LowPrecisionLu, LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner, Preconditioner,
-    Recycle, RecycleScalar, StopReason,
+    BlockRecycle, Factorization, FnOperator, FnPreconditioner, KrylovResult, KrylovSettings,
+    LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner,
+    Preconditioner, Recycle, RecycleScalar, StopReason,
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
