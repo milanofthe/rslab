@@ -1957,6 +1957,25 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
         d.harvest(20).is_none(),
         "a deflating solve harvests nothing"
     );
+    // the harvest applies the operator no wider than the solve does: a one-column solve's
+    // harvest of many directions through an operator that takes one column at a time
+    struct OneAtATime<'a>(&'a CscMatrix<C>);
+    impl LinearOperator<C> for OneAtATime<'_> {
+        fn n(&self) -> usize {
+            self.0.n
+        }
+        fn apply(&self, x: &[C], y: &mut [C]) {
+            self.0.symv(x, y);
+        }
+        fn apply_block(&self, x: &[C], y: &mut [C], s: usize) {
+            assert_eq!(s, 1, "applied {s} columns at once");
+            self.0.symv(x, y);
+        }
+    }
+    let one = OneAtATime(&a);
+    let mut g1 = BlockGmres::new(&one, &first[..n], 1, &NoPreconditioner, &set, None).unwrap();
+    assert!(g1.solve(1e-10, None).unwrap().converged);
+    assert!(g1.harvest(20).is_some_and(|r| r.dim() > 1));
     // the memory it holds is the plan's, the deflation included
     let plan =
         set.block_bytes::<C>(n, s, d.deepest()) + set.deflation_bytes::<C>(n, s, d.rec_dim());

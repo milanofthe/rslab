@@ -796,8 +796,12 @@ where
             return None;
         }
         // their images, orthonormalized with the directions along (`C = A U` stays)
+        // in blocks of at most the solve's width: the operator is applied as the solve applies
+        // it (a matrix-free operator sizes its scratch for that)
         let mut au = vec![T::zero(); kept * n];
-        self.op.apply_block(&u, &mut au, kept);
+        for (ui, ai) in u.chunks(self.s * n).zip(au.chunks_mut(self.s * n)) {
+            self.op.apply_block(ui, ai, ui.len() / n);
+        }
         let (mut uu, mut cc) = (Vec::with_capacity(kept * n), Vec::with_capacity(kept * n));
         for (ui, ci) in u.chunks_exact(n).zip(au.chunks_exact(n)) {
             orthonormal_into(
