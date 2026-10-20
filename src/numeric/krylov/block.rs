@@ -737,7 +737,7 @@ where
 {
     /// Up to `k` directions this solve's open cycles found slowest, as a
     /// [`BlockRecycle`] for later solves of the same operator
-    /// ([`deflating`](Self::deflating)): per open cycle of `d` steps the
+    /// ([`deflating`](Self::deflating)): per open cycle of `d` steps up to `d / 2`
     /// harmonic-Ritz pairs of smallest magnitude of its `(d+1) x d` relation
     /// `A Z = V H_bar` (`H_bar^H H_bar g = theta H^H g`) and their directions
     /// `Z g`, over all columns by ascending `|theta|`, orthonormalized with the
@@ -771,7 +771,10 @@ where
                     m2[i * d + j] = hb(j, i).conj();
                 }
             }
-            for (theta, g) in harmonic_ritz_smallest(&m1, &m2, d, k) {
+            // at most half the cycle's depth from one column: the harmonic Ritz pairs of a
+            // short cycle are crude, and deflating crude directions slows the solves it serves
+            // (GCRO-DR's rule, as `gmres_recycled` caps its subspace at half the restart)
+            for (theta, g) in harmonic_ritz_smallest(&m1, &m2, d, k.min(d / 2)) {
                 cands.push((theta.norm(), c, theta, g));
             }
         }
