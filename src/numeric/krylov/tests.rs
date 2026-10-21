@@ -1878,3 +1878,110 @@ fn block_gmres_memory_plan_matches_the_solve() {
         }
     }
 }
+
+/// Deflating what a solve of the same operator found slowest pays: on an
+/// indefinite Helmholtz grid a second block of right-hand sides solves in fewer
+/// iterations with the first solve's harmonic-Ritz subspace, to the same
+/// tolerance (true residuals), and a deflating solve harvests nothing.
+#[test]
+fn block_gmres_deflating_a_harvest_saves_iterations() {
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(20, c(0.6, 0.02), c(-1.0, 0.0));
+    let n = a.n;
+    let s = 3;
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(2000)
+        .with_restart(600);
+    let first = ladder_rhs(n, s);
+    let mut g = BlockGmres::new(&a, &first, s, &NoPreconditioner, &set, None).unwrap();
+    assert!(g.solve(1e-10, None).unwrap().converged);
+    let rec = g.harvest(20).expect("open cycles to harvest");
+    assert!(rec.dim() > 0 && rec.dim() <= 20);
+    {
+        let (u, cimg) = rec.parts();
+        for i in 0..rec.dim() {
+            let mut y = vec![C::default(); n];
+            a.symv(&u[i * n..(i + 1) * n], &mut y);
+            let e = (0..n)
+                .map(|r| (y[r] - cimg[i * n + r]).norm())
+                .fold(0.0, f64::max);
+            let cn: f64 = cimg[i * n..(i + 1) * n]
+                .iter()
+                .map(|v| v.norm_sqr())
+                .sum::<f64>()
+                .sqrt();
+            eprintln!("rec {i}: |Au - c| {e:.2e}, |c| {cn:.3}");
+        }
+    }
+    // other right-hand sides on the same operator
+    let second: Vec<C> = (0..n * s)
+        .map(|i| c(((i * 7) % 11) as f64 - 5.0, ((i * 3) % 13) as f64 - 6.0))
+        .collect();
+    let plain = gmres_block(
+        &a,
+        &second,
+        s,
+        &NoPreconditioner,
+        &set.clone().with_tol(1e-10),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut d = BlockGmres::new(&a, &second, s, &NoPreconditioner, &set, None)
+        .unwrap()
+        .deflating(&rec)
+        .unwrap();
+    let r = d.solve(1e-10, None).unwrap();
+    assert!(r.converged && plain.converged);
+    assert!(
+        r.iters < plain.iters,
+        "deflating {} against plain {}",
+        r.iters,
+        plain.iters
+    );
+    for k in 0..s {
+        let mut y = vec![C::default(); n];
+        a.symv(&r.x[k * n..(k + 1) * n], &mut y);
+        let rn = (0..n)
+            .map(|i| (y[i] - second[k * n + i]).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        let bn = second[k * n..(k + 1) * n]
+            .iter()
+            .map(|v| v.norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(rn <= 1e-10 * bn * (1.0 + 1e-6), "column {k}: {}", rn / bn);
+    }
+    assert!(
+        d.harvest(20).is_none(),
+        "a deflating solve harvests nothing"
+    );
+    // the harvest applies the operator no wider than the solve does: a one-column solve's
+    // harvest of many directions through an operator that takes one column at a time
+    struct OneAtATime<'a>(&'a CscMatrix<C>);
+    impl LinearOperator<C> for OneAtATime<'_> {
+        fn n(&self) -> usize {
+            self.0.n
+        }
+        fn apply(&self, x: &[C], y: &mut [C]) {
+            self.0.symv(x, y);
+        }
+        fn apply_block(&self, x: &[C], y: &mut [C], s: usize) {
+            assert_eq!(s, 1, "applied {s} columns at once");
+            self.0.symv(x, y);
+        }
+    }
+    let one = OneAtATime(&a);
+    let mut g1 = BlockGmres::new(&one, &first[..n], 1, &NoPreconditioner, &set, None).unwrap();
+    assert!(g1.solve(1e-10, None).unwrap().converged);
+    assert!(g1.harvest(20).is_some_and(|r| r.dim() > 1));
+    // the memory it holds is the plan's, the deflation included
+    let plan =
+        set.block_bytes::<C>(n, s, d.deepest()) + set.deflation_bytes::<C>(n, s, d.rec_dim());
+    assert!(
+        plan >= d.resident_bytes(),
+        "plan {plan} held {}",
+        d.resident_bytes()
+    );
+}

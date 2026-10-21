@@ -4,6 +4,7 @@
 use super::util::*;
 use super::*;
 
+use super::recycle::RecycleScalar;
 use crate::error::RslabError;
 use crate::scalar::Scalar;
 
@@ -35,6 +36,12 @@ struct Column<T> {
     zb: Vec<T>,
     /// Row-major `(m+1) x m`, entry `(i, j)` at `h[i*m + j]`.
     h: Vec<T>,
+    /// The same before the Givens rotations: `A Z = V H_bar` of the open cycle
+    /// (`+ C B` when deflating), the matrix [`BlockGmres::harvest`] reads.
+    hraw: Vec<T>,
+    /// Deflating ([`BlockRecycle`] of dimension `k`): step `j`'s components
+    /// `C^H A z_j` at `bm[j*k..(j+1)*k]`.
+    bm: Vec<T>,
     cs: Vec<T>,
     sn: Vec<T>,
     g: Vec<T>,
@@ -43,11 +50,13 @@ struct Column<T> {
 }
 
 impl<T: Scalar> Column<T> {
-    fn new(n: usize, m: usize) -> Self {
+    fn new(n: usize, m: usize, k: usize) -> Self {
         Column {
             v: basis(n * (m + 1)),
             zb: basis(n * m),
             h: vec![T::zero(); (m + 1) * m],
+            hraw: vec![T::zero(); (m + 1) * m],
+            bm: vec![T::zero(); m * k],
             cs: vec![T::zero(); m],
             sn: vec![T::zero(); m],
             g: vec![T::zero(); m + 1],
@@ -79,9 +88,16 @@ impl<T: Scalar> Column<T> {
     /// The open cycle's coefficients `y` (back substitution on the leading
     /// well-conditioned block, so a rank-deficient Hessenberg breaks down
     /// deterministically instead of dividing by about zero) and the solution
-    /// `x0 + Z y` into `out`.
+    /// `x0 + Z y` into `out`, deflating `rec`: `x0 + Z y - U B y`.
     #[allow(clippy::needless_range_loop)]
-    fn correction(&self, m: usize, y: &mut [T], x0: &[T], out: &mut [T]) {
+    fn correction(
+        &self,
+        m: usize,
+        rec: Option<&BlockRecycle<T>>,
+        y: &mut [T],
+        x0: &[T],
+        out: &mut [T],
+    ) {
         let n = out.len();
         out.copy_from_slice(x0);
         let jd = well_conditioned_dim(&self.h, m, self.steps.unwrap_or(0));
@@ -98,6 +114,51 @@ impl<T: Scalar> Column<T> {
                 *o = *o + z * yi;
             }
         }
+        if let Some(rec) = rec {
+            let k = rec.k;
+            for i in 0..k {
+                let t = (0..jd).fold(T::zero(), |a, j| a + self.bm[j * k + i] * y[j]);
+                if t != T::zero() {
+                    for (o, &u) in out.iter_mut().zip(&rec.u[i * n..(i + 1) * n]) {
+                        *o = *o - u * t;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A subspace a block GMRES deflates (GCRO): `k` directions `u` in the solution
+/// space and their images `c = A u` under the operator they were taken on,
+/// orthonormal (each column-major `n x k`). A solve of the same operator with it
+/// ([`BlockGmres::deflating`]) starts every cycle from the residual's part
+/// outside `range(C)` and keeps its Krylov vectors orthogonal to `C`, so the
+/// slow directions the subspace holds are not found again. Taken from a solve by
+/// [`BlockGmres::harvest`]; valid only for the operator of that solve (`c = A u`
+/// is not recomputed), so it serves solves of one operator with different
+/// right-hand sides, not a sequence of operators.
+#[derive(Clone, Debug)]
+pub struct BlockRecycle<T> {
+    n: usize,
+    k: usize,
+    u: Vec<T>,
+    c: Vec<T>,
+}
+
+impl<T> BlockRecycle<T> {
+    /// The subspace's dimension.
+    pub fn dim(&self) -> usize {
+        self.k
+    }
+
+    /// The directions and their images, column-major `n x k` each.
+    pub fn parts(&self) -> (&[T], &[T]) {
+        (&self.u, &self.c)
+    }
+
+    /// Heap bytes of the directions and their images.
+    pub fn heap_bytes(&self) -> u64 {
+        crate::memory::vec_bytes(&self.u) + crate::memory::vec_bytes(&self.c)
     }
 }
 
@@ -177,6 +238,11 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     /// The columns of the last residual check, in column order (their residual
     /// vectors in `w` at these positions).
     chk: Vec<usize>,
+    /// The subspace deflated ([`deflating`](Self::deflating)), with its
+    /// projections of a panel and their partial sums.
+    rec: Option<&'a BlockRecycle<T>>,
+    rproj: Vec<T>,
+    rscratch: Vec<T>,
 }
 
 impl<'a, T, A, M> BlockGmres<'a, T, A, M>
@@ -245,7 +311,7 @@ where
             out: x.clone(),
             x,
             res,
-            cols: (0..s).map(|_| Column::new(n, m)).collect(),
+            cols: (0..s).map(|_| Column::new(n, m, 0)).collect(),
             iters: 0,
             deepest: 0,
             panel: vec![T::zero(); n * s],
@@ -260,7 +326,31 @@ where
             y: vec![T::zero(); m],
             act: Vec::with_capacity(s),
             chk: Vec::with_capacity(s),
+            rec: None,
+            rproj: Vec::new(),
+            rscratch: Vec::new(),
         })
+    }
+
+    /// This solve deflating `rec` (taken by [`harvest`](Self::harvest) from a
+    /// solve of the same operator): every cycle starts from the residual's part
+    /// outside `range(C)` with its correction inside, and every Krylov vector is
+    /// kept orthogonal to `C`. Before the first [`solve`](Self::solve).
+    pub fn deflating(mut self, rec: &'a BlockRecycle<T>) -> Result<Self, RslabError> {
+        if rec.n != self.n {
+            return Err(RslabError::DimensionMismatch {
+                expected: self.n,
+                got: rec.n,
+            });
+        }
+        let (n, s, m, k) = (self.n, self.s, self.m, rec.k);
+        for col in &mut self.cols {
+            col.bm = vec![T::zero(); m * k];
+        }
+        self.rproj = vec![T::zero(); k * s];
+        self.rscratch = vec![T::zero(); n.div_ceil(self.chunk) * k * s];
+        self.rec = Some(rec);
+        Ok(self)
     }
 
     /// Heap bytes the solve holds now: every column's basis as far as it is
@@ -275,10 +365,10 @@ where
             .iter()
             .map(|c| {
                 (c.v.len() + c.zb.len()) as u64 * sz
-                    + vec_bytes(&c.h)
-                    + vec_bytes(&c.cs)
-                    + vec_bytes(&c.sn)
-                    + vec_bytes(&c.g)
+                    + [&c.h, &c.hraw, &c.bm, &c.cs, &c.sn, &c.g]
+                        .into_iter()
+                        .map(vec_bytes)
+                        .sum::<u64>()
             })
             .sum();
         cols + [
@@ -291,10 +381,13 @@ where
             &self.proj2,
             &self.proj_scratch,
             &self.y,
+            &self.rproj,
+            &self.rscratch,
         ]
         .into_iter()
         .map(vec_bytes)
         .sum::<u64>()
+            + self.rec.map_or(0, BlockRecycle::heap_bytes)
             + vec_bytes(&self.bnorm)
             + vec_bytes(&self.res)
             + vec_bytes(&self.wnorm0)
@@ -308,6 +401,11 @@ where
     /// [`solve`](Self::solve) calls (a diagnosis of an unconverged rung).
     pub fn operator(&self) -> &'a A {
         self.op
+    }
+
+    /// The dimension of the subspace deflated (`0` without one).
+    pub fn rec_dim(&self) -> usize {
+        self.rec.map_or(0, |r| r.k)
     }
 
     /// Block iterations over all [`solve`](Self::solve) calls so far.
@@ -433,6 +531,7 @@ where
             let (cb, pb) = (c * n, a * n);
             self.cols[c].correction(
                 m,
+                self.rec,
                 &mut self.y,
                 &self.x[cb..cb + n],
                 &mut self.out[cb..cb + n],
@@ -467,8 +566,34 @@ where
             }
             let cb = c * n;
             self.x[cb..cb + n].copy_from_slice(&self.out[cb..cb + n]);
-            self.cols[c].open(&self.w[a * n..(a + 1) * n], r * self.bnorm[c]);
-            self.deepest = self.deepest.max(1);
+            let rv = &mut self.w[a * n..(a + 1) * n];
+            let beta = match &self.rec {
+                // deflating: the residual's part in `range(C)` first (`x += U C^H r`,
+                // `r -= C C^H r`), the solution handed out moving with it
+                Some(rec) => {
+                    for i in 0..rec.k {
+                        let ci = &rec.c[i * n..(i + 1) * n];
+                        let t = dotc(ci, rv);
+                        for (x, &ck) in rv.iter_mut().zip(ci) {
+                            *x = *x - ck * t;
+                        }
+                        let ui = &rec.u[i * n..(i + 1) * n];
+                        for (x, &u) in self.x[cb..cb + n].iter_mut().zip(ui) {
+                            *x = *x + u * t;
+                        }
+                    }
+                    self.out[cb..cb + n].copy_from_slice(&self.x[cb..cb + n]);
+                    let beta = norm2(rv);
+                    // its residual is the projected one: checked again before it counts
+                    self.res[c] = if beta == 0.0 { Some(0.0) } else { None };
+                    beta
+                }
+                None => r * self.bnorm[c],
+            };
+            if beta > 0.0 {
+                self.cols[c].open(&self.w[a * n..(a + 1) * n], beta);
+                self.deepest = self.deepest.max(1);
+            }
         }
     }
 
@@ -504,11 +629,23 @@ where
             reorth,
             wnorm0,
             reorth_eta,
+            rec,
+            rproj,
+            rscratch,
             ..
         } = self;
         let (cols, act, off, chunk) = (&*cols, &*act, &off[..=sa], *chunk);
         let layers = |a: usize| &cols[act[a].0].v[..];
         let w = &mut w[..sa * n];
+        // deflating: the panel's components in `range(C)` first, kept per step
+        if let Some(rec) = &*rec {
+            ortho_in_pool(ortho_pool, || {
+                panel_project(&rec.c, rec.k, w, sa, n, chunk, rproj, rscratch)
+            });
+            ortho_in_pool(ortho_pool, || {
+                panel_subtract(&rec.c, rec.k, w, sa, n, chunk, rproj)
+            });
+        }
         ortho_in_pool(ortho_pool, || {
             column_project(&layers, off, w, n, chunk, proj1, proj_scratch)
         });
@@ -540,6 +677,11 @@ where
         for a in 0..sa {
             let (c, j) = self.act[a];
             let col = &mut self.cols[c];
+            if let Some(rec) = &self.rec {
+                for i in 0..rec.k {
+                    col.bm[j * rec.k + i] = self.rproj[i * sa + a];
+                }
+            }
             for i in 0..=j {
                 let p = self.off[a] + i;
                 col.h[i * m + j] = if any {
@@ -547,12 +689,14 @@ where
                 } else {
                     self.proj1[p]
                 };
+                col.hraw[i * m + j] = col.h[i * m + j];
             }
             grow(&mut col.zb, (j + 1) * n);
             col.zb[j * n..(j + 1) * n].copy_from_slice(&self.z[a * n..(a + 1) * n]);
             let wa = &self.w[a * n..(a + 1) * n];
             let hn = norm2(wa);
             col.h[(j + 1) * m + j] = T::from_real(hn);
+            col.hraw[(j + 1) * m + j] = col.h[(j + 1) * m + j];
             grow(&mut col.v, (j + 2) * n);
             let next = &mut col.v[(j + 1) * n..(j + 2) * n];
             if hn > 0.0 {
@@ -585,15 +729,147 @@ where
     }
 }
 
+impl<'a, T, A, M> BlockGmres<'a, T, A, M>
+where
+    T: RecycleScalar,
+    A: LinearOperator<T> + ?Sized,
+    M: Preconditioner<T> + ?Sized,
+{
+    /// Up to `k` directions this solve's open cycles found slowest, as a
+    /// [`BlockRecycle`] for later solves of the same operator
+    /// ([`deflating`](Self::deflating)): per open cycle of `d` steps up to `d / 2`
+    /// harmonic-Ritz pairs of smallest magnitude of its `(d+1) x d` relation
+    /// `A Z = V H_bar` (`H_bar^H H_bar g = theta H^H g`) and their directions
+    /// `Z g`, over all columns by ascending `|theta|`, orthonormalized with the
+    /// dependent ones dropped; then their images `C = A U` by one operator
+    /// product of the `k` columns, orthonormalized with `U` along. The images
+    /// are computed rather than taken from the relation (`V H_bar g`): the
+    /// columns' candidates overlap, and orthonormalizing nearly dependent ones
+    /// amplified the relation's rounding to `|A u - c|` of 4e-2. `None` where no
+    /// cycle is open or the solve deflates itself (its relation then has the
+    /// deflated part too).
+    pub fn harvest(&self, k: usize) -> Option<BlockRecycle<T>> {
+        use crate::numeric::dense_eig::harmonic_ritz_smallest;
+        type Cx = num_complex::Complex<f64>;
+        if self.rec.is_some() || k == 0 {
+            return None;
+        }
+        let (n, m) = (self.n, self.m);
+        // every column's candidates: (|theta|, column, theta, g)
+        let mut cands: Vec<(f64, usize, Cx, Vec<Cx>)> = Vec::new();
+        for (c, col) in self.cols.iter().enumerate() {
+            let Some(d) = col.steps.filter(|&d| d > 0) else {
+                continue;
+            };
+            let hb = |i: usize, j: usize| col.hraw[i * m + j].to_c();
+            // `M1 = H_bar^H H_bar`, `M2 = H^H` (row-major `d x d`)
+            let mut m1 = vec![Cx::new(0.0, 0.0); d * d];
+            let mut m2 = vec![Cx::new(0.0, 0.0); d * d];
+            for i in 0..d {
+                for j in 0..d {
+                    m1[i * d + j] = (0..=d).map(|r| hb(r, i).conj() * hb(r, j)).sum();
+                    m2[i * d + j] = hb(j, i).conj();
+                }
+            }
+            // at most half the cycle's depth from one column: the harmonic Ritz pairs of a
+            // short cycle are crude, and deflating crude directions slows the solves it serves
+            // (GCRO-DR's rule, as `gmres_recycled` caps its subspace at half the restart)
+            for (theta, g) in harmonic_ritz_smallest(&m1, &m2, d, k.min(d / 2)) {
+                cands.push((theta.norm(), c, theta, g));
+            }
+        }
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // the directions, orthonormal
+        let mut u: Vec<T> = Vec::new();
+        for (_, c, theta, g) in cands {
+            let kept = u.len() / n;
+            if kept >= k {
+                break;
+            }
+            let d = g.len();
+            let cand = T::combine_ritz(&self.cols[c].zb[..d * n], n, d, &[(theta, g)], k - kept);
+            // a column's Ritz vector the others found too is not new: kept only
+            // where most of it lies outside the kept ones (the DGKS ratio)
+            for v in cand.chunks_exact(n) {
+                orthonormal_into(&mut u, None, v, n, self.reorth_eta);
+            }
+        }
+        let kept = u.len() / n;
+        if kept == 0 {
+            return None;
+        }
+        // their images, orthonormalized with the directions along (`C = A U` stays)
+        // in blocks of at most the solve's width: the operator is applied as the solve applies
+        // it (a matrix-free operator sizes its scratch for that)
+        let mut au = vec![T::zero(); kept * n];
+        for (ui, ai) in u.chunks(self.s * n).zip(au.chunks_mut(self.s * n)) {
+            self.op.apply_block(ui, ai, ui.len() / n);
+        }
+        let (mut uu, mut cc) = (Vec::with_capacity(kept * n), Vec::with_capacity(kept * n));
+        for (ui, ci) in u.chunks_exact(n).zip(au.chunks_exact(n)) {
+            orthonormal_into(
+                &mut cc,
+                Some((&mut uu, ui)),
+                ci,
+                n,
+                crate::constants::RECYCLE_RANK_TOL,
+            );
+        }
+        let k = cc.len() / n;
+        (k > 0).then_some(BlockRecycle { n, k, u: uu, c: cc })
+    }
+}
+
+/// Append `v` to the orthonormal columns `q` (column-major, length `n` each) by
+/// modified Gram-Schmidt, unless it keeps no more than `keep` of its norm (it
+/// lies in their span to that degree). With `along = (p, w)` the same
+/// combination of `w` and `p`'s columns goes to `p`, so a relation
+/// `q_i = A p_i` holds for the appended column too.
+fn orthonormal_into<T: Scalar>(
+    q: &mut Vec<T>,
+    along: Option<(&mut Vec<T>, &[T])>,
+    v: &[T],
+    n: usize,
+    keep: f64,
+) {
+    let mut x = v.to_vec();
+    let mut y = along.as_ref().map(|(_, w)| w.to_vec());
+    let orig = norm2(&x);
+    if orig == 0.0 {
+        return;
+    }
+    for j in 0..q.len() / n {
+        let qj = &q[j * n..(j + 1) * n];
+        let t = dotc(qj, &x);
+        for (a, &b) in x.iter_mut().zip(qj) {
+            *a = *a - b * t;
+        }
+        if let (Some(y), Some((p, _))) = (y.as_mut(), along.as_ref()) {
+            for (a, &b) in y.iter_mut().zip(&p[j * n..(j + 1) * n]) {
+                *a = *a - b * t;
+            }
+        }
+    }
+    let nrm = norm2(&x);
+    if nrm <= keep * orig {
+        return;
+    }
+    let inv = T::from_real(1.0 / nrm);
+    q.extend(x.iter().map(|&a| a * inv));
+    if let (Some(y), Some((p, _))) = (y, along) {
+        p.extend(y.iter().map(|&a| a * inv));
+    }
+}
+
 /// Heap bytes of a [`BlockGmres`] of `s` right-hand sides of length `n` at
 /// restart `m` and reduction chunk `chunk` once its columns' bases are `depth`
 /// vectors deep: the allocations of [`BlockGmres::new`] and the written bases
 /// ([`BlockGmres::resident_bytes`] of a solve at that depth in every column).
 pub(super) fn block_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, depth: usize) -> u64 {
     let sz = std::mem::size_of::<T>();
-    // per column: the basis, its preconditioned steps, the Hessenberg matrix, the two
-    // rotations, `g`
-    let column = n * depth + n * depth.saturating_sub(1) + (m + 1) * m + 2 * m + (m + 1);
+    // per column: the basis, its preconditioned steps, the Hessenberg matrix rotated
+    // and as built, the two rotations, `g`
+    let column = n * depth + n * depth.saturating_sub(1) + 2 * (m + 1) * m + 2 * m + (m + 1);
     // the panels `x`, `out`, `panel`, `z`, `w`; the two projections and their partial
     // sums; `y`
     let panels = 5 * n * s; // lit: the five n x s panels of `BlockGmres::new`
@@ -605,6 +881,15 @@ pub(super) fn block_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, depth: 
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<(usize, usize)>();
     ((s * column + shared) * sz + s * per_rhs + std::mem::size_of::<usize>()) as u64
+}
+
+/// Heap bytes [`BlockGmres::deflating`] adds to a solve of `s` right-hand sides
+/// of length `n` at restart `m` and reduction chunk `chunk` for a subspace of
+/// dimension `k`: the subspace, every column's components on it per step, and
+/// a panel's projections with their partial sums.
+pub(super) fn deflation_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, k: usize) -> u64 {
+    let sz = std::mem::size_of::<T>();
+    ((2 * n * k + s * m * k + k * s + n.div_ceil(chunk.max(1)) * k * s) * sz) as u64
 }
 
 /// Right-preconditioned restarted **block GMRES** for `s` right-hand sides `b`
