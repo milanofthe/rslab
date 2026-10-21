@@ -62,7 +62,7 @@ pub unsafe fn gemm<T: Scalar>(
     // caller's structural choice, the threads only schedule it.
     let go = match mode.parallelism {
         gemm::Parallelism::None => Go::Here,
-        gemm::Parallelism::Rayon(_) => work.go(pieces),
+        gemm::Parallelism::Rayon(_) => work.go::<crate::parallel::Rayon>(pieces),
     };
     let Go::Wide(width) = go else {
         let mode = match mode.parallelism {
@@ -91,7 +91,7 @@ pub unsafe fn gemm<T: Scalar>(
             ..mode
         };
         let (dst, lhs, rhs) = (Ptr(dst), Ptr(lhs as *mut T), Ptr(rhs as *mut T));
-        work.wide(n.div_ceil(per), width, &|b| {
+        work.wide::<crate::parallel::Rayon>(n.div_ceil(per), width, &|b| {
             let (j0, j1) = (b * per, ((b + 1) * per).min(n));
             // SAFETY: the blocks write disjoint columns of `dst`, within
             // the caller's bounds.
@@ -125,7 +125,7 @@ pub unsafe fn gemm<T: Scalar>(
         parallelism: gemm::Parallelism::Rayon(width),
         ..mode
     };
-    work.watch(pieces, width, || {
+    work.watch::<crate::parallel::Rayon, _>(pieces, width, || {
         T::gemm(
             m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
             alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,

@@ -191,7 +191,7 @@ impl Supervariables {
         let n_groups = self.len();
         i32::try_from(pattern.row_idx.len()).ok()?;
         let work = crate::parallel::Work::of(pattern.row_idx.len() as f64, &COMPRESS_RATE);
-        let go = work.go(n_groups);
+        let go = work.go::<crate::parallel::Rayon>(n_groups);
         let k = match go {
             crate::parallel::Go::Wide(k) => k,
             _ => 1,

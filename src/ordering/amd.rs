@@ -67,7 +67,7 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
         }
     };
     let work = crate::parallel::Work::of(nnz as f64, &PERMUTE_RATE);
-    let go = work.go(n);
+    let go = work.go::<crate::parallel::Rayon>(n);
     if let crate::parallel::Go::Wide(k) = go {
         let target = nnz.div_ceil(crate::constants::FINE_PIECES_PER_WORKER * k);
         let mut blocks: Vec<(usize, usize, &mut [usize])> = Vec::new();

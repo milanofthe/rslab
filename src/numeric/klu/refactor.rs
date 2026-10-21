@@ -1,11 +1,9 @@
 //! The numeric-only refactorization on a frozen pattern and pivot order.
 
 use super::*;
-use crate::constants::{
-    GAIN, KLU_HANDOFF_NS, KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER, PIPE_RUN, RATE_EXPLORE,
-    RATE_STALE,
-};
+use crate::constants::{KLU_HANDOFF_NS, KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER, PIPE_RUN};
 use crate::parallel::{Dispatch, Rate, ScalarRates};
+use rspool::constants::{GAIN, RATE_EXPLORE, RATE_STALE};
 
 /// What a unit of replay work costs a thread, learned from the sequential
 /// replays only (see [`Rate`]): its first refactors replay sequentially to

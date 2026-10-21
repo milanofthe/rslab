@@ -1153,7 +1153,7 @@ impl<T: Scalar> SolvePlan<T> {
                 .map(|&(_, lo, hi)| (hi - lo) as usize)
                 .sum::<usize>();
             let take_work = Work::of((adds * nr + pulls.len()) as f64, PULL_RATE.of::<T>());
-            match take_work.go(w.div_ceil(SOLVE_PULL_COLS)) {
+            match take_work.go::<crate::parallel::Rayon>(w.div_ceil(SOLVE_PULL_COLS)) {
                 Go::Wide(k) => {
                     crate::parallel::chunks_on(yc, SOLVE_PULL_COLS * nr, k, take_work, |ci, c| {
                         take(ci * SOLVE_PULL_COLS, c)
@@ -1190,8 +1190,8 @@ impl<T: Scalar> SolvePlan<T> {
         // leaf of the tree (estimated: a node's own sections nest inside).
         let leaves = (0..nt).filter(|&t| kids_ptr[t + 1] == kids_ptr[t]).count();
         let all = Self::sweep_work(self.top_total(), nr, true);
-        match all.go(leaves) {
-            Go::Wide(k) => all.wide(nt, k, &walk),
+        match all.go::<crate::parallel::Rayon>(leaves) {
+            Go::Wide(k) => all.wide::<crate::parallel::Rayon>(nt, k, &walk),
             go => all.serial(go, || (0..nt).for_each(walk)),
         }
     }
@@ -1455,7 +1455,7 @@ impl<T: Scalar> SolvePlan<T> {
         // runs as an ancestor, not inside a subtree's piece).
         let flops = Work::of((m * w * nr) as f64, NODE_GEMM_RATE.of::<T>());
         let go = if par {
-            flops.go(m.div_ceil(SOLVE_GEMM_ROWS))
+            flops.go::<crate::parallel::Rayon>(m.div_ceil(SOLVE_GEMM_ROWS))
         } else {
             Go::Here
         };
