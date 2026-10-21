@@ -1323,7 +1323,7 @@ tuned values, listed by `to_dict`.
 - `nd_seed, nd_init_trials, nd_coarsen_floor, nd_leaf_size` (int): Nested dissection: seed (1), initial bisections (7), coarsest graph size (120), subgraphs ordered by minimum degree (200).
 - `nd_two_hop_ratio, nd_max_imbalance, nd_max_overshoot` (float): Coarsening ratio below which two-hop matching runs (0.85), allowed side imbalance (0.2), separator growth that ends a refinement pass (4).
 - `nd_fm_passes, nd_move_limit` (int): Refinement passes per level (10) and moves without improvement that end one (1 048 576).
-- `nd_parallel_min_vertices, nd_parallel_min_edges` (int): Sizes from which subproblems (4096) and coarsening levels (200 000) run in parallel.
+- `nd_parallel_min_vertices, nd_parallel_min_edges` (int, optional): Sizes from which subproblems and coarsening levels run in parallel; `None` (default): where that is worth it on the pool.
 - `amd_aggressive, amd_dense_alpha, amf_dense_alpha`: Minimum degree: aggressive absorption (True) and the dense-row threshold (10), also of minimum fill.
 - `amalgamation` ({'auto', 'adjacency', 'renumber'}, default 'auto'): How merges reach non-adjacent children; `'auto'` renumbers unless fewer than `path_like_fraction` (0.05) of the internal tree nodes have several children.
 - `relax_min_n` (int, default 1024): Relaxed amalgamation applies from this many unknowns.
@@ -1334,7 +1334,8 @@ tuned values, listed by `to_dict`.
 - `cmod_tiles, cmod_tile_min, cmod_tile_max, trsm_rows` (int): A parallel update splits a node into about 16 column tiles of 32 to 256 columns; rows per task of the LU panel's triangular solve (256).
 - `complex_split_min_ratio, complex_split_tile` (int): Complex products run as real products when their flops are this many times their plane copies (64), in tiles of this edge (256).
 - `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
-- `solve_leaf_subtrees, solve_par_min_work` (int): Triangular solves: leaf subtrees of the parallel sweeps (128), and the work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all (1 048 576).
+- `solve_leaf_subtrees` (int): Triangular solves: leaf subtrees of the parallel sweeps (128).
+- `solve_par_min_work` (int, optional): The work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all; `None` (default): where its work is worth more than one thread there.
 
 #### `Settings.to_dict()`
 
@@ -1350,10 +1351,10 @@ Settings of the KLU (circuit) path.
 - `row_scaling` (bool, default True): Divide each row by its max-magnitude entry before factoring.
 - `btf` (bool, default True): Permute to block upper triangular form first (keep it on).
 - `matching` (bool, default True): Maximum-product row matching (MC64) as the transversal of the block triangular form, so the diagonal-preference pivoting rarely leaves the diagonal; needs `btf`.
-- `parallel` (bool, optional): Per-block parallel factor / refactor over the BTF blocks. `None` (default) is the structural auto gate (several blocks, `par_min_nnz` nonzeros, no dominant block); `True` / `False` force it. The result is bit-identical in every mode.
-- `par_min_nnz` (int, default 8000): Nonzeros from which the auto gate factors blocks in parallel.
-- `par_min_work` (int, default 2e5): Replay work a unit of parallel refactorization must carry, in fmadds (not the unit of `Settings(solve_par_min_work=...)`).
-- `par_min_ratio` (float, default 2.0): Simultaneous work the structure must offer for a parallel refactor.
+- `parallel` (bool, optional): Parallel factor / refactor over the BTF blocks and inside a block. `None` (default): side by side as the work is worth on the pool; `True` / `False` force it. The result is bit-identical in every mode.
+- `par_min_nnz` (int, optional): A fixed gate in place of the time: nonzeros from which the first factor runs its blocks in parallel (no block holding half the columns). Default `None`.
+- `par_min_work` (int, optional): A fixed gate in place of the time: replay work a unit of parallel refactorization must carry, in fmadds (not the unit of `Settings(solve_par_min_work=...)`). Default `None`.
+- `par_min_ratio` (float, optional): With it, the simultaneous work the structure must offer for a parallel refactor. Default `None`.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 
 #### `KluSettings.to_dict()`
