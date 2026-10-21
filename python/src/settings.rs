@@ -141,6 +141,7 @@ fn kind(ty: &str) -> &'static str {
     match ty {
         "bool" => "a bool",
         "f64" => "a float",
+        "Option<usize>" => "a non-negative int or None",
         _ => "a non-negative int",
     }
 }
@@ -188,8 +189,8 @@ plain_knobs! {
     "nd_fm_passes": u32 => ordering.nd.fm_passes;
     "nd_move_limit": usize => ordering.nd.move_limit;
     "nd_max_overshoot": f64 => ordering.nd.max_overshoot;
-    "nd_parallel_min_vertices": usize => ordering.nd.parallel_min_vertices;
-    "nd_parallel_min_edges": usize => ordering.nd.parallel_min_edges;
+    "nd_parallel_min_vertices": Option<usize> => ordering.nd.parallel_min_vertices;
+    "nd_parallel_min_edges": Option<usize> => ordering.nd.parallel_min_edges;
     "amd_aggressive": bool => ordering.amd.aggressive;
     "amd_dense_alpha": f64 => ordering.amd.dense_alpha;
     "amf_dense_alpha": f64 => ordering.amf.dense_alpha;
@@ -217,7 +218,7 @@ plain_knobs! {
     "cmod_tile_max": usize => kernels.cmod_tile_max;
     "trsm_rows": usize => kernels.trsm_rows;
     "solve_leaf_subtrees": usize => solve.leaf_subtrees;
-    "solve_par_min_work": usize => solve.par_min_work;
+    "solve_par_min_work": Option<usize> => solve.par_min_work;
 }
 
 /// Settings of the symmetric LDL^T and the unsymmetric LU factorizations.
@@ -318,9 +319,9 @@ plain_knobs! {
 /// nd_fm_passes, nd_move_limit : int
 ///     Refinement passes per level (10) and moves without improvement that
 ///     end one (1 048 576).
-/// nd_parallel_min_vertices, nd_parallel_min_edges : int
-///     Sizes from which subproblems (4096) and coarsening levels (200 000)
-///     run in parallel.
+/// nd_parallel_min_vertices, nd_parallel_min_edges : int, optional
+///     Sizes from which subproblems and coarsening levels run in parallel;
+///     ``None`` (default): where that is worth it on the pool.
 /// amd_aggressive, amd_dense_alpha, amf_dense_alpha
 ///     Minimum degree: aggressive absorption (True) and the dense-row
 ///     threshold (10), also of minimum fill.
@@ -352,10 +353,12 @@ plain_knobs! {
 ///     times their plane copies (64), in tiles of this edge (256).
 /// use_gemm_schur : bool, default True
 ///     SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
-/// solve_leaf_subtrees, solve_par_min_work : int
-///     Triangular solves: leaf subtrees of the parallel sweeps (128), and the
-///     work (panel entries times right-hand sides, up to four) from which a
-///     sweep runs on the thread pool at all (1 048 576).
+/// solve_leaf_subtrees : int
+///     Triangular solves: leaf subtrees of the parallel sweeps (128).
+/// solve_par_min_work : int, optional
+///     The work (panel entries times right-hand sides, up to four) from which
+///     a sweep runs on the thread pool at all; ``None`` (default): where its
+///     work is worth more than one thread there.
 #[pyclass(name = "Settings", module = "rslab")]
 #[derive(Clone, Default)]
 pub struct PySettings {
@@ -571,17 +574,21 @@ impl PySettings {
 ///     triangular form, so the diagonal-preference pivoting rarely leaves
 ///     the diagonal; needs ``btf``.
 /// parallel : bool, optional
-///     Per-block parallel factor / refactor over the BTF blocks. ``None``
-///     (default) is the structural auto gate (several blocks,
-///     ``par_min_nnz`` nonzeros, no dominant block); ``True`` / ``False``
-///     force it. The result is bit-identical in every mode.
-/// par_min_nnz : int, default 8000
-///     Nonzeros from which the auto gate factors blocks in parallel.
-/// par_min_work : int, default 2e5
-///     Replay work a unit of parallel refactorization must carry, in fmadds
-///     (not the unit of ``Settings(solve_par_min_work=...)``).
-/// par_min_ratio : float, default 2.0
-///     Simultaneous work the structure must offer for a parallel refactor.
+///     Parallel factor / refactor over the BTF blocks and inside a block.
+///     ``None`` (default): side by side as the work is worth on the pool;
+///     ``True`` / ``False`` force it. The result is bit-identical in every
+///     mode.
+/// par_min_nnz : int, optional
+///     A fixed gate in place of the time: nonzeros from which the first
+///     factor runs its blocks in parallel (no block holding half the
+///     columns). Default ``None``.
+/// par_min_work : int, optional
+///     A fixed gate in place of the time: replay work a unit of parallel
+///     refactorization must carry, in fmadds (not the unit of
+///     ``Settings(solve_par_min_work=...)``). Default ``None``.
+/// par_min_ratio : float, optional
+///     With it, the simultaneous work the structure must offer for a
+///     parallel refactor. Default ``None``.
 /// interrupt : Interrupt, optional
 ///     A cancellation flag polled by the numeric phase.
 #[pyclass(name = "KluSettings", module = "rslab")]
@@ -615,15 +622,15 @@ impl PyKluSettings {
                 o.with_pivot_threshold(v.extract().map_err(|_| bad(key, "a float", v))?)
             }
             "par_min_nnz" => rslab::KluSettings {
-                par_min_nnz: v.extract().map_err(|_| bad(key, "an int", v))?,
+                par_min_nnz: Some(v.extract().map_err(|_| bad(key, "an int", v))?),
                 ..o
             },
             "par_min_work" => rslab::KluSettings {
-                par_min_work: v.extract().map_err(|_| bad(key, "an int", v))?,
+                par_min_work: Some(v.extract().map_err(|_| bad(key, "an int", v))?),
                 ..o
             },
             "par_min_ratio" => rslab::KluSettings {
-                par_min_ratio: v.extract().map_err(|_| bad(key, "a float", v))?,
+                par_min_ratio: Some(v.extract().map_err(|_| bad(key, "a float", v))?),
                 ..o
             },
             "matching" => o.with_matching(v.extract().map_err(|_| bad(key, "a bool", v))?),
