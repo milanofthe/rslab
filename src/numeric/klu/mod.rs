@@ -188,9 +188,10 @@ struct KluFactors<T> {
     /// Per-original-row reciprocal scale factor (all 1 when scaling is off).
     rs_inv: Vec<f64>,
     scaled: bool,
-    /// Whether the first factor ran its blocks side by side (decided on the
-    /// blocks' input entries; a refactor decides on the exact replay work
-    /// in `plan` instead). Read by tests only.
+    /// Whether the first factor's blocks were worth factoring side by side
+    /// (decided on the blocks' input entries, and run so once the rate has
+    /// had its probes; a refactor decides on the exact replay work in
+    /// `plan` instead). Read by tests only.
     #[cfg_attr(not(test), allow(dead_code))]
     parallel: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
@@ -231,7 +232,9 @@ struct KluFactors<T> {
     replay_xs: Vec<Vec<T>>,
     /// Which columns the current pipelined replay has done.
     ready: Ready,
-    /// How the current refactor replays each block of `plan.blocks`.
+    /// How the last refactor decided to replay each block of `plan.blocks`
+    /// (it replayed them sequentially instead while the replay rate had its
+    /// probes, and when it explored).
     modes: Vec<Mode>,
 }
 

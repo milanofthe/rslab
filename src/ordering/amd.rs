@@ -67,10 +67,8 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
         }
     };
     let work = crate::parallel::Work::of(nnz as f64, &PERMUTE_RATE);
-    let k = crate::parallel::width(work.time(), n);
-    if k < 2 {
-        PERMUTE_RATE.time(nnz as f64, || fill(0, n, &mut row_idx));
-    } else {
+    let go = work.go(n);
+    if let crate::parallel::Go::Wide(k) = go {
         let target = nnz.div_ceil(crate::constants::FINE_PIECES_PER_WORKER * k);
         let mut blocks: Vec<(usize, usize, &mut [usize])> = Vec::new();
         let mut rest: &mut [usize] = &mut row_idx;
@@ -85,7 +83,9 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
             rest = tail;
             j0 = j1;
         }
-        crate::parallel::for_each_owned(blocks, work, |(j0, j1, out)| fill(j0, j1, out));
+        crate::parallel::for_each_owned_on(blocks, k, work, |(j0, j1, out)| fill(j0, j1, out));
+    } else {
+        work.serial(go, || fill(0, n, &mut row_idx));
     }
 
     CscPattern {

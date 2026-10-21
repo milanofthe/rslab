@@ -680,8 +680,17 @@ pub(super) fn factor_impl<T: Scalar>(
     let max_bn = sym.max_block_size();
     let rate = FACTOR_RATE.of::<T>();
     let entries = sym.nnz as f64;
-    let sampled = !parallel && rate.sample(entries);
-    let started = crate::clock::Instant::now();
+    // The sequential driver while the rate has not had its probes (unless
+    // the policy wants the blocks side by side), measured for it as a probe
+    // or sampled; the parallel one decides on it, and measures it where it
+    // runs serially ([`crate::parallel`]). `On` goes as wide as the pool.
+    let forced = settings.parallel == KluParallel::On;
+    let side = parallel && (forced || !rate.probing(entries));
+    let timing = if side {
+        None
+    } else {
+        rate.begin(entries, false)
+    };
 
     // Numeric output buffers, filled either incrementally block-by-block
     // (sequential: one reused scratch + one reused block buffer, no
@@ -705,7 +714,7 @@ pub(super) fn factor_impl<T: Scalar>(
     let mut scatter_target = vec![0 as Ki; sym.nnz];
     let mut fin_of_pre = vec![0 as Ki; n];
 
-    if !parallel {
+    if !side {
         // Same fill heuristics as the per-block reserves (MNA class ~6x
         // input): caps the doubling-growth copies of the append at one.
         // (The parallel branch replaces these vectors with exact-size
@@ -771,13 +780,17 @@ pub(super) fn factor_impl<T: Scalar>(
                 scatter_target[k as usize] = fin;
             }
         }
-        if sampled {
-            rate.learn(started.elapsed().as_nanos() as f64, entries);
+        if let Some(t) = timing {
+            rate.end(t, entries);
         }
     } else {
         let blocks: Vec<Result<BlockOut<T>, RslabError>> = crate::parallel::map_init(
             nblocks,
-            Work::of(entries, rate),
+            if forced {
+                Work::ns(f64::INFINITY)
+            } else {
+                Work::of(entries, rate)
+            },
             || KluScratch::<T>::new(max_bn),
             |scratch, b| {
                 settings.interrupted()?;

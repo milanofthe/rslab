@@ -41,14 +41,6 @@ pub const SOLVE_DIAG_BLOCK: usize = 64;
 /// Contract: timing.
 pub const SOLVE_GEMM_ROWS: usize = 256;
 
-/// Work of a node's product below its diagonal block from which it runs in
-/// row chunks on the pool, in entries times right-hand sides.
-/// Used by: `supernodal::solve::SolvePlan::fwd_node_gemm`.
-/// Why: about a millisecond of one core; below it the product is short
-/// enough to stay with the task that runs the node.
-/// Contract: timing.
-pub const SOLVE_GEMM_PAR_MIN: usize = 1 << 22;
-
 /// Columns per task of an ancestor's take of the leaf subtrees' terms in the
 /// forward sweep (columns).
 /// Used by: `supernodal::solve::SolvePlan::top_forward_flow`.
@@ -56,12 +48,3 @@ pub const SOLVE_GEMM_PAR_MIN: usize = 1 << 22;
 /// 100 k additions, well above a task's start.
 /// Contract: timing (each column sums its sources in the same order).
 pub const SOLVE_PULL_COLS: usize = 32;
-
-/// Additions of an ancestor's take of the subtrees' terms (sources times
-/// columns times right-hand sides) from which it runs on the pool.
-/// Used by: `supernodal::solve::SolvePlan::top_forward_flow`.
-/// Why: the wide nodes near the root take the terms of every leaf subtree on
-/// the critical path (a 1067-column root of a near-field LU spent 13 ms
-/// there on one thread); below this it is under a millisecond.
-/// Contract: timing.
-pub const SOLVE_PULL_PAR_MIN: usize = 1 << 20;

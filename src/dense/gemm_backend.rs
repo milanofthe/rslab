@@ -54,19 +54,17 @@ pub unsafe fn gemm<T: Scalar>(
     conj_rhs: bool,
     mode: GemmMode,
 ) {
-    let rate = GEMM_RATE.of::<T>();
-    let flops = (m * n * k) as f64;
+    use crate::parallel::{Go, Work};
+    let work = Work::of((m * n * k) as f64, GEMM_RATE.of::<T>());
+    let pieces = n.div_ceil(crate::constants::GEMM_PIECE_MIN_COLS);
     // A product of the parallel path runs on as many threads as it is
     // worth, one included: the path (the kernel and its blocking) is the
     // caller's structural choice, the threads only schedule it.
-    let width = match mode.parallelism {
-        gemm::Parallelism::None => 1,
-        gemm::Parallelism::Rayon(_) => {
-            let pieces = n.div_ceil(crate::constants::GEMM_PIECE_MIN_COLS);
-            crate::parallel::width(flops * rate.ns_per_op(), pieces)
-        }
+    let go = match mode.parallelism {
+        gemm::Parallelism::None => Go::Here,
+        gemm::Parallelism::Rayon(_) => work.go(pieces),
     };
-    if width < 2 {
+    let Go::Wide(width) = go else {
         let mode = match mode.parallelism {
             gemm::Parallelism::None => mode,
             gemm::Parallelism::Rayon(_) => GemmMode {
@@ -74,13 +72,13 @@ pub unsafe fn gemm<T: Scalar>(
                 ..mode
             },
         };
-        return rate.time(flops, || {
+        return work.serial(go, || {
             T::gemm(
                 m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
                 alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
             )
         });
-    }
+    };
     // On a lent pool: the columns in blocks, each the crate's parallel path
     // on one thread (the per-entry sums do not depend on the column
     // blocking, so the result is the rayon path's).
@@ -93,7 +91,7 @@ pub unsafe fn gemm<T: Scalar>(
             ..mode
         };
         let (dst, lhs, rhs) = (Ptr(dst), Ptr(lhs as *mut T), Ptr(rhs as *mut T));
-        crate::parallel::run_width(n.div_ceil(per), width, &|b| {
+        work.wide(n.div_ceil(per), width, &|b| {
             let (j0, j1) = (b * per, ((b + 1) * per).min(n));
             // SAFETY: the blocks write disjoint columns of `dst`, within
             // the caller's bounds.
@@ -127,10 +125,12 @@ pub unsafe fn gemm<T: Scalar>(
         parallelism: gemm::Parallelism::Rayon(width),
         ..mode
     };
-    T::gemm(
-        m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs, alpha,
-        beta, conj_dst, conj_lhs, conj_rhs, mode,
-    )
+    work.watch(pieces, width, || {
+        T::gemm(
+            m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+            alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
+        )
+    })
 }
 
 /// What a multiply-add of a product costs a thread, learned from the

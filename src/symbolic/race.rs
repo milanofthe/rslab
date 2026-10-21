@@ -134,10 +134,12 @@ pub(super) fn race(
     let seed = ordering.nd.seed;
     let n = full.n;
     // The candidates side by side where their orderings are worth more
-    // than one thread; nested dissection is speculated on only then.
-    let entries = full.row_idx.len() as f64;
-    let rate = &super::ordering_graph::ORDER_RATE;
-    let all = crate::parallel::Work::of(entries * r.candidates.len() as f64, rate);
+    // than one thread; nested dissection is speculated on only then. Their
+    // work is estimated at what an ordering has cost per entry (learned
+    // where an ordering runs, `ordering_graph`): a candidate's prefix is
+    // more than its ordering, so the race is not measured for that rate.
+    let ordering_ns = full.row_idx.len() as f64 * super::ordering_graph::ORDER_RATE.ns_per_op();
+    let all = crate::parallel::Work::ns(ordering_ns * r.candidates.len() as f64);
     let side = crate::parallel::width(all.time(), r.candidates.len()) > 1;
     let parallel = n > r.nd_min_n && side;
     // The lower triangle's entry count, as the gate was calibrated on it.
@@ -181,7 +183,7 @@ pub(super) fn race(
                 px
             },
             || {
-                let work = crate::parallel::Work::of(entries * rest.len() as f64, rate);
+                let work = crate::parallel::Work::ns(ordering_ns * rest.len() as f64);
                 crate::parallel::map(rest.len(), work, |i| prefix(graph, ordering, rest[i], seed))
             },
         );

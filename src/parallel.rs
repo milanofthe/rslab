@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use crate::constants::{
     ASSUMED_HELPER_NS, ASSUMED_SECTION_NS, CALIBRATION_LINES, CALIBRATION_PIECE_NS,
-    CALIBRATION_ROUNDS, COMPLEX_OPS, GAIN, PIECES_PER_WORKER, RATE_MIN_NS, RATE_SAMPLE_EVERY,
-    RATE_WEIGHT,
+    CALIBRATION_ROUNDS, COMPLEX_OPS, GAIN, PIECES_PER_WORKER, RATE_EXPLORE, RATE_PROBES,
+    RATE_SAMPLE_EVERY, RATE_STALE, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP,
 };
 
 /// Workers a host lends rslab.
@@ -289,18 +289,26 @@ impl Dispatch {
 
 /// What an op of some work costs, in ns: a prior until runs are measured,
 /// then their running mean. A section's work is its ops at its kind's rate
-/// (a replay's fmadds, a product's multiply-adds, a pass's entries). A
-/// thread measures one run in [`RATE_SAMPLE_EVERY`] of those estimated at
-/// [`RATE_MIN_NS`] or more.
+/// (a replay's fmadds, a product's multiply-adds, a pass's entries). Only
+/// serial runs are measured, never wide ones, whose time mixes the work
+/// with what the hand-off cost: the first [`RATE_PROBES`] sections of a
+/// rate run serially for it ([`probing`](Self::probing)), after them one
+/// serial run in [`RATE_SAMPLE_EVERY`] is measured, a section that goes wide
+/// runs serially now and then to be measured ([`explore`](Self::explore)),
+/// and a wide run far faster than its rate predicts has the rate probe anew
+/// ([`run_watched`]).
 #[derive(Debug)]
 pub struct Rate {
     /// ns per op, as `f32` bits.
     ns: AtomicU32,
-}
-
-thread_local! {
-    /// The runs this thread could have measured, counted for the sampling.
-    static TICK: Cell<u32> = const { Cell::new(0) };
+    /// Runs counted for the sampling.
+    runs: AtomicU32,
+    /// Runs that would go wide, counted for the exploration: a count of its
+    /// own, so that the sampling's steps cannot keep it off the multiples
+    /// it explores at.
+    wide: AtomicU32,
+    /// Serial probes run.
+    probes: AtomicU32,
 }
 
 impl Rate {
@@ -308,7 +316,28 @@ impl Rate {
     pub const fn new(prior: f32) -> Self {
         Rate {
             ns: AtomicU32::new(prior.to_bits()),
+            runs: AtomicU32::new(0),
+            wide: AtomicU32::new(0),
+            probes: AtomicU32::new(0),
         }
+    }
+
+    /// Whether a run of `ops` ops is to run serially, to be measured: the
+    /// rate has not had its probes yet.
+    pub fn probing(&self, ops: f64) -> bool {
+        ops > 0.0 && self.probes.load(Relaxed) < RATE_PROBES
+    }
+
+    /// Whether a run of `ops` ops that would go `k` wide is to run serially
+    /// instead, measured: one in [`RATE_EXPLORE`] times `k - 1`.
+    pub fn explore(&self, ops: f64, k: usize) -> bool {
+        let every = RATE_EXPLORE.saturating_mul(k.saturating_sub(1).max(1) as u32);
+        ops > 0.0 && self.wide.fetch_add(1, Relaxed).is_multiple_of(every)
+    }
+
+    /// The rate is stale: its next runs probe again (warm, all counted).
+    pub fn reprobe(&self) {
+        self.probes.store(1, Relaxed);
     }
 
     /// ns per op.
@@ -316,17 +345,18 @@ impl Rate {
         f32::from_bits(self.ns.load(Relaxed)) as f64
     }
 
-    /// Whether to measure a run of `ops` ops.
+    /// Whether to measure a run of `ops` ops: one in [`RATE_SAMPLE_EVERY`].
     pub fn sample(&self, ops: f64) -> bool {
-        ops * self.ns_per_op() >= RATE_MIN_NS
-            && TICK.with(|t| {
-                let v = t.get();
-                t.set(v.wrapping_add(1));
-                v.is_multiple_of(RATE_SAMPLE_EVERY)
-            })
+        ops > 0.0
+            && self
+                .runs
+                .fetch_add(1, Relaxed)
+                .is_multiple_of(RATE_SAMPLE_EVERY)
     }
 
-    /// A run of `ops` ops took `ns` ns of one thread.
+    /// A serial run of `ops` ops took `ns` ns: the running mean follows a
+    /// faster run at once ([`RATE_WEIGHT_DOWN`]), a slower one only as they
+    /// keep coming ([`RATE_WEIGHT_UP`]).
     pub fn learn(&self, ns: f64, ops: f64) {
         if !(ns > 0.0 && ops > 0.0) {
             return;
@@ -334,20 +364,76 @@ impl Rate {
         let seen = (ns / ops) as f32;
         let _ = self.ns.fetch_update(Relaxed, Relaxed, |b| {
             let old = f32::from_bits(b);
-            Some((old + RATE_WEIGHT * (seen - old)).to_bits())
+            let w = if seen < old {
+                RATE_WEIGHT_DOWN
+            } else {
+                RATE_WEIGHT_UP
+            };
+            Some((old + w * (seen - old)).to_bits())
         });
     }
 
-    /// `f`, a run of `ops` ops on this thread, measured if sampled.
+    /// `f`, a serial run of `ops` ops, measured if it is a probe or
+    /// sampled. The first probe warms the caches and is not counted; the
+    /// first counted one replaces the prior.
     pub fn time<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
-        if !self.sample(ops) {
-            return f();
-        }
-        let t = crate::clock::Instant::now();
+        let timing = self.begin(ops, false);
         let r = f();
-        self.learn(t.elapsed().as_nanos() as f64, ops);
+        if let Some(t) = timing {
+            self.end(t, ops);
+        }
         r
     }
+
+    /// `f`, a serial run of `ops` ops, measured.
+    pub fn measure<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
+        let timing = self.begin(ops, true);
+        let r = f();
+        if let Some(t) = timing {
+            self.end(t, ops);
+        }
+        r
+    }
+
+    /// A serial run of `ops` ops starts: timed if it is a probe or sampled
+    /// ([`time`](Self::time)), or `always`; [`end`](Self::end) learns from
+    /// it. For a run that is no closure.
+    pub(crate) fn begin(&self, ops: f64, always: bool) -> Option<Timing> {
+        if always {
+            return Some(Timing {
+                probe: None,
+                start: crate::clock::Instant::now(),
+            });
+        }
+        let probe = self.probing(ops).then(|| self.probes.fetch_add(1, Relaxed));
+        if probe.is_none() && !self.sample(ops) {
+            return None;
+        }
+        Some(Timing {
+            probe,
+            start: crate::clock::Instant::now(),
+        })
+    }
+
+    /// The run `t` of `ops` ops ([`begin`](Self::begin)) ended.
+    pub(crate) fn end(&self, t: Timing, ops: f64) {
+        let ns = t.start.elapsed().as_nanos() as f64;
+        match t.probe {
+            Some(0) => {}
+            Some(1) if ns > 0.0 && ops > 0.0 => {
+                self.ns.store(((ns / ops) as f32).to_bits(), Relaxed)
+            }
+            _ => self.learn(ns, ops),
+        }
+    }
+}
+
+/// A serial run being measured ([`Rate::begin`]): which probe it is, if
+/// one, and when it started.
+#[derive(Debug)]
+pub(crate) struct Timing {
+    probe: Option<u32>,
+    start: crate::clock::Instant,
 }
 
 /// One [`Rate`] per scalar type of a kind of work: real and complex, double
@@ -385,15 +471,29 @@ impl ScalarRates {
 }
 
 /// A section's work: `ops` at a learned rate, which learns from the
-/// section's runs, or an estimate in ns.
+/// section's serial runs ([`of`](Self::of)), or an estimate in ns
+/// ([`ns`](Self::ns)).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Work<'r> {
     ops: f64,
     rate: Option<&'r Rate>,
 }
 
+/// How a section runs ([`Work::go`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Go {
+    /// Serially on the calling thread, measured as a probe or sampled.
+    Here,
+    /// Serially on the calling thread, measured: it would have gone wide.
+    Explore,
+    /// On this many threads, the run watched for a stale rate.
+    Wide(usize),
+}
+
 impl<'r> Work<'r> {
-    /// `ns` ns of work.
+    /// `ns` ns of work: decided on, never measured. For a section that
+    /// opens sections of its own, or whose work is estimated at a rate other
+    /// runs learn.
     pub(crate) fn ns(ns: f64) -> Self {
         Work {
             ops: ns,
@@ -401,7 +501,11 @@ impl<'r> Work<'r> {
         }
     }
 
-    /// `ops` ops at `rate`.
+    /// `ops` ops at `rate`, which learns from the section's serial runs. The
+    /// section is that work and no other, and opens no section that may go
+    /// wide: a serial run is measured whole, and a section inside it that
+    /// went wide would pass for a cheaper op (else [`ns`](Self::ns) at the
+    /// rate).
     pub(crate) fn of(ops: f64, rate: &'r Rate) -> Self {
         Work {
             ops,
@@ -417,13 +521,62 @@ impl<'r> Work<'r> {
         }
     }
 
-    /// `f` run on this thread, measured for the rate if sampled.
-    fn serial<R>(&self, f: impl FnOnce() -> R) -> R {
-        match self.rate {
-            Some(r) => r.time(self.ops, f),
-            None => f(),
+    /// How the section runs here in `pieces` pieces: serially while its
+    /// rate probes, else on as many threads as it is worth ([`width`]), now
+    /// and then serially instead to keep the rate the code's
+    /// ([`Rate::explore`]).
+    pub(crate) fn go(&self, pieces: usize) -> Go {
+        if self.rate.is_some_and(|r| r.probing(self.ops)) {
+            return Go::Here;
+        }
+        let k = width(self.time(), pieces);
+        if k < 2 {
+            return Go::Here;
+        }
+        if self.rate.is_some_and(|r| r.explore(self.ops, k)) {
+            return Go::Explore;
+        }
+        Go::Wide(k)
+    }
+
+    /// `f`, the section run on this thread as `go` has it: measured for the
+    /// rate as a probe or sampled, or (exploring) every time.
+    pub(crate) fn serial<R>(&self, go: Go, f: impl FnOnce() -> R) -> R {
+        match (self.rate, go) {
+            (Some(r), Go::Explore) => r.measure(self.ops, f),
+            (Some(r), _) => r.time(self.ops, f),
+            (None, _) => f(),
         }
     }
+
+    /// The section as `n` pieces on `k` threads ([`run_width`]), watched
+    /// ([`watch`](Self::watch)).
+    pub(crate) fn wide(&self, n: usize, k: usize, f: &(dyn Fn(usize) + Sync)) {
+        self.watch(n, k, || run_width(n, k, f))
+    }
+
+    /// `f`, the section run wide in `pieces` pieces on `k` threads: timed
+    /// when sampled, and far faster than its rate predicts
+    /// ([`RATE_STALE`]) it has the rate probe anew.
+    pub(crate) fn watch<R>(&self, pieces: usize, k: usize, f: impl FnOnce() -> R) -> R {
+        let Some(rate) = self.rate.filter(|r| r.sample(self.ops)) else {
+            return f();
+        };
+        let t = crate::clock::Instant::now();
+        let r = f();
+        if stale(t.elapsed().as_nanos() as f64, self.time(), pieces, k) {
+            rate.reprobe();
+        }
+        r
+    }
+}
+
+/// Whether a run of `work` ns in `pieces` pieces on `k` threads that took
+/// `spent` ns took less than [`RATE_STALE`] of the time predicted for it.
+fn stale(spent: f64, work: f64, pieces: usize, k: usize) -> bool {
+    let (p, k) = (pieces.max(1), k.clamp(1, pieces.max(1)));
+    let predicted = work * (p.div_ceil(k) as f64 / p as f64) + dispatch().cost(k);
+    spent > 0.0 && spent < RATE_STALE * predicted
 }
 
 /// A lent pool and what a section costs on it.
@@ -675,10 +828,10 @@ fn rayon_run(n: usize, k: usize, f: &(dyn Fn(usize) + Sync)) {
     }
 }
 
-/// `f(i)` for `i` in `0..n` on `k` threads (the calling one among them) of
-/// the lent pool, or of the current rayon pool; serially on this thread for
-/// `k < 2`, without touching either.
-pub(crate) fn run_width(n: usize, k: usize, f: &(dyn Fn(usize) + Sync)) {
+/// Run `f(i)` for `i` in `0..n` on `k` threads (the calling one among them)
+/// of the lent pool, or of the current rayon pool; serially on this thread
+/// for `k < 2`, without touching either.
+pub fn run_width(n: usize, k: usize, f: &(dyn Fn(usize) + Sync)) {
     if n < 2 || k < 2 {
         return (0..n).for_each(f);
     }
@@ -689,25 +842,34 @@ pub(crate) fn run_width(n: usize, k: usize, f: &(dyn Fn(usize) + Sync)) {
     }
 }
 
-/// `n` pieces of `work` together on `k` threads ([`run_width`]); the
-/// work's rate learns from the run when sampled: the threads' time in the
-/// pieces, whatever the section cost and however many threads came.
-pub(crate) fn run_work(n: usize, k: usize, work: Work<'_>, f: &(dyn Fn(usize) + Sync)) {
-    if k < 2 || n < 2 {
-        return work.serial(|| (0..n).for_each(f));
+/// Run `n` pieces of `work` ns of work together: on as many threads as it
+/// is worth here ([`width`]), else serially on this thread.
+pub fn run(n: usize, work: f64, f: &(dyn Fn(usize) + Sync)) {
+    run_width(n, width(work, n), f)
+}
+
+/// Run `n` pieces of `ops` ops of code at `rate` together, on as many
+/// threads as they are worth ([`run`]); the rate learns from the serial
+/// runs (its probes first, see [`Rate`]).
+pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &(dyn Fn(usize) + Sync)) {
+    let work = Work::of(ops, rate);
+    match work.go(n) {
+        Go::Wide(k) => work.wide(n, k, f),
+        go => work.serial(go, || (0..n).for_each(f)),
     }
-    match work.rate {
-        Some(rate) if rate.sample(work.ops) => {
-            let busy = AtomicU64::new(0);
-            run_width(n, k, &|i| {
-                let t = crate::clock::Instant::now();
-                f(i);
-                busy.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
-            });
-            rate.learn(busy.into_inner() as f64, work.ops);
-        }
-        _ => run_width(n, k, f),
+}
+
+/// [`run_width`] of `n` pieces of `work` ns on `k` threads, timed if
+/// `timed`: whether it took less than [`RATE_STALE`] of the time predicted
+/// for it (the rates its work was estimated at are stale).
+pub fn run_watched(n: usize, k: usize, work: f64, timed: bool, f: &(dyn Fn(usize) + Sync)) -> bool {
+    if !timed {
+        run_width(n, k, f);
+        return false;
     }
+    let t = crate::clock::Instant::now();
+    run_width(n, k, f);
+    stale(t.elapsed().as_nanos() as f64, work, n, k)
 }
 
 /// Items per piece for `n` items on `k` threads: about
@@ -718,14 +880,23 @@ fn piece_len(n: usize, k: usize) -> usize {
 
 /// `f(i)` for every `i` in `0..n`, `work` all of them.
 pub(crate) fn for_each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
-    let k = width(work.time(), n);
-    if k < 2 {
-        return work.serial(|| (0..n).for_each(&f));
-    }
+    let k = match work.go(n) {
+        Go::Wide(k) => k,
+        go => return work.serial(go, || (0..n).for_each(&f)),
+    };
     let len = piece_len(n, k);
-    run_work(n.div_ceil(len), k, work, &|p| {
+    work.wide(n.div_ceil(len), k, &|p| {
         (p * len..((p + 1) * len).min(n)).for_each(&f)
     });
+}
+
+/// `f(i)` for every `i` in `0..n`, each its own piece (pieces of very
+/// unequal work, such as the walks of a task tree), `work` all of them.
+pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
+    match work.go(n) {
+        Go::Wide(k) => work.wide(n, k, &f),
+        go => work.serial(go, || (0..n).for_each(&f)),
+    }
 }
 
 /// `f(k, chunk)` for every chunk of `size` entries of `v` (the last one
@@ -737,14 +908,27 @@ pub(crate) fn chunks_mut<T: Send>(
     f: impl Fn(usize, &mut [T]) + Sync + Send,
 ) {
     let size = size.max(1);
-    let (len, n) = (v.len(), v.len().div_ceil(size));
-    let k = width(work.time(), n);
-    if k < 2 {
-        return work.serial(|| v.chunks_mut(size).enumerate().for_each(|(i, c)| f(i, c)));
+    match work.go(v.len().div_ceil(size)) {
+        Go::Wide(k) => chunks_on(v, size, k, work, f),
+        go => work.serial(go, || {
+            v.chunks_mut(size).enumerate().for_each(|(i, c)| f(i, c))
+        }),
     }
+}
+
+/// [`chunks_mut`] on `k` threads, the decision taken ([`Work::go`]).
+pub(crate) fn chunks_on<T: Send>(
+    v: &mut [T],
+    size: usize,
+    k: usize,
+    work: Work<'_>,
+    f: impl Fn(usize, &mut [T]) + Sync + Send,
+) {
+    let size = size.max(1);
+    let (len, n) = (v.len(), v.len().div_ceil(size));
     let base = SendPtr(v.as_mut_ptr());
     let per = piece_len(n, k);
-    run_work(n.div_ceil(per), k, work, &|q| {
+    work.wide(n.div_ceil(per), k, &|q| {
         for c in q * per..((q + 1) * per).min(n) {
             let (a, b) = (c * size, ((c + 1) * size).min(len));
             // SAFETY: the chunks are disjoint ranges of `v`, which outlives
@@ -764,16 +948,18 @@ pub(crate) fn zip_mut<A: Sync, S: Send>(
     f: impl Fn(usize, &A, &mut S) + Sync + Send,
 ) {
     let n = items.len().min(scratch.len());
-    let k = width(work.time(), n);
-    if k < 2 {
-        return work.serial(|| {
-            for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
-                f(i, a, s);
-            }
-        });
-    }
+    let k = match work.go(n) {
+        Go::Wide(k) => k,
+        go => {
+            return work.serial(go, || {
+                for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
+                    f(i, a, s);
+                }
+            })
+        }
+    };
     let base = SendPtr(scratch.as_mut_ptr());
-    run_work(n, k, work, &|i| {
+    work.wide(n, k, &|i| {
         // SAFETY: piece `i` alone holds `scratch[i]`.
         f(i, &items[i], unsafe { &mut *base.get().add(i) })
     });
@@ -785,16 +971,25 @@ pub(crate) fn map<R: Send>(
     work: Work<'_>,
     f: impl Fn(usize) -> R + Sync + Send,
 ) -> Vec<R> {
-    let k = width(work.time(), n);
-    if k < 2 {
-        return work.serial(|| (0..n).map(f).collect());
+    match work.go(n) {
+        Go::Wide(k) => map_on(n, k, work, f),
+        go => work.serial(go, || (0..n).map(f).collect()),
     }
+}
+
+/// [`map`] on `k` threads, the decision taken ([`Work::go`]).
+pub(crate) fn map_on<R: Send>(
+    n: usize,
+    k: usize,
+    work: Work<'_>,
+    f: impl Fn(usize) -> R + Sync + Send,
+) -> Vec<R> {
     let mut out: Vec<std::mem::MaybeUninit<R>> = Vec::with_capacity(n);
     // SAFETY: every slot is written below before it is read.
     unsafe { out.set_len(n) };
     let base = SendPtr(out.as_mut_ptr());
     let len = piece_len(n, k);
-    run_work(n.div_ceil(len), k, work, &|p| {
+    work.wide(n.div_ceil(len), k, &|p| {
         for i in p * len..((p + 1) * len).min(n) {
             // SAFETY: piece `p` alone writes slot `i`.
             unsafe { (*base.get().add(i)).write(f(i)) };
@@ -811,14 +1006,15 @@ pub(crate) fn map_owned<A: Send, R: Send>(
     work: Work<'_>,
     f: impl Fn(A) -> R + Sync + Send,
 ) -> Vec<R> {
-    if width(work.time(), items.len()) < 2 {
-        return work.serial(|| items.into_iter().map(f).collect());
-    }
+    let k = match work.go(items.len()) {
+        Go::Wide(k) => k,
+        go => return work.serial(go, || items.into_iter().map(f).collect()),
+    };
     let slots: Vec<std::sync::Mutex<Option<A>>> = items
         .into_iter()
         .map(|a| std::sync::Mutex::new(Some(a)))
         .collect();
-    map(slots.len(), work, |i| match lock(&slots[i]).take() {
+    map_on(slots.len(), k, work, |i| match lock(&slots[i]).take() {
         Some(a) => f(a),
         None => unreachable!("every item is taken once"),
     })
@@ -831,18 +1027,20 @@ pub(crate) fn map_init<S, R: Send>(
     init: impl Fn() -> S + Sync + Send,
     f: impl Fn(&mut S, usize) -> R + Sync + Send,
 ) -> Vec<R> {
-    let k = width(work.time(), n);
-    if k < 2 {
-        return work.serial(|| {
-            let mut s = init();
-            (0..n).map(|i| f(&mut s, i)).collect()
-        });
-    }
+    let k = match work.go(n) {
+        Go::Wide(k) => k,
+        go => {
+            return work.serial(go, || {
+                let mut s = init();
+                (0..n).map(|i| f(&mut s, i)).collect()
+            })
+        }
+    };
     let len = piece_len(n, k);
     let pieces = n.div_ceil(len);
     let mut out: Vec<Vec<R>> = (0..pieces).map(|_| Vec::new()).collect();
     let base = SendPtr(out.as_mut_ptr());
-    run_work(pieces, k, work, &|p| {
+    work.wide(pieces, k, &|p| {
         let mut s = init();
         let part: Vec<R> = (p * len..((p + 1) * len).min(n))
             .map(|i| f(&mut s, i))
@@ -855,10 +1053,32 @@ pub(crate) fn map_init<S, R: Send>(
 
 /// `f(item)` for every item of `items`, consumed, `work` all of them.
 pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(A) + Sync + Send) {
-    if width(work.time(), items.len()) < 2 {
-        return work.serial(|| items.into_iter().for_each(f));
+    match work.go(items.len()) {
+        Go::Wide(k) => for_each_owned_on(items, k, work, f),
+        go => work.serial(go, || items.into_iter().for_each(f)),
     }
-    map_owned(items, work, f);
+}
+
+/// [`for_each_owned`] on `k` threads, the decision taken ([`Work::go`]).
+pub(crate) fn for_each_owned_on<A: Send>(
+    items: Vec<A>,
+    k: usize,
+    work: Work<'_>,
+    f: impl Fn(A) + Sync + Send,
+) {
+    let slots: Vec<std::sync::Mutex<Option<A>>> = items
+        .into_iter()
+        .map(|a| std::sync::Mutex::new(Some(a)))
+        .collect();
+    let n = slots.len();
+    let len = piece_len(n, k);
+    work.wide(n.div_ceil(len), k, &|p| {
+        for slot in &slots[p * len..((p + 1) * len).min(n)] {
+            if let Some(a) = lock(slot).take() {
+                f(a);
+            }
+        }
+    });
 }
 
 /// `v` sorted by `key`, unstably: on rayon in parallel where `work` is
@@ -868,22 +1088,35 @@ pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
     work: Work<'_>,
     key: impl Fn(&T) -> K + Sync + Send,
 ) {
-    if lent().is_some() || width(work.time(), v.len()) < 2 {
-        return work.serial(|| v.sort_unstable_by_key(key));
-    }
+    let go = if lent().is_some() {
+        Go::Here
+    } else {
+        work.go(v.len())
+    };
+    let Go::Wide(k) = go else {
+        return work.serial(go, || v.sort_unstable_by_key(key));
+    };
     use rayon::prelude::*;
-    v.par_sort_unstable_by_key(key)
+    let n = v.len();
+    work.watch(n, k, || v.par_sort_unstable_by_key(key))
 }
 
 /// Whether `f(i)` holds for some `i` in `0..n`, `work` all of them.
 pub(crate) fn any(n: usize, work: Work<'_>, f: impl Fn(usize) -> bool + Sync + Send) -> bool {
-    if width(work.time(), n) < 2 {
-        return work.serial(|| (0..n).any(f));
-    }
+    let k = match work.go(n) {
+        Go::Wide(k) => k,
+        go => return work.serial(go, || (0..n).any(f)),
+    };
     let found = std::sync::atomic::AtomicBool::new(false);
-    for_each(n, work, |i| {
-        if !found.load(Relaxed) && f(i) {
-            found.store(true, Relaxed);
+    let len = piece_len(n, k);
+    work.wide(n.div_ceil(len), k, &|p| {
+        for i in p * len..((p + 1) * len).min(n) {
+            if found.load(Relaxed) {
+                return;
+            }
+            if f(i) {
+                found.store(true, Relaxed);
+            }
         }
     });
     found.into_inner()
@@ -896,9 +1129,15 @@ pub(crate) fn join<A: Send, B: Send>(
     a: impl FnOnce() -> A + Send,
     b: impl FnOnce() -> B + Send,
 ) -> (A, B) {
-    if width(work.time(), 2) < 2 {
-        return (a(), b());
+    let go = work.go(2);
+    if !matches!(go, Go::Wide(_)) {
+        return work.serial(go, || (a(), b()));
     }
+    work.watch(2, 2, || join_on(a, b))
+}
+
+/// [`join`] side by side.
+fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) {
     match current() {
         Some(l) => {
             let (mut a, mut b) = (Some(a), Some(b));
@@ -990,17 +1229,25 @@ pub(crate) fn scope<'s, R: Send>(
     work: Work<'_>,
     body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send + 's,
 ) -> R {
-    if width(work.time(), usize::MAX) < 2 {
-        let queue = std::sync::Mutex::new(std::collections::VecDeque::new());
-        let r = body(&Scope(ScopeOn::Here(&queue)));
-        loop {
-            let task = lock(&queue).pop_front();
-            match task {
-                Some(task) => task(&Scope(ScopeOn::Here(&queue))),
-                None => return r,
+    let go = work.go(usize::MAX);
+    let Go::Wide(k) = go else {
+        return work.serial(go, || {
+            let queue = std::sync::Mutex::new(std::collections::VecDeque::new());
+            let r = body(&Scope(ScopeOn::Here(&queue)));
+            loop {
+                let task = lock(&queue).pop_front();
+                match task {
+                    Some(task) => task(&Scope(ScopeOn::Here(&queue))),
+                    None => return r,
+                }
             }
-        }
-    }
+        });
+    };
+    work.watch(usize::MAX, k, || scope_on(body))
+}
+
+/// [`scope`] on the pool.
+fn scope_on<'s, R: Send>(body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send + 's) -> R {
     match current() {
         Some(l) => {
             let (mut body, mut r) = (Some(body), None);
@@ -1077,8 +1324,39 @@ mod tests {
             r.learn(1e4, 1e4);
         }
         assert!((r.ns_per_op() - 1.0).abs() < 1e-3, "{}", r.ns_per_op());
-        // a run too small to measure is never sampled
-        assert!(!(0..64).any(|_| r.sample(1.0)));
+        // down fast, up slow: one slower run moves the mean a little only
+        r.learn(1e5, 1e4);
+        assert!((r.ns_per_op() - 1.9).abs() < 1e-3, "{}", r.ns_per_op());
+        // and a faster one half the way at once
+        r.learn(1e3, 1e4);
+        assert!((r.ns_per_op() - 1.0).abs() < 1e-3, "{}", r.ns_per_op());
+        // a run of no work is never sampled, any other now and then
+        assert!(!(0..64).any(|_| r.sample(0.0)));
+        assert!((0..64).any(|_| r.sample(1.0)));
+        // the probes: the first not counted, the next replaces the prior
+        let p = Rate::new(1e6);
+        assert!(p.probing(1.0));
+        for _ in 0..RATE_PROBES {
+            p.time(1e3, || {
+                std::thread::sleep(std::time::Duration::from_micros(100))
+            });
+        }
+        assert!(!p.probing(1.0));
+        assert!(p.ns_per_op() < 1e6, "{}", p.ns_per_op());
+        p.reprobe();
+        assert!(p.probing(1.0));
+        // a wide run explores once in RATE_EXPLORE (on two threads), however
+        // the samples before and between fell
+        let e = Rate::new(1.0);
+        let _ = e.sample(1.0);
+        let explored = (0..2 * RATE_EXPLORE)
+            .filter(|_| {
+                let x = e.explore(1.0, 2);
+                let _ = e.sample(1.0);
+                x
+            })
+            .count();
+        assert_eq!(explored, 2);
         let s = ScalarRates::new(1.0);
         assert_eq!(s.of::<f64>().ns_per_op(), 1.0);
         assert_eq!(
@@ -1123,6 +1401,15 @@ mod tests {
             assert_eq!(away.load(Relaxed), 0, "tiny work left the thread");
             let v = map(1000, Work::ns(1e9), |i| i * 2);
             assert!(v.iter().enumerate().all(|(i, &x)| x == 2 * i));
+            // a rate that has not had its probes runs its sections here,
+            // however large they look at its prior
+            let r = Rate::new(1e6);
+            for_each(64, Work::of(1e9, &r), |_| {
+                if std::thread::current().id() != me {
+                    away.fetch_add(1, Relaxed);
+                }
+            });
+            assert_eq!(away.load(Relaxed), 0, "a probe left the thread");
         });
     }
 }

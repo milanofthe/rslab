@@ -137,7 +137,7 @@ fn a_sweep_of_serial_factorizations_does_not_nest() {
 #[test]
 fn a_sweep_of_parallel_factorizations_and_solves_does_not_nest() {
     let mut solver = SolverSettings::default().with_threads(Threads::Fixed(2));
-    solver.solve.par_min_work = 0;
+    solver.solve.par_min_work = Some(0);
     factor_sweep(solver, 8);
 }
 

@@ -124,26 +124,60 @@ pub const CALIBRATION_PIECE_NS: u64 = 5_000;
 /// Contract: timing.
 pub const CALIBRATION_LINES: usize = 8;
 
-/// A thread measures one in this many of the runs a
-/// [`Rate`](crate::parallel::Rate) could learn from (runs).
+/// A [`Rate`](crate::parallel::Rate) measures one in this many of its
+/// serial runs (runs).
 /// Used by: `parallel::Rate::sample`.
-/// Why: two clock reads per sampled run, too few to show.
+/// Why: two clock reads, a few ns a run on average even for the smallest
+/// sections, whose rate decides as much as a large one's.
 /// Contract: timing.
 pub const RATE_SAMPLE_EVERY: u32 = 16;
 
-/// A [`Rate`](crate::parallel::Rate) learns only from runs it estimates at
-/// this many ns or more (ns).
-/// Used by: `parallel::Rate::sample`.
-/// Why: two clock reads do not show against it, and the rate is updated
-/// rarely enough that the threads do not contend for it.
+/// The first runs of a [`Rate`](crate::parallel::Rate)'s sections run
+/// serially and are measured, the first of them (cold caches) not counted
+/// (runs).
+/// Used by: `parallel::Rate::probing`, `parallel::Rate::time`.
+/// Why: the rate a section's width is decided on comes from runs on one
+/// thread, never from wide ones, whose time mixes the work with what the
+/// hand-off cost; a rate learned from them would keep its sections wide or
+/// serial whatever the work.
 /// Contract: timing.
-pub const RATE_MIN_NS: f64 = 2_000.0;
+pub const RATE_PROBES: u32 = 4;
 
-/// The weight of a new measurement in a rate's running mean (1).
-/// Used by: `parallel::Rate::learn`.
-/// Why: a few runs move it, one outlier does not.
+/// A wide run (one in [`RATE_SAMPLE_EVERY`] is timed) that takes less than
+/// this fraction of the time its rate predicts shows the rate stale: the
+/// rate probes anew (1).
+/// Used by: `parallel::Work::watch`, `parallel::run_watched`,
+/// `KluSolver::refactor`.
+/// Why: the code got cheaper than its rate since (warm caches, a smaller
+/// scalar's kernel), and a rate learned only from serial runs would not see
+/// it while its sections run wide.
 /// Contract: timing.
-pub const RATE_WEIGHT: f32 = 0.25;
+pub const RATE_STALE: f64 = 0.5;
+
+/// A section that would run on `k` threads runs serially, measured, once
+/// in this many times `k - 1` runs (runs).
+/// Used by: `parallel::Rate::explore`, `KluSolver::refactor` (how often a
+/// refactor decides without the surcharges its parallel replays learn).
+/// Why: its rate stays the code's as it is now, for about a percent of the
+/// section's time.
+/// Contract: timing.
+pub const RATE_EXPLORE: u32 = 100;
+
+/// The weight of a new measurement in a rate's running mean toward less
+/// time (1).
+/// Used by: `parallel::Rate::learn`.
+/// Why: interruptions only ever add time to a run, so the mean follows a
+/// faster run at once and a slower one only as they keep coming
+/// ([`RATE_WEIGHT_UP`]).
+/// Contract: timing.
+pub const RATE_WEIGHT_DOWN: f32 = 0.5;
+
+/// The weight of a new measurement in a rate's running mean toward more
+/// time (1).
+/// Used by: `parallel::Rate::learn`.
+/// Why: see [`RATE_WEIGHT_DOWN`].
+/// Contract: timing.
+pub const RATE_WEIGHT_UP: f32 = 0.1;
 
 /// What a complex multiply-add costs against a real one, the factor
 /// between the real and the complex prior of every rate (1).
@@ -154,7 +188,9 @@ pub const COMPLEX_OPS: f32 = 4.0;
 
 /// ns per multiply-add of a dense product (`m n k` of a GEMM), before any
 /// is measured (ns per multiply-add).
-/// Used by: `dense::gemm_backend::gemm`, `numeric::supernodal::node`.
+/// Used by: `dense::gemm_backend::gemm`, `numeric::supernodal::node`,
+/// `supernodal::solve` (a node's products, the sweeps of a block of
+/// right-hand sides).
 /// Why: a SIMD kernel's rate with its packing.
 /// Machine: a prior, replaced by what the sequential products measure.
 /// Contract: timing.
@@ -181,7 +217,8 @@ pub const SOLVE_NS_PER_ENTRY: f32 = 0.5;
 /// transpose, a fill, a comparison), before any is measured (ns per entry).
 /// Used by: the analysis passes (`ordering::amd`, `scaling::mc64`,
 /// `lu::solver`, `symbolic::supervariables`), the zero fill of a factor,
-/// the Krylov reductions.
+/// the Krylov reductions, an ancestor's take of the terms accumulated for
+/// it (`supernodal::solve`).
 /// Why: a streamed entry and a random access.
 /// Machine: a prior, replaced by what the passes measure.
 /// Contract: timing.

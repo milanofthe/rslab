@@ -191,9 +191,13 @@ impl Supervariables {
         let n_groups = self.len();
         i32::try_from(pattern.row_idx.len()).ok()?;
         let work = crate::parallel::Work::of(pattern.row_idx.len() as f64, &COMPRESS_RATE);
-        let k = crate::parallel::width(work.time(), n_groups);
+        let go = work.go(n_groups);
+        let k = match go {
+            crate::parallel::Go::Wide(k) => k,
+            _ => 1,
+        };
         let blocks = (crate::constants::FINE_PIECES_PER_WORKER * k).clamp(1, n_groups.max(1));
-        let parts: Vec<(Vec<i32>, Vec<i32>)> = crate::parallel::map(blocks, work, |b| {
+        let part = |b: usize| {
             let (g0, g1) = (b * n_groups / blocks, (b + 1) * n_groups / blocks);
             let (mut lens, mut rows) = (Vec::with_capacity(g1 - g0), Vec::new());
             let mut col: Vec<i32> = Vec::new();
@@ -213,7 +217,11 @@ impl Supervariables {
                 rows.extend_from_slice(&col);
             }
             (lens, rows)
-        });
+        };
+        let parts: Vec<(Vec<i32>, Vec<i32>)> = match go {
+            crate::parallel::Go::Wide(k) => crate::parallel::map_on(blocks, k, work, part),
+            go => work.serial(go, || (0..blocks).map(part).collect()),
+        };
         let mut col_ptr = Vec::with_capacity(n_groups + 1);
         col_ptr.push(0i32);
         let mut row_idx = Vec::with_capacity(parts.iter().map(|p| p.1.len()).sum());

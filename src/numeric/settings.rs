@@ -411,8 +411,8 @@ impl Default for KernelSettings {
 
 /// Scheduling of the supernodal triangular solves. The result does not
 /// depend on the thread count; these change at most the rounding. The nodes'
-/// products run as GEMMs, the large ones in row chunks on the pool
-/// ([`SOLVE_GEMM_PAR_MIN`](crate::constants::SOLVE_GEMM_PAR_MIN)).
+/// products run as GEMMs, in row chunks on the pool where their work is
+/// worth it there ([`crate::parallel`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolveSettings {
     /// Independent leaf subtrees the tree is cut into for the parallel
