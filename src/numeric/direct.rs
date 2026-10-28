@@ -108,6 +108,102 @@ pub(crate) trait SolveCore<T: Scalar> {
     fn counter(&self) -> &SolveCounter;
     /// The works of its own `solve*` calls ([`WorkPool`]).
     fn works(&self) -> &WorkPool<T>;
+    /// The determinant of the matrix that was factored, from the pivots,
+    /// the permutations and the scalings.
+    fn log_det_raw(&self) -> Result<LogDet<T>, RslabError>;
+}
+
+/// A determinant as `phase * exp(log_abs)`: a product of many pivots
+/// neither under- nor overflows in this form. `phase` has unit modulus
+/// (`+-1` for a real field), or is zero for a zero factor.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LogDet<T> {
+    phase: T,
+    log_abs: f64,
+}
+
+impl<T: Scalar> LogDet<T> {
+    pub(crate) fn one() -> Self {
+        Self {
+            phase: T::one(),
+            log_abs: 0.0,
+        }
+    }
+
+    /// Multiply by `v`.
+    pub(crate) fn mul(&mut self, v: T) {
+        let m = v.magnitude();
+        if m == 0.0 {
+            self.phase = T::zero();
+            self.log_abs = f64::NEG_INFINITY;
+            return;
+        }
+        // Renormalized every step, so the phase stays on the unit circle.
+        let p = self.phase * v * T::from_real(1.0 / m);
+        self.phase = p * T::from_real(1.0 / p.magnitude().max(f64::MIN_POSITIVE));
+        self.log_abs += m.ln();
+    }
+
+    /// Divide by `v`.
+    pub(crate) fn div(&mut self, v: T) {
+        let m = v.magnitude();
+        self.mul(v.conj() * T::from_real(1.0 / (m * m)));
+    }
+
+    /// Divide by the positive real `s` (a scaling).
+    pub(crate) fn div_scale(&mut self, s: f64) {
+        self.log_abs -= s.ln();
+    }
+
+    /// Multiply by the sign of the permutation `p`.
+    pub(crate) fn permutation(&mut self, p: &[usize]) {
+        let mut seen = vec![false; p.len()];
+        let mut odd = false;
+        for start in 0..p.len() {
+            let mut i = start;
+            let mut len = 0usize;
+            while !seen[i] {
+                seen[i] = true;
+                i = p[i];
+                len += 1;
+            }
+            if len > 0 && len.is_multiple_of(2) {
+                odd = !odd;
+            }
+        }
+        if odd {
+            self.phase = T::zero() - self.phase;
+        }
+    }
+
+    pub(crate) fn parts(self) -> (T, f64) {
+        (self.phase, self.log_abs)
+    }
+}
+
+/// [`SolveCore::log_det_raw`], refused for a statically perturbed factor:
+/// its determinant is that of the perturbed matrix.
+pub(crate) fn log_det<T: Scalar, S: SolveCore<T>>(
+    s: &S,
+    n_perturbed: usize,
+) -> Result<(T, f64), RslabError> {
+    if n_perturbed > 0 {
+        return Err(RslabError::InvalidInput(format!(
+            "{}: {n_perturbed} pivots were lifted by the static floor, the factor's              determinant is not that of the matrix",
+            S::NAME
+        )));
+    }
+    Ok(s.log_det_raw()?.parts())
+}
+
+/// The dense inverse, column-major, as one block solve against the identity.
+pub(crate) fn inverse<T: Scalar, S: SolveCore<T>>(s: &S) -> Result<Vec<T>, RslabError> {
+    let n = s.dim();
+    let mut e = vec![T::zero(); n * n];
+    for i in 0..n {
+        e[i * n + i] = T::one();
+    }
+    solve(s, &e, n, false)
 }
 
 fn record<T: Scalar, S: SolveCore<T>>(s: &S, rhs: usize, t: crate::clock::Instant, steps: usize) {
@@ -294,6 +390,33 @@ macro_rules! direct_solver {
                 $crate::numeric::direct::solve_refined(self, a, b, policy)
             }
 
+            /// The determinant of `A` as `(phase, log|det A|)`: `phase` has unit
+            /// modulus (`+-1` for a real field) and the log form neither under-
+            /// nor overflows. The pivots, the permutations and the scalings are
+            /// all accounted for. A factor whose pivots the static floor lifted
+            /// ([`n_perturbed`](Self::n_perturbed) `> 0`) belongs to a perturbed
+            /// matrix and is refused with [`RslabError::InvalidInput`].
+            ///
+            /// [`RslabError::InvalidInput`]: $crate::RslabError::InvalidInput
+            pub fn log_det(&self) -> Result<(T, f64), $crate::RslabError> {
+                $crate::numeric::direct::log_det(self, $solver::n_perturbed(self))
+            }
+
+            /// The determinant of `A`, `phase * exp(log|det A|)` of
+            /// [`log_det`](Self::log_det): zero or infinite where it under- or
+            /// overflows.
+            pub fn det(&self) -> Result<T, $crate::RslabError> {
+                let (phase, log_abs) = $solver::log_det(self)?;
+                Ok(phase * T::from_real(log_abs.exp()))
+            }
+
+            /// The dense inverse `A^-1`, column-major `n x n` as
+            /// [`solve_many`](Self::solve_many) returns it, from one block solve
+            /// against the identity.
+            pub fn inverse(&self) -> Result<Vec<T>, $crate::RslabError> {
+                $crate::numeric::direct::inverse(self)
+            }
+
             /// Refine an existing iterate `x` of `A x = b` in place.
             pub fn refine_into<A: $crate::refine::RefineOperator<T> + ?Sized>(
                 &self,
@@ -356,6 +479,15 @@ macro_rules! direct_solver {
             }
             fn n_perturbed(&self) -> usize {
                 $solver::n_perturbed(self)
+            }
+            fn log_det(&self) -> Result<(T, f64), $crate::RslabError> {
+                $solver::log_det(self)
+            }
+            fn det(&self) -> Result<T, $crate::RslabError> {
+                $solver::det(self)
+            }
+            fn inverse(&self) -> Result<Vec<T>, $crate::RslabError> {
+                $solver::inverse(self)
             }
             fn diagnostics(&self) -> $crate::Diagnostics {
                 $solver::diagnostics(self)

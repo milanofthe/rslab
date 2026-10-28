@@ -550,3 +550,31 @@ def test_klu_factors_reproduce_the_matrix(dtype, row_scaling):
     f.refactor(A.data * 2.0)
     A = A * 2.0
     assert reconstruction_error() < tol
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.complex128])
+def test_det_and_inverse_match_numpy(dtype):
+    rng = np.random.default_rng(31)
+    n = 40
+    A = rng.standard_normal((n, n)).astype(dtype)
+    if np.iscomplexobj(A):
+        A += 1j * rng.standard_normal((n, n))
+    S = A + A.T
+    sign, logabs = np.linalg.slogdet(A)
+    for f in (rslab.lu(sp.csc_matrix(A)), rslab.klu(sp.csc_matrix(A))):
+        phase, log_abs = f.log_det()
+        assert abs(log_abs - logabs) < 1e-12 and abs(phase - sign) < 1e-12
+        assert abs(f.det() - np.linalg.det(A)) <= 1e-10 * abs(np.linalg.det(A))
+        X = f.inverse()
+        assert X.shape == (n, n) and np.abs(A @ X - np.eye(n)).max() < 1e-10
+    phase, log_abs = rslab.ldlt(sp.csc_matrix(S)).log_det()
+    sign, logabs = np.linalg.slogdet(S)
+    assert abs(log_abs - logabs) < 1e-12 and abs(phase - sign) < 1e-12
+
+
+def test_log_det_refuses_a_perturbed_factor():
+    A = sp.csc_matrix(np.array([[1.0, 2.0], [2.0, 4.0]]))
+    f = rslab.ldlt(A, preconditioner=1e-8)
+    assert f.n_perturbed > 0
+    with pytest.raises(RuntimeError):
+        f.log_det()

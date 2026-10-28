@@ -15,8 +15,8 @@ use rslab::{
 };
 
 use crate::common::{
-    array1, array2, block, csc_matrix, diagnostics_dict, heavy, index_array, map_err, vector,
-    Pattern, Release, C32, C64,
+    array1, array2, block, csc_matrix, diagnostics_dict, heavy, index_array, map_err, scalar,
+    vector, Pattern, Release, C32, C64,
 };
 use crate::krylov::{self, Operator};
 
@@ -387,6 +387,23 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         array2(py, &x, n, nrhs)
     }
 
+    pub fn log_det(&self, py: Python<'_>) -> PyResult<(PyObject, f64)> {
+        let (phase, log_abs) = Factorization::<T>::log_det(&self.s).map_err(map_err)?;
+        Ok((scalar(py, phase)?, log_abs))
+    }
+
+    pub fn det(&self, py: Python<'_>) -> PyResult<PyObject> {
+        scalar(py, Factorization::<T>::det(&self.s).map_err(map_err)?)
+    }
+
+    pub fn inverse(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let n = self.n();
+        let x = py
+            .allow_threads(|| Factorization::<T>::inverse(&self.s))
+            .map_err(map_err)?;
+        array2(py, &x, n, n)
+    }
+
     /// The Krylov operator: the factored matrix, or an explicit override.
     fn operator(&self, operator: Option<Operator<'_>>) -> PyResult<Option<GeneralCsc<T>>> {
         match operator {
@@ -709,6 +726,36 @@ macro_rules! handle {
             ///     The solutions, one column per right-hand side.
             fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
                 dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.solve_many(py, b))
+            }
+
+            /// The determinant of ``A`` in log form.
+            ///
+            /// Returns
+            /// -------
+            /// tuple
+            ///     ``(phase, log_abs)`` with ``det(A) = phase * exp(log_abs)``:
+            ///     ``phase`` has unit modulus (``+-1`` for a real matrix), and
+            ///     the log form neither under- nor overflows. Raises
+            ///     ``RuntimeError`` for a factor whose pivots the static floor
+            ///     lifted (``n_perturbed > 0``): it belongs to a perturbed matrix.
+            fn log_det(&self, py: Python<'_>) -> PyResult<(PyObject, f64)> {
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.log_det(py))
+            }
+
+            /// The determinant of ``A``, ``phase * exp(log_abs)`` of
+            /// :meth:`log_det`: zero or infinite where it under- or overflows.
+            fn det(&self, py: Python<'_>) -> PyResult<PyObject> {
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.det(py))
+            }
+
+            /// The dense inverse ``A^-1`` from one block solve against the
+            /// identity.
+            ///
+            /// Returns
+            /// -------
+            /// ndarray, shape (n, n)
+            fn inverse(&self, py: Python<'_>) -> PyResult<PyObject> {
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.inverse(py))
             }
 
             /// Flexible restarted GMRES with this factor as the preconditioner.

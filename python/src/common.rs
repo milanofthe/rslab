@@ -282,6 +282,11 @@ pub fn array1<T: Element>(py: Python<'_>, v: Vec<T>) -> PyObject {
     v.into_pyarray_bound(py).into_any().unbind()
 }
 
+/// One value as a NumPy scalar of its dtype.
+pub fn scalar<T: Element>(py: Python<'_>, v: T) -> PyResult<PyObject> {
+    Ok(array1(py, vec![v]).bind(py).get_item(0)?.unbind())
+}
+
 /// Indices (a permutation, block boundaries) as an int64 NumPy array.
 pub fn index_array(py: Python<'_>, v: &[usize]) -> PyObject {
     array1(py, v.iter().map(|&i| i as i64).collect::<Vec<i64>>())

@@ -692,6 +692,20 @@ impl<T: Scalar> SolveCore<T> for AutoSolver<'_, T> {
     fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
         &self.works
     }
+
+    fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {
+        match self.active {
+            Some(AutoBackend::Klu) => self.klu_factor().map(|s| s.log_det_raw()),
+            Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map(|s| s.log_det_raw()),
+            Some(AutoBackend::Lu) => self.lu.as_ref().map(|s| s.log_det_raw()),
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            Err(RslabError::InvalidInput(
+                "auto: no successful factorization to solve with".to_string(),
+            ))
+        })
+    }
 }
 
 crate::numeric::direct::direct_solver!(AutoSolver<'s>);

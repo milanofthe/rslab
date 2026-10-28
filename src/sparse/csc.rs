@@ -49,6 +49,36 @@ impl<T: Scalar> CscMatrix<T> {
         self.values.len()
     }
 
+    /// The lower triangle of the dense symmetric `n x n` matrix `a` in
+    /// row-major order (`a[i * n + j]` is entry `(i, j)`, the upper triangle
+    /// is not read), its exact zeros left out of the pattern.
+    pub fn from_dense_row_major(n: usize, a: &[T]) -> Result<Self, RslabError> {
+        if a.len() != n * n {
+            return Err(RslabError::InvalidInput(format!(
+                "CscMatrix::from_dense_row_major: {} entries for n = {n}",
+                a.len()
+            )));
+        }
+        let mut m = CscMatrix {
+            n,
+            col_ptr: Vec::with_capacity(n + 1),
+            row_idx: Vec::new(),
+            values: Vec::new(),
+        };
+        m.col_ptr.push(0);
+        for j in 0..n {
+            for i in j..n {
+                let v = a[i * n + j];
+                if v != T::zero() {
+                    m.row_idx.push(i);
+                    m.values.push(v);
+                }
+            }
+            m.col_ptr.push(m.values.len());
+        }
+        Ok(m)
+    }
+
     /// Build a CSC matrix from coordinate (triplet) format.
     ///
     /// Entries must be lower-triangle (row >= col). Duplicate entries are summed.

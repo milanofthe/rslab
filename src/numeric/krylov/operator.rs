@@ -239,6 +239,20 @@ impl<H: Demote, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F>
     fn n_perturbed(&self) -> usize {
         self.factor.n_perturbed()
     }
+    /// The determinant of the demoted matrix, to the low precision.
+    fn log_det(&self) -> Result<(H, f64), RslabError> {
+        let (phase, log_abs) = self.factor.log_det()?;
+        Ok((H::promote(phase), log_abs))
+    }
+    /// The determinant of the demoted matrix, to the low precision.
+    fn det(&self) -> Result<H, RslabError> {
+        let (phase, log_abs) = Factorization::<H>::log_det(self)?;
+        Ok(phase * H::from_real(log_abs.exp()))
+    }
+    /// The inverse of the demoted matrix, to the low precision.
+    fn inverse(&self) -> Result<Vec<H>, RslabError> {
+        through_low(&[], |_| self.factor.inverse())
+    }
     fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
         self.factor.diagnostics()
     }
@@ -313,6 +327,13 @@ pub trait Factorization<T: Scalar>: Preconditioner<T> {
     fn factor_nnz(&self) -> usize;
     /// Pivots lifted by the static regularization (0 for an exact factor).
     fn n_perturbed(&self) -> usize;
+    /// The determinant of `A` as `(phase, log|det A|)`; refused for a
+    /// statically perturbed factor.
+    fn log_det(&self) -> Result<(T, f64), RslabError>;
+    /// The determinant of `A`.
+    fn det(&self) -> Result<T, RslabError>;
+    /// The dense inverse `A^-1`, column-major `n x n`.
+    fn inverse(&self) -> Result<Vec<T>, RslabError>;
     /// Everything the factorization reports about itself.
     fn diagnostics(&self) -> crate::diagnostics::Diagnostics;
 }

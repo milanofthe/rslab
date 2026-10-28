@@ -53,6 +53,35 @@ impl<T: Scalar> GeneralCsc<T> {
         Ok(CscLayout::new(n, rows, cols)?.assemble(vals))
     }
 
+    /// The dense `n x n` matrix `a` in row-major order (`a[i * n + j]` is
+    /// entry `(i, j)`), its exact zeros left out of the pattern.
+    pub fn from_dense_row_major(n: usize, a: &[T]) -> Result<Self, RslabError> {
+        if a.len() != n * n {
+            return Err(RslabError::InvalidInput(format!(
+                "GeneralCsc::from_dense_row_major: {} entries for n = {n}",
+                a.len()
+            )));
+        }
+        let mut m = GeneralCsc {
+            n,
+            col_ptr: Vec::with_capacity(n + 1),
+            row_idx: Vec::new(),
+            values: Vec::new(),
+        };
+        m.col_ptr.push(0);
+        for j in 0..n {
+            for i in 0..n {
+                let v = a[i * n + j];
+                if v != T::zero() {
+                    m.row_idx.push(i);
+                    m.values.push(v);
+                }
+            }
+            m.col_ptr.push(m.values.len());
+        }
+        Ok(m)
+    }
+
     /// Number of stored nonzeros.
     pub fn nnz(&self) -> usize {
         self.values.len()

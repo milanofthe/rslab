@@ -16,6 +16,24 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
         &self.works
     }
 
+    /// `P_r R A P_c^T` is block upper triangular with `L_b U_b` on its
+    /// diagonal blocks (`R` the row scaling): `det A` is the product of the
+    /// `U_b` diagonals, the signs of both permutations and the reciprocal
+    /// row scaling.
+    fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {
+        let f = &self.factors;
+        let mut d = crate::numeric::direct::LogDet::one();
+        for &u in &f.udiag {
+            d.mul(u);
+        }
+        d.permutation(&f.row_perm);
+        d.permutation(&f.col_perm);
+        for &s in &f.rs_inv {
+            d.div_scale(s);
+        }
+        Ok(d)
+    }
+
     fn solve_raw_into(
         &self,
         b: &[T],
