@@ -421,6 +421,8 @@ impl LuSymbolic {
                 perturbed: factors.n_perturbed,
                 two_by_two: None,
                 inertia: None,
+                // from the factor the solver holds, see `diagnostics`
+                min_pivot: None,
             },
             warnings,
             ..Default::default()
@@ -712,6 +714,10 @@ impl<T: Scalar> LuSolver<T> {
     pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
         let mut d = self.diagnostics.clone();
         d.solves = self.solves.snapshot();
+        // `U`'s diagonal, held as its reciprocals
+        let r = self.plan_u.diag_inv();
+        d.numeric.min_pivot = (self.factored && !r.is_empty())
+            .then(|| 1.0 / r.iter().map(|v| v.magnitude()).fold(0.0, f64::max));
         d
     }
 

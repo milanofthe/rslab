@@ -92,6 +92,9 @@ impl<T: Scalar> KluSolver<T> {
     pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
         let mut d = self.diagnostics.clone();
         d.solves = self.solves.snapshot();
+        let u = &self.factors.udiag;
+        d.numeric.min_pivot =
+            (!u.is_empty()).then(|| u.iter().map(|v| v.magnitude()).fold(f64::MAX, f64::min));
         d
     }
 

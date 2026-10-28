@@ -267,7 +267,7 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
 
         f = rslab.ldlt(A)                       # defaults
         f = rslab.ldlt(A, ordering="metis", threads=2)
-        f = rslab.ldlt(A, preconditioner=1e-4)  # never-fail static pivoting
+        f = rslab.ldlt(A, preconditioner=1e-8)  # never-fail static pivoting
         x = f.solve(b, refine=2)
         print(f.inertia, f.diagnostics()["summary"])
     """
@@ -710,7 +710,7 @@ def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
 
         x = rslab.spsolve(A, b)                          # the automatic path
         X = rslab.spsolve(A, np.random.rand(n, 5))       # 5 right-hand sides
-        x = rslab.spsolve(A, b, preconditioner=1e-4, refine=2)
+        x = rslab.spsolve(A, b, preconditioner=1e-8, refine=2)
     """
     if symmetric is True:
         f = ldlt(A, **kwargs)

@@ -77,6 +77,7 @@ fn ldlt_diagnostics_are_filled() {
     assert!(d.decisions.n_supernodes > 0 && d.decisions.max_front > 0);
     assert_eq!(d.numeric.inertia, Some((a.n, 0, 0)), "SPD grid");
     assert_eq!(d.numeric.two_by_two, Some(0));
+    assert!(d.numeric.min_pivot.is_some_and(|p| p > 0.0 && p <= 1.0));
     assert_eq!(d.solves.calls, 2);
     assert_eq!(d.solves.rhs, 3);
     assert!(d.warnings.is_empty(), "{:?}", d.warnings);
@@ -94,6 +95,7 @@ fn lu_diagnostics_are_filled_on_both_entry_points() {
     assert_eq!(d.decisions.ordering_requested, "Amd");
     assert_eq!(d.decisions.ordering_used, "Amd");
     assert_eq!(d.numeric.two_by_two, None);
+    assert!(d.numeric.min_pivot.is_some_and(|p| p > 0.0));
     let _ = direct.solve(&vec![1.0; a.n]).unwrap();
     assert_eq!(direct.diagnostics().solves.calls, 1);
 }
@@ -107,7 +109,27 @@ fn klu_diagnostics_are_filled() {
     assert_eq!(d.n, a.n);
     assert_eq!(d.decisions.method, "Klu");
     assert!(d.stage_ms("klu-factor").is_some());
+    assert!(d.numeric.min_pivot.is_some_and(|p| p > 0.0));
     assert_eq!(d.solves.calls, 1);
+}
+
+/// A pivot the static floor lifted shows as the floor: the smallest pivot
+/// of a singular matrix's factor.
+#[test]
+fn min_pivot_is_the_floor_a_singular_pivot_was_lifted_to() {
+    let floor = 1e-8;
+    let s = SolverSettings::preconditioner(floor);
+    let lower = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[1.0, 2.0, 4.0]).unwrap();
+    let f = LdltSolver::factor(&lower, &s).unwrap();
+    assert_eq!(f.n_perturbed(), 1);
+    assert_eq!(f.diagnostics().numeric.min_pivot, Some(floor));
+    let full =
+        GeneralCsc::from_triplets(2, &[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 2.0, 2.0, 4.0]).unwrap();
+    let f = LuSolver::factor(&full, &s).unwrap();
+    assert_eq!(f.n_perturbed(), 1);
+    // held as its reciprocal, the floor comes back to rounding
+    let p = f.diagnostics().numeric.min_pivot.unwrap();
+    assert!((p - floor).abs() <= 4.0 * f64::EPSILON * floor, "{p:e}");
 }
 
 #[test]
