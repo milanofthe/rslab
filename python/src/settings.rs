@@ -261,8 +261,12 @@ plain_knobs! {
 /// preconditioner : float, optional
 ///     Static-pivot floor: a pivot with magnitude below it is lifted to it,
 ///     so the factorization never fails and produces the factor of a nearby
-///     ``A + E``. Recover accuracy with ``solve(b, refine=k)``. ``1e-4`` is a
-///     good start.
+///     ``A + E``. Recover accuracy with ``solve(b, refine=k)``. The floor
+///     applies to the equilibrated matrix (entries of order one): ``1e-8``
+///     (about ``sqrt(eps)``) lifts only pivots that vanish to working
+///     precision; a larger floor also lifts genuine small pivots (those of
+///     the charge block of a saddle system lie at 1e-8 to 1e-6).
+///     ``diagnostics()["numeric"]["min_pivot"]`` shows the smallest one.
 /// force_accept : bool, default False
 ///     In exact mode, accept tiny pivots instead of raising on rank
 ///     deficiency. Ignored when ``preconditioner`` is set.

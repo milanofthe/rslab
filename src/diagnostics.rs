@@ -148,6 +148,11 @@ pub struct NumericReport {
     pub two_by_two: Option<usize>,
     /// Inertia `(positive, negative, zero)` of a symmetric factor.
     pub inertia: Option<(usize, usize, usize)>,
+    /// The smallest pivot magnitude of the factor, on the equilibrated
+    /// matrix the static floor is compared with: the 1x1 pivots and the
+    /// smallest singular value of each 2x2 block. A lifted pivot shows as
+    /// the floor. `None` without a factor.
+    pub min_pivot: Option<f64>,
 }
 
 /// Solve-phase accumulators (updated by every `solve*` call on the factor).
@@ -362,6 +367,9 @@ impl Diagnostics {
         }
         if let Some(k) = self.numeric.two_by_two {
             s.push_str(&format!(" pivots2x2={k}"));
+        }
+        if let Some(p) = self.numeric.min_pivot {
+            s.push_str(&format!(" min_pivot={p:.1e}"));
         }
         for st in &self.stages {
             s.push_str(&format!(" {}={:.1}ms", st.name, st.wall_ms));

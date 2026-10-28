@@ -40,8 +40,14 @@ pub enum ZeroPivotAction {
     /// column live (LAPACK / MA57-style static pivoting). The factor satisfies
     /// `L*D*L^T = A + delta ` for the produced `L`, `D`; `delta ` is bounded in the worst
     /// case by `||A[:,k]||^2 / abs_floor`, so drive iterative refinement against
-    /// the unperturbed `A` for tight tolerances. A typical recipe is
-    /// `abs_floor = eps_rel * ||A||inf` with `eps_rel in [1e-12, 1e-8]`.
+    /// the unperturbed `A` for tight tolerances. The pivots it is compared
+    /// with are those of the equilibrated matrix (entries of order one), so
+    /// `abs_floor` is relative to it: about `sqrt(eps)` (1e-8) lifts only
+    /// pivots that vanish to working precision, a larger floor also lifts
+    /// genuine small pivots (the charge block of a saddle system has them at
+    /// 1e-8 to 1e-6) and the factor becomes one of a perturbed matrix.
+    /// [`NumericReport::min_pivot`](crate::diagnostics::NumericReport::min_pivot)
+    /// shows how close the pivots came.
     PerturbToEps { abs_floor: f64 },
 }
 

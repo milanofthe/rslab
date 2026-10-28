@@ -90,7 +90,31 @@ impl<T: Scalar> LdltSolver<T> {
     pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
         let mut d = self.diagnostics.clone();
         d.solves = self.solves.snapshot();
+        d.numeric.min_pivot = (self.factored && self.factors.n > 0).then(|| self.min_pivot());
         d
+    }
+
+    /// The smallest pivot magnitude of `D`: its 1x1 pivots and the smallest
+    /// singular value of each 2x2 block, `|det| / sigma_max`.
+    fn min_pivot(&self) -> f64 {
+        let f = &self.factors;
+        let mut m = f64::MAX;
+        let mut k = 0;
+        while k < f.n {
+            if f.two_by_two[k] {
+                let (a, b, c) = (f.d_diag[k], f.d_subdiag[k], f.d_diag[k + 1]);
+                let det = (a * c - b * b).magnitude();
+                let fro = a.magnitude_sq() + 2.0 * b.magnitude_sq() + c.magnitude_sq();
+                let disc = (fro * fro - 4.0 * det * det).max(0.0).sqrt(); // lit: the discriminant of the 2x2 singular values
+                let smax = ((fro + disc) / 2.0).sqrt();
+                m = m.min(if smax > 0.0 { det / smax } else { 0.0 });
+                k += 2;
+            } else {
+                m = m.min(f.d_diag[k].magnitude());
+                k += 1;
+            }
+        }
+        m
     }
 
     /// Number of stored nonzeros in the global lower-triangular factor `L`
@@ -721,6 +745,8 @@ impl LdltSymbolic {
                     factors.inertia.negative,
                     factors.inertia.zero,
                 )),
+                // from the factor the solver holds, see `diagnostics`
+                min_pivot: None,
             },
             warnings,
             ..Default::default()

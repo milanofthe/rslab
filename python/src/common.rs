@@ -407,6 +407,7 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     let num = PyDict::new_bound(py);
     num.set_item("perturbed", d.numeric.perturbed)?;
     num.set_item("two_by_two", d.numeric.two_by_two)?;
+    num.set_item("min_pivot", d.numeric.min_pivot)?;
     num.set_item("inertia", d.numeric.inertia)?;
     out.set_item("numeric", num)?;
     let sv = PyDict::new_bound(py);

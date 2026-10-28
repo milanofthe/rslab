@@ -124,7 +124,7 @@ solves against one matrix keep the handle instead (`auto` /
 ```python
 x = rslab.spsolve(A, b)                          # the automatic path
 X = rslab.spsolve(A, np.random.rand(n, 5))       # 5 right-hand sides
-x = rslab.spsolve(A, b, preconditioner=1e-4, refine=2)
+x = rslab.spsolve(A, b, preconditioner=1e-8, refine=2)
 ```
 
 ## Factor handles
@@ -198,7 +198,7 @@ automatically), so `A` may be stored full or triangular.
 ```python
 f = rslab.ldlt(A)                       # defaults
 f = rslab.ldlt(A, ordering="metis", threads=2)
-f = rslab.ldlt(A, preconditioner=1e-4)  # never-fail static pivoting
+f = rslab.ldlt(A, preconditioner=1e-8)  # never-fail static pivoting
 x = f.solve(b, refine=2)
 print(f.inertia, f.diagnostics()["summary"])
 ```
@@ -1305,7 +1305,7 @@ tuned values, listed by `to_dict`.
 - `nemin` (int, default 16): Supernode amalgamation threshold. Smaller means finer supernodes: less fill, more per-front overhead.
 - `relax` (bool or (int, int), default False): Relaxed (fill-tolerant) amalgamation. `True` uses fronts up to 256 columns wide with at most 64 explicit-zero rows per merge, a pair `(max_width, max_extra_rows)` sets them.
 - `threads` (int or 'auto' or ('auto', int) or 'ambient', optional): Worker budget of the scoped factorization pool. `None` (default) is the per-matrix predictor capped at 4 workers (or the calibrated pick after `rslab.install_diagnose`); an `int` pins the count (`0` = all logical cores); `'auto'` is the predictor without the cap, `('auto', max)` the predictor capped at `max`; `'ambient'` runs on the caller's rayon pool. The factor is bit-identical for every value.
-- `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. `1e-4` is a good start.
+- `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. The floor applies to the equilibrated matrix (entries of order one): `1e-8` (about `sqrt(eps)`) lifts only pivots that vanish to working precision; a larger floor also lifts genuine small pivots (those of the charge block of a saddle system lie at 1e-8 to 1e-6). `diagnostics()["numeric"]["min_pivot"]` shows the smallest one.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
 - `factor_dtype` (str or dtype, optional): Store the factor in the lower-precision twin of the matrix's dtype (`'float32'` for float64, `'complex64'` for complex128): half the factor memory, single-precision kernels. The handle keeps the matrix in its own precision, so `solve(b, refine=k)` and the Krylov methods reach its accuracy. LDL^T and LU paths; `None` factors in the matrix's dtype.
 - `pivot_threshold` (float, default 0.1): Threshold partial pivoting of the LU path in `[0, 1]` (`1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.

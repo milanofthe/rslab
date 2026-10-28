@@ -68,7 +68,7 @@ accuracy. `gmres`, `gmres_block`, `cocg` and `cocr` take any factor handle as
 preconditioner:
 
 ```python
-f = rslab.ldlt(A, preconditioner=1e-4)
+f = rslab.ldlt(A, preconditioner=1e-8)
 x = f.solve(b, refine=20)
 
 M = rslab.lu(A, factor_dtype="complex64")  # complex128 A, half the factor memory
