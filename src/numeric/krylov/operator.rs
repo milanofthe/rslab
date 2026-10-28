@@ -270,7 +270,7 @@ impl LowPrecisionPreconditioner {
 
 impl LowPrecisionLu {
     /// Demote `A` to `Complex<f32>` and LU-factor it (options honoured:
-    /// static pivoting and drop tolerance for a preconditioner).
+    /// static pivoting for a preconditioner).
     pub fn factor(a: &GeneralCsc<Complex<f64>>, opts: &SolverSettings) -> Result<Self, RslabError> {
         Ok(Self::new(crate::numeric::lu::LuSolver::factor(
             &a.demoted(),
@@ -292,7 +292,7 @@ impl LowPrecisionLu {
 /// A direct solver: [`LdltSolver`], [`LuSolver`](crate::LuSolver) and
 /// [`KluSolver`](crate::KluSolver). Each is also a [`Preconditioner`], so a
 /// solver loop can hold `&dyn Factorization` and swap the symmetric, general
-/// and circuit paths, exact or incomplete factors, freely.
+/// and circuit paths freely.
 pub trait Factorization<T: Scalar>: Preconditioner<T> {
     /// The matrix dimension.
     fn n(&self) -> usize;

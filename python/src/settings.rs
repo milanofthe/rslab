@@ -266,12 +266,6 @@ plain_knobs! {
 /// force_accept : bool, default False
 ///     In exact mode, accept tiny pivots instead of raising on rank
 ///     deficiency. Ignored when ``preconditioner`` is set.
-/// drop_tol : float, optional
-///     Sparsification of the finished factor: entries below it (relative to
-///     the column maximum) are zeroed, and rows that end up empty in every
-///     column of a supernode are dropped from the stored factor. The
-///     factorization itself runs complete, so it saves neither time nor peak
-///     memory. ``None`` keeps the factor as computed.
 /// factor_dtype : str or dtype, optional
 ///     Store the factor in the lower-precision twin of the matrix's dtype
 ///     (``'float32'`` for float64, ``'complex64'`` for complex128): half the
@@ -418,7 +412,6 @@ impl PySettings {
             "force_accept" => {
                 self.force_accept = v.extract().map_err(|_| bad(key, "a bool", v))?;
             }
-            "drop_tol" => o.drop_tol = Some(v.extract().map_err(|_| bad(key, "a float", v))?),
             "factor_dtype" => {
                 let name: String = v
                     .py()
@@ -519,7 +512,6 @@ impl PySettings {
         d.set_item("threads", self.threads_value(py))?;
         d.set_item("preconditioner", self.preconditioner)?;
         d.set_item("force_accept", self.force_accept)?;
-        d.set_item("drop_tol", o.drop_tol)?;
         d.set_item("factor_dtype", self.factor_dtype.as_deref())?;
         d.set_item("ordering", ordering_name(&o.ordering.method))?;
         d.set_item(

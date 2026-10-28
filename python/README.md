@@ -86,7 +86,7 @@ constant of the solver is one (`nd_fm_passes`, `race_candidates`,
 
 ```python
 f = rslab.lu(A, ordering="metis", threads=8, pivot_threshold=0.5)
-s = rslab.Settings(preconditioner=1e-6, drop_tol=1e-3)
+s = rslab.Settings(preconditioner=1e-6, factor_dtype="complex64")
 ```
 
 Settings a path does not read are listed under

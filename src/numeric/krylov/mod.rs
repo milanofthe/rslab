@@ -3,7 +3,7 @@
 //!
 //! The target use is **3D EM FEM / MOM**: large complex-symmetric `A = A^T`
 //! (PARDISO `mtype 6`) systems solved iteratively, with a robust, memory-light
-//! RLA factorization (static-pivoted, optionally `f32` / incomplete) as the
+//! RLA factorization (static-pivoted, optionally `f32`) as the
 //! preconditioner. The iterative method of choice for `A = A^T` is **COCG**
 //! (Conjugate Orthogonal Conjugate Gradient, van der Vorst & Melissen 1990):
 //! structurally CG, but every inner product is the *unconjugated* bilinear

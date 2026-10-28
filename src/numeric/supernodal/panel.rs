@@ -269,20 +269,13 @@ impl<T: Scalar> PanelArena<T> {
     ///
     /// # Safety
     /// As [`slot_mut`](Self::slot_mut): only the owner of `s`, once.
-    pub unsafe fn finish_slot(
-        &self,
-        s: usize,
-        w: usize,
-        two_by_two: Option<&[bool]>,
-        drop_tol: Option<f64>,
-    ) -> PanelOut {
+    pub unsafe fn finish_slot(&self, s: usize, w: usize, two_by_two: Option<&[bool]>) -> PanelOut {
         let mut scratch = self.scratch.take();
         finish_panel(
             self.slot_mut(s),
             self.rows_mut(s),
             w,
             two_by_two,
-            drop_tol,
             &mut scratch,
         )
     }
@@ -367,9 +360,9 @@ pub(crate) struct PanelOut {
     pub m: usize,
     pub len: usize,
     /// Structural slots (diagonal excluded) holding an exact zero: numeric
-    /// cancellation, the symmetrized pattern of an unsymmetric matrix, or
-    /// `drop_tol`. `nnz() - zeros` is the stored nonzero count a sparse
-    /// factor would report.
+    /// cancellation or the symmetrized pattern of an unsymmetric matrix.
+    /// `nnz() - zeros` is the stored nonzero count a sparse factor would
+    /// report.
     pub zeros: usize,
 }
 
@@ -406,16 +399,14 @@ impl<T> Default for PanelScratch<T> {
 /// ascending elimination order (`rows[i]` is the elimination index of panel
 /// row `w + i` on entry, and ascending on exit), for an LDL^T factor the
 /// `(p+1, p)` entry of each 2x2 pivot is cleared (that coupling lives in
-/// `D`), `drop_tol` zeroes the entries below `tau * max|col|` of their
-/// column (the diagonal excluded), and off-block rows that end up without a
-/// nonzero in any column are dropped from the panel and from `rows`
-/// (compacted in place, the tails of the slots are left behind).
+/// `D`), and off-block rows without a nonzero in any column are dropped
+/// from the panel and from `rows` (compacted in place, the tails of the
+/// slots are left behind).
 pub(crate) fn finish_panel<T: Scalar>(
     panel: &mut [T],
     rows: &mut [u32],
     w: usize,
     two_by_two: Option<&[bool]>,
-    drop_tol: Option<f64>,
     sc: &mut PanelScratch<T>,
 ) -> PanelOut {
     let m = rows.len();
@@ -440,21 +431,6 @@ pub(crate) fn finish_panel<T: Scalar>(
         for p in 0..w {
             if two_by_two[p] && p + 1 < w {
                 panel[p * ld + p + 1] = zero;
-            }
-        }
-    }
-    if let Some(tau) = drop_tol {
-        for p in 0..w {
-            let col = &mut panel[p * ld..(p + 1) * ld];
-            let colmax = col[p + 1..]
-                .iter()
-                .map(|v| v.magnitude())
-                .fold(0.0, f64::max);
-            let thresh = tau * colmax;
-            for v in col[p + 1..].iter_mut() {
-                if v.magnitude() < thresh {
-                    *v = zero;
-                }
             }
         }
     }
@@ -534,9 +510,9 @@ mod tests {
         }
         let outs = unsafe {
             [
-                arena.finish_slot(0, 1, None, None),
-                arena.finish_slot(1, 1, None, None),
-                arena.finish_slot(2, 1, None, None),
+                arena.finish_slot(0, 1, None),
+                arena.finish_slot(1, 1, None),
+                arena.finish_slot(2, 1, None),
             ]
         };
         // Rows come in as {2, 1}: sorted to {1, 2}, and row 2 (the zero) is dropped.
