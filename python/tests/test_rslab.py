@@ -267,7 +267,6 @@ def _stagnating_operator(m=18, rank=3, seed=4):
     return (S + G).tocsc(), rng
 
 
-@pytest.mark.xfail(strict=True, reason="recycling loses to warm restarts, #182")
 def test_gmres_recycle_cross_solve_beats_warm_and_cold():
     # GCRO-DR recycling (issue #5) across a sequence of related solves (slowly
     # rotating RHS, weak nearby factor -> stagnation). Total iterations must

@@ -40,9 +40,16 @@ use num_complex::Complex;
 // `x += P z_1 + Z y`. Recomputing `C` each solve (the default) is `k` matvecs +
 // `k` M-solves and keeps the invariant exact when `A` / `M` change between solves.
 //
+// **The budget.** A cycle runs `restart` Arnoldi steps orthogonal to `C`, as many
+// as a plain FGMRES cycle, so every cycle minimizes over `range(C)` plus a Krylov
+// space of the plain cycle's size. Taking the `k` vectors out of the restart
+// instead left `restart - k` fresh directions: a recycled GMRES(10) with `k = 5`
+// took as many iterations as plain GMRES(5) and lost to plain GMRES(10) on a weak
+// preconditioner (#182).
+//
 // **Memory.** `U` and `C` are each `n*k` extra scalars (plus the same-size `P`),
-// on top of the FGMRES `V`+`Z` bases. `k` defaults modest and is capped at
-// `restart/2` so the deflation never starves the Arnoldi space.
+// on top of the FGMRES `V`+`Z` bases; the default restart leaves them out of the
+// basis budget.
 //
 // **Correctness is independent of `U`'s quality.** `U` only shapes the Krylov
 // space to *accelerate* convergence; the outer true-residual stop test is
@@ -246,7 +253,7 @@ impl RecycleScalar for Complex<f32> {
 /// (another `2*n*k`) live only for the duration of a solve.
 #[derive(Debug, Clone)]
 pub struct Recycle<T> {
-    /// Target subspace dimension (capped at `restart/2` per solve).
+    /// Target subspace dimension.
     k: usize,
     /// Recycle vectors, column-major `n x kc` (`kc <= k`), in preconditioned space.
     u: Vec<T>,
@@ -267,7 +274,7 @@ impl<T: Scalar> Recycle<T> {
 
     /// A fresh, empty recycle handle targeting `k` harmonic-Ritz vectors. The
     /// first solve seeds `U` (there is nothing to deflate yet); subsequent solves
-    /// deflate and refresh it. `k` is capped at `restart/2` inside the solve.
+    /// deflate and refresh it.
     pub fn new(k: usize) -> Self {
         Recycle {
             k,
@@ -475,7 +482,9 @@ fn recompute_recycle<T: RecycleScalar>(
 /// solve*. See the module-level "GCRO-DR" section for the algorithm and when it
 /// pays (stagnating, restart-limited, or slowly-varying-sequence solves).
 ///
-/// `recycle.dim()` = `k` (capped at `restart/2`). Pass the **same** handle to a
+/// `recycle.dim()` = `k`, on top of the `restart` Arnoldi steps of a cycle (the
+/// default restart leaves the `3 k` vectors of `U`, `P = M^-1 U` and `C = A P`
+/// out of the basis budget). Pass the **same** handle to a
 /// sequence of related solves; it is refreshed in place at the end of each. The
 /// optional `x0` warm start composes with recycling (seed from the previous
 /// solution *and* recycle its stagnation subspace). With an empty handle and
@@ -502,10 +511,15 @@ where
         });
     }
     let (tol, max_iter, reorth_eta) = (settings.tol, settings.max_iter, settings.reorth_eta);
-    let m = settings.restart_for(n, 1, std::mem::size_of::<T>(), 2);
-    // Cap the recycle dimension at restart/2 so the Arnoldi space (m - k) is never
-    // starved. `k = 0` (or an empty handle) degrades to plain FGMRES.
-    let k = recycle.k.min(m / 2);
+    // `k = 0` (or an empty handle) degrades to plain FGMRES. The default restart
+    // keeps the basis budget for `V` and `Z` once `U`, `P` and `C` are held.
+    let k = recycle.k;
+    let vb = std::mem::size_of::<T>();
+    let m = KrylovSettings {
+        basis_budget_bytes: settings.basis_budget_bytes.saturating_sub(3 * k * n * vb), // lit: the three recycle bases U, P and C
+        ..settings.clone()
+    }
+    .restart_for(n, 1, vb, 2);
     let bnorm = norm2(b);
     let mut x = match x0 {
         Some(g) => {
@@ -580,8 +594,8 @@ where
             continue; // exact in the recycle space; loop top confirms convergence
         }
 
-        // Arnoldi dimension this cycle (orthogonal to C).
-        let p_arn = m - ncur;
+        // Arnoldi dimension this cycle (orthogonal to C): a plain cycle's.
+        let p_arn = m;
         let inv_beta = T::from_real(1.0 / beta);
         let mut vb = vec![T::zero(); n * (p_arn + 1)];
         let mut zb = vec![T::zero(); n * p_arn];
