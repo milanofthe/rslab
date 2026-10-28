@@ -441,6 +441,12 @@ fn runs(list: &[u32], sn_of: &[u32]) -> usize {
 
 impl<T: Scalar> SolvePlan<T> {
     /// Heap bytes held: the panels (the factor's values) and the schedule.
+    /// The reciprocals of the diagonal of a non-unit factor (empty for a
+    /// unit one), in elimination order.
+    pub(crate) fn diag_inv(&self) -> &[T] {
+        &self.diag_inv
+    }
+
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::{nested_bytes, vec_bytes};
         vec_bytes(&self.sn_col)

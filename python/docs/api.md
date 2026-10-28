@@ -322,6 +322,11 @@ as the preconditioner; the minimal-residual sibling of
 
 - `KrylovResult`: `x`, `converged`, `iters`, `final_res`, `stop`.
 
+#### `Auto.det()`
+
+The determinant of `A`, `phase * exp(log_abs)` of
+`log_det`: zero or infinite where it under- or overflows.
+
 #### `Auto.diagnostics()`
 
 The factorization report as a dictionary: `stages` (name,
@@ -370,6 +375,23 @@ factor as the preconditioner.
 **Returns**
 
 - `KrylovResult`: `x` of shape `(n, nrhs)`, `converged`, `iters`, `final_res` (one value per column), `stop`.
+
+#### `Auto.inverse()`
+
+The dense inverse `A^-1` from one block solve against the
+identity.
+
+**Returns**
+
+- `ndarray, shape (n, n)`:
+
+#### `Auto.log_det()`
+
+The determinant of `A` in log form.
+
+**Returns**
+
+- `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
 
 #### `Auto.recycle(k)`
 
@@ -488,6 +510,11 @@ as the preconditioner; the minimal-residual sibling of
 
 - `KrylovResult`: `x`, `converged`, `iters`, `final_res`, `stop`.
 
+#### `Ldlt.det()`
+
+The determinant of `A`, `phase * exp(log_abs)` of
+`log_det`: zero or infinite where it under- or overflows.
+
 #### `Ldlt.diagnostics()`
 
 The factorization report as a dictionary: `stages` (name,
@@ -536,6 +563,23 @@ factor as the preconditioner.
 **Returns**
 
 - `KrylovResult`: `x` of shape `(n, nrhs)`, `converged`, `iters`, `final_res` (one value per column), `stop`.
+
+#### `Ldlt.inverse()`
+
+The dense inverse `A^-1` from one block solve against the
+identity.
+
+**Returns**
+
+- `ndarray, shape (n, n)`:
+
+#### `Ldlt.log_det()`
+
+The determinant of `A` in log form.
+
+**Returns**
+
+- `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
 
 #### `Ldlt.recycle(k)`
 
@@ -636,6 +680,11 @@ as the preconditioner; the minimal-residual sibling of
 
 - `KrylovResult`: `x`, `converged`, `iters`, `final_res`, `stop`.
 
+#### `Lu.det()`
+
+The determinant of `A`, `phase * exp(log_abs)` of
+`log_det`: zero or infinite where it under- or overflows.
+
 #### `Lu.diagnostics()`
 
 The factorization report as a dictionary: `stages` (name,
@@ -684,6 +733,23 @@ factor as the preconditioner.
 **Returns**
 
 - `KrylovResult`: `x` of shape `(n, nrhs)`, `converged`, `iters`, `final_res` (one value per column), `stop`.
+
+#### `Lu.inverse()`
+
+The dense inverse `A^-1` from one block solve against the
+identity.
+
+**Returns**
+
+- `ndarray, shape (n, n)`:
+
+#### `Lu.log_det()`
+
+The determinant of `A` in log form.
+
+**Returns**
+
+- `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
 
 #### `Lu.recycle(k)`
 
@@ -795,6 +861,11 @@ as the preconditioner; the minimal-residual sibling of
 
 - `KrylovResult`: `x`, `converged`, `iters`, `final_res`, `stop`.
 
+#### `Klu.det()`
+
+The determinant of `A`, `phase * exp(log_abs)` of
+`log_det`: zero or infinite where it under- or overflows.
+
 #### `Klu.diagnostics()`
 
 The factorization report as a dictionary: `stages` (name,
@@ -843,6 +914,23 @@ factor as the preconditioner.
 **Returns**
 
 - `KrylovResult`: `x` of shape `(n, nrhs)`, `converged`, `iters`, `final_res` (one value per column), `stop`.
+
+#### `Klu.inverse()`
+
+The dense inverse `A^-1` from one block solve against the
+identity.
+
+**Returns**
+
+- `ndarray, shape (n, n)`:
+
+#### `Klu.log_det()`
+
+The determinant of `A` in log form.
+
+**Returns**
+
+- `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
 
 #### `Klu.recycle(k)`
 

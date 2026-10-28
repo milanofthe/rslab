@@ -745,6 +745,28 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         &self.works
     }
 
+    /// `P_r D_r A D_c P_c^T = L U`: `det A` is the product of `U`'s
+    /// diagonal, the signs of both permutations and the reciprocal
+    /// scalings.
+    fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {
+        if !self.factored {
+            return Err(RslabError::InvalidInput(
+                "the last refactorization failed; refactor before solving".to_string(),
+            ));
+        }
+        let f = &self.factors;
+        let mut d = crate::numeric::direct::LogDet::one();
+        for &r in self.plan_u.diag_inv() {
+            d.div(r);
+        }
+        d.permutation(&f.perm_row);
+        d.permutation(&f.perm);
+        for &s in f.d_row.iter().chain(&f.d_col) {
+            d.div_scale(s);
+        }
+        Ok(d)
+    }
+
     /// The factored matrix is `(P_r D_r) A (D_c P_c^T) = L U`. `A x = b`
     /// gathers through the row side, sweeps `L` forward and `U` backward and
     /// scatters through the column side; `A^T x = b` is the mirror image,

@@ -138,6 +138,35 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
         &self.works
     }
 
+    /// `P S A S P^T = L D L^T`: `det A` is the product of `D`'s 1x1 and
+    /// 2x2 blocks over the squared scaling (the symmetric permutation
+    /// cancels).
+    fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {
+        if !self.factored {
+            return Err(RslabError::InvalidInput(
+                "the last refactorization failed; refactor before solving".to_string(),
+            ));
+        }
+        let f = &self.factors;
+        let mut d = crate::numeric::direct::LogDet::one();
+        let mut k = 0;
+        while k < f.n {
+            if f.two_by_two[k] {
+                let off = f.d_subdiag[k];
+                d.mul(f.d_diag[k] * f.d_diag[k + 1] - off * off);
+                k += 2;
+            } else {
+                d.mul(f.d_diag[k]);
+                k += 1;
+            }
+        }
+        for &s in &self.scale {
+            d.div_scale(s);
+            d.div_scale(s);
+        }
+        Ok(d)
+    }
+
     /// `x = D P (A_hat^-1 (P^T D b))`: the equilibration is fused into the
     /// permutation gather and scatter around the triangular sweeps. `A` is
     /// symmetric, so the transpose is the same solve.
