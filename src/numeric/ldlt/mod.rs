@@ -17,7 +17,7 @@
 //! * The global factor `L` is kept in supernodal panel form
 //!   (`PanelFactor`): each supernode's dense panel, once its last consumer
 //!   is done, is finished in place (off-block rows into elimination order,
-//!   the 2x2 couplings cleared, `drop_tol` applied) and becomes the stored
+//!   the 2x2 couplings cleared) and becomes the stored
 //!   factor, so the memory peak is the resident panels themselves (see the
 //!   a-priori [`MemoryEstimate`](crate::diagnostics::MemoryEstimate)).
 

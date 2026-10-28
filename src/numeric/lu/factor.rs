@@ -100,7 +100,6 @@ fn emit_and_free<T: Scalar>(
     emit: &LlEmit<T>,
     sym: &SymbolicFactorization,
     st: &LuStructure,
-    drop_tol: Option<f64>,
 ) {
     let snode = &sym.supernodes[k];
     let (first, ncol) = (snode.first_col, snode.ncol);
@@ -134,8 +133,8 @@ fn emit_and_free<T: Scalar>(
     for (r, &g) in u_rows.iter_mut().zip(&cols_u[ncol..nrow_u]) {
         *r = unsafe { emit.eg(g as usize) } as u32;
     }
-    let l_out = unsafe { emit.l_arena.finish_slot(k, ncol, None, drop_tol) };
-    let u_out = unsafe { emit.u_arena.finish_slot(k, ncol, None, drop_tol) };
+    let l_out = unsafe { emit.l_arena.finish_slot(k, ncol, None) };
+    let u_out = unsafe { emit.u_arena.finish_slot(k, ncol, None) };
     unsafe { emit.panels.set(k, (l_out, u_out)) };
 }
 
@@ -150,7 +149,6 @@ fn factor_lu_left_looking<T: Scalar>(
     d_row: &[f64],
     d_col: &[f64],
     perturb_floor: Option<f64>,
-    drop_tol: Option<f64>,
     kt: KernelTuning,
     storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
     pools: &LuPools<T>,
@@ -172,7 +170,7 @@ fn factor_lu_left_looking<T: Scalar>(
             kt,
         )
     };
-    let emit_free = |k: usize| emit_and_free(k, &emit, sym, st, drop_tol);
+    let emit_free = |k: usize| emit_and_free(k, &emit, sym, st);
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
@@ -255,9 +253,8 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
 
     // Two-sided equilibration A_hat = D_r A D_c with d_r[i] = 1/sqrt(max_j |A_ij|),
     // d_c[j] = 1/sqrt(max_i |A_ij|). Tames the dynamic range (these MoM near-field
-    // matrices span ~6 orders) so the LU factor - and any incomplete drop -
-    // stays well-scaled; the solve undoes it transparently. Computed from the
-    // original (unpermuted) A.
+    // matrices span ~6 orders) so the LU factor stays well-scaled; the solve
+    // undoes it transparently. Computed from the original (unpermuted) A.
     // The matrix the pipeline factors: `A` itself, or its MC64 row-permuted
     // form `B` (row `i` of `B` is row `row_of[i]` of `A`) with the matching's
     // scalings; otherwise the max-norm equilibration.
@@ -323,7 +320,6 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
                 &d_row,
                 &d_col,
                 perturb_floor,
-                opts.drop_tol,
                 opts.kernel(),
                 storage,
                 pools,

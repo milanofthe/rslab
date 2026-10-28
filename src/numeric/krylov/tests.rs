@@ -281,6 +281,22 @@ fn unsym_grid(m: usize) -> crate::sparse::general::GeneralCsc<C> {
     GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap()
 }
 
+/// The diagonal of `a`: its factor is a deliberately weak preconditioner.
+fn diagonal_part(
+    a: &crate::sparse::general::GeneralCsc<C>,
+) -> crate::sparse::general::GeneralCsc<C> {
+    let (mut idx, mut vals) = (Vec::new(), Vec::new());
+    for j in 0..a.n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            if a.row_idx[k] == j {
+                idx.push(j);
+                vals.push(a.values[k]);
+            }
+        }
+    }
+    crate::sparse::general::GeneralCsc::from_triplets(a.n, &idx, &idx, &vals).unwrap()
+}
+
 /// Wraps a preconditioner and counts every scalar `apply` (the `M^-1` solves).
 struct CountingPc<'a, M: ?Sized> {
     inner: &'a M,
@@ -307,13 +323,9 @@ fn fgmres_saves_one_precond_apply_per_restart_cycle() {
     let a = unsym_grid(10); // n = 100
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    // Weak (heavily incomplete) factor so the solve needs several restart
-    // cycles at a short restart length - exercising the per-cycle update path.
-    let opts = SolverSettings {
-        drop_tol: Some(8e-1),
-        ..Default::default()
-    };
-    let lu = LuSolver::factor(&a, &opts).unwrap();
+    // Weak preconditioner so the solve needs several restart cycles at a
+    // short restart length - exercising the per-cycle update path.
+    let lu = LuSolver::factor(&diagonal_part(&a), &SolverSettings::default()).unwrap();
     let restart = 5;
     let counting = CountingPc {
         inner: &lu,
@@ -940,56 +952,6 @@ fn cocr_handles_indefinite_helmholtz() {
 }
 
 #[test]
-fn incomplete_factor_reduces_fill_and_still_preconditions() {
-    // Threshold dropping shrinks the factor (less memory) at the cost of a
-    // weaker preconditioner - but COCG must still converge to the true
-    // f64 solution. Demonstrates the memory <-> iteration tradeoff.
-    let c = |re, im| Complex::new(re, im);
-    let a = grid(16, c(4.0, 1.0), c(-1.0, 0.2));
-    let n = a.n;
-    let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
-
-    let full = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
-    let opts = SolverSettings::default().with_drop_tol(5e-2);
-    let inc = LdltSolver::factor(&a, &opts).unwrap();
-
-    assert!(
-        inc.factor_nnz() < full.factor_nnz(),
-        "dropping should reduce fill: incomplete {} vs complete {}",
-        inc.factor_nnz(),
-        full.factor_nnz()
-    );
-
-    let rf = cocg(
-        &a,
-        &b,
-        &full,
-        &crate::KrylovSettings::default()
-            .with_tol(1e-10)
-            .with_max_iter(1000),
-    )
-    .unwrap();
-    let ri = cocg(
-        &a,
-        &b,
-        &inc,
-        &crate::KrylovSettings::default()
-            .with_tol(1e-10)
-            .with_max_iter(1000),
-    )
-    .unwrap();
-    assert!(ri.converged, "incomplete-preconditioned COCG must converge");
-    assert!(
-        ri.iters >= rf.iters,
-        "incomplete factor should need >= complete-factor iterations"
-    );
-    let mut ax = vec![C::default(); n];
-    a.symv(&ri.x, &mut ax);
-    let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
-    assert!(res < 1e-8, "residual {}", res);
-}
-
-#[test]
 fn f32_preconditioner_keeps_f64_accuracy() {
     // Factor the preconditioner in Complex<f32> (half memory) but iterate in
     // f64: the solution must still reach f64-level residual, and the f32
@@ -1253,10 +1215,10 @@ fn gmres_happy_breakdown_on_eigenvector_rhs() {
 }
 
 #[test]
-fn gmres_block_incomplete_factor_multirate_deflation() {
+fn gmres_block_nearby_factor_multirate_deflation() {
     // Multi-rate within-cycle deflation under a genuine
-    // **factor-based** (drop-tol) preconditioner. The operator is diagonal with
-    // distinct entries `d_i`; the preconditioner is a `drop_tol` LU factor of a
+    // **factor-based** preconditioner. The operator is diagonal with
+    // distinct entries `d_i`; the preconditioner is an LU factor of a
     // *different* diagonal matrix `diag(p_i)` - a deliberately imperfect
     // approximate inverse, so the preconditioned operator `M^-1A = diag(d_i/p_i)`
     // still has distinct eigenvalues. Right-hand side `k` is supported on the
@@ -1287,12 +1249,7 @@ fn gmres_block_incomplete_factor_multirate_deflation() {
         pv.push(c(1.0 + i as f64, 0.1));
     }
     let pmat = GeneralCsc::<C>::from_triplets(n, &pr, &pc_, &pv).unwrap();
-    // drop-tol factor path (imperfect preconditioner)
-    let opts = SolverSettings {
-        drop_tol: Some(1e-2),
-        ..Default::default()
-    };
-    let lu = LuSolver::factor(&pmat, &opts).unwrap();
+    let lu = LuSolver::factor(&pmat, &SolverSettings::default()).unwrap();
 
     // RHS k = sum of the first k+1 unit vectors -> converges in exactly k+1 steps.
     let mut bblk = vec![C::default(); n * s];
@@ -1398,18 +1355,14 @@ fn stagnation_spectrum(n: usize, n_small: usize) -> Vec<C> {
 #[test]
 fn gmres_recycled_matches_plain_on_hard_matrix() {
     // Correctness: the recycled solve must reach the SAME solution as plain
-    // FGMRES on a hard preconditioned system (weak incomplete LU factor, short
+    // FGMRES on a hard preconditioned system (weak diagonal factor, short
     // restart -> many cycles), to the same tolerance.
     use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(12); // n = 144
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    let opts = SolverSettings {
-        drop_tol: Some(8e-1),
-        ..Default::default()
-    };
-    let lu = LuSolver::factor(&a, &opts).unwrap();
+    let lu = LuSolver::factor(&diagonal_part(&a), &SolverSettings::default()).unwrap();
     let (tol, maxit, restart) = (1e-10, 4000, 12);
     let plain = gmres(
         &a,

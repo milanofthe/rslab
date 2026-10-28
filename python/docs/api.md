@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 1.3.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 1.7.0 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -107,7 +107,7 @@ solves against one matrix keep the handle instead (`auto` /
 - `A` (scipy.sparse matrix or array-like): The `n x n` system matrix.
 - `b` (ndarray): Right-hand side: a 1-D vector of length `n` or a 2-D `n x nrhs` block. Cast to the factor's dtype automatically.
 - `symmetric` (bool, optional): Force the symmetric `L D L^T` path (`True`) or the unsymmetric `L U` path (`False`). When omitted, the automatic path decides.
-- `refine` (int, default 0): Steps of iterative refinement against the original matrix, per right-hand side. Meaningful with `preconditioner=...` / `drop_tol=...`, where the factor is inexact.
+- `refine` (int, default 0): Steps of iterative refinement against the original matrix, per right-hand side. Meaningful with `preconditioner=...`, where the factor is inexact.
 - `**kwargs`: Any `Settings` keyword, for the supernodal paths.
 
 **Returns**
@@ -182,7 +182,7 @@ automatically), so `A` may be stored full or triangular.
 
 - `A` (scipy.sparse matrix or array-like): The symmetric `n x n` system matrix. Converted to CSC and its lower triangle taken; duplicate entries are summed.
 - `settings` (Settings, optional): A prepared `Settings` object.
-- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `drop_tol`, `force_accept`, `ordering`, `scaling`, `nemin`, `relax`, `panel_nb`, `interrupt` ...), overriding `settings`.
+- `**kwargs`: Any `Settings` keyword (`threads`, `preconditioner`, `force_accept`, `ordering`, `scaling`, `nemin`, `relax`, `panel_nb`, `interrupt` ...), overriding `settings`.
 
 **Returns**
 
@@ -232,7 +232,7 @@ fields as `ldlt`. The full matrix is read.
 f = rslab.lu(A)
 x = f.solve(b)
 r = f.gmres(b, tol=1e-10)               # the factor as preconditioner
-x, converged, iters, res, stop = rslab.lu(A, drop_tol=1e-2).gmres(b)
+x, converged, iters, res, stop = rslab.lu(A, preconditioner=1e-8).gmres(b)
 ```
 
 ### `klu(A, *, settings: 'KluSettings | None' = None, **kwargs) -> 'Klu'`
@@ -1028,7 +1028,7 @@ A-priori memory and work estimate for a factor in the given dtype.
 
 Numeric factorization of `data` (the CSC value array of the lower
 triangle, in the analyzed pattern's order, in any supported dtype).
-Numeric settings (`threads`, `preconditioner`, `drop_tol`,
+Numeric settings (`threads`, `preconditioner`,
 `pivot_threshold`, `scaling` ...) may be overridden per call.
 Numeric factorization of new values on the analyzed pattern.
 
@@ -1219,7 +1219,6 @@ tuned values, listed by `to_dict`.
 - `threads` (int or 'auto' or ('auto', int) or 'ambient', optional): Worker budget of the scoped factorization pool. `None` (default) is the per-matrix predictor capped at 4 workers (or the calibrated pick after `rslab.install_diagnose`); an `int` pins the count (`0` = all logical cores); `'auto'` is the predictor without the cap, `('auto', max)` the predictor capped at `max`; `'ambient'` runs on the caller's rayon pool. The factor is bit-identical for every value.
 - `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. `1e-4` is a good start.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
-- `drop_tol` (float, optional): Sparsification of the finished factor: entries below it (relative to the column maximum) are zeroed, and rows that end up empty in every column of a supernode are dropped from the stored factor. The factorization itself runs complete, so it saves neither time nor peak memory. `None` keeps the factor as computed.
 - `factor_dtype` (str or dtype, optional): Store the factor in the lower-precision twin of the matrix's dtype (`'float32'` for float64, `'complex64'` for complex128): half the factor memory, single-precision kernels. The handle keeps the matrix in its own precision, so `solve(b, refine=k)` and the Krylov methods reach its accuracy. LDL^T and LU paths; `None` factors in the matrix's dtype.
 - `pivot_threshold` (float, default 0.1): Threshold partial pivoting of the LU path in `[0, 1]` (`1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
 - `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
@@ -1313,7 +1312,7 @@ Flexible restarted GMRES on `A x = b`, optionally preconditioned.
 
 - `A` (scipy.sparse matrix or array-like): The operator (any square matrix; converted to CSC).
 - `b` (ndarray, shape (n,)): Right-hand side; cast to the operator's (or preconditioner's) dtype.
-- `M` (Ldlt or Lu or Klu, optional): A factor handle used as the preconditioner, e.g. an incomplete or low-precision factor of `A` or a factor of a nearby matrix. `None` runs unpreconditioned.
+- `M` (Ldlt or Lu or Klu, optional): A factor handle used as the preconditioner, e.g. a static-pivoted or low-precision factor of `A` or a factor of a nearby matrix. `None` runs unpreconditioned.
 - `tol` (float, default 1e-8): Relative residual target `||b - A x|| <= tol * ||b||`.
 - `maxit` (int, default 400): Iteration budget.
 - `restart` (int, optional): Arnoldi basis size; by default chosen so the basis stays under 1 GiB (between 20 and 80).
@@ -1327,7 +1326,7 @@ Flexible restarted GMRES on `A x = b`, optionally preconditioned.
 **Example**
 
 ```python
-M = rslab.lu(A, drop_tol=1e-3)                    # ILU-style preconditioner
+M = rslab.lu(A, preconditioner=1e-8)              # static-pivoted factor
 x, ok, iters, res, stop = rslab.gmres(A, b, M, tol=1e-10)
 r = rslab.gmres(A2, b, M)                         # M reused on a nearby A2
 ```
@@ -1362,7 +1361,7 @@ memory, one matrix-vector product per iteration, no restart.
 
 - `A` (scipy.sparse matrix): The `n x n` operator.
 - `b` (ndarray, shape (n,)): Right-hand side.
-- `M` (factor handle, optional): A factor (`ldlt`, `lu`, `klu`, typically incomplete or with static pivoting) used as the preconditioner.
+- `M` (factor handle, optional): A factor (`ldlt`, `lu`, `klu`, typically with static pivoting, in low precision or of a nearby matrix) used as the preconditioner.
 - `tol` (float, default 1e-8): Relative residual target `||b - A x|| <= tol * ||b||`.
 - `maxit` (int, default 400): Iteration budget.
 

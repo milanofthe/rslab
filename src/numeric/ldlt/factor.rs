@@ -27,8 +27,8 @@ pub(crate) struct LdltNumeric<T> {
     pub factor: PanelFactor<T>,
     /// `D`, the permutation and the outcome.
     pub pivots: LdltPivots<T>,
-    /// Structural panel slots holding an exact zero (cancellation or
-    /// `drop_tol`); the stored nonzeros are `factor.nnz() - n_zeros`.
+    /// Structural panel slots holding an exact zero (cancellation); the
+    /// stored nonzeros are `factor.nnz() - n_zeros`.
     pub n_zeros: usize,
 }
 
@@ -183,7 +183,6 @@ fn ldlt_emit_and_free<T: Scalar>(
     emit: &LlEmitLdlt<T>,
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
-    drop_tol: Option<f64>,
 ) {
     let ncol = sym.supernodes[k].ncol;
     let nrow = sched.rows(k).len();
@@ -198,7 +197,7 @@ fn ldlt_emit_and_free<T: Scalar>(
         *r = unsafe { emit.eg(g as usize) } as u32;
     }
     let (_, _, two) = unsafe { emit.d_of(k, ncol) };
-    let out = unsafe { emit.arena.finish_slot(k, ncol, Some(two), drop_tol) };
+    let out = unsafe { emit.arena.finish_slot(k, ncol, Some(two)) };
     unsafe { emit.panels.set(k, out) };
 }
 
@@ -259,7 +258,7 @@ fn factor_left_looking<T: Scalar>(
             kt,
         )
     };
-    let emit_free = |k: usize| ldlt_emit_and_free(k, &emit, sym, sched, opts.drop_tol);
+    let emit_free = |k: usize| ldlt_emit_and_free(k, &emit, sym, sched);
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();

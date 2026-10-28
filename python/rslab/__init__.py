@@ -241,7 +241,7 @@ def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
         A prepared :class:`Settings` object.
     **kwargs
         Any :class:`Settings` keyword (``threads``, ``preconditioner``,
-        ``drop_tol``, ``force_accept``, ``ordering``, ``scaling``, ``nemin``,
+        ``force_accept``, ``ordering``, ``scaling``, ``nemin``,
         ``relax``, ``panel_nb``, ``interrupt`` ...),
         overriding ``settings``.
 
@@ -314,7 +314,7 @@ def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
         f = rslab.lu(A)
         x = f.solve(b)
         r = f.gmres(b, tol=1e-10)               # the factor as preconditioner
-        x, converged, iters, res, stop = rslab.lu(A, drop_tol=1e-2).gmres(b)
+        x, converged, iters, res, stop = rslab.lu(A, preconditioner=1e-8).gmres(b)
     """
     return _rslab.lu_factor(*_csc_parts(A, "lu"), settings=settings, **kwargs)
 
@@ -504,7 +504,7 @@ def gmres(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _rslab.K
     b : ndarray, shape (n,)
         Right-hand side; cast to the operator's (or preconditioner's) dtype.
     M : Ldlt or Lu or Klu, optional
-        A factor handle used as the preconditioner, e.g. an incomplete or
+        A factor handle used as the preconditioner, e.g. a static-pivoted or
         low-precision factor of ``A`` or a factor of a nearby matrix.
         ``None`` runs unpreconditioned.
     tol : float, default 1e-8
@@ -530,7 +530,7 @@ def gmres(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _rslab.K
     -------
     .. code-block:: python
 
-        M = rslab.lu(A, drop_tol=1e-3)                    # ILU-style preconditioner
+        M = rslab.lu(A, preconditioner=1e-8)              # static-pivoted factor
         x, ok, iters, res, stop = rslab.gmres(A, b, M, tol=1e-10)
         r = rslab.gmres(A2, b, M)                         # M reused on a nearby A2
     """
@@ -594,8 +594,8 @@ def cocg(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
     b : ndarray, shape (n,)
         Right-hand side.
     M : factor handle, optional
-        A factor (``ldlt``, ``lu``, ``klu``, typically incomplete or with
-        static pivoting) used as the preconditioner.
+        A factor (``ldlt``, ``lu``, ``klu``, typically with static pivoting,
+        in low precision or of a nearby matrix) used as the preconditioner.
     tol : float, default 1e-8
         Relative residual target ``||b - A x|| <= tol * ||b||``.
     maxit : int, default 400
@@ -686,8 +686,8 @@ def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
         path decides.
     refine : int, default 0
         Steps of iterative refinement against the original matrix, per
-        right-hand side. Meaningful with ``preconditioner=...`` /
-        ``drop_tol=...``, where the factor is inexact.
+        right-hand side. Meaningful with ``preconditioner=...``, where the
+        factor is inexact.
     **kwargs
         Any :class:`Settings` keyword, for the supernodal paths.
 

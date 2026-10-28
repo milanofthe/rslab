@@ -62,7 +62,7 @@ pub(crate) struct LuNumeric<T> {
     /// Pivots perturbed by the static regularization.
     pub n_perturbed: usize,
     /// Structural panel slots holding an exact zero (the symmetrized
-    /// pattern, cancellation or `drop_tol`); the stored nonzeros are
+    /// pattern or cancellation); the stored nonzeros are
     /// `l.nnz() + ut.nnz() - n_zeros`.
     pub n_zeros: usize,
 }

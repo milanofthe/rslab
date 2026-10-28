@@ -94,8 +94,8 @@
 //!
 //! ## Preconditioners
 //!
-//! Static pivoting ([`SolverSettings::preconditioner`]) never fails, and a
-//! drop tolerance trades fill for iterations. [`gmres`], [`gmres_block`],
+//! Static pivoting ([`SolverSettings::preconditioner`]) never fails.
+//! [`gmres`], [`gmres_block`],
 //! [`cocg`] (complex symmetric) and [`cocr`] take any [`LinearOperator`] and
 //! [`Preconditioner`] with their [`KrylovSettings`]; a factor of the
 //! [`demoted`](GeneralCsc::demoted) matrix preconditions an iteration in the
@@ -109,7 +109,7 @@
 //! let a = CscMatrix::<Complex<f64>>::from_triplets(
 //!     3, &[0, 1, 2, 1], &[0, 1, 2, 0],
 //!     &[c(4.0, 1.0), c(4.0, 1.0), c(4.0, 1.0), c(-1.0, 0.2)])?;
-//! let m = LdltSolver::factor(&a, &SolverSettings::preconditioner(1e-8).with_drop_tol(1e-2))?;
+//! let m = LdltSolver::factor(&a, &SolverSettings::preconditioner(1e-8))?;
 //! let res = cocg(&a, &vec![c(1.0, 0.0); 3], &m, &KrylovSettings::default().with_tol(1e-10))?;
 //! assert!(res.converged);
 //! # Ok(()) }

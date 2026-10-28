@@ -57,8 +57,8 @@ pub(crate) enum FactorPath {
 
 /// Settings of the sparse LDL^T and LU factorizations. Defaults give an
 /// **exact** complete factorization that fails on rank deficiency; relaxing
-/// [`pivoting`](Self::pivoting) and [`drop_tol`](Self::drop_tol) turns it
-/// into a robust, memory-light preconditioner. The analysis groups
+/// [`pivoting`](Self::pivoting) turns it into a robust preconditioner. The
+/// analysis groups
 /// ([`ordering`](Self::ordering), [`amalgamation`](Self::amalgamation)) are
 /// read when analyzing, the rest when factoring and solving.
 #[derive(Debug, Clone)]
@@ -71,10 +71,6 @@ pub struct SolverSettings {
     pub scaling: ScalingStrategy,
     /// The row matching of the LU path.
     pub matching: MatchingSettings,
-    /// Threshold dropping for an incomplete factorization: fill entries below
-    /// `tau` relative to their column are discarded. `None` (default) keeps
-    /// the factor complete.
-    pub drop_tol: Option<f64>,
     /// The fill-reducing ordering. Analyze-time.
     pub ordering: OrderingSettings,
     /// How columns merge into supernodes. Analyze-time.
@@ -437,7 +433,6 @@ impl Default for SolverSettings {
             pivoting: PivotSettings::default(),
             scaling: ScalingStrategy::OnePassInfNorm,
             matching: MatchingSettings::default(),
-            drop_tol: None,
             ordering: OrderingSettings::default(),
             amalgamation: AmalgamationSettings::default(),
             kernels: KernelSettings::default(),
@@ -449,25 +444,16 @@ impl Default for SolverSettings {
 }
 
 impl SolverSettings {
-    /// Exact, complete factorization (the default): fail on a singular pivot,
-    /// no fill dropping.
+    /// Exact, complete factorization (the default): fail on a singular pivot.
     pub fn exact() -> Self {
         Self::default()
     }
 
     /// Robust never-fail preconditioner: static pivoting lifts any pivot below
     /// `abs_floor` (typically `eps_rel * ||A||`) to it, so the factorization
-    /// always succeeds. Compose with [`with_drop_tol`](Self::with_drop_tol)
-    /// for an incomplete factor.
+    /// always succeeds.
     pub fn preconditioner(abs_floor: f64) -> Self {
         Self::default().with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor })
-    }
-
-    /// Drop fill below `tau` relative to its column (see
-    /// [`drop_tol`](Self::drop_tol)).
-    pub fn with_drop_tol(mut self, tau: f64) -> Self {
-        self.drop_tol = Some(tau);
-        self
     }
 
     /// Set the near-zero pivot policy.

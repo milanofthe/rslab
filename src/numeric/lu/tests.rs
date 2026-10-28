@@ -616,62 +616,6 @@ fn phased_general_lu_analyze_once_factor_many() {
     }
 }
 
-#[test]
-fn incomplete_lu_reduces_fill_and_still_solves() {
-    // Unsymmetric grid: incomplete LU (drop_tol) must shrink nnz(L+U) yet
-    // still drive iterative refinement to a small residual - the MoM
-    // sparse-preconditioner configuration.
-    let c = |re, im| Complex::new(re, im);
-    let m = 14;
-    let n = m * m;
-    let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
-    let idx = |a: usize, b: usize| a * m + b;
-    for a in 0..m {
-        for b in 0..m {
-            let p = idx(a, b);
-            rr.push(p);
-            cc.push(p);
-            vv.push(c(8.0, 1.0));
-            if b + 1 < m {
-                let q = idx(a, b + 1);
-                rr.push(p);
-                cc.push(q);
-                vv.push(c(-1.0, 0.2));
-                rr.push(q);
-                cc.push(p);
-                vv.push(c(-2.0, 0.1));
-            }
-            if a + 1 < m {
-                let q = idx(a + 1, b);
-                rr.push(p);
-                cc.push(q);
-                vv.push(c(-1.5, 0.3));
-                rr.push(q);
-                cc.push(p);
-                vv.push(c(-0.5, 0.4));
-            }
-        }
-    }
-    let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
-    let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-
-    let full = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
-    let opts = SolverSettings::default().with_drop_tol(5e-2);
-    let inc = LuSolver::factor(&a, &opts).unwrap();
-    assert!(
-        inc.factor_nnz() < full.factor_nnz(),
-        "ILU should reduce fill: {} vs {}",
-        inc.factor_nnz(),
-        full.factor_nnz()
-    );
-    // The incomplete factor + a few refinement steps still solves accurately.
-    let x = inc
-        .solve_refined(&a, &b, &crate::RefinePolicy::steps(10))
-        .unwrap()
-        .0;
-    assert!(resid(&a, &x, &b) < 1e-6, "residual {}", resid(&a, &x, &b));
-}
-
 /// A random unsymmetric matrix with a dominant diagonal (every column its
 /// diagonal plus a few random rows, so `A + A^T` is much larger than `A`);
 /// with `holes` every

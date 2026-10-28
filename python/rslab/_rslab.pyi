@@ -33,7 +33,6 @@ class Settings:
         threads: int | str | tuple[str, int] | None = ...,
         preconditioner: float | None = ...,
         force_accept: bool = ...,
-        drop_tol: float | None = ...,
         ordering: str | None = ...,
         race_candidates: Sequence[str] | None = ...,
         scaling: str | NDArray[Any] | None = ...,

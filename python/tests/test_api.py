@@ -271,7 +271,7 @@ def test_cocg_cocr_complex_symmetric(solver):
     b = np.ones(n, dtype=np.complex128)
     r = solver(A, b, tol=1e-10, maxit=5000)
     assert r.converged and _res(A, r.x, b) < 1e-8
-    M = rslab.ldlt(A, drop_tol=1e-2)
+    M = rslab.ldlt(A, preconditioner=1e-8)
     r2 = solver(A, b, M, tol=1e-10, maxit=5000)
     assert r2.converged and r2.iters <= r.iters
 
@@ -408,7 +408,6 @@ def test_every_setting_round_trips():
     s = rslab.Settings(
         threads=("auto", 2),
         preconditioner=1e-6,
-        drop_tol=1e-3,
         ordering="amf",
         scaling="mc64",
         pivot_threshold=0.5,

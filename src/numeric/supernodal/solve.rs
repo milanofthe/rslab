@@ -600,10 +600,10 @@ impl<T: Scalar> SolvePlan<T> {
         // Accumulator slots of the off-tree rows: a subtree's row its position
         // in the subtree's `ext`, an ancestor's off-block row its position in
         // the ancestor's own rows. A row whose supernode is not an ancestor of
-        // the writer (possible only for a pruned, `drop_tol` factor, whose
-        // structure no longer follows an elimination tree) makes the
-        // structure degenerate; such a factor is solved without the subtree
-        // phase (everything above the cut, sequential in the tree phases).
+        // the writer (the structure no longer follows an elimination tree)
+        // makes the structure degenerate; such a factor is solved without the
+        // subtree phase (everything above the cut, sequential in the tree
+        // phases).
         let mut ext_slot = vec![NONE; rows.len()];
         let mut on_path = vec![false; ns];
         let mut degenerate = false;
@@ -649,9 +649,8 @@ impl<T: Scalar> SolvePlan<T> {
         }
         let chain = degenerate;
         let (subtrees, top, top_levels, ext_slot) = if degenerate {
-            // The structure does not follow an elimination tree (a pruned
-            // factor, or an LU whose row pivoting moved rows across
-            // subtrees): one sequential chain, every node an ancestor
+            // The structure does not follow an elimination tree (an LU whose
+            // row pivoting moved rows across subtrees): one sequential chain, every node an ancestor
             // without slots. Levels run from the root, so the deepest level
             // (processed first by the forward sweep) is the first column.
             if crate::logging::enabled(crate::logging::LogLevel::Debug) {
@@ -1892,19 +1891,43 @@ mod tests {
     }
 
     #[test]
-    fn plan_cuts_the_tree_and_falls_back_on_pruned_factors() {
+    fn plan_cuts_the_tree() {
         let a = grid(60, 0.0);
         let s = LdltSolver::factor(&a, &SolverSettings::default().with_threads(1)).unwrap();
         assert!(s.plan.subtrees.len() > 1);
         assert!(!s.plan.top_levels.is_empty());
-        let pruned = LdltSolver::factor(
-            &a,
-            &SolverSettings::default().with_threads(1).with_drop_tol(0.2),
-        )
-        .unwrap();
-        let b = vec![1.0; a.n];
-        let x = pruned.solve(&b).unwrap();
-        assert!(x.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn plan_falls_back_on_a_structure_off_the_tree() {
+        use super::super::panel::PanelFactor;
+        use super::{PlanWork, SolvePlan};
+        // Unit `L` of three 1-column supernodes on the tree 0 -> 2, 1 -> 2,
+        // supernode 0 holding row 1 (a sibling, not an ancestor):
+        // L = [[1, 0, 0], [0.5, 1, 0], [0.25, -2, 1]].
+        let factor = PanelFactor {
+            n: 3,
+            sn_col: vec![0, 1, 2, 3],
+            rows: vec![1, 2, 2],
+            row_ptr: vec![0, 2, 3, 3],
+            val_ptr: vec![0, 3, 5, 6],
+            vals: vec![1.0, 0.5, 0.25, 1.0, -2.0, 1.0],
+        };
+        let plan = SolvePlan::from_panels(
+            factor,
+            &[2, 2, usize::MAX],
+            true,
+            crate::SolveSettings::default(),
+        );
+        assert!(plan.subtrees.is_empty(), "solved as one sequential chain");
+        let mut work = PlanWork::default();
+        // L x = b and L^T x = c for x = [1, 2, 3].
+        let mut y = vec![1.0, 2.5, -0.75];
+        plan.forward(1, &mut y, &mut work, crate::Threads::Fixed(1));
+        assert_eq!(y, [1.0, 2.0, 3.0]);
+        let mut y = vec![2.75, -4.0, 3.0];
+        plan.backward(1, &mut y, &mut work, crate::Threads::Fixed(1));
+        assert_eq!(y, [1.0, 2.0, 3.0]);
     }
 
     /// Unsymmetric convection-diffusion grid for the LU plans.
