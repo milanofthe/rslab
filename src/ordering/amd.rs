@@ -85,7 +85,7 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
         }
         crate::parallel::for_each_owned_on(blocks, k, work, |(j0, j1, out)| fill(j0, j1, out));
     } else {
-        work.serial(go, || fill(0, n, &mut row_idx));
+        work.serial(|| fill(0, n, &mut row_idx));
     }
 
     CscPattern {

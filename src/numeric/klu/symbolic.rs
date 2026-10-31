@@ -308,9 +308,7 @@ impl KluSymbolic {
                 self.nnz >= min && self.max_block_size() * 2 <= self.n
             }
             // The blocks' input entries at what an entry has cost, in as
-            // many equal pieces as the largest block leaves room for (the
-            // factor runs the sequential driver instead while that rate has
-            // not had its probes).
+            // many equal pieces as the largest block leaves room for.
             (KluParallel::Auto, None) => {
                 let entries = |b: usize| {
                     (self.pat_col_ptr[self.block_ptr[b + 1]] - self.pat_col_ptr[self.block_ptr[b]])

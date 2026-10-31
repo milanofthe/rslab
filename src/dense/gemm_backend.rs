@@ -72,7 +72,7 @@ pub unsafe fn gemm<T: Scalar>(
                 ..mode
             },
         };
-        return work.serial(go, || {
+        return work.serial(|| {
             T::gemm(
                 m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
                 alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,

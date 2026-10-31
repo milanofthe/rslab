@@ -680,12 +680,11 @@ pub(super) fn factor_impl<T: Scalar>(
     let max_bn = sym.max_block_size();
     let rate = FACTOR_RATE.of::<T>();
     let entries = sym.nnz as f64;
-    // The sequential driver while the rate has not had its probes (unless
-    // the policy wants the blocks side by side), measured for it as a probe
-    // or sampled; the parallel one decides on it, and measures it where it
-    // runs serially ([`crate::parallel`]). `On` goes as wide as the pool.
+    // The parallel driver decides on the rate and measures it where it
+    // runs serially ([`crate::parallel`]); the sequential one is sampled
+    // for it. `On` goes as wide as the pool.
     let forced = settings.parallel == KluParallel::On;
-    let side = parallel && (forced || !rate.probing(entries));
+    let side = parallel;
     let timing = if side {
         None
     } else {

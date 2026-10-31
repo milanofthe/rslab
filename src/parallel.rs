@@ -23,8 +23,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 pub use rspool::rayon::{
-    dispatch, kept, pool_dispatch as rayon_dispatch, prepare, run, run_rated, run_watched,
-    run_width, threads, width, width_on, Rayon,
+    dispatch, kept, pool_dispatch as rayon_dispatch, prepare, run, run_rated, run_width, threads,
+    width, width_on, Rayon,
 };
 pub use rspool::{
     as_piece, current, install, install_lent, share_of, Dispatch, Go, Lent, Piece, Pool, Rate,
@@ -82,7 +82,7 @@ impl ScalarRates {
 pub(crate) fn for_each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
-        go => return work.serial(go, || (0..n).for_each(&f)),
+        _ => return work.serial(|| (0..n).for_each(&f)),
     };
     let len = piece_len(n, k);
     work.wide::<Rayon>(n.div_ceil(len), k, &|p| {
@@ -95,7 +95,7 @@ pub(crate) fn for_each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send
 pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
     match work.go::<Rayon>(n) {
         Go::Wide(k) => work.wide::<Rayon>(n, k, &f),
-        go => work.serial(go, || (0..n).for_each(&f)),
+        _ => work.serial(|| (0..n).for_each(&f)),
     }
 }
 
@@ -110,9 +110,7 @@ pub(crate) fn chunks_mut<T: Send>(
     let size = size.max(1);
     match work.go::<Rayon>(v.len().div_ceil(size)) {
         Go::Wide(k) => chunks_on(v, size, k, work, f),
-        go => work.serial(go, || {
-            v.chunks_mut(size).enumerate().for_each(|(i, c)| f(i, c))
-        }),
+        _ => work.serial(|| v.chunks_mut(size).enumerate().for_each(|(i, c)| f(i, c))),
     }
 }
 
@@ -150,8 +148,8 @@ pub(crate) fn zip_mut<A: Sync, S: Send>(
     let n = items.len().min(scratch.len());
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
-        go => {
-            return work.serial(go, || {
+        Go::Here => {
+            return work.serial(|| {
                 for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
                     f(i, a, s);
                 }
@@ -173,7 +171,7 @@ pub(crate) fn map<R: Send>(
 ) -> Vec<R> {
     match work.go::<Rayon>(n) {
         Go::Wide(k) => map_on(n, k, work, f),
-        go => work.serial(go, || (0..n).map(f).collect()),
+        _ => work.serial(|| (0..n).map(f).collect()),
     }
 }
 
@@ -208,7 +206,7 @@ pub(crate) fn map_owned<A: Send, R: Send>(
 ) -> Vec<R> {
     let k = match work.go::<Rayon>(items.len()) {
         Go::Wide(k) => k,
-        go => return work.serial(go, || items.into_iter().map(f).collect()),
+        _ => return work.serial(|| items.into_iter().map(f).collect()),
     };
     let slots: Vec<std::sync::Mutex<Option<A>>> = items
         .into_iter()
@@ -229,8 +227,8 @@ pub(crate) fn map_init<S, R: Send>(
 ) -> Vec<R> {
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
-        go => {
-            return work.serial(go, || {
+        Go::Here => {
+            return work.serial(|| {
                 let mut s = init();
                 (0..n).map(|i| f(&mut s, i)).collect()
             })
@@ -255,7 +253,7 @@ pub(crate) fn map_init<S, R: Send>(
 pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(A) + Sync + Send) {
     match work.go::<Rayon>(items.len()) {
         Go::Wide(k) => for_each_owned_on(items, k, work, f),
-        go => work.serial(go, || items.into_iter().for_each(f)),
+        _ => work.serial(|| items.into_iter().for_each(f)),
     }
 }
 
@@ -294,7 +292,7 @@ pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
         work.go::<Rayon>(v.len())
     };
     let Go::Wide(k) = go else {
-        return work.serial(go, || v.sort_unstable_by_key(key));
+        return work.serial(|| v.sort_unstable_by_key(key));
     };
     use ::rayon::prelude::*;
     let n = v.len();
@@ -305,7 +303,7 @@ pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
 pub(crate) fn any(n: usize, work: Work<'_>, f: impl Fn(usize) -> bool + Sync + Send) -> bool {
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
-        go => return work.serial(go, || (0..n).any(f)),
+        _ => return work.serial(|| (0..n).any(f)),
     };
     let found = std::sync::atomic::AtomicBool::new(false);
     let len = piece_len(n, k);
@@ -331,7 +329,7 @@ pub(crate) fn join<A: Send, B: Send>(
 ) -> (A, B) {
     let go = work.go::<Rayon>(2);
     if !matches!(go, Go::Wide(_)) {
-        return work.serial(go, || (a(), b()));
+        return work.serial(|| (a(), b()));
     }
     work.watch::<Rayon, _>(2, 2, || join_on(a, b))
 }
@@ -438,7 +436,7 @@ pub(crate) fn scope<'s, R: Send>(
 ) -> R {
     let go = work.go::<Rayon>(usize::MAX);
     let Go::Wide(k) = go else {
-        return work.serial(go, || {
+        return work.serial(|| {
             let queue = std::sync::Mutex::new(std::collections::VecDeque::new());
             let r = body(&Scope(ScopeOn::Here(&queue)));
             loop {
@@ -546,15 +544,10 @@ mod tests {
             assert_eq!(away.load(Relaxed), 0, "tiny work left the thread");
             let v = map(1000, Work::ns(1e9), |i| i * 2);
             assert!(v.iter().enumerate().all(|(i, &x)| x == 2 * i));
-            // a rate that has not had its probes runs its sections here,
-            // however large they look at its prior
+            // large work at a learned rate goes wide and computes the same
             let r = Rate::new(1e6);
-            for_each(64, Work::of(1e9, &r), |_| {
-                if std::thread::current().id() != me {
-                    away.fetch_add(1, Relaxed);
-                }
-            });
-            assert_eq!(away.load(Relaxed), 0, "a probe left the thread");
+            let w = map(1000, Work::of(1e9, &r), |i| i * 3);
+            assert!(w.iter().enumerate().all(|(i, &x)| x == 3 * i));
         });
     }
 }

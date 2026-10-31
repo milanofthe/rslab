@@ -3,7 +3,7 @@
 use super::*;
 use crate::constants::{KLU_HANDOFF_NS, KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER, PIPE_RUN};
 use crate::parallel::{Dispatch, Rate, ScalarRates};
-use rspool::constants::{GAIN, RATE_EXPLORE, RATE_STALE};
+use rspool::constants::{GAIN, TUNE_EXPLORE};
 
 /// What a unit of replay work costs a thread, learned from the sequential
 /// replays only (see [`Rate`]): its first refactors replay sequentially to
@@ -24,7 +24,7 @@ static HANDOFF_RATE: Rate = Rate::new(KLU_HANDOFF_NS);
 static LEVEL_RATE: Rate = Rate::new(0.0);
 
 /// Counts the refactors that weigh the surcharges ([`HANDOFF_RATE`],
-/// [`LEVEL_RATE`]): one in [`RATE_EXPLORE`] decides without them, so a
+/// [`LEVEL_RATE`]): one in [`TUNE_EXPLORE`] decides without them, so a
 /// surcharge that once kept every block sequential is measured again (both
 /// are what the parallel replays cost beyond the replay, learned from them
 /// alone).
@@ -67,9 +67,6 @@ struct Decide {
     seq: f64,
     hand: f64,
     level: f64,
-    /// The replay rate has not had its probes: a refactor decided side by
-    /// side replays sequentially, measured.
-    probing: bool,
 }
 
 impl Decide {
@@ -85,7 +82,7 @@ impl Decide {
             && total > 0.0
             && SURCHARGED
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                .is_multiple_of(RATE_EXPLORE);
+                .is_multiple_of(TUNE_EXPLORE);
         Decide {
             dispatch: if forced {
                 crate::parallel::kept(true, threads)
@@ -101,7 +98,6 @@ impl Decide {
             } else {
                 LEVEL_RATE.ns_per_op()
             },
-            probing: !forced && rate.probing(total),
         }
     }
 
@@ -266,15 +262,12 @@ impl<T: Scalar> KluSolver<T> {
         modes.clear();
         let serial = plan.total as f64 * decide.seq;
         let cheap = serial.is_nan() || serial < decide.dispatch.break_even();
-        // The time predicted for the blocks one by one as decided.
-        let mut predicted = serial;
         modes.extend(plan.blocks.iter().map(|bp| {
             if cheap {
                 Mode::Serial
             } else {
                 let bn = f.block_ptr[bp.b + 1] - f.block_ptr[bp.b];
-                let (m, t) = decide.mode(plan, bp, bn);
-                predicted += t - bp.work as f64 * decide.seq;
+                let (m, _) = decide.mode(plan, bp, bn);
                 m
             }
         }));
@@ -282,19 +275,15 @@ impl<T: Scalar> KluSolver<T> {
         if let Some(m) = plan.forced {
             modes.iter_mut().for_each(|x| *x = m);
         }
-        let (mut width_blocks, side) = if cheap {
+        let (mut width_blocks, _) = if cheap {
             (1, serial)
         } else {
             decide.blocks(plan, nblocks)
         };
-        if width_blocks > 1 {
-            predicted = side;
-        }
         let mut wide = width_blocks > 1 || modes.iter().any(|m| *m != Mode::Serial);
         // A refactor decided side by side replays sequentially instead,
-        // measured, while the replay rate has not had its probes, and now and
-        // then after: the rate stays what a sequential replay costs now (see
-        // `REPLAY_RATE`). `modes` keeps what was decided.
+        // measured, now and then: the rate stays what a sequential replay
+        // costs now (see `REPLAY_RATE`). `modes` keeps what was decided.
         let widest = modes.iter().fold(width_blocks, |k, m| match m {
             Mode::Pipelined(p) => k.max(*p),
             Mode::Levels => k.max(decide.threads),
@@ -306,16 +295,16 @@ impl<T: Scalar> KluSolver<T> {
         #[cfg(not(test))]
         let pinned = false;
         let free = pinned || plan.policy == KluParallel::On || plan.floors();
-        let probe = wide && !free && decide.probing;
-        let explore = wide && !free && !probe && rate.explore(plan.total as f64, widest);
-        let sequential = probe || explore;
+        // now and then a refactor decided side by side replays
+        // sequentially, measured: the replay rate stays the code's
+        let explore = wide
+            && !free
+            && rspool::draw(TUNE_EXPLORE.saturating_mul(widest.saturating_sub(1).max(1) as u32));
+        let sequential = explore;
         if sequential {
             width_blocks = 1;
             wide = false;
         }
-        // A parallel replay timed now and then: far faster than predicted,
-        // the replay rate is stale.
-        let watch = (wide && rate.sample(plan.total as f64)).then(crate::clock::Instant::now);
         // The pipelined replays: this refactor's number on the columns; and
         // for every parallel replay a zero work vector per worker, kept
         // across refactors.
@@ -711,12 +700,6 @@ impl<T: Scalar> KluSolver<T> {
                 rate.measure(total, all)?;
             } else {
                 rate.time(total, all)?;
-            }
-        }
-        if let Some(start) = watch {
-            let spent = start.elapsed().as_nanos() as f64;
-            if spent > 0.0 && spent < RATE_STALE * predicted {
-                rate.reprobe();
             }
         }
         f.rs_next = std::mem::replace(&mut f.rs_inv, rs_inv);

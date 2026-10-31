@@ -220,7 +220,7 @@ impl Supervariables {
         };
         let parts: Vec<(Vec<i32>, Vec<i32>)> = match go {
             crate::parallel::Go::Wide(k) => crate::parallel::map_on(blocks, k, work, part),
-            go => work.serial(go, || (0..blocks).map(part).collect()),
+            _ => work.serial(|| (0..blocks).map(part).collect()),
         };
         let mut col_ptr = Vec::with_capacity(n_groups + 1);
         col_ptr.push(0i32);

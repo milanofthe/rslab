@@ -189,9 +189,8 @@ struct KluFactors<T> {
     rs_inv: Vec<f64>,
     scaled: bool,
     /// Whether the first factor's blocks were worth factoring side by side
-    /// (decided on the blocks' input entries, and run so once the rate has
-    /// had its probes; a refactor decides on the exact replay work in
-    /// `plan` instead). Read by tests only.
+    /// (decided on the blocks' input entries; a refactor decides on the
+    /// exact replay work in `plan` instead). Read by tests only.
     #[cfg_attr(not(test), allow(dead_code))]
     parallel: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
@@ -233,8 +232,7 @@ struct KluFactors<T> {
     /// Which columns the current pipelined replay has done.
     ready: Ready,
     /// How the last refactor decided to replay each block of `plan.blocks`
-    /// (it replayed them sequentially instead while the replay rate had its
-    /// probes, and when it explored).
+    /// (it replayed them sequentially instead when it explored).
     modes: Vec<Mode>,
 }
 

@@ -960,7 +960,7 @@ impl<T: Scalar> SolvePlan<T> {
         if par {
             crate::parallel::zip_mut(items, scratch, work, f);
         } else {
-            work.serial(Go::Here, || {
+            work.serial(|| {
                 for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
                     f(i, a, s);
                 }
@@ -993,8 +993,7 @@ impl<T: Scalar> SolvePlan<T> {
     /// ancestor level, and the decision to run on the pool: where the
     /// sweep's work (its panel entries times the right-hand sides, at what
     /// the sweeps have measured) is worth more than one of the budget's
-    /// threads across the leaf subtrees, entering the pool paid, once that
-    /// rate has had its serial probes; or where
+    /// threads across the leaf subtrees, entering the pool paid; or where
     /// the panel entries times the right-hand sides up to four clear
     /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work),
     /// where that is set.
@@ -1011,17 +1010,15 @@ impl<T: Scalar> SolvePlan<T> {
         work.parallel = budget > 1
             && match self.cfg.par_min_work {
                 Some(min) => ops >= min,
-                // Serially while the sweeps' rate has not had its probes
-                // (they are measured on one thread, see `crate::parallel`).
+                // as wide as the sweeps' measured rate makes it worth
                 None => {
                     let entries = self.vals.len().saturating_mul(nr) as f64;
                     let rate = Self::sweep_rate(nr);
-                    !rate.probing(entries)
-                        && crate::parallel::width_on(
-                            budget,
-                            entries * rate.ns_per_op(),
-                            self.subtrees.len().max(2),
-                        ) > 1
+                    crate::parallel::width_on(
+                        budget,
+                        entries * rate.ns_per_op(),
+                        self.subtrees.len().max(2),
+                    ) > 1
                 }
             };
         work
@@ -1159,7 +1156,7 @@ impl<T: Scalar> SolvePlan<T> {
                         take(ci * SOLVE_PULL_COLS, c)
                     })
                 }
-                go => take_work.serial(go, || take(0, yc)),
+                _ => take_work.serial(|| take(0, yc)),
             }
             let (a0, a1) = (self.top_acc_off[ti] * nr, self.top_acc_off[ti + 1] * nr);
             let acc = unsafe { std::slice::from_raw_parts_mut(accs.ptr().add(a0), a1 - a0) };
@@ -1192,7 +1189,7 @@ impl<T: Scalar> SolvePlan<T> {
         let all = Self::sweep_work(self.top_total(), nr, true);
         match all.go::<crate::parallel::Rayon>(leaves) {
             Go::Wide(k) => all.wide::<crate::parallel::Rayon>(nt, k, &walk),
-            go => all.serial(go, || (0..nt).for_each(walk)),
+            _ => all.serial(|| (0..nt).for_each(walk)),
         }
     }
 
@@ -1465,7 +1462,7 @@ impl<T: Scalar> SolvePlan<T> {
                     product(ci * SOLVE_GEMM_ROWS, out)
                 })
             }
-            go if par => flops.serial(go, || product(0, t)),
+            _ if par => flops.serial(|| product(0, t)),
             _ => product(0, t),
         }
         let rows = &self.rows[r0..r0 + m];
