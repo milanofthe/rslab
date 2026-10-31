@@ -126,3 +126,7 @@ name = "klu_refactor"
 
 [[example]]
 name = "pool_bench"
+
+[[example]]
+name = "analysis_memory"
+required-features = ["matgen"]

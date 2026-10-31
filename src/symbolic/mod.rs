@@ -106,7 +106,10 @@ pub fn analyze(
     }
     let graph = OrderingGraph::new(full, ordering);
     let px = race::prefix(&graph, ordering, method, ordering.nd.seed)?;
-    race::finish(px, full, amalgamation)
+    crate::logging::timed(
+        || "analysis: finish".into(),
+        || race::finish(px, full, amalgamation),
+    )
 }
 
 #[cfg(test)]
