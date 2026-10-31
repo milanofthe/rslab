@@ -22,7 +22,8 @@ use std::sync::Mutex;
 /// row_idx)`, `B` the pattern of `a` with row `r` renamed `row_map[r]` (the
 /// matching's row permutation, applied on the fly). The symmetric analysis
 /// needs a structurally symmetric pattern so the elimination tree carries
-/// fill for both `L` and `U`.
+/// fill for both `L` and `U`. The buckets are compacted in place, so the
+/// pattern is built in one buffer of an index per entry of `a`.
 fn symmetrized_lower_pattern<T: Scalar>(
     a: &GeneralCsc<T>,
     row_map: Option<&[usize]>,
@@ -72,12 +73,15 @@ fn symmetrized_lower_pattern<T: Scalar>(
     });
     let mut col_ptr = Vec::with_capacity(n + 1);
     col_ptr.push(0);
-    let mut row_idx = Vec::with_capacity(start[n]);
+    let mut len = 0;
     for j in 0..n {
-        row_idx.extend_from_slice(&scattered[start[j]..start[j] + kept[j]]);
-        col_ptr.push(row_idx.len());
+        scattered.copy_within(start[j]..start[j] + kept[j], len);
+        len += kept[j];
+        col_ptr.push(len);
     }
-    (col_ptr, row_idx)
+    scattered.truncate(len);
+    scattered.shrink_to_fit();
+    (col_ptr, scattered)
 }
 
 /// Whether the row matching is needed: some column's diagonal entry is
@@ -147,8 +151,8 @@ pub struct LuSymbolic {
 
 impl LuSymbolic {
     /// Heap bytes this analysis holds: the ordering, the supernodes, the
-    /// permuted pattern and, once a factorization has built them, the
-    /// schedule and the input program every later factorization reuses.
+    /// schedule, the exact structures and, once a factorization has built
+    /// it, the input program every later factorization reuses.
     /// The analysis stays alive while it is factored, so these bytes are part
     /// of every factorization's footprint.
     pub fn heap_bytes(&self) -> u64 {
@@ -182,7 +186,7 @@ impl LuSymbolic {
         let nnz = a.row_idx.len();
         if n == 0 {
             return Ok(LuSymbolic {
-                symb: analyze_with(0, &[0], &[], opts)?,
+                symb: analyze_with(crate::symbolic::full_pattern(0, &[0], &[])?, 0, opts)?,
                 n: 0,
                 nnz: 0,
                 matching: None,
@@ -227,16 +231,19 @@ impl LuSymbolic {
         } else {
             None
         };
-        let (col_ptr, row_idx) = crate::logging::timed(
+        // The lower triangle lives only until the full pattern is built.
+        let (pattern, lower_nnz) = crate::logging::timed(
             || "lu analyze: symmetrized pattern".into(),
             || {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
-                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
-                    symmetrized_lower_pattern(a, row_map.as_deref())
-                })
+                let (col_ptr, row_idx) =
+                    crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
+                        symmetrized_lower_pattern(a, row_map.as_deref())
+                    });
+                crate::symbolic::full_pattern(n, &col_ptr, &row_idx).map(|p| (p, row_idx.len()))
             },
-        );
-        let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
+        )?;
+        let symb = analyze_with(pattern, lower_nnz, opts)?;
         let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
             (Some((sym, _)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);

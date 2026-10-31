@@ -10,6 +10,7 @@ use crate::constants::{
 use crate::error::RslabError;
 use crate::numeric::settings::{in_scoped_pool, stack_for_depth, SolverSettings};
 use crate::numeric::supernodal::LlSchedule;
+use crate::sparse::csc::CscPattern;
 use crate::symbolic::SymbolicFactorization;
 
 /// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
@@ -54,7 +55,7 @@ pub(crate) struct SymbolicInner {
     /// The left-looking schedule (row structures + updater lists),
     /// pattern-only and shared by the numeric drivers and the estimators.
     /// Built with the analysis: it is the last reader of the symbolic
-    /// factorization's permuted pattern, which the analysis then drops.
+    /// factorization's pattern, which the analysis then drops.
     pub(crate) ll_schedule: LlSchedule,
 }
 
@@ -149,12 +150,12 @@ impl SupernodalAnalysis {
     }
 }
 
-/// Analyze a sparsity pattern (`n`, CSC `col_ptr`/`row_idx`, lower
-/// triangle): value-independent, reused by every factorization of the pattern.
+/// Analyze a full symmetric sparsity pattern
+/// ([`full_pattern`](crate::symbolic::full_pattern)) of an input with `nnz`
+/// entries: value-independent, reused by every factorization of the pattern.
 pub(crate) fn analyze_with(
-    n: usize,
-    col_ptr: &[usize],
-    row_idx: &[usize],
+    pattern: CscPattern<i32>,
+    nnz: usize,
     opts: &SolverSettings,
 ) -> Result<SupernodalAnalysis, RslabError> {
     // The symbolic build (ordering, elimination tree, supernode amalgamation,
@@ -168,18 +169,18 @@ pub(crate) fn analyze_with(
     // solver-in-the-loop contract the factorization honours), so every parallel
     // step inside the analysis - notably the ND seed ensemble - respects the
     // configured worker count instead of grabbing all cores.
+    let n = pattern.n;
     in_scoped_pool(opts.resolved_threads(), stack_for_depth(n), || {
-        analyze_with_inner(n, col_ptr, row_idx, opts)
+        analyze_with_inner(pattern, nnz, opts)
     })
 }
 
 fn analyze_with_inner(
-    n: usize,
-    col_ptr: &[usize],
-    row_idx: &[usize],
+    pattern: CscPattern<i32>,
+    nnz: usize,
     opts: &SolverSettings,
 ) -> Result<SupernodalAnalysis, RslabError> {
-    let nnz = row_idx.len();
+    let n = pattern.n;
     if n == 0 {
         return Ok(SupernodalAnalysis {
             inner: None,
@@ -189,14 +190,14 @@ fn analyze_with_inner(
     }
     let mut sym = crate::logging::timed(
         || format!("analysis: symbolic {:?}", opts.ordering.method),
-        || crate::symbolic::analyze(n, col_ptr, row_idx, &opts.ordering, &opts.amalgamation),
+        || crate::symbolic::analyze_pattern(pattern, &opts.ordering, &opts.amalgamation),
     )?;
-    // The schedule reads the permuted pattern for the last time: past it the
-    // pattern (a word per entry of `A + A^T`, the largest part of the
-    // analysis) is dead weight every factorization of the pattern would carry.
+    // The schedule reads the pattern for the last time: past it the pattern
+    // (an index per entry of `A + A^T`, the largest part of the analysis) is
+    // dead weight every factorization of the pattern would carry.
     let ll_schedule =
         crate::logging::timed(|| "analysis: schedule".into(), || LlSchedule::build(&sym));
-    sym.permuted_pattern = crate::sparse::csc::CscPattern {
+    sym.pattern = CscPattern {
         n,
         col_ptr: Vec::new(),
         row_idx: Vec::new(),

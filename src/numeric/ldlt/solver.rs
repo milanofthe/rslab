@@ -341,8 +341,8 @@ pub struct LdltSymbolic {
 
 impl LdltSymbolic {
     /// Heap bytes this analysis holds: the ordering, the supernodes, the
-    /// permuted pattern and, once a factorization has built them, the
-    /// schedule and the input program every later factorization reuses.
+    /// schedule and, once a factorization has built it, the input program
+    /// every later factorization reuses.
     /// The analysis stays alive while it is factored, so these bytes are part
     /// of every factorization's footprint.
     pub fn heap_bytes(&self) -> u64 {
@@ -355,7 +355,8 @@ impl LdltSymbolic {
     pub fn analyze<T: Scalar>(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
         a.validate()?;
         let t = crate::clock::Instant::now();
-        let symbolic = analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?;
+        let pattern = crate::symbolic::full_pattern(a.n, &a.col_ptr, &a.row_idx)?;
+        let symbolic = analyze_pattern_with(pattern, a.row_idx.len(), opts)?;
         let analyze_ms = crate::clock::ms(t.elapsed());
         let sym = Self {
             symbolic,

@@ -826,16 +826,16 @@ fn every_direct_solver_is_a_factorization() {
     }
 }
 
-/// The analysis keeps no permuted pattern once its schedule is built (a word
-/// per entry of `A + A^T`, the largest part of an analysis), and its
+/// The analysis keeps no pattern once its schedule is built (an index per
+/// entry of `A + A^T`, the largest part of an analysis), and its
 /// factorizations still solve.
 #[test]
-fn analysis_drops_the_permuted_pattern() {
+fn analysis_drops_the_pattern() {
     let a = unsymmetric_holes(600, 3, 7, false);
     let opts = SolverSettings::default();
     let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
     let (sym, _) = lusym.symb.sym_and_levels().unwrap();
-    assert!(sym.permuted_pattern.col_ptr.is_empty() && sym.permuted_pattern.row_idx.is_empty());
+    assert!(sym.pattern.col_ptr.is_empty() && sym.pattern.row_idx.is_empty());
     let b: Vec<f64> = (0..a.n).map(|i| 1.0 + i as f64 / a.n as f64).collect();
     let x = lusym.factor(&a, &opts).unwrap().solve(&b).unwrap();
     let mut ax = vec![0.0f64; a.n];
@@ -971,10 +971,8 @@ fn analyses_match_the_recorded_fingerprints() {
     let lap = crate::matgen::stencil::laplacian::<f64>(&[14, 14, 14], &Default::default());
     let lower = |s: &SolverSettings| {
         let mut h = fingerprint::Fnv::new();
-        fingerprint::analysis(
-            &mut h,
-            &analyze_with(lap.n, &lap.col_ptr, &lap.row_idx, s).unwrap(),
-        );
+        let full = crate::symbolic::full_pattern(lap.n, &lap.col_ptr, &lap.row_idx).unwrap();
+        fingerprint::analysis(&mut h, &analyze_with(full, lap.row_idx.len(), s).unwrap());
         h.0
     };
     let got = [
