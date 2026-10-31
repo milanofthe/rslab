@@ -90,7 +90,7 @@ pub fn coarsen_level(
             if match_[u as usize] != UNMATCHED {
                 continue;
             }
-            let w = fine.adjwgt[k];
+            let w = fine.wgt(k);
             // Tie-break: strictly greater weight wins; on ties pick
             // the lower vertex id (matches METIS SHEM).
             if w > best_w || (w == best_w && (best < 0 || u < best)) {
@@ -240,18 +240,15 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
         head[c] = v as i32;
     }
     // The adjacency of coarse vertices `c0..c1`, one coarse vertex at a time
-    // with an edge-weight marker, appended to `adjncy`/`adjwgt` with each
-    // vertex's end offset pushed to `ends`. `slot[cu]` holds the tag (the
-    // coarse vertex being contracted) and the accumulated weight side by
-    // side; it needs no reset between calls: its tags are coarse ids, and
-    // each is contracted exactly once.
-    let range = |c0: usize,
-                 c1: usize,
-                 slot: &mut [[i32; 2]],
-                 touched: &mut Vec<i32>,
-                 ends: &mut Vec<usize>,
-                 adjncy: &mut Vec<i32>,
-                 adjwgt: &mut Vec<i32>| {
+    // with an edge-weight marker, written to `adj`/`wgt` from their start;
+    // returns each vertex's end offset and the entries written. `slot[cu]`
+    // holds the tag (the coarse vertex being contracted) and the accumulated
+    // weight side by side; it needs no reset between calls: its tags are
+    // coarse ids, and each is contracted exactly once.
+    let range = |(slot, touched): &mut (Vec<[i32; 2]>, Vec<i32>),
+                 (c0, c1, adj, wgt): (usize, usize, &mut [i32], &mut [i32])| {
+        let mut ends = Vec::with_capacity(c1 - c0);
+        let mut len = 0;
         for (c, &first) in head.iter().enumerate().take(c1).skip(c0) {
             touched.clear();
             let mut v = first;
@@ -268,89 +265,86 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
                     }
                     let sl = &mut slot[cn2 as usize];
                     if sl[0] != c as i32 {
-                        *sl = [c as i32, fine.adjwgt[k]];
+                        *sl = [c as i32, fine.wgt(k)];
                         touched.push(cn2);
                     } else {
-                        sl[1] = sl[1].saturating_add(fine.adjwgt[k]);
+                        sl[1] = sl[1].saturating_add(fine.wgt(k));
                     }
                 }
                 v = next[vu];
             }
             for &tgt in touched.iter() {
-                adjncy.push(tgt);
-                adjwgt.push(slot[tgt as usize][1]);
+                adj[len] = tgt;
+                wgt[len] = slot[tgt as usize][1];
+                len += 1;
             }
-            ends.push(adjncy.len());
+            ends.push(len);
         }
+        (ends, len)
     };
 
     // Coarse vertices are independent, so large levels contract in parallel
-    // blocks whose outputs are concatenated in order: the coarse graph is the
-    // same as the serial loop's, whatever the thread count. On the top levels
-    // of a large nested dissection this was most of the coarsening time.
+    // blocks, the outputs concatenated in order: the coarse graph is the same
+    // as the serial loop's, whatever the thread count. On the top levels of a
+    // large nested dissection this was most of the coarsening time. A
+    // block's fine degree sum bounds its coarse edges, so every block writes
+    // into its own range of one buffer of the fine graph's size, and the
+    // ranges then close up in place: the level never holds its edges twice.
     let blocks = if fine.adjncy.len() >= parallel_min_edges && rayon::current_num_threads() > 1 {
         (crate::constants::FINE_PIECES_PER_WORKER * rayon::current_num_threads()).min(cn)
     } else {
         1
     };
-    let (mut xadj, adjncy, adjwgt) = if blocks <= 1 {
-        let mut ends = Vec::with_capacity(cn);
-        let mut adjncy = Vec::with_capacity(fine.adjncy.len());
-        let mut adjwgt = Vec::with_capacity(fine.adjncy.len());
-        range(
-            0,
-            cn,
-            &mut vec![[-1, 0]; cn],
-            &mut Vec::new(),
-            &mut ends,
-            &mut adjncy,
-            &mut adjwgt,
-        );
-        (ends, adjncy, adjwgt)
+    let first = |b: usize| b * cn / blocks;
+    let bounds: Vec<usize> = (0..blocks)
+        .map(|b| {
+            let mut bound = 0usize;
+            for &f in &head[first(b)..first(b + 1)] {
+                let mut v = f;
+                while v >= 0 {
+                    let vu = v as usize;
+                    bound += (fine.xadj[vu + 1] - fine.xadj[vu]) as usize;
+                    v = next[vu];
+                }
+            }
+            bound
+        })
+        .collect();
+    let mut adjncy = vec![0i32; fine.adjncy.len()];
+    let mut adjwgt = vec![0i32; fine.adjncy.len()];
+    let mut pieces = Vec::with_capacity(blocks);
+    let (mut adj_rest, mut wgt_rest) = (&mut adjncy[..], &mut adjwgt[..]);
+    for (b, &bound) in bounds.iter().enumerate() {
+        let (adj, a_rest) = std::mem::take(&mut adj_rest).split_at_mut(bound);
+        let (wgt, w_rest) = std::mem::take(&mut wgt_rest).split_at_mut(bound);
+        (adj_rest, wgt_rest) = (a_rest, w_rest);
+        pieces.push((first(b), first(b + 1), adj, wgt));
+    }
+    let init = || (vec![[-1i32, 0]; cn], Vec::new());
+    let parts: Vec<(Vec<usize>, usize)> = if blocks <= 1 {
+        let mut state = init();
+        pieces.into_iter().map(|p| range(&mut state, p)).collect()
     } else {
         use rayon::prelude::*;
-        let parts: Vec<(Vec<usize>, Vec<i32>, Vec<i32>)> = (0..blocks)
-            .into_par_iter()
-            .map_init(
-                || (vec![[-1i32, 0]; cn], Vec::new()),
-                |(slot, touched), b| {
-                    let (c0, c1) = (b * cn / blocks, (b + 1) * cn / blocks);
-                    // The block's fine degree sum bounds its coarse edges.
-                    let mut bound = 0usize;
-                    for &first in &head[c0..c1] {
-                        let mut v = first;
-                        while v >= 0 {
-                            let vu = v as usize;
-                            bound += (fine.xadj[vu + 1] - fine.xadj[vu]) as usize;
-                            v = next[vu];
-                        }
-                    }
-                    let mut part = (
-                        Vec::with_capacity(c1 - c0),
-                        Vec::with_capacity(bound),
-                        Vec::with_capacity(bound),
-                    );
-                    range(c0, c1, slot, touched, &mut part.0, &mut part.1, &mut part.2);
-                    part
-                },
-            )
-            .collect();
-        let total: usize = parts.iter().map(|p| p.1.len()).sum();
-        let mut ends = Vec::with_capacity(cn);
-        let mut adjncy = Vec::with_capacity(total);
-        let mut adjwgt = Vec::with_capacity(total);
-        for (part_ends, part_adj, part_wgt) in parts {
-            let base = adjncy.len();
-            ends.extend(part_ends.iter().map(|&e| base + e));
-            adjncy.extend(part_adj);
-            adjwgt.extend(part_wgt);
-        }
-        (ends, adjncy, adjwgt)
+        pieces.into_par_iter().map_init(init, range).collect()
     };
-    xadj.insert(0, 0);
+    let mut xadj: Vec<i32> = Vec::with_capacity(cn + 1);
+    xadj.push(0);
+    let (mut src, mut len) = (0, 0);
+    for ((ends, count), bound) in parts.into_iter().zip(bounds) {
+        adjncy.copy_within(src..src + count, len);
+        adjwgt.copy_within(src..src + count, len);
+        xadj.extend(ends.iter().map(|&e| (len + e) as i32));
+        len += count;
+        src += bound;
+    }
+    for v in [&mut adjncy, &mut adjwgt] {
+        v.truncate(len);
+        v.shrink_to_fit();
+    }
     Graph {
         nvtxs: cnvtxs,
-        xadj: xadj.into_iter().map(|e| e as i32).collect(),
+        xadj,
         adjncy,
         vwgt,
         adjwgt,

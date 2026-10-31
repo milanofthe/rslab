@@ -99,16 +99,22 @@ pub(crate) fn nd_order(
     let (cc_label, ncc) = connected_components(&graph);
     stats.n_components = ncc as u32;
     let mut work: Vec<(Graph, Vec<i32>, usize, u64)> = Vec::new();
-    let mut offset: usize = 0;
-    for c in 0..ncc {
-        let (sub, vtx_map) = extract_by_label(&graph, &cc_label, c as i32);
-        let count = sub.nvtxs as usize;
-        if count > 0 {
-            work.push((sub, vtx_map, offset, child_seed(opts.seed, c as u64)));
+    if ncc == 1 {
+        // The one component is the graph itself, ordered without a copy.
+        let vtx_map = (0..graph.nvtxs).collect();
+        work.push((graph, vtx_map, 0, child_seed(opts.seed, 0)));
+    } else {
+        let mut offset: usize = 0;
+        for c in 0..ncc {
+            let (sub, vtx_map) = extract_by_label(&graph, &cc_label, c as i32);
+            let count = sub.nvtxs as usize;
+            if count > 0 {
+                work.push((sub, vtx_map, offset, child_seed(opts.seed, c as u64)));
+            }
+            offset += count;
         }
-        offset += count;
+        drop(graph);
     }
-    drop(graph);
     // Components are independent as well.
     let results: Vec<Result<(), OrderingError>> = {
         use rayon::prelude::*;
@@ -153,23 +159,24 @@ fn nd_subproblem(
 
     let (cc_label, ncc) = connected_components(&subgraph);
     if ncc > 1 {
+        // The components are extracted first, so the subgraph is gone
+        // before they are ordered.
+        let mut parts = Vec::with_capacity(ncc);
         let mut off = offset;
         for c in 0..ncc {
             let (sub, map) = extract_by_label(&subgraph, &cc_label, c as i32);
             let map_to_orig: Vec<i32> = map.iter().map(|&local| vtx_map[local as usize]).collect();
             let count = sub.nvtxs as usize;
             if count > 0 {
-                nd_subproblem(
-                    sub,
-                    map_to_orig,
-                    off,
-                    child_seed(seed, crate::constants::CHILD_SEED_OFFSET + c as u64),
-                    opts,
-                    writer,
-                    acc,
-                )?;
+                let seed = child_seed(seed, crate::constants::CHILD_SEED_OFFSET + c as u64);
+                parts.push((sub, map_to_orig, off, seed));
             }
             off += count;
+        }
+        drop(subgraph);
+        drop(vtx_map);
+        for (sub, map, off, seed) in parts {
+            nd_subproblem(sub, map, off, seed, opts, writer, acc)?;
         }
         return Ok(());
     }
@@ -256,7 +263,7 @@ fn multilevel_node_bisection(
     stats: &mut MetisStats,
 ) -> Vec<u8> {
     let mut counters = CoarsenCounters::default();
-    let levels = coarsen(graph, opts, rng, &mut counters);
+    let mut levels = coarsen(graph, opts, rng, &mut counters);
     stats.n_two_hop_fallbacks += counters.n_two_hop_fallbacks;
     stats.n_levels += levels.len() as u32;
 
@@ -299,14 +306,10 @@ fn multilevel_node_bisection(
 
     // Uncoarsen: project the tri-section and refine the node separator
     // at each level (METIS Refine2WayNode). `cmap` at level i maps
-    // previous-graph vertices to level-i graph vertices.
-    for level_idx in (0..levels.len()).rev() {
-        let cg = &levels[level_idx];
-        let prev_graph: &Graph = if level_idx == 0 {
-            graph
-        } else {
-            &levels[level_idx - 1].graph
-        };
+    // previous-graph vertices to level-i graph vertices. A level is dropped
+    // once projected: the sibling subproblems coarsen meanwhile.
+    while let Some(cg) = levels.pop() {
+        let prev_graph: &Graph = levels.last().map_or(graph, |l| &l.graph);
         let prev_n = prev_graph.nvtxs as usize;
         let mut proj: Vec<u8> = vec![PART_A; prev_n];
         for (v, p) in proj.iter_mut().enumerate().take(prev_n) {
@@ -459,11 +462,16 @@ fn extract_by_list(graph: &Graph, verts: &[i32]) -> (Graph, Vec<i32>) {
     (build_induced(graph, &vtx_map, &local_id), vtx_map)
 }
 
+/// The subgraph induced by `vtx_map`, `local_id` its inverse (`-1` off it).
+/// Its adjacency is allocated at the degree sum of its vertices, which
+/// exceeds it by the edges leaving the subgraph (to a separator).
 fn build_induced(graph: &Graph, vtx_map: &[i32], local_id: &[i32]) -> Graph {
     let sub_n = vtx_map.len();
+    let bound: usize = vtx_map.iter().map(|&v| graph.degree(v) as usize).sum();
+    let unit = graph.adjwgt.is_empty();
     let mut xadj: Vec<i32> = Vec::with_capacity(sub_n + 1);
-    let mut adjncy: Vec<i32> = Vec::new();
-    let mut adjwgt: Vec<i32> = Vec::new();
+    let mut adjncy: Vec<i32> = Vec::with_capacity(bound);
+    let mut adjwgt: Vec<i32> = Vec::with_capacity(if unit { 0 } else { bound });
     let mut vwgt: Vec<i32> = Vec::with_capacity(sub_n);
     xadj.push(0);
     for &orig in vtx_map {
@@ -476,11 +484,15 @@ fn build_induced(graph: &Graph, vtx_map: &[i32], local_id: &[i32]) -> Graph {
             let lu = local_id[u];
             if lu >= 0 {
                 adjncy.push(lu);
-                adjwgt.push(graph.adjwgt[k]);
+                if !unit {
+                    adjwgt.push(graph.adjwgt[k]);
+                }
             }
         }
         xadj.push(adjncy.len() as i32);
     }
+    adjncy.shrink_to_fit();
+    adjwgt.shrink_to_fit();
     Graph {
         nvtxs: sub_n as i32,
         xadj,

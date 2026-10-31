@@ -16,7 +16,6 @@ use super::supernode::{
 use super::{OrderingMethod, SymbolicFactorization};
 use crate::error::RslabError;
 use crate::numeric::settings::{AmalgamationSettings, OrderingSettings};
-use crate::ordering::amd::permute_pattern;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::{biased_postorder, postorder};
 use crate::sparse::csc::CscPattern;
@@ -92,12 +91,11 @@ fn checked_permutation(p: &[usize], n: usize) -> Result<Vec<usize>, RslabError> 
     Ok(p.to_vec())
 }
 
-/// Race the candidates and finish the one with the smallest exact factor.
+/// Race the candidates on `graph`; the one with the smallest exact factor.
 pub(super) fn race(
-    full: &CscPattern,
+    graph: &OrderingGraph,
     ordering: &OrderingSettings,
-    amalgamation: &AmalgamationSettings,
-) -> Result<SymbolicFactorization, RslabError> {
+) -> Result<Prefix, RslabError> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
     // Stage 1: the cheap candidates run concurrently (each prefix is itself
@@ -132,14 +130,13 @@ pub(super) fn race(
         )));
     }
     let seed = ordering.nd.seed;
-    let n = full.n;
+    let n = graph.pattern.n;
     let parallel = n > r.nd_min_n && crate::parallel::threads() > 1;
     // The lower triangle's entry count, as the gate was calibrated on it.
-    let eager = parallel && (full.row_idx.len() + n) / 2 >= r.eager_nd_min_nnz;
+    let eager = parallel && (graph.pattern.row_idx.len() + n) / 2 >= r.eager_nd_min_nnz;
     // One ordering graph for every candidate: built per candidate it cost as
     // much as a minimum-degree ordering.
-    let graph = &OrderingGraph::new(full, ordering);
-    graph.prepare()?;
+    graph.prepare();
     // One slot per ensemble seed, filled by its (at most one) ND prefix.
     let ensemble = r.ensemble_size.max(1);
     let nd: Vec<OnceLock<Option<Prefix>>> = (0..ensemble).map(|_| OnceLock::new()).collect();
@@ -215,24 +212,21 @@ pub(super) fn race(
             best = Some(nd);
         }
     }
-    let Some(winner) = best else {
-        return Err(last_err.unwrap_or_else(|| {
+    best.ok_or_else(|| {
+        last_err.unwrap_or_else(|| {
             RslabError::InvalidInput("ordering race: no candidate succeeded".to_string())
-        }));
-    };
-    crate::logging::timed(
-        || "analysis: finish".into(),
-        || finish(winner, full, amalgamation),
-    )
+        })
+    })
 }
 
 /// The analysis of the adopted candidate: its ordering composed with a
 /// postorder of the tree (so every supernode's columns are consecutive), the
 /// merge-biased renumbering where the amalgamation asks for it, and the
-/// supernodes.
+/// supernodes. `full` is the pattern it was ordered on, kept for the
+/// schedule.
 pub(super) fn finish(
     px: Prefix,
-    full: &CscPattern,
+    full: CscPattern<i32>,
     params: &AmalgamationSettings,
 ) -> Result<SymbolicFactorization, RslabError> {
     let n = full.n;
@@ -266,15 +260,10 @@ pub(super) fn finish(
     for (new, &old) in perm.iter().enumerate() {
         perm_inv[old] = new;
     }
-    let permuted_pattern = permute_pattern(full, &perm);
-    debug_assert_eq!(
-        etree.parent,
-        EliminationTree::from_pattern(&permuted_pattern).parent
-    );
-    debug_assert_eq!(
-        col_counts,
-        super::column_counts::column_counts_gnp(&permuted_pattern, &etree)
-    );
+    debug_assert!({
+        let s = structure(&full, perm.clone());
+        s.etree.parent == etree.parent && s.col_counts == col_counts
+    });
     let supernodes = find_supernodes(&etree, &col_counts, &params);
     Ok(SymbolicFactorization {
         n,
@@ -282,7 +271,7 @@ pub(super) fn finish(
         perm_inv,
         supernodes,
         factor_nnz: px.factor_nnz,
-        permuted_pattern,
+        pattern: full,
         resolved_method: px.method,
         resolved_amalgamation: strategy,
     })

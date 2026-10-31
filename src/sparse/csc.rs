@@ -22,12 +22,55 @@ pub struct CscMatrix<T = f64> {
 }
 
 /// Symmetric sparsity pattern (full, not just lower triangle).
-/// Used for AMD ordering and elimination tree construction.
+/// Used for AMD ordering and elimination tree construction. The indices are
+/// `usize`, or on the pattern an analysis orders the `i32` of the ordering
+/// crates: half the bytes, and handed to them as it is.
 #[derive(Debug, Clone)]
-pub struct CscPattern {
+pub struct CscPattern<I = usize> {
     pub n: usize,
-    pub col_ptr: Vec<usize>,
-    pub row_idx: Vec<usize>,
+    pub col_ptr: Vec<I>,
+    pub row_idx: Vec<I>,
+}
+
+/// An index type of a [`CscPattern`].
+pub trait PatternIndex: Copy + Ord + Send + Sync {
+    /// The largest index the type holds.
+    const MAX: usize;
+    /// `i`, checked against [`MAX`](Self::MAX) by the caller.
+    fn of(i: usize) -> Self;
+    fn get(self) -> usize;
+}
+
+impl PatternIndex for usize {
+    const MAX: usize = usize::MAX;
+    #[inline]
+    fn of(i: usize) -> Self {
+        i
+    }
+    #[inline]
+    fn get(self) -> usize {
+        self
+    }
+}
+
+impl PatternIndex for i32 {
+    const MAX: usize = i32::MAX as usize;
+    #[inline]
+    fn of(i: usize) -> Self {
+        i as i32
+    }
+    #[inline]
+    fn get(self) -> usize {
+        self as usize
+    }
+}
+
+impl<I: PatternIndex> CscPattern<I> {
+    /// The rows of column `j`.
+    #[inline]
+    pub(crate) fn col(&self, j: usize) -> &[I] {
+        &self.row_idx[self.col_ptr[j].get()..self.col_ptr[j + 1].get()]
+    }
 }
 
 impl<T: crate::scalar::Demote> CscMatrix<T> {
@@ -207,6 +250,7 @@ impl<T: Scalar> CscMatrix<T> {
     /// (see the free function `symmetric_pattern`).
     pub fn symmetric_pattern(&self) -> CscPattern {
         symmetric_pattern(self.n, &self.col_ptr, &self.row_idx)
+            .unwrap_or_else(|| unreachable!("usize holds every index"))
     }
 
     /// Symmetric matrix-vector product: y = A * x.
@@ -251,13 +295,18 @@ impl<T: Scalar> CscMatrix<T> {
 
 /// The full symmetric pattern of a lower triangle (`col_ptr`, `row_idx`):
 /// both `(i, j)` and `(j, i)` for every off-diagonal entry, rows sorted
-/// within each column.
+/// within each column, with indices of type `I`; `None` where they do not
+/// fit it.
 ///
 /// Column `c` is the transposed entries above the diagonal followed by `c`'s
 /// own lower column. Walking the columns in order delivers the transposed
 /// entries of every column in ascending order and the lower columns are
 /// sorted already, so no column is sorted.
-pub fn symmetric_pattern(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> CscPattern {
+pub fn symmetric_pattern<I: PatternIndex>(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+) -> Option<CscPattern<I>> {
     // `above[c]`: entries of row `c` left of the diagonal.
     let mut above = vec![0usize; n];
     for j in 0..n {
@@ -271,33 +320,46 @@ pub fn symmetric_pattern(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> CscP
             }
         }
     }
-    let mut out_ptr = vec![0usize; n + 1];
-    for c in 0..n {
-        out_ptr[c + 1] = out_ptr[c] + above[c] + (col_ptr[c + 1] - col_ptr[c]);
+    let total = row_idx.len() + above.iter().sum::<usize>();
+    if n > I::MAX || total > I::MAX {
+        return None;
     }
-    let mut out_idx = vec![0usize; out_ptr[n]];
-    let mut next = out_ptr[..n].to_vec();
+    let mut out_ptr = Vec::with_capacity(n + 1);
+    let mut next = Vec::with_capacity(n);
+    out_ptr.push(I::of(0));
+    for c in 0..n {
+        let at = out_ptr[c].get();
+        next.push(at);
+        out_ptr.push(I::of(at + above[c] + (col_ptr[c + 1] - col_ptr[c])));
+    }
+    let mut out_idx = vec![I::of(0); total];
     for j in 0..n {
         let own = &row_idx[col_ptr[j]..col_ptr[j + 1]];
-        let at = out_ptr[j] + above[j];
-        out_idx[at..at + own.len()].copy_from_slice(own);
+        let at = out_ptr[j].get() + above[j];
+        for (d, &i) in out_idx[at..at + own.len()].iter_mut().zip(own) {
+            *d = I::of(i);
+        }
         for &i in own {
             if i != j {
-                out_idx[next[i]] = j;
+                out_idx[next[i]] = I::of(j);
                 next[i] += 1;
             }
         }
     }
-    CscPattern {
+    Some(CscPattern {
         n,
         col_ptr: out_ptr,
         row_idx: out_idx,
-    }
+    })
 }
 
 /// [`symmetric_pattern`] of any pattern, by
 /// placing both entries of each pair and sorting every column.
-fn symmetric_pattern_sorted(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> CscPattern {
+fn symmetric_pattern_sorted<I: PatternIndex>(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+) -> Option<CscPattern<I>> {
     // Count entries per column in the full pattern
     let mut col_counts = vec![0usize; n];
     for j in 0..n {
@@ -308,25 +370,31 @@ fn symmetric_pattern_sorted(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> C
             }
         }
     }
+    let pat_nnz = col_counts.iter().sum::<usize>();
+    if n > I::MAX || pat_nnz > I::MAX {
+        return None;
+    }
 
     // Build col_ptr
-    let mut pat_col_ptr = vec![0usize; n + 1];
+    let mut pat_col_ptr = Vec::with_capacity(n + 1);
+    let mut offsets = Vec::with_capacity(n);
+    pat_col_ptr.push(I::of(0));
     for j in 0..n {
-        pat_col_ptr[j + 1] = pat_col_ptr[j] + col_counts[j];
+        let at = pat_col_ptr[j].get();
+        offsets.push(at);
+        pat_col_ptr.push(I::of(at + col_counts[j]));
     }
-    let pat_nnz = pat_col_ptr[n];
-    let mut pat_row_idx = vec![0usize; pat_nnz];
+    let mut pat_row_idx = vec![I::of(0); pat_nnz];
 
     // Place entries
-    let mut offsets = pat_col_ptr[..n].to_vec();
     for j in 0..n {
         for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
             // (i, j) in lower triangle
-            pat_row_idx[offsets[j]] = i;
+            pat_row_idx[offsets[j]] = I::of(i);
             offsets[j] += 1;
             if i != j {
                 // (j, i) - transpose
-                pat_row_idx[offsets[i]] = j;
+                pat_row_idx[offsets[i]] = I::of(j);
                 offsets[i] += 1;
             }
         }
@@ -334,16 +402,16 @@ fn symmetric_pattern_sorted(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> C
 
     // Sort row indices within each column
     for j in 0..n {
-        let start = pat_col_ptr[j];
-        let end = pat_col_ptr[j + 1];
+        let start = pat_col_ptr[j].get();
+        let end = pat_col_ptr[j + 1].get();
         pat_row_idx[start..end].sort_unstable();
     }
 
-    CscPattern {
+    Some(CscPattern {
         n,
         col_ptr: pat_col_ptr,
         row_idx: pat_row_idx,
-    }
+    })
 }
 
 #[cfg(test)]

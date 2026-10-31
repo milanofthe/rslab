@@ -32,12 +32,12 @@ pub(crate) struct Supervariables {
 
 impl Supervariables {
     /// Find the groups of `pattern` (full symmetric, sorted rows per column).
-    pub fn of(pattern: &CscPattern) -> Self {
+    pub fn of(pattern: &CscPattern<i32>) -> Self {
         let n = pattern.n;
         let closed = |v: usize| {
-            let rows = &pattern.row_idx[pattern.col_ptr[v]..pattern.col_ptr[v + 1]];
-            let at = rows.partition_point(|&r| r < v);
-            let has_self = rows.get(at) == Some(&v);
+            let rows = pattern.col(v);
+            let at = rows.partition_point(|&r| (r as usize) < v);
+            let has_self = rows.get(at).is_some_and(|&r| r as usize == v);
             (rows, at, has_self)
         };
         // Order-independent key of the closed adjacency: its length and a
@@ -49,11 +49,11 @@ impl Supervariables {
                 h ^= x as u64;
                 h = h.wrapping_mul(FNV_PRIME);
             };
-            rows[..at].iter().for_each(|&r| mix(r));
+            rows[..at].iter().for_each(|&r| mix(r as usize));
             mix(v);
             rows[at + usize::from(has_self)..]
                 .iter()
-                .for_each(|&r| mix(r));
+                .for_each(|&r| mix(r as usize));
             (rows.len() + usize::from(!has_self), h)
         };
         let same = |a: usize, b: usize| -> bool {
@@ -61,9 +61,13 @@ impl Supervariables {
                 let (rows, at, has_self) = closed(v);
                 rows[..at]
                     .iter()
-                    .copied()
+                    .map(|&r| r as usize)
                     .chain(std::iter::once(v))
-                    .chain(rows[at + usize::from(has_self)..].iter().copied())
+                    .chain(
+                        rows[at + usize::from(has_self)..]
+                            .iter()
+                            .map(|&r| r as usize),
+                    )
             };
             merged(a).eq(merged(b))
         };
@@ -164,15 +168,13 @@ impl Supervariables {
             .collect()
     }
 
-    /// The compressed graph as the `i32` arrays of the ordering crates: one
-    /// vertex per group, an edge between two groups whenever their members
-    /// are adjacent, no self-loops, rows sorted. The members of a group share
-    /// their neighbours, so the group's first member stands for all of them.
-    /// Blocks of groups compress in parallel. `None` when the graph does not
-    /// fit `i32` indices.
-    pub fn compress(&self, pattern: &CscPattern) -> Option<(Vec<i32>, Vec<i32>)> {
+    /// The compressed graph: one vertex per group, an edge between two
+    /// groups whenever their members are adjacent, no self-loops, rows
+    /// sorted. The members of a group share their neighbours, so the group's
+    /// first member stands for all of them. Blocks of groups compress in
+    /// parallel; the graph is smaller than `pattern`, so its indices fit.
+    pub fn compress(&self, pattern: &CscPattern<i32>) -> CscPattern<i32> {
         let n_groups = self.len();
-        i32::try_from(pattern.row_idx.len()).ok()?;
         let blocks = (crate::constants::FINE_PIECES_PER_WORKER * crate::parallel::threads())
             .clamp(1, n_groups.max(1));
         let parts: Vec<(Vec<i32>, Vec<i32>)> = crate::parallel::map(blocks, 1, |b| {
@@ -183,9 +185,10 @@ impl Supervariables {
                 let v = self.members[self.ptr[g]];
                 col.clear();
                 col.extend(
-                    pattern.row_idx[pattern.col_ptr[v]..pattern.col_ptr[v + 1]]
+                    pattern
+                        .col(v)
                         .iter()
-                        .map(|&r| self.group_of[r])
+                        .map(|&r| self.group_of[r as usize])
                         .filter(|&h| h != g)
                         .map(|h| h as i32),
                 );
@@ -205,7 +208,11 @@ impl Supervariables {
             }
             row_idx.extend_from_slice(&rows);
         }
-        Some((col_ptr, row_idx))
+        CscPattern {
+            n: n_groups,
+            col_ptr,
+            row_idx,
+        }
     }
 }
 
@@ -214,11 +221,11 @@ mod tests {
     use super::*;
 
     /// Full symmetric pattern with the diagonal, from an edge list.
-    fn pattern(n: usize, edges: &[(usize, usize)]) -> CscPattern {
-        let mut cols: Vec<Vec<usize>> = (0..n).map(|v| vec![v]).collect();
+    fn pattern(n: usize, edges: &[(usize, usize)]) -> CscPattern<i32> {
+        let mut cols: Vec<Vec<i32>> = (0..n).map(|v| vec![v as i32]).collect();
         for &(a, b) in edges {
-            cols[a].push(b);
-            cols[b].push(a);
+            cols[a].push(b as i32);
+            cols[b].push(a as i32);
         }
         let mut col_ptr = vec![0];
         let mut row_idx = Vec::new();
@@ -226,7 +233,7 @@ mod tests {
             c.sort_unstable();
             c.dedup();
             row_idx.extend(c);
-            col_ptr.push(row_idx.len());
+            col_ptr.push(row_idx.len() as i32);
         }
         CscPattern {
             n,
@@ -244,10 +251,10 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert_eq!(s.group_of, vec![0, 0, 1, 2, 2]);
         assert_eq!(s.weights(), vec![2, 1, 2]);
-        let (col_ptr, row_idx) = s.compress(&p).unwrap();
+        let g = s.compress(&p);
         // Groups {0, 1}, {2}, {3, 4}: the pairs touch only the middle.
-        assert_eq!(col_ptr, vec![0, 1, 3, 4]);
-        assert_eq!(row_idx, vec![1, 0, 2, 1]);
+        assert_eq!(g.col_ptr, vec![0, 1, 3, 4]);
+        assert_eq!(g.row_idx, vec![1, 0, 2, 1]);
     }
 
     #[test]

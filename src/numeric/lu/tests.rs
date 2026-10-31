@@ -826,16 +826,16 @@ fn every_direct_solver_is_a_factorization() {
     }
 }
 
-/// The analysis keeps no permuted pattern once its schedule is built (a word
-/// per entry of `A + A^T`, the largest part of an analysis), and its
+/// The analysis keeps no pattern once its schedule is built (an index per
+/// entry of `A + A^T`, the largest part of an analysis), and its
 /// factorizations still solve.
 #[test]
-fn analysis_drops_the_permuted_pattern() {
+fn analysis_drops_the_pattern() {
     let a = unsymmetric_holes(600, 3, 7, false);
     let opts = SolverSettings::default();
     let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
     let (sym, _) = lusym.symb.sym_and_levels().unwrap();
-    assert!(sym.permuted_pattern.col_ptr.is_empty() && sym.permuted_pattern.row_idx.is_empty());
+    assert!(sym.pattern.col_ptr.is_empty() && sym.pattern.row_idx.is_empty());
     let b: Vec<f64> = (0..a.n).map(|i| 1.0 + i as f64 / a.n as f64).collect();
     let x = lusym.factor(&a, &opts).unwrap().solve(&b).unwrap();
     let mut ax = vec![0.0f64; a.n];
@@ -848,4 +848,158 @@ fn analysis_drops_the_permuted_pattern() {
         .sqrt();
     let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
     assert!(rn < 1e-10 * bn, "residual {rn} against {bn}");
+}
+
+/// FNV-1a over everything an analysis decides: the ordering, the
+/// supernodes, the levels, the schedule and, for LU, the exact `L` and `U`
+/// structures and the row matching.
+#[cfg(feature = "matgen")]
+mod fingerprint {
+    use super::*;
+    use crate::numeric::supernodal::analysis::SupernodalAnalysis;
+
+    pub struct Fnv(pub u64);
+
+    impl Fnv {
+        pub fn new() -> Self {
+            Fnv(0xcbf2_9ce4_8422_2325)
+        }
+        pub fn mix(&mut self, x: u64) {
+            self.0 ^= x;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        pub fn all(&mut self, v: impl IntoIterator<Item = u64>) {
+            let mut len = 0u64;
+            for x in v {
+                self.mix(x);
+                len += 1;
+            }
+            self.mix(len);
+        }
+    }
+
+    pub fn analysis(h: &mut Fnv, symb: &SupernodalAnalysis) {
+        let Some(i) = &symb.inner else {
+            return h.mix(0);
+        };
+        let s = &i.sym;
+        h.all(s.perm.iter().map(|&x| x as u64));
+        h.all(s.perm_inv.iter().map(|&x| x as u64));
+        h.mix(s.factor_nnz as u64);
+        h.all(
+            format!("{:?} {:?}", s.resolved_method, s.resolved_amalgamation)
+                .bytes()
+                .map(u64::from),
+        );
+        for sn in &s.supernodes {
+            h.all([sn.first_col, sn.ncol, sn.nrow].map(|x| x as u64));
+            h.all(sn.children.iter().map(|&x| x as u64));
+        }
+        for lv in &i.by_level {
+            h.all(lv.iter().map(|&x| x as u64));
+        }
+        let sched = &i.ll_schedule;
+        for k in 0..s.supernodes.len() {
+            h.all(sched.rows(k).iter().map(|&x| u64::from(x)));
+            h.all(sched.updaters(k).iter().map(|&x| u64::from(x)));
+        }
+        h.all(sched.parent.iter().map(|&x| x as u64));
+        h.all(sched.leaves.iter().map(|&x| x as u64));
+    }
+
+    pub fn lu(s: &LuSymbolic) -> u64 {
+        let mut h = Fnv::new();
+        analysis(&mut h, &s.symb);
+        for k in 0..s.symb.n_supernodes() {
+            h.all(s.structure.rows_l(k).iter().map(|&x| u64::from(x)));
+            h.all(s.structure.cols_u(k).iter().map(|&x| u64::from(x)));
+        }
+        if let Some(m) = &s.matching {
+            h.all(m.row_of.iter().map(|&x| x as u64));
+        }
+        h.0
+    }
+
+    /// Two unknowns per point of `a`, coupled as their points are: groups
+    /// of indistinguishable vertices, ordered on the compressed graph.
+    pub fn pairs(a: &GeneralCsc<f64>) -> GeneralCsc<f64> {
+        let (mut col_ptr, mut row_idx) = (vec![0usize], Vec::new());
+        for j in 0..2 * a.n {
+            let c = j / 2;
+            for &i in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
+                row_idx.extend([2 * i, 2 * i + 1]);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let values = vec![1.0; row_idx.len()];
+        GeneralCsc {
+            n: 2 * a.n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+}
+
+/// The analyses of a set of patterns, fingerprinted bit for bit against the
+/// ones recorded with release 1.8.0: a memory or speed change of the
+/// analysis must not change the ordering or the symbolic structure. The
+/// cases cover nested dissection (with and without the compressed graph),
+/// the race with dissection and its seed ensemble, minimum degree, a given
+/// permutation, the row matching, and a lower-triangle (LDL^T) input.
+#[cfg(feature = "matgen")]
+#[test]
+fn analyses_match_the_recorded_fingerprints() {
+    use crate::matgen::bem::near_field;
+    use crate::numeric::supernodal::analysis::analyze_with;
+    use crate::symbolic::OrderingMethod;
+    let near = near_field::<f64>(3000, 150, 0.3, 5);
+    let pairs = fingerprint::pairs(&near_field::<f64>(1500, 60, 0.3, 6));
+    let holes = unsymmetric_holes(2000, 4, 11, true);
+    let plain = SolverSettings::default().with_matching(false);
+    let nd = plain.clone().with_ordering(OrderingMethod::MetisND);
+    let mut raced = plain.clone();
+    raced.ordering.race.nd_min_n = 0;
+    raced.ordering.race.nd_min_work = 0;
+    raced.ordering.race.ensemble = true;
+    raced.ordering.race.ensemble_min_flops = 0;
+    let rev: Vec<usize> = (0..near.n).rev().collect();
+    let given = plain.clone().with_permutation(rev.into());
+    let lu = |a: &GeneralCsc<f64>, s: &SolverSettings| {
+        fingerprint::lu(&LuSymbolic::analyze(a, s).unwrap())
+    };
+    let lap = crate::matgen::stencil::laplacian::<f64>(&[14, 14, 14], &Default::default());
+    let lower = |s: &SolverSettings| {
+        let mut h = fingerprint::Fnv::new();
+        let full = crate::symbolic::full_pattern(lap.n, &lap.col_ptr, &lap.row_idx).unwrap();
+        fingerprint::analysis(&mut h, &analyze_with(full, lap.row_idx.len(), s).unwrap());
+        h.0
+    };
+    let got = [
+        ("near nd", lu(&near, &nd)),
+        ("near race", lu(&near, &raced)),
+        (
+            "near amd",
+            lu(&near, &plain.clone().with_ordering(OrderingMethod::Amd)),
+        ),
+        ("near given", lu(&near, &given)),
+        ("pairs nd", lu(&pairs, &nd)),
+        ("pairs auto", lu(&pairs, &plain)),
+        ("holes matched", lu(&holes, &SolverSettings::default())),
+        ("lower nd", lower(&nd)),
+        ("lower auto", lower(&plain)),
+    ];
+    let recorded: [u64; 9] = [
+        0xc21cc65510c53390,
+        0xf29a0fad01f31bd2,
+        0x45796e75dfbad397,
+        0xcf0f183af2ae0938,
+        0x57e5732a78bc2d0c,
+        0x5c7b1180d598aa78,
+        0x244615ac6d2b7bc9,
+        0x43c149ec7bdb6d74,
+        0x0ae0a86c6daeff63,
+    ];
+    let report: Vec<String> = got.iter().map(|(k, v)| format!("{k}: {v:#018x}")).collect();
+    assert_eq!(got.map(|(_, v)| v), recorded, "{report:#?}");
 }

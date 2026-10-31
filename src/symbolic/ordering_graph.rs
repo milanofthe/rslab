@@ -1,10 +1,11 @@
 //! The graph the fill-reducing orderings run on.
 //!
 //! Every candidate of the ordering race orders the same graph: the full
-//! symmetric pattern, compressed to its groups of indistinguishable vertices
-//! when they shrink it (see [`supervariables`](super::supervariables)), in
-//! the `i32` form the ordering crates take. It is built once per pattern and
-//! shared; per candidate it cost as much as the minimum-degree ordering.
+//! symmetric pattern, held in the `i32` form the ordering crates take and
+//! handed to them as it is, or the graph of its groups of indistinguishable
+//! vertices when they shrink it (see [`supervariables`](super::supervariables)).
+//! The compressed graph is built once per pattern and shared; per candidate
+//! it cost as much as the minimum-degree ordering.
 
 use super::supervariables::Supervariables;
 use super::OrderingMethod;
@@ -15,66 +16,58 @@ use crate::sparse::csc::CscPattern;
 use std::sync::OnceLock;
 
 pub(super) struct OrderingGraph<'a> {
-    /// The full symmetric pattern (both triangles, sorted rows).
-    pub pattern: &'a CscPattern,
+    /// The full symmetric pattern (both triangles, sorted rows), the graph
+    /// the ordering crates order where it is not compressed.
+    pub pattern: &'a CscPattern<i32>,
     /// The options of the orderings and the compression.
     settings: &'a OrderingSettings,
-    /// The graph handed to the ordering crates, built on first use (a given
-    /// permutation needs none). Build it with [`prepare`](Self::prepare)
-    /// before orderings run concurrently: a worker waiting inside the build
-    /// could otherwise steal a task that waits on the same build.
-    ordered: OnceLock<Result<Ordered, String>>,
+    /// The compressed graph where the groups shrink the pattern enough,
+    /// built on first use (a given permutation needs none). Build it with
+    /// [`prepare`](Self::prepare) before orderings run concurrently: a
+    /// worker waiting inside the build could otherwise steal a task that
+    /// waits on the same build.
+    compressed: OnceLock<Option<Compressed>>,
 }
 
-struct Ordered {
-    /// The groups, when the graph is ordered compressed.
-    groups: Option<Supervariables>,
+struct Compressed {
+    groups: Supervariables,
     /// Group sizes, the vertex weights of the compressed graph.
-    weights: Option<Vec<i32>>,
-    /// The ordered graph (compressed or not) as `i32` arrays.
-    col_ptr: Vec<i32>,
-    row_idx: Vec<i32>,
+    weights: Vec<i32>,
+    /// One vertex per group.
+    graph: CscPattern<i32>,
 }
 
 impl<'a> OrderingGraph<'a> {
-    pub fn new(pattern: &'a CscPattern, settings: &'a OrderingSettings) -> Self {
+    pub fn new(pattern: &'a CscPattern<i32>, settings: &'a OrderingSettings) -> Self {
         OrderingGraph {
             pattern,
             settings,
-            ordered: OnceLock::new(),
+            compressed: OnceLock::new(),
         }
     }
 
-    /// Build the ordered graph now.
-    pub fn prepare(&self) -> Result<(), RslabError> {
-        self.ordered().map(|_| ())
+    /// Build the compressed graph now.
+    pub fn prepare(&self) {
+        self.compressed();
     }
 
-    fn ordered(&self) -> Result<&Ordered, RslabError> {
+    fn compressed(&self) -> Option<&Compressed> {
         let (pattern, ratio) = (self.pattern, self.settings.compress_max_ratio);
-        self.ordered
+        self.compressed
             .get_or_init(|| {
                 crate::logging::timed(
                     || "analysis: ordering graph".into(),
                     || {
                         let groups = Supervariables::of(pattern);
-                        let groups =
-                            ((groups.len() as f64) <= ratio * pattern.n as f64).then_some(groups);
-                        let (col_ptr, row_idx) = match &groups {
-                            Some(g) => g.compress(pattern).ok_or_else(too_large)?,
-                            None => to_i32(pattern)?,
-                        };
-                        Ok(Ordered {
-                            weights: groups.as_ref().map(Supervariables::weights),
+                        ((groups.len() as f64) <= ratio * pattern.n as f64).then(|| Compressed {
+                            weights: groups.weights(),
+                            graph: groups.compress(pattern),
                             groups,
-                            col_ptr,
-                            row_idx,
                         })
                     },
                 )
             })
             .as_ref()
-            .map_err(|e| RslabError::InvalidInput(e.clone()))
     }
 
     /// Order the graph with the concrete `method` (nested dissection with
@@ -83,9 +76,9 @@ impl<'a> OrderingGraph<'a> {
     /// from a count weighted by the group sizes, a fraction of the work on
     /// the full pattern.
     pub fn order(&self, method: OrderingMethod, nd_seed: u64) -> Result<Structure, RslabError> {
-        let g = self.ordered()?;
-        let nv = g.col_ptr.len() - 1;
-        let pat = rslab_ordering_core::CscPattern::new(nv, &g.col_ptr, &g.row_idx)
+        let c = self.compressed();
+        let g = c.map_or(self.pattern, |c| &c.graph);
+        let pat = rslab_ordering_core::CscPattern::new(g.n, &g.col_ptr, &g.row_idx)
             .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
         let order = crate::logging::timed(
             || format!("analysis: ordering {method:?} seed {nd_seed}"),
@@ -101,8 +94,8 @@ impl<'a> OrderingGraph<'a> {
                         seed: nd_seed,
                         ..self.settings.nd.clone()
                     };
-                    match &g.weights {
-                        Some(w) => rslab_metis::metis_order_weighted(&pat, w, &opts),
+                    match c {
+                        Some(c) => rslab_metis::metis_order_weighted(&pat, &c.weights, &opts),
                         None => rslab_metis::metis_order_full(&pat, &opts),
                     }
                     .map(|(perm, _, _)| perm)
@@ -112,10 +105,10 @@ impl<'a> OrderingGraph<'a> {
             },
         )
         .map_err(|e| RslabError::InvalidInput(format!("ordering failed: {e}")))?;
-        let order = checked(&order, nv)?;
+        let order = checked(&order, g.n)?;
         let t = crate::clock::Instant::now();
-        let s = match &g.groups {
-            Some(groups) => grouped_structure(g, groups, &order),
+        let s = match c {
+            Some(c) => grouped_structure(c, &order),
             None => structure(self.pattern, order),
         };
         if crate::logging::enabled(crate::logging::LogLevel::Debug) {
@@ -137,14 +130,17 @@ pub(super) struct Structure {
 }
 
 /// The structure under the ordering `perm` of the full `pattern`, read
-/// through the permutation.
-pub(super) fn structure(pattern: &CscPattern, perm: Vec<usize>) -> Structure {
+/// through the permutation: column `new` is the original column
+/// `perm[new]` with its rows mapped by the inverse, so the permuted pattern
+/// is never built or sorted.
+pub(super) fn structure(pattern: &CscPattern<i32>, perm: Vec<usize>) -> Structure {
     let mut perm_inv = vec![0usize; perm.len()];
     for (new, &old) in perm.iter().enumerate() {
         perm_inv[old] = new;
     }
-    let etree = EliminationTree::from_permuted_pattern(pattern, &perm, &perm_inv);
-    let col_counts = super::column_counts_permuted(pattern, &perm, &perm_inv, &etree);
+    let cols = |new: usize| pattern.col(perm[new]).iter().map(|&r| perm_inv[r as usize]);
+    let etree = EliminationTree::from_cols(pattern.n, cols);
+    let col_counts = super::column_counts::gnp(pattern.n, &etree, cols, |_| 1);
     Structure {
         perm,
         etree,
@@ -157,18 +153,13 @@ pub(super) fn structure(pattern: &CscPattern, perm: Vec<usize>) -> Structure {
 /// consecutively and share their structure, so they form a chain in the
 /// tree whose last member hangs below the first member of the parent group,
 /// and member `t` of a group with weighted count `c` has `c - t` entries.
-fn grouped_structure(g: &Ordered, groups: &Supervariables, order: &[usize]) -> Structure {
-    let ng = order.len();
+fn grouped_structure(c: &Compressed, order: &[usize]) -> Structure {
+    let (groups, ng) = (&c.groups, order.len());
     let mut inv = vec![0usize; ng];
     for (k, &v) in order.iter().enumerate() {
         inv[v] = k;
     }
-    let cols = |k: usize| {
-        let v = order[k];
-        g.row_idx[g.col_ptr[v] as usize..g.col_ptr[v + 1] as usize]
-            .iter()
-            .map(|&r| inv[r as usize])
-    };
+    let cols = |k: usize| c.graph.col(order[k]).iter().map(|&r| inv[r as usize]);
     let etree = EliminationTree::from_cols(ng, cols);
     let size = |k: usize| groups.ptr[order[k] + 1] - groups.ptr[order[k]];
     let counts = super::column_counts::gnp(ng, &etree, cols, |k| size(k) as i64);
@@ -218,19 +209,4 @@ fn checked(order: &[i32], n: usize) -> Result<Vec<usize>, RslabError> {
             "ordering is not a permutation".to_string(),
         )),
     }
-}
-
-fn too_large() -> String {
-    "matrix too large for i32-indexed ordering crates".to_string()
-}
-
-/// The pattern as the `i32` arrays of the ordering crates.
-fn to_i32(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), String> {
-    let conv = |v: &[usize]| -> Result<Vec<i32>, String> {
-        v.iter()
-            .map(|&x| i32::try_from(x))
-            .collect::<Result<_, _>>()
-            .map_err(|_| too_large())
-    };
-    Ok((conv(&pattern.col_ptr)?, conv(&pattern.row_idx)?))
 }

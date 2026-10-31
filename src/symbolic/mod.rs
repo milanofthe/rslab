@@ -17,7 +17,7 @@ use crate::numeric::settings::{AmalgamationSettings, OrderingSettings};
 use crate::sparse::csc::CscPattern;
 use ordering_graph::OrderingGraph;
 
-pub use column_counts::{column_counts_gnp, column_counts_permuted, total_factor_nnz};
+pub use column_counts::{column_counts_gnp, total_factor_nnz};
 pub use supernode::{
     find_supernodes, pick_amalgamation_strategy, supernode_parents, AmalgamationStrategy,
     RelaxAmalgamation, Supernode,
@@ -62,9 +62,11 @@ pub struct SymbolicFactorization {
     /// Entries of the scalar factor `L`, diagonal included (before the
     /// amalgamation adds explicit zeros).
     pub factor_nnz: usize,
-    /// The full symmetric pattern under the ordering. The supernodal analysis
-    /// empties it once its schedule is built (the pattern's last reader).
-    pub permuted_pattern: CscPattern,
+    /// The full symmetric pattern the ordering was computed on, in the
+    /// original numbering (`perm_inv` maps it to the factor's). The
+    /// supernodal analysis empties it once its schedule is built (the
+    /// pattern's last reader).
+    pub pattern: CscPattern<i32>,
     /// The ordering used (the race winner under `Auto`).
     pub resolved_method: OrderingMethod,
     /// The amalgamation strategy used (`Auto` resolved).
@@ -72,7 +74,7 @@ pub struct SymbolicFactorization {
 }
 
 impl SymbolicFactorization {
-    /// Heap bytes held: the permutations, the supernodes and the permuted pattern.
+    /// Heap bytes held: the permutations, the supernodes and the pattern.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
         vec_bytes(&self.perm)
@@ -83,9 +85,25 @@ impl SymbolicFactorization {
                 .iter()
                 .map(|s| vec_bytes(&s.children))
                 .sum::<u64>()
-            + vec_bytes(&self.permuted_pattern.col_ptr)
-            + vec_bytes(&self.permuted_pattern.row_idx)
+            + vec_bytes(&self.pattern.col_ptr)
+            + vec_bytes(&self.pattern.row_idx)
     }
+}
+
+/// The full symmetric pattern of the lower triangle (`col_ptr`, `row_idx`)
+/// of an `n x n` pattern, in the `i32` form the analysis orders.
+pub fn full_pattern(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+) -> Result<CscPattern<i32>, RslabError> {
+    crate::logging::timed(
+        || "analysis: symmetric pattern".into(),
+        || crate::sparse::csc::symmetric_pattern(n, col_ptr, row_idx),
+    )
+    .ok_or_else(|| {
+        RslabError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
+    })
 }
 
 /// Analyze the lower triangle (`col_ptr`, `row_idx`) of an `n x n` pattern.
@@ -96,17 +114,31 @@ pub fn analyze(
     ordering: &OrderingSettings,
     amalgamation: &AmalgamationSettings,
 ) -> Result<SymbolicFactorization, RslabError> {
+    analyze_pattern(full_pattern(n, col_ptr, row_idx)?, ordering, amalgamation)
+}
+
+/// Analyze a full symmetric pattern ([`full_pattern`]), which the result
+/// keeps for the schedule.
+pub fn analyze_pattern(
+    full: CscPattern<i32>,
+    ordering: &OrderingSettings,
+    amalgamation: &AmalgamationSettings,
+) -> Result<SymbolicFactorization, RslabError> {
     let method = ordering.method;
-    let full = &crate::logging::timed(
-        || "analysis: symmetric pattern".into(),
-        || crate::sparse::csc::symmetric_pattern(n, col_ptr, row_idx),
-    );
-    if method == OrderingMethod::Auto && ordering.permutation.is_none() {
-        return race::race(full, ordering, amalgamation);
-    }
-    let graph = OrderingGraph::new(full, ordering);
-    let px = race::prefix(&graph, ordering, method, ordering.nd.seed)?;
-    race::finish(px, full, amalgamation)
+    // The ordering graph (and the compressed graph it may build) is dropped
+    // before the finish.
+    let px = {
+        let graph = OrderingGraph::new(&full, ordering);
+        if method == OrderingMethod::Auto && ordering.permutation.is_none() {
+            race::race(&graph, ordering)?
+        } else {
+            race::prefix(&graph, ordering, method, ordering.nd.seed)?
+        }
+    };
+    crate::logging::timed(
+        || "analysis: finish".into(),
+        || race::finish(px, full, amalgamation),
+    )
 }
 
 #[cfg(test)]
@@ -250,7 +282,7 @@ mod tests {
     }
 
     /// The frontal height reported by the analysis equals the row set the
-    /// numeric schedule builds from the permuted pattern, merged supernodes
+    /// numeric schedule builds from the pattern, merged supernodes
     /// included.
     #[test]
     fn supernode_heights_match_the_built_row_sets() {
@@ -303,7 +335,7 @@ mod tests {
         }
         let n = k * k * d;
         let a = CscMatrix::from_triplets(n, &r, &c, &vec![1.0; r.len()]).unwrap();
-        let full = crate::sparse::csc::symmetric_pattern(n, &a.col_ptr, &a.row_idx);
+        let full = full_pattern(n, &a.col_ptr, &a.row_idx).unwrap();
         let settings = OrderingSettings::default();
         let graph = OrderingGraph::new(&full, &settings);
         for method in [
