@@ -124,7 +124,7 @@ pub fn refine_bisection(
                 // u's ed +w, id -w -> delta gain = +2w. If u shares v's
                 // new side (`to`): edge was crossing, now internal
                 // -> delta gain = -2w.
-                let w = graph.adjwgt[k];
+                let w = graph.wgt(k);
                 if labels[u] == from {
                     gain[u] += 2 * w;
                 } else {
@@ -193,7 +193,7 @@ fn compute_gains(graph: &Graph, labels: &[u8], gain: &mut [i32]) {
         let mut id: i32 = 0;
         for k in lo..hi {
             let u = graph.adjncy[k] as usize;
-            let w = graph.adjwgt[k];
+            let w = graph.wgt(k);
             if labels[u] == lv {
                 id = id.saturating_add(w);
             } else {
