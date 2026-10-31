@@ -55,7 +55,7 @@ serde_json = "1"
 num-complex = "0.4"
 # Work stealing for the assembly-tree drivers, the orderings and the solves.
 rayon = "1.10"
-rspool = { git = "https://github.com/milanofthe/rspool", rev = "1007f2c", version = "0.1.0", features = ["rayon"] }
+rspool = { git = "https://github.com/milanofthe/rspool", rev = "8f29a7e", version = "0.1.0", features = ["rayon"] }
 # Real and complex SIMD GEMM of the dense kernels (runtime AVX2/AVX-512
 # dispatch; the AVX-512 kernels exist only with `x86-v4`).
 gemm = { version = "0.19", features = ["x86-v4"] }
