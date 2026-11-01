@@ -1251,11 +1251,11 @@ pub(super) fn block_bytes<T>(
     // sums; `y`
     let panels = 5 * n * s; // lit: the five n x s panels of `BlockGmres::new`
     let shared = panels + 2 * s * (m + 1) + n.div_ceil(chunk.max(1)) * s * (m + 1) + m;
-    // `bnorm`, `wnorm0`, `res`, `reorth`, `off` (one more), `act`, `chk`
+    // `bnorm`, `wnorm0`, `res`, `reorth`, `off` (one more), `act`, `chk`, `closing`
     let per_rhs = 2 * std::mem::size_of::<f64>()
         + std::mem::size_of::<Option<f64>>()
         + std::mem::size_of::<bool>()
-        + 2 * std::mem::size_of::<usize>()
+        + 3 * std::mem::size_of::<usize>()
         + std::mem::size_of::<(usize, usize)>();
     ((s * column + shared) * sz + s * bases * stored + s * per_rhs + std::mem::size_of::<usize>())
         as u64
