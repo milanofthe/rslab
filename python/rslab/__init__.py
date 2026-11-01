@@ -558,7 +558,7 @@ def gmres_block(A, B, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _r
     tol : float, default 1e-8
         Relative residual target per column.
     maxit : int, default 400
-        Iteration budget.
+        Iteration budget of every column.
     restart : int, optional
         Block Arnoldi basis size (see :func:`gmres`).
     x0 : ndarray, shape (n, nrhs), optional

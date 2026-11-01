@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 1.7.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 1.8.1 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -367,7 +367,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -555,7 +555,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -725,7 +725,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -906,7 +906,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -1429,7 +1429,7 @@ Block GMRES on `A X = B` for an `n x nrhs` block, optionally preconditioned.
 - `B` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `M` (factor handle, optional): A factor used as the preconditioner.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 

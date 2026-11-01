@@ -819,7 +819,7 @@ macro_rules! handle {
             /// tol : float, default 1e-8
             ///     Relative residual target per column.
             /// maxit : int, default 400
-            ///     Iteration budget.
+            ///     Iteration budget of every column.
             /// restart : int, optional
             ///     Block Arnoldi basis size (see :meth:`gmres`).
             /// x0 : ndarray, shape (n, nrhs), optional
