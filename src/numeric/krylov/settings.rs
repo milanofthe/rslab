@@ -50,6 +50,13 @@ pub struct KrylovSettings {
     /// preconditioner apply per residual check; the bases take half the memory.
     /// Default `true`.
     pub flexible: bool,
+    /// The memory a block GMRES may hold (bytes, [`block_bytes`](Self::block_bytes)):
+    /// where the bases would outgrow it, the columns with the worst residual
+    /// estimates close their cycles and wait while the others run on, and start
+    /// again once those finished ([`BlockGmres::solve`](super::BlockGmres::solve)).
+    /// Every column keeps the restart; the room bounds how many run at once.
+    /// `None` (default): no bound.
+    pub room_bytes: Option<u64>,
 }
 
 impl Default for KrylovSettings {
@@ -64,6 +71,7 @@ impl Default for KrylovSettings {
             reorth_eta: KRYLOV_REORTH_ETA,
             ortho_chunk: KRYLOV_ORTHO_CHUNK,
             flexible: true,
+            room_bytes: None,
         }
     }
 }
@@ -91,6 +99,11 @@ impl KrylovSettings {
         self.flexible = flexible;
         self
     }
+    /// Bound the memory of a block GMRES ([`room_bytes`](Self::room_bytes)).
+    pub fn with_room(mut self, bytes: u64) -> Self {
+        self.room_bytes = Some(bytes);
+        self
+    }
     /// The bases a block GMRES column stores: `V` and `Z` when
     /// [`flexible`](Self::flexible), `V` alone otherwise.
     pub(crate) fn bases(&self) -> usize {
@@ -106,11 +119,21 @@ impl KrylovSettings {
     /// in scalars `T` holds once its bases are `depth` vectors deep (a solve of
     /// `k` iterations without a restart: `k + 1`), at the restart these settings
     /// give: the bases `V` and (when [`flexible`](Self::flexible)) `Z` as
-    /// written, the Hessenberg matrices, the panels and the reduction scratch.
+    /// written, the Hessenberg matrices, the panels and the reduction scratch;
+    /// within [`room_bytes`](Self::room_bytes) where set (at least one column a step
+    /// deep beside the rest).
     pub fn block_bytes<T>(&self, n: usize, s: usize, depth: usize) -> u64 {
         let m = self.restart_for(n, s, std::mem::size_of::<T>(), self.bases());
-        let depth = depth.min(m + 1);
-        super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, depth, self.flexible)
+        let plan =
+            |d: usize| super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, d, self.flexible);
+        let full = plan(depth.min(m + 1));
+        match self.room_bytes {
+            Some(room) => {
+                let step = (n * self.bases() * std::mem::size_of::<T>()) as u64;
+                full.min(room.max(plan(0) + 2 * step))
+            }
+            None => full,
+        }
     }
 
     /// What deflating a subspace of dimension `k`

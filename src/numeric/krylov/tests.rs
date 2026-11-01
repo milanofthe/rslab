@@ -2032,3 +2032,56 @@ fn block_gmres_fixed_preconditioner_harvests() {
         plain.iters
     );
 }
+
+/// A block GMRES in a room ([`KrylovSettings::room_bytes`]) that holds two of its
+/// columns at the restart's depth: the columns with the worst estimates close
+/// their cycles and wait while the others run on, every column converges, the
+/// solutions agree with the unbounded solve's to the tolerance, and the solve
+/// never holds more than the room and a step of one column.
+#[test]
+fn block_gmres_room_runs_the_columns_in_waves() {
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(14, c(1.2, 0.05), c(-1.0, 0.0));
+    let n = a.n;
+    let s = 6;
+    let b = ladder_rhs(n, s);
+    let lu = NoPreconditioner;
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(40)
+        .with_flexible(false);
+    let mut free = BlockGmres::new(&a, &b, s, &lu, &set, None).unwrap();
+    let rf = free.solve(1e-10, None).unwrap();
+    let column = set.block_bytes::<C>(n, 1, 41) - set.block_bytes::<C>(n, 1, 0);
+    let room = set.block_bytes::<C>(n, s, 0) + 2 * column;
+    let tight = set.clone().with_room(room);
+    let mut g = BlockGmres::new(&a, &b, s, &lu, &tight, None).unwrap();
+    let (mut peak, mut waited) = (0, 0);
+    let mut mon = |p: &BlockProgress<'_>| {
+        peak = peak.max(p.resident);
+        waited = waited.max(p.waiting);
+        true
+    };
+    let r = g.solve(1e-10, Some(&mut mon)).unwrap();
+    assert!(rf.converged && r.converged, "{:?}", r.final_res);
+    assert!(
+        r.closed > 0 && waited > 0,
+        "closed {} waited {waited}",
+        r.closed
+    );
+    let step = (n * std::mem::size_of::<C>()) as u64;
+    assert!(peak <= room + step, "peak {peak} room {room}");
+    assert!(tight.block_bytes::<C>(n, s, 41) <= room);
+    for k in 0..s {
+        let xn = rf.x[k * n..(k + 1) * n]
+            .iter()
+            .map(|v| v.norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        let d = (0..n)
+            .map(|i| (rf.x[k * n + i] - r.x[k * n + i]).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(d <= 1e-7 * xn, "column {k}: {}", d / xn);
+    }
+}
