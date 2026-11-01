@@ -1255,7 +1255,7 @@ pub(super) fn block_bytes<T>(
     let per_rhs = 2 * std::mem::size_of::<f64>()
         + std::mem::size_of::<Option<f64>>()
         + std::mem::size_of::<bool>()
-        + 3 * std::mem::size_of::<usize>()
+        + 3 * std::mem::size_of::<usize>() // lit: `act`, `chk` and `closing`
         + std::mem::size_of::<(usize, usize)>();
     ((s * column + shared) * sz + s * bases * stored + s * per_rhs + std::mem::size_of::<usize>())
         as u64
