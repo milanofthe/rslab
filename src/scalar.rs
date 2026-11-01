@@ -25,7 +25,9 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 /// A field with a lower-precision twin: `f64` over `f32`, `Complex<f64>`
 /// over `Complex<f32>`. A factor computed in the twin takes half the memory
 /// and preconditions an iteration in this field
-/// ([`MixedPrecision`](crate::MixedPrecision)).
+/// ([`MixedPrecision`](crate::MixedPrecision)); a block GMRES may store its
+/// bases in it ([`KrylovSettings::basis_single`](crate::KrylovSettings::basis_single)).
+/// The single fields have nothing lower and are their own twin.
 pub trait Demote: Scalar {
     /// The lower-precision twin.
     type Low: Scalar;
@@ -52,6 +54,26 @@ impl Demote for Complex<f64> {
     }
     fn promote(low: Complex<f32>) -> Complex<f64> {
         Complex::new(low.re as f64, low.im as f64)
+    }
+}
+
+impl Demote for f32 {
+    type Low = f32;
+    fn demote(self) -> f32 {
+        self
+    }
+    fn promote(low: f32) -> f32 {
+        low
+    }
+}
+
+impl Demote for Complex<f32> {
+    type Low = Complex<f32>;
+    fn demote(self) -> Complex<f32> {
+        self
+    }
+    fn promote(low: Complex<f32>) -> Complex<f32> {
+        low
     }
 }
 
@@ -172,6 +194,9 @@ pub trait Scalar:
     /// Whether every component is finite (no `NaN`/`inf`) - used by pivot
     /// health checks.
     fn is_finite(self) -> bool;
+
+    /// Append the little-endian bytes of the components (real, then imaginary).
+    fn le_bytes(self, out: &mut Vec<u8>);
 }
 
 /// `a*b + c` through the hardware FMA **when the build enables it**
@@ -245,6 +270,11 @@ impl Scalar for f64 {
     #[inline]
     fn is_finite(self) -> bool {
         f64::is_finite(self)
+    }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
     }
 }
 
@@ -341,6 +371,12 @@ impl Scalar for Complex<f64> {
     fn is_finite(self) -> bool {
         self.re.is_finite() && self.im.is_finite()
     }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.re.to_le_bytes());
+        out.extend_from_slice(&self.im.to_le_bytes());
+    }
 }
 
 impl Scalar for f32 {
@@ -394,6 +430,11 @@ impl Scalar for f32 {
     #[inline]
     fn is_finite(self) -> bool {
         f32::is_finite(self)
+    }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
     }
 }
 
@@ -487,6 +528,12 @@ impl Scalar for Complex<f32> {
     #[inline]
     fn is_finite(self) -> bool {
         self.re.is_finite() && self.im.is_finite()
+    }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.re.to_le_bytes());
+        out.extend_from_slice(&self.im.to_le_bytes());
     }
 }
 
