@@ -4,6 +4,8 @@ use crate::constants::{
     KRYLOV_BASIS_BUDGET_BYTES, KRYLOV_MAX_ITER, KRYLOV_ORTHO_CHUNK, KRYLOV_REORTH_ETA,
     KRYLOV_RESTART_MAX, KRYLOV_RESTART_MIN, KRYLOV_TOL,
 };
+use crate::scalar::Demote;
+use crate::stored::Stored;
 
 /// Settings of [`gmres`](super::gmres), [`gmres_block`](super::gmres_block),
 /// [`gmres_recycled`](super::gmres_recycled), [`cocg`](super::cocg) and
@@ -50,6 +52,24 @@ pub struct KrylovSettings {
     /// preconditioner apply per residual check; the bases take half the memory.
     /// Default `true`.
     pub flexible: bool,
+    /// A block GMRES stores its bases `V` and `Z` in the single-precision twin of
+    /// its scalar ([`Stored`](crate::Stored): `Complex<f32>` for `Complex<f64>`,
+    /// `f32` for `f64`), half their memory, and reads them through the full
+    /// precision: every product, the Hessenberg matrices, the rotations, the
+    /// residuals and the solutions stay in it. A cycle's true residual then stalls
+    /// at the rounding of its stored vectors, relative to the residual it started
+    /// from (`1.3e-8` on a grid where full bases reach `3e-14`): above
+    /// [`single_for`](crate::single_for)'s tolerance (`9.5e-7`) it never shows, below
+    /// a column whose check finds it above the tolerance restarts from its true
+    /// residual, and the restarts carry it to the tolerance in more iterations (34
+    /// against 28 to `1e-10` on a grid restarting every 30 steps). Chosen at
+    /// [`BlockGmres::new`](super::BlockGmres::new) for the whole solve, the calls
+    /// continuing it to tighter tolerances too. The
+    /// default restart ([`basis_budget_bytes`](Self::basis_budget_bytes)) and the
+    /// memory ([`room_bytes`](Self::room_bytes), [`block_bytes`](Self::block_bytes))
+    /// count the bytes stored. Without effect for the single fields (their own
+    /// twin). Default `false`.
+    pub basis_single: bool,
     /// The memory a block GMRES may hold (bytes, [`block_bytes`](Self::block_bytes)):
     /// where the bases would outgrow it, the columns with the worst residual
     /// estimates close their cycles and wait while the others run on, and start
@@ -71,6 +91,7 @@ impl Default for KrylovSettings {
             reorth_eta: KRYLOV_REORTH_ETA,
             ortho_chunk: KRYLOV_ORTHO_CHUNK,
             flexible: true,
+            basis_single: false,
             room_bytes: None,
         }
     }
@@ -99,6 +120,11 @@ impl KrylovSettings {
         self.flexible = flexible;
         self
     }
+    /// Store the bases of a block GMRES in single precision ([`basis_single`](Self::basis_single)).
+    pub fn with_basis_single(mut self, single: bool) -> Self {
+        self.basis_single = single;
+        self
+    }
     /// Bound the memory of a block GMRES ([`room_bytes`](Self::room_bytes)).
     pub fn with_room(mut self, bytes: u64) -> Self {
         self.room_bytes = Some(bytes);
@@ -114,22 +140,31 @@ impl KrylovSettings {
         }
     }
 
+    /// Bytes of a basis scalar of a block GMRES in `T` as stored
+    /// ([`basis_single`](Self::basis_single)).
+    pub(crate) fn basis_scalar_bytes<T: Demote>(&self) -> usize {
+        Stored::<T>::scalar_bytes(self.basis_single)
+    }
+
     /// Heap bytes a block GMRES ([`gmres_block`](super::gmres_block),
     /// [`BlockGmres`](super::BlockGmres)) of `s` right-hand sides of length `n`
     /// in scalars `T` holds once its bases are `depth` vectors deep (a solve of
     /// `k` iterations without a restart: `k + 1`), at the restart these settings
     /// give: the bases `V` and (when [`flexible`](Self::flexible)) `Z` as
-    /// written, the Hessenberg matrices, the panels and the reduction scratch;
+    /// written and stored ([`basis_single`](Self::basis_single)), the Hessenberg
+    /// matrices, the panels and the reduction scratch;
     /// within [`room_bytes`](Self::room_bytes) where set (at least one column a step
     /// deep beside the rest).
-    pub fn block_bytes<T>(&self, n: usize, s: usize, depth: usize) -> u64 {
-        let m = self.restart_for(n, s, std::mem::size_of::<T>(), self.bases());
-        let plan =
-            |d: usize| super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, d, self.flexible);
+    pub fn block_bytes<T: Demote>(&self, n: usize, s: usize, depth: usize) -> u64 {
+        let stored = self.basis_scalar_bytes::<T>();
+        let m = self.restart_for(n, s, stored, self.bases());
+        let plan = |d: usize| {
+            super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, d, self.flexible, stored)
+        };
         let full = plan(depth.min(m + 1));
         match self.room_bytes {
             Some(room) => {
-                let step = (n * self.bases() * std::mem::size_of::<T>()) as u64;
+                let step = (n * self.bases() * stored) as u64;
                 full.min(room.max(plan(0) + 2 * step))
             }
             None => full,
@@ -140,8 +175,8 @@ impl KrylovSettings {
     /// ([`BlockGmres::deflating`](super::BlockGmres::deflating)) adds to
     /// [`block_bytes`](Self::block_bytes): the subspace, every column's
     /// components on it per step, and a panel's projections.
-    pub fn deflation_bytes<T>(&self, n: usize, s: usize, k: usize) -> u64 {
-        let m = self.restart_for(n, s, std::mem::size_of::<T>(), self.bases());
+    pub fn deflation_bytes<T: Demote>(&self, n: usize, s: usize, k: usize) -> u64 {
+        let m = self.restart_for(n, s, self.basis_scalar_bytes::<T>(), self.bases());
         super::block::deflation_bytes::<T>(n, s, m, self.ortho_chunk, k)
     }
 

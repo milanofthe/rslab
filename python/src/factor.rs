@@ -9,9 +9,9 @@ use std::marker::PhantomData;
 use numpy::Element;
 use pyo3::prelude::*;
 use rslab::{
-    BackwardError, CscMatrix, Factorization, GeneralCsc, KluSolver, LdltSolver, LdltSymbolic,
-    LinearOperator, LuSolver, LuSymbolic, MixedPrecision, Recycle, RecycleScalar, RefineOperator,
-    RefinePolicy, Scalar, SolverSettings,
+    BackwardError, CscMatrix, Demote, Factorization, GeneralCsc, KluSolver, LdltSolver,
+    LdltSymbolic, LinearOperator, LuSolver, LuSymbolic, MixedPrecision, Recycle, RecycleScalar,
+    RefineOperator, RefinePolicy, Scalar, SolverSettings,
 };
 
 use crate::common::{
@@ -105,7 +105,9 @@ impl PyRecycle {
 
 /// One of the four scalar fields, with the glue that ties a concrete type to
 /// the per-field enum variants.
-pub trait Field: Scalar + Element + RecycleScalar + Default + Send + Sync + 'static {
+pub trait Field:
+    Scalar + Demote + Element + RecycleScalar + Default + Send + Sync + 'static
+{
     const DTYPE: &'static str;
     fn recycle_new(k: usize) -> RecycleAny;
     fn recycle_mut(any: &mut RecycleAny) -> Option<&mut Recycle<Self>>;
@@ -267,7 +269,7 @@ macro_rules! mixed_direct {
     ($solver:ident, $matrix:ident) => {
         impl<T> Direct<T> for MixedPrecision<$solver<T::Low>>
         where
-            T: Field + rslab::Demote,
+            T: Field,
             T::Low: Field,
         {
             type Matrix = $matrix<T>;
@@ -500,7 +502,7 @@ impl<T: Field> Pair<T, LdltSolver<T>> {
     }
 }
 
-impl<T: Field + rslab::Demote> Pair<T, MixedPrecision<LdltSolver<T::Low>>>
+impl<T: Field> Pair<T, MixedPrecision<LdltSolver<T::Low>>>
 where
     T::Low: Field,
 {

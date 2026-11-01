@@ -6,7 +6,8 @@ use super::*;
 
 use super::recycle::RecycleScalar;
 use crate::error::RslabError;
-use crate::scalar::Scalar;
+use crate::scalar::{Demote, Scalar};
+use crate::stored::Stored;
 
 /// Outcome of a block (multi-RHS) Krylov solve.
 #[derive(Debug, Clone)]
@@ -51,15 +52,15 @@ pub struct BlockProgress<'p> {
 /// One right-hand side's Arnoldi state: its basis, the Hessenberg matrix under
 /// its Givens rotations and the rotated least-squares right-hand side of the
 /// open restart cycle.
-struct Column<T> {
-    /// The basis, layer `i` the slice `v[i*n..(i+1)*n]`: the restart's layers
-    /// reserved, the ones the cycle has written resident ([`basis`], [`grow`]).
-    v: Vec<T>,
+struct Column<T: Demote> {
+    /// The basis, layer `i` the scalars `[i*n, (i+1)*n)`: the restart's layers
+    /// reserved, the ones the cycle has written resident ([`Stored`]).
+    v: Stored<T>,
     /// The preconditioned basis `z_i = M^-1 v_i` of the steps taken, laid out as
     /// `v`: the solution is formed from the vectors the Arnoldi relation holds.
     /// Empty when the preconditioner is fixed ([`KrylovSettings::flexible`]
     /// `false`): `Z y = M^-1 (V y)` then.
-    zb: Vec<T>,
+    zb: Stored<T>,
     /// Row-major `(m+1) x m`, entry `(i, j)` at `h[i*m + j]`.
     h: Vec<T>,
     /// The same before the Givens rotations: `A Z = V H_bar` of the open cycle
@@ -82,12 +83,12 @@ struct Column<T> {
     evict: bool,
 }
 
-impl<T: Scalar> Column<T> {
+impl<T: Demote> Column<T> {
     /// No basis yet: [`open`](Self::open) reserves it.
     fn new(m: usize, k: usize) -> Self {
         Column {
-            v: Vec::new(),
-            zb: Vec::new(),
+            v: Stored::default(),
+            zb: Stored::default(),
             h: vec![T::zero(); (m + 1) * m],
             hraw: vec![T::zero(); (m + 1) * m],
             bm: vec![T::zero(); m * k],
@@ -108,13 +109,13 @@ impl<T: Scalar> Column<T> {
 
     /// Heap bytes of its bases as written.
     fn basis_bytes(&self) -> u64 {
-        ((self.v.len() + self.zb.len()) * std::mem::size_of::<T>()) as u64
+        self.v.bytes() + self.zb.bytes()
     }
 
     /// Release its bases: no cycle open.
     fn release(&mut self) {
-        self.v = Vec::new();
-        self.zb = Vec::new();
+        self.v = Stored::default();
+        self.zb = Stored::default();
         self.steps = None;
     }
 
@@ -125,25 +126,24 @@ impl<T: Scalar> Column<T> {
             .map_or(f64::INFINITY, |j| self.g[j].magnitude() / bnorm)
     }
 
-    /// Open a cycle on the residual `r` of norm `beta > 0`, the restart's layers of
-    /// its bases reserved where it holds none.
-    fn open(&mut self, r: &[T], beta: f64, flexible: bool) {
+    /// Open a cycle on the residual `r` of norm `beta > 0` (scaled to the first basis
+    /// vector in place), the restart's layers of its bases reserved where it holds
+    /// none (in the twin with `single`).
+    fn open(&mut self, r: &mut [T], beta: f64, flexible: bool, single: bool) {
         let n = r.len();
         if !self.holds() {
             let m = self.cs.len();
-            self.v = basis(n * (m + 1));
+            self.v = Stored::with_capacity(n * (m + 1), single);
             if flexible {
-                self.zb = basis(n * m);
+                self.zb = Stored::with_capacity(n * m, single);
             }
         }
         self.h.iter_mut().for_each(|e| *e = T::zero());
         self.g.iter_mut().for_each(|e| *e = T::zero());
         self.g[0] = T::from_real(beta);
-        grow(&mut self.v, n);
         let inv = T::from_real(1.0 / beta);
-        for (v, &ri) in self.v[..n].iter_mut().zip(r) {
-            *v = ri * inv;
-        }
+        r.iter_mut().for_each(|ri| *ri = *ri * inv);
+        self.v.write(0, r);
         self.steps = Some(0);
     }
 
@@ -163,14 +163,11 @@ impl<T: Scalar> Column<T> {
         jd
     }
 
-    /// `out += B y`: the first `jd` vectors of the basis `b` (laid out as `v`)
-    /// combined by `y`.
-    fn combine(b: &[T], jd: usize, y: &[T], out: &mut [T]) {
+    /// `out += B y`: the first `jd` vectors of the basis `b` combined by `y`.
+    fn combine(b: &Stored<T>, jd: usize, y: &[T], out: &mut [T]) {
         let n = out.len();
         for (i, &yi) in y.iter().enumerate().take(jd) {
-            for (o, &z) in out.iter_mut().zip(&b[i * n..(i + 1) * n]) {
-                *o = *o + z * yi;
-            }
+            b.axpy(i * n, yi, out);
         }
     }
 
@@ -276,7 +273,7 @@ impl<T> BlockRecycle<T> {
 /// checked in one batched operator apply: a column above the tolerance closes
 /// its cycle and restarts from its true residual, as does a column whose cycle
 /// reached the restart.
-pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
+pub struct BlockGmres<'a, T: Demote, A: ?Sized, M: ?Sized> {
     op: &'a A,
     precond: &'a M,
     b: &'a [T],
@@ -328,6 +325,8 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     /// The preconditioner may change between steps: the columns keep `Z`
     /// ([`KrylovSettings::flexible`]).
     flexible: bool,
+    /// The bases are stored in the twin ([`KrylovSettings::basis_single`]).
+    single: bool,
     /// The bytes the columns' bases may hold together: the room set less what the
     /// solve holds besides ([`KrylovSettings::room_bytes`]); `None`: no bound.
     room: Option<u64>,
@@ -345,7 +344,7 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
 
 impl<'a, T, A, M> BlockGmres<'a, T, A, M>
 where
-    T: Scalar,
+    T: Demote,
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
@@ -380,7 +379,7 @@ where
             None => vec![T::zero(); n * s],
         };
         // the bases a column keeps: `V`, and `Z` where the preconditioner is flexible
-        let m = settings.restart_for(n, s, std::mem::size_of::<T>(), settings.bases());
+        let m = settings.restart_for(n, s, settings.basis_scalar_bytes::<T>(), settings.bases());
         let chunk = settings.ortho_chunk.max(1);
         let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
         let mut res = vec![None; s];
@@ -411,6 +410,7 @@ where
             res,
             cols: (0..s).map(|_| Column::new(m, 0)).collect(),
             flexible: settings.flexible,
+            single: settings.basis_single,
             room: None,
             closed: 0,
             probe: None,
@@ -472,17 +472,17 @@ where
     }
 
     /// Heap bytes the solve holds now: every column's basis as far as it is
-    /// written (the restart's reservation is address space only), the
+    /// written in the precision it is stored in (the restart's reservation is
+    /// address space only), the
     /// Hessenberg matrices, the panels and the reduction scratch.
     /// [`KrylovSettings::block_bytes`] predicts it for a given depth.
     pub fn resident_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
-        let sz = std::mem::size_of::<T>() as u64;
         let cols: u64 = self
             .cols
             .iter()
             .map(|c| {
-                (c.v.len() + c.zb.len()) as u64 * sz
+                c.basis_bytes()
                     + [&c.h, &c.hraw, &c.bm, &c.cs, &c.sn, &c.g]
                         .into_iter()
                         .map(vec_bytes)
@@ -608,7 +608,7 @@ where
                 break;
             }
             let before = self.probe.and_then(|p| p());
-            let grown = (self.act.len() * self.n * self.bases() * std::mem::size_of::<T>()) as u64;
+            let grown = self.act.len() as u64 * self.layer_bytes();
             self.step()?;
             if let (Some(b), Some(a)) = (before, self.probe.and_then(|p| p())) {
                 self.side = self.side.max(b.saturating_sub(a).saturating_sub(grown));
@@ -698,7 +698,7 @@ where
             return;
         };
         let m = self.m;
-        let per = (self.n * self.bases()) as u64 * std::mem::size_of::<T>() as u64;
+        let per = self.layer_bytes();
         if free >= self.act.len() as u64 * per {
             return;
         }
@@ -756,6 +756,11 @@ where
         } else {
             1
         }
+    }
+
+    /// The bytes a step adds to a column's bases.
+    fn layer_bytes(&self) -> u64 {
+        (self.n * self.bases() * Stored::<T>::scalar_bytes(self.single)) as u64
     }
 
     /// Close column `c`'s cycle on the solution formed (`x <- out`), its bases
@@ -893,7 +898,12 @@ where
                 None => r * self.bnorm[c],
             };
             if beta > 0.0 {
-                self.cols[c].open(&self.w[a * n..(a + 1) * n], beta, self.flexible);
+                self.cols[c].open(
+                    &mut self.w[a * n..(a + 1) * n],
+                    beta,
+                    self.flexible,
+                    self.single,
+                );
                 self.deepest = self.deepest.max(1);
             }
         }
@@ -908,7 +918,9 @@ where
     fn step(&mut self) -> Result<(), RslabError> {
         let (n, m, sa) = (self.n, self.m, self.act.len());
         for (a, &(c, j)) in self.act.iter().enumerate() {
-            self.panel[a * n..(a + 1) * n].copy_from_slice(&self.cols[c].v[j * n..(j + 1) * n]);
+            self.cols[c]
+                .v
+                .read(j * n, &mut self.panel[a * n..(a + 1) * n]);
             self.off[a + 1] = self.off[a] + j + 1;
         }
         self.precond
@@ -937,7 +949,7 @@ where
             ..
         } = self;
         let (cols, act, off, chunk) = (&*cols, &*act, &off[..=sa], *chunk);
-        let layers = |a: usize| &cols[act[a].0].v[..];
+        let layers = |a: usize| &cols[act[a].0].v;
         let w = &mut w[..sa * n];
         // deflating: the panel's components in `range(C)` first, kept per step
         if let Some(rec) = &*rec {
@@ -994,23 +1006,20 @@ where
                 col.hraw[i * m + j] = col.h[i * m + j];
             }
             if self.flexible {
-                grow(&mut col.zb, (j + 1) * n);
-                col.zb[j * n..(j + 1) * n].copy_from_slice(&self.z[a * n..(a + 1) * n]);
+                col.zb.write(j * n, &self.z[a * n..(a + 1) * n]);
             }
-            let wa = &self.w[a * n..(a + 1) * n];
+            let wa = &mut self.w[a * n..(a + 1) * n];
             let hn = norm2(wa);
             col.h[(j + 1) * m + j] = T::from_real(hn);
             col.hraw[(j + 1) * m + j] = col.h[(j + 1) * m + j];
-            grow(&mut col.v, (j + 2) * n);
-            let next = &mut col.v[(j + 1) * n..(j + 2) * n];
+            // the next basis vector, scaled in the panel
             if hn > 0.0 {
                 let inv = T::from_real(1.0 / hn);
-                for (v, &wi) in next.iter_mut().zip(wa) {
-                    *v = wi * inv;
-                }
+                wa.iter_mut().for_each(|wi| *wi = *wi * inv);
             } else {
-                next.iter_mut().for_each(|v| *v = T::zero());
+                wa.iter_mut().for_each(|wi| *wi = T::zero());
             }
+            col.v.write((j + 1) * n, wa);
             // The earlier rotations, then a new one zeroing `h[j+1][j]`.
             for i in 0..j {
                 let (hi, hi1) = (col.h[i * m + j], col.h[(i + 1) * m + j]);
@@ -1036,7 +1045,7 @@ where
 
 impl<'a, T, A, M> BlockGmres<'a, T, A, M>
 where
-    T: RecycleScalar,
+    T: RecycleScalar + Demote,
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
@@ -1094,10 +1103,14 @@ where
             let d = g.len();
             // the Ritz vectors in the solution space: `Z g`, as `M^-1 (V g)` where `Z`
             // is not kept
+            let pairs = [(theta, g)];
+            let ritz = |b: &Stored<T>| {
+                T::combine_ritz(&|j, a, out| b.axpy(j * n, a, out), n, d, &pairs, k - kept)
+            };
             let cand = if self.flexible {
-                T::combine_ritz(&self.cols[c].zb[..d * n], n, d, &[(theta, g)], k - kept)
+                ritz(&self.cols[c].zb)
             } else {
-                let vg = T::combine_ritz(&self.cols[c].v[..d * n], n, d, &[(theta, g)], k - kept);
+                let vg = ritz(&self.cols[c].v);
                 let mut zg = vec![T::zero(); vg.len()];
                 // (no wider than the solve applies it)
                 let width = self.s * n;
@@ -1185,8 +1198,9 @@ fn orthonormal_into<T: Scalar>(
 
 /// Heap bytes of a [`BlockGmres`] of `s` right-hand sides of length `n` at
 /// restart `m` and reduction chunk `chunk` once its columns' bases are `depth`
-/// vectors deep: the allocations of [`BlockGmres::new`] and the written bases
-/// ([`BlockGmres::resident_bytes`] of a solve at that depth in every column).
+/// vectors deep, of `stored` bytes a basis scalar: the allocations of
+/// [`BlockGmres::new`] and the written bases ([`BlockGmres::resident_bytes`] of a
+/// solve at that depth in every column).
 pub(super) fn block_bytes<T>(
     n: usize,
     s: usize,
@@ -1194,16 +1208,18 @@ pub(super) fn block_bytes<T>(
     chunk: usize,
     depth: usize,
     flexible: bool,
+    stored: usize,
 ) -> u64 {
     let sz = std::mem::size_of::<T>();
-    // per column: the basis, its preconditioned steps (flexible only), the Hessenberg
-    // matrix rotated and as built, the two rotations, `g`
+    // per column: the basis and its preconditioned steps (flexible only), then the
+    // Hessenberg matrix rotated and as built, the two rotations, `g`
     let z = if flexible {
         n * depth.saturating_sub(1)
     } else {
         0
     };
-    let column = n * depth + z + 2 * (m + 1) * m + 2 * m + (m + 1);
+    let bases = n * depth + z;
+    let column = 2 * (m + 1) * m + 2 * m + (m + 1);
     // the panels `x`, `out`, `panel`, `z`, `w`; the two projections and their partial
     // sums; `y`
     let panels = 5 * n * s; // lit: the five n x s panels of `BlockGmres::new`
@@ -1214,7 +1230,8 @@ pub(super) fn block_bytes<T>(
         + std::mem::size_of::<bool>()
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<(usize, usize)>();
-    ((s * column + shared) * sz + s * per_rhs + std::mem::size_of::<usize>()) as u64
+    ((s * column + shared) * sz + s * bases * stored + s * per_rhs + std::mem::size_of::<usize>())
+        as u64
 }
 
 /// Heap bytes [`BlockGmres::deflating`] adds to a solve of `s` right-hand sides
@@ -1246,7 +1263,8 @@ pub(super) fn deflation_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, k: 
 ///
 /// **Memory:** every column's bases `V` and `Z` (`V` alone when not
 /// [`flexible`](KrylovSettings::flexible)) reserve the restart's layers of address
-/// space once its first cycle opens and hold what its cycles have written; the solve
+/// space once its first cycle opens and hold what its cycles have written, in single
+/// precision with [`basis_single`](KrylovSettings::basis_single); the solve
 /// holds about [`KrylovSettings::block_bytes`] for the depth it reaches, within
 /// [`KrylovSettings::room_bytes`] where set. An unset
 /// [`KrylovSettings::restart`] is capped to
@@ -1275,7 +1293,7 @@ pub fn gmres_block<T, A, M>(
     mon: Option<&mut dyn FnMut(&BlockProgress<'_>) -> bool>,
 ) -> Result<BlockKrylovResult<T>, RslabError>
 where
-    T: Scalar,
+    T: Demote,
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {

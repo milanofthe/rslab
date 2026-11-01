@@ -1810,7 +1810,7 @@ fn block_gmres_continued_rung_beats_a_restart() {
 
 /// The memory plan of a block GMRES ([`KrylovSettings::block_bytes`]) is what a
 /// solve holds at the depth it reached: exactly for one column, a bound for
-/// several (they stop at different depths).
+/// several (they stop at different depths), its bases in full precision or single.
 #[test]
 fn block_gmres_memory_plan_matches_the_solve() {
     let a = unsym_grid(16);
@@ -1818,8 +1818,9 @@ fn block_gmres_memory_plan_matches_the_solve() {
     let set = crate::KrylovSettings::default()
         .with_max_iter(2000)
         .with_restart(300);
-    for s in [1usize, 4] {
+    for (s, single) in [(1usize, false), (4, false), (1, true), (4, true)] {
         let b = ladder_rhs(n, s);
+        let set = set.clone().with_basis_single(single);
         let mut g = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None).unwrap();
         g.solve(1e-9, None).unwrap();
         let plan = set.block_bytes::<C>(n, s, g.deepest());
@@ -2084,4 +2085,226 @@ fn block_gmres_room_runs_the_columns_in_waves() {
             .sqrt();
         assert!(d <= 1e-7 * xn, "column {k}: {}", d / xn);
     }
+}
+
+/// A block GMRES solve with its bases in full or single precision
+/// ([`KrylovSettings::basis_single`]): what it reached and held.
+struct BasisRun {
+    iters: usize,
+    converged: bool,
+    worst: f64,
+    /// The worst true residual of the first check after a step: where the cycles'
+    /// solutions stood when their estimates first met the tolerance.
+    first: f64,
+    resident: u64,
+    plan: u64,
+    x: Vec<C>,
+}
+
+fn basis_run<A: LinearOperator<C> + ?Sized, M: Preconditioner<C> + ?Sized>(
+    a: &A,
+    b: &[C],
+    s: usize,
+    pc: &M,
+    set: &crate::KrylovSettings,
+    tol: f64,
+) -> BasisRun {
+    let n = a.n();
+    let mut g = BlockGmres::new(a, b, s, pc, set, None).unwrap();
+    let mut first = None;
+    let mut mon = |p: &BlockProgress<'_>| {
+        if p.iterations > 0 && first.is_none() {
+            let r = p
+                .checked
+                .iter()
+                .map(|&c| p.residuals[c].unwrap_or(f64::INFINITY));
+            first = Some(r.fold(0.0, f64::max));
+        }
+        true
+    };
+    let r = g.solve(tol, Some(&mut mon)).unwrap();
+    BasisRun {
+        iters: r.iters,
+        converged: r.converged,
+        worst: r.final_res.iter().copied().fold(0.0, f64::max),
+        first: first.unwrap_or(f64::NAN),
+        resident: g.resident_bytes(),
+        plan: set.block_bytes::<C>(n, s, g.deepest()),
+        x: r.x,
+    }
+}
+
+/// The largest relative difference of the columns of two solutions.
+fn column_gap(x: &[C], y: &[C], n: usize) -> f64 {
+    (0..x.len() / n)
+        .map(|k| {
+            let xn = x[k * n..(k + 1) * n]
+                .iter()
+                .map(|v| v.norm_sqr())
+                .sum::<f64>();
+            let d = (0..n)
+                .map(|i| (x[k * n + i] - y[k * n + i]).norm_sqr())
+                .sum::<f64>();
+            (d / xn).sqrt()
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Bases stored in single precision ([`KrylovSettings::basis_single`]) reach the
+/// tolerance: on the unsymmetric grid unpreconditioned and with a weak (diagonal)
+/// LU, on the indefinite Helmholtz grid, and with a single-precision LU of the
+/// operator, flexible and not, to `1e-8` and `1e-10`. Their solutions agree with
+/// the full-precision ones to the tolerance, the bases take half the bytes and the
+/// memory plan covers what the solve holds.
+///
+/// A cycle's true residual stalls at the rounding of its stored vectors (about
+/// `3e-8` here, [`block_gmres_single_basis_cycle_stalls_at_its_rounding`]), so
+/// below it a column restarts from its true residual once more: measured
+/// iterations full -> single, flexible and fixed alike, `1e-8` / `1e-10`: unsym
+/// 22 -> 24 / 28 -> 34, unsym diag-lu 22 -> 24 / 28 -> 35, helmholtz (restarting
+/// every 40 steps anyway) 1025 -> 1076 / 1305 -> 1367, unsym c32-lu 2 -> 3 (flexible),
+/// 3 -> 3 (fixed: the single-precision factor stalls the cycle at 2e-7 either way).
+#[test]
+fn block_gmres_single_basis_reaches_the_tolerance() {
+    use crate::numeric::lu::LuSolver;
+    let c = |re, im| Complex::new(re, im);
+    let u = unsym_grid(20);
+    let h = grid(14, c(1.2, 0.05), c(-1.0, 0.0));
+    let diag = LuSolver::factor(&diagonal_part(&u), &SolverSettings::default()).unwrap();
+    let low = LowPrecisionLu::factor(&u, &SolverSettings::default()).unwrap();
+    let s = 4;
+    type Case<'a> = (
+        &'a str,
+        &'a dyn LinearOperator<C>,
+        &'a dyn Preconditioner<C>,
+        usize,
+    );
+    let cases: [Case<'_>; 4] = [
+        ("unsym", &u, &NoPreconditioner, 30),
+        ("unsym diag-lu", &u, &diag, 30),
+        ("helmholtz", &h, &NoPreconditioner, 40),
+        ("unsym c32-lu", &u, &low, 30),
+    ];
+    for (name, a, pc, m) in cases {
+        let n = a.n();
+        let b = ladder_rhs(n, s);
+        for flexible in [true, false] {
+            let set = crate::KrylovSettings::default()
+                .with_max_iter(4000)
+                .with_restart(m)
+                .with_flexible(flexible);
+            let single = set.clone().with_basis_single(true);
+            for tol in [1e-8, 1e-10] {
+                let f = basis_run(a, &b, s, pc, &set, tol);
+                let g = basis_run(a, &b, s, pc, &single, tol);
+                let gap = column_gap(&f.x, &g.x, n);
+                eprintln!(
+                    "{name} flexible {flexible} tol {tol:e}: iters {} -> {}, first check \
+                     {:.1e} -> {:.1e}, final {:.1e} -> {:.1e}, gap {gap:.1e}, resident {} -> {}",
+                    f.iters, g.iters, f.first, g.first, f.worst, g.worst, f.resident, g.resident
+                );
+                assert!(
+                    f.converged && g.converged,
+                    "{name}: {} {}",
+                    f.worst,
+                    g.worst
+                );
+                // at most a quarter more and the one restart (35 of 28 the most)
+                assert!(
+                    g.iters <= f.iters + f.iters / 4 + 2,
+                    "{name}: {} {}",
+                    f.iters,
+                    g.iters
+                );
+                assert!(gap <= 10.0 * tol, "{name}: gap {gap:e}");
+                assert!(
+                    g.plan >= g.resident,
+                    "{name}: plan {} held {}",
+                    g.plan,
+                    g.resident
+                );
+                assert!(g.resident < f.resident);
+            }
+            // the bases at any depth: half the bytes
+            let bases = |t: &crate::KrylovSettings| {
+                t.block_bytes::<C>(n, s, m + 1) - t.block_bytes::<C>(n, s, 0)
+            };
+            assert_eq!(bases(&set), 2 * bases(&single));
+        }
+    }
+}
+
+/// One cycle of single-precision bases (a restart long enough for the whole solve):
+/// once its estimate passes far below single precision, its true residual stands at
+/// the rounding of the stored vectors, `1.3e-8` flexible and fixed alike (full
+/// bases: `3.2e-14`), below the tolerance from which the bases are stored single
+/// without a cost ([`single_for`](crate::single_for), `9.5e-7`). One restart from
+/// the true residual carries it on to `6.3e-14`, 49 iterations against 35.
+#[test]
+fn block_gmres_single_basis_cycle_stalls_at_its_rounding() {
+    let u = unsym_grid(20);
+    let n = u.n;
+    let b = ladder_rhs(n, 1);
+    let edge = crate::constants::SINGLE_MARGIN * f32::EPSILON as f64 / 2.0;
+    for flexible in [true, false] {
+        let set = crate::KrylovSettings::default()
+            .with_max_iter(4000)
+            .with_restart(300)
+            .with_flexible(flexible);
+        let f = basis_run(&u, &b, 1, &NoPreconditioner, &set, 1e-13);
+        let g = basis_run(
+            &u,
+            &b,
+            1,
+            &NoPreconditioner,
+            &set.with_basis_single(true),
+            1e-13,
+        );
+        eprintln!(
+            "flexible {flexible}: iters {} -> {}, first check {:.1e} -> {:.1e}, final {:.1e} -> {:.1e}",
+            f.iters, g.iters, f.first, g.first, f.worst, g.worst
+        );
+        assert!(f.converged && g.converged, "{} {}", f.worst, g.worst);
+        assert!(
+            f.first <= 1e-13 && f.first * 1e4 < g.first,
+            "{} {}",
+            f.first,
+            g.first
+        );
+        assert!(g.first <= edge / 16.0, "{}", g.first);
+        assert!(g.iters <= f.iters + f.iters / 2, "{} {}", f.iters, g.iters);
+    }
+}
+
+/// Single-precision bases continue a ladder of tolerances in their Krylov space:
+/// `1e-6`, then `1e-8`, then `1e-10`. At `1e-6`, above the tolerance from which
+/// [`single_for`](crate::single_for) stores single, the solve steps as the full one
+/// does (16 iterations each); below, a cycle stalling at its rounding restarts once:
+/// 8 iterations against 6 to `1e-8`, 6 against 6 on to `1e-10`.
+#[test]
+fn block_gmres_single_basis_continues_a_ladder() {
+    let u = unsym_grid(20);
+    let n = u.n;
+    let s = 4;
+    let b = ladder_rhs(n, s);
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(80)
+        .with_flexible(false);
+    let single = set.clone().with_basis_single(true);
+    let mut f = BlockGmres::new(&u, &b, s, &NoPreconditioner, &set, None).unwrap();
+    let mut g = BlockGmres::new(&u, &b, s, &NoPreconditioner, &single, None).unwrap();
+    let (mut fi, mut gi) = (0, 0);
+    for tol in [1e-6, 1e-8, 1e-10] {
+        let (rf, rg) = (f.solve(tol, None).unwrap(), g.solve(tol, None).unwrap());
+        eprintln!("ladder tol {tol:e}: iters {} -> {}", rf.iters, rg.iters);
+        assert!(rf.converged && rg.converged, "{:?}", rg.final_res);
+        assert!(column_gap(&rf.x, &rg.x, n) <= 10.0 * tol);
+        if crate::single_for::<C>(tol) {
+            assert_eq!(rf.iters, rg.iters);
+        }
+        fi += rf.iters;
+        gi += rg.iters;
+    }
+    assert!(gi <= fi + 4, "{fi} {gi}");
 }

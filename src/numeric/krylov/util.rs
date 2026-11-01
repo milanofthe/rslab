@@ -3,7 +3,8 @@
 //! Gram-Schmidt passes of the block solver.
 
 use crate::numeric::settings::Threads;
-use crate::scalar::Scalar;
+use crate::scalar::{Demote, Scalar};
+use crate::stored::{axpy_as, dotc_as, Stored};
 
 /// A Krylov basis of up to `cap` scalars: the capacity reserved (address space alone), its
 /// length grown by [`grow`] as the iteration writes it, so a solve that stops after `k` steps
@@ -45,11 +46,13 @@ pub(super) fn norm2<T: Scalar>(x: &[T]) -> f64 {
 /// GMRES orthogonalises in (distinct from COCG's unconjugated form).
 #[inline]
 pub(super) fn dotc<T: Scalar>(x: &[T], y: &[T]) -> T {
-    let mut s = T::zero();
-    for (&xi, &yi) in x.iter().zip(y) {
-        s = s + xi.conj() * yi;
-    }
-    s
+    dotc_as(x, y, |v| v)
+}
+
+/// `out += a x`, entry by entry.
+#[inline]
+pub(super) fn axpy<T: Scalar>(x: &[T], a: T, out: &mut [T]) {
+    axpy_as(x, a, out, |v| v)
 }
 
 /// Complex Givens rotation `(c, s)` that zeroes `g` against `f`: with the
@@ -154,8 +157,8 @@ pub(super) fn ortho_in_pool<R: Send>(
 /// `scratch` (`>= ceil(n / chunk) * off[last]`), folded in chunk order: the
 /// result does not depend on the thread count.
 #[inline]
-pub(super) fn column_project<'v, T: Scalar>(
-    layers: &(dyn Fn(usize) -> &'v [T] + Sync),
+pub(super) fn column_project<'v, T: Demote>(
+    layers: &(dyn Fn(usize) -> &'v Stored<T> + Sync),
     off: &[usize],
     w: &[T],
     n: usize,
@@ -176,11 +179,7 @@ pub(super) fn column_project<'v, T: Scalar>(
             let v = layers(a);
             let wa = &w[a * n + r0..a * n + r1];
             for i in 0..off[a + 1] - off[a] {
-                let mut sdot = T::zero();
-                for (x, &y) in v[i * n + r0..i * n + r1].iter().zip(wa) {
-                    sdot = sdot + x.conj() * y;
-                }
-                out[off[a] + i] = sdot;
+                out[off[a] + i] = v.dotc(i * n + r0, wa);
             }
         }
     });
@@ -197,8 +196,8 @@ pub(super) fn column_project<'v, T: Scalar>(
 /// accumulated in basis order at every entry. Parallel over fixed row chunks
 /// within each column, so the update is thread-count independent.
 #[inline]
-pub(super) fn column_subtract<'v, T: Scalar>(
-    layers: &(dyn Fn(usize) -> &'v [T] + Sync),
+pub(super) fn column_subtract<'v, T: Demote>(
+    layers: &(dyn Fn(usize) -> &'v Stored<T> + Sync),
     off: &[usize],
     w: &mut [T],
     n: usize,
@@ -212,12 +211,8 @@ pub(super) fn column_subtract<'v, T: Scalar>(
         crate::parallel::chunks_mut(wa, chunk, |ci, part| {
             let r0 = ci * chunk;
             for (i, &h) in coef.iter().enumerate() {
-                if h == T::zero() {
-                    continue;
-                }
-                let vi = &v[i * n + r0..i * n + r0 + part.len()];
-                for (x, &y) in part.iter_mut().zip(vi) {
-                    *x = *x - h * y;
+                if h != T::zero() {
+                    v.axpy(i * n + r0, -h, part);
                 }
             }
         });
