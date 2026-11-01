@@ -21,7 +21,7 @@ pub struct GeneralCsc<T> {
     pub values: Vec<T>,
 }
 
-impl<T: crate::scalar::Demote> GeneralCsc<T> {
+impl<T: Scalar> GeneralCsc<T> {
     /// This matrix in the lower-precision field (same pattern), the input of
     /// a [`MixedPrecision`](crate::MixedPrecision) factor.
     pub fn demoted(&self) -> GeneralCsc<T::Low> {
@@ -32,9 +32,7 @@ impl<T: crate::scalar::Demote> GeneralCsc<T> {
             values: self.values.iter().map(|&v| v.demote()).collect(),
         }
     }
-}
 
-impl<T: Scalar> GeneralCsc<T> {
     /// Build from `(row, col, value)` triplets. Indices are 0-based; duplicates
     /// are summed in entry order; rows within a column are sorted. For many
     /// value sets on one pattern, build the [`CscLayout`] once and

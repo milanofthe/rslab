@@ -6,7 +6,7 @@ use super::*;
 
 use super::recycle::RecycleScalar;
 use crate::error::RslabError;
-use crate::scalar::{Demote, Scalar};
+use crate::scalar::Scalar;
 use crate::stored::Stored;
 
 /// Outcome of a block (multi-RHS) Krylov solve.
@@ -52,7 +52,7 @@ pub struct BlockProgress<'p> {
 /// One right-hand side's Arnoldi state: its basis, the Hessenberg matrix under
 /// its Givens rotations and the rotated least-squares right-hand side of the
 /// open restart cycle.
-struct Column<T: Demote> {
+struct Column<T: Scalar> {
     /// The basis, layer `i` the scalars `[i*n, (i+1)*n)`: the restart's layers
     /// reserved, the ones the cycle has written resident ([`Stored`]).
     v: Stored<T>,
@@ -83,7 +83,7 @@ struct Column<T: Demote> {
     evict: bool,
 }
 
-impl<T: Demote> Column<T> {
+impl<T: Scalar> Column<T> {
     /// No basis yet: [`open`](Self::open) reserves it.
     fn new(m: usize, k: usize) -> Self {
         Column {
@@ -273,7 +273,7 @@ impl<T> BlockRecycle<T> {
 /// checked in one batched operator apply: a column above the tolerance closes
 /// its cycle and restarts from its true residual, as does a column whose cycle
 /// reached the restart.
-pub struct BlockGmres<'a, T: Demote, A: ?Sized, M: ?Sized> {
+pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     op: &'a A,
     precond: &'a M,
     b: &'a [T],
@@ -344,7 +344,7 @@ pub struct BlockGmres<'a, T: Demote, A: ?Sized, M: ?Sized> {
 
 impl<'a, T, A, M> BlockGmres<'a, T, A, M>
 where
-    T: Demote,
+    T: Scalar,
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
@@ -1045,7 +1045,7 @@ where
 
 impl<'a, T, A, M> BlockGmres<'a, T, A, M>
 where
-    T: RecycleScalar + Demote,
+    T: RecycleScalar,
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
@@ -1293,7 +1293,7 @@ pub fn gmres_block<T, A, M>(
     mon: Option<&mut dyn FnMut(&BlockProgress<'_>) -> bool>,
 ) -> Result<BlockKrylovResult<T>, RslabError>
 where
-    T: Demote,
+    T: Scalar,
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {

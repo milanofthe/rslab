@@ -4,7 +4,7 @@ use crate::constants::{
     KRYLOV_BASIS_BUDGET_BYTES, KRYLOV_MAX_ITER, KRYLOV_ORTHO_CHUNK, KRYLOV_REORTH_ETA,
     KRYLOV_RESTART_MAX, KRYLOV_RESTART_MIN, KRYLOV_TOL,
 };
-use crate::scalar::Demote;
+use crate::scalar::Scalar;
 use crate::stored::Stored;
 
 /// Settings of [`gmres`](super::gmres), [`gmres_block`](super::gmres_block),
@@ -142,7 +142,7 @@ impl KrylovSettings {
 
     /// Bytes of a basis scalar of a block GMRES in `T` as stored
     /// ([`basis_single`](Self::basis_single)).
-    pub(crate) fn basis_scalar_bytes<T: Demote>(&self) -> usize {
+    pub(crate) fn basis_scalar_bytes<T: Scalar>(&self) -> usize {
         Stored::<T>::scalar_bytes(self.basis_single)
     }
 
@@ -155,7 +155,7 @@ impl KrylovSettings {
     /// matrices, the panels and the reduction scratch;
     /// within [`room_bytes`](Self::room_bytes) where set (at least one column a step
     /// deep beside the rest).
-    pub fn block_bytes<T: Demote>(&self, n: usize, s: usize, depth: usize) -> u64 {
+    pub fn block_bytes<T: Scalar>(&self, n: usize, s: usize, depth: usize) -> u64 {
         let stored = self.basis_scalar_bytes::<T>();
         let m = self.restart_for(n, s, stored, self.bases());
         let plan = |d: usize| {
@@ -175,7 +175,7 @@ impl KrylovSettings {
     /// ([`BlockGmres::deflating`](super::BlockGmres::deflating)) adds to
     /// [`block_bytes`](Self::block_bytes): the subspace, every column's
     /// components on it per step, and a panel's projections.
-    pub fn deflation_bytes<T: Demote>(&self, n: usize, s: usize, k: usize) -> u64 {
+    pub fn deflation_bytes<T: Scalar>(&self, n: usize, s: usize, k: usize) -> u64 {
         let m = self.restart_for(n, s, self.basis_scalar_bytes::<T>(), self.bases());
         super::block::deflation_bytes::<T>(n, s, m, self.ortho_chunk, k)
     }

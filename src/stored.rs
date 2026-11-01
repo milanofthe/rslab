@@ -2,19 +2,19 @@
 //! read and computed with in the field itself.
 
 use crate::constants::SINGLE_MARGIN;
-use crate::scalar::{Demote, Scalar};
+use crate::scalar::Scalar;
 
 /// Whether data accurate to the relative tolerance `tol` is stored in the
-/// single-precision twin of `T` ([`Stored`]): where the twin's unit roundoff
-/// is at most [`SINGLE_MARGIN`](crate::constants::SINGLE_MARGIN)ths of `tol`,
-/// so the rounding adds at most that share to the error the data holds
-/// (`Complex<f64>`: from `tol = 16 * 6e-8 = 9.5e-7` on).
-pub fn single_for<T: Demote>(tol: f64) -> bool {
+/// single-precision twin of `T` ([`Stored`]): where
+/// [`SINGLE_MARGIN`](crate::constants::SINGLE_MARGIN) times the twin's unit
+/// roundoff is at most `tol`, so the rounding adds at most a sixteenth of `tol`
+/// to the error the data holds (`Complex<f64>`: from `tol = 16 * 6e-8 = 9.5e-7` on).
+pub fn single_for<T: Scalar>(tol: f64) -> bool {
     tol >= SINGLE_MARGIN * <T::Low as Scalar>::EPSILON / 2.0
 }
 
 /// A buffer of values of the field `T`, stored in `T` or in its single-precision
-/// twin `T::Low` ([`Demote`], half the memory for the double fields): written
+/// twin [`T::Low`](Scalar::Low) (half the memory for the double fields): written
 /// from `T` (rounded to the storage), read as `T` (widened, exactly), and its
 /// products ([`dotc`](Self::dotc), [`axpy`](Self::axpy)) run in `T`, each stored
 /// value widened as it is loaded, so no copy in `T` is formed. Whether to
@@ -32,24 +32,24 @@ pub fn single_for<T: Demote>(tol: f64) -> bool {
 /// assert!((s.at(2) - x[2]).norm() <= f32::EPSILON as f64);
 /// ```
 #[derive(Clone, Debug)]
-pub struct Stored<T: Demote> {
+pub struct Stored<T: Scalar> {
     repr: Repr<T>,
 }
 
 #[derive(Clone, Debug)]
-enum Repr<T: Demote> {
+enum Repr<T: Scalar> {
     Full(Vec<T>),
     Single(Vec<T::Low>),
 }
 
-impl<T: Demote> Default for Stored<T> {
+impl<T: Scalar> Default for Stored<T> {
     /// Empty, in `T`.
     fn default() -> Self {
         Self::with_capacity(0, false)
     }
 }
 
-impl<T: Demote> Stored<T> {
+impl<T: Scalar> Stored<T> {
     /// The values `x`, in the twin with `single`.
     pub fn new(x: &[T], single: bool) -> Self {
         let mut s = Self::with_capacity(x.len(), single);

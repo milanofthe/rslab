@@ -211,7 +211,7 @@ pub use io::mtx::{
 pub use logging::{LogLevel, LogSink};
 pub use memory::MemoryPlan;
 pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
-pub use scalar::{Demote, Scalar};
+pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
 pub use stored::{single_for, Stored};
 // The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`,

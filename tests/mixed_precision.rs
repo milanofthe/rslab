@@ -5,8 +5,8 @@
 
 use num_complex::Complex64;
 use rslab::{
-    gmres_block, BackwardError, CscMatrix, Demote, Factorization, GeneralCsc, KrylovSettings,
-    LdltSymbolic, LinearOperator, LuSymbolic, MixedPrecision, Preconditioner, RefinePolicy, Scalar,
+    gmres_block, BackwardError, CscMatrix, Factorization, GeneralCsc, KrylovSettings, LdltSymbolic,
+    LinearOperator, LuSymbolic, MixedPrecision, Preconditioner, RefinePolicy, Scalar,
     SolverSettings,
 };
 

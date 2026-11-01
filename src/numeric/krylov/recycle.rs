@@ -140,7 +140,7 @@ fn combine_ritz_real<T: Scalar>(
 /// Complex-field recycle reconstruction (`Complex<f64>` / `Complex<f32>`): the
 /// harmonic-Ritz vectors are genuinely complex, so `U <- [U, V] g_i` directly, one
 /// vector per pair. `mk` casts a `Complex<f64>` coefficient into the working field
-/// (identity for `Complex<f64>`, a narrowing cast for `Complex<f32>`).
+/// (identity for `Complex<f64>`, [`Scalar::demote`] for `Complex<f32>`).
 fn combine_ritz_complex<T: Scalar>(
     col: &dyn Fn(usize, T, &mut [T]),
     n: usize,
@@ -210,7 +210,7 @@ impl RecycleScalar for Complex<f64> {
 
 impl RecycleScalar for Complex<f32> {
     fn to_c(self) -> Complex<f64> {
-        Complex::new(self.re as f64, self.im as f64)
+        Complex::<f64>::promote(self)
     }
     fn combine_ritz(
         col: &dyn Fn(usize, Complex<f32>, &mut [Complex<f32>]),
@@ -219,9 +219,7 @@ impl RecycleScalar for Complex<f32> {
         pairs: &[(Complex<f64>, Vec<Complex<f64>>)],
         kmax: usize,
     ) -> Vec<Complex<f32>> {
-        combine_ritz_complex(col, n, d, pairs, kmax, |z| {
-            Complex::new(z.re as f32, z.im as f32)
-        })
+        combine_ritz_complex(col, n, d, pairs, kmax, Scalar::demote)
     }
 }
 

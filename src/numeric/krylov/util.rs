@@ -3,7 +3,7 @@
 //! Gram-Schmidt passes of the block solver.
 
 use crate::numeric::settings::Threads;
-use crate::scalar::{Demote, Scalar};
+use crate::scalar::Scalar;
 use crate::stored::{axpy_as, dotc_as, Stored};
 
 /// A Krylov basis of up to `cap` scalars: the capacity reserved (address space alone), its
@@ -157,7 +157,7 @@ pub(super) fn ortho_in_pool<R: Send>(
 /// `scratch` (`>= ceil(n / chunk) * off[last]`), folded in chunk order: the
 /// result does not depend on the thread count.
 #[inline]
-pub(super) fn column_project<'v, T: Demote>(
+pub(super) fn column_project<'v, T: Scalar>(
     layers: &(dyn Fn(usize) -> &'v Stored<T> + Sync),
     off: &[usize],
     w: &[T],
@@ -196,7 +196,7 @@ pub(super) fn column_project<'v, T: Demote>(
 /// accumulated in basis order at every entry. Parallel over fixed row chunks
 /// within each column, so the update is thread-count independent.
 #[inline]
-pub(super) fn column_subtract<'v, T: Demote>(
+pub(super) fn column_subtract<'v, T: Scalar>(
     layers: &(dyn Fn(usize) -> &'v Stored<T> + Sync),
     off: &[usize],
     w: &mut [T],

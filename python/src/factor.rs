@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use numpy::Element;
 use pyo3::prelude::*;
 use rslab::{
-    BackwardError, CscMatrix, Demote, Factorization, GeneralCsc, KluSolver, LdltSolver,
+    BackwardError, CscMatrix, Factorization, GeneralCsc, KluSolver, LdltSolver,
     LdltSymbolic, LinearOperator, LuSolver, LuSymbolic, MixedPrecision, Recycle, RecycleScalar,
     RefineOperator, RefinePolicy, Scalar, SolverSettings,
 };
@@ -106,7 +106,7 @@ impl PyRecycle {
 /// One of the four scalar fields, with the glue that ties a concrete type to
 /// the per-field enum variants.
 pub trait Field:
-    Scalar + Demote + Element + RecycleScalar + Default + Send + Sync + 'static
+    Scalar + Element + RecycleScalar + Default + Send + Sync + 'static
 {
     const DTYPE: &'static str;
     fn recycle_new(k: usize) -> RecycleAny;
