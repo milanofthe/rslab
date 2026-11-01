@@ -45,6 +45,9 @@ pub struct BlockProgress<'p> {
     pub waiting: usize,
     /// The columns whose true residual this check formed.
     pub checked: &'p [usize],
+    /// The columns of `checked` whose cycles close for memory short of the
+    /// restart: the check ends no cycle of theirs.
+    pub closing: &'p [usize],
     /// Every column's last true relative residual, `None` once it stepped since.
     pub residuals: &'p [Option<f64>],
     /// Heap bytes the solve holds ([`BlockGmres::resident_bytes`]).
@@ -330,6 +333,8 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     /// The columns of the last residual check, in column order (their residual
     /// vectors in `w` at these positions).
     chk: Vec<usize>,
+    /// The columns of `chk` closing for memory ([`BlockProgress::closing`]).
+    closing: Vec<usize>,
     /// The preconditioner may change between steps: the columns keep `Z`
     /// ([`KrylovSettings::flexible`]).
     flexible: bool,
@@ -441,6 +446,7 @@ where
             y: vec![T::zero(); m],
             act: Vec::with_capacity(s),
             chk: Vec::with_capacity(s),
+            closing: Vec::with_capacity(s),
             rec: None,
             rproj: Vec::new(),
             rscratch: Vec::new(),
@@ -525,6 +531,7 @@ where
             + vec_bytes(&self.off)
             + vec_bytes(&self.act)
             + vec_bytes(&self.chk)
+            + vec_bytes(&self.closing)
     }
 
     /// The operator the solve runs on, for the caller's own products between
@@ -599,12 +606,17 @@ where
                             0.0_f64,
                             |a, r| if r.is_nan() { f64::INFINITY } else { a.max(r) },
                         );
+                    self.closing.clear();
+                    let cols = &self.cols;
+                    self.closing
+                        .extend(self.chk.iter().filter(|&&c| cols[c].evict));
                     let progress = BlockProgress {
                         iterations: self.iters - start,
                         worst,
                         active: self.act.len(),
                         waiting: self.cols.iter().filter(|c| c.waits).count(),
                         checked: &self.chk,
+                        closing: &self.closing,
                         residuals: &self.res,
                         resident: self.resident_bytes(),
                     };
