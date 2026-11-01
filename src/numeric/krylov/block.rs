@@ -333,6 +333,11 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     room: Option<u64>,
     /// Cycles closed for room ([`BlockKrylovResult::closed`]).
     closed: usize,
+    /// The memory the process may still take ([`within`](Self::within)).
+    probe: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
+    /// The most the process grew by over a step beside the bases' growth, as the
+    /// probe saw it.
+    side: u64,
     rec: Option<&'a BlockRecycle<T>>,
     rproj: Vec<T>,
     rscratch: Vec<T>,
@@ -408,6 +413,8 @@ where
             flexible: settings.flexible,
             room: None,
             closed: 0,
+            probe: None,
+            side: 0,
             iters: 0,
             deepest: 0,
             panel: vec![T::zero(); n * s],
@@ -452,6 +459,16 @@ where
         self.rscratch = vec![T::zero(); n.div_ceil(self.chunk) * k * s];
         self.rec = Some(rec);
         Ok(self)
+    }
+
+    /// This solve within the memory `probe` says the process may still take
+    /// (bytes, `None`: not known), asked before and after every step: the bases
+    /// grow only into it, less the most a step took beside them (the operator's
+    /// and the preconditioner's scratch, as measured), as within
+    /// [`KrylovSettings::room_bytes`]. Before the first [`solve`](Self::solve).
+    pub fn within(mut self, probe: &'a (dyn Fn() -> Option<u64> + Sync)) -> Self {
+        self.probe = Some(probe);
+        self
     }
 
     /// Heap bytes the solve holds now: every column's basis as far as it is
@@ -590,7 +607,12 @@ where
             if !stepping {
                 break;
             }
+            let before = self.probe.and_then(|p| p());
+            let grown = (self.act.len() * self.n * self.bases() * std::mem::size_of::<T>()) as u64;
             self.step()?;
+            if let (Some(b), Some(a)) = (before, self.probe.and_then(|p| p())) {
+                self.side = self.side.max(b.saturating_sub(a).saturating_sub(grown));
+            }
         }
         // A cancel leaves the columns stepped since their last check unformed.
         self.check(true)?;
@@ -645,32 +667,49 @@ where
         }
     }
 
-    /// Keep the bases within the room ([`KrylovSettings::room_bytes`]): where the
-    /// next step of the columns in `act` would take them past it, the columns not
-    /// stepping give their bases up (a finished one at once, a paused one closes
-    /// its cycle at the next check), then the stepping ones with the worst
-    /// estimates close theirs until the rest reach the restart within the room.
-    /// The columns closed wait for the next wave ([`admit`](Self::admit)): the easy
-    /// ones finish in the room together, the hard ones then have it. At least one
-    /// column steps on; one alone closes only once its cycle took a step and its
-    /// next does not fit (a restart at the depth the room holds).
+    /// The memory the bases may still grow by: what the room left
+    /// ([`KrylovSettings::room_bytes`]) and what the probe says the process may
+    /// still take, less the most a step took beside the bases ([`within`](Self::within));
+    /// `None` without either.
+    fn free(&self) -> Option<u64> {
+        let bases: u64 = self.cols.iter().map(Column::basis_bytes).sum();
+        let room = self.room.map(|r| r.saturating_sub(bases));
+        let live = self
+            .probe
+            .and_then(|p| p())
+            .map(|r| r.saturating_sub(self.side));
+        match (room, live) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Keep the bases within the memory ([`free`](Self::free)): where the next step
+    /// of the columns in `act` would not fit, the columns not stepping give their
+    /// bases up (a finished one at once, a paused one closes its cycle at the next
+    /// check), then the stepping ones with the worst estimates close theirs until
+    /// the rest reach the restart in what is free. The columns closed wait for the
+    /// next wave ([`admit`](Self::admit)): the easy ones finish together, the hard
+    /// ones then have the memory. At least one column steps on; one alone closes
+    /// only once its cycle took a step and its next does not fit (a restart at the
+    /// depth the memory holds).
     fn evict(&mut self) {
-        let Some(room) = self.room else {
+        let Some(free) = self.free() else {
             return;
         };
         let m = self.m;
         let per = (self.n * self.bases()) as u64 * std::mem::size_of::<T>() as u64;
-        let mut resident: u64 = self.cols.iter().map(Column::basis_bytes).sum();
-        if resident + self.act.len() as u64 * per <= room {
+        if free >= self.act.len() as u64 * per {
             return;
         }
+        let mut freed = 0;
         let stepping =
             |act: &[(usize, usize)], c: usize| act.binary_search_by_key(&c, |a| a.0).is_ok();
         for c in 0..self.s {
             if !self.cols[c].holds() || stepping(&self.act, c) {
                 continue;
             }
-            resident -= self.cols[c].basis_bytes();
+            freed += self.cols[c].basis_bytes();
             if self.res[c].is_some() {
                 self.close(c);
             } else {
@@ -689,16 +728,16 @@ where
         let mut out = vec![false; self.act.len()];
         let mut kept = self.act.len();
         for i in order {
-            if resident + need <= room {
+            if free + freed >= need {
                 break;
             }
             let (c, j) = self.act[i];
-            if kept == 1 && (j == 0 || resident + per <= room) {
+            if kept == 1 && (j == 0 || free + freed >= per) {
                 break;
             }
             out[i] = true;
             kept -= 1;
-            resident -= self.cols[c].basis_bytes();
+            freed += self.cols[c].basis_bytes();
             need -= ahead(self, i);
             self.cols[c].evict = true;
             self.closed += 1;
