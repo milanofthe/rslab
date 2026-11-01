@@ -2038,7 +2038,8 @@ fn block_gmres_fixed_preconditioner_harvests() {
 /// columns at the restart's depth: the columns with the worst estimates close
 /// their cycles and wait while the others run on, every column converges, the
 /// solutions agree with the unbounded solve's to the tolerance, and the solve
-/// never holds more than the room and a step of one column.
+/// never holds more than the room and a step of one column; the waves take
+/// at most the unbounded iterations each.
 #[test]
 fn block_gmres_room_runs_the_columns_in_waves() {
     let c = |re, im| Complex::new(re, im);
@@ -2064,6 +2065,10 @@ fn block_gmres_room_runs_the_columns_in_waves() {
         true
     };
     let r = g.solve(1e-10, Some(&mut mon)).unwrap();
+    eprintln!(
+        "room: iters {} -> {}, closed {}, peak {peak} room {room}",
+        rf.iters, r.iters, r.closed
+    );
     assert!(rf.converged && r.converged, "{:?}", r.final_res);
     assert!(
         r.closed > 0 && waited > 0,
@@ -2072,6 +2077,8 @@ fn block_gmres_room_runs_the_columns_in_waves() {
     );
     let step = (n * std::mem::size_of::<C>()) as u64;
     assert!(peak <= room + step, "peak {peak} room {room}");
+    // two columns at a time: three waves, each no longer than the unbounded solve
+    assert!(r.iters <= s / 2 * rf.iters, "{} {}", r.iters, rf.iters);
     assert!(tight.block_bytes::<C>(n, s, 41) <= room);
     for k in 0..s {
         let xn = rf.x[k * n..(k + 1) * n]
@@ -2085,6 +2092,87 @@ fn block_gmres_room_runs_the_columns_in_waves() {
             .sqrt();
         assert!(d <= 1e-7 * xn, "column {k}: {}", d / xn);
     }
+}
+
+/// The identity preconditioner, recording the widest block it applied: the most
+/// columns a flexible block GMRES stepped at once (it applies it in its steps alone).
+#[derive(Default)]
+struct Widest(std::sync::atomic::AtomicUsize);
+
+impl Preconditioner<C> for Widest {
+    fn apply(&self, r: &[C], z: &mut [C]) -> Result<(), RslabError> {
+        self.apply_block(r, z, 1, r.len())
+    }
+    fn apply_block(&self, r: &[C], z: &mut [C], s: usize, n: usize) -> Result<(), RslabError> {
+        self.0.fetch_max(s, std::sync::atomic::Ordering::Relaxed);
+        z[..n * s].copy_from_slice(&r[..n * s]);
+        Ok(())
+    }
+}
+
+/// A block GMRES within a live memory probe ([`BlockGmres::within`]) that says the
+/// process may take three steps of a column more: at most three columns step at
+/// once, the others waiting (one at first, more once finished columns give their
+/// bases up); every column converges and the solutions agree with the unbounded
+/// solve's to the tolerance.
+/// A probe that knows nothing (`None`) bounds nothing: the solve is the unbounded
+/// one, bit for bit.
+#[test]
+fn block_gmres_within_a_probe_runs_the_columns_in_waves() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(14, c(1.2, 0.05), c(-1.0, 0.0));
+    let n = a.n;
+    let s = 6;
+    let b = ladder_rhs(n, s);
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(40);
+    let mut free = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None).unwrap();
+    let rf = free.solve(1e-10, None).unwrap();
+    assert!(rf.converged);
+
+    let unknown = || -> Option<u64> { None };
+    let mut g = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None)
+        .unwrap()
+        .within(&unknown);
+    let r = g.solve(1e-10, None).unwrap();
+    assert_eq!((r.iters, r.closed), (rf.iters, 0));
+    assert_eq!(r.x, rf.x);
+
+    let asked = AtomicUsize::new(0);
+    // a step of a flexible column: a vector of `V` and one of `Z`
+    let step = (2 * n * std::mem::size_of::<C>()) as u64;
+    let probe = || {
+        asked.fetch_add(1, Ordering::Relaxed);
+        Some(3 * step)
+    };
+    let pc = Widest::default();
+    let mut g = BlockGmres::new(&a, &b, s, &pc, &set, None)
+        .unwrap()
+        .within(&probe);
+    let mut waited = 0;
+    let mut mon = |p: &BlockProgress<'_>| {
+        waited = waited.max(p.waiting);
+        true
+    };
+    let r = g.solve(1e-10, Some(&mut mon)).unwrap();
+    eprintln!(
+        "within: iters {} -> {}, closed {}, probe asked {}",
+        rf.iters,
+        r.iters,
+        r.closed,
+        asked.load(Ordering::Relaxed)
+    );
+    assert!(r.converged, "{:?}", r.final_res);
+    assert!(pc.0.load(Ordering::Relaxed) <= 3 && waited == s - 1);
+    assert!(
+        (s - 1..=s * (s - 1) / 2).contains(&r.closed),
+        "closed {}",
+        r.closed
+    );
+    assert!(asked.load(Ordering::Relaxed) > 2 * r.iters);
+    assert!(column_gap(&rf.x, &r.x, n) <= 1e-7);
 }
 
 /// A block GMRES solve with its bases in full or single precision
