@@ -263,7 +263,12 @@ impl<T> BlockRecycle<T> {
 /// relation by the preconditioner's own rounding: a static-pivoted near-field LU
 /// of a 79 k unknown MoM system (backward error 2e-3) left the true residuals at
 /// 1e-5 to 2e-5 where the least squares said 1e-6, and every column restarted.
-/// The price is the second basis in memory.
+/// The price is the second basis in memory; a preconditioner that is one fixed
+/// operator can do without it ([`KrylovSettings::flexible`] `false`).
+///
+/// **Room:** within [`KrylovSettings::room_bytes`] the columns run in waves:
+/// where the bases would outgrow it, those with the worst estimates close their
+/// cycles and wait until the others finished, every column at the restart.
 ///
 /// A column whose least-squares residual reaches the tolerance pauses: it leaves
 /// the batched applies and keeps its cycle open. Once no column can step, the
@@ -1200,9 +1205,11 @@ pub(super) fn deflation_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, k: 
 /// **Deflation:** a RHS whose least-squares residual reaches `tol` leaves the
 /// batched applies, so they shrink to the active width as columns converge.
 ///
-/// **Memory:** every column's bases `V` and `Z` reserve `n*(2*restart+1)`
-/// scalars of address space and hold what its cycle has written; the solve holds about
-/// [`KrylovSettings::block_bytes`] for the depth it reaches. An unset
+/// **Memory:** every column's bases `V` and `Z` (`V` alone when not
+/// [`flexible`](KrylovSettings::flexible)) reserve the restart's layers of address
+/// space once its first cycle opens and hold what its cycles have written; the solve
+/// holds about [`KrylovSettings::block_bytes`] for the depth it reaches, within
+/// [`KrylovSettings::room_bytes`] where set. An unset
 /// [`KrylovSettings::restart`] is capped to
 /// [`KrylovSettings::basis_budget_bytes`]; an explicit value is honoured exactly.
 ///
