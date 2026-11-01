@@ -1,15 +1,15 @@
 //! The scalar field over which RLA factorizations operate.
 //!
 //! [`Scalar`] is implemented for [`f64`] (real symmetric LDL^T) and
-//! [`num_complex::Complex<f64>`] (complex *symmetric* LDL^T, PARDISO `mtype 6`).
+//! [`num_complex::Complex<f64>`] (complex *symmetric* LDL^T, PARDISO `mtype 6`),
+//! and for their single-precision twins `f32` and `Complex<f32>`.
 //!
 //! Design notes:
 //!
 //! * Magnitudes are always returned as `f64`. There is deliberately no
 //!   associated `Real` type: every pivot threshold and scaling factor in the
 //!   solver is an `f64`, so keeping magnitudes concrete keeps the pivot logic
-//!   uniform across the real and complex paths. A future `Complex<f32>` path,
-//!   if ever wanted, would revisit this.
+//!   uniform across the real and complex paths, single precision included.
 //! * The complex path is *symmetric* (A = A^T), **not** Hermitian. On that path
 //!   no value is ever conjugated. [`Scalar::conj`] is provided as the identity
 //!   for `f64` and as the genuine conjugate for `Complex<f64>` so a future
@@ -21,40 +21,7 @@ use std::fmt::Debug;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// A scalar field element supporting the operations the numeric kernels
-/// require.
-/// A field with a lower-precision twin: `f64` over `f32`, `Complex<f64>`
-/// over `Complex<f32>`. A factor computed in the twin takes half the memory
-/// and preconditions an iteration in this field
-/// ([`MixedPrecision`](crate::MixedPrecision)).
-pub trait Demote: Scalar {
-    /// The lower-precision twin.
-    type Low: Scalar;
-    /// Round to the twin.
-    fn demote(self) -> Self::Low;
-    /// Widen from the twin (exact).
-    fn promote(low: Self::Low) -> Self;
-}
-
-impl Demote for f64 {
-    type Low = f32;
-    fn demote(self) -> f32 {
-        self as f32
-    }
-    fn promote(low: f32) -> f64 {
-        low as f64
-    }
-}
-
-impl Demote for Complex<f64> {
-    type Low = Complex<f32>;
-    fn demote(self) -> Complex<f32> {
-        Complex::new(self.re as f32, self.im as f32)
-    }
-    fn promote(low: Complex<f32>) -> Complex<f64> {
-        Complex::new(low.re as f64, low.im as f64)
-    }
-}
-
+/// require, with its lower-precision twin [`Low`](Self::Low).
 pub trait Scalar:
     'static
     + Copy
@@ -74,6 +41,20 @@ pub trait Scalar:
     /// The unit roundoff of the working precision (`f64::EPSILON` for the
     /// double types, `f32::EPSILON` for the single ones), as an `f64`.
     const EPSILON: f64 = f64::EPSILON;
+
+    /// The lower-precision twin: `f32` for `f64`, `Complex<f32>` for
+    /// `Complex<f64>`; the single fields have nothing lower and are their own.
+    /// A factor computed in the twin takes half the memory and preconditions an
+    /// iteration in this field ([`MixedPrecision`](crate::MixedPrecision)); values
+    /// accurate to a tolerance may be stored in it ([`Stored`](crate::Stored),
+    /// [`single_for`](crate::single_for)).
+    type Low: Scalar;
+
+    /// Round to the twin.
+    fn demote(self) -> Self::Low;
+
+    /// Widen from the twin (exact).
+    fn promote(low: Self::Low) -> Self;
 
     /// The additive identity `0`.
     fn zero() -> Self;
@@ -172,6 +153,9 @@ pub trait Scalar:
     /// Whether every component is finite (no `NaN`/`inf`) - used by pivot
     /// health checks.
     fn is_finite(self) -> bool;
+
+    /// Append the little-endian bytes of the components (real, then imaginary).
+    fn le_bytes(self, out: &mut Vec<u8>);
 }
 
 /// `a*b + c` through the hardware FMA **when the build enables it**
@@ -197,6 +181,17 @@ pub(crate) fn fmadd<T: Scalar>(a: T, b: T, c: T) -> T {
 }
 
 impl Scalar for f64 {
+    type Low = f32;
+
+    #[inline]
+    fn demote(self) -> f32 {
+        self as f32
+    }
+
+    #[inline]
+    fn promote(low: f32) -> Self {
+        low as f64
+    }
     #[inline]
     fn zero() -> Self {
         0.0
@@ -246,10 +241,26 @@ impl Scalar for f64 {
     fn is_finite(self) -> bool {
         f64::is_finite(self)
     }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
+    }
 }
 
 impl Scalar for Complex<f64> {
     const COMPLEX: bool = true;
+    type Low = Complex<f32>;
+
+    #[inline]
+    fn demote(self) -> Complex<f32> {
+        Complex::new(self.re as f32, self.im as f32)
+    }
+
+    #[inline]
+    fn promote(low: Complex<f32>) -> Self {
+        Complex::new(low.re as f64, low.im as f64)
+    }
 
     unsafe fn gemm(
         m: usize,
@@ -341,10 +352,27 @@ impl Scalar for Complex<f64> {
     fn is_finite(self) -> bool {
         self.re.is_finite() && self.im.is_finite()
     }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.re.to_le_bytes());
+        out.extend_from_slice(&self.im.to_le_bytes());
+    }
 }
 
 impl Scalar for f32 {
     const EPSILON: f64 = f32::EPSILON as f64;
+    type Low = f32;
+
+    #[inline]
+    fn demote(self) -> f32 {
+        self
+    }
+
+    #[inline]
+    fn promote(low: f32) -> Self {
+        low
+    }
     #[inline]
     fn zero() -> Self {
         0.0
@@ -395,11 +423,27 @@ impl Scalar for f32 {
     fn is_finite(self) -> bool {
         f32::is_finite(self)
     }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
+    }
 }
 
 impl Scalar for Complex<f32> {
     const EPSILON: f64 = f32::EPSILON as f64;
     const COMPLEX: bool = true;
+    type Low = Complex<f32>;
+
+    #[inline]
+    fn demote(self) -> Complex<f32> {
+        self
+    }
+
+    #[inline]
+    fn promote(low: Complex<f32>) -> Self {
+        low
+    }
 
     unsafe fn gemm(
         m: usize,
@@ -488,6 +532,12 @@ impl Scalar for Complex<f32> {
     fn is_finite(self) -> bool {
         self.re.is_finite() && self.im.is_finite()
     }
+
+    #[inline]
+    fn le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.re.to_le_bytes());
+        out.extend_from_slice(&self.im.to_le_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -547,6 +597,21 @@ mod tests {
         let r = z.mul_add(Complex::new(1.0, 1.0), Complex::new(1.0, 0.0));
         assert!((r.re - 1.0).abs() < 1e-15);
         assert!((r.im - 2.0).abs() < 1e-15);
+    }
+
+    /// The twin: a double rounds to it and widens back exactly, a single is its own.
+    #[test]
+    fn low_twin_rounds_and_widens() {
+        let z = Complex::new(1.0 / 3.0, -0.1);
+        let low: Complex<f32> = z.demote();
+        assert_eq!(low, Complex::new(1.0f32 / 3.0, -0.1f32));
+        assert_eq!(
+            Complex::<f64>::promote(low),
+            Complex::new(low.re as f64, low.im as f64)
+        );
+        assert_eq!(f64::promote(0.25f64.demote()), 0.25);
+        assert_eq!(low.demote(), low);
+        assert_eq!(f32::promote(0.1f32), 0.1f32);
     }
 
     #[test]

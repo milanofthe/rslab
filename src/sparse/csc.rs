@@ -73,7 +73,7 @@ impl<I: PatternIndex> CscPattern<I> {
     }
 }
 
-impl<T: crate::scalar::Demote> CscMatrix<T> {
+impl<T: Scalar> CscMatrix<T> {
     /// This matrix in the lower-precision field (same pattern), the input of
     /// a [`MixedPrecision`](crate::MixedPrecision) factor.
     pub fn demoted(&self) -> CscMatrix<T::Low> {
@@ -84,9 +84,7 @@ impl<T: crate::scalar::Demote> CscMatrix<T> {
             values: self.values.iter().map(|&v| v.demote()).collect(),
         }
     }
-}
 
-impl<T: Scalar> CscMatrix<T> {
     /// Number of stored nonzeros (lower triangle only).
     pub fn nnz(&self) -> usize {
         self.values.len()

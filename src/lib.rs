@@ -185,6 +185,8 @@ pub mod parallel;
 pub mod ordering;
 pub(crate) mod refine;
 pub(crate) mod scalar;
+// Values stored in single precision where their accuracy allows.
+pub(crate) mod stored;
 // MC64 max-product matching and the equilibrations of the factor paths.
 pub(crate) mod scaling;
 pub(crate) mod sparse;
@@ -209,8 +211,9 @@ pub use io::mtx::{
 pub use logging::{LogLevel, LogSink};
 pub use memory::MemoryPlan;
 pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
-pub use scalar::{Demote, Scalar};
+pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
+pub use stored::{single_for, Stored};
 // The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`,
 // and the automatic path over them.
 pub use numeric::auto::{AutoBackend, AutoSettings, AutoSolver, AutoSymbolic};
@@ -226,9 +229,9 @@ pub use numeric::settings::{
 // The Krylov solvers and their operator and preconditioner traits.
 pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_recycled, BlockArnoldi, BlockGmres, BlockKrylovResult,
-    BlockRecycle, Factorization, FnOperator, FnPreconditioner, KrylovResult, KrylovSettings,
-    LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner,
-    Preconditioner, Recycle, RecycleScalar, StopReason,
+    BlockProgress, BlockRecycle, Factorization, FnOperator, FnPreconditioner, KrylovResult,
+    KrylovSettings, LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, MixedPrecision,
+    NoPreconditioner, Preconditioner, Recycle, RecycleScalar, StopReason,
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;

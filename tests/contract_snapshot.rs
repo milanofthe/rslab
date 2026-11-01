@@ -75,6 +75,8 @@ fn rslab_contract_constants() {
         0x4039000000000000
     );
     assert_eq!(c::AUTO_SYMMETRY_TOL.to_bits(), 0x0000000000000000);
+    // precision
+    assert_eq!(c::SINGLE_MARGIN.to_bits(), 0x4030000000000000);
     // scaling
     assert_eq!(c::LOG_HUGE.to_bits(), 0x4086280000000000);
     assert_eq!(c::INFNORM_MAX_ITER, 10);

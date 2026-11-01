@@ -4,7 +4,7 @@
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltSolver;
 use crate::numeric::settings::{SolverSettings, Threads};
-use crate::scalar::{Demote, Scalar};
+use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
 use num_complex::Complex;
@@ -139,7 +139,7 @@ impl<T: Scalar> Preconditioner<T> for NoPreconditioner {
 }
 
 /// A factor computed in a lower-precision field, applied inside an iteration
-/// in the higher one: `F` factors `A` demoted to `H::Low` (see [`Demote`])
+/// in the higher one: `F` factors `A` demoted to its twin [`H::Low`](Scalar::Low)
 /// and every solve demotes its right-hand side, solves and promotes the
 /// result. The factor takes half the memory and its kernels run in single
 /// precision; the Krylov method (or [`solve_refined`](Factorization::solve_refined)
@@ -183,7 +183,7 @@ impl<F> MixedPrecision<F> {
 }
 
 /// Run `solve` on `b` demoted to `H::Low` and promote its result.
-fn through_low<H: Demote>(
+fn through_low<H: Scalar>(
     b: &[H],
     solve: impl FnOnce(&[H::Low]) -> Result<Vec<H::Low>, RslabError>,
 ) -> Result<Vec<H>, RslabError> {
@@ -191,7 +191,7 @@ fn through_low<H: Demote>(
     Ok(solve(&low)?.into_iter().map(H::promote).collect())
 }
 
-impl<H: Demote, F: Factorization<H::Low>> Preconditioner<H> for MixedPrecision<F> {
+impl<H: Scalar, F: Factorization<H::Low>> Preconditioner<H> for MixedPrecision<F> {
     fn apply(&self, r: &[H], z: &mut [H]) -> Result<(), RslabError> {
         z.copy_from_slice(&through_low(r, |r| self.factor.solve(r))?);
         Ok(())
@@ -205,7 +205,7 @@ impl<H: Demote, F: Factorization<H::Low>> Preconditioner<H> for MixedPrecision<F
     }
 }
 
-impl<H: Demote, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F> {
+impl<H: Scalar, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F> {
     fn n(&self) -> usize {
         self.factor.n()
     }

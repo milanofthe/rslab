@@ -1810,7 +1810,7 @@ fn block_gmres_continued_rung_beats_a_restart() {
 
 /// The memory plan of a block GMRES ([`KrylovSettings::block_bytes`]) is what a
 /// solve holds at the depth it reached: exactly for one column, a bound for
-/// several (they stop at different depths).
+/// several (they stop at different depths), its bases in full precision or single.
 #[test]
 fn block_gmres_memory_plan_matches_the_solve() {
     let a = unsym_grid(16);
@@ -1818,8 +1818,9 @@ fn block_gmres_memory_plan_matches_the_solve() {
     let set = crate::KrylovSettings::default()
         .with_max_iter(2000)
         .with_restart(300);
-    for s in [1usize, 4] {
+    for (s, single) in [(1usize, false), (4, false), (1, true), (4, true)] {
         let b = ladder_rhs(n, s);
+        let set = set.clone().with_basis_single(single);
         let mut g = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None).unwrap();
         g.solve(1e-9, None).unwrap();
         let plan = set.block_bytes::<C>(n, s, g.deepest());
@@ -1937,4 +1938,461 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
         "plan {plan} held {}",
         d.resident_bytes()
     );
+}
+
+/// A fixed preconditioner (an LU) needs no preconditioned basis
+/// ([`KrylovSettings::flexible`] `false`): the block GMRES keeps `V` alone and
+/// forms `x0 + M^-1 (V y)`. It reaches the same tolerance in the same steps as the
+/// flexible solve, its solutions agree with that solve's to the tolerance, it
+/// holds less, and the memory plan is what it holds.
+#[test]
+fn block_gmres_fixed_preconditioner_keeps_one_basis() {
+    use crate::numeric::lu::LuSolver;
+    let a = unsym_grid(14);
+    let n = a.n;
+    let s = 4;
+    let b = ladder_rhs(n, s);
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(400)
+        .with_restart(12);
+    let mut flex = BlockGmres::new(&a, &b, s, &lu, &set, None).unwrap();
+    let rf = flex.solve(1e-11, None).unwrap();
+    let fixed_set = set.clone().with_flexible(false);
+    let mut fixed = BlockGmres::new(&a, &b, s, &lu, &fixed_set, None).unwrap();
+    let rx = fixed.solve(1e-11, None).unwrap();
+    assert!(
+        rf.converged && rx.converged,
+        "{:?} {:?}",
+        rf.final_res,
+        rx.final_res
+    );
+    assert_eq!(rf.iters, rx.iters);
+    for k in 0..s {
+        let xn = rf.x[k * n..(k + 1) * n]
+            .iter()
+            .map(|v| v.norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        let d = (0..n)
+            .map(|i| (rf.x[k * n + i] - rx.x[k * n + i]).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(d <= 1e-9 * xn, "column {k}: {}", d / xn);
+    }
+    assert!(fixed.resident_bytes() < flex.resident_bytes());
+    let plan = fixed_set.block_bytes::<C>(n, s, fixed.deepest());
+    assert!(
+        plan >= fixed.resident_bytes(),
+        "plan {plan} held {}",
+        fixed.resident_bytes()
+    );
+    assert!(plan < set.block_bytes::<C>(n, s, fixed.deepest()));
+}
+
+/// A solve without the preconditioned basis harvests as the flexible one does:
+/// its Ritz vectors `M^-1 (V g)` (here `M` the identity) span a subspace whose
+/// deflation pays on further right-hand sides.
+#[test]
+fn block_gmres_fixed_preconditioner_harvests() {
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(20, c(0.6, 0.02), c(-1.0, 0.0));
+    let n = a.n;
+    let s = 3;
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(2000)
+        .with_restart(600)
+        .with_flexible(false);
+    let first = ladder_rhs(n, s);
+    let mut g = BlockGmres::new(&a, &first, s, &NoPreconditioner, &set, None).unwrap();
+    assert!(g.solve(1e-10, None).unwrap().converged);
+    let rec = g.harvest(20).expect("open cycles to harvest");
+    let second: Vec<C> = (0..n * s)
+        .map(|i| c(((i * 7) % 11) as f64 - 5.0, ((i * 3) % 13) as f64 - 6.0))
+        .collect();
+    let plain = gmres_block(
+        &a,
+        &second,
+        s,
+        &NoPreconditioner,
+        &set.clone().with_tol(1e-10),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut d = BlockGmres::new(&a, &second, s, &NoPreconditioner, &set, None)
+        .unwrap()
+        .deflating(&rec)
+        .unwrap();
+    let r = d.solve(1e-10, None).unwrap();
+    assert!(r.converged && plain.converged);
+    assert!(
+        r.iters < plain.iters,
+        "deflating {} against plain {}",
+        r.iters,
+        plain.iters
+    );
+}
+
+/// A block GMRES in a room ([`KrylovSettings::room_bytes`]) that holds two of its
+/// columns at the restart's depth: the columns with the worst estimates close
+/// their cycles and wait while the others run on, every column converges, the
+/// solutions agree with the unbounded solve's to the tolerance, and the solve
+/// never holds more than the room and a step of one column; the waves take
+/// at most the unbounded iterations each.
+#[test]
+fn block_gmres_room_runs_the_columns_in_waves() {
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(14, c(1.2, 0.05), c(-1.0, 0.0));
+    let n = a.n;
+    let s = 6;
+    let b = ladder_rhs(n, s);
+    let lu = NoPreconditioner;
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(40)
+        .with_flexible(false);
+    let mut free = BlockGmres::new(&a, &b, s, &lu, &set, None).unwrap();
+    let rf = free.solve(1e-10, None).unwrap();
+    let column = set.block_bytes::<C>(n, 1, 41) - set.block_bytes::<C>(n, 1, 0);
+    let room = set.block_bytes::<C>(n, s, 0) + 2 * column;
+    let tight = set.clone().with_room(room);
+    let mut g = BlockGmres::new(&a, &b, s, &lu, &tight, None).unwrap();
+    let (mut peak, mut waited) = (0, 0);
+    let mut mon = |p: &BlockProgress<'_>| {
+        peak = peak.max(p.resident);
+        waited = waited.max(p.waiting);
+        true
+    };
+    let r = g.solve(1e-10, Some(&mut mon)).unwrap();
+    eprintln!(
+        "room: iters {} -> {}, closed {}, peak {peak} room {room}",
+        rf.iters, r.iters, r.closed
+    );
+    assert!(rf.converged && r.converged, "{:?}", r.final_res);
+    assert!(
+        r.closed > 0 && waited > 0,
+        "closed {} waited {waited}",
+        r.closed
+    );
+    let step = (n * std::mem::size_of::<C>()) as u64;
+    assert!(peak <= room + step, "peak {peak} room {room}");
+    // two columns at a time: three waves, each no longer than the unbounded solve
+    assert!(r.iters <= s / 2 * rf.iters, "{} {}", r.iters, rf.iters);
+    assert!(tight.block_bytes::<C>(n, s, 41) <= room);
+    for k in 0..s {
+        let xn = rf.x[k * n..(k + 1) * n]
+            .iter()
+            .map(|v| v.norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        let d = (0..n)
+            .map(|i| (rf.x[k * n + i] - r.x[k * n + i]).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(d <= 1e-7 * xn, "column {k}: {}", d / xn);
+    }
+}
+
+/// The identity preconditioner, recording the widest block it applied: the most
+/// columns a flexible block GMRES stepped at once (it applies it in its steps alone).
+#[derive(Default)]
+struct Widest(std::sync::atomic::AtomicUsize);
+
+impl Preconditioner<C> for Widest {
+    fn apply(&self, r: &[C], z: &mut [C]) -> Result<(), RslabError> {
+        self.apply_block(r, z, 1, r.len())
+    }
+    fn apply_block(&self, r: &[C], z: &mut [C], s: usize, n: usize) -> Result<(), RslabError> {
+        self.0.fetch_max(s, std::sync::atomic::Ordering::Relaxed);
+        z[..n * s].copy_from_slice(&r[..n * s]);
+        Ok(())
+    }
+}
+
+/// A block GMRES within a live memory probe ([`BlockGmres::within`]) that says the
+/// process may take three steps of a column more: at most three columns step at
+/// once, the others waiting (one at first, more once finished columns give their
+/// bases up); every column converges and the solutions agree with the unbounded
+/// solve's to the tolerance.
+/// A probe that knows nothing (`None`) bounds nothing: the solve is the unbounded
+/// one, bit for bit.
+#[test]
+fn block_gmres_within_a_probe_runs_the_columns_in_waves() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(14, c(1.2, 0.05), c(-1.0, 0.0));
+    let n = a.n;
+    let s = 6;
+    let b = ladder_rhs(n, s);
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(40);
+    let mut free = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None).unwrap();
+    let rf = free.solve(1e-10, None).unwrap();
+    assert!(rf.converged);
+
+    let unknown = || -> Option<u64> { None };
+    let mut g = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None)
+        .unwrap()
+        .within(&unknown);
+    let r = g.solve(1e-10, None).unwrap();
+    assert_eq!((r.iters, r.closed), (rf.iters, 0));
+    assert_eq!(r.x, rf.x);
+
+    let asked = AtomicUsize::new(0);
+    // a step of a flexible column: a vector of `V` and one of `Z`
+    let step = (2 * n * std::mem::size_of::<C>()) as u64;
+    let probe = || {
+        asked.fetch_add(1, Ordering::Relaxed);
+        Some(3 * step)
+    };
+    let pc = Widest::default();
+    let mut g = BlockGmres::new(&a, &b, s, &pc, &set, None)
+        .unwrap()
+        .within(&probe);
+    let mut waited = 0;
+    let mut mon = |p: &BlockProgress<'_>| {
+        waited = waited.max(p.waiting);
+        true
+    };
+    let r = g.solve(1e-10, Some(&mut mon)).unwrap();
+    eprintln!(
+        "within: iters {} -> {}, closed {}, probe asked {}",
+        rf.iters,
+        r.iters,
+        r.closed,
+        asked.load(Ordering::Relaxed)
+    );
+    assert!(r.converged, "{:?}", r.final_res);
+    assert!(pc.0.load(Ordering::Relaxed) <= 3 && waited == s - 1);
+    assert!(
+        (s - 1..=s * (s - 1) / 2).contains(&r.closed),
+        "closed {}",
+        r.closed
+    );
+    assert!(asked.load(Ordering::Relaxed) > 2 * r.iters);
+    assert!(column_gap(&rf.x, &r.x, n) <= 1e-7);
+}
+
+/// A block GMRES solve with its bases in full or single precision
+/// ([`KrylovSettings::basis_single`]): what it reached and held.
+struct BasisRun {
+    iters: usize,
+    converged: bool,
+    worst: f64,
+    /// The worst true residual of the first check after a step: where the cycles'
+    /// solutions stood when their estimates first met the tolerance.
+    first: f64,
+    resident: u64,
+    plan: u64,
+    x: Vec<C>,
+}
+
+fn basis_run<A: LinearOperator<C> + ?Sized, M: Preconditioner<C> + ?Sized>(
+    a: &A,
+    b: &[C],
+    s: usize,
+    pc: &M,
+    set: &crate::KrylovSettings,
+    tol: f64,
+) -> BasisRun {
+    let n = a.n();
+    let mut g = BlockGmres::new(a, b, s, pc, set, None).unwrap();
+    let mut first = None;
+    let mut mon = |p: &BlockProgress<'_>| {
+        if p.iterations > 0 && first.is_none() {
+            let r = p
+                .checked
+                .iter()
+                .map(|&c| p.residuals[c].unwrap_or(f64::INFINITY));
+            first = Some(r.fold(0.0, f64::max));
+        }
+        true
+    };
+    let r = g.solve(tol, Some(&mut mon)).unwrap();
+    BasisRun {
+        iters: r.iters,
+        converged: r.converged,
+        worst: r.final_res.iter().copied().fold(0.0, f64::max),
+        first: first.unwrap_or(f64::NAN),
+        resident: g.resident_bytes(),
+        plan: set.block_bytes::<C>(n, s, g.deepest()),
+        x: r.x,
+    }
+}
+
+/// The largest relative difference of the columns of two solutions.
+fn column_gap(x: &[C], y: &[C], n: usize) -> f64 {
+    (0..x.len() / n)
+        .map(|k| {
+            let xn = x[k * n..(k + 1) * n]
+                .iter()
+                .map(|v| v.norm_sqr())
+                .sum::<f64>();
+            let d = (0..n)
+                .map(|i| (x[k * n + i] - y[k * n + i]).norm_sqr())
+                .sum::<f64>();
+            (d / xn).sqrt()
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Bases stored in single precision ([`KrylovSettings::basis_single`]) reach the
+/// tolerance: on the unsymmetric grid unpreconditioned and with a weak (diagonal)
+/// LU, on the indefinite Helmholtz grid, and with a single-precision LU of the
+/// operator, flexible and not, to `1e-8` and `1e-10`. Their solutions agree with
+/// the full-precision ones to the tolerance, the bases take half the bytes and the
+/// memory plan covers what the solve holds.
+///
+/// A cycle's true residual stalls at the rounding of its stored vectors (about
+/// `3e-8` here, [`block_gmres_single_basis_cycle_stalls_at_its_rounding`]), so
+/// below it a column restarts from its true residual once more: measured
+/// iterations full -> single, flexible and fixed alike, `1e-8` / `1e-10`: unsym
+/// 22 -> 24 / 28 -> 34, unsym diag-lu 22 -> 24 / 28 -> 35, helmholtz (restarting
+/// every 40 steps anyway) 1025 -> 1076 / 1305 -> 1367, unsym c32-lu 2 -> 3 (flexible),
+/// 3 -> 3 (fixed: the single-precision factor stalls the cycle at 2e-7 either way).
+#[test]
+fn block_gmres_single_basis_reaches_the_tolerance() {
+    use crate::numeric::lu::LuSolver;
+    let c = |re, im| Complex::new(re, im);
+    let u = unsym_grid(20);
+    let h = grid(14, c(1.2, 0.05), c(-1.0, 0.0));
+    let diag = LuSolver::factor(&diagonal_part(&u), &SolverSettings::default()).unwrap();
+    let low = LowPrecisionLu::factor(&u, &SolverSettings::default()).unwrap();
+    let s = 4;
+    type Case<'a> = (
+        &'a str,
+        &'a dyn LinearOperator<C>,
+        &'a dyn Preconditioner<C>,
+        usize,
+    );
+    let cases: [Case<'_>; 4] = [
+        ("unsym", &u, &NoPreconditioner, 30),
+        ("unsym diag-lu", &u, &diag, 30),
+        ("helmholtz", &h, &NoPreconditioner, 40),
+        ("unsym c32-lu", &u, &low, 30),
+    ];
+    for (name, a, pc, m) in cases {
+        let n = a.n();
+        let b = ladder_rhs(n, s);
+        for flexible in [true, false] {
+            let set = crate::KrylovSettings::default()
+                .with_max_iter(4000)
+                .with_restart(m)
+                .with_flexible(flexible);
+            let single = set.clone().with_basis_single(true);
+            for tol in [1e-8, 1e-10] {
+                let f = basis_run(a, &b, s, pc, &set, tol);
+                let g = basis_run(a, &b, s, pc, &single, tol);
+                let gap = column_gap(&f.x, &g.x, n);
+                eprintln!(
+                    "{name} flexible {flexible} tol {tol:e}: iters {} -> {}, first check \
+                     {:.1e} -> {:.1e}, final {:.1e} -> {:.1e}, gap {gap:.1e}, resident {} -> {}",
+                    f.iters, g.iters, f.first, g.first, f.worst, g.worst, f.resident, g.resident
+                );
+                assert!(
+                    f.converged && g.converged,
+                    "{name}: {} {}",
+                    f.worst,
+                    g.worst
+                );
+                // at most a quarter more and the one restart (35 of 28 the most)
+                assert!(
+                    g.iters <= f.iters + f.iters / 4 + 2,
+                    "{name}: {} {}",
+                    f.iters,
+                    g.iters
+                );
+                assert!(gap <= 10.0 * tol, "{name}: gap {gap:e}");
+                assert!(
+                    g.plan >= g.resident,
+                    "{name}: plan {} held {}",
+                    g.plan,
+                    g.resident
+                );
+                assert!(g.resident < f.resident);
+            }
+            // the bases at any depth: half the bytes
+            let bases = |t: &crate::KrylovSettings| {
+                t.block_bytes::<C>(n, s, m + 1) - t.block_bytes::<C>(n, s, 0)
+            };
+            assert_eq!(bases(&set), 2 * bases(&single));
+        }
+    }
+}
+
+/// One cycle of single-precision bases (a restart long enough for the whole solve):
+/// once its estimate passes far below single precision, its true residual stands at
+/// the rounding of the stored vectors, `1.3e-8` flexible and fixed alike (full
+/// bases: `3.2e-14`), below the tolerance from which the bases are stored single
+/// without a cost ([`single_for`](crate::single_for), `9.5e-7`). One restart from
+/// the true residual carries it on to `6.3e-14`, 49 iterations against 35.
+#[test]
+fn block_gmres_single_basis_cycle_stalls_at_its_rounding() {
+    let u = unsym_grid(20);
+    let n = u.n;
+    let b = ladder_rhs(n, 1);
+    let edge = crate::constants::SINGLE_MARGIN * f32::EPSILON as f64 / 2.0;
+    for flexible in [true, false] {
+        let set = crate::KrylovSettings::default()
+            .with_max_iter(4000)
+            .with_restart(300)
+            .with_flexible(flexible);
+        let f = basis_run(&u, &b, 1, &NoPreconditioner, &set, 1e-13);
+        let g = basis_run(
+            &u,
+            &b,
+            1,
+            &NoPreconditioner,
+            &set.with_basis_single(true),
+            1e-13,
+        );
+        eprintln!(
+            "flexible {flexible}: iters {} -> {}, first check {:.1e} -> {:.1e}, final {:.1e} -> {:.1e}",
+            f.iters, g.iters, f.first, g.first, f.worst, g.worst
+        );
+        assert!(f.converged && g.converged, "{} {}", f.worst, g.worst);
+        assert!(
+            f.first <= 1e-13 && f.first * 1e4 < g.first,
+            "{} {}",
+            f.first,
+            g.first
+        );
+        assert!(g.first <= edge / 16.0, "{}", g.first);
+        assert!(g.iters <= f.iters + f.iters / 2, "{} {}", f.iters, g.iters);
+    }
+}
+
+/// Single-precision bases continue a ladder of tolerances in their Krylov space:
+/// `1e-6`, then `1e-8`, then `1e-10`. At `1e-6`, above the tolerance from which
+/// [`single_for`](crate::single_for) stores single, the solve steps as the full one
+/// does (16 iterations each); below, a cycle stalling at its rounding restarts once:
+/// 8 iterations against 6 to `1e-8`, 6 against 6 on to `1e-10`.
+#[test]
+fn block_gmres_single_basis_continues_a_ladder() {
+    let u = unsym_grid(20);
+    let n = u.n;
+    let s = 4;
+    let b = ladder_rhs(n, s);
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(80)
+        .with_flexible(false);
+    let single = set.clone().with_basis_single(true);
+    let mut f = BlockGmres::new(&u, &b, s, &NoPreconditioner, &set, None).unwrap();
+    let mut g = BlockGmres::new(&u, &b, s, &NoPreconditioner, &single, None).unwrap();
+    let (mut fi, mut gi) = (0, 0);
+    for tol in [1e-6, 1e-8, 1e-10] {
+        let (rf, rg) = (f.solve(tol, None).unwrap(), g.solve(tol, None).unwrap());
+        eprintln!("ladder tol {tol:e}: iters {} -> {}", rf.iters, rg.iters);
+        assert!(rf.converged && rg.converged, "{:?}", rg.final_res);
+        assert!(column_gap(&rf.x, &rg.x, n) <= 10.0 * tol);
+        if crate::single_for::<C>(tol) {
+            assert_eq!(rf.iters, rg.iters);
+        }
+        fi += rf.iters;
+        gi += rg.iters;
+    }
+    assert!(gi <= fi + 4, "{fi} {gi}");
 }
