@@ -1938,3 +1938,97 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
         d.resident_bytes()
     );
 }
+
+/// A fixed preconditioner (an LU) needs no preconditioned basis
+/// ([`KrylovSettings::flexible`] `false`): the block GMRES keeps `V` alone and
+/// forms `x0 + M^-1 (V y)`. It reaches the same tolerance in the same steps as the
+/// flexible solve, its solutions agree with that solve's to the tolerance, it
+/// holds less, and the memory plan is what it holds.
+#[test]
+fn block_gmres_fixed_preconditioner_keeps_one_basis() {
+    use crate::numeric::lu::LuSolver;
+    let a = unsym_grid(14);
+    let n = a.n;
+    let s = 4;
+    let b = ladder_rhs(n, s);
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(400)
+        .with_restart(12);
+    let mut flex = BlockGmres::new(&a, &b, s, &lu, &set, None).unwrap();
+    let rf = flex.solve(1e-11, None).unwrap();
+    let fixed_set = set.clone().with_flexible(false);
+    let mut fixed = BlockGmres::new(&a, &b, s, &lu, &fixed_set, None).unwrap();
+    let rx = fixed.solve(1e-11, None).unwrap();
+    assert!(
+        rf.converged && rx.converged,
+        "{:?} {:?}",
+        rf.final_res,
+        rx.final_res
+    );
+    assert_eq!(rf.iters, rx.iters);
+    for k in 0..s {
+        let xn = rf.x[k * n..(k + 1) * n]
+            .iter()
+            .map(|v| v.norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        let d = (0..n)
+            .map(|i| (rf.x[k * n + i] - rx.x[k * n + i]).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(d <= 1e-9 * xn, "column {k}: {}", d / xn);
+    }
+    assert!(fixed.resident_bytes() < flex.resident_bytes());
+    let plan = fixed_set.block_bytes::<C>(n, s, fixed.deepest());
+    assert!(
+        plan >= fixed.resident_bytes(),
+        "plan {plan} held {}",
+        fixed.resident_bytes()
+    );
+    assert!(plan < set.block_bytes::<C>(n, s, fixed.deepest()));
+}
+
+/// A solve without the preconditioned basis harvests as the flexible one does:
+/// its Ritz vectors `M^-1 (V g)` (here `M` the identity) span a subspace whose
+/// deflation pays on further right-hand sides.
+#[test]
+fn block_gmres_fixed_preconditioner_harvests() {
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(20, c(0.6, 0.02), c(-1.0, 0.0));
+    let n = a.n;
+    let s = 3;
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(2000)
+        .with_restart(600)
+        .with_flexible(false);
+    let first = ladder_rhs(n, s);
+    let mut g = BlockGmres::new(&a, &first, s, &NoPreconditioner, &set, None).unwrap();
+    assert!(g.solve(1e-10, None).unwrap().converged);
+    let rec = g.harvest(20).expect("open cycles to harvest");
+    let second: Vec<C> = (0..n * s)
+        .map(|i| c(((i * 7) % 11) as f64 - 5.0, ((i * 3) % 13) as f64 - 6.0))
+        .collect();
+    let plain = gmres_block(
+        &a,
+        &second,
+        s,
+        &NoPreconditioner,
+        &set.clone().with_tol(1e-10),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut d = BlockGmres::new(&a, &second, s, &NoPreconditioner, &set, None)
+        .unwrap()
+        .deflating(&rec)
+        .unwrap();
+    let r = d.solve(1e-10, None).unwrap();
+    assert!(r.converged && plain.converged);
+    assert!(
+        r.iters < plain.iters,
+        "deflating {} against plain {}",
+        r.iters,
+        plain.iters
+    );
+}

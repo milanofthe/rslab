@@ -42,6 +42,14 @@ pub struct KrylovSettings {
     /// The chunks are summed in a fixed order, so the result depends on this
     /// value but not on the thread count. Default `2048`.
     pub ortho_chunk: usize,
+    /// The preconditioner may differ from step to step (flexible GMRES): every
+    /// column of a block GMRES keeps its preconditioned basis `Z = M^-1 V`
+    /// beside `V` and forms its solution `x0 + Z y` from it. `false`, for a
+    /// preconditioner that is one fixed operator (a factorization): only `V` is
+    /// kept and the solution formed as `x0 + M^-1 (V y)`, one batched
+    /// preconditioner apply per residual check; the bases take half the memory.
+    /// Default `true`.
+    pub flexible: bool,
 }
 
 impl Default for KrylovSettings {
@@ -55,6 +63,7 @@ impl Default for KrylovSettings {
             restart_max: KRYLOV_RESTART_MAX,
             reorth_eta: KRYLOV_REORTH_ETA,
             ortho_chunk: KRYLOV_ORTHO_CHUNK,
+            flexible: true,
         }
     }
 }
@@ -77,16 +86,31 @@ impl KrylovSettings {
         self.restart = Some(restart);
         self
     }
+    /// Whether the preconditioner may change between steps ([`flexible`](Self::flexible)).
+    pub fn with_flexible(mut self, flexible: bool) -> Self {
+        self.flexible = flexible;
+        self
+    }
+    /// The bases a block GMRES column stores: `V` and `Z` when
+    /// [`flexible`](Self::flexible), `V` alone otherwise.
+    pub(crate) fn bases(&self) -> usize {
+        if self.flexible {
+            2
+        } else {
+            1
+        }
+    }
 
     /// Heap bytes a block GMRES ([`gmres_block`](super::gmres_block),
     /// [`BlockGmres`](super::BlockGmres)) of `s` right-hand sides of length `n`
     /// in scalars `T` holds once its bases are `depth` vectors deep (a solve of
     /// `k` iterations without a restart: `k + 1`), at the restart these settings
-    /// give: the bases `V` and `Z` as written, the Hessenberg matrices, the panels
-    /// and the reduction scratch.
+    /// give: the bases `V` and (when [`flexible`](Self::flexible)) `Z` as
+    /// written, the Hessenberg matrices, the panels and the reduction scratch.
     pub fn block_bytes<T>(&self, n: usize, s: usize, depth: usize) -> u64 {
-        let m = self.restart_for(n, s, std::mem::size_of::<T>(), 2);
-        super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, depth.min(m + 1))
+        let m = self.restart_for(n, s, std::mem::size_of::<T>(), self.bases());
+        let depth = depth.min(m + 1);
+        super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, depth, self.flexible)
     }
 
     /// What deflating a subspace of dimension `k`
@@ -94,7 +118,7 @@ impl KrylovSettings {
     /// [`block_bytes`](Self::block_bytes): the subspace, every column's
     /// components on it per step, and a panel's projections.
     pub fn deflation_bytes<T>(&self, n: usize, s: usize, k: usize) -> u64 {
-        let m = self.restart_for(n, s, std::mem::size_of::<T>(), 2);
+        let m = self.restart_for(n, s, std::mem::size_of::<T>(), self.bases());
         super::block::deflation_bytes::<T>(n, s, m, self.ortho_chunk, k)
     }
 

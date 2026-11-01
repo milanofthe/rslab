@@ -33,6 +33,8 @@ struct Column<T> {
     v: Vec<T>,
     /// The preconditioned basis `z_i = M^-1 v_i` of the steps taken, laid out as
     /// `v`: the solution is formed from the vectors the Arnoldi relation holds.
+    /// Empty when the preconditioner is fixed ([`KrylovSettings::flexible`]
+    /// `false`): `Z y = M^-1 (V y)` then.
     zb: Vec<T>,
     /// Row-major `(m+1) x m`, entry `(i, j)` at `h[i*m + j]`.
     h: Vec<T>,
@@ -50,10 +52,10 @@ struct Column<T> {
 }
 
 impl<T: Scalar> Column<T> {
-    fn new(n: usize, m: usize, k: usize) -> Self {
+    fn new(n: usize, m: usize, k: usize, flexible: bool) -> Self {
         Column {
             v: basis(n * (m + 1)),
-            zb: basis(n * m),
+            zb: if flexible { basis(n * m) } else { Vec::new() },
             h: vec![T::zero(); (m + 1) * m],
             hraw: vec![T::zero(); (m + 1) * m],
             bm: vec![T::zero(); m * k],
@@ -87,19 +89,9 @@ impl<T: Scalar> Column<T> {
 
     /// The open cycle's coefficients `y` (back substitution on the leading
     /// well-conditioned block, so a rank-deficient Hessenberg breaks down
-    /// deterministically instead of dividing by about zero) and the solution
-    /// `x0 + Z y` into `out`, deflating `rec`: `x0 + Z y - U B y`.
+    /// deterministically instead of dividing by about zero); returns how many.
     #[allow(clippy::needless_range_loop)]
-    fn correction(
-        &self,
-        m: usize,
-        rec: Option<&BlockRecycle<T>>,
-        y: &mut [T],
-        x0: &[T],
-        out: &mut [T],
-    ) {
-        let n = out.len();
-        out.copy_from_slice(x0);
+    fn coefficients(&self, m: usize, y: &mut [T]) -> usize {
         let jd = well_conditioned_dim(&self.h, m, self.steps.unwrap_or(0));
         for i in (0..jd).rev() {
             let mut acc = self.g[i];
@@ -108,22 +100,50 @@ impl<T: Scalar> Column<T> {
             }
             y[i] = acc * self.h[i * m + i].recip();
         }
-        for i in 0..jd {
-            let yi = y[i];
-            for (o, &z) in out.iter_mut().zip(&self.zb[i * n..(i + 1) * n]) {
+        jd
+    }
+
+    /// `out += B y`: the first `jd` vectors of the basis `b` (laid out as `v`)
+    /// combined by `y`.
+    fn combine(b: &[T], jd: usize, y: &[T], out: &mut [T]) {
+        let n = out.len();
+        for (i, &yi) in y.iter().enumerate().take(jd) {
+            for (o, &z) in out.iter_mut().zip(&b[i * n..(i + 1) * n]) {
                 *o = *o + z * yi;
             }
         }
-        if let Some(rec) = rec {
-            let k = rec.k;
-            for i in 0..k {
-                let t = (0..jd).fold(T::zero(), |a, j| a + self.bm[j * k + i] * y[j]);
-                if t != T::zero() {
-                    for (o, &u) in out.iter_mut().zip(&rec.u[i * n..(i + 1) * n]) {
-                        *o = *o - u * t;
-                    }
+    }
+
+    /// `out -= U B y` for the subspace `rec` deflated: the part of the open
+    /// cycle's correction in its directions.
+    fn deflated(&self, rec: &BlockRecycle<T>, jd: usize, y: &[T], out: &mut [T]) {
+        let n = out.len();
+        let k = rec.k;
+        for i in 0..k {
+            let t = (0..jd).fold(T::zero(), |a, j| a + self.bm[j * k + i] * y[j]);
+            if t != T::zero() {
+                for (o, &u) in out.iter_mut().zip(&rec.u[i * n..(i + 1) * n]) {
+                    *o = *o - u * t;
                 }
             }
+        }
+    }
+
+    /// The open cycle's solution `x0 + Z y` into `out` from the stored
+    /// preconditioned basis, deflating `rec`: `x0 + Z y - U B y`.
+    fn correction(
+        &self,
+        m: usize,
+        rec: Option<&BlockRecycle<T>>,
+        y: &mut [T],
+        x0: &[T],
+        out: &mut [T],
+    ) {
+        out.copy_from_slice(x0);
+        let jd = self.coefficients(m, y);
+        Self::combine(&self.zb, jd, y, out);
+        if let Some(rec) = rec {
+            self.deflated(rec, jd, y, out);
         }
     }
 }
@@ -240,6 +260,9 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     chk: Vec<usize>,
     /// The subspace deflated ([`deflating`](Self::deflating)), with its
     /// projections of a panel and their partial sums.
+    /// The preconditioner may change between steps: the columns keep `Z`
+    /// ([`KrylovSettings::flexible`]).
+    flexible: bool,
     rec: Option<&'a BlockRecycle<T>>,
     rproj: Vec<T>,
     rscratch: Vec<T>,
@@ -281,8 +304,8 @@ where
             Some(g) => g.to_vec(),
             None => vec![T::zero(); n * s],
         };
-        // two bases a column: `V` and `Z`
-        let m = settings.restart_for(n, s, std::mem::size_of::<T>(), 2);
+        // the bases a column keeps: `V`, and `Z` where the preconditioner is flexible
+        let m = settings.restart_for(n, s, std::mem::size_of::<T>(), settings.bases());
         let chunk = settings.ortho_chunk.max(1);
         let bnorm: Vec<f64> = (0..s).map(|c| norm2(&b[c * n..c * n + n])).collect();
         let mut res = vec![None; s];
@@ -311,7 +334,10 @@ where
             out: x.clone(),
             x,
             res,
-            cols: (0..s).map(|_| Column::new(n, m, 0)).collect(),
+            cols: (0..s)
+                .map(|_| Column::new(n, m, 0, settings.flexible))
+                .collect(),
+            flexible: settings.flexible,
             iters: 0,
             deepest: 0,
             panel: vec![T::zero(); n * s],
@@ -445,7 +471,7 @@ where
             // The residual check: with columns stepping, only the full cycles
             // (they restart from their true residual); else every column that
             // stepped since its last check.
-            let checked = self.check(!stepping);
+            let checked = self.check(!stepping)?;
             if checked {
                 if let Some(mo) = mon.as_mut() {
                     // NaN-honest: a non-finite residual is the worst one
@@ -474,7 +500,7 @@ where
             self.step()?;
         }
         // A cancel leaves the columns stepped since their last check unformed.
-        self.check(true);
+        self.check(true)?;
         let final_res: Vec<f64> = self
             .res
             .iter()
@@ -514,7 +540,7 @@ where
     /// those whose cycle reached the restart) and their true residuals; the
     /// residual vectors stay in `w` (compact, in the order of `chk`).
     /// Whether any column was checked.
-    fn check(&mut self, all: bool) -> bool {
+    fn check(&mut self, all: bool) -> Result<bool, RslabError> {
         let (n, m) = (self.n, self.m);
         self.chk.clear();
         for c in 0..self.s {
@@ -524,19 +550,51 @@ where
         }
         let k = self.chk.len();
         if k == 0 {
-            return false;
+            return Ok(false);
         }
-        // The open cycles' solutions `x + Z y`, from the stored preconditioned basis.
-        for (a, &c) in self.chk.iter().enumerate() {
-            let (cb, pb) = (c * n, a * n);
-            self.cols[c].correction(
-                m,
-                self.rec,
-                &mut self.y,
-                &self.x[cb..cb + n],
-                &mut self.out[cb..cb + n],
-            );
-            self.panel[pb..pb + n].copy_from_slice(&self.out[cb..cb + n]);
+        if self.flexible {
+            // The open cycles' solutions `x + Z y`, from the stored preconditioned basis.
+            for (a, &c) in self.chk.iter().enumerate() {
+                let (cb, pb) = (c * n, a * n);
+                self.cols[c].correction(
+                    m,
+                    self.rec,
+                    &mut self.y,
+                    &self.x[cb..cb + n],
+                    &mut self.out[cb..cb + n],
+                );
+                self.panel[pb..pb + n].copy_from_slice(&self.out[cb..cb + n]);
+            }
+        } else {
+            // The open cycles' solutions `x + M^-1 (V y)`: every column's `V y`, one
+            // batched preconditioner apply, then `x` and the deflated part.
+            for (a, &c) in self.chk.iter().enumerate() {
+                let pb = a * n;
+                let col = &self.cols[c];
+                let jd = col.coefficients(m, &mut self.y);
+                let p = &mut self.panel[pb..pb + n];
+                p.iter_mut().for_each(|e| *e = T::zero());
+                Column::combine(&col.v, jd, &self.y, p);
+            }
+            self.precond
+                .apply_block(&self.panel[..k * n], &mut self.z[..k * n], k, n)?;
+            for (a, &c) in self.chk.iter().enumerate() {
+                let (cb, pb) = (c * n, a * n);
+                let col = &self.cols[c];
+                let out = &mut self.out[cb..cb + n];
+                for ((o, &x), &z) in out
+                    .iter_mut()
+                    .zip(&self.x[cb..cb + n])
+                    .zip(&self.z[pb..pb + n])
+                {
+                    *o = x + z;
+                }
+                if let Some(rec) = self.rec {
+                    let jd = col.coefficients(m, &mut self.y);
+                    col.deflated(rec, jd, &self.y, out);
+                }
+                self.panel[pb..pb + n].copy_from_slice(out);
+            }
         }
         // Their true residuals, one batched operator apply.
         self.op
@@ -551,7 +609,7 @@ where
             }
             self.res[c] = Some(rn.sqrt() / self.bnorm[c]);
         }
-        true
+        Ok(true)
     }
 
     /// Restart every column the last check left above `tol`: its cycle closes
@@ -691,8 +749,10 @@ where
                 };
                 col.hraw[i * m + j] = col.h[i * m + j];
             }
-            grow(&mut col.zb, (j + 1) * n);
-            col.zb[j * n..(j + 1) * n].copy_from_slice(&self.z[a * n..(a + 1) * n]);
+            if self.flexible {
+                grow(&mut col.zb, (j + 1) * n);
+                col.zb[j * n..(j + 1) * n].copy_from_slice(&self.z[a * n..(a + 1) * n]);
+            }
             let wa = &self.w[a * n..(a + 1) * n];
             let hn = norm2(wa);
             col.h[(j + 1) * m + j] = T::from_real(hn);
@@ -787,7 +847,24 @@ where
                 break;
             }
             let d = g.len();
-            let cand = T::combine_ritz(&self.cols[c].zb[..d * n], n, d, &[(theta, g)], k - kept);
+            // the Ritz vectors in the solution space: `Z g`, as `M^-1 (V g)` where `Z`
+            // is not kept
+            let cand = if self.flexible {
+                T::combine_ritz(&self.cols[c].zb[..d * n], n, d, &[(theta, g)], k - kept)
+            } else {
+                let vg = T::combine_ritz(&self.cols[c].v[..d * n], n, d, &[(theta, g)], k - kept);
+                let mut zg = vec![T::zero(); vg.len()];
+                // (no wider than the solve applies it)
+                let width = self.s * n;
+                let applied = vg
+                    .chunks(width)
+                    .zip(zg.chunks_mut(width))
+                    .all(|(v, z)| self.precond.apply_block(v, z, v.len() / n, n).is_ok());
+                if !applied {
+                    continue;
+                }
+                zg
+            };
             // a column's Ritz vector the others found too is not new: kept only
             // where most of it lies outside the kept ones (the DGKS ratio)
             for v in cand.chunks_exact(n) {
@@ -865,11 +942,23 @@ fn orthonormal_into<T: Scalar>(
 /// restart `m` and reduction chunk `chunk` once its columns' bases are `depth`
 /// vectors deep: the allocations of [`BlockGmres::new`] and the written bases
 /// ([`BlockGmres::resident_bytes`] of a solve at that depth in every column).
-pub(super) fn block_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, depth: usize) -> u64 {
+pub(super) fn block_bytes<T>(
+    n: usize,
+    s: usize,
+    m: usize,
+    chunk: usize,
+    depth: usize,
+    flexible: bool,
+) -> u64 {
     let sz = std::mem::size_of::<T>();
-    // per column: the basis, its preconditioned steps, the Hessenberg matrix rotated
-    // and as built, the two rotations, `g`
-    let column = n * depth + n * depth.saturating_sub(1) + 2 * (m + 1) * m + 2 * m + (m + 1);
+    // per column: the basis, its preconditioned steps (flexible only), the Hessenberg
+    // matrix rotated and as built, the two rotations, `g`
+    let z = if flexible {
+        n * depth.saturating_sub(1)
+    } else {
+        0
+    };
+    let column = n * depth + z + 2 * (m + 1) * m + 2 * m + (m + 1);
     // the panels `x`, `out`, `panel`, `z`, `w`; the two projections and their partial
     // sums; `y`
     let panels = 5 * n * s; // lit: the five n x s panels of `BlockGmres::new`
