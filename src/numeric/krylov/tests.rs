@@ -2059,12 +2059,17 @@ fn block_gmres_room_runs_the_columns_in_waves() {
     let tight = set.clone().with_room(room);
     let mut g = BlockGmres::new(&a, &b, s, &lu, &tight, None).unwrap();
     let (mut peak, mut waited) = (0, 0);
+    let mut closings = 0;
     let mut mon = |p: &BlockProgress<'_>| {
         peak = peak.max(p.resident);
         waited = waited.max(p.waiting);
+        // a column closing for memory is one of the checked
+        assert!(p.closing.iter().all(|c| p.checked.contains(c)));
+        closings += p.closing.len();
         true
     };
     let r = g.solve(1e-10, Some(&mut mon)).unwrap();
+    assert!(closings <= r.closed);
     eprintln!(
         "room: iters {} -> {}, closed {}, peak {peak} room {room}",
         rf.iters, r.iters, r.closed
