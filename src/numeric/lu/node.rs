@@ -13,7 +13,6 @@ use crate::numeric::supernodal::ScratchPool;
 use crate::numeric::supernodal::{Li, LlSchedule, PanelPtr};
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// One running [`lu_ll_factor_node`]'s buffers: the within-front row
 /// permutation, the panel's pivot reciprocals and the sequential `cmod`'s
@@ -118,7 +117,6 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     pools: &LuPools<T>,
     emit: &LlEmit<T>,
     perturb_floor: Option<f64>,
-    n_perturbed: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     kt.interrupted()?;
@@ -454,7 +452,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // Join-steal guard (see the cmod fork gate above): a small node must not
     // fork inside its cdiv either.
     let ll_cdiv_par = kt.k.cdiv_par(nrow_l, ncol);
-    let mut local_perturbed = 0usize;
+    // The node's pivot floors, `(column of the node, what the floor added)`.
+    let mut floors: Vec<(usize, T)> = Vec::new();
     // Restricted partial pivoting: row interchanges within the fully-summed block
     // `[0, ncol)` only (the standard sparse-direct choice). `rperm[i]` is the
     // row-structure index physically at position `i`; the trailing rows are never
@@ -512,8 +511,9 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             let mut piv = lbuf[k * nrow_l + k];
             match perturb_floor {
                 Some(floor) if piv.magnitude() < floor => {
-                    piv = perturb_pivot(piv, floor);
-                    local_perturbed += 1;
+                    let lifted = perturb_pivot(piv, floor);
+                    floors.push((k, lifted - piv));
+                    piv = lifted;
                 }
                 None if piv == T::zero() => {
                     return Err(RslabError::NumericallyRankDeficient);
@@ -704,13 +704,14 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         }
         kb = ke;
     }
-    if local_perturbed > 0 {
-        n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
+    let eoff = emit.e_offset[s];
+    if !floors.is_empty() {
+        let mut all = emit.floors.lock().unwrap_or_else(|e| e.into_inner());
+        all.extend(floors.into_iter().map(|(k, delta)| (eoff + k, delta)));
     }
     // Populate the O(n) index maps for `s` from its (final) `rperm` and the
     // symbolic elimination offset - consumed by `emit_and_free` and the assembly.
     // Writes target disjoint global indices; visibility via the subtree join.
-    let eoff = emit.e_offset[s];
     for (p, &rp) in rperm[..ncol].iter().enumerate() {
         let g_col = first + p;
         let g_row = rows_l[rp] as usize;

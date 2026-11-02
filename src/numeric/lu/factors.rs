@@ -2,13 +2,14 @@
 //! and the permutations, scalings and counters the solver keeps next to it.
 
 use crate::numeric::supernodal::panel::PanelFactor;
+use crate::refine::PivotFloor;
 use crate::scalar::Scalar;
 
 /// Everything of `P_r^T A P = L U` except the panels: the permutations, the
 /// equilibration and the outcome, `perm[e]` mapping factorization position
 /// `e` to the original index.
 #[derive(Clone)]
-pub(crate) struct LuPivots {
+pub(crate) struct LuPivots<T> {
     pub n: usize,
     /// Column permutation: factorization position -> original column index
     /// (`P^T A P = L U`, the fill-reducing ordering).
@@ -23,12 +24,13 @@ pub(crate) struct LuPivots {
     /// Parent of every supernode in the assembly tree (`usize::MAX` for a
     /// root); empty when unknown.
     pub supernode_parent: Vec<usize>,
-    /// Number of statically perturbed pivots.
-    pub n_perturbed: usize,
+    /// The pivot floors: the factor is of `A + E`, these the entries of `E`.
+    pub floors: Vec<PivotFloor<T>>,
 }
 
-impl LuPivots {
-    /// Heap bytes held: the permutations, the scalings and the supernode tree.
+impl<T> LuPivots<T> {
+    /// Heap bytes held: the permutations, the scalings, the supernode tree
+    /// and the pivot floors.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
         vec_bytes(&self.perm)
@@ -36,6 +38,7 @@ impl LuPivots {
             + vec_bytes(&self.d_row)
             + vec_bytes(&self.d_col)
             + vec_bytes(&self.supernode_parent)
+            + vec_bytes(&self.floors)
     }
 }
 
@@ -59,8 +62,9 @@ pub(crate) struct LuNumeric<T> {
     pub d_col: Vec<f64>,
     /// Supernode tree over the factor's supernodes (`usize::MAX` for a root).
     pub supernode_parent: Vec<usize>,
-    /// Pivots perturbed by the static regularization.
-    pub n_perturbed: usize,
+    /// The pivot floors, in `A`'s indices (`B`'s rows until the row
+    /// matching is folded back).
+    pub floors: Vec<PivotFloor<T>>,
     /// Structural panel slots holding an exact zero (the symmetrized
     /// pattern or cancellation); the stored nonzeros are
     /// `l.nnz() + ut.nnz() - n_zeros`.
@@ -81,7 +85,7 @@ impl<T: Scalar> LuNumeric<T> {
 
     /// Split into the two panel factors and the [`LuPivots`] the solver
     /// keeps next to them.
-    pub(crate) fn into_parts(self) -> (PanelFactor<T>, PanelFactor<T>, LuPivots) {
+    pub(crate) fn into_parts(self) -> (PanelFactor<T>, PanelFactor<T>, LuPivots<T>) {
         let pivots = LuPivots {
             n: self.l.n,
             perm: self.perm,
@@ -89,7 +93,7 @@ impl<T: Scalar> LuNumeric<T> {
             d_row: self.d_row,
             d_col: self.d_col,
             supernode_parent: self.supernode_parent,
-            n_perturbed: self.n_perturbed,
+            floors: self.floors,
         };
         (self.l, self.ut, pivots)
     }

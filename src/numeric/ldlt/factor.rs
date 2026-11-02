@@ -13,6 +13,7 @@ use crate::numeric::settings::{
 };
 use crate::numeric::supernodal::panel::{PanelArena, PanelFactor, PanelOut, PanelStorage};
 use crate::numeric::supernodal::{emit_refcount_offsets, Cells, Input, InputProgram, LlSchedule};
+use crate::refine::PivotFloor;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
@@ -58,7 +59,7 @@ pub(crate) fn factor_numeric<T: Scalar>(
                     two_by_two: Vec::new(),
                     perm: Vec::new(),
                     supernode_parent: Vec::new(),
-                    n_perturbed: 0,
+                    floors: Vec::new(),
                     inertia: Inertia::new(0, 0, 0),
                 },
                 n_zeros: 0,
@@ -95,7 +96,7 @@ pub(crate) fn factor_numeric<T: Scalar>(
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),
-        || factor_left_looking(sym, sched, inp, opts, storage, pools),
+        || factor_left_looking(sym, sched, inp, scale, opts, storage, pools),
     )
 }
 
@@ -117,6 +118,9 @@ pub(super) struct LlEmitLdlt<T> {
     pub(super) inertia_pos: AtomicUsize,
     pub(super) inertia_neg: AtomicUsize,
     pub(super) inertia_zero: AtomicUsize,
+    /// The pivot floors, `(elimination position, what the floor added to
+    /// the diagonal)`, each node's pushed once it is factored.
+    pub(super) floors: std::sync::Mutex<Vec<(usize, T)>>,
 }
 
 impl<T: Scalar> LlEmitLdlt<T> {
@@ -151,6 +155,7 @@ impl<T: Scalar> LlEmitLdlt<T> {
             inertia_pos: AtomicUsize::new(0),
             inertia_neg: AtomicUsize::new(0),
             inertia_zero: AtomicUsize::new(0),
+            floors: Default::default(),
         }
     }
     #[inline]
@@ -226,11 +231,12 @@ fn static_pivot_floor<T: Scalar>(values: &[T], opts: &SolverSettings) -> Option<
 /// permutation. There is **no contribution-block stack and no extract copy-out**
 /// (the panels are the factor), so the transient is just the factor itself (the
 /// PARDISO memory profile), including indefinite (zero-/tiny-diagonal) systems
-/// via the 2x2 blocks.
+/// via the 2x2 blocks. `inp` is the matrix scaled by `scale` when given.
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
     inp: Input<T>,
+    scale: Option<&[f64]>,
     opts: &SolverSettings,
     storage: Option<PanelStorage<T>>,
     pools: &BkPools<T>,
@@ -243,24 +249,11 @@ fn factor_left_looking<T: Scalar>(
     // written once and read only by ancestors -> no synchronization needed beyond
     // the forest's dependency order.
     let emit = LlEmitLdlt::<T>::new(sym, sched, storage);
-    let n_perturbed_atomic = AtomicUsize::new(0);
     let kt = opts.kernel();
-    let factor_node = |s: usize| {
-        ll_factor_node(
-            s,
-            sym,
-            inp,
-            sched,
-            pools,
-            &emit,
-            perturb_floor,
-            &n_perturbed_atomic,
-            kt,
-        )
-    };
+    let factor_node =
+        |s: usize| ll_factor_node(s, sym, inp, sched, pools, &emit, perturb_floor, kt);
     let emit_free = |k: usize| ldlt_emit_and_free(k, &emit, sym, sched);
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
-    let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     let LlEmitLdlt {
@@ -273,6 +266,7 @@ fn factor_left_looking<T: Scalar>(
         inertia_pos,
         inertia_neg,
         inertia_zero,
+        floors,
         ..
     } = emit;
     let (factor, n_zeros) = arena.finish(n, sym.supernodes.iter().map(|sn| sn.ncol), |s| unsafe {
@@ -282,6 +276,23 @@ fn factor_left_looking<T: Scalar>(
     let d_diag: Vec<T> = (0..n).map(|e| unsafe { *d_diag.get(e) }).collect();
     let d_subdiag: Vec<T> = (0..n).map(|e| unsafe { *d_subdiag.get(e) }).collect();
     let two_by_two: Vec<bool> = (0..n).map(|e| unsafe { *two_by_two.get(e) }).collect();
+    // The factor is of `S A S + Delta` (`S` the scaling) with `Delta` on the
+    // diagonal in elimination order: of `A + E`, `E = S^-1 Delta S^-1` at
+    // each position's original index.
+    let mut floors = floors.into_inner().unwrap_or_else(|e| e.into_inner());
+    floors.sort_unstable_by_key(|&(e, _)| e);
+    let floors = floors
+        .into_iter()
+        .map(|(e, delta)| {
+            let i = perm[e];
+            let s = scale.map_or(1.0, |s| s[i]);
+            PivotFloor {
+                row: i,
+                col: i,
+                delta: delta * T::from_real((s * s).recip()),
+            }
+        })
+        .collect();
     let inertia = Inertia::new(
         inertia_pos.load(Ordering::Relaxed),
         inertia_neg.load(Ordering::Relaxed),
@@ -297,7 +308,7 @@ fn factor_left_looking<T: Scalar>(
             two_by_two,
             perm,
             supernode_parent,
-            n_perturbed,
+            floors,
             inertia,
         },
         n_zeros,

@@ -603,16 +603,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
         }
     }
 
-    /// Pivots the active factor's static regularization lifted.
-    pub fn n_perturbed(&self) -> usize {
-        match self.active {
-            Some(AutoBackend::Klu) => self.klu_factor().map_or(0, |s| s.n_perturbed()),
-            Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map_or(0, |s| s.n_perturbed()),
-            Some(AutoBackend::Lu) => self.lu.as_ref().map_or(0, |s| s.n_perturbed()),
-            None => 0,
-        }
-    }
-
     /// The active factor's [`Diagnostics`](crate::Diagnostics) with this
     /// solver's solve accounts; empty without a factor.
     pub fn diagnostics(&self) -> crate::Diagnostics {
@@ -691,6 +681,16 @@ impl<T: Scalar> SolveCore<T> for AutoSolver<'_, T> {
     }
     fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
         &self.works
+    }
+
+    /// The active factor's.
+    fn perturbations(&self) -> &[crate::PivotFloor<T>] {
+        match self.active {
+            Some(AutoBackend::Klu) => self.klu_factor().map_or(&[], |s| s.perturbations()),
+            Some(AutoBackend::Ldlt) => self.ldlt.as_ref().map_or(&[], |s| s.perturbations()),
+            Some(AutoBackend::Lu) => self.lu.as_ref().map_or(&[], |s| s.perturbations()),
+            None => &[],
+        }
     }
 
     fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {

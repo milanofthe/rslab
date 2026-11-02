@@ -8,7 +8,7 @@
 
 use crate::diagnostics::SolveCounter;
 use crate::error::RslabError;
-use crate::refine::{refine_in_place, RefineOperator, RefineOutcome, RefinePolicy};
+use crate::refine::{refine_in_place, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy};
 use crate::scalar::Scalar;
 
 /// The scratch of a solve, lent by the caller: sized by the first solve and
@@ -111,6 +111,8 @@ pub(crate) trait SolveCore<T: Scalar> {
     /// The determinant of the matrix that was factored, from the pivots,
     /// the permutations and the scalings.
     fn log_det_raw(&self) -> Result<LogDet<T>, RslabError>;
+    /// The pivot floors `E` of the factor, which is of `A + E`.
+    fn perturbations(&self) -> &[PivotFloor<T>];
 }
 
 /// A determinant as `phase * exp(log_abs)`: a product of many pivots
@@ -278,7 +280,9 @@ where
     }
     check(n, b.len(), 1)?;
     check(n, x.len(), 1)?;
-    refine_in_place(a, b, x, policy, |r| s.solve_raw(r, 1, false))
+    refine_in_place(a, s.perturbations(), b, x, policy, |r| {
+        s.solve_raw(r, 1, false)
+    })
 }
 
 pub(crate) fn solve_refined<T, S, A>(
@@ -380,7 +384,10 @@ macro_rules! direct_solver {
             /// Solve `A x = b` with iterative refinement against `a`, the matrix
             /// this factor was computed from (or the exact one it
             /// approximates), under `policy`, reporting the backward error
-            /// reached.
+            /// reached. With [`RefineSystem::Factored`] the system is `a`
+            /// plus the factor's [`perturbations`](Self::perturbations).
+            ///
+            /// [`RefineSystem::Factored`]: $crate::RefineSystem::Factored
             pub fn solve_refined<A: $crate::refine::RefineOperator<T> + ?Sized>(
                 &self,
                 a: &A,
@@ -415,6 +422,23 @@ macro_rules! direct_solver {
             /// against the identity.
             pub fn inverse(&self) -> Result<Vec<T>, $crate::RslabError> {
                 $crate::numeric::direct::inverse(self)
+            }
+
+            /// The pivot floors static pivoting added: the factor is the
+            /// exact factor of `A + E`, these the entries of `E` in `A`'s
+            /// indices, ordered by elimination. Empty for an exact factor
+            /// (and always on the KLU path, which reports a vanishing pivot
+            /// as [`RslabError::SingularBasis`] instead).
+            ///
+            /// [`RslabError::SingularBasis`]: $crate::RslabError::SingularBasis
+            pub fn perturbations(&self) -> &[$crate::PivotFloor<T>] {
+                $crate::numeric::direct::SolveCore::perturbations(self)
+            }
+
+            /// Pivots the static floor lifted, the entries of
+            /// [`perturbations`](Self::perturbations).
+            pub fn n_perturbed(&self) -> usize {
+                $solver::perturbations(self).len()
             }
 
             /// Refine an existing iterate `x` of `A x = b` in place.
@@ -479,6 +503,9 @@ macro_rules! direct_solver {
             }
             fn n_perturbed(&self) -> usize {
                 $solver::n_perturbed(self)
+            }
+            fn perturbations(&self) -> std::borrow::Cow<'_, [$crate::PivotFloor<T>]> {
+                std::borrow::Cow::Borrowed($solver::perturbations(self))
             }
             fn log_det(&self) -> Result<(T, f64), $crate::RslabError> {
                 $solver::log_det(self)
