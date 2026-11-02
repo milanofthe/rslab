@@ -13,17 +13,22 @@ use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
 use crate::numeric::supernodal::panel::{PanelArena, PanelFactor, PanelOut, PanelStorage};
 use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule};
+use crate::refine::PivotFloor;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
-/// Fold the MC64 row matching back into the factors: pivot rows and the row
-/// scaling are reported in `A`'s row indices, as the solves expect.
+/// Fold the MC64 row matching back into the factors: pivot rows, the pivot
+/// floors and the row scaling are reported in `A`'s row indices, as the
+/// solves expect.
 fn finish_matching<T: Scalar>(fac: &mut LuNumeric<T>, lusym: &LuSymbolic) {
     if let Some(m) = &lusym.matching {
         for e in fac.perm_row.iter_mut() {
             *e = m.row_of[*e];
+        }
+        for f in fac.floors.iter_mut() {
+            f.row = m.row_of[f.row];
         }
         fac.d_row = m.r.clone();
     }
@@ -47,6 +52,9 @@ pub(super) struct LlEmit<T> {
     pub(super) row_pos_of_g: Cells<usize>,
     pub(super) perm: Cells<usize>,
     pub(super) perm_row: Cells<usize>,
+    /// The pivot floors, `(elimination position, what the floor added to
+    /// the pivot)`, each node's pushed once it is factored.
+    pub(super) floors: std::sync::Mutex<Vec<(usize, T)>>,
 }
 
 impl<T: Scalar> LlEmit<T> {
@@ -78,6 +86,7 @@ impl<T: Scalar> LlEmit<T> {
             row_pos_of_g: Cells::new(n, usize::MAX),
             perm: Cells::new(n, 0),
             perm_row: Cells::new(n, 0),
+            floors: Default::default(),
         }
     }
     #[inline]
@@ -155,30 +164,17 @@ fn factor_lu_left_looking<T: Scalar>(
 ) -> Result<LuNumeric<T>, RslabError> {
     let n = sym.n;
     let emit = LlEmit::<T>::new(sym, sched, st, storage);
-    let n_perturbed_atomic = AtomicUsize::new(0);
-    let factor_node = |s: usize| {
-        lu_ll_factor_node(
-            s,
-            sym,
-            inp,
-            sched,
-            st,
-            pools,
-            &emit,
-            perturb_floor,
-            &n_perturbed_atomic,
-            kt,
-        )
-    };
+    let factor_node =
+        |s: usize| lu_ll_factor_node(s, sym, inp, sched, st, pools, &emit, perturb_floor, kt);
     let emit_free = |k: usize| emit_and_free(k, &emit, sym, st);
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
-    let n_perturbed = n_perturbed_atomic.load(Ordering::Relaxed);
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     let LlEmit {
         l_arena,
         u_arena,
         panels,
+        floors,
         ..
     } = emit;
     let (l, zeros_l) = l_arena.finish(n, sym.supernodes.iter().map(|sn| sn.ncol), |s| unsafe {
@@ -189,6 +185,22 @@ fn factor_lu_left_looking<T: Scalar>(
     });
     let perm: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm.get(e) }).collect();
     let perm_row: Vec<usize> = (0..n).map(|e| unsafe { *emit.perm_row.get(e) }).collect();
+    // The factor is of `A_hat + Delta`, `A_hat = D_r A D_c` (`B`'s rows under
+    // a matching) and `Delta` diagonal in elimination order: of `A + E` with
+    // `E = D_r^-1 Delta D_c^-1` at each position's pivot row and column.
+    let mut floors = floors.into_inner().unwrap_or_else(|e| e.into_inner());
+    floors.sort_unstable_by_key(|&(e, _)| e);
+    let floors = floors
+        .into_iter()
+        .map(|(e, delta)| {
+            let (row, col) = (perm_row[e], perm[e]);
+            PivotFloor {
+                row,
+                col,
+                delta: delta * T::from_real((d_row[row] * d_col[col]).recip()),
+            }
+        })
+        .collect();
 
     Ok(LuNumeric {
         l,
@@ -198,7 +210,7 @@ fn factor_lu_left_looking<T: Scalar>(
         d_row: d_row.to_vec(),
         d_col: d_col.to_vec(),
         supernode_parent,
-        n_perturbed,
+        floors,
         n_zeros: zeros_l + zeros_u,
     })
 }
@@ -230,7 +242,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
             d_row: Vec::new(),
             d_col: Vec::new(),
             supernode_parent: Vec::new(),
-            n_perturbed: 0,
+            floors: Vec::new(),
             n_zeros: 0,
         });
     }

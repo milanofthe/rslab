@@ -40,7 +40,11 @@ pub enum ZeroPivotAction {
     /// column live (LAPACK / MA57-style static pivoting). The factor satisfies
     /// `L*D*L^T = A + delta ` for the produced `L`, `D`; `delta ` is bounded in the worst
     /// case by `||A[:,k]||^2 / abs_floor`, so drive iterative refinement against
-    /// the unperturbed `A` for tight tolerances. The pivots it is compared
+    /// the unperturbed `A` for tight tolerances. The factor reports `delta`
+    /// in `A`'s indices ([`LuSolver::perturbations`](crate::LuSolver::perturbations)),
+    /// and [`RefineSystem::Factored`](crate::RefineSystem::Factored) refines
+    /// against `A + delta` instead, to the factor's own accuracy whatever its
+    /// size. The pivots it is compared
     /// with are those of the equilibrated matrix (entries of order one), so
     /// `abs_floor` is relative to it: about `sqrt(eps)` (1e-8) lifts only
     /// pivots that vanish to working precision, a larger floor also lifts

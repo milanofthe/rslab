@@ -210,7 +210,9 @@ pub use io::mtx::{
 };
 pub use logging::{LogLevel, LogSink};
 pub use memory::MemoryPlan;
-pub use refine::{BackwardError, RefineOperator, RefineOutcome, RefinePolicy};
+pub use refine::{
+    BackwardError, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy, RefineSystem,
+};
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
 pub use stored::{single_for, Stored};

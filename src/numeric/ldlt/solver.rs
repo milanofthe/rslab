@@ -125,13 +125,6 @@ impl<T: Scalar> LdltSolver<T> {
         self.diagnostics.factor_nnz as usize
     }
 
-    /// Number of statically perturbed pivots (preconditioner mode). Zero for
-    /// an exact factorization. A nonzero count means the stored factor is of a
-    /// slightly perturbed `A + E`; solve via iterative refinement / Krylov.
-    pub fn n_perturbed(&self) -> usize {
-        self.factors.n_perturbed
-    }
-
     /// Inertia (counts of positive/negative/zero eigenvalues) of the factored
     /// matrix. **Exact only for a real symmetric matrix** (`T = f64`/`f32`);
     /// equilibration uses a real diagonal `D > 0`, so the signs are preserved.
@@ -160,6 +153,10 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
     }
     fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
         &self.works
+    }
+
+    fn perturbations(&self) -> &[crate::PivotFloor<T>] {
+        &self.factors.floors
     }
 
     /// `P S A S P^T = L D L^T`: `det A` is the product of `D`'s 1x1 and
@@ -739,7 +736,7 @@ impl LdltSymbolic {
             estimate: Some(estimate),
             decisions,
             numeric: crate::diagnostics::NumericReport {
-                perturbed: factors.n_perturbed,
+                perturbed: factors.floors.len(),
                 two_by_two: Some(factors.two_by_two.iter().filter(|&&b| b).count()),
                 inertia: Some((
                     factors.inertia.positive,

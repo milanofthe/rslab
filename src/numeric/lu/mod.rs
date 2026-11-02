@@ -17,8 +17,9 @@
 //! * **Threshold partial pivoting** (UMFPACK-style, `THRESH = 0.1`), bounded to
 //!   each panel's fully-summed block: the diagonal is kept unless it falls below
 //!   `THRESH * |colmax|`, in which case the column max is brought up. Sub-floor
-//!   pivots are perturbed in preconditioner mode ([`ZeroPivotAction::PerturbToEps`])
-//!   or rejected in exact mode. Pivoting stays cheap on the equilibrated,
+//!   pivots are perturbed in preconditioner mode ([`ZeroPivotAction::PerturbToEps`],
+//!   reported in [`perturbations`](crate::LuSolver::perturbations)) or
+//!   rejected in exact mode. Pivoting stays cheap on the equilibrated,
 //!   unit-diagonal MoM matrices while guarding the genuinely ill-scaled columns.
 //! * The factors `L` (unit lower) and `U^T` (the pivots on its diagonal) are
 //!   kept in supernodal panel form (`PanelFactor`), in factorization order:

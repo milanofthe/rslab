@@ -388,7 +388,7 @@ impl LuSymbolic {
         (
             PanelFactor<T>,
             PanelFactor<T>,
-            LuPivots,
+            LuPivots<T>,
             usize,
             crate::diagnostics::Diagnostics,
             SolverSettings,
@@ -425,7 +425,7 @@ impl LuSymbolic {
             estimate: Some(estimate),
             decisions,
             numeric: crate::diagnostics::NumericReport {
-                perturbed: factors.n_perturbed,
+                perturbed: factors.floors.len(),
                 two_by_two: None,
                 inertia: None,
                 // from the factor the solver holds, see `diagnostics`
@@ -677,7 +677,7 @@ impl LuSymbolic {
 /// [`LuSolver::factor`].
 #[derive(Clone)]
 pub struct LuSolver<T> {
-    factors: LuPivots,
+    factors: LuPivots<T>,
     /// `L` and `U^T` (the panels, their only storage) with the tree schedule
     /// of [`crate::numeric::supernodal::solve`]; `factors` carries the
     /// permutations, scalings and counters with empty CSC arrays.
@@ -733,11 +733,6 @@ impl<T: Scalar> LuSolver<T> {
         self.nnz
     }
 
-    /// Number of statically perturbed pivots (preconditioner mode).
-    pub fn n_perturbed(&self) -> usize {
-        self.factors.n_perturbed
-    }
-
     /// The matrix dimension.
     pub fn n(&self) -> usize {
         self.factors.n
@@ -756,6 +751,10 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
     }
     fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
         &self.works
+    }
+
+    fn perturbations(&self) -> &[crate::PivotFloor<T>] {
+        &self.factors.floors
     }
 
     /// `P_r D_r A D_c P_c^T = L U`: `det A` is the product of `U`'s

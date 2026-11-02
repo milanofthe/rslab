@@ -19,6 +19,10 @@
 //!
 //! Rows whose denominator underflows are skipped rather than reported as
 //! infinite: a structurally empty row carries no information about the solve.
+//!
+//! A factor whose pivots static pivoting lifted is the exact factor of
+//! `A + E`, not of `A`, so refinement has two systems it can solve; see
+//! [`RefineSystem`].
 
 use crate::error::RslabError;
 use crate::scalar::Scalar;
@@ -37,6 +41,56 @@ pub enum BackwardError {
     Componentwise,
 }
 
+/// One entry of the perturbation `E` static pivoting adds to the matrix:
+/// the factor is the exact factor of `A + E`, `E[row, col] = delta`, in the
+/// indices of the caller's `A` (the row matching, the permutations and the
+/// equilibration undone). Each lifted pivot is one entry; no two entries
+/// share a row or a column.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PivotFloor<T> {
+    /// Row of `A`.
+    pub row: usize,
+    /// Column of `A`.
+    pub col: usize,
+    /// What the floor added to the entry.
+    pub delta: T,
+}
+
+impl<T: Scalar> PivotFloor<T> {
+    /// The same entry in the field `H` this one is the lower-precision twin of.
+    pub(crate) fn promote<H: Scalar<Low = T>>(self) -> PivotFloor<H> {
+        PivotFloor {
+            row: self.row,
+            col: self.col,
+            delta: H::promote(self.delta),
+        }
+    }
+}
+
+/// Which system refinement solves. A factor whose pivots static pivoting
+/// lifted is the exact factor of `A + E`, not of `A`: `E` holds one entry per
+/// lifted pivot, the [`PivotFloor`]s the factorization reports. Against the
+/// caller's `A` refinement is the classic static pivoting plus refinement of
+/// MA57 and MUMPS, which converges while `E` is small against `A` (the
+/// correction contracts by `(A + E)^-1 E`); against the factor's own `A + E`
+/// it converges at the factor's accuracy whatever the size of `E`, the
+/// accurate apply of the factor as an operator, such as a low-precision
+/// factor refined to the accuracy of the high-precision field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RefineSystem {
+    /// The operator the caller passes, `A`: the residuals undo the pivot
+    /// floors, which pays while they are small against `A` and stagnates
+    /// otherwise. The default, the system the caller asked to solve.
+    #[default]
+    Matrix,
+    /// The matrix the factor is of, `A + E`, `E` its [`PivotFloor`]s: the
+    /// accurate solve of the perturbed system, for a factor used as an
+    /// operator or preconditioner. The same as [`Matrix`](Self::Matrix) for a
+    /// factor without floors. The measured backward error is then that of
+    /// `A + E`, its componentwise denominator `(|A| + |E|) |x| + |b|`.
+    Factored,
+}
+
 /// What the caller asks refinement to achieve.
 #[derive(Debug, Clone, Copy)]
 pub struct RefinePolicy {
@@ -47,6 +101,8 @@ pub struct RefinePolicy {
     pub target: f64,
     /// Which backward error to measure.
     pub measure: BackwardError,
+    /// Which system to refine: the caller's matrix or the factor's own.
+    pub system: RefineSystem,
 }
 
 impl Default for RefinePolicy {
@@ -55,6 +111,7 @@ impl Default for RefinePolicy {
             max_steps: crate::constants::REFINE_MAX_STEPS,
             target: crate::constants::REFINE_TARGET,
             measure: BackwardError::default(),
+            system: RefineSystem::default(),
         }
     }
 }
@@ -66,6 +123,7 @@ impl RefinePolicy {
             max_steps,
             target: 0.0,
             measure: BackwardError::default(),
+            system: RefineSystem::default(),
         }
     }
 
@@ -78,6 +136,12 @@ impl RefinePolicy {
     /// Builder: stop at this backward error.
     pub fn with_target(mut self, target: f64) -> Self {
         self.target = target;
+        self
+    }
+
+    /// Builder: refine this system.
+    pub fn with_system(mut self, system: RefineSystem) -> Self {
+        self.system = system;
         self
     }
 }
@@ -151,6 +215,32 @@ impl<T: Scalar> RefineOperator<T> for GeneralCsc<T> {
     }
 }
 
+/// `A + E`: the operator `a` plus the pivot floors of a factor.
+struct Floored<'a, T, A: ?Sized> {
+    a: &'a A,
+    floors: &'a [PivotFloor<T>],
+}
+
+impl<T: Scalar, A: RefineOperator<T> + ?Sized> RefineOperator<T> for Floored<'_, T, A> {
+    fn dim(&self) -> usize {
+        self.a.dim()
+    }
+    fn apply(&self, x: &[T], y: &mut [T]) {
+        self.a.apply(x, y);
+        for f in self.floors {
+            y[f.row] = y[f.row] + f.delta * x[f.col];
+        }
+    }
+    /// `(|A| + |E|) |x|`: the magnitudes of the two parts, not of their sum,
+    /// which only the factor's frame knows.
+    fn apply_abs(&self, x: &[T], y: &mut [f64]) {
+        self.a.apply_abs(x, y);
+        for f in self.floors {
+            y[f.row] += f.delta.magnitude() * x[f.col].magnitude();
+        }
+    }
+}
+
 /// `||r||_inf / (||A||_inf ||x||_inf + ||b||_inf)`, with `a_inf = ||A||_inf`
 /// supplied by the caller (it is a property of the matrix, not of the iterate).
 fn normwise<T: Scalar>(r: &[T], x: &[T], b: &[T], a_inf: f64) -> f64 {
@@ -176,13 +266,36 @@ fn componentwise<T: Scalar>(r: &[T], b: &[T], abs_ax: &[f64]) -> f64 {
     worst
 }
 
-/// Refine `x` in place against `a` and `b`, using `solve` for the correction
-/// steps, and report what was achieved.
+/// Refine `x` in place for `b`, using `solve` (a factor of `a + E`, `E` its
+/// pivot `floors`) for the correction steps, against the system
+/// `policy.system` names, and report what was achieved.
+pub(crate) fn refine_in_place<T, A, S>(
+    a: &A,
+    floors: &[PivotFloor<T>],
+    b: &[T],
+    x: &mut [T],
+    policy: &RefinePolicy,
+    solve: S,
+) -> Result<RefineOutcome, RslabError>
+where
+    T: Scalar,
+    A: RefineOperator<T> + ?Sized,
+    S: FnMut(&[T]) -> Result<Vec<T>, RslabError>,
+{
+    match policy.system {
+        RefineSystem::Factored if !floors.is_empty() => {
+            refine_against(&Floored { a, floors }, b, x, policy, solve)
+        }
+        _ => refine_against(a, b, x, policy, solve),
+    }
+}
+
+/// Refine `x` in place against `a` and `b`.
 ///
 /// The iterate returned is the best one seen, not the last: refinement is not
 /// monotone on ill-conditioned systems, and returning a worse vector than the
 /// one already computed would be a regression the caller cannot detect.
-pub(crate) fn refine_in_place<T, A, S>(
+fn refine_against<T, A, S>(
     a: &A,
     b: &[T],
     x: &mut [T],

@@ -261,7 +261,9 @@ plain_knobs! {
 /// preconditioner : float, optional
 ///     Static-pivot floor: a pivot with magnitude below it is lifted to it,
 ///     so the factorization never fails and produces the factor of a nearby
-///     ``A + E``. Recover accuracy with ``solve(b, refine=k)``. The floor
+///     ``A + E``. Recover accuracy with ``solve(b, refine=k)``, or solve
+///     ``A + E`` itself to working accuracy with
+///     ``solve(b, refine=k, system='factored')``. The floor
 ///     applies to the equilibrated matrix (entries of order one): ``1e-8``
 ///     (about ``sqrt(eps)``) lifts only pivots that vanish to working
 ///     precision; a larger floor also lifts genuine small pivots (those of

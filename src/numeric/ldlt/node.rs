@@ -13,7 +13,6 @@ use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::LlSchedule;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
-use std::sync::atomic::AtomicUsize;
 
 /// Factor one supernode's panel: assemble `A`, apply every descendant's `cmod`
 /// update (BLAS-3 with scalar fallback), then `cdiv` (partial 1x1 LDL^T). Reads
@@ -29,7 +28,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
     pools: &BkPools<T>,
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
-    n_perturbed: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     kt.interrupted()?;
@@ -260,17 +258,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
             }
         }
     }
-    ll_cdiv_emit(
-        s,
-        sym,
-        sched,
-        pools,
-        emit,
-        perturb_floor,
-        n_perturbed,
-        kt,
-        panel,
-    )
+    ll_cdiv_emit(s, sym, sched, pools, emit, perturb_floor, kt, panel)
 }
 
 /// Heap bytes [`ll_factor_node`] allocates for supernode `s` while it runs,

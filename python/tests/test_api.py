@@ -314,6 +314,44 @@ def test_solve_refine_target_and_measure():
         f.solve(b, refine=1, measure="sideways")
 
 
+def _floored_saddle(m=10, n2=24):
+    # [K B; B^T 0] with every third constraint a copy of the one before:
+    # singular, so static pivoting lifts pivots.
+    n1 = m * m
+    t = []
+    for j in range(n1):
+        x, y = j % m, j // m
+        t.append((j, j, 4.0 + 0.3j))
+        if x > 0:
+            t.append((j - 1, j, -1.2 + 0.1j))
+        if x + 1 < m:
+            t.append((j + 1, j, -0.8))
+        if y > 0:
+            t.append((j - m, j, -1.2 + 0.1j))
+        if y + 1 < m:
+            t.append((j + m, j, -0.8))
+    for c in range(n2):
+        i, j = (4 * (c - 1) if c % 3 == 2 else 4 * c), n1 + c
+        t += [(i, j, 1.0), (i + 1, j, -1.0), (j, i, 1.0), (j, i + 1, -1.0)]
+    r, c, v = zip(*t)
+    n = n1 + n2
+    return sp.csc_matrix((np.array(v, dtype=complex), (r, c)), shape=(n, n))
+
+
+def test_solve_refine_factored_system():
+    A = _floored_saddle()
+    f = rslab.lu(A, preconditioner=1e-2)
+    rows, cols, deltas = f.perturbations()
+    assert len(deltas) == f.n_perturbed > 0
+    E = sp.csc_matrix((deltas, (rows, cols)), shape=A.shape)
+    b = np.arange(A.shape[0]) + 1j
+    x = f.solve(b, refine=3, system="factored")
+    assert _res(A + E, x, b) < 1e-13
+    assert _res(A, x, b) > 1e-6
+    with pytest.raises(ValueError):
+        f.solve(b, refine=1, system="sideways")
+
+
 def test_log_sink_and_level():
     seen = []
     rslab.set_log_sink(lambda level, msg: seen.append((level, msg)))

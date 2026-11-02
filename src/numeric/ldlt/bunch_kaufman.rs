@@ -15,7 +15,7 @@ use crate::numeric::supernodal::PanelPtr as LdltPanelPtr;
 use crate::numeric::supernodal::ScratchPool;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 /// One running [`ll_cdiv_emit`]'s buffers (see there).
 pub(super) struct BkScratch<T> {
@@ -323,7 +323,8 @@ unsafe fn flush_trailing<T: Scalar>(
 /// `nrow` height), which is what makes the cdiv panel lookahead sound: the
 /// step for panel `p+1` may run concurrently with the wide part of panel
 /// `p`'s deferred Schur update (columns `>= ke2`), the two column ranges are
-/// disjoint. Returns the number of perturbed pivots.
+/// disjoint. Pushes each pivot floor, `(column of the node, what the floor
+/// added to the diagonal)`, to `floors`.
 #[allow(clippy::too_many_arguments)]
 fn ll_bk_panel_step<T: Scalar>(
     panel: &mut [T],
@@ -344,8 +345,8 @@ fn ll_bk_panel_step<T: Scalar>(
     deep_swaps: &mut [usize],
     mult_snap: &mut [T],
     wpool: &ScratchPool<Vec<T>>,
-) -> Result<usize, RslabError> {
-    let mut perturbed = 0usize;
+    floors: &mut Vec<(usize, T)>,
+) -> Result<(), RslabError> {
     // getf2: unblocked Bunch-Kaufman over the panel columns [kb, ke), with
     // EVERYTHING bounded to the panel rows `< ke`: pivot candidates,
     // rank-1/rank-2 updates, interchanges. The deep rows `[ke, nrow)` -
@@ -418,9 +419,10 @@ fn ll_bk_panel_step<T: Scalar>(
             let mut dk = panel[k + k * nrow];
             match perturb_floor {
                 Some(floor) if dk.magnitude() < floor => {
-                    dk = perturb_pivot(dk, floor);
+                    let lifted = perturb_pivot(dk, floor);
+                    floors.push((k, lifted - dk));
+                    dk = lifted;
                     panel[k + k * nrow] = dk;
-                    perturbed += 1;
                 }
                 None if dk == T::zero() => {
                     return Err(RslabError::NumericallyRankDeficient);
@@ -461,14 +463,25 @@ fn ll_bk_panel_step<T: Scalar>(
                 Some(floor) => {
                     let fl = (floor * floor).max(growth_floor);
                     if det.magnitude() < fl {
-                        let lift = floor.max(scale * GROWTH_EPS.sqrt());
+                        // Lift both diagonal entries in steps of `step` until
+                        // the block clears the floor, so the stored block is
+                        // the exact block of the matrix plus the lift: the
+                        // determinant is a monic quadratic in the lift whose
+                        // roots, when it is still below the floor at one
+                        // step, lie within a few steps of zero.
+                        let step = floor.max(scale * GROWTH_EPS.sqrt());
+                        let mut lift = step;
+                        while ((d11 + T::from_real(lift)) * (d22 + T::from_real(lift)) - d21 * d21)
+                            .magnitude()
+                            < fl
+                        {
+                            lift += step;
+                        }
                         d11 = d11 + T::from_real(lift);
                         d22 = d22 + T::from_real(lift);
                         det = d11 * d22 - d21 * d21;
-                        if det.magnitude() < fl {
-                            det = det + T::from_real(fl);
-                        }
-                        perturbed += 1;
+                        floors.push((k, T::from_real(lift)));
+                        floors.push((k + 1, T::from_real(lift)));
                     }
                 }
                 None if det.magnitude() <= growth_floor => {
@@ -574,7 +587,7 @@ fn ll_bk_panel_step<T: Scalar>(
         }
     }
 
-    Ok(perturbed)
+    Ok(())
 }
 
 /// Heap bytes [`ll_cdiv_emit`] allocates for an `nrow x ncol` panel besides
@@ -646,7 +659,6 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     pools: &BkPools<T>,
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
-    n_perturbed: &AtomicUsize,
     kt: KernelTuning,
     panel: &mut [T],
 ) -> Result<(), RslabError> {
@@ -731,7 +743,8 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     for v in [&mut *l21buf, &mut *gbuf, &mut *tmp, &mut *tmp_w] {
         v.clear();
     }
-    let mut local_perturbed = 0usize;
+    // The node's pivot floors, `(column of the node, what the floor added)`.
+    let mut floors: Vec<(usize, T)> = Vec::new();
     // The high-water mark of columns already factored ahead by the lookahead
     // join.
     let mut done_through = 0usize;
@@ -758,13 +771,9 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 &mut *deep_swaps,
                 &mut *mult_snap,
                 &pools.w,
+                &mut floors,
             );
-            match r {
-                Ok(np) => local_perturbed += np,
-                Err(e) => {
-                    return Err(e);
-                }
-            }
+            r?;
         }
         // Deferred panel trailing update: panel[ke.., ke..ncol] -= L21*D*R^T, where
         // L21 = panel rows [ke,nrow) x panel cols [kb,ke) (mtxpw), G = L21*D (block-
@@ -849,6 +858,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 tmp_w.resize(mt * wide, T::zero());
                 let (left, right) = panel.split_at_mut(ke2 * nrow);
                 let (gbuf_ref, l21_ref, tw_ref) = (&gbuf, &l21buf, &mut *tmp_w);
+                let floors_ref = &mut floors;
                 let (step_res, ()) = crate::parallel::join(
                     || {
                         ll_bk_panel_step(
@@ -870,6 +880,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                             &mut *deep_swaps_b,
                             &mut *mult_snap_b,
                             &pools.w,
+                            floors_ref,
                         )
                     },
                     || {
@@ -899,12 +910,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                         }
                     },
                 );
-                match step_res {
-                    Ok(np) => local_perturbed += np,
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
+                step_res?;
                 done_through = ke2;
             } else {
                 tmp.clear();
@@ -955,13 +961,14 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
         }
         kb = ke;
     }
-    if local_perturbed > 0 {
-        n_perturbed.fetch_add(local_perturbed, Ordering::Relaxed);
+    let eoff = emit.e_offset[s];
+    if !floors.is_empty() {
+        let mut all = emit.floors.lock().unwrap_or_else(|e| e.into_inner());
+        all.extend(floors.into_iter().map(|(k, delta)| (eoff + k, delta)));
     }
     // Populate the O(n) emit maps + inertia for `s` (block-aware over its 1x1/2x2
     // Bunch-Kaufman D), mirroring the legacy pass-1 emit. The `e`-numbering is one
     // position per column, so `e_offset[s] + p` is column `p`'s elimination index.
-    let eoff = emit.e_offset[s];
     let (mut ipos, mut ineg, mut izero) = (0usize, 0usize, 0usize);
     let mut pp = 0;
     while pp < ncol {

@@ -103,6 +103,7 @@ fn refinement_against_the_double_matrix_recovers_double_accuracy() {
         max_steps: 10,
         target: 1e-14,
         measure: BackwardError::Normwise,
+        ..Default::default()
     };
     // Real symmetric: LDL^T in f32 under f64 refinement.
     let (n, r, c, v) = grid(40, true, 4.5f64, -1.0);
