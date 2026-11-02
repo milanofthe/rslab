@@ -61,4 +61,4 @@ pub use operator::{
 };
 pub use recycle::{gmres_recycled, Recycle, RecycleScalar};
 pub use result::{KrylovResult, StopReason};
-pub use settings::KrylovSettings;
+pub use settings::{BasisSwitch, BlockBasis, KrylovSettings};

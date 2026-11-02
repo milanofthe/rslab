@@ -5,7 +5,7 @@ use crate::constants::{
     KRYLOV_RESTART_MAX, KRYLOV_RESTART_MIN, KRYLOV_TOL,
 };
 use crate::scalar::Scalar;
-use crate::stored::Stored;
+use crate::stored::{single_for, Stored};
 
 /// Settings of [`gmres`](super::gmres), [`gmres_block`](super::gmres_block),
 /// [`gmres_recycled`](super::gmres_recycled), [`cocg`](super::cocg) and
@@ -51,6 +51,7 @@ pub struct KrylovSettings {
     /// preconditioner that is one fixed operator (a factorization): only `V` is
     /// kept and the solution formed as `x0 + M^-1 (V y)`, one batched
     /// preconditioner apply per residual check; the bases take half the memory.
+    /// With [`downgrade`](Self::downgrade) `Z` is kept while it fits.
     /// Default `true`.
     pub flexible: bool,
     /// A block GMRES stores its bases `V` and `Z` in the single-precision twin of
@@ -63,8 +64,9 @@ pub struct KrylovSettings {
     /// [`single_for`](crate::single_for)'s tolerance (`9.5e-7`) that never shows;
     /// below it a column found above the tolerance restarts from its true residual,
     /// at the cost of more iterations (34 against 28 to `1e-10` on a grid restarting
-    /// every 30 steps). Fixed at [`BlockGmres::new`](super::BlockGmres::new) for
-    /// every call of the solve. The default restart
+    /// every 30 steps). Set at [`BlockGmres::new`](super::BlockGmres::new) for
+    /// every call of the solve, or taken by one where the memory runs out
+    /// ([`downgrade`](Self::downgrade)). The default restart
     /// ([`basis_budget_bytes`](Self::basis_budget_bytes)) and the memory
     /// ([`room_bytes`](Self::room_bytes), [`block_bytes`](Self::block_bytes)) count
     /// the bytes stored. Without effect for the single fields (their own twin).
@@ -78,6 +80,80 @@ pub struct KrylovSettings {
     /// A live bound, the memory the process has left, is
     /// [`BlockGmres::within`](super::BlockGmres::within). `None` (default): no bound.
     pub room_bytes: Option<u64>,
+    /// The preconditioner is one fixed operator, so a block GMRES may lower its bases
+    /// where they would outgrow the memory, before any column closes its cycle for
+    /// room: a [`flexible`](Self::flexible) one first drops `Z` from every column (its
+    /// open cycles carry on, their solutions formed as `x0 + M^-1 (V y)` from then
+    /// on), then the bases are rounded to single precision
+    /// ([`basis_single`](Self::basis_single)) where the tolerance of the call allows
+    /// it ([`single_for`](crate::single_for)). Each step is taken once a solve, when
+    /// the next step of the columns stepping would not fit (as a column is closed for
+    /// room otherwise), and kept; the solve reports it
+    /// ([`BlockKrylovResult::lowered`](super::BlockKrylovResult::lowered)).
+    /// `flexible` then means: keep `Z` while it fits. [`block_bytes`](Self::block_bytes)
+    /// plans the bases a solve ends in. Default `false`: the bases stay as set.
+    pub downgrade: bool,
+}
+
+/// How a block GMRES stores its bases: with the preconditioned basis `Z` beside `V`
+/// ([`KrylovSettings::flexible`]), in single precision
+/// ([`KrylovSettings::basis_single`]). A solve that may lower them
+/// ([`KrylovSettings::downgrade`]) goes down [`lower`](Self::lower)'s ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockBasis {
+    /// `Z` is kept: the solutions are `x0 + Z y`.
+    pub flexible: bool,
+    /// The bases are stored in the single-precision twin.
+    pub single: bool,
+}
+
+impl BlockBasis {
+    /// The next representation down for scalars `T` and the tolerance `tol`: `V` alone
+    /// where `Z` is kept, else `V` in single precision where [`single_for`] of `tol`
+    /// allows it and that halves the bytes (not for the single fields); `None` at the
+    /// bottom.
+    pub fn lower<T: Scalar>(self, tol: f64) -> Option<Self> {
+        if self.flexible {
+            Some(Self {
+                flexible: false,
+                ..self
+            })
+        } else if !self.single
+            && single_for::<T>(tol)
+            && Stored::<T>::scalar_bytes(true) < Stored::<T>::scalar_bytes(false)
+        {
+            Some(Self {
+                single: true,
+                ..self
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The bases a column stores: `V` and `Z` when flexible, `V` alone otherwise.
+    fn bases(self) -> usize {
+        if self.flexible {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Bytes a step adds to the bases of a block GMRES column of length `n` in `T`.
+    pub(crate) fn layer_bytes<T: Scalar>(self, n: usize) -> u64 {
+        (n * self.bases() * Stored::<T>::scalar_bytes(self.single)) as u64
+    }
+}
+
+/// A representation the bases of a block GMRES were lowered to, and when
+/// ([`KrylovSettings::downgrade`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BasisSwitch {
+    /// Block iterations before it, over all [`solve`](super::BlockGmres::solve) calls.
+    pub iteration: usize,
+    /// The representation from then on.
+    pub basis: BlockBasis,
 }
 
 impl Default for KrylovSettings {
@@ -94,6 +170,7 @@ impl Default for KrylovSettings {
             flexible: true,
             basis_single: false,
             room_bytes: None,
+            downgrade: false,
         }
     }
 }
@@ -131,26 +208,26 @@ impl KrylovSettings {
         self.room_bytes = Some(bytes);
         self
     }
-    /// The bases a block GMRES column stores: `V` and `Z` when
-    /// [`flexible`](Self::flexible), `V` alone otherwise.
-    fn bases(&self) -> usize {
-        if self.flexible {
-            2
-        } else {
-            1
+    /// Let a block GMRES lower its bases where the memory runs out
+    /// ([`downgrade`](Self::downgrade)): the preconditioner is one fixed operator.
+    pub fn with_downgrade(mut self, downgrade: bool) -> Self {
+        self.downgrade = downgrade;
+        self
+    }
+
+    /// The representation a block GMRES starts with.
+    pub fn basis(&self) -> BlockBasis {
+        BlockBasis {
+            flexible: self.flexible,
+            single: self.basis_single,
         }
     }
 
     /// The restart of a block GMRES of `s` right-hand sides of length `n` in `T`,
-    /// its bases as stored.
+    /// its bases as stored at the start.
     pub(crate) fn block_restart<T: Scalar>(&self, n: usize, s: usize) -> usize {
-        let stored = Stored::<T>::scalar_bytes(self.basis_single);
-        self.restart_for(n, s, stored, self.bases())
-    }
-
-    /// Bytes a step adds to the bases of a block GMRES column of length `n` in `T`.
-    pub(crate) fn layer_bytes<T: Scalar>(&self, n: usize) -> u64 {
-        (n * self.bases() * Stored::<T>::scalar_bytes(self.basis_single)) as u64
+        let b = self.basis();
+        self.restart_for(n, s, Stored::<T>::scalar_bytes(b.single), b.bases())
     }
 
     /// Heap bytes a block GMRES ([`gmres_block`](super::gmres_block),
@@ -160,23 +237,33 @@ impl KrylovSettings {
     /// give: the bases `V` and (when [`flexible`](Self::flexible)) `Z` as
     /// written and stored ([`basis_single`](Self::basis_single)), the Hessenberg
     /// matrices, the panels and the reduction scratch;
-    /// within [`room_bytes`](Self::room_bytes) where set (at least one column a step
-    /// deep beside the rest).
+    /// within [`room_bytes`](Self::room_bytes) where set: the bases a solve to
+    /// [`tol`](Self::tol) ends in, the most accurate of the ladder it may go down
+    /// ([`downgrade`](Self::downgrade), [`BlockBasis::lower`]) that fits the room at
+    /// `depth`, else the lowest within the room (at least one column a step deep
+    /// beside the rest).
     pub fn block_bytes<T: Scalar>(&self, n: usize, s: usize, depth: usize) -> u64 {
-        let stored = Stored::<T>::scalar_bytes(self.basis_single);
         let m = self.block_restart::<T>(n, s);
-        let plan = |d: usize| {
-            super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, d, self.flexible, stored)
+        let plan = |b: BlockBasis, d: usize| {
+            let stored = Stored::<T>::scalar_bytes(b.single);
+            super::block::block_bytes::<T>(n, s, m, self.ortho_chunk, d, b.flexible, stored)
         };
-        let full = plan(depth.min(m + 1));
-        match self.room_bytes {
-            Some(room) => {
-                // one column two vectors deep: its start and a step
-                let column = (plan(2) - plan(0)) / s as u64;
-                full.min(room.max(plan(0) + column))
+        let depth = depth.min(m + 1);
+        let mut basis = self.basis();
+        let Some(room) = self.room_bytes else {
+            return plan(basis, depth);
+        };
+        while plan(basis, depth) > room {
+            match basis.lower::<T>(self.tol).filter(|_| self.downgrade) {
+                Some(b) => basis = b,
+                None => {
+                    // one column two vectors deep: its start and a step
+                    let column = (plan(basis, 2) - plan(basis, 0)) / s as u64;
+                    return plan(basis, depth).min(room.max(plan(basis, 0) + column));
+                }
             }
-            None => full,
         }
+        plan(basis, depth)
     }
 
     /// What deflating a subspace of dimension `k`

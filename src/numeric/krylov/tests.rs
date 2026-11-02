@@ -2401,3 +2401,104 @@ fn block_gmres_single_basis_continues_a_ladder() {
     }
     assert!(gi <= fi + 4, "{fi} {gi}");
 }
+
+/// A block GMRES that may lower its bases ([`KrylovSettings::downgrade`], here with the
+/// diagonal LU, a fixed operator) in rooms that force each rung of the ladder: a room
+/// that holds the flexible bases at the restart's depth changes nothing (bit for bit
+/// the unbounded flexible solve); one that holds `V` alone drops `Z`; one that holds
+/// `V` in single precision rounds it there too (only where the tolerance allows it);
+/// a smaller one then runs the columns in waves. Every solve converges, its solutions
+/// agree with the unbounded one's to the tolerance, it holds no more than the room and
+/// a step of one column, and the plan within the room is the plan of the bases it
+/// ended in.
+#[test]
+fn block_gmres_lowers_its_bases_before_waves() {
+    use crate::numeric::lu::LuSolver;
+    let u = unsym_grid(20);
+    let n = u.n;
+    let s = 4;
+    let b = ladder_rhs(n, s);
+    let pc = LuSolver::factor(&diagonal_part(&u), &SolverSettings::default()).unwrap();
+    let m = 10;
+    let deep = m + 1;
+    let set = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(m)
+        .with_downgrade(true);
+    let flexible = set.basis();
+    let fixed = BlockBasis {
+        flexible: false,
+        single: false,
+    };
+    let single = BlockBasis {
+        flexible: false,
+        single: true,
+    };
+    // the plan of the bases as `basis` stores them, unbounded
+    let plan = |basis: BlockBasis, d: usize| {
+        set.clone()
+            .with_flexible(basis.flexible)
+            .with_basis_single(basis.single)
+            .with_downgrade(false)
+            .block_bytes::<C>(n, s, d)
+    };
+    let column = |basis: BlockBasis| (plan(basis, deep) - plan(basis, 0)) / s as u64;
+    for tol in [1e-6, 1e-10] {
+        let today = set.clone().with_downgrade(false);
+        let rf = BlockGmres::new(&u, &b, s, &pc, &today, None)
+            .unwrap()
+            .solve(tol, None)
+            .unwrap();
+        assert!(rf.converged && rf.lowered.is_empty());
+        let lowest = if crate::single_for::<C>(tol) {
+            vec![fixed, single]
+        } else {
+            vec![fixed]
+        };
+        let bottom = *lowest.last().unwrap();
+        let mut cases = vec![
+            (plan(flexible, deep), vec![], false),
+            (plan(fixed, deep), vec![fixed], false),
+        ];
+        if crate::single_for::<C>(tol) {
+            cases.push((plan(single, deep), vec![fixed, single], false));
+        }
+        cases.push((plan(bottom, 0) + 2 * column(bottom), lowest.clone(), true));
+        for (room, path, waves) in cases {
+            let tight = set.clone().with_tol(tol).with_room(room);
+            let mut g = BlockGmres::new(&u, &b, s, &pc, &tight, None).unwrap();
+            let mut peak = 0;
+            let mut mon = |p: &BlockProgress<'_>| {
+                peak = peak.max(p.resident);
+                assert_eq!(p.basis, p.lowered.last().map_or(flexible, |w| w.basis));
+                true
+            };
+            let r = g.solve(tol, Some(&mut mon)).unwrap();
+            let gap = column_gap(&rf.x, &r.x, n);
+            eprintln!(
+                "downgrade tol {tol:e} room {room}: iters {} -> {}, lowered {:?}, closed {}, \
+                 peak {peak}, gap {gap:.1e}",
+                rf.iters, r.iters, r.lowered, r.closed
+            );
+            assert!(r.converged, "{:?}", r.final_res);
+            let went: Vec<BlockBasis> = r.lowered.iter().map(|w| w.basis).collect();
+            assert_eq!(went, path);
+            assert_eq!(r.basis, *path.last().unwrap_or(&flexible));
+            assert_eq!(g.basis(), r.basis);
+            assert_eq!(r.closed > 0, waves, "closed {}", r.closed);
+            let step = r.basis.layer_bytes::<C>(n);
+            assert!(peak <= room + step, "peak {peak} room {room}");
+            if path.is_empty() {
+                assert_eq!((r.iters, &r.x), (rf.iters, &rf.x));
+            }
+            assert!(gap <= 10.0 * tol, "gap {gap:e}");
+            // the plan within the room: the bases the solve ended in
+            let within = tight.block_bytes::<C>(n, s, deep);
+            if waves {
+                assert!(within <= room, "plan {within} room {room}");
+            } else {
+                assert_eq!(within, plan(r.basis, deep));
+            }
+        }
+    }
+}
