@@ -172,6 +172,16 @@ impl<T: Scalar> Stored<T> {
         }
     }
 
+    /// Store the values in the twin from now on: those written are rounded, the
+    /// capacity is kept. They are copied, so while it runs the values are held twice.
+    pub fn round_to_single(&mut self) {
+        if let Repr::Full(v) = &self.repr {
+            let mut low = Vec::with_capacity(v.capacity());
+            low.extend(v.iter().map(|a| a.demote()));
+            self.repr = Repr::Single(low);
+        }
+    }
+
     /// The stored values' little-endian bytes, in the precision stored (a fingerprint).
     pub fn le_bytes(&self, out: &mut Vec<u8>) {
         match &self.repr {
@@ -237,6 +247,29 @@ mod tests {
         full.le_bytes(&mut fb);
         single.le_bytes(&mut sb);
         assert_eq!((fb.len(), sb.len()), (37 * 16, 37 * 8));
+    }
+
+    /// Rounded to the twin later, a store holds what one written single holds, its
+    /// capacity kept; one single already stays as it is.
+    #[test]
+    fn stored_rounds_to_single_in_place() {
+        let x: Vec<C> = (0..19)
+            .map(|i| C::new((i as f64).cos() / 7.0, i as f64 * 0.3))
+            .collect();
+        let mut s = Stored::<C>::with_capacity(32, false);
+        s.write(0, &x);
+        s.round_to_single();
+        let direct = Stored::new(&x, true);
+        assert!(s.is_single() && s.capacity() >= 32);
+        assert_eq!((s.len(), s.bytes()), (direct.len(), direct.bytes()));
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        s.le_bytes(&mut a);
+        direct.le_bytes(&mut b);
+        assert_eq!(a, b);
+        s.round_to_single();
+        let mut c = Vec::new();
+        s.le_bytes(&mut c);
+        assert_eq!(a, c);
     }
 
     /// A write past the end grows the store, zero filled, within the capacity.

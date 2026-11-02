@@ -5,6 +5,7 @@ use super::util::*;
 use super::*;
 
 use super::recycle::RecycleScalar;
+use super::settings::{BasisSwitch, BlockBasis};
 use crate::error::RslabError;
 use crate::scalar::Scalar;
 use crate::stored::Stored;
@@ -27,6 +28,11 @@ pub struct BlockKrylovResult<T> {
     /// Cycles closed before the restart because the bases filled the memory
     /// ([`KrylovSettings::room_bytes`], [`BlockGmres::within`]), over all calls so far.
     pub closed: usize,
+    /// The representation the bases ended in.
+    pub basis: BlockBasis,
+    /// The representations they were lowered to for memory and when
+    /// ([`KrylovSettings::downgrade`]), over all calls so far.
+    pub lowered: Vec<BasisSwitch>,
 }
 
 /// What the monitor of a block GMRES ([`BlockGmres::solve`]) receives after every
@@ -52,6 +58,11 @@ pub struct BlockProgress<'p> {
     pub residuals: &'p [Option<f64>],
     /// Heap bytes the solve holds ([`BlockGmres::resident_bytes`]).
     pub resident: u64,
+    /// The representation of the bases.
+    pub basis: BlockBasis,
+    /// The representations they were lowered to for memory and when
+    /// ([`KrylovSettings::downgrade`]), over all calls so far.
+    pub lowered: &'p [BasisSwitch],
 }
 
 /// One right-hand side's Arnoldi state: its basis, the Hessenberg matrix under
@@ -140,14 +151,14 @@ impl<T: Scalar> Column<T> {
 
     /// Open a cycle on the residual `r` of norm `beta > 0` (scaled to the first basis
     /// vector in place), the restart's layers of its bases reserved where it holds
-    /// none (in the twin with `single`).
-    fn open(&mut self, r: &mut [T], beta: f64, flexible: bool, single: bool) {
+    /// none (as `basis` stores them).
+    fn open(&mut self, r: &mut [T], beta: f64, basis: BlockBasis) {
         let n = r.len();
         if !self.holds() {
             let m = self.cs.len();
-            self.v = Stored::with_capacity(n * (m + 1), single);
-            if flexible {
-                self.zb = Stored::with_capacity(n * m, single);
+            self.v = Stored::with_capacity(n * (m + 1), basis.single);
+            if basis.flexible {
+                self.zb = Stored::with_capacity(n * m, basis.single);
             }
         }
         self.h.iter_mut().for_each(|e| *e = T::zero());
@@ -278,7 +289,10 @@ impl<T> BlockRecycle<T> {
 /// **Room:** within [`KrylovSettings::room_bytes`] and the memory a probe reports
 /// ([`within`](Self::within)) the columns run in waves: where the bases would
 /// outgrow it, those with the worst estimates close their cycles and wait until
-/// the others finished, every column at the restart.
+/// the others finished, every column at the restart. With a fixed preconditioner
+/// ([`KrylovSettings::downgrade`]) the bases are lowered first: `Z` dropped, then
+/// `V` rounded to single precision where the tolerance allows it, the open cycles
+/// carried on.
 ///
 /// A column whose least-squares residual reaches the tolerance pauses: it leaves
 /// the batched applies and keeps its cycle open. Once no column can step, the
@@ -335,11 +349,13 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     chk: Vec<usize>,
     /// The columns of `chk` closing for memory ([`BlockProgress::closing`]).
     closing: Vec<usize>,
-    /// The preconditioner may change between steps: the columns keep `Z`
-    /// ([`KrylovSettings::flexible`]).
-    flexible: bool,
-    /// The bases are stored in the twin ([`KrylovSettings::basis_single`]).
-    single: bool,
+    /// How the bases are stored now ([`KrylovSettings::flexible`],
+    /// [`KrylovSettings::basis_single`]).
+    basis: BlockBasis,
+    /// They may be lowered for memory ([`KrylovSettings::downgrade`]).
+    downgrade: bool,
+    /// The representations they were lowered to ([`BlockKrylovResult::lowered`]).
+    lowered: Vec<BasisSwitch>,
     /// The bytes a step adds to a column's bases.
     layer: u64,
     /// The bytes the columns' bases may hold together: the room set less what the
@@ -425,9 +441,10 @@ where
             x,
             res,
             cols: (0..s).map(|_| Column::new(m, 0)).collect(),
-            flexible: settings.flexible,
-            single: settings.basis_single,
-            layer: settings.layer_bytes::<T>(n),
+            basis: settings.basis(),
+            downgrade: settings.downgrade,
+            lowered: Vec::new(),
+            layer: settings.basis().layer_bytes::<T>(n),
             room: None,
             closed: 0,
             probe: None,
@@ -587,7 +604,7 @@ where
             if self.act.is_empty() {
                 self.admit();
             }
-            self.evict();
+            self.evict(tol);
             let stepping = !self.act.is_empty();
             // The residual check: with columns stepping, only the full cycles
             // (they restart from their true residual); else every column that
@@ -619,6 +636,8 @@ where
                         closing: &self.closing,
                         residuals: &self.res,
                         resident: self.resident_bytes(),
+                        basis: self.basis,
+                        lowered: &self.lowered,
                     };
                     if !mo(&progress) {
                         stalled = true;
@@ -660,7 +679,14 @@ where
                 StopReason::MaxIter
             },
             closed: self.closed,
+            basis: self.basis,
+            lowered: self.lowered.clone(),
         })
+    }
+
+    /// The representation of the bases now.
+    pub fn basis(&self) -> BlockBasis {
+        self.basis
     }
 
     /// `act`: the columns that can step toward `tol`, an open cycle short of the
@@ -714,7 +740,9 @@ where
     }
 
     /// Keep the bases within the memory ([`free`](Self::free)): where the next step
-    /// of the columns in `act` would not fit, the columns not stepping give their
+    /// of the columns in `act` would not fit, the bases are lowered first where they
+    /// may be ([`lower`](Self::lower), toward `tol`); where it still does not fit, the
+    /// columns not stepping give their
     /// bases up (a finished one at once, a paused one closes its cycle at the next
     /// check), then the stepping ones with the worst estimates close theirs until
     /// the rest reach the restart in what is free (at once where no step was taken
@@ -723,19 +751,29 @@ where
     /// ones then have the memory. At least one column steps on; one alone closes
     /// only once its cycle took a step and its next does not fit (a restart at the
     /// depth the memory holds).
-    fn evict(&mut self) {
-        let Some(free) = self.free() else {
+    fn evict(&mut self, tol: f64) {
+        let Some(mut free) = self.free() else {
             return;
         };
-        let (n, m, per) = (self.n, self.m, self.layer);
+        let (n, m) = (self.n, self.m);
         // what the columns in `act` grow by to step `to(j)` of their cycles
         let grow = |g: &Self, i: usize, to: &dyn Fn(usize) -> usize| {
             let (c, j) = g.act[i];
-            g.cols[c].growth(n, j, to(j), per)
+            g.cols[c].growth(n, j, to(j), g.layer)
         };
         let next = |g: &Self, i: usize| grow(g, i, &|j| j + 1);
         let ahead = |g: &Self, i: usize| grow(g, i, &|_| m);
-        if free >= (0..self.act.len()).map(|i| next(self, i)).sum::<u64>() {
+        let step = |g: &Self| (0..g.act.len()).map(|i| next(g, i)).sum::<u64>();
+        while free < step(self) {
+            let Some(to) = self.basis.lower::<T>(tol).filter(|_| self.downgrade) else {
+                break;
+            };
+            // what the bases give up is free (a live probe may not see it yet)
+            let held = self.basis_bytes();
+            self.lower(to);
+            free += held - self.basis_bytes();
+        }
+        if free >= step(self) {
             return;
         }
         let mut freed = 0;
@@ -790,6 +828,28 @@ where
         });
     }
 
+    /// Store the bases as `to` from now on, every column's open cycle carried on: `Z`
+    /// dropped (the solutions then `x + M^-1 (V y)`, the preconditioner a fixed
+    /// operator, [`KrylovSettings::downgrade`]), the bases rounded to single
+    /// precision (a column at a time).
+    fn lower(&mut self, to: BlockBasis) {
+        for col in &mut self.cols {
+            if !to.flexible {
+                col.zb = Stored::default();
+            }
+            if to.single {
+                col.v.round_to_single();
+                col.zb.round_to_single();
+            }
+        }
+        self.basis = to;
+        self.layer = to.layer_bytes::<T>(self.n);
+        self.lowered.push(BasisSwitch {
+            iteration: self.iters,
+            basis: to,
+        });
+    }
+
     /// Close column `c`'s cycle on the solution formed (`x <- out`), its bases
     /// released.
     fn close(&mut self, c: usize) {
@@ -819,7 +879,7 @@ where
         if k == 0 {
             return Ok(false);
         }
-        if self.flexible {
+        if self.basis.flexible {
             // The open cycles' solutions `x + Z y`, from the stored preconditioned basis.
             for (a, &c) in self.chk.iter().enumerate() {
                 let (cb, pb) = (c * n, a * n);
@@ -925,12 +985,7 @@ where
                 None => r * self.bnorm[c],
             };
             if beta > 0.0 {
-                self.cols[c].open(
-                    &mut self.w[a * n..(a + 1) * n],
-                    beta,
-                    self.flexible,
-                    self.single,
-                );
+                self.cols[c].open(&mut self.w[a * n..(a + 1) * n], beta, self.basis);
                 self.deepest = self.deepest.max(1);
             }
         }
@@ -1032,7 +1087,7 @@ where
                 };
                 col.hraw[i * m + j] = col.h[i * m + j];
             }
-            if self.flexible {
+            if self.basis.flexible {
                 col.zb.write(j * n, &self.z[a * n..(a + 1) * n]);
             }
             let wa = &mut self.w[a * n..(a + 1) * n];
@@ -1134,7 +1189,7 @@ where
             let ritz = |b: &Stored<T>| {
                 T::combine_ritz(&|j, a, out| b.axpy(j * n, a, out), n, d, &pairs, k - kept)
             };
-            let cand = if self.flexible {
+            let cand = if self.basis.flexible {
                 ritz(&self.cols[c].zb)
             } else {
                 let vg = ritz(&self.cols[c].v);
@@ -1293,7 +1348,8 @@ pub(super) fn deflation_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, k: 
 /// space while a cycle is open and hold what its cycles have written, in single
 /// precision with [`basis_single`](KrylovSettings::basis_single); the solve
 /// holds about [`KrylovSettings::block_bytes`] for the depth it reaches, within
-/// [`KrylovSettings::room_bytes`] where set. An unset
+/// [`KrylovSettings::room_bytes`] where set, lowering its bases there first with
+/// [`downgrade`](KrylovSettings::downgrade). An unset
 /// [`KrylovSettings::restart`] is capped to
 /// [`KrylovSettings::basis_budget_bytes`]; an explicit value is honoured exactly.
 ///
