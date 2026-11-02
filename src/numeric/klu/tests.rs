@@ -938,8 +938,21 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
         [Mode::Serial],
         "sections costing more than the work"
     );
-    install(on(Dispatch::free(4)), || s.refactor(&a)).unwrap();
-    assert_ne!(s.factors.modes[..], [Mode::Serial], "free sections go wide");
+    // On a free pool a block goes wide where nothing says otherwise: the
+    // pick among its ways, before any is measured (what the refactors in
+    // this process measured is theirs).
+    let plan = &s.factors.plan;
+    let bp = &plan.blocks[0];
+    let bn = s.factors.block_ptr[bp.b + 1] - s.factors.block_ptr[bp.b];
+    let fresh = crate::parallel::Choice::new();
+    let decide = super::refactor::Decide::on(Dispatch::free(4), 4);
+    assert_ne!(
+        decide.mode(plan, bp, bn, &fresh).0,
+        Mode::Serial,
+        "free sections go wide"
+    );
+    let costly = super::refactor::Decide::on(Dispatch::new(vec![1e12; 5]), 4);
+    assert_eq!(costly.mode(plan, bp, bn, &fresh).0, Mode::Serial);
 }
 
 #[test]

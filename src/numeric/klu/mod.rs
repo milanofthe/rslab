@@ -231,9 +231,10 @@ struct KluFactors<T> {
     replay_xs: Vec<Vec<T>>,
     /// Which columns the current pipelined replay has done.
     ready: Ready,
-    /// How the last refactor decided to replay each block of `plan.blocks`
-    /// (it replayed them sequentially instead when it explored).
+    /// How the last refactor replayed each block of `plan.blocks`, and the
+    /// picks among the ways it measured them for.
     modes: Vec<Mode>,
+    picks: Vec<Option<crate::parallel::Pick>>,
 }
 
 /// How a refactor replays a block of the [`ReplayPlan`].
@@ -281,9 +282,6 @@ struct BlockPlan {
     b: usize,
     /// Its replay work.
     work: u64,
-    /// What a pipelined replay hands between threads: its columns and the
-    /// `L` columns they read.
-    handoffs: u64,
     /// The most work of a level of two columns or more (none below it).
     widest: u64,
     /// Level `l` is the columns `cols[ptr[l]..ptr[l + 1]]`, ascending, each

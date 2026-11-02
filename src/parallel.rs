@@ -27,8 +27,8 @@ pub use rspool::rayon::{
     width, width_on, Rayon,
 };
 pub use rspool::{
-    as_piece, current, install, install_lent, share_of, Dispatch, Go, Lent, Piece, Pool, Rate,
-    Serial, Spawn, Task, Timing, Work,
+    as_piece, current, install, install_lent, share_of, Choice, Dispatch, Go, Lent, Pick, Piece,
+    Pool, Rate, Serial, Spawn, Task, Timing, Work,
 };
 
 use crate::constants::{COMPLEX_OPS, PIECES_PER_WORKER};
@@ -44,29 +44,46 @@ fn piece_len(n: usize, k: usize) -> usize {
     n.div_ceil(PIECES_PER_WORKER * k.max(1)).max(1)
 }
 
-/// One [`Rate`] per scalar type of a kind of work: real and complex, double
-/// and single precision, the complex priors [`COMPLEX_OPS`] times the real.
+/// One `X` per scalar type of a kind of work: real and complex, double and
+/// single precision.
 #[derive(Debug)]
-pub(crate) struct ScalarRates {
-    real: Rate,
-    complex: Rate,
-    real32: Rate,
-    complex32: Rate,
+pub(crate) struct PerScalar<X> {
+    real: X,
+    complex: X,
+    real32: X,
+    complex32: X,
 }
 
-impl ScalarRates {
-    /// `prior` ns per real op.
+/// One [`Rate`] per scalar type of a kind of work.
+pub(crate) type ScalarRates = PerScalar<Rate>;
+
+impl PerScalar<Rate> {
+    /// `prior` ns per real op, the complex priors [`COMPLEX_OPS`] times it.
     pub(crate) const fn new(prior: f32) -> Self {
-        ScalarRates {
+        PerScalar {
             real: Rate::new(prior),
             complex: Rate::new(prior * COMPLEX_OPS),
             real32: Rate::new(prior),
             complex32: Rate::new(prior * COMPLEX_OPS),
         }
     }
+}
 
-    /// The rate of `T`.
-    pub(crate) fn of<T: crate::scalar::Scalar>(&self) -> &Rate {
+impl PerScalar<Choice> {
+    /// Nothing measured yet.
+    pub(crate) const fn choices() -> Self {
+        PerScalar {
+            real: Choice::new(),
+            complex: Choice::new(),
+            real32: Choice::new(),
+            complex32: Choice::new(),
+        }
+    }
+}
+
+impl<X> PerScalar<X> {
+    /// The one of `T`.
+    pub(crate) fn of<T: crate::scalar::Scalar>(&self) -> &X {
         let parts = if T::COMPLEX { 2 } else { 1 };
         let single = std::mem::size_of::<T>() < parts * std::mem::size_of::<f64>();
         match (T::COMPLEX, single) {

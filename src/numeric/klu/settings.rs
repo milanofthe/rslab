@@ -32,8 +32,10 @@ pub struct KluSettings {
     /// worth on the pool it runs on: the work (input entries for a factor,
     /// the exact replay work of the pivot-final pattern for a refactor) at
     /// the rates measured on earlier runs, against what a section costs on
-    /// the pool ([`crate::parallel::Dispatch`]), decided anew by every
-    /// refactor with the pool it is given. Real circuits are often one
+    /// the pool ([`crate::parallel::Dispatch`]); a refactor replays a block
+    /// the way, and its blocks side by side on the width, its replays of
+    /// that size were fastest ([`crate::parallel::Choice`]), decided anew by
+    /// every refactor with the pool it is given. Real circuits are often one
     /// giant irreducible block plus thousands of singletons, where
     /// distributing blocks cannot help, and small systems refactor faster
     /// on one thread than on any pool. Run inside a bounded rayon pool to

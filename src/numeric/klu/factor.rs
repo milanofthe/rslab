@@ -31,7 +31,7 @@ impl BlockPlan {
     /// Block `b` from column `bs` on, its columns' levels `level` (`nlev`
     /// of them) and replay work `colw`: the columns grouped by level,
     /// ascending within each, with the work of every level.
-    fn new(b: usize, bs: usize, level: &[Ki], colw: &[u64], nlev: usize, handoffs: u64) -> Self {
+    fn new(b: usize, bs: usize, level: &[Ki], colw: &[u64], nlev: usize) -> Self {
         let mut ptr = vec![0u32; nlev + 1];
         let mut level_work = vec![0u64; nlev];
         for (&l, &w) in level.iter().zip(colw) {
@@ -55,7 +55,6 @@ impl BlockPlan {
         BlockPlan {
             b,
             work: colw.iter().sum(),
-            handoffs,
             widest,
             ptr,
             cols,
@@ -111,9 +110,7 @@ fn compute_replay_plan(
         plan.total += w_b;
         plan.largest = plan.largest.max(w_b);
         if planned(bn, nlev, settings.parallel) {
-            let handoffs = (bn + u_colptr[be] - u_colptr[bs]) as u64;
-            plan.blocks
-                .push(BlockPlan::new(b, bs, &level, &colw, nlev, handoffs));
+            plan.blocks.push(BlockPlan::new(b, bs, &level, &colw, nlev));
         }
     }
     plan
@@ -952,5 +949,6 @@ pub(super) fn factor_impl<T: Scalar>(
         replay_xs: Vec::new(),
         ready: Ready::default(),
         modes: Vec::new(),
+        picks: Vec::new(),
     })
 }

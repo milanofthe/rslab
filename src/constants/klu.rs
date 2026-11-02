@@ -23,18 +23,6 @@ pub const PIPE_RUN: usize = 1;
 /// Contract: timing.
 pub const KLU_REPLAY_NS_PER_WORK: f32 = 0.5;
 
-/// ns a pipelined replay spends per column and per `L` column a column
-/// reads beyond the replay itself (the claim, the wait for the column it
-/// reads, the line it moves between cores), before any is measured (ns per
-/// hand-off).
-/// Used by: `KluSolver::refactor` (whether a block replays pipelined).
-/// Why: about a cache line moved between cores, where the column read is
-/// not done yet; it is what makes light columns slower pipelined than
-/// sequentially.
-/// Machine: a prior, replaced by what the pipelined replays measure.
-/// Contract: timing.
-pub const KLU_HANDOFF_NS: f32 = 50.0;
-
 /// ns per input entry of a block's first factorization (the reach, the
 /// pivot search, the fill), before any is measured (ns per entry).
 /// Used by: `KluSymbolic::factor` (whether its blocks factor side by side).
