@@ -291,8 +291,10 @@ def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
     **kwargs
         Any :class:`Settings` keyword, overriding ``settings``.
         ``pivot_threshold`` (default 0.1) is the threshold-pivoting tolerance of this path;
-        ``scaling`` is ignored here (the LU path scales two-sided) and
-        reported under ``diagnostics()['warnings']``.
+        ``scaling`` is the two-sided equilibration: ``'one_pass'`` (default),
+        ``'inf_norm'`` (iterated until every row and column maximum is one) or
+        ``'identity'``; a symmetric scaling is reported under
+        ``diagnostics()['warnings']``.
 
     Returns
     -------

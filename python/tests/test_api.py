@@ -68,6 +68,28 @@ def test_lu_matching_setting():
     assert rslab.lu(B, matching=False).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
 
 
+def test_lu_equilibration_setting():
+    # The LU equilibrates one step by default, iterated on request: rows and
+    # columns of unrelated scale end with every maximum at one, no pivot under
+    # the static floor, and a solve to roundoff.
+    rng = np.random.default_rng(3)
+    A = _general(400)
+    r, c = 10.0 ** rng.integers(-6, 7, 400), 10.0 ** rng.integers(-6, 7, 400)
+    S = (sp.diags(r) @ A @ sp.diags(c)).tocsc()
+    b = S @ np.ones(400)
+    one = rslab.lu(S, preconditioner=1e-6, matching=False)
+    it = rslab.lu(S, preconditioner=1e-6, matching=False, scaling="inf_norm")
+    assert one.diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
+    assert it.diagnostics()["decisions"]["scaling"] == "TwoSidedRuiz"
+    assert not it.diagnostics()["warnings"]
+    assert it.n_perturbed <= one.n_perturbed
+    x = it.solve(b)
+    omega = np.max(np.abs(S @ x - b) / (abs(S) @ np.abs(x) + np.abs(b)))
+    assert omega < 1e-10
+    assert rslab.lu(S, scaling="identity").diagnostics()["decisions"]["scaling"] == "Identity"
+    assert rslab.lu(S, scaling="mc64").diagnostics()["warnings"]
+
+
 def test_klu_matching_setting():
     assert rslab.KluSettings().to_dict()["matching"] is True
     A = _circuit(300)

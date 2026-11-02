@@ -215,7 +215,7 @@ fields as `ldlt`. The full matrix is read.
 
 - `A` (scipy.sparse matrix or array-like): The `n x n` system matrix. Converted to CSC; duplicates summed.
 - `settings` (Settings, optional): A prepared `Settings` object.
-- `**kwargs`: Any `Settings` keyword, overriding `settings`. `pivot_threshold` (default 0.1) is the threshold-pivoting tolerance of this path; `scaling` is ignored here (the LU path scales two-sided) and reported under `diagnostics()['warnings']`.
+- `**kwargs`: Any `Settings` keyword, overriding `settings`. `pivot_threshold` (default 0.1) is the threshold-pivoting tolerance of this path; `scaling` is the two-sided equilibration: `'one_pass'` (default), `'inf_norm'` (iterated until every row and column maximum is one) or `'identity'`; a symmetric scaling is reported under `diagnostics()['warnings']`.
 
 **Returns**
 
@@ -1341,7 +1341,7 @@ tuned values, listed by `to_dict`.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
 - `factor_dtype` (str or dtype, optional): Store the factor in the lower-precision twin of the matrix's dtype (`'float32'` for float64, `'complex64'` for complex128): half the factor memory, single-precision kernels. The handle keeps the matrix in its own precision, so `solve(b, refine=k)` and the Krylov methods reach its accuracy. LDL^T and LU paths; `None` factors in the matrix's dtype.
 - `pivot_threshold` (float, default 0.1): Threshold partial pivoting of the LU path in `[0, 1]` (`1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
-- `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
+- `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Equilibration before the factorization. LDL^T: the symmetric `diag(s) A diag(s)`, a named strategy or a float array `s` of length `n`. LU: the two-sided `diag(r) A diag(c)`, `'one_pass'` (the default, one step), `'inf_norm'` (iterated until every row and column maximum is one, for rows and columns of unrelated scale) or `'identity'`; the symmetric `'mc64'` and an array are reported as ignored there, and under the LU's row matching the matching scales.
 - `matching` (bool, default True): Maximum-product row matching (MC64) before the LU analysis, applied where a diagonal entry is below `matching_negligible_diagonal` (default `1e-10`) times its column's largest entry. LU path only.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 

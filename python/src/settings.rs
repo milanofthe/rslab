@@ -284,10 +284,13 @@ plain_knobs! {
 ///     full partial pivoting). Ignored, and reported in the diagnostics, on
 ///     the LDL^T path.
 /// scaling : {'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional
-///     Symmetric equilibration before the LDL^T factorization: a named
-///     strategy, or a float array ``s`` of length ``n`` applying the
-///     external scaling ``diag(s) A diag(s)``. The LU path uses its own
-///     two-sided scaling and reports a set value.
+///     Equilibration before the factorization. LDL^T: the symmetric
+///     ``diag(s) A diag(s)``, a named strategy or a float array ``s`` of
+///     length ``n``. LU: the two-sided ``diag(r) A diag(c)``, ``'one_pass'``
+///     (the default, one step), ``'inf_norm'`` (iterated until every row and
+///     column maximum is one, for rows and columns of unrelated scale) or
+///     ``'identity'``; the symmetric ``'mc64'`` and an array are reported as
+///     ignored there, and under the LU's row matching the matching scales.
 /// matching : bool, default True
 ///     Maximum-product row matching (MC64) before the LU analysis, applied
 ///     where a diagonal entry is below ``matching_negligible_diagonal``
