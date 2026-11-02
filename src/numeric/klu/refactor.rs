@@ -99,34 +99,34 @@ impl Decide {
     }
 
     /// The ways block `bp` of `bn` columns, `serial` ns sequentially, can
-    /// replay, each with the time predicted for it: sequentially (unless
-    /// every section is free), level by level where a level is worth a
-    /// section, pipelined on 2, 4, ... threads up to the pool's.
-    fn ways(&self, bp: &BlockPlan, bn: usize, serial: f64) -> ([(Mode, f64); TUNE_ARMS], usize) {
-        let mut ways = [(Mode::Serial, serial); TUNE_ARMS];
-        let mut n = 0;
-        let mut add = |m: Mode, t: f64| {
-            if n < TUNE_ARMS {
-                ways[n] = (m, t);
-                n += 1;
-            }
-        };
+    /// replay, each at a number of its own, with the time predicted for it
+    /// where it is available: 0 sequentially (unless every section is
+    /// free), 1 level by level (where a level is worth a section), `a + 1`
+    /// pipelined on `2^a` threads, the last one on all the pool's.
+    fn ways(
+        &self,
+        bp: &BlockPlan,
+        bn: usize,
+        serial: f64,
+    ) -> ([Option<(Mode, f64)>; TUNE_ARMS], usize) {
+        let mut ways = [None; TUNE_ARMS];
         if !self.forced {
-            add(Mode::Serial, serial);
+            ways[0] = Some((Mode::Serial, serial));
         }
         if (bp.widest as f64 * self.seq) >= self.dispatch.break_even() {
             let levels = (0..bp.level_work.len()).map(|l| self.level(bp, l).1).sum();
-            add(Mode::Levels, levels);
+            ways[1] = Some((Mode::Levels, levels));
         }
         let cap = self.threads.min(bn);
-        let mut k = 2;
-        while k <= cap {
+        let mut n = 2;
+        while n < TUNE_ARMS && cap >= 2 {
+            let k = (1usize << (n - 1)).min(cap);
             let share = bn.div_ceil(k) as f64 / bn as f64;
-            add(Mode::Pipelined(k), serial * share + self.dispatch.cost(k));
+            ways[n] = Some((Mode::Pipelined(k), serial * share + self.dispatch.cost(k)));
+            n += 1;
             if k == cap {
                 break;
             }
-            k = (2 * k).min(cap);
         }
         (ways, n)
     }
@@ -149,14 +149,16 @@ impl Decide {
         if serial.is_nan() || serial < self.dispatch.break_even() {
             return (Mode::Serial, None);
         }
-        match self.ways(bp, bn, serial) {
-            (_, 0) => (Mode::Serial, None),
-            (ways, 1) => (ways[0].0, None),
-            (ways, n) => {
-                let pick = choices.pick(serial, bp.work as f64, n, |o| ways[o].1);
-                (ways[pick.option].0, Some(pick))
-            }
+        let (ways, n) = self.ways(bp, bn, serial);
+        let open = ways.iter().flatten().count();
+        if open < 2 {
+            return (
+                ways.iter().flatten().next().map_or(Mode::Serial, |w| w.0),
+                None,
+            );
         }
+        let pick = choices.pick(serial, bp.work as f64, n, |o| ways[o].map(|w| w.1));
+        (ways[pick.option].map_or(Mode::Serial, |w| w.0), Some(pick))
     }
 
     /// Whether the blocks may replay side by side at all: two of them or
