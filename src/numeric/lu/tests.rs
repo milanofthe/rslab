@@ -79,6 +79,107 @@ fn lu_matching_bounds_pivot_growth() {
     let s0 = LuSolver::factor(&a, &opts.with_matching(false));
     assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
 }
+
+/// Rows and columns scaled independently over twelve decades, the diagonal
+/// kept (the scale disparity of a saddle `D_r A D_c` whose current and charge
+/// rows and columns carry unrelated scales): the one-step equilibration
+/// leaves rows and columns far below the unit scale, their pivots fall under
+/// the static floor and the factor misses its matrix; the iterated (Ruiz)
+/// equilibration brings every row and column maximum to one, floors no pivot
+/// and solves to roundoff. Under the row matching the matching's scaling
+/// already does this, and the equilibration setting changes nothing.
+#[test]
+fn iterated_equilibration_lifts_the_floored_pivots() {
+    use crate::scaling::ScalingStrategy;
+    use crate::ZeroPivotAction;
+    let m = 40usize;
+    let n = m * m;
+    let dec = 13usize;
+    let rs = |i: usize| 10f64.powi(((i * 7919) % dec) as i32 - (dec / 2) as i32);
+    let cs = |j: usize| 10f64.powi(((j * 104729) % dec) as i32 - (dec / 2) as i32);
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..n {
+        let (x, y) = (j % m, j / m);
+        let mut push = |i: usize, val: f64| {
+            r.push(i);
+            c.push(j);
+            v.push(val * rs(i) * cs(j));
+        };
+        push(j, 4.0);
+        if x > 0 {
+            push(j - 1, -1.4);
+        }
+        if x + 1 < m {
+            push(j + 1, -0.6);
+        }
+        if y > 0 {
+            push(j - m, -1.0);
+        }
+        if y + 1 < m {
+            push(j + m, -1.0);
+        }
+    }
+    let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
+    let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
+    // componentwise backward error: the rows span twelve decades
+    let omega = |x: &[f64]| {
+        let mut res = b.clone();
+        let mut d: Vec<f64> = b.iter().map(|v| v.abs()).collect();
+        for j in 0..n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                res[a.row_idx[k]] -= a.values[k] * x[j];
+                d[a.row_idx[k]] += a.values[k].abs() * x[j].abs();
+            }
+        }
+        res.iter()
+            .zip(&d)
+            .map(|(ri, di)| if *di > 0.0 { ri.abs() / di } else { 0.0 })
+            .fold(0.0, f64::max)
+    };
+    let opts = SolverSettings::preconditioner(1e-6)
+        .with_threads(1)
+        .with_matching(false);
+    assert!(matches!(
+        opts.pivoting.on_zero_pivot,
+        ZeroPivotAction::PerturbToEps { .. }
+    ));
+    let one = LuSolver::factor(&a, &opts).unwrap();
+    assert_eq!(one.diagnostics().decisions.scaling, "TwoSidedRowCol");
+    let x1 = one.solve(&b).unwrap();
+    assert!(
+        one.perturbations().len() > 10,
+        "one step: {} floors",
+        one.perturbations().len()
+    );
+    assert!(omega(&x1) > 1e-3, "one step: backward error {}", omega(&x1));
+    let ruiz = LuSolver::factor(&a, &opts.clone().with_scaling(ScalingStrategy::InfNorm)).unwrap();
+    assert_eq!(ruiz.diagnostics().decisions.scaling, "TwoSidedRuiz");
+    assert!(ruiz.diagnostics().warnings.is_empty());
+    let x2 = ruiz.solve(&b).unwrap();
+    assert!(
+        ruiz.perturbations().is_empty(),
+        "iterated: {} floors",
+        ruiz.perturbations().len()
+    );
+    assert!(
+        omega(&x2) < 1e-11,
+        "iterated: backward error {}",
+        omega(&x2)
+    );
+    // the matching's scaling is the equilibration under the matching (made to
+    // run: every diagonal counts as missing)
+    let mut matched = opts.clone().with_matching(true);
+    matched.matching.negligible_diagonal = 2.0;
+    let sm = LuSolver::factor(&a, &matched).unwrap();
+    assert_eq!(sm.diagnostics().decisions.scaling, "Mc64RowMatching");
+    let xm = sm.solve(&b).unwrap();
+    let xr = LuSolver::factor(&a, &matched.with_scaling(ScalingStrategy::InfNorm))
+        .unwrap()
+        .solve(&b)
+        .unwrap();
+    assert_eq!(xm, xr);
+}
+
 use num_complex::Complex;
 
 fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {

@@ -263,39 +263,38 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
         .sym_and_levels()
         .ok_or_else(|| RslabError::InvalidInput("internal: empty symbolic".to_string()))?;
 
-    // Two-sided equilibration A_hat = D_r A D_c with d_r[i] = 1/sqrt(max_j |A_ij|),
-    // d_c[j] = 1/sqrt(max_i |A_ij|). Tames the dynamic range (these MoM near-field
-    // matrices span ~6 orders) so the LU factor stays well-scaled; the solve
-    // undoes it transparently. Computed from the original (unpermuted) A.
-    // The matrix the pipeline factors: `A` itself, or its MC64 row-permuted
-    // form `B` (row `i` of `B` is row `row_of[i]` of `A`) with the matching's
-    // scalings; otherwise the max-norm equilibration.
+    // Two-sided equilibration A_hat = D_r A D_c (`opts.scaling`: the one-pass
+    // default, the iterated Ruiz form or none; `scaling::twosided`). Tames the
+    // dynamic range (MoM near-field saddles span ten orders) so the LU factor,
+    // its threshold test and its static pivot floor work on unit-scale rows and
+    // columns; the solve undoes it transparently. Computed from the original
+    // (unpermuted) A. Under the MC64 row matching the matrix factored is its
+    // row-permuted form `B` (row `i` of `B` is row `row_of[i]` of `A`) with the
+    // matching's scalings, which already put every row and column maximum at
+    // one: the equilibration setting has nothing left to do there.
     let (d_row, d_col): (Vec<f64>, Vec<f64>) = match &lusym.matching {
         Some(m) => ((0..n).map(|i| m.r[m.row_of[i]]).collect(), m.c.clone()),
-        None => {
-            let mut rmax = vec![0.0f64; n];
-            let mut cmax = vec![0.0f64; n];
-            for j in 0..n {
-                for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                    let i = a.row_idx[k];
-                    let m = a.values[k].magnitude();
-                    if m > rmax[i] {
-                        rmax[i] = m;
-                    }
-                    if m > cmax[j] {
-                        cmax[j] = m;
-                    }
+        None => crate::logging::timed(
+            || format!("lu: equilibration {:?}", opts.scaling),
+            || {
+                // on the factorization's workers (its sweeps run in parallel)
+                let (r, c, steps) = opts.threads.run(
+                    0,
+                    |cap| cap,
+                    || {
+                        crate::scaling::equilibrate_general(
+                            a,
+                            &opts.scaling,
+                            opts.pivoting.threshold,
+                        )
+                    },
+                );
+                if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+                    crate::logging::debug(&format!("lu: equilibration in {steps} steps"));
                 }
-            }
-            (
-                rmax.iter()
-                    .map(|&r| crate::scaling::inv_sqrt_scale_guarded(r))
-                    .collect(),
-                cmax.iter()
-                    .map(|&c| crate::scaling::inv_sqrt_scale_guarded(c))
-                    .collect(),
-            )
-        }
+                (r, c)
+            },
+        ),
     };
 
     // `A`'s row `r` is `B`'s row `b_row[r]`, scaled by `d_row[b_row[r]]`.

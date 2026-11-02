@@ -75,9 +75,13 @@ pub(crate) enum FactorPath {
 pub struct SolverSettings {
     /// Pivot selection and the near-zero pivot policy.
     pub pivoting: PivotSettings,
-    /// Symmetric equilibration `A_hat = D A D` of the LDL^T path.
-    /// [`Identity`](ScalingStrategy::Identity) disables it. The LU path uses
-    /// its own two-sided scaling and ignores this.
+    /// Equilibration: `A_hat = D A D` on the LDL^T path, the two-sided
+    /// `A_hat = D_r A D_c` on the LU path, which reads
+    /// [`OnePassInfNorm`](ScalingStrategy::OnePassInfNorm) (the default, one
+    /// step), [`InfNorm`](ScalingStrategy::InfNorm) (iterated until every row
+    /// and column maximum is one) and [`Identity`](ScalingStrategy::Identity)
+    /// (none); the symmetric strategies are ignored there, and under the LU's
+    /// row matching the matching's own scaling is the equilibration.
     pub scaling: ScalingStrategy,
     /// The row matching of the LU path.
     pub matching: MatchingSettings,
@@ -614,10 +618,13 @@ impl SolverSettings {
                 }
             }
             FactorPath::Lu => {
-                if self.scaling != d.scaling {
+                if matches!(
+                    self.scaling,
+                    ScalingStrategy::Mc64Symmetric | ScalingStrategy::External(_)
+                ) {
                     out.push(format!(
-                        "scaling = {:?} is ignored by the LU path (it equilibrates rows and \
-                         columns with its own two-sided scaling)",
+                        "scaling = {:?} is ignored by the LU path (a symmetric scaling; the LU \
+                         equilibrates rows and columns one-pass, iterated or not at all)",
                         self.scaling
                     ));
                 }

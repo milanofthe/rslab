@@ -411,11 +411,13 @@ impl LuSymbolic {
         let factor_bytes = numeric.bytes() as u64;
         let (l, ut, factors) = numeric.into_parts();
         let mut decisions = self.symb.decisions(self.requested_ordering);
-        decisions.scaling = if self.matching.is_some() {
-            "Mc64RowMatching".to_string()
-        } else {
-            "TwoSidedRowCol".to_string()
-        };
+        decisions.scaling = match (&self.matching, &opts.scaling) {
+            (Some(_), _) => "Mc64RowMatching",
+            (None, crate::scaling::ScalingStrategy::InfNorm) => "TwoSidedRuiz",
+            (None, crate::scaling::ScalingStrategy::Identity) => "Identity",
+            (None, _) => "TwoSidedRowCol",
+        }
+        .to_string();
         decisions.method = "LeftLooking".to_string();
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,

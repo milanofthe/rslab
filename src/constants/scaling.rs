@@ -33,3 +33,11 @@ pub const HUNGARIAN_DENSE_COL_DIV: usize = 10;
 /// Why: on small matrices every column is "dense" by that measure.
 /// Contract: results.
 pub const HUNGARIAN_DENSE_MIN_ROWS: usize = 50;
+
+/// Entries of a matrix per piece of the two-sided equilibration at least
+/// (entries): below it the pieces run on fewer workers, down to one.
+/// Used by: `scaling::twosided::maxima`.
+/// Why: a piece also takes and folds a row-maxima buffer of `n`; with fewer
+/// entries than this per piece that costs about as much as the piece.
+/// Contract: performance only (a maximum is the same in any order).
+pub const EQUILIBRATION_PIECE_MIN_NNZ: usize = 1 << 16;
