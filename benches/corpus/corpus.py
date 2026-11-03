@@ -90,10 +90,12 @@ MOM = [
 ]
 
 # rapidfem's driven-sweep examples (python/python_src/rapidfem/examples/fd_<name>.py), each
-# up to its second frequency: the first system and its refactorization values.
-FEM_EXAMPLES = ['wr90', 'coax_step', 'wr90_pml', 'iris_filter', 'stepped_impedance_filter',
-                'coupled_line_filter', 'microstrip_line', 'patch_antenna', 'vivaldi_antenna',
-                'pyramidal_horn', 'rfic_spiral_from_json']
+# up to its second frequency: the first system and its refactorization values. Left out:
+# coupled_line_filter (5.6M DOF, beyond the corpus machine), dielectric_resonator and
+# inverted_f_antenna (eigenmode and adaptive refinement, which do not dump), stl_import (an
+# import demo).
+FEM_EXAMPLES = ['wr90', 'coax_step', 'wr90_pml', 'iris_filter', 'pyramidal_horn', 'patch_antenna',
+                'rfic_spiral_from_json', 'microstrip_line', 'vivaldi_antenna', 'stepped_impedance_filter']
 # Systems a sweep dumps per example: the first frequency and the next one.
 FEM_DUMPS = 2
 
