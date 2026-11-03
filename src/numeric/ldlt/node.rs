@@ -282,8 +282,8 @@ pub(super) fn ll_node_scratch<T: Scalar>(
     use crate::memory::grown;
     let vb = std::mem::size_of::<T>();
     let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
-    let (cdiv, mut planes) =
-        super::bunch_kaufman::ll_cdiv_scratch::<T>(ncol, sched.rows(s).len(), k);
+    let (cdiv, mut planes, cdiv_copies) =
+        super::bunch_kaufman::ll_cdiv_scratch::<T>(ncol, sched.rows(s).len(), k, workers);
     let plan = crate::numeric::supernodal::CmodPlan::new(
         sym,
         s,
@@ -322,10 +322,12 @@ pub(super) fn ll_node_scratch<T: Scalar>(
             }
             worst = worst.max(vd + u);
         }
-        let copies = if slab_planes > planes {
-            slabs.min(workers.max(1))
+        // The slabs' planes and the cdiv's are taken at different times; the
+        // larger planes on the larger number of workers bounds both.
+        let copies = if slab_planes > 0 {
+            slabs.min(workers.max(1)).max(cdiv_copies)
         } else {
-            1
+            cdiv_copies
         };
         let bytes = ((worst * slabs.min(workers.max(1)) * vb) as u64).max(cdiv);
         (bytes, planes.max(slab_planes), copies)
@@ -346,6 +348,6 @@ pub(super) fn ll_node_scratch<T: Scalar>(
                 }
             }
         }
-        (((vc + vd + u) * vb) as u64 + cdiv, planes, 1)
+        (((vc + vd + u) * vb) as u64 + cdiv, planes, cdiv_copies)
     }
 }

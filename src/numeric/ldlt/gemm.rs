@@ -106,3 +106,136 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
         c0 += tw;
     }
 }
+
+/// The trailing update of one panel step on and below the diagonal, straight
+/// into the panel: `B[r, c] -= G[r, :] R[c, :]^T` for the trailing columns
+/// `c` in `[c0, c1)` and the rows `r >= c`, indices relative to the first
+/// trailing row and column of the panel. `G` and `R` are the `mt x pw`
+/// column-major blocks of the step (leading dimension `mt`); `dst` is the
+/// panel entry at the first trailing row of column `c0`, column stride
+/// `nrow`.
+///
+/// The columns go in tiles of `tw`, the tiled form of the `cmod` update:
+/// the rows below a tile's diagonal block are one GEMM into the panel, the
+/// diagonal block one GEMM into a buffer of `pool` whose lower triangle is
+/// then subtracted, so the panel's upper triangle is never written. With
+/// `par` the tiles run on the pool, each a sequential GEMM (so a complex
+/// tile keeps the split kernel); a tile computes the same bits either way.
+///
+/// # Safety
+/// `dst` with stride `nrow` must address the `mt` trailing rows of columns
+/// `[c0, c1)`, which no one else touches meanwhile; `g` and `r` hold
+/// `mt * pw` entries.
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn schur_tiles<T: Scalar>(
+    dst: *mut T,
+    nrow: usize,
+    mt: usize,
+    pw: usize,
+    g: &[T],
+    r: &[T],
+    (c0, c1): (usize, usize),
+    tw: usize,
+    par: bool,
+    pool: &crate::numeric::supernodal::ScratchPool<Vec<T>>,
+    ks: &crate::KernelSettings,
+) {
+    use crate::dense::gemm_backend::{gemm, GemmMode};
+    debug_assert!(g.len() >= mt * pw && r.len() >= mt * pw && c1 <= mt);
+    let tw = tw.max(1);
+    let tiles = (c1 - c0).div_ceil(tw);
+    let base = crate::numeric::supernodal::PanelPtr(dst);
+    let mode = GemmMode::new(gemm::Parallelism::None, ks);
+    let tile = |t: usize| {
+        let a = c0 + t * tw;
+        let b = (a + tw).min(c1);
+        let w = b - a;
+        // SAFETY: column `a` of the caller's range; the operands are the
+        // caller's blocks, disjoint from the panel.
+        unsafe {
+            let col = base.get().add((a - c0) * nrow);
+            let mut diag = pool.take();
+            diag.clear();
+            diag.resize(w * w, T::zero());
+            gemm(
+                w,
+                w,
+                pw,
+                diag.as_mut_ptr(),
+                w as isize,
+                1,
+                false,
+                g.as_ptr().add(a),
+                mt as isize,
+                1,
+                r.as_ptr().add(a),
+                1,
+                mt as isize,
+                T::zero(),
+                T::one(),
+                false,
+                false,
+                false,
+                mode,
+            );
+            for j in 0..w {
+                for i in j..w {
+                    let p = col.add(a + i + j * nrow);
+                    *p = *p - diag[i + j * w];
+                }
+            }
+            if mt > b {
+                gemm(
+                    mt - b,
+                    w,
+                    pw,
+                    col.add(b),
+                    nrow as isize,
+                    1,
+                    true,
+                    g.as_ptr().add(b),
+                    mt as isize,
+                    1,
+                    r.as_ptr().add(a),
+                    1,
+                    mt as isize,
+                    T::one(),
+                    T::zero() - T::one(),
+                    false,
+                    false,
+                    false,
+                    mode,
+                );
+            }
+        }
+    };
+    if par && tiles > 1 {
+        crate::parallel::for_each(tiles, 1, tile);
+    } else {
+        (0..tiles).for_each(tile);
+    }
+}
+
+/// The largest split planes ([`split_plane_entries`](crate::dense::gemm_backend::split_plane_entries))
+/// a [`schur_tiles`] call over the columns `[c0, c1)` takes on one worker,
+/// and its tile count.
+pub(super) fn schur_tile_planes(
+    mt: usize,
+    (c0, c1): (usize, usize),
+    pw: usize,
+    tw: usize,
+    ks: &crate::KernelSettings,
+) -> (usize, usize) {
+    use crate::dense::gemm_backend::split_plane_entries;
+    let tw = tw.max(1);
+    let mut worst = 0;
+    let mut a = c0;
+    while a < c1 {
+        let b = (a + tw).min(c1);
+        worst = worst
+            .max(split_plane_entries(b - a, b - a, pw, false, ks))
+            .max(split_plane_entries(mt - b, b - a, pw, false, ks));
+        a = b;
+    }
+    (worst, (c1 - c0).div_ceil(tw))
+}
