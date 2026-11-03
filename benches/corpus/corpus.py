@@ -334,12 +334,16 @@ def build_sane(src, out, work, only, reuse):
         for k, (f, fb) in enumerate(picked):
             a = read_mtx(f)
             b = np.asarray(scipy.io.mmread(str(fb))).reshape(a.shape[0], -1) if fb.exists() else None
+            consistent = b is None or not np.any(b)
+            if consistent:
+                b = a @ np.ones(a.shape[0])  # no right-hand side to measure against: x = 1
             if route is None:
                 import rslab
                 route = rslab.analyze(a, path='auto').route
             path = 'klu' if route == 'klu' else ('ldlt' if symmetry(a) == 'symmetric' else 'lu')
-            save(out, 'circuit', f'{name}_f{k:02d}', a, b if b is not None else np.ones(a.shape[0]), {
+            save(out, 'circuit', f'{name}_f{k:02d}', a, b, {
                 'path': path, 'settings': {}, 'auto_route': route, 'dump_file': f.name,
+                'rhs': 'A @ ones (every dumped one zero)' if consistent else 'dumped',
                 'command': f'SANE_DUMP_MATRIX=DIR SANE_DUMP_LIMIT={SANE_DUMP_LIMIT[analysis]} '
                            f'SANE_VACASK_UPSTREAM=<circuits>/cases/vacask_c6288_psp103/.. python '
                            f'{" ".join(cmd[:4])} <threads> 1',
@@ -348,18 +352,23 @@ def build_sane(src, out, work, only, reuse):
 
 
 def pick_sane(raw, analysis):
-    """The (matrix, rhs) files of a SANE dump the corpus keeps: SANE writes a file per solve,
-    so repeated matrices (the six stages of a Rosenbrock step share one) are dropped. DC: the
-    first two distinct Jacobians (Newton iterates 0 and 1); transient: the last two distinct
-    ones among the dumped, consecutive stage matrices past the consistent start."""
-    files = sorted(f for f in raw.glob('sane_*_*.mtx') if not f.stem.endswith('_b'))
+    """The (matrix, rhs) files of a SANE dump the corpus keeps. SANE writes a file per solve,
+    so one matrix comes with several right-hand sides (the six stages of a Rosenbrock step
+    share it; the first stage's is zero at rest): per distinct matrix the right-hand side of
+    the largest norm. DC: the first two distinct Jacobians (Newton iterates 0 and 1);
+    transient: the last two distinct ones among the dumped, consecutive stage matrices past
+    the consistent start."""
+    files = [f for f in raw.glob('sane_*_*.mtx') if not f.stem.endswith('_b')]
     files.sort(key=lambda f: int(f.stem.rsplit('_', 1)[1]))
-    distinct, seen = [], set()
+    groups = {}
     for f in files:
-        digest = hashlib.sha256(f.read_bytes()).hexdigest()
-        if digest not in seen:
-            seen.add(digest)
-            distinct.append(f)
+        groups.setdefault(hashlib.sha256(f.read_bytes()).hexdigest(), []).append(f)
+
+    def norm(f):
+        fb = f.with_name(f.stem + '_b.mtx')
+        return float(np.linalg.norm(np.asarray(scipy.io.mmread(str(fb))))) if fb.exists() else 0.0
+
+    distinct = [max(g, key=norm) for g in groups.values()]
     keep = distinct[:2] if analysis == 'dc' else distinct[-2:]
     return [(f, f.with_name(f.stem + '_b.mtx')) for f in keep]
 
