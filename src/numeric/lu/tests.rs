@@ -1215,13 +1215,6 @@ fn delayed_pivots_fit_the_memory_plan() {
         "{plan:?} {}",
         f.heap_bytes()
     );
-    // The structures closed under delays contain the exact ones.
-    let (exact, closed) = (&sym.structure, sym.closed.get().unwrap());
-    for s in 0..sym.symb.n_supernodes() {
-        let within = |a: &[Li], b: &[Li]| a.iter().all(|g| b.contains(g));
-        assert!(within(exact.rows_l(s), closed.rows_l(s)));
-        assert!(within(exact.cols_u(s), closed.cols_u(s)));
-    }
 }
 
 #[test]
@@ -1272,4 +1265,38 @@ fn delays_past_their_allowance_fall_back() {
     let b = vec![1.0; a.n];
     let x = f.solve(&b).unwrap();
     assert!(x.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn delayed_pivots_carry_rows_beyond_the_structure() {
+    // The grid with one direction of every third coupling dropped: a
+    // structurally unsymmetric pattern, where the rows a delayed pivot
+    // carries may lie outside its parent's exact structure.
+    let g = off_diagonal_pivots(26, 1e-9, 11);
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..g.n {
+        for p in g.col_ptr[j]..g.col_ptr[j + 1] {
+            let i = g.row_idx[p];
+            if i < j && (i + j).is_multiple_of(3) {
+                continue;
+            }
+            r.push(i);
+            c.push(j);
+            v.push(g.values[p]);
+        }
+    }
+    let a = GeneralCsc::<f64>::from_triplets(g.n, &r, &c, &v).unwrap();
+    let b: Vec<f64> = (0..a.n).map(|i| ((i * 5 % 11) as f64) - 5.0).collect();
+    let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let confined = LuSolver::factor(&a, &delays_settings(0.0)).unwrap();
+    let delayed = LuSolver::factor(&a, &delays_settings(1.0)).unwrap();
+    let d = delayed.diagnostics().numeric;
+    assert!(d.delayed.unwrap() > 0 && d.forced == Some(0), "{d:?}");
+    let rel = resid(&a, &delayed.solve(&b).unwrap(), &b) / bnorm;
+    let rel0 = resid(&a, &confined.solve(&b).unwrap(), &b) / bnorm;
+    // (dense partial pivoting: 1e-9)
+    assert!(
+        rel < 1e-8 && rel < 1e-3 * rel0,
+        "residual {rel:.1e} with delays, {rel0:.1e} without"
+    );
 }

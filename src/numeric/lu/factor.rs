@@ -465,7 +465,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
                 .ok_or_else(|| RslabError::InvalidInput("internal: empty symbolic".to_string()))?;
             let growth = opts.pivoting.delay_growth;
             let run = |growth: f64, storage| {
-                let st = lusym.structure_for(growth);
+                let st = &lusym.structure;
                 let kt = opts.kernel();
                 factor_lu_left_looking(
                     sym,

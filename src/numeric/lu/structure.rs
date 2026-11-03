@@ -13,19 +13,14 @@
 //! - the `U` columns of `s`: columns of `B` past the block in `s`'s rows, and
 //!   the columns past `s` of every `k` whose `L` rows reach `s`.
 //!
-//! Row interchanges inside a supernode's fully-summed block permute the
-//! block rows among themselves and leave both sets unchanged: they are exact
-//! up to numerical cancellation. A delayed pivot (`delay`) moves a column
-//! and a row of a child into its parent's fully-summed block, with the rows
-//! and columns past the child the delayed pair carries. The structure
-//! [`closed`](LuStructure::closed) under delays holds them: there a child
-//! counts as reaching its parent, its rows and columns past the parent
-//! joining the parent's whether or not its own `U` columns or `L` rows land
-//! there. By induction every structure a factorization with delayed pivots
-//! builds stays within it (the delayed rows and columns aside, which are the
-//! parent's own). On a structurally symmetric pattern the closure adds
-//! nothing. Both are subsets of the symmetric structure, and every
-//! contributing `k` is among `s`'s symmetric updaters, which the
+//! Pivoting inside a supernode's fully-summed block permutes the block rows
+//! among themselves and leaves both sets unchanged: they are exact up to
+//! numerical cancellation. A delayed pivot (`delay`) moves a column and a
+//! row of a child into its parent's fully-summed block, with the rows and
+//! columns past the child the delayed pair carries; the factorization adds
+//! those the parent lacks to the parent's sets, and passes them on by the
+//! same rule as below (`node`). Both are subsets of the symmetric structure,
+//! and every contributing `k` is among `s`'s symmetric updaters, which the
 //! construction walks.
 
 use crate::numeric::supernodal::{Li, LlSchedule};
@@ -69,6 +64,14 @@ impl LuStructure {
         &self.u[self.u_off[s]..self.u_off[s + 1]]
     }
 
+    /// Whether the list `v` (ascending past a prefix of indices below
+    /// `first`) hits a supernode's columns `[first, last)`.
+    #[inline]
+    pub fn hits(v: &[Li], first: usize, last: usize) -> bool {
+        let p = v.partition_point(|&g| (g as usize) < first);
+        p < v.len() && (v[p] as usize) < last
+    }
+
     /// From the pattern of `A` (`col_ptr`, `row_idx`), the row matching
     /// (`row_map[r]`: the row of `B` that row `r` of `A` becomes) and the
     /// analysis of `B + B^T`.
@@ -101,36 +104,7 @@ impl LuStructure {
                 }
             }
         }
-        Self::grow(lseed, useed, sym, sched, false)
-    }
-
-    /// This structure closed under delayed pivots (see the module docs).
-    pub fn closed(&self, sym: &SymbolicFactorization, sched: &LlSchedule) -> Self {
-        let ns = sym.supernodes.len();
-        let past = |v: &[Li], s: usize| v[sym.supernodes[s].ncol..].to_vec();
-        let lseed = (0..ns).map(|s| past(self.rows_l(s), s)).collect();
-        let useed = (0..ns).map(|s| past(self.cols_u(s), s)).collect();
-        Self::grow(lseed, useed, sym, sched, true)
-    }
-
-    /// The structures from their seeds (each supernode's rows and columns
-    /// past its block that it has of its own), by the updates; `closed`
-    /// lets every child reach its parent.
-    fn grow(
-        mut lseed: Vec<Vec<Li>>,
-        mut useed: Vec<Vec<Li>>,
-        sym: &SymbolicFactorization,
-        sched: &LlSchedule,
-        closed: bool,
-    ) -> Self {
-        let nsuper = sym.supernodes.len();
-        let end = |s: usize| sym.supernodes[s].first_col + sym.supernodes[s].ncol;
         let mut st = Self::empty();
-        // `s`'s columns `[first, last)` hit by the ascending list `v`.
-        let hits = |v: &[Li], first: usize, last: usize| {
-            let p = v.partition_point(|&g| (g as usize) < first);
-            p < v.len() && (v[p] as usize) < last
-        };
         for s in 0..nsuper {
             let (first, last) = (sym.supernodes[s].first_col, end(s));
             let (mut l, mut u) = (std::mem::take(&mut lseed[s]), std::mem::take(&mut useed[s]));
@@ -138,11 +112,10 @@ impl LuStructure {
                 let k = k as usize;
                 let nck = sym.supernodes[k].ncol;
                 let (lk, uk) = (&st.rows_l(k)[nck..], &st.cols_u(k)[nck..]);
-                let child = closed && sched.parent[k] == s;
-                if child || hits(uk, first, last) {
+                if Self::hits(uk, first, last) {
                     l.extend(lk.iter().filter(|&&g| g as usize >= last));
                 }
-                if child || hits(lk, first, last) {
+                if Self::hits(lk, first, last) {
                     u.extend(uk.iter().filter(|&&g| g as usize >= last));
                 }
             }

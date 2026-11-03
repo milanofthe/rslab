@@ -13,9 +13,13 @@
 //! decision depends on the values alone, never on the thread count or the
 //! timing.
 //!
-//! A delayed pair enlarges the parent's front by a row and a column, so the
-//! parent outgrows its slot of the arena and factors into buffers of its
-//! own (`PanelArena::grow`); its slot stays untouched. The growth over the
+//! A delayed pair enlarges the parent's front by a row and a column, and by
+//! the rows and columns past the child it carries that the parent's
+//! structure lacks (on a structurally unsymmetric pattern, as under the row
+//! matching); an ancestor that takes updates from a front with such rows
+//! takes the rows too (the rule of the structure, `structure`). Such a front
+//! outgrows its slot of the arena and factors into buffers of its own
+//! (`PanelArena::grow`); its slot stays untouched. The growth over the
 //! slots, summed over the forest, is bounded by
 //! [`PivotSettings::delay_growth`](crate::PivotSettings::delay_growth) of
 //! the factor, which the memory plan reserves. A factorization whose delays
@@ -36,11 +40,15 @@ pub(super) struct NodePivots {
     /// pivot order, then those passed to the parent.
     pub rows: Vec<Li>,
     pub cols: Vec<Li>,
-    /// With pivots passed on: the finished panels' rows and columns past the
-    /// pivots, the passed ones first, then the structure's off-block ones
-    /// (what the ancestors' updates read). Empty otherwise: the structure's.
+    /// With pivots passed on or rows and columns beyond the structure's:
+    /// the finished panels' rows and columns past the pivots, the passed
+    /// ones first, then the off-block ones (what the ancestors' updates
+    /// read). Empty otherwise: the structure's.
     pub off_l: Vec<Li>,
     pub off_u: Vec<Li>,
+    /// Its off-block rows or columns go beyond the structure's: the
+    /// delayed pivots it took brought them, or an updater passed them on.
+    pub extras: bool,
     /// Pivots that failed the threshold over their whole column and could
     /// not be delayed.
     pub forced: usize,
@@ -62,7 +70,7 @@ impl NodePivots {
         k: usize,
         ncol: usize,
     ) -> (usize, &'a [Li], &'a [Li]) {
-        if self.passed() > 0 {
+        if self.passed() > 0 || self.extras {
             (self.npiv, &self.off_l, &self.off_u)
         } else {
             (self.npiv, &st.rows_l(k)[ncol..], &st.cols_u(k)[ncol..])

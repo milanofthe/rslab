@@ -147,9 +147,6 @@ pub struct LuSymbolic {
     /// The exact structures of `L` and `U`, tighter than the analysis's
     /// symmetric one on an unsymmetric pattern.
     pub(super) structure: LuStructure,
-    /// The structures closed under delayed pivots, built from the exact
-    /// ones by the first factorization that may delay a pivot.
-    pub(super) closed: std::sync::OnceLock<LuStructure>,
 }
 
 impl LuSymbolic {
@@ -162,7 +159,6 @@ impl LuSymbolic {
         use crate::memory::vec_bytes;
         self.symb.heap_bytes()
             + self.structure.heap_bytes()
-            + self.closed.get().map_or(0, |c| c.heap_bytes())
             + self.input.get().map_or(0, |p| p.heap_bytes())
             + self.matching.as_ref().map_or(0, |m| {
                 vec_bytes(&m.row_of) + vec_bytes(&m.r) + vec_bytes(&m.c)
@@ -199,7 +195,6 @@ impl LuSymbolic {
                 est_cache: Mutex::new(Vec::new()),
                 input: std::sync::OnceLock::new(),
                 structure: LuStructure::empty(),
-                closed: std::sync::OnceLock::new(),
             });
         }
         let t = crate::clock::Instant::now();
@@ -286,21 +281,7 @@ impl LuSymbolic {
             est_cache: Mutex::new(Vec::new()),
             input: std::sync::OnceLock::new(),
             structure,
-            closed: std::sync::OnceLock::new(),
         })
-    }
-
-    /// The structures a factorization whose fronts may grow by
-    /// `delay_growth` for delayed pivots works on: the exact ones, or those
-    /// closed under delays.
-    pub(super) fn structure_for(&self, delay_growth: f64) -> &LuStructure {
-        let delays = delay_growth > 0.0;
-        match (delays, self.symb.sym_and_levels(), self.symb.ll_schedule()) {
-            (true, Some((sym, _)), Some(sched)) => self
-                .closed
-                .get_or_init(|| self.structure.closed(sym, sched)),
-            _ => &self.structure,
-        }
     }
 
     /// Whether the analysis carries an MC64 row matching.
@@ -604,10 +585,7 @@ impl LuSymbolic {
         else {
             return plan;
         };
-        // The structures the factorization works on, closed under delayed
-        // pivots where they may happen (built here once, part of the
-        // analysis from then on).
-        let st = self.structure_for(opts.pivoting.delay_growth);
+        let st = &self.structure;
         // After the schedule above is built: it is part of the analysis.
         plan.analysis_bytes = self.heap_bytes();
         let vb = std::mem::size_of::<T>();

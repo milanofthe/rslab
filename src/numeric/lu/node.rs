@@ -23,6 +23,8 @@ use std::sync::atomic::Ordering;
 pub(super) struct LuScratch<T> {
     rows: Vec<Li>,
     cols: Vec<Li>,
+    xl: Vec<Li>,
+    xu: Vec<Li>,
     col: Vec<T>,
     lupd: Vec<T>,
     uupd: Vec<T>,
@@ -31,7 +33,13 @@ pub(super) struct LuScratch<T> {
 impl<T> crate::memory::HeapBytes for LuScratch<T> {
     fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes as b;
-        b(&self.rows) + b(&self.cols) + b(&self.col) + b(&self.lupd) + b(&self.uupd)
+        b(&self.rows)
+            + b(&self.cols)
+            + b(&self.xl)
+            + b(&self.xu)
+            + b(&self.col)
+            + b(&self.lupd)
+            + b(&self.uupd)
     }
 }
 
@@ -40,6 +48,8 @@ impl<T> Default for LuScratch<T> {
         LuScratch {
             rows: Vec::new(),
             cols: Vec::new(),
+            xl: Vec::new(),
+            xu: Vec::new(),
             col: Vec::new(),
             lupd: Vec::new(),
             uupd: Vec::new(),
@@ -150,30 +160,72 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     let ll_gemm_par = kt.k.par_gemm;
     let snode = &sym.supernodes[s];
     let (first, ncol) = (snode.first_col, snode.ncol);
-    let (off_l, off_u) = (&st.rows_l(s)[ncol..], &st.cols_u(s)[ncol..]);
+    let last = first + ncol;
     let n = sym.n;
     // SAFETY: a factored supernode's record is written once, before its
     // consumers (the ancestors, this node among them) start.
     let done = |k: usize| unsafe { emit.pivots.get(k) };
+    let view = |k: usize| done(k).off(st, k, sym.supernodes[k].ncol);
     // The fully-summed block: this supernode's columns and the delayed
     // pivots its children pass (`delay`), then the off-block rows.
     let d_in: usize = snode.children.iter().map(|&c| done(c).passed()).sum();
     let nfs = ncol + d_in;
-    let (cn_l, cn_u) = (off_l.len(), off_u.len());
-    let (nrow_l, nrow_u) = (nfs + cn_l, nfs + cn_u);
     let mut lent = pools.node.take();
     let LuScratch {
         rows,
         cols,
+        xl,
+        xu,
         col,
         lupd,
         uupd,
     } = &mut *lent;
+    // The off-block rows and columns: the structure's, and those beyond it
+    // that the delayed pivots of the children carry or that an updater with
+    // such rows passes on by the rule of the structure.
+    xl.clear();
+    xu.clear();
+    fn past(v: &[Li], last: usize) -> impl Iterator<Item = Li> + '_ {
+        v.iter().copied().filter(move |&g| g as usize >= last)
+    }
+    for &c in &snode.children {
+        if done(c).passed() > 0 {
+            let (_, olc, ouc) = view(c);
+            xl.extend(past(olc, last));
+            xu.extend(past(ouc, last));
+        }
+    }
+    for &k in sched.updaters(s) {
+        let k = k as usize;
+        if done(k).extras {
+            let (_, olk, ouk) = view(k);
+            if LuStructure::hits(ouk, first, last) {
+                xl.extend(past(olk, last));
+            }
+            if LuStructure::hits(olk, first, last) {
+                xu.extend(past(ouk, last));
+            }
+        }
+    }
+    let (st_l, st_u) = (&st.rows_l(s)[ncol..], &st.cols_u(s)[ncol..]);
+    let mut extras = false;
+    for (x, own) in [(&mut *xl, st_l), (&mut *xu, st_u)] {
+        if !x.is_empty() {
+            x.extend_from_slice(own);
+            x.sort_unstable();
+            x.dedup();
+            extras |= x.len() > own.len();
+        }
+    }
+    let off_l: &[Li] = if xl.len() > st_l.len() { xl } else { st_l };
+    let off_u: &[Li] = if xu.len() > st_u.len() { xu } else { st_u };
+    let (cn_l, cn_u) = (off_l.len(), off_u.len());
+    let (nrow_l, nrow_u) = (nfs + cn_l, nfs + cn_u);
     // The front's rows and columns (global indices) in panel order.
     rows.clear();
     cols.clear();
-    rows.extend((first..first + ncol).map(|g| g as Li));
-    cols.extend((first..first + ncol).map(|g| g as Li));
+    rows.extend((first..last).map(|g| g as Li));
+    cols.extend((first..last).map(|g| g as Li));
     for &c in &snode.children {
         let pc = done(c);
         rows.extend_from_slice(&pc.rows[pc.npiv..]);
@@ -186,13 +238,14 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // `nrow_u x nfs`; the factorization writes its off-block rows, `U12[p, t]`
     // at `ut[p * nrow_u + nfs + t]` (row `p` of `U` is column `p` of the
     // panel), and the emit fills the diagonal block. The node's slots, or,
-    // with delayed pivots taken, buffers of its own: what they add over the
-    // slots counts against the factorization's allowance.
+    // with delayed pivots taken or rows beyond the structure, buffers of its
+    // own: what they add over the slots counts against the factorization's
+    // allowance.
     // SAFETY: this task owns supernode `s`; nobody reads its slots before the
     // node is done (its ancestors start after it).
     let (lbuf, ut): (&mut [T], &mut [T]) = unsafe {
         let (la, ua) = (&emit.l_arena, &emit.u_arena);
-        if d_in == 0 {
+        if d_in == 0 && !extras {
             (la.claim(s), ua.claim(s))
         } else {
             let (lv, uv) = (nrow_l * nfs, nrow_u * nfs);
@@ -509,7 +562,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         // pivots, and of each delayed row over its columns past them. Every
         // update from below is in (descendants reach a delayed index only
         // through the child that delayed it), and every row and column lies
-        // in this front (the structure is closed under delays).
+        // in this front (the children's ones past it were added above).
         for &c in &snode.children {
             let pc = done(c);
             if pc.passed() == 0 {
@@ -832,21 +885,22 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     }
     // What the node leaves: its pivots, the pivots it passes on (the rows and
     // columns past its pivots, as its ancestors read them, start with them).
-    let passed = npiv < nfs;
+    let own_lists = npiv < nfs || extras;
     let pivots = NodePivots {
         npiv,
         rows: rows[..nfs].to_vec(),
         cols: cols[..nfs].to_vec(),
-        off_l: if passed {
+        off_l: if own_lists {
             rows[npiv..].to_vec()
         } else {
             Vec::new()
         },
-        off_u: if passed {
+        off_u: if own_lists {
             cols[npiv..].to_vec()
         } else {
             Vec::new()
         },
+        extras,
         forced,
     };
     // SAFETY: each supernode's record is written by its own task, once.
