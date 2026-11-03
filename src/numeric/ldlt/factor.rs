@@ -82,21 +82,25 @@ pub(crate) fn factor_numeric<T: Scalar>(
         )
     });
     let weight = scale.map(|s| move |i: usize, j: usize| s[i] * s[j]);
-    let vals = prog.values(
-        &a.col_ptr,
-        &a.row_idx,
-        &a.values,
-        weight.as_ref().map(|w| w as &dyn Fn(usize, usize) -> f64),
-    );
-    let inp = Input::new(prog, &vals);
 
     // Run in a scoped pool of `opts.threads` so concurrent solves don't
-    // oversubscribe.
+    // oversubscribe; the values are scattered on its workers too.
     let sched = inner.schedule();
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),
-        || factor_left_looking(sym, sched, inp, scale, opts, storage, pools),
+        || {
+            let vals = prog.values(
+                &a.col_ptr,
+                &a.row_idx,
+                &a.values,
+                weight
+                    .as_ref()
+                    .map(|w| w as &(dyn Fn(usize, usize) -> f64 + Sync)),
+            );
+            let inp = Input::new(prog, &vals);
+            factor_left_looking(sym, sched, inp, scale, opts, storage, pools)
+        },
     )
 }
 
