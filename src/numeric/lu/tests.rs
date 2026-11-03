@@ -1104,3 +1104,230 @@ fn analyses_match_the_recorded_fingerprints() {
     let report: Vec<String> = got.iter().map(|(k, v)| format!("{k}: {v:#018x}")).collect();
     assert_eq!(got.map(|(_, v)| v), recorded, "{report:#?}");
 }
+
+/// A matrix whose stable pivots lie off the diagonal: a `k x k` grid of
+/// unknowns coupled to their neighbours by entries of order one (unsymmetric
+/// values, random signs), the diagonal `diag` small at every other point
+/// and two elsewhere. A front can pivot such a column only on a coupling to
+/// a row it holds; a column whose couplings all lead to rows of its
+/// ancestors has no stable pivot in its front.
+fn off_diagonal_pivots(k: usize, diag: f64, seed: u64) -> GeneralCsc<f64> {
+    let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let n = k * k;
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..k {
+        for j in 0..k {
+            let p = i * k + j;
+            r.push(p);
+            c.push(p);
+            v.push(if (i + j) % 2 == 0 { diag } else { 2.0 });
+            for (di, dj) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+                let (ii, jj) = (i as i64 + di, j as i64 + dj);
+                if ii < 0 || jj < 0 || ii as usize >= k || jj as usize >= k {
+                    continue;
+                }
+                let x = next();
+                r.push(ii as usize * k + jj as usize);
+                c.push(p);
+                v.push(if x < 0.5 { -0.5 - x } else { x });
+            }
+        }
+    }
+    GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap()
+}
+
+fn delays_settings(growth: f64) -> SolverSettings {
+    SolverSettings::default()
+        .with_matching(false)
+        .with_delay_growth(growth)
+}
+
+#[test]
+fn delayed_pivots_keep_the_factor_stable() {
+    let a = off_diagonal_pivots(24, 1e-9, 3);
+    let b: Vec<f64> = (0..a.n).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
+    let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let confined = LuSolver::factor(&a, &delays_settings(0.0)).unwrap();
+    let d = confined.diagnostics().numeric;
+    assert_eq!(d.delayed, Some(0));
+    let forced = d.forced.unwrap();
+    assert!(forced > 0, "the pivots of this matrix lie off their fronts");
+    let delayed = LuSolver::factor(&a, &delays_settings(1.0)).unwrap();
+    let d = delayed.diagnostics().numeric;
+    assert!(d.delayed.unwrap() > 0, "{d:?}");
+    assert!(d.forced.unwrap() < forced, "{d:?} against {forced} forced");
+    let x = delayed.solve(&b).unwrap();
+    let rel = resid(&a, &x, &b) / bnorm;
+    let x0 = confined.solve(&b).unwrap();
+    let rel0 = resid(&a, &x0, &b) / bnorm;
+    // (dense partial pivoting: 1e-11)
+    assert!(
+        rel < 1e-10 && rel < 1e-4 * rel0,
+        "residual {rel:.1e} with delays, {rel0:.1e} without"
+    );
+    // The transposed solve runs on the same factor.
+    let xt = delayed.solve_transpose(&b).unwrap();
+    let relt = transpose_residual(&a, &xt, &b) / bnorm;
+    assert!(relt < 1e-10, "transposed residual {relt:.1e}");
+}
+
+#[test]
+fn delayed_pivots_are_deterministic_and_refactor_bitwise() {
+    use crate::numeric::settings::Threads;
+    let a = off_diagonal_pivots(30, 1e-9, 5);
+    let b: Vec<f64> = (0..a.n).map(|i| (i % 5) as f64 - 2.0).collect();
+    let solve = |threads: usize| {
+        let s = delays_settings(0.5).with_threads(Threads::Fixed(threads));
+        let f = LuSolver::factor(&a, &s).unwrap();
+        (f.solve(&b).unwrap(), f.diagnostics().numeric.delayed)
+    };
+    let (x1, d1) = solve(1);
+    let (x4, d4) = solve(4);
+    assert!(d1.unwrap() > 0);
+    assert_eq!(d1, d4);
+    assert!(x1.iter().zip(&x4).all(|(p, q)| p.to_bits() == q.to_bits()));
+    // A refactorization in the buffers of a factor with delays: the same bits.
+    let s = delays_settings(0.5).with_threads(Threads::Fixed(4));
+    let sym = LuSymbolic::analyze(&a, &s).unwrap();
+    let mut f = sym.factor(&a, &s).unwrap();
+    sym.refactor(&a, &s, &mut f).unwrap();
+    let xr = f.solve(&b).unwrap();
+    assert!(xr.iter().zip(&x4).all(|(p, q)| p.to_bits() == q.to_bits()));
+}
+
+#[test]
+fn delayed_pivots_fit_the_memory_plan() {
+    use crate::numeric::settings::Threads;
+    let a = off_diagonal_pivots(30, 1e-9, 7);
+    let s = delays_settings(0.5).with_threads(Threads::Fixed(4));
+    let sym = LuSymbolic::analyze(&a, &s).unwrap();
+    let plan = sym.memory_plan::<f64>(&s, 1);
+    let f = sym.factor(&a, &s).unwrap();
+    assert!(f.diagnostics().numeric.delayed.unwrap() > 0);
+    assert!(
+        plan.factor_bytes >= f.heap_bytes(),
+        "{plan:?} {}",
+        f.heap_bytes()
+    );
+    // The structures closed under delays contain the exact ones.
+    let (exact, closed) = (&sym.structure, sym.closed.get().unwrap());
+    for s in 0..sym.symb.n_supernodes() {
+        let within = |a: &[Li], b: &[Li]| a.iter().all(|g| b.contains(g));
+        assert!(within(exact.rows_l(s), closed.rows_l(s)));
+        assert!(within(exact.cols_u(s), closed.cols_u(s)));
+    }
+}
+
+#[test]
+fn delayed_pivots_in_complex_and_single_precision() {
+    use num_complex::Complex;
+    let a = off_diagonal_pivots(20, 1e-7, 9);
+    let z = |v: f64, i: usize| Complex::new(v, 0.25 * v * ((i % 3) as f64 - 1.0));
+    let ac = GeneralCsc {
+        n: a.n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: a.values.iter().enumerate().map(|(i, &v)| z(v, i)).collect(),
+    };
+    let b: Vec<Complex<f64>> = (0..a.n).map(|i| z(1.0 + (i % 4) as f64, i)).collect();
+    let f = LuSolver::factor(&ac, &delays_settings(1.0)).unwrap();
+    assert!(f.diagnostics().numeric.delayed.unwrap() > 0);
+    let x = f.solve(&b).unwrap();
+    assert!(resid(&ac, &x, &b) < 1e-10);
+    let a32 = GeneralCsc {
+        n: a.n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: a.values.iter().map(|&v| v as f32).collect(),
+    };
+    let b32: Vec<f32> = (0..a.n).map(|i| (i % 4) as f32 - 1.5).collect();
+    let conf = LuSolver::factor(&a32, &delays_settings(0.0)).unwrap();
+    let del = LuSolver::factor(&a32, &delays_settings(1.0)).unwrap();
+    let (r0, r1) = (
+        resid(&a32, &conf.solve(&b32).unwrap(), &b32),
+        resid(&a32, &del.solve(&b32).unwrap(), &b32),
+    );
+    assert!(
+        r1 < 0.1 * r0,
+        "f32 residual {r1:.1e} with delays, {r0:.1e} without"
+    );
+}
+
+#[test]
+fn delays_past_their_allowance_fall_back() {
+    let a = off_diagonal_pivots(24, 1e-9, 3);
+    let f = LuSolver::factor(&a, &delays_settings(1e-6)).unwrap();
+    let d = f.diagnostics();
+    assert_eq!(d.numeric.delayed, Some(0));
+    assert!(
+        d.warnings.iter().any(|w| w.contains("delay_growth")),
+        "{d:?}"
+    );
+    let b = vec![1.0; a.n];
+    let x = f.solve(&b).unwrap();
+    assert!(x.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+#[ignore]
+fn debug_delays() {
+    let a = off_diagonal_pivots(24, 1e-9, 3);
+    let n = a.n;
+    let b: Vec<f64> = (0..n).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
+    // dense GEPP
+    let mut d = vec![0.0f64; n * n];
+    for j in 0..n {
+        for p in a.col_ptr[j]..a.col_ptr[j + 1] {
+            d[a.row_idx[p] * n + j] += a.values[p];
+        }
+    }
+    let mut x = b.clone();
+    for k in 0..n {
+        let p = (k..n)
+            .max_by(|&i, &j| d[i * n + k].abs().partial_cmp(&d[j * n + k].abs()).unwrap())
+            .unwrap();
+        if p != k {
+            for c in 0..n {
+                d.swap(k * n + c, p * n + c);
+            }
+            x.swap(k, p);
+        }
+        for i in k + 1..n {
+            let l = d[i * n + k] / d[k * n + k];
+            if l != 0.0 {
+                for c in k..n {
+                    d[i * n + c] -= l * d[k * n + c];
+                }
+                x[i] -= l * x[k];
+            }
+        }
+    }
+    for k in (0..n).rev() {
+        let mut s = x[k];
+        for c in k + 1..n {
+            s -= d[k * n + c] * x[c];
+        }
+        x[k] = s / d[k * n + k];
+    }
+    eprintln!("dense GEPP residual {:.2e}", resid(&a, &x, &b));
+    for (g, u) in [(0.0, 0.1), (1.0, 0.1), (100.0, 0.1), (0.0, 1.0), (1.0, 1.0)] {
+        let s = delays_settings(g).with_pivot_threshold(u);
+        let f = LuSolver::factor(&a, &s).unwrap();
+        let x = f.solve(&b).unwrap();
+        let dd = f.diagnostics();
+        eprintln!(
+            "growth {g} u {u}: residual {:.2e} delayed {:?} forced {:?} nnz {} sn {}",
+            resid(&a, &x, &b),
+            dd.numeric.delayed,
+            dd.numeric.forced,
+            f.factor_nnz(),
+            dd.decisions.n_supernodes
+        );
+    }
+}

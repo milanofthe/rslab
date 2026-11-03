@@ -136,7 +136,7 @@ impl<T: Scalar> LlEmitLdlt<T> {
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
         let shapes = (0..nsuper).map(|s| {
             let w = sym.supernodes[s].ncol;
-            (w, sched.rows(s).len() - w)
+            crate::numeric::supernodal::panel::slot_sizes(w, sched.rows(s).len() - w)
         });
         let arena = match storage {
             Some(v) => PanelArena::reuse(v, shapes),
@@ -202,7 +202,7 @@ fn ldlt_emit_and_free<T: Scalar>(
         *r = unsafe { emit.eg(g as usize) } as u32;
     }
     let (_, _, two) = unsafe { emit.d_of(k, ncol) };
-    let out = unsafe { emit.arena.finish_slot(k, ncol, Some(two)) };
+    let out = unsafe { emit.arena.finish_slot(k, ncol, nrow - ncol, Some(two)) };
     unsafe { emit.panels.set(k, out) };
 }
 

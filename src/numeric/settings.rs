@@ -109,11 +109,22 @@ pub struct SolverSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PivotSettings {
     /// Threshold partial pivoting of the LU path, `u in [0, 1]`: the diagonal
-    /// stays the pivot unless it falls below `u * |colmax|` in its
-    /// fully-summed block. `1` is full partial pivoting, `0` keeps the
-    /// diagonal unless it is exactly zero. Default `0.1`. The LDL^T path
-    /// pivots by Bunch-Kaufman and ignores it.
+    /// stays the pivot unless it falls below `u * |colmax|`, the largest
+    /// entry of its column in the front (its off-block rows included); then
+    /// the largest fully-summed entry pivots. `1` is full partial pivoting,
+    /// `0` keeps the diagonal unless it is exactly zero. Default `0.1`. The
+    /// LDL^T path pivots by Bunch-Kaufman and ignores it.
     pub threshold: f64,
+    /// Delayed pivoting of the LU path: where no fully-summed row of a
+    /// column passes the threshold over its whole column (the stable pivot
+    /// lies in a row of an ancestor), the column and a row are passed to the
+    /// parent front, which pivots them with its own. The value is the growth
+    /// of each front's panels the delayed pivots may cause, a fraction of
+    /// its entries; the arenas and the memory plan reserve it, and a column
+    /// past a front's share pivots within its front as without delays
+    /// ([`NumericReport::forced`](crate::NumericReport::forced)). `0`
+    /// (the default) delays nothing. The LDL^T path ignores it.
+    pub delay_growth: f64,
     /// What a pivot that is still too small does. Default
     /// [`Fail`](ZeroPivotAction::Fail).
     pub on_zero_pivot: ZeroPivotAction,
@@ -123,6 +134,7 @@ impl Default for PivotSettings {
     fn default() -> Self {
         Self {
             threshold: LU_PIVOT_THRESHOLD,
+            delay_growth: LU_DELAY_GROWTH,
             on_zero_pivot: ZeroPivotAction::Fail,
         }
     }
@@ -483,6 +495,13 @@ impl SolverSettings {
         self
     }
 
+    /// Set the growth delayed pivots may cause, clamped to at least `0`
+    /// (see [`PivotSettings::delay_growth`]).
+    pub fn with_delay_growth(mut self, growth: f64) -> Self {
+        self.pivoting.delay_growth = if growth > 0.0 { growth } else { 0.0 };
+        self
+    }
+
     /// Set the worker-thread policy; a number is a fixed count (`0` = all
     /// logical cores).
     pub fn with_threads(mut self, threads: impl Into<Threads>) -> Self {
@@ -599,6 +618,13 @@ impl SolverSettings {
                         "pivoting.threshold = {} is ignored by the LDL^T path (Bunch-Kaufman \
                          pivots the fully-summed block)",
                         self.pivoting.threshold
+                    ));
+                }
+                if self.pivoting.delay_growth != d.pivoting.delay_growth {
+                    out.push(format!(
+                        "pivoting.delay_growth = {} is ignored by the LDL^T path (Bunch-Kaufman \
+                         pivots within the fully-summed block)",
+                        self.pivoting.delay_growth
                     ));
                 }
                 if self.matching != d.matching {

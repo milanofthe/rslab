@@ -147,6 +147,9 @@ pub struct LuSymbolic {
     /// The exact structures of `L` and `U`, tighter than the analysis's
     /// symmetric one on an unsymmetric pattern.
     pub(super) structure: LuStructure,
+    /// The structures closed under delayed pivots, built from the exact
+    /// ones by the first factorization that may delay a pivot.
+    pub(super) closed: std::sync::OnceLock<LuStructure>,
 }
 
 impl LuSymbolic {
@@ -159,6 +162,7 @@ impl LuSymbolic {
         use crate::memory::vec_bytes;
         self.symb.heap_bytes()
             + self.structure.heap_bytes()
+            + self.closed.get().map_or(0, |c| c.heap_bytes())
             + self.input.get().map_or(0, |p| p.heap_bytes())
             + self.matching.as_ref().map_or(0, |m| {
                 vec_bytes(&m.row_of) + vec_bytes(&m.r) + vec_bytes(&m.c)
@@ -195,6 +199,7 @@ impl LuSymbolic {
                 est_cache: Mutex::new(Vec::new()),
                 input: std::sync::OnceLock::new(),
                 structure: LuStructure::empty(),
+                closed: std::sync::OnceLock::new(),
             });
         }
         let t = crate::clock::Instant::now();
@@ -281,7 +286,21 @@ impl LuSymbolic {
             est_cache: Mutex::new(Vec::new()),
             input: std::sync::OnceLock::new(),
             structure,
+            closed: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The structures a factorization whose fronts may grow by
+    /// `delay_growth` for delayed pivots works on: the exact ones, or those
+    /// closed under delays.
+    pub(super) fn structure_for(&self, delay_growth: f64) -> &LuStructure {
+        let delays = delay_growth > 0.0;
+        match (delays, self.symb.sym_and_levels(), self.symb.ll_schedule()) {
+            (true, Some((sym, _)), Some(sched)) => self
+                .closed
+                .get_or_init(|| self.structure.closed(sym, sched)),
+            _ => &self.structure,
+        }
     }
 
     /// Whether the analysis carries an MC64 row matching.
@@ -400,7 +419,7 @@ impl LuSymbolic {
             crate::numeric::supernodal::analysis::auto_threads(&self.symb, &estimate, cap)
         });
         let opts = opts.pinned(resolved_threads);
-        let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
+        let mut warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
         for w in &warnings {
             crate::logging::warn(&format!("lu settings: {w}"));
         }
@@ -409,6 +428,13 @@ impl LuSymbolic {
         let factor_ms = crate::clock::ms(t.elapsed());
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
+        let (delayed, forced) = (numeric.delayed, numeric.forced);
+        if numeric.delays_dropped {
+            warnings.push(format!(
+                "delayed pivots exceed pivoting.delay_growth = {}; factored without delays",
+                opts.pivoting.delay_growth
+            ));
+        }
         let (l, ut, factors) = numeric.into_parts();
         let mut decisions = self.symb.decisions(self.requested_ordering);
         decisions.scaling = match (&self.matching, &opts.scaling) {
@@ -432,6 +458,8 @@ impl LuSymbolic {
                 inertia: None,
                 // from the factor the solver holds, see `diagnostics`
                 min_pivot: None,
+                delayed: Some(delayed),
+                forced: Some(forced),
             },
             warnings,
             ..Default::default()
@@ -574,27 +602,49 @@ impl LuSymbolic {
         else {
             return plan;
         };
+        // The structures the factorization works on, closed under delayed
+        // pivots where they may happen (built here once, part of the
+        // analysis from then on).
+        let st = self.structure_for(opts.pivoting.delay_growth);
         // After the schedule above is built: it is part of the analysis.
         plan.analysis_bytes = self.heap_bytes();
         let vb = std::mem::size_of::<T>();
         let k = opts.kernel().k;
-        let st = &self.structure;
         let (n, nnz, ns) = (sym.n, self.nnz, sym.supernodes.len());
         let w = |s: usize| sym.supernodes[s].ncol;
         let widths: Vec<usize> = (0..ns).map(w).collect();
         let off_l: Vec<usize> = (0..ns).map(|s| st.rows_l(s).len() - w(s)).collect();
         let off_u: Vec<usize> = (0..ns).map(|s| st.cols_u(s).len() - w(s)).collect();
-        let panels: usize = (0..ns)
-            .map(|s| (2 * w(s) + off_l[s] + off_u[s]) * w(s))
-            .sum();
+        // The arenas' slots, and with delayed pivots the values they may add
+        // over them (`delay`): the grown fronts' buffers while the forest is
+        // factored, the factor's growth after it.
+        let delay_growth = opts.pivoting.delay_growth;
+        let (l_slots, u_slots) = super::factor::lu_slots(sym, st, delay_growth > 0.0);
+        let allowance = super::factor::delay_allowance(&l_slots, &u_slots, delay_growth);
+        let panels: usize = l_slots
+            .iter()
+            .chain(&u_slots)
+            .map(|&(v, _)| v)
+            .sum::<usize>()
+            + allowance;
         // the same panels packed as the solve plans hold them
         let packed: usize = (0..ns)
             .map(|s| {
                 use crate::numeric::supernodal::solve::packed_len;
                 packed_len(w(s), off_l[s]) + packed_len(w(s), off_u[s])
             })
-            .sum();
-        let rows: usize = off_l.iter().sum::<usize>() + off_u.iter().sum::<usize>();
+            .sum::<usize>()
+            + allowance;
+        let rows: usize = l_slots.iter().chain(&u_slots).map(|&(_, m)| m).sum();
+        // With delayed pivots, every supernode's record may hold its rows and
+        // columns past its pivots.
+        let passing: usize = if delay_growth > 0.0 {
+            (0..ns)
+                .map(|s| st.rows_l(s).len() + st.cols_u(s).len())
+                .sum()
+        } else {
+            0
+        };
         let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
         let parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
         use crate::numeric::supernodal::solve::layout_size;
@@ -638,7 +688,8 @@ impl LuSymbolic {
         // positions and permutations) and the forest's lists, every node's
         // row permutation and emitted rows until the end, the workers'
         // scratch and the heaviest set of nodes running at once.
-        let cells = ns * LU_NODE_CELL_BYTES + LU_NODE_CELL_BYTES_PER_COL * n;
+        let cells =
+            ns * LU_NODE_CELL_BYTES + LU_NODE_CELL_BYTES_PER_COL * n + IDX32_BYTES * passing;
         let slots =
             WORD_BYTES * (0..ns).map(|s| st.rows_l(s).len()).sum::<usize>() + IDX32_BYTES * rows;
         let scratch: Vec<(u64, usize, usize)> = (0..ns)

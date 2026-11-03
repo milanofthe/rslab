@@ -13,11 +13,20 @@
 //! - the `U` columns of `s`: columns of `B` past the block in `s`'s rows, and
 //!   the columns past `s` of every `k` whose `L` rows reach `s`.
 //!
-//! Pivoting stays inside a supernode's fully-summed block, so row
-//! interchanges permute the block rows among themselves and leave both sets
-//! unchanged: they are exact up to numerical cancellation. Both are subsets
-//! of the symmetric structure, and every contributing `k` is among `s`'s
-//! symmetric updaters, which the construction walks.
+//! Row interchanges inside a supernode's fully-summed block permute the
+//! block rows among themselves and leave both sets unchanged: they are exact
+//! up to numerical cancellation. A delayed pivot (`delay`) moves a column
+//! and a row of a child into its parent's fully-summed block, with the rows
+//! and columns past the child the delayed pair carries. The structure
+//! [`closed`](LuStructure::closed) under delays holds them: there a child
+//! counts as reaching its parent, its rows and columns past the parent
+//! joining the parent's whether or not its own `U` columns or `L` rows land
+//! there. By induction every structure a factorization with delayed pivots
+//! builds stays within it (the delayed rows and columns aside, which are the
+//! parent's own). On a structurally symmetric pattern the closure adds
+//! nothing. Both are subsets of the symmetric structure, and every
+//! contributing `k` is among `s`'s symmetric updaters, which the
+//! construction walks.
 
 use crate::numeric::supernodal::{Li, LlSchedule};
 use crate::symbolic::SymbolicFactorization;
@@ -92,6 +101,30 @@ impl LuStructure {
                 }
             }
         }
+        Self::grow(lseed, useed, sym, sched, false)
+    }
+
+    /// This structure closed under delayed pivots (see the module docs).
+    pub fn closed(&self, sym: &SymbolicFactorization, sched: &LlSchedule) -> Self {
+        let ns = sym.supernodes.len();
+        let past = |v: &[Li], s: usize| v[sym.supernodes[s].ncol..].to_vec();
+        let lseed = (0..ns).map(|s| past(self.rows_l(s), s)).collect();
+        let useed = (0..ns).map(|s| past(self.cols_u(s), s)).collect();
+        Self::grow(lseed, useed, sym, sched, true)
+    }
+
+    /// The structures from their seeds (each supernode's rows and columns
+    /// past its block that it has of its own), by the updates; `closed`
+    /// lets every child reach its parent.
+    fn grow(
+        mut lseed: Vec<Vec<Li>>,
+        mut useed: Vec<Vec<Li>>,
+        sym: &SymbolicFactorization,
+        sched: &LlSchedule,
+        closed: bool,
+    ) -> Self {
+        let nsuper = sym.supernodes.len();
+        let end = |s: usize| sym.supernodes[s].first_col + sym.supernodes[s].ncol;
         let mut st = Self::empty();
         // `s`'s columns `[first, last)` hit by the ascending list `v`.
         let hits = |v: &[Li], first: usize, last: usize| {
@@ -105,10 +138,11 @@ impl LuStructure {
                 let k = k as usize;
                 let nck = sym.supernodes[k].ncol;
                 let (lk, uk) = (&st.rows_l(k)[nck..], &st.cols_u(k)[nck..]);
-                if hits(uk, first, last) {
+                let child = closed && sched.parent[k] == s;
+                if child || hits(uk, first, last) {
                     l.extend(lk.iter().filter(|&&g| g as usize >= last));
                 }
-                if hits(lk, first, last) {
+                if child || hits(lk, first, last) {
                     u.extend(uk.iter().filter(|&&g| g as usize >= last));
                 }
             }

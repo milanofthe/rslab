@@ -13,6 +13,15 @@
 /// Contract: results.
 pub const LU_PIVOT_THRESHOLD: f64 = 0.1;
 
+/// Delayed pivoting of the LU path: the growth of each front's panels that
+/// the delayed pivots it takes from its children may cause (fraction of its
+/// panel entries, 1); `0` keeps every pivot in its own front.
+/// Used by: `PivotSettings::delay_growth`.
+/// Why: off by default: the allowance is reserved in every factor's arena
+/// and memory plan whether or not a pivot is delayed.
+/// Contract: results.
+pub const LU_DELAY_GROWTH: f64 = 0.0;
+
 /// A diagonal entry counts as missing below this fraction of its column's
 /// largest magnitude; the LU row matching runs when any is missing (1).
 /// Used by: `MatchingSettings::negligible_diagonal`.
