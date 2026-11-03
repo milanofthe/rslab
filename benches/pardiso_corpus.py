@@ -11,8 +11,8 @@ its refactorization values from `<name>_f<NN+1>.npz` when that exists.
 Per repeat a worker times analysis, factorization, solve and refactorization,
 then refines the refactorization to a relative residual of 1e-10 (plain
 iterative refinement, the same for both solvers; `to_target` runs from new
-values to that answer). It records the peak working
-set above the loaded matrix, PARDISO's own memory report and RSLAB's
+values to that answer). It records the peak working set above the loaded
+matrix and solver library, PARDISO's own memory report and RSLAB's
 diagnostics (stage times, memory estimate). Both solvers run with the same
 thread count. `pardiso` runs `pardisoinit`'s defaults for the matrix type,
 `pardiso-2l` adds the two-level factorization (`iparm(24) = 1`). Results append
@@ -234,6 +234,9 @@ def measure(name, first, second, repeats, warmup, threads):
     a2, b2, _ = load(second)
     path = meta['path']
     runs, report = [], {}
+    # The solver's library loaded before the baseline: the peak is the solver's work alone,
+    # not the size of its binary (two revisions' wheels differ in it).
+    SOLVERS[name.split('@')[0]](path, {}, threads)
     base_mb = working_set_mb()[0]
     for round_ in range(warmup + repeats):
         # A variant takes the production settings of its family (`pardiso-2l`: `pardiso`), a
