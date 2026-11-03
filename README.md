@@ -108,6 +108,9 @@ factorization will hold and its peak, here against a counting allocator at
 Reproduce with `python benches/pardiso_corpus.py <corpus>`,
 `python benches/memory_peak.py <corpus>` (extension built with the
 `alloc-stats` feature) and `python benches/pardiso_corpus_plot.py`.
+The corpus itself is rebuilt from pinned commits of the codes it comes from
+by `benches/corpus/corpus.py`; `benches/corpus/pool.sh ab A B` measures one
+revision against another on it.
 
 ## Design
 
