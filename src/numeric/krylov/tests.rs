@@ -2502,3 +2502,86 @@ fn block_gmres_lowers_its_bases_before_waves() {
         }
     }
 }
+
+/// The step monitor sees the open cycles' estimates after every step and ends a
+/// call where it says so; after a [`BlockGmres::restart`] the next call starts
+/// new cycles from the solutions handed out, here on a changed preconditioner.
+/// With flexible bases and with `V` alone the solutions meet the tolerance in
+/// true residual, in fewer steps than the weak preconditioner alone takes.
+#[test]
+fn block_gmres_restarts_on_a_changed_preconditioner() {
+    use crate::numeric::lu::LuSolver;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let a = unsym_grid(20);
+    let n = a.n;
+    let s = 3;
+    let b = ladder_rhs(n, s);
+    let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
+    let base = crate::KrylovSettings::default()
+        .with_max_iter(4000)
+        .with_restart(200);
+    let weak_alone = gmres_block(
+        &a,
+        &b,
+        s,
+        &NoPreconditioner,
+        &base.clone().with_tol(1e-10),
+        None,
+        None,
+    )
+    .unwrap();
+    let probe = 6usize;
+    for (name, set) in [
+        ("flexible", base.clone()),
+        ("V alone", base.clone().with_flexible(false)),
+    ] {
+        let good = AtomicBool::new(false);
+        let pc = FnPreconditioner::new(|r: &[C], z: &mut [C], k: usize| {
+            if good.load(Ordering::Relaxed) {
+                let x = lu.solve_many(&r[..k * n], k)?;
+                z[..k * n].copy_from_slice(&x);
+            } else {
+                z[..k * n].copy_from_slice(&r[..k * n]);
+            }
+            Ok(())
+        });
+        let mut g = BlockGmres::new(&a, &b, s, &pc, &set, None).unwrap();
+        let mut seen = Vec::new();
+        let mut stop = |p: &StepProgress<'_>| {
+            assert_eq!(p.estimates.len(), s);
+            seen.push(p.worst);
+            p.iterations < probe
+        };
+        let r1 = g.solve_watched(1e-10, None, Some(&mut stop)).unwrap();
+        assert_eq!(r1.stop, StopReason::Stalled, "{name}");
+        assert_eq!(r1.iters, probe, "{name}");
+        assert_eq!(seen.len(), probe, "{name}");
+        assert!(
+            seen.windows(2).all(|w| w[1] <= w[0] * (1.0 + 1e-12)),
+            "{name}: {seen:?}"
+        );
+        g.restart();
+        good.store(true, Ordering::Relaxed);
+        let r2 = g.solve(1e-10, None).unwrap();
+        assert!(r2.converged, "{name}: {:?}", r2.final_res);
+        assert!(r1.iters + r2.iters < weak_alone.iters, "{name}");
+        for k in 0..s {
+            let mut y = vec![C::default(); n];
+            a.matvec(&r2.x[k * n..(k + 1) * n], &mut y);
+            let rn = (0..n)
+                .map(|i| (y[i] - b[k * n + i]).norm_sqr())
+                .sum::<f64>()
+                .sqrt();
+            let bn = b[k * n..(k + 1) * n]
+                .iter()
+                .map(|v| v.norm_sqr())
+                .sum::<f64>()
+                .sqrt();
+            assert!(
+                rn <= 1e-10 * bn * (1.0 + 1e-6),
+                "{name}, column {k}: {}",
+                rn / bn
+            );
+        }
+    }
+}

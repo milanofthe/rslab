@@ -234,7 +234,7 @@ pub use numeric::krylov::{
     BlockGmres, BlockKrylovResult, BlockProgress, BlockRecycle, Factorization, FnOperator,
     FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator, LowPrecisionLu,
     LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner, Preconditioner, Recycle,
-    RecycleScalar, StopReason,
+    RecycleScalar, StepProgress, StopReason,
 };
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;

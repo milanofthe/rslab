@@ -65,6 +65,26 @@ pub struct BlockProgress<'p> {
     pub lowered: &'p [BasisSwitch],
 }
 
+/// What the step monitor of a block GMRES ([`BlockGmres::solve_watched`])
+/// receives after every block step: the residuals the open cycles would hand
+/// out now (their least-squares estimates, in exact arithmetic the true
+/// residuals), between the checks of true residuals.
+#[derive(Debug, Clone, Copy)]
+pub struct StepProgress<'p> {
+    /// Block iterations of this call.
+    pub iterations: usize,
+    /// The worst over the columns not waiting: an open cycle's estimate, else
+    /// the last true residual, a non-finite one counting as infinite.
+    pub worst: f64,
+    /// The columns stepping next.
+    pub active: usize,
+    /// Per column its estimate where its cycle is open, else its last true
+    /// residual (`None` where it has none yet).
+    pub estimates: &'p [Option<f64>],
+    /// The representation of the bases.
+    pub basis: BlockBasis,
+}
+
 /// One right-hand side's Arnoldi state: its basis, the Hessenberg matrix under
 /// its Givens rotations and the rotated least-squares right-hand side of the
 /// open restart cycle.
@@ -349,6 +369,8 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     chk: Vec<usize>,
     /// The columns of `chk` closing for memory ([`BlockProgress::closing`]).
     closing: Vec<usize>,
+    /// Per column its estimate for the step monitor ([`StepProgress::estimates`]).
+    est: Vec<Option<f64>>,
     /// How the bases are stored now ([`KrylovSettings::flexible`],
     /// [`KrylovSettings::basis_single`]).
     basis: BlockBasis,
@@ -444,6 +466,7 @@ where
             basis: settings.basis(),
             downgrade: settings.downgrade,
             lowered: Vec::new(),
+            est: Vec::new(),
             layer: settings.basis().layer_bytes::<T>(n),
             room: None,
             closed: 0,
@@ -588,7 +611,22 @@ where
     pub fn solve(
         &mut self,
         tol: f64,
+        mon: Option<&mut dyn FnMut(&BlockProgress<'_>) -> bool>,
+    ) -> Result<BlockKrylovResult<T>, RslabError> {
+        self.solve_watched(tol, mon, None)
+    }
+
+    /// [`solve`](Self::solve) with a step monitor as well: after every block
+    /// step `step` receives the [`StepProgress`] (the open cycles' estimates,
+    /// no true residual formed) and returns whether to go on; `false` ends the
+    /// call as `mon` does (`StopReason::Stalled`, the solutions formed). A
+    /// further call continues the open cycles; a caller that changes the
+    /// preconditioner in between [`restart`](Self::restart)s first.
+    pub fn solve_watched(
+        &mut self,
+        tol: f64,
         mut mon: Option<&mut dyn FnMut(&BlockProgress<'_>) -> bool>,
+        mut step: Option<&mut dyn FnMut(&StepProgress<'_>) -> bool>,
     ) -> Result<BlockKrylovResult<T>, RslabError> {
         let start = self.iters;
         let mut stalled = false;
@@ -657,6 +695,34 @@ where
                 let grown = self.basis_bytes() - held;
                 self.side = self.side.max(b.saturating_sub(a).saturating_sub(grown));
             }
+            if let Some(st) = step.as_mut() {
+                self.est.clear();
+                for c in 0..self.s {
+                    let col = &self.cols[c];
+                    self.est.push(match (col.steps, self.res[c]) {
+                        (Some(_), None) => Some(col.estimate(self.bnorm[c])),
+                        (_, r) => r,
+                    });
+                }
+                let worst = (0..self.s)
+                    .filter(|&c| !self.cols[c].waits)
+                    .map(|c| self.est[c].unwrap_or(f64::INFINITY))
+                    .fold(
+                        0.0_f64,
+                        |a, r| if r.is_nan() { f64::INFINITY } else { a.max(r) },
+                    );
+                let progress = StepProgress {
+                    iterations: self.iters - start,
+                    worst,
+                    active: self.act.len(),
+                    estimates: &self.est,
+                    basis: self.basis,
+                };
+                if !st(&progress) {
+                    stalled = true;
+                    break;
+                }
+            }
         }
         // A cancel leaves the columns stepped since their last check unformed.
         self.check(true)?;
@@ -687,6 +753,21 @@ where
     /// The representation of the bases now.
     pub fn basis(&self) -> BlockBasis {
         self.basis
+    }
+
+    /// Close every open cycle on the solution handed out by the last call: the next call
+    /// starts a new one from its true residual, the Krylov space so far released. A caller
+    /// that changes the preconditioner between calls restarts so: a cycle is formed under one
+    /// preconditioner (`x0 + M^-1 (V y)` needs it, and the flexible bases built on the one it
+    /// dropped carried no gain on the measured systems).
+    pub fn restart(&mut self) {
+        for c in 0..self.s {
+            if self.cols[c].steps.is_some() && self.res[c].is_some() {
+                self.close(c);
+                // checked again (its true residual) before a new cycle opens
+                self.res[c] = None;
+            }
+        }
     }
 
     /// `act`: the columns that can step toward `tol`, an open cycle short of the
