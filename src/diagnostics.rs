@@ -154,6 +154,11 @@ pub struct NumericReport {
     /// their front (a root, or the delay allowance spent): the pivot growth
     /// the threshold bounds is not bounded there. `None` for the other paths.
     pub forced: Option<usize>,
+    /// The growth of the supernodal LU's panels its delayed pivots caused
+    /// while it was factored, a fraction of the panels without delays: the
+    /// least [`PivotSettings::delay_growth`](crate::PivotSettings::delay_growth)
+    /// that holds them. `None` for the other paths.
+    pub delay_growth: Option<f64>,
     /// Inertia `(positive, negative, zero)` of a symmetric factor.
     pub inertia: Option<(usize, usize, usize)>,
     /// The smallest pivot magnitude of the factor, on the equilibrated
@@ -381,6 +386,9 @@ impl Diagnostics {
         }
         if let Some(k) = self.numeric.forced.filter(|&k| k > 0) {
             s.push_str(&format!(" forced={k}"));
+        }
+        if let Some(g) = self.numeric.delay_growth.filter(|&g| g > 0.0) {
+            s.push_str(&format!(" delay_growth={g:.2}"));
         }
         if let Some(p) = self.numeric.min_pivot {
             s.push_str(&format!(" min_pivot={p:.1e}"));

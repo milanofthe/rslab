@@ -57,6 +57,8 @@ pub(super) struct LlEmit<T> {
     /// passed it (the factorization then stops).
     pub(super) allowance: usize,
     pub(super) growth: AtomicUsize,
+    /// The values of the slots, the reference of the growth.
+    pub(super) slot_values: usize,
     pub(super) overflowed: std::sync::atomic::AtomicBool,
     /// `e_of_g[g]` = elimination position of COLUMN g; `row_pos_of_g[g]` =
     /// position whose PIVOT ROW is g. Written by [`place`](Self::place)
@@ -85,6 +87,7 @@ impl<T: Scalar> LlEmit<T> {
         let delays = delay_growth > 0.0;
         let (l_slots, u_slots) = lu_slots(sym, st, delays);
         let allowance = delay_allowance(&l_slots, &u_slots, delay_growth);
+        let slot_values = l_slots.iter().chain(&u_slots).map(|&(v, _)| v).sum();
         let (l_arena, u_arena) = match storage {
             _ if delays => {
                 // Slots zeroed as they are claimed, so a grown front's never
@@ -114,6 +117,7 @@ impl<T: Scalar> LlEmit<T> {
             delays,
             allowance,
             growth: AtomicUsize::new(0),
+            slot_values,
             overflowed: Default::default(),
             e_of_g: Cells::new(n, usize::MAX),
             row_pos_of_g: Cells::new(n, usize::MAX),
@@ -283,6 +287,8 @@ fn factor_lu_left_looking<T: Scalar>(
         .map(|s| unsafe { emit.pivots.get(s) }.passed())
         .sum();
     let forced = (0..ns).map(|s| unsafe { emit.pivots.get(s) }.forced).sum();
+    let growth = emit.growth.load(std::sync::atomic::Ordering::Acquire) as f64
+        / emit.slot_values.max(1) as f64;
     let kept: Vec<bool> = (0..ns).map(|s| npiv(s) > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     let mut perm = vec![0usize; n];
@@ -338,6 +344,7 @@ fn factor_lu_left_looking<T: Scalar>(
         n_zeros: zeros_l + zeros_u,
         delayed,
         forced,
+        delay_growth: growth,
         delays_dropped: false,
     }))
 }
@@ -373,6 +380,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
             n_zeros: 0,
             delayed: 0,
             forced: 0,
+            delay_growth: 0.0,
             delays_dropped: false,
         });
     }

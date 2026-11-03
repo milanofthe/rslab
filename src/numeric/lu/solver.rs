@@ -428,7 +428,8 @@ impl LuSymbolic {
         let factor_ms = crate::clock::ms(t.elapsed());
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
-        let (delayed, forced) = (numeric.delayed, numeric.forced);
+        let (delayed, forced, delay_growth) =
+            (numeric.delayed, numeric.forced, numeric.delay_growth);
         if numeric.delays_dropped {
             warnings.push(format!(
                 "delayed pivots exceed pivoting.delay_growth = {}; factored without delays",
@@ -460,6 +461,7 @@ impl LuSymbolic {
                 min_pivot: None,
                 delayed: Some(delayed),
                 forced: Some(forced),
+                delay_growth: Some(delay_growth),
             },
             warnings,
             ..Default::default()
