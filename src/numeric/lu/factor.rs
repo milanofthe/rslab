@@ -52,13 +52,9 @@ pub(super) struct LlEmit<T> {
     /// known, and the supernodes emitted, only once the whole forest is
     /// factored.
     pub(super) delays: bool,
-    /// The values the fronts that take delayed pivots may add over their
-    /// slots, all together; what they added so far; whether one would have
-    /// passed it (the factorization then stops).
-    pub(super) allowance: usize,
-    pub(super) growth: AtomicUsize,
-    /// The values of the slots, the reference of the growth.
+    /// The values of the analysis's slots, the reference of the growth.
     pub(super) slot_values: usize,
+    /// A front found the arenas' room spent (the factorization stops).
     pub(super) overflowed: std::sync::atomic::AtomicBool,
     /// `e_of_g[g]` = elimination position of COLUMN g; `row_pos_of_g[g]` =
     /// position whose PIVOT ROW is g. Written by [`place`](Self::place)
@@ -85,17 +81,20 @@ impl<T: Scalar> LlEmit<T> {
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
         let ns = sym.supernodes.len();
         let delays = delay_growth > 0.0;
-        let (l_slots, u_slots) = lu_slots(sym, st, delays);
+        let (l_slots, u_slots) = lu_slots(sym, st);
         let allowance = delay_allowance(&l_slots, &u_slots, delay_growth);
         let slot_values = l_slots.iter().chain(&u_slots).map(|&(v, _)| v).sum();
         let (l_arena, u_arena) = match storage {
             _ if delays => {
-                // Slots zeroed as they are claimed, so a grown front's never
-                // is (the buffers of an earlier factor would be resident).
+                // Slots claimed as the fronts start, of the size they have
+                // then, within the analysis's values and the allowance (an
+                // earlier factor's buffers go: their pages would stay
+                // resident).
                 drop(storage);
+                let room = |v: &[Slot]| v.iter().map(|&(v, _)| v).sum::<usize>() + allowance;
                 (
-                    PanelArena::lazy(l_slots.into_iter(), allowance),
-                    PanelArena::lazy(u_slots.into_iter(), allowance),
+                    PanelArena::lazy(ns, room(&l_slots)),
+                    PanelArena::lazy(ns, room(&u_slots)),
                 )
             }
             Some((l, u)) => (
@@ -115,8 +114,6 @@ impl<T: Scalar> LlEmit<T> {
             panels: Cells::new_default(ns),
             pivots: Cells::new_default(ns),
             delays,
-            allowance,
-            growth: AtomicUsize::new(0),
             slot_values,
             overflowed: Default::default(),
             e_of_g: Cells::new(n, usize::MAX),
@@ -152,19 +149,13 @@ impl<T: Scalar> LlEmit<T> {
 pub(super) type Slot = (usize, usize);
 
 /// The arena slots `(values, rows)` of the `L` and `U^T` panels of every
-/// supernode: its panels of the structure `st`, and with delayed pivots
-/// room in the row lists for the pivots it may pass on.
-pub(super) fn lu_slots(
-    sym: &SymbolicFactorization,
-    st: &LuStructure,
-    delays: bool,
-) -> (Vec<Slot>, Vec<Slot>) {
+/// supernode of the structure `st`.
+pub(super) fn lu_slots(sym: &SymbolicFactorization, st: &LuStructure) -> (Vec<Slot>, Vec<Slot>) {
     use crate::numeric::supernodal::panel::slot_sizes;
     let ns = sym.supernodes.len();
     let slot = |s: usize, nrows: usize| {
         let w = sym.supernodes[s].ncol;
-        let (v, m) = slot_sizes(w, nrows - w);
-        (v, if delays && w > 0 { m + w } else { m })
+        slot_sizes(w, nrows - w)
     };
     (
         (0..ns).map(|s| slot(s, st.rows_l(s).len())).collect(),
@@ -287,8 +278,8 @@ fn factor_lu_left_looking<T: Scalar>(
         .map(|s| unsafe { emit.pivots.get(s) }.passed())
         .sum();
     let forced = (0..ns).map(|s| unsafe { emit.pivots.get(s) }.forced).sum();
-    let growth = emit.growth.load(std::sync::atomic::Ordering::Acquire) as f64
-        / emit.slot_values.max(1) as f64;
+    let claimed = emit.l_arena.claimed() + emit.u_arena.claimed();
+    let growth = claimed.saturating_sub(emit.slot_values) as f64 / emit.slot_values.max(1) as f64;
     let kept: Vec<bool> = (0..ns).map(|s| npiv(s) > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     let mut perm = vec![0usize; n];

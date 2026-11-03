@@ -599,7 +599,7 @@ impl LuSymbolic {
         // over them (`delay`): the grown fronts' buffers while the forest is
         // factored, the factor's growth after it.
         let delay_growth = opts.pivoting.delay_growth;
-        let (l_slots, u_slots) = super::factor::lu_slots(sym, st, delay_growth > 0.0);
+        let (l_slots, u_slots) = super::factor::lu_slots(sym, st);
         let allowance = super::factor::delay_allowance(&l_slots, &u_slots, delay_growth);
         let panels: usize = l_slots
             .iter()

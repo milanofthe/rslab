@@ -237,27 +237,28 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // below and `U11` on and above the diagonal). `ut`: the `U^T` panel,
     // `nrow_u x nfs`; the factorization writes its off-block rows, `U12[p, t]`
     // at `ut[p * nrow_u + nfs + t]` (row `p` of `U` is column `p` of the
-    // panel), and the emit fills the diagonal block. The node's slots, or,
-    // with delayed pivots taken or rows beyond the structure, buffers of its
-    // own: what they add over the slots counts against the factorization's
-    // allowance.
+    // panel), and the emit fills the diagonal block. The node's slots: the
+    // analysis's, or, where pivots may be delayed, claimed now at the size
+    // the front has, within the arenas' room (the factorization stops when
+    // it is spent).
     // SAFETY: this task owns supernode `s`; nobody reads its slots before the
     // node is done (its ancestors start after it).
     let (lbuf, ut): (&mut [T], &mut [T]) = unsafe {
-        let (la, ua) = (&emit.l_arena, &emit.u_arena);
-        if d_in == 0 && !extras {
-            (la.claim(s), ua.claim(s))
-        } else {
-            let (lv, uv) = (nrow_l * nfs, nrow_u * nfs);
-            let added = (lv + uv).saturating_sub(la.slot_len(s) + ua.slot_len(s));
-            let before = emit.growth.fetch_add(added, Ordering::AcqRel);
-            if before + added > emit.allowance {
+        let (vl, vu) = (nrow_l * nfs, nrow_u * nfs);
+        // Room for the rows past the pivots: past all of the block without
+        // delays, else past at least one pivot.
+        let past = |nrow: usize| if emit.delays { nrow } else { nrow - nfs };
+        match (
+            emit.l_arena.claim(s, vl, past(nrow_l)),
+            emit.u_arena.claim(s, vu, past(nrow_u)),
+        ) {
+            (Some(l), Some(u)) => (l, u),
+            _ => {
                 emit.overflowed.store(true, Ordering::Release);
                 return Err(RslabError::InvalidInput(
                     "delayed pivots exceed their allowance".to_string(),
                 ));
             }
-            (la.grow(s, lv, nrow_l), ua.grow(s, uv, nrow_u))
         }
     };
     debug_assert!(lbuf.len() == nrow_l * nfs && ut.len() == nrow_u * nfs);

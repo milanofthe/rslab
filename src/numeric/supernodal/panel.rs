@@ -9,11 +9,12 @@
 //! in ascending elimination order. The row list is shared by the panel's
 //! columns, so the index overhead is `m` words per supernode rather than one
 //! per entry, and the values are exactly the dense panels the factorization
-//! kernels produce. All panels live in **one buffer in supernode order** (the
-//! [`PanelArena`] the drivers factor into), so a sweep streams through memory
-//! the way the elimination tree is walked -- a left-looking driver hands its
-//! panel over without a copy, and the solves run BLAS-3 style on the same
-//! memory. Compared with a compressed-column factor with one `usize` index
+//! kernels produce. All panels live in **one buffer**, in supernode order
+//! (or, where fronts outgrew the analysis, the order they were factored in)
+//! (the [`PanelArena`] the drivers factor into), so a sweep streams through
+//! memory the way the elimination tree is walked -- a left-looking driver
+//! hands its panel over without a copy, and the solves run BLAS-3 style on
+//! the same memory. Compared with a compressed-column factor with one `usize` index
 //! per entry (24 bytes per complex entry, and a second copy for the solve
 //! layout) this is the whole factor at 16 bytes per complex entry, once.
 //!
@@ -35,12 +36,13 @@ pub struct PanelFactor<T> {
     pub rows: Vec<u32>,
     /// Row starts into `rows`, `ns + 1` entries.
     pub row_ptr: Vec<usize>,
-    /// Panel starts into `vals`, `ns + 1` entries.
-    pub val_ptr: Vec<usize>,
-    /// The panels back to back in supernode order: supernode `s` is the
-    /// `(w + m) x w` column-major block `vals[val_ptr[s]..val_ptr[s + 1]]`
-    /// (leading dimension `w + m`); entries above the diagonal of the
-    /// diagonal block are unused.
+    /// Panel starts into `vals`, `ns` entries.
+    pub val_off: Vec<usize>,
+    /// The panels back to back, in supernode order or, where fronts outgrew
+    /// the analysis (delayed pivots), in the order they were factored:
+    /// supernode `s` is the `(w + m) x w` column-major block from
+    /// `vals[val_off[s]]` (leading dimension `w + m`); entries above the
+    /// diagonal of the diagonal block are unused.
     pub vals: Vec<T>,
 }
 
@@ -52,7 +54,7 @@ impl<T: Scalar> PanelFactor<T> {
             sn_col: vec![0],
             rows: Vec::new(),
             row_ptr: vec![0],
-            val_ptr: vec![0],
+            val_off: Vec::new(),
             vals: Vec::new(),
         }
     }
@@ -74,7 +76,8 @@ impl<T: Scalar> PanelFactor<T> {
     /// The panel of supernode `s`.
     #[inline]
     pub fn panel(&self, s: usize) -> &[T] {
-        &self.vals[self.val_ptr[s]..self.val_ptr[s + 1]]
+        let (_, w, m) = self.shape(s);
+        &self.vals[self.val_off[s]..self.val_off[s] + (w + m) * w]
     }
 
     /// Structural entry count of the factor: the lower triangles of the
@@ -137,34 +140,33 @@ pub fn permute_panel_rows<T: Copy>(
 }
 
 /// The factor's buffers while a numeric driver fills them: one value slot
-/// per supernode of the analysis, sized `(w + m) x w` from its symbolic
-/// shape, and one row slot of at least `m` entries, both back to back in
-/// supernode order. Each slot is written by the one task that owns its
-/// supernode (the drivers factor straight into it), read by the tasks that
-/// update from it once it is published, and finished in place
-/// ([`finish_slot`](Self::finish_slot)). [`finish`](Self::finish) then
-/// closes the gaps left by dropped rows and yields the [`PanelFactor`].
+/// and one row slot per supernode of the analysis. Each slot is written by
+/// the one task that owns its supernode (the drivers factor straight into
+/// it), read by the tasks that update from it once it is published, and
+/// finished in place ([`finish_slot`](Self::finish_slot)).
+/// [`finish`](Self::finish) then closes the gaps left by dropped rows and
+/// yields the [`PanelFactor`].
 ///
-/// An LU front that takes delayed pivots outgrows its slot: it
-/// [`grow`](Self::grow)s into buffers of its own, which the accessors serve
-/// from then on and [`finish`](Self::finish) moves into the factor. Such an
-/// arena is [`lazy`](Self::lazy): a slot is zeroed by its owner when it is
-/// [`claim`](Self::claim)ed rather than up front, so the slot of a grown
-/// front is never touched (no resident memory), and the factor's buffer has
-/// room for the growth.
+/// The slots are fixed by the analysis, `(w + m) x w` from each
+/// supernode's symbolic shape, back to back in supernode order and zeroed
+/// up front ([`new`](Self::new)); or, where fronts may outgrow the analysis
+/// (an LU with delayed pivots), [`lazy`](Self::lazy): each owner claims a
+/// slot of the size its front has when it starts, from a buffer of fixed
+/// room, zeroed then. The slots then lie in the order the fronts started,
+/// with no holes, so only the values the factor holds are ever resident and
+/// closing the gaps moves every panel down.
 pub(crate) struct PanelArena<T> {
-    /// Slot starts per supernode of the analysis, `nsuper + 1` entries.
-    slot_ptr: Vec<usize>,
+    /// Each supernode's value slot `(start, length)`.
+    slots: Cells<(usize, usize)>,
     vals: Vec<T>,
     base: PanelPtr<T>,
-    /// Row slot starts, `nsuper + 1` entries, and the rows.
+    /// Row slot starts, `nsuper + 1` entries, and the rows (fixed slots).
     row_slot_ptr: Vec<usize>,
     rows: Vec<u32>,
     row_base: PanelPtr<u32>,
-    /// The buffers of the supernodes that outgrew their slots (empty for
-    /// the others): values and rows.
-    grown: Cells<(Vec<T>, Vec<u32>)>,
-    /// Slots are zeroed when claimed, not up front.
+    /// Lazy: the next free value, and each supernode's own row slot.
+    cursor: std::sync::atomic::AtomicUsize,
+    lazy_rows: Cells<Vec<u32>>,
     lazy: bool,
     /// The scratch of [`finish_slot`](Self::finish_slot), per running call.
     scratch: ScratchPool<PanelScratch<T>>,
@@ -182,29 +184,20 @@ impl<T: Scalar> PanelArena<T> {
     /// supernode (see [`slot_sizes`]). The values are zero-initialized, so a
     /// slot starts as the zero panel the assembly expects.
     pub fn new(slots: impl Iterator<Item = (usize, usize)>) -> Self {
-        Self::new_in(PanelStorage::default(), slots, 0, false, false)
+        Self::new_in(PanelStorage::default(), slots, false)
     }
 
     /// [`new`](Self::new) in `storage`, the buffers of an earlier factor of
     /// this analysis: no allocation where their capacity suffices, and the
     /// capacity kept through [`finish`](Self::finish).
     pub fn reuse(storage: PanelStorage<T>, slots: impl Iterator<Item = (usize, usize)>) -> Self {
-        Self::new_in(storage, slots, 0, true, false)
-    }
-
-    /// The slots of [`new`](Self::new), zeroed as they are claimed, in a
-    /// buffer with room for `extra` more values: what the supernodes that
-    /// [`grow`](Self::grow) may add to the factor.
-    pub fn lazy(slots: impl Iterator<Item = (usize, usize)>, extra: usize) -> Self {
-        Self::new_in(PanelStorage::default(), slots, extra, false, true)
+        Self::new_in(storage, slots, true)
     }
 
     fn new_in(
         storage: PanelStorage<T>,
         slots: impl Iterator<Item = (usize, usize)>,
-        extra: usize,
         reused: bool,
-        lazy: bool,
     ) -> Self {
         let PanelStorage { mut vals, mut rows } = storage;
         let cap = slots.size_hint().0 + 1;
@@ -216,106 +209,136 @@ impl<T: Scalar> PanelArena<T> {
             row_slot_ptr.push(row_slot_ptr.last().copied().unwrap_or(0) + m);
         }
         let total = slot_ptr.last().copied().unwrap_or(0);
+        // The whole factor, often hundreds of MB: zero it across the calling
+        // pool rather than on one thread (41 ms serial on a 465 MB factor).
         vals.clear();
-        vals.reserve(total + extra);
-        if !lazy {
-            // The whole factor, often hundreds of MB: zero it across the calling
-            // pool rather than on one thread (41 ms serial on a 465 MB factor).
-            crate::parallel::chunks_mut(
-                &mut vals.spare_capacity_mut()[..total],
-                crate::constants::ZERO_FILL_CHUNK,
-                |_, chunk| {
-                    chunk.iter_mut().for_each(|v| {
-                        v.write(T::zero());
-                    })
-                },
-            );
-            // SAFETY: every element of the first `total` was written above.
-            unsafe { vals.set_len(total) };
-        }
+        vals.reserve(total);
+        crate::parallel::chunks_mut(
+            &mut vals.spare_capacity_mut()[..total],
+            crate::constants::ZERO_FILL_CHUNK,
+            |_, chunk| {
+                chunk.iter_mut().for_each(|v| {
+                    v.write(T::zero());
+                })
+            },
+        );
+        // SAFETY: every element of the first `total` was written above.
+        unsafe { vals.set_len(total) };
         rows.clear();
         rows.resize(row_slot_ptr.last().copied().unwrap_or(0), 0);
+        let ns = slot_ptr.len() - 1;
+        let slots = Cells::new(ns, (0usize, 0usize));
+        for s in 0..ns {
+            // SAFETY: not shared yet.
+            unsafe { slots.set(s, (slot_ptr[s], slot_ptr[s + 1] - slot_ptr[s])) };
+        }
+        Self::with(slots, vals, row_slot_ptr, rows, false, reused)
+    }
+
+    /// Slots of `nsuper` supernodes claimed as their fronts start
+    /// ([`claim`](Self::claim)), together at most `room` values.
+    pub fn lazy(nsuper: usize, room: usize) -> Self {
+        let mut vals = Vec::new();
+        vals.reserve_exact(room);
+        let row_slot_ptr = vec![0usize; nsuper + 1];
+        Self::with(
+            Cells::new(nsuper, (0usize, 0usize)),
+            vals,
+            row_slot_ptr,
+            Vec::new(),
+            true,
+            false,
+        )
+    }
+
+    fn with(
+        slots: Cells<(usize, usize)>,
+        mut vals: Vec<T>,
+        row_slot_ptr: Vec<usize>,
+        mut rows: Vec<u32>,
+        lazy: bool,
+        reused: bool,
+    ) -> Self {
+        let ns = row_slot_ptr.len() - 1;
         let base = PanelPtr(vals.as_mut_ptr());
         let row_base = PanelPtr(rows.as_mut_ptr());
-        let ns = slot_ptr.len() - 1;
         PanelArena {
-            slot_ptr,
+            slots,
             vals,
             base,
             row_slot_ptr,
             rows,
             row_base,
-            grown: Cells::new_default(ns),
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+            lazy_rows: Cells::new_default(if lazy { ns } else { 0 }),
             lazy,
             scratch: ScratchPool::new(),
             reused,
         }
     }
 
-    /// Entries of slot `s` (of its own buffer when it grew).
-    #[inline]
-    pub fn slot_len(&self, s: usize) -> usize {
-        // SAFETY: a grown buffer is set by the owner before the slot is
-        // published; see `grow`.
-        match unsafe { self.grown.get(s) } {
-            (g, _) if !g.is_empty() => g.len(),
-            _ => self.slot_ptr[s + 1] - self.slot_ptr[s],
+    /// The values claimed so far (a lazy arena; the slots' total else).
+    pub fn claimed(&self) -> usize {
+        if self.lazy {
+            self.cursor.load(std::sync::atomic::Ordering::Acquire)
+        } else {
+            self.vals.len()
         }
     }
 
-    /// Supernode `s`'s slot, zeroed in a lazy arena, for its owner to factor
-    /// into.
+    /// Entries of slot `s`.
+    #[inline]
+    pub fn slot_len(&self, s: usize) -> usize {
+        // SAFETY: a slot is set before it is published.
+        unsafe { self.slots.get(s) }.1
+    }
+
+    /// Supernode `s`'s slot for its owner to factor into: `vals` zeroed
+    /// values and room for `rows` rows. A fixed slot is the analysis's and
+    /// holds them; a lazy one is claimed now, `None` when the arena's room
+    /// is spent.
     ///
     /// # Safety
     /// Only the owner of `s`, once, before anybody reads the slot.
     #[allow(clippy::mut_from_ref)]
-    pub unsafe fn claim(&self, s: usize) -> &mut [T] {
-        if self.lazy {
-            let (p0, p1) = (self.slot_ptr[s], self.slot_ptr[s + 1]);
-            let start = self.base.get().add(p0);
-            let len = p1 - p0;
-            if len >= crate::constants::ZERO_FILL_CHUNK {
-                let at = PanelPtr(start);
-                let chunks = len.div_ceil(crate::constants::ZERO_FILL_CHUNK);
-                crate::parallel::for_each(chunks, 1, |c| {
-                    let c0 = c * crate::constants::ZERO_FILL_CHUNK;
-                    let c1 = (c0 + crate::constants::ZERO_FILL_CHUNK).min(len);
-                    std::ptr::write_bytes(at.get().add(c0), 0, c1 - c0);
-                });
-            } else {
-                std::ptr::write_bytes(start, 0, len);
-            }
+    pub unsafe fn claim(&self, s: usize, vals: usize, rows: usize) -> Option<&mut [T]> {
+        if !self.lazy {
+            debug_assert!(vals <= self.slot_len(s), "a front within its fixed slot");
+            debug_assert!(rows <= self.row_slot_ptr[s + 1] - self.row_slot_ptr[s]);
+            return Some(&mut self.slot_mut(s)[..vals]);
         }
-        self.slot_mut(s)
-    }
-
-    /// Supernode `s` outgrows its slot: buffers of its own, `vals` zeroed
-    /// values and `rows` rows, which the accessors serve from now on.
-    ///
-    /// # Safety
-    /// Only the owner of `s`, once, instead of [`claim`](Self::claim).
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn grow(&self, s: usize, vals: usize, rows: usize) -> &mut [T] {
-        self.grown.set(s, (vec![T::zero(); vals], vec![0u32; rows]));
-        self.slot_mut(s)
+        use std::sync::atomic::Ordering;
+        let start = self.cursor.fetch_add(vals, Ordering::AcqRel);
+        if start + vals > self.vals.capacity() {
+            return None;
+        }
+        self.slots.set(s, (start, vals));
+        self.lazy_rows.set(s, vec![0u32; rows]);
+        let at = PanelPtr(self.base.get().add(start));
+        let chunk = crate::constants::ZERO_FILL_CHUNK;
+        if vals <= chunk {
+            std::ptr::write_bytes(at.get(), 0, vals);
+        } else {
+            crate::parallel::for_each(vals.div_ceil(chunk), 1, |c| {
+                let c0 = c * chunk;
+                // SAFETY: the claimed range, in the buffer's capacity.
+                unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(vals - c0)) };
+            });
+        }
+        Some(self.slot_mut(s))
     }
 
     /// The slot of supernode `s` for writing.
     ///
     /// # Safety
     /// Only the owner of `s` may call this, and not while any reader holds a
-    /// reference from [`slot`](Self::slot); in a lazy arena only after
-    /// [`claim`](Self::claim) or [`grow`](Self::grow).
+    /// reference from [`slot`](Self::slot); in a lazy arena after
+    /// [`claim`](Self::claim).
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn slot_mut(&self, s: usize) -> &mut [T] {
-        match self.grown.get_mut(s) {
-            (g, _) if !g.is_empty() => g,
-            _ => std::slice::from_raw_parts_mut(
-                self.base.get().add(self.slot_ptr[s]),
-                self.slot_ptr[s + 1] - self.slot_ptr[s],
-            ),
-        }
+        let (start, len) = *self.slots.get(s);
+        std::slice::from_raw_parts_mut(self.base.get().add(start), len)
     }
 
     /// The slot of supernode `s` for reading.
@@ -325,13 +348,8 @@ impl<T: Scalar> PanelArena<T> {
     /// reader calls this, and must not write again while readers exist.
     #[inline]
     pub unsafe fn slot(&self, s: usize) -> &[T] {
-        match self.grown.get(s) {
-            (g, _) if !g.is_empty() => g,
-            _ => std::slice::from_raw_parts(
-                self.base.get().add(self.slot_ptr[s]),
-                self.slot_ptr[s + 1] - self.slot_ptr[s],
-            ),
-        }
+        let (start, len) = *self.slots.get(s);
+        std::slice::from_raw_parts(self.base.get().add(start), len)
     }
 
     /// The row slot of supernode `s`: room for its `m` off-block rows, for
@@ -343,13 +361,11 @@ impl<T: Scalar> PanelArena<T> {
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn rows_mut(&self, s: usize) -> &mut [u32] {
-        match self.grown.get_mut(s) {
-            (g, r) if !g.is_empty() => r,
-            _ => {
-                let (r0, r1) = (self.row_slot_ptr[s], self.row_slot_ptr[s + 1]);
-                std::slice::from_raw_parts_mut(self.row_base.get().add(r0), r1 - r0)
-            }
+        if self.lazy {
+            return self.lazy_rows.get_mut(s);
         }
+        let (r0, r1) = (self.row_slot_ptr[s], self.row_slot_ptr[s + 1]);
+        std::slice::from_raw_parts_mut(self.row_base.get().add(r0), r1 - r0)
     }
 
     /// Finish supernode `s`'s panel of `w` columns and `m` off-block rows in
@@ -377,11 +393,10 @@ impl<T: Scalar> PanelArena<T> {
 
     /// Close the arena into the factor: `ncols` gives the column count of
     /// every supernode's finished panel (0 skipped), `outs(s)` the finished
-    /// panel's row count and compacted length. Slots are moved in place to
-    /// close the gaps of dropped rows and delayed pivots and to make room for
-    /// the grown buffers, which are then copied in and freed, so the
-    /// factor's buffers are exact. Returns the factor and the zero-slot
-    /// count.
+    /// panel's row count and compacted length. The panels move down in the
+    /// order of their slots to close the gaps of dropped rows and delayed
+    /// pivots, so the factor's buffers are exact. Returns the factor and the
+    /// zero-slot count.
     pub fn finish(
         mut self,
         n: usize,
@@ -390,12 +405,11 @@ impl<T: Scalar> PanelArena<T> {
     ) -> (PanelFactor<T>, usize) {
         let cap = ncols.size_hint().0 + 1;
         let mut sn_col: Vec<u32> = Vec::with_capacity(cap);
-        let (mut val_ptr, mut row_ptr) = (Vec::with_capacity(cap), Vec::with_capacity(cap));
+        let mut row_ptr = Vec::with_capacity(cap);
         sn_col.push(0);
-        val_ptr.push(0usize);
         row_ptr.push(0usize);
         let mut zeros = 0usize;
-        // Every kept panel: its supernode, length and rows.
+        // Every kept panel: its supernode, its finished length and rows.
         let mut kept: Vec<(usize, usize, usize)> = Vec::with_capacity(cap);
         for (s, w) in ncols.enumerate() {
             if w == 0 {
@@ -406,82 +420,61 @@ impl<T: Scalar> PanelArena<T> {
             debug_assert!(out.len <= self.slot_len(s));
             kept.push((s, out.len, out.m));
             sn_col.push(sn_col.last().copied().unwrap_or(0) + w as u32);
-            val_ptr.push(val_ptr.last().copied().unwrap_or(0) + out.len);
             row_ptr.push(row_ptr.last().copied().unwrap_or(0) + out.m);
             zeros += out.zeros;
         }
         debug_assert_eq!(sn_col.last().copied(), Some(n as u32));
-        let total = val_ptr.last().copied().unwrap_or(0);
+        // The values in the order of the slots, each panel moved down to the
+        // end of the ones before it (reads stay ahead of writes).
+        // SAFETY (the slot reads): every slot is finished and unshared.
+        let start = |i: usize| unsafe { self.slots.get(kept[i].0) }.0;
+        let mut order: Vec<usize> = (0..kept.len()).collect();
+        if self.lazy {
+            order.sort_unstable_by_key(|&i| start(i));
+        }
+        let mut val_off = vec![0usize; kept.len()];
+        let (base, mut at) = (self.vals.as_mut_ptr(), 0usize);
+        let mut moved = false;
+        for &i in &order {
+            let (src, len) = (start(i), kept[i].1);
+            debug_assert!(at <= src);
+            if at != src {
+                // SAFETY: both ranges lie in the buffer's capacity, the source
+                // holds the finished panel; `copy` handles the overlap.
+                unsafe { std::ptr::copy(base.add(src), base.add(at), len) };
+                moved = true;
+            }
+            val_off[i] = at;
+            at += len;
+        }
+        let total = at;
         let total_rows = row_ptr.last().copied().unwrap_or(0);
-        // A panel in its slot moves to its place in the factor: the ones
-        // moving up first, from the last down, then the ones moving down,
-        // from the first up; no source is overwritten before it is read (a
-        // panel ends within its slot, and the places keep the slots'
-        // order). The grown buffers fill their places last.
-        let in_slot = |s: usize| unsafe { self.grown.get(s).0.is_empty() };
-        let grows = kept.iter().any(|&(s, _, _)| !in_slot(s));
-        // Room for the growth was reserved (`lazy`); a factor beyond it is a
-        // driver's error.
-        assert!(
-            total <= self.vals.capacity(),
-            "the factor outgrew its buffer"
-        );
-        if total_rows > self.rows.len() {
-            self.rows.resize(total_rows, 0);
-        }
-        let base = self.vals.as_mut_ptr();
-        let mut moves = |up: bool| {
-            let order: Box<dyn Iterator<Item = usize>> = if up {
-                Box::new((0..kept.len()).rev())
-            } else {
-                Box::new(0..kept.len())
-            };
-            for i in order {
-                let (s, len, m) = kept[i];
-                if !in_slot(s) {
-                    continue;
-                }
-                let (src, dst) = (self.slot_ptr[s], val_ptr[i]);
-                let (rsrc, rdst) = (self.row_slot_ptr[s], row_ptr[i]);
-                if (dst > src) == up && dst != src {
-                    // SAFETY: both ranges lie in the buffer's capacity and the
-                    // source holds the finished panel; `copy` handles overlap.
-                    unsafe { std::ptr::copy(base.add(src), base.add(dst), len) };
-                }
-                if (rdst > rsrc) == up && rdst != rsrc {
-                    self.rows.copy_within(rsrc..rsrc + m, rdst);
-                }
-            }
-        };
-        moves(true);
-        moves(false);
-        let mut moved = kept
-            .iter()
-            .enumerate()
-            .any(|(i, &(s, _, _))| !in_slot(s) || self.slot_ptr[s] != val_ptr[i]);
-        if grows {
-            for (i, &(s, len, m)) in kept.iter().enumerate() {
-                if in_slot(s) {
-                    continue;
-                }
-                // SAFETY: the record is the finished supernode's own.
-                let (g, r) = std::mem::take(unsafe { self.grown.get_mut(s) });
-                // SAFETY: the place lies in the capacity; the buffer is separate.
-                unsafe { std::ptr::copy_nonoverlapping(g.as_ptr(), base.add(val_ptr[i]), len) };
-                self.rows[row_ptr[i]..row_ptr[i] + m].copy_from_slice(&r[..m]);
-            }
-            moved = true;
-        }
         let (mut vals, mut rows) = (self.vals, self.rows);
-        // SAFETY: every entry of the first `total` was written: each panel's
-        // place by its move or copy, and the places tile `[0, total)`.
+        // SAFETY: the first `total` values are the panels written above (a
+        // fixed arena's whole buffer was initialized up front).
         unsafe { vals.set_len(total) };
         if (moved || total < vals.capacity()) && !self.reused {
             vals.shrink_to_fit();
         }
-        rows.truncate(total_rows);
-        if !self.reused {
-            rows.shrink_to_fit();
+        if self.lazy {
+            rows = Vec::with_capacity(total_rows);
+            for &(s, _, m) in &kept {
+                // SAFETY: the finished supernode's own rows.
+                rows.extend_from_slice(&unsafe { self.lazy_rows.get(s) }[..m]);
+            }
+        } else {
+            let mut rdst = 0;
+            for &(s, _, m) in &kept {
+                let rsrc = self.row_slot_ptr[s];
+                if rdst != rsrc {
+                    rows.copy_within(rsrc..rsrc + m, rdst);
+                }
+                rdst += m;
+            }
+            rows.truncate(total_rows);
+            if !self.reused {
+                rows.shrink_to_fit();
+            }
         }
         // Exact, as the plan keeps it (the memory plan counts it so).
         row_ptr.shrink_to_fit();
@@ -491,7 +484,7 @@ impl<T: Scalar> PanelArena<T> {
                 sn_col,
                 rows,
                 row_ptr,
-                val_ptr,
+                val_off,
                 vals,
             },
             zeros,
@@ -682,7 +675,7 @@ mod tests {
         let (f, zeros) = arena.finish(3, [1usize, 1, 1].into_iter(), |_| outs.next().unwrap());
         assert_eq!(zeros, 0);
         assert_eq!(f.vals, vec![1.0, 5.0, 1.0, 6.0, 1.0]);
-        assert_eq!(f.val_ptr, vec![0, 2, 4, 5]);
+        assert_eq!(f.val_off, vec![0, 2, 4]);
         assert_eq!(f.rows, vec![1, 2]);
         assert_eq!(f.row_ptr, vec![0, 1, 2, 2]);
     }

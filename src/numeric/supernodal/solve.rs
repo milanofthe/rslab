@@ -75,9 +75,9 @@ pub(crate) struct SolvePlan<T> {
     /// supernode's leaf subtree, `NONE` when it is written directly.
     ext_slot: Vec<u32>,
     /// The panels in the factor's own storage ([`PanelFactor`]), packed in
-    /// place by column blocks ([`packed_blocks`]): supernode `s` from
-    /// `val_ptr[s]`.
-    val_ptr: Vec<usize>,
+    /// place by column blocks ([`packed_blocks`]): supernode `s` is
+    /// `vals[val_rng[s].0..val_rng[s].1]`.
+    val_rng: Vec<(usize, usize)>,
     vals: Vec<T>,
     /// A row list of the factor's size, the buffer the next refactorization
     /// emits its rows into (see [`take_storage`](Self::take_storage)).
@@ -385,9 +385,9 @@ pub(crate) fn layout_size<'r>(
         level_len[depth[s]] += 1;
     }
     let top: Vec<usize> = (0..ns).filter(|&s| is_top[s]).collect();
-    // sn_col, row_ptr, val_ptr (pushed by the arena), rows, ext_slot, top_index.
+    // sn_col, row_ptr, val_rng (a pair per supernode), rows, ext_slot, top_index.
     let (idx, word, vec) = (IDX32_BYTES, WORD_BYTES, VEC_HEADER_BYTES);
-    let fixed = idx * (ns + 1) + word * (ns + 1) + word * pushed(ns + 1) + word * rows + idx * ns;
+    let fixed = idx * (ns + 1) + word * (ns + 1) + 2 * word * ns + word * rows + idx * ns;
     let subtrees = leaf_roots.len() * std::mem::size_of::<Subtree>()
         + (0..leaf_roots.len())
             .map(|t| idx * pushed(sizes[t]) + idx * ext[t])
@@ -453,7 +453,7 @@ impl<T: Scalar> SolvePlan<T> {
             + vec_bytes(&self.row_ptr)
             + vec_bytes(&self.rows)
             + vec_bytes(&self.ext_slot)
-            + vec_bytes(&self.val_ptr)
+            + vec_bytes(&self.val_rng)
             + vec_bytes(&self.vals)
             + vec_bytes(&self.spare_rows)
             + vec_bytes(&self.diag_inv)
@@ -512,7 +512,7 @@ impl<T: Scalar> SolvePlan<T> {
         let PanelFactor {
             rows,
             row_ptr,
-            val_ptr,
+            val_off,
             mut vals,
             ..
         } = factor;
@@ -522,7 +522,7 @@ impl<T: Scalar> SolvePlan<T> {
                 .all(|p| p[0] < p[1])),
             "off-block rows ascending"
         );
-        let val_ptr = pack_panels(&mut vals, &sn_col, &row_ptr, &val_ptr);
+        let val_rng = pack_panels(&mut vals, &sn_col, &row_ptr, &val_off);
         let known = supernode_parent.len() == ns;
 
         let mut parent = vec![NONE; ns];
@@ -761,7 +761,7 @@ impl<T: Scalar> SolvePlan<T> {
             row_ptr,
             rows,
             ext_slot,
-            val_ptr,
+            val_rng,
             vals,
             diag_inv,
             subtrees,
@@ -829,20 +829,20 @@ impl<T: Scalar> SolvePlan<T> {
         let PanelFactor {
             mut vals,
             rows,
-            val_ptr,
+            val_off,
             ..
         } = factor;
         if !unit {
             for s in 0..ns {
                 let (c0, c1) = (self.sn_col[s] as usize, self.sn_col[s + 1] as usize);
                 let ld = c1 - c0 + self.row_ptr[s + 1] - self.row_ptr[s];
-                let panel = &vals[val_ptr[s]..];
+                let panel = &vals[val_off[s]..];
                 for k in 0..c1 - c0 {
                     self.diag_inv[c0 + k] = panel[k * ld + k].recip();
                 }
             }
         }
-        self.val_ptr = pack_panels(&mut vals, &self.sn_col, &self.row_ptr, &val_ptr);
+        self.val_rng = pack_panels(&mut vals, &self.sn_col, &self.row_ptr, &val_off);
         self.vals = vals;
         self.spare_rows = rows;
     }
@@ -859,7 +859,8 @@ impl<T: Scalar> SolvePlan<T> {
         let w = self.sn_col[s + 1] as usize - c0;
         let r0 = self.row_ptr[s];
         let m = self.row_ptr[s + 1] - r0;
-        let panel = &self.vals[self.val_ptr[s]..self.val_ptr[s + 1]];
+        let (v0, v1) = self.val_rng[s];
+        let panel = &self.vals[v0..v1];
         (c0, w, r0, m, w + m, panel)
     }
 
@@ -1695,36 +1696,40 @@ pub(crate) fn packed_len(w: usize, m: usize) -> usize {
 }
 
 /// Pack the panels of `vals` (supernode `s` the column-major `(w + m) x w` block at
-/// `full_ptr[s]`, `sn_col` and `row_ptr` giving `w` and `m`) in place into the plan's layout
-/// ([`packed_blocks`]) and return the packed starts (`ns + 1`). Every column moves to an
-/// offset no larger than its own and the columns go in order, so no source is overwritten
-/// before it is read; the buffer then shrinks to the packed size.
+/// `full_off[s]`, `sn_col` and `row_ptr` giving `w` and `m`) in place into the plan's layout
+/// ([`packed_blocks`]) and return each one's packed range. The panels go in the order they
+/// lie in, every column moves to an offset no larger than its own and the columns go in
+/// order, so no source is overwritten before it is read; the buffer then shrinks to the
+/// packed size.
 fn pack_panels<T: Copy>(
     vals: &mut Vec<T>,
     sn_col: &[u32],
     row_ptr: &[usize],
-    full_ptr: &[usize],
-) -> Vec<usize> {
+    full_off: &[usize],
+) -> Vec<(usize, usize)> {
     let ns = sn_col.len() - 1;
-    let mut ptr = Vec::with_capacity(ns + 1);
+    let mut order: Vec<usize> = (0..ns).collect();
+    if full_off.windows(2).any(|p| p[0] > p[1]) {
+        order.sort_unstable_by_key(|&s| full_off[s]);
+    }
+    let mut rng = vec![(0usize, 0usize); ns];
     let mut at = 0usize;
-    for s in 0..ns {
-        ptr.push(at);
+    for s in order {
         let w = (sn_col[s + 1] - sn_col[s]) as usize;
         let m = row_ptr[s + 1] - row_ptr[s];
         let ld = w + m;
         for (jb, je, off, ldb) in packed_blocks(w, m) {
             for k in jb..je {
-                let src = full_ptr[s] + k * ld + jb;
+                let src = full_off[s] + k * ld + jb;
                 vals.copy_within(src..src + ldb, at + off + (k - jb) * ldb);
             }
         }
-        at += packed_len(w, m);
+        rng[s] = (at, at + packed_len(w, m));
+        at = rng[s].1;
     }
-    ptr.push(at);
     vals.truncate(at);
     vals.shrink_to_fit();
-    ptr
+    rng
 }
 
 /// `D z = y` for the block diagonal (1x1 and 2x2 pivots), on `nr` right-hand
@@ -1916,7 +1921,7 @@ mod tests {
             sn_col: vec![0, 1, 2, 3],
             rows: vec![1, 2, 2],
             row_ptr: vec![0, 2, 3, 3],
-            val_ptr: vec![0, 3, 5, 6],
+            val_off: vec![0, 3, 5],
             vals: vec![1.0, 0.5, 0.25, 1.0, -2.0, 1.0],
         };
         let plan = SolvePlan::from_panels(
