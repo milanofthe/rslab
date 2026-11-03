@@ -13,8 +13,9 @@
 #       RSLAB revisions against REF_A (benches/pardiso_corpus.py --rslab) with MKL PARDISO
 #       beside them: one job per family (--family, default all) on the machine that holds
 #       it, as many cores as the measurement has threads and the memory of PLACEMENT; e.g.
-#       `pool.sh ab main main feat/x` (main twice: the noise next to the change). Results:
-#       falllow fetch RUN (ab.jsonl).
+#       `pool.sh ab main main feat/x` (main twice: the noise next to the change). Three
+#       rounds of one warm repeat per side unless the options say otherwise (the runs that
+#       measured the noise of each family). Results: falllow fetch RUN (ab.jsonl).
 #
 # Env: CORPUS_CACHE (rslab-corpus), CORPUS_CPU (6, the physical cores of the pool machines),
 # CORPUS_MEMORY (a corpus build: a source's build and dumps can need more than the A/B),
@@ -47,7 +48,7 @@ if [ "$mode" = job-ab ]; then
   printf '%s\n' "$@" | grep -q '^/cache/' || inputs=("/cache/$CACHE")
   echo "== $(lscpu | grep 'Model name' | tr -s ' '), $(nproc) threads, ${FALLLOW_MEMORY_MIB:-?} MiB"
   exec /scratch/venv-ab/bin/python -u rslab/benches/pardiso_corpus.py ${inputs[@]+"${inputs[@]}"} --rslab "${revs[@]}" \
-    --build-dir /scratch/revisions --out /artifacts/ab.jsonl "$@"
+    --build-dir /scratch/revisions --out /artifacts/ab.jsonl --rounds 3 --warmup 1 --repeats 1 "$@"
 fi
 
 # --- on this machine: stage and submit --------------------------------------------------------
