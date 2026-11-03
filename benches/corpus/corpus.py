@@ -74,9 +74,10 @@ NEEDS = {'rapidmom': ['rapidmom'], 'rapidfem': ['rapidfem'], 'sane': ['sane', 'c
 FEEDS = {'rapidmom': ['mom'], 'legacy': ['mom'], 'rapidfem': ['fem'], 'sane': ['circuit'],
          'suitesparse': ['circuit', 'fem']}
 # Where a family lives (the pool cache rslab-corpus of that machine) and the memory its A/B
-# job asks for: the peak falllow measured for main against main with headroom (mom 10.1 GB,
-# circuit 1.1 GB, fem 2.8 GB).
-PLACEMENT = {'mom': ('milan-box-01', '13G'), 'circuit': ('strato-2', '2G'), 'fem': ('strato-1', '4G')}
+# job asks for: the measured peak of the run with headroom (mom 10.1 GB, circuit 1.1 GB, fem
+# 2.8 GB), but no less than the cold wheel builds need: their resident set stays below 1 GB,
+# yet within a 2 or 4 GB limit they crawled for half an hour on the page cache (40 s at 8 GB).
+PLACEMENT = {'mom': ('milan-box-01', '13G'), 'circuit': ('strato-2', '8G'), 'fem': ('strato-1', '8G')}
 # SuiteSparse's file server first, the old University of Florida mirror after it.
 SUITESPARSE_MIRRORS = ['https://sparse.tamu.edu/MM', 'https://www.cise.ufl.edu/research/sparse/MM']
 
