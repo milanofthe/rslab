@@ -613,15 +613,18 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
         if pw > 0 && cw > 0 && mt > 0 && k.use_gemm_schur {
             l21 = grown(l21, mt * pw);
             let par = mt * cw * pw >= par_cdiv;
-            let tw = if par { k.cmod_tile(cw) } else { k.schur_tile };
-            let tiles = cw.div_ceil(tw.max(1));
-            let at_once = if par { tiles.min(workers.max(1)) } else { 1 };
-            diag = diag.max(tw.min(cw).pow(2) * at_once);
+            let tiles = if par {
+                (k.cmod_tile(cw), k.cmod_tile(mt))
+            } else {
+                (k.schur_tile, mt)
+            };
             let cw_n = (ke + nb).min(ncol) - ke;
             for range in [(0, cw_n), (cw_n, cw)] {
-                if T::COMPLEX && range.1 > range.0 {
-                    let (p, _) = schur_tile_planes(mt, range, pw, tw, k);
-                    if p > 0 {
+                if range.1 > range.0 {
+                    let (p, pieces) = schur_tile_planes(mt, range, pw, tiles, k);
+                    let at_once = if par { pieces.min(workers.max(1)) } else { 1 };
+                    diag = diag.max(tiles.0.min(cw).pow(2) * at_once);
+                    if T::COMPLEX && p > 0 {
                         planes = planes.max(p);
                         copies = copies.max(at_once);
                     }
@@ -816,10 +819,10 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             // the tiles, and therefore the bits, are deterministic per
             // matrix; `ll_thread_determinism` holds.
             let par = mt * cw * pw >= ll_cdiv_par;
-            let tw = if par {
-                kt.k.cmod_tile(cw)
+            let tiles = if par {
+                (kt.k.cmod_tile(cw), kt.k.cmod_tile(mt))
             } else {
-                kt.k.schur_tile
+                (kt.k.schur_tile, mt)
             };
             let schur = |dst: *mut T, range: (usize, usize)| {
                 // SAFETY: `dst` addresses the trailing rows of the columns in
@@ -833,7 +836,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                         &gbuf[..],
                         &l21buf[..],
                         range,
-                        tw,
+                        tiles,
                         par,
                         &pools.w,
                         &kt.k,

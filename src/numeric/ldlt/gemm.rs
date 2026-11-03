@@ -115,12 +115,12 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
 /// panel entry at the first trailing row of column `c0`, column stride
 /// `nrow`.
 ///
-/// The columns go in tiles of `tw`, the tiled form of the `cmod` update:
-/// the rows below a tile's diagonal block are one GEMM into the panel, the
-/// diagonal block one GEMM into a buffer of `pool` whose lower triangle is
-/// then subtracted, so the panel's upper triangle is never written. With
-/// `par` the tiles run on the pool, each a sequential GEMM (so a complex
-/// tile keeps the split kernel); a tile computes the same bits either way.
+/// The columns go in tiles of `tw`, the tiled form of the `cmod` update, and
+/// the rows below a tile's diagonal block in blocks of `rb`: each block is
+/// one GEMM into the panel, the diagonal block one GEMM into a buffer of
+/// `pool` whose lower triangle is then subtracted, so the panel's upper
+/// triangle is never written. With `par` the pieces run on the pool, each a
+/// sequential GEMM; a piece computes the same bits either way.
 ///
 /// # Safety
 /// `dst` with stride `nrow` must address the `mt` trailing rows of columns
@@ -135,65 +135,76 @@ pub(super) unsafe fn schur_tiles<T: Scalar>(
     g: &[T],
     r: &[T],
     (c0, c1): (usize, usize),
-    tw: usize,
+    (tw, rb): (usize, usize),
     par: bool,
     pool: &crate::numeric::supernodal::ScratchPool<Vec<T>>,
     ks: &crate::KernelSettings,
 ) {
     use crate::dense::gemm_backend::{gemm, GemmMode};
     debug_assert!(g.len() >= mt * pw && r.len() >= mt * pw && c1 <= mt);
-    let tw = tw.max(1);
+    let (tw, rb) = (tw.max(1), rb.max(1));
     let tiles = (c1 - c0).div_ceil(tw);
+    // Pieces of tile `t`: its diagonal block, then its row blocks below.
+    let pieces = |t: usize| 1 + (mt - (c0 + (t + 1) * tw).min(c1)).div_ceil(rb);
+    let mut first = Vec::with_capacity(tiles + 1);
+    first.push(0usize);
+    for t in 0..tiles {
+        first.push(first[t] + pieces(t));
+    }
     let base = crate::numeric::supernodal::PanelPtr(dst);
     let mode = GemmMode::new(gemm::Parallelism::None, ks);
-    let tile = |t: usize| {
+    let piece = |q: usize| {
+        let t = first.partition_point(|&f| f <= q) - 1;
         let a = c0 + t * tw;
         let b = (a + tw).min(c1);
         let w = b - a;
-        // SAFETY: column `a` of the caller's range; the operands are the
-        // caller's blocks, disjoint from the panel.
+        // SAFETY: column `a` of the caller's range and rows of its trailing
+        // block; the operands are the caller's blocks, disjoint from the panel.
         unsafe {
             let col = base.get().add((a - c0) * nrow);
-            let mut diag = pool.take();
-            diag.clear();
-            diag.resize(w * w, T::zero());
-            gemm(
-                w,
-                w,
-                pw,
-                diag.as_mut_ptr(),
-                w as isize,
-                1,
-                false,
-                g.as_ptr().add(a),
-                mt as isize,
-                1,
-                r.as_ptr().add(a),
-                1,
-                mt as isize,
-                T::zero(),
-                T::one(),
-                false,
-                false,
-                false,
-                mode,
-            );
-            for j in 0..w {
-                for i in j..w {
-                    let p = col.add(a + i + j * nrow);
-                    *p = *p - diag[i + j * w];
-                }
-            }
-            if mt > b {
+            if q == first[t] {
+                let mut diag = pool.take();
+                diag.clear();
+                diag.resize(w * w, T::zero());
                 gemm(
-                    mt - b,
+                    w,
                     w,
                     pw,
-                    col.add(b),
+                    diag.as_mut_ptr(),
+                    w as isize,
+                    1,
+                    false,
+                    g.as_ptr().add(a),
+                    mt as isize,
+                    1,
+                    r.as_ptr().add(a),
+                    1,
+                    mt as isize,
+                    T::zero(),
+                    T::one(),
+                    false,
+                    false,
+                    false,
+                    mode,
+                );
+                for j in 0..w {
+                    for i in j..w {
+                        let p = col.add(a + i + j * nrow);
+                        *p = *p - diag[i + j * w];
+                    }
+                }
+            } else {
+                let r0 = b + (q - first[t] - 1) * rb;
+                let r1 = (r0 + rb).min(mt);
+                gemm(
+                    r1 - r0,
+                    w,
+                    pw,
+                    col.add(r0),
                     nrow as isize,
                     1,
                     true,
-                    g.as_ptr().add(b),
+                    g.as_ptr().add(r0),
                     mt as isize,
                     1,
                     r.as_ptr().add(a),
@@ -209,33 +220,35 @@ pub(super) unsafe fn schur_tiles<T: Scalar>(
             }
         }
     };
-    if par && tiles > 1 {
-        crate::parallel::for_each(tiles, 1, tile);
+    let total = first[tiles];
+    if par && total > 1 {
+        crate::parallel::for_each(total, 1, piece);
     } else {
-        (0..tiles).for_each(tile);
+        (0..total).for_each(piece);
     }
 }
 
 /// The largest split planes ([`split_plane_entries`](crate::dense::gemm_backend::split_plane_entries))
 /// a [`schur_tiles`] call over the columns `[c0, c1)` takes on one worker,
-/// and its tile count.
+/// and its piece count.
 pub(super) fn schur_tile_planes(
     mt: usize,
     (c0, c1): (usize, usize),
     pw: usize,
-    tw: usize,
+    (tw, rb): (usize, usize),
     ks: &crate::KernelSettings,
 ) -> (usize, usize) {
     use crate::dense::gemm_backend::split_plane_entries;
-    let tw = tw.max(1);
-    let mut worst = 0;
+    let (tw, rb) = (tw.max(1), rb.max(1));
+    let (mut worst, mut pieces) = (0, 0);
     let mut a = c0;
     while a < c1 {
         let b = (a + tw).min(c1);
         worst = worst
             .max(split_plane_entries(b - a, b - a, pw, false, ks))
-            .max(split_plane_entries(mt - b, b - a, pw, false, ks));
+            .max(split_plane_entries(rb.min(mt - b), b - a, pw, false, ks));
+        pieces += 1 + (mt - b).div_ceil(rb);
         a = b;
     }
-    (worst, (c1 - c0).div_ceil(tw))
+    (worst, pieces)
 }
