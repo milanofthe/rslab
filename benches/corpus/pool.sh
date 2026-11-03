@@ -17,6 +17,7 @@
 #       falllow fetch RUN (ab.jsonl).
 #
 # Env: CORPUS_CACHE (rslab-corpus), CORPUS_CPU (6, the physical cores of the pool machines),
+# CORPUS_MEMORY (a corpus build: a source's build and dumps can need more than the A/B),
 # CORPUS_DISK. Every job is submitted detached; follow it with falllow logs -f RUN.
 set -euo pipefail
 
@@ -87,7 +88,7 @@ corpus)
   cd "$stage"
   while read -r family machine memory; do
     falllow run --machine "$machine" "${caches[@]}" --name "corpus-$source-$family-$(date +%H%M%S)" \
-      --cpu "${CORPUS_CPU:-6}" --memory "$memory" --disk "${CORPUS_DISK:-40G}" --detach \
+      --cpu "${CORPUS_CPU:-6}" --memory "${CORPUS_MEMORY:-$memory}" --disk "${CORPUS_DISK:-40G}" --detach \
       -- bash rslab/benches/corpus/pool.sh job-corpus "$source" --family "$family" "$@" < /dev/null
   done < <(python3 "$HERE/corpus.py" placement "$source")
   ;;

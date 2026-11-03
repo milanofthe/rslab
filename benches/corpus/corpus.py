@@ -75,8 +75,8 @@ FEEDS = {'rapidmom': ['mom'], 'legacy': ['mom'], 'rapidfem': ['fem'], 'sane': ['
          'suitesparse': ['circuit', 'fem']}
 # Where a family lives (the pool cache rslab-corpus of that machine) and the memory its A/B
 # job asks for: the peak falllow measured for main against main with headroom (mom 10.1 GB,
-# circuit 1.1 GB; fem not yet measured, a strato machine's room).
-PLACEMENT = {'mom': ('milan-box-01', '13G'), 'circuit': ('strato-2', '2G'), 'fem': ('strato-1', '18G')}
+# circuit 1.1 GB, fem 2.8 GB).
+PLACEMENT = {'mom': ('milan-box-01', '13G'), 'circuit': ('strato-2', '2G'), 'fem': ('strato-1', '4G')}
 # SuiteSparse's file server first, the old University of Florida mirror after it.
 SUITESPARSE_MIRRORS = ['https://sparse.tamu.edu/MM', 'https://www.cise.ufl.edu/research/sparse/MM']
 
@@ -170,9 +170,13 @@ def save(out, family, name, a, b, meta):
 
 
 def from_lower(lower):
-    """The full matrix of its lower triangle."""
-    lower = sp.csc_matrix(lower)
-    return (lower + lower.T - sp.diags(lower.diagonal())).tocsc()
+    """The full matrix of its lower triangle, pattern for pattern: entries that are zero at
+    one frequency stay, so the systems of a sweep share their pattern as in the source."""
+    lower = sp.coo_matrix(lower)
+    off = lower.row != lower.col
+    rows = np.concatenate([lower.row, lower.col[off]])
+    cols = np.concatenate([lower.col, lower.row[off]])
+    return sp.csc_matrix((np.concatenate([lower.data, lower.data[off]]), (rows, cols)), shape=lower.shape)
 
 
 def read_mtx(path):
