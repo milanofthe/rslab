@@ -430,8 +430,11 @@ def compare(rows, base):
                 better.append(m)
             if singles and not mark:
                 parts[-1] += f' ({len(singles)} single beyond)'
-        text = ('regression beyond noise: ' + ', '.join(worse) if worse else 'no regression beyond noise')
-        text += ('; improvement: ' + ', '.join(better)) if better else ''
+        if not any(n is not None for v in per.values() for _, n, _ in v):
+            text = 'one sample a side, no verdict'
+        else:
+            text = ('regression beyond noise: ' + ', '.join(worse) if worse else 'no regression beyond noise')
+            text += ('; improvement: ' + ', '.join(better)) if better else ''
         print(f'{fam:<10}{side} / {base}, {len(set(s for v in per.values() for *_, s in v))} systems: '
               f'{"; ".join(parts)}  ->  {text}', flush=True)
 
