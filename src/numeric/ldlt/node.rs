@@ -57,7 +57,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
         sym,
         s,
         sched.updaters(s),
-        |k| (sched.rows(k), sched.rows(k)),
+        |k| {
+            let nck = sym.supernodes[k].ncol;
+            (nck, &sched.rows(k)[nck..], &sched.rows(k)[nck..])
+        },
         false,
         &kt.k,
     );
@@ -285,7 +288,10 @@ pub(super) fn ll_node_scratch<T: Scalar>(
         sym,
         s,
         sched.updaters(s),
-        |k| (sched.rows(k), sched.rows(k)),
+        |k| {
+            let nck = sym.supernodes[k].ncol;
+            (nck, &sched.rows(k)[nck..], &sched.rows(k)[nck..])
+        },
         false,
         k,
     );

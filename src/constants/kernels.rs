@@ -59,6 +59,14 @@ pub const FORK_MIN_FLOPS: usize = 100_000_000;
 /// Contract: rounding.
 pub const SCHUR_TILE: usize = 256;
 
+/// Rows of the off-block part of an LU pivot column brought up to date at a
+/// time from the panel's earlier pivots (rows).
+/// Used by: `numeric::lu::node::deep_update`.
+/// Why: a run of complex doubles stays in the L1 cache across the panel's
+/// up to 32 columns.
+/// Contract: timing (each row takes the same operations in any run).
+pub const LU_DEEP_ROWS: usize = 256;
+
 /// Columns per sub-block of the deferred trailing sweep in the
 /// Bunch-Kaufman panel, the rank of its GEMMs (columns).
 /// Used by: `KernelSettings::trailing_block`.

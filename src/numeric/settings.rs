@@ -109,11 +109,24 @@ pub struct SolverSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PivotSettings {
     /// Threshold partial pivoting of the LU path, `u in [0, 1]`: the diagonal
-    /// stays the pivot unless it falls below `u * |colmax|` in its
-    /// fully-summed block. `1` is full partial pivoting, `0` keeps the
-    /// diagonal unless it is exactly zero. Default `0.1`. The LDL^T path
-    /// pivots by Bunch-Kaufman and ignores it.
+    /// stays the pivot unless it falls below `u * |colmax|`, the largest
+    /// entry of its column in the front (its off-block rows included); then
+    /// the largest fully-summed entry pivots. `1` is full partial pivoting,
+    /// `0` keeps the diagonal unless it is exactly zero. Default `0.1`. The
+    /// LDL^T path pivots by Bunch-Kaufman and ignores it.
     pub threshold: f64,
+    /// Delayed pivoting of the LU path: where no fully-summed row of a
+    /// column passes the threshold over its whole column (the stable pivot
+    /// lies in a row of an ancestor), the column and a row are passed to the
+    /// parent front, which pivots them with its own; the analysis then runs
+    /// the row matching on every column (MC64, the pairing that keeps the
+    /// delays few), whatever [`MatchingSettings`] says. The memory plan
+    /// reserves the growth the delays may cause; a factorization whose
+    /// delays would need more is redone without them, with a warning.
+    /// Default `false`: every pivot stays in its front, and one that fails
+    /// the threshold over its column counts as
+    /// [`forced`](crate::NumericReport::forced). The LDL^T path ignores it.
+    pub delayed: bool,
     /// What a pivot that is still too small does. Default
     /// [`Fail`](ZeroPivotAction::Fail).
     pub on_zero_pivot: ZeroPivotAction,
@@ -123,6 +136,7 @@ impl Default for PivotSettings {
     fn default() -> Self {
         Self {
             threshold: LU_PIVOT_THRESHOLD,
+            delayed: false,
             on_zero_pivot: ZeroPivotAction::Fail,
         }
     }
@@ -483,6 +497,13 @@ impl SolverSettings {
         self
     }
 
+    /// Turn the LU path's delayed pivoting on or off (see
+    /// [`PivotSettings::delayed`]).
+    pub fn with_delayed_pivots(mut self, on: bool) -> Self {
+        self.pivoting.delayed = on;
+        self
+    }
+
     /// Set the worker-thread policy; a number is a fixed count (`0` = all
     /// logical cores).
     pub fn with_threads(mut self, threads: impl Into<Threads>) -> Self {
@@ -600,6 +621,13 @@ impl SolverSettings {
                          pivots the fully-summed block)",
                         self.pivoting.threshold
                     ));
+                }
+                if self.pivoting.delayed {
+                    out.push(
+                        "pivoting.delayed is ignored by the LDL^T path (Bunch-Kaufman pivots \
+                         within the fully-summed block)"
+                            .to_string(),
+                    );
                 }
                 if self.matching != d.matching {
                     out.push("matching is ignored by the LDL^T path (an LU setting)".to_string());

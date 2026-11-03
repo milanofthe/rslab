@@ -745,6 +745,8 @@ impl LdltSymbolic {
                 )),
                 // from the factor the solver holds, see `diagnostics`
                 min_pivot: None,
+                delayed: None,
+                forced: None,
             },
             warnings,
             ..Default::default()

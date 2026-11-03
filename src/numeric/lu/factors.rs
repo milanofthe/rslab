@@ -69,6 +69,14 @@ pub(crate) struct LuNumeric<T> {
     /// pattern or cancellation); the stored nonzeros are
     /// `l.nnz() + ut.nnz() - n_zeros`.
     pub n_zeros: usize,
+    /// Pivots a front passed to its parent (one delayed twice counts twice).
+    pub delayed: usize,
+    /// Pivots that failed the threshold over their whole column and stayed
+    /// in their front.
+    pub forced: usize,
+    /// The delayed pivots exceeded their allowance: the factor is the one
+    /// without them.
+    pub delays_dropped: bool,
 }
 
 impl<T: Scalar> LuNumeric<T> {

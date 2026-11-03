@@ -39,6 +39,7 @@ class Settings:
         relax: bool | tuple[int, int] | None = ...,
         amalgamation: str | None = ...,
         pivot_threshold: float | None = ...,
+        delayed_pivots: bool | None = ...,
         matching_negligible_diagonal: float | None = ...,
         compress_max_ratio: float | None = ...,
         nd_two_hop_ratio: float | None = ...,
