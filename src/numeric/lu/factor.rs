@@ -249,8 +249,18 @@ fn factor_lu_left_looking<T: Scalar>(
             emit_and_free(k, &emit, sym, st)
         }
     };
-    let forest =
-        crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free);
+    let forest = crate::logging::timed(
+        || "lu: forest".into(),
+        || {
+            crate::numeric::supernodal::ll_forest(
+                sym,
+                sched,
+                &emit.refcount,
+                &factor_node,
+                &emit_free,
+            )
+        },
+    );
     if emit.overflowed.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(None);
     }
@@ -272,7 +282,10 @@ fn factor_lu_left_looking<T: Scalar>(
             // SAFETY: each supernode placed once, after the forest.
             unsafe { emit.place(s, eoff) };
         }
-        crate::parallel::for_each(ns, 1, |k| emit_and_free(k, &emit, sym, st));
+        crate::logging::timed(
+            || "lu: emit".into(),
+            || crate::parallel::for_each(ns, 1, |k| emit_and_free(k, &emit, sym, st)),
+        );
     }
     let delayed = (0..ns)
         .map(|s| unsafe { emit.pivots.get(s) }.passed())
@@ -299,12 +312,18 @@ fn factor_lu_left_looking<T: Scalar>(
         floors,
         ..
     } = emit;
-    let (l, zeros_l) = l_arena.finish(n, widths.iter().copied(), |s| unsafe {
-        std::mem::take(&mut panels.get_mut(s).0)
-    });
-    let (ut, zeros_u) = u_arena.finish(n, widths.iter().copied(), |s| unsafe {
-        std::mem::take(&mut panels.get_mut(s).1)
-    });
+    let ((l, zeros_l), (ut, zeros_u)) = crate::logging::timed(
+        || "lu: panels closed".into(),
+        || {
+            let l = l_arena.finish(n, widths.iter().copied(), |s| unsafe {
+                std::mem::take(&mut panels.get_mut(s).0)
+            });
+            let u = u_arena.finish(n, widths.iter().copied(), |s| unsafe {
+                std::mem::take(&mut panels.get_mut(s).1)
+            });
+            (l, u)
+        },
+    );
     // The factor is of `A_hat + Delta`, `A_hat = D_r A D_c` (`B`'s rows under
     // a matching) and `Delta` diagonal in elimination order: of `A + E` with
     // `E = D_r^-1 Delta D_c^-1` at each position's pivot row and column.
