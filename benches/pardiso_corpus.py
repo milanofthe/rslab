@@ -174,10 +174,19 @@ SOLVERS = {'rslab': Rslab, 'pardiso': Pardiso,
 
 
 def working_set_mb():
-    """(current, peak) working set of this process in MB (peak RSS on Linux)."""
+    """(current, peak) working set of this process in MB: the peak the OS keeps (Windows' peak
+    working set, Linux' VmHWM, else getrusage's resident maximum, bytes on macOS)."""
     import psutil
     m = psutil.Process().memory_info()
-    return m.rss / 2**20, getattr(m, 'peak_wset', m.rss) / 2**20
+    peak = getattr(m, 'peak_wset', None)
+    if peak is None:
+        try:
+            with open('/proc/self/status') as fh:
+                peak = next(int(line.split()[1]) * 1024 for line in fh if line.startswith('VmHWM:'))
+        except OSError:
+            import resource
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return m.rss / 2**20, peak / 2**20
 
 
 def measure(name, first, second, repeats, warmup, threads):
