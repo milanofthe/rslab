@@ -10,8 +10,8 @@ its refactorization values from `<name>_f<NN+1>.npz` when that exists.
 
 Per repeat a worker times analysis, factorization, solve and refactorization,
 then refines the refactorization to a relative residual of 1e-10 (plain
-iterative refinement, the same for both solvers; `to_target` runs from new
-values to that answer). It records the peak working set above the loaded
+iterative refinement, the same for both solvers, stopped where a step no
+longer lowers the residual; `to_target` runs from new values to that answer). It records the peak working set above the loaded
 matrix and solver library, PARDISO's own memory report and RSLAB's
 diagnostics (stage times, memory estimate). Both solvers run with the same
 thread count. `pardiso` runs `pardisoinit`'s defaults for the matrix type,
@@ -253,14 +253,20 @@ def measure(name, first, second, repeats, warmup, threads):
         t3 = clock(); solver.factorize(native2)
         t4 = clock(); x2 = solver.solve(b2)
         t5 = clock()
-        steps = 0
-        while residual(a2, x2, b2) > TARGET and steps < 50:
-            x2 = x2 + solver.solve(b2 - a2 @ x2)
+        steps, res = 0, residual(a2, x2, b2)
+        # Until the target, or until a step no longer lowers the residual (refinement that
+        # diverges or stalls where the factor cannot get further); that step is not kept.
+        while res > TARGET and steps < 50:
+            x_next = x2 + solver.solve(b2 - a2 @ x2)
+            res_next = residual(a2, x_next, b2)
             steps += 1
+            if res_next >= res:
+                break
+            x2, res = x_next, res_next
         t6 = clock()
         run = {'analyze': t1 - t0, 'factor': t2 - t1, 'solve': t3 - t2, 'refactor': t4 - t3,
                'residual': residual(a, x, b), 'to_target': t6 - t3, 'refine_steps': steps,
-               'refined_residual': residual(a2, x2, b2)}
+               'refined_residual': res}
         report = solver.report()
         if hasattr(solver, 'close'):
             solver.close()
