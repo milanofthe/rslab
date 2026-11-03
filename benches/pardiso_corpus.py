@@ -31,8 +31,10 @@ Each revision is a git ref of this repository or `LABEL=DIR`, a source tree
 the way the published one is (`maturin build --release` in `python/`) into a
 virtual environment of its own under `--build-dir`, once per commit, every
 build through one cargo target directory. The workers of one system run
-interleaved, `--rounds` times each (A, B, PARDISO, A, B, PARDISO, ...), so a
-drift of the machine reaches every side alike. The comparison against the
+interleaved, `--rounds` times each (A, B, A, B, ...), so a drift of the
+machine reaches every side alike; PARDISO, no side of the comparison, runs in
+the first round only. An older revision runs without the settings of a system
+it does not know (`settings_dropped` in its report). The comparison against the
 first revision follows the runs (or `--compare FILE` prints it for a results
 file): per system and metric the median ratio and the noise, and a verdict
 per corpus family.
@@ -94,6 +96,15 @@ class Rslab:
     def __init__(self, path, settings, threads):
         import rslab
         self.rslab, self.path, self.factor = rslab, path, None
+        # An older revision runs without the settings it does not know, and says which.
+        kind = rslab.KluSettings if path == 'klu' else rslab.Settings
+        self.dropped = []
+        for key, value in settings.items():
+            try:
+                kind(**{key: value})
+            except (TypeError, ValueError):
+                self.dropped.append(key)
+        settings = {k: v for k, v in settings.items() if k not in self.dropped}
         # KLU parallelizes over its BTF blocks on its own and takes no count.
         self.settings = settings if path == 'klu' else {'threads': threads, **settings}
 
@@ -117,7 +128,8 @@ class Rslab:
         return {'stages': {s['name']: s['wall_ms'] / 1e3 for s in d.get('stages', [])},
                 'factor_nnz': d.get('factor_nnz'), 'decisions': d.get('decisions'),
                 'factor_bytes': next((s['bytes'] for s in d.get('stages', []) if s['name'] == 'factor'), None),
-                'estimate': est, 'numeric': d.get('numeric'), 'version': self.rslab.__version__}
+                'estimate': est, 'numeric': d.get('numeric'), 'warnings': d.get('warnings'),
+                'settings_dropped': self.dropped, 'version': self.rslab.__version__}
 
 
 def load_mkl():
@@ -500,7 +512,8 @@ def main():
     rows = []
     for f in files:
         for round_ in range(args.rounds):
-            for name in solvers:
+            # With revisions to compare, the reference solvers run once: they are no side of it.
+            for name in [s for s in solvers if round_ == 0 or s in pythons or not pythons]:
                 cmd = [str(pythons.get(name, sys.executable)), __file__, '--worker', name, str(f),
                        str(partner(f)), '--threads', str(threads), '--repeats', str(args.repeats),
                        '--warmup', str(args.warmup)]
