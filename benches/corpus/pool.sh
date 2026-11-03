@@ -2,23 +2,24 @@
 # The pool entry of RSLAB's benchmark corpus, run from an rslab checkout.
 #
 #   benches/corpus/pool.sh corpus SOURCE [corpus.py build options]
-#       One source of the corpus (benches/corpus/corpus.py) built on the corpus machine into
-#       its cache: the source ships at its pinned commit, archived from a local clone
-#       (CORPUS_SRC_<NAME>=DIR, e.g. CORPUS_SRC_SANE) or from a fresh clone of GitHub.
-#       A path /cache/<name>/... among the options mounts that cache too (--reuse).
-#       CORPUS_INPUTS=DIR ships DIR into the corpus' inputs/ (the MoM project cases).
+#       One source of the corpus (benches/corpus/corpus.py) built into the cache of each
+#       machine that holds a family it feeds (corpus.py PLACEMENT): the source ships at its
+#       pinned commit, archived from a local clone (CORPUS_SRC_<NAME>=DIR, e.g.
+#       CORPUS_SRC_SANE) or from a fresh clone of GitHub. A path /cache/<name>/... among the
+#       options mounts that cache too (--reuse). CORPUS_INPUTS=DIR ships DIR into the
+#       corpus' inputs/ (the MoM project cases).
 #
-#   benches/corpus/pool.sh ab REF_A REF_B [pardiso_corpus.py options and inputs]
-#       The A/B of two RSLAB revisions (benches/pardiso_corpus.py --rslab), REF_A the base,
-#       with MKL PARDISO beside them, on the whole corpus unless inputs under /cache/ are
-#       given; e.g. `pool.sh ab main feat/x --family fem`. The machine to itself (all its
-#       cores), so the timings see no other job. Results: falllow fetch RUN (ab.jsonl).
+#   benches/corpus/pool.sh ab REF_A REF_B [REF ...] [pardiso_corpus.py options]
+#       RSLAB revisions against REF_A (benches/pardiso_corpus.py --rslab) with MKL PARDISO
+#       beside them: one job per family (--family, default all) on the machine that holds
+#       it, as many cores as the measurement has threads and the memory of PLACEMENT; e.g.
+#       `pool.sh ab main main feat/x` (main twice: the noise next to the change). Results:
+#       falllow fetch RUN (ab.jsonl).
 #
-# Env: CORPUS_MACHINE (default milan-box-01), CORPUS_CACHE (rslab-corpus), CORPUS_CPU,
-# CORPUS_MEMORY, CORPUS_DISK (the job's resources), CORPUS_DETACH=1 (submit, do not follow).
+# Env: CORPUS_CACHE (rslab-corpus), CORPUS_CPU (6, the physical cores of the pool machines),
+# CORPUS_DISK. Every job is submitted detached; follow it with falllow logs -f RUN.
 set -euo pipefail
 
-MACHINE=${CORPUS_MACHINE:-milan-box-01}
 CACHE=${CORPUS_CACHE:-rslab-corpus}
 HERE=$(cd "$(dirname "$0")" && pwd)
 mode=${1:?usage: pool.sh corpus SOURCE [options] | ab REF_A REF_B [options]}
@@ -65,8 +66,6 @@ for a in "$@"; do
     caches+=(--cache "${BASH_REMATCH[1]}")
   fi
 done
-follow=()
-[ "${CORPUS_DETACH:-0}" = 1 ] && follow=(--detach)
 
 case $mode in
 corpus)
@@ -86,14 +85,28 @@ corpus)
   done < <(python3 "$HERE/corpus.py" pins "$source")
   [ -n "${CORPUS_INPUTS:-}" ] && cp -R "$CORPUS_INPUTS" "$stage/inputs"
   cd "$stage"
-  falllow run --machine "$MACHINE" "${caches[@]}" --name "corpus-$source-$(date +%H%M%S)" \
-    --cpu "${CORPUS_CPU:-6..12}" --memory "${CORPUS_MEMORY:-32G}" --disk "${CORPUS_DISK:-80G}" \
-    ${follow[@]+"${follow[@]}"} -- bash rslab/benches/corpus/pool.sh job-corpus "$source" "$@"
+  while read -r family machine memory; do
+    falllow run --machine "$machine" "${caches[@]}" --name "corpus-$source-$family-$(date +%H%M%S)" \
+      --cpu "${CORPUS_CPU:-6}" --memory "$memory" --disk "${CORPUS_DISK:-40G}" --detach \
+      -- bash rslab/benches/corpus/pool.sh job-corpus "$source" --family "$family" "$@" < /dev/null
+  done < <(python3 "$HERE/corpus.py" placement "$source")
   ;;
 ab)
-  a=${1:?usage: pool.sh ab REF_A REF_B [options]}; b=${2:?usage: pool.sh ab REF_A REF_B [options]}; shift 2
+  refs=()
+  while [ $# -gt 0 ] && [[ $1 != -* ]]; do refs+=("$1"); shift; done
+  [ ${#refs[@]} -ge 2 ] || { echo "usage: pool.sh ab REF_A REF_B [REF ...] [options]" >&2; exit 2; }
+  # the families asked for (--family), the rest of the options passed on
+  families=() rest=()
+  while [ $# -gt 0 ]; do
+    if [ "$1" = --family ]; then
+      shift
+      while [ $# -gt 0 ] && [[ $1 != -* ]]; do families+=("$1"); shift; done
+    else
+      rest+=("$1"); shift
+    fi
+  done
   k=0
-  for ref in "$a" "$b"; do
+  for ref in "${refs[@]}"; do
     sha=$(git -C "$REPO" rev-parse --verify "$ref^{commit}")
     mkdir -p "$stage/revs/$k"
     git -C "$REPO" archive --format=tar "$sha" -- . ':(exclude)docs' ':(exclude)benches/bench_out' \
@@ -103,9 +116,12 @@ ab)
     k=$((k + 1))
   done
   cd "$stage"
-  falllow run --machine "$MACHINE" "${caches[@]}" --name "corpus-ab-$(date +%H%M%S)" \
-    --cpu "${CORPUS_CPU:-12}" --memory "${CORPUS_MEMORY:-40G}" --disk "${CORPUS_DISK:-60G}" \
-    ${follow[@]+"${follow[@]}"} -- bash rslab/benches/corpus/pool.sh job-ab "$@"
+  while read -r family machine memory; do
+    if [ ${#families[@]} -gt 0 ] && [[ " ${families[*]} " != *" $family "* ]]; then continue; fi
+    falllow run --machine "$machine" "${caches[@]}" --name "corpus-ab-$family-$(date +%H%M%S)" \
+      --cpu "${CORPUS_CPU:-6}" --memory "$memory" --disk "${CORPUS_DISK:-40G}" --detach \
+      -- bash rslab/benches/corpus/pool.sh job-ab --family "$family" ${rest[@]+"${rest[@]}"} < /dev/null
+  done < <(python3 "$HERE/corpus.py" placement)
   ;;
 *)
   echo "unknown mode $mode: corpus or ab" >&2

@@ -52,6 +52,8 @@ import scipy.io
 import scipy.sparse as sp
 
 HERE = Path(__file__).resolve().parent
+# The families a build writes (`build --family`), all by default.
+FAMILIES = {'mom', 'circuit', 'fem'}
 
 # The pinned sources: repository, commit and the paths of it a job needs (git pathspecs).
 SOURCES = {
@@ -66,9 +68,15 @@ SOURCES = {
     'circuits': {'repo': 'milanofthe/circuit-reference-suite', 'commit': '6a97c8c6d3d24f5dbd3709a0ca479be3054c5449',
                  'paths': ['cases/vacask_c6288_psp103']},
 }
-# The sources a build ships, per corpus source.
+# The sources a build ships, and the families it writes, per corpus source.
 NEEDS = {'rapidmom': ['rapidmom'], 'rapidfem': ['rapidfem'], 'sane': ['sane', 'circuits'],
          'suitesparse': [], 'legacy': []}
+FEEDS = {'rapidmom': ['mom'], 'legacy': ['mom'], 'rapidfem': ['fem'], 'sane': ['circuit'],
+         'suitesparse': ['circuit', 'fem']}
+# Where a family lives (the pool cache rslab-corpus of that machine) and the memory its A/B
+# job asks for: the peak falllow measured for main against main with headroom (mom 10.1 GB,
+# circuit 1.1 GB; fem not yet measured, a strato machine's room).
+PLACEMENT = {'mom': ('milan-box-01', '13G'), 'circuit': ('strato-2', '2G'), 'fem': ('strato-1', '18G')}
 # SuiteSparse's file server first, the old University of Florida mirror after it.
 SUITESPARSE_MIRRORS = ['https://sparse.tamu.edu/MM', 'https://www.cise.ufl.edu/research/sparse/MM']
 
@@ -90,28 +98,26 @@ MOM = [
 ]
 
 # rapidfem's driven-sweep examples (python/python_src/rapidfem/examples/fd_<name>.py), each
-# up to its second frequency: the first system and its refactorization values. Left out:
-# coupled_line_filter (5.6M DOF, beyond the corpus machine), dielectric_resonator and
-# inverted_f_antenna (eigenmode and adaptive refinement, which do not dump), stl_import (an
-# import demo).
-FEM_EXAMPLES = ['wr90', 'coax_step', 'wr90_pml', 'iris_filter', 'pyramidal_horn', 'patch_antenna',
-                'rfic_spiral_from_json', 'microstrip_line', 'vivaldi_antenna', 'stepped_impedance_filter']
+# up to its second frequency: the first system and its refactorization values. A spread of
+# sizes and terminations: waveguide ports (28k), PML (51k), horn with PML and ABC (140k),
+# lumped port with PML (186k), numerical wave ports (262k). The other examples repeat these
+# classes at sizes up to 5.6M DOF, beyond what the corpus machines factor in minutes.
+FEM_EXAMPLES = ['wr90', 'wr90_pml', 'pyramidal_horn', 'patch_antenna', 'microstrip_line']
 # Systems a sweep dumps per example: the first frequency and the next one.
 FEM_DUMPS = 2
 
 # SANE circuits (benchmarks/scaling.py cases) and analyses. A DC run dumps its Newton
 # Jacobians from the first on, a transient (uic) its consistent start and then the stage
 # matrices of the Rosenbrock steps; SANE_DUMP_LIMIT bounds the files of one run.
-SANE = [('chain1000', 'tran'), ('c1908', 'dc'), ('c1908', 'tran'), ('c3540', 'tran'), ('c6288', 'tran'),
-        ('c7552', 'dc'), ('c7552', 'tran'), ('ibmpg1', 'dc'), ('grid300', 'tran'), ('ibmpg2', 'dc')]
+SANE = [('c1908', 'dc'), ('c1908', 'tran'), ('c6288', 'tran'), ('c7552', 'dc'), ('c7552', 'tran'),
+        ('ibmpg1', 'dc'), ('grid300', 'tran'), ('ibmpg2', 'dc')]
 SANE_DUMP_LIMIT = {'dc': 8, 'tran': 40}
 
 # SuiteSparse FEM matrices for the classes rapidfem does not factor: (group/name, kind).
 SUITESPARSE_FEM = [
-    ('Boeing/bcsstk36', 'spd'), ('Williams/cant', 'spd'), ('Boeing/pwtk', 'spd'),
-    ('GHS_indef/helm3d01', 'indefinite'), ('GHS_indef/dawson5', 'indefinite'), ('GHS_indef/bmw3_2', 'indefinite'),
-    ('Simon/raefsky3', None), ('Bova/rma10', None), ('Norris/torso3', None),
-    ('Lee/fem_filter', None), ('Lee/fem_hifreq_circuit', None),
+    ('Boeing/bcsstk36', 'spd'), ('Boeing/pwtk', 'spd'),
+    ('GHS_indef/helm3d01', 'indefinite'), ('GHS_indef/dawson5', 'indefinite'),
+    ('Simon/raefsky3', None), ('Norris/torso3', None), ('Lee/fem_filter', None),
 ]
 
 # Systems of the pool cache bench-mtx (dumped by hand from rapidmom in October 2026, the
@@ -145,6 +151,8 @@ def symmetry(a):
 
 def save(out, family, name, a, b, meta):
     """`out/<family>/<name>.npz`, the format of benches/pardiso_corpus.py, written atomically."""
+    if family not in FAMILIES:
+        return
     a = sp.csc_matrix(a)
     a.sum_duplicates()
     a.sort_indices()
@@ -409,7 +417,7 @@ def build_suitesparse(src, out, work, only, reuse):
            [(g, n, 'fem', kind) for (gn, kind) in SUITESPARSE_FEM for g, n in [gn.split('/')]]
     for group, name, family, kind in todo:
         sysname = f'ss_{name}'
-        if only and sysname not in only:
+        if family not in FAMILIES or (only and sysname not in only):
             continue
         url = fetch_suitesparse(group, name, raw)
         if not url:
@@ -457,19 +465,27 @@ def main():
     b.add_argument('--work', type=Path, default=Path(os.environ.get('FALLLOW_SCRATCH', '/scratch')) / 'corpus')
     b.add_argument('--only', nargs='+', help='only these systems (their names without _fNN)')
     b.add_argument('--reuse', type=Path, help='rapidmom: earlier dumps of the same commit; legacy: bench-mtx')
+    b.add_argument('--family', nargs='+', help='only the systems of these families')
     m = sub.add_parser('manifest', help='rewrite the manifest from the corpus files')
     m.add_argument('out', type=Path)
     pins = sub.add_parser('pins', help='the sources a build ships, one line each: name repo commit pathspecs')
     pins.add_argument('source', choices=list(BUILDERS))
+    place = sub.add_parser('placement', help='family machine memory, one line each: of SOURCE, else all')
+    place.add_argument('source', nargs='?', choices=list(BUILDERS))
     args = p.parse_args()
     if args.cmd == 'pins':
         for name in NEEDS[args.source]:
             print(name, SOURCES[name]['repo'], SOURCES[name]['commit'], *SOURCES[name]['paths'])
         return
+    if args.cmd == 'placement':
+        for family in (FEEDS[args.source] if args.source else PLACEMENT):
+            print(family, *PLACEMENT[family])
+        return
     if args.cmd == 'manifest':
         manifest(args.out)
         return
     args.work.mkdir(parents=True, exist_ok=True)
+    FAMILIES.intersection_update(args.family or FAMILIES)
     only = set(args.only or [])
     t0 = time.perf_counter()
     BUILDERS[args.source](args.src.resolve(), args.out.resolve(), args.work.resolve(), only, args.reuse)
