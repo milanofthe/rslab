@@ -164,12 +164,8 @@ pub(crate) struct PanelArena<T> {
     row_slot_ptr: Vec<usize>,
     rows: Vec<u32>,
     row_base: PanelPtr<u32>,
-    /// Lazy: the next free value; the values claimed and the most they may
-    /// be; the slots that did not fit, and each supernode's own row slot.
+    /// Lazy: the next free value, and each supernode's own row slot.
     cursor: std::sync::atomic::AtomicUsize,
-    claimed: std::sync::atomic::AtomicUsize,
-    limit: usize,
-    spilled: Cells<Vec<T>>,
     lazy_rows: Cells<Vec<u32>>,
     lazy: bool,
     /// The scratch of [`finish_slot`](Self::finish_slot), per running call.
@@ -182,9 +178,6 @@ pub(crate) struct PanelArena<T> {
 // SAFETY: slots are disjoint and each has a single writer before any reader
 // (the drivers' publication discipline, see the type docs).
 unsafe impl<T: Send> Sync for PanelArena<T> {}
-
-/// The start of a lazy slot that lives in a buffer of its own.
-const SPILLED: usize = usize::MAX;
 
 impl<T: Scalar> PanelArena<T> {
     /// Allocate the slots of the given sizes `(values, rows)`, one per
@@ -243,23 +236,19 @@ impl<T: Scalar> PanelArena<T> {
     }
 
     /// Slots of `nsuper` supernodes claimed as their fronts start
-    /// ([`claim`](Self::claim)): in a buffer of `size` values, the size of
-    /// the factor the analysis predicts, and past it in buffers of their
-    /// own; together at most `limit` values.
-    pub fn lazy(nsuper: usize, size: usize, limit: usize) -> Self {
+    /// ([`claim`](Self::claim)), together at most `room` values.
+    pub fn lazy(nsuper: usize, room: usize) -> Self {
         let mut vals = Vec::new();
-        vals.reserve_exact(size);
+        vals.reserve_exact(room);
         let row_slot_ptr = vec![0usize; nsuper + 1];
-        let mut arena = Self::with(
+        Self::with(
             Cells::new(nsuper, (0usize, 0usize)),
             vals,
             row_slot_ptr,
             Vec::new(),
             true,
             false,
-        );
-        arena.limit = limit;
-        arena
+        )
     }
 
     fn with(
@@ -281,9 +270,6 @@ impl<T: Scalar> PanelArena<T> {
             rows,
             row_base,
             cursor: std::sync::atomic::AtomicUsize::new(0),
-            claimed: std::sync::atomic::AtomicUsize::new(0),
-            limit: usize::MAX,
-            spilled: Cells::new_default(if lazy { ns } else { 0 }),
             lazy_rows: Cells::new_default(if lazy { ns } else { 0 }),
             lazy,
             scratch: ScratchPool::new(),
@@ -294,7 +280,7 @@ impl<T: Scalar> PanelArena<T> {
     /// The values claimed so far (a lazy arena; the slots' total else).
     pub fn claimed(&self) -> usize {
         if self.lazy {
-            self.claimed.load(std::sync::atomic::Ordering::Acquire)
+            self.cursor.load(std::sync::atomic::Ordering::Acquire)
         } else {
             self.vals.len()
         }
@@ -309,10 +295,8 @@ impl<T: Scalar> PanelArena<T> {
 
     /// Supernode `s`'s slot for its owner to factor into: `vals` zeroed
     /// values and room for `rows` rows. A fixed slot is the analysis's and
-    /// holds them; a lazy one is claimed now, in the arena's buffer where it
-    /// fits, else in one of its own, and `None` once the values claimed
-    /// would pass the limit (which does not depend on the order of the
-    /// claims: their sum passes it or not).
+    /// holds them; a lazy one is claimed now, `None` when the arena's room
+    /// is spent.
     ///
     /// # Safety
     /// Only the owner of `s`, once, before anybody reads the slot.
@@ -324,37 +308,21 @@ impl<T: Scalar> PanelArena<T> {
             return Some(&mut self.slot_mut(s)[..vals]);
         }
         use std::sync::atomic::Ordering;
-        if self.claimed.fetch_add(vals, Ordering::AcqRel) + vals > self.limit {
+        let start = self.cursor.fetch_add(vals, Ordering::AcqRel);
+        if start + vals > self.vals.capacity() {
             return None;
         }
+        self.slots.set(s, (start, vals));
         self.lazy_rows.set(s, vec![0u32; rows]);
-        let mut at = self.cursor.load(Ordering::Acquire);
-        loop {
-            if at + vals > self.vals.capacity() {
-                self.spilled.set(s, vec![T::zero(); vals]);
-                self.slots.set(s, (SPILLED, vals));
-                return Some(self.slot_mut(s));
-            }
-            match self.cursor.compare_exchange_weak(
-                at,
-                at + vals,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(now) => at = now,
-            }
-        }
-        self.slots.set(s, (at, vals));
-        let start = PanelPtr(self.base.get().add(at));
+        let at = PanelPtr(self.base.get().add(start));
         let chunk = crate::constants::ZERO_FILL_CHUNK;
         if vals <= chunk {
-            std::ptr::write_bytes(start.get(), 0, vals);
+            std::ptr::write_bytes(at.get(), 0, vals);
         } else {
             crate::parallel::for_each(vals.div_ceil(chunk), 1, |c| {
                 let c0 = c * chunk;
                 // SAFETY: the claimed range, in the buffer's capacity.
-                unsafe { std::ptr::write_bytes(start.get().add(c0), 0, chunk.min(vals - c0)) };
+                unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(vals - c0)) };
             });
         }
         Some(self.slot_mut(s))
@@ -369,10 +337,8 @@ impl<T: Scalar> PanelArena<T> {
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn slot_mut(&self, s: usize) -> &mut [T] {
-        match *self.slots.get(s) {
-            (SPILLED, _) => self.spilled.get_mut(s),
-            (start, len) => std::slice::from_raw_parts_mut(self.base.get().add(start), len),
-        }
+        let (start, len) = *self.slots.get(s);
+        std::slice::from_raw_parts_mut(self.base.get().add(start), len)
     }
 
     /// The slot of supernode `s` for reading.
@@ -382,10 +348,8 @@ impl<T: Scalar> PanelArena<T> {
     /// reader calls this, and must not write again while readers exist.
     #[inline]
     pub unsafe fn slot(&self, s: usize) -> &[T] {
-        match *self.slots.get(s) {
-            (SPILLED, _) => self.spilled.get(s),
-            (start, len) => std::slice::from_raw_parts(self.base.get().add(start), len),
-        }
+        let (start, len) = *self.slots.get(s);
+        std::slice::from_raw_parts(self.base.get().add(start), len)
     }
 
     /// The row slot of supernode `s`: room for its `m` off-block rows, for
@@ -461,8 +425,7 @@ impl<T: Scalar> PanelArena<T> {
         }
         debug_assert_eq!(sn_col.last().copied(), Some(n as u32));
         // The values in the order of the slots, each panel moved down to the
-        // end of the ones before it (reads stay ahead of writes); then the
-        // spilled ones, each buffer freed once copied.
+        // end of the ones before it (reads stay ahead of writes).
         // SAFETY (the slot reads): every slot is finished and unshared.
         let start = |i: usize| unsafe { self.slots.get(kept[i].0) }.0;
         let mut order: Vec<usize> = (0..kept.len()).collect();
@@ -470,34 +433,16 @@ impl<T: Scalar> PanelArena<T> {
             order.sort_unstable_by_key(|&i| start(i));
         }
         let mut val_off = vec![0usize; kept.len()];
-        let mut at = 0usize;
+        let (base, mut at) = (self.vals.as_mut_ptr(), 0usize);
         let mut moved = false;
         for &i in &order {
             let (src, len) = (start(i), kept[i].1);
-            if src == SPILLED {
-                // SAFETY: the finished supernode's own buffer, unshared.
-                let own = std::mem::take(unsafe { self.spilled.get_mut(kept[i].0) });
-                if at + len > self.vals.capacity() {
-                    // the factor outgrew the analysis's: room after the panels
-                    // placed so far
-                    // SAFETY: they are initialized.
-                    unsafe { self.vals.set_len(at) };
-                    self.vals.reserve(len);
-                }
-                // SAFETY: the place lies in the capacity; the buffer is separate.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(own.as_ptr(), self.vals.as_mut_ptr().add(at), len)
-                };
+            debug_assert!(at <= src);
+            if at != src {
+                // SAFETY: both ranges lie in the buffer's capacity, the source
+                // holds the finished panel; `copy` handles the overlap.
+                unsafe { std::ptr::copy(base.add(src), base.add(at), len) };
                 moved = true;
-            } else {
-                debug_assert!(at <= src);
-                if at != src {
-                    // SAFETY: both ranges lie in the buffer's capacity, the
-                    // source holds the finished panel; `copy` handles overlap.
-                    let base = self.vals.as_mut_ptr();
-                    unsafe { std::ptr::copy(base.add(src), base.add(at), len) };
-                    moved = true;
-                }
             }
             val_off[i] = at;
             at += len;
@@ -509,7 +454,7 @@ impl<T: Scalar> PanelArena<T> {
         // fixed arena's whole buffer was initialized up front).
         unsafe { vals.set_len(total) };
         if (moved || total < vals.capacity()) && !self.reused {
-            vals.shrink_to_fit();
+            release_room(&mut vals);
         }
         if self.lazy {
             rows = Vec::with_capacity(total_rows);
@@ -544,6 +489,17 @@ impl<T: Scalar> PanelArena<T> {
             },
             zeros,
         )
+    }
+}
+
+/// Give back the room of `v` past its values where that keeps the buffer
+/// in place: a shrink by less than half. Allocators move a block they shrink
+/// by more (mimalloc copies it), a second copy of the factor at its peak;
+/// such room is a lazy arena's allowance, which was never touched and holds
+/// no resident memory.
+pub(crate) fn release_room<T>(v: &mut Vec<T>) {
+    if 2 * v.len() >= v.capacity() {
+        v.shrink_to_fit();
     }
 }
 

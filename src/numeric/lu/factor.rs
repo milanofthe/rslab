@@ -91,13 +91,10 @@ impl<T: Scalar> LlEmit<T> {
                 // earlier factor's buffers go: their pages would stay
                 // resident).
                 drop(storage);
-                let size = |v: &[Slot]| v.iter().map(|&(v, _)| v).sum::<usize>();
-                let (l, u) = (size(&l_slots), size(&u_slots));
-                // the allowance shared as the panels are
-                let share = |v: usize| v + allowance * v / (l + u).max(1);
+                let room = |v: &[Slot]| v.iter().map(|&(v, _)| v).sum::<usize>() + allowance;
                 (
-                    PanelArena::lazy(ns, l, share(l)),
-                    PanelArena::lazy(ns, u, share(u)),
+                    PanelArena::lazy(ns, room(&l_slots)),
+                    PanelArena::lazy(ns, room(&u_slots)),
                 )
             }
             Some((l, u)) => (

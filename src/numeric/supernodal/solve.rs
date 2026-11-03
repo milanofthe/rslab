@@ -1699,8 +1699,8 @@ pub(crate) fn packed_len(w: usize, m: usize) -> usize {
 /// `full_off[s]`, `sn_col` and `row_ptr` giving `w` and `m`) in place into the plan's layout
 /// ([`packed_blocks`]) and return each one's packed range. The panels go in the order they
 /// lie in, every column moves to an offset no larger than its own and the columns go in
-/// order, so no source is overwritten before it is read; the buffer then shrinks to the
-/// packed size.
+/// order, so no source is overwritten before it is read; the buffer then gives back its
+/// room ([`release_room`](super::panel::release_room)).
 fn pack_panels<T: Copy>(
     vals: &mut Vec<T>,
     sn_col: &[u32],
@@ -1728,7 +1728,7 @@ fn pack_panels<T: Copy>(
         at = rng[s].1;
     }
     vals.truncate(at);
-    vals.shrink_to_fit();
+    super::panel::release_room(vals);
     rng
 }
 
