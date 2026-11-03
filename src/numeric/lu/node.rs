@@ -73,9 +73,13 @@ impl<T> LuPools<T> {
 
 /// `x -= L[rows, kb..k] u` for the off-block rows of a pivot column: `x` holds
 /// rows `nfs..` of the column, `u` its entries `kb..k` (the `U` of this
-/// panel's pivots so far), `lbuf` the panel (column stride `ld`). Row by row
-/// the same operations in the same order however the rows are split, so the
-/// parallel form is bit-identical to the serial one.
+/// panel's pivots so far), `lbuf` the panel's columns before it (column
+/// stride `ld`); with `want` the largest squared magnitude of the result.
+/// Runs of [`LU_DEEP_ROWS`](crate::constants::LU_DEEP_ROWS) rows take every
+/// column in turn, so a run stays in cache; row by row the same operations
+/// in the same order however the rows are split, so the parallel form is
+/// bit-identical to the serial one.
+#[allow(clippy::too_many_arguments)]
 fn deep_update<T: Scalar>(
     lbuf: &[T],
     ld: usize,
@@ -83,23 +87,39 @@ fn deep_update<T: Scalar>(
     kb: usize,
     u: &[T],
     x: &mut [T],
+    want: bool,
     par: bool,
-) {
-    let apply = |r0: usize, xs: &mut [T]| {
-        for (jj, &uj) in u.iter().enumerate() {
-            if uj != T::zero() {
-                let lj = &lbuf[(kb + jj) * ld + nfs + r0..];
-                for (v, &l) in xs.iter_mut().zip(lj) {
-                    *v = *v - l * uj;
+) -> f64 {
+    use std::sync::atomic::AtomicU64;
+    let run = crate::constants::LU_DEEP_ROWS;
+    let apply = |r0: usize, xs: &mut [T]| -> f64 {
+        let mut top = 0.0f64;
+        for (q, chunk) in xs.chunks_mut(run).enumerate() {
+            let at = nfs + r0 + q * run;
+            for (jj, &uj) in u.iter().enumerate() {
+                if uj != T::zero() {
+                    let lj = &lbuf[(kb + jj) * ld + at..(kb + jj) * ld + at + chunk.len()];
+                    for (v, &l) in chunk.iter_mut().zip(lj) {
+                        *v = *v - l * uj;
+                    }
                 }
             }
+            if want {
+                top = chunk.iter().map(|v| v.magnitude_sq()).fold(top, f64::max);
+            }
         }
+        top
     };
     if par {
+        // Non-negative doubles order as their bits.
+        let top = AtomicU64::new(0);
         let chunk = x.len().div_ceil(crate::parallel::threads()).max(1);
-        crate::parallel::chunks_mut(x, chunk, |c, xs| apply(c * chunk, xs));
+        crate::parallel::chunks_mut(x, chunk, |c, xs| {
+            top.fetch_max(apply(c * chunk, xs).to_bits(), Ordering::Relaxed);
+        });
+        f64::from_bits(top.into_inner())
     } else {
-        apply(0, x);
+        apply(0, x)
     }
 }
 
@@ -577,42 +597,48 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         while npiv < live && npiv - kb < nb_cdiv {
             let k = npiv;
             // Column `k` from row `kb` down, brought up to date with this
-            // panel's pivots `kb..k`: in a copy, so a delayed column keeps the
-            // state of the columns still to come.
-            col.clear();
-            col.extend_from_slice(&lbuf[k * nrow_l + kb..(k + 1) * nrow_l]);
-            {
-                let (fs, deep) = col.split_at_mut(nfs - kb);
+            // panel's pivots `kb..k`. Where it may be delayed, in a copy, so a
+            // delayed column keeps the state of the columns still to come.
+            let (stable, p, best, deep) = {
+                let (before, rest) = lbuf.split_at_mut(k * nrow_l);
+                let own = &mut rest[kb..nrow_l];
+                let x: &mut [T] = if may_delay {
+                    col.clear();
+                    col.extend_from_slice(own);
+                    col
+                } else {
+                    own
+                };
+                let (fs, offb) = x.split_at_mut(nfs - kb);
                 for j in kb..k {
                     let u = fs[j - kb];
                     if u != T::zero() {
-                        let lj = &lbuf[j * nrow_l + j + 1..j * nrow_l + nfs];
-                        for (x, &l) in fs[j + 1 - kb..].iter_mut().zip(lj) {
-                            *x = *x - l * u;
+                        let lj = &before[j * nrow_l + j + 1..j * nrow_l + nfs];
+                        for (v, &l) in fs[j + 1 - kb..].iter_mut().zip(lj) {
+                            *v = *v - l * u;
                         }
                     }
                 }
-                if cn_l > 0 && k > kb {
-                    deep_update(lbuf, nrow_l, nfs, kb, &fs[..k - kb], deep, deep_par);
-                }
-            }
-            let mut piv_row = k;
-            if thresh_sq > 0.0 {
-                let cand = &col[k - kb..nfs - kb];
+                let want = thresh_sq > 0.0;
+                let deep =
+                    deep_update(before, nrow_l, nfs, kb, &fs[..k - kb], offb, want, deep_par);
+                // The largest fully-summed candidate.
+                let cand = &fs[k - kb..];
                 let (mut p, mut best) = (0, cand[0].magnitude_sq());
-                for (i, v) in cand.iter().enumerate().skip(1) {
-                    let m = v.magnitude_sq();
-                    if m > best {
-                        best = m;
-                        p = i;
+                if want {
+                    for (i, v) in cand.iter().enumerate().skip(1) {
+                        let m = v.magnitude_sq();
+                        if m > best {
+                            best = m;
+                            p = i;
+                        }
                     }
                 }
-                let deep = col[nfs - kb..]
-                    .iter()
-                    .map(|v| v.magnitude_sq())
-                    .fold(0.0, f64::max);
                 // Some fully-summed row passes the test over the whole column.
-                let stable = best >= thresh_sq * deep;
+                (best >= thresh_sq * deep, p, best, deep)
+            };
+            let mut piv_row = k;
+            if thresh_sq > 0.0 {
                 if !stable {
                     if may_delay {
                         // Delayed: to the end of the live columns, which this
@@ -627,11 +653,18 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     forced += 1;
                 }
                 let reference = if stable { best.max(deep) } else { best };
-                if p != 0 && cand[0].magnitude_sq() < thresh_sq * reference {
+                let diag = if may_delay {
+                    col[k - kb]
+                } else {
+                    lbuf[k * nrow_l + k]
+                };
+                if p != 0 && diag.magnitude_sq() < thresh_sq * reference {
                     piv_row = k + p;
                 }
             }
-            lbuf[k * nrow_l + kb..(k + 1) * nrow_l].copy_from_slice(col);
+            if may_delay {
+                lbuf[k * nrow_l + kb..(k + 1) * nrow_l].copy_from_slice(col);
+            }
             if piv_row != k {
                 for c in 0..nfs {
                     lbuf.swap(c * nrow_l + k, c * nrow_l + piv_row);
