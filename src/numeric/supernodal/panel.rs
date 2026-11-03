@@ -277,15 +277,6 @@ impl<T: Scalar> PanelArena<T> {
         }
     }
 
-    /// The values claimed so far (a lazy arena; the slots' total else).
-    pub fn claimed(&self) -> usize {
-        if self.lazy {
-            self.cursor.load(std::sync::atomic::Ordering::Acquire)
-        } else {
-            self.vals.len()
-        }
-    }
-
     /// Entries of slot `s`.
     #[inline]
     pub fn slot_len(&self, s: usize) -> usize {

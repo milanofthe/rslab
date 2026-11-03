@@ -5,7 +5,7 @@ use super::factor::factor_general_lu_numeric;
 use super::factors::LuPivots;
 use super::structure::LuStructure;
 use crate::constants::{
-    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY,
+    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY, LU_DELAY_ALLOWANCE,
     LU_INPUT_BUILD_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
     LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
@@ -201,8 +201,10 @@ impl LuSymbolic {
         // MC64 row matching: analyze the row-permuted matrix `B` whose
         // diagonal carries the matched entries, where the diagonal of `A`
         // cannot carry the pivots itself.
-        let matching = if opts.matching.enabled
-            && diagonal_needs_matching(a, opts.matching.negligible_diagonal)
+        // Delayed pivoting pairs with the matching on every column.
+        let matching = if opts.pivoting.delayed
+            || (opts.matching.enabled
+                && diagonal_needs_matching(a, opts.matching.negligible_diagonal))
         {
             let cache = crate::logging::timed(
                 || "lu analyze: matching".into(),
@@ -405,16 +407,16 @@ impl LuSymbolic {
             crate::logging::warn(&format!("lu settings: {w}"));
         }
         let t = crate::clock::Instant::now();
-        let numeric = factor_general_lu_numeric(self, a, &opts, storage, pools)?;
+        let growth = super::factor::delay_growth(&opts);
+        let numeric = factor_general_lu_numeric(self, a, &opts, growth, storage, pools)?;
         let factor_ms = crate::clock::ms(t.elapsed());
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
-        let (delayed, forced, delay_growth) =
-            (numeric.delayed, numeric.forced, numeric.delay_growth);
+        let (delayed, forced) = (numeric.delayed, numeric.forced);
         if numeric.delays_dropped {
             warnings.push(format!(
-                "delayed pivots exceed pivoting.delay_growth = {}; factored without delays",
-                opts.pivoting.delay_growth
+                "delayed pivots exceed their allowance (LU_DELAY_ALLOWANCE = {LU_DELAY_ALLOWANCE}); \
+                 factored without delays"
             ));
         }
         let (l, ut, factors) = numeric.into_parts();
@@ -442,7 +444,6 @@ impl LuSymbolic {
                 min_pivot: None,
                 delayed: Some(delayed),
                 forced: Some(forced),
-                delay_growth: Some(delay_growth),
             },
             warnings,
             ..Default::default()
@@ -598,7 +599,7 @@ impl LuSymbolic {
         // The arenas' slots, and with delayed pivots the values they may add
         // over them (`delay`): the grown fronts' buffers while the forest is
         // factored, the factor's growth after it.
-        let delay_growth = opts.pivoting.delay_growth;
+        let delay_growth = super::factor::delay_growth(opts);
         let (l_slots, u_slots) = super::factor::lu_slots(sym, st);
         let allowance = super::factor::delay_allowance(&l_slots, &u_slots, delay_growth);
         let panels: usize = l_slots

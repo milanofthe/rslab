@@ -763,8 +763,9 @@ fn exact_structure_bounds_the_factor() {
         let opts = SolverSettings::default().with_matching(matching);
         let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
         assert_eq!(lusym.has_matching(), matching);
-        let num = factor_general_lu_numeric(&lusym, &a, &opts, None, &super::node::LuPools::new())
-            .unwrap();
+        let num =
+            factor_general_lu_numeric(&lusym, &a, &opts, 0.0, None, &super::node::LuPools::new())
+                .unwrap();
         let (sym, _) = lusym.symb.sym_and_levels().unwrap();
         let sched = lusym.symb.ll_schedule().unwrap();
         let st = &lusym.structure;
@@ -1142,10 +1143,8 @@ fn off_diagonal_pivots(k: usize, diag: f64, seed: u64) -> GeneralCsc<f64> {
     GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-fn delays_settings(growth: f64) -> SolverSettings {
-    SolverSettings::default()
-        .with_matching(false)
-        .with_delay_growth(growth)
+fn delays_settings(on: bool) -> SolverSettings {
+    SolverSettings::default().with_delayed_pivots(on)
 }
 
 #[test]
@@ -1153,12 +1152,12 @@ fn delayed_pivots_keep_the_factor_stable() {
     let a = off_diagonal_pivots(24, 1e-9, 3);
     let b: Vec<f64> = (0..a.n).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
     let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    let confined = LuSolver::factor(&a, &delays_settings(0.0)).unwrap();
+    let confined = LuSolver::factor(&a, &delays_settings(false)).unwrap();
     let d = confined.diagnostics().numeric;
     assert_eq!(d.delayed, Some(0));
     let forced = d.forced.unwrap();
     assert!(forced > 0, "the pivots of this matrix lie off their fronts");
-    let delayed = LuSolver::factor(&a, &delays_settings(1.0)).unwrap();
+    let delayed = LuSolver::factor(&a, &delays_settings(true)).unwrap();
     let d = delayed.diagnostics().numeric;
     assert!(d.delayed.unwrap() > 0, "{d:?}");
     assert!(d.forced.unwrap() < forced, "{d:?} against {forced} forced");
@@ -1183,7 +1182,7 @@ fn delayed_pivots_are_deterministic_and_refactor_bitwise() {
     let a = off_diagonal_pivots(30, 1e-9, 5);
     let b: Vec<f64> = (0..a.n).map(|i| (i % 5) as f64 - 2.0).collect();
     let solve = |threads: usize| {
-        let s = delays_settings(0.5).with_threads(Threads::Fixed(threads));
+        let s = delays_settings(true).with_threads(Threads::Fixed(threads));
         let f = LuSolver::factor(&a, &s).unwrap();
         (f.solve(&b).unwrap(), f.diagnostics().numeric.delayed)
     };
@@ -1193,7 +1192,7 @@ fn delayed_pivots_are_deterministic_and_refactor_bitwise() {
     assert_eq!(d1, d4);
     assert!(x1.iter().zip(&x4).all(|(p, q)| p.to_bits() == q.to_bits()));
     // A refactorization in the buffers of a factor with delays: the same bits.
-    let s = delays_settings(0.5).with_threads(Threads::Fixed(4));
+    let s = delays_settings(true).with_threads(Threads::Fixed(4));
     let sym = LuSymbolic::analyze(&a, &s).unwrap();
     let mut f = sym.factor(&a, &s).unwrap();
     sym.refactor(&a, &s, &mut f).unwrap();
@@ -1205,7 +1204,7 @@ fn delayed_pivots_are_deterministic_and_refactor_bitwise() {
 fn delayed_pivots_fit_the_memory_plan() {
     use crate::numeric::settings::Threads;
     let a = off_diagonal_pivots(30, 1e-9, 7);
-    let s = delays_settings(0.5).with_threads(Threads::Fixed(4));
+    let s = delays_settings(true).with_threads(Threads::Fixed(4));
     let sym = LuSymbolic::analyze(&a, &s).unwrap();
     let plan = sym.memory_plan::<f64>(&s, 1);
     let f = sym.factor(&a, &s).unwrap();
@@ -1229,7 +1228,7 @@ fn delayed_pivots_in_complex_and_single_precision() {
         values: a.values.iter().enumerate().map(|(i, &v)| z(v, i)).collect(),
     };
     let b: Vec<Complex<f64>> = (0..a.n).map(|i| z(1.0 + (i % 4) as f64, i)).collect();
-    let f = LuSolver::factor(&ac, &delays_settings(1.0)).unwrap();
+    let f = LuSolver::factor(&ac, &delays_settings(true)).unwrap();
     assert!(f.diagnostics().numeric.delayed.unwrap() > 0);
     let x = f.solve(&b).unwrap();
     assert!(resid(&ac, &x, &b) < 1e-10);
@@ -1240,8 +1239,8 @@ fn delayed_pivots_in_complex_and_single_precision() {
         values: a.values.iter().map(|&v| v as f32).collect(),
     };
     let b32: Vec<f32> = (0..a.n).map(|i| (i % 4) as f32 - 1.5).collect();
-    let conf = LuSolver::factor(&a32, &delays_settings(0.0)).unwrap();
-    let del = LuSolver::factor(&a32, &delays_settings(1.0)).unwrap();
+    let conf = LuSolver::factor(&a32, &delays_settings(false)).unwrap();
+    let del = LuSolver::factor(&a32, &delays_settings(true)).unwrap();
     let (r0, r1) = (
         resid(&a32, &conf.solve(&b32).unwrap(), &b32),
         resid(&a32, &del.solve(&b32).unwrap(), &b32),
@@ -1255,16 +1254,13 @@ fn delayed_pivots_in_complex_and_single_precision() {
 #[test]
 fn delays_past_their_allowance_fall_back() {
     let a = off_diagonal_pivots(24, 1e-9, 3);
-    let f = LuSolver::factor(&a, &delays_settings(1e-6)).unwrap();
-    let d = f.diagnostics();
-    assert_eq!(d.numeric.delayed, Some(0));
-    assert!(
-        d.warnings.iter().any(|w| w.contains("delay_growth")),
-        "{d:?}"
-    );
-    let b = vec![1.0; a.n];
-    let x = f.solve(&b).unwrap();
-    assert!(x.iter().all(|v| v.is_finite()));
+    let s = delays_settings(true);
+    let lusym = LuSymbolic::analyze(&a, &s).unwrap();
+    let pools = super::node::LuPools::new();
+    let with = factor_general_lu_numeric(&lusym, &a, &s, 1.0, None, &pools).unwrap();
+    assert!(with.delayed > 0 && !with.delays_dropped);
+    let dropped = factor_general_lu_numeric(&lusym, &a, &s, 1e-9, None, &pools).unwrap();
+    assert!(dropped.delays_dropped && dropped.delayed == 0);
 }
 
 #[test]
@@ -1288,8 +1284,8 @@ fn delayed_pivots_carry_rows_beyond_the_structure() {
     let a = GeneralCsc::<f64>::from_triplets(g.n, &r, &c, &v).unwrap();
     let b: Vec<f64> = (0..a.n).map(|i| ((i * 5 % 11) as f64) - 5.0).collect();
     let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    let confined = LuSolver::factor(&a, &delays_settings(0.0)).unwrap();
-    let delayed = LuSolver::factor(&a, &delays_settings(1.0)).unwrap();
+    let confined = LuSolver::factor(&a, &delays_settings(false)).unwrap();
+    let delayed = LuSolver::factor(&a, &delays_settings(true)).unwrap();
     let d = delayed.diagnostics().numeric;
     assert!(d.delayed.unwrap() > 0 && d.forced == Some(0), "{d:?}");
     let rel = resid(&a, &delayed.solve(&b).unwrap(), &b) / bnorm;

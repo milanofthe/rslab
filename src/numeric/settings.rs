@@ -118,13 +118,15 @@ pub struct PivotSettings {
     /// Delayed pivoting of the LU path: where no fully-summed row of a
     /// column passes the threshold over its whole column (the stable pivot
     /// lies in a row of an ancestor), the column and a row are passed to the
-    /// parent front, which pivots them with its own. The value is the growth
-    /// of each front's panels the delayed pivots may cause, a fraction of
-    /// its entries; the arenas and the memory plan reserve it, and a column
-    /// past a front's share pivots within its front as without delays
-    /// ([`NumericReport::forced`](crate::NumericReport::forced)). `0`
-    /// (the default) delays nothing. The LDL^T path ignores it.
-    pub delay_growth: f64,
+    /// parent front, which pivots them with its own; the analysis then runs
+    /// the row matching on every column (MC64, the pairing that keeps the
+    /// delays few), whatever [`MatchingSettings`] says. The memory plan
+    /// reserves the growth the delays may cause; a factorization whose
+    /// delays would need more is redone without them, with a warning.
+    /// Default `false`: every pivot stays in its front, and one that fails
+    /// the threshold over its column counts as
+    /// [`forced`](crate::NumericReport::forced). The LDL^T path ignores it.
+    pub delayed: bool,
     /// What a pivot that is still too small does. Default
     /// [`Fail`](ZeroPivotAction::Fail).
     pub on_zero_pivot: ZeroPivotAction,
@@ -134,7 +136,7 @@ impl Default for PivotSettings {
     fn default() -> Self {
         Self {
             threshold: LU_PIVOT_THRESHOLD,
-            delay_growth: LU_DELAY_GROWTH,
+            delayed: false,
             on_zero_pivot: ZeroPivotAction::Fail,
         }
     }
@@ -495,10 +497,10 @@ impl SolverSettings {
         self
     }
 
-    /// Set the growth delayed pivots may cause, clamped to at least `0`
-    /// (see [`PivotSettings::delay_growth`]).
-    pub fn with_delay_growth(mut self, growth: f64) -> Self {
-        self.pivoting.delay_growth = if growth > 0.0 { growth } else { 0.0 };
+    /// Turn the LU path's delayed pivoting on or off (see
+    /// [`PivotSettings::delayed`]).
+    pub fn with_delayed_pivots(mut self, on: bool) -> Self {
+        self.pivoting.delayed = on;
         self
     }
 
@@ -620,12 +622,12 @@ impl SolverSettings {
                         self.pivoting.threshold
                     ));
                 }
-                if self.pivoting.delay_growth != d.pivoting.delay_growth {
-                    out.push(format!(
-                        "pivoting.delay_growth = {} is ignored by the LDL^T path (Bunch-Kaufman \
-                         pivots within the fully-summed block)",
-                        self.pivoting.delay_growth
-                    ));
+                if self.pivoting.delayed {
+                    out.push(
+                        "pivoting.delayed is ignored by the LDL^T path (Bunch-Kaufman pivots \
+                         within the fully-summed block)"
+                            .to_string(),
+                    );
                 }
                 if self.matching != d.matching {
                     out.push("matching is ignored by the LDL^T path (an LU setting)".to_string());

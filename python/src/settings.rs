@@ -169,7 +169,7 @@ macro_rules! plain_knobs {
 
 plain_knobs! {
     "pivot_threshold": f64 => pivoting.threshold;
-    "delay_growth": f64 => pivoting.delay_growth;
+    "delayed_pivots": bool => pivoting.delayed;
     "matching": bool => matching.enabled;
     "matching_negligible_diagonal": f64 => matching.negligible_diagonal;
     "compress_max_ratio": f64 => ordering.compress_max_ratio;
@@ -284,15 +284,14 @@ plain_knobs! {
 ///     Threshold partial pivoting of the LU path in ``[0, 1]`` (``1.0`` is
 ///     full partial pivoting). Ignored, and reported in the diagnostics, on
 ///     the LDL^T path.
-/// delay_growth : float, default 0.0
+/// delayed_pivots : bool, default False
 ///     Delayed pivoting of the LU path: a column none of whose fully-summed
 ///     rows passes the threshold over the whole column moves to the parent
-///     front. The value bounds the growth of the factor the delays may
-///     cause, as a fraction of its entries (the memory plan reserves it);
-///     past it the factor is computed without delays and a warning says so.
-///     ``0`` delays nothing. ``diagnostics()["numeric"]["delayed"]`` and
-///     ``["forced"]`` count the delayed pivots and those that failed the
-///     threshold and stayed.
+///     front, and the analysis matches rows on every column (MC64). Where
+///     the delays would grow the factor past their allowance, the factor is
+///     computed without them and a warning says so.
+///     ``diagnostics()["numeric"]["delayed"]`` and ``["forced"]`` count the
+///     delayed pivots and those that failed the threshold and stayed.
 /// scaling : {'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional
 ///     Equilibration before the factorization. LDL^T: the symmetric
 ///     ``diag(s) A diag(s)``, a named strategy or a float array ``s`` of

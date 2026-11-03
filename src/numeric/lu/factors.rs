@@ -74,9 +74,6 @@ pub(crate) struct LuNumeric<T> {
     /// Pivots that failed the threshold over their whole column and stayed
     /// in their front.
     pub forced: usize,
-    /// The growth of the panels the delayed pivots caused while the forest
-    /// was factored, a fraction of the slots' values.
-    pub delay_growth: f64,
     /// The delayed pivots exceeded their allowance: the factor is the one
     /// without them.
     pub delays_dropped: bool,

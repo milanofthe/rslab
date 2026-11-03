@@ -19,7 +19,7 @@
 //!   largest entry in the front (its off-block rows included), in which case
 //!   the largest fully-summed entry is brought up. Where no fully-summed row
 //!   passes, the stable pivot lies in a row of an ancestor: with
-//!   [`PivotSettings::delay_growth`](crate::PivotSettings::delay_growth) the
+//!   [`PivotSettings::delayed`](crate::PivotSettings::delayed) the
 //!   column is **delayed** to the parent front (`delay`), otherwise it pivots
 //!   within its front and counts as forced. Sub-floor
 //!   pivots are perturbed in preconditioner mode ([`ZeroPivotAction::PerturbToEps`],

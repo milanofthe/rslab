@@ -21,8 +21,8 @@
 //! pivots may be delayed every front claims its slots of the arena when it
 //! starts, at the size it has then (`PanelArena::lazy`), and only what the
 //! fronts hold is ever resident. The arenas' room is the analysis's panels
-//! and [`PivotSettings::delay_growth`](crate::PivotSettings::delay_growth)
-//! of them on top, which the memory plan reserves. A factorization whose
+//! and [`LU_DELAY_ALLOWANCE`](crate::constants::LU_DELAY_ALLOWANCE) of
+//! them on top, which the memory plan reserves. A factorization whose
 //! fronts would need more stops (whether they do does not depend on the
 //! order the fronts run in) and the factor is computed again without
 //! delays: every pivot in its own front, as before, reported as a warning.

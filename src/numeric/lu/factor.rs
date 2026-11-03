@@ -52,8 +52,6 @@ pub(super) struct LlEmit<T> {
     /// known, and the supernodes emitted, only once the whole forest is
     /// factored.
     pub(super) delays: bool,
-    /// The values of the analysis's slots, the reference of the growth.
-    pub(super) slot_values: usize,
     /// A front found the arenas' room spent (the factorization stops).
     pub(super) overflowed: std::sync::atomic::AtomicBool,
     /// `e_of_g[g]` = elimination position of COLUMN g; `row_pos_of_g[g]` =
@@ -83,7 +81,6 @@ impl<T: Scalar> LlEmit<T> {
         let delays = delay_growth > 0.0;
         let (l_slots, u_slots) = lu_slots(sym, st);
         let allowance = delay_allowance(&l_slots, &u_slots, delay_growth);
-        let slot_values = l_slots.iter().chain(&u_slots).map(|&(v, _)| v).sum();
         let (l_arena, u_arena) = match storage {
             _ if delays => {
                 // Slots claimed as the fronts start, of the size they have
@@ -114,7 +111,6 @@ impl<T: Scalar> LlEmit<T> {
             panels: Cells::new_default(ns),
             pivots: Cells::new_default(ns),
             delays,
-            slot_values,
             overflowed: Default::default(),
             e_of_g: Cells::new(n, usize::MAX),
             row_pos_of_g: Cells::new(n, usize::MAX),
@@ -161,6 +157,19 @@ pub(super) fn lu_slots(sym: &SymbolicFactorization, st: &LuStructure) -> (Vec<Sl
         (0..ns).map(|s| slot(s, st.rows_l(s).len())).collect(),
         (0..ns).map(|s| slot(s, st.cols_u(s).len())).collect(),
     )
+}
+
+/// The growth of the panels delayed pivots may cause under `opts`, a
+/// fraction of the analysis's: [`LU_DELAY_ALLOWANCE`] with delayed
+/// pivoting, else none.
+///
+/// [`LU_DELAY_ALLOWANCE`]: crate::constants::LU_DELAY_ALLOWANCE
+pub(super) fn delay_growth(opts: &SolverSettings) -> f64 {
+    if opts.pivoting.delayed {
+        crate::constants::LU_DELAY_ALLOWANCE
+    } else {
+        0.0
+    }
 }
 
 /// The values delayed pivots may add to the factor over its slots:
@@ -249,18 +258,8 @@ fn factor_lu_left_looking<T: Scalar>(
             emit_and_free(k, &emit, sym, st)
         }
     };
-    let forest = crate::logging::timed(
-        || "lu: forest".into(),
-        || {
-            crate::numeric::supernodal::ll_forest(
-                sym,
-                sched,
-                &emit.refcount,
-                &factor_node,
-                &emit_free,
-            )
-        },
-    );
+    let forest =
+        crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free);
     if emit.overflowed.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(None);
     }
@@ -282,17 +281,12 @@ fn factor_lu_left_looking<T: Scalar>(
             // SAFETY: each supernode placed once, after the forest.
             unsafe { emit.place(s, eoff) };
         }
-        crate::logging::timed(
-            || "lu: emit".into(),
-            || crate::parallel::for_each(ns, 1, |k| emit_and_free(k, &emit, sym, st)),
-        );
+        crate::parallel::for_each(ns, 1, |k| emit_and_free(k, &emit, sym, st));
     }
     let delayed = (0..ns)
         .map(|s| unsafe { emit.pivots.get(s) }.passed())
         .sum();
     let forced = (0..ns).map(|s| unsafe { emit.pivots.get(s) }.forced).sum();
-    let claimed = emit.l_arena.claimed() + emit.u_arena.claimed();
-    let growth = claimed.saturating_sub(emit.slot_values) as f64 / emit.slot_values.max(1) as f64;
     let kept: Vec<bool> = (0..ns).map(|s| npiv(s) > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
     let mut perm = vec![0usize; n];
@@ -312,18 +306,12 @@ fn factor_lu_left_looking<T: Scalar>(
         floors,
         ..
     } = emit;
-    let ((l, zeros_l), (ut, zeros_u)) = crate::logging::timed(
-        || "lu: panels closed".into(),
-        || {
-            let l = l_arena.finish(n, widths.iter().copied(), |s| unsafe {
-                std::mem::take(&mut panels.get_mut(s).0)
-            });
-            let u = u_arena.finish(n, widths.iter().copied(), |s| unsafe {
-                std::mem::take(&mut panels.get_mut(s).1)
-            });
-            (l, u)
-        },
-    );
+    let (l, zeros_l) = l_arena.finish(n, widths.iter().copied(), |s| unsafe {
+        std::mem::take(&mut panels.get_mut(s).0)
+    });
+    let (ut, zeros_u) = u_arena.finish(n, widths.iter().copied(), |s| unsafe {
+        std::mem::take(&mut panels.get_mut(s).1)
+    });
     // The factor is of `A_hat + Delta`, `A_hat = D_r A D_c` (`B`'s rows under
     // a matching) and `Delta` diagonal in elimination order: of `A + E` with
     // `E = D_r^-1 Delta D_c^-1` at each position's pivot row and column.
@@ -354,12 +342,13 @@ fn factor_lu_left_looking<T: Scalar>(
         n_zeros: zeros_l + zeros_u,
         delayed,
         forced,
-        delay_growth: growth,
         delays_dropped: false,
     }))
 }
 
-/// PARDISO phases 2-3 for the general path: numeric LU reusing a [`LuSymbolic`].
+/// PARDISO phases 2-3 for the general path: numeric LU reusing a [`LuSymbolic`],
+/// its fronts' panels free to grow by `delay_growth` for delayed pivots
+/// ([`delay_growth`] of the settings).
 /// `a` must share the analyzed pattern (`n`, `nnz`). `storage` holds the panel
 /// buffers of an earlier factor of the same analysis, filled again in place.
 #[allow(clippy::needless_range_loop)] // CSC column loops index col_ptr + scaling
@@ -367,6 +356,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
     opts: &SolverSettings,
+    delay_growth: f64,
     storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
     pools: &LuPools<T>,
 ) -> Result<LuNumeric<T>, RslabError> {
@@ -390,7 +380,6 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
             n_zeros: 0,
             delayed: 0,
             forced: 0,
-            delay_growth: 0.0,
             delays_dropped: false,
         });
     }
@@ -473,7 +462,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
                 .symb
                 .ll_schedule()
                 .ok_or_else(|| RslabError::InvalidInput("internal: empty symbolic".to_string()))?;
-            let growth = opts.pivoting.delay_growth;
+            let growth = delay_growth;
             let run = |growth: f64, storage| {
                 let st = &lusym.structure;
                 let kt = opts.kernel();
@@ -498,7 +487,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
                     // their allowance: the factor without them, every pivot
                     // in its own front.
                     crate::logging::warn(&format!(
-                        "lu: delayed pivots exceed pivoting.delay_growth = {growth}; factored \
+                        "lu: delayed pivots exceed their allowance ({growth}); factored \
                          without delays"
                     ));
                     let mut fac = run(0.0, None)?.ok_or_else(|| {

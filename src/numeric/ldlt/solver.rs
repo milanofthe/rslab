@@ -747,7 +747,6 @@ impl LdltSymbolic {
                 min_pivot: None,
                 delayed: None,
                 forced: None,
-                delay_growth: None,
             },
             warnings,
             ..Default::default()
