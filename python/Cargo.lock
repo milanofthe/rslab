@@ -648,7 +648,7 @@ dependencies = [
 [[package]]
 name = "rspool"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rspool?rev=44aa903#44aa90379601e13985ecae8d4eb7f3faa95b3bff"
+source = "git+https://github.com/milanofthe/rspool?rev=475d2e5#475d2e56a6befbaa9f9f10b6d7c09637b347457e"
 dependencies = [
  "rayon",
 ]
