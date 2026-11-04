@@ -20,7 +20,6 @@
 //! many threads run them.
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::Arc;
 
 pub use rspool::rayon::{
     dispatch, kept, pool_dispatch as rayon_dispatch, prepare, run, run_rated, run_width, threads,
