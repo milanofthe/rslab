@@ -52,6 +52,8 @@ pub(super) struct Decide {
     forced: bool,
     /// ns per unit of replay work.
     seq: f64,
+    /// Whether `seq` was measured, not the prior.
+    learned: bool,
 }
 
 impl Decide {
@@ -67,6 +69,7 @@ impl Decide {
             threads,
             forced,
             seq: REPLAY_RATE.of::<T>().ns_per_op(),
+            learned: REPLAY_RATE.of::<T>().learned(),
         }
     }
 
@@ -78,6 +81,7 @@ impl Decide {
             threads,
             forced: false,
             seq: 1.0,
+            learned: true,
         }
     }
 
@@ -166,6 +170,12 @@ impl Decide {
             return (Mode::Serial, None);
         }
         let (ways, n) = self.ways(bp, bn, serial);
+        // Until a replay has measured the rate, sequentially (and measured):
+        // every way is predicted in its units, and against a prior the
+        // measured time of another way would always win.
+        if !self.learned && ways[0].is_some() {
+            return (Mode::Serial, None);
+        }
         let open = ways.iter().flatten().count();
         if open < 2 {
             return (
@@ -606,6 +616,7 @@ impl<T: Scalar> KluSolver<T> {
                 Ok(())
             };
             match at {
+                Some(i) if !rate.learned() => rate.measure(plan.blocks[i].work as f64, run),
                 Some(i) if timed => rate.time(plan.blocks[i].work as f64, run),
                 _ => run(),
             }
