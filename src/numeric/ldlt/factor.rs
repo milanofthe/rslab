@@ -74,31 +74,25 @@ pub(crate) fn factor_numeric<T: Scalar>(
 
     // P^T A P (lower fold) through the cached input program: the structure is
     // frozen on the first factorization of this pattern; every later
-    // (re)factorization pays one linear values pass only.
+    // (re)factorization reads the values where they are.
     let prog = inner.input.get_or_init(|| {
         crate::logging::timed(
             || "ldlt: input program".into(),
             || InputProgram::symmetric(&a.col_ptr, &a.row_idx, &sym.perm_inv),
         )
     });
-    let weight = scale.map(|s| move |i: usize, j: usize| s[i] * s[j]);
+    // The scaling by elimination index: entry `(g, c)` of `P^T A P` is `A`'s
+    // times `s[perm[g]] * s[perm[c]]`.
+    let s_perm: Option<Vec<f64>> = scale.map(|s| sym.perm.iter().map(|&i| s[i]).collect());
 
     // Run in a scoped pool of `opts.threads` so concurrent solves don't
-    // oversubscribe; the values are scattered on its workers too.
+    // oversubscribe.
     let sched = inner.schedule();
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),
         || {
-            let vals = prog.values(
-                &a.col_ptr,
-                &a.row_idx,
-                &a.values,
-                weight
-                    .as_ref()
-                    .map(|w| w as &(dyn Fn(usize, usize) -> f64 + Sync)),
-            );
-            let inp = Input::new(prog, &vals);
+            let inp = Input::new(prog, &a.values, s_perm.as_deref().map(|s| (s, s)));
             factor_left_looking(sym, sched, inp, scale, opts, storage, pools)
         },
     )
@@ -214,12 +208,15 @@ fn ldlt_emit_and_free<T: Scalar>(
 /// `PerturbToEps { abs_floor }` is taken as given (rslab convention: an
 /// absolute floor, typically `eps_rel * ||A||inf`); `Fail` disables
 /// perturbation. `values` are the values being factored.
-fn static_pivot_floor<T: Scalar>(values: &[T], opts: &SolverSettings) -> Option<f64> {
+fn static_pivot_floor<T: Scalar>(
+    values: impl Iterator<Item = T>,
+    opts: &SolverSettings,
+) -> Option<f64> {
     match opts.pivoting.on_zero_pivot {
         ZeroPivotAction::Fail => None,
         ZeroPivotAction::PerturbToEps { abs_floor } => Some(abs_floor.max(0.0)),
         ZeroPivotAction::ForceAccept => {
-            let anorm = values.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+            let anorm = values.map(|v| v.magnitude()).fold(0.0, f64::max);
             Some(anorm.max(1.0) * f64::EPSILON)
         }
     }

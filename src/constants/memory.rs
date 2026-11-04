@@ -66,28 +66,23 @@ pub const VEC_HEADER_BYTES: usize = 24;
 pub const VEC_MIN_CAP: usize = 4;
 
 /// The input program a factorization builds once per analysis keeps, per
-/// entry, its index (in the column or the row part) and its position (bytes
-/// per entry).
+/// entry, its index (in the column or the row part) and the entry of `A` it
+/// reads (bytes per entry). Its build places them where they stay, so this is
+/// its build's peak per entry too.
 /// Used by: `LdltSymbolic::memory_plan`, `LuSymbolic::memory_plan`.
 /// Why: two `u32` per entry.
 /// Contract: estimate.
 pub const INPUT_PROGRAM_BYTES_PER_ENTRY: usize = 2 * IDX32_BYTES;
 
-/// The peak of building that input program, per entry (bytes per entry).
-/// Used by: `LdltSymbolic::memory_plan`, `LuSymbolic::memory_plan`.
-/// Why: the build's temporaries as the model counts them.
-/// Contract: estimate.
-pub const INPUT_BUILD_BYTES_PER_ENTRY: usize = 28;
-
 /// ... and per column, LDL^T (bytes per column).
 /// Used by: `LdltSymbolic::memory_plan`.
-/// Why: as for [`INPUT_BUILD_BYTES_PER_ENTRY`].
+/// Why: the build's pointer and cursor arrays as the model counts them.
 /// Contract: estimate.
 pub const LDLT_INPUT_BUILD_BYTES_PER_COL: usize = 32;
 
 /// ... and per column, LU (bytes per column).
 /// Used by: `LuSymbolic::memory_plan`.
-/// Why: as for [`INPUT_BUILD_BYTES_PER_ENTRY`].
+/// Why: the build's pointer and cursor arrays as the model counts them.
 /// Contract: estimate.
 pub const LU_INPUT_BUILD_BYTES_PER_COL: usize = 48;
 
