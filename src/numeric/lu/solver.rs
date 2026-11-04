@@ -6,8 +6,8 @@ use super::factors::LuPivots;
 use super::structure::LuStructure;
 use crate::constants::{
     IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY, LU_DELAY_ALLOWANCE, LU_INPUT_BUILD_BYTES_PER_COL,
-    LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL, LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS,
-    VEC_HEADER_BYTES, WORD_BYTES,
+    LU_INPUT_SCALING_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
+    LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 
 use crate::error::RslabError;
@@ -683,8 +683,10 @@ impl LuSymbolic {
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LU_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during =
-            (4 * WORD_BYTES * n + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
+        let during = (LU_INPUT_SCALING_BYTES_PER_COL * n + vb * panels + cells + slots) as u64
+            + workers
+            + pooled
+            + nodes;
         // After it: the factor with its panels as factored (the plans pack
         // them in place), the emitted row lists until the plans have copied
         // them, and a plan's build.

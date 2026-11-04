@@ -111,6 +111,14 @@ pub const LU_NODE_CELL_BYTES: usize = 8 + 8 + 80 + 24 + 8 + 8 + 8 + (4 * VEC_HEA
 /// Contract: estimate.
 pub const LU_NODE_CELL_BYTES_PER_COL: usize = 4 * WORD_BYTES + 2 * IDX32_BYTES;
 
+/// Per column while an LU forest is factored: the row and the column
+/// scaling by `A`'s index and by elimination index, as the input is read
+/// (bytes per column).
+/// Used by: `LuSymbolic::memory_plan`.
+/// Why: four words.
+/// Contract: estimate.
+pub const LU_INPUT_SCALING_BYTES_PER_COL: usize = 4 * WORD_BYTES;
+
 /// Per column of an LU factor: both permutations and both scalings (bytes
 /// per column).
 /// Used by: `LuSymbolic::memory_plan`.
