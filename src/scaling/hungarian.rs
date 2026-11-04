@@ -31,12 +31,13 @@
 /// ensures this via per-column normalization of log absolute values.
 /// Explicit zero entries in the pattern are allowed and represent
 /// "cost 0" edges (which are the column-maximum entries after
-/// normalization).
+/// normalization). The pattern is the matrix's own where the costs keep
+/// every entry of it (borrowed, no copy), else built for the costs.
 #[derive(Debug, Clone)]
-pub(crate) struct CostGraph {
+pub(crate) struct CostGraph<'a> {
     pub n: usize,
-    pub col_ptr: Vec<usize>,
-    pub row_idx: Vec<usize>,
+    pub col_ptr: std::borrow::Cow<'a, [usize]>,
+    pub row_idx: std::borrow::Cow<'a, [usize]>,
     pub cost: Vec<f64>,
 }
 
@@ -291,7 +292,7 @@ impl IndexHeap {
 /// (or `NONE`), and `u[i]` is set to `RINF` for empty rows (rows
 /// with no incident edges), finite otherwise.
 fn hungarian_init_heuristic(
-    cost: &CostGraph,
+    cost: &CostGraph<'_>,
     iperm: &mut [usize],
     jperm: &mut [usize],
     u: &mut [f64],
@@ -451,7 +452,7 @@ fn hungarian_init_heuristic(
 ///   region of `q`, which here is represented by a boolean plus the
 ///   accumulated `visited_rows` list for the post-update sweep).
 /// - `heap` is the open-set min-heap keyed on `d[i]`.
-pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
+pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
     hungarian_match_instrumented(cost).0
 }
 
@@ -460,7 +461,7 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
 /// inner loop (they live in `IndexHeap::new`/`reset` and the phase-3
 /// augmentation loop), so this carries negligible overhead and
 /// produces bit-identical matchings. Used by the heap regression guard.
-pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, HungarianStats) {
+pub(crate) fn hungarian_match_instrumented(cost: &CostGraph<'_>) -> (Matching, HungarianStats) {
     let n = cost.n;
     let m = n; // square cost graph
     let mut stats = HungarianStats::default();
@@ -687,7 +688,7 @@ fn finalize_duals(cost: &CostGraph, jperm: &[usize], u: &[f64], v: &mut [f64]) {
 /// public `Matching` return type. Also applies the "zero u for
 /// unmatched rows" rule from `scaling.f90:1169`.
 fn build_matching(
-    cost: &CostGraph,
+    cost: &CostGraph<'_>,
     iperm: Vec<usize>,
     jperm: Vec<usize>,
     mut u: Vec<f64>,
@@ -733,7 +734,7 @@ mod tests {
     /// Build a `CostGraph` from dense (row, col, cost) triples.
     /// Only used in tests - converts a small list of entries into
     /// the CSC format the Hungarian kernel expects.
-    fn build_cost_graph(n: usize, entries: &[(usize, usize, f64)]) -> CostGraph {
+    fn build_cost_graph(n: usize, entries: &[(usize, usize, f64)]) -> CostGraph<'static> {
         let mut by_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         for &(r, c, v) in entries {
             by_col[c].push((r, v));
@@ -751,8 +752,8 @@ mod tests {
         }
         CostGraph {
             n,
-            col_ptr,
-            row_idx,
+            col_ptr: col_ptr.into(),
+            row_idx: row_idx.into(),
             cost,
         }
     }
@@ -979,7 +980,7 @@ mod tests {
     /// so the main augmenting loop runs Theta(n) shortest-path searches -
     /// exactly the near-tree regime where a per-column heap
     /// reallocation would be O(n*m). nnz = deg*n grows linearly in n.
-    fn gen_random_sparse(n: usize, deg: usize, seed: u64) -> CostGraph {
+    fn gen_random_sparse(n: usize, deg: usize, seed: u64) -> CostGraph<'static> {
         let mut rng = Lcg(seed);
         let mut by_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         for col in by_col.iter_mut() {
@@ -1008,8 +1009,8 @@ mod tests {
         }
         CostGraph {
             n,
-            col_ptr,
-            row_idx,
+            col_ptr: col_ptr.into(),
+            row_idx: row_idx.into(),
             cost,
         }
     }
