@@ -55,22 +55,24 @@ pub unsafe fn gemm<T: Scalar>(
     mode: GemmMode,
 ) {
     use crate::parallel::{Go, Work};
+    // A product of the sequential path is the caller's: run as it is, not
+    // decided on or measured (most are the small products of a solve's
+    // nodes, whose time per multiply-add says nothing of a front's).
+    if matches!(mode.parallelism, gemm::Parallelism::None) {
+        return T::gemm(
+            m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+            alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
+        );
+    }
     let work = Work::of((m * n * k) as f64, GEMM_RATE.of::<T>());
     let pieces = n.div_ceil(crate::constants::GEMM_PIECE_MIN_COLS);
     // A product of the parallel path runs on as many threads as it is
     // worth, one included: the path (the kernel and its blocking) is the
     // caller's structural choice, the threads only schedule it.
-    let go = match mode.parallelism {
-        gemm::Parallelism::None => Go::Here,
-        gemm::Parallelism::Rayon(_) => work.go::<crate::parallel::Rayon>(pieces),
-    };
-    let Go::Wide(width) = go else {
-        let mode = match mode.parallelism {
-            gemm::Parallelism::None => mode,
-            gemm::Parallelism::Rayon(_) => GemmMode {
-                parallelism: gemm::Parallelism::Rayon(1),
-                ..mode
-            },
+    let Go::Wide(width) = work.go::<crate::parallel::Rayon>(pieces) else {
+        let mode = GemmMode {
+            parallelism: gemm::Parallelism::Rayon(1),
+            ..mode
         };
         return work.serial(|| {
             T::gemm(
@@ -134,7 +136,7 @@ pub unsafe fn gemm<T: Scalar>(
 }
 
 /// What a multiply-add of a product costs a thread, learned from the
-/// products that run on one.
+/// products of the parallel path that run on one.
 static GEMM_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::GEMM_NS_PER_FLOP);
 
