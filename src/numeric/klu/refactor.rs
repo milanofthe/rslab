@@ -52,6 +52,20 @@ impl ReplayPlan {
             .then(|| bp.work / bn.max(1) as u64 >= PIPE_COL_WORK)
     }
 
+    /// Whether anything of a refactor starts side by side: a block
+    /// ([`start`](Self::start)), or the blocks together, where their work
+    /// clears the floor and no block holds more than its share of the ratio
+    /// (the user's, else the defaults), or the policy is `On`. Where nothing
+    /// does, a refactor replays sequentially without looking at the pool.
+    fn starts_wide(&self) -> bool {
+        let blocks = self.total >= self.min_work.unwrap_or(KLU_PAR_MIN_FMADDS)
+            && self.total as f64
+                >= self.min_ratio.unwrap_or(KLU_PAR_MIN_RATIO) * self.largest as f64;
+        self.policy == KluParallel::On
+            || blocks
+            || (self.blocks.iter()).any(|bp| self.start(bp, bp.cols.len()).is_some())
+    }
+
     /// Whether the blocks together clear the user's floors.
     fn blocks_pay(&self) -> bool {
         self.min_work.is_none_or(|w| self.total >= w)
@@ -76,10 +90,16 @@ pub(super) struct Decide {
 
 impl Decide {
     fn new<T: Scalar>(plan: &ReplayPlan) -> Self {
-        let threads = crate::parallel::threads();
         let forced = plan.policy == KluParallel::On || plan.floors();
+        let threads = if forced || plan.starts_wide() {
+            crate::parallel::threads()
+        } else {
+            1
+        };
         Decide {
-            dispatch: if forced {
+            dispatch: if threads < 2 {
+                Dispatch::never()
+            } else if forced {
                 crate::parallel::kept(true, threads)
             } else {
                 crate::parallel::dispatch()
@@ -122,11 +142,13 @@ impl Decide {
     /// replay, each at a number of its own, with what is predicted for it
     /// where it is available: 0 sequentially (unless every section is
     /// free), 1 level by level (where a level is worth a section), `a + 1`
-    /// pipelined on `2^a` threads, the last one on all the pool's. A side by
-    /// side replay takes no less than the block's longest chain, and a
-    /// pipelined one on `k` threads is expected at Brent's bound for a
-    /// greedy schedule: its share of the work, the chain on top. A parallel
-    /// way the block's structure does not start it with (`start`, see
+    /// pipelined on `2^a` threads, the last one on all the pool's, at its
+    /// share of the work and the section. No chain of the elimination DAG
+    /// bounds a pipeline from below: a column eliminates against the
+    /// columns it reads as they finish, so the chain of whole columns
+    /// overstates its critical path (ASIC_100ks: a chain ratio below two,
+    /// pipelined over three times faster). A parallel way the block's
+    /// structure does not start it with (`start`, see
     /// [`ReplayPlan::start`]) is expected never: only explored.
     fn ways(
         &self,
@@ -145,11 +167,10 @@ impl Decide {
             };
             ways[0] = Some((Mode::Serial, prior));
         }
-        let span = bp.span as f64 * self.seq;
         let cap = self.threads.min(bn);
         if (bp.widest as f64 * self.seq) >= self.dispatch.break_even() {
             let levels = (0..bp.level_work.len()).map(|l| self.level(bp, l).1).sum();
-            let least = (serial / cap.max(1) as f64).max(span);
+            let least = serial / cap.max(1) as f64;
             ways[1] = Some((
                 Mode::Levels,
                 Prior {
@@ -163,10 +184,7 @@ impl Decide {
             let k = (1usize << (n - 1)).min(cap);
             let share = serial * bn.div_ceil(k) as f64 / bn as f64;
             let cost = self.dispatch.cost(k);
-            let prior = Prior {
-                expected: share + span + cost,
-                least: share.max(span) + cost,
-            };
+            let prior = Prior::exactly(share + cost);
             ways[n] = Some((Mode::Pipelined(k), prior));
             n += 1;
             if k == cap {
