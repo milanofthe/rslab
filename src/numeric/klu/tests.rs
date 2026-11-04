@@ -947,10 +947,15 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
     let fresh = crate::parallel::Choice::new();
     let decide = super::refactor::Decide::on(Dispatch::free(4), 4);
     assert_ne!(
-        decide.mode(plan, bp, bn, &fresh).0,
+        install(on(Dispatch::free(4)), || decide
+            .mode(plan, bp, bn, &fresh)
+            .0),
         Mode::Serial,
         "free sections go wide"
     );
+    // its light columns start level by level only where the workers wait
+    // awake between the levels: on a lent pool, not on rayon's
+    assert_eq!(decide.mode(plan, bp, bn, &fresh).0, Mode::Serial);
     let costly = super::refactor::Decide::on(Dispatch::new(vec![1e12; 5]), 4);
     assert_eq!(costly.mode(plan, bp, bn, &fresh).0, Mode::Serial);
 }

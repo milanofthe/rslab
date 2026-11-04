@@ -43,13 +43,16 @@ impl ReplayPlan {
     /// [`KLU_PAR_MIN_FMADDS`] and [`KLU_PAR_MIN_RATIO`]) or the policy is
     /// `On`, then pipelined (`Some(true)`) where its columns carry
     /// [`PIPE_COL_WORK`] on average and level by level where they are
-    /// lighter.
+    /// lighter, under `Auto` that only on a lent pool, whose workers wait
+    /// awake between the levels (a rayon pool's sleep; sequentially there).
     fn start(&self, bp: &BlockPlan, bn: usize) -> Option<bool> {
         let nlev = bp.level_work.len().max(1);
         let pays = bp.work >= self.min_work.unwrap_or(KLU_PAR_MIN_FMADDS)
             && bn as f64 / nlev as f64 >= self.min_ratio.unwrap_or(KLU_PAR_MIN_RATIO);
-        (self.policy == KluParallel::On || pays)
+        let on = self.policy == KluParallel::On;
+        (on || pays)
             .then(|| bp.work / bn.max(1) as u64 >= PIPE_COL_WORK)
+            .filter(|&pipelined| pipelined || on || crate::parallel::is_lent())
     }
 
     /// Whether anything of a refactor starts side by side: a block
