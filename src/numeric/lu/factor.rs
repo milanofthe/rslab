@@ -442,10 +442,6 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
             || InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym),
         )
     });
-    let weight = |r: usize, j: usize| d_row[b_row.as_ref().map_or(r, |b| b[r])] * d_col[j];
-    let vals = prog.values(&a.col_ptr, &a.row_idx, &a.values, Some(&weight));
-    drop(b_row);
-    let inp = Input::new(prog, &vals);
     // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
     // trees), shared by both LU paths.
     let stack = crate::numeric::settings::stack_for_depth(
@@ -453,11 +449,18 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     );
 
     // Run in a scoped pool of `opts.threads` so concurrent solves don't
-    // oversubscribe.
+    // oversubscribe; the values are scattered on its workers too.
     let mut fac = opts.threads.run(
         stack,
         |cap| crate::numeric::supernodal::analysis::recommend_threads_for_sym(&lusym.symb, cap),
         || {
+            let vals = {
+                let weight =
+                    |r: usize, j: usize| d_row[b_row.as_ref().map_or(r, |b| b[r])] * d_col[j];
+                prog.values(&a.col_ptr, &a.row_idx, &a.values, Some(&weight))
+            };
+            drop(b_row);
+            let inp = Input::new(prog, &vals);
             let sched = lusym
                 .symb
                 .ll_schedule()

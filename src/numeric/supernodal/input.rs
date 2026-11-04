@@ -136,30 +136,32 @@ impl InputProgram {
     /// Scatter a value set of `A` (the pattern this was built from) into the
     /// program's order in one pass. With `weight`, entry `(i, j)` of `A` is
     /// multiplied by `weight(i, j)` on the way (the equilibration), so no
-    /// scaled copy of `A` is ever held.
+    /// scaled copy of `A` is ever held. Runs in column blocks on the pool:
+    /// every entry has a slot of its own.
     pub fn values<T: Scalar>(
         &self,
         col_ptr: &[usize],
         row_idx: &[usize],
         values: &[T],
-        weight: Option<&dyn Fn(usize, usize) -> f64>,
+        weight: Option<&(dyn Fn(usize, usize) -> f64 + Sync)>,
     ) -> Vec<T> {
-        debug_assert_eq!(values.len(), self.pos.len());
-        let mut out = vec![T::zero(); values.len()];
-        match weight {
-            None => {
-                for (k, &p) in self.pos.iter().enumerate() {
-                    out[p as usize] = values[k];
-                }
+        let len = values.len();
+        debug_assert_eq!(len, self.pos.len());
+        let mut out: Vec<T> = Vec::with_capacity(len);
+        let base = super::PanelPtr(out.as_mut_ptr());
+        crate::parallel::for_each(self.n, crate::constants::INPUT_PIECE_MIN_COLS, |j| {
+            for k in col_ptr[j]..col_ptr[j + 1] {
+                let v = match weight {
+                    None => values[k],
+                    Some(w) => values[k] * T::from_real(w(row_idx[k], j)),
+                };
+                // SAFETY: `pos` maps the entries one to one onto `0..len`,
+                // so every slot is written once, by this column's piece.
+                unsafe { base.get().add(self.pos[k] as usize).write(v) };
             }
-            Some(w) => {
-                for j in 0..self.n {
-                    for k in col_ptr[j]..col_ptr[j + 1] {
-                        out[self.pos[k] as usize] = values[k] * T::from_real(w(row_idx[k], j));
-                    }
-                }
-            }
-        }
+        });
+        // SAFETY: all `len` slots written above.
+        unsafe { out.set_len(len) };
         out
     }
 }
