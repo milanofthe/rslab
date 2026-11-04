@@ -254,9 +254,19 @@ pub(crate) fn solve<T: Scalar, S: SolveCore<T>>(
 ) -> Result<Vec<T>, RslabError> {
     check(s.dim(), b.len(), nrhs)?;
     let mut x = vec![T::zero(); b.len()];
-    s.works()
-        .with(|w| solve_into(s, b, nrhs, transpose, &mut x, w))?;
+    solve_pooled_into(s, b, nrhs, transpose, &mut x)?;
     Ok(x)
+}
+
+/// [`solve_into`] on a work of the solver's own pool.
+pub(crate) fn solve_pooled_into<T: Scalar, S: SolveCore<T>>(
+    s: &S,
+    b: &[T],
+    nrhs: usize,
+    transpose: bool,
+    x: &mut [T],
+) -> Result<(), RslabError> {
+    s.works().with(|w| solve_into(s, b, nrhs, transpose, x, w))
 }
 
 pub(crate) fn refine_into<T, S, A>(
@@ -456,9 +466,9 @@ macro_rules! direct_solver {
         impl<$($lt,)? T: $crate::scalar::Scalar> $crate::Preconditioner<T>
             for $solver<$($lt,)? T>
         {
+            // straight into `z`, on a work of the solver's own pool
             fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), $crate::RslabError> {
-                z.copy_from_slice(&$solver::solve(self, r)?);
-                Ok(())
+                $crate::numeric::direct::solve_pooled_into(self, r, 1, false, z)
             }
             fn apply_block(
                 &self,
@@ -467,8 +477,13 @@ macro_rules! direct_solver {
                 s: usize,
                 n: usize,
             ) -> Result<(), $crate::RslabError> {
-                z[..n * s].copy_from_slice(&$solver::solve_many(self, &r[..n * s], s)?);
-                Ok(())
+                $crate::numeric::direct::solve_pooled_into(
+                    self,
+                    &r[..n * s],
+                    s,
+                    false,
+                    &mut z[..n * s],
+                )
             }
             fn solve_threads(&self) -> $crate::Threads {
                 self.solve_threads
