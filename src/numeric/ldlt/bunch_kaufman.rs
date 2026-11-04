@@ -525,7 +525,7 @@ fn ll_bk_panel_step<T: Scalar>(
             let pp = LdltPanelPtr(panel.as_mut_ptr());
             let nthreads = crate::parallel::threads();
             let cs = deep.div_ceil(nthreads).max(1);
-            crate::parallel::for_each(nthreads, 1, |c| {
+            crate::parallel::for_each(nthreads, crate::parallel::Work::ns(f64::INFINITY), |c| {
                 let r0 = (ke + c * cs).min(nrow);
                 let r1 = (r0 + cs).min(nrow);
                 if r0 >= r1 {
@@ -856,6 +856,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 let right = LdltPanelPtr(right[ke..].as_mut_ptr());
                 let floors_ref = &mut floors;
                 let (step_res, ()) = crate::parallel::join(
+                    crate::parallel::Work::ns(f64::INFINITY),
                     || {
                         ll_bk_panel_step(
                             left,

@@ -222,7 +222,7 @@ pub(super) unsafe fn schur_tiles<T: Scalar>(
     };
     let total = first[tiles];
     if par && total > 1 {
-        crate::parallel::for_each(total, 1, piece);
+        crate::parallel::for_each(total, crate::parallel::Work::ns(f64::INFINITY), piece);
     } else {
         (0..total).for_each(piece);
     }

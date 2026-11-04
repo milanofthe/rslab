@@ -57,17 +57,20 @@ pub unsafe fn gemm<T: Scalar>(
     // A parallel product on a lent pool: its columns in blocks, each the
     // crate's parallel path on one thread (the per-entry sums do not depend
     // on the column blocking, so the result is the rayon path's).
-    if !matches!(mode.parallelism, gemm::Parallelism::None) && n >= 2 {
-        if let Some(pool) = crate::parallel::lent() {
-            let per = n
-                .div_ceil(crate::constants::PIECES_PER_WORKER * pool.threads().max(1))
-                .max(crate::constants::GEMM_PIECE_MIN_COLS);
-            let one = GemmMode {
-                parallelism: gemm::Parallelism::Rayon(1),
-                ..mode
-            };
-            let (dst, lhs, rhs) = (Ptr(dst), Ptr(lhs as *mut T), Ptr(rhs as *mut T));
-            crate::parallel::for_each(n.div_ceil(per), 1, |b| {
+    if !matches!(mode.parallelism, gemm::Parallelism::None) && n >= 2 && crate::parallel::is_lent()
+    {
+        let per = n
+            .div_ceil(crate::constants::PIECES_PER_WORKER * crate::parallel::threads())
+            .max(crate::constants::GEMM_PIECE_MIN_COLS);
+        let one = GemmMode {
+            parallelism: gemm::Parallelism::Rayon(1),
+            ..mode
+        };
+        let (dst, lhs, rhs) = (Ptr(dst), Ptr(lhs as *mut T), Ptr(rhs as *mut T));
+        crate::parallel::for_each(
+            n.div_ceil(per),
+            crate::parallel::Work::ns(f64::INFINITY),
+            |b| {
                 let (j0, j1) = (b * per, ((b + 1) * per).min(n));
                 // SAFETY: the blocks write disjoint columns of `dst`, within
                 // the caller's bounds.
@@ -94,9 +97,9 @@ pub unsafe fn gemm<T: Scalar>(
                         one,
                     )
                 }
-            });
-            return;
-        }
+            },
+        );
+        return;
     }
     T::gemm(
         m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs, alpha,

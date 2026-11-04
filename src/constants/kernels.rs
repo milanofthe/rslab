@@ -31,22 +31,24 @@ pub const PANEL_NB_MIN: usize = 8;
 /// Contract: rounding (scalar mul-add vs FMA GEMM).
 pub const SCALAR_GATE: usize = 4096;
 
-/// From this an update GEMM runs rayon-parallel (flops).
+/// From this an update GEMM takes the parallel path, on as many threads as
+/// its work is worth (flops).
 /// Used by: `KernelSettings::par_gemm`.
 /// Why: tuned default.
 /// Contract: rounding (selects the tiled update path).
 pub const PAR_GEMM_MIN_FLOPS: usize = 1_000_000;
 
-/// From this a panel's trailing update runs rayon-parallel (flops).
+/// From this a panel's trailing update takes the parallel path, on as many
+/// threads as its work is worth (flops).
 /// Used by: `KernelSettings::par_cdiv`.
 /// Why: tuned default.
 /// Contract: rounding.
 pub const PAR_CDIV_MIN_FLOPS: usize = 8_000_000;
 
-/// From this the updates of one supernode fork across workers (flops). A
-/// small node that forks pays the join-steal latency: its waiting thread
-/// steals other work, often a whole sibling subtree, and the node's chain
-/// stalls.
+/// From this the updates of one supernode take the forking path, on as many
+/// threads as their work is worth (flops). A small node that forks pays
+/// the join-steal latency: its waiting thread steals other work, often a
+/// whole sibling subtree, and the node's chain stalls.
 /// Used by: `KernelSettings::fork_min_flops`.
 /// Why: tuned default; a forking small node stalls its chain (74 ms of
 /// cmod at 0.03 Gflop measured on a 1046x170 node).

@@ -49,6 +49,10 @@ fn steps_bound(spread: f64, tol: f64) -> usize {
     (ln_s / ln_t).log2().ceil() as usize + 1
 }
 
+/// What a maximum costs per entry, learned from the passes.
+static MAXIMA_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
+
 /// The row and column maxima of `diag(r) A diag(c)` (the first step, `r = c =
 /// 1`, reads `|a_ij|` exactly as the one-pass scaling always has). The columns
 /// in pieces of about equal entries on the pool, each piece its own row maxima,
@@ -87,7 +91,8 @@ fn maxima<T: Scalar>(a: &GeneralCsc<T>, r: &[f64], c: &[f64], rm: &mut [f64], cm
         (j0, rows, cols)
     };
     rm.fill(0.0);
-    for (j0, rows, cols) in crate::parallel::map(pieces, 1, part) {
+    let work = crate::parallel::Work::of(nnz as f64, &MAXIMA_RATE);
+    for (j0, rows, cols) in crate::parallel::map(pieces, work, part) {
         cm[j0..j0 + cols.len()].copy_from_slice(&cols);
         for (x, y) in rm.iter_mut().zip(&rows) {
             if *y > *x {

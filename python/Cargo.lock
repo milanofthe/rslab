@@ -599,6 +599,7 @@ dependencies = [
  "rslab-amf",
  "rslab-metis",
  "rslab-ordering-core",
+ "rspool",
  "serde",
  "serde_json",
  "sysinfo",
@@ -642,6 +643,14 @@ dependencies = [
  "pyo3",
  "rayon",
  "rslab",
+]
+
+[[package]]
+name = "rspool"
+version = "0.1.0"
+source = "git+https://github.com/milanofthe/rspool?rev=126e64c#126e64c45a9234137330e9d2d86cebb699d92227"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]

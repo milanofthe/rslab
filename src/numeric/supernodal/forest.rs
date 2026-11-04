@@ -50,13 +50,13 @@ pub(crate) fn ll_forest(
                 emit_free(k);
             }
         };
-        if sched.updaters(s).len() >= crate::constants::FREE_PAR_MIN_UPDATERS {
-            let up = sched.updaters(s);
-            crate::parallel::for_each(up.len(), 1, |i| free(up[i] as usize));
+        let up = sched.updaters(s);
+        if up.len() >= crate::constants::FREE_PAR_MIN_UPDATERS {
+            crate::parallel::for_each(up.len(), crate::parallel::Work::ns(f64::INFINITY), |i| {
+                free(up[i] as usize)
+            });
         } else {
-            for &k in sched.updaters(s) {
-                free(k as usize);
-            }
+            up.iter().for_each(|&k| free(k as usize));
         }
         if refcount[s].load(Ordering::Relaxed) == 0 {
             emit_free(s);
@@ -94,7 +94,7 @@ pub(crate) fn ll_forest(
             .collect();
         let node: &(dyn Fn(usize) -> bool + Sync) = &node;
         let (parent, pending) = (&sched.parent[..], &pending[..]);
-        crate::parallel::scope(|sc| {
+        crate::parallel::scope(crate::parallel::Work::ns(f64::INFINITY), |sc| {
             for &leaf in &sched.leaves {
                 sc.spawn(move |sc| run(sc, leaf, node, parent, pending));
             }

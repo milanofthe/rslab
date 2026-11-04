@@ -38,21 +38,6 @@ pub const STACK_MIN: usize = 16 * 1024 * 1024;
 /// Contract: timing.
 pub const STACK_MAX: usize = if usize::BITS >= 64 { 8 << 30 } else { 1 << 30 };
 
-/// Updaters of a supernode from which their release after its
-/// factorization runs on the pool (updaters).
-/// Used by: `supernodal::forest::ll_forest`.
-/// Why: the wide top-of-tree frees are disjoint and worth spreading; a
-/// short list is cheaper on the calling thread.
-/// Contract: timing.
-pub const FREE_PAR_MIN_UPDATERS: usize = 64;
-
-/// Entries from which the AMD input pattern is transposed in parallel
-/// blocks (nonzeros).
-/// Used by: `ordering::amd`.
-/// Why: below it the parallel section costs more than the transpose.
-/// Contract: timing.
-pub const AMD_TRANSPOSE_PAR_MIN_NNZ: usize = 1 << 16;
-
 /// Default cap of the predicted worker count, `Threads::Auto { max }`
 /// (workers).
 /// Used by: `Threads::default`.
@@ -65,10 +50,11 @@ pub const AMD_TRANSPOSE_PAR_MIN_NNZ: usize = 1 << 16;
 pub const DEFAULT_MAX_THREADS: usize = 4;
 
 /// Pieces a parallel loop is cut into per worker (pieces per worker).
-/// Used by: `parallel::piece_len` (every `crate::parallel` loop), the
-/// column blocks of a GEMM on a lent pool (`dense::gemm_backend::gemm`),
-/// the row chunks of the blocked ancestor sweep
-/// (`supernodal::solve::SolvePlan::apex_forward`).
+/// Used by: `parallel::piece_len` (every `crate::parallel` loop, per
+/// thread it runs on), the column blocks of a GEMM on a lent pool
+/// (`dense::gemm_backend::gemm`), the row chunks of the blocked ancestor
+/// sweep (`supernodal::solve::SolvePlan::apex_forward`), the pieces of a
+/// KLU refactor's levels and blocks (`KluSolver::refactor`).
 /// Why: a few pieces per worker balance uneven pieces while keeping the
 /// per-piece overhead small.
 /// Contract: timing.
@@ -88,36 +74,82 @@ pub const FINE_PIECES_PER_WORKER: usize = 8;
 /// Contract: timing (the per-entry sums do not depend on the blocking).
 pub const GEMM_PIECE_MIN_COLS: usize = 16;
 
-/// Fewest columns per piece of the LU analysis's symmetrization sort
-/// (columns).
-/// Used by: `lu::solver::symmetrized_lower_pattern`.
-/// Why: a column's sort is short; pieces must carry many.
+/// What a complex multiply-add costs against a real one, the factor
+/// between the real and the complex prior of every rate (1).
+/// Used by: `parallel::ScalarRates`.
+/// Why: four real multiply-adds make one complex one.
 /// Contract: timing.
-pub const SYMMETRIZE_PIECE_MIN_COLS: usize = 256;
+pub const COMPLEX_OPS: f32 = 4.0;
 
-/// Fewest columns per piece of the LU analysis's diagonal check (columns).
-/// Used by: `lu::solver::diagonal_needs_matching`.
-/// Why: one column's check is a few comparisons.
+/// ns per multiply-add of a dense product (`m n k` of a GEMM), before any
+/// is measured (ns per multiply-add).
+/// Used by: `supernodal::solve` (the sweeps of a block of right-hand
+/// sides, whose node kernels are products).
+/// Why: a SIMD kernel's rate with its packing.
+/// Machine: a prior, replaced by what the sequential sweeps measure.
 /// Contract: timing.
-pub const DIAGONAL_CHECK_PIECE_MIN_COLS: usize = 1024;
+pub const GEMM_NS_PER_FLOP: f32 = 0.05;
 
-/// Fewest entries per piece of the MC64 logarithm pass (entries).
-/// Used by: `scaling::mc64::compute_matching_general`.
-/// Why: one entry is one logarithm.
+/// ns per panel entry and right-hand side of a supernodal triangular sweep,
+/// before any is measured (ns per entry).
+/// Used by: `supernodal::solve`.
+/// Why: one multiply-add on a streamed panel entry.
+/// Machine: a prior, replaced by what the sweeps measure.
 /// Contract: timing.
-pub const MC64_LOG_PIECE_MIN_ENTRIES: usize = 4096;
+pub const SOLVE_NS_PER_ENTRY: f32 = 0.5;
 
-/// Fewest columns per piece of the MC64 column-maximum pass (columns).
-/// Used by: `scaling::mc64::compute_matching_general`.
-/// Why: a column is a short scan.
+/// ns per entry of a pass over a pattern or a vector (a scan, a copy, a
+/// transpose, a fill, a comparison), before any is measured (ns per entry).
+/// Used by: the analysis passes (`ordering::amd`, `scaling::mc64`,
+/// `scaling::twosided`, `lu::solver`, `symbolic::supervariables`), the
+/// splice of a KLU factor, the Krylov reductions.
+/// Why: a streamed entry and a random access.
+/// Machine: a prior, replaced by what the passes measure.
 /// Contract: timing.
-pub const MC64_COLMAX_PIECE_MIN_COLS: usize = 256;
+pub const SCAN_NS_PER_ENTRY: f32 = 1.0;
 
-/// Fewest runs per piece of the supervariable detection (runs).
-/// Used by: `symbolic::supervariables::Supervariables::of`.
-/// Why: a run of equal keys is a short comparison.
+/// ns per entry of a pass that sorts, hashes or takes a logarithm per
+/// entry, before any is measured (ns per entry).
+/// Used by: `scaling::mc64`, `lu::solver`, `symbolic::supervariables`.
+/// Why: a comparison sort's few passes, a hash, a `ln`.
+/// Machine: a prior, replaced by what the passes measure.
 /// Contract: timing.
-pub const SUPERVARIABLE_PIECE_MIN_RUNS: usize = 64;
+pub const SORT_NS_PER_ENTRY: f32 = 10.0;
+
+/// Updaters of a supernode from which their release after its
+/// factorization runs on the pool (updaters).
+/// Used by: `supernodal::forest::ll_forest`.
+/// Why: the wide top-of-tree frees are disjoint and worth spreading; a
+/// short list is cheaper on the calling thread.
+/// Contract: timing.
+pub const FREE_PAR_MIN_UPDATERS: usize = 64;
+
+/// ns per entry of the symmetrized pattern a fill-reducing ordering takes,
+/// before any is measured (ns per entry).
+/// Used by: `symbolic::race` (whether the candidates run side by side),
+/// `symbolic::ordering_graph` (what it learns from).
+/// Why: a minimum-degree ordering's quotient-graph updates.
+/// Machine: a prior, replaced by what the orderings measure.
+/// Contract: timing.
+pub const ORDER_NS_PER_ENTRY: f32 = 50.0;
+
+/// ns per vertex of a nested-dissection subproblem, from which its two
+/// sides are ordered side by side (ns per vertex).
+/// Used by: `symbolic::ordering_graph` (`MetisOptions::parallel_min_vertices`
+/// left unset).
+/// Why: a multilevel bisection with refinement and the recursion below it.
+/// Machine: a prior; the section cost it is set against is measured.
+/// Contract: timing.
+pub const ND_NS_PER_VERTEX: f32 = 1_000.0;
+
+/// ns per adjacency entry of a coarse-graph contraction, from which a level
+/// contracts in parallel blocks (ns per entry).
+/// Used by: `symbolic::ordering_graph` (`MetisOptions::parallel_min_edges`
+/// left unset).
+/// Why: a hash-merge of the matched vertices' adjacencies.
+/// Machine: a prior; the section cost it is set against is measured.
+/// Contract: timing.
+pub const CONTRACT_NS_PER_ENTRY: f32 = 10.0;
 
 /// Entries per chunk of the parallel zero fill of a new factor (entries).
 /// Used by: `supernodal::panel::PanelArena::new_in`.

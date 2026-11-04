@@ -36,17 +36,57 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMM_PAR_MIN, SOLVE_GEMM_ROWS,
-    SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN, SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
+    GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMM_PAR_MIN,
+    SOLVE_GEMM_ROWS, SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS,
+    SOLVE_PULL_PAR_MIN, SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
+use crate::parallel::{Choice, PerScalar, Pick, Prior, Rate, ScalarRates, Work};
 use crate::scalar::Scalar;
 use std::sync::atomic::Ordering;
 
 const NONE: u32 = u32::MAX;
+
+/// Whether a sweep runs on the calling thread (0) or on the pool (1): the
+/// way the sweeps of its kind and size were fastest ([`Choice`]), a sweep
+/// starting on the pool from [`SOLVE_PAR_MIN_ENTRY_RHS`] on before either
+/// is measured. Per kind ([`Sweep`]): a forward sweep takes its subtrees'
+/// terms where a backward one does not, and on a near-field LU took two
+/// and a half times as long on as many panel entries; and per one or a
+/// block of right-hand sides, whose kernels differ as their rates do
+/// ([`sweep_rate`](SolvePlan::sweep_rate)).
+static SWEEP_WAYS: [[PerScalar<Choice>; 2]; 3] = [
+    [PerScalar::choices(), PerScalar::choices()],
+    [PerScalar::choices(), PerScalar::choices()],
+    [PerScalar::choices(), PerScalar::choices()],
+];
+
+/// What a sweep does: its own measured ways ([`SWEEP_WAYS`]).
+#[derive(Clone, Copy)]
+enum Sweep {
+    Forward,
+    Backward,
+    /// The forward and backward sweeps of an `L D L^T` solve in one.
+    Whole,
+}
+
+impl Sweep {
+    /// The ways of this kind of sweep of `nr` right-hand sides.
+    fn ways<T: Scalar>(self, nr: usize) -> &'static Choice {
+        SWEEP_WAYS[self as usize][usize::from(nr > 1)].of::<T>()
+    }
+}
+
+/// What a panel entry costs a sweep of one right-hand side (the register
+/// tiles), learned from the sweeps.
+static SOLVE_RATE: ScalarRates = ScalarRates::new(SOLVE_NS_PER_ENTRY);
+
+/// What a panel entry costs a sweep per right-hand side of a block (the
+/// GEMM node kernels), learned from the sweeps.
+static SOLVE_BLOCK_RATE: ScalarRates = ScalarRates::new(GEMM_NS_PER_FLOP);
 
 /// One leaf subtree of the cut: its supernodes in elimination order and the
 /// rows outside it its updates accumulate into.
@@ -122,6 +162,8 @@ pub(crate) struct SolvePlan<T> {
     /// The structure is no elimination tree (see `from_panels`): the level
     /// sweeps alone, one node after another.
     chain: bool,
+    /// The panel entries of the leaf subtrees, the work their sweeps share.
+    subtree_work: usize,
     /// The blocking of the sweeps.
     cfg: crate::SolveSettings,
 }
@@ -192,6 +234,9 @@ pub(crate) struct PlanWork<T> {
     pending: Vec<std::sync::atomic::AtomicU32>,
     /// This sweep's decision: on the pool, or on the calling thread.
     parallel: bool,
+    /// The pick it was made as and its work in ops, where its run is to
+    /// be measured.
+    pick: Option<(Pick, f64)>,
 }
 
 impl<T> Default for PlanWork<T> {
@@ -204,6 +249,7 @@ impl<T> Default for PlanWork<T> {
             top_acc: Vec::new(),
             pending: Vec::new(),
             parallel: false,
+            pick: None,
         }
     }
 }
@@ -755,6 +801,11 @@ impl<T: Scalar> SolvePlan<T> {
         }
         let mut pull: Vec<(u32, u32, u32)> = Vec::with_capacity(pull_ptr[top.len()]);
         pull.extend(pulls.into_iter().flatten());
+        // The work of the subtrees' sweeps.
+        let entries = |s: u32| val_rng[s as usize].1 - val_rng[s as usize].0;
+        let subtree_work = (subtrees.iter())
+            .map(|st| st.nodes.iter().map(|&s| entries(s)).sum::<usize>())
+            .sum();
         Self {
             n,
             sn_col,
@@ -785,6 +836,7 @@ impl<T: Scalar> SolvePlan<T> {
             pull_ptr,
             pull,
             chain,
+            subtree_work,
             spare_rows: Vec::new(),
             cfg,
         }
@@ -877,54 +929,168 @@ impl<T: Scalar> SolvePlan<T> {
             return f();
         }
         match threads {
-            _ if crate::parallel::lent().is_some() => crate::parallel::enter(f),
-            Threads::Ambient => crate::parallel::enter(f),
+            _ if crate::parallel::is_lent() => crate::parallel::enter(f64::INFINITY, f),
+            Threads::Ambient => crate::parallel::enter(f64::INFINITY, f),
             budget => budget.run(0, |cap| cap, f),
         }
     }
 
-    /// `f` over the items with their scratch, on the pool when `par`, in
-    /// order on the calling thread otherwise: the same sums either way.
+    /// What a panel entry costs a sweep per right-hand side, of one or of a
+    /// block of `nr`.
+    fn sweep_rate(nr: usize) -> &'static Rate {
+        if nr == 1 {
+            SOLVE_RATE.of::<T>()
+        } else {
+            SOLVE_BLOCK_RATE.of::<T>()
+        }
+    }
+
+    /// The work of a sweep over `entries` panel entries and `nr` right-hand
+    /// sides, at the sweeps' rate (its runs on the calling thread measured).
+    fn sweep_work(entries: usize, nr: usize) -> Work<'static> {
+        Work::of((entries * nr) as f64, Self::sweep_rate(nr))
+    }
+
+    /// `f` over the items with their scratch: as wide as the pool when
+    /// `par`, in order on the calling thread otherwise, `work` all of them
+    /// measured there; the same sums either way.
     fn each<A: Sync, S: Send>(
         par: bool,
+        work: Work<'_>,
         items: &[A],
         scratch: &mut [S],
         f: impl Fn(usize, &A, &mut S) + Sync + Send,
     ) {
         if par {
-            crate::parallel::zip_mut(items, scratch, f);
+            crate::parallel::zip_mut(items, scratch, crate::parallel::Work::ns(f64::INFINITY), f);
         } else {
-            for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
-                f(i, a, s);
-            }
+            work.serial(|| {
+                for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
+                    f(i, a, s);
+                }
+            });
         }
+    }
+
+    /// The panel entries of the supernodes `nodes`.
+    fn nodes_work(&self, nodes: &[u32]) -> usize {
+        (nodes.iter())
+            .map(|&s| self.val_rng[s as usize].1 - self.val_rng[s as usize].0)
+            .sum()
+    }
+
+    /// The panel entries of the leaf subtrees.
+    fn subtrees_work(&self) -> usize {
+        self.subtree_work
     }
 
     /// `work` fitted to a sweep of `nr` right-hand sides under the thread
     /// budget `threads`: a scratch per subtree and per node of the widest
-    /// ancestor level, and the decision to run on the pool, taken on the
-    /// budget and the sweep's work (panel entries times right-hand sides up
-    /// to four: a wider block gains no more from the pool than four columns
-    /// do).
+    /// ancestor level, and the decision to run on the pool: the way the
+    /// sweeps of its kind and work were fastest ([`SWEEP_WAYS`]), on the pool
+    /// expected at its work over the budget's threads where its panel
+    /// entries times the right-hand sides up to four reach
+    /// [`SOLVE_PAR_MIN_ENTRY_RHS`] (whatever the sweeps' rate, which a
+    /// sweep on the pool does not measure, says), else only explored, and
+    /// the calling thread the other way round; or
+    /// where they clear
+    /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work),
+    /// where that is set.
     fn fit<'w>(
         &self,
         work: &'w mut PlanWork<T>,
         nr: usize,
         threads: Threads,
+        kind: Sweep,
     ) -> &'w mut PlanWork<T> {
         let widest = self.top_levels.iter().map(Vec::len).max().unwrap_or(0);
         work.fit(self.subtrees.len(), widest, self.top.len());
-        work.parallel = threads.resolve(|cap| cap) > 1
-            && self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE)) >= self.cfg.par_min_work;
+        let budget = threads.resolve(|cap| cap);
+        let ops = self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE));
+        work.pick = None;
+        work.parallel = budget > 1
+            && match self.cfg.par_min_work {
+                Some(min) => ops >= min,
+                None => {
+                    let entries = self.vals.len().saturating_mul(nr) as f64;
+                    let serial = entries * Self::sweep_rate(nr).ns_per_op();
+                    let starts = ops >= SOLVE_PAR_MIN_ENTRY_RHS;
+                    let ways = [
+                        // The way the start does not take is only explored
+                        // until measured: the sweeps' rate a sequential one
+                        // is estimated at may be a prior far off (a block
+                        // of right-hand sides: the GEMM rate, a sweep seven
+                        // times slower).
+                        Prior {
+                            expected: if starts { f64::INFINITY } else { serial },
+                            least: 0.0,
+                        },
+                        Prior {
+                            expected: if starts {
+                                serial / budget as f64
+                            } else {
+                                f64::INFINITY
+                            },
+                            least: serial / budget as f64,
+                        },
+                    ];
+                    let pick = kind
+                        .ways::<T>(nr)
+                        .pick(serial, entries, 2, |o| Some(ways[o]));
+                    if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+                        crate::logging::debug(&format!(
+                            "solve: sweep nr={nr} budget={budget} serial~{:.2} ms pool~{:.2} ms -> {} (measured {})",
+                            crate::clock::ms(std::time::Duration::from_nanos(serial as u64)),
+                            crate::clock::ms(std::time::Duration::from_nanos(ways[1].expected as u64)),
+                            if pick.option == 1 { "pool" } else { "here" },
+                            pick.measured()
+                        ));
+                    }
+                    work.pick = pick.measured().then_some((pick, entries));
+                    pick.option == 1
+                }
+            };
         work
+    }
+
+    /// `sweep` of `nr` right-hand sides on `work` fitted for it, on the pool
+    /// or on the calling thread as decided, timed for the way it ran where
+    /// that is to be measured (once there).
+    fn sweep<R: Send>(
+        &self,
+        work: &mut PlanWork<T>,
+        nr: usize,
+        threads: Threads,
+        kind: Sweep,
+        sweep: impl FnOnce(&mut PlanWork<T>) -> R + Send,
+    ) -> R {
+        let work = self.fit(work, nr, threads, kind);
+        let timed = work.pick.take();
+        // timed in the pool: building it on its first use and measuring
+        // its section cost is no time of the way
+        Self::in_pool(work.parallel, threads, || {
+            let t = crate::clock::Instant::now();
+            let r = sweep(work);
+            if let Some((pick, ops)) = timed {
+                let ns = t.elapsed().as_nanos() as f64;
+                kind.ways::<T>(nr).record(pick, ns, ops);
+                if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+                    crate::logging::debug(&format!(
+                        "solve: sweep way {} took {:.2} ms",
+                        pick.option,
+                        crate::clock::ms(std::time::Duration::from_nanos(ns as u64))
+                    ));
+                }
+            }
+            r
+        })
     }
 
     /// Forward sweep `L y = y` in place on `nr` row-major right-hand sides,
     /// on at most `threads` workers.
     pub fn forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        let work = self.fit(work, nr, threads);
-        Self::in_pool(work.parallel, threads, || {
-            self.forward_block(nr, y, work);
+        self.sweep(work, nr, threads, Sweep::Forward, |work| {
+            self.forward_block(nr, y, work)
         })
     }
 
@@ -932,9 +1098,8 @@ impl<T: Scalar> SolvePlan<T> {
     /// place on `nr` row-major right-hand sides, on at most `threads`
     /// workers.
     pub fn backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        let work = self.fit(work, nr, threads);
-        Self::in_pool(work.parallel, threads, || {
-            self.backward_block(nr, x, work);
+        self.sweep(work, nr, threads, Sweep::Backward, |work| {
+            self.backward_block(nr, x, work)
         })
     }
 
@@ -947,8 +1112,7 @@ impl<T: Scalar> SolvePlan<T> {
         work: &mut PlanWork<T>,
         threads: Threads,
     ) -> Result<(), RslabError> {
-        let work = self.fit(work, 1, threads);
-        Self::in_pool(work.parallel, threads, || {
+        self.sweep(work, 1, threads, Sweep::Whole, |work| {
             self.solve_block_inner(f, y, 1, work)
         })
     }
@@ -1041,9 +1205,12 @@ impl<T: Scalar> SolvePlan<T> {
                 // a wide node near the root takes the terms of every leaf
                 // subtree: its columns in chunks on the pool, each column
                 // summing its sources in order
-                crate::parallel::chunks_mut(yc, SOLVE_PULL_COLS * nr, |ci, c| {
-                    take(ci * SOLVE_PULL_COLS, c)
-                });
+                crate::parallel::chunks_mut(
+                    yc,
+                    SOLVE_PULL_COLS * nr,
+                    crate::parallel::Work::ns(f64::INFINITY),
+                    |ci, c| take(ci * SOLVE_PULL_COLS, c),
+                );
             } else {
                 take(0, yc);
             }
@@ -1058,7 +1225,7 @@ impl<T: Scalar> SolvePlan<T> {
         for (t, p) in pending.iter().enumerate() {
             p.store((kids_ptr[t + 1] - kids_ptr[t]) as u32, Ordering::Relaxed);
         }
-        crate::parallel::for_each(nt, 1, |leaf| {
+        let walk = |leaf: usize| {
             if kids_ptr[leaf + 1] > kids_ptr[leaf] {
                 return;
             }
@@ -1071,7 +1238,8 @@ impl<T: Scalar> SolvePlan<T> {
                     _ => return,
                 }
             }
-        });
+        };
+        crate::parallel::for_each(nt, crate::parallel::Work::ns(f64::INFINITY), walk);
     }
 
     /// The backward sweep of the ancestors as a task tree: an ancestor runs
@@ -1096,6 +1264,7 @@ impl<T: Scalar> SolvePlan<T> {
             self.bwd_node_gemm(s, nr, x, true, &mut sc.g);
             pool.give(sc);
         };
+        /// The tree under ancestor `ti`: its branches side by side.
         fn tree(ti: usize, node: &(dyn Fn(usize) + Sync), kids_ptr: &[usize], kids: &[u32]) {
             let mut t = ti;
             loop {
@@ -1104,21 +1273,18 @@ impl<T: Scalar> SolvePlan<T> {
                     [] => return,
                     [only] => t = *only as usize,
                     k => {
-                        return crate::parallel::for_each(k.len(), 1, |c| {
-                            tree(k[c] as usize, node, kids_ptr, kids)
-                        })
+                        return crate::parallel::each(
+                            k.len(),
+                            crate::parallel::Work::ns(f64::INFINITY),
+                            |c| tree(k[c] as usize, node, kids_ptr, kids),
+                        )
                     }
                 }
             }
         }
-        let node: &(dyn Fn(usize) + Sync) = &node;
-        crate::parallel::for_each(self.top_roots.len(), 1, |r| {
-            tree(
-                self.top_roots[r] as usize,
-                node,
-                &self.top_kids_ptr,
-                &self.top_kids,
-            )
+        let roots = &self.top_roots;
+        crate::parallel::each(roots.len(), crate::parallel::Work::ns(f64::INFINITY), |c| {
+            tree(roots[c] as usize, &node, &self.top_kids_ptr, &self.top_kids)
         });
     }
 
@@ -1139,16 +1305,24 @@ impl<T: Scalar> SolvePlan<T> {
                 self.fwd_node_gemm(s, nr, y, acc, par, &mut sc.t);
             };
             if node_par {
-                Self::each(par, level, &mut work.level[..level.len()], |i, &s, sc| {
-                    // SAFETY: see `Shared`; the node writes only its own
-                    // columns, its off-block rows go to its accumulator. A
-                    // large node keeps its row tasks inside the level's
-                    // (the same arithmetic either way): one large node per
-                    // level otherwise ran on one thread while the others
-                    // finished their small ones.
-                    let yv = unsafe { shared.slice() };
-                    sweep(i, s, yv, par, sc);
-                });
+                // a node's own sections nest inside: estimated, not measured
+                let sweep_work = Self::sweep_work(self.nodes_work(level), nr);
+                Self::each(
+                    par,
+                    sweep_work,
+                    level,
+                    &mut work.level[..level.len()],
+                    |i, &s, sc| {
+                        // SAFETY: see `Shared`; the node writes only its own
+                        // columns, its off-block rows go to its accumulator. A
+                        // large node keeps its row tasks inside the level's
+                        // (the same arithmetic either way): one large node per
+                        // level otherwise ran on one thread while the others
+                        // finished their small ones.
+                        let yv = unsafe { shared.slice() };
+                        sweep(i, s, yv, par, sc);
+                    },
+                );
             } else {
                 for (i, &s) in level.iter().enumerate() {
                     sweep(i, s, y, true, &mut work.apex);
@@ -1177,13 +1351,21 @@ impl<T: Scalar> SolvePlan<T> {
                 self.bwd_node_gemm(s, nr, x, par, &mut sc.g);
             };
             if node_par {
-                Self::each(par, level, &mut work.level[..level.len()], |_, &s, sc| {
-                    // SAFETY: see `Shared`; the node writes only its own
-                    // columns and reads final ancestor columns. Its row
-                    // tasks nest as in the forward sweep.
-                    let xv = unsafe { shared.slice() };
-                    sweep(s, xv, par, sc);
-                });
+                // a node's own sections nest inside: estimated, not measured
+                let sweep_work = Self::sweep_work(self.nodes_work(level), nr);
+                Self::each(
+                    par,
+                    sweep_work,
+                    level,
+                    &mut work.level[..level.len()],
+                    |_, &s, sc| {
+                        // SAFETY: see `Shared`; the node writes only its own
+                        // columns and reads final ancestor columns. Its row
+                        // tasks nest as in the forward sweep.
+                        let xv = unsafe { shared.slice() };
+                        sweep(s, xv, par, sc);
+                    },
+                );
             } else {
                 for &s in level {
                     sweep(s, x, true, &mut work.apex);
@@ -1201,8 +1383,8 @@ impl<T: Scalar> SolvePlan<T> {
     /// each block's triangle on the register tiles, the rows below it in the
     /// node's triangle updated by one product, then the rows below the node as
     /// `L_off X`, the blocks' products summed into `t` (in row chunks of
-    /// [`SOLVE_GEMM_ROWS`] on the pool when `par` and it is at least
-    /// [`SOLVE_GEMM_PAR_MIN`]), each row taken off `y` where the node writes it
+    /// [`SOLVE_GEMM_ROWS`] on the pool when `par` and its work is worth it
+    /// there), each row taken off `y` where the node writes it
     /// directly and into the accumulator `acc` at its slot otherwise. A row's
     /// sums run in the products' order, so a column of a block agrees with its
     /// single solve to rounding, not to the bit.
@@ -1297,10 +1479,15 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
         };
+        // In row chunks on the pool from SOLVE_GEMM_PAR_MIN on (`par`: the
+        // node runs as an ancestor, not inside a subtree's piece).
         if par && m * w * nr >= SOLVE_GEMM_PAR_MIN {
-            crate::parallel::chunks_mut(t, SOLVE_GEMM_ROWS * nr, |ci, out| {
-                product(ci * SOLVE_GEMM_ROWS, out)
-            });
+            crate::parallel::chunks_mut(
+                t,
+                SOLVE_GEMM_ROWS * nr,
+                crate::parallel::Work::ns(f64::INFINITY),
+                |ci, out| product(ci * SOLVE_GEMM_ROWS, out),
+            );
         } else {
             product(0, t);
         }
@@ -1321,7 +1508,7 @@ impl<T: Scalar> SolvePlan<T> {
     /// products as GEMMs, block by block of the packed panel ([`packed_blocks`]):
     /// the final values of the rows below the node gathered and taken off each
     /// block's rows as one product `L_off^T G` (the blocks on the pool when `par`
-    /// and it is at least [`SOLVE_GEMM_PAR_MIN`]), then the triangle from the
+    /// and their work is worth it there), then the triangle from the
     /// last block up: each block takes off the rows below it in the node by one
     /// product and solves its own triangle column by column, last to first, each
     /// column scaled after its terms.
@@ -1378,7 +1565,12 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             };
             if par && m * w * nr >= SOLVE_GEMM_PAR_MIN {
-                crate::parallel::chunks_mut(xb, SOLVE_DIAG_BLOCK * nr, product);
+                crate::parallel::chunks_mut(
+                    xb,
+                    SOLVE_DIAG_BLOCK * nr,
+                    crate::parallel::Work::ns(f64::INFINITY),
+                    product,
+                );
             } else {
                 for (b, out) in xb.chunks_mut(SOLVE_DIAG_BLOCK * nr).enumerate() {
                     product(b, out);
@@ -1444,8 +1636,7 @@ impl<T: Scalar> SolvePlan<T> {
         work: &mut PlanWork<T>,
         threads: Threads,
     ) -> Result<(), RslabError> {
-        let work = self.fit(work, nr, threads);
-        Self::in_pool(work.parallel, threads, || {
+        self.sweep(work, nr, threads, Sweep::Whole, |work| {
             self.solve_block_inner(f, y, nr, work)
         })
     }
@@ -1474,7 +1665,8 @@ impl<T: Scalar> SolvePlan<T> {
         let mut phases = PhaseTrace::start();
         let par = work.parallel;
         let scratch = &mut work.subtrees[..self.subtrees.len()];
-        Self::each(par, &self.subtrees, scratch, |_, st, sc| {
+        let sweep_work = Self::sweep_work(self.subtrees_work(), nr);
+        Self::each(par, sweep_work, &self.subtrees, scratch, |_, st, sc| {
             sc.acc.clear();
             sc.acc.resize(st.ext.len() * nr, T::zero());
             // SAFETY: see `Shared`.
@@ -1512,7 +1704,8 @@ impl<T: Scalar> SolvePlan<T> {
         let shared = Shared(y.as_mut_ptr(), y.len());
         let par = work.parallel;
         let scratch = &mut work.subtrees[..self.subtrees.len()];
-        Self::each(par, &self.subtrees, scratch, |_, st, sc| {
+        let sweep_work = Self::sweep_work(self.subtrees_work(), nr);
+        Self::each(par, sweep_work, &self.subtrees, scratch, |_, st, sc| {
             // SAFETY: see `Shared`.
             let xv = unsafe { shared.slice() };
             for &s in st.nodes.iter().rev() {
@@ -2000,7 +2193,7 @@ mod tests {
         let opts = SolverSettings {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
-                par_min_work: 0,
+                par_min_work: Some(0),
             },
             ..SolverSettings::default()
         }

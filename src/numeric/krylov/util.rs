@@ -103,6 +103,11 @@ pub(super) fn well_conditioned_dim<T: Scalar>(h: &[T], stride: usize, jdim: usiz
     jdim
 }
 
+/// What a multiply-add of the orthogonalization costs a thread, learned from
+/// the reductions.
+static ORTHO_RATE: crate::parallel::ScalarRates =
+    crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
+
 /// The scoped rayon pool for the block-GMRES orthogonalization reductions,
 /// from the preconditioner's [`Threads`] policy. `Ambient`
 /// returns `None` - the reductions then run on the caller's current pool (the
@@ -118,7 +123,7 @@ pub(super) fn well_conditioned_dim<T: Scalar>(h: &[T], stride: usize, jdim: usiz
 pub(super) fn solve_thread_pool(policy: Threads) -> Option<std::sync::Arc<rayon::ThreadPool>> {
     match policy {
         // A lent pool serves every section (see `crate::parallel`).
-        _ if crate::parallel::lent().is_some() => None,
+        _ if crate::parallel::is_lent() => None,
         Threads::Ambient => None,
         // `Fixed(k)` (the resolved factor budget): a `k`-worker pool (`0` = all
         // cores). `Auto` never reaches here - factors resolve it to `Fixed` up
@@ -173,7 +178,8 @@ pub(super) fn column_project<'v, T: Scalar>(
     }
     let nchunks = n.div_ceil(chunk);
     let part = &mut scratch[..nchunks * width];
-    crate::parallel::chunks_mut(part, width, |ci, out| {
+    let work = crate::parallel::Work::of((n * width) as f64, ORTHO_RATE.of::<T>());
+    crate::parallel::chunks_mut(part, width, work, |ci, out| {
         let (r0, r1) = (ci * chunk, ((ci + 1) * chunk).min(n));
         for a in 0..off.len() - 1 {
             let v = layers(a);
@@ -208,7 +214,8 @@ pub(super) fn column_subtract<'v, T: Scalar>(
         let v = layers(a);
         let coef = &proj[off[a]..off[a + 1]];
         let wa = &mut w[a * n..(a + 1) * n];
-        crate::parallel::chunks_mut(wa, chunk, |ci, part| {
+        let work = crate::parallel::Work::of((n * coef.len()) as f64, ORTHO_RATE.of::<T>());
+        crate::parallel::chunks_mut(wa, chunk, work, |ci, part| {
             let r0 = ci * chunk;
             for (i, &h) in coef.iter().enumerate() {
                 if h != T::zero() {
@@ -264,7 +271,8 @@ pub(super) fn panel_project<T: Scalar>(
     if nchunks == 1 {
         sums(0, part);
     } else {
-        crate::parallel::chunks_mut(part, width, sums);
+        let work = crate::parallel::Work::of((n * width) as f64, ORTHO_RATE.of::<T>());
+        crate::parallel::chunks_mut(part, width, work, sums);
     }
     for ci in 0..nchunks {
         let base = ci * width;
@@ -305,7 +313,8 @@ pub(super) fn panel_subtract<T: Scalar>(
         if n <= chunk {
             update(0, wc);
         } else {
-            crate::parallel::chunks_mut(wc, chunk, update);
+            let work = crate::parallel::Work::of((n * cols) as f64, ORTHO_RATE.of::<T>());
+            crate::parallel::chunks_mut(wc, chunk, work, update);
         }
     }
 }

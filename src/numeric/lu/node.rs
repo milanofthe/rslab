@@ -124,9 +124,14 @@ fn deep_update<T: Scalar>(
         // Non-negative doubles order as their bits.
         let top = AtomicU64::new(0);
         let chunk = x.len().div_ceil(crate::parallel::threads()).max(1);
-        crate::parallel::chunks_mut(x, chunk, |c, xs| {
-            top.fetch_max(apply(c * chunk, xs).to_bits(), Ordering::Relaxed);
-        });
+        crate::parallel::chunks_mut(
+            x,
+            chunk,
+            crate::parallel::Work::ns(f64::INFINITY),
+            |c, xs| {
+                top.fetch_max(apply(c * chunk, xs).to_bits(), Ordering::Relaxed);
+            },
+        );
         f64::from_bits(top.into_inner())
     } else {
         apply(0, x)
@@ -137,7 +142,12 @@ fn deep_update<T: Scalar>(
 fn deep_scale<T: Scalar>(x: &mut [T], pinv: T, par: bool) {
     if par {
         let chunk = x.len().div_ceil(crate::parallel::threads()).max(1);
-        crate::parallel::chunks_mut(x, chunk, |_, xs| xs.iter_mut().for_each(|v| *v = *v * pinv));
+        crate::parallel::chunks_mut(
+            x,
+            chunk,
+            crate::parallel::Work::ns(f64::INFINITY),
+            |_, xs| xs.iter_mut().for_each(|v| *v = *v * pinv),
+        );
     } else {
         x.iter_mut().for_each(|v| *v = *v * pinv);
     }
@@ -317,7 +327,9 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         // then runs of `U12` columns in `ut`.
         if tiled {
             let (gloc_ref, gloc_u_ref) = (&gloc, &gloc_u);
-            crate::parallel::chunks_mut(&mut lbuf[..nrow_l * ncol], nrow_l * tile_w, |ti, slab| {
+            let work = crate::parallel::Work::ns(f64::INFINITY);
+            let lslab = &mut lbuf[..nrow_l * ncol];
+            crate::parallel::chunks_mut(lslab, nrow_l * tile_w, work, |ti, slab| {
                 let c0 = ti * tile_w;
                 let c1 = (c0 + tile_w).min(ncol);
                 let mut lupd = pools.slab.take();
@@ -374,7 +386,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 // A slab is the run `[u0, u1)` of U12's columns: rows `nfs + u0..nfs + u1`
                 // of every `ut` column, disjoint between slabs.
                 let up = PanelPtr(ut.as_mut_ptr());
-                crate::parallel::for_each(cn_u.div_ceil(tile_u), 1, |ti| {
+                crate::parallel::for_each(cn_u.div_ceil(tile_u), work, |ti| {
                     let u0 = ti * tile_u;
                     let u1 = (u0 + tile_u).min(cn_u);
                     let g0 = off_u[u0];
@@ -759,15 +771,20 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         // Profiled at 22% of cdiv CPU when serial (MoM fronts).
         if (nfs - ke) * pw * pw >= ll_cdiv_par {
             let (head, tail) = lbuf.split_at_mut(ke * nrow_l);
-            crate::parallel::chunks_mut(tail, nrow_l, |_, col| {
-                for r in (kb + 1)..ke {
-                    let mut acc = col[r];
-                    for i in kb..r {
-                        acc = acc - head[i * nrow_l + r] * col[i];
+            crate::parallel::chunks_mut(
+                tail,
+                nrow_l,
+                crate::parallel::Work::ns(f64::INFINITY),
+                |_, col| {
+                    for r in (kb + 1)..ke {
+                        let mut acc = col[r];
+                        for i in kb..r {
+                            acc = acc - head[i * nrow_l + r] * col[i];
+                        }
+                        col[r] = acc;
                     }
-                    col[r] = acc;
-                }
-            });
+                },
+            );
         } else {
             for j in ke..nfs {
                 for r in (kb + 1)..ke {
@@ -802,10 +819,14 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         if cn_u * pw * pw >= ll_cdiv_par {
             let lref: &[T] = lbuf;
             let run = kt.k.trsm_rows;
-            crate::parallel::for_each(cn_u.div_ceil(run), 1, |b| {
-                let t0 = nfs + b * run;
-                trsm_u(t0, (t0 + run).min(nrow_u), up, lref)
-            });
+            crate::parallel::for_each(
+                cn_u.div_ceil(run),
+                crate::parallel::Work::ns(f64::INFINITY),
+                |b| {
+                    let t0 = nfs + b * run;
+                    trsm_u(t0, (t0 + run).min(nrow_u), up, lref)
+                },
+            );
         } else {
             trsm_u(nfs, nrow_u, up, lbuf);
         }

@@ -281,7 +281,9 @@ fn factor_lu_left_looking<T: Scalar>(
             // SAFETY: each supernode placed once, after the forest.
             unsafe { emit.place(s, eoff) };
         }
-        crate::parallel::for_each(ns, 1, |k| emit_and_free(k, &emit, sym, st));
+        crate::parallel::for_each(ns, crate::parallel::Work::ns(f64::INFINITY), |k| {
+            emit_and_free(k, &emit, sym, st)
+        });
     }
     let delayed = (0..ns)
         .map(|s| unsafe { emit.pivots.get(s) }.passed())
