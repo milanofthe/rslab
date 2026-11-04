@@ -371,8 +371,10 @@ fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B
             }
         }
         None => {
-            let half = Some((share_of(::rayon::current_num_threads()) / 2).max(1));
-            ::rayon::join(|| as_piece(None, half, a), || as_piece(None, half, b))
+            // each side leaves its sections the whole pool: rayon runs
+            // their pieces on free threads only, and halving it kept the
+            // threads a short side leaves behind from the long side's
+            ::rayon::join(|| as_piece(None, None, a), || as_piece(None, None, b))
         }
     }
 }
