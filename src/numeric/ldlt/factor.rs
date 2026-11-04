@@ -33,6 +33,7 @@ pub(crate) struct LdltNumeric<T> {
     pub n_zeros: usize,
 }
 
+/// The numeric factorization of `a` (validated by the caller) on `symb`.
 pub(crate) fn factor_numeric<T: Scalar>(
     symb: &SupernodalAnalysis,
     a: &CscMatrix<T>,
@@ -41,7 +42,6 @@ pub(crate) fn factor_numeric<T: Scalar>(
     storage: Option<PanelStorage<T>>,
     pools: &BkPools<T>,
 ) -> Result<LdltNumeric<T>, RslabError> {
-    a.validate()?;
     let n = symb.n;
     if a.n != n || a.row_idx.len() != symb.nnz {
         return Err(RslabError::InvalidInput(

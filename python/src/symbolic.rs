@@ -11,7 +11,8 @@ use rslab::{
 };
 
 use crate::common::{
-    heavy, map_err, memory_estimate_dict, memory_plan_dict, with_dtype, with_dtype_name, Pattern,
+    heavy, map_err, memory_estimate_dict, memory_plan_dict, vector, with_dtype, with_dtype_name,
+    Pattern, Values,
 };
 use crate::factor::{Auto, Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
@@ -205,9 +206,10 @@ impl PyLdltSymbolic {
             kwargs,
         )?;
         let opts = st.resolved();
-        let data = &self.pattern.values_of(py, data, true)?;
-        with_dtype!(data, |d: T| {
-            let a = self.pattern.csc::<T>(d)?;
+        let p = &self.pattern;
+        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, true)?;
+        with_dtype!(values.data(), |T| {
+            let a = p.csc::<T>(values.read()?)?;
             Ok(Ldlt {
                 inner: T::ldlt_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
             })
@@ -239,8 +241,8 @@ pub fn analyze_ldlt(
 ) -> PyResult<PyLdltSymbolic> {
     let st = settings_from(settings, kwargs)?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.csc::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.csc::<T>(vector(data, "data")?)?;
         let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
         Ok(PyLdltSymbolic {
             sym,
@@ -264,8 +266,8 @@ pub fn ldlt_factor(
 ) -> PyResult<Ldlt> {
     let st = settings_from(settings, kwargs)?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.csc::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.csc::<T>(vector(data, "data")?)?;
         let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
         Ok(Ldlt {
             inner: T::ldlt_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
@@ -454,9 +456,10 @@ impl PyLuSymbolic {
             kwargs,
         )?;
         let opts = st.resolved();
-        let data = &self.pattern.values_of(py, data, false)?;
-        with_dtype!(data, |d: T| {
-            let a = self.pattern.general::<T>(d)?;
+        let p = &self.pattern;
+        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
+        with_dtype!(values.data(), |T| {
+            let a = p.general::<T>(values.read()?)?;
             Ok(Lu {
                 inner: T::lu_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
             })
@@ -487,8 +490,8 @@ pub fn analyze_lu(
 ) -> PyResult<PyLuSymbolic> {
     let st = settings_from(settings, kwargs)?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.general::<T>(vector(data, "data")?)?;
         let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
         Ok(PyLuSymbolic {
             sym,
@@ -512,8 +515,8 @@ pub fn lu_factor(
 ) -> PyResult<Lu> {
     let st = settings_from(settings, kwargs)?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.general::<T>(vector(data, "data")?)?;
         let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
         Ok(Lu {
             inner: T::lu_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
@@ -693,9 +696,10 @@ impl PyKluSymbolic {
             Some(settings.unwrap_or_else(|| self.settings.clone())),
             kwargs,
         )?;
-        let data = &self.pattern.values_of(py, data, false)?;
-        with_dtype!(data, |d: T| {
-            let a = self.pattern.general::<T>(d)?;
+        let p = &self.pattern;
+        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
+        with_dtype!(values.data(), |T| {
+            let a = p.general::<T>(values.read()?)?;
             let s = heavy(py, || self.sym.factor(&a, &st.inner)).map_err(map_err)?;
             Ok(Klu {
                 inner: T::klu(Pair::new(s, a)),
@@ -727,8 +731,8 @@ pub fn analyze_klu(
 ) -> PyResult<PyKluSymbolic> {
     let st = klu_settings_from(settings, kwargs)?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.general::<T>(vector(data, "data")?)?;
         let sym = heavy(py, || KluSymbolic::analyze(&a, &st.inner)).map_err(map_err)?;
         Ok(PyKluSymbolic {
             sym,
@@ -752,8 +756,8 @@ pub fn klu_factor(
 ) -> PyResult<Klu> {
     let st = klu_settings_from(settings, kwargs)?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.general::<T>(vector(data, "data")?)?;
         let s = heavy(py, || KluSolver::<T>::factor(&a, &st.inner)).map_err(map_err)?;
         Ok(Klu {
             inner: T::klu(Pair::new(s, a)),
@@ -888,9 +892,10 @@ impl PyAutoSymbolic {
     /// RuntimeError
     ///     If the matrix is numerically singular.
     fn factor(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Auto> {
-        let data = &self.pattern.values_of(py, data, false)?;
-        with_dtype!(data, |d: T| {
-            let a = self.pattern.general::<T>(d)?;
+        let p = &self.pattern;
+        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
+        with_dtype!(values.data(), |T| {
+            let a = p.general::<T>(values.read()?)?;
             let mut s = rslab::AutoSolver::<T>::new(self.sym.clone());
             s.values_mut().copy_from_slice(&a.values);
             heavy(py, || s.refactor(&self.settings)).map_err(map_err)?;
@@ -932,8 +937,8 @@ pub fn analyze_auto(
         kwargs,
     )?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.general::<T>(vector(data, "data")?)?;
         let sym = heavy(py, || {
             rslab::AutoSymbolic::analyze(rslab::CscLayout::of(&a)?, &a.values, &st)
         })
@@ -973,8 +978,8 @@ pub fn auto_factor(
         kwargs,
     )?;
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pattern.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pattern.general::<T>(vector(data, "data")?)?;
         let s = heavy(py, || rslab::AutoSolver::<T>::factor(&a, &st)).map_err(map_err)?;
         Ok(Auto {
             inner: T::auto(Pair::new(s, a)),
