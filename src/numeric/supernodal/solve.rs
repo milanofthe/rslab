@@ -1046,6 +1046,15 @@ impl<T: Scalar> SolvePlan<T> {
                     let pick = SWEEP_WAYS
                         .of::<T>()
                         .pick(serial, entries, 2, |o| Some(ways[o]));
+                    if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+                        crate::logging::debug(&format!(
+                            "solve: sweep nr={nr} budget={budget} serial~{:.2} ms pool~{:.2} ms -> {} (measured {})",
+                            serial / 1e6,
+                            ways[1].expected / 1e6,
+                            if pick.option == 1 { "pool" } else { "here" },
+                            pick.measured()
+                        ));
+                    }
                     work.pick = pick.measured().then_some((pick, entries));
                     pick.option == 1
                 }
@@ -1073,6 +1082,13 @@ impl<T: Scalar> SolvePlan<T> {
             if let Some((pick, ops)) = timed {
                 let ns = t.elapsed().as_nanos() as f64;
                 SWEEP_WAYS.of::<T>().record(pick, ns, ops);
+                if crate::logging::enabled(crate::logging::LogLevel::Debug) {
+                    crate::logging::debug(&format!(
+                        "solve: sweep way {} took {:.2} ms",
+                        pick.option,
+                        ns / 1e6
+                    ));
+                }
             }
             r
         })
