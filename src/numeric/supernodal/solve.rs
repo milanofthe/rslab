@@ -36,9 +36,9 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMM_PAR_MIN,
-    SOLVE_GEMM_ROWS, SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS,
-    SOLVE_PULL_PAR_MIN, SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
+    DOT_SUMS, GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK,
+    SOLVE_GEMM_PAR_MIN, SOLVE_GEMM_ROWS, SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS,
+    SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN, SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
@@ -1785,18 +1785,21 @@ impl<T: Scalar> SolvePlan<T> {
     }
 }
 
-/// `a . b` in four running sums (the loads of a column overlap).
+/// `a . b` in [`DOT_SUMS`] running sums.
 #[inline(always)]
 fn dot<T: Scalar>(a: &[T], b: &[T]) -> T {
     let n = a.len().min(b.len());
-    let mut acc = [T::zero(); 4];
-    let ((ac, ar), (bc, br)) = (a[..n].as_chunks::<4>(), b[..n].as_chunks::<4>());
+    let mut acc = [T::zero(); DOT_SUMS];
+    let ((ac, ar), (bc, br)) = (
+        a[..n].as_chunks::<DOT_SUMS>(),
+        b[..n].as_chunks::<DOT_SUMS>(),
+    );
     for (x, y) in ac.iter().zip(bc) {
-        for t in 0..4 {
-            acc[t] = crate::scalar::fmadd(x[t], y[t], acc[t]);
+        for ((a, &x), &y) in acc.iter_mut().zip(x).zip(y) {
+            *a = crate::scalar::fmadd(x, y, *a);
         }
     }
-    let mut sum = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+    let mut sum = acc.iter().fold(T::zero(), |s, &a| s + a);
     for (&x, &y) in ar.iter().zip(br) {
         sum = crate::scalar::fmadd(x, y, sum);
     }
