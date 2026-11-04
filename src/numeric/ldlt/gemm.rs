@@ -222,9 +222,7 @@ pub(super) unsafe fn schur_tiles<T: Scalar>(
     };
     let total = first[tiles];
     if par && total > 1 {
-        let rate = crate::numeric::supernodal::CMOD_RATE.of::<T>();
-        let work = crate::parallel::Work::of((mt * (c1 - c0) * pw) as f64, rate);
-        crate::parallel::for_each(total, work, piece);
+        crate::parallel::for_each(total, crate::parallel::Work::ns(f64::INFINITY), piece);
     } else {
         (0..total).for_each(piece);
     }

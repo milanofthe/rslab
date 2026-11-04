@@ -24,10 +24,6 @@
 use crate::numeric::supernodal::{Cells, PanelPtr, ScratchPool};
 use crate::scalar::Scalar;
 
-/// What zeroing one entry of a new factor costs, learned from the fills.
-static ZERO_RATE: crate::parallel::ScalarRates =
-    crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
-
 /// A lower triangular factor in supernodal panel form (see the module docs).
 #[derive(Clone, Debug)]
 pub struct PanelFactor<T> {
@@ -220,7 +216,7 @@ impl<T: Scalar> PanelArena<T> {
         crate::parallel::chunks_mut(
             &mut vals.spare_capacity_mut()[..total],
             crate::constants::ZERO_FILL_CHUNK,
-            crate::parallel::Work::of(total as f64, ZERO_RATE.of::<T>()),
+            crate::parallel::Work::ns(f64::INFINITY),
             |_, chunk| {
                 chunk.iter_mut().for_each(|v| {
                     v.write(T::zero());
@@ -315,12 +311,15 @@ impl<T: Scalar> PanelArena<T> {
         if vals <= chunk {
             std::ptr::write_bytes(at.get(), 0, vals);
         } else {
-            let work = crate::parallel::Work::of(vals as f64, ZERO_RATE.of::<T>());
-            crate::parallel::for_each(vals.div_ceil(chunk), work, |c| {
-                let c0 = c * chunk;
-                // SAFETY: the claimed range, in the buffer's capacity.
-                unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(vals - c0)) };
-            });
+            crate::parallel::for_each(
+                vals.div_ceil(chunk),
+                crate::parallel::Work::ns(f64::INFINITY),
+                |c| {
+                    let c0 = c * chunk;
+                    // SAFETY: the claimed range, in the buffer's capacity.
+                    unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(vals - c0)) };
+                },
+            );
         }
         Some(self.slot_mut(s))
     }

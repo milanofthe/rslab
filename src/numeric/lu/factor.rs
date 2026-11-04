@@ -13,11 +13,6 @@ use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
 use crate::numeric::supernodal::panel::{PanelArena, PanelFactor, PanelOut, PanelStorage};
-
-/// What emitting one factor entry after delayed pivots costs, learned from
-/// the emissions.
-static EMIT_RATE: crate::parallel::ScalarRates =
-    crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
 use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule};
 use crate::refine::PivotFloor;
 use crate::scalar::Scalar;
@@ -263,14 +258,8 @@ fn factor_lu_left_looking<T: Scalar>(
             emit_and_free(k, &emit, sym, st)
         }
     };
-    let forest = crate::numeric::supernodal::ll_forest(
-        sym,
-        sched,
-        &emit.refcount,
-        &factor_node,
-        &emit_free,
-        crate::dense::gemm_backend::ns_per_flop::<T>(),
-    );
+    let forest =
+        crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free);
     if emit.overflowed.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(None);
     }
@@ -292,8 +281,9 @@ fn factor_lu_left_looking<T: Scalar>(
             // SAFETY: each supernode placed once, after the forest.
             unsafe { emit.place(s, eoff) };
         }
-        let work = crate::parallel::Work::of(sym.factor_nnz as f64, EMIT_RATE.of::<T>());
-        crate::parallel::for_each(ns, work, |k| emit_and_free(k, &emit, sym, st));
+        crate::parallel::for_each(ns, crate::parallel::Work::ns(f64::INFINITY), |k| {
+            emit_and_free(k, &emit, sym, st)
+        });
     }
     let delayed = (0..ns)
         .map(|s| unsafe { emit.pivots.get(s) }.passed())

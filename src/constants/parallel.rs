@@ -83,22 +83,12 @@ pub const COMPLEX_OPS: f32 = 4.0;
 
 /// ns per multiply-add of a dense product (`m n k` of a GEMM), before any
 /// is measured (ns per multiply-add).
-/// Used by: `dense::gemm_backend::gemm`, `numeric::supernodal::node`,
-/// `supernodal::solve` (a node's products, the sweeps of a block of
-/// right-hand sides).
+/// Used by: `supernodal::solve` (the sweeps of a block of right-hand
+/// sides, whose node kernels are products).
 /// Why: a SIMD kernel's rate with its packing.
-/// Machine: a prior, replaced by what the sequential products measure.
+/// Machine: a prior, replaced by what the sequential sweeps measure.
 /// Contract: timing.
 pub const GEMM_NS_PER_FLOP: f32 = 0.05;
-
-/// ns per multiply-add of the scalar loops of the dense kernels (a panel's
-/// deep rows, a triangular solve's columns, a slab's updates), before any is
-/// measured (ns per multiply-add).
-/// Used by: `numeric::ldlt`, `numeric::lu` (their row and column sweeps).
-/// Why: a scalar loop over strided columns.
-/// Machine: a prior, replaced by what the runs measure.
-/// Contract: timing.
-pub const LOOP_NS_PER_FLOP: f32 = 0.5;
 
 /// ns per panel entry and right-hand side of a supernodal triangular sweep,
 /// before any is measured (ns per entry).
@@ -111,9 +101,8 @@ pub const SOLVE_NS_PER_ENTRY: f32 = 0.5;
 /// ns per entry of a pass over a pattern or a vector (a scan, a copy, a
 /// transpose, a fill, a comparison), before any is measured (ns per entry).
 /// Used by: the analysis passes (`ordering::amd`, `scaling::mc64`,
-/// `lu::solver`, `symbolic::supervariables`), the zero fill of a factor,
-/// the Krylov reductions, an ancestor's take of the terms accumulated for
-/// it (`supernodal::solve`).
+/// `scaling::twosided`, `lu::solver`, `symbolic::supervariables`), the
+/// splice of a KLU factor, the Krylov reductions.
 /// Why: a streamed entry and a random access.
 /// Machine: a prior, replaced by what the passes measure.
 /// Contract: timing.
@@ -127,13 +116,13 @@ pub const SCAN_NS_PER_ENTRY: f32 = 1.0;
 /// Contract: timing.
 pub const SORT_NS_PER_ENTRY: f32 = 10.0;
 
-/// ns per updater released after a supernode's factorization, before any
-/// is measured (ns per updater).
+/// Updaters of a supernode from which their release after its
+/// factorization runs on the pool (updaters).
 /// Used by: `supernodal::forest::ll_forest`.
-/// Why: a shared counter, and for the last consumer a panel freed.
-/// Machine: a prior, replaced by what the releases measure.
+/// Why: the wide top-of-tree frees are disjoint and worth spreading; a
+/// short list is cheaper on the calling thread.
 /// Contract: timing.
-pub const FREE_NS_PER_UPDATER: f32 = 100.0;
+pub const FREE_PAR_MIN_UPDATERS: usize = 64;
 
 /// ns per entry of the symmetrized pattern a fill-reducing ordering takes,
 /// before any is measured (ns per entry).
