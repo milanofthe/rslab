@@ -123,7 +123,7 @@ static ORTHO_RATE: crate::parallel::ScalarRates =
 pub(super) fn solve_thread_pool(policy: Threads) -> Option<std::sync::Arc<rayon::ThreadPool>> {
     match policy {
         // A lent pool serves every section (see `crate::parallel`).
-        _ if crate::parallel::lent().is_some() => None,
+        _ if crate::parallel::is_lent() => None,
         Threads::Ambient => None,
         // `Fixed(k)` (the resolved factor budget): a `k`-worker pool (`0` = all
         // cores). `Auto` never reaches here - factors resolve it to `Fixed` up

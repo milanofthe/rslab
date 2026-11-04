@@ -27,16 +27,11 @@ pub use rspool::rayon::{
     width, width_on, Rayon,
 };
 pub use rspool::{
-    as_piece, current, install, install_lent, share_of, Choice, Dispatch, Go, Lent, Pick, Piece,
-    Pool, Rate, Serial, Spawn, Task, Timing, Work,
+    as_piece, current, install, install_lent, is_lent, share_of, Choice, Dispatch, Go, Lent, Pick,
+    Piece, Pool, Rate, Serial, Spawn, Task, Timing, Work,
 };
 
 use crate::constants::{COMPLEX_OPS, PIECES_PER_WORKER};
-
-/// The lent pool, if any.
-pub(crate) fn lent() -> Option<Arc<dyn Pool>> {
-    current().map(|l| l.pool)
-}
 
 /// Items per piece for `n` items on `k` threads: about
 /// [`PIECES_PER_WORKER`] pieces per thread.

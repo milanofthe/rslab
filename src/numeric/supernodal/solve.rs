@@ -920,7 +920,7 @@ impl<T: Scalar> SolvePlan<T> {
             return f();
         }
         match threads {
-            _ if crate::parallel::lent().is_some() => crate::parallel::enter(f64::INFINITY, f),
+            _ if crate::parallel::is_lent() => crate::parallel::enter(f64::INFINITY, f),
             Threads::Ambient => crate::parallel::enter(f64::INFINITY, f),
             budget => budget.run(0, |cap| cap, f),
         }

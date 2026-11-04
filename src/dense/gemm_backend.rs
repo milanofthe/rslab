@@ -84,7 +84,7 @@ pub unsafe fn gemm<T: Scalar>(
     // On a lent pool: the columns in blocks, each the crate's parallel path
     // on one thread (the per-entry sums do not depend on the column
     // blocking, so the result is the rayon path's).
-    if crate::parallel::lent().is_some() {
+    if crate::parallel::is_lent() {
         let per = n
             .div_ceil(crate::constants::PIECES_PER_WORKER * width)
             .max(crate::constants::GEMM_PIECE_MIN_COLS);
