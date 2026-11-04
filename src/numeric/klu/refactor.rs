@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::constants::{KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER, PIPE_RUN};
-use crate::parallel::{Choice, Dispatch, Go, PerScalar, Pick, Rayon, ScalarRates, Work};
+use crate::parallel::{Choice, Dispatch, Go, PerScalar, Pick, Prior, Rayon, ScalarRates, Work};
 use rspool::constants::TUNE_ARMS;
 
 /// What a unit of replay work costs a thread, learned from the sequential
@@ -99,30 +99,46 @@ impl Decide {
     }
 
     /// The ways block `bp` of `bn` columns, `serial` ns sequentially, can
-    /// replay, each at a number of its own, with the time predicted for it
+    /// replay, each at a number of its own, with what is predicted for it
     /// where it is available: 0 sequentially (unless every section is
     /// free), 1 level by level (where a level is worth a section), `a + 1`
-    /// pipelined on `2^a` threads, the last one on all the pool's.
+    /// pipelined on `2^a` threads, the last one on all the pool's. A side by
+    /// side replay takes no less than the block's longest chain, and a
+    /// pipelined one on `k` threads is expected at Brent's bound for a
+    /// greedy schedule: its share of the work, the chain on top.
     fn ways(
         &self,
         bp: &BlockPlan,
         bn: usize,
         serial: f64,
-    ) -> ([Option<(Mode, f64)>; TUNE_ARMS], usize) {
+    ) -> ([Option<(Mode, Prior)>; TUNE_ARMS], usize) {
         let mut ways = [None; TUNE_ARMS];
         if !self.forced {
-            ways[0] = Some((Mode::Serial, serial));
+            ways[0] = Some((Mode::Serial, Prior::exactly(serial)));
         }
+        let span = bp.span as f64 * self.seq;
+        let cap = self.threads.min(bn);
         if (bp.widest as f64 * self.seq) >= self.dispatch.break_even() {
             let levels = (0..bp.level_work.len()).map(|l| self.level(bp, l).1).sum();
-            ways[1] = Some((Mode::Levels, levels));
+            let least = (serial / cap.max(1) as f64).max(span);
+            ways[1] = Some((
+                Mode::Levels,
+                Prior {
+                    expected: levels,
+                    least,
+                },
+            ));
         }
-        let cap = self.threads.min(bn);
         let mut n = 2;
         while n < TUNE_ARMS && cap >= 2 {
             let k = (1usize << (n - 1)).min(cap);
-            let share = bn.div_ceil(k) as f64 / bn as f64;
-            ways[n] = Some((Mode::Pipelined(k), serial * share + self.dispatch.cost(k)));
+            let share = serial * bn.div_ceil(k) as f64 / bn as f64;
+            let cost = self.dispatch.cost(k);
+            let prior = Prior {
+                expected: share + span + cost,
+                least: share.max(span) + cost,
+            };
+            ways[n] = Some((Mode::Pipelined(k), prior));
             n += 1;
             if k == cap {
                 break;

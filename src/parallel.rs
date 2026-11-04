@@ -27,7 +27,7 @@ pub use rspool::rayon::{
 };
 pub use rspool::{
     as_piece, current, install, install_lent, is_lent, share_of, Choice, Dispatch, Go, Lent, Pick,
-    Piece, Pool, Rate, Serial, Spawn, Task, Timing, Work,
+    Piece, Pool, Prior, Rate, Serial, Spawn, Task, Timing, Work,
 };
 
 use crate::constants::{COMPLEX_OPS, PIECES_PER_WORKER};

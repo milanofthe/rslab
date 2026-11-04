@@ -284,6 +284,9 @@ struct BlockPlan {
     work: u64,
     /// The most work of a level of two columns or more (none below it).
     widest: u64,
+    /// The work of its longest dependency chain: no replay of it, however
+    /// wide, takes less.
+    span: u64,
     /// Level `l` is the columns `cols[ptr[l]..ptr[l + 1]]`, ascending, each
     /// reading only `L` columns of earlier levels; `level_work[l]` their
     /// replay work.
