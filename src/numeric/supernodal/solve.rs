@@ -991,7 +991,8 @@ impl<T: Scalar> SolvePlan<T> {
     /// expected at its work over the budget's threads where its panel
     /// entries times the right-hand sides up to four reach
     /// [`SOLVE_PAR_MIN_ENTRY_RHS`] (whatever the sweeps' rate, which a
-    /// sweep on the pool does not measure, says), else only explored; or
+    /// sweep on the pool does not measure, says), else only explored, and
+    /// the calling thread the other way round; or
     /// where they clear
     /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work),
     /// where that is set.
@@ -1015,9 +1016,13 @@ impl<T: Scalar> SolvePlan<T> {
                     let serial = entries * Self::sweep_rate(nr).ns_per_op();
                     let starts = ops >= SOLVE_PAR_MIN_ENTRY_RHS;
                     let ways = [
-                        // an estimate at the sweeps' rate, no bound
+                        // The way the start does not take is only explored
+                        // until measured: the sweeps' rate a sequential one
+                        // is estimated at may be a prior far off (a block
+                        // of right-hand sides: the GEMM rate, a sweep seven
+                        // times slower).
                         Prior {
-                            expected: serial,
+                            expected: if starts { f64::INFINITY } else { serial },
                             least: 0.0,
                         },
                         Prior {
