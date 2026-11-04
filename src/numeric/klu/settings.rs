@@ -63,12 +63,17 @@ pub struct KluSettings {
     /// side by side (not the panel entries of
     /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work)).
     /// Where it passes, the replay goes as wide as the pool. Default
-    /// `None`: as the work is worth on the pool.
+    /// `None`: as the replays measure it is worth on the pool, a block
+    /// starting side by side (before any of its ways is measured) where it
+    /// carries [`KLU_PAR_MIN_FMADDS`](crate::constants::KLU_PAR_MIN_FMADDS).
     pub par_min_work: Option<u64>,
     /// With [`par_min_work`](Self::par_min_work), the simultaneous work the
     /// structure must offer for a parallel refactor: across blocks `sum
     /// work / max block work`, inside a block the mean level width of its
-    /// elimination DAG. Default `None`: as the work is worth on the pool.
+    /// elimination DAG. Default `None`: as the replays measure it is worth
+    /// on the pool, a block starting side by side where its levels are
+    /// [`KLU_PAR_MIN_RATIO`](crate::constants::KLU_PAR_MIN_RATIO) columns
+    /// wide on average.
     pub par_min_ratio: Option<f64>,
     /// Caller-owned cancellation flag for the numeric phase, read and never
     /// written, polled at block boundaries and inside the pipelined refactor at

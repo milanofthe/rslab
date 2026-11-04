@@ -1,7 +1,10 @@
 //! The numeric-only refactorization on a frozen pattern and pivot order.
 
 use super::*;
-use crate::constants::{KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER, PIPE_RUN};
+use crate::constants::{
+    KLU_PAR_MIN_FMADDS, KLU_PAR_MIN_RATIO, KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER,
+    PIPE_COL_WORK, PIPE_RUN,
+};
 use crate::parallel::{Choice, Dispatch, Go, PerScalar, Pick, Prior, Rayon, ScalarRates, Work};
 use rspool::constants::TUNE_ARMS;
 
@@ -12,11 +15,13 @@ use rspool::constants::TUNE_ARMS;
 static REPLAY_RATE: ScalarRates = ScalarRates::new(KLU_REPLAY_NS_PER_WORK);
 
 /// How a block replays: the way its replays of its size were fastest
-/// (sequentially, level by level, pipelined on 2, 4, ... threads), a way
-/// not measured yet counted at what the pool's section cost predicts for
-/// it ([`Choice`]). What a parallel replay pays beyond its section cost (the
-/// hand-offs of a pipeline, the levels that find the workers asleep) is in
-/// the measurement.
+/// (sequentially, level by level, pipelined on 2, 4, ... threads). A way
+/// not measured yet counts at what Brent's bounds and the pool's section
+/// cost predict for it where the block's structure starts it that way
+/// ([`ReplayPlan::start`]), and is only explored otherwise ([`Choice`]).
+/// What a parallel replay pays beyond its section cost (the hand-offs of a
+/// pipeline, the `L` columns read from other cores, the levels that find
+/// the workers asleep) is in the measurement.
 static MODES: PerScalar<Choice> = PerScalar::choices();
 
 impl ReplayPlan {
@@ -30,6 +35,21 @@ impl ReplayPlan {
         let nlev = bp.level_work.len().max(1);
         self.min_work.is_none_or(|w| bp.work >= w)
             && self.min_ratio.is_none_or(|r| bn as f64 / nlev as f64 >= r)
+    }
+
+    /// How block `bp` of `bn` columns starts, before any of its ways is
+    /// measured (`None` sequentially): side by side where its work clears
+    /// the floor and its mean level width the ratio (the user's, else
+    /// [`KLU_PAR_MIN_FMADDS`] and [`KLU_PAR_MIN_RATIO`]) or the policy is
+    /// `On`, then pipelined (`Some(true)`) where its columns carry
+    /// [`PIPE_COL_WORK`] on average and level by level where they are
+    /// lighter.
+    fn start(&self, bp: &BlockPlan, bn: usize) -> Option<bool> {
+        let nlev = bp.level_work.len().max(1);
+        let pays = bp.work >= self.min_work.unwrap_or(KLU_PAR_MIN_FMADDS)
+            && bn as f64 / nlev as f64 >= self.min_ratio.unwrap_or(KLU_PAR_MIN_RATIO);
+        (self.policy == KluParallel::On || pays)
+            .then(|| bp.work / bn.max(1) as u64 >= PIPE_COL_WORK)
     }
 
     /// Whether the blocks together clear the user's floors.
@@ -52,8 +72,6 @@ pub(super) struct Decide {
     forced: bool,
     /// ns per unit of replay work.
     seq: f64,
-    /// Whether `seq` was measured, not the prior.
-    learned: bool,
 }
 
 impl Decide {
@@ -69,7 +87,6 @@ impl Decide {
             threads,
             forced,
             seq: REPLAY_RATE.of::<T>().ns_per_op(),
-            learned: REPLAY_RATE.of::<T>().learned(),
         }
     }
 
@@ -81,7 +98,6 @@ impl Decide {
             threads,
             forced: false,
             seq: 1.0,
-            learned: true,
         }
     }
 
@@ -109,12 +125,15 @@ impl Decide {
     /// pipelined on `2^a` threads, the last one on all the pool's. A side by
     /// side replay takes no less than the block's longest chain, and a
     /// pipelined one on `k` threads is expected at Brent's bound for a
-    /// greedy schedule: its share of the work, the chain on top.
+    /// greedy schedule: its share of the work, the chain on top. A way the
+    /// block's structure does not start it with (`start`, see
+    /// [`ReplayPlan::start`]) is expected never: only explored.
     fn ways(
         &self,
         bp: &BlockPlan,
         bn: usize,
         serial: f64,
+        start: Option<bool>,
     ) -> ([Option<(Mode, Prior)>; TUNE_ARMS], usize) {
         let mut ways = [None; TUNE_ARMS];
         if !self.forced {
@@ -154,6 +173,25 @@ impl Decide {
                 break;
             }
         }
+        // Before a way is measured the block starts as its structure says
+        // (`start`): the others are expected never, only explored where
+        // they could win. Where the way it says is not offered, every way
+        // offered is expected at its prediction.
+        let started = |m: Mode| {
+            matches!(
+                (start, m),
+                (None, Mode::Serial)
+                    | (Some(false), Mode::Levels)
+                    | (Some(true), Mode::Pipelined(_))
+            )
+        };
+        if ways.iter().flatten().any(|w| started(w.0)) {
+            for (m, p) in ways.iter_mut().flatten() {
+                if !started(*m) {
+                    p.expected = f64::INFINITY;
+                }
+            }
+        }
         (ways, n)
     }
 
@@ -175,17 +213,7 @@ impl Decide {
         if serial.is_nan() || serial < self.dispatch.break_even() {
             return (Mode::Serial, None);
         }
-        let (ways, n) = self.ways(bp, bn, serial);
-        // Until a replay has measured the rate, sequentially, measured for
-        // the rate and as the way: every other way is predicted in its
-        // units, and against a prior the measured time of another way
-        // would always win.
-        if !self.learned && ways[0].is_some() {
-            let pick = choices.pick(serial, bp.work as f64, n, |o| {
-                ways[o].filter(|_| o == 0).map(|w| w.1)
-            });
-            return (Mode::Serial, Some(pick));
-        }
+        let (ways, n) = self.ways(bp, bn, serial, plan.start(bp, bn));
         let open = ways.iter().flatten().count();
         if open < 2 {
             return (

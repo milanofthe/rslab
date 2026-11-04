@@ -15,6 +15,42 @@ pub const COL_WORK: u64 = 32;
 /// Contract: timing.
 pub const PIPE_RUN: usize = 1;
 
+/// Mean replay work of a block's columns from which a refactor starts it
+/// pipelined rather than level by level, before any of its ways is
+/// measured (fmadds per column): a pipelined column costs a claim and a
+/// wait per `L` column it reads, which lighter columns do not repay, while a
+/// level costs a parallel section, which a deep elimination DAG of heavy
+/// columns pays far too often.
+/// Used by: `KluSolver::refactor` (the ways a block starts from).
+/// Why: on the SuiteSparse circuits and SANE's c7552 stage matrix at 12
+/// workers the columns carry either at most about 200 (c7552, circuit_4,
+/// scircuit: level by level 1.5 to 2x the sequential replay, pipelined
+/// slower than it) or at least about 1700 (rajat15, the ASICs, onetone2,
+/// twotone: pipelined 3 to 7x, level by level barely faster than
+/// sequential); 512 separates the two classes.
+/// Machine: a prior, replaced by what the replays measure.
+/// Contract: timing.
+pub const PIPE_COL_WORK: u64 = 512;
+
+/// Replay work from which a refactor starts a block side by side, before
+/// any of its ways is measured, where the user set no floor (fmadds plus
+/// [`COL_WORK`] a column).
+/// Used by: `KluSolver::refactor` (the ways a block starts from).
+/// Why: below it starting the parallel section costs more than the overlap
+/// gains (the default floor of 1.13).
+/// Machine: a prior, replaced by what the replays measure.
+/// Contract: timing.
+pub const KLU_PAR_MIN_FMADDS: u64 = 200_000;
+
+/// Mean level width of a block's elimination DAG from which a refactor
+/// starts it side by side, before any of its ways is measured, where the
+/// user set no ratio (columns).
+/// Used by: `KluSolver::refactor` (the ways a block starts from).
+/// Why: at least two units of work side by side.
+/// Machine: a prior, replaced by what the replays measure.
+/// Contract: timing.
+pub const KLU_PAR_MIN_RATIO: f64 = 2.0;
+
 /// ns per unit of replay work (an fmadd, [`COL_WORK`] a column) of a real
 /// refactorization, before any is measured (ns per fmadd).
 /// Used by: `KluSolver::refactor`.
