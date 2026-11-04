@@ -37,18 +37,24 @@
 
 use crate::constants::{
     GEMM_NS_PER_FLOP, IDX32_BYTES, SCAN_NS_PER_ENTRY, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK,
-    SOLVE_GEMM_ROWS, SOLVE_NS_PER_ENTRY, SOLVE_PULL_COLS, SOLVE_RHS_TILE, TILE_ROWS,
-    VEC_HEADER_BYTES, WORD_BYTES,
+    SOLVE_GEMM_ROWS, SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS, SOLVE_RHS_TILE,
+    TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
-use crate::parallel::{Go, Rate, ScalarRates, Work};
+use crate::parallel::{Choice, Go, PerScalar, Pick, Prior, Rate, ScalarRates, Work};
 use crate::scalar::Scalar;
 use std::sync::atomic::Ordering;
 
 const NONE: u32 = u32::MAX;
+
+/// Whether a sweep runs on the calling thread (0) or on the pool (1): the
+/// way the sweeps of its size were fastest ([`Choice`]), a sweep starting
+/// on the pool from [`SOLVE_PAR_MIN_ENTRY_RHS`] on before either is
+/// measured.
+static SWEEP_WAYS: PerScalar<Choice> = PerScalar::choices();
 
 /// What a panel entry costs a sweep of one right-hand side (the register
 /// tiles), learned from the sweeps.
@@ -215,6 +221,9 @@ pub(crate) struct PlanWork<T> {
     pending: Vec<std::sync::atomic::AtomicU32>,
     /// This sweep's decision: on the pool, or on the calling thread.
     parallel: bool,
+    /// The pick it was made as and its work in ops, where its run is to
+    /// be measured.
+    pick: Option<(Pick, f64)>,
 }
 
 impl<T> Default for PlanWork<T> {
@@ -227,6 +236,7 @@ impl<T> Default for PlanWork<T> {
             top_acc: Vec::new(),
             pending: Vec::new(),
             parallel: false,
+            pick: None,
         }
     }
 }
@@ -991,11 +1001,12 @@ impl<T: Scalar> SolvePlan<T> {
 
     /// `work` fitted to a sweep of `nr` right-hand sides under the thread
     /// budget `threads`: a scratch per subtree and per node of the widest
-    /// ancestor level, and the decision to run on the pool: where the
-    /// sweep's work (its panel entries times the right-hand sides, at what
-    /// the sweeps have measured) is worth more than one of the budget's
-    /// threads across the leaf subtrees, entering the pool paid; or where
-    /// the panel entries times the right-hand sides up to four clear
+    /// ancestor level, and the decision to run on the pool: the way the
+    /// sweeps of its work were fastest ([`SWEEP_WAYS`]), on the pool
+    /// expected at its work over the threads it is worth there (entering
+    /// the pool paid) where its panel entries times the right-hand sides up
+    /// to four reach [`SOLVE_PAR_MIN_ENTRY_RHS`], else only explored; or
+    /// where they clear
     /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work),
     /// where that is set.
     fn fit<'w>(
@@ -1008,40 +1019,72 @@ impl<T: Scalar> SolvePlan<T> {
         work.fit(self.subtrees.len(), widest, self.top.len());
         let budget = threads.resolve(|cap| cap);
         let ops = self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE));
+        work.pick = None;
         work.parallel = budget > 1
             && match self.cfg.par_min_work {
                 Some(min) => ops >= min,
-                // as wide as the sweeps' measured rate makes it worth
                 None => {
                     let entries = self.vals.len().saturating_mul(nr) as f64;
-                    let rate = Self::sweep_rate(nr);
-                    crate::parallel::width_on(
-                        budget,
-                        entries * rate.ns_per_op(),
-                        self.subtrees.len().max(2),
-                    ) > 1
+                    let serial = entries * Self::sweep_rate(nr).ns_per_op();
+                    let k = crate::parallel::width_on(budget, serial, self.subtrees.len().max(2));
+                    let starts = ops >= SOLVE_PAR_MIN_ENTRY_RHS && k > 1;
+                    let ways = [
+                        // an estimate at the sweeps' rate, no bound
+                        Prior {
+                            expected: serial,
+                            least: 0.0,
+                        },
+                        Prior {
+                            expected: if starts {
+                                serial / k as f64
+                            } else {
+                                f64::INFINITY
+                            },
+                            least: serial / budget as f64,
+                        },
+                    ];
+                    let pick = SWEEP_WAYS
+                        .of::<T>()
+                        .pick(serial, entries, 2, |o| Some(ways[o]));
+                    work.pick = pick.measured().then_some((pick, entries));
+                    pick.option == 1
                 }
             };
         work
     }
 
+    /// `sweep` of `nr` right-hand sides on `work` fitted for it, on the pool
+    /// or on the calling thread as decided, timed for the way it ran where
+    /// that is to be measured.
+    fn sweep<R: Send>(
+        &self,
+        work: &mut PlanWork<T>,
+        nr: usize,
+        threads: Threads,
+        sweep: impl FnOnce(&mut PlanWork<T>) -> R + Send,
+    ) -> R {
+        let work = self.fit(work, nr, threads);
+        let timed = work.pick.take();
+        let t = crate::clock::Instant::now();
+        let r = Self::in_pool(work.parallel, threads, || sweep(work));
+        if let Some((pick, ops)) = timed {
+            let ns = t.elapsed().as_nanos() as f64;
+            SWEEP_WAYS.of::<T>().record(pick, ns, ops);
+        }
+        r
+    }
+
     /// Forward sweep `L y = y` in place on `nr` row-major right-hand sides,
     /// on at most `threads` workers.
     pub fn forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        let work = self.fit(work, nr, threads);
-        Self::in_pool(work.parallel, threads, || {
-            self.forward_block(nr, y, work);
-        })
+        self.sweep(work, nr, threads, |work| self.forward_block(nr, y, work))
     }
 
     /// Backward sweep `L^T x = x` (or `U x = x` for a non-unit factor) in
     /// place on `nr` row-major right-hand sides, on at most `threads`
     /// workers.
     pub fn backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        let work = self.fit(work, nr, threads);
-        Self::in_pool(work.parallel, threads, || {
-            self.backward_block(nr, x, work);
-        })
+        self.sweep(work, nr, threads, |work| self.backward_block(nr, x, work))
     }
 
     /// Solve `L D L^T y = y` in place on the permuted, scaled right-hand
@@ -1053,8 +1096,7 @@ impl<T: Scalar> SolvePlan<T> {
         work: &mut PlanWork<T>,
         threads: Threads,
     ) -> Result<(), RslabError> {
-        let work = self.fit(work, 1, threads);
-        Self::in_pool(work.parallel, threads, || {
+        self.sweep(work, 1, threads, |work| {
             self.solve_block_inner(f, y, 1, work)
         })
     }

@@ -13,8 +13,19 @@ pub const TILE_ROWS: usize = 4;
 /// Contract: timing (the solves are thread-count independent).
 pub const SOLVE_LEAF_SUBTREES: usize = 128;
 
+/// Work of a triangular sweep from which it starts on the thread pool,
+/// before its ways are measured, in factor panel entries times right-hand
+/// sides, the latter counted up to four (entries x rhs). Not the unit of the
+/// KLU path's [`KLU_PAR_MIN_FMADDS`](super::KLU_PAR_MIN_FMADDS).
+/// Used by: `supernodal::solve::SolvePlan::fit`.
+/// Why: about where handing a sweep to the pool starts to pay; a smaller
+/// one costs several times the solve there at a few thousand unknowns.
+/// Machine: a prior, replaced by what the sweeps measure.
+/// Contract: timing (the same bits either way).
+pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
+
 /// Right-hand sides per register tile of the solve kernels, and how many of
-/// them count toward a sweep's work for the parallel gate (right-hand
+/// them count toward a sweep's work where it starts on the pool (right-hand
 /// sides).
 /// Used by: `supernodal::solve` (`tri_rows`, `SolvePlan::fit`).
 /// Why: a tile of [`TILE_ROWS`] rows by four right-hand sides stays in

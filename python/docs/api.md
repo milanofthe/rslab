@@ -1368,7 +1368,7 @@ tuned values, listed by `to_dict`.
 - `complex_split_min_ratio, complex_split_tile` (int): Complex products run as real products when their flops are this many times their plane copies (64), in tiles of this edge (256).
 - `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
 - `solve_leaf_subtrees` (int): Triangular solves: leaf subtrees of the parallel sweeps (128).
-- `solve_par_min_work` (int, optional): The work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all; `None` (default): where its work is worth more than one thread there.
+- `solve_par_min_work` (int, optional): The work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all; `None` (default): the way the sweeps of its work measured fastest, starting on the pool from about a million.
 
 #### `Settings.to_dict()`
 

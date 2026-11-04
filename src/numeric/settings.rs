@@ -444,11 +444,11 @@ pub struct SolveSettings {
     /// sweep from which it runs on the thread pool, in the factor's panel
     /// entries times the right-hand sides, up to four (not the fmadds of
     /// [`KluSettings::par_min_work`](crate::KluSettings::par_min_work)).
-    /// Default `None`: a sweep runs on the pool where its work, at the
-    /// rate the sweeps have measured, is worth more than one thread there
-    /// ([`crate::parallel`]); a smaller one on the calling thread, where
-    /// handing it to the pool costs more than it saves. The same bits
-    /// either way.
+    /// Default `None`: a sweep runs the way the sweeps of its work were
+    /// measured fastest, on the pool or on the calling thread
+    /// ([`crate::parallel`]), starting on the pool from
+    /// [`SOLVE_PAR_MIN_ENTRY_RHS`](crate::constants::SOLVE_PAR_MIN_ENTRY_RHS)
+    /// before either is measured. The same bits either way.
     pub par_min_work: Option<usize>,
 }
 
