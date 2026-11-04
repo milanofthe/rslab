@@ -1035,8 +1035,8 @@ impl<T: Scalar> SolvePlan<T> {
                     if crate::logging::enabled(crate::logging::LogLevel::Debug) {
                         crate::logging::debug(&format!(
                             "solve: sweep nr={nr} budget={budget} serial~{:.2} ms pool~{:.2} ms -> {} (measured {})",
-                            serial / 1e6,
-                            ways[1].expected / 1e6,
+                            crate::clock::ms(std::time::Duration::from_nanos(serial as u64)),
+                            crate::clock::ms(std::time::Duration::from_nanos(ways[1].expected as u64)),
                             if pick.option == 1 { "pool" } else { "here" },
                             pick.measured()
                         ));
@@ -1073,7 +1073,7 @@ impl<T: Scalar> SolvePlan<T> {
                     crate::logging::debug(&format!(
                         "solve: sweep way {} took {:.2} ms",
                         pick.option,
-                        ns / 1e6
+                        crate::clock::ms(std::time::Duration::from_nanos(ns as u64))
                     ));
                 }
             }
