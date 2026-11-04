@@ -68,6 +68,28 @@ def test_lu_matching_setting():
     assert rslab.lu(B, matching=False).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
 
 
+def test_lu_equilibration_setting():
+    # The LU equilibrates one step by default, iterated on request: rows and
+    # columns of unrelated scale end with every maximum at one, no pivot under
+    # the static floor, and a solve to roundoff.
+    rng = np.random.default_rng(3)
+    A = _general(400)
+    r, c = 10.0 ** rng.integers(-6, 7, 400), 10.0 ** rng.integers(-6, 7, 400)
+    S = (sp.diags(r) @ A @ sp.diags(c)).tocsc()
+    b = S @ np.ones(400)
+    one = rslab.lu(S, preconditioner=1e-6, matching=False)
+    it = rslab.lu(S, preconditioner=1e-6, matching=False, scaling="inf_norm")
+    assert one.diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
+    assert it.diagnostics()["decisions"]["scaling"] == "TwoSidedRuiz"
+    assert not it.diagnostics()["warnings"]
+    assert it.n_perturbed <= one.n_perturbed
+    x = it.solve(b)
+    omega = np.max(np.abs(S @ x - b) / (abs(S) @ np.abs(x) + np.abs(b)))
+    assert omega < 1e-10
+    assert rslab.lu(S, scaling="identity").diagnostics()["decisions"]["scaling"] == "Identity"
+    assert rslab.lu(S, scaling="mc64").diagnostics()["warnings"]
+
+
 def test_klu_matching_setting():
     assert rslab.KluSettings().to_dict()["matching"] is True
     A = _circuit(300)
@@ -314,6 +336,44 @@ def test_solve_refine_target_and_measure():
         f.solve(b, refine=1, measure="sideways")
 
 
+def _floored_saddle(m=10, n2=24):
+    # [K B; B^T 0] with every third constraint a copy of the one before:
+    # singular, so static pivoting lifts pivots.
+    n1 = m * m
+    t = []
+    for j in range(n1):
+        x, y = j % m, j // m
+        t.append((j, j, 4.0 + 0.3j))
+        if x > 0:
+            t.append((j - 1, j, -1.2 + 0.1j))
+        if x + 1 < m:
+            t.append((j + 1, j, -0.8))
+        if y > 0:
+            t.append((j - m, j, -1.2 + 0.1j))
+        if y + 1 < m:
+            t.append((j + m, j, -0.8))
+    for c in range(n2):
+        i, j = (4 * (c - 1) if c % 3 == 2 else 4 * c), n1 + c
+        t += [(i, j, 1.0), (i + 1, j, -1.0), (j, i, 1.0), (j, i + 1, -1.0)]
+    r, c, v = zip(*t)
+    n = n1 + n2
+    return sp.csc_matrix((np.array(v, dtype=complex), (r, c)), shape=(n, n))
+
+
+def test_solve_refine_factored_system():
+    A = _floored_saddle()
+    f = rslab.lu(A, preconditioner=1e-2)
+    rows, cols, deltas = f.perturbations()
+    assert len(deltas) == f.n_perturbed > 0
+    E = sp.csc_matrix((deltas, (rows, cols)), shape=A.shape)
+    b = np.arange(A.shape[0]) + 1j
+    x = f.solve(b, refine=3, system="factored")
+    assert _res(A + E, x, b) < 1e-13
+    assert _res(A, x, b) > 1e-6
+    with pytest.raises(ValueError):
+        f.solve(b, refine=1, system="sideways")
+
+
 def test_log_sink_and_level():
     seen = []
     rslab.set_log_sink(lambda level, msg: seen.append((level, msg)))
@@ -399,6 +459,45 @@ def test_symbolic_factor_and_refactor_accept_the_matrix():
     D = (G + sp.eye(n, k=1, format="csc")).tocsc()
     with pytest.raises(ValueError):
         rslab.analyze(G, "lu").factor(D)
+
+
+@pytest.mark.parametrize("path", ["ldlt", "lu", "klu", "auto"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_symbolic_factor_reads_the_matrix_as_its_values(path, index):
+    import numpy as np
+    import scipy.sparse as sp
+
+    n = 60
+    rng = np.random.default_rng(5)
+    A = sp.random(n, n, density=0.1, random_state=rng, format="csc") + 10.0 * sp.eye(n, format="csc")
+    S = (A + A.T).tocsc()
+    S.indptr, S.indices = S.indptr.astype(index), S.indices.astype(index)
+    b = rng.standard_normal(n)
+    sym = rslab.analyze(S, path)
+    prepared = rslab._lower_csc(S) if path == "ldlt" else rslab._full_csc(S)
+    x = sym.factor(prepared.data).solve(b)
+    # the matrix gives the factor of its value array, bit for bit
+    assert np.array_equal(sym.factor(S).solve(b), x)
+    # a matrix in another storage order (unsorted rows, a split duplicate) is the same
+    # matrix: prepared like at analysis time, and the caller's arrays stay as they were
+    indptr, indices, values = [0], [], []
+    for j in range(n):
+        rows = S.indices[S.indptr[j]:S.indptr[j + 1]][::-1]
+        vals = S.data[S.indptr[j]:S.indptr[j + 1]][::-1].copy()
+        vals[0] /= 2.0  # half of it here, the other half a duplicate at the column's end
+        indices += [*rows, rows[0]]
+        values += [*vals, vals[0]]
+        indptr.append(len(indices))
+    U = sp.csc_matrix((np.array(values), np.array(indices), np.array(indptr)), shape=S.shape)
+    U.indptr, U.indices = U.indptr.astype(index), U.indices.astype(index)
+    assert not U.has_canonical_format
+    kept = (U.indptr.copy(), U.indices.copy(), U.data.copy())
+    assert np.allclose(sym.factor(U).solve(b), x)
+    assert all(np.array_equal(a, k) for a, k in zip((U.indptr, U.indices, U.data), kept))
+    # one entry more in the factored part is refused
+    D = (S + sp.eye(n, k=-1, format="csc")).tocsc()
+    with pytest.raises(ValueError):
+        sym.factor(D)
 
 
 def test_every_setting_round_trips():

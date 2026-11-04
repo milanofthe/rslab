@@ -106,31 +106,6 @@ pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<u
     )
 }
 
-/// [`column_counts_gnp`] of the permuted pattern `P^T A P` (`perm[new] =
-/// old`, `perm_inv[old] = new`, `etree` the elimination tree of the permuted
-/// pattern), read through the permutation: column `new` is the original
-/// column `perm[new]` with its rows mapped by `perm_inv`. The counts only
-/// need each column's entries below the diagonal, in any order, so the
-/// permuted pattern is never built or sorted.
-pub fn column_counts_permuted(
-    pattern: &CscPattern,
-    perm: &[usize],
-    perm_inv: &[usize],
-    etree: &EliminationTree,
-) -> Vec<usize> {
-    gnp(
-        pattern.n,
-        etree,
-        |i| {
-            let j = perm[i];
-            pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]]
-                .iter()
-                .map(|&r| perm_inv[r])
-        },
-        |_| 1,
-    )
-}
-
 /// The Gilbert-Ng-Peyton count over a column view: `cols(i)` yields the rows
 /// of column `i` (any order, no duplicates; entries on or above the diagonal
 /// are skipped), and row `r` counts `weight(r)` times. With every weight one

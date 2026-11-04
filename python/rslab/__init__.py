@@ -195,8 +195,10 @@ def _full_csc(A):
     """Full matrix as a sorted, summed CSC matrix (both triangles, as given)."""
     sp = _require_scipy()
     A = sp.csc_matrix(A)
-    A.sum_duplicates()
-    A.sort_indices()
+    if not A.has_canonical_format:
+        # A CSC input shares its arrays with `A`: sort and sum a copy, not them.
+        A = A.copy()
+        A.sum_duplicates()
     return A
 
 
@@ -291,8 +293,10 @@ def lu(A, *, settings: Settings | None = None, **kwargs) -> Lu:
     **kwargs
         Any :class:`Settings` keyword, overriding ``settings``.
         ``pivot_threshold`` (default 0.1) is the threshold-pivoting tolerance of this path;
-        ``scaling`` is ignored here (the LU path scales two-sided) and
-        reported under ``diagnostics()['warnings']``.
+        ``scaling`` is the two-sided equilibration: ``'one_pass'`` (default),
+        ``'inf_norm'`` (iterated until every row and column maximum is one) or
+        ``'identity'``; a symmetric scaling is reported under
+        ``diagnostics()['warnings']``.
 
     Returns
     -------
@@ -558,7 +562,7 @@ def gmres_block(A, B, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _r
     tol : float, default 1e-8
         Relative residual target per column.
     maxit : int, default 400
-        Iteration budget.
+        Iteration budget of every column.
     restart : int, optional
         Block Arnoldi basis size (see :func:`gmres`).
     x0 : ndarray, shape (n, nrhs), optional

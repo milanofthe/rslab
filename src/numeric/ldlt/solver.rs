@@ -27,9 +27,8 @@
 use super::factor::{factor_numeric, LdltNumeric};
 use super::pivots::LdltPivots;
 use crate::constants::{
-    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY,
-    LDLT_INPUT_BUILD_BYTES_PER_COL, LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, VEC_HEADER_BYTES,
-    WORD_BYTES,
+    IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY, LDLT_INPUT_BUILD_BYTES_PER_COL,
+    LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
@@ -125,13 +124,6 @@ impl<T: Scalar> LdltSolver<T> {
         self.diagnostics.factor_nnz as usize
     }
 
-    /// Number of statically perturbed pivots (preconditioner mode). Zero for
-    /// an exact factorization. A nonzero count means the stored factor is of a
-    /// slightly perturbed `A + E`; solve via iterative refinement / Krylov.
-    pub fn n_perturbed(&self) -> usize {
-        self.factors.n_perturbed
-    }
-
     /// Inertia (counts of positive/negative/zero eigenvalues) of the factored
     /// matrix. **Exact only for a real symmetric matrix** (`T = f64`/`f32`);
     /// equilibration uses a real diagonal `D > 0`, so the signs are preserved.
@@ -160,6 +152,10 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
     }
     fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
         &self.works
+    }
+
+    fn perturbations(&self) -> &[crate::PivotFloor<T>] {
+        &self.factors.floors
     }
 
     /// `P S A S P^T = L D L^T`: `det A` is the product of `D`'s 1x1 and
@@ -341,8 +337,8 @@ pub struct LdltSymbolic {
 
 impl LdltSymbolic {
     /// Heap bytes this analysis holds: the ordering, the supernodes, the
-    /// permuted pattern and, once a factorization has built them, the
-    /// schedule and the input program every later factorization reuses.
+    /// schedule and, once a factorization has built it, the input program
+    /// every later factorization reuses.
     /// The analysis stays alive while it is factored, so these bytes are part
     /// of every factorization's footprint.
     pub fn heap_bytes(&self) -> u64 {
@@ -355,7 +351,8 @@ impl LdltSymbolic {
     pub fn analyze<T: Scalar>(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
         a.validate()?;
         let t = crate::clock::Instant::now();
-        let symbolic = analyze_pattern_with(a.n, &a.col_ptr, &a.row_idx, opts)?;
+        let pattern = crate::symbolic::full_pattern(a.n, &a.col_ptr, &a.row_idx)?;
+        let symbolic = analyze_pattern_with(pattern, a.row_idx.len(), opts)?;
         let analyze_ms = crate::clock::ms(t.elapsed());
         let sym = Self {
             symbolic,
@@ -547,14 +544,15 @@ impl LdltSymbolic {
             &opts.solve,
             crate::numeric::settings::all_cores(),
         );
-        // The input program the first factorization keeps (two index arrays
-        // and the positions, two pointer arrays), and the peak of its build.
+        // The input program the first factorization keeps (the indices and
+        // the entries of `A` they read, two pointer arrays), and the peak of
+        // its build.
         let (growth, growth_build) = if inner.input.get().is_some() {
             (0, 0)
         } else {
             (
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + 2 * WORD_BYTES * (n + 1),
-                INPUT_BUILD_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
+                INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
         // Held by the factor: the panels (packed by the solve plan) and their
@@ -567,11 +565,12 @@ impl LdltSymbolic {
                 + WORD_BYTES * ns
         };
         let factor = factor_with(packed);
-        // While the forest is factored: the permuted values and the scaling,
-        // the arena, the emit cells (refcounts, offsets, panel records, the
-        // pivots by column) and the forest's own lists, every node's slot (D,
-        // the flags and the row permutation) and emitted rows until the end,
-        // the workers' scratch and the heaviest set of nodes running at once.
+        // While the forest is factored: the scaling (by `A`'s and by
+        // elimination index), the arena, the emit cells (refcounts, offsets,
+        // panel records, the pivots by column) and the forest's own lists,
+        // every node's slot (D, the flags and the row permutation) and emitted
+        // rows until the end, the workers' scratch and the heaviest set of
+        // nodes running at once.
         let cells = ns * LDLT_NODE_CELL_BYTES + n * (WORD_BYTES + WORD_BYTES + 2 * vb + 1);
         let slots: usize = (0..ns)
             .map(|s| w(s) * (2 * vb + 1) + WORD_BYTES * r(s))
@@ -587,10 +586,8 @@ impl LdltSymbolic {
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LDLT_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during = (vb * nnz + WORD_BYTES * n + vb * panels + cells + slots) as u64
-            + workers
-            + pooled
-            + nodes;
+        let during =
+            (2 * WORD_BYTES * n + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
         // After it: the factor with its panels as factored (the plan packs
         // them in place), the emitted row lists until the plan has copied
         // them, and the plan's build.
@@ -738,7 +735,7 @@ impl LdltSymbolic {
             estimate: Some(estimate),
             decisions,
             numeric: crate::diagnostics::NumericReport {
-                perturbed: factors.n_perturbed,
+                perturbed: factors.floors.len(),
                 two_by_two: Some(factors.two_by_two.iter().filter(|&&b| b).count()),
                 inertia: Some((
                     factors.inertia.positive,
@@ -747,6 +744,8 @@ impl LdltSymbolic {
                 )),
                 // from the factor the solver holds, see `diagnostics`
                 min_pivot: None,
+                delayed: None,
+                forced: None,
             },
             warnings,
             ..Default::default()

@@ -146,6 +146,14 @@ pub struct NumericReport {
     pub perturbed: usize,
     /// Bunch-Kaufman 2x2 pivots (`None` for the LU paths).
     pub two_by_two: Option<usize>,
+    /// Pivots a front of the supernodal LU passed to its parent: a column
+    /// none of whose fully-summed rows passes the threshold over the whole
+    /// column (one delayed twice counts twice). `None` for the other paths.
+    pub delayed: Option<usize>,
+    /// Pivots of the supernodal LU that failed that threshold and stayed in
+    /// their front (a root, or the delay allowance spent): the pivot growth
+    /// the threshold bounds is not bounded there. `None` for the other paths.
+    pub forced: Option<usize>,
     /// Inertia `(positive, negative, zero)` of a symmetric factor.
     pub inertia: Option<(usize, usize, usize)>,
     /// The smallest pivot magnitude of the factor, on the equilibrated
@@ -367,6 +375,12 @@ impl Diagnostics {
         }
         if let Some(k) = self.numeric.two_by_two {
             s.push_str(&format!(" pivots2x2={k}"));
+        }
+        if let Some(k) = self.numeric.delayed.filter(|&k| k > 0) {
+            s.push_str(&format!(" delayed={k}"));
+        }
+        if let Some(k) = self.numeric.forced.filter(|&k| k > 0) {
+            s.push_str(&format!(" forced={k}"));
         }
         if let Some(p) = self.numeric.min_pivot {
             s.push_str(&format!(" min_pivot={p:.1e}"));

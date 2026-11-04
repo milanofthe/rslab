@@ -1,6 +1,6 @@
 # rslab Python API reference
 
-Generated from the docstrings of `rslab` 1.8.0 by `tools/gen_api_reference.py`; do not edit by hand.
+Generated from the docstrings of `rslab` 1.13.1 by `tools/gen_api_reference.py`; do not edit by hand.
 
 ## Package
 
@@ -215,7 +215,7 @@ fields as `ldlt`. The full matrix is read.
 
 - `A` (scipy.sparse matrix or array-like): The `n x n` system matrix. Converted to CSC; duplicates summed.
 - `settings` (Settings, optional): A prepared `Settings` object.
-- `**kwargs`: Any `Settings` keyword, overriding `settings`. `pivot_threshold` (default 0.1) is the threshold-pivoting tolerance of this path; `scaling` is ignored here (the LU path scales two-sided) and reported under `diagnostics()['warnings']`.
+- `**kwargs`: Any `Settings` keyword, overriding `settings`. `pivot_threshold` (default 0.1) is the threshold-pivoting tolerance of this path; `scaling` is the two-sided equilibration: `'one_pass'` (default), `'inf_norm'` (iterated until every row and column maximum is one) or `'identity'`; a symmetric scaling is reported under `diagnostics()['warnings']`.
 
 **Returns**
 
@@ -367,7 +367,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -392,6 +392,13 @@ The determinant of `A` in log form.
 **Returns**
 
 - `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
+
+#### `Auto.perturbations()`
+
+The pivots the `preconditioner` floor lifted: the factor is
+the exact factor of `A + E`, returned as `(rows, cols,
+deltas)` with `E[rows[k], cols[k]] = deltas[k]` in the
+indices of `A`. Empty for an exact factor.
 
 #### `Auto.recycle(k)`
 
@@ -419,16 +426,17 @@ Factor new values on the same pattern, in place.
 - `ValueError`: If the pattern differs or the value count does not match.
 - `RuntimeError`: If the matrix is numerically singular.
 
-#### `Auto.solve(b, refine=0, target=None, measure='normwise')`
+#### `Auto.solve(b, refine=0, target=None, measure='normwise', system='matrix')`
 
 Solve `A x = b` for one right-hand side.
 
 **Parameters**
 
 - `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
-- `refine` (int, default 0): Steps of iterative refinement against the original matrix.
+- `refine` (int, default 0): Steps of iterative refinement against `system`.
 - `target` (float, optional): Stop refining once the backward error is below this value (by default all `refine` steps run).
 - `measure` ({'normwise', 'componentwise'}, default 'normwise'): The backward-error measure `target` refers to.
+- `system` ({'matrix', 'factored'}, default 'matrix'): The system refinement solves: the original matrix `A`, or `A + E`, the matrix the factor is of, `E` the pivots the `preconditioner` floor lifted (the accurate solve of the perturbed system, for the factor used as an operator; the same as `'matrix'` when `n_perturbed` is 0).
 
 #### `Auto.solve_many(b)`
 
@@ -555,7 +563,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -581,6 +589,13 @@ The determinant of `A` in log form.
 
 - `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
 
+#### `Ldlt.perturbations()`
+
+The pivots the `preconditioner` floor lifted: the factor is
+the exact factor of `A + E`, returned as `(rows, cols,
+deltas)` with `E[rows[k], cols[k]] = deltas[k]` in the
+indices of `A`. Empty for an exact factor.
+
 #### `Ldlt.recycle(k)`
 
 A `Recycle` workspace holding up to `k` deflation
@@ -594,16 +609,17 @@ vectors for a sequence of `gmres` calls.
 
 - `Recycle`: The workspace to pass as `recycle=` to `gmres`.
 
-#### `Ldlt.solve(b, refine=0, target=None, measure='normwise')`
+#### `Ldlt.solve(b, refine=0, target=None, measure='normwise', system='matrix')`
 
 Solve `A x = b` for one right-hand side.
 
 **Parameters**
 
 - `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
-- `refine` (int, default 0): Steps of iterative refinement against the original matrix.
+- `refine` (int, default 0): Steps of iterative refinement against `system`.
 - `target` (float, optional): Stop refining once the backward error is below this value (by default all `refine` steps run).
 - `measure` ({'normwise', 'componentwise'}, default 'normwise'): The backward-error measure `target` refers to.
+- `system` ({'matrix', 'factored'}, default 'matrix'): The system refinement solves: the original matrix `A`, or `A + E`, the matrix the factor is of, `E` the pivots the `preconditioner` floor lifted (the accurate solve of the perturbed system, for the factor used as an operator; the same as `'matrix'` when `n_perturbed` is 0).
 
 #### `Ldlt.solve_many(b)`
 
@@ -725,7 +741,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -751,6 +767,13 @@ The determinant of `A` in log form.
 
 - `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
 
+#### `Lu.perturbations()`
+
+The pivots the `preconditioner` floor lifted: the factor is
+the exact factor of `A + E`, returned as `(rows, cols,
+deltas)` with `E[rows[k], cols[k]] = deltas[k]` in the
+indices of `A`. Empty for an exact factor.
+
 #### `Lu.recycle(k)`
 
 A `Recycle` workspace holding up to `k` deflation
@@ -764,16 +787,17 @@ vectors for a sequence of `gmres` calls.
 
 - `Recycle`: The workspace to pass as `recycle=` to `gmres`.
 
-#### `Lu.solve(b, refine=0, target=None, measure='normwise')`
+#### `Lu.solve(b, refine=0, target=None, measure='normwise', system='matrix')`
 
 Solve `A x = b` for one right-hand side.
 
 **Parameters**
 
 - `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
-- `refine` (int, default 0): Steps of iterative refinement against the original matrix.
+- `refine` (int, default 0): Steps of iterative refinement against `system`.
 - `target` (float, optional): Stop refining once the backward error is below this value (by default all `refine` steps run).
 - `measure` ({'normwise', 'componentwise'}, default 'normwise'): The backward-error measure `target` refers to.
+- `system` ({'matrix', 'factored'}, default 'matrix'): The system refinement solves: the original matrix `A`, or `A + E`, the matrix the factor is of, `E` the pivots the `preconditioner` floor lifted (the accurate solve of the perturbed system, for the factor used as an operator; the same as `'matrix'` when `n_perturbed` is 0).
 
 #### `Lu.solve_many(b)`
 
@@ -906,7 +930,7 @@ factor as the preconditioner.
 
 - `b` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 - `operator` (tuple, optional): A different CSC matrix to iterate on, as in `gmres`.
@@ -931,6 +955,13 @@ The determinant of `A` in log form.
 **Returns**
 
 - `tuple`: `(phase, log_abs)` with `det(A) = phase * exp(log_abs)`: `phase` has unit modulus (`+-1` for a real matrix), and the log form neither under- nor overflows. Raises `RuntimeError` for a factor whose pivots the static floor lifted (`n_perturbed > 0`): it belongs to a perturbed matrix.
+
+#### `Klu.perturbations()`
+
+The pivots the `preconditioner` floor lifted: the factor is
+the exact factor of `A + E`, returned as `(rows, cols,
+deltas)` with `E[rows[k], cols[k]] = deltas[k]` in the
+indices of `A`. Empty for an exact factor.
 
 #### `Klu.recycle(k)`
 
@@ -965,16 +996,17 @@ factor if this raises.
 - `ValueError`: If the pattern differs or the value count does not match.
 - `RuntimeError`: If a pivot is numerically zero.
 
-#### `Klu.solve(b, refine=0, target=None, measure='normwise')`
+#### `Klu.solve(b, refine=0, target=None, measure='normwise', system='matrix')`
 
 Solve `A x = b` for one right-hand side.
 
 **Parameters**
 
 - `b` (ndarray, shape (n,)): Right-hand side in the factor's dtype.
-- `refine` (int, default 0): Steps of iterative refinement against the original matrix.
+- `refine` (int, default 0): Steps of iterative refinement against `system`.
 - `target` (float, optional): Stop refining once the backward error is below this value (by default all `refine` steps run).
 - `measure` ({'normwise', 'componentwise'}, default 'normwise'): The backward-error measure `target` refers to.
+- `system` ({'matrix', 'factored'}, default 'matrix'): The system refinement solves: the original matrix `A`, or `A + E`, the matrix the factor is of, `E` the pivots the `preconditioner` floor lifted (the accurate solve of the perturbed system, for the factor used as an operator; the same as `'matrix'` when `n_perturbed` is 0).
 
 #### `Klu.solve_many(b)`
 
@@ -1305,11 +1337,12 @@ tuned values, listed by `to_dict`.
 - `nemin` (int, default 16): Supernode amalgamation threshold. Smaller means finer supernodes: less fill, more per-front overhead.
 - `relax` (bool or (int, int), default False): Relaxed (fill-tolerant) amalgamation. `True` uses fronts up to 256 columns wide with at most 64 explicit-zero rows per merge, a pair `(max_width, max_extra_rows)` sets them.
 - `threads` (int or 'auto' or ('auto', int) or 'ambient', optional): Worker budget of the scoped factorization pool. `None` (default) is the per-matrix predictor capped at 4 workers (or the calibrated pick after `rslab.install_diagnose`); an `int` pins the count (`0` = all logical cores); `'auto'` is the predictor without the cap, `('auto', max)` the predictor capped at `max`; `'ambient'` runs on the caller's rayon pool. The factor is bit-identical for every value.
-- `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`. The floor applies to the equilibrated matrix (entries of order one): `1e-8` (about `sqrt(eps)`) lifts only pivots that vanish to working precision; a larger floor also lifts genuine small pivots (those of the charge block of a saddle system lie at 1e-8 to 1e-6). `diagnostics()["numeric"]["min_pivot"]` shows the smallest one.
+- `preconditioner` (float, optional): Static-pivot floor: a pivot with magnitude below it is lifted to it, so the factorization never fails and produces the factor of a nearby `A + E`. Recover accuracy with `solve(b, refine=k)`, or solve `A + E` itself to working accuracy with `solve(b, refine=k, system='factored')`. The floor applies to the equilibrated matrix (entries of order one): `1e-8` (about `sqrt(eps)`) lifts only pivots that vanish to working precision; a larger floor also lifts genuine small pivots (those of the charge block of a saddle system lie at 1e-8 to 1e-6). `diagnostics()["numeric"]["min_pivot"]` shows the smallest one.
 - `force_accept` (bool, default False): In exact mode, accept tiny pivots instead of raising on rank deficiency. Ignored when `preconditioner` is set.
 - `factor_dtype` (str or dtype, optional): Store the factor in the lower-precision twin of the matrix's dtype (`'float32'` for float64, `'complex64'` for complex128): half the factor memory, single-precision kernels. The handle keeps the matrix in its own precision, so `solve(b, refine=k)` and the Krylov methods reach its accuracy. LDL^T and LU paths; `None` factors in the matrix's dtype.
 - `pivot_threshold` (float, default 0.1): Threshold partial pivoting of the LU path in `[0, 1]` (`1.0` is full partial pivoting). Ignored, and reported in the diagnostics, on the LDL^T path.
-- `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Symmetric equilibration before the LDL^T factorization: a named strategy, or a float array `s` of length `n` applying the external scaling `diag(s) A diag(s)`. The LU path uses its own two-sided scaling and reports a set value.
+- `delayed_pivots` (bool, default False): Delayed pivoting of the LU path: a column none of whose fully-summed rows passes the threshold over the whole column moves to the parent front, and the analysis matches rows on every column (MC64). Where the delays would grow the factor past their allowance, the factor is computed without them and a warning says so. `diagnostics()["numeric"]["delayed"]` and `["forced"]` count the delayed pivots and those that failed the threshold and stayed.
+- `scaling` ({'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional): Equilibration before the factorization. LDL^T: the symmetric `diag(s) A diag(s)`, a named strategy or a float array `s` of length `n`. LU: the two-sided `diag(r) A diag(c)`, `'one_pass'` (the default, one step), `'inf_norm'` (iterated until every row and column maximum is one, for rows and columns of unrelated scale) or `'identity'`; the symmetric `'mc64'` and an array are reported as ignored there, and under the LU's row matching the matching scales.
 - `matching` (bool, default True): Maximum-product row matching (MC64) before the LU analysis, applied where a diagonal entry is below `matching_negligible_diagonal` (default `1e-10`) times its column's largest entry. LU path only.
 - `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 
@@ -1430,7 +1463,7 @@ Block GMRES on `A X = B` for an `n x nrhs` block, optionally preconditioned.
 - `B` (ndarray, shape (n, nrhs)): Right-hand side block.
 - `M` (factor handle, optional): A factor used as the preconditioner.
 - `tol` (float, default 1e-8): Relative residual target per column.
-- `maxit` (int, default 400): Iteration budget.
+- `maxit` (int, default 400): Iteration budget of every column.
 - `restart` (int, optional): Block Arnoldi basis size (see `gmres`).
 - `x0` (ndarray, shape (n, nrhs), optional): Initial guess.
 

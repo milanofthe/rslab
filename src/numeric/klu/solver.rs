@@ -16,6 +16,12 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
         &self.works
     }
 
+    /// None: a vanishing pivot is a [`RslabError::SingularBasis`] at factor
+    /// time instead.
+    fn perturbations(&self) -> &[crate::PivotFloor<T>] {
+        &[]
+    }
+
     /// `P_r R A P_c^T` is block upper triangular with `L_b U_b` on its
     /// diagonal blocks (`R` the row scaling): `det A` is the product of the
     /// `U_b` diagonals, the signs of both permutations and the reciprocal
@@ -112,12 +118,6 @@ impl<T: Scalar> KluSolver<T> {
         d.numeric.min_pivot =
             (!u.is_empty()).then(|| u.iter().map(|v| v.magnitude()).fold(f64::MAX, f64::min));
         d
-    }
-
-    /// Pivots lifted by a static regularization: always `0`, a vanishing
-    /// pivot is a [`RslabError::SingularBasis`] at factor time instead.
-    pub fn n_perturbed(&self) -> usize {
-        0
     }
 
     /// Matrix dimension.

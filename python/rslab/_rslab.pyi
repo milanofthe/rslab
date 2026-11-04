@@ -39,6 +39,7 @@ class Settings:
         relax: bool | tuple[int, int] | None = ...,
         amalgamation: str | None = ...,
         pivot_threshold: float | None = ...,
+        delayed_pivots: bool | None = ...,
         matching_negligible_diagonal: float | None = ...,
         compress_max_ratio: float | None = ...,
         nd_two_hop_ratio: float | None = ...,
@@ -126,6 +127,7 @@ class _Factor:
     def factor_nnz(self) -> int: ...
     @property
     def n_perturbed(self) -> int: ...
+    def perturbations(self) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any]]: ...
     @property
     def dtype(self) -> str: ...
     @property
@@ -137,6 +139,7 @@ class _Factor:
         refine: int = ...,
         target: float | None = ...,
         measure: str = ...,
+        system: str = ...,
     ) -> NDArray[Any]: ...
     def solve_many(self, b: NDArray[Any]) -> NDArray[Any]: ...
     def solve_transpose(self, b: NDArray[Any]) -> NDArray[Any]: ...

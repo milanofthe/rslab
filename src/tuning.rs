@@ -27,7 +27,10 @@ pub struct HardwareInfo {
 }
 
 impl HardwareInfo {
-    /// Probe the current machine (cores via std, RAM via sysinfo).
+    /// Probe the current machine (cores via std, RAM via sysinfo). In a container (a cgroup
+    /// with a memory limit, Linux) the RAM is the container's: the smaller of the host's and the
+    /// cgroup's total and free memory, so a memory plan checked against it fails fast instead of
+    /// being OOM-killed. The cores already honour a CPU quota (`available_parallelism`).
     pub fn probe() -> Self {
         let logical = std::thread::available_parallelism()
             .map(|p| p.get())
@@ -35,11 +38,16 @@ impl HardwareInfo {
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
         let physical = sys.physical_core_count().unwrap_or(logical);
+        let (mut total, mut available) = (sys.total_memory(), sys.available_memory());
+        if let Some(cg) = sys.cgroup_limits() {
+            total = total.min(cg.total_memory);
+            available = available.min(cg.free_memory);
+        }
         HardwareInfo {
             logical_cores: logical,
             physical_cores: physical.max(1),
-            total_ram_bytes: sys.total_memory(),
-            available_ram_bytes: sys.available_memory(),
+            total_ram_bytes: total,
+            available_ram_bytes: available,
         }
     }
     /// Stable key for the calibration cache (cores + RAM size bucket).
@@ -439,6 +447,28 @@ fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_takes_the_containers_memory() {
+        // in a cgroup with a memory limit (a container) the probe reports the container's RAM,
+        // never the host's beyond it (#150)
+        let hw = HardwareInfo::probe();
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        eprintln!(
+            "probe: total {} MB, available {} MB; host total {} MB; cgroup {:?}",
+            hw.total_ram_bytes >> 20,
+            hw.available_ram_bytes >> 20,
+            sys.total_memory() >> 20,
+            sys.cgroup_limits().map(|c| c.total_memory >> 20)
+        );
+        assert!(hw.total_ram_bytes <= sys.total_memory());
+        assert!(hw.available_ram_bytes <= hw.total_ram_bytes);
+        if let Some(cg) = sys.cgroup_limits() {
+            assert!(hw.total_ram_bytes <= cg.total_memory);
+            assert!(hw.available_ram_bytes <= cg.free_memory);
+        }
+    }
 
     #[test]
     fn cost_model_thread_count_respects_critical_path() {

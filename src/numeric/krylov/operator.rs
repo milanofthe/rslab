@@ -4,7 +4,7 @@
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltSolver;
 use crate::numeric::settings::{SolverSettings, Threads};
-use crate::scalar::{Demote, Scalar};
+use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
 use num_complex::Complex;
@@ -139,7 +139,7 @@ impl<T: Scalar> Preconditioner<T> for NoPreconditioner {
 }
 
 /// A factor computed in a lower-precision field, applied inside an iteration
-/// in the higher one: `F` factors `A` demoted to `H::Low` (see [`Demote`])
+/// in the higher one: `F` factors `A` demoted to its twin [`H::Low`](Scalar::Low)
 /// and every solve demotes its right-hand side, solves and promotes the
 /// result. The factor takes half the memory and its kernels run in single
 /// precision; the Krylov method (or [`solve_refined`](Factorization::solve_refined)
@@ -183,7 +183,7 @@ impl<F> MixedPrecision<F> {
 }
 
 /// Run `solve` on `b` demoted to `H::Low` and promote its result.
-fn through_low<H: Demote>(
+fn through_low<H: Scalar>(
     b: &[H],
     solve: impl FnOnce(&[H::Low]) -> Result<Vec<H::Low>, RslabError>,
 ) -> Result<Vec<H>, RslabError> {
@@ -191,7 +191,7 @@ fn through_low<H: Demote>(
     Ok(solve(&low)?.into_iter().map(H::promote).collect())
 }
 
-impl<H: Demote, F: Factorization<H::Low>> Preconditioner<H> for MixedPrecision<F> {
+impl<H: Scalar, F: Factorization<H::Low>> Preconditioner<H> for MixedPrecision<F> {
     fn apply(&self, r: &[H], z: &mut [H]) -> Result<(), RslabError> {
         z.copy_from_slice(&through_low(r, |r| self.factor.solve(r))?);
         Ok(())
@@ -205,7 +205,7 @@ impl<H: Demote, F: Factorization<H::Low>> Preconditioner<H> for MixedPrecision<F
     }
 }
 
-impl<H: Demote, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F> {
+impl<H: Scalar, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F> {
     fn n(&self) -> usize {
         self.factor.n()
     }
@@ -219,8 +219,11 @@ impl<H: Demote, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F>
     fn solve_transpose(&self, b: &[H]) -> Result<Vec<H>, RslabError> {
         through_low(b, |b| self.factor.solve_transpose(b))
     }
-    /// Mixed-precision iterative refinement: residuals against `a` in `H`,
+    /// Mixed-precision iterative refinement: residuals against `a` (plus the
+    /// factor's pivot floors for [`RefineSystem::Factored`]) in `H`,
     /// corrections from the low-precision factor.
+    ///
+    /// [`RefineSystem::Factored`]: crate::RefineSystem::Factored
     fn solve_refined(
         &self,
         a: &dyn crate::refine::RefineOperator<H>,
@@ -228,7 +231,8 @@ impl<H: Demote, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F>
         policy: &crate::refine::RefinePolicy,
     ) -> Result<(Vec<H>, crate::refine::RefineOutcome), RslabError> {
         let mut x = Factorization::solve(self, b)?;
-        let outcome = crate::refine::refine_in_place(a, b, &mut x, policy, |r| {
+        let floors = Factorization::<H>::perturbations(self);
+        let outcome = crate::refine::refine_in_place(a, &floors, b, &mut x, policy, |r| {
             Factorization::solve(self, r)
         })?;
         Ok((x, outcome))
@@ -238,6 +242,11 @@ impl<H: Demote, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F>
     }
     fn n_perturbed(&self) -> usize {
         self.factor.n_perturbed()
+    }
+    /// The low-precision factor's floors, promoted.
+    fn perturbations(&self) -> std::borrow::Cow<'_, [crate::refine::PivotFloor<H>]> {
+        let floors = self.factor.perturbations();
+        floors.iter().map(|&f| f.promote()).collect()
     }
     /// The determinant of the demoted matrix, to the low precision.
     fn log_det(&self) -> Result<(H, f64), RslabError> {
@@ -327,6 +336,9 @@ pub trait Factorization<T: Scalar>: Preconditioner<T> {
     fn factor_nnz(&self) -> usize;
     /// Pivots lifted by the static regularization (0 for an exact factor).
     fn n_perturbed(&self) -> usize;
+    /// The pivot floors `E`: the factor is of `A + E` (see
+    /// [`LuSolver::perturbations`](crate::LuSolver::perturbations)).
+    fn perturbations(&self) -> std::borrow::Cow<'_, [crate::refine::PivotFloor<T>]>;
     /// The determinant of `A` as `(phase, log|det A|)`; refused for a
     /// statically perturbed factor.
     fn log_det(&self) -> Result<(T, f64), RslabError>;

@@ -267,8 +267,8 @@ pub fn gmres_plain(
     x0: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
     let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pat.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pat.operator::<T>(vector(data, "data")?)?;
         gmres::<T, _>(
             py,
             &a,
@@ -303,8 +303,8 @@ pub fn gmres_block_plain(
     x0: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
     let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pat.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pat.operator::<T>(vector(data, "data")?)?;
         gmres_block::<T, _>(
             py,
             &a,
@@ -336,8 +336,8 @@ pub fn cocg_plain(
     maxit: usize,
 ) -> PyResult<PyObject> {
     let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pat.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pat.operator::<T>(vector(data, "data")?)?;
         cocg::<T, _>(py, &a, &NoPreconditioner, b, tol, maxit)
     })
 }
@@ -360,8 +360,8 @@ pub fn cocr_plain(
     maxit: usize,
 ) -> PyResult<PyObject> {
     let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |d: T| {
-        let a = pat.general::<T>(d)?;
+    with_dtype!(data, |T| {
+        let a = pat.operator::<T>(vector(data, "data")?)?;
         cocr::<T, _>(py, &a, &NoPreconditioner, b, tol, maxit)
     })
 }

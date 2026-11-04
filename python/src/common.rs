@@ -95,26 +95,27 @@ macro_rules! with_dtype_name {
 pub(crate) use with_dtype_name;
 
 /// Run `$body` with `$T` bound to the scalar type of the 1-D NumPy array
-/// `$data` and `$d` to its contents (copied into a Rust-owned `Vec`, so the
-/// body may release the GIL).
+/// `$data` (the array itself is not read).
 macro_rules! with_dtype {
-    ($data:expr, |$d:ident : $T:ident| $body:block) => {{
+    ($data:expr, |$T:ident| $body:block) => {{
         let data: &::pyo3::Bound<'_, ::pyo3::PyAny> = $data;
-        if let Ok(arr) = data.extract::<::numpy::PyReadonlyArray1<f64>>() {
+        if data.extract::<::numpy::PyReadonlyArray1<f64>>().is_ok() {
             type $T = f64;
-            let $d: Vec<$T> = arr.as_slice()?.to_vec();
             $body
-        } else if let Ok(arr) = data.extract::<::numpy::PyReadonlyArray1<$crate::common::C64>>() {
+        } else if data
+            .extract::<::numpy::PyReadonlyArray1<$crate::common::C64>>()
+            .is_ok()
+        {
             type $T = $crate::common::C64;
-            let $d: Vec<$T> = arr.as_slice()?.to_vec();
             $body
-        } else if let Ok(arr) = data.extract::<::numpy::PyReadonlyArray1<f32>>() {
+        } else if data.extract::<::numpy::PyReadonlyArray1<f32>>().is_ok() {
             type $T = f32;
-            let $d: Vec<$T> = arr.as_slice()?.to_vec();
             $body
-        } else if let Ok(arr) = data.extract::<::numpy::PyReadonlyArray1<$crate::common::C32>>() {
+        } else if data
+            .extract::<::numpy::PyReadonlyArray1<$crate::common::C32>>()
+            .is_ok()
+        {
             type $T = $crate::common::C32;
-            let $d: Vec<$T> = arr.as_slice()?.to_vec();
             $body
         } else {
             Err($crate::common::unsupported_dtype())
@@ -184,74 +185,163 @@ impl Pattern {
         Ok(())
     }
 
-    /// The value array for this pattern from either a value array (in the
-    /// pattern's order) or a SciPy sparse matrix with the same pattern: the
-    /// matrix is reduced to its lower triangle (`lower`) or taken whole,
-    /// sorted and summed like at analysis time, and its pattern is checked
-    /// against this one entry by entry before its values are used.
-    pub fn values_of<'py>(
-        &self,
-        py: Python<'py>,
-        obj: &Bound<'py, PyAny>,
-        lower: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        if !obj.hasattr("indptr")? {
-            return Ok(obj.clone());
-        }
-        let rslab = py.import_bound("rslab")?;
-        let prep = rslab.getattr(if lower { "_lower_csc" } else { "_full_csc" })?;
-        let m = prep.call1((obj,))?;
-        let shape: (usize, usize) = m.getattr("shape")?.extract()?;
-        if shape.0 != self.n || shape.1 != self.n {
-            return Err(PyValueError::new_err(format!(
-                "matrix is {}x{}, the analyzed pattern is {}x{}",
-                shape.0, shape.1, self.n, self.n
-            )));
-        }
-        let indptr: PyReadonlyArray1<i64> = m
-            .getattr("indptr")?
-            .call_method1("astype", ("int64",))?
-            .extract()?;
-        let indices: PyReadonlyArray1<i64> = m
-            .getattr("indices")?
-            .call_method1("astype", ("int64",))?
-            .extract()?;
-        let (ip, ix) = (indptr.as_slice()?, indices.as_slice()?);
-        let same = ip.len() == self.col_ptr.len()
-            && ix.len() == self.row_idx.len()
-            && ip.iter().zip(&self.col_ptr).all(|(&a, &b)| a as usize == b)
-            && ix.iter().zip(&self.row_idx).all(|(&a, &b)| a as usize == b);
-        if !same {
-            return Err(PyValueError::new_err(
-                "the matrix has a different sparsity pattern than the one that was analyzed (same positions, any values, are required; re-analyze for a new pattern)",
-            ));
-        }
-        m.getattr("data")
-    }
-
+    /// The matrix of `values` on this pattern, unchecked: the core validates
+    /// what it analyzes or factors.
     pub fn csc<T: Scalar>(&self, values: Vec<T>) -> PyResult<rslab::CscMatrix<T>> {
         self.check_values(values.len())?;
-        let m = rslab::CscMatrix {
+        Ok(rslab::CscMatrix {
             n: self.n,
             col_ptr: self.col_ptr.clone(),
             row_idx: self.row_idx.clone(),
             values,
-        };
-        m.validate().map_err(map_err)?;
-        Ok(m)
+        })
     }
 
+    /// [`csc`](Self::csc) for a general matrix.
     pub fn general<T: Scalar>(&self, values: Vec<T>) -> PyResult<rslab::GeneralCsc<T>> {
         self.check_values(values.len())?;
-        let m = rslab::GeneralCsc {
+        Ok(rslab::GeneralCsc {
             n: self.n,
             col_ptr: self.col_ptr.clone(),
             row_idx: self.row_idx.clone(),
             values,
-        };
+        })
+    }
+
+    /// A Krylov operator of `values` on this pattern: validated here, since
+    /// the core applies an operator without a check of its own.
+    pub fn operator<T: Scalar>(&self, values: Vec<T>) -> PyResult<rslab::GeneralCsc<T>> {
+        let m = self.general(values)?;
         m.validate().map_err(map_err)?;
         Ok(m)
     }
+}
+
+/// The values a factorization reads on the analyzed pattern `(col_ptr,
+/// row_idx)`: a value array in the pattern's order, or a SciPy matrix with
+/// the pattern, sorted and summed like at analysis time and its lower
+/// triangle taken (`lower`) or the whole.
+pub struct Values<'py, 'p> {
+    data: Bound<'py, PyAny>,
+    /// `(indptr, indices)` of a matrix; none for a value array.
+    index: Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>,
+    col_ptr: &'p [usize],
+    row_idx: &'p [usize],
+    lower: bool,
+}
+
+impl<'py, 'p> Values<'py, 'p> {
+    pub fn of(
+        py: Python<'py>,
+        obj: &Bound<'py, PyAny>,
+        col_ptr: &'p [usize],
+        row_idx: &'p [usize],
+        lower: bool,
+    ) -> PyResult<Self> {
+        let mut values = Self {
+            data: obj.clone(),
+            index: None,
+            col_ptr,
+            row_idx,
+            lower,
+        };
+        if !obj.hasattr("indptr")? {
+            return Ok(values);
+        }
+        let m = py
+            .import_bound("rslab")?
+            .getattr("_full_csc")?
+            .call1((obj,))?;
+        let shape: (usize, usize) = m.getattr("shape")?.extract()?;
+        let n = col_ptr.len() - 1;
+        if shape != (n, n) {
+            return Err(PyValueError::new_err(format!(
+                "matrix is {}x{}, the analyzed pattern is {n}x{n}",
+                shape.0, shape.1
+            )));
+        }
+        values.data = m.getattr("data")?;
+        values.index = Some((m.getattr("indptr")?, m.getattr("indices")?));
+        Ok(values)
+    }
+
+    /// The value array, whose dtype is the factorization's.
+    pub fn data(&self) -> &Bound<'py, PyAny> {
+        &self.data
+    }
+
+    /// The values in the pattern's order: the value array (its length the
+    /// caller's to check), or the matrix's entries column by column, each
+    /// column checked against the pattern as it is copied (one pass).
+    pub fn read<T: Element + Copy>(&self) -> PyResult<Vec<T>> {
+        let Some((indptr, indices)) = &self.index else {
+            return vector::<T>(&self.data, "data");
+        };
+        let data: PyReadonlyArray1<T> = self
+            .data
+            .extract()
+            .map_err(|_| PyValueError::new_err("data dtype does not match the factor dtype"))?;
+        let data = data.as_slice()?;
+        let (col_ptr, row_idx, lower) = (self.col_ptr, self.row_idx, self.lower);
+        macro_rules! try_index {
+            ($I:ty) => {
+                if let (Ok(ip), Ok(ix)) = (
+                    indptr.extract::<PyReadonlyArray1<$I>>(),
+                    indices.extract::<PyReadonlyArray1<$I>>(),
+                ) {
+                    let (ip, ix) = (ip.as_slice()?, ix.as_slice()?);
+                    return gather(ip, ix, data, col_ptr, row_idx, lower).ok_or_else(|| {
+                        PyValueError::new_err(
+                            "the matrix has a different sparsity pattern than the one that was analyzed (same positions, any values, are required; re-analyze for a new pattern)",
+                        )
+                    });
+                }
+            };
+        }
+        try_index!(i32);
+        try_index!(i64);
+        Err(PyValueError::new_err(
+            "indptr and indices must both be int32 or both int64",
+        ))
+    }
+}
+
+/// The values of the canonical CSC matrix `(ip, ix, data)` (each column's
+/// rows from the diagonal down with `lower`) in the order of the pattern
+/// `(col_ptr, row_idx)`, or none if its pattern is another.
+fn gather<I: CscIndex, T: Copy>(
+    ip: &[I],
+    ix: &[I],
+    data: &[T],
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    lower: bool,
+) -> Option<Vec<T>> {
+    if ip.len() != col_ptr.len() || ix.len() != data.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(row_idx.len());
+    for (j, (p, want)) in ip.windows(2).zip(col_ptr.windows(2)).enumerate() {
+        let (start, end) = (p[0].to_usize()?, p[1].to_usize()?);
+        let col = ix.get(start..end)?;
+        let skip = if lower {
+            let diag = I::from_usize(j)?;
+            col.partition_point(|&r| r < diag)
+        } else {
+            0
+        };
+        let want = &row_idx[want[0]..want[1]];
+        if col.len() - skip != want.len()
+            || col[skip..]
+                .iter()
+                .zip(want)
+                .any(|(&r, &w)| r.to_usize() != Some(w))
+        {
+            return None;
+        }
+        out.extend_from_slice(&data[start + skip..end]);
+    }
+    Some(out)
 }
 
 /// A 1-D right-hand side of the factor's scalar type, copied out (strided
@@ -260,7 +350,10 @@ pub fn vector<T: Element + Clone>(b: &Bound<'_, PyAny>, what: &str) -> PyResult<
     let arr: PyReadonlyArray1<T> = b.extract().map_err(|_| {
         PyValueError::new_err(format!("{what} dtype does not match the factor dtype"))
     })?;
-    Ok(arr.as_array().iter().cloned().collect())
+    Ok(match arr.as_slice() {
+        Ok(s) => s.to_vec(),
+        Err(_) => arr.as_array().iter().cloned().collect(),
+    })
 }
 
 /// A 2-D `n x nrhs` block of the factor's scalar type as `(n, nrhs, column-major data)`.
@@ -407,6 +500,8 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     let num = PyDict::new_bound(py);
     num.set_item("perturbed", d.numeric.perturbed)?;
     num.set_item("two_by_two", d.numeric.two_by_two)?;
+    num.set_item("delayed", d.numeric.delayed)?;
+    num.set_item("forced", d.numeric.forced)?;
     num.set_item("min_pivot", d.numeric.min_pivot)?;
     num.set_item("inertia", d.numeric.inertia)?;
     out.set_item("numeric", num)?;

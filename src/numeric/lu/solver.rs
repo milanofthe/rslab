@@ -5,8 +5,8 @@ use super::factor::factor_general_lu_numeric;
 use super::factors::LuPivots;
 use super::structure::LuStructure;
 use crate::constants::{
-    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY,
-    LU_INPUT_BUILD_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
+    IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY, LU_DELAY_ALLOWANCE, LU_INPUT_BUILD_BYTES_PER_COL,
+    LU_INPUT_SCALING_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
     LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 
@@ -31,7 +31,8 @@ use std::sync::Mutex;
 /// row_idx)`, `B` the pattern of `a` with row `r` renamed `row_map[r]` (the
 /// matching's row permutation, applied on the fly). The symmetric analysis
 /// needs a structurally symmetric pattern so the elimination tree carries
-/// fill for both `L` and `U`.
+/// fill for both `L` and `U`. The buckets are compacted in place, so the
+/// pattern is built in one buffer of an index per entry of `a`.
 fn symmetrized_lower_pattern<T: Scalar>(
     a: &GeneralCsc<T>,
     row_map: Option<&[usize]>,
@@ -81,12 +82,15 @@ fn symmetrized_lower_pattern<T: Scalar>(
     });
     let mut col_ptr = Vec::with_capacity(n + 1);
     col_ptr.push(0);
-    let mut row_idx = Vec::with_capacity(start[n]);
+    let mut len = 0;
     for j in 0..n {
-        row_idx.extend_from_slice(&scattered[start[j]..start[j] + kept[j]]);
-        col_ptr.push(row_idx.len());
+        scattered.copy_within(start[j]..start[j] + kept[j], len);
+        len += kept[j];
+        col_ptr.push(len);
     }
-    (col_ptr, row_idx)
+    scattered.truncate(len);
+    scattered.shrink_to_fit();
+    (col_ptr, scattered)
 }
 
 /// Whether the row matching is needed: some column's diagonal entry is
@@ -147,8 +151,8 @@ pub struct LuSymbolic {
     /// and walking every node's updaters per call is expensive).
     pub(super) est_cache: Mutex<Vec<((usize, bool), crate::diagnostics::MemoryEstimate)>>,
     /// The split permuted input's program ([`InputProgram::general`](crate::numeric::supernodal::InputProgram)), built at the first
-    /// factorization: every (re)factorization reduces to one linear values
-    /// scatter (row matching and equilibration applied on the way).
+    /// factorization: every (re)factorization reads the values where they are
+    /// through it (row matching and equilibration applied on the way).
     pub(super) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
     /// The exact structures of `L` and `U`, tighter than the analysis's
     /// symmetric one on an unsymmetric pattern.
@@ -157,8 +161,8 @@ pub struct LuSymbolic {
 
 impl LuSymbolic {
     /// Heap bytes this analysis holds: the ordering, the supernodes, the
-    /// permuted pattern and, once a factorization has built them, the
-    /// schedule and the input program every later factorization reuses.
+    /// schedule, the exact structures and, once a factorization has built
+    /// it, the input program every later factorization reuses.
     /// The analysis stays alive while it is factored, so these bytes are part
     /// of every factorization's footprint.
     pub fn heap_bytes(&self) -> u64 {
@@ -192,7 +196,7 @@ impl LuSymbolic {
         let nnz = a.row_idx.len();
         if n == 0 {
             return Ok(LuSymbolic {
-                symb: analyze_with(0, &[0], &[], opts)?,
+                symb: analyze_with(crate::symbolic::full_pattern(0, &[0], &[])?, 0, opts)?,
                 n: 0,
                 nnz: 0,
                 matching: None,
@@ -207,8 +211,10 @@ impl LuSymbolic {
         // MC64 row matching: analyze the row-permuted matrix `B` whose
         // diagonal carries the matched entries, where the diagonal of `A`
         // cannot carry the pivots itself.
-        let matching = if opts.matching.enabled
-            && diagonal_needs_matching(a, opts.matching.negligible_diagonal)
+        // Delayed pivoting pairs with the matching on every column.
+        let matching = if opts.pivoting.delayed
+            || (opts.matching.enabled
+                && diagonal_needs_matching(a, opts.matching.negligible_diagonal))
         {
             let cache = crate::logging::timed(
                 || "lu analyze: matching".into(),
@@ -237,16 +243,19 @@ impl LuSymbolic {
         } else {
             None
         };
-        let (col_ptr, row_idx) = crate::logging::timed(
+        // The lower triangle lives only until the full pattern is built.
+        let (pattern, lower_nnz) = crate::logging::timed(
             || "lu analyze: symmetrized pattern".into(),
             || {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
-                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
-                    symmetrized_lower_pattern(a, row_map.as_deref())
-                })
+                let (col_ptr, row_idx) =
+                    crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
+                        symmetrized_lower_pattern(a, row_map.as_deref())
+                    });
+                crate::symbolic::full_pattern(n, &col_ptr, &row_idx).map(|p| (p, row_idx.len()))
             },
-        );
-        let symb = analyze_with(n, &col_ptr, &row_idx, opts)?;
+        )?;
+        let symb = analyze_with(pattern, lower_nnz, opts)?;
         let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
             (Some((sym, _)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
@@ -391,7 +400,7 @@ impl LuSymbolic {
         (
             PanelFactor<T>,
             PanelFactor<T>,
-            LuPivots,
+            LuPivots<T>,
             usize,
             crate::diagnostics::Diagnostics,
             SolverSettings,
@@ -403,22 +412,32 @@ impl LuSymbolic {
             crate::numeric::supernodal::analysis::auto_threads(&self.symb, &estimate, cap)
         });
         let opts = opts.pinned(resolved_threads);
-        let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
+        let mut warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
         for w in &warnings {
             crate::logging::warn(&format!("lu settings: {w}"));
         }
         let t = crate::clock::Instant::now();
-        let numeric = factor_general_lu_numeric(self, a, &opts, storage, pools)?;
+        let growth = super::factor::delay_growth(&opts);
+        let numeric = factor_general_lu_numeric(self, a, &opts, growth, storage, pools)?;
         let factor_ms = crate::clock::ms(t.elapsed());
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
+        let (delayed, forced) = (numeric.delayed, numeric.forced);
+        if numeric.delays_dropped {
+            warnings.push(format!(
+                "delayed pivots exceed their allowance (LU_DELAY_ALLOWANCE = {LU_DELAY_ALLOWANCE}); \
+                 factored without delays"
+            ));
+        }
         let (l, ut, factors) = numeric.into_parts();
         let mut decisions = self.symb.decisions(self.requested_ordering);
-        decisions.scaling = if self.matching.is_some() {
-            "Mc64RowMatching".to_string()
-        } else {
-            "TwoSidedRowCol".to_string()
-        };
+        decisions.scaling = match (&self.matching, &opts.scaling) {
+            (Some(_), _) => "Mc64RowMatching",
+            (None, crate::scaling::ScalingStrategy::InfNorm) => "TwoSidedRuiz",
+            (None, crate::scaling::ScalingStrategy::Identity) => "Identity",
+            (None, _) => "TwoSidedRowCol",
+        }
+        .to_string();
         decisions.method = "LeftLooking".to_string();
         let mut diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
@@ -428,11 +447,13 @@ impl LuSymbolic {
             estimate: Some(estimate),
             decisions,
             numeric: crate::diagnostics::NumericReport {
-                perturbed: factors.n_perturbed,
+                perturbed: factors.floors.len(),
                 two_by_two: None,
                 inertia: None,
                 // from the factor the solver holds, see `diagnostics`
                 min_pivot: None,
+                delayed: Some(delayed),
+                forced: Some(forced),
             },
             warnings,
             ..Default::default()
@@ -575,27 +596,46 @@ impl LuSymbolic {
         else {
             return plan;
         };
+        let st = &self.structure;
         // After the schedule above is built: it is part of the analysis.
         plan.analysis_bytes = self.heap_bytes();
         let vb = std::mem::size_of::<T>();
         let k = opts.kernel().k;
-        let st = &self.structure;
         let (n, nnz, ns) = (sym.n, self.nnz, sym.supernodes.len());
         let w = |s: usize| sym.supernodes[s].ncol;
         let widths: Vec<usize> = (0..ns).map(w).collect();
         let off_l: Vec<usize> = (0..ns).map(|s| st.rows_l(s).len() - w(s)).collect();
         let off_u: Vec<usize> = (0..ns).map(|s| st.cols_u(s).len() - w(s)).collect();
-        let panels: usize = (0..ns)
-            .map(|s| (2 * w(s) + off_l[s] + off_u[s]) * w(s))
-            .sum();
+        // The arenas' slots, and with delayed pivots the values they may add
+        // over them (`delay`): the grown fronts' buffers while the forest is
+        // factored, the factor's growth after it.
+        let delay_growth = super::factor::delay_growth(opts);
+        let (l_slots, u_slots) = super::factor::lu_slots(sym, st);
+        let allowance = super::factor::delay_allowance(&l_slots, &u_slots, delay_growth);
+        let panels: usize = l_slots
+            .iter()
+            .chain(&u_slots)
+            .map(|&(v, _)| v)
+            .sum::<usize>()
+            + allowance;
         // the same panels packed as the solve plans hold them
         let packed: usize = (0..ns)
             .map(|s| {
                 use crate::numeric::supernodal::solve::packed_len;
                 packed_len(w(s), off_l[s]) + packed_len(w(s), off_u[s])
             })
-            .sum();
-        let rows: usize = off_l.iter().sum::<usize>() + off_u.iter().sum::<usize>();
+            .sum::<usize>()
+            + allowance;
+        let rows: usize = l_slots.iter().chain(&u_slots).map(|&(_, m)| m).sum();
+        // With delayed pivots, every supernode's record may hold its rows and
+        // columns past its pivots.
+        let passing: usize = if delay_growth > 0.0 {
+            (0..ns)
+                .map(|s| st.rows_l(s).len() + st.cols_u(s).len())
+                .sum()
+        } else {
+            0
+        };
         let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
         let parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
         use crate::numeric::supernodal::solve::layout_size;
@@ -614,14 +654,15 @@ impl LuSymbolic {
             &opts.solve,
             cores,
         );
-        // The input program the first factorization keeps (two index arrays
-        // and the positions, two pointer arrays), and the peak of its build.
+        // The input program the first factorization keeps (the indices and
+        // the entries of `A` they read, two pointer arrays), and the peak of
+        // its build.
         let (growth, growth_build) = if self.input.get().is_some() {
             (0, 0)
         } else {
             (
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + 2 * WORD_BYTES * (n + 1),
-                INPUT_BUILD_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
+                INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
         // Held by the factor: the `L` and `U^T` panels (packed by the solve
@@ -634,12 +675,13 @@ impl LuSymbolic {
                 + WORD_BYTES * ns
         };
         let factor = factor_with(packed);
-        // While the forest is factored: the scalings, the permuted values,
-        // both arenas, the emit cells (refcounts, offsets, panel records,
+        // While the forest is factored: the scalings (by `A`'s and by
+        // elimination index), both arenas, the emit cells (refcounts, offsets, panel records,
         // positions and permutations) and the forest's lists, every node's
         // row permutation and emitted rows until the end, the workers'
         // scratch and the heaviest set of nodes running at once.
-        let cells = ns * LU_NODE_CELL_BYTES + LU_NODE_CELL_BYTES_PER_COL * n;
+        let cells =
+            ns * LU_NODE_CELL_BYTES + LU_NODE_CELL_BYTES_PER_COL * n + IDX32_BYTES * passing;
         let slots =
             WORD_BYTES * (0..ns).map(|s| st.rows_l(s).len()).sum::<usize>() + IDX32_BYTES * rows;
         let scratch: Vec<(u64, usize, usize)> = (0..ns)
@@ -651,7 +693,7 @@ impl LuSymbolic {
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LU_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during = (2 * WORD_BYTES * n + vb * nnz + vb * panels + cells + slots) as u64
+        let during = (LU_INPUT_SCALING_BYTES_PER_COL * n + vb * panels + cells + slots) as u64
             + workers
             + pooled
             + nodes;
@@ -680,7 +722,7 @@ impl LuSymbolic {
 /// [`LuSolver::factor`].
 #[derive(Clone)]
 pub struct LuSolver<T> {
-    factors: LuPivots,
+    factors: LuPivots<T>,
     /// `L` and `U^T` (the panels, their only storage) with the tree schedule
     /// of [`crate::numeric::supernodal::solve`]; `factors` carries the
     /// permutations, scalings and counters with empty CSC arrays.
@@ -736,11 +778,6 @@ impl<T: Scalar> LuSolver<T> {
         self.nnz
     }
 
-    /// Number of statically perturbed pivots (preconditioner mode).
-    pub fn n_perturbed(&self) -> usize {
-        self.factors.n_perturbed
-    }
-
     /// The matrix dimension.
     pub fn n(&self) -> usize {
         self.factors.n
@@ -759,6 +796,10 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
     }
     fn works(&self) -> &crate::numeric::direct::WorkPool<T> {
         &self.works
+    }
+
+    fn perturbations(&self) -> &[crate::PivotFloor<T>] {
+        &self.factors.floors
     }
 
     /// `P_r D_r A D_c P_c^T = L U`: `det A` is the product of `U`'s

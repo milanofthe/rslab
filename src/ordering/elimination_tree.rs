@@ -33,22 +33,6 @@ impl EliminationTree {
         })
     }
 
-    /// The elimination tree of the **permuted** pattern `P^T A P` (with
-    /// `perm[new] = old` and `perm_inv[old] = new`), computed without
-    /// materializing the permuted pattern: column `new` reads the original
-    /// column `perm[new]` and maps each row through `perm_inv` on the fly.
-    /// The etree is a unique function of the pattern, so this is identical to
-    /// `from_pattern(&permute_pattern(pattern, perm))` at one O(nnz) pattern
-    /// build less.
-    pub fn from_permuted_pattern(pattern: &CscPattern, perm: &[usize], perm_inv: &[usize]) -> Self {
-        Self::from_cols(pattern.n, |jn| {
-            let j = perm[jn];
-            pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]]
-                .iter()
-                .map(|&r| perm_inv[r])
-        })
-    }
-
     /// Liu's union-find etree construction over an abstract column-entry view:
     /// `cols(j)` yields the row indices of column `j` (any order; entries
     /// `>= j` are skipped). The result is a unique function of the pattern.

@@ -58,13 +58,14 @@ pub(crate) struct Span {
 
 impl CmodPlan {
     /// The plan of supernode `s` over its `updaters`; `lists(k)` gives an
-    /// updater's full `L` row and `U` column lists (own columns first). With
-    /// `count_u` the `U12` updates count as work too (the LU kernel).
+    /// updater's pivot count and its off-block `L` row and `U` column lists
+    /// (the rows and columns of its panel past its pivots). With `count_u`
+    /// the `U12` updates count as work too (the LU kernel).
     pub fn new<'a>(
         sym: &crate::symbolic::SymbolicFactorization,
         s: usize,
         updaters: &[Li],
-        lists: impl Fn(usize) -> (&'a [Li], &'a [Li]),
+        lists: impl Fn(usize) -> (usize, &'a [Li], &'a [Li]),
         count_u: bool,
         k: &crate::KernelSettings,
     ) -> Self {
@@ -86,9 +87,7 @@ impl CmodPlan {
         let (mut flops, mut lsum, mut usum): (usize, usize, usize) = (0, 0, 0);
         for &k in updaters {
             let k = k as usize;
-            let nck = sym.supernodes[k].ncol;
-            let (lk, uk) = lists(k);
-            let (ol, ou) = (&lk[nck..], &uk[nck..]);
+            let (nck, ol, ou) = lists(k);
             let (l, u) = (landing(ol), landing(ou));
             // `L` rows from the landing range down times the `U` columns landing
             // here, and (LU) the landing `L` rows times the `U` columns past here.

@@ -79,6 +79,107 @@ fn lu_matching_bounds_pivot_growth() {
     let s0 = LuSolver::factor(&a, &opts.with_matching(false));
     assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
 }
+
+/// Rows and columns scaled independently over twelve decades, the diagonal
+/// kept (the scale disparity of a saddle `D_r A D_c` whose current and charge
+/// rows and columns carry unrelated scales): the one-step equilibration
+/// leaves rows and columns far below the unit scale, their pivots fall under
+/// the static floor and the factor misses its matrix; the iterated (Ruiz)
+/// equilibration brings every row and column maximum to one, floors no pivot
+/// and solves to roundoff. Under the row matching the matching's scaling
+/// already does this, and the equilibration setting changes nothing.
+#[test]
+fn iterated_equilibration_lifts_the_floored_pivots() {
+    use crate::scaling::ScalingStrategy;
+    use crate::ZeroPivotAction;
+    let m = 40usize;
+    let n = m * m;
+    let dec = 13usize;
+    let rs = |i: usize| 10f64.powi(((i * 7919) % dec) as i32 - (dec / 2) as i32);
+    let cs = |j: usize| 10f64.powi(((j * 104729) % dec) as i32 - (dec / 2) as i32);
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..n {
+        let (x, y) = (j % m, j / m);
+        let mut push = |i: usize, val: f64| {
+            r.push(i);
+            c.push(j);
+            v.push(val * rs(i) * cs(j));
+        };
+        push(j, 4.0);
+        if x > 0 {
+            push(j - 1, -1.4);
+        }
+        if x + 1 < m {
+            push(j + 1, -0.6);
+        }
+        if y > 0 {
+            push(j - m, -1.0);
+        }
+        if y + 1 < m {
+            push(j + m, -1.0);
+        }
+    }
+    let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
+    let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
+    // componentwise backward error: the rows span twelve decades
+    let omega = |x: &[f64]| {
+        let mut res = b.clone();
+        let mut d: Vec<f64> = b.iter().map(|v| v.abs()).collect();
+        for j in 0..n {
+            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+                res[a.row_idx[k]] -= a.values[k] * x[j];
+                d[a.row_idx[k]] += a.values[k].abs() * x[j].abs();
+            }
+        }
+        res.iter()
+            .zip(&d)
+            .map(|(ri, di)| if *di > 0.0 { ri.abs() / di } else { 0.0 })
+            .fold(0.0, f64::max)
+    };
+    let opts = SolverSettings::preconditioner(1e-6)
+        .with_threads(1)
+        .with_matching(false);
+    assert!(matches!(
+        opts.pivoting.on_zero_pivot,
+        ZeroPivotAction::PerturbToEps { .. }
+    ));
+    let one = LuSolver::factor(&a, &opts).unwrap();
+    assert_eq!(one.diagnostics().decisions.scaling, "TwoSidedRowCol");
+    let x1 = one.solve(&b).unwrap();
+    assert!(
+        one.perturbations().len() > 10,
+        "one step: {} floors",
+        one.perturbations().len()
+    );
+    assert!(omega(&x1) > 1e-3, "one step: backward error {}", omega(&x1));
+    let ruiz = LuSolver::factor(&a, &opts.clone().with_scaling(ScalingStrategy::InfNorm)).unwrap();
+    assert_eq!(ruiz.diagnostics().decisions.scaling, "TwoSidedRuiz");
+    assert!(ruiz.diagnostics().warnings.is_empty());
+    let x2 = ruiz.solve(&b).unwrap();
+    assert!(
+        ruiz.perturbations().is_empty(),
+        "iterated: {} floors",
+        ruiz.perturbations().len()
+    );
+    assert!(
+        omega(&x2) < 1e-11,
+        "iterated: backward error {}",
+        omega(&x2)
+    );
+    // the matching's scaling is the equilibration under the matching (made to
+    // run: every diagonal counts as missing)
+    let mut matched = opts.clone().with_matching(true);
+    matched.matching.negligible_diagonal = 2.0;
+    let sm = LuSolver::factor(&a, &matched).unwrap();
+    assert_eq!(sm.diagnostics().decisions.scaling, "Mc64RowMatching");
+    let xm = sm.solve(&b).unwrap();
+    let xr = LuSolver::factor(&a, &matched.with_scaling(ScalingStrategy::InfNorm))
+        .unwrap()
+        .solve(&b)
+        .unwrap();
+    assert_eq!(xm, xr);
+}
+
 use num_complex::Complex;
 
 fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
@@ -662,8 +763,9 @@ fn exact_structure_bounds_the_factor() {
         let opts = SolverSettings::default().with_matching(matching);
         let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
         assert_eq!(lusym.has_matching(), matching);
-        let num = factor_general_lu_numeric(&lusym, &a, &opts, None, &super::node::LuPools::new())
-            .unwrap();
+        let num =
+            factor_general_lu_numeric(&lusym, &a, &opts, 0.0, None, &super::node::LuPools::new())
+                .unwrap();
         let (sym, _) = lusym.symb.sym_and_levels().unwrap();
         let sched = lusym.symb.ll_schedule().unwrap();
         let st = &lusym.structure;
@@ -826,16 +928,16 @@ fn every_direct_solver_is_a_factorization() {
     }
 }
 
-/// The analysis keeps no permuted pattern once its schedule is built (a word
-/// per entry of `A + A^T`, the largest part of an analysis), and its
+/// The analysis keeps no pattern once its schedule is built (an index per
+/// entry of `A + A^T`, the largest part of an analysis), and its
 /// factorizations still solve.
 #[test]
-fn analysis_drops_the_permuted_pattern() {
+fn analysis_drops_the_pattern() {
     let a = unsymmetric_holes(600, 3, 7, false);
     let opts = SolverSettings::default();
     let lusym = LuSymbolic::analyze(&a, &opts).unwrap();
     let (sym, _) = lusym.symb.sym_and_levels().unwrap();
-    assert!(sym.permuted_pattern.col_ptr.is_empty() && sym.permuted_pattern.row_idx.is_empty());
+    assert!(sym.pattern.col_ptr.is_empty() && sym.pattern.row_idx.is_empty());
     let b: Vec<f64> = (0..a.n).map(|i| 1.0 + i as f64 / a.n as f64).collect();
     let x = lusym.factor(&a, &opts).unwrap().solve(&b).unwrap();
     let mut ax = vec![0.0f64; a.n];
@@ -848,4 +950,349 @@ fn analysis_drops_the_permuted_pattern() {
         .sqrt();
     let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
     assert!(rn < 1e-10 * bn, "residual {rn} against {bn}");
+}
+
+/// FNV-1a over everything an analysis decides: the ordering, the
+/// supernodes, the levels, the schedule and, for LU, the exact `L` and `U`
+/// structures and the row matching.
+#[cfg(feature = "matgen")]
+mod fingerprint {
+    use super::*;
+    use crate::numeric::supernodal::analysis::SupernodalAnalysis;
+
+    pub struct Fnv(pub u64);
+
+    impl Fnv {
+        pub fn new() -> Self {
+            Fnv(0xcbf2_9ce4_8422_2325)
+        }
+        pub fn mix(&mut self, x: u64) {
+            self.0 ^= x;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        pub fn all(&mut self, v: impl IntoIterator<Item = u64>) {
+            let mut len = 0u64;
+            for x in v {
+                self.mix(x);
+                len += 1;
+            }
+            self.mix(len);
+        }
+    }
+
+    pub fn analysis(h: &mut Fnv, symb: &SupernodalAnalysis) {
+        let Some(i) = &symb.inner else {
+            return h.mix(0);
+        };
+        let s = &i.sym;
+        h.all(s.perm.iter().map(|&x| x as u64));
+        h.all(s.perm_inv.iter().map(|&x| x as u64));
+        h.mix(s.factor_nnz as u64);
+        h.all(
+            format!("{:?} {:?}", s.resolved_method, s.resolved_amalgamation)
+                .bytes()
+                .map(u64::from),
+        );
+        for sn in &s.supernodes {
+            h.all([sn.first_col, sn.ncol, sn.nrow].map(|x| x as u64));
+            h.all(sn.children.iter().map(|&x| x as u64));
+        }
+        for lv in &i.by_level {
+            h.all(lv.iter().map(|&x| x as u64));
+        }
+        let sched = &i.ll_schedule;
+        for k in 0..s.supernodes.len() {
+            h.all(sched.rows(k).iter().map(|&x| u64::from(x)));
+            h.all(sched.updaters(k).iter().map(|&x| u64::from(x)));
+        }
+        h.all(sched.parent.iter().map(|&x| x as u64));
+        h.all(sched.leaves.iter().map(|&x| x as u64));
+    }
+
+    pub fn lu(s: &LuSymbolic) -> u64 {
+        let mut h = Fnv::new();
+        analysis(&mut h, &s.symb);
+        for k in 0..s.symb.n_supernodes() {
+            h.all(s.structure.rows_l(k).iter().map(|&x| u64::from(x)));
+            h.all(s.structure.cols_u(k).iter().map(|&x| u64::from(x)));
+        }
+        if let Some(m) = &s.matching {
+            h.all(m.row_of.iter().map(|&x| x as u64));
+        }
+        h.0
+    }
+
+    /// Two unknowns per point of `a`, coupled as their points are: groups
+    /// of indistinguishable vertices, ordered on the compressed graph.
+    pub fn pairs(a: &GeneralCsc<f64>) -> GeneralCsc<f64> {
+        let (mut col_ptr, mut row_idx) = (vec![0usize], Vec::new());
+        for j in 0..2 * a.n {
+            let c = j / 2;
+            for &i in &a.row_idx[a.col_ptr[c]..a.col_ptr[c + 1]] {
+                row_idx.extend([2 * i, 2 * i + 1]);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let values = vec![1.0; row_idx.len()];
+        GeneralCsc {
+            n: 2 * a.n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+}
+
+/// The analyses of a set of patterns, fingerprinted bit for bit against the
+/// ones recorded with release 1.8.0: a memory or speed change of the
+/// analysis must not change the ordering or the symbolic structure. The
+/// cases cover nested dissection (with and without the compressed graph),
+/// the race with dissection and its seed ensemble, minimum degree, a given
+/// permutation, the row matching, and a lower-triangle (LDL^T) input.
+#[cfg(feature = "matgen")]
+#[test]
+fn analyses_match_the_recorded_fingerprints() {
+    use crate::matgen::bem::near_field;
+    use crate::numeric::supernodal::analysis::analyze_with;
+    use crate::symbolic::OrderingMethod;
+    let near = near_field::<f64>(3000, 150, 0.3, 5);
+    let pairs = fingerprint::pairs(&near_field::<f64>(1500, 60, 0.3, 6));
+    let holes = unsymmetric_holes(2000, 4, 11, true);
+    let plain = SolverSettings::default().with_matching(false);
+    let nd = plain.clone().with_ordering(OrderingMethod::MetisND);
+    let mut raced = plain.clone();
+    raced.ordering.race.nd_min_n = 0;
+    raced.ordering.race.nd_min_work = 0;
+    raced.ordering.race.ensemble = true;
+    raced.ordering.race.ensemble_min_flops = 0;
+    let rev: Vec<usize> = (0..near.n).rev().collect();
+    let given = plain.clone().with_permutation(rev.into());
+    let lu = |a: &GeneralCsc<f64>, s: &SolverSettings| {
+        fingerprint::lu(&LuSymbolic::analyze(a, s).unwrap())
+    };
+    let lap = crate::matgen::stencil::laplacian::<f64>(&[14, 14, 14], &Default::default());
+    let lower = |s: &SolverSettings| {
+        let mut h = fingerprint::Fnv::new();
+        let full = crate::symbolic::full_pattern(lap.n, &lap.col_ptr, &lap.row_idx).unwrap();
+        fingerprint::analysis(&mut h, &analyze_with(full, lap.row_idx.len(), s).unwrap());
+        h.0
+    };
+    let got = [
+        ("near nd", lu(&near, &nd)),
+        ("near race", lu(&near, &raced)),
+        (
+            "near amd",
+            lu(&near, &plain.clone().with_ordering(OrderingMethod::Amd)),
+        ),
+        ("near given", lu(&near, &given)),
+        ("pairs nd", lu(&pairs, &nd)),
+        ("pairs auto", lu(&pairs, &plain)),
+        ("holes matched", lu(&holes, &SolverSettings::default())),
+        ("lower nd", lower(&nd)),
+        ("lower auto", lower(&plain)),
+    ];
+    let recorded: [u64; 9] = [
+        0xc21cc65510c53390,
+        0xf29a0fad01f31bd2,
+        0x45796e75dfbad397,
+        0xcf0f183af2ae0938,
+        0x57e5732a78bc2d0c,
+        0x5c7b1180d598aa78,
+        0x244615ac6d2b7bc9,
+        0x43c149ec7bdb6d74,
+        0x0ae0a86c6daeff63,
+    ];
+    let report: Vec<String> = got.iter().map(|(k, v)| format!("{k}: {v:#018x}")).collect();
+    assert_eq!(got.map(|(_, v)| v), recorded, "{report:#?}");
+}
+
+/// A matrix whose stable pivots lie off the diagonal: a `k x k` grid of
+/// unknowns coupled to their neighbours by entries of order one (unsymmetric
+/// values, random signs), the diagonal `diag` small at every other point
+/// and two elsewhere. A front can pivot such a column only on a coupling to
+/// a row it holds; a column whose couplings all lead to rows of its
+/// ancestors has no stable pivot in its front.
+fn off_diagonal_pivots(k: usize, diag: f64, seed: u64) -> GeneralCsc<f64> {
+    let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let n = k * k;
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..k {
+        for j in 0..k {
+            let p = i * k + j;
+            r.push(p);
+            c.push(p);
+            v.push(if (i + j) % 2 == 0 { diag } else { 2.0 });
+            for (di, dj) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+                let (ii, jj) = (i as i64 + di, j as i64 + dj);
+                if ii < 0 || jj < 0 || ii as usize >= k || jj as usize >= k {
+                    continue;
+                }
+                let x = next();
+                r.push(ii as usize * k + jj as usize);
+                c.push(p);
+                v.push(if x < 0.5 { -0.5 - x } else { x });
+            }
+        }
+    }
+    GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap()
+}
+
+fn delays_settings(on: bool) -> SolverSettings {
+    SolverSettings::default().with_delayed_pivots(on)
+}
+
+#[test]
+fn delayed_pivots_keep_the_factor_stable() {
+    let a = off_diagonal_pivots(24, 1e-9, 3);
+    let b: Vec<f64> = (0..a.n).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
+    let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let confined = LuSolver::factor(&a, &delays_settings(false)).unwrap();
+    let d = confined.diagnostics().numeric;
+    assert_eq!(d.delayed, Some(0));
+    let forced = d.forced.unwrap();
+    assert!(forced > 0, "the pivots of this matrix lie off their fronts");
+    let delayed = LuSolver::factor(&a, &delays_settings(true)).unwrap();
+    let d = delayed.diagnostics().numeric;
+    assert!(d.delayed.unwrap() > 0, "{d:?}");
+    assert!(d.forced.unwrap() < forced, "{d:?} against {forced} forced");
+    let x = delayed.solve(&b).unwrap();
+    let rel = resid(&a, &x, &b) / bnorm;
+    let x0 = confined.solve(&b).unwrap();
+    let rel0 = resid(&a, &x0, &b) / bnorm;
+    // (dense partial pivoting: 1e-11)
+    assert!(
+        rel < 1e-10 && rel < 1e-4 * rel0,
+        "residual {rel:.1e} with delays, {rel0:.1e} without"
+    );
+    // The transposed solve runs on the same factor.
+    let xt = delayed.solve_transpose(&b).unwrap();
+    let relt = transpose_residual(&a, &xt, &b) / bnorm;
+    assert!(relt < 1e-10, "transposed residual {relt:.1e}");
+}
+
+#[test]
+fn delayed_pivots_are_deterministic_and_refactor_bitwise() {
+    use crate::numeric::settings::Threads;
+    let a = off_diagonal_pivots(30, 1e-9, 5);
+    let b: Vec<f64> = (0..a.n).map(|i| (i % 5) as f64 - 2.0).collect();
+    let solve = |threads: usize| {
+        let s = delays_settings(true).with_threads(Threads::Fixed(threads));
+        let f = LuSolver::factor(&a, &s).unwrap();
+        (f.solve(&b).unwrap(), f.diagnostics().numeric.delayed)
+    };
+    let (x1, d1) = solve(1);
+    let (x4, d4) = solve(4);
+    assert!(d1.unwrap() > 0);
+    assert_eq!(d1, d4);
+    assert!(x1.iter().zip(&x4).all(|(p, q)| p.to_bits() == q.to_bits()));
+    // A refactorization in the buffers of a factor with delays: the same bits.
+    let s = delays_settings(true).with_threads(Threads::Fixed(4));
+    let sym = LuSymbolic::analyze(&a, &s).unwrap();
+    let mut f = sym.factor(&a, &s).unwrap();
+    sym.refactor(&a, &s, &mut f).unwrap();
+    let xr = f.solve(&b).unwrap();
+    assert!(xr.iter().zip(&x4).all(|(p, q)| p.to_bits() == q.to_bits()));
+}
+
+#[test]
+fn delayed_pivots_fit_the_memory_plan() {
+    use crate::numeric::settings::Threads;
+    let a = off_diagonal_pivots(30, 1e-9, 7);
+    let s = delays_settings(true).with_threads(Threads::Fixed(4));
+    let sym = LuSymbolic::analyze(&a, &s).unwrap();
+    let plan = sym.memory_plan::<f64>(&s, 1);
+    let f = sym.factor(&a, &s).unwrap();
+    assert!(f.diagnostics().numeric.delayed.unwrap() > 0);
+    assert!(
+        plan.factor_bytes >= f.heap_bytes(),
+        "{plan:?} {}",
+        f.heap_bytes()
+    );
+}
+
+#[test]
+fn delayed_pivots_in_complex_and_single_precision() {
+    use num_complex::Complex;
+    let a = off_diagonal_pivots(20, 1e-7, 9);
+    let z = |v: f64, i: usize| Complex::new(v, 0.25 * v * ((i % 3) as f64 - 1.0));
+    let ac = GeneralCsc {
+        n: a.n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: a.values.iter().enumerate().map(|(i, &v)| z(v, i)).collect(),
+    };
+    let b: Vec<Complex<f64>> = (0..a.n).map(|i| z(1.0 + (i % 4) as f64, i)).collect();
+    let f = LuSolver::factor(&ac, &delays_settings(true)).unwrap();
+    assert!(f.diagnostics().numeric.delayed.unwrap() > 0);
+    let x = f.solve(&b).unwrap();
+    assert!(resid(&ac, &x, &b) < 1e-10);
+    let a32 = GeneralCsc {
+        n: a.n,
+        col_ptr: a.col_ptr.clone(),
+        row_idx: a.row_idx.clone(),
+        values: a.values.iter().map(|&v| v as f32).collect(),
+    };
+    let b32: Vec<f32> = (0..a.n).map(|i| (i % 4) as f32 - 1.5).collect();
+    let conf = LuSolver::factor(&a32, &delays_settings(false)).unwrap();
+    let del = LuSolver::factor(&a32, &delays_settings(true)).unwrap();
+    let (r0, r1) = (
+        resid(&a32, &conf.solve(&b32).unwrap(), &b32),
+        resid(&a32, &del.solve(&b32).unwrap(), &b32),
+    );
+    assert!(
+        r1 < 0.1 * r0,
+        "f32 residual {r1:.1e} with delays, {r0:.1e} without"
+    );
+}
+
+#[test]
+fn delays_past_their_allowance_fall_back() {
+    let a = off_diagonal_pivots(24, 1e-9, 3);
+    let s = delays_settings(true);
+    let lusym = LuSymbolic::analyze(&a, &s).unwrap();
+    let pools = super::node::LuPools::new();
+    let with = factor_general_lu_numeric(&lusym, &a, &s, 1.0, None, &pools).unwrap();
+    assert!(with.delayed > 0 && !with.delays_dropped);
+    let dropped = factor_general_lu_numeric(&lusym, &a, &s, 1e-9, None, &pools).unwrap();
+    assert!(dropped.delays_dropped && dropped.delayed == 0);
+}
+
+#[test]
+fn delayed_pivots_carry_rows_beyond_the_structure() {
+    // The grid with one direction of every third coupling dropped: a
+    // structurally unsymmetric pattern, where the rows a delayed pivot
+    // carries may lie outside its parent's exact structure.
+    let g = off_diagonal_pivots(26, 1e-9, 11);
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..g.n {
+        for p in g.col_ptr[j]..g.col_ptr[j + 1] {
+            let i = g.row_idx[p];
+            if i < j && (i + j).is_multiple_of(3) {
+                continue;
+            }
+            r.push(i);
+            c.push(j);
+            v.push(g.values[p]);
+        }
+    }
+    let a = GeneralCsc::<f64>::from_triplets(g.n, &r, &c, &v).unwrap();
+    let b: Vec<f64> = (0..a.n).map(|i| ((i * 5 % 11) as f64) - 5.0).collect();
+    let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let confined = LuSolver::factor(&a, &delays_settings(false)).unwrap();
+    let delayed = LuSolver::factor(&a, &delays_settings(true)).unwrap();
+    let d = delayed.diagnostics().numeric;
+    assert!(d.delayed.unwrap() > 0 && d.forced == Some(0), "{d:?}");
+    let rel = resid(&a, &delayed.solve(&b).unwrap(), &b) / bnorm;
+    let rel0 = resid(&a, &confined.solve(&b).unwrap(), &b) / bnorm;
+    // (dense partial pivoting: 1e-9)
+    assert!(
+        rel < 1e-8 && rel < 1e-3 * rel0,
+        "residual {rel:.1e} with delays, {rel0:.1e} without"
+    );
 }

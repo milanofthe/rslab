@@ -13,7 +13,8 @@
 //!   is no delayed pivoting: a fully-summed block that is singular in exact
 //!   mode surfaces as [`RslabError::NumericallyRankDeficient`], and the
 //!   static-pivot mode ([`ZeroPivotAction`], the `preconditioner` settings)
-//!   lifts the pivot to the floor instead and reports it in `n_perturbed`.
+//!   lifts the pivot to the floor instead and reports it in
+//!   [`perturbations`](crate::LdltSolver::perturbations).
 //! * The global factor `L` is kept in supernodal panel form
 //!   (`PanelFactor`): each supernode's dense panel, once its last consumer
 //!   is done, is finished in place (off-block rows into elimination order,

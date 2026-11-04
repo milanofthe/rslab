@@ -170,6 +170,7 @@ macro_rules! plain_knobs {
 
 plain_knobs! {
     "pivot_threshold": f64 => pivoting.threshold;
+    "delayed_pivots": bool => pivoting.delayed;
     "matching": bool => matching.enabled;
     "matching_negligible_diagonal": f64 => matching.negligible_diagonal;
     "compress_max_ratio": f64 => ordering.compress_max_ratio;
@@ -262,7 +263,9 @@ plain_knobs! {
 /// preconditioner : float, optional
 ///     Static-pivot floor: a pivot with magnitude below it is lifted to it,
 ///     so the factorization never fails and produces the factor of a nearby
-///     ``A + E``. Recover accuracy with ``solve(b, refine=k)``. The floor
+///     ``A + E``. Recover accuracy with ``solve(b, refine=k)``, or solve
+///     ``A + E`` itself to working accuracy with
+///     ``solve(b, refine=k, system='factored')``. The floor
 ///     applies to the equilibrated matrix (entries of order one): ``1e-8``
 ///     (about ``sqrt(eps)``) lifts only pivots that vanish to working
 ///     precision; a larger floor also lifts genuine small pivots (those of
@@ -282,11 +285,22 @@ plain_knobs! {
 ///     Threshold partial pivoting of the LU path in ``[0, 1]`` (``1.0`` is
 ///     full partial pivoting). Ignored, and reported in the diagnostics, on
 ///     the LDL^T path.
+/// delayed_pivots : bool, default False
+///     Delayed pivoting of the LU path: a column none of whose fully-summed
+///     rows passes the threshold over the whole column moves to the parent
+///     front, and the analysis matches rows on every column (MC64). Where
+///     the delays would grow the factor past their allowance, the factor is
+///     computed without them and a warning says so.
+///     ``diagnostics()["numeric"]["delayed"]`` and ``["forced"]`` count the
+///     delayed pivots and those that failed the threshold and stayed.
 /// scaling : {'one_pass', 'inf_norm', 'mc64', 'identity'} or array, optional
-///     Symmetric equilibration before the LDL^T factorization: a named
-///     strategy, or a float array ``s`` of length ``n`` applying the
-///     external scaling ``diag(s) A diag(s)``. The LU path uses its own
-///     two-sided scaling and reports a set value.
+///     Equilibration before the factorization. LDL^T: the symmetric
+///     ``diag(s) A diag(s)``, a named strategy or a float array ``s`` of
+///     length ``n``. LU: the two-sided ``diag(r) A diag(c)``, ``'one_pass'``
+///     (the default, one step), ``'inf_norm'`` (iterated until every row and
+///     column maximum is one, for rows and columns of unrelated scale) or
+///     ``'identity'``; the symmetric ``'mc64'`` and an array are reported as
+///     ignored there, and under the LU's row matching the matching scales.
 /// matching : bool, default True
 ///     Maximum-product row matching (MC64) before the LU analysis, applied
 ///     where a diagonal entry is below ``matching_negligible_diagonal``

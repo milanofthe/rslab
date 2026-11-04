@@ -85,7 +85,9 @@ impl LlSchedule {
             "left-looking schedule requires n < 2^32"
         );
         // Row structures: own columns ++ sorted union of the column patterns'
-        // trailing rows and the children's off-diagonal rows.
+        // trailing rows and the children's off-diagonal rows. Column `j` of
+        // the permuted pattern is column `perm[j]` of the pattern, its rows
+        // mapped by `perm_inv`.
         let mut rs_off = Vec::with_capacity(nsuper + 1);
         rs_off.push(0usize);
         let mut rs: Vec<Li> = Vec::new();
@@ -95,8 +97,8 @@ impl LlSchedule {
             let own_last = snode.first_col + snode.ncol;
             trailing.clear();
             for j in snode.first_col..own_last {
-                for k in sym.permuted_pattern.col_ptr[j]..sym.permuted_pattern.col_ptr[j + 1] {
-                    let r = sym.permuted_pattern.row_idx[k];
+                for &r in sym.pattern.col(sym.perm[j]) {
+                    let r = sym.perm_inv[r as usize];
                     if r >= own_last {
                         trailing.push(r as Li);
                     }

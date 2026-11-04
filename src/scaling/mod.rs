@@ -27,6 +27,13 @@
 //! `x = D * (A_hat^-1 * (D b))`. The same vector is applied on both ends,
 //! not its inverse. The sparsity pattern is unaffected.
 //!
+//! ## Two-sided equilibration (LU)
+//!
+//! `twosided::equilibrate_general` turns the same strategy into row and
+//! column scalings `A_hat = D_r A D_c` of a general matrix: `OnePassInfNorm`
+//! (the default) one Knight-Ruiz step, `InfNorm` the step iterated (Ruiz
+//! 2001) until every row and column maximum is one, `Identity` none.
+//!
 //! ## Unsymmetric matching (LU)
 //!
 //! `mc64::compute_matching_general` computes a maximum-product
@@ -42,6 +49,9 @@ use crate::sparse::csc::CscMatrix;
 mod hungarian;
 mod infnorm;
 pub(crate) mod mc64;
+mod twosided;
+
+pub(crate) use twosided::equilibrate_general;
 
 /// One Knight-Ruiz equilibration step `d <- d / sqrt(m)`, guarded against
 /// overflow/underflow. Applies the update only when
@@ -95,12 +105,15 @@ pub(crate) fn inv_sqrt_scale_guarded(m: f64) -> f64 {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ScalingStrategy {
     /// Knight-Ruiz inf-norm iterative equilibration (the "iterative Ruiz"
-    /// arm of the equilibration knob). See `infnorm::compute_infnorm`.
+    /// arm of the equilibration knob). See `infnorm::compute_infnorm`; on the
+    /// LU path the two-sided form, every row and column maximum brought to one
+    /// (`twosided::equilibrate_general`).
     InfNorm,
     /// One-pass symmetric inf-norm equilibration `s_i = 1/sqrt(max_j |A_ij|)` (a
     /// single Knight-Ruiz step). The [`crate::SolverSettings`] default:
     /// cheapest, tolerates a zero diagonal, no iteration. See
-    /// `infnorm::compute_onepass`.
+    /// `infnorm::compute_onepass`; on the LU path the two-sided step
+    /// `1/sqrt(row max)`, `1/sqrt(column max)`.
     #[default]
     OnePassInfNorm,
     /// MC64-style symmetric matching-based scaling. Matches the

@@ -11,12 +11,12 @@ use pyo3::prelude::*;
 use rslab::{
     BackwardError, CscMatrix, Factorization, GeneralCsc, KluSolver, LdltSolver, LdltSymbolic,
     LinearOperator, LuSolver, LuSymbolic, MixedPrecision, Recycle, RecycleScalar, RefineOperator,
-    RefinePolicy, Scalar, SolverSettings,
+    RefinePolicy, RefineSystem, Scalar, SolverSettings,
 };
 
 use crate::common::{
     array1, array2, block, csc_matrix, diagnostics_dict, heavy, index_array, map_err, scalar,
-    vector, Pattern, Release, C32, C64,
+    vector, Pattern, Release, Values, C32, C64,
 };
 use crate::krylov::{self, Operator};
 
@@ -267,7 +267,7 @@ macro_rules! mixed_direct {
     ($solver:ident, $matrix:ident) => {
         impl<T> Direct<T> for MixedPrecision<$solver<T::Low>>
         where
-            T: Field + rslab::Demote,
+            T: Field,
             T::Low: Field,
         {
             type Matrix = $matrix<T>;
@@ -294,7 +294,12 @@ pub struct Pair<T: Field, S: Direct<T>> {
     _release: Release,
 }
 
-pub fn refine_policy(refine: usize, target: Option<f64>, measure: &str) -> PyResult<RefinePolicy> {
+pub fn refine_policy(
+    refine: usize,
+    target: Option<f64>,
+    measure: &str,
+    system: &str,
+) -> PyResult<RefinePolicy> {
     let measure = match measure {
         "normwise" => BackwardError::Normwise,
         "componentwise" => BackwardError::Componentwise,
@@ -304,10 +309,20 @@ pub fn refine_policy(refine: usize, target: Option<f64>, measure: &str) -> PyRes
             )))
         }
     };
+    let system = match system {
+        "matrix" => RefineSystem::Matrix,
+        "factored" => RefineSystem::Factored,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "system must be 'matrix' or 'factored', got '{other}'"
+            )))
+        }
+    };
     Ok(RefinePolicy {
         max_steps: refine,
         target: target.unwrap_or(0.0),
         measure,
+        system,
     })
 }
 
@@ -339,6 +354,19 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         Factorization::<T>::n_perturbed(&self.s)
     }
 
+    pub fn perturbations(&self, py: Python<'_>) -> PyObject {
+        let floors = Factorization::<T>::perturbations(&self.s);
+        let rows: Vec<usize> = floors.iter().map(|f| f.row).collect();
+        let cols: Vec<usize> = floors.iter().map(|f| f.col).collect();
+        let deltas: Vec<T> = floors.iter().map(|f| f.delta).collect();
+        (
+            index_array(py, &rows),
+            index_array(py, &cols),
+            array1(py, deltas),
+        )
+            .into_py(py)
+    }
+
     pub fn factor_dtype(&self) -> &'static str {
         Direct::<T>::factor_dtype(&self.s)
     }
@@ -354,9 +382,10 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         refine: usize,
         target: Option<f64>,
         measure: &str,
+        system: &str,
     ) -> PyResult<PyObject> {
         let bvec = vector::<T>(b, "rhs")?;
-        let policy = refine_policy(refine, target, measure)?;
+        let policy = refine_policy(refine, target, measure, system)?;
         let x = py
             .allow_threads(|| {
                 if policy.max_steps > 0 {
@@ -410,7 +439,7 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
             None => Ok(None),
             Some((n, indptr, indices, data)) => {
                 let pat = Pattern::from_py(n, &indptr, &indices)?;
-                Ok(Some(pat.general(vector::<T>(&data, "operator data")?)?))
+                Ok(Some(pat.operator(vector::<T>(&data, "operator data")?)?))
             }
         }
     }
@@ -500,7 +529,7 @@ impl<T: Field> Pair<T, LdltSolver<T>> {
     }
 }
 
-impl<T: Field + rslab::Demote> Pair<T, MixedPrecision<LdltSolver<T::Low>>>
+impl<T: Field> Pair<T, MixedPrecision<LdltSolver<T::Low>>>
 where
     T::Low: Field,
 {
@@ -512,13 +541,8 @@ where
 
 impl<T: Field> Pair<T, KluSolver<T>> {
     pub fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let pattern = crate::common::Pattern {
-            n: self.a.n,
-            col_ptr: self.a.col_ptr.clone(),
-            row_idx: self.a.row_idx.clone(),
-        };
-        let data = &pattern.values_of(py, data, false)?;
-        let d = vector::<T>(data, "data")?;
+        let a = &self.a;
+        let d = Values::of(py, data, &a.col_ptr, &a.row_idx, false)?.read::<T>()?;
         if d.len() != self.a.values.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "data length {} does not match the factored pattern nnz {}",
@@ -541,13 +565,8 @@ impl<T: Field> Pair<T, AutoFactor<T>> {
         data: &Bound<'_, PyAny>,
         settings: &rslab::AutoSettings,
     ) -> PyResult<()> {
-        let pattern = crate::common::Pattern {
-            n: self.a.n,
-            col_ptr: self.a.col_ptr.clone(),
-            row_idx: self.a.row_idx.clone(),
-        };
-        let data = &pattern.values_of(py, data, false)?;
-        let d = vector::<T>(data, "data")?;
+        let a = &self.a;
+        let d = Values::of(py, data, &a.col_ptr, &a.row_idx, false)?.read::<T>()?;
         if d.len() != self.a.values.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "data length {} does not match the factored pattern nnz {}",
@@ -628,6 +647,14 @@ macro_rules! handle {
                 dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.n_perturbed())
             }
 
+            /// The pivots the ``preconditioner`` floor lifted: the factor is
+            /// the exact factor of ``A + E``, returned as ``(rows, cols,
+            /// deltas)`` with ``E[rows[k], cols[k]] = deltas[k]`` in the
+            /// indices of ``A``. Empty for an exact factor.
+            fn perturbations(&self, py: Python<'_>) -> PyObject {
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.perturbations(py))
+            }
+
             /// Heap bytes this factor holds on the Rust side: the factor and
             /// the copy of the matrix kept for residuals and refinement.
             #[getter]
@@ -678,13 +705,19 @@ macro_rules! handle {
             /// b : ndarray, shape (n,)
             ///     Right-hand side in the factor's dtype.
             /// refine : int, default 0
-            ///     Steps of iterative refinement against the original matrix.
+            ///     Steps of iterative refinement against ``system``.
             /// target : float, optional
             ///     Stop refining once the backward error is below this value
             ///     (by default all ``refine`` steps run).
             /// measure : {'normwise', 'componentwise'}, default 'normwise'
             ///     The backward-error measure ``target`` refers to.
-            #[pyo3(signature = (b, refine = 0, target = None, measure = "normwise"))]
+            /// system : {'matrix', 'factored'}, default 'matrix'
+            ///     The system refinement solves: the original matrix ``A``,
+            ///     or ``A + E``, the matrix the factor is of, ``E`` the pivots
+            ///     the ``preconditioner`` floor lifted (the accurate solve of
+            ///     the perturbed system, for the factor used as an operator;
+            ///     the same as ``'matrix'`` when ``n_perturbed`` is 0).
+            #[pyo3(signature = (b, refine = 0, target = None, measure = "normwise", system = "matrix"))]
             fn solve(
                 &self,
                 py: Python<'_>,
@@ -692,8 +725,9 @@ macro_rules! handle {
                 refine: usize,
                 target: Option<f64>,
                 measure: &str,
+                system: &str,
             ) -> PyResult<PyObject> {
-                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.solve(py, b, refine, target, measure))
+                dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.solve(py, b, refine, target, measure, system))
             }
 
             /// Solve ``A^T y = b`` on the same factors (plain transpose, not the
@@ -817,7 +851,7 @@ macro_rules! handle {
             /// tol : float, default 1e-8
             ///     Relative residual target per column.
             /// maxit : int, default 400
-            ///     Iteration budget.
+            ///     Iteration budget of every column.
             /// restart : int, optional
             ///     Block Arnoldi basis size (see :meth:`gmres`).
             /// x0 : ndarray, shape (n, nrhs), optional

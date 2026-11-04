@@ -51,7 +51,9 @@ mod util;
 mod warmstart_tests;
 
 pub use arnoldi::BlockArnoldi;
-pub use block::{gmres_block, BlockGmres, BlockKrylovResult, BlockRecycle};
+pub use block::{
+    gmres_block, BlockGmres, BlockKrylovResult, BlockProgress, BlockRecycle, StepProgress,
+};
 pub use cg::{cocg, cocr};
 pub use closures::{FnOperator, FnPreconditioner};
 pub use gmres::gmres;
@@ -61,4 +63,4 @@ pub use operator::{
 };
 pub use recycle::{gmres_recycled, Recycle, RecycleScalar};
 pub use result::{KrylovResult, StopReason};
-pub use settings::KrylovSettings;
+pub use settings::{BasisSwitch, BlockBasis, KrylovSettings};

@@ -13,7 +13,6 @@ use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::LlSchedule;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
-use std::sync::atomic::AtomicUsize;
 
 /// Factor one supernode's panel: assemble `A`, apply every descendant's `cmod`
 /// update (BLAS-3 with scalar fallback), then `cdiv` (partial 1x1 LDL^T). Reads
@@ -29,7 +28,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
     pools: &BkPools<T>,
     emit: &LlEmitLdlt<T>,
     perturb_floor: Option<f64>,
-    n_perturbed: &AtomicUsize,
     kt: KernelTuning,
 ) -> Result<(), RslabError> {
     kt.interrupted()?;
@@ -59,7 +57,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
         sym,
         s,
         sched.updaters(s),
-        |k| (sched.rows(k), sched.rows(k)),
+        |k| {
+            let nck = sym.supernodes[k].ncol;
+            (nck, &sched.rows(k)[nck..], &sched.rows(k)[nck..])
+        },
         false,
         &kt.k,
     );
@@ -262,17 +263,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
             }
         }
     }
-    ll_cdiv_emit(
-        s,
-        sym,
-        sched,
-        pools,
-        emit,
-        perturb_floor,
-        n_perturbed,
-        kt,
-        panel,
-    )
+    ll_cdiv_emit(s, sym, sched, pools, emit, perturb_floor, kt, panel)
 }
 
 /// Heap bytes [`ll_factor_node`] allocates for supernode `s` while it runs,
@@ -293,13 +284,16 @@ pub(super) fn ll_node_scratch<T: Scalar>(
     use crate::memory::grown;
     let vb = std::mem::size_of::<T>();
     let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
-    let (cdiv, mut planes) =
-        super::bunch_kaufman::ll_cdiv_scratch::<T>(ncol, sched.rows(s).len(), k);
+    let (cdiv, mut planes, cdiv_copies) =
+        super::bunch_kaufman::ll_cdiv_scratch::<T>(ncol, sched.rows(s).len(), k, workers);
     let plan = crate::numeric::supernodal::CmodPlan::new(
         sym,
         s,
         sched.updaters(s),
-        |k| (sched.rows(k), sched.rows(k)),
+        |k| {
+            let nck = sym.supernodes[k].ncol;
+            (nck, &sched.rows(k)[nck..], &sched.rows(k)[nck..])
+        },
         false,
         k,
     );
@@ -330,10 +324,12 @@ pub(super) fn ll_node_scratch<T: Scalar>(
             }
             worst = worst.max(vd + u);
         }
-        let copies = if slab_planes > planes {
-            slabs.min(workers.max(1))
+        // The slabs' planes and the cdiv's are taken at different times; the
+        // larger planes on the larger number of workers bounds both.
+        let copies = if slab_planes > 0 {
+            slabs.min(workers.max(1)).max(cdiv_copies)
         } else {
-            1
+            cdiv_copies
         };
         let bytes = ((worst * slabs.min(workers.max(1)) * vb) as u64).max(cdiv);
         (bytes, planes.max(slab_planes), copies)
@@ -354,6 +350,6 @@ pub(super) fn ll_node_scratch<T: Scalar>(
                 }
             }
         }
-        (((vc + vd + u) * vb) as u64 + cdiv, planes, 1)
+        (((vc + vd + u) * vb) as u64 + cdiv, planes, cdiv_copies)
     }
 }

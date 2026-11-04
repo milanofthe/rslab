@@ -148,8 +148,8 @@ fn settings_ignored_by_a_path_are_reported() {
         .diagnostics()
         .warnings
         .is_empty());
-    // scaling belongs to the symmetric path: the LU path reports it.
-    let lu = SolverSettings::exact().with_scaling(ScalingStrategy::Identity);
+    // a symmetric scaling has no two-sided form: the LU path reports it.
+    let lu = SolverSettings::exact().with_scaling(ScalingStrategy::Mc64Symmetric);
     let w = LuSolver::factor(&full, &lu).unwrap().diagnostics().warnings;
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains("scaling"));

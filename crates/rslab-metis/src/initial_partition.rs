@@ -30,7 +30,7 @@ pub fn cut_size(graph: &Graph, labels: &[u8]) -> i32 {
         for k in lo..hi {
             let u = graph.adjncy[k] as usize;
             if u > v && labels[u] != lv {
-                cut += graph.adjwgt[k] as i64;
+                cut += graph.wgt(k) as i64;
             }
         }
     }
@@ -83,7 +83,7 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
         for k in lo..hi {
-            *wt = wt.saturating_add(graph.adjwgt[k]);
+            *wt = wt.saturating_add(graph.wgt(k));
         }
     }
 
@@ -104,7 +104,7 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
             }
             // v is in A, u is in B: edge (v,u) is one more edge on u's
             // A side.
-            gain[u] = gain[u].saturating_add(graph.adjwgt[k]);
+            gain[u] = gain[u].saturating_add(graph.wgt(k));
             if !in_boundary[u] {
                 in_boundary[u] = true;
                 boundary.push(u as i32);

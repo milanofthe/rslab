@@ -13,11 +13,15 @@
 //! - the `U` columns of `s`: columns of `B` past the block in `s`'s rows, and
 //!   the columns past `s` of every `k` whose `L` rows reach `s`.
 //!
-//! Pivoting stays inside a supernode's fully-summed block, so row
-//! interchanges permute the block rows among themselves and leave both sets
-//! unchanged: they are exact up to numerical cancellation. Both are subsets
-//! of the symmetric structure, and every contributing `k` is among `s`'s
-//! symmetric updaters, which the construction walks.
+//! Pivoting inside a supernode's fully-summed block permutes the block rows
+//! among themselves and leaves both sets unchanged: they are exact up to
+//! numerical cancellation. A delayed pivot (`delay`) moves a column and a
+//! row of a child into its parent's fully-summed block, with the rows and
+//! columns past the child the delayed pair carries; the factorization adds
+//! those the parent lacks to the parent's sets, and passes them on by the
+//! same rule as below (`node`). Both are subsets of the symmetric structure,
+//! and every contributing `k` is among `s`'s symmetric updaters, which the
+//! construction walks.
 
 use crate::numeric::supernodal::{Li, LlSchedule};
 use crate::symbolic::SymbolicFactorization;
@@ -60,6 +64,14 @@ impl LuStructure {
         &self.u[self.u_off[s]..self.u_off[s + 1]]
     }
 
+    /// Whether the list `v` (ascending past a prefix of indices below
+    /// `first`) hits a supernode's columns `[first, last)`.
+    #[inline]
+    pub fn hits(v: &[Li], first: usize, last: usize) -> bool {
+        let p = v.partition_point(|&g| (g as usize) < first);
+        p < v.len() && (v[p] as usize) < last
+    }
+
     /// From the pattern of `A` (`col_ptr`, `row_idx`), the row matching
     /// (`row_map[r]`: the row of `B` that row `r` of `A` becomes) and the
     /// analysis of `B + B^T`.
@@ -93,11 +105,6 @@ impl LuStructure {
             }
         }
         let mut st = Self::empty();
-        // `s`'s columns `[first, last)` hit by the ascending list `v`.
-        let hits = |v: &[Li], first: usize, last: usize| {
-            let p = v.partition_point(|&g| (g as usize) < first);
-            p < v.len() && (v[p] as usize) < last
-        };
         for s in 0..nsuper {
             let (first, last) = (sym.supernodes[s].first_col, end(s));
             let (mut l, mut u) = (std::mem::take(&mut lseed[s]), std::mem::take(&mut useed[s]));
@@ -105,10 +112,10 @@ impl LuStructure {
                 let k = k as usize;
                 let nck = sym.supernodes[k].ncol;
                 let (lk, uk) = (&st.rows_l(k)[nck..], &st.cols_u(k)[nck..]);
-                if hits(uk, first, last) {
+                if Self::hits(uk, first, last) {
                     l.extend(lk.iter().filter(|&&g| g as usize >= last));
                 }
-                if hits(lk, first, last) {
+                if Self::hits(lk, first, last) {
                     u.extend(uk.iter().filter(|&&g| g as usize >= last));
                 }
             }

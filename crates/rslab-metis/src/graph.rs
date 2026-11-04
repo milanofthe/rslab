@@ -34,7 +34,11 @@ pub struct Graph {
     pub adjncy: Vec<i32>,
     /// Vertex weights, length `nvtxs`. Default: all 1.
     pub vwgt: Vec<i32>,
-    /// Edge weights, aligned with `adjncy`. Default: all 1.
+    /// Edge weights, aligned with `adjncy`, or empty where every edge
+    /// weighs one: the input graph and the subgraphs extracted from it, so
+    /// only the coarse graphs, whose contraction sums the weights, carry
+    /// them (half the bytes of an input graph). Read with
+    /// [`wgt`](Self::wgt).
     pub adjwgt: Vec<i32>,
 }
 
@@ -88,13 +92,12 @@ impl Graph {
             xadj.push(adjncy.len() as i32);
         }
         let vwgt = vec![1i32; n];
-        let adjwgt = vec![1i32; adjncy.len()];
         Ok(Graph {
             nvtxs,
             xadj,
             adjncy,
             vwgt,
-            adjwgt,
+            adjwgt: Vec::new(),
         })
     }
 
@@ -115,11 +118,14 @@ impl Graph {
         &self.adjncy[lo..hi]
     }
 
-    /// Borrow the edge-weight slice aligned with [`Self::neighbors`].
-    pub fn edge_weights(&self, v: i32) -> &[i32] {
-        let lo = self.xadj[v as usize] as usize;
-        let hi = self.xadj[(v + 1) as usize] as usize;
-        &self.adjwgt[lo..hi]
+    /// Weight of the edge at `adjncy[k]`.
+    #[inline]
+    pub fn wgt(&self, k: usize) -> i32 {
+        if self.adjwgt.is_empty() {
+            1
+        } else {
+            self.adjwgt[k]
+        }
     }
 }
 
@@ -218,7 +224,10 @@ mod tests {
             assert!(g.xadj[i] <= g.xadj[i + 1], "xadj non-decreasing at {}", i);
         }
         assert_eq!(g.vwgt.len(), g.nvtxs as usize, "vwgt length");
-        assert_eq!(g.adjwgt.len(), g.adjncy.len(), "adjwgt length");
+        assert!(
+            g.adjwgt.is_empty() || g.adjwgt.len() == g.adjncy.len(),
+            "adjwgt length"
+        );
         for (i, &r) in g.adjncy.iter().enumerate() {
             assert!(r >= 0 && r < g.nvtxs, "adjncy[{}]={} OOB", i, r);
         }
@@ -317,7 +326,7 @@ mod tests {
         let pat = CscPattern::new(5, &cp, &ri).unwrap();
         let g = Graph::from_csc_pattern(&pat).unwrap();
         assert!(g.vwgt.iter().all(|&w| w == 1));
-        assert!(g.adjwgt.iter().all(|&w| w == 1));
+        assert!((0..g.adjncy.len()).all(|k| g.wgt(k) == 1));
     }
 
     #[test]

@@ -13,6 +13,19 @@
 /// Contract: results.
 pub const LU_PIVOT_THRESHOLD: f64 = 0.1;
 
+/// Delayed pivoting of the LU path: the growth of the factor's panels the
+/// delayed pivots may cause, a fraction of the panels the analysis
+/// predicts (1). The memory plan reserves it; a factorization that would
+/// need more is redone without delays.
+/// Used by: `numeric::lu::factor` (with `PivotSettings::delayed`).
+/// Why: measured with the row matching on every column on the rapidmom
+/// near matrices (rslab#204): 5 to 6 percent on pa180a (74.6k unknowns,
+/// 3.1k to 3.8k delays) and tia130a (15.8k, 0.6k to 0.7k delays) at 1 and
+/// 170 to 180 GHz, 1 percent on the kit spiral and momstack; four times the
+/// largest.
+/// Contract: results (whether the delays are kept).
+pub const LU_DELAY_ALLOWANCE: f64 = 0.25;
+
 /// A diagonal entry counts as missing below this fraction of its column's
 /// largest magnitude; the LU row matching runs when any is missing (1).
 /// Used by: `MatchingSettings::negligible_diagonal`.
