@@ -27,9 +27,8 @@
 use super::factor::{factor_numeric, LdltNumeric};
 use super::pivots::LdltPivots;
 use crate::constants::{
-    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY,
-    LDLT_INPUT_BUILD_BYTES_PER_COL, LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, VEC_HEADER_BYTES,
-    WORD_BYTES,
+    IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY, LDLT_INPUT_BUILD_BYTES_PER_COL,
+    LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
@@ -545,14 +544,15 @@ impl LdltSymbolic {
             &opts.solve,
             crate::numeric::settings::all_cores(),
         );
-        // The input program the first factorization keeps (two index arrays
-        // and the positions, two pointer arrays), and the peak of its build.
+        // The input program the first factorization keeps (the indices and
+        // the entries of `A` they read, two pointer arrays), and the peak of
+        // its build.
         let (growth, growth_build) = if inner.input.get().is_some() {
             (0, 0)
         } else {
             (
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + 2 * WORD_BYTES * (n + 1),
-                INPUT_BUILD_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
+                INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
         // Held by the factor: the panels (packed by the solve plan) and their
@@ -565,11 +565,12 @@ impl LdltSymbolic {
                 + WORD_BYTES * ns
         };
         let factor = factor_with(packed);
-        // While the forest is factored: the permuted values and the scaling,
-        // the arena, the emit cells (refcounts, offsets, panel records, the
-        // pivots by column) and the forest's own lists, every node's slot (D,
-        // the flags and the row permutation) and emitted rows until the end,
-        // the workers' scratch and the heaviest set of nodes running at once.
+        // While the forest is factored: the scaling (by `A`'s and by
+        // elimination index), the arena, the emit cells (refcounts, offsets,
+        // panel records, the pivots by column) and the forest's own lists,
+        // every node's slot (D, the flags and the row permutation) and emitted
+        // rows until the end, the workers' scratch and the heaviest set of
+        // nodes running at once.
         let cells = ns * LDLT_NODE_CELL_BYTES + n * (WORD_BYTES + WORD_BYTES + 2 * vb + 1);
         let slots: usize = (0..ns)
             .map(|s| w(s) * (2 * vb + 1) + WORD_BYTES * r(s))
@@ -585,10 +586,8 @@ impl LdltSymbolic {
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LDLT_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during = (vb * nnz + WORD_BYTES * n + vb * panels + cells + slots) as u64
-            + workers
-            + pooled
-            + nodes;
+        let during =
+            (2 * WORD_BYTES * n + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
         // After it: the factor with its panels as factored (the plan packs
         // them in place), the emitted row lists until the plan has copied
         // them, and the plan's build.

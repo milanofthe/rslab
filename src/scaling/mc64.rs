@@ -155,9 +155,9 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
             col_ptr[j + 1] = kept;
         }
         cost.truncate(kept);
-        (col_ptr, row_idx)
+        (col_ptr.into(), row_idx.into())
     } else {
-        (a.col_ptr.clone(), a.row_idx.clone())
+        (a.col_ptr[..].into(), a.row_idx[..].into())
     };
     let graph = CostGraph {
         n,
@@ -321,7 +321,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
 /// "fall back to identity" signal.
 ///
 /// Algorithmic mirror: SPRAL `src/scaling.f90:636-657`.
-fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), RslabError> {
+fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph<'static>, Vec<f64>), RslabError> {
     let n = matrix.n;
 
     // Two-pass expansion: first count the non-zero entries per
@@ -428,8 +428,8 @@ fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), RslabEr
 
     let graph = CostGraph {
         n,
-        col_ptr,
-        row_idx,
+        col_ptr: col_ptr.into(),
+        row_idx: row_idx.into(),
         cost,
     };
     Ok((graph, cmax))

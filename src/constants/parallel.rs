@@ -88,15 +88,6 @@ pub const FINE_PIECES_PER_WORKER: usize = 8;
 /// Contract: timing (the per-entry sums do not depend on the blocking).
 pub const GEMM_PIECE_MIN_COLS: usize = 16;
 
-/// Fewest columns per piece of the scatter of a factorization's input values
-/// into the permuted order (columns).
-/// Used by: `supernodal::InputProgram::values`.
-/// Why: a column is a few entries; serial, the scatter took 22 to 50 ms of a
-/// 6-thread factorization of 140k to 262k complex FEM systems (rapidfem
-/// corpus, Ryzen 5 5600X).
-/// Contract: timing (every entry is written alike in any blocking).
-pub const INPUT_PIECE_MIN_COLS: usize = 1024;
-
 /// Fewest columns per piece of the LU analysis's symmetrization sort
 /// (columns).
 /// Used by: `lu::solver::symmetrized_lower_pattern`.

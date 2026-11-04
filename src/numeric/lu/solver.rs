@@ -5,8 +5,8 @@ use super::factor::factor_general_lu_numeric;
 use super::factors::LuPivots;
 use super::structure::LuStructure;
 use crate::constants::{
-    IDX32_BYTES, INPUT_BUILD_BYTES_PER_ENTRY, INPUT_PROGRAM_BYTES_PER_ENTRY, LU_DELAY_ALLOWANCE,
-    LU_INPUT_BUILD_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
+    IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY, LU_DELAY_ALLOWANCE, LU_INPUT_BUILD_BYTES_PER_COL,
+    LU_INPUT_SCALING_BYTES_PER_COL, LU_NODE_CELL_BYTES, LU_NODE_CELL_BYTES_PER_COL,
     LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 
@@ -141,8 +141,8 @@ pub struct LuSymbolic {
     /// and walking every node's updaters per call is expensive).
     pub(super) est_cache: Mutex<Vec<((usize, bool), crate::diagnostics::MemoryEstimate)>>,
     /// The split permuted input's program ([`InputProgram::general`](crate::numeric::supernodal::InputProgram)), built at the first
-    /// factorization: every (re)factorization reduces to one linear values
-    /// scatter (row matching and equilibration applied on the way).
+    /// factorization: every (re)factorization reads the values where they are
+    /// through it (row matching and equilibration applied on the way).
     pub(super) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
     /// The exact structures of `L` and `U`, tighter than the analysis's
     /// symmetric one on an unsymmetric pattern.
@@ -644,14 +644,15 @@ impl LuSymbolic {
             &opts.solve,
             cores,
         );
-        // The input program the first factorization keeps (two index arrays
-        // and the positions, two pointer arrays), and the peak of its build.
+        // The input program the first factorization keeps (the indices and
+        // the entries of `A` they read, two pointer arrays), and the peak of
+        // its build.
         let (growth, growth_build) = if self.input.get().is_some() {
             (0, 0)
         } else {
             (
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + 2 * WORD_BYTES * (n + 1),
-                INPUT_BUILD_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
+                INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
         // Held by the factor: the `L` and `U^T` panels (packed by the solve
@@ -664,8 +665,8 @@ impl LuSymbolic {
                 + WORD_BYTES * ns
         };
         let factor = factor_with(packed);
-        // While the forest is factored: the scalings, the permuted values,
-        // both arenas, the emit cells (refcounts, offsets, panel records,
+        // While the forest is factored: the scalings (by `A`'s and by
+        // elimination index), both arenas, the emit cells (refcounts, offsets, panel records,
         // positions and permutations) and the forest's lists, every node's
         // row permutation and emitted rows until the end, the workers'
         // scratch and the heaviest set of nodes running at once.
@@ -682,7 +683,7 @@ impl LuSymbolic {
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LU_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
-        let during = (2 * WORD_BYTES * n + vb * nnz + vb * panels + cells + slots) as u64
+        let during = (LU_INPUT_SCALING_BYTES_PER_COL * n + vb * panels + cells + slots) as u64
             + workers
             + pooled
             + nodes;

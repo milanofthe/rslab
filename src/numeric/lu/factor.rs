@@ -230,7 +230,7 @@ fn emit_and_free<T: Scalar>(
     unsafe { emit.panels.set(k, (l_out, u_out)) };
 }
 
-/// Supernodal left-looking LU into an `LuNumeric`. `inp` is the equilibrated permuted matrix; `d_row`/`d_col`
+/// Supernodal left-looking LU into an `LuNumeric`. `inp` reads the equilibrated permuted matrix; `d_row`/`d_col`
 /// the equilibration carried into the result; `delay_growth` the growth of
 /// the factor delayed pivots may cause (`delay`). `None` when they would
 /// have caused more.
@@ -434,14 +434,20 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
         ),
     };
 
-    // `A`'s row `r` is `B`'s row `b_row[r]`, scaled by `d_row[b_row[r]]`.
-    let b_row: Option<Vec<usize>> = lusym.matching.as_ref().map(|m| m.row_map());
     let prog = lusym.input.get_or_init(|| {
         crate::logging::timed(
             || "lu: input program".into(),
-            || InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym),
+            || {
+                // `A`'s row `r` is `B`'s row `b_row[r]`
+                let b_row = lusym.matching.as_ref().map(|m| m.row_map());
+                InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym)
+            },
         )
     });
+    // The scaling by elimination index: entry `(g, c)` of `P^T B P` is `A`'s
+    // times `d_row[perm[g]] * d_col[perm[c]]` (`d_row` by `B`'s rows).
+    let (s_row, s_col): (Vec<f64>, Vec<f64>) =
+        sym.perm.iter().map(|&i| (d_row[i], d_col[i])).unzip();
     // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
     // trees), shared by both LU paths.
     let stack = crate::numeric::settings::stack_for_depth(
@@ -449,18 +455,12 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     );
 
     // Run in a scoped pool of `opts.threads` so concurrent solves don't
-    // oversubscribe; the values are scattered on its workers too.
+    // oversubscribe.
     let mut fac = opts.threads.run(
         stack,
         |cap| crate::numeric::supernodal::analysis::recommend_threads_for_sym(&lusym.symb, cap),
         || {
-            let vals = {
-                let weight =
-                    |r: usize, j: usize| d_row[b_row.as_ref().map_or(r, |b| b[r])] * d_col[j];
-                prog.values(&a.col_ptr, &a.row_idx, &a.values, Some(&weight))
-            };
-            drop(b_row);
-            let inp = Input::new(prog, &vals);
+            let inp = Input::new(prog, &a.values, Some((&s_row, &s_col)));
             let sched = lusym
                 .symb
                 .ll_schedule()

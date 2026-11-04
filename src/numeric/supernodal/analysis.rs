@@ -49,7 +49,7 @@ pub(crate) struct SymbolicInner {
     pub(crate) by_level: Vec<Vec<usize>>,
     /// Lazily built input program of the LDL^T path (`P^T A P`, lower fold):
     /// the permuted structure is fixed per pattern, so every (re)factorization
-    /// reduces to one linear values pass. See
+    /// reads the values where they are. See
     /// [`crate::numeric::supernodal::InputProgram`].
     pub(crate) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
     /// The left-looking schedule (row structures + updater lists),
