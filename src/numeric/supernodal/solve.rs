@@ -1055,7 +1055,7 @@ impl<T: Scalar> SolvePlan<T> {
 
     /// `sweep` of `nr` right-hand sides on `work` fitted for it, on the pool
     /// or on the calling thread as decided, timed for the way it ran where
-    /// that is to be measured.
+    /// that is to be measured (once there).
     fn sweep<R: Send>(
         &self,
         work: &mut PlanWork<T>,
@@ -1065,13 +1065,17 @@ impl<T: Scalar> SolvePlan<T> {
     ) -> R {
         let work = self.fit(work, nr, threads);
         let timed = work.pick.take();
-        let t = crate::clock::Instant::now();
-        let r = Self::in_pool(work.parallel, threads, || sweep(work));
-        if let Some((pick, ops)) = timed {
-            let ns = t.elapsed().as_nanos() as f64;
-            SWEEP_WAYS.of::<T>().record(pick, ns, ops);
-        }
-        r
+        // timed in the pool: building it on its first use and measuring
+        // its section cost is no time of the way
+        Self::in_pool(work.parallel, threads, || {
+            let t = crate::clock::Instant::now();
+            let r = sweep(work);
+            if let Some((pick, ops)) = timed {
+                let ns = t.elapsed().as_nanos() as f64;
+                SWEEP_WAYS.of::<T>().record(pick, ns, ops);
+            }
+            r
+        })
     }
 
     /// Forward sweep `L y = y` in place on `nr` row-major right-hand sides,
