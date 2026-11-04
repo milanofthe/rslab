@@ -169,7 +169,9 @@ pub fn near_field<T: Scalar>(n: usize, per_col: usize, spread: f64, seed: u64) -
         }
         out.sort_unstable();
     };
-    let counts = crate::parallel::map_init(n, Vec::new, |buf, j| {
+    // A generator: every section as wide as the pool.
+    let all = crate::parallel::Work::ns(f64::INFINITY);
+    let counts = crate::parallel::map_init(n, all, Vec::new, |buf, j| {
         near(j, buf);
         buf.len()
     });
@@ -186,7 +188,7 @@ pub fn near_field<T: Scalar>(n: usize, per_col: usize, spread: f64, seed: u64) -
         columns.push((j, head));
         rest = tail;
     }
-    crate::parallel::for_each_owned(columns, 64, |(j, dst)| {
+    crate::parallel::for_each_owned(columns, all, |(j, dst)| {
         let mut buf = Vec::with_capacity(dst.len());
         near(j, &mut buf);
         dst.copy_from_slice(&buf);
