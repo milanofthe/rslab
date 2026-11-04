@@ -461,6 +461,45 @@ def test_symbolic_factor_and_refactor_accept_the_matrix():
         rslab.analyze(G, "lu").factor(D)
 
 
+@pytest.mark.parametrize("path", ["ldlt", "lu", "klu", "auto"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_symbolic_factor_reads_the_matrix_as_its_values(path, index):
+    import numpy as np
+    import scipy.sparse as sp
+
+    n = 60
+    rng = np.random.default_rng(5)
+    A = sp.random(n, n, density=0.1, random_state=rng, format="csc") + 10.0 * sp.eye(n, format="csc")
+    S = (A + A.T).tocsc()
+    S.indptr, S.indices = S.indptr.astype(index), S.indices.astype(index)
+    b = rng.standard_normal(n)
+    sym = rslab.analyze(S, path)
+    prepared = rslab._lower_csc(S) if path == "ldlt" else rslab._full_csc(S)
+    x = sym.factor(prepared.data).solve(b)
+    # the matrix gives the factor of its value array, bit for bit
+    assert np.array_equal(sym.factor(S).solve(b), x)
+    # a matrix in another storage order (unsorted rows, a split duplicate) is the same
+    # matrix: prepared like at analysis time, and the caller's arrays stay as they were
+    indptr, indices, values = [0], [], []
+    for j in range(n):
+        rows = S.indices[S.indptr[j]:S.indptr[j + 1]][::-1]
+        vals = S.data[S.indptr[j]:S.indptr[j + 1]][::-1].copy()
+        vals[0] /= 2.0  # half of it here, the other half a duplicate at the column's end
+        indices += [*rows, rows[0]]
+        values += [*vals, vals[0]]
+        indptr.append(len(indices))
+    U = sp.csc_matrix((np.array(values), np.array(indices), np.array(indptr)), shape=S.shape)
+    U.indptr, U.indices = U.indptr.astype(index), U.indices.astype(index)
+    assert not U.has_canonical_format
+    kept = (U.indptr.copy(), U.indices.copy(), U.data.copy())
+    assert np.allclose(sym.factor(U).solve(b), x)
+    assert all(np.array_equal(a, k) for a, k in zip((U.indptr, U.indices, U.data), kept))
+    # one entry more in the factored part is refused
+    D = (S + sp.eye(n, k=-1, format="csc")).tocsc()
+    with pytest.raises(ValueError):
+        sym.factor(D)
+
+
 def test_every_setting_round_trips():
     """Every Settings and KluSettings keyword is accepted and reported by to_dict."""
     import numpy as np

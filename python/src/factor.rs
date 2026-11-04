@@ -16,7 +16,7 @@ use rslab::{
 
 use crate::common::{
     array1, array2, block, csc_matrix, diagnostics_dict, heavy, index_array, map_err, scalar,
-    vector, Pattern, Release, C32, C64,
+    vector, Pattern, Release, Values, C32, C64,
 };
 use crate::krylov::{self, Operator};
 
@@ -439,7 +439,7 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
             None => Ok(None),
             Some((n, indptr, indices, data)) => {
                 let pat = Pattern::from_py(n, &indptr, &indices)?;
-                Ok(Some(pat.general(vector::<T>(&data, "operator data")?)?))
+                Ok(Some(pat.operator(vector::<T>(&data, "operator data")?)?))
             }
         }
     }
@@ -541,13 +541,8 @@ where
 
 impl<T: Field> Pair<T, KluSolver<T>> {
     pub fn refactor(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let pattern = crate::common::Pattern {
-            n: self.a.n,
-            col_ptr: self.a.col_ptr.clone(),
-            row_idx: self.a.row_idx.clone(),
-        };
-        let data = &pattern.values_of(py, data, false)?;
-        let d = vector::<T>(data, "data")?;
+        let a = &self.a;
+        let d = Values::of(py, data, &a.col_ptr, &a.row_idx, false)?.read::<T>()?;
         if d.len() != self.a.values.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "data length {} does not match the factored pattern nnz {}",
@@ -570,13 +565,8 @@ impl<T: Field> Pair<T, AutoFactor<T>> {
         data: &Bound<'_, PyAny>,
         settings: &rslab::AutoSettings,
     ) -> PyResult<()> {
-        let pattern = crate::common::Pattern {
-            n: self.a.n,
-            col_ptr: self.a.col_ptr.clone(),
-            row_idx: self.a.row_idx.clone(),
-        };
-        let data = &pattern.values_of(py, data, false)?;
-        let d = vector::<T>(data, "data")?;
+        let a = &self.a;
+        let d = Values::of(py, data, &a.col_ptr, &a.row_idx, false)?.read::<T>()?;
         if d.len() != self.a.values.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "data length {} does not match the factored pattern nnz {}",
