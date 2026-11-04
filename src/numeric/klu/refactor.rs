@@ -125,8 +125,8 @@ impl Decide {
     /// pipelined on `2^a` threads, the last one on all the pool's. A side by
     /// side replay takes no less than the block's longest chain, and a
     /// pipelined one on `k` threads is expected at Brent's bound for a
-    /// greedy schedule: its share of the work, the chain on top. A way the
-    /// block's structure does not start it with (`start`, see
+    /// greedy schedule: its share of the work, the chain on top. A parallel
+    /// way the block's structure does not start it with (`start`, see
     /// [`ReplayPlan::start`]) is expected never: only explored.
     fn ways(
         &self,
@@ -174,15 +174,14 @@ impl Decide {
             }
         }
         // Before a way is measured the block starts as its structure says
-        // (`start`): the others are expected never, only explored where
-        // they could win. Where the way it says is not offered, every way
-        // offered is expected at its prediction.
+        // (`start`): the parallel ways it does not say are expected never,
+        // only explored where they could win; sequentially is always
+        // expected at its estimate. Where the way it says is not offered,
+        // every way offered is expected at its prediction.
         let started = |m: Mode| {
             matches!(
                 (start, m),
-                (None, Mode::Serial)
-                    | (Some(false), Mode::Levels)
-                    | (Some(true), Mode::Pipelined(_))
+                (_, Mode::Serial) | (Some(false), Mode::Levels) | (Some(true), Mode::Pipelined(_))
             )
         };
         if ways.iter().flatten().any(|w| started(w.0)) {
