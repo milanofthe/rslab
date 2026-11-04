@@ -51,10 +51,34 @@ use std::sync::atomic::Ordering;
 const NONE: u32 = u32::MAX;
 
 /// Whether a sweep runs on the calling thread (0) or on the pool (1): the
-/// way the sweeps of its size were fastest ([`Choice`]), a sweep starting
-/// on the pool from [`SOLVE_PAR_MIN_ENTRY_RHS`] on before either is
-/// measured.
-static SWEEP_WAYS: PerScalar<Choice> = PerScalar::choices();
+/// way the sweeps of its kind and size were fastest ([`Choice`]), a sweep
+/// starting on the pool from [`SOLVE_PAR_MIN_ENTRY_RHS`] on before either
+/// is measured. Per kind ([`Sweep`]): a forward sweep takes its subtrees'
+/// terms where a backward one does not, and on a near-field LU took two
+/// and a half times as long on as many panel entries; and per one or a
+/// block of right-hand sides, whose kernels differ as their rates do
+/// ([`sweep_rate`](SolvePlan::sweep_rate)).
+static SWEEP_WAYS: [[PerScalar<Choice>; 2]; 3] = [
+    [PerScalar::choices(), PerScalar::choices()],
+    [PerScalar::choices(), PerScalar::choices()],
+    [PerScalar::choices(), PerScalar::choices()],
+];
+
+/// What a sweep does: its own measured ways ([`SWEEP_WAYS`]).
+#[derive(Clone, Copy)]
+enum Sweep {
+    Forward,
+    Backward,
+    /// The forward and backward sweeps of an `L D L^T` solve in one.
+    Whole,
+}
+
+impl Sweep {
+    /// The ways of this kind of sweep of `nr` right-hand sides.
+    fn ways<T: Scalar>(self, nr: usize) -> &'static Choice {
+        SWEEP_WAYS[self as usize][usize::from(nr > 1)].of::<T>()
+    }
+}
 
 /// What a panel entry costs a sweep of one right-hand side (the register
 /// tiles), learned from the sweeps.
@@ -1002,7 +1026,7 @@ impl<T: Scalar> SolvePlan<T> {
     /// `work` fitted to a sweep of `nr` right-hand sides under the thread
     /// budget `threads`: a scratch per subtree and per node of the widest
     /// ancestor level, and the decision to run on the pool: the way the
-    /// sweeps of its work were fastest ([`SWEEP_WAYS`]), on the pool
+    /// sweeps of its kind and work were fastest ([`SWEEP_WAYS`]), on the pool
     /// expected at its work over the budget's threads where its panel
     /// entries times the right-hand sides up to four reach
     /// [`SOLVE_PAR_MIN_ENTRY_RHS`] (whatever the sweeps' rate, which a
@@ -1015,6 +1039,7 @@ impl<T: Scalar> SolvePlan<T> {
         work: &'w mut PlanWork<T>,
         nr: usize,
         threads: Threads,
+        kind: Sweep,
     ) -> &'w mut PlanWork<T> {
         let widest = self.top_levels.iter().map(Vec::len).max().unwrap_or(0);
         work.fit(self.subtrees.len(), widest, self.top.len());
@@ -1043,8 +1068,8 @@ impl<T: Scalar> SolvePlan<T> {
                             least: serial / budget as f64,
                         },
                     ];
-                    let pick = SWEEP_WAYS
-                        .of::<T>()
+                    let pick = kind
+                        .ways::<T>(nr)
                         .pick(serial, entries, 2, |o| Some(ways[o]));
                     if crate::logging::enabled(crate::logging::LogLevel::Debug) {
                         crate::logging::debug(&format!(
@@ -1070,9 +1095,10 @@ impl<T: Scalar> SolvePlan<T> {
         work: &mut PlanWork<T>,
         nr: usize,
         threads: Threads,
+        kind: Sweep,
         sweep: impl FnOnce(&mut PlanWork<T>) -> R + Send,
     ) -> R {
-        let work = self.fit(work, nr, threads);
+        let work = self.fit(work, nr, threads, kind);
         let timed = work.pick.take();
         // timed in the pool: building it on its first use and measuring
         // its section cost is no time of the way
@@ -1081,7 +1107,7 @@ impl<T: Scalar> SolvePlan<T> {
             let r = sweep(work);
             if let Some((pick, ops)) = timed {
                 let ns = t.elapsed().as_nanos() as f64;
-                SWEEP_WAYS.of::<T>().record(pick, ns, ops);
+                kind.ways::<T>(nr).record(pick, ns, ops);
                 if crate::logging::enabled(crate::logging::LogLevel::Debug) {
                     crate::logging::debug(&format!(
                         "solve: sweep way {} took {:.2} ms",
@@ -1097,14 +1123,18 @@ impl<T: Scalar> SolvePlan<T> {
     /// Forward sweep `L y = y` in place on `nr` row-major right-hand sides,
     /// on at most `threads` workers.
     pub fn forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        self.sweep(work, nr, threads, |work| self.forward_block(nr, y, work))
+        self.sweep(work, nr, threads, Sweep::Forward, |work| {
+            self.forward_block(nr, y, work)
+        })
     }
 
     /// Backward sweep `L^T x = x` (or `U x = x` for a non-unit factor) in
     /// place on `nr` row-major right-hand sides, on at most `threads`
     /// workers.
     pub fn backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        self.sweep(work, nr, threads, |work| self.backward_block(nr, x, work))
+        self.sweep(work, nr, threads, Sweep::Backward, |work| {
+            self.backward_block(nr, x, work)
+        })
     }
 
     /// Solve `L D L^T y = y` in place on the permuted, scaled right-hand
@@ -1116,7 +1146,7 @@ impl<T: Scalar> SolvePlan<T> {
         work: &mut PlanWork<T>,
         threads: Threads,
     ) -> Result<(), RslabError> {
-        self.sweep(work, 1, threads, |work| {
+        self.sweep(work, 1, threads, Sweep::Whole, |work| {
             self.solve_block_inner(f, y, 1, work)
         })
     }
@@ -1670,8 +1700,7 @@ impl<T: Scalar> SolvePlan<T> {
         work: &mut PlanWork<T>,
         threads: Threads,
     ) -> Result<(), RslabError> {
-        let work = self.fit(work, nr, threads);
-        Self::in_pool(work.parallel, threads, || {
+        self.sweep(work, nr, threads, Sweep::Whole, |work| {
             self.solve_block_inner(f, y, nr, work)
         })
     }
