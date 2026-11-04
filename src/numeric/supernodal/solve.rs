@@ -1003,9 +1003,10 @@ impl<T: Scalar> SolvePlan<T> {
     /// budget `threads`: a scratch per subtree and per node of the widest
     /// ancestor level, and the decision to run on the pool: the way the
     /// sweeps of its work were fastest ([`SWEEP_WAYS`]), on the pool
-    /// expected at its work over the threads it is worth there (entering
-    /// the pool paid) where its panel entries times the right-hand sides up
-    /// to four reach [`SOLVE_PAR_MIN_ENTRY_RHS`], else only explored; or
+    /// expected at its work over the budget's threads where its panel
+    /// entries times the right-hand sides up to four reach
+    /// [`SOLVE_PAR_MIN_ENTRY_RHS`] (whatever the sweeps' rate, which a
+    /// sweep on the pool does not measure, says), else only explored; or
     /// where they clear
     /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work),
     /// where that is set.
@@ -1026,8 +1027,7 @@ impl<T: Scalar> SolvePlan<T> {
                 None => {
                     let entries = self.vals.len().saturating_mul(nr) as f64;
                     let serial = entries * Self::sweep_rate(nr).ns_per_op();
-                    let k = crate::parallel::width_on(budget, serial, self.subtrees.len().max(2));
-                    let starts = ops >= SOLVE_PAR_MIN_ENTRY_RHS && k > 1;
+                    let starts = ops >= SOLVE_PAR_MIN_ENTRY_RHS;
                     let ways = [
                         // an estimate at the sweeps' rate, no bound
                         Prior {
@@ -1036,7 +1036,7 @@ impl<T: Scalar> SolvePlan<T> {
                         },
                         Prior {
                             expected: if starts {
-                                serial / k as f64
+                                serial / budget as f64
                             } else {
                                 f64::INFINITY
                             },

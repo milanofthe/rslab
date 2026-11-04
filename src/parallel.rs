@@ -23,7 +23,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 pub use rspool::rayon::{
     dispatch, kept, pool_dispatch as rayon_dispatch, prepare, run, run_rated, run_width, threads,
-    width, width_on, Rayon,
+    width, Rayon,
 };
 pub use rspool::{
     as_piece, current, install, install_lent, is_lent, share_of, Choice, Dispatch, Go, Lent, Pick,
