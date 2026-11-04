@@ -118,7 +118,13 @@ impl Decide {
     ) -> ([Option<(Mode, Prior)>; TUNE_ARMS], usize) {
         let mut ways = [None; TUNE_ARMS];
         if !self.forced {
-            ways[0] = Some((Mode::Serial, Prior::exactly(serial)));
+            // an estimate at the replay rate, no bound: explored whenever
+            // it is not the fastest, so a cold first measurement is undone
+            let prior = Prior {
+                expected: serial,
+                least: 0.0,
+            };
+            ways[0] = Some((Mode::Serial, prior));
         }
         let span = bp.span as f64 * self.seq;
         let cap = self.threads.min(bn);
@@ -170,11 +176,15 @@ impl Decide {
             return (Mode::Serial, None);
         }
         let (ways, n) = self.ways(bp, bn, serial);
-        // Until a replay has measured the rate, sequentially (and measured):
-        // every way is predicted in its units, and against a prior the
-        // measured time of another way would always win.
+        // Until a replay has measured the rate, sequentially, measured for
+        // the rate and as the way: every other way is predicted in its
+        // units, and against a prior the measured time of another way
+        // would always win.
         if !self.learned && ways[0].is_some() {
-            return (Mode::Serial, None);
+            let pick = choices.pick(serial, bp.work as f64, n, |o| {
+                ways[o].filter(|_| o == 0).map(|w| w.1)
+            });
+            return (Mode::Serial, Some(pick));
         }
         let open = ways.iter().flatten().count();
         if open < 2 {
