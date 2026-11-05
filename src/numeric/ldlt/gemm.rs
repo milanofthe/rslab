@@ -50,7 +50,9 @@ pub(super) fn lower_tile_planes(
 /// stride 1); `lhs` is `m x k` with column stride `lhs_cs` (row stride 1);
 /// `rhs` is read as `k x ncols` with strides `(rhs_cs = 1, rhs_rs)` -
 /// element `(kk, j)` at `rhs[j + kk*rhs_rs]`. Each tile's GEMM goes
-/// rayon-parallel at/above the `par_cdiv` flop bar.
+/// rayon-parallel at/above the `par_cdiv` flop bar. With `acc` the product
+/// is added to what `tmp` holds (a product summed over several blocks of
+/// `k`), else it overwrites it.
 ///
 /// SAFETY: the three buffers must be pairwise-disjoint allocations sized
 /// for the strides passed (`tmp` >= `m*ncols`; `lhs` rows `[0, m)` x cols
@@ -67,6 +69,7 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
     rhs: *const T,
     rhs_rs: isize,
     par_cdiv: usize,
+    acc: bool,
     ks: &crate::KernelSettings,
 ) {
     debug_assert!(ncols <= m);
@@ -89,14 +92,14 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
             tmp.as_mut_ptr().add(c0 * m + c0),
             m as isize,
             1,
-            false,
+            acc,
             lhs.add(c0),
             lhs_cs,
             1,
             rhs.add(c0),
             1,
             rhs_rs,
-            T::zero(),
+            if acc { T::one() } else { T::zero() },
             T::one(),
             false,
             false,

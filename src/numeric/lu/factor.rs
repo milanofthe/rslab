@@ -184,12 +184,9 @@ pub(super) fn delay_allowance(l_slots: &[Slot], u_slots: &[Slot], delay_growth: 
 }
 
 /// Emit supernode `k` once its last updater is done (or, with delayed pivots,
-/// once the forest is): the left-looking panel `lbuf` (`L` strictly below the
-/// diagonal, `U`'s diagonal block on and above it) becomes the `L` panel as
-/// it is, its pivot columns, and `U^T`'s panel, whose off-block rows the
-/// factorization wrote in place (`U12`), gets its diagonal block and the
-/// rows of the delayed columns from the upper triangle. Both get their rows
-/// past the pivots in elimination order.
+/// once the forest is): its `L` and `U^T` panels, as the node stored them
+/// (`U`'s diagonal block moved to `U^T`), get their rows past the pivots in
+/// elimination order.
 fn emit_and_free<T: Scalar>(
     k: usize,
     emit: &LlEmit<T>,
@@ -203,18 +200,6 @@ fn emit_and_free<T: Scalar>(
     let (npiv, ol, ou) = pv.off(st, k, sym.supernodes[k].ncol);
     if npiv == 0 {
         return;
-    }
-    let (nrow_l, nrow_u, nfs) = (npiv + ol.len(), npiv + ou.len(), pv.rows.len());
-    // `U^T`'s diagonal block and delayed columns from the upper triangle of
-    // the `L` slot.
-    {
-        let lbuf: &[T] = unsafe { emit.l_arena.slot(k) };
-        let ut = unsafe { emit.u_arena.slot_mut(k) };
-        for p in 0..npiv {
-            for i in p..nfs {
-                ut[p * nrow_u + i] = lbuf[i * nrow_l + p];
-            }
-        }
     }
     // The rows past the pivots in elimination indices, into the arenas' row slots.
     let l_rows = unsafe { emit.l_arena.rows_mut(k) };

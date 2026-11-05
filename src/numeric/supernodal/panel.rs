@@ -2,25 +2,25 @@
 //! the numeric drivers write and the solves read.
 //!
 //! A factor `L` (unit lower triangular, or a general lower triangular `U^T`)
-//! is stored per supernode as one dense column-major panel of `(w + m) x w`
-//! entries with leading dimension `w + m`: `w` columns of the supernode, the
-//! `w x w` diagonal block on top (only its lower triangle is meaningful, the
-//! unit diagonal is implicit for a unit factor), the `m` off-block rows below
-//! in ascending elimination order. The row list is shared by the panel's
-//! columns, so the index overhead is `m` words per supernode rather than one
-//! per entry, and the values are exactly the dense panels the factorization
-//! kernels produce. All panels live in **one buffer**, in supernode order
-//! (or, where fronts outgrew the analysis, the order they were factored in)
-//! (the [`PanelArena`] the drivers factor into), so a sweep streams through
-//! memory the way the elimination tree is walked -- a left-looking driver
-//! hands its panel over without a copy, and the solves run BLAS-3 style on
-//! the same memory. Compared with a compressed-column factor with one `usize` index
-//! per entry (24 bytes per complex entry, and a second copy for the solve
-//! layout) this is the whole factor at 16 bytes per complex entry, once.
-//!
-//! [`PanelFactor::to_csc`] materializes the compressed-column form on demand
-//! for the reference solves and the public CSC factor types.
+//! is stored per supernode as one dense panel: `w` columns of the supernode,
+//! the `w x w` diagonal block on top (only its lower triangle is meaningful,
+//! the unit diagonal is implicit for a unit factor), the `m` off-block rows
+//! below in ascending elimination order. The columns go in blocks of
+//! [`SOLVE_DIAG_BLOCK`], each block column-major holding the rows from its
+//! own first column down ([`packed_blocks`]): of the diagonal block's upper
+//! triangle only the part inside each block's square is stored, and a panel
+//! of one block is the full column-major `(w + m) x w` one. The row list is
+//! shared by the panel's columns, so the index overhead is `m` words per
+//! supernode rather than one per entry. All panels live in **one buffer**,
+//! in supernode order (or, where fronts outgrew the analysis, the order
+//! they were factored in) (the [`PanelArena`] the drivers factor into), so a
+//! sweep streams through memory the way the elimination tree is walked, and
+//! the solves run BLAS-3 style on the memory the drivers wrote. Compared
+//! with a compressed-column factor with one `usize` index per entry (24
+//! bytes per complex entry, and a second copy for the solve layout) this is
+//! the whole factor at 16 bytes per complex entry, once.
 
+use crate::constants::SOLVE_DIAG_BLOCK;
 use crate::numeric::supernodal::{Cells, PanelPtr, ScratchPool};
 use crate::scalar::Scalar;
 
@@ -40,9 +40,9 @@ pub struct PanelFactor<T> {
     pub val_off: Vec<usize>,
     /// The panels back to back, in supernode order or, where fronts outgrew
     /// the analysis (delayed pivots), in the order they were factored:
-    /// supernode `s` is the `(w + m) x w` column-major block from
-    /// `vals[val_off[s]]` (leading dimension `w + m`); entries above the
-    /// diagonal of the diagonal block are unused.
+    /// supernode `s` is the [`packed_len`] entries from `vals[val_off[s]]`
+    /// in [`packed_blocks`]; the stored entries above the diagonal of the
+    /// diagonal block are unused.
     pub vals: Vec<T>,
 }
 
@@ -73,11 +73,11 @@ impl<T: Scalar> PanelFactor<T> {
         (c0, w, self.row_ptr[s + 1] - self.row_ptr[s])
     }
 
-    /// The panel of supernode `s`.
+    /// The panel of supernode `s` ([`packed_blocks`]).
     #[inline]
     pub fn panel(&self, s: usize) -> &[T] {
         let (_, w, m) = self.shape(s);
-        &self.vals[self.val_off[s]..self.val_off[s] + (w + m) * w]
+        &self.vals[self.val_off[s]..self.val_off[s] + packed_len(w, m)]
     }
 
     /// Structural entry count of the factor: the lower triangles of the
@@ -113,29 +113,74 @@ impl<T> Default for PanelStorage<T> {
     }
 }
 
-/// Reorder the rows of a column-major `(ld) x w` panel in place so that row
-/// `i` of the result is row `order[i]` of the input (`order` is a permutation
-/// of `0..ld`). One column of scratch, no allocation per call beyond it.
-pub fn permute_panel_rows<T: Copy>(
-    panel: &mut [T],
-    ld: usize,
+/// Where block `b` of a panel of `w + m = wm` rows starts: `sum_{i < b} nb
+/// (wm - i nb)` entries of the blocks before it (`nb` =
+/// [`SOLVE_DIAG_BLOCK`]).
+#[inline]
+fn block_start(wm: usize, b: usize) -> usize {
+    let nb = SOLVE_DIAG_BLOCK;
+    b * nb * wm - nb * nb * (b * b.saturating_sub(1) / 2)
+}
+
+/// The column blocks of a panel of `w` columns and `m` off-block rows as it
+/// is stored: `(jb, je, offset, ld)`, block `jb..je` the dense column-major
+/// `ld x (je - jb)` block at `offset` from the panel's start, holding rows
+/// `jb..w + m` of its columns (`ld = w + m - jb`). Nothing reads an entry
+/// above a block's rows (the factorizations work on and below the
+/// diagonal, the sweeps read the triangle in column blocks and the rows
+/// below in products), so of the diagonal block's upper triangle only the
+/// part inside each block's own square is stored.
+pub(crate) fn packed_blocks(
     w: usize,
-    order: &[u32],
-    tmp: &mut Vec<T>,
-) {
-    debug_assert_eq!(order.len(), ld);
-    debug_assert_eq!(panel.len(), ld * w);
-    if order.iter().enumerate().all(|(i, &o)| o as usize == i) {
-        return;
-    }
-    tmp.clear();
-    for k in 0..w {
-        let col = &mut panel[k * ld..(k + 1) * ld];
-        tmp.extend_from_slice(col);
-        for (i, &o) in order.iter().enumerate() {
-            col[i] = tmp[o as usize];
+    m: usize,
+) -> impl DoubleEndedIterator<Item = (usize, usize, usize, usize)> + ExactSizeIterator {
+    let nb = SOLVE_DIAG_BLOCK;
+    (0..w.div_ceil(nb)).map(move |b| {
+        let (jb, je) = (b * nb, ((b + 1) * nb).min(w));
+        (jb, je, block_start(w + m, b), w + m - jb)
+    })
+}
+
+/// Entries of a panel of `w` columns and `m` off-block rows ([`packed_blocks`]).
+pub(crate) fn packed_len(w: usize, m: usize) -> usize {
+    packed_blocks(w, m)
+        .map(|(jb, je, _, ld)| ld * (je - jb))
+        .sum()
+}
+
+/// Whether a panel of `w` columns is one block, stored as the full
+/// column-major `(w + m) x w` panel the factorization kernels work on.
+#[inline]
+pub(crate) fn one_block(w: usize) -> bool {
+    w <= SOLVE_DIAG_BLOCK
+}
+
+/// Column `k` of a panel of `w` columns and `m` off-block rows:
+/// `(start, jb)`, its stored rows `jb..w + m` from entry `start` on.
+#[inline]
+pub(crate) fn packed_col(w: usize, m: usize, k: usize) -> (usize, usize) {
+    let b = k / SOLVE_DIAG_BLOCK;
+    let jb = b * SOLVE_DIAG_BLOCK;
+    (block_start(w + m, b) + (k - jb) * (w + m - jb), jb)
+}
+
+/// Store the full column-major `(w + m) x w` panel `full` packed
+/// ([`packed_blocks`]) at `dst`.
+///
+/// # Safety
+/// `dst` is valid for [`packed_len`]`(w, m)` writes and does not overlap
+/// `full`.
+pub(crate) unsafe fn pack_into<T: Copy>(full: &[T], w: usize, m: usize, dst: *mut T) {
+    let ld = w + m;
+    debug_assert!(full.len() >= ld * w);
+    for (jb, je, off, ldb) in packed_blocks(w, m) {
+        for k in jb..je {
+            std::ptr::copy_nonoverlapping(
+                full.as_ptr().add(k * ld + jb),
+                dst.add(off + (k - jb) * ldb),
+                ldb,
+            );
         }
-        tmp.clear();
     }
 }
 
@@ -147,14 +192,17 @@ pub fn permute_panel_rows<T: Copy>(
 /// [`finish`](Self::finish) then closes the gaps left by dropped rows and
 /// yields the [`PanelFactor`].
 ///
-/// The slots are fixed by the analysis, `(w + m) x w` from each
-/// supernode's symbolic shape, back to back in supernode order and zeroed
-/// up front ([`new`](Self::new)); or, where fronts may outgrow the analysis
-/// (an LU with delayed pivots), [`lazy`](Self::lazy): each owner claims a
-/// slot of the size its front has when it starts, from a buffer of fixed
-/// room, zeroed then. The slots then lie in the order the fronts started,
-/// with no holes, so only the values the factor holds are ever resident and
-/// closing the gaps moves every panel down.
+/// The slots are fixed by the analysis, the [`packed_len`] of each
+/// supernode's symbolic shape, back to back in supernode order
+/// ([`new`](Self::new)); or, where fronts may outgrow the analysis (an LU
+/// with delayed pivots), [`lazy`](Self::lazy): each owner claims a slot of
+/// the size its front has, from a buffer of fixed room. The slots then lie
+/// in the order they were claimed, with no holes, so only the values the
+/// factor holds are ever resident and closing the gaps moves every panel
+/// down. Nothing is zeroed up front: a supernode of one column block
+/// factors in its slot, zeroed when claimed ([`claim`](Self::claim)), a
+/// wider one in a full panel of its own that it then stores packed
+/// ([`place`](Self::place)), so every slot is written before it is read.
 pub(crate) struct PanelArena<T> {
     /// Each supernode's value slot `(start, length)`.
     slots: Cells<(usize, usize)>,
@@ -181,8 +229,7 @@ unsafe impl<T: Send> Sync for PanelArena<T> {}
 
 impl<T: Scalar> PanelArena<T> {
     /// Allocate the slots of the given sizes `(values, rows)`, one per
-    /// supernode (see [`slot_sizes`]). The values are zero-initialized, so a
-    /// slot starts as the zero panel the assembly expects.
+    /// supernode (see [`slot_sizes`]).
     pub fn new(slots: impl Iterator<Item = (usize, usize)>) -> Self {
         Self::new_in(PanelStorage::default(), slots, false)
     }
@@ -209,22 +256,10 @@ impl<T: Scalar> PanelArena<T> {
             row_slot_ptr.push(row_slot_ptr.last().copied().unwrap_or(0) + m);
         }
         let total = slot_ptr.last().copied().unwrap_or(0);
-        // The whole factor, often hundreds of MB: zero it across the calling
-        // pool rather than on one thread (41 ms serial on a 465 MB factor).
+        // The values stay unset: every slot is written by its owner before
+        // anyone reads it, and the length is set when they are ([`finish`]).
         vals.clear();
         vals.reserve(total);
-        crate::parallel::chunks_mut(
-            &mut vals.spare_capacity_mut()[..total],
-            crate::constants::ZERO_FILL_CHUNK,
-            crate::parallel::Work::ns(f64::INFINITY),
-            |_, chunk| {
-                chunk.iter_mut().for_each(|v| {
-                    v.write(T::zero());
-                })
-            },
-        );
-        // SAFETY: every element of the first `total` was written above.
-        unsafe { vals.set_len(total) };
         rows.clear();
         rows.resize(row_slot_ptr.last().copied().unwrap_or(0), 0);
         let ns = slot_ptr.len() - 1;
@@ -294,10 +329,49 @@ impl<T: Scalar> PanelArena<T> {
     /// Only the owner of `s`, once, before anybody reads the slot.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn claim(&self, s: usize, vals: usize, rows: usize) -> Option<&mut [T]> {
+        let at = PanelPtr(self.base.get().add(self.take(s, vals, rows)?));
+        zero(at, vals);
+        Some(std::slice::from_raw_parts_mut(at.get(), vals))
+    }
+
+    /// Store supernode `s`'s factored front, the column-major `ld x cols`
+    /// `full`, in its slot with room for `rows` rows: its first `w` columns
+    /// the panel, packed ([`pack_into`]), the columns past them (the pivots
+    /// an LU front passes on) whole after it. A fixed slot, or one claimed
+    /// now from a lazy arena's room (`false` when it is spent).
+    ///
+    /// # Safety
+    /// Only the owner of `s`, once, before anybody reads the slot.
+    pub unsafe fn place(
+        &self,
+        s: usize,
+        full: &[T],
+        ld: usize,
+        w: usize,
+        cols: usize,
+        rows: usize,
+    ) -> bool {
+        let len = packed_len(w, ld - w);
+        let Some(start) = self.take(s, len + (cols - w) * ld, rows) else {
+            return false;
+        };
+        let at = self.base.get().add(start);
+        pack_into(full, w, ld - w, at);
+        std::ptr::copy_nonoverlapping(full.as_ptr().add(w * ld), at.add(len), (cols - w) * ld);
+        true
+    }
+
+    /// The start of supernode `s`'s slot of `vals` values and `rows` rows:
+    /// its fixed one, or claimed now from a lazy arena's room (`None` when
+    /// it is spent).
+    ///
+    /// # Safety
+    /// Only the owner of `s`, once.
+    unsafe fn take(&self, s: usize, vals: usize, rows: usize) -> Option<usize> {
         if !self.lazy {
             debug_assert!(vals <= self.slot_len(s), "a front within its fixed slot");
             debug_assert!(rows <= self.row_slot_ptr[s + 1] - self.row_slot_ptr[s]);
-            return Some(&mut self.slot_mut(s)[..vals]);
+            return Some(self.slots.get(s).0);
         }
         use std::sync::atomic::Ordering;
         let start = self.cursor.fetch_add(vals, Ordering::AcqRel);
@@ -306,22 +380,7 @@ impl<T: Scalar> PanelArena<T> {
         }
         self.slots.set(s, (start, vals));
         self.lazy_rows.set(s, vec![0u32; rows]);
-        let at = PanelPtr(self.base.get().add(start));
-        let chunk = crate::constants::ZERO_FILL_CHUNK;
-        if vals <= chunk {
-            std::ptr::write_bytes(at.get(), 0, vals);
-        } else {
-            crate::parallel::for_each(
-                vals.div_ceil(chunk),
-                crate::parallel::Work::ns(f64::INFINITY),
-                |c| {
-                    let c0 = c * chunk;
-                    // SAFETY: the claimed range, in the buffer's capacity.
-                    unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(vals - c0)) };
-                },
-            );
-        }
-        Some(self.slot_mut(s))
+        Some(start)
     }
 
     /// The slot of supernode `s` for writing.
@@ -412,7 +471,7 @@ impl<T: Scalar> PanelArena<T> {
                 continue;
             }
             let out = outs(s);
-            debug_assert_eq!(out.len, (w + out.m) * w);
+            debug_assert_eq!(out.len, packed_len(w, out.m));
             debug_assert!(out.len <= self.slot_len(s));
             kept.push((s, out.len, out.m));
             sn_col.push(sn_col.last().copied().unwrap_or(0) + w as u32);
@@ -446,8 +505,8 @@ impl<T: Scalar> PanelArena<T> {
         let total = at;
         let total_rows = row_ptr.last().copied().unwrap_or(0);
         let (mut vals, mut rows) = (self.vals, self.rows);
-        // SAFETY: the first `total` values are the panels written above (a
-        // fixed arena's whole buffer was initialized up front).
+        // SAFETY: the first `total` values are the panels written above,
+        // every one written by its owner.
         unsafe { vals.set_len(total) };
         if (moved || total < vals.capacity()) && !self.reused {
             release_room(&mut vals);
@@ -488,6 +547,27 @@ impl<T: Scalar> PanelArena<T> {
     }
 }
 
+/// Zero `len` values from `at`, across the calling pool when they are many.
+///
+/// # Safety
+/// `at` is valid for `len` writes that nobody else makes meanwhile.
+unsafe fn zero<T>(at: PanelPtr<T>, len: usize) {
+    let chunk = crate::constants::ZERO_FILL_CHUNK;
+    if len <= chunk {
+        std::ptr::write_bytes(at.get(), 0, len);
+    } else {
+        crate::parallel::for_each(
+            len.div_ceil(chunk),
+            crate::parallel::Work::ns(f64::INFINITY),
+            |c| {
+                let c0 = c * chunk;
+                // SAFETY: a chunk of the range, which the caller owns.
+                unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(len - c0)) };
+            },
+        );
+    }
+}
+
 /// Give back the room of `v` past its values where that keeps the buffer
 /// in place: a shrink by less than half. Allocators move a block they shrink
 /// by more (mimalloc copies it), a second copy of the factor at its peak;
@@ -499,20 +579,20 @@ pub(crate) fn release_room<T>(v: &mut Vec<T>) {
     }
 }
 
-/// The arena slot `(values, rows)` of a supernode whose panel is `(w + m) x
-/// w` (`w` columns, `m` off-block rows): none for an empty supernode.
+/// The arena slot `(values, rows)` of a supernode of `w` columns and `m`
+/// off-block rows ([`packed_len`]): none for an empty supernode.
 pub(crate) fn slot_sizes(w: usize, m: usize) -> (usize, usize) {
     if w == 0 {
         (0, 0)
     } else {
-        ((w + m) * w, m)
+        (packed_len(w, m), m)
     }
 }
 
 /// One supernode's finished panel, as left in its arena slots: its
 /// off-block row count `m` (the rows in the row slot, elimination indices,
-/// ascending), the compacted panel length `(w + m) * w`, and the zero-slot
-/// count.
+/// ascending), the compacted panel length [`packed_len`]`(w, m)`, and the
+/// zero-slot count.
 #[derive(Default)]
 pub(crate) struct PanelOut {
     pub m: usize,
@@ -527,7 +607,6 @@ pub(crate) struct PanelOut {
 /// The buffers of one [`finish_panel`] call.
 pub(crate) struct PanelScratch<T> {
     order: Vec<u32>,
-    full: Vec<u32>,
     sorted: Vec<u32>,
     tmp: Vec<T>,
     row_nz: Vec<bool>,
@@ -536,7 +615,7 @@ pub(crate) struct PanelScratch<T> {
 impl<T> crate::memory::HeapBytes for PanelScratch<T> {
     fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes as b;
-        b(&self.order) + b(&self.full) + b(&self.sorted) + b(&self.tmp) + b(&self.row_nz)
+        b(&self.order) + b(&self.sorted) + b(&self.tmp) + b(&self.row_nz)
     }
 }
 
@@ -544,7 +623,6 @@ impl<T> Default for PanelScratch<T> {
     fn default() -> Self {
         PanelScratch {
             order: Vec::new(),
-            full: Vec::new(),
             sorted: Vec::new(),
             tmp: Vec::new(),
             row_nz: Vec::new(),
@@ -552,14 +630,15 @@ impl<T> Default for PanelScratch<T> {
     }
 }
 
-/// Finish one supernode's panel in its slot: rows `0..w` are the supernode's
-/// own columns in elimination order, the `m` rows below are permuted into
-/// ascending elimination order (`rows[i]` is the elimination index of panel
-/// row `w + i` on entry, and ascending on exit), for an LDL^T factor the
-/// `(p+1, p)` entry of each 2x2 pivot is cleared (that coupling lives in
-/// `D`), and off-block rows without a nonzero in any column are dropped
-/// from the panel and from `rows` (compacted in place, the tails of the
-/// slots are left behind).
+/// Finish one supernode's panel of `w` columns in its slot
+/// ([`packed_blocks`]): rows `0..w` are the supernode's own columns in
+/// elimination order, the `m` rows below are permuted into ascending
+/// elimination order (`rows[i]` is the elimination index of off-block row
+/// `i` on entry, and ascending on exit), for an LDL^T factor the `(p+1, p)`
+/// entry of each 2x2 pivot is cleared (that coupling lives in `D`), and
+/// off-block rows without a nonzero in any column are dropped from the
+/// panel and from `rows` (the panel stored again for the rows kept, the
+/// tails of the slots are left behind).
 pub(crate) fn finish_panel<T: Scalar>(
     panel: &mut [T],
     rows: &mut [u32],
@@ -568,18 +647,22 @@ pub(crate) fn finish_panel<T: Scalar>(
     sc: &mut PanelScratch<T>,
 ) -> PanelOut {
     let m = rows.len();
-    let ld = w + m;
-    debug_assert!(panel.len() >= ld * w);
-    let panel = &mut panel[..ld * w];
-    let sorted = rows.windows(2).all(|p| p[0] < p[1]);
-    if !sorted {
+    debug_assert!(panel.len() >= packed_len(w, m));
+    let panel = &mut panel[..packed_len(w, m)];
+    // Column `k`'s off-block rows start `w - jb` into its stored rows.
+    if !rows.windows(2).all(|p| p[0] < p[1]) {
         sc.order.clear();
         sc.order.extend(0..m as u32);
         sc.order.sort_unstable_by_key(|&i| rows[i as usize]);
-        sc.full.clear();
-        sc.full.extend(0..w as u32);
-        sc.full.extend(sc.order.iter().map(|&i| w as u32 + i));
-        permute_panel_rows(panel, ld, w, &sc.full, &mut sc.tmp);
+        for k in 0..w {
+            let (start, jb) = packed_col(w, m, k);
+            let off = &mut panel[start + w - jb..start + w - jb + m];
+            sc.tmp.clear();
+            sc.tmp.extend_from_slice(off);
+            for (i, &o) in sc.order.iter().enumerate() {
+                off[i] = sc.tmp[o as usize];
+            }
+        }
         sc.sorted.clear();
         sc.sorted.extend(sc.order.iter().map(|&i| rows[i as usize]));
         rows.copy_from_slice(&sc.sorted);
@@ -588,7 +671,8 @@ pub(crate) fn finish_panel<T: Scalar>(
     if let Some(two_by_two) = two_by_two {
         for p in 0..w {
             if two_by_two[p] && p + 1 < w {
-                panel[p * ld + p + 1] = zero;
+                let (start, jb) = packed_col(w, m, p);
+                panel[start + p + 1 - jb] = zero;
             }
         }
     }
@@ -600,9 +684,13 @@ pub(crate) fn finish_panel<T: Scalar>(
     row_nz.clear();
     row_nz.resize(m, false);
     for p in 0..w {
-        let col = &panel[p * ld..(p + 1) * ld];
-        zeros += col[p + 1..w].iter().filter(|&&v| v == zero).count();
-        for (i, &v) in col[w..].iter().enumerate() {
+        let (start, jb) = packed_col(w, m, p);
+        let col = &panel[start..start + w + m - jb];
+        zeros += col[p + 1 - jb..w - jb]
+            .iter()
+            .filter(|&&v| v == zero)
+            .count();
+        for (i, &v) in col[w - jb..].iter().enumerate() {
             if v == zero {
                 zeros += 1;
             } else {
@@ -611,25 +699,24 @@ pub(crate) fn finish_panel<T: Scalar>(
         }
     }
     let m2 = row_nz.iter().filter(|&&b| b).count();
-    let mut len = ld * w;
+    let mut len = packed_len(w, m);
     if m2 < m {
-        let ld2 = w + m2;
-        let mut dst = 0;
-        for p in 0..w {
-            let src = p * ld;
-            // Reads stay ahead of writes: `dst <= src` and the kept row `i`
-            // lands at an offset no larger than its source.
-            panel.copy_within(src..src + w, dst);
-            let mut k = w;
+        // Column by column in order, each to an offset no larger than its
+        // own and its kept rows to offsets no larger than theirs, so reads
+        // stay ahead of writes.
+        for k in 0..w {
+            let (src, jb) = packed_col(w, m, k);
+            let (dst, _) = packed_col(w, m2, k);
+            panel.copy_within(src..src + w - jb, dst);
+            let mut at = dst + w - jb;
             for (i, &keep) in row_nz.iter().enumerate() {
                 if keep {
-                    panel[dst + k] = panel[src + w + i];
-                    k += 1;
+                    panel[at] = panel[src + w - jb + i];
+                    at += 1;
                 }
             }
-            dst += ld2;
         }
-        len = ld2 * w;
+        len = packed_len(w, m2);
         let mut k = 0;
         for i in 0..m {
             if row_nz[i] {
@@ -645,15 +732,6 @@ pub(crate) fn finish_panel<T: Scalar>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn row_permutation_in_place() {
-        // 3 x 2 panel, column-major.
-        let mut panel = vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0];
-        let mut tmp = Vec::new();
-        permute_panel_rows(&mut panel, 3, 2, &[2, 0, 1], &mut tmp);
-        assert_eq!(panel, vec![2.0, 0.0, 1.0, 12.0, 10.0, 11.0]);
-    }
 
     #[test]
     fn arena_finish_closes_gaps_and_drops_empty_rows() {

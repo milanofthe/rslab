@@ -127,18 +127,19 @@ pub const LU_INPUT_SCALING_BYTES_PER_COL: usize = 4 * WORD_BYTES;
 pub const LU_PERM_SCALE_BYTES_PER_COL: usize = 4 * WORD_BYTES;
 
 /// Scratch pools of an LDL^T factorization: the panel kernel's, the
-/// deep-row replay's, the `cmod`'s and the arena's (pools).
+/// deep-row replay's, the `cmod`'s, the full panels of the wide nodes and
+/// the arena's (pools).
 /// Used by: `LdltSymbolic::memory_plan`.
 /// Why: one per pooled scratch type.
 /// Contract: estimate.
-pub const LDLT_SCRATCH_POOLS: usize = 4;
+pub const LDLT_SCRATCH_POOLS: usize = 5;
 
 /// Scratch pools of an LU factorization: the node kernel's, the tiled
-/// `cmod`'s and the arena's (pools).
+/// `cmod`'s, the full panels of the wide fronts and the arena's (pools).
 /// Used by: `LuSymbolic::memory_plan`.
 /// Why: one per pooled scratch type.
 /// Contract: estimate.
-pub const LU_SCRATCH_POOLS: usize = 3;
+pub const LU_SCRATCH_POOLS: usize = 4;
 
 /// Per supernode while a solve plan is built: `sn_of`, the tree (parent,
 /// children), work, heap, flags and slots (bytes per supernode).

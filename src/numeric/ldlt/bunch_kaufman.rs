@@ -84,6 +84,8 @@ pub(super) struct BkPools<T> {
     pub(super) node: ScratchPool<BkScratch<T>>,
     pub(super) w: ScratchPool<Vec<T>>,
     pub(super) cmod: ScratchPool<(Vec<T>, Vec<T>, Vec<T>)>,
+    /// The full panel a node wider than one column block factors in.
+    pub(super) panel: ScratchPool<Vec<T>>,
 }
 
 /// A copy of a factor starts with scratch of its own, grown by its first
@@ -100,6 +102,7 @@ impl<T> BkPools<T> {
             node: ScratchPool::new(),
             w: ScratchPool::new(),
             cmod: ScratchPool::new(),
+            panel: ScratchPool::new(),
         }
     }
 }

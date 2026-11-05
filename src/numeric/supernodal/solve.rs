@@ -43,7 +43,9 @@ use crate::constants::{
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
-use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
+use crate::numeric::supernodal::panel::{
+    packed_blocks, packed_col, packed_len, PanelFactor, PanelStorage,
+};
 use crate::parallel::{Choice, PerScalar, Pick, Prior, Rate, ScalarRates, Work};
 use crate::scalar::Scalar;
 use std::sync::atomic::Ordering;
@@ -114,8 +116,8 @@ pub(crate) struct SolvePlan<T> {
     /// Per off-block row: accumulator slot when the row lies outside the
     /// supernode's leaf subtree, `NONE` when it is written directly.
     ext_slot: Vec<u32>,
-    /// The panels in the factor's own storage ([`PanelFactor`]), packed in
-    /// place by column blocks ([`packed_blocks`]): supernode `s` is
+    /// The panels in the factor's own storage ([`PanelFactor`]), in column
+    /// blocks ([`packed_blocks`]): supernode `s` is
     /// `vals[val_rng[s].0..val_rng[s].1]`.
     val_rng: Vec<(usize, usize)>,
     vals: Vec<T>,
@@ -548,9 +550,10 @@ impl<T: Scalar> SolvePlan<T> {
             let mut d = Vec::with_capacity(n);
             for s in 0..ns {
                 let (_, w, m) = factor.shape(s);
-                let ld = w + m;
+                let panel = factor.panel(s);
                 for k in 0..w {
-                    d.push(factor.panel(s)[k * ld + k].recip());
+                    let (start, jb) = packed_col(w, m, k);
+                    d.push(panel[start + k - jb].recip());
                 }
             }
             d
@@ -559,7 +562,7 @@ impl<T: Scalar> SolvePlan<T> {
             rows,
             row_ptr,
             val_off,
-            mut vals,
+            vals,
             ..
         } = factor;
         debug_assert!(
@@ -568,8 +571,7 @@ impl<T: Scalar> SolvePlan<T> {
                 .all(|p| p[0] < p[1])),
             "off-block rows ascending"
         );
-        let val_rng = pack_panels(&mut vals, &sn_col, &row_ptr, &val_off);
-        super::panel::release_room(&mut vals);
+        let val_rng = panel_ranges(&sn_col, &row_ptr, &val_off);
         let known = supernode_parent.len() == ns;
 
         let mut parent = vec![NONE; ns];
@@ -867,7 +869,7 @@ impl<T: Scalar> SolvePlan<T> {
     ) {
         let cfg_now = cfg;
         let ns = factor.n_supernodes();
-        // (the supernodes and their rows fix the panels' shapes, packed or not)
+        // (the supernodes and their rows fix the panels' shapes)
         let same = cfg_now == self.cfg
             && factor.n == self.n
             && unit == self.diag_inv.is_empty()
@@ -878,25 +880,24 @@ impl<T: Scalar> SolvePlan<T> {
             *self = Self::from_panels(factor, supernode_parent, unit, cfg);
             return;
         }
-        // The new row list equals the plan's: kept as the next spare, and the
-        // buffer keeps its room for the next factorization to fill again.
+        // The new row list equals the plan's: kept as the next spare.
+        if !unit {
+            for s in 0..ns {
+                let (c0, w, m) = factor.shape(s);
+                let panel = factor.panel(s);
+                for k in 0..w {
+                    let (start, jb) = packed_col(w, m, k);
+                    self.diag_inv[c0 + k] = panel[start + k - jb].recip();
+                }
+            }
+        }
         let PanelFactor {
-            mut vals,
+            vals,
             rows,
             val_off,
             ..
         } = factor;
-        if !unit {
-            for s in 0..ns {
-                let (c0, c1) = (self.sn_col[s] as usize, self.sn_col[s + 1] as usize);
-                let ld = c1 - c0 + self.row_ptr[s + 1] - self.row_ptr[s];
-                let panel = &vals[val_off[s]..];
-                for k in 0..c1 - c0 {
-                    self.diag_inv[c0 + k] = panel[k * ld + k].recip();
-                }
-            }
-        }
-        self.val_rng = pack_panels(&mut vals, &self.sn_col, &self.row_ptr, &val_off);
+        self.val_rng = panel_ranges(&self.sn_col, &self.row_ptr, &val_off);
         self.vals = vals;
         self.spare_rows = rows;
     }
@@ -1953,65 +1954,16 @@ fn tri_tile<T: Scalar, const W: usize>(
     }
 }
 
-/// The column blocks of a node of width `w` with `m` off-block rows in the plan's packed
-/// panel: `(jb, je, offset, ld)`, block `jb..je` the dense column-major `ld x (je - jb)`
-/// block at `offset` from the node's start, holding rows `jb..w + m` of its columns (`ld = w +
-/// m - jb`). A sweep reads no entry above a block's rows (the triangle in column blocks, the
-/// rows below in products), so those are not stored: of the diagonal block's unused upper
-/// triangle only the part inside each block's own square remains.
-fn packed_blocks(
-    w: usize,
-    m: usize,
-) -> impl DoubleEndedIterator<Item = (usize, usize, usize, usize)> + ExactSizeIterator {
-    let nb = SOLVE_DIAG_BLOCK;
-    // `k` full blocks before block `k`: `sum_{i < k} nb (w + m - i nb)`
-    let before = move |k: usize| k * nb * (w + m) - nb * nb * (k * k.saturating_sub(1) / 2);
-    (0..w.div_ceil(nb)).map(move |k| {
-        let (jb, je) = (k * nb, ((k + 1) * nb).min(w));
-        (jb, je, before(k), w + m - jb)
-    })
-}
-
-/// Entries of a node's packed panel ([`packed_blocks`]).
-pub(crate) fn packed_len(w: usize, m: usize) -> usize {
-    packed_blocks(w, m)
-        .map(|(jb, je, _, ld)| ld * (je - jb))
-        .sum()
-}
-
-/// Pack the panels of `vals` (supernode `s` the column-major `(w + m) x w` block at
-/// `full_off[s]`, `sn_col` and `row_ptr` giving `w` and `m`) in place into the plan's layout
-/// ([`packed_blocks`]) and return each one's packed range. The panels go in the order they
-/// lie in, every column moves to an offset no larger than its own and the columns go in
-/// order, so no source is overwritten before it is read. The buffer keeps its room.
-fn pack_panels<T: Copy>(
-    vals: &mut Vec<T>,
-    sn_col: &[u32],
-    row_ptr: &[usize],
-    full_off: &[usize],
-) -> Vec<(usize, usize)> {
-    let ns = sn_col.len() - 1;
-    let mut order: Vec<usize> = (0..ns).collect();
-    if full_off.windows(2).any(|p| p[0] > p[1]) {
-        order.sort_unstable_by_key(|&s| full_off[s]);
-    }
-    let mut rng = vec![(0usize, 0usize); ns];
-    let mut at = 0usize;
-    for s in order {
-        let w = (sn_col[s + 1] - sn_col[s]) as usize;
-        let m = row_ptr[s + 1] - row_ptr[s];
-        let ld = w + m;
-        for (jb, je, off, ldb) in packed_blocks(w, m) {
-            for k in jb..je {
-                let src = full_off[s] + k * ld + jb;
-                vals.copy_within(src..src + ldb, at + off + (k - jb) * ldb);
-            }
-        }
-        rng[s] = (at, at + packed_len(w, m));
-        at = rng[s].1;
-    }
-    vals.truncate(at);
-    rng
+/// Each supernode's range of a factor's values ([`packed_len`] from its
+/// offset), `sn_col` and `row_ptr` giving its shape.
+fn panel_ranges(sn_col: &[u32], row_ptr: &[usize], val_off: &[usize]) -> Vec<(usize, usize)> {
+    (0..sn_col.len() - 1)
+        .map(|s| {
+            let w = (sn_col[s + 1] - sn_col[s]) as usize;
+            let len = packed_len(w, row_ptr[s + 1] - row_ptr[s]);
+            (val_off[s], val_off[s] + len)
+        })
+        .collect()
 }
 
 /// `D z = y` for the block diagonal (1x1 and 2x2 pivots), on `nr` right-hand

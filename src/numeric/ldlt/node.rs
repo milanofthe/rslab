@@ -6,6 +6,7 @@ use super::bunch_kaufman::ll_cdiv_emit;
 use super::bunch_kaufman::BkPools;
 use super::factor::LlEmitLdlt;
 use super::gemm::{grow_scratch, lower_tile_gemm};
+use crate::numeric::supernodal::panel::{one_block, packed_blocks, packed_col};
 use crate::numeric::supernodal::{Input, Span};
 
 use crate::error::RslabError;
@@ -37,10 +38,23 @@ pub(super) fn ll_factor_node<T: Scalar>(
     let (first, ncol) = (snode.first_col, snode.ncol);
     let nrow = sched.rows(s).len();
     let n = sym.n;
-    // SAFETY: this task owns supernode `s`; nobody reads its slot before the
-    // node is done (its ancestors start after it).
-    let panel: &mut [T] = unsafe { emit.arena.slot_mut(s) };
-    debug_assert_eq!(panel.len(), nrow * ncol);
+    // A node of one column block factors in its slot, stored as it is
+    // factored; a wider one in a full panel of its own, stored packed once
+    // it is factored (`place`).
+    let mut full = (!one_block(ncol)).then(|| {
+        let mut b = pools.panel.take();
+        b.clear();
+        b.resize(nrow * ncol, T::zero());
+        b
+    });
+    let panel: &mut [T] = match &mut full {
+        Some(b) => &mut b[..],
+        // SAFETY: this task owns supernode `s`; nobody reads its slot before
+        // the node is done (its ancestors start after it).
+        None => unsafe { emit.arena.claim(s, nrow * ncol, nrow - ncol) }.ok_or_else(|| {
+            RslabError::InvalidInput("ldlt: a supernode outside its slot".to_string())
+        })?,
+    };
 
     // Global-to-local rows (narrow entries halve the table's random-access
     // footprint); restored when the node returns.
@@ -80,7 +94,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
             } in spans_ref
             {
                 let nck = sym.supernodes[kk].ncol;
-                let nrk = sched.rows(kk).len();
                 let ok = &sched.rows(kk)[nck..];
                 let nok = ok.len();
                 // Updater columns landing in this slab.
@@ -93,43 +106,22 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 // SAFETY: `kk` is a factored descendant of `s`, its cells
                 // are written and never mutated again.
                 let pk: &[T] = unsafe { emit.arena.slot(kk) };
-                let (dk, dsub_k, two_k) = unsafe { emit.d_of(kk, nck) };
+                let d = unsafe { emit.d_of(kk, nck) };
                 // G = (kk's block rows q0..q1) * D, column-major npk x nck.
-                grow_scratch(vd_buf, npk * nck);
-                let mut ck = 0;
-                while ck < nck {
-                    if two_k[ck] {
-                        let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
-                        for i in 0..npk {
-                            let a = pk[(nck + q0 + i) + ck * nrk];
-                            let b = pk[(nck + q0 + i) + (ck + 1) * nrk];
-                            vd_buf[i + ck * npk] = d11 * a + d21 * b;
-                            vd_buf[i + (ck + 1) * npk] = d21 * a + d22 * b;
-                        }
-                        ck += 2;
-                    } else {
-                        let dkc = dk[ck];
-                        for i in 0..npk {
-                            vd_buf[i + ck * npk] = pk[(nck + q0 + i) + ck * nrk] * dkc;
-                        }
-                        ck += 1;
-                    }
-                }
+                d_apply(vd_buf, pk, nck, nok, q0, npk, d);
                 let mrows = nok - q0;
-                grow_scratch(u_buf, mrows * npk);
                 // Serial per slab - the parallelism is across slabs.
-                // SAFETY: lhs (read), rhs (read), dst (write) pairwise
-                // disjoint; strides in bounds.
+                // SAFETY: `pk` and `vd_buf` hold what the product reads.
                 unsafe {
-                    lower_tile_gemm(
-                        &mut *u_buf,
-                        mrows,
-                        npk,
+                    cmod_product(
+                        u_buf,
+                        pk,
                         nck,
-                        pk.as_ptr().add(nck + q0),
-                        nrk as isize,
-                        vd_buf.as_ptr(),
-                        npk as isize,
+                        nok,
+                        q0,
+                        mrows,
+                        vd_buf,
+                        npk,
                         usize::MAX,
                         &kt.k,
                     )
@@ -155,13 +147,13 @@ pub(super) fn ll_factor_node<T: Scalar>(
     } in spans.iter().filter(|_| !tiled)
     {
         let nck = sym.supernodes[kk].ncol;
-        let nrk = sched.rows(kk).len();
         let ok = &sched.rows(kk)[nck..];
         let nok = ok.len();
         // SAFETY: `kk` is a factored descendant of `s` (its update reaches `s`),
         // so its panel/dval cells are written and never mutated again.
         let pk: &[T] = unsafe { emit.arena.slot(kk) };
-        let (dk, dsub_k, two_k) = unsafe { emit.d_of(kk, nck) };
+        let d = unsafe { emit.d_of(kk, nck) };
+        let (dk, dsub_k, two_k) = d;
         // Bunch-Kaufman block structure of `kk`'s D (pivoted column order). The
         // cmod `L*D*L^T` is invariant under `kk`'s internal column permutation, so
         // only the block-diagonal `D`-apply has to honor the 2x2 blocks.
@@ -174,12 +166,17 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 let tcol = ok[c_idx] as usize - first;
                 // vc = D * (column `c_idx` of kk's off-diagonal block), with D
                 // block-diagonal (1x1 and complex-symmetric 2x2 blocks).
+                // Column `ck`'s off-block row `r` of `kk` at `at(ck) + r`.
+                let at = |ck: usize| {
+                    let (start, jb) = packed_col(nck, nok, ck);
+                    start + nck - jb
+                };
                 let mut ck = 0;
                 while ck < nck {
-                    let a = pk[(nck + c_idx) + ck * nrk];
+                    let a = pk[at(ck) + c_idx];
                     if two_k[ck] {
                         let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
-                        let b = pk[(nck + c_idx) + (ck + 1) * nrk];
+                        let b = pk[at(ck + 1) + c_idx];
                         vc[ck] = d11 * a + d21 * b;
                         vc[ck + 1] = d21 * a + d22 * b;
                         ck += 2;
@@ -191,36 +188,20 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 for r_idx in c_idx..nok {
                     let trow = gloc[ok[r_idx] as usize] as usize;
                     let mut acc = T::zero();
-                    for ck in 0..nck {
-                        acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
+                    for (jb, je, off, ld) in packed_blocks(nck, nok) {
+                        let col = off + nck - jb + r_idx;
+                        for ck in jb..je {
+                            acc = acc + pk[col + (ck - jb) * ld] * vc[ck];
+                        }
                     }
                     panel[trow + tcol * nrow] = panel[trow + tcol * nrow] - acc;
                 }
             }
         } else {
-            grow_scratch(vd_buf, npk * nck);
             // G = (kk's in-panel off-diagonal block) * D, stored column-major as
             // `vd_buf[c + ck*npk]`. D is block-diagonal (1x1 and 2x2 blocks); a
-            // 2x2 block mixes its two columns. GEMM below is unchanged.
-            let mut ck = 0;
-            while ck < nck {
-                if two_k[ck] {
-                    let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
-                    for i in 0..npk {
-                        let a = pk[(nck + p0 + i) + ck * nrk];
-                        let b = pk[(nck + p0 + i) + (ck + 1) * nrk];
-                        vd_buf[i + ck * npk] = d11 * a + d21 * b;
-                        vd_buf[i + (ck + 1) * npk] = d21 * a + d22 * b;
-                    }
-                    ck += 2;
-                } else {
-                    let dkc = dk[ck];
-                    for i in 0..npk {
-                        vd_buf[i + ck * npk] = pk[(nck + p0 + i) + ck * nrk] * dkc;
-                    }
-                    ck += 1;
-                }
-            }
+            // 2x2 block mixes its two columns.
+            d_apply(vd_buf, pk, nck, nok, p0, npk, d);
             // Only rows >= p0 land in (or below) the target block: computing
             // the full `nok`-tall product and discarding rows `< p0` in the
             // write-back wasted `p0*npk*nck` flops per update - large for
@@ -234,20 +215,17 @@ pub(super) fn ll_factor_node<T: Scalar>(
             // updates into the topmost supernodes (`mrows ~ npk`) the full
             // rectangle wasted another ~half of the flops.
             let mrows = nok - p0;
-            grow_scratch(u_buf, mrows * npk);
-            // SAFETY: lhs (`pk` off-diag block from row p0, read), rhs
-            // (`vd_buf`, read), dst (`u_buf`, write) are pairwise-disjoint;
-            // strides in bounds.
+            // SAFETY: `pk` and `vd_buf` hold what the product reads.
             unsafe {
-                lower_tile_gemm(
-                    &mut *u_buf,
-                    mrows,
-                    npk,
+                cmod_product(
+                    u_buf,
+                    pk,
                     nck,
-                    pk.as_ptr().add(nck + p0),
-                    nrk as isize,
-                    vd_buf.as_ptr(),
-                    npk as isize,
+                    nok,
+                    p0,
+                    mrows,
+                    vd_buf,
+                    npk,
                     seq_gemm_par,
                     &kt.k,
                 )
@@ -262,13 +240,98 @@ pub(super) fn ll_factor_node<T: Scalar>(
             }
         }
     }
-    ll_cdiv_emit(s, sym, sched, pools, emit, perturb_floor, kt, panel)
+    ll_cdiv_emit(s, sym, sched, pools, emit, perturb_floor, kt, panel)?;
+    if let Some(b) = &full {
+        // SAFETY: as the claim above.
+        unsafe { emit.arena.place(s, b, nrow, ncol, ncol, nrow - ncol) };
+    }
+    Ok(())
+}
+
+/// `G = R D` into `vd` (column-major `npk x nck`): `R` the off-block rows
+/// `r0..r0 + npk` of a factored descendant of `nck` columns and `mk`
+/// off-block rows, its panel `pk`, and `D` its block diagonal `d` (1x1 and
+/// 2x2 blocks; a 2x2 block mixes its two columns).
+fn d_apply<T: Scalar>(
+    vd: &mut Vec<T>,
+    pk: &[T],
+    nck: usize,
+    mk: usize,
+    r0: usize,
+    npk: usize,
+    (dk, dsub_k, two_k): (&[T], &[T], &[bool]),
+) {
+    grow_scratch(vd, npk * nck);
+    // Column `ck`'s off-block row `r0` of the descendant.
+    let at = |ck: usize| {
+        let (start, jb) = packed_col(nck, mk, ck);
+        start + nck - jb + r0
+    };
+    let mut ck = 0;
+    while ck < nck {
+        if two_k[ck] {
+            let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
+            let (ca, cb) = (at(ck), at(ck + 1));
+            for i in 0..npk {
+                let (a, b) = (pk[ca + i], pk[cb + i]);
+                vd[i + ck * npk] = d11 * a + d21 * b;
+                vd[i + (ck + 1) * npk] = d21 * a + d22 * b;
+            }
+            ck += 2;
+        } else {
+            let (dkc, ca) = (dk[ck], at(ck));
+            for i in 0..npk {
+                vd[i + ck * npk] = pk[ca + i] * dkc;
+            }
+            ck += 1;
+        }
+    }
+}
+
+/// `U = R G^T` on and below each tile's diagonal into `u` (`mrows x npk`):
+/// `R` the `mrows` off-block rows from `r0` of a factored descendant of
+/// `nck` columns and `mk` off-block rows (its panel `pk`), `G` the `npk x
+/// nck` product of [`d_apply`] in `vd`. The sum runs over the descendant's
+/// column blocks, one product each.
+///
+/// # Safety
+/// `pk` is the descendant's panel and `vd` holds `npk * nck` entries.
+#[allow(clippy::too_many_arguments)]
+unsafe fn cmod_product<T: Scalar>(
+    u: &mut Vec<T>,
+    pk: &[T],
+    nck: usize,
+    mk: usize,
+    r0: usize,
+    mrows: usize,
+    vd: &[T],
+    npk: usize,
+    par: usize,
+    ks: &crate::KernelSettings,
+) {
+    grow_scratch(u, mrows * npk);
+    for (b, (jb, je, off, ld)) in packed_blocks(nck, mk).enumerate() {
+        lower_tile_gemm(
+            &mut *u,
+            mrows,
+            npk,
+            je - jb,
+            pk.as_ptr().add(off + nck - jb + r0),
+            ld as isize,
+            vd.as_ptr().add(jb * npk),
+            npk as isize,
+            par,
+            b > 0,
+            ks,
+        );
+    }
 }
 
 /// Heap bytes [`ll_factor_node`] allocates for supernode `s` while it runs,
-/// for the memory plan: the tiled cmod's per-slab buffers on up to
-/// `workers` threads at once, or the sequential cmod's buffers, which stay
-/// allocated through the cdiv ([`ll_cdiv_scratch`](super::bunch_kaufman::ll_cdiv_scratch));
+/// for the memory plan: the full panel of a node wider than one column
+/// block, and the tiled cmod's per-slab buffers on up to `workers` threads
+/// at once, or the sequential cmod's buffers, which stay allocated through
+/// the cdiv ([`ll_cdiv_scratch`](super::bunch_kaufman::ll_cdiv_scratch));
 /// the largest split planes its GEMMs take on a worker (complex fields)
 /// and how many workers may take them at once. Replays the kernel's plan
 /// and growth of its buffers.
@@ -283,6 +346,11 @@ pub(super) fn ll_node_scratch<T: Scalar>(
     use crate::memory::grown;
     let vb = std::mem::size_of::<T>();
     let (first, ncol) = (sym.supernodes[s].first_col, sym.supernodes[s].ncol);
+    let full = if one_block(ncol) {
+        0
+    } else {
+        (sched.rows(s).len() * ncol * vb) as u64
+    };
     let (cdiv, mut planes, cdiv_copies) =
         super::bunch_kaufman::ll_cdiv_scratch::<T>(ncol, sched.rows(s).len(), k, workers);
     let plan = crate::numeric::supernodal::CmodPlan::new(
@@ -331,7 +399,7 @@ pub(super) fn ll_node_scratch<T: Scalar>(
             cdiv_copies
         };
         let bytes = ((worst * slabs.min(workers.max(1)) * vb) as u64).max(cdiv);
-        (bytes, planes.max(slab_planes), copies)
+        (full + bytes, planes.max(slab_planes), copies)
     } else {
         let (mut vc, mut vd, mut u) = (0, 0, 0);
         for sp in &plan.spans {
@@ -349,6 +417,10 @@ pub(super) fn ll_node_scratch<T: Scalar>(
                 }
             }
         }
-        (((vc + vd + u) * vb) as u64 + cdiv, planes, cdiv_copies)
+        (
+            full + ((vc + vd + u) * vb) as u64 + cdiv,
+            planes,
+            cdiv_copies,
+        )
     }
 }

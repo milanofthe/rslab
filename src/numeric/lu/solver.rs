@@ -549,11 +549,19 @@ impl LuSymbolic {
             };
         };
         // The `L` and `U^T` panels of a supernode, `(w + m_l) x w` and
-        // `(w + m_u) x w` on the exact structure; they are the stored factor.
+        // `(w + m_u) x w` on the exact structure, stored by column blocks.
         let st = &self.structure;
         let nsuper = sym.supernodes.len();
         let panels: u64 = (0..nsuper)
             .map(|s| ((st.rows_l(s).len() + st.cols_u(s).len()) * sym.supernodes[s].ncol) as u64)
+            .sum();
+        let stored: u64 = (0..nsuper)
+            .map(|s| {
+                use crate::numeric::supernodal::panel::packed_len;
+                let w = sym.supernodes[s].ncol;
+                (packed_len(w, st.rows_l(s).len() - w) + packed_len(w, st.cols_u(s).len() - w))
+                    as u64
+            })
             .sum();
         let settings = SolverSettings {
             threads: crate::numeric::settings::Threads::Fixed(0),
@@ -564,8 +572,8 @@ impl LuSymbolic {
             value_bytes,
             factor_nnz: panels,
             factor_bytes: plan.factor_bytes,
-            panels_all_bytes: panels * value_bytes as u64,
-            panel_live_peak_bytes: panels * value_bytes as u64,
+            panels_all_bytes: stored * value_bytes as u64,
+            panel_live_peak_bytes: stored * value_bytes as u64,
             transient_peak_bytes: plan.peak_bytes(),
             factor_flops: (0..nsuper)
                 .map(|s| {
@@ -604,8 +612,6 @@ impl LuSymbolic {
         let (n, nnz, ns) = (sym.n, self.nnz, sym.supernodes.len());
         let w = |s: usize| sym.supernodes[s].ncol;
         let widths: Vec<usize> = (0..ns).map(w).collect();
-        let off_l: Vec<usize> = (0..ns).map(|s| st.rows_l(s).len() - w(s)).collect();
-        let off_u: Vec<usize> = (0..ns).map(|s| st.cols_u(s).len() - w(s)).collect();
         // The arenas' slots, and with delayed pivots the values they may add
         // over them (`delay`): the grown fronts' buffers while the forest is
         // factored, the factor's growth after it.
@@ -616,14 +622,6 @@ impl LuSymbolic {
             .iter()
             .chain(&u_slots)
             .map(|&(v, _)| v)
-            .sum::<usize>()
-            + allowance;
-        // the same panels packed as the solve plans hold them
-        let packed: usize = (0..ns)
-            .map(|s| {
-                use crate::numeric::supernodal::solve::packed_len;
-                packed_len(w(s), off_l[s]) + packed_len(w(s), off_u[s])
-            })
             .sum::<usize>()
             + allowance;
         let rows: usize = l_slots.iter().chain(&u_slots).map(|&(_, m)| m).sum();
@@ -665,16 +663,13 @@ impl LuSymbolic {
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
-        // Held by the factor: the `L` and `U^T` panels (packed by the solve
-        // plans) with their schedules, `U`'s reciprocal diagonal, both
-        // permutations and scalings, and the supernode tree.
-        let factor_with = |panels: usize| {
-            vb * (panels + n)
-                + (layout_l.held + layout_u.held) as usize
-                + LU_PERM_SCALE_BYTES_PER_COL * n
-                + WORD_BYTES * ns
-        };
-        let factor = factor_with(packed);
+        // Held by the factor: the `L` and `U^T` panels with their schedules,
+        // `U`'s reciprocal diagonal, both permutations and scalings, and the
+        // supernode tree.
+        let factor = vb * (panels + n)
+            + (layout_l.held + layout_u.held) as usize
+            + LU_PERM_SCALE_BYTES_PER_COL * n
+            + WORD_BYTES * ns;
         // While the forest is factored: the scalings (by `A`'s and by
         // elimination index), both arenas, the emit cells (refcounts, offsets, panel records,
         // positions and permutations) and the forest's lists, every node's
@@ -689,7 +684,8 @@ impl LuSymbolic {
             .collect();
         let mut planes: Vec<(usize, usize)> = scratch.iter().map(|&(_, p, c)| (p, c)).collect();
         let (workers, kept) = crate::memory::worker_bytes::<T>(n, 2, threads, &mut planes);
-        // The node kernel's, the tiled `cmod`'s and the arena's pools.
+        // The node kernel's, the tiled `cmod`'s, the wide fronts' panels and
+        // the arena's pools.
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LU_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
@@ -697,10 +693,9 @@ impl LuSymbolic {
             + workers
             + pooled
             + nodes;
-        // After it: the factor with its panels as factored (the plans pack
-        // them in place), the emitted row lists until the plans have copied
-        // them, and a plan's build.
-        let after = factor_with(panels) as u64
+        // After it: the factor, the emitted row lists until the plans have
+        // copied them, and a plan's build.
+        let after = factor as u64
             + (IDX32_BYTES * rows + 2 * VEC_HEADER_BYTES * ns) as u64
             + layout_l.build.max(layout_u.build);
         plan.analysis_growth_bytes = growth as u64;

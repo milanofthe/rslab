@@ -455,11 +455,18 @@ impl LdltSymbolic {
         };
         let nsuper = sym.supernodes.len();
         let dims = |s: usize| (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
-        // One dense panel per supernode, which is the stored factor.
+        // One dense panel per supernode, stored by column blocks.
         let panels: u64 = (0..nsuper)
             .map(|s| {
                 let (nc, nr) = dims(s);
                 nr * nc
+            })
+            .sum();
+        let stored: u64 = (0..nsuper)
+            .map(|s| {
+                let (nc, nr) = dims(s);
+                crate::numeric::supernodal::panel::packed_len(nc as usize, (nr - nc) as usize)
+                    as u64
             })
             .sum();
         let settings = SolverSettings {
@@ -490,8 +497,8 @@ impl LdltSymbolic {
             value_bytes,
             factor_nnz: panels,
             factor_bytes: plan.factor_bytes,
-            panels_all_bytes: panels * value_bytes as u64,
-            panel_live_peak_bytes: panels * value_bytes as u64,
+            panels_all_bytes: stored * value_bytes as u64,
+            panel_live_peak_bytes: stored * value_bytes as u64,
             transient_peak_bytes: plan.peak_bytes(),
             factor_flops: flops,
             critical_path_flops: cp,
@@ -529,10 +536,9 @@ impl LdltSymbolic {
         let r = |s: usize| sched.rows(s).len();
         let widths: Vec<usize> = (0..ns).map(w).collect();
         let off: Vec<usize> = (0..ns).map(|s| r(s) - w(s)).collect();
-        let panels: usize = (0..ns).map(|s| r(s) * w(s)).sum();
-        // the same panels packed as the solve plan holds them
-        let packed: usize = (0..ns)
-            .map(|s| crate::numeric::supernodal::solve::packed_len(w(s), off[s]))
+        // The panels as stored, by column blocks.
+        let panels: usize = (0..ns)
+            .map(|s| crate::numeric::supernodal::panel::packed_len(w(s), off[s]))
             .sum();
         let rows: usize = off.iter().sum();
         let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
@@ -555,16 +561,12 @@ impl LdltSymbolic {
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
-        // Held by the factor: the panels (packed by the solve plan) and their
-        // schedule, D, the 2x2 flags, the permutation, the supernode tree and
-        // the scaling.
-        let factor_with = |panels: usize| {
-            vb * panels
-                + layout.held as usize
-                + n * (2 * vb + 1 + WORD_BYTES + WORD_BYTES)
-                + WORD_BYTES * ns
-        };
-        let factor = factor_with(packed);
+        // Held by the factor: the panels and their schedule, D, the 2x2
+        // flags, the permutation, the supernode tree and the scaling.
+        let factor = vb * panels
+            + layout.held as usize
+            + n * (2 * vb + 1 + WORD_BYTES + WORD_BYTES)
+            + WORD_BYTES * ns;
         // While the forest is factored: the scaling (by `A`'s and by
         // elimination index), the arena, the emit cells (refcounts, offsets,
         // panel records, the pivots by column) and the forest's own lists,
@@ -588,12 +590,10 @@ impl LdltSymbolic {
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
         let during =
             (2 * WORD_BYTES * n + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
-        // After it: the factor with its panels as factored (the plan packs
-        // them in place), the emitted row lists until the plan has copied
-        // them, and the plan's build.
-        let after = factor_with(panels) as u64
-            + (IDX32_BYTES * rows + VEC_HEADER_BYTES * ns) as u64
-            + layout.build;
+        // After it: the factor, the emitted row lists until the plan has
+        // copied them, and the plan's build.
+        let after =
+            factor as u64 + (IDX32_BYTES * rows + VEC_HEADER_BYTES * ns) as u64 + layout.build;
         plan.analysis_growth_bytes = growth as u64;
         plan.factor_bytes = factor as u64;
         plan.kept_bytes = kept + pooled;

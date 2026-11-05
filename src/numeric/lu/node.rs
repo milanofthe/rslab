@@ -6,6 +6,7 @@
 use super::delay::NodePivots;
 use super::factor::LlEmit;
 use super::structure::LuStructure;
+use crate::numeric::supernodal::panel::{one_block, packed_blocks, packed_len};
 use crate::numeric::supernodal::Input;
 
 use crate::error::RslabError;
@@ -58,10 +59,12 @@ impl<T> Default for LuScratch<T> {
 }
 
 /// The scratch pools of one LU factorization: the node kernel's buffers per
-/// running node and the tiled `cmod`'s update block per slab.
+/// running node, the tiled `cmod`'s update block per slab and the full
+/// panels of the fronts wider than one column block.
 pub(super) struct LuPools<T> {
     pub(super) node: ScratchPool<LuScratch<T>>,
     pub(super) slab: ScratchPool<Vec<T>>,
+    pub(super) panels: ScratchPool<Vec<T>>,
 }
 
 /// A copy of a factor starts with scratch of its own, grown by its first
@@ -77,8 +80,81 @@ impl<T> LuPools<T> {
         LuPools {
             node: ScratchPool::new(),
             slab: ScratchPool::new(),
+            panels: ScratchPool::new(),
         }
     }
+}
+
+/// `dst = L_k[rl.., :] U_k[:, ru..]`, `m x n` column-major with leading
+/// dimension `m`: `L_k` and `U^T_k` the panels `lk` and `uk` of a factored
+/// descendant of `nck` pivots with `ml` and `mu` rows past them, `rl` and
+/// `ru` counted past the pivots. The sum runs over the descendant's column
+/// blocks, one product each.
+///
+/// # Safety
+/// `dst` holds `m * n` entries, `lk` and `uk` the descendant's panels.
+#[allow(clippy::too_many_arguments)]
+unsafe fn lu_product<T: Scalar>(
+    dst: *mut T,
+    m: usize,
+    n: usize,
+    nck: usize,
+    lk: &[T],
+    ml: usize,
+    rl: usize,
+    uk: &[T],
+    mu: usize,
+    ru: usize,
+    par: gemm::Parallelism,
+    ks: &crate::KernelSettings,
+) {
+    let blocks = packed_blocks(nck, ml).zip(packed_blocks(nck, mu));
+    for (b, ((jb, je, offl, ldl), (_, _, offu, ldu))) in blocks.enumerate() {
+        crate::dense::gemm_backend::gemm(
+            m,
+            n,
+            je - jb,
+            dst,
+            m as isize,
+            1,
+            b > 0,
+            lk.as_ptr().add(offl + nck - jb + rl),
+            ldl as isize,
+            1,
+            uk.as_ptr().add(offu + nck - jb + ru),
+            1,
+            ldu as isize,
+            if b > 0 { T::one() } else { T::zero() },
+            T::one(),
+            false,
+            false,
+            false,
+            crate::dense::gemm_backend::GemmMode::new(par, ks),
+        );
+    }
+}
+
+/// `L_k[r, :] U_k[:, c]`, `r` and `c` counted past the `nck` pivots of a
+/// factored descendant (as [`lu_product`]), summed in column order.
+fn lu_dot<T: Scalar>(
+    nck: usize,
+    lk: &[T],
+    ml: usize,
+    r: usize,
+    uk: &[T],
+    mu: usize,
+    c: usize,
+) -> T {
+    let mut acc = T::zero();
+    for ((jb, je, offl, ldl), (_, _, offu, ldu)) in
+        packed_blocks(nck, ml).zip(packed_blocks(nck, mu))
+    {
+        let (bl, bu) = (offl + nck - jb + r, offu + nck - jb + c);
+        for ck in 0..je - jb {
+            acc = acc + lk[bl + ck * ldl] * uk[bu + ck * ldu];
+        }
+    }
+    acc
 }
 
 /// `x -= L[rows, kb..k] u` for the off-block rows of a pivot column: `x` holds
@@ -247,29 +323,41 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // below and `U11` on and above the diagonal). `ut`: the `U^T` panel,
     // `nrow_u x nfs`; the factorization writes its off-block rows, `U12[p, t]`
     // at `ut[p * nrow_u + nfs + t]` (row `p` of `U` is column `p` of the
-    // panel), and the emit fills the diagonal block. The node's slots: the
-    // analysis's, or, where pivots may be delayed, claimed now at the size
-    // the front has, within the arenas' room (the factorization stops when
-    // it is spent).
-    // SAFETY: this task owns supernode `s`; nobody reads its slots before the
-    // node is done (its ancestors start after it).
-    let (lbuf, ut): (&mut [T], &mut [T]) = unsafe {
-        let (vl, vu) = (nrow_l * nfs, nrow_u * nfs);
-        // Room for the rows past the pivots: past all of the block without
-        // delays, else past at least one pivot.
-        let past = |nrow: usize| if emit.delays { nrow } else { nrow - nfs };
-        match (
-            emit.l_arena.claim(s, vl, past(nrow_l)),
-            emit.u_arena.claim(s, vu, past(nrow_u)),
-        ) {
+    // panel), and its diagonal block is filled from `lbuf` at the end. A
+    // front of one column block factors in its slots, stored as it is
+    // factored; a wider one in full panels of its own, stored packed once it
+    // is factored (`place`). The slots: the analysis's, or, where pivots may
+    // be delayed, claimed at the size the front has, within the arenas' room
+    // (the factorization stops when it is spent).
+    let (vl, vu) = (nrow_l * nfs, nrow_u * nfs);
+    // Room for the rows past the pivots: past all of the block without
+    // delays, else past at least one pivot.
+    let past = |nrow: usize| if emit.delays { nrow } else { nrow - nfs };
+    let spent = || {
+        emit.overflowed.store(true, Ordering::Release);
+        Err(RslabError::InvalidInput(
+            "delayed pivots exceed their allowance".to_string(),
+        ))
+    };
+    let mut full = (!one_block(nfs)).then(|| {
+        let mut b = pools.panels.take();
+        b.clear();
+        b.resize(vl + vu, T::zero());
+        b
+    });
+    let (lbuf, ut): (&mut [T], &mut [T]) = match &mut full {
+        Some(b) => b.split_at_mut(vl),
+        // SAFETY: this task owns supernode `s`; nobody reads its slots before
+        // the node is done (its ancestors start after it).
+        None => match unsafe {
+            (
+                emit.l_arena.claim(s, vl, past(nrow_l)),
+                emit.u_arena.claim(s, vu, past(nrow_u)),
+            )
+        } {
             (Some(l), Some(u)) => (l, u),
-            _ => {
-                emit.overflowed.store(true, Ordering::Release);
-                return Err(RslabError::InvalidInput(
-                    "delayed pivots exceed their allowance".to_string(),
-                ));
-            }
-        }
+            _ => return spent(),
+        },
     };
     debug_assert!(lbuf.len() == nrow_l * nfs && ut.len() == nrow_u * nfs);
 
@@ -280,7 +368,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         // SAFETY: `k` is a factored descendant of `s`; its slots are published
         // and never written again.
         let (lk, uk): (&[T], &[T]) = unsafe { (emit.l_arena.slot(k), emit.u_arena.slot(k)) };
-        (nck, ol, ou, lk, uk, nck + ol.len(), nck + ou.len())
+        (nck, ol, ou, lk, uk)
     };
     {
         // Global to local: `L` rows into `lbuf`, `U` columns into `ut`.
@@ -334,7 +422,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 let c1 = (c0 + tile_w).min(ncol);
                 let mut lupd = pools.slab.take();
                 for sp in spans {
-                    let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
+                    let (nck, ol, ou, lk, uk) = updater(sp.k);
                     let (p0l, (p0u, p1u)) = (sp.l.0, sp.u);
                     let q0 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c0);
                     let q1 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c1);
@@ -347,29 +435,19 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     lupd.resize(mrows * npk, T::zero());
                     // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
                     unsafe {
-                        crate::dense::gemm_backend::gemm(
+                        lu_product(
+                            lupd.as_mut_ptr(),
                             mrows,
                             npk,
                             nck,
-                            lupd.as_mut_ptr(),
-                            mrows as isize,
-                            1,
-                            false,
-                            lk.as_ptr().add(nck + p0l),
-                            nrk_l as isize,
-                            1,
-                            uk.as_ptr().add(nck + q0),
-                            1,
-                            nrk_u as isize,
-                            T::zero(),
-                            T::one(),
-                            false,
-                            false,
-                            false,
-                            crate::dense::gemm_backend::GemmMode::new(
-                                gemm::Parallelism::None,
-                                &kt.k,
-                            ),
+                            lk,
+                            ol.len(),
+                            p0l,
+                            uk,
+                            ou.len(),
+                            q0,
+                            gemm::Parallelism::None,
+                            &kt.k,
                         );
                     }
                     for jj in 0..npk {
@@ -393,7 +471,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     let g1 = if u1 < cn_u { off_u[u1] } else { Li::MAX };
                     let mut uupd = pools.slab.take();
                     for sp in spans {
-                        let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
+                        let (nck, ol, ou, lk, uk) = updater(sp.k);
                         let ((p0l, p1l), p1u) = (sp.l, sp.u.1);
                         let t0 = p1u + ou[p1u..].partition_point(|&g| g < g0);
                         let t1 = p1u + ou[p1u..].partition_point(|&g| g < g1);
@@ -405,29 +483,19 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         uupd.resize(npk * ntr, T::zero());
                         // SAFETY: lhs/rhs/dst pairwise disjoint; strides in bounds.
                         unsafe {
-                            crate::dense::gemm_backend::gemm(
+                            lu_product(
+                                uupd.as_mut_ptr(),
                                 npk,
                                 ntr,
                                 nck,
-                                uupd.as_mut_ptr(),
-                                npk as isize,
-                                1,
-                                false,
-                                lk.as_ptr().add(nck + p0l),
-                                nrk_l as isize,
-                                1,
-                                uk.as_ptr().add(nck + t0),
-                                1,
-                                nrk_u as isize,
-                                T::zero(),
-                                T::one(),
-                                false,
-                                false,
-                                false,
-                                crate::dense::gemm_backend::GemmMode::new(
-                                    gemm::Parallelism::None,
-                                    &kt.k,
-                                ),
+                                lk,
+                                ol.len(),
+                                p0l,
+                                uk,
+                                ou.len(),
+                                t0,
+                                gemm::Parallelism::None,
+                                &kt.k,
                             );
                         }
                         for jj in 0..ntr {
@@ -449,7 +517,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
 
         // Sequential per-update cmod (small nodes / narrow panels).
         for sp in spans.iter().filter(|_| !tiled) {
-            let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
+            let (nck, ol, ou, lk, uk) = updater(sp.k);
             let ((p0l, p1l), (p0u, p1u)) = (sp.l, sp.u);
             // L update: rows `ol[p0l..]` times the `U` columns landing here;
             // U12 update: the `L` rows landing here times the `U` columns past here.
@@ -460,12 +528,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 for jj in 0..npk_u {
                     let tcol = ou[p0u + jj] as usize - first;
                     for i in 0..mrows {
-                        let mut acc = T::zero();
-                        for ck in 0..nck {
-                            acc = acc
-                                + lk[(nck + p0l + i) + ck * nrk_l]
-                                    * uk[ck * nrk_u + nck + p0u + jj];
-                        }
+                        let acc = lu_dot(nck, lk, ol.len(), p0l + i, uk, ou.len(), p0u + jj);
                         let trow = gloc[ol[p0l + i] as usize] as usize;
                         lbuf[tcol * nrow_l + trow] = lbuf[tcol * nrow_l + trow] - acc;
                     }
@@ -473,12 +536,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 for jj in 0..ntrail {
                     let tu = gloc_u[ou[p1u + jj] as usize] as usize;
                     for i in 0..npk_l {
-                        let mut acc = T::zero();
-                        for ck in 0..nck {
-                            acc = acc
-                                + lk[(nck + p0l + i) + ck * nrk_l]
-                                    * uk[ck * nrk_u + nck + p1u + jj];
-                        }
+                        let acc = lu_dot(nck, lk, ol.len(), p0l + i, uk, ou.len(), p1u + jj);
                         let urow = ol[p0l + i] as usize - first;
                         ut[urow * nrow_u + tu] = ut[urow * nrow_u + tu] - acc;
                     }
@@ -500,26 +558,19 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 // SAFETY: lhs (lk off-diag rows), rhs (uk landing columns), dst
                 // (lupd) are disjoint; strides in bounds.
                 unsafe {
-                    crate::dense::gemm_backend::gemm(
+                    lu_product(
+                        lupd.as_mut_ptr(),
                         mrows,
                         npk_u,
                         nck,
-                        lupd.as_mut_ptr(),
-                        mrows as isize,
-                        1,
-                        false,
-                        lk.as_ptr().add(nck + p0l),
-                        nrk_l as isize,
-                        1,
-                        uk.as_ptr().add(nck + p0u),
-                        1,
-                        nrk_u as isize,
-                        T::zero(),
-                        T::one(),
-                        false,
-                        false,
-                        false,
-                        crate::dense::gemm_backend::GemmMode::new(par(mrows * npk_u * nck), &kt.k),
+                        lk,
+                        ol.len(),
+                        p0l,
+                        uk,
+                        ou.len(),
+                        p0u,
+                        par(mrows * npk_u * nck),
+                        &kt.k,
                     );
                 }
                 for jj in 0..npk_u {
@@ -537,26 +588,19 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 uupd.resize(npk_l * ntrail, T::zero());
                 // SAFETY: as above; rhs is the trailing U columns of `uk`.
                 unsafe {
-                    crate::dense::gemm_backend::gemm(
+                    lu_product(
+                        uupd.as_mut_ptr(),
                         npk_l,
                         ntrail,
                         nck,
-                        uupd.as_mut_ptr(),
-                        npk_l as isize,
-                        1,
-                        false,
-                        lk.as_ptr().add(nck + p0l),
-                        nrk_l as isize,
-                        1,
-                        uk.as_ptr().add(nck + p1u),
-                        1,
-                        nrk_u as isize,
-                        T::zero(),
-                        T::one(),
-                        false,
-                        false,
-                        false,
-                        crate::dense::gemm_backend::GemmMode::new(par(npk_l * ntrail * nck), &kt.k),
+                        lk,
+                        ol.len(),
+                        p0l,
+                        uk,
+                        ou.len(),
+                        p1u,
+                        par(npk_l * ntrail * nck),
+                        &kt.k,
                     );
                 }
                 for jj in 0..ntrail {
@@ -586,9 +630,11 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             // SAFETY: `c` is factored; its slots are published and never
             // written again before the emit, which runs after this node.
             let (lc, uc): (&[T], &[T]) = unsafe { (emit.l_arena.slot(c), emit.u_arena.slot(c)) };
+            // The delayed columns follow the panels whole (`place`).
+            let (tl, tu) = (packed_len(npc, olc.len()), packed_len(npc, ouc.len()));
             for (j, &gc) in pc.cols[npc..].iter().enumerate() {
                 let dst = gloc_u[gc as usize] as usize * nrow_l;
-                let src = &lc[(npc + j) * ldc + npc..(npc + j + 1) * ldc];
+                let src = &lc[tl + j * ldc + npc..tl + (j + 1) * ldc];
                 for (&g, &v) in olc.iter().zip(src) {
                     debug_assert!(gloc[g as usize] != Li::MAX, "delayed row outside the front");
                     let li = dst + gloc[g as usize] as usize;
@@ -597,7 +643,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             }
             for (i, &gr) in pc.rows[npc..].iter().enumerate() {
                 let r = gloc[gr as usize] as usize;
-                let src = &uc[(npc + i) * lduc + nfs_c..(npc + i + 1) * lduc];
+                let src = &uc[tu + i * lduc + nfs_c..tu + (i + 1) * lduc];
                 for (&g, &v) in ouc[nfs_c - npc..].iter().zip(src) {
                     let g = g as usize;
                     if g < first + ncol {
@@ -905,6 +951,24 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         let mut all = emit.floors.lock().unwrap_or_else(|e| e.into_inner());
         all.extend(floors.into_iter().map(|(k, delta)| (s, k, delta)));
     }
+    // `U^T`'s diagonal block and the rows of the delayed columns, from the
+    // upper triangle of `lbuf`.
+    for p in 0..npiv {
+        for i in p..nfs {
+            ut[p * nrow_u + i] = lbuf[i * nrow_l + p];
+        }
+    }
+    if let Some(b) = &full {
+        let (l, u) = b.split_at(vl);
+        // SAFETY: as the claims above.
+        let placed = unsafe {
+            emit.l_arena.place(s, l, nrow_l, npiv, nfs, past(nrow_l))
+                && emit.u_arena.place(s, u, nrow_u, npiv, nfs, past(nrow_u))
+        };
+        if !placed {
+            return spent();
+        }
+    }
     // What the node leaves: its pivots, the pivots it passes on (the rows and
     // columns past its pivots, as its ancestors read them, start with them).
     let own_lists = npiv < nfs || extras;
@@ -936,10 +1000,11 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
 }
 
 /// Heap bytes [`lu_ll_factor_node`] allocates for supernode `s` while it
-/// runs, for the memory plan: the tiled cmod's per-slab buffers (the `L`
-/// slabs, then the `U12` runs) on up to `workers` threads at once, or the
-/// sequential cmod's buffers, which stay allocated through the cdiv, and
-/// the front's row and column lists and its pivot column; the largest split
+/// runs, for the memory plan: the full panels of a front wider than one
+/// column block, the tiled cmod's per-slab buffers (the `L` slabs, then the
+/// `U12` runs) on up to `workers` threads at once, or the sequential cmod's
+/// buffers, which stay allocated through the cdiv, and the front's row and
+/// column lists and its pivot column; the largest split
 /// planes its GEMMs take on a worker (complex fields) and how many workers
 /// may take them at once. Replays the kernel's plan and growth of its
 /// buffers (of a front without delayed pivots).
@@ -959,7 +1024,12 @@ pub(super) fn lu_node_scratch<T: Scalar>(
     let (nrow_l, cn_u) = (st.rows_l(s).len(), cols_u.len() - ncol);
     let nb = k.panel_width(k.lu_panel_nb, ncol);
     let lists = (nrow_l + cols_u.len()) * crate::constants::IDX32_BYTES;
-    let cdiv = nrow_l * vb + lists;
+    let full = if one_block(ncol) {
+        0
+    } else {
+        (nrow_l + cols_u.len()) * ncol * vb
+    };
+    let cdiv = full + nrow_l * vb + lists;
     // The cdiv's two GEMMs per panel: the trailing `L` update and the `U12` rows.
     let mut planes = 0;
     if T::COMPLEX {
