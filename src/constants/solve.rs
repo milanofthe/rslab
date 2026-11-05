@@ -24,14 +24,6 @@ pub const SOLVE_LEAF_SUBTREES: usize = 128;
 /// Contract: timing (the same bits either way).
 pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
 
-/// Running sums of the dot products of a single right-hand side's backward
-/// sweep (sums).
-/// Used by: `supernodal::solve` (`dot`).
-/// Why: independent sums let the loads of a column overlap instead of each
-/// multiply-add waiting for the last; four cover a load's latency.
-/// Contract: rounding (the order the terms are summed in).
-pub const DOT_SUMS: usize = 4;
-
 /// Right-hand sides per register tile of the solve kernels, and how many of
 /// them count toward a sweep's work where it starts on the pool (right-hand
 /// sides).
