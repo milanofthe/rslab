@@ -192,7 +192,10 @@ fn ldlt_emit_and_free<T: Scalar>(
     // SAFETY (the slot accesses below): the owner of supernode `k` emits it
     // exactly once, after its last updater has read the panel (refcount
     // zero); nobody reads it afterwards.
-    debug_assert_eq!(emit.arena.slot_len(k), nrow * ncol);
+    debug_assert_eq!(
+        emit.arena.slot_len(k),
+        crate::numeric::supernodal::panel::packed_len(ncol, nrow - ncol)
+    );
     // The pivoting stays inside the diagonal block, so the off-diagonal rows
     // are in the schedule's order; the 2x2 flags are in the emit cells.
     let rows = unsafe { emit.arena.rows_mut(k) };
