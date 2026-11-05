@@ -764,4 +764,32 @@ mod tests {
         assert_eq!(f.rows, vec![1, 2]);
         assert_eq!(f.row_ptr, vec![0, 1, 2, 2]);
     }
+
+    #[test]
+    fn a_wide_panel_is_finished_in_its_column_blocks() {
+        // Two column blocks; off-block rows {9, 5, 7}, the one of 5 empty.
+        let (w, m) = (SOLVE_DIAG_BLOCK + 6, 3usize);
+        let ld = w + m;
+        let mut full = vec![0.0f64; ld * w];
+        for k in 0..w {
+            for i in k..ld {
+                full[k * ld + i] = (1000 * k + i + 1) as f64;
+            }
+            full[k * ld + w + 1] = 0.0;
+        }
+        let mut panel = vec![0.0; packed_len(w, m)];
+        unsafe { pack_into(&full, w, m, panel.as_mut_ptr()) };
+        let mut rows = [9u32, 5, 7];
+        let out = finish_panel(&mut panel, &mut rows, w, None, &mut PanelScratch::default());
+        assert_eq!((out.m, out.len), (2, packed_len(w, 2)));
+        assert_eq!(rows[..2], [7, 9]);
+        for k in 0..w {
+            let (start, jb) = packed_col(w, 2, k);
+            for i in k..w {
+                assert_eq!(panel[start + i - jb], full[k * ld + i]);
+            }
+            assert_eq!(panel[start + w - jb], full[k * ld + w + 2]);
+            assert_eq!(panel[start + w - jb + 1], full[k * ld + w]);
+        }
+    }
 }
