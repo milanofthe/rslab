@@ -569,6 +569,7 @@ impl<T: Scalar> SolvePlan<T> {
             "off-block rows ascending"
         );
         let val_rng = pack_panels(&mut vals, &sn_col, &row_ptr, &val_off);
+        super::panel::release_room(&mut vals);
         let known = supernode_parent.len() == ns;
 
         let mut parent = vec![NONE; ns];
@@ -877,7 +878,8 @@ impl<T: Scalar> SolvePlan<T> {
             *self = Self::from_panels(factor, supernode_parent, unit, cfg);
             return;
         }
-        // The new row list equals the plan's: kept as the next spare.
+        // The new row list equals the plan's: kept as the next spare, and the
+        // buffer keeps its room for the next factorization to fill again.
         let PanelFactor {
             mut vals,
             rows,
@@ -1981,8 +1983,7 @@ pub(crate) fn packed_len(w: usize, m: usize) -> usize {
 /// `full_off[s]`, `sn_col` and `row_ptr` giving `w` and `m`) in place into the plan's layout
 /// ([`packed_blocks`]) and return each one's packed range. The panels go in the order they
 /// lie in, every column moves to an offset no larger than its own and the columns go in
-/// order, so no source is overwritten before it is read; the buffer then gives back its
-/// room ([`release_room`](super::panel::release_room)).
+/// order, so no source is overwritten before it is read. The buffer keeps its room.
 fn pack_panels<T: Copy>(
     vals: &mut Vec<T>,
     sn_col: &[u32],
@@ -2010,7 +2011,6 @@ fn pack_panels<T: Copy>(
         at = rng[s].1;
     }
     vals.truncate(at);
-    super::panel::release_room(vals);
     rng
 }
 
