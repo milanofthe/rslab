@@ -22,11 +22,16 @@ categories = ["mathematics", "science"]
 autobins = true
 autoexamples = false
 autotests = true
+# The targets declared below ship with their sources (the source
+# distribution's manifest must find them); the benches' scripts and results
+# do not.
 exclude = [
-    "/benches",
-    "/examples",
+    "/benches/*.py",
+    "/benches/*.c",
+    "/benches/*.sh",
+    "/benches/bench_out",
+    "/benches/corpus",
     "/src/bin",
-    "/tests",
     "/.github",
     "/.githooks",
     "/docs",
