@@ -228,6 +228,7 @@ pub use numeric::settings::{
     OrderingSettings, PivotSettings, RaceSettings, SolveSettings, SolverSettings, Threads,
     ZeroPivotAction,
 };
+pub use numeric::supernodal::solve::SparseReach;
 // The Krylov solvers and their operator and preconditioner traits.
 pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_recycled, BasisSwitch, BlockArnoldi, BlockBasis,
@@ -239,6 +240,7 @@ pub use numeric::krylov::{
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
 pub use sparse::layout::{CscLayout, Triplets};
+pub use sparse::rhs::SparseRhs;
 pub use symbolic::{AmalgamationStrategy, OrderingMethod, RelaxAmalgamation};
 
 /// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /

@@ -39,6 +39,8 @@ use crate::numeric::supernodal::panel::PanelFactor;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 
+mod sparse;
+
 /// A factored sparse symmetric matrix, ready to solve against many right-hand
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
 #[derive(Clone)]
