@@ -178,13 +178,11 @@ impl<T: Scalar> CscMatrix<T> {
                 "row_idx and values length mismatch".to_string(),
             ));
         }
-        // X6 residual (repo-review-2026-06-09-verification.md): `col_ptr`
-        // must start at 0. A monotone `col_ptr` beginning at `k > 0` with
+        // `col_ptr` must start at 0. A monotone `col_ptr` beginning at `k > 0` with
         // `col_ptr[n] == nnz` passes every other check (length, monotone,
         // in-bounds, sorted, lower-triangle) while positions `0..k` of
         // `row_idx`/`values` are never covered by any column range -
-        // silently dropped and never factored. Completes the column-pointer
-        // contract the monotonicity check below began.
+        // silently dropped and never factored.
         if self.col_ptr[0] != 0 {
             return Err(RslabError::InvalidInput(format!(
                 "col_ptr[0] must be 0, got {}",
@@ -495,10 +493,8 @@ mod tests {
         assert!(m.validate().is_err());
     }
 
-    /// upper-triangle triplets must be rejected, not silently
-    /// accepted. The two matrices below describe the same symmetric
-    /// system; previously the upper-triangle form was accepted and
-    /// produced different solve results downstream.
+    /// Upper-triangle triplets are rejected, not silently accepted. The two
+    /// matrices below describe the same symmetric system.
     #[test]
     fn test_from_triplets_rejects_upper_triangle() {
         // Lower-triangle form: (0,0)=2, (1,0)=1, (1,1)=2
@@ -506,7 +502,7 @@ mod tests {
         lower.validate().unwrap();
 
         // Upper-triangle form of the same matrix: (0,0)=2, (0,1)=1, (1,1)=2.
-        // Must be rejected - previously was silently accepted.
+        // Must be rejected.
         let err = CscMatrix::from_triplets(2, &[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, 2.0])
             .expect_err("upper-triangle triplet must be rejected");
         let msg = format!("{}", err);
@@ -652,8 +648,7 @@ mod tests {
         );
     }
 
-    /// X6 residual (repo-review-2026-06-09-verification.md): `validate()`
-    /// must reject a `col_ptr` that does not start at 0. A monotone
+    /// `validate()` must reject a `col_ptr` that does not start at 0. A monotone
     /// `col_ptr` beginning at `k > 0` with `col_ptr[n] == nnz` passes the
     /// length, monotonicity, `col_ptr[n] == nnz`, in-bounds, sorted and
     /// lower-triangle checks, yet positions `0..k` of `row_idx`/`values`
@@ -663,7 +658,7 @@ mod tests {
     /// Witness: n = 2, nnz = 2, `col_ptr = [1, 1, 2]`. Monotone,
     /// `col_ptr[2] == 2 == nnz`; column 0's range `[1, 1)` is empty and
     /// column 1's range `[1, 2)` reads only index 1, so `row_idx[0]` /
-    /// `values[0]` are never covered. Pre-fix `validate()` returned `Ok`.
+    /// `values[0]` are never covered.
     #[test]
     fn validate_rejects_nonzero_col_ptr_start() {
         let m = CscMatrix {

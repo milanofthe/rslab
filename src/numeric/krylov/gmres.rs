@@ -94,7 +94,7 @@ where
     // the Givens `cs`/`sn`, the LS RHS `g`, and the back-substitution `y`. A
     // many-restart solve (the ill-conditioned regime) then does no per-cycle heap
     // churn; the reused buffers are zeroed each cycle, so the numerics are
-    // bit-identical to the old fresh-allocation-per-cycle path.
+    // bit-identical to a fresh allocation per cycle.
     let mut h = vec![T::zero(); (m + 1) * m];
     let mut cs = vec![T::zero(); m];
     let mut sn = vec![T::zero(); m];
@@ -118,7 +118,7 @@ where
             break;
         }
         // Column 0 of the basis = r / ||r||. Reset the reused Hessenberg / Givens /
-        // LS state to the fresh-zero semantics of the old per-cycle allocation.
+        // LS state to zero.
         let inv_beta = T::from_real(1.0 / beta);
         grow(&mut v, n);
         for k in 0..n {

@@ -293,8 +293,7 @@ impl<T: Scalar> KluSolver<T> {
         row_scale_inv_into(a, f.scaled, &mut rs_inv);
 
         // Branch-free pattern verification against the recorded program: every
-        // entry must map to the exact final position it had at factor time
-        // (this subsumes the old per-column F-walk and leftover checks).
+        // entry must map to the exact final position it had at factor time.
         {
             let mut acc: Ki = 0;
             for (k, &r) in a.row_idx.iter().enumerate() {

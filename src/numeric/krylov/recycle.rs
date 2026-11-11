@@ -255,7 +255,7 @@ pub struct Recycle<T> {
 
 impl<T: Scalar> Recycle<T> {
     /// The stored recycle vectors: column-major `n x kc` (`kc` columns of length `n`),
-    /// in the preconditioned space — the approximate smallest-magnitude eigenvectors of
+    /// in the preconditioned space: the approximate smallest-magnitude eigenvectors of
     /// `A M^-1` the last solve found. For inspection (which physical directions a solver
     /// keeps re-discovering); empty before the first solve.
     pub fn vectors(&self) -> (&[T], usize, usize) {

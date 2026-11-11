@@ -5,7 +5,7 @@
 //! the remaining A-vertices from the remaining B-vertices. The
 //! minimum-weight such set is the minimum vertex cover of the
 //! bipartite graph between A-boundary and B-boundary induced by
-//! crossing edges (König's theorem).
+//! crossing edges (Konig's theorem).
 //!
 //! Algorithm:
 //!
@@ -14,7 +14,7 @@
 //! 2. Build the bipartite crossing-edge graph.
 //! 3. Compute a maximum matching with Kuhn's augmenting-path
 //!    algorithm (O(V*E); sufficient at our graph sizes).
-//! 4. Use König's construction to extract the minimum vertex cover
+//! 4. Use Konig's construction to extract the minimum vertex cover
 //!    from the matching, and relabel those vertices as `PART_SEP`.
 //!
 //! References:
@@ -104,7 +104,7 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
         try_augment(ai as i32, &adj, &mut match_a, &mut match_b, &mut visited);
     }
 
-    // 5. König's construction. Starting from unmatched A-vertices,
+    // 5. Konig's construction. Starting from unmatched A-vertices,
     //    alternately walk unmatched edges (A->B) and matched edges (B->A).
     //    Let Z be the set of reachable vertices.
     //    Min vertex cover = (A \ Z) union (B intersect Z).

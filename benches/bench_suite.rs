@@ -1163,7 +1163,7 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
             })
             .collect(),
         // Unsymmetric distribution (LU path): convection-diffusion is the canonical
-        // sparse-unsymmetric class (advection-dominated, high grid-Péclet), in 3D and
+        // sparse-unsymmetric class (advection-dominated, high grid-Peclet), in 3D and
         // 2D, plus a BEM/MoM near-field kernel for the dense-ish contrast. All
         // genuinely complex-valued.
         // One matrix per size, rotating through the classes/parameters (see the

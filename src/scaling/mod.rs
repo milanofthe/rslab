@@ -189,8 +189,3 @@ pub fn compute_scaling(
         ScalingStrategy::Mc64Symmetric => mc64::compute_symmetric(matrix),
     }
 }
-
-// Hungarian kernel types, used by the `mc64` module. Not part of the
-// public API.
-#[allow(unused_imports)]
-pub(crate) use hungarian::{hungarian_match, CostGraph, Matching};

@@ -251,7 +251,7 @@ fn nd_subproblem(
 /// Multilevel node bisection, METIS `MlevelNodeBisectionL1` structure:
 /// coarsen -> initial *edge* bisection with niparts trials (best
 /// post-FM cut) -> convert to a node separator once, at the coarsest
-/// level (König min vertex cover) -> refine the **node separator**
+/// level (Konig min vertex cover) -> refine the **node separator**
 /// itself at the coarsest level and at every uncoarsening step
 /// (balance + one-sided node FM). Returns labels in {PART_A, PART_B,
 /// PART_SEP}.
