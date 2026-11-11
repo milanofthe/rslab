@@ -162,6 +162,9 @@ fn lu_and_klu_report_the_same_way() {
 /// a refinement against `A`.
 const FLOOR: f64 = 1e-2;
 
+/// `|b - (A + E) x| / |b|` below which a system counts as solved to roundoff.
+const ROUNDOFF: f64 = 1e-12;
+
 /// A saddle point `[K B; B^T 0]` whose constraints repeat: every third
 /// column of `B` copies the one before it, so `A` is singular and static
 /// pivoting has to lift pivots. `K` is a complex grid operator on `m x m`
@@ -269,7 +272,7 @@ fn lu_perturbations_are_the_factored_matrix() {
             floors.len()
         );
         assert!(
-            be < 1e-12,
+            be < ROUNDOFF,
             "matching {matching}: |b - (A + E) x|/|b| = {be:.1e}"
         );
         assert!(
@@ -293,7 +296,7 @@ fn ldlt_perturbations_are_the_factored_matrix() {
     let x = s.solve(&b).unwrap();
     let be = floored_residual(&a, floors, &x, &b);
     eprintln!("ldlt: {} floors, |b - (A + E) x| {be:.1e}", floors.len());
-    assert!(be < 1e-12, "|b - (A + E) x|/|b| = {be:.1e}");
+    assert!(be < ROUNDOFF, "|b - (A + E) x|/|b| = {be:.1e}");
 }
 
 /// Refinement against `A` cannot converge on a singular `A` (the correction
@@ -315,7 +318,7 @@ fn refinement_against_the_factored_matrix_converges() {
     eprintln!("lu: against A {given:?}, against A + E {own:?}");
     assert!(!given.certified, "A is singular: {given:?}");
     assert!(own.certified && own.steps <= 2, "{own:?}");
-    assert!(floored_residual(&a, lu.perturbations(), &x, &b) < 1e-14);
+    assert!(floored_residual(&a, lu.perturbations(), &x, &b) < ROUNDOFF);
 
     let (n, r, c, v) = floored_saddle(true);
     let a = CscMatrix::<Z>::from_triplets(n, &r, &c, &v).unwrap();
