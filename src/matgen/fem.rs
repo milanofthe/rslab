@@ -4,8 +4,8 @@
 //! FEM edge-element / EM workload) and the **saddle-point** Stokes/KKT operator
 //! (symmetric indefinite, `[A B^T; B -betaC]`). Both are assembled directly on a
 //! structured grid with finite differences, no external FEM library, following
-//! the standard discretizations (curl-curl `curl curl E - (omega^2 eps - i omega sigma) E`, Nédélec/Yee;
-//! Stokes MAC / mixed-FEM `[A B^T; B 0]` with Brezzi-Pitkäranta pressure
+//! the standard discretizations (curl-curl `curl curl E - (omega^2 eps - i omega sigma) E`, Nedelec/Yee;
+//! Stokes MAC / mixed-FEM `[A B^T; B 0]` with Brezzi-Pitkaranta pressure
 //! stabilization `-betaC`). References: Jin, *The FEM in Electromagnetics*;
 //! Elman-Silvester-Wathen, *Finite Elements and Fast Iterative Solvers* (IFISS);
 //! Benzi-Golub-Liesen, *Numerical solution of saddle point problems*.
@@ -144,7 +144,7 @@ pub fn curl_curl(dims: &[usize], omega: f64, sigma: f64) -> CscMatrix<Complex<f6
 /// **Saddle-point** Stokes/KKT operator `[A B^T; B -betaC]` on a structured grid
 /// (symmetric indefinite), generic over the scalar type. `A` is the velocity
 /// vector Laplacian (SPD), `B` the discrete divergence coupling velocity to
-/// pressure, and `-betaC` a Brezzi-Pitkäranta pressure-Laplacian stabilization
+/// pressure, and `-betaC` a Brezzi-Pitkaranta pressure-Laplacian stabilization
 /// (`beta>0`) that regularizes the otherwise-singular zero `(2,2)` block on a
 /// collocated grid. DOF layout: velocity `a*n+i` (`a<ndim`), then pressure
 /// `ndim*n + i`. The zero/negative pressure block makes the system indefinite --
@@ -224,11 +224,11 @@ pub enum Flow {
 /// diffusion term is the usual 5/7-point Laplacian scaled by `eps`.
 ///
 /// * `upwind=false` (central differences) is the sharp, oscillation-prone form
-///   that stresses pivoting at small `eps` (high grid-Péclet `|b|h/eps`);
+///   that stresses pivoting at small `eps` (high grid-Peclet `|b|h/eps`);
 /// * `upwind=true` is the first-order upwind form, a diagonally dominant M-matrix.
 ///
 /// Sweeping `eps` moves the operator from diffusion-dominated (nearly symmetric,
-/// small Péclet) to advection-dominated (strongly unsymmetric), and [`Flow`]
+/// small Peclet) to advection-dominated (strongly unsymmetric), and [`Flow`]
 /// varies the advection field --- together they span the unsymmetric distribution
 /// on a structured grid without an external FEM library.
 pub fn convection_diffusion<T: Scalar>(

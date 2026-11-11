@@ -36,8 +36,7 @@ pub(crate) fn emit_refcount_offsets(
 pub(crate) type Li = u32;
 
 /// Pattern-only left-looking schedule, built once per symbolic analysis and
-/// shared by the LDLT/LU drivers and the a-priori memory estimators (it was
-/// previously rebuilt by each of them, per factorization): the per-supernode
+/// shared by the LDLT/LU drivers and the a-priori memory estimators: the per-supernode
 /// row structures and the updater lists, both in flat CSR-like storage with
 /// narrow [`Li`] values.
 pub(crate) struct LlSchedule {

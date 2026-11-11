@@ -21,32 +21,30 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-// Internal modules are `pub` (hidden) for tests and examples; not
-// every helper is used by `metis_order_full`, so dead-code lint is
-// suppressed at the module root.
+// Internal modules are `pub` (hidden) for tests and examples.
 #[doc(hidden)]
-#[allow(dead_code, missing_docs)]
+#[allow(missing_docs)]
 pub mod coarsen;
 // The numbers nested dissection is tuned and defined by; reached by the
 // contract tests.
 #[doc(hidden)]
 pub mod constants;
 #[doc(hidden)]
-#[allow(dead_code, missing_docs)]
+#[allow(missing_docs)]
 pub mod fm_refine;
 #[doc(hidden)]
-#[allow(dead_code, missing_docs)]
+#[allow(missing_docs)]
 pub mod graph;
 #[doc(hidden)]
-#[allow(dead_code, missing_docs)]
+#[allow(missing_docs)]
 pub mod initial_partition;
 mod node_nd;
 #[doc(hidden)]
-#[allow(dead_code, missing_docs)]
+#[allow(missing_docs)]
 pub mod rng;
 mod sep_refine;
 #[doc(hidden)]
-#[allow(dead_code, missing_docs)]
+#[allow(missing_docs)]
 pub mod separator;
 
 pub use rslab_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};

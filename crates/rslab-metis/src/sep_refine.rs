@@ -471,7 +471,7 @@ mod tests {
         Graph::from_csc_pattern(&pat).unwrap()
     }
 
-    /// Build a valid trisection on a grid via GGP + König, then check
+    /// Build a valid trisection on a grid via GGP + Konig, then check
     /// the refiner's invariants.
     fn refined_grid_case(m: usize, n: usize, seed: u64) -> (Graph, Vec<u8>, i64) {
         let g = grid(m, n);

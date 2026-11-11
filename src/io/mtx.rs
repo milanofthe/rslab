@@ -20,7 +20,7 @@ pub struct MtxMatrix<T = f64> {
 impl<T: Scalar> MtxMatrix<T> {
     /// Convert to a dense symmetric matrix.
     ///
-    /// X2 (REG-4): duplicate coordinates are **summed**, matching `to_csc`
+    /// Duplicate coordinates are **summed**, matching `to_csc`
     /// (which sums via `CscMatrix::from_triplets`) and the Matrix Market /
     /// COO convention used by scipy and MATLAB.
     #[cfg(test)]
@@ -285,11 +285,10 @@ fn parse_mtx_with<T: Scalar>(
     let (_, header) = lines
         .next()
         .ok_or_else(|| RslabError::IoError(format!("{}: empty file", source)))?;
-    // X11: compare the banner token by token (case-insensitive) rather than
-    // against one exact single-space string. The Matrix Market spec and the
-    // reference NIST `mmio` reader tokenize the banner on arbitrary
-    // whitespace, so a legal banner whose fields are separated by multiple
-    // spaces or tabs must be accepted, not rejected as "unsupported header".
+    // Compare the banner token by token (case-insensitive). The Matrix
+    // Market spec and the reference NIST `mmio` reader tokenize the banner
+    // on arbitrary whitespace, so fields separated by multiple spaces or
+    // tabs are legal.
     let banner: [&str; 5] = ["%%matrixmarket", "matrix", "coordinate", field, symmetry];
     let mut header_tokens = header.split_whitespace();
     let banner_ok = banner.iter().all(|expected| {
@@ -366,15 +365,14 @@ fn parse_mtx_with<T: Scalar>(
 
     // Parse entries.
     //
-    // X10: do not trust the header's `nnz` for the up-front allocation. A
+    // Do not trust the header's `nnz` for the up-front allocation. A
     // corrupt header (e.g. nnz = 10^17) would make this a multi-exabyte
     // request; the allocator returns null and `handle_alloc_error` aborts
-    // the process instead of returning an `Err`. `nnz` is only a hint here
-    // (never validated against the actual entry count), so clamp the
-    // reservation to the source byte length - each entry occupies at least
-    // one byte in the file, so that is a hard upper bound on the true
-    // count. Valid files (where `nnz <= contents.len()` always holds) get
-    // the same exact reservation as before.
+    // the process instead of returning an `Err`. The reservation is clamped
+    // to the source byte length: each entry occupies at least one byte in
+    // the file, so that is a hard upper bound on the true count. Valid
+    // files (where `nnz <= contents.len()` always holds) reserve exactly
+    // `nnz`. The count itself is validated after the loop.
     let mut entries = Vec::with_capacity(nnz.min(contents.len()));
     for (line_no, line) in lines {
         let trimmed = line.trim();
@@ -455,18 +453,11 @@ fn parse_mtx_with<T: Scalar>(
         }
     }
 
-    // X2 (REG-4, repo-review-2026-06-09-verification.md): the size line's
-    // `nnz` field was parsed but used only as an allocation hint (clamped
-    // by X10) and never validated against the actual entry count. The
-    // Matrix Market spec defines that field as the number of entries that
-    // follow, so a body with more or fewer data lines than the header
-    // declares is a malformed file - previously it parsed silently into a
-    // matrix that did not match its own declaration (a truncated file read
-    // as a valid smaller matrix). Validate it now. This also turns the
-    // bogus-huge-nnz case (X10) from an `Ok` carrying the unvalidated
-    // entries into a recoverable count-mismatch `Err`; the no-abort
-    // property X10 protects still holds (the reservation above stays
-    // clamped to the source byte length, so no multi-exabyte allocation).
+    // The Matrix Market spec defines the size line's `nnz` as the number
+    // of entries that follow, so a body with more or fewer data lines than
+    // the header declares is a malformed file (a truncated file would
+    // otherwise read as a valid smaller matrix). A bogus huge `nnz` also
+    // ends here, as a recoverable count-mismatch `Err`.
     if entries.len() != nnz {
         return Err(RslabError::IoError(format!(
             "{}: declared nnz {} does not match the {} entries in the file",
@@ -548,24 +539,13 @@ mod tests {
         assert_eq!(dense.get(2, 0), 0.0); // not set
     }
 
-    /// The entries Vec was
-    /// reserved with `Vec::with_capacity(nnz)` straight from the untrusted
-    /// MTX size line. A corrupt header declaring an enormous nnz turns that
-    /// into a multi-exabyte allocation request; the allocator returns null
-    /// and Rust's `handle_alloc_error` ABORTS the process - a hard crash,
-    /// not a recoverable `RslabError`, on malformed input a library caller
-    /// cannot guard against. The reservation is clamped to the source byte
-    /// length - a hard upper bound on the true entry count - so the parse
-    /// runs to completion instead of aborting.
-    ///
-    /// Revised for X2 (REG-4): the declared nnz is now also *validated*
-    /// against the real entry count, so this file (10^17 declared, two
-    /// real) returns a recoverable count-mismatch `Err` rather than an `Ok`
-    /// carrying the unvalidated entries. The property X10 protects - a
-    /// bogus huge nnz must not *abort the process* - still holds: the call
-    /// RETURNS an `Err`, which it could only do by surviving the clamped
-    /// `with_capacity` (an unclamped reservation would abort here before any
-    /// count check could run).
+    /// A corrupt header declaring an enormous nnz must not turn into a
+    /// multi-exabyte reservation: the allocator returns null and Rust's
+    /// `handle_alloc_error` aborts the process, which a library caller
+    /// cannot guard against. This file (10^17 declared, two real) returns
+    /// a recoverable count-mismatch `Err`, which it can only do by
+    /// surviving the clamped `with_capacity` (an unclamped reservation
+    /// would abort before the count check runs).
     #[test]
     fn huge_nnz_header_does_not_abort() {
         let mtx = "\
@@ -585,14 +565,11 @@ mod tests {
         }
     }
 
-    /// X2 / REG-4 (repo-review-2026-06-09-verification.md): the size line's
-    /// declared nnz was parsed but never checked against the actual number
-    /// of data lines, so a truncated or corrupt file parsed silently into a
-    /// matrix that did not match its own declaration. The count is now
-    /// validated. Oracle: the Matrix Market spec - the size line's third
-    /// field is the number of entries that follow. Here the header declares
-    /// 4 entries but the body has 2; pre-fix this returned `Ok` with
-    /// `entries.len() == 2`, post-fix it is rejected.
+    /// The size line's declared nnz is checked against the number of data
+    /// lines, so a truncated or corrupt file is rejected. Oracle: the
+    /// Matrix Market spec, where the size line's third field is the number
+    /// of entries that follow. Here the header declares 4 entries but the
+    /// body has 2.
     #[test]
     fn declared_nnz_must_match_entry_count() {
         let mtx = "\
@@ -602,7 +579,7 @@ mod tests {
 2 2 3.0
 ";
         let err = parse_mtx(mtx, "test").expect_err(
-            "a declared nnz that disagrees with the actual entry count must be rejected (X2)",
+            "a declared nnz that disagrees with the actual entry count must be rejected",
         );
         match err {
             RslabError::IoError(msg) => assert!(
@@ -613,13 +590,10 @@ mod tests {
         }
     }
 
-    /// X2 / REG-4: duplicate coordinates must be summed by BOTH conversion
-    /// paths. `to_csc` summed them (via `from_triplets`) while `to_dense`
-    /// overwrote them (last-wins), so the same file produced two different
-    /// matrices. Oracle: the Matrix Market / COO duplicate-summing
-    /// convention (scipy, MATLAB). Here (1,1) is listed as 2.0 then 1.0;
-    /// pre-fix `to_dense.get(0,0)` was 1.0 while `to_csc` summed to 3.0,
-    /// post-fix both are 3.0.
+    /// Duplicate coordinates are summed by both conversion paths, so the
+    /// same file gives one matrix. Oracle: the Matrix Market / COO
+    /// duplicate-summing convention (scipy, MATLAB). Here (1,1) is listed
+    /// as 2.0 then 1.0, and both paths give 3.0.
     #[test]
     fn duplicate_entries_summed_consistently_by_both_paths() {
         let mtx = "\
@@ -655,12 +629,9 @@ mod tests {
         );
     }
 
-    /// The banner was compared
-    /// against the exact single-space string. A legal MTX banner separates
-    /// its five fields with arbitrary whitespace; the NIST `mmio` reference
-    /// tokenizes it. Pre-fix this multi-space banner failed the exact-string
-    /// compare and returned "unsupported header"; post-fix the token-by-token
-    /// compare accepts it.
+    /// A legal MTX banner separates its five fields with arbitrary
+    /// whitespace; the NIST `mmio` reference tokenizes it. A multi-space
+    /// banner is accepted.
     #[test]
     fn multispace_banner_is_accepted() {
         let mtx = "\
@@ -670,25 +641,22 @@ mod tests {
 2 2 5.0
 ";
         let m = parse_mtx(mtx, "test")
-            .expect("a banner separated by multiple spaces is legal and must parse (X11)");
+            .expect("a banner separated by multiple spaces is legal and must parse");
         assert_eq!(m.n, 2);
         assert_eq!(m.entries.len(), 2);
     }
 
-    /// X11: a banner whose fields are separated by tabs is equally legal.
-    /// Pre-fix the exact-string compare rejected it; post-fix it parses.
+    /// A banner whose fields are separated by tabs is equally legal.
     #[test]
     fn tab_separated_banner_is_accepted() {
         let mtx = "%%MatrixMarket\tmatrix\tcoordinate\treal\tsymmetric\n2 2 1\n1 1 7.0\n";
-        let m =
-            parse_mtx(mtx, "test").expect("a tab-separated banner is legal and must parse (X11)");
+        let m = parse_mtx(mtx, "test").expect("a tab-separated banner is legal and must parse");
         assert_eq!(m.n, 2);
         assert_eq!(m.entries.len(), 1);
     }
 
-    /// X11: `f64::from_str` accepts "nan", so pre-fix this file parsed to an
-    /// `Ok(MtxMatrix)` carrying a NaN entry that silently poisons any
-    /// downstream factorization. Post-fix a non-finite value is rejected.
+    /// `f64::from_str` accepts "nan"; a NaN entry would poison any
+    /// downstream factorization, so a non-finite value is rejected.
     #[test]
     fn nan_value_is_rejected() {
         let mtx = "\
@@ -697,7 +665,7 @@ mod tests {
 1 1 nan
 ";
         let err = parse_mtx(mtx, "test")
-            .expect_err("a NaN entry value must be rejected, not read through (X11)");
+            .expect_err("a NaN entry value must be rejected, not read through");
         match err {
             RslabError::IoError(msg) => assert!(
                 msg.contains("non-finite"),
@@ -707,8 +675,7 @@ mod tests {
         }
     }
 
-    /// X11: likewise "inf" is accepted by `f64::from_str`. Pre-fix it built an
-    /// `MtxMatrix` carrying +inf; post-fix it is rejected.
+    /// Likewise "inf" is accepted by `f64::from_str` and rejected here.
     #[test]
     fn inf_value_is_rejected() {
         let mtx = "\
@@ -717,7 +684,7 @@ mod tests {
 1 1 inf
 ";
         let err = parse_mtx(mtx, "test")
-            .expect_err("an inf entry value must be rejected, not read through (X11)");
+            .expect_err("an inf entry value must be rejected, not read through");
         match err {
             RslabError::IoError(msg) => assert!(
                 msg.contains("non-finite"),

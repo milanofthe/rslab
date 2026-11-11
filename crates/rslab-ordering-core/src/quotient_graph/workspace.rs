@@ -15,9 +15,6 @@
 //!
 //! The workspace is shared by `rslab-amd` and `rslab-amf`; the
 //! AMD-vs-AMF delta lives entirely in the elimination metric.
-//
-// Not every field or helper is read by every elimination loop.
-#![allow(dead_code)]
 
 use super::WorkspaceOptions;
 use crate::{CscPattern, OrderingError};

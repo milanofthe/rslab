@@ -22,8 +22,6 @@
 //! supervariable detection. The `_amf` variants are the AMF
 //! counterparts (see `metric.rs`).
 
-#![allow(dead_code)]
-
 use super::workspace::{clear_flag, flip, Workspace, NONE};
 use crate::OrderingError;
 
