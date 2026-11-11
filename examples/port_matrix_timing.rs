@@ -1,9 +1,9 @@
 //! Time the port matrix `Z = B^T A^-1 B` of sparse ports from forward sweeps
 //! alone (`LdltSolver::port_matrix`) against `B^T X` from one dense block
-//! solve of all ports (`solve_many`), and the sparse solve
-//! (`LdltSolver::solve_sparse`) against the same dense solve.
+//! solve of all ports (`solve_many`).
 //!
 //! `cargo run --release --features matgen --example port_matrix_timing -- [case] [size] [ports] [threads] [reps] [scattered|clustered] [z-dump-file]`
+//! (`PORT_ONLY=1` times the port matrix alone)
 //!
 //! - `helmholtz`: 2D 5-point `Lap - k^2 I` on a `size x size` grid,
 //!   `k^2 = 0.3 (1 + 0.02 i)` per cell (complex symmetric, lossy, indefinite
@@ -16,31 +16,12 @@
 //! maximum over `reps` runs after one warm-up.
 use num_complex::Complex;
 use rslab::matgen::fem::curl_curl;
-use rslab::{CscMatrix, LdltSolver, SolverSettings, SparseRhs, Threads};
+use rslab::matgen::stencil::{helmholtz, StencilOpts};
+use rslab::matgen::Rng;
+use rslab::{LdltSolver, SolverSettings, SparseRhs, Threads};
 use std::time::Instant;
 
 type C = Complex<f64>;
-
-fn helmholtz(m: usize, k2: C) -> CscMatrix<C> {
-    let n = m * m;
-    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
-    for j in 0..n {
-        r.push(j);
-        c.push(j);
-        v.push(C::new(4.0, 0.0) - k2);
-        if j % m + 1 < m {
-            r.push(j + 1);
-            c.push(j);
-            v.push(C::new(-1.0, 0.0));
-        }
-        if j + m < n {
-            r.push(j + m);
-            c.push(j);
-            v.push(C::new(-1.0, 0.0));
-        }
-    }
-    CscMatrix::from_triplets(n, &r, &c, &v).unwrap()
-}
 
 /// `p` ports of six unknowns each, weight 1/6, starting at pseudo-random
 /// unknowns in `first..first + span`; `next(i, k)` is the `k`-th unknown of
@@ -51,13 +32,10 @@ fn ports(
     (first, span): (usize, usize),
     next: impl Fn(usize, usize) -> usize,
 ) -> SparseRhs<C> {
-    let mut state = 0x1234_5678_9abc_def0u64;
+    let mut rng = Rng::new(0x1234_5678_9abc_def0);
     let cols: Vec<Vec<(usize, C)>> = (0..p)
         .map(|_| {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let i = first + (state >> 33) as usize % span.max(1);
+            let i = first + (rng.next_u64() % span.max(1) as u64) as usize;
             (0..6)
                 .map(|k| (next(i, k) % n, C::new(1.0 / 6.0, 0.0)))
                 .collect()
@@ -109,7 +87,7 @@ fn main() {
         }
         _ => {
             let m = arg(2, 400);
-            let a = helmholtz(m, C::new(0.3, 0.006));
+            let a = helmholtz(&[m, m], C::new(0.3, 0.006), &StencilOpts::default());
             let n = a.n;
             (
                 a,
@@ -137,7 +115,6 @@ fn main() {
         let x = f.solve_many(&dense, p).unwrap();
         b.transpose_times(&x, p).unwrap()
     });
-    let (ts, _) = time(reps, || f.solve_sparse(&b).unwrap());
     // Optional: the bits of `Z` to a file, to compare builds.
     if let Some(path) = args.get(7) {
         let bytes: Vec<u8> = z
@@ -157,11 +134,10 @@ fn main() {
     let mean = reach.iter().map(|r| r.panel_entries as f64).sum::<f64>() / p.max(1) as f64;
     println!(
         "port_matrix {} | {p} dense solves + B^T X {} ({:.1}x by medians) | \
-         solve_sparse {} | max|dZ|/max|Z| {:.1e} | mean reach {:.1}% of the factor",
+         max|dZ|/max|Z| {:.1e} | mean reach {:.1}% of the factor",
         show(tz),
         show(td),
         td[0] / tz[0],
-        show(ts),
         diff / scale,
         100.0 * mean / reach.first().map_or(1, |r| r.total_panel_entries) as f64
     );

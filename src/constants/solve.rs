@@ -79,14 +79,21 @@ pub const SOLVE_PULL_PAR_MIN: usize = 1 << 20;
 
 /// Columns of a sparse right-hand side per block of the reach-limited
 /// forward sweeps of [`LdltSolver::port_matrix`](crate::LdltSolver::port_matrix)
-/// and [`LdltSolver::solve_sparse`](crate::LdltSolver::solve_sparse)
 /// (right-hand sides).
-/// Used by: `SolveSettings::port_block`.
+/// Used by: `supernodal::solve::SolvePlan::port_matrix`.
 /// Why: a block sweeps the union of its columns' reaches once; columns
-/// grouped by the subtree they start in share most of it, and eight keep
-/// the union close to one column's reach while every panel entry read is
-/// applied to eight right-hand sides.
-/// Contract: timing (each column is swept alone in its lane, and the port
-/// matrix sums every entry over the same rows in the same order, whatever
-/// the block).
+/// grouped by the subtree they start in share most of it, and a wider block
+/// applies every panel entry read to more right-hand sides until the union
+/// outgrows one column's reach. Port matrix of 200 six-unknown ports
+/// (`examples/port_matrix_timing.rs`, median of 5), seconds:
+///
+/// | width                    | 1     | 2     | 4     | 8     | 16    | 32    | 64    |
+/// |--------------------------|-------|-------|-------|-------|-------|-------|-------|
+/// | helmholtz 400^2, 1 thr   | 0.231 | 0.096 | 0.070 | 0.069 | 0.072 | 0.084 | 0.135 |
+/// | helmholtz 400^2, 8 thr   | 0.045 | 0.030 | 0.014 | 0.016 | 0.021 | 0.023 | 0.046 |
+/// | curl-curl 20^3, 1 thr    | 1.046 | 0.662 | 0.535 | 0.581 | 0.558 | 0.578 | 0.649 |
+/// | curl-curl 20^3, 8 thr    | 0.246 | 0.132 | 0.125 | 0.112 | 0.133 | 0.128 | 0.235 |
+///
+/// Flat from 4 to 16; 8 is within 15% of the best in every row.
+/// Contract: timing (`Z` has the same bits for every thread count).
 pub const SOLVE_PORT_BLOCK: usize = 8;

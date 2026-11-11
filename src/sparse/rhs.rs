@@ -1,7 +1,6 @@
-//! Sparse right-hand sides: an `n x ncols` block stored by columns, for the
-//! solves that visit only the part of the factor a right-hand side reaches
-//! ([`LdltSolver::solve_sparse`](crate::LdltSolver::solve_sparse),
-//! [`LdltSolver::port_matrix`](crate::LdltSolver::port_matrix)).
+//! Sparse right-hand sides: an `n x ncols` block stored by columns, for
+//! [`LdltSolver::port_matrix`](crate::LdltSolver::port_matrix), which visits
+//! only the part of the factor a right-hand side reaches.
 
 use crate::error::RslabError;
 use crate::scalar::Scalar;

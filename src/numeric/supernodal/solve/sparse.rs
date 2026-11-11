@@ -1,6 +1,6 @@
 //! Sparse right-hand sides on the plan: the reach of a sparse column in the
-//! supernodal factor, forward sweeps limited to it, and the port matrix
-//! `Z = B^T A^-1 B` from forward sweeps alone.
+//! supernodal factor and the port matrix `Z = B^T A^-1 B` from forward
+//! sweeps limited to it.
 //!
 //! ## Reach
 //!
@@ -28,22 +28,23 @@
 //! no backward sweep is needed. A 2x2 block of `D` couples two columns of
 //! one supernode, which a reach holds together.
 //!
-//! The columns go in blocks of [`SolveSettings::port_block`](crate::SolveSettings::port_block),
+//! The columns go in blocks of [`SOLVE_PORT_BLOCK`](crate::constants::SOLVE_PORT_BLOCK),
 //! ordered by the first supernode each one reaches (columns starting in one
 //! subtree share most of their reach). A block's `Y` is swept on the union
-//! of its columns' reaches in a compact buffer of just those rows, each
-//! column in its own lane by the same operations whatever the block. An
-//! entry of `Z` sums `y_a v_c` (`v = D^-1 y`) over the rows two blocks
-//! share, in ascending order; the rows of a block's union outside a
-//! column's own reach hold exact zeros there. So `Z` does not depend on the
-//! block width, the column grouping or the thread count, and it is exactly
-//! symmetric (each pair is computed once). (A column step whose lanes are
-//! all zero is skipped, so exact zeros may differ in sign between
-//! groupings; values do not.)
+//! of its columns' reaches in a compact buffer of just those rows, node by
+//! node with the plan's own node kernel (its triangle and GEMM products);
+//! only where a node's off-block rows land differs. Only `Y` is kept: an
+//! entry block of `Z` is `Y_I^T D^-1 Y_J` over the nodes two blocks share,
+//! in ascending order, `D^-1` applied to a node's rows of `Y_J` when the
+//! product reaches it, each node's rows as one GEMM. The rows of a block's
+//! union outside a column's own reach hold exact zeros there. Each pair of
+//! blocks is computed once, so `Z` is exactly symmetric, and the blocks and
+//! pairs are fixed by the columns, so `Z` has the same bits for every thread
+//! count.
 
-use super::{packed_blocks, solve_diagonal, PlanWork, SolvePlan, NONE};
-use crate::constants::SOLVE_PAR_MIN_ENTRY_RHS;
+use super::{solve_diagonal, sub_assign, SolvePlan, NONE};
 use crate::constants::SOLVE_RHS_TILE;
+use crate::constants::{SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PORT_BLOCK};
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
@@ -122,8 +123,6 @@ struct ForwardBlock<T> {
     offsets: Vec<usize>,
     /// Row-major `rows x lanes` (`y[q * lanes + c]`).
     y: Vec<T>,
-    /// `D^-1 y`, the same layout (port matrix only).
-    v: Vec<T>,
 }
 
 impl<T: Scalar> SolvePlan<T> {
@@ -204,11 +203,10 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// The forward sweep `L y = y` of node `s` on the compact buffer `y`
-    /// (`nr` lanes, the node's columns at rows `base..`), its off-block rows
-    /// found through `map`. Column by column in the diagonal block; the
-    /// off-block rows take their terms summed over the node's columns in
-    /// ascending order, then once.
+    /// The forward sweep of node `s` on the compact buffer `y` (`nr` lanes,
+    /// the node's columns at rows `base..`): the plan's node kernel
+    /// ([`fwd_node_core`](Self::fwd_node_core)) on the node's rows, its
+    /// off-block products taken off the rows `map` gives them.
     fn fwd_node_compact(
         &self,
         s: u32,
@@ -218,46 +216,18 @@ impl<T: Scalar> SolvePlan<T> {
         map: &[u32],
         t: &mut Vec<T>,
     ) {
-        let (_, w, r0, m, _, panel) = self.node(s);
-        t.clear();
-        t.resize(m * nr, T::zero());
-        for (jb, je, off, ld) in packed_blocks(w, m) {
-            for k in jb..je {
-                let col = &panel[off + (k - jb) * ld..off + (k - jb + 1) * ld];
-                let (head, tail) = y.split_at_mut((base + k + 1) * nr);
-                let xk = &head[(base + k) * nr..];
-                // A column whose lanes are all exactly zero changes nothing
-                // (up to the sign of exact zeros): common near a port's
-                // start, where most of a node's columns are still zero.
-                if xk.iter().all(|&x| x == T::zero()) {
-                    continue;
-                }
-                for i in k + 1..w {
-                    let l = col[i - jb];
-                    let yi = &mut tail[(i - k - 1) * nr..(i - k) * nr];
-                    for (a, &x) in yi.iter_mut().zip(xk) {
-                        *a = *a - l * x;
-                    }
-                }
-                for r in 0..m {
-                    let l = col[w + r - jb];
-                    for (a, &x) in t[r * nr..(r + 1) * nr].iter_mut().zip(xk) {
-                        *a = *a + l * x;
-                    }
-                }
-            }
-        }
+        // An `LDL^T` plan has a unit-diagonal `L` (no scaling in the sweep).
+        debug_assert!(self.diag_inv.is_empty(), "the plan is not unit-diagonal");
+        let (_, w, r0, m, _, _) = self.node(s);
+        self.fwd_node_core(s, nr, &mut y[base * nr..(base + w) * nr], false, t);
         for (r, &row) in self.rows[r0..r0 + m].iter().enumerate() {
             let q = map[row as usize] as usize;
-            for (a, &d) in y[q * nr..(q + 1) * nr].iter_mut().zip(&t[r * nr..]) {
-                *a = *a - d;
-            }
+            sub_assign(&mut y[q * nr..(q + 1) * nr], &t[r * nr..(r + 1) * nr]);
         }
     }
 
     /// `Y` of the columns `cols` of `b`: their reach, the scaled, permuted
-    /// entries placed in a compact buffer, and the forward sweep over it;
-    /// with `f`, also `D^-1 Y`.
+    /// entries placed in a compact buffer, and the forward sweep over it.
     fn sparse_forward(
         &self,
         maps: &ColumnMaps,
@@ -265,8 +235,7 @@ impl<T: Scalar> SolvePlan<T> {
         b: &SparseRhs<T>,
         cols: &[usize],
         sc: &mut ReachScratch<T>,
-        f: Option<&LdltPivots<T>>,
-    ) -> Result<ForwardBlock<T>, RslabError> {
+    ) -> ForwardBlock<T> {
         let nr = cols.len();
         let mut nodes = Vec::new();
         let starts = cols
@@ -299,43 +268,12 @@ impl<T: Scalar> SolvePlan<T> {
             sc.map[self.sn_col[s as usize] as usize..self.sn_col[s as usize + 1] as usize]
                 .fill(NONE);
         }
-        let v = match f {
-            Some(f) => self.diagonal_compact(f, &nodes, &offsets, nr, &y)?,
-            None => Vec::new(),
-        };
-        Ok(ForwardBlock {
+        ForwardBlock {
             cols: cols.to_vec(),
             nodes,
             offsets,
             y,
-            v,
-        })
-    }
-
-    /// `D^-1 y` on a compact buffer, 1x1 and 2x2 blocks as
-    /// [`solve_diagonal`] takes them.
-    fn diagonal_compact(
-        &self,
-        f: &LdltPivots<T>,
-        nodes: &[u32],
-        offsets: &[usize],
-        nr: usize,
-        y: &[T],
-    ) -> Result<Vec<T>, RslabError> {
-        let mut v = y.to_vec();
-        for (&s, &base) in nodes.iter().zip(offsets) {
-            let (c0, c1) = (
-                self.sn_col[s as usize] as usize,
-                self.sn_col[s as usize + 1] as usize,
-            );
-            let rows = &mut v[base * nr..(base + c1 - c0) * nr];
-            // A 2x2 block never straddles a supernode: its pivots are chosen
-            // inside one fully-summed block. `solve_diagonal` on the node's
-            // rows is the global one restricted to them.
-            let local = LocalPivots { f, c0, c1 };
-            local.solve(rows, nr)?;
         }
-        Ok(v)
     }
 
     /// The task budget and whether a call over sparse columns runs on the
@@ -398,20 +336,20 @@ impl<T: Scalar> SolvePlan<T> {
         let p = b.ncols();
         let maps = self.column_maps(&f.perm);
         let order = self.sparse_order(&maps, b);
-        let groups: Vec<&[usize]> = order.chunks(self.cfg.port_block.max(1)).collect();
-        let par = self.sparse_parallel(self.cfg.port_block.min(p), threads);
+        let groups: Vec<&[usize]> = order.chunks(SOLVE_PORT_BLOCK).collect();
+        let par = self.sparse_parallel(SOLVE_PORT_BLOCK.min(p), threads);
         let blocks = Self::map_blocks(par, threads, groups.len(), |sc, i| {
-            self.sparse_forward(&maps, scale, b, groups[i], sc, Some(f))
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+            self.sparse_forward(&maps, scale, b, groups[i], sc)
+        });
         let pairs: Vec<(usize, usize)> = (0..blocks.len())
             .flat_map(|i| (i..blocks.len()).map(move |j| (i, j)))
             .collect();
-        let products = Self::map_blocks(par, threads, pairs.len(), |_, k| {
+        let products = Self::map_blocks(par, threads, pairs.len(), |sc, k| {
             let (i, j) = pairs[k];
-            self.block_product(&blocks[i], &blocks[j])
-        });
+            self.block_product(f, &blocks[i], &blocks[j], &mut sc.t)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
         let mut z = vec![T::zero(); p * p];
         for (&(i, j), prod) in pairs.iter().zip(&products) {
             let (bi, bj) = (&blocks[i], &blocks[j]);
@@ -430,11 +368,23 @@ impl<T: Scalar> SolvePlan<T> {
         Ok(z)
     }
 
-    /// `Y_I^T V_J` over the rows both blocks reach, ascending; row-major
-    /// `lanes_I x lanes_J`.
-    fn block_product(&self, bi: &ForwardBlock<T>, bj: &ForwardBlock<T>) -> Vec<T> {
+    /// `Y_I^T D^-1 Y_J` over the nodes both blocks reach, ascending;
+    /// row-major `lanes_I x lanes_J`. Per shared node, `D^-1` is applied to
+    /// `Y_J`'s rows of it in `v` (a node holds its 2x2 blocks whole) and the
+    /// node's rows go in as one GEMM.
+    fn block_product(
+        &self,
+        f: &LdltPivots<T>,
+        bi: &ForwardBlock<T>,
+        bj: &ForwardBlock<T>,
+        v: &mut Vec<T>,
+    ) -> Result<Vec<T>, RslabError> {
         let (li, lj) = (bi.cols.len(), bj.cols.len());
         let mut out = vec![T::zero(); li * lj];
+        let mode = crate::dense::gemm_backend::GemmMode::new(
+            gemm::Parallelism::None,
+            &crate::KernelSettings::default(),
+        );
         let (mut p, mut q) = (0, 0);
         while p < bi.nodes.len() && q < bj.nodes.len() {
             let (s, t) = (bi.nodes[p], bj.nodes[q]);
@@ -446,175 +396,63 @@ impl<T: Scalar> SolvePlan<T> {
                 }
                 continue;
             }
-            let w = (self.sn_col[s as usize + 1] - self.sn_col[s as usize]) as usize;
+            let c0 = self.sn_col[s as usize] as usize;
+            let w = self.sn_col[s as usize + 1] as usize - c0;
             let (oi, oj) = (bi.offsets[p], bj.offsets[q]);
-            for k in 0..w {
-                let yi = &bi.y[(oi + k) * li..(oi + k + 1) * li];
-                let vj = &bj.v[(oj + k) * lj..(oj + k + 1) * lj];
-                for (a, &ya) in yi.iter().enumerate() {
-                    for (o, &vc) in out[a * lj..(a + 1) * lj].iter_mut().zip(vj) {
-                        *o = *o + ya * vc;
-                    }
-                }
+            v.clear();
+            v.extend_from_slice(&bj.y[oj * lj..(oj + w) * lj]);
+            solve_diagonal(f, v, lj, c0..c0 + w)?;
+            // SAFETY: `out` is `li x lj` (column stride 1, row stride `lj`);
+            // `Y_I^T`'s `li x w` entries are `bi.y[(oi + k) * li + a]` and `V`'s
+            // `w x lj` entries `v[k * lj + c]`, all inside their buffers.
+            unsafe {
+                crate::dense::gemm_backend::gemm(
+                    li,
+                    lj,
+                    w,
+                    out.as_mut_ptr(),
+                    1,
+                    lj as isize,
+                    true,
+                    bi.y.as_ptr().add(oi * li),
+                    li as isize,
+                    1,
+                    v.as_ptr(),
+                    1,
+                    lj as isize,
+                    T::one(),
+                    T::one(),
+                    false,
+                    false,
+                    false,
+                    mode,
+                );
             }
             p += 1;
             q += 1;
         }
-        out
-    }
-
-    /// `A X = B` for sparse `B`: the forward sweep limited to each block's
-    /// reach, then the diagonal and the full backward sweep on all columns.
-    /// The dense column-major `n x ncols` solution.
-    pub(crate) fn solve_sparse(
-        &self,
-        f: &LdltPivots<T>,
-        scale: &[f64],
-        b: &SparseRhs<T>,
-        threads: Threads,
-    ) -> Result<Vec<T>, RslabError> {
-        let (n, p) = (self.n, b.ncols());
-        let maps = self.column_maps(&f.perm);
-        let order = self.sparse_order(&maps, b);
-        let groups: Vec<&[usize]> = order.chunks(self.cfg.port_block.max(1)).collect();
-        let par = self.sparse_parallel(self.cfg.port_block.min(p), threads);
-        let blocks = Self::map_blocks(par, threads, groups.len(), |sc, i| {
-            self.sparse_forward(&maps, scale, b, groups[i], sc, None)
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-        let mut y = vec![T::zero(); n * p];
-        for blk in &blocks {
-            let nr = blk.cols.len();
-            for (&s, &base) in blk.nodes.iter().zip(&blk.offsets) {
-                let c0 = self.sn_col[s as usize] as usize;
-                let w = self.sn_col[s as usize + 1] as usize - c0;
-                for k in 0..w {
-                    let row = &blk.y[(base + k) * nr..(base + k + 1) * nr];
-                    for (lane, &c) in blk.cols.iter().enumerate() {
-                        y[(c0 + k) * p + c] = row[lane];
-                    }
-                }
-            }
-        }
-        drop(blocks);
-        solve_diagonal(f, &mut y, p)?;
-        self.backward(p, &mut y, &mut PlanWork::default(), threads);
-        let mut x = vec![T::zero(); n * p];
-        for (e, &i) in f.perm.iter().enumerate() {
-            let si = T::from_real(scale[i]);
-            for c in 0..p {
-                x[c * n + i] = y[e * p + c] * si;
-            }
-        }
-        Ok(x)
+        Ok(out)
     }
 }
 
-/// The block diagonal of the columns `c0..c1` of one supernode.
-struct LocalPivots<'a, T> {
-    f: &'a LdltPivots<T>,
-    c0: usize,
-    c1: usize,
-}
-
-impl<T: Scalar> LocalPivots<'_, T> {
-    /// `D z = y` on the node's rows (`nr` lanes), as [`solve_diagonal`] does
-    /// on the whole factor, with its error on a singular block.
-    fn solve(&self, y: &mut [T], nr: usize) -> Result<(), RslabError> {
-        let f = self.f;
-        let mut k = self.c0;
-        while k < self.c1 {
-            let row = (k - self.c0) * nr;
-            if f.two_by_two[k] && k + 1 >= self.c1 {
-                // A 2x2 block is chosen inside one fully-summed block, so it
-                // cannot start at a supernode's last column; if it does, the
-                // factor and the plan disagree and `Z` would be wrong.
-                debug_assert!(false, "2x2 pivot at the last column {k} of a supernode");
-                return Err(RslabError::InvalidInput(format!(
-                    "2x2 pivot at column {k} straddles a supernode boundary: \
-                     the factor does not match its solve plan"
-                )));
-            }
-            if f.two_by_two[k] {
-                let (d11, d21, d22) = (f.d_diag[k], f.d_subdiag[k], f.d_diag[k + 1]);
-                let det = d11 * d22 - d21 * d21;
-                if det == T::zero() {
-                    return Err(RslabError::NumericallyRankDeficient);
-                }
-                let detinv = det.recip();
-                let (r0, r1) = y[row..row + 2 * nr].split_at_mut(nr);
-                for c in 0..nr {
-                    let (z0, z1) = (r0[c], r1[c]);
-                    r0[c] = (d22 * z0 - d21 * z1) * detinv;
-                    r1[c] = (d11 * z1 - d21 * z0) * detinv;
-                }
-                k += 2;
-            } else {
-                if f.d_diag[k] == T::zero() {
-                    return Err(RslabError::NumericallyRankDeficient);
-                }
-                let dinv = f.d_diag[k].recip();
-                for v in &mut y[row..row + nr] {
-                    *v = *v * dinv;
-                }
-                k += 1;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "matgen"))]
 mod tests {
     use super::*;
     use crate::numeric::settings::SolverSettings;
+    use crate::numeric::supernodal::solve::PlanWork;
     use crate::sparse::csc::CscMatrix;
     use crate::LdltSolver;
     use num_complex::Complex;
 
     type C = Complex<f64>;
 
-    /// A complex-symmetric 2D 5-point Helmholtz-like matrix (lower triangle).
+    /// A complex-symmetric 2D 5-point Helmholtz grid (lower triangle).
     fn grid(m: usize) -> CscMatrix<C> {
-        let n = m * m;
-        let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
-        for j in 0..n {
-            r.push(j);
-            c.push(j);
-            v.push(C::new(3.7, 0.05 + 0.001 * (j % 7) as f64));
-            if j % m + 1 < m {
-                r.push(j + 1);
-                c.push(j);
-                v.push(C::new(-1.0, 0.0));
-            }
-            if j + m < n {
-                r.push(j + m);
-                c.push(j);
-                v.push(C::new(-1.0, 0.0));
-            }
-        }
-        CscMatrix::from_triplets(n, &r, &c, &v).unwrap()
-    }
-
-    /// A 2x2 pivot flagged at a supernode's last column is refused (and
-    /// asserted in debug builds), never taken as a 1x1 pivot.
-    #[test]
-    fn straddling_two_by_two_is_refused() {
-        let a = grid(6);
-        let f = LdltSolver::factor(&a, &SolverSettings::default().with_threads(1)).unwrap();
-        let (plan, pv, _) = f.parts();
-        let mut bad = pv.clone();
-        let (c0, c1) = (plan.sn_col[0] as usize, plan.sn_col[1] as usize);
-        bad.two_by_two[c1 - 1] = true;
-        let local = LocalPivots { f: &bad, c0, c1 };
-        let mut y = vec![C::new(1.0, 0.0); c1 - c0];
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| local.solve(&mut y, 1)));
-        if cfg!(debug_assertions) {
-            assert!(r.is_err(), "debug builds assert");
-        } else {
-            assert!(matches!(r, Ok(Err(RslabError::InvalidInput(_)))));
-        }
+        crate::matgen::stencil::helmholtz(
+            &[m, m],
+            C::new(0.3, -0.05),
+            &crate::matgen::stencil::StencilOpts::default(),
+        )
     }
 
     /// The reach holds every nonzero of the full forward sweep, and the
@@ -628,7 +466,7 @@ mod tests {
         let mut sc = ReachScratch::default();
         for &row in &[0usize, 17, 150, 323] {
             let b = SparseRhs::from_columns(a.n, &[vec![(row, C::new(1.0, 0.5))]]).unwrap();
-            let blk = (plan.sparse_forward(&maps, scale, &b, &[0], &mut sc, None)).unwrap();
+            let blk = plan.sparse_forward(&maps, scale, &b, &[0], &mut sc);
             // the full forward sweep of the same scaled, permuted column
             let mut y = vec![C::new(0.0, 0.0); a.n];
             y[maps.elim_of[row]] = C::new(1.0, 0.5) * scale[row];

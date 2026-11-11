@@ -208,7 +208,12 @@ pub(crate) fn inverse<T: Scalar, S: SolveCore<T>>(s: &S) -> Result<Vec<T>, Rslab
     solve(s, &e, n, false)
 }
 
-fn record<T: Scalar, S: SolveCore<T>>(s: &S, rhs: usize, t: crate::clock::Instant, steps: usize) {
+pub(crate) fn record<T: Scalar, S: SolveCore<T>>(
+    s: &S,
+    rhs: usize,
+    t: crate::clock::Instant,
+    steps: usize,
+) {
     let ms = crate::clock::ms(t.elapsed());
     s.counter().record(rhs, ms, steps);
     if crate::logging::enabled(crate::logging::LogLevel::Debug) {

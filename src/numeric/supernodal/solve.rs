@@ -1402,14 +1402,37 @@ impl<T: Scalar> SolvePlan<T> {
         par: bool,
         t: &mut Vec<T>,
     ) {
-        let (c0, w, r0, m, _, panel) = self.node(s);
+        let (c0, w, r0, m, _, _) = self.node(s);
+        self.fwd_node_core(s, nr, &mut y[c0 * nr..(c0 + w) * nr], par, t);
+        if m == 0 {
+            return;
+        }
+        let rows = &self.rows[r0..r0 + m];
+        let slots = &self.ext_slot[r0..r0 + m];
+        for (i, ti) in t[..m * nr].chunks_exact(nr).enumerate() {
+            if slots[i] == NONE {
+                let r = rows[i] as usize;
+                sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
+            } else {
+                let sl = slots[i] as usize;
+                add_assign(&mut acc[sl * nr..(sl + 1) * nr], ti);
+            }
+        }
+    }
+
+    /// The node part of [`fwd_node_gemm`](Self::fwd_node_gemm), shared with
+    /// the reach-limited sweep of sparse right-hand sides: the triangle of
+    /// node `s` on its own rows `yb` (`nr` wide), then `L_off X` into
+    /// `t[..m * nr]` (left untouched when the node has no off-block rows). The
+    /// caller takes `t` off the rows the node's off-block rows map to.
+    pub(super) fn fwd_node_core(&self, s: u32, nr: usize, yb: &mut [T], par: bool, t: &mut Vec<T>) {
+        let (c0, w, _, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         let mode = crate::dense::gemm_backend::GemmMode::new(
             gemm::Parallelism::None,
             &crate::KernelSettings::default(),
         );
         let (one, minus) = (T::one(), T::from_real(-1.0));
-        let yb = &mut y[c0 * nr..(c0 + w) * nr];
         for (jb, je, off, ld) in packed_blocks(w, m) {
             let block = &panel[off..];
             let d = dinv.get(jb..je).unwrap_or(&[]);
@@ -1495,17 +1518,6 @@ impl<T: Scalar> SolvePlan<T> {
             );
         } else {
             product(0, t);
-        }
-        let rows = &self.rows[r0..r0 + m];
-        let slots = &self.ext_slot[r0..r0 + m];
-        for (i, ti) in t.chunks_exact(nr).enumerate() {
-            if slots[i] == NONE {
-                let r = rows[i] as usize;
-                sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
-            } else {
-                let sl = slots[i] as usize;
-                add_assign(&mut acc[sl * nr..(sl + 1) * nr], ti);
-            }
         }
     }
 
@@ -1657,7 +1669,7 @@ impl<T: Scalar> SolvePlan<T> {
         let mut phases = PhaseTrace::start();
         self.forward_block(nr, y, work);
         phases.lap("forward");
-        solve_diagonal(f, y, nr)?;
+        solve_diagonal(f, y, nr, 0..f.n)?;
         phases.lap("diag");
         self.backward_block(nr, y, work);
         phases.lap("backward");
@@ -1928,13 +1940,24 @@ fn pack_panels<T: Copy>(
     rng
 }
 
-/// `D z = y` for the block diagonal (1x1 and 2x2 pivots), on `nr` right-hand
-/// sides stored row-major.
-fn solve_diagonal<T: Scalar>(f: &LdltPivots<T>, y: &mut [T], nr: usize) -> Result<(), RslabError> {
-    let n = f.n;
-    let mut k = 0;
-    while k < n {
+/// `D z = y` for the block diagonal (1x1 and 2x2 pivots) of the columns
+/// `cols`, on `nr` right-hand sides stored row-major (`y` holds the rows of
+/// `cols`). A 2x2 block lies inside one supernode's fully-summed block, so a
+/// range of whole supernodes never cuts one.
+fn solve_diagonal<T: Scalar>(
+    f: &LdltPivots<T>,
+    y: &mut [T],
+    nr: usize,
+    cols: std::ops::Range<usize>,
+) -> Result<(), RslabError> {
+    let mut k = cols.start;
+    while k < cols.end {
+        let row = (k - cols.start) * nr;
         if f.two_by_two[k] {
+            debug_assert!(
+                k + 1 < cols.end,
+                "2x2 pivot at column {k} crosses the range end"
+            );
             let d11 = f.d_diag[k];
             let d21 = f.d_subdiag[k];
             let d22 = f.d_diag[k + 1];
@@ -1943,7 +1966,7 @@ fn solve_diagonal<T: Scalar>(f: &LdltPivots<T>, y: &mut [T], nr: usize) -> Resul
                 return Err(RslabError::NumericallyRankDeficient);
             }
             let detinv = det.recip();
-            let (r0, r1) = y[k * nr..(k + 2) * nr].split_at_mut(nr);
+            let (r0, r1) = y[row..row + 2 * nr].split_at_mut(nr);
             for c in 0..nr {
                 let z0 = r0[c];
                 let z1 = r1[c];
@@ -1957,7 +1980,7 @@ fn solve_diagonal<T: Scalar>(f: &LdltPivots<T>, y: &mut [T], nr: usize) -> Resul
                 return Err(RslabError::NumericallyRankDeficient);
             }
             let dinv = d.recip();
-            for v in &mut y[k * nr..(k + 1) * nr] {
+            for v in &mut y[row..row + nr] {
                 *v = *v * dinv;
             }
             k += 1;
@@ -2197,7 +2220,6 @@ mod tests {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: Some(0),
-                ..crate::SolveSettings::default()
             },
             ..SolverSettings::default()
         }

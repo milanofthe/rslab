@@ -104,6 +104,11 @@ required-features = ["matgen-download"]
 name = "interrupt"
 required-features = ["matgen"]
 
+# The sparse right-hand side tests build their grids with the generators.
+[[test]]
+name = "sparse_rhs"
+required-features = ["matgen"]
+
 [[bench]]
 name = "bench_suite"
 harness = false
