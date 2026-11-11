@@ -577,6 +577,7 @@ def test_tuned_knobs_still_solve():
         schur_tile=32,
         fork_min_flops=0,
         solve_leaf_subtrees=4,
+        solve_port_block=3,
     )
     x = rslab.ldlt(A, **knobs).solve(b)
     assert np.linalg.norm(A @ x - b) <= 1e-10 * np.linalg.norm(b)

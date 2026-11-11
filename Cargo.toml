@@ -136,3 +136,7 @@ name = "pool_bench"
 [[example]]
 name = "analysis_memory"
 required-features = ["matgen"]
+
+[[example]]
+name = "port_matrix_timing"
+required-features = ["matgen"]

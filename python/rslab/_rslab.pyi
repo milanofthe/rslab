@@ -81,6 +81,7 @@ class Settings:
         complex_split_min_ratio: int | None = ...,
         complex_split_tile: int | None = ...,
         solve_leaf_subtrees: int | None = ...,
+        solve_port_block: int | None = ...,
         interrupt: Interrupt | None = ...,
     ) -> None: ...
     def to_dict(self) -> dict[str, Any]: ...

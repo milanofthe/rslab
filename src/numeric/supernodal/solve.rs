@@ -50,6 +50,9 @@ use std::sync::atomic::Ordering;
 
 const NONE: u32 = u32::MAX;
 
+mod sparse;
+pub use sparse::SparseReach;
+
 /// Whether a sweep runs on the calling thread (0) or on the pool (1): the
 /// way the sweeps of its kind and size were fastest ([`Choice`]), a sweep
 /// starting on the pool from [`SOLVE_PAR_MIN_ENTRY_RHS`] on before either
@@ -2194,6 +2197,7 @@ mod tests {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: Some(0),
+                ..crate::SolveSettings::default()
             },
             ..SolverSettings::default()
         }

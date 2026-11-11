@@ -450,6 +450,11 @@ pub struct SolveSettings {
     /// [`SOLVE_PAR_MIN_ENTRY_RHS`](crate::constants::SOLVE_PAR_MIN_ENTRY_RHS)
     /// before either is measured. The same bits either way.
     pub par_min_work: Option<usize>,
+    /// Columns of a sparse right-hand side per block of the reach-limited
+    /// forward sweeps ([`LdltSolver::port_matrix`](crate::LdltSolver::port_matrix),
+    /// [`LdltSolver::solve_sparse`](crate::LdltSolver::solve_sparse)).
+    /// Default `8`. The same bits for any width.
+    pub port_block: usize,
 }
 
 impl Default for SolveSettings {
@@ -457,6 +462,7 @@ impl Default for SolveSettings {
         Self {
             leaf_subtrees: SOLVE_LEAF_SUBTREES,
             par_min_work: None,
+            port_block: SOLVE_PORT_BLOCK,
         }
     }
 }

@@ -1369,6 +1369,7 @@ tuned values, listed by `to_dict`.
 - `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
 - `solve_leaf_subtrees` (int): Triangular solves: leaf subtrees of the parallel sweeps (128).
 - `solve_par_min_work` (int, optional): The work (panel entries times right-hand sides, up to four) from which a sweep runs on the thread pool at all; `None` (default): the way the sweeps of its work measured fastest, starting on the pool from about a million.
+- `solve_port_block` (int): Sparse right-hand sides per block of the reach-limited forward sweeps of the port matrix and the sparse solve (8).
 
 #### `Settings.to_dict()`
 

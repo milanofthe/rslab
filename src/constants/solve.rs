@@ -76,3 +76,17 @@ pub const SOLVE_PULL_COLS: usize = 32;
 /// there on one thread); below this it is under a millisecond.
 /// Contract: timing.
 pub const SOLVE_PULL_PAR_MIN: usize = 1 << 20;
+
+/// Columns of a sparse right-hand side per block of the reach-limited
+/// forward sweeps of [`LdltSolver::port_matrix`](crate::LdltSolver::port_matrix)
+/// and [`LdltSolver::solve_sparse`](crate::LdltSolver::solve_sparse)
+/// (right-hand sides).
+/// Used by: `SolveSettings::port_block`.
+/// Why: a block sweeps the union of its columns' reaches once; columns
+/// grouped by the subtree they start in share most of it, and eight keep
+/// the union close to one column's reach while every panel entry read is
+/// applied to eight right-hand sides.
+/// Contract: timing (each column is swept alone in its lane, and the port
+/// matrix sums every entry over the same rows in the same order, whatever
+/// the block).
+pub const SOLVE_PORT_BLOCK: usize = 8;

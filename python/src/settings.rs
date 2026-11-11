@@ -220,6 +220,7 @@ plain_knobs! {
     "trsm_rows": usize => kernels.trsm_rows;
     "solve_leaf_subtrees": usize => solve.leaf_subtrees;
     "solve_par_min_work": Option<usize> => solve.par_min_work;
+    "solve_port_block": usize => solve.port_block;
 }
 
 /// Settings of the symmetric LDL^T and the unsymmetric LU factorizations.
@@ -374,6 +375,9 @@ plain_knobs! {
 ///     a sweep runs on the thread pool at all; ``None`` (default): the way
 ///     the sweeps of its work measured fastest, starting on the pool from
 ///     about a million.
+/// solve_port_block : int
+///     Sparse right-hand sides per block of the reach-limited forward sweeps
+///     of the port matrix and the sparse solve (8).
 #[pyclass(name = "Settings", module = "rslab")]
 #[derive(Clone, Default)]
 pub struct PySettings {
