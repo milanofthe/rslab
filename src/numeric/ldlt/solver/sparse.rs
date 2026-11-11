@@ -47,7 +47,8 @@ impl<T: Scalar> LdltSolver<T> {
     /// symmetric `A` not the adjoint) of a sparse block `B`, column-major
     /// `ncols x ncols` and exactly symmetric. Computed as `Y^T D^-1 Y` with
     /// `Y = L^-1 P^T S B` from forward sweeps limited to the columns' reach,
-    /// with no backward sweep and no dense `n x ncols` block; the 2x2 blocks of
+    /// with no backward sweep; `Y` is stored on the rows of the reach only
+    /// ([`sparse_reach`](Self::sparse_reach) gives its size). The 2x2 blocks of
     /// `D` and the equilibration `S` are taken in. Agrees with `B^T X` from
     /// [`solve_many`](Self::solve_many) to rounding. The same bits for every
     /// thread count.
