@@ -2325,8 +2325,8 @@ mod tests {
                 .build()
                 .unwrap()
         };
-        let nrhs = 32;
-        let a = convdiff(60);
+        let nrhs = 64;
+        let a = convdiff(80);
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
         let bb: Vec<f64> = (0..n * nrhs)
