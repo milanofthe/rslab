@@ -810,7 +810,7 @@ impl<T: Scalar> SolvePlan<T> {
         let subtree_work = (subtrees.iter())
             .map(|st| st.nodes.iter().map(|&s| entries(s)).sum::<usize>())
             .sum();
-        Self {
+        let plan = Self {
             n,
             sn_col,
             row_ptr,
@@ -843,7 +843,9 @@ impl<T: Scalar> SolvePlan<T> {
             subtree_work,
             spare_rows: Vec::new(),
             cfg,
-        }
+        };
+        plan.log_layout();
+        plan
     }
 
     /// The panels' buffer and a spare row list, taken out for the next
@@ -907,6 +909,53 @@ impl<T: Scalar> SolvePlan<T> {
     /// Bytes of the panel storage (values plus row indices).
     pub fn bytes(&self) -> usize {
         self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * IDX32_BYTES
+    }
+
+    /// The schedule's bounds at the `debug` level, in panel entries (a
+    /// sweep's work per right-hand side): the leaf subtrees' share and their
+    /// balance, the ancestors' share, the longest chain of ancestors to a
+    /// root (the critical path of their task tree), the widths of the top
+    /// levels and the accumulator slots the ancestors take.
+    fn log_layout(&self) {
+        if !crate::logging::enabled(crate::logging::LogLevel::Debug) {
+            return;
+        }
+        let entries = |s: u32| self.val_rng[s as usize].1 - self.val_rng[s as usize].0;
+        let sub: Vec<usize> = (self.subtrees.iter())
+            .map(|st| st.nodes.iter().map(|&s| entries(s)).sum())
+            .collect();
+        let sub_max = sub.iter().copied().max().unwrap_or(0);
+        let top_work = self.nodes_work(&self.top);
+        // ancestors ascend, a parent after its children
+        let mut path = vec![0usize; self.top.len()];
+        for ti in 0..self.top.len() {
+            let kids = &self.top_kids[self.top_kids_ptr[ti]..self.top_kids_ptr[ti + 1]];
+            let below = kids.iter().map(|&k| path[k as usize]).max().unwrap_or(0);
+            path[ti] = entries(self.top[ti]) + below;
+        }
+        let critical = path.iter().copied().max().unwrap_or(0);
+        let widths: Vec<usize> = self.top_levels.iter().take(12).map(Vec::len).collect();
+        let slots: usize = self.subtrees.iter().map(|st| st.ext.len()).sum();
+        let big = self.top.iter().copied().max_by_key(|&s| entries(s));
+        let big = big.map_or(String::new(), |s| {
+            let (_, w, _, m, _, _) = self.node(s);
+            format!(" largest ancestor {} entries (w={w} m={m})", entries(s))
+        });
+        crate::logging::debug(&format!(
+            "solve layout: n={} chain={} entries={} subtrees={} entries={} (max {} mean {:.0}) \
+             ancestors={} entries={} levels={} widths={widths:?} critical path={} slots={slots}{big}",
+            self.n,
+            self.chain,
+            self.subtree_work + top_work,
+            self.subtrees.len(),
+            self.subtree_work,
+            sub_max,
+            self.subtree_work as f64 / sub.len().max(1) as f64,
+            self.top.len(),
+            top_work,
+            self.top_levels.len(),
+            critical,
+        ));
     }
 
     #[inline]
