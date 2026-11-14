@@ -449,7 +449,11 @@ pub(crate) fn layout_size<'r>(
         + (0..leaf_roots.len())
             .map(|t| idx * pushed(sizes[t]) + idx * ext[t])
             .sum::<usize>();
-    let levels = level_len.len() * vec + level_len.iter().map(|&l| idx * pushed(l)).sum::<usize>();
+    // the levels' nodes and their accumulators' starts (`top_acc_ptr`, `l + 1` each)
+    let levels = 2 * level_len.len() * vec
+        + (level_len.iter())
+            .map(|&l| idx * pushed(l) + word * pushed(l + 1))
+            .sum::<usize>();
     // The task schedule: the ancestors, their roots, parents and children,
     // the accumulator offsets and the pulls (a run of a source's rows per
     // ancestor they lie in: every leaf subtree's and every ancestor's).
@@ -2632,9 +2636,8 @@ mod tests {
     /// as the level sweeps do, to the bit: a tree cut into few subtrees, so
     /// most of it lies above the cut, every sweep on the pool, against one
     /// thread (the level sweeps); LU and LDL^T, one and several right-hand
-    /// sides, the chunks small enough that the large nodes run their products
-    /// in row chunks for one right-hand side too
-    /// ([`node_chunks`](super::SolvePlan::node_chunks)).
+    /// sides, every product cut into its finest row chunks, for one
+    /// right-hand side too ([`node_chunks`](super::SolvePlan::node_chunks)).
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
         use crate::{LuSolver, OrderingMethod};
@@ -2642,7 +2645,7 @@ mod tests {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: Some(0),
-                gemm_task: 1 << 12,
+                gemm_task: 1,
             },
             ..SolverSettings::default()
         }
