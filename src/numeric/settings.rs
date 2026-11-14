@@ -438,7 +438,8 @@ impl Default for KernelSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolveSettings {
     /// Independent leaf subtrees the tree is cut into for the parallel
-    /// sweeps. Default `128`.
+    /// sweeps. Default
+    /// [`SOLVE_LEAF_SUBTREES`](crate::constants::SOLVE_LEAF_SUBTREES).
     pub leaf_subtrees: usize,
     /// A fixed gate in place of the time gate: the work of a triangular
     /// sweep from which it runs on the thread pool, in the factor's panel
