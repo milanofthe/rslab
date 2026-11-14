@@ -36,9 +36,9 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_NS_PER_ENTRY,
-    SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN, SOLVE_RHS_TILE, TILE_ROWS,
-    VEC_HEADER_BYTES, WORD_BYTES,
+    GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMV_ROWS,
+    SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN,
+    SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
@@ -1002,20 +1002,19 @@ impl<T: Scalar> SolvePlan<T> {
     /// The row chunks a node's product of `rows` rows and depth `depth` for `nr`
     /// right-hand sides runs in on the pool (`par`, the node an ancestor): about
     /// [`SolveSettings::gemm_task`](crate::SolveSettings::gemm_task) entries times
-    /// right-hand sides each, at least two rows each (a single row is a
-    /// matrix-vector product inside the GEMM, with its own order of sums). One,
-    /// the whole product, on the calling thread; none for no rows. Within a call
-    /// the GEMM blocks a product's depth alike for any row count (depth up to 64
-    /// here in the forward sweep, row counts up to 64 in the backward one), so a
-    /// row's sums are the same in a chunk as in the whole product, and a node's
-    /// are the same on one thread as on many.
+    /// right-hand sides each, at least [`chunk_align`] rows each and cut at its
+    /// multiples ([`chunk_rows`]). One, the whole product, on the calling thread;
+    /// none for no rows. Within a call the GEMM blocks a product's depth alike
+    /// for any row count (depth up to 64 here in the forward sweep, row counts
+    /// up to 64 in the backward one), so a row's sums are the same in a chunk as
+    /// in the whole product, and a node's are the same on one thread as on many.
     fn node_chunks(&self, par: bool, rows: usize, depth: usize, nr: usize) -> usize {
         let whole = usize::from(rows > 0);
         if !par {
             return whole;
         }
         let by_work = (rows * depth * nr).div_ceil(self.cfg.gemm_task.max(1));
-        by_work.min(rows / 2).max(whole)
+        by_work.min(rows / chunk_align(nr)).max(whole)
     }
 
     #[inline]
@@ -1626,7 +1625,7 @@ impl<T: Scalar> SolvePlan<T> {
             let own = self.node_chunks(par, w - je, k, nr);
             let yp = Shared(yb.as_mut_ptr(), yb.len());
             run_chunks(own, tr, |i| {
-                let r = chunk_rows(i, own, w - je);
+                let r = chunk_rows(i, own, w - je, nr);
                 // SAFETY: a chunk writes its own rows of `yb` (below `je`); the
                 // block's solved rows `jb..je` and the panel are only read.
                 unsafe {
@@ -1665,7 +1664,7 @@ impl<T: Scalar> SolvePlan<T> {
             Shared(t.as_mut_ptr(), t.len()),
         );
         run_chunks(below, tr, |i| {
-            let r = chunk_rows(i, below, m);
+            let r = chunk_rows(i, below, m, nr);
             for (b, (jb, je, off, ld)) in packed_blocks(w, m).enumerate() {
                 // SAFETY: a chunk writes its own rows of `t`; the solved rows of `yb`
                 // and the panel are only read.
@@ -1755,7 +1754,7 @@ impl<T: Scalar> SolvePlan<T> {
                 let Some((jb, je, off, ld)) = packed_blocks(w, m).nth(b) else {
                     return;
                 };
-                let r = chunk_rows(q, count, je - jb);
+                let r = chunk_rows(q, count, je - jb, nr);
                 // SAFETY: the chunk writes its own rows of the node; the panel and
                 // the gathered rows are only read.
                 unsafe {
@@ -1792,7 +1791,7 @@ impl<T: Scalar> SolvePlan<T> {
                     Shared(xb.as_mut_ptr(), xb.len()),
                 );
                 run_chunks(count, tr, |q| {
-                    let r = chunk_rows(q, count, je - jb);
+                    let r = chunk_rows(q, count, je - jb, nr);
                     // SAFETY: the chunk writes its own rows of `jb..je`, rows `je..w`
                     // are read: disjoint; the block's rows `je..w` lie in it.
                     unsafe {
@@ -2268,10 +2267,35 @@ fn packed_blocks(
     })
 }
 
-/// The rows of chunk `i` of `count` over `rows` rows, the chunks as even as
-/// they can be.
-fn chunk_rows(i: usize, count: usize, rows: usize) -> std::ops::Range<usize> {
-    i * rows / count..(i + 1) * rows / count
+/// The rows a chunk of a product of `nr` right-hand sides starts at a multiple
+/// of, and its least rows. For one right-hand side the GEMM runs a matrix-vector
+/// product: a column's rows in SIMD lanes from the product's first row, the rows
+/// past its last full lane one by one with other rounding, so a chunk starts at
+/// a multiple of the widest lane ([`SOLVE_GEMV_ROWS`]) and every row keeps the
+/// lane it has in the whole product. For several, two: a single row is a
+/// matrix-vector product inside the GEMM, with its own order of sums.
+fn chunk_align(nr: usize) -> usize {
+    if nr == 1 {
+        SOLVE_GEMV_ROWS
+    } else {
+        2
+    }
+}
+
+/// The rows of chunk `i` of the `count` chunks of a product of `rows` rows and
+/// `nr` right-hand sides ([`SolvePlan::node_chunks`]): as even as they can be in
+/// units of [`chunk_align`] rows, the last one taking the rows past its last unit.
+fn chunk_rows(i: usize, count: usize, rows: usize, nr: usize) -> std::ops::Range<usize> {
+    let align = chunk_align(nr);
+    let units = rows / align;
+    let at = |c: usize| {
+        if c >= count {
+            rows
+        } else {
+            c * units / count * align
+        }
+    };
+    at(i)..at(i + 1)
 }
 
 /// `f(i)` for the `count` chunks of a node's product

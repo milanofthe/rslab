@@ -89,6 +89,7 @@ fn rslab_contract_constants() {
     assert_eq!(c::SOLVE_RHS_TILE, 4);
     assert_eq!(c::SOLVE_DIAG_BLOCK, 64);
     assert_eq!(c::SOLVE_GEMM_TASK, 1 << 17);
+    assert_eq!(c::SOLVE_GEMV_ROWS, 16);
     assert_eq!(c::SOLVE_PULL_COLS, 32);
 }
 

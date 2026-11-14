@@ -63,6 +63,18 @@ pub const SOLVE_DIAG_BLOCK: usize = 64;
 /// product; see `node_chunks`).
 pub const SOLVE_GEMM_TASK: usize = 1 << 17;
 
+/// Rows a row chunk of a node's product for one right-hand side starts at a
+/// multiple of (rows).
+/// Used by: `supernodal::solve::chunk_align` (`SolvePlan::node_chunks`, `chunk_rows`).
+/// Why: for one right-hand side the GEMM runs a matrix-vector product whose
+/// column runs the rows in SIMD lanes from the product's first row and the rows
+/// past its last full lane one by one, with other rounding; a chunk starting at
+/// a multiple of the widest lane (16: `f32` on AVX-512) leaves every row in its
+/// lane of the whole product. Chunks cut at arbitrary rows gave the forward
+/// sweep of tia130a's near-field LU other bits on 2 threads than on 1.
+/// Contract: results (the solution is the same on any thread count).
+pub const SOLVE_GEMV_ROWS: usize = 16;
+
 /// Columns per task of an ancestor's take of the leaf subtrees' terms in the
 /// forward sweep (columns).
 /// Used by: `supernodal::solve::SolvePlan::top_forward_flow`.
