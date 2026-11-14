@@ -178,8 +178,7 @@ impl KluSymbolic {
                 let mut lj = 0usize;
                 w_b += crate::constants::COL_WORK;
                 leaves.clear();
-                for k in self.pat_col_ptr[j]..self.pat_col_ptr[j + 1] {
-                    let pre = self.pat_row_idx[k];
+                for &pre in &self.pat_row_idx[self.pat_col_ptr[j]..self.pat_col_ptr[j + 1]] {
                     if pre < bs {
                         f_nnz += 1;
                         continue;
