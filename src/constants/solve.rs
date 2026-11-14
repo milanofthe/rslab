@@ -9,8 +9,25 @@ pub const TILE_ROWS: usize = 4;
 /// Independent leaf subtrees the tree is cut into for the parallel sweeps
 /// (subtrees).
 /// Used by: `SolveSettings::leaf_subtrees`.
-/// Why: tuned default; many more than workers, for balance.
-/// Contract: timing (the solves are thread-count independent).
+/// Why: many more than workers, for balance of the subtrees' phase. Fewer,
+/// larger leaf subtrees shrink the accumulators the subtrees fill and the
+/// ancestors take (tia130a near-field LU: 319 k slots at 128, 160 k at 32).
+/// Near-field LUs, 16 right-hand sides, EPYC-Milan (6 cores / 12 threads),
+/// median of 21 (`examples/lu_solve_timing.rs` with `RSLAB_DELAYED=1`,
+/// `RSLAB_LEAF`), ms:
+///
+/// | leaf subtrees               | 32    | 64    | 128   |
+/// |-----------------------------|-------|-------|-------|
+/// | tia130a 1 GHz, 12 threads   | 27.6  | 28.4  | 30.2  |
+/// | tia130a 1 GHz, 1 thread     | 106.3 | 107.2 | 109.6 |
+/// | tia130a 170 GHz, 12 threads | 27.6  | 27.9  | 29.4  |
+/// | momstack 1 GHz, 12 threads  | 4.40  | 4.98  | 5.15  |
+/// | pa180a 1 GHz, 12 threads    | 93.1  | 100.4 | 99.3  |
+///
+/// (pa180a varies by a tenth from run to run.) Not measured on other matrix
+/// families or on more threads, so the default stays.
+/// Contract: rounding (the cut groups the subtrees' terms; every cut solves
+/// alike on any thread count).
 pub const SOLVE_LEAF_SUBTREES: usize = 128;
 
 /// Work of a triangular sweep from which it starts on the thread pool,
@@ -27,7 +44,7 @@ pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
 /// Right-hand sides per register tile of the solve kernels, and how many of
 /// them count toward a sweep's work where it starts on the pool (right-hand
 /// sides).
-/// Used by: `supernodal::solve` (`tri_rows`, `SolvePlan::fit`).
+/// Used by: `supernodal::solve` (`tri_rows`, `tri_up`, `SolvePlan::fit`).
 /// Why: a tile of [`TILE_ROWS`] rows by four right-hand sides stays in
 /// registers; the kernels are instantiated for tiles of 1 to 4.
 /// Contract: rounding (each right-hand side is summed alike in any tile;
@@ -46,8 +63,7 @@ pub const SOLVE_DIAG_BLOCK: usize = 64;
 /// Work of a row chunk of a node's products in the sweeps, in panel entries
 /// times right-hand sides: a product of more is cut into row chunks, which
 /// an ancestor runs on the pool.
-/// Used by: `supernodal::solve::node_chunks` (`SolvePlan::fwd_node_core`,
-/// `bwd_node_gemm`).
+/// Used by: `SolveSettings::gemm_task` (`supernodal::solve::SolvePlan::node_chunks`).
 /// Why: the ancestors' chain to the root is the critical path of the sweeps,
 /// and its nodes are mostly narrow and deep (tia130a near-field LU, 15.8 k
 /// unknowns, 16 right-hand sides: of the forward chain's 5.0 M entries 0.9 M
@@ -59,10 +75,32 @@ pub const SOLVE_DIAG_BLOCK: usize = 64;
 /// several times a task's start. With these chunks the ancestors' sweeps run
 /// 3.2 (forward) and 3.9 (backward) times faster on 12 threads than on one,
 /// the solve 38.6 -> 32.4 ms (EPYC-Milan, 6 cores / 12 threads, median of 21,
-/// `examples/lu_solve_timing.rs` with `RSLAB_DELAYED=1`).
+/// `examples/lu_solve_timing.rs` with `RSLAB_DELAYED=1`). Swept with
+/// `RSLAB_GEMM_TASK` on 12 threads (leaf subtrees 128), ms:
+///
+/// | entries x rhs | 2^14 | 2^15 | 2^16 | 2^17 | 2^18 | 2^19 |
+/// |---------------|------|------|------|------|------|------|
+/// | 4 rhs         | 15.6 | 17.0 | 16.1 | 17.6 | 18.4 | 19.0 |
+/// | 16 rhs        | 32.1 | 32.1 | 30.0 | 29.6 | 31.8 | 30.8 |
+///
+/// Within the run-to-run spread from 2^14 to 2^17 at 16 right-hand sides
+/// (2^21: 43.6 before the products below a node ran in one section); 4 favour
+/// smaller chunks by up to a tenth, not reproduced on 6 threads.
 /// Contract: timing (a row's sums are the same in a chunk as in the whole
 /// product; see `node_chunks`).
 pub const SOLVE_GEMM_TASK: usize = 1 << 17;
+
+/// Rows a row chunk of a node's product for one right-hand side starts at a
+/// multiple of (rows).
+/// Used by: `supernodal::solve::chunk_align` (`SolvePlan::node_chunks`, `chunk_rows`).
+/// Why: for one right-hand side the GEMM runs a matrix-vector product whose
+/// column runs the rows in SIMD lanes from the product's first row and the rows
+/// past its last full lane one by one, with other rounding; a chunk starting at
+/// a multiple of the widest lane (16: `f32` on AVX-512) leaves every row in its
+/// lane of the whole product. Chunks cut at arbitrary rows gave the forward
+/// sweep of tia130a's near-field LU other bits on 2 threads than on 1.
+/// Contract: results (the solution is the same on any thread count).
+pub const SOLVE_GEMV_ROWS: usize = 16;
 
 /// Columns per task of an ancestor's take of the leaf subtrees' terms in the
 /// forward sweep (columns).

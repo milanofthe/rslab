@@ -219,7 +219,7 @@ impl<T: Scalar> SolvePlan<T> {
         // An `LDL^T` plan has a unit-diagonal `L` (no scaling in the sweep).
         debug_assert!(self.diag_inv.is_empty(), "the plan is not unit-diagonal");
         let (_, w, r0, m, _, _) = self.node(s);
-        self.fwd_node_core(s, nr, &mut y[base * nr..(base + w) * nr], false, t);
+        self.fwd_node_core(s, nr, &mut y[base * nr..(base + w) * nr], false, t, None);
         for (r, &row) in self.rows[r0..r0 + m].iter().enumerate() {
             let q = map[row as usize] as usize;
             sub_assign(&mut y[q * nr..(q + 1) * nr], &t[r * nr..(r + 1) * nr]);
