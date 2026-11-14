@@ -95,8 +95,8 @@ fn field(line: &str, key: &str) -> f64 {
 type Classes = Vec<(String, f64, f64, Vec<f64>)>;
 
 /// The time fields of the node trace (ns, counts for `sections` and `chunks`).
-const NODE_FIELDS: [&str; 10] = [
-    "total", "take", "zero", "tri", "gemm", "pooled", "scatter", "sections", "section", "chunks",
+const NODE_FIELDS: [&str; 9] = [
+    "total", "take", "tri", "gemm", "pooled", "scatter", "sections", "section", "chunks",
 ];
 
 /// A `solve node` or `solve subtrees` record added to its classes in `sums`.
@@ -205,9 +205,11 @@ fn trace(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize) {
         };
         let v: Vec<f64> = (0..NODE_FIELDS.len()).map(med).collect();
         let ms = |i: usize| v[i] / 1e6;
-        let (sections, chunks) = (v[7].max(1.0), v[9].max(1.0));
+        let (sections, chunks) = (v[6].max(1.0), v[8].max(1.0));
         println!(
-            "  nodes nr={nr:2} {name:12} n={count:4} entries={:6.2}M total={:7.2} ns/entry-rhs={:.3}              take={:.2} zero={:.2} tri={:.2} gemm={:.2} pooled={:.2} scatter={:.2}              sections={} section={:.2} ({:.1} us each, {:.1} chunks of {:.1} us)",
+            "  nodes nr={nr:2} {name:12} n={count:4} entries={:6.2}M total={:7.2} ns/entry-rhs={:.3} \
+             take={:.2} tri={:.2} gemm={:.2} pooled={:.2} scatter={:.2} \
+             sections={} section={:.2} ({:.1} us each, {:.1} chunks of {:.1} us)",
             entries / 1e6,
             ms(0),
             v[0] / (entries * nr as f64),
@@ -216,12 +218,11 @@ fn trace(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize) {
             ms(3),
             ms(4),
             ms(5),
-            ms(6),
-            v[7],
-            ms(8),
-            v[8] / sections / 1e3,
-            v[9] / sections,
-            v[5] / chunks / 1e3,
+            v[6],
+            ms(7),
+            v[7] / sections / 1e3,
+            v[8] / sections,
+            v[4] / chunks / 1e3,
         );
     }
 }

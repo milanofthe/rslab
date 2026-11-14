@@ -50,6 +50,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const NONE: u32 = u32::MAX;
 
+/// The flag of an accumulator slot ([`SolvePlan::ext_slot`]) whose term is the
+/// first one written into it in the forward sweep: the term is stored, not
+/// added, so no accumulator is zeroed.
+const FIRST: u32 = !(u32::MAX >> 1);
+
 mod sparse;
 pub use sparse::SparseReach;
 
@@ -115,7 +120,10 @@ pub(crate) struct SolvePlan<T> {
     /// Off-block row indices per supernode, ascending.
     rows: Vec<u32>,
     /// Per off-block row: accumulator slot when the row lies outside the
-    /// supernode's leaf subtree, `NONE` when it is written directly.
+    /// supernode's leaf subtree, `NONE` when it is written directly; with
+    /// [`FIRST`] set where its node is the first in the forward sweep to write
+    /// the slot (every slot of an ancestor's own accumulator, and in a leaf
+    /// subtree the first of its nodes in order that reaches the row).
     ext_slot: Vec<u32>,
     /// The panels in the factor's own storage ([`PanelFactor`]), packed in
     /// place by column blocks ([`packed_blocks`]): supernode `s` is
@@ -675,6 +683,7 @@ impl<T: Scalar> SolvePlan<T> {
                 continue;
             };
             mark(parent[root as usize], true, &mut on_path);
+            let mut written = vec![false; st.ext.len()];
             for &s in &st.nodes {
                 for e in row_ptr[s as usize]..row_ptr[s as usize + 1] {
                     let r = rows[e];
@@ -682,7 +691,9 @@ impl<T: Scalar> SolvePlan<T> {
                     if subtree_of[a as usize] != subtree_of[s as usize] {
                         if on_path[a as usize] {
                             // `ext` holds every such row
-                            ext_slot[e] = st.ext.partition_point(|&x| x < r) as u32;
+                            let slot = st.ext.partition_point(|&x| x < r);
+                            let first = !std::mem::replace(&mut written[slot], true);
+                            ext_slot[e] = slot as u32 | if first { FIRST } else { 0 };
                         } else {
                             degenerate = true;
                         }
@@ -696,7 +707,7 @@ impl<T: Scalar> SolvePlan<T> {
             let r0 = row_ptr[t as usize];
             for e in r0..row_ptr[t as usize + 1] {
                 if on_path[sn_of[rows[e] as usize] as usize] {
-                    ext_slot[e] = (e - r0) as u32;
+                    ext_slot[e] = (e - r0) as u32 | FIRST;
                 } else {
                     degenerate = true;
                 }
@@ -1265,8 +1276,8 @@ impl<T: Scalar> SolvePlan<T> {
     ) {
         let nt = self.top.len();
         let nsub = self.subtrees.len();
-        work.top_acc.clear();
-        work.top_acc.resize(self.top_acc_off[nt] * nr, T::zero());
+        // every slot's first term is stored ([`FIRST`]): no zeroing, only growth
+        grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
         let ys = Shared(y.as_mut_ptr(), y.len());
         let accs = Shared(work.top_acc.as_mut_ptr(), work.top_acc.len());
         let pool = &work.pool;
@@ -1425,8 +1436,7 @@ impl<T: Scalar> SolvePlan<T> {
             let node_par = !par || level.len() >= nt || nt == 1;
             // One accumulator block for the level, a disjoint slice per node.
             let ptr = &self.top_acc_ptr[li];
-            work.top_acc.clear();
-            work.top_acc.resize(ptr[level.len()] * nr, T::zero());
+            grow(&mut work.top_acc, ptr[level.len()] * nr);
             let accs = Shared(work.top_acc.as_mut_ptr(), work.top_acc.len());
             let sweep = |i: usize, s: u32, y: &mut [T], par: bool, sc: &mut Scratch<T>| {
                 // SAFETY: node `i` owns its range of the level's block.
@@ -1520,14 +1530,11 @@ impl<T: Scalar> SolvePlan<T> {
     // -----------------------------------------------------------------------
 
     /// The forward sweep of node `s` for `nr` right-hand sides with its dense
-    /// products as GEMMs, block by block of the packed panel ([`packed_blocks`]):
-    /// each block's triangle on the register tiles, then the rows below it,
-    /// the node's own and its rows below the node (`L_off X`, the blocks'
-    /// products summed into `t`), in one product (in row chunks on the pool
-    /// when `par`, [`node_chunks`](Self::node_chunks)), each row of `t` taken off `y` where the node writes it
-    /// directly and into the accumulator `acc` at its slot otherwise. A row's
-    /// sums run in the products' order, so a column of a block agrees with its
-    /// single solve to rounding, not to the bit.
+    /// products as GEMMs ([`fwd_node_core`](Self::fwd_node_core)), each row of
+    /// `L_off X` taken off `y` where the node writes it directly and into the
+    /// accumulator `acc` at its slot otherwise. A row's sums run in the
+    /// products' order, so a column of a block agrees with its single solve to
+    /// rounding, not to the bit.
     #[allow(clippy::too_many_arguments)]
     fn fwd_node_gemm(
         &self,
@@ -1551,12 +1558,18 @@ impl<T: Scalar> SolvePlan<T> {
             |t| &t.scatter,
             || {
                 for (i, ti) in t[..m * nr].chunks_exact(nr).enumerate() {
-                    if slots[i] == NONE {
+                    let sl = slots[i];
+                    if sl == NONE {
                         let r = rows[i] as usize;
                         sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
                     } else {
-                        let sl = slots[i] as usize;
-                        add_assign(&mut acc[sl * nr..(sl + 1) * nr], ti);
+                        let a = (sl & !FIRST) as usize;
+                        let to = &mut acc[a * nr..(a + 1) * nr];
+                        if sl & FIRST != 0 {
+                            to.copy_from_slice(ti);
+                        } else {
+                            add_assign(to, ti);
+                        }
                     }
                 }
             },
@@ -1564,9 +1577,14 @@ impl<T: Scalar> SolvePlan<T> {
     }
 
     /// The node part of [`fwd_node_gemm`](Self::fwd_node_gemm), shared with
-    /// the reach-limited sweep of sparse right-hand sides: the triangle of
-    /// node `s` on its own rows `yb` (`nr` wide), then `L_off X` into
-    /// `t[..m * nr]` (left untouched when the node has no off-block rows). The
+    /// the reach-limited sweep of sparse right-hand sides, block by block of
+    /// the packed panel ([`packed_blocks`]): each block's triangle on the
+    /// register tiles on the node's own rows `yb` (`nr` wide), then the node's
+    /// own rows below it take its columns in one product; once the triangle is
+    /// solved, `L_off X` into `t[..m * nr]` (left untouched when the node has
+    /// no off-block rows), each row the blocks' products summed in block order,
+    /// in one section of row chunks across all blocks. The products run in row
+    /// chunks on the pool when `par` ([`node_chunks`](Self::node_chunks)). The
     /// caller takes `t` off the rows the node's off-block rows map to. Timed
     /// into `tr` where traced.
     pub(super) fn fwd_node_core(
@@ -1585,11 +1603,8 @@ impl<T: Scalar> SolvePlan<T> {
             &crate::KernelSettings::default(),
         );
         let (one, minus) = (T::one(), T::from_real(-1.0));
-        // the first block's product overwrites every entry of `t`: no zeroing, only growth
-        if m > 0 && t.len() < m * nr {
-            t.resize(m * nr, T::zero());
-        }
-        for (b, (jb, je, off, ld)) in packed_blocks(w, m).enumerate() {
+        let pp = Shared(panel.as_ptr() as *mut T, panel.len());
+        for (jb, je, off, ld) in packed_blocks(w, m) {
             let d = dinv.get(jb..je).unwrap_or(&[]);
             timed(
                 tr,
@@ -1606,57 +1621,31 @@ impl<T: Scalar> SolvePlan<T> {
                     )
                 },
             );
-            // the rows below the block's triangle take its columns: the node's own
-            // `je..w` off `yb`, its rows below the node into `t`
+            // the node's own rows `je..w` take the block's columns
             let k = je - jb;
             let own = self.node_chunks(par, w - je, k, nr);
-            let below = self.node_chunks(par, m, k, nr);
-            let (pp, yp, tp) = (
-                Shared(panel.as_ptr() as *mut T, panel.len()),
-                Shared(yb.as_mut_ptr(), yb.len()),
-                Shared(t.as_mut_ptr(), t.len()),
-            );
-            run_chunks(own + below, tr, |i| {
-                let (dst, at, read, lhs, beta, r) = if i < own {
-                    let r = chunk_rows(i, own, w - je);
-                    (
-                        yp.ptr(),
-                        (je + r.start) * nr,
-                        true,
-                        off + k + r.start,
-                        minus,
-                        r,
-                    )
-                } else {
-                    let r = chunk_rows(i - own, below, m);
-                    (
-                        tp.ptr(),
-                        r.start * nr,
-                        b > 0,
-                        off + w - jb + r.start,
-                        one,
-                        r,
-                    )
-                };
-                // SAFETY: a chunk writes its own rows of `yb` (below `je`) or of `t`;
-                // the block's solved rows `jb..je` of `yb` and the panel are only read.
+            let yp = Shared(yb.as_mut_ptr(), yb.len());
+            run_chunks(own, tr, |i| {
+                let r = chunk_rows(i, own, w - je);
+                // SAFETY: a chunk writes its own rows of `yb` (below `je`); the
+                // block's solved rows `jb..je` and the panel are only read.
                 unsafe {
                     crate::dense::gemm_backend::gemm(
                         r.len(),
                         nr,
                         k,
-                        dst.add(at),
+                        yp.ptr().add((je + r.start) * nr),
                         1,
                         nr as isize,
-                        read,
-                        pp.ptr().add(lhs) as *const T,
+                        true,
+                        pp.ptr().add(off + k + r.start) as *const T,
                         ld as isize,
                         1,
                         yp.ptr().add(jb * nr) as *const T,
                         1,
                         nr as isize,
                         one,
-                        beta,
+                        minus,
                         false,
                         false,
                         false,
@@ -1665,6 +1654,46 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             });
         }
+        if m == 0 {
+            return;
+        }
+        // the first block's product overwrites every entry of `t`
+        grow(t, m * nr);
+        let below = self.node_chunks(par, m, w, nr);
+        let (yp, tp) = (
+            Shared(yb.as_mut_ptr(), yb.len()),
+            Shared(t.as_mut_ptr(), t.len()),
+        );
+        run_chunks(below, tr, |i| {
+            let r = chunk_rows(i, below, m);
+            for (b, (jb, je, off, ld)) in packed_blocks(w, m).enumerate() {
+                // SAFETY: a chunk writes its own rows of `t`; the solved rows of `yb`
+                // and the panel are only read.
+                unsafe {
+                    crate::dense::gemm_backend::gemm(
+                        r.len(),
+                        nr,
+                        je - jb,
+                        tp.ptr().add(r.start * nr),
+                        1,
+                        nr as isize,
+                        b > 0,
+                        pp.ptr().add(off + w - jb + r.start) as *const T,
+                        ld as isize,
+                        1,
+                        yp.ptr().add(jb * nr) as *const T,
+                        1,
+                        nr as isize,
+                        one,
+                        one,
+                        false,
+                        false,
+                        false,
+                        mode,
+                    );
+                }
+            }
+        });
     }
 
     /// The backward sweep of node `s` for `nr` right-hand sides with its dense
@@ -1791,29 +1820,10 @@ impl<T: Scalar> SolvePlan<T> {
                     }
                 });
             }
-            let block = &panel[off..];
             timed(
                 tr,
                 |t| &t.tri,
-                || {
-                    for k in (jb..je).rev() {
-                        let col = &block[(k - jb) * ld..(k - jb + 1) * ld];
-                        let (head, tail) = xb.split_at_mut((k + 1) * nr);
-                        let xk = &mut head[k * nr..];
-                        for i in k + 1..je {
-                            let l = col[i - jb];
-                            let xi = &tail[(i - k - 1) * nr..(i - k) * nr];
-                            for (a, &v) in xk.iter_mut().zip(xi) {
-                                *a = *a - l * v;
-                            }
-                        }
-                        if let Some(&d) = dinv.get(k) {
-                            for a in xk.iter_mut() {
-                                *a = *a * d;
-                            }
-                        }
-                    }
-                },
+                || tri_up(xb, &panel[off..], dinv, ld, nr, jb, je),
             );
         }
     }
@@ -1861,14 +1871,7 @@ impl<T: Scalar> SolvePlan<T> {
         let scratch = &mut work.subtrees[..self.subtrees.len()];
         let sweep_work = Self::sweep_work(self.subtrees_work(), nr);
         Self::each(par, sweep_work, &self.subtrees, scratch, |_, st, sc| {
-            timed(
-                sub_tr,
-                |t| &t.zero,
-                || {
-                    sc.acc.clear();
-                    sc.acc.resize(st.ext.len() * nr, T::zero());
-                },
-            );
+            grow(&mut sc.acc, st.ext.len() * nr);
             // SAFETY: see `Shared`.
             let yv = unsafe { shared.slice() };
             for &s in &st.nodes {
@@ -1922,6 +1925,14 @@ impl<T: Scalar> SolvePlan<T> {
         if let Some(trace) = trace {
             trace.finish(self, "bwd");
         }
+    }
+}
+
+/// `v` at least `len` long, only grown: every entry a sweep reads it writes
+/// first.
+fn grow<T: Scalar>(v: &mut Vec<T>, len: usize) {
+    if v.len() < len {
+        v.resize(len, T::zero());
     }
 }
 
@@ -1997,8 +2008,6 @@ pub(super) struct NodeTimes {
     /// The take of the terms for its columns (forward) or the gather of its
     /// rows below (backward).
     take: AtomicU64,
-    /// The zeroing of a leaf subtree's accumulator.
-    zero: AtomicU64,
     /// The triangles on the node's thread.
     tri: AtomicU64,
     /// The products on the node's thread, whole.
@@ -2062,10 +2071,9 @@ impl SweepTrace {
         let line = |t: &NodeTimes| {
             let v = |a: &AtomicU64| a.load(Ordering::Relaxed);
             format!(
-                "total={} take={} zero={} tri={} gemm={} pooled={} scatter={} sections={} section={} chunks={}",
+                "total={} take={} tri={} gemm={} pooled={} scatter={} sections={} section={} chunks={}",
                 v(&t.total),
                 v(&t.take),
-                v(&t.zero),
                 v(&t.tri),
                 v(&t.gemm),
                 v(&t.pooled),
@@ -2175,6 +2183,69 @@ fn tri_tile<T: Scalar, const W: usize>(
             v[(i + r) * nr + c0..(i + r) * nr + c0 + W].copy_from_slice(&acc[r]);
         }
         i += rn;
+    }
+}
+
+/// The transposed unit-lower triangle of the columns `jb..je` (scaled by `diag_inv` where
+/// it is given) on the row-major right-hand sides `v` (`nr` wide), the block `block` its
+/// column-major panel block (`ld`, row `i` of column `k` at `(k - jb) * ld + i - jb`), last
+/// row first: row `k` takes `- l_ik v_i` for `i` ascending from `k + 1`, then its scale.
+/// The right-hand sides are independent, so a tile of up to [`SOLVE_RHS_TILE`] of them
+/// is kept in registers across a row's terms, in the very order of operations of the
+/// row-at-a-time form, to the bit.
+fn tri_up<T: Scalar>(
+    v: &mut [T],
+    block: &[T],
+    diag_inv: &[T],
+    ld: usize,
+    nr: usize,
+    jb: usize,
+    je: usize,
+) {
+    let mut c0 = 0;
+    while c0 < nr {
+        let w = (nr - c0).min(SOLVE_RHS_TILE);
+        match w {
+            4 => tri_up_tile::<T, 4>(v, block, diag_inv, ld, nr, c0, jb, je),
+            3 => tri_up_tile::<T, 3>(v, block, diag_inv, ld, nr, c0, jb, je),
+            2 => tri_up_tile::<T, 2>(v, block, diag_inv, ld, nr, c0, jb, je),
+            _ => tri_up_tile::<T, 1>(v, block, diag_inv, ld, nr, c0, jb, je),
+        }
+        c0 += w;
+    }
+}
+
+/// [`tri_up`] for the right-hand sides `c0..c0 + W`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn tri_up_tile<T: Scalar, const W: usize>(
+    v: &mut [T],
+    block: &[T],
+    diag_inv: &[T],
+    ld: usize,
+    nr: usize,
+    c0: usize,
+    jb: usize,
+    je: usize,
+) {
+    for k in (jb..je).rev() {
+        let col = &block[(k - jb) * ld..];
+        let mut acc = [T::zero(); W];
+        acc.copy_from_slice(&v[k * nr + c0..k * nr + c0 + W]);
+        // the rows below `k` in the block are final
+        for i in k + 1..je {
+            let l = col[i - jb];
+            let vi = &v[i * nr + c0..i * nr + c0 + W];
+            for (a, &x) in acc.iter_mut().zip(vi) {
+                *a = *a - l * x;
+            }
+        }
+        if let Some(&d) = diag_inv.get(k) {
+            for a in acc.iter_mut() {
+                *a = *a * d;
+            }
+        }
+        v[k * nr + c0..k * nr + c0 + W].copy_from_slice(&acc);
     }
 }
 

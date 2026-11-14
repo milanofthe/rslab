@@ -27,7 +27,7 @@ pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
 /// Right-hand sides per register tile of the solve kernels, and how many of
 /// them count toward a sweep's work where it starts on the pool (right-hand
 /// sides).
-/// Used by: `supernodal::solve` (`tri_rows`, `SolvePlan::fit`).
+/// Used by: `supernodal::solve` (`tri_rows`, `tri_up`, `SolvePlan::fit`).
 /// Why: a tile of [`TILE_ROWS`] rows by four right-hand sides stays in
 /// registers; the kernels are instantiated for tiles of 1 to 4.
 /// Contract: rounding (each right-hand side is summed alike in any tile;
@@ -46,8 +46,7 @@ pub const SOLVE_DIAG_BLOCK: usize = 64;
 /// Work of a row chunk of a node's products in the sweeps, in panel entries
 /// times right-hand sides: a product of more is cut into row chunks, which
 /// an ancestor runs on the pool.
-/// Used by: `supernodal::solve::node_chunks` (`SolvePlan::fwd_node_core`,
-/// `bwd_node_gemm`).
+/// Used by: `SolveSettings::gemm_task` (`supernodal::solve::SolvePlan::node_chunks`).
 /// Why: the ancestors' chain to the root is the critical path of the sweeps,
 /// and its nodes are mostly narrow and deep (tia130a near-field LU, 15.8 k
 /// unknowns, 16 right-hand sides: of the forward chain's 5.0 M entries 0.9 M
