@@ -57,8 +57,8 @@ pub const SOLVE_DIAG_BLOCK: usize = 64;
 /// 2.9 times their one-thread time on 12 threads. At the 0.22 ns an entry
 /// and right-hand side the ancestors took there, a chunk is about 30 us,
 /// several times a task's start.
-/// Contract: timing (the chunks depend on the product's shape alone, and a
-/// row's sums do not depend on them; see `node_chunks`).
+/// Contract: timing (a row's sums are the same in a chunk as in the whole
+/// product; see `node_chunks`).
 pub const SOLVE_GEMM_TASK: usize = 1 << 17;
 
 /// Columns per task of an ancestor's take of the leaf subtrees' terms in the

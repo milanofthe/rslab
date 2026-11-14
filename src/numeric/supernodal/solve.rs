@@ -1454,8 +1454,8 @@ impl<T: Scalar> SolvePlan<T> {
     /// products as GEMMs, block by block of the packed panel ([`packed_blocks`]):
     /// each block's triangle on the register tiles, then the rows below it,
     /// the node's own and its rows below the node (`L_off X`, the blocks'
-    /// products summed into `t`), in one product in row chunks
-    /// ([`node_chunks`], on the pool when `par`), each row of `t` taken off `y` where the node writes it
+    /// products summed into `t`), in one product (in row chunks on the pool
+    /// when `par`, [`node_chunks`]), each row of `t` taken off `y` where the node writes it
     /// directly and into the accumulator `acc` at its slot otherwise. A row's
     /// sums run in the products' order, so a column of a block agrees with its
     /// single solve to rounding, not to the bit.
@@ -1517,14 +1517,14 @@ impl<T: Scalar> SolvePlan<T> {
             // the rows below the block's triangle take its columns: the node's own
             // `je..w` off `yb`, its rows below the node into `t`
             let k = je - jb;
-            let own = node_chunks(w - je, k, nr);
-            let below = node_chunks(m, k, nr);
+            let own = node_chunks(par, w - je, k, nr);
+            let below = node_chunks(par, m, k, nr);
             let (pp, yp, tp) = (
                 Shared(panel.as_ptr() as *mut T, panel.len()),
                 Shared(yb.as_mut_ptr(), yb.len()),
                 Shared(t.as_mut_ptr(), t.len()),
             );
-            run_chunks(par, own + below, |i| {
+            run_chunks(own + below, |i| {
                 let (dst, at, read, lhs, beta, r) = if i < own {
                     let r = chunk_rows(i, own, w - je);
                     (
@@ -1581,8 +1581,8 @@ impl<T: Scalar> SolvePlan<T> {
     /// node's rows as one product `L_off^T G`, then the triangle from the last
     /// block up: each block takes off the rows below it in the node by one
     /// product and solves its own triangle column by column, last to first, each
-    /// column scaled after its terms. The products run in row chunks
-    /// ([`node_chunks`], on the pool when `par`), within a block's rows.
+    /// column scaled after its terms. The products run in row chunks on the
+    /// pool when `par` ([`node_chunks`]), within a block's rows.
     fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
         let (c0, w, r0, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
@@ -1604,15 +1604,15 @@ impl<T: Scalar> SolvePlan<T> {
             let nb = w.div_ceil(SOLVE_DIAG_BLOCK);
             let last_rows = w - (nb - 1) * SOLVE_DIAG_BLOCK;
             let (full, last) = (
-                node_chunks(SOLVE_DIAG_BLOCK, m, nr),
-                node_chunks(last_rows, m, nr),
+                node_chunks(par, SOLVE_DIAG_BLOCK, m, nr),
+                node_chunks(par, last_rows, m, nr),
             );
             let (pp, gp, xp) = (
                 Shared(panel.as_ptr() as *mut T, panel.len()),
                 Shared(g.as_mut_ptr(), g.len()),
                 Shared(xb.as_mut_ptr(), xb.len()),
             );
-            run_chunks(par, (nb - 1) * full + last, |i| {
+            run_chunks((nb - 1) * full + last, |i| {
                 let (b, q, count) = match i.checked_sub((nb - 1) * full) {
                     None => (i / full, i % full, full),
                     Some(q) => (nb - 1, q, last),
@@ -1651,12 +1651,12 @@ impl<T: Scalar> SolvePlan<T> {
         for (jb, je, off, ld) in packed_blocks(w, m).rev() {
             if je < w {
                 let k = w - je;
-                let count = node_chunks(je - jb, k, nr);
+                let count = node_chunks(par, je - jb, k, nr);
                 let (pp, xp) = (
                     Shared(panel.as_ptr() as *mut T, panel.len()),
                     Shared(xb.as_mut_ptr(), xb.len()),
                 );
-                run_chunks(par, count, |q| {
+                run_chunks(count, |q| {
                     let r = chunk_rows(q, count, je - jb);
                     // SAFETY: the chunk writes its own rows of `jb..je`, rows `je..w`
                     // are read: disjoint; the block's rows `je..w` lie in it.
@@ -1962,17 +1962,21 @@ fn packed_blocks(
 }
 
 /// The row chunks a node's product of `rows` rows and depth `depth` for `nr`
-/// right-hand sides is cut into: about [`SOLVE_GEMM_TASK`] entries times
-/// right-hand sides each, at least two rows each (a single row is a
-/// matrix-vector product inside the GEMM, with its own order of sums); none
-/// for no rows. A function of the product's shape alone, so a sweep cuts a
-/// node alike whichever thread runs it and however many there are. Within a
-/// call the GEMM blocks a product's depth alike for any row count (depth up
-/// to 64 here in the forward sweep, row counts up to 64 in the backward one),
-/// so a row's sums do not depend on the chunks either.
-fn node_chunks(rows: usize, depth: usize, nr: usize) -> usize {
+/// right-hand sides runs in on the pool (`par`, the node an ancestor): about
+/// [`SOLVE_GEMM_TASK`] entries times right-hand sides each, at least two rows
+/// each (a single row is a matrix-vector product inside the GEMM, with its own
+/// order of sums). One, the whole product, on the calling thread; none for no
+/// rows. Within a call the GEMM blocks a product's depth alike for any row
+/// count (depth up to 64 here in the forward sweep, row counts up to 64 in the
+/// backward one), so a row's sums are the same in a chunk as in the whole
+/// product, and a node's are the same on one thread as on many.
+fn node_chunks(par: bool, rows: usize, depth: usize, nr: usize) -> usize {
+    let whole = usize::from(rows > 0);
+    if !par {
+        return whole;
+    }
     let by_work = (rows * depth * nr).div_ceil(SOLVE_GEMM_TASK);
-    by_work.min(rows / 2).max(usize::from(rows > 0))
+    by_work.min(rows / 2).max(whole)
 }
 
 /// The rows of chunk `i` of `count` over `rows` rows, the chunks as even as
@@ -1981,10 +1985,10 @@ fn chunk_rows(i: usize, count: usize, rows: usize) -> std::ops::Range<usize> {
     i * rows / count..(i + 1) * rows / count
 }
 
-/// `f(i)` for the `count` chunks of a node's product: each its own task on the
-/// pool when `par` and there are several, in order on this thread otherwise.
-fn run_chunks(par: bool, count: usize, f: impl Fn(usize) + Sync + Send) {
-    if par && count > 1 {
+/// `f(i)` for the `count` chunks of a node's product ([`node_chunks`]): each
+/// its own task on the pool where there are several.
+fn run_chunks(count: usize, f: impl Fn(usize) + Sync + Send) {
+    if count > 1 {
         crate::parallel::each(count, crate::parallel::Work::ns(f64::INFINITY), f);
     } else {
         (0..count).for_each(f);
@@ -2338,7 +2342,7 @@ mod tests {
             p.top.iter().any(|&s| {
                 let (_, w, _, m, _, _) = p.node(s);
                 let k = w.min(SOLVE_DIAG_BLOCK);
-                node_chunks(w - k + m, k, nrhs) > 1 || node_chunks(k, m, nrhs) > 1
+                node_chunks(true, w - k + m, k, nrhs) > 1 || node_chunks(true, k, m, nrhs) > 1
             })
         };
         let lu = on(1).install(|| LuSolver::factor(&a, &opts).unwrap());
