@@ -36,9 +36,9 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMM_TASK,
-    SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN,
-    SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
+    GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_NS_PER_ENTRY,
+    SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN, SOLVE_RHS_TILE, TILE_ROWS,
+    VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
@@ -46,7 +46,7 @@ use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::parallel::{Choice, PerScalar, Pick, Prior, Rate, ScalarRates, Work};
 use crate::scalar::Scalar;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const NONE: u32 = u32::MAX;
 
@@ -926,30 +926,18 @@ impl<T: Scalar> SolvePlan<T> {
             .collect();
         let sub_max = sub.iter().copied().max().unwrap_or(0);
         let top_work = self.nodes_work(&self.top);
-        // ancestors ascend, a parent after its children
-        let mut path = vec![0usize; self.top.len()];
-        let mut next = vec![NONE; self.top.len()];
-        for ti in 0..self.top.len() {
-            let kids = &self.top_kids[self.top_kids_ptr[ti]..self.top_kids_ptr[ti + 1]];
-            if let Some(&k) = kids.iter().max_by_key(|&&k| path[k as usize]) {
-                next[ti] = k;
-                path[ti] = path[k as usize];
-            }
-            path[ti] += entries(self.top[ti]);
-        }
-        let critical = path.iter().copied().max().unwrap_or(0);
+        let path = self.critical_path();
+        let critical = self.nodes_work(&path.iter().map(|&t| self.top[t]).collect::<Vec<_>>());
         // the nodes of that chain: their triangles' and their rows below's entries, and
         // the widths of the large ones (root first)
         let (mut tri, mut off, mut wide) = (0usize, 0usize, Vec::new());
-        let mut at = (0..self.top.len() as u32).max_by_key(|&t| path[t as usize]);
-        while let Some(t) = at.filter(|&t| t != NONE) {
-            let (_, w, _, m, _, _) = self.node(self.top[t as usize]);
+        for &t in &path {
+            let (_, w, _, m, _, _) = self.node(self.top[t]);
             tri += w * (w + 1) / 2;
             off += w * m;
             if w >= SOLVE_DIAG_BLOCK {
                 wide.push((w, m));
             }
-            at = Some(next[t as usize]);
         }
         let widths: Vec<usize> = self.top_levels.iter().map(Vec::len).collect();
         let slots: usize = self.subtrees.iter().map(|st| st.ext.len()).sum();
@@ -974,6 +962,49 @@ impl<T: Scalar> SolvePlan<T> {
             self.top_levels.len(),
             critical,
         ));
+    }
+
+    /// The longest chain of ancestors to a root in panel entries, the
+    /// critical path of their task tree: its `top` indices, root first.
+    fn critical_path(&self) -> Vec<usize> {
+        let entries = |s: u32| self.val_rng[s as usize].1 - self.val_rng[s as usize].0;
+        // ancestors ascend, a parent after its children
+        let mut path = vec![0usize; self.top.len()];
+        let mut next = vec![NONE; self.top.len()];
+        for ti in 0..self.top.len() {
+            let kids = &self.top_kids[self.top_kids_ptr[ti]..self.top_kids_ptr[ti + 1]];
+            if let Some(&k) = kids.iter().max_by_key(|&&k| path[k as usize]) {
+                next[ti] = k;
+                path[ti] = path[k as usize];
+            }
+            path[ti] += entries(self.top[ti]);
+        }
+        let mut chain = Vec::new();
+        let mut at = (0..self.top.len() as u32).max_by_key(|&t| path[t as usize]);
+        while let Some(t) = at.filter(|&t| t != NONE) {
+            chain.push(t as usize);
+            at = Some(next[t as usize]);
+        }
+        chain
+    }
+
+    /// The row chunks a node's product of `rows` rows and depth `depth` for `nr`
+    /// right-hand sides runs in on the pool (`par`, the node an ancestor): about
+    /// [`SolveSettings::gemm_task`](crate::SolveSettings::gemm_task) entries times
+    /// right-hand sides each, at least two rows each (a single row is a
+    /// matrix-vector product inside the GEMM, with its own order of sums). One,
+    /// the whole product, on the calling thread; none for no rows. Within a call
+    /// the GEMM blocks a product's depth alike for any row count (depth up to 64
+    /// here in the forward sweep, row counts up to 64 in the backward one), so a
+    /// row's sums are the same in a chunk as in the whole product, and a node's
+    /// are the same on one thread as on many.
+    fn node_chunks(&self, par: bool, rows: usize, depth: usize, nr: usize) -> usize {
+        let whole = usize::from(rows > 0);
+        if !par {
+            return whole;
+        }
+        let by_work = (rows * depth * nr).div_ceil(self.cfg.gemm_task.max(1));
+        by_work.min(rows / 2).max(whole)
     }
 
     #[inline]
@@ -1225,7 +1256,13 @@ impl<T: Scalar> SolvePlan<T> {
     /// takes its terms in the same order and the result is the level
     /// sweeps' to the bit. Every ancestor keeps its accumulator to the end
     /// of the sweep, in one block. The subtrees' reduction is part of it.
-    fn top_forward_flow(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
+    fn top_forward_flow(
+        &self,
+        nr: usize,
+        y: &mut [T],
+        work: &mut PlanWork<T>,
+        trace: Option<&SweepTrace>,
+    ) {
         let nt = self.top.len();
         let nsub = self.subtrees.len();
         work.top_acc.clear();
@@ -1234,7 +1271,7 @@ impl<T: Scalar> SolvePlan<T> {
         let accs = Shared(work.top_acc.as_mut_ptr(), work.top_acc.len());
         let pool = &work.pool;
         let subs = &work.subtrees;
-        let node = |ti: usize| {
+        let node = |ti: usize, tr: Option<&NodeTimes>| {
             let s = self.top[ti];
             let (c0, w, _, _, _, _) = self.node(s);
             // SAFETY: see `Shared`. This task alone writes the columns of
@@ -1273,23 +1310,29 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             };
             let yc = &mut y[c0 * nr..(c0 + w) * nr];
-            if pulls.len() * w * nr >= SOLVE_PULL_PAR_MIN {
-                // a wide node near the root takes the terms of every leaf
-                // subtree: its columns in chunks on the pool, each column
-                // summing its sources in order
-                crate::parallel::chunks_mut(
-                    yc,
-                    SOLVE_PULL_COLS * nr,
-                    crate::parallel::Work::ns(f64::INFINITY),
-                    |ci, c| take(ci * SOLVE_PULL_COLS, c),
-                );
-            } else {
-                take(0, yc);
-            }
+            timed(
+                tr,
+                |t| &t.take,
+                || {
+                    if pulls.len() * w * nr >= SOLVE_PULL_PAR_MIN {
+                        // a wide node near the root takes the terms of every leaf
+                        // subtree: its columns in chunks on the pool, each column
+                        // summing its sources in order
+                        crate::parallel::chunks_mut(
+                            yc,
+                            SOLVE_PULL_COLS * nr,
+                            crate::parallel::Work::ns(f64::INFINITY),
+                            |ci, c| take(ci * SOLVE_PULL_COLS, c),
+                        );
+                    } else {
+                        take(0, yc);
+                    }
+                },
+            );
             let (a0, a1) = (self.top_acc_off[ti] * nr, self.top_acc_off[ti + 1] * nr);
             let acc = unsafe { std::slice::from_raw_parts_mut(accs.ptr().add(a0), a1 - a0) };
             let mut sc = pool.take();
-            self.fwd_node_gemm(s, nr, y, acc, true, &mut sc.t);
+            self.fwd_node_gemm(s, nr, y, acc, true, &mut sc.t, tr);
             pool.give(sc);
         };
         let kids_ptr = &self.top_kids_ptr;
@@ -1303,7 +1346,7 @@ impl<T: Scalar> SolvePlan<T> {
             }
             let mut t = leaf;
             loop {
-                node(t);
+                SweepTrace::node(trace, t, |tr| node(t, tr));
                 match self.top_parent[t] {
                     NONE => return,
                     p if pending[p as usize].fetch_sub(1, Ordering::AcqRel) == 1 => t = p as usize,
@@ -1324,7 +1367,13 @@ impl<T: Scalar> SolvePlan<T> {
     /// path whatever the tree's height: every ancestor holds more than that
     /// share of the work (`cut`), so each branch passed leaves more than it
     /// behind.
-    fn top_backward_flow(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
+    fn top_backward_flow(
+        &self,
+        nr: usize,
+        x: &mut [T],
+        work: &mut PlanWork<T>,
+        trace: Option<&SweepTrace>,
+    ) {
         let xs = Shared(x.as_mut_ptr(), x.len());
         let pool = &work.pool;
         let node = |ti: usize| {
@@ -1333,7 +1382,9 @@ impl<T: Scalar> SolvePlan<T> {
             // `s`, and the ancestors' columns it reads are final.
             let x = unsafe { xs.slice() };
             let mut sc = pool.take();
-            self.bwd_node_gemm(s, nr, x, true, &mut sc.g);
+            SweepTrace::node(trace, ti, |tr| {
+                self.bwd_node_gemm(s, nr, x, true, &mut sc.g, tr)
+            });
             pool.give(sc);
         };
         /// The tree under ancestor `ti`: its branches side by side.
@@ -1360,7 +1411,13 @@ impl<T: Scalar> SolvePlan<T> {
         });
     }
 
-    fn top_forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
+    fn top_forward(
+        &self,
+        nr: usize,
+        y: &mut [T],
+        work: &mut PlanWork<T>,
+        trace: Option<&SweepTrace>,
+    ) {
         let par = work.parallel;
         let nt = crate::parallel::threads();
         let shared = Shared(y.as_mut_ptr(), y.len());
@@ -1374,7 +1431,10 @@ impl<T: Scalar> SolvePlan<T> {
             let sweep = |i: usize, s: u32, y: &mut [T], par: bool, sc: &mut Scratch<T>| {
                 // SAFETY: node `i` owns its range of the level's block.
                 let acc = unsafe { &mut accs.slice()[ptr[i] * nr..ptr[i + 1] * nr] };
-                self.fwd_node_gemm(s, nr, y, acc, par, &mut sc.t);
+                let ti = self.top_index[s as usize] as usize;
+                SweepTrace::node(trace, ti, |tr| {
+                    self.fwd_node_gemm(s, nr, y, acc, par, &mut sc.t, tr)
+                });
             };
             if node_par {
                 // a node's own sections nest inside: estimated, not measured
@@ -1413,14 +1473,23 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    fn top_backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
+    fn top_backward(
+        &self,
+        nr: usize,
+        x: &mut [T],
+        work: &mut PlanWork<T>,
+        trace: Option<&SweepTrace>,
+    ) {
         let par = work.parallel;
         let nt = crate::parallel::threads();
         let shared = Shared(x.as_mut_ptr(), x.len());
         for level in &self.top_levels {
             let node_par = !par || level.len() >= nt || nt == 1;
             let sweep = |s: u32, x: &mut [T], par: bool, sc: &mut Scratch<T>| {
-                self.bwd_node_gemm(s, nr, x, par, &mut sc.g);
+                let ti = self.top_index[s as usize] as usize;
+                SweepTrace::node(trace, ti, |tr| {
+                    self.bwd_node_gemm(s, nr, x, par, &mut sc.g, tr)
+                });
             };
             if node_par {
                 // a node's own sections nest inside: estimated, not measured
@@ -1455,10 +1524,11 @@ impl<T: Scalar> SolvePlan<T> {
     /// each block's triangle on the register tiles, then the rows below it,
     /// the node's own and its rows below the node (`L_off X`, the blocks'
     /// products summed into `t`), in one product (in row chunks on the pool
-    /// when `par`, [`node_chunks`]), each row of `t` taken off `y` where the node writes it
+    /// when `par`, [`node_chunks`](Self::node_chunks)), each row of `t` taken off `y` where the node writes it
     /// directly and into the accumulator `acc` at its slot otherwise. A row's
     /// sums run in the products' order, so a column of a block agrees with its
     /// single solve to rounding, not to the bit.
+    #[allow(clippy::too_many_arguments)]
     fn fwd_node_gemm(
         &self,
         s: u32,
@@ -1467,31 +1537,47 @@ impl<T: Scalar> SolvePlan<T> {
         acc: &mut [T],
         par: bool,
         t: &mut Vec<T>,
+        tr: Option<&NodeTimes>,
     ) {
         let (c0, w, r0, m, _, _) = self.node(s);
-        self.fwd_node_core(s, nr, &mut y[c0 * nr..(c0 + w) * nr], par, t);
+        self.fwd_node_core(s, nr, &mut y[c0 * nr..(c0 + w) * nr], par, t, tr);
         if m == 0 {
             return;
         }
         let rows = &self.rows[r0..r0 + m];
         let slots = &self.ext_slot[r0..r0 + m];
-        for (i, ti) in t[..m * nr].chunks_exact(nr).enumerate() {
-            if slots[i] == NONE {
-                let r = rows[i] as usize;
-                sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
-            } else {
-                let sl = slots[i] as usize;
-                add_assign(&mut acc[sl * nr..(sl + 1) * nr], ti);
-            }
-        }
+        timed(
+            tr,
+            |t| &t.scatter,
+            || {
+                for (i, ti) in t[..m * nr].chunks_exact(nr).enumerate() {
+                    if slots[i] == NONE {
+                        let r = rows[i] as usize;
+                        sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
+                    } else {
+                        let sl = slots[i] as usize;
+                        add_assign(&mut acc[sl * nr..(sl + 1) * nr], ti);
+                    }
+                }
+            },
+        );
     }
 
     /// The node part of [`fwd_node_gemm`](Self::fwd_node_gemm), shared with
     /// the reach-limited sweep of sparse right-hand sides: the triangle of
     /// node `s` on its own rows `yb` (`nr` wide), then `L_off X` into
     /// `t[..m * nr]` (left untouched when the node has no off-block rows). The
-    /// caller takes `t` off the rows the node's off-block rows map to.
-    pub(super) fn fwd_node_core(&self, s: u32, nr: usize, yb: &mut [T], par: bool, t: &mut Vec<T>) {
+    /// caller takes `t` off the rows the node's off-block rows map to. Timed
+    /// into `tr` where traced.
+    pub(super) fn fwd_node_core(
+        &self,
+        s: u32,
+        nr: usize,
+        yb: &mut [T],
+        par: bool,
+        t: &mut Vec<T>,
+        tr: Option<&NodeTimes>,
+    ) {
         let (c0, w, _, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         let mode = crate::dense::gemm_backend::GemmMode::new(
@@ -1505,26 +1591,32 @@ impl<T: Scalar> SolvePlan<T> {
         }
         for (b, (jb, je, off, ld)) in packed_blocks(w, m).enumerate() {
             let d = dinv.get(jb..je).unwrap_or(&[]);
-            tri_rows(
-                &mut yb[jb * nr..je * nr],
-                &panel[off..],
-                d,
-                ld,
-                nr,
-                0,
-                je - jb,
+            timed(
+                tr,
+                |t| &t.tri,
+                || {
+                    tri_rows(
+                        &mut yb[jb * nr..je * nr],
+                        &panel[off..],
+                        d,
+                        ld,
+                        nr,
+                        0,
+                        je - jb,
+                    )
+                },
             );
             // the rows below the block's triangle take its columns: the node's own
             // `je..w` off `yb`, its rows below the node into `t`
             let k = je - jb;
-            let own = node_chunks(par, w - je, k, nr);
-            let below = node_chunks(par, m, k, nr);
+            let own = self.node_chunks(par, w - je, k, nr);
+            let below = self.node_chunks(par, m, k, nr);
             let (pp, yp, tp) = (
                 Shared(panel.as_ptr() as *mut T, panel.len()),
                 Shared(yb.as_mut_ptr(), yb.len()),
                 Shared(t.as_mut_ptr(), t.len()),
             );
-            run_chunks(own + below, |i| {
+            run_chunks(own + below, tr, |i| {
                 let (dst, at, read, lhs, beta, r) = if i < own {
                     let r = chunk_rows(i, own, w - je);
                     (
@@ -1582,8 +1674,16 @@ impl<T: Scalar> SolvePlan<T> {
     /// block up: each block takes off the rows below it in the node by one
     /// product and solves its own triangle column by column, last to first, each
     /// column scaled after its terms. The products run in row chunks on the
-    /// pool when `par` ([`node_chunks`]), within a block's rows.
-    fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
+    /// pool when `par` ([`node_chunks`](Self::node_chunks)), within a block's rows.
+    fn bwd_node_gemm(
+        &self,
+        s: u32,
+        nr: usize,
+        x: &mut [T],
+        par: bool,
+        g: &mut Vec<T>,
+        tr: Option<&NodeTimes>,
+    ) {
         let (c0, w, r0, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         let mode = crate::dense::gemm_backend::GemmMode::new(
@@ -1592,10 +1692,16 @@ impl<T: Scalar> SolvePlan<T> {
         );
         let (one, minus) = (T::one(), T::from_real(-1.0));
         if m > 0 {
-            g.clear();
-            for &r in &self.rows[r0..r0 + m] {
-                g.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
-            }
+            timed(
+                tr,
+                |t| &t.take,
+                || {
+                    g.clear();
+                    for &r in &self.rows[r0..r0 + m] {
+                        g.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
+                    }
+                },
+            );
         }
         let xb = &mut x[c0 * nr..(c0 + w) * nr];
         if m > 0 {
@@ -1604,15 +1710,15 @@ impl<T: Scalar> SolvePlan<T> {
             let nb = w.div_ceil(SOLVE_DIAG_BLOCK);
             let last_rows = w - (nb - 1) * SOLVE_DIAG_BLOCK;
             let (full, last) = (
-                node_chunks(par, SOLVE_DIAG_BLOCK, m, nr),
-                node_chunks(par, last_rows, m, nr),
+                self.node_chunks(par, SOLVE_DIAG_BLOCK, m, nr),
+                self.node_chunks(par, last_rows, m, nr),
             );
             let (pp, gp, xp) = (
                 Shared(panel.as_ptr() as *mut T, panel.len()),
                 Shared(g.as_mut_ptr(), g.len()),
                 Shared(xb.as_mut_ptr(), xb.len()),
             );
-            run_chunks((nb - 1) * full + last, |i| {
+            run_chunks((nb - 1) * full + last, tr, |i| {
                 let (b, q, count) = match i.checked_sub((nb - 1) * full) {
                     None => (i / full, i % full, full),
                     Some(q) => (nb - 1, q, last),
@@ -1651,12 +1757,12 @@ impl<T: Scalar> SolvePlan<T> {
         for (jb, je, off, ld) in packed_blocks(w, m).rev() {
             if je < w {
                 let k = w - je;
-                let count = node_chunks(par, je - jb, k, nr);
+                let count = self.node_chunks(par, je - jb, k, nr);
                 let (pp, xp) = (
                     Shared(panel.as_ptr() as *mut T, panel.len()),
                     Shared(xb.as_mut_ptr(), xb.len()),
                 );
-                run_chunks(count, |q| {
+                run_chunks(count, tr, |q| {
                     let r = chunk_rows(q, count, je - jb);
                     // SAFETY: the chunk writes its own rows of `jb..je`, rows `je..w`
                     // are read: disjoint; the block's rows `je..w` lie in it.
@@ -1686,23 +1792,29 @@ impl<T: Scalar> SolvePlan<T> {
                 });
             }
             let block = &panel[off..];
-            for k in (jb..je).rev() {
-                let col = &block[(k - jb) * ld..(k - jb + 1) * ld];
-                let (head, tail) = xb.split_at_mut((k + 1) * nr);
-                let xk = &mut head[k * nr..];
-                for i in k + 1..je {
-                    let l = col[i - jb];
-                    let xi = &tail[(i - k - 1) * nr..(i - k) * nr];
-                    for (a, &v) in xk.iter_mut().zip(xi) {
-                        *a = *a - l * v;
+            timed(
+                tr,
+                |t| &t.tri,
+                || {
+                    for k in (jb..je).rev() {
+                        let col = &block[(k - jb) * ld..(k - jb + 1) * ld];
+                        let (head, tail) = xb.split_at_mut((k + 1) * nr);
+                        let xk = &mut head[k * nr..];
+                        for i in k + 1..je {
+                            let l = col[i - jb];
+                            let xi = &tail[(i - k - 1) * nr..(i - k) * nr];
+                            for (a, &v) in xk.iter_mut().zip(xi) {
+                                *a = *a - l * v;
+                            }
+                        }
+                        if let Some(&d) = dinv.get(k) {
+                            for a in xk.iter_mut() {
+                                *a = *a * d;
+                            }
+                        }
                     }
-                }
-                if let Some(&d) = dinv.get(k) {
-                    for a in xk.iter_mut() {
-                        *a = *a * d;
-                    }
-                }
-            }
+                },
+            );
         }
     }
 
@@ -1743,21 +1855,29 @@ impl<T: Scalar> SolvePlan<T> {
     fn forward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let shared = Shared(y.as_mut_ptr(), y.len());
         let mut phases = PhaseTrace::start();
+        let trace = SweepTrace::start();
+        let sub_tr = trace.as_ref().map(|t| &t.subtrees);
         let par = work.parallel;
         let scratch = &mut work.subtrees[..self.subtrees.len()];
         let sweep_work = Self::sweep_work(self.subtrees_work(), nr);
         Self::each(par, sweep_work, &self.subtrees, scratch, |_, st, sc| {
-            sc.acc.clear();
-            sc.acc.resize(st.ext.len() * nr, T::zero());
+            timed(
+                sub_tr,
+                |t| &t.zero,
+                || {
+                    sc.acc.clear();
+                    sc.acc.resize(st.ext.len() * nr, T::zero());
+                },
+            );
             // SAFETY: see `Shared`.
             let yv = unsafe { shared.slice() };
             for &s in &st.nodes {
-                self.fwd_node_gemm(s, nr, yv, &mut sc.acc, false, &mut sc.t);
+                self.fwd_node_gemm(s, nr, yv, &mut sc.acc, false, &mut sc.t, sub_tr);
             }
         });
         phases.lap("fwd-subtrees");
         if self.flows(work) {
-            self.top_forward_flow(nr, y, work);
+            self.top_forward_flow(nr, y, work, trace.as_ref());
             phases.lap("fwd-top");
         } else {
             for (st, sc) in self.subtrees.iter().zip(&work.subtrees) {
@@ -1767,18 +1887,23 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
             phases.lap("fwd-reduce");
-            self.top_forward(nr, y, work);
+            self.top_forward(nr, y, work, trace.as_ref());
             phases.lap("fwd-top");
         }
         phases.finish("forward-block", work.parallel);
+        if let Some(trace) = trace {
+            trace.finish(self, "fwd");
+        }
     }
 
     fn backward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let mut phases = PhaseTrace::start();
+        let trace = SweepTrace::start();
+        let sub_tr = trace.as_ref().map(|t| &t.subtrees);
         if self.flows(work) {
-            self.top_backward_flow(nr, y, work);
+            self.top_backward_flow(nr, y, work, trace.as_ref());
         } else {
-            self.top_backward(nr, y, work);
+            self.top_backward(nr, y, work, trace.as_ref());
         }
         phases.lap("bwd-top");
         let shared = Shared(y.as_mut_ptr(), y.len());
@@ -1789,11 +1914,14 @@ impl<T: Scalar> SolvePlan<T> {
             // SAFETY: see `Shared`.
             let xv = unsafe { shared.slice() };
             for &s in st.nodes.iter().rev() {
-                self.bwd_node_gemm(s, nr, xv, false, &mut sc.g);
+                self.bwd_node_gemm(s, nr, xv, false, &mut sc.g, sub_tr);
             }
         });
         phases.lap("bwd-subtrees");
         phases.finish("backward-block", work.parallel);
+        if let Some(trace) = trace {
+            trace.finish(self, "bwd");
+        }
     }
 }
 
@@ -1857,6 +1985,114 @@ impl PhaseTrace {
                 parts.join(" ")
             ));
         }
+    }
+}
+
+/// Wall times inside a sweep, in ns, of one ancestor or summed over the
+/// leaf subtrees' tasks ([`SweepTrace`]); only at the `debug` log level.
+#[derive(Default)]
+pub(super) struct NodeTimes {
+    /// The node's whole sweep.
+    total: AtomicU64,
+    /// The take of the terms for its columns (forward) or the gather of its
+    /// rows below (backward).
+    take: AtomicU64,
+    /// The zeroing of a leaf subtree's accumulator.
+    zero: AtomicU64,
+    /// The triangles on the node's thread.
+    tri: AtomicU64,
+    /// The products on the node's thread, whole.
+    gemm: AtomicU64,
+    /// The products' chunks in the pool sections, summed.
+    pooled: AtomicU64,
+    /// The scatter of `L_off X` into the right-hand sides and accumulators.
+    scatter: AtomicU64,
+    /// The pool sections of the products: their count, wall and chunks.
+    sections: AtomicU64,
+    section: AtomicU64,
+    chunks: AtomicU64,
+}
+
+/// `f()`, its wall time added to the counter `at` of `tr` where traced.
+#[inline]
+fn timed<R>(
+    tr: Option<&NodeTimes>,
+    at: impl Fn(&NodeTimes) -> &AtomicU64,
+    f: impl FnOnce() -> R,
+) -> R {
+    match tr {
+        None => f(),
+        Some(tr) => {
+            let t0 = crate::clock::Instant::now();
+            let r = f();
+            at(tr).fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            r
+        }
+    }
+}
+
+/// The node times of one sweep, emitted at the `debug` log level
+/// (`examples/lu_solve_timing.rs` aggregates them): a line per ancestor
+/// with its shape, entries and whether it lies on the critical path, and a
+/// line for the leaf subtrees.
+#[derive(Default)]
+struct SweepTrace {
+    nodes: std::sync::Mutex<Vec<(usize, NodeTimes)>>,
+    subtrees: NodeTimes,
+}
+
+impl SweepTrace {
+    /// A trace when the `debug` log level is on.
+    fn start() -> Option<Self> {
+        crate::logging::enabled(crate::logging::LogLevel::Debug).then(Self::default)
+    }
+
+    /// `f(times)` for ancestor `ti`, its times kept where traced.
+    fn node(trace: Option<&Self>, ti: usize, f: impl FnOnce(Option<&NodeTimes>)) {
+        let Some(trace) = trace else {
+            return f(None);
+        };
+        let times = NodeTimes::default();
+        timed(Some(&times), |t| &t.total, || f(Some(&times)));
+        let mut nodes = trace.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.push((ti, times));
+    }
+
+    fn finish<T: Scalar>(&self, plan: &SolvePlan<T>, what: &str) {
+        let line = |t: &NodeTimes| {
+            let v = |a: &AtomicU64| a.load(Ordering::Relaxed);
+            format!(
+                "total={} take={} zero={} tri={} gemm={} pooled={} scatter={} sections={} section={} chunks={}",
+                v(&t.total),
+                v(&t.take),
+                v(&t.zero),
+                v(&t.tri),
+                v(&t.gemm),
+                v(&t.pooled),
+                v(&t.scatter),
+                v(&t.sections),
+                v(&t.section),
+                v(&t.chunks)
+            )
+        };
+        let path = plan.critical_path();
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        for (ti, t) in nodes.iter() {
+            let s = plan.top[*ti];
+            let (_, w, _, m, _, _) = plan.node(s);
+            let (v0, v1) = plan.val_rng[s as usize];
+            crate::logging::debug(&format!(
+                "solve node {what} w={w} m={m} entries={} path={} {}",
+                v1 - v0,
+                u8::from(path.contains(ti)),
+                line(t)
+            ));
+        }
+        crate::logging::debug(&format!(
+            "solve subtrees {what} entries={} {}",
+            plan.subtree_work,
+            line(&self.subtrees)
+        ));
     }
 }
 
@@ -1961,37 +2197,29 @@ fn packed_blocks(
     })
 }
 
-/// The row chunks a node's product of `rows` rows and depth `depth` for `nr`
-/// right-hand sides runs in on the pool (`par`, the node an ancestor): about
-/// [`SOLVE_GEMM_TASK`] entries times right-hand sides each, at least two rows
-/// each (a single row is a matrix-vector product inside the GEMM, with its own
-/// order of sums). One, the whole product, on the calling thread; none for no
-/// rows. Within a call the GEMM blocks a product's depth alike for any row
-/// count (depth up to 64 here in the forward sweep, row counts up to 64 in the
-/// backward one), so a row's sums are the same in a chunk as in the whole
-/// product, and a node's are the same on one thread as on many.
-fn node_chunks(par: bool, rows: usize, depth: usize, nr: usize) -> usize {
-    let whole = usize::from(rows > 0);
-    if !par {
-        return whole;
-    }
-    let by_work = (rows * depth * nr).div_ceil(SOLVE_GEMM_TASK);
-    by_work.min(rows / 2).max(whole)
-}
-
 /// The rows of chunk `i` of `count` over `rows` rows, the chunks as even as
 /// they can be.
 fn chunk_rows(i: usize, count: usize, rows: usize) -> std::ops::Range<usize> {
     i * rows / count..(i + 1) * rows / count
 }
 
-/// `f(i)` for the `count` chunks of a node's product ([`node_chunks`]): each
-/// its own task on the pool where there are several.
-fn run_chunks(count: usize, f: impl Fn(usize) + Sync + Send) {
+/// `f(i)` for the `count` chunks of a node's product
+/// ([`node_chunks`](SolvePlan::node_chunks)): each its own task on the pool
+/// where there are several; timed into `tr` where traced.
+fn run_chunks(count: usize, tr: Option<&NodeTimes>, f: impl Fn(usize) + Sync + Send) {
     if count > 1 {
-        crate::parallel::each(count, crate::parallel::Work::ns(f64::INFINITY), f);
+        let f = |i| timed(tr, |t| &t.pooled, || f(i));
+        timed(
+            tr,
+            |t| &t.section,
+            || crate::parallel::each(count, crate::parallel::Work::ns(f64::INFINITY), f),
+        );
+        if let Some(tr) = tr {
+            tr.sections.fetch_add(1, Ordering::Relaxed);
+            tr.chunks.fetch_add(count as u64, Ordering::Relaxed);
+        }
     } else {
-        (0..count).for_each(f);
+        (0..count).for_each(|i| timed(tr, |t| &t.gemm, || f(i)));
     }
 }
 
@@ -2310,7 +2538,7 @@ mod tests {
     /// most of it lies above the cut, every sweep on the pool, against one
     /// thread (the level sweeps); LU and LDL^T, one and several right-hand
     /// sides, enough of them that the large nodes run their products in row
-    /// chunks ([`node_chunks`]).
+    /// chunks ([`node_chunks`](super::SolvePlan::node_chunks)).
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
         use crate::{LuSolver, OrderingMethod};
@@ -2318,6 +2546,7 @@ mod tests {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: Some(0),
+                ..crate::SolveSettings::default()
             },
             ..SolverSettings::default()
         }
@@ -2337,12 +2566,12 @@ mod tests {
             .map(|k| ((k * 13) % 11) as f64 - 5.0)
             .collect();
         // an ancestor whose first block's products below it run in several chunks
-        use super::{node_chunks, SolvePlan, SOLVE_DIAG_BLOCK};
+        use super::{SolvePlan, SOLVE_DIAG_BLOCK};
         let chunked = |p: &SolvePlan<f64>| {
             p.top.iter().any(|&s| {
                 let (_, w, _, m, _, _) = p.node(s);
                 let k = w.min(SOLVE_DIAG_BLOCK);
-                node_chunks(true, w - k + m, k, nrhs) > 1 || node_chunks(true, k, m, nrhs) > 1
+                p.node_chunks(true, w - k + m, k, nrhs) > 1 || p.node_chunks(true, k, m, nrhs) > 1
             })
         };
         let lu = on(1).install(|| LuSolver::factor(&a, &opts).unwrap());

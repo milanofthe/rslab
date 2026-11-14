@@ -11,11 +11,15 @@
 //!   preconditioner), else pivots stay in their front without matching;
 //! - `RSLAB_TRACE=1`: the phases of the sweeps from the solver's own trace (the `debug` log),
 //!   medians over a second round of `reps`, the way each sweep ran (pool or calling
-//!   thread) and the solve layout of both factors;
+//!   thread) and the solve layout of both factors; and the ancestors' node times by class
+//!   (wide `w >= 256`, narrow and deep `m >= 1024`, the rest; and the critical path), the
+//!   leaf subtrees' times summed over their tasks: medians of the per-apply sums, ms;
 //! - `RSLAB_COPIES=k`: `k` threads at once, each applying its own copy of the factor on
 //!   its thread (run with `RAYON_NUM_THREADS=1`), against the factor's memory bandwidth;
 //! - `RSLAB_RELAX=width,rows`: a relaxed amalgamation, `RSLAB_NEMIN` the amalgamation's
-//!   width.
+//!   width;
+//! - `RSLAB_LEAF=k`: `SolveSettings::leaf_subtrees`, `RSLAB_GEMM_TASK=k`:
+//!   `SolveSettings::gemm_task`.
 use num_complex::Complex;
 use rslab::{
     LogLevel, LogSink, LuSolver, OrderingMethod, Preconditioner, SolverSettings, Threads,
@@ -79,20 +83,79 @@ fn laps(line: &str, sums: &mut Vec<(String, f64)>) {
     }
 }
 
+/// The number of `key=value` in a record, 0 where it lacks the key.
+fn field(line: &str, key: &str) -> f64 {
+    (line.split_whitespace())
+        .find_map(|t| t.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// The node times a record of the solve's node trace is added to, by sweep and class:
+/// `(name, entries, count, [ns per field])`.
+type Classes = Vec<(String, f64, f64, Vec<f64>)>;
+
+/// The time fields of the node trace (ns, counts for `sections` and `chunks`).
+const NODE_FIELDS: [&str; 10] = [
+    "total", "take", "zero", "tri", "gemm", "pooled", "scatter", "sections", "section", "chunks",
+];
+
+/// A `solve node` or `solve subtrees` record added to its classes in `sums`.
+fn node_record(line: &str, sums: &mut Classes) {
+    let (classes, dir): (Vec<&str>, &str) = if let Some(r) = line.strip_prefix("solve node ") {
+        let (w, m) = (field(r, "w"), field(r, "m"));
+        let class = if w >= 256.0 {
+            "wide"
+        } else if m >= 1024.0 {
+            "deep"
+        } else {
+            "rest"
+        };
+        let mut c = vec![class, "all"];
+        if field(r, "path") == 1.0 {
+            c.push("path");
+        }
+        (c, &r[..3])
+    } else if let Some(r) = line.strip_prefix("solve subtrees ") {
+        (vec!["subtrees"], &r[..3])
+    } else {
+        return;
+    };
+    let vals: Vec<f64> = NODE_FIELDS.iter().map(|k| field(line, k)).collect();
+    for c in classes {
+        let name = format!("{dir} {c}");
+        let at = match sums.iter().position(|e| e.0 == name) {
+            Some(i) => i,
+            None => {
+                sums.push((name, 0.0, 0.0, vec![0.0; NODE_FIELDS.len()]));
+                sums.len() - 1
+            }
+        };
+        let e = &mut sums[at];
+        e.1 += field(line, "entries");
+        e.2 += 1.0;
+        for (a, v) in e.3.iter_mut().zip(&vals) {
+            *a += v;
+        }
+    }
+}
+
 /// One traced round: per apply the sweeps' laps, the ways the sweeps ran and the whole
-/// solve as the solver timed it; medians over the round.
+/// solve as the solver timed it, and the node times by class; medians over the round.
 fn trace(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize) {
     let n = b.len() / nr;
     rslab::logging::set_level(LogLevel::Debug);
     let mut per: Vec<Vec<(String, f64)>> = Vec::new();
+    let mut per_nodes: Vec<Classes> = Vec::new();
     let mut ways: Vec<String> = Vec::new();
     for _ in 0..reps {
         LINES.lock().unwrap().clear();
         s.apply_block(b, x, nr, n).unwrap();
         let lines = std::mem::take(&mut *LINES.lock().unwrap());
         let mut sums = Vec::new();
+        let mut nodes = Classes::new();
         let mut way = Vec::new();
         for l in &lines {
+            node_record(l, &mut nodes);
             if l.starts_with("forward-block:") || l.starts_with("backward-block:") {
                 laps(l.split_once(':').unwrap().1, &mut sums);
             } else if let Some(rest) = l.strip_prefix("solve: sweep nr=") {
@@ -113,6 +176,7 @@ fn trace(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize) {
             }
         }
         per.push(sums);
+        per_nodes.push(nodes);
         ways.push(way.join("/"));
     }
     rslab::logging::set_level(LogLevel::Warning);
@@ -130,6 +194,36 @@ fn trace(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize) {
         out.join(" "),
         ways.join(", ")
     );
+    // per class: medians over the applies of the per-apply sums
+    for (name, entries, count, _) in &per_nodes[0] {
+        let med = |i: usize| {
+            median(
+                (per_nodes.iter())
+                    .filter_map(|p| p.iter().find(|e| &e.0 == name).map(|e| e.3[i]))
+                    .collect(),
+            )
+        };
+        let v: Vec<f64> = (0..NODE_FIELDS.len()).map(med).collect();
+        let ms = |i: usize| v[i] / 1e6;
+        let (sections, chunks) = (v[7].max(1.0), v[9].max(1.0));
+        println!(
+            "  nodes nr={nr:2} {name:12} n={count:4} entries={:6.2}M total={:7.2} ns/entry-rhs={:.3}              take={:.2} zero={:.2} tri={:.2} gemm={:.2} pooled={:.2} scatter={:.2}              sections={} section={:.2} ({:.1} us each, {:.1} chunks of {:.1} us)",
+            entries / 1e6,
+            ms(0),
+            v[0] / (entries * nr as f64),
+            ms(1),
+            ms(2),
+            ms(3),
+            ms(4),
+            ms(5),
+            ms(6),
+            v[7],
+            ms(8),
+            v[8] / sections / 1e3,
+            v[9] / sections,
+            v[5] / chunks / 1e3,
+        );
+    }
 }
 
 fn main() {
@@ -162,11 +256,15 @@ fn main() {
             max_extra_rows: v[1],
         }));
     }
-    if let Some(n) = std::env::var("RSLAB_NEMIN")
-        .ok()
-        .and_then(|s| s.parse().ok())
-    {
+    let env = |name: &str| std::env::var(name).ok().and_then(|s| s.parse().ok());
+    if let Some(n) = env("RSLAB_NEMIN") {
         opts = opts.with_nemin(n);
+    }
+    if let Some(k) = env("RSLAB_LEAF") {
+        opts.solve.leaf_subtrees = k;
+    }
+    if let Some(k) = env("RSLAB_GEMM_TASK") {
+        opts.solve.gemm_task = k;
     }
     let traced = flag("RSLAB_TRACE");
     if traced {
@@ -185,9 +283,11 @@ fn main() {
         }
     }
     println!(
-        "n={n} fill={} factor {factor_s:.2} s threads={} delayed={delayed}",
+        "n={n} fill={} factor {factor_s:.2} s threads={} delayed={delayed} leaf_subtrees={} gemm_task={}",
         s.factor_nnz(),
-        rayon::current_num_threads()
+        rayon::current_num_threads(),
+        opts.solve.leaf_subtrees,
+        opts.solve.gemm_task
     );
     let rhs = |k: usize| C::new(((k * 7) % 13) as f64 - 6.0, ((k * 3) % 5) as f64 - 2.0);
     let single: Vec<C> = (0..n).map(rhs).collect();
