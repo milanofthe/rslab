@@ -88,8 +88,8 @@ impl EliminationTree {
         }
         let mut next = ptr[..n].to_vec();
         let mut idx = vec![0usize; ptr[n]];
-        for j in 0..n {
-            if let Some(p) = self.parent[j] {
+        for (j, &p) in self.parent.iter().enumerate() {
+            if let Some(p) = p {
                 idx[next[p]] = j;
                 next[p] += 1;
             }
@@ -99,8 +99,8 @@ impl EliminationTree {
 
     pub fn children(&self) -> Vec<Vec<usize>> {
         let mut ch = vec![Vec::new(); self.n];
-        for j in 0..self.n {
-            if let Some(p) = self.parent[j] {
+        for (j, &p) in self.parent.iter().enumerate() {
+            if let Some(p) = p {
                 ch[p].push(j);
             }
         }

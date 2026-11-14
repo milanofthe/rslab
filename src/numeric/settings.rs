@@ -1021,8 +1021,8 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
     let nsuper = sym.supernodes.len();
     let mut height = vec![0usize; nsuper];
     let mut is_child = vec![false; nsuper];
-    for s in 0..nsuper {
-        for &c in &sym.supernodes[s].children {
+    for sn in &sym.supernodes {
+        for &c in &sn.children {
             is_child[c] = true;
         }
     }
