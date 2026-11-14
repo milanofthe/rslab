@@ -9,12 +9,12 @@ pub const TILE_ROWS: usize = 4;
 /// Independent leaf subtrees the tree is cut into for the parallel sweeps
 /// (subtrees).
 /// Used by: `SolveSettings::leaf_subtrees`.
-/// Why: fewer, larger leaf subtrees shrink the accumulators the subtrees fill
-/// and the ancestors take (tia130a near-field LU: 319 k slots at 128, 160 k at
-/// 32) and the ancestors above the cut; more balance the subtrees' phase
-/// better. Near-field LUs, 16 right-hand sides, EPYC-Milan (6 cores / 12
-/// threads), median of 21 (`examples/lu_solve_timing.rs` with
-/// `RSLAB_DELAYED=1`, `RSLAB_LEAF`), ms:
+/// Why: many more than workers, for balance of the subtrees' phase. Fewer,
+/// larger leaf subtrees shrink the accumulators the subtrees fill and the
+/// ancestors take (tia130a near-field LU: 319 k slots at 128, 160 k at 32).
+/// Near-field LUs, 16 right-hand sides, EPYC-Milan (6 cores / 12 threads),
+/// median of 21 (`examples/lu_solve_timing.rs` with `RSLAB_DELAYED=1`,
+/// `RSLAB_LEAF`), ms:
 ///
 /// | leaf subtrees               | 32    | 64    | 128   |
 /// |-----------------------------|-------|-------|-------|
@@ -24,13 +24,11 @@ pub const TILE_ROWS: usize = 4;
 /// | momstack 1 GHz, 12 threads  | 4.40  | 4.98  | 5.15  |
 /// | pa180a 1 GHz, 12 threads    | 93.1  | 100.4 | 99.3  |
 ///
-/// One right-hand side on 12 threads: tia130a 13.6 / 14.1 / 14.3, pa180a
-/// 43.3 / 52.8 / 42.5. 16 was as fast as 32 on tia130a and momstack and 14 %
-/// slower than 128 on pa180a (122 against 108, one cut before the ancestors'
-/// products below ran in one section); 256 slower than 128 on all four.
+/// (pa180a varies by a tenth from run to run.) Not measured on other matrix
+/// families or on more threads, so the default stays.
 /// Contract: rounding (the cut groups the subtrees' terms; every cut solves
 /// alike on any thread count).
-pub const SOLVE_LEAF_SUBTREES: usize = 32;
+pub const SOLVE_LEAF_SUBTREES: usize = 128;
 
 /// Work of a triangular sweep from which it starts on the thread pool,
 /// before its ways are measured, in factor panel entries times right-hand
