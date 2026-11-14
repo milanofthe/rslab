@@ -2632,8 +2632,9 @@ mod tests {
     /// as the level sweeps do, to the bit: a tree cut into few subtrees, so
     /// most of it lies above the cut, every sweep on the pool, against one
     /// thread (the level sweeps); LU and LDL^T, one and several right-hand
-    /// sides, enough of them that the large nodes run their products in row
-    /// chunks ([`node_chunks`](super::SolvePlan::node_chunks)).
+    /// sides, the chunks small enough that the large nodes run their products
+    /// in row chunks for one right-hand side too
+    /// ([`node_chunks`](super::SolvePlan::node_chunks)).
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
         use crate::{LuSolver, OrderingMethod};
@@ -2641,7 +2642,7 @@ mod tests {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: Some(0),
-                ..crate::SolveSettings::default()
+                gemm_task: 1 << 12,
             },
             ..SolverSettings::default()
         }
@@ -2660,13 +2661,12 @@ mod tests {
         let bb: Vec<f64> = (0..n * nrhs)
             .map(|k| ((k * 13) % 11) as f64 - 5.0)
             .collect();
-        // an ancestor whose first block's products below it run in several chunks
-        use super::{SolvePlan, SOLVE_DIAG_BLOCK};
+        // an ancestor whose product below it runs in several chunks for one right-hand side
+        use super::SolvePlan;
         let chunked = |p: &SolvePlan<f64>| {
             p.top.iter().any(|&s| {
                 let (_, w, _, m, _, _) = p.node(s);
-                let k = w.min(SOLVE_DIAG_BLOCK);
-                p.node_chunks(true, w - k + m, k, nrhs) > 1 || p.node_chunks(true, k, m, nrhs) > 1
+                p.node_chunks(true, m, w, 1) > 1
             })
         };
         let lu = on(1).install(|| LuSolver::factor(&a, &opts).unwrap());
