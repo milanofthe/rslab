@@ -56,7 +56,10 @@ pub const SOLVE_DIAG_BLOCK: usize = 64;
 /// and triangles on one thread capped both sweeps of the ancestors at 2.7 to
 /// 2.9 times their one-thread time on 12 threads. At the 0.22 ns an entry
 /// and right-hand side the ancestors took there, a chunk is about 30 us,
-/// several times a task's start.
+/// several times a task's start. With these chunks the ancestors' sweeps run
+/// 3.2 (forward) and 3.9 (backward) times faster on 12 threads than on one,
+/// the solve 38.6 -> 32.4 ms (EPYC-Milan, 6 cores / 12 threads, median of 21,
+/// `examples/lu_solve_timing.rs` with `RSLAB_DELAYED=1`).
 /// Contract: timing (a row's sums are the same in a chunk as in the whole
 /// product; see `node_chunks`).
 pub const SOLVE_GEMM_TASK: usize = 1 << 17;
