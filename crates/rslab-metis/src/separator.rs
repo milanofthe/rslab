@@ -44,8 +44,8 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
         }
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
-        for k in lo..hi {
-            let u = graph.adjncy[k] as usize;
+        for &u in &graph.adjncy[lo..hi] {
+            let u = u as usize;
             if labels[u] != lv && (labels[u] == PART_A || labels[u] == PART_B) {
                 if lv == PART_A {
                     is_bnd_a[v] = true;
@@ -87,8 +87,8 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
         let vu = v as usize;
         let lo = graph.xadj[vu] as usize;
         let hi = graph.xadj[vu + 1] as usize;
-        for k in lo..hi {
-            let u = graph.adjncy[k] as usize;
+        for &u in &graph.adjncy[lo..hi] {
+            let u = u as usize;
             let bi = b_idx[u];
             if bi >= 0 {
                 adj[ai].push(bi);

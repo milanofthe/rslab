@@ -138,8 +138,7 @@ fn main() {
         let n = a.n;
         let mut adj: Vec<Vec<i32>> = vec![Vec::new(); n];
         for j in 0..n {
-            for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let i = a.row_idx[k];
+            for &i in &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]] {
                 adj[j].push(i as i32);
                 if i != j {
                     adj[i].push(j as i32);

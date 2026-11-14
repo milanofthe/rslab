@@ -180,8 +180,8 @@ pub fn initial_bisect_bfs(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
         a_weight += graph.vwgt[v] as i64;
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
-        for k in lo..hi {
-            let u = graph.adjncy[k] as usize;
+        for &u in &graph.adjncy[lo..hi] {
+            let u = u as usize;
             if !visited[u] {
                 visited[u] = true;
                 queue.push_back(u);
