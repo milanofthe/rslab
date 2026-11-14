@@ -951,7 +951,7 @@ impl<T: Scalar> SolvePlan<T> {
             }
             at = Some(next[t as usize]);
         }
-        let widths: Vec<usize> = self.top_levels.iter().take(12).map(Vec::len).collect();
+        let widths: Vec<usize> = self.top_levels.iter().map(Vec::len).collect();
         let slots: usize = self.subtrees.iter().map(|st| st.ext.len()).sum();
         let big = self.top.iter().copied().max_by_key(|&s| entries(s));
         let big = big.map_or(String::new(), |s| {
