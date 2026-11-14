@@ -233,8 +233,13 @@ fn main() {
             .map(|(a, b)| (a - b).norm())
             .fold(0.0, f64::max)
             / scale;
+        // FNV-1a of the solution's bits, to compare builds and thread counts
+        let bits = (x.iter().flat_map(|v| [v.re.to_bits(), v.im.to_bits()]))
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                (h ^ b).wrapping_mul(0x100_0000_01b3)
+            });
         println!(
-            "nrhs={nrhs:2}: {med:7.2} ms median, {best:7.2} ms best, {:6.2} ms per column, {:5.1} GB/s of factor, column 0 against the single solve {dev:.1e}",
+            "nrhs={nrhs:2}: {med:7.2} ms median, {best:7.2} ms best, {:6.2} ms per column, {:5.1} GB/s of factor, column 0 against the single solve {dev:.1e}, bits {bits:016x}",
             med / nrhs as f64,
             s.factor_nnz() as f64 * 16.0 / med / 1e6,
         );
