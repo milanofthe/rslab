@@ -43,22 +43,26 @@ pub const SOLVE_RHS_TILE: usize = 4;
 /// Contract: rounding.
 pub const SOLVE_DIAG_BLOCK: usize = 64;
 
-/// Rows per task of a node's product of its rows below the diagonal block
-/// with the right-hand sides, in the multi right-hand side forward sweep
-/// (rows).
-/// Used by: `supernodal::solve::SolvePlan::fwd_node_gemm`.
-/// Why: 256 rows of a 900-column node are about 40 M flops for 23
-/// right-hand sides, far above a task's start.
-/// Contract: timing.
-pub const SOLVE_GEMM_ROWS: usize = 256;
-
-/// Work of a node's product below its diagonal block from which it runs in
-/// row chunks on the pool, in entries times right-hand sides.
-/// Used by: `supernodal::solve::SolvePlan::fwd_node_gemm`, `bwd_node_gemm`.
-/// Why: about a millisecond of one core; below it the product is short
-/// enough to stay with the task that runs the node.
-/// Contract: timing.
-pub const SOLVE_GEMM_PAR_MIN: usize = 1 << 22;
+/// Work of a row chunk of a node's products in the sweeps, in panel entries
+/// times right-hand sides: a product of more is cut into row chunks, which
+/// an ancestor runs on the pool.
+/// Used by: `supernodal::solve::node_chunks` (`SolvePlan::fwd_node_core`,
+/// `bwd_node_gemm`).
+/// Why: the ancestors' chain to the root is the critical path of the sweeps,
+/// and its nodes are mostly narrow and deep (tia130a near-field LU, 15.8 k
+/// unknowns, 16 right-hand sides: of the forward chain's 5.0 M entries 0.9 M
+/// in triangles, the rest below them in nodes such as 77 x 1601 or
+/// 743 x 1278). Whole products of up to 4 M entries times right-hand sides
+/// and triangles on one thread capped both sweeps of the ancestors at 2.7 to
+/// 2.9 times their one-thread time on 12 threads. At the 0.22 ns an entry
+/// and right-hand side the ancestors took there, a chunk is about 30 us,
+/// several times a task's start. With these chunks the ancestors' sweeps run
+/// 3.2 (forward) and 3.9 (backward) times faster on 12 threads than on one,
+/// the solve 38.6 -> 32.4 ms (EPYC-Milan, 6 cores / 12 threads, median of 21,
+/// `examples/lu_solve_timing.rs` with `RSLAB_DELAYED=1`).
+/// Contract: timing (a row's sums are the same in a chunk as in the whole
+/// product; see `node_chunks`).
+pub const SOLVE_GEMM_TASK: usize = 1 << 17;
 
 /// Columns per task of an ancestor's take of the leaf subtrees' terms in the
 /// forward sweep (columns).
