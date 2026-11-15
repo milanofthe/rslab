@@ -61,6 +61,10 @@ pub(crate) struct DagWork {
     chunk_ptr: Vec<usize>,
     /// Forward: per row chunk, the parent's tiles its rows lie in, `lo..hi`.
     tiles: Vec<(u32, u32)>,
+    /// Forward: the takes with no open input, `(top index, tile)`, collected
+    /// before any task runs (a running task may make others ready, which it
+    /// then runs itself).
+    first: Vec<(u32, u32)>,
 }
 
 impl DagWork {
@@ -752,6 +756,17 @@ impl<T: Scalar> SolvePlan<T> {
             }
         }
         work.dag.tiles = tiles;
+        let mut first = std::mem::take(&mut work.dag.first);
+        first.clear();
+        for ti in 0..nt {
+            let nd = fwd_node(self, &work.dag, nr, ti);
+            for b in 0..nd.nb {
+                if work.dag.open[nd.take(b)].load(Ordering::Relaxed) == 0 {
+                    first.push((ti as u32, b as u32));
+                }
+            }
+        }
+        work.dag.first = first;
         let tr = DagTrace::new(trace, nt);
         let fwd = Fwd {
             plan: self,
@@ -764,14 +779,9 @@ impl<T: Scalar> SolvePlan<T> {
         };
         let fwd = &fwd;
         crate::parallel::scope(crate::parallel::Work::ns(f64::INFINITY), |sc| {
-            for ti in 0..nt {
-                let nd = fwd.node(ti);
-                for b in 0..nd.nb {
-                    if fwd.dag.open[nd.take(b)].load(Ordering::Relaxed) == 0 {
-                        let t = FwdTask::Take(ti as u32, b as u32);
-                        sc.spawn(move |sc| run(fwd, sc, t));
-                    }
-                }
+            for &(ti, b) in &fwd.dag.first {
+                let t = FwdTask::Take(ti, b);
+                sc.spawn(move |sc| run(fwd, sc, t));
             }
         });
         if let Some(tr) = tr {
