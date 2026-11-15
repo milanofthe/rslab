@@ -265,7 +265,7 @@ fn fwd_node<T: Scalar>(plan: &SolvePlan<T>, dag: &DagWork, nr: usize, ti: usize)
         m,
         nb,
         nc: dag.chunk_ptr[ti + 1] - dag.chunk_ptr[ti],
-        merged: nb >= 3 && w - (nb - 1) * SOLVE_DIAG_BLOCK < chunk_align(nr),
+        merged: nb > 2 && w - (nb - 1) * SOLVE_DIAG_BLOCK < chunk_align(nr),
         base: dag.base[ti],
     }
 }
@@ -712,7 +712,8 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             }
             if nd.merged {
-                set(nd.own(nd.nb - 2, 0), 3);
+                // the last tile's take as well
+                add(nd.own(nd.nb - 2, 0));
             }
             for c in 0..nd.nc {
                 set(nd.below(c, 0), 1);
