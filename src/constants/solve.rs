@@ -102,23 +102,6 @@ pub const SOLVE_GEMM_TASK: usize = 1 << 17;
 /// Contract: results (the solution is the same on any thread count).
 pub const SOLVE_GEMV_ROWS: usize = 16;
 
-/// Columns per task of an ancestor's take of the leaf subtrees' terms in the
-/// forward sweep (columns).
-/// Used by: `supernodal::solve::SolvePlan::top_forward_flow`.
-/// Why: 32 columns of 23 right-hand sides from 128 subtrees are about
-/// 100 k additions, well above a task's start.
-/// Contract: timing (each column sums its sources in the same order).
-pub const SOLVE_PULL_COLS: usize = 32;
-
-/// Additions of an ancestor's take of the subtrees' terms (sources times
-/// columns times right-hand sides) from which it runs on the pool.
-/// Used by: `supernodal::solve::SolvePlan::top_forward_flow`.
-/// Why: the wide nodes near the root take the terms of every leaf subtree on
-/// the critical path (a 1067-column root of a near-field LU spent 13 ms
-/// there on one thread); below this it is under a millisecond.
-/// Contract: timing.
-pub const SOLVE_PULL_PAR_MIN: usize = 1 << 20;
-
 /// Columns of a sparse right-hand side per block of the reach-limited
 /// forward sweeps of [`LdltSolver::port_matrix`](crate::LdltSolver::port_matrix)
 /// (right-hand sides).

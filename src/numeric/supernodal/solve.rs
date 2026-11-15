@@ -21,14 +21,15 @@
 //! function of the thread count) plus the ancestors above the cut. In the
 //! forward sweep the subtrees run in parallel; updates that leave a subtree
 //! (into ancestor rows) go to a per-subtree accumulator. The ancestors then
-//! run as a task tree: in the forward sweep an ancestor starts when its
-//! children are done and first takes in the accumulations for its columns,
-//! in the order a level-by-level sweep reduces them; in the backward sweep it
-//! starts when its parent is done, and the subtrees follow in parallel
-//! reading only final values. A large ancestor runs its products in row
-//! chunks on the pool, and a wide one takes the subtrees' terms in column
-//! chunks. Every sum is formed in the same order for every thread count, so
-//! the solution is bit-identical from one thread to many.
+//! run as a task DAG over the 64-column tiles of their dense nodes: in the
+//! forward sweep a tile of an ancestor starts once the row chunks of its
+//! children that reach it are done, takes in the accumulations for its
+//! columns in the order a level-by-level sweep reduces them, and the products
+//! of a solved tile run while the next tile solves its triangle; in the
+//! backward sweep an ancestor starts when its parent is done, and the
+//! subtrees follow in parallel reading only final values. Every sum is formed
+//! in the same order for every thread count, so the solution is
+//! bit-identical from one thread to many.
 
 // The kernels index several parallel arrays (panels, row lists, slots,
 // right-hand sides) at offset positions; index loops read closer to the
@@ -37,8 +38,8 @@
 
 use crate::constants::{
     GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMV_ROWS,
-    SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_PULL_COLS, SOLVE_PULL_PAR_MIN,
-    SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
+    SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES,
+    WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
@@ -55,6 +56,7 @@ const NONE: u32 = u32::MAX;
 /// added, so no accumulator is zeroed.
 const FIRST: u32 = !(u32::MAX >> 1);
 
+mod dag;
 mod sparse;
 pub use sparse::SparseReach;
 
@@ -145,9 +147,8 @@ pub(crate) struct SolvePlan<T> {
     /// Per ancestor level, the start of each node's accumulator (its own
     /// off-block rows) in the level's block, in slots (`level.len() + 1`).
     top_acc_ptr: Vec<Vec<usize>>,
-    /// The ancestors by `top_index` (ascending), the schedule of the
-    /// parallel sweeps: every ancestor a task that starts when the nodes it
-    /// depends on are done (see `top_forward_flow`).
+    /// The ancestors by `top_index` (ascending), a parent after its
+    /// children: the nodes of the parallel sweeps' task DAG ([`dag`]).
     top: Vec<u32>,
     /// The roots among the ancestors, by `top_index`.
     top_roots: Vec<u32>,
@@ -191,33 +192,6 @@ pub(crate) struct Scratch<T> {
     acc: Vec<T>,
 }
 
-/// Scratch for the ancestor tasks, taken by a node for its sweep and given
-/// back after it: as many as nodes run at once rather than one per ancestor
-/// (a near-field LU's 440 ancestors held about 250 MB for 23 right-hand
-/// sides). Not per worker: a node waiting inside its sections may run
-/// another node on its thread meanwhile.
-pub(crate) struct ScratchPool<T>(std::sync::Mutex<Vec<Scratch<T>>>);
-
-impl<T> Default for ScratchPool<T> {
-    fn default() -> Self {
-        Self(std::sync::Mutex::new(Vec::new()))
-    }
-}
-
-impl<T> ScratchPool<T> {
-    fn take(&self) -> Scratch<T> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pop()
-            .unwrap_or_default()
-    }
-
-    fn give(&self, sc: Scratch<T>) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(sc);
-    }
-}
-
 impl<T> Default for Scratch<T> {
     fn default() -> Self {
         Self {
@@ -237,12 +211,12 @@ pub(crate) struct PlanWork<T> {
     subtrees: Vec<Scratch<T>>,
     level: Vec<Scratch<T>>,
     apex: Scratch<T>,
-    /// The ancestor tasks' scratch ([`ScratchPool`]).
-    pool: ScratchPool<T>,
+    /// The ancestors' accumulators (forward) and gathered rows below
+    /// (backward), each ancestor's at `top_acc_off`; a level's (the level
+    /// sweeps).
     top_acc: Vec<T>,
-    /// Per ancestor, the children whose forward sweep is still to finish
-    /// (`top_forward_flow`).
-    pending: Vec<std::sync::atomic::AtomicU32>,
+    /// The open inputs of the ancestors' task DAG ([`dag`]).
+    dag: dag::DagWork,
     /// This sweep's decision: on the pool, or on the calling thread.
     parallel: bool,
     /// The pick it was made as and its work in ops, where its run is to
@@ -256,9 +230,8 @@ impl<T> Default for PlanWork<T> {
             subtrees: Vec::new(),
             level: Vec::new(),
             apex: Scratch::default(),
-            pool: ScratchPool::default(),
             top_acc: Vec::new(),
-            pending: Vec::new(),
+            dag: dag::DagWork::default(),
             parallel: false,
             pick: None,
         }
@@ -267,13 +240,8 @@ impl<T> Default for PlanWork<T> {
 
 impl<T> PlanWork<T> {
     /// At least a scratch per subtree and per node of the widest level of
-    /// `plan`, and a count per ancestor (`top` of them); never shrinks, so
-    /// one work serves several plans.
-    fn fit(&mut self, subtrees: usize, widest: usize, top: usize) {
-        if self.pending.len() < top {
-            self.pending
-                .resize_with(top, || std::sync::atomic::AtomicU32::new(0));
-        }
+    /// `plan`; never shrinks, so one work serves several plans.
+    fn fit(&mut self, subtrees: usize, widest: usize) {
         if self.subtrees.len() < subtrees {
             self.subtrees.resize_with(subtrees, Scratch::default);
         }
@@ -472,13 +440,13 @@ pub(crate) fn layout_size<'r>(
     // sn_of, the tree (parent, children), work, heap, flags and slots.
     let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
     // Accumulators of the subtrees (their `ext`) and of every ancestor (its
-    // own off-block rows; the task sweep keeps them all to its end), and per
-    // thread a node's product and gathered rows twice: a subtree sweep's, and
-    // the pooled scratch of the ancestor tasks running at once.
+    // own off-block rows; the task DAG keeps them all to its end and gathers
+    // the rows below into them backward), and per thread a subtree sweep's
+    // node product and gathered rows.
     let max_ld = (0..ns).map(|s| w[s] + m[s]).max().unwrap_or(0);
     let solve_per_rhs = ext.iter().sum::<usize>()
         + top.iter().map(|&t| m[t]).sum::<usize>()
-        + threads.max(1) * 2 * (2 * max_ld);
+        + threads.max(1) * 2 * max_ld;
     LayoutSize {
         held: (fixed + subtrees + levels + schedule) as u64,
         build: build as u64,
@@ -1121,7 +1089,7 @@ impl<T: Scalar> SolvePlan<T> {
         kind: Sweep,
     ) -> &'w mut PlanWork<T> {
         let widest = self.top_levels.iter().map(Vec::len).max().unwrap_or(0);
-        work.fit(self.subtrees.len(), widest, self.top.len());
+        work.fit(self.subtrees.len(), widest);
         let budget = threads.resolve(|cap| cap);
         let ops = self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE));
         work.pick = None;
@@ -1235,194 +1203,25 @@ impl<T: Scalar> SolvePlan<T> {
     }
 
     // -----------------------------------------------------------------------
-    // Ancestor supernodes: a task tree, sections inside the large nodes
+    // Ancestor supernodes: a task DAG over their tiles, or the levels
     // -----------------------------------------------------------------------
     //
     // The supernodes above the cut form the top of the elimination tree.
-    // On the pool they run as a task tree (`top_forward_flow`,
-    // `top_backward_flow`), with no level waiting for its slowest node and
-    // no recursion along the tree's height: on a
-    // 32 k near-field LU the level sweeps ran most levels (fewer nodes than
-    // threads) one node after another, 16 threads slower than 4. A node's
-    // products run as GEMMs ([`fwd_node_gemm`](Self::fwd_node_gemm),
-    // [`bwd_node_gemm`](Self::bwd_node_gemm)), a large one's in row chunks on
-    // the pool, and a wide node takes the leaf subtrees' terms in column
-    // chunks. On one thread, or on a factor whose structure is no elimination
-    // tree, the levels run in order (`top_forward`, `top_backward`), with the
-    // same arithmetic per node and per column.
+    // On the pool they run as a task DAG over the 64-column tiles of their
+    // dense nodes ([`dag`]: `forward_dag`, `backward_dag`): a tile's products
+    // start once the tile they take is solved, a parent's tile once the
+    // chunks of its children that reach it are done, with no level waiting
+    // for its slowest node and no node waiting for its slowest section. On
+    // one thread, or on a factor whose structure is no elimination tree, the
+    // levels run in order (`top_forward`, `top_backward`), the node products
+    // as GEMMs ([`fwd_node_gemm`](Self::fwd_node_gemm),
+    // [`bwd_node_gemm`](Self::bwd_node_gemm)); the DAG runs the same products
+    // cut by rows, so every row's sums are the same.
 
-    /// Whether the ancestors run as tasks (`top_forward_flow`,
-    /// `top_backward_flow`) rather than level by level.
+    /// Whether the ancestors run as the task DAG (`forward_dag`,
+    /// `backward_dag`) rather than level by level.
     fn flows(&self, work: &PlanWork<T>) -> bool {
         work.parallel && !self.chain && !self.top.is_empty()
-    }
-
-    /// The forward sweep of the ancestors as a task tree: an ancestor runs
-    /// once its children are done, with no level waiting for its slowest
-    /// node. Every leaf of the tree starts a walk toward the root; a walk
-    /// goes on to the parent when it finished the parent's last child to
-    /// finish (the pending counts' acquire-release orders the children's
-    /// writes before the parent), and ends otherwise. No task is allocated
-    /// and nothing recurses: a walk is a loop. Before its sweep an ancestor
-    /// takes into its columns what the
-    /// leaf subtrees and its descendants above the cut accumulated for them
-    /// (`pull`), in the order the level sweeps reduce them, so every column
-    /// takes its terms in the same order and the result is the level
-    /// sweeps' to the bit. Every ancestor keeps its accumulator to the end
-    /// of the sweep, in one block. The subtrees' reduction is part of it.
-    fn top_forward_flow(
-        &self,
-        nr: usize,
-        y: &mut [T],
-        work: &mut PlanWork<T>,
-        trace: Option<&SweepTrace>,
-    ) {
-        let nt = self.top.len();
-        let nsub = self.subtrees.len();
-        // every slot's first term is stored ([`FIRST`]): no zeroing, only growth
-        grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
-        let ys = Shared(y.as_mut_ptr(), y.len());
-        let accs = Shared(work.top_acc.as_mut_ptr(), work.top_acc.len());
-        let pool = &work.pool;
-        let subs = &work.subtrees;
-        let node = |ti: usize, tr: Option<&NodeTimes>| {
-            let s = self.top[ti];
-            let (c0, w, _, _, _, _) = self.node(s);
-            // SAFETY: see `Shared`. This task alone writes the columns of
-            // `s` and its own accumulator; the accumulators it reads belong
-            // to nodes that are done (its descendants, ordered before it by
-            // the pending counts' acquire-release).
-            let y = unsafe { ys.slice() };
-            let pulls = &self.pull[self.pull_ptr[ti]..self.pull_ptr[ti + 1]];
-            // the columns `j0..` of this node take every source's terms for them:
-            // of a source's run, the slots whose rows lie in those columns
-            let take = |j0: usize, yc: &mut [T]| {
-                let (lo_r, hi_r) = ((c0 + j0) as u32, (c0 + j0 + yc.len() / nr) as u32);
-                for &(src, lo, hi) in pulls {
-                    let (src, lo, hi) = (src as usize, lo as usize, hi as usize);
-                    let list = if src < nsub {
-                        &self.subtrees[src].ext[lo..hi]
-                    } else {
-                        let d = self.top[src - nsub] as usize;
-                        &self.rows[self.row_ptr[d] + lo..self.row_ptr[d] + hi]
-                    };
-                    let a = list.partition_point(|&r| r < lo_r);
-                    let b = list.partition_point(|&r| r < hi_r);
-                    if a == b {
-                        continue;
-                    }
-                    let from = if src < nsub {
-                        &subs[src].acc[(lo + a) * nr..(lo + b) * nr]
-                    } else {
-                        let o = (self.top_acc_off[src - nsub] + lo + a) * nr;
-                        unsafe { std::slice::from_raw_parts(accs.ptr().add(o), (b - a) * nr) }
-                    };
-                    for (k, &r) in list[a..b].iter().enumerate() {
-                        let i = (r - lo_r) as usize;
-                        sub_assign(&mut yc[i * nr..(i + 1) * nr], &from[k * nr..(k + 1) * nr]);
-                    }
-                }
-            };
-            let yc = &mut y[c0 * nr..(c0 + w) * nr];
-            timed(
-                tr,
-                |t| &t.take,
-                || {
-                    if pulls.len() * w * nr >= SOLVE_PULL_PAR_MIN {
-                        // a wide node near the root takes the terms of every leaf
-                        // subtree: its columns in chunks on the pool, each column
-                        // summing its sources in order
-                        crate::parallel::chunks_mut(
-                            yc,
-                            SOLVE_PULL_COLS * nr,
-                            crate::parallel::Work::ns(f64::INFINITY),
-                            |ci, c| take(ci * SOLVE_PULL_COLS, c),
-                        );
-                    } else {
-                        take(0, yc);
-                    }
-                },
-            );
-            let (a0, a1) = (self.top_acc_off[ti] * nr, self.top_acc_off[ti + 1] * nr);
-            let acc = unsafe { std::slice::from_raw_parts_mut(accs.ptr().add(a0), a1 - a0) };
-            let mut sc = pool.take();
-            self.fwd_node_gemm(s, nr, y, acc, true, &mut sc.t, tr);
-            pool.give(sc);
-        };
-        let kids_ptr = &self.top_kids_ptr;
-        let pending = &work.pending[..nt];
-        for (t, p) in pending.iter().enumerate() {
-            p.store((kids_ptr[t + 1] - kids_ptr[t]) as u32, Ordering::Relaxed);
-        }
-        let walk = |leaf: usize| {
-            if kids_ptr[leaf + 1] > kids_ptr[leaf] {
-                return;
-            }
-            let mut t = leaf;
-            loop {
-                SweepTrace::node(trace, t, |tr| node(t, tr));
-                match self.top_parent[t] {
-                    NONE => return,
-                    p if pending[p as usize].fetch_sub(1, Ordering::AcqRel) == 1 => t = p as usize,
-                    _ => return,
-                }
-            }
-        };
-        crate::parallel::for_each(nt, crate::parallel::Work::ns(f64::INFINITY), walk);
-    }
-
-    /// The backward sweep of the ancestors as a task tree: an ancestor runs
-    /// when its parent is done (every column it reads is then final), then
-    /// its children's trees side by side. Each node's
-    /// arithmetic is the level sweep's. A chain of single children runs in
-    /// a loop; the fork-join on the stack (no task is allocated) nests only
-    /// where the tree branches, fewer than
-    /// [`leaf_subtrees`](crate::SolveSettings::leaf_subtrees) times on any
-    /// path whatever the tree's height: every ancestor holds more than that
-    /// share of the work (`cut`), so each branch passed leaves more than it
-    /// behind.
-    fn top_backward_flow(
-        &self,
-        nr: usize,
-        x: &mut [T],
-        work: &mut PlanWork<T>,
-        trace: Option<&SweepTrace>,
-    ) {
-        let xs = Shared(x.as_mut_ptr(), x.len());
-        let pool = &work.pool;
-        let node = |ti: usize| {
-            let s = self.top[ti];
-            // SAFETY: see `Shared`; this task alone writes the columns of
-            // `s`, and the ancestors' columns it reads are final.
-            let x = unsafe { xs.slice() };
-            let mut sc = pool.take();
-            SweepTrace::node(trace, ti, |tr| {
-                self.bwd_node_gemm(s, nr, x, true, &mut sc.g, tr)
-            });
-            pool.give(sc);
-        };
-        /// The tree under ancestor `ti`: its branches side by side.
-        fn tree(ti: usize, node: &(dyn Fn(usize) + Sync), kids_ptr: &[usize], kids: &[u32]) {
-            let mut t = ti;
-            loop {
-                node(t);
-                match &kids[kids_ptr[t]..kids_ptr[t + 1]] {
-                    [] => return,
-                    [only] => t = *only as usize,
-                    k => {
-                        return crate::parallel::each(
-                            k.len(),
-                            crate::parallel::Work::ns(f64::INFINITY),
-                            |c| tree(k[c] as usize, node, kids_ptr, kids),
-                        )
-                    }
-                }
-            }
-        }
-        let roots = &self.top_roots;
-        crate::parallel::each(roots.len(), crate::parallel::Work::ns(f64::INFINITY), |c| {
-            tree(roots[c] as usize, &node, &self.top_kids_ptr, &self.top_kids)
-        });
     }
 
     fn top_forward(
@@ -1601,11 +1400,6 @@ impl<T: Scalar> SolvePlan<T> {
     ) {
         let (c0, w, _, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
-        let mode = crate::dense::gemm_backend::GemmMode::new(
-            gemm::Parallelism::None,
-            &crate::KernelSettings::default(),
-        );
-        let (one, minus) = (T::one(), T::from_real(-1.0));
         let pp = Shared(panel.as_ptr() as *mut T, panel.len());
         for (jb, je, off, ld) in packed_blocks(w, m) {
             let d = dinv.get(jb..je).unwrap_or(&[]);
@@ -1633,27 +1427,15 @@ impl<T: Scalar> SolvePlan<T> {
                 // SAFETY: a chunk writes its own rows of `yb` (below `je`); the
                 // block's solved rows `jb..je` and the panel are only read.
                 unsafe {
-                    crate::dense::gemm_backend::gemm(
-                        r.len(),
+                    fwd_own(
+                        yp.ptr(),
+                        pp.ptr().add(off),
+                        ld,
+                        jb,
+                        je,
+                        je + r.start..je + r.end,
                         nr,
-                        k,
-                        yp.ptr().add((je + r.start) * nr),
-                        1,
-                        nr as isize,
-                        true,
-                        pp.ptr().add(off + k + r.start) as *const T,
-                        ld as isize,
-                        1,
-                        yp.ptr().add(jb * nr) as *const T,
-                        1,
-                        nr as isize,
-                        one,
-                        minus,
-                        false,
-                        false,
-                        false,
-                        mode,
-                    );
+                    )
                 }
             });
         }
@@ -1673,27 +1455,18 @@ impl<T: Scalar> SolvePlan<T> {
                 // SAFETY: a chunk writes its own rows of `t`; the solved rows of `yb`
                 // and the panel are only read.
                 unsafe {
-                    crate::dense::gemm_backend::gemm(
-                        r.len(),
+                    fwd_below(
+                        tp.ptr(),
+                        pp.ptr().add(off),
+                        ld,
+                        w,
+                        jb,
+                        je,
+                        yp.ptr(),
+                        r.clone(),
                         nr,
-                        je - jb,
-                        tp.ptr().add(r.start * nr),
-                        1,
-                        nr as isize,
                         b > 0,
-                        pp.ptr().add(off + w - jb + r.start) as *const T,
-                        ld as isize,
-                        1,
-                        yp.ptr().add(jb * nr) as *const T,
-                        1,
-                        nr as isize,
-                        one,
-                        one,
-                        false,
-                        false,
-                        false,
-                        mode,
-                    );
+                    )
                 }
             }
         });
@@ -1718,11 +1491,6 @@ impl<T: Scalar> SolvePlan<T> {
     ) {
         let (c0, w, r0, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
-        let mode = crate::dense::gemm_backend::GemmMode::new(
-            gemm::Parallelism::None,
-            &crate::KernelSettings::default(),
-        );
-        let (one, minus) = (T::one(), T::from_real(-1.0));
         if m > 0 {
             timed(
                 tr,
@@ -1736,6 +1504,11 @@ impl<T: Scalar> SolvePlan<T> {
             );
         }
         let xb = &mut x[c0 * nr..(c0 + w) * nr];
+        let (pp, gp, xp) = (
+            Shared(panel.as_ptr() as *mut T, panel.len()),
+            Shared(g.as_mut_ptr(), g.len()),
+            Shared(xb.as_mut_ptr(), xb.len()),
+        );
         if m > 0 {
             // the node's rows `X[i] -= sum_r L[r, i] G[r]`, each block's rows in its
             // chunks: every full block cut alike, the last one by its own rows
@@ -1744,11 +1517,6 @@ impl<T: Scalar> SolvePlan<T> {
             let (full, last) = (
                 self.node_chunks(par, SOLVE_DIAG_BLOCK, m, nr),
                 self.node_chunks(par, last_rows, m, nr),
-            );
-            let (pp, gp, xp) = (
-                Shared(panel.as_ptr() as *mut T, panel.len()),
-                Shared(g.as_mut_ptr(), g.len()),
-                Shared(xb.as_mut_ptr(), xb.len()),
             );
             run_chunks((nb - 1) * full + last, tr, |i| {
                 let (b, q, count) = match i.checked_sub((nb - 1) * full) {
@@ -1762,64 +1530,38 @@ impl<T: Scalar> SolvePlan<T> {
                 // SAFETY: the chunk writes its own rows of the node; the panel and
                 // the gathered rows are only read.
                 unsafe {
-                    crate::dense::gemm_backend::gemm(
-                        r.len(),
-                        nr,
+                    bwd_off(
+                        xp.ptr(),
+                        pp.ptr().add(off),
+                        ld,
+                        w,
                         m,
-                        xp.ptr().add((jb + r.start) * nr),
-                        1,
-                        nr as isize,
-                        true,
-                        pp.ptr().add(off + w - jb + r.start * ld) as *const T,
-                        1,
-                        ld as isize,
-                        gp.ptr() as *const T,
-                        1,
-                        nr as isize,
-                        one,
-                        minus,
-                        false,
-                        false,
-                        false,
-                        mode,
-                    );
+                        jb,
+                        gp.ptr(),
+                        jb + r.start..jb + r.end,
+                        nr,
+                    )
                 }
             });
         }
         for (jb, je, off, ld) in packed_blocks(w, m).rev() {
             if je < w {
-                let k = w - je;
-                let count = self.node_chunks(par, je - jb, k, nr);
-                let (pp, xp) = (
-                    Shared(panel.as_ptr() as *mut T, panel.len()),
-                    Shared(xb.as_mut_ptr(), xb.len()),
-                );
+                let count = self.node_chunks(par, je - jb, w - je, nr);
                 run_chunks(count, tr, |q| {
                     let r = chunk_rows(q, count, je - jb, nr);
                     // SAFETY: the chunk writes its own rows of `jb..je`, rows `je..w`
-                    // are read: disjoint; the block's rows `je..w` lie in it.
+                    // are read: disjoint.
                     unsafe {
-                        crate::dense::gemm_backend::gemm(
-                            r.len(),
+                        bwd_in(
+                            xp.ptr(),
+                            pp.ptr().add(off),
+                            ld,
+                            w,
+                            jb,
+                            je,
+                            jb + r.start..jb + r.end,
                             nr,
-                            k,
-                            xp.ptr().add((jb + r.start) * nr),
-                            1,
-                            nr as isize,
-                            true,
-                            pp.ptr().add(off + je - jb + r.start * ld) as *const T,
-                            1,
-                            ld as isize,
-                            xp.ptr().add(je * nr) as *const T,
-                            1,
-                            nr as isize,
-                            one,
-                            minus,
-                            false,
-                            false,
-                            false,
-                            mode,
-                        );
+                        )
                     }
                 });
             }
@@ -1883,7 +1625,7 @@ impl<T: Scalar> SolvePlan<T> {
         });
         phases.lap("fwd-subtrees");
         if self.flows(work) {
-            self.top_forward_flow(nr, y, work, trace.as_ref());
+            self.forward_dag(nr, y, work, trace.as_ref());
             phases.lap("fwd-top");
         } else {
             for (st, sc) in self.subtrees.iter().zip(&work.subtrees) {
@@ -1907,7 +1649,7 @@ impl<T: Scalar> SolvePlan<T> {
         let trace = SweepTrace::start();
         let sub_tr = trace.as_ref().map(|t| &t.subtrees);
         if self.flows(work) {
-            self.top_backward_flow(nr, y, work, trace.as_ref());
+            self.backward_dag(nr, y, work, trace.as_ref());
         } else {
             self.top_backward(nr, y, work, trace.as_ref());
         }
@@ -2006,7 +1748,8 @@ impl PhaseTrace {
 /// leaf subtrees' tasks ([`SweepTrace`]); only at the `debug` log level.
 #[derive(Default)]
 pub(super) struct NodeTimes {
-    /// The node's whole sweep.
+    /// The node's whole sweep (in the task DAG, from its first task's start
+    /// to its last one's end).
     total: AtomicU64,
     /// The take of the terms for its columns (forward) or the gather of its
     /// rows below (backward).
@@ -2015,7 +1758,8 @@ pub(super) struct NodeTimes {
     tri: AtomicU64,
     /// The products on the node's thread, whole.
     gemm: AtomicU64,
-    /// The products' chunks in the pool sections, summed.
+    /// The products' chunks in the pool sections (in the task DAG, the
+    /// tile products), summed.
     pooled: AtomicU64,
     /// The scatter of `L_off X` into the right-hand sides and accumulators.
     scatter: AtomicU64,
@@ -2066,7 +1810,12 @@ impl SweepTrace {
         };
         let times = NodeTimes::default();
         timed(Some(&times), |t| &t.total, || f(Some(&times)));
-        let mut nodes = trace.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        trace.add(ti, times);
+    }
+
+    /// The times of ancestor `ti`, kept.
+    fn add(&self, ti: usize, times: NodeTimes) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         nodes.push((ti, times));
     }
 
@@ -2320,6 +2069,174 @@ fn run_chunks(count: usize, tr: Option<&NodeTimes>, f: impl Fn(usize) + Sync + S
     } else {
         (0..count).for_each(|i| timed(tr, |t| &t.gemm, || f(i)));
     }
+}
+
+/// The GEMM mode of the sweeps' node products, each on the calling thread.
+/// Every node product of the level sweeps and of the ancestors' task DAG is
+/// one of the four below ([`fwd_own`], [`fwd_below`], [`bwd_off`], [`bwd_in`]),
+/// cut by rows only, so a row's sums do not depend on who runs them.
+fn node_mode() -> crate::dense::gemm_backend::GemmMode {
+    crate::dense::gemm_backend::GemmMode::new(
+        gemm::Parallelism::None,
+        &crate::KernelSettings::default(),
+    )
+}
+
+/// Forward, a node's own rows `rows` (from `je` on) take the solved block
+/// `jb..je`: `y[rows] -= L[rows, jb..je] y[jb..je]`, `y` the node's rows (`nr`
+/// wide), `block` the packed block ([`packed_blocks`], `ld`).
+///
+/// SAFETY: `y` holds the node's rows and `block` its block; rows `rows` are
+/// written by this call alone, rows `jb..je` and the block only read.
+#[allow(clippy::too_many_arguments)]
+unsafe fn fwd_own<T: Scalar>(
+    y: *mut T,
+    block: *const T,
+    ld: usize,
+    jb: usize,
+    je: usize,
+    rows: std::ops::Range<usize>,
+    nr: usize,
+) {
+    crate::dense::gemm_backend::gemm(
+        rows.len(),
+        nr,
+        je - jb,
+        y.add(rows.start * nr),
+        1,
+        nr as isize,
+        true,
+        block.add(rows.start - jb),
+        ld as isize,
+        1,
+        y.add(jb * nr) as *const T,
+        1,
+        nr as isize,
+        T::one(),
+        T::from_real(-1.0),
+        false,
+        false,
+        false,
+        node_mode(),
+    );
+}
+
+/// Forward, the rows `rows` below a node of width `w` take the solved block
+/// `jb..je`: `t[rows] (+)= L_off[rows, jb..je] y[jb..je]`, stored where `!add`
+/// (the first block), `t` the rows below the node (`nr` wide).
+///
+/// SAFETY: as [`fwd_own`]; rows `rows` of `t` are written by this call alone.
+#[allow(clippy::too_many_arguments)]
+unsafe fn fwd_below<T: Scalar>(
+    t: *mut T,
+    block: *const T,
+    ld: usize,
+    w: usize,
+    jb: usize,
+    je: usize,
+    y: *const T,
+    rows: std::ops::Range<usize>,
+    nr: usize,
+    add: bool,
+) {
+    crate::dense::gemm_backend::gemm(
+        rows.len(),
+        nr,
+        je - jb,
+        t.add(rows.start * nr),
+        1,
+        nr as isize,
+        add,
+        block.add(w - jb + rows.start),
+        ld as isize,
+        1,
+        y.add(jb * nr),
+        1,
+        nr as isize,
+        T::one(),
+        T::one(),
+        false,
+        false,
+        false,
+        node_mode(),
+    );
+}
+
+/// Backward, a node's rows `rows` (in the block `jb..`) take its `m` rows below:
+/// `x[rows] -= L_off[.., rows]^T g`, `g` their final values gathered (`nr` wide).
+///
+/// SAFETY: as [`fwd_own`]; `g` holds `m` rows.
+#[allow(clippy::too_many_arguments)]
+unsafe fn bwd_off<T: Scalar>(
+    x: *mut T,
+    block: *const T,
+    ld: usize,
+    w: usize,
+    m: usize,
+    jb: usize,
+    g: *const T,
+    rows: std::ops::Range<usize>,
+    nr: usize,
+) {
+    crate::dense::gemm_backend::gemm(
+        rows.len(),
+        nr,
+        m,
+        x.add(rows.start * nr),
+        1,
+        nr as isize,
+        true,
+        block.add(w - jb + (rows.start - jb) * ld),
+        1,
+        ld as isize,
+        g,
+        1,
+        nr as isize,
+        T::one(),
+        T::from_real(-1.0),
+        false,
+        false,
+        false,
+        node_mode(),
+    );
+}
+
+/// Backward, a node's rows `rows` of the block `jb..je` take its solved rows
+/// `je..w` in one product: `x[rows] -= L[je..w, rows]^T x[je..w]`.
+///
+/// SAFETY: as [`fwd_own`]; rows `je..w` are only read.
+#[allow(clippy::too_many_arguments)]
+unsafe fn bwd_in<T: Scalar>(
+    x: *mut T,
+    block: *const T,
+    ld: usize,
+    w: usize,
+    jb: usize,
+    je: usize,
+    rows: std::ops::Range<usize>,
+    nr: usize,
+) {
+    crate::dense::gemm_backend::gemm(
+        rows.len(),
+        nr,
+        w - je,
+        x.add(rows.start * nr),
+        1,
+        nr as isize,
+        true,
+        block.add(je - jb + (rows.start - jb) * ld),
+        1,
+        ld as isize,
+        x.add(je * nr) as *const T,
+        1,
+        nr as isize,
+        T::one(),
+        T::from_real(-1.0),
+        false,
+        false,
+        false,
+        node_mode(),
+    );
 }
 
 /// Entries of a node's packed panel ([`packed_blocks`]).
@@ -2632,12 +2549,13 @@ mod tests {
         rn / bn
     }
 
-    /// The ancestors as tasks (`top_forward_flow`, `top_backward_flow`) solve
-    /// as the level sweeps do, to the bit: a tree cut into few subtrees, so
-    /// most of it lies above the cut, every sweep on the pool, against one
-    /// thread (the level sweeps); LU and LDL^T, one and several right-hand
-    /// sides, every product cut into its finest row chunks, for one
-    /// right-hand side too ([`node_chunks`](super::SolvePlan::node_chunks)).
+    /// The ancestors' task DAG (`forward_dag`, `backward_dag`) solves as the
+    /// level sweeps do, to the bit: a tree cut into few subtrees, so most of
+    /// it lies above the cut, every sweep on the pool, against one thread (the
+    /// level sweeps); LU and LDL^T, one and several right-hand sides, nodes of
+    /// several tiles, every product cut into its finest row chunks, for one
+    /// right-hand side too ([`node_chunks`](super::SolvePlan::node_chunks)), so
+    /// the DAG holds thousands of tasks and their order varies from run to run.
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
         use crate::{LuSolver, OrderingMethod};
@@ -2691,6 +2609,9 @@ mod tests {
             "a tree above the cut"
         );
         assert!(chunked(&ld.plan), "LDL^T products in chunks");
+        let tiled = (ld.plan.top.iter())
+            .any(|&s| ld.plan.node(s).1 > 2 * crate::constants::SOLVE_DIAG_BLOCK);
+        assert!(tiled, "an ancestor of three tiles or more");
         let (g1, gb1) =
             on(1).install(|| (ld.solve(&gb).unwrap(), ld.solve_many(&gbb, nrhs).unwrap()));
         for t in [2usize, 5, 8] {
