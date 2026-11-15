@@ -723,7 +723,11 @@ impl<T: Scalar> SolvePlan<T> {
             let add = |i: usize| dag.open[i].fetch_add(1, Ordering::Relaxed);
             for g in 1..nd.nb {
                 for s in 0..g {
-                    set(nd.own(g, s), 2);
+                    // (a merged last tile has no product of its own there: no
+                    // task, no open input)
+                    if nd.own_task(g, s).is_some() {
+                        set(nd.own(g, s), 2);
+                    }
                 }
             }
             if nd.merged {
