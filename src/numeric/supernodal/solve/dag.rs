@@ -65,6 +65,8 @@ pub(crate) struct DagWork {
     /// before any task runs (a running task may make others ready, which it
     /// then runs itself).
     first: Vec<(u32, u32)>,
+    /// The counters of the sweep laid out last, `open[..len]`.
+    len: usize,
 }
 
 impl DagWork {
@@ -77,12 +79,21 @@ impl DagWork {
     }
 
     fn reset(&mut self, len: usize) {
+        self.len = len;
         if self.open.len() < len {
             self.open.resize_with(len, || AtomicU32::new(0));
         }
         for o in &self.open[..len] {
             o.store(0, Ordering::Relaxed);
         }
+    }
+
+    /// Whether every counter of the sweep is closed: each task had all its
+    /// inputs and ran once. A counter left open is a task that never started,
+    /// one closed once too often has wrapped; either way the sweep's result is
+    /// not the solution, so the sweeps check it after their scope.
+    fn drained(&self) -> bool {
+        (self.open[..self.len].iter()).all(|o| o.load(Ordering::Relaxed) == 0)
     }
 }
 
@@ -784,6 +795,10 @@ impl<T: Scalar> SolvePlan<T> {
                 sc.spawn(move |sc| run(fwd, sc, t));
             }
         });
+        assert!(
+            work.dag.drained(),
+            "solve DAG: a task of the forward sweep did not run once"
+        );
         if let Some(tr) = tr {
             tr.finish(trace);
         }
@@ -837,6 +852,10 @@ impl<T: Scalar> SolvePlan<T> {
                 sc.spawn(move |sc| run(bwd, sc, BwdTask::Start(r)));
             }
         });
+        assert!(
+            work.dag.drained(),
+            "solve DAG: a task of the backward sweep did not run once"
+        );
         if let Some(tr) = tr {
             tr.finish(trace);
         }
