@@ -15,6 +15,9 @@
 //!       `RLA_KLU_RW_BIG=1` - include the multi-million-row Freescale set.
 //!       `RLA_BENCH_OUT=path.jsonl` - append one JSONL record per
 //!       (matrix, solver) for `benches/klu_realworld_plot.py`.
+//!       `RLA_KLU_RW_FILES=a.mtx:dir/` - also run local Matrix Market files
+//!       (a directory adds its `.mtx` files), group `local`; with
+//!       `RLA_KLU_RW_LOCAL_ONLY=1` the downloaded corpus is skipped.
 
 use std::time::Instant;
 
@@ -61,8 +64,11 @@ fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
 
 /// Load `<group>/<name>` as a real general CSC, or explain why not.
 fn load(group: &str, name: &str) -> Result<GeneralCsc<f64>, String> {
-    let path = fetch(group, name)?;
-    match read_mtx_any(&path).map_err(|e| format!("parse: {e}"))? {
+    load_path(&fetch(group, name)?)
+}
+
+fn load_path(path: &std::path::Path) -> Result<GeneralCsc<f64>, String> {
+    match read_mtx_any(path).map_err(|e| format!("parse: {e}"))? {
         MtxLoaded::General(c) => {
             if c.values.iter().any(|v| v.im != 0.0) {
                 return Err("complex values (real corpus expected)".into());
@@ -120,6 +126,31 @@ fn emit(
     }
 }
 
+/// The Matrix Market files of `RLA_KLU_RW_FILES`, directories expanded, sorted by name.
+fn local_files() -> Vec<std::path::PathBuf> {
+    let Ok(spec) = std::env::var("RLA_KLU_RW_FILES") else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in spec.split(':').filter(|e| !e.is_empty()) {
+        let path = std::path::PathBuf::from(entry);
+        if path.is_dir() {
+            let mut inner: Vec<_> = std::fs::read_dir(&path)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
+                .collect();
+            inner.sort();
+            files.extend(inner);
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
 fn main() {
     let big = std::env::var("RLA_KLU_RW_BIG")
         .map(|v| v == "1")
@@ -130,12 +161,31 @@ fn main() {
     }
     let mut ratios: Vec<Row> = Vec::new();
 
-    let list: Vec<_> = CORPUS
-        .iter()
-        .chain(if big { CORPUS_BIG } else { &[] })
-        .collect();
-    for &&(group, name) in &list {
-        let a = match load(group, name) {
+    let local_only = std::env::var("RLA_KLU_RW_LOCAL_ONLY").is_ok_and(|v| v == "1");
+    let mut list: Vec<(String, String, Option<std::path::PathBuf>)> = if local_only {
+        Vec::new()
+    } else {
+        CORPUS
+            .iter()
+            .chain(if big { CORPUS_BIG } else { &[] })
+            .map(|&(g, n)| (g.to_string(), n.to_string(), None))
+            .collect()
+    };
+    list.extend(local_files().into_iter().map(|p| {
+        let name = p
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        ("local".to_string(), name, Some(p))
+    }));
+    for (group, name, path) in &list {
+        let (group, name) = (group.as_str(), name.as_str());
+        let loaded = match path {
+            Some(p) => load_path(p),
+            None => load(group, name),
+        };
+        let a = match loaded {
             Ok(a) => a,
             Err(e) => {
                 println!("=== {group}/{name}: SKIP ({e})");
