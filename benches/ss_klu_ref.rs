@@ -91,7 +91,8 @@ fn build_shim() -> Option<std::path::PathBuf> {
             // MinGW links straight against the DLL; no import lib needed.
             cmd.arg(&src).arg(format!("{prefix}/bin/klu.dll"));
         } else {
-            cmd.arg(format!("-L{prefix}/lib")).arg("-lklu").arg(&src);
+            // the library after the source: with --as-needed an earlier -lklu is dropped
+            cmd.arg(&src).arg(format!("-L{prefix}/lib")).arg("-lklu");
         }
         if cfg!(target_os = "linux") {
             cmd.arg("-fPIC");

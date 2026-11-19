@@ -13,6 +13,7 @@
  * Build (done automatically by klu_circuit when the library is present):
  *   cc -O2 -std=c11 -I<inc>/suitesparse -L<lib> -lklu -dynamiclib klu_shim.c -o klu_shim.dylib
  */
+#define _POSIX_C_SOURCE 199309L /* clock_gettime under -std=c11 on glibc */
 #include <klu.h>
 #include <stdint.h>
 #include <string.h>
