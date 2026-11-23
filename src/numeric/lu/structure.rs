@@ -74,12 +74,15 @@ impl LuStructure {
 
     /// From the pattern of `A` (`col_ptr`, `row_idx`), the row matching
     /// (`row_map[r]`: the row of `B` that row `r` of `A` becomes) and the
-    /// analysis of `B + B^T`.
+    /// analysis of `B + B^T` with its tree levels (`levels[0]` the leaves).
+    /// A supernode's sets read only those of its updaters, which lie on
+    /// lower levels, so the supernodes of a level are built side by side.
     pub fn build(
         col_ptr: &[usize],
         row_idx: &[usize],
         row_map: Option<&[usize]>,
         sym: &SymbolicFactorization,
+        levels: &[Vec<usize>],
         sched: &LlSchedule,
     ) -> Self {
         let n = sym.n;
@@ -104,27 +107,44 @@ impl LuStructure {
                 }
             }
         }
-        let mut st = Self::empty();
-        for s in 0..nsuper {
-            let (first, last) = (sym.supernodes[s].first_col, end(s));
-            let (mut l, mut u) = (std::mem::take(&mut lseed[s]), std::mem::take(&mut useed[s]));
-            for &k in sched.updaters(s) {
-                let k = k as usize;
-                let nck = sym.supernodes[k].ncol;
-                let (lk, uk) = (&st.rows_l(k)[nck..], &st.cols_u(k)[nck..]);
-                if Self::hits(uk, first, last) {
-                    l.extend(lk.iter().filter(|&&g| g as usize >= last));
+        // Per supernode its `L` rows and `U` columns past its own columns.
+        let mut ext: Vec<(Vec<Li>, Vec<Li>)> = (lseed.into_iter()).zip(useed).collect();
+        for level in levels {
+            let entries: usize = (level.iter())
+                .map(|&s| {
+                    let own = ext[s].0.len() + ext[s].1.len();
+                    let from = |k: &Li| ext[*k as usize].0.len() + ext[*k as usize].1.len();
+                    own + sched.updaters(s).iter().map(from).sum::<usize>()
+                })
+                .sum();
+            let work = crate::parallel::Work::of(entries as f64, &STRUCTURE_RATE);
+            let built = crate::parallel::map(level.len(), work, |i| {
+                let s = level[i];
+                let (first, last) = (sym.supernodes[s].first_col, end(s));
+                let (mut l, mut u) = (ext[s].0.clone(), ext[s].1.clone());
+                for &k in sched.updaters(s) {
+                    let (lk, uk) = &ext[k as usize];
+                    if Self::hits(uk, first, last) {
+                        l.extend(lk.iter().filter(|&&g| g as usize >= last));
+                    }
+                    if Self::hits(lk, first, last) {
+                        u.extend(uk.iter().filter(|&&g| g as usize >= last));
+                    }
                 }
-                if Self::hits(lk, first, last) {
-                    u.extend(uk.iter().filter(|&&g| g as usize >= last));
+                for v in [&mut l, &mut u] {
+                    v.sort_unstable();
+                    v.dedup();
                 }
+                (l, u)
+            });
+            for (&s, lu) in level.iter().zip(built) {
+                ext[s] = lu;
             }
-            for (v, out, off) in [
-                (&mut l, &mut st.l, &mut st.l_off),
-                (&mut u, &mut st.u, &mut st.u_off),
-            ] {
-                v.sort_unstable();
-                v.dedup();
+        }
+        let mut st = Self::empty();
+        for (s, (l, u)) in ext.iter().enumerate() {
+            let (first, last) = (sym.supernodes[s].first_col, end(s));
+            for (v, out, off) in [(l, &mut st.l, &mut st.l_off), (u, &mut st.u, &mut st.u_off)] {
                 out.extend((first..last).map(|c| c as Li));
                 out.extend_from_slice(v);
                 off.push(out.len());
@@ -142,3 +162,8 @@ impl LuStructure {
         st
     }
 }
+
+/// What an entry of the sets costs their build (collected, sorted and
+/// deduplicated), learned from the serial builds.
+static STRUCTURE_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);

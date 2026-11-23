@@ -254,10 +254,19 @@ impl LuSymbolic {
         };
         let symb = analyze_with(pattern, lower_nnz, opts)?;
         let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
-            (Some((sym, _)), Some(sched)) => {
+            (Some((sym, levels)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
                 let _s = rsprobe::scope!(DEBUG, "structure");
-                LuStructure::build(&a.col_ptr, &a.row_idx, row_map.as_deref(), sym, sched)
+                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
+                    LuStructure::build(
+                        &a.col_ptr,
+                        &a.row_idx,
+                        row_map.as_deref(),
+                        sym,
+                        levels,
+                        sched,
+                    )
+                })
             }
             _ => LuStructure::empty(),
         };
