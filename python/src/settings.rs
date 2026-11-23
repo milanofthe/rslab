@@ -178,7 +178,6 @@ plain_knobs! {
     "race_nd_min_n": usize => ordering.race.nd_min_n;
     "race_nd_min_work": u64 => ordering.race.nd_min_work;
     "race_assumed_workers": usize => ordering.race.assumed_workers;
-    "race_eager_nd_min_nnz": usize => ordering.race.eager_nd_min_nnz;
     "race_ensemble_size": usize => ordering.race.ensemble_size;
     "race_ensemble_min_flops": u64 => ordering.race.ensemble_min_flops;
     "nd_seed": u64 => ordering.nd.seed;
@@ -317,8 +316,6 @@ plain_knobs! {
 ///     Nested dissection joins the race above ``race_nd_min_n`` unknowns
 ///     (10 000) when the best cheap candidate predicts at least
 ///     ``race_nd_min_work`` flops (1.25e9) per ``race_assumed_workers`` (4).
-/// race_eager_nd_min_nnz : int, default 2 000 000
-///     Entries from which the dissection starts speculatively.
 /// race_ensemble_size, race_ensemble_min_flops : int
 ///     Seeds of the ``nd_ensemble`` (3) and the flops from which it runs
 ///     (5e10).

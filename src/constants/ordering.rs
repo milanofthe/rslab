@@ -32,15 +32,6 @@ pub const RACE_ND_MIN_WORK: u64 = 1_250_000_000;
 /// Contract: results (moves the nested-dissection gate).
 pub const RACE_ASSUMED_WORKERS: usize = 4;
 
-/// Patterns with at least this many entries (lower triangle) start the
-/// dissection at once, speculatively, where more than one worker is
-/// available (nonzeros).
-/// Used by: `RaceSettings::eager_nd_min_nnz`.
-/// Why: on smaller patterns a discarded speculative dissection outlasts the
-/// cheap stage (it doubled the race on a 128k power grid).
-/// Contract: timing (the race decides as without the speculation).
-pub const RACE_EAGER_ND_MIN_NNZ: usize = 2_000_000;
-
 /// Seeds of the nested-dissection ensemble, `nd.seed` upwards (seeds).
 /// Used by: `RaceSettings::ensemble_size`.
 /// Why: tuned default.

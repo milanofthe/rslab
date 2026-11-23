@@ -130,7 +130,7 @@ pub fn analyze_pattern(
         if method == OrderingMethod::Auto && ordering.permutation.is_none() {
             race::race(&graph, ordering)?
         } else {
-            race::prefix(&graph, ordering, method, ordering.nd.seed)?
+            race::prefix(&graph, ordering, method, ordering.nd.seed, None)?
         }
     };
     let _s = rsprobe::scope!(DEBUG, "supernodes");
@@ -340,7 +340,7 @@ mod tests {
             OrderingMethod::MetisND,
             OrderingMethod::Rcm,
         ] {
-            let grouped = graph.order(method, 1).unwrap();
+            let grouped = graph.order(method, 1, None).unwrap();
             let direct = ordering_graph::structure(&full, grouped.perm.clone());
             assert_eq!(grouped.etree.parent, direct.etree.parent, "{method:?}");
             assert_eq!(grouped.col_counts, direct.col_counts, "{method:?}");

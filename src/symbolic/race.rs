@@ -19,6 +19,8 @@ use crate::numeric::settings::{AmalgamationSettings, OrderingSettings};
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::{biased_postorder, postorder};
 use crate::sparse::csc::CscPattern;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 /// A candidate: its ordering (new-to-old, before the postorder) with the
 /// elimination tree, column counts and exact scalar factor size under it.
@@ -56,16 +58,17 @@ fn prefix_work(px: &Prefix, workers: usize) -> u64 {
 }
 
 /// The candidate for the concrete `method` (or the given permutation where
-/// the settings carry one).
+/// the settings carry one); nested dissection fails once `stop` is set.
 pub(super) fn prefix(
     graph: &OrderingGraph,
     ordering: &OrderingSettings,
     method: OrderingMethod,
     nd_seed: u64,
+    stop: Option<&Arc<AtomicBool>>,
 ) -> Result<Prefix, RslabError> {
     let s = match &ordering.permutation {
         Some(p) => structure(graph.pattern, checked_permutation(p, graph.pattern.n)?),
-        None => graph.order(method, nd_seed)?,
+        None => graph.order(method, nd_seed, stop)?,
     };
     Ok(Prefix {
         factor_nnz: total_factor_nnz(&s.col_counts),
@@ -96,7 +99,7 @@ pub(super) fn race(
     graph: &OrderingGraph,
     ordering: &OrderingSettings,
 ) -> Result<Prefix, RslabError> {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
     use std::sync::OnceLock;
     // Stage 1: the cheap candidates run concurrently (each prefix is itself
     // mostly sequential, so the race wall is roughly the slowest candidate);
@@ -104,16 +107,14 @@ pub(super) fn race(
     // breaking ties - regardless of completion order.
     //
     // With more than one worker, the first nested-dissection seed starts
-    // speculatively instead of after stage 1: the ND prefixes are the longest
-    // part of the race, and stage 1 leaves most workers idle. On patterns
-    // with at least `eager_nd_min_nnz` entries it starts at once; on smaller
-    // ones only once the first candidate predicts enough work to pass the ND
-    // gate, because a discarded ND run on a small pattern outlasts the whole
-    // stage 1 (it doubled the race on a 128k power grid). The other ensemble
-    // seeds start as soon as stage 1 has decided that they count. Stage 2
-    // decides from stage 1 alone which seeds count, exactly as it would have
-    // run them, so the result does not depend on the thread count or on
-    // whether anything was speculated.
+    // speculatively with stage 1 instead of after it: the ND prefixes are
+    // the longest part of the race, and stage 1 leaves most workers idle.
+    // Where stage 1 decides that no seed counts, the speculative one is
+    // stopped, so a discarded dissection ends with stage 1 instead of
+    // outlasting it. The other ensemble seeds start as soon as stage 1 has
+    // decided that they count. Stage 2 decides from stage 1 alone which
+    // seeds count, exactly as it would have run them, so the result does
+    // not depend on the thread count or on whether anything was speculated.
     let r = &ordering.race;
     let Some((&first, rest)) = r.candidates.split_first() else {
         return Err(RslabError::InvalidInput(
@@ -141,8 +142,8 @@ pub(super) fn race(
     let all = crate::parallel::Work::ns(ordering_ns * r.candidates.len() as f64);
     let side = crate::parallel::width(all.time(), r.candidates.len()) > 1;
     let parallel = n > r.nd_min_n && side;
-    // The lower triangle's entry count, as the gate was calibrated on it.
-    let eager = parallel && (graph.pattern.row_idx.len() + n) / 2 >= r.eager_nd_min_nnz;
+    // Set where stage 1 discards the speculative dissection.
+    let stop = Arc::new(AtomicBool::new(false));
     // One ordering graph for every candidate: built per candidate it cost as
     // much as a minimum-degree ordering.
     graph.prepare();
@@ -159,30 +160,30 @@ pub(super) fn race(
     let (mut best, last_err, seeds) = crate::parallel::scope(scoped, |sc| {
         let start = |i: usize| {
             if !started[i].swap(true, Ordering::Relaxed) {
-                let nd = &nd;
+                let (nd, stop) = (&nd, &stop);
                 sc.spawn(move |_| {
-                    let px = prefix(graph, ordering, OrderingMethod::MetisND, seed + i as u64);
+                    let px = prefix(
+                        graph,
+                        ordering,
+                        OrderingMethod::MetisND,
+                        seed + i as u64,
+                        Some(stop),
+                    );
                     let _ = nd[i].set(px.ok());
                 });
             }
         };
-        if eager {
+        if parallel {
             start(0);
         }
         let (head, tail) = crate::parallel::join(
             all,
-            || {
-                let px = prefix(graph, ordering, first, seed);
-                if parallel
-                    && matches!(&px, Ok(p) if prefix_work(p, r.assumed_workers) >= r.nd_min_work)
-                {
-                    start(0);
-                }
-                px
-            },
+            || prefix(graph, ordering, first, seed, None),
             || {
                 let work = crate::parallel::Work::ns(ordering_ns * rest.len() as f64);
-                crate::parallel::map(rest.len(), work, |i| prefix(graph, ordering, rest[i], seed))
+                crate::parallel::map(rest.len(), work, |i| {
+                    prefix(graph, ordering, rest[i], seed, None)
+                })
             },
         );
         let mut best: Option<Prefix> = None;
@@ -214,6 +215,9 @@ pub(super) fn race(
             }
             _ => 0,
         };
+        if seeds == 0 {
+            stop.store(true, Ordering::Relaxed);
+        }
         for i in 0..seeds {
             start(i);
         }

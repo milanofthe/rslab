@@ -271,7 +271,6 @@ fn the_race_is_thread_count_invariant() {
     let mut open = SolverSettings::default().with_nd_ensemble(true);
     let race = &mut open.ordering.race;
     (race.nd_min_n, race.nd_min_work, race.ensemble_min_flops) = (0, 0, 0);
-    race.eager_nd_min_nnz = 0;
     let solve = |t: usize| -> Vec<f64> {
         let sym = LdltSymbolic::analyze(&a, &open.clone().with_threads(t)).unwrap();
         sym.factor(&a, &SolverSettings::default().with_threads(4))

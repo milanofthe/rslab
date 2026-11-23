@@ -227,10 +227,6 @@ pub struct RaceSettings {
     pub nd_min_work: u64,
     /// Workers the time prediction assumes. Default `4`.
     pub assumed_workers: usize,
-    /// Patterns with at least this many entries (lower triangle) start the
-    /// dissection at once, speculatively, where more than one worker is
-    /// available. Default `2_000_000`.
-    pub eager_nd_min_nnz: usize,
     /// Keep the best of several dissection seeds on heavy factorizations.
     /// Buys up to a few percent of fill (15 percent on 3D meshes) for more
     /// dissections, which pays over many refactorizations of one analysis.
@@ -254,7 +250,6 @@ impl Default for RaceSettings {
             nd_min_n: RACE_ND_MIN_N,
             nd_min_work: RACE_ND_MIN_WORK,
             assumed_workers: RACE_ASSUMED_WORKERS,
-            eager_nd_min_nnz: RACE_EAGER_ND_MIN_NNZ,
             ensemble: false,
             ensemble_size: RACE_ENSEMBLE_SIZE,
             ensemble_min_flops: RACE_ENSEMBLE_MIN_FLOPS,
