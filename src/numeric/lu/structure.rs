@@ -118,10 +118,12 @@ impl LuStructure {
                 })
                 .sum();
             let work = crate::parallel::Work::of(entries as f64, &STRUCTURE_RATE);
-            let built = crate::parallel::map(level.len(), work, |i| {
-                let s = level[i];
+            // Only lower levels are read: this level's seeds move out.
+            let seeds: Vec<_> = (level.iter())
+                .map(|&s| (s, std::mem::take(&mut ext[s])))
+                .collect();
+            let built = crate::parallel::map_owned(seeds, work, |(s, (mut l, mut u))| {
                 let (first, last) = (sym.supernodes[s].first_col, end(s));
-                let (mut l, mut u) = (ext[s].0.clone(), ext[s].1.clone());
                 for &k in sched.updaters(s) {
                     let (lk, uk) = &ext[k as usize];
                     if Self::hits(uk, first, last) {
