@@ -151,7 +151,7 @@ fn main() {
             let a =
                 fem::convection_diffusion::<f64>(&[size, size], 0.01, fem::Flow::Rotating, true);
             let (n, nnz) = (a.n, a.row_idx.len());
-            let s = KluSettings::default();
+            let s = KluSettings::default().with_threads(threads);
             let (mut times, mut hash) = (Times::default(), 0);
             for run in 0..=reps {
                 let keep = run > 0;

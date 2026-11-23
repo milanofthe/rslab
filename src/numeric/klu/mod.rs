@@ -177,6 +177,8 @@ impl BlockCaps {
 struct KluFactors<T> {
     /// The flag armed for the factorization, carried so `refactor` polls it too.
     interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The workers of the factorization, which every refactor replays on.
+    threads: crate::numeric::settings::Threads,
     n: usize,
     nnz_a: usize,
     block_ptr: Vec<usize>,

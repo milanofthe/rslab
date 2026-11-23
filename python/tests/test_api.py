@@ -125,6 +125,9 @@ def test_klu_settings():
     d = s.to_dict()
     assert d["pivot_threshold"] == 0.5 and d["parallel"] is False and d["btf"] is True
     assert rslab.KluSettings().to_dict()["parallel"] is None
+    assert rslab.KluSettings().to_dict()["threads"] is None
+    assert rslab.KluSettings(threads=2).to_dict()["threads"] == 2
+    assert rslab.KluSettings(threads="ambient").to_dict()["threads"] == "ambient"
     with pytest.raises(TypeError):
         rslab.KluSettings(ordering="amd")
     f = rslab.klu(_circuit(300), settings=s)

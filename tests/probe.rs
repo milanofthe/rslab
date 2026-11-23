@@ -2,7 +2,9 @@
 //! scopes, its counts as measures at them, its log lines as events there. A
 //! setting the chosen path does not read is a WARN event the record keeps.
 
-use rslab::{CscMatrix, LdltSolver, SolverSettings};
+use rslab::{
+    CscMatrix, GeneralCsc, KluParallel, KluSettings, KluSymbolic, LdltSolver, SolverSettings,
+};
 use rsprobe::{Buffer, Context, Kind, Level};
 
 /// 2D 5-point grid Laplacian (k x k), SPD-shifted, lower triangle.
@@ -112,4 +114,61 @@ fn finer_scopes_open_with_the_threshold() {
 fn f_supernodes(a: &CscMatrix<f64>) -> u64 {
     let f = LdltSolver::factor(a, &SolverSettings::exact()).unwrap();
     f.diagnostics().decisions.n_supernodes as u64
+}
+
+/// Unsymmetric 2D convection-diffusion grid (k x k), one irreducible block.
+fn grid_unsym(k: usize) -> GeneralCsc<f64> {
+    let n = k * k;
+    let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..k {
+        for j in 0..k {
+            let p = i * k + j;
+            rows.push(p);
+            cols.push(p);
+            vals.push(4.5);
+            for (ii, jj, v) in [(i + 1, j, -1.3), (i, j + 1, -0.7)] {
+                if ii < k && jj < k {
+                    let q = ii * k + jj;
+                    rows.extend([q, p]);
+                    cols.extend([p, q]);
+                    vals.extend([v, -2.0 - v]);
+                }
+            }
+        }
+    }
+    GeneralCsc::from_triplets(n, &rows, &cols, &vals).unwrap()
+}
+
+#[test]
+fn klu_runs_on_the_workers_its_settings_set() {
+    // Called from a worker of a wider pool, with every replay forced side by
+    // side: the threads busy under each phase are those of the policy, not
+    // the caller's pool.
+    let width = 2;
+    let ctx = Context::builder().threshold(Level::INFO).build();
+    let a = grid_unsym(120);
+    let s = (KluSettings::default())
+        .with_parallel(KluParallel::On)
+        .with_threads(width);
+    let wide = rayon::ThreadPoolBuilder::new()
+        .num_threads(4 * width)
+        .build()
+        .unwrap();
+    wide.install(|| {
+        let _on = ctx.enter();
+        let sym = KluSymbolic::analyze(&a, &s).unwrap();
+        let mut f = sym.factor(&a, &s).unwrap();
+        for _ in 0..3 {
+            f.refactor(&a).unwrap();
+        }
+    });
+    let r = ctx.record();
+    for phase in ["analyze", "factor", "refactor"] {
+        let node = &r.nodes[r.find(&[phase]).unwrap() as usize];
+        let (wall, busy) = (node.get("wall") as f64, node.get("busy") as f64);
+        assert!(
+            busy <= width as f64 * wall,
+            "{phase}: busy {busy} ns over wall {wall} ns on {width} threads"
+        );
+    }
 }

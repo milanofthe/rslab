@@ -97,6 +97,7 @@ class KluSettings:
         par_min_nnz: int | None = ...,
         par_min_work: int | None = ...,
         par_min_ratio: float | None = ...,
+        threads: int | str | tuple[str, int] | None = ...,
         interrupt: Interrupt | None = ...,
     ) -> None: ...
     def to_dict(self) -> dict[str, Any]: ...
