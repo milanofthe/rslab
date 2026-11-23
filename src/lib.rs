@@ -123,7 +123,9 @@
 //! `tuning` has run), capped at 4 so concurrent solves coexist;
 //! [`Threads::Fixed`] pins it and [`Threads::Ambient`] runs on the
 //! surrounding rayon pool, which keeps a factorization and the solves after
-//! it on one pool. A caller-owned flag ([`SolverSettings::with_interrupt`])
+//! it on one pool. The KLU path takes the same policy
+//! ([`KluSettings::threads`]) and enters its pool only for a factor or
+//! refactor with work worth a second thread. A caller-owned flag ([`SolverSettings::with_interrupt`])
 //! cancels a running factorization at the next supernode or panel boundary.
 //!
 //! ## Tuning
