@@ -4,7 +4,8 @@
 //! runs after one warm-up, on one JSON line with the hash of the solution's
 //! bits. The timed runs record into an rsprobe context, written to the path in
 //! `RSPROBE_RECORD` (parameters: case, n, nnz, threads) for
-//! `python -m rsprobe report`; with `--features rsprobe/on` only.
+//! `python -m rsprobe report`; with `--features rsprobe/on` only. The
+//! context's threshold is INFO, or `debug` or `trace` from `RSPROBE_LEVEL`.
 //!
 //! `cargo run --release --features matgen --example phases -- <case> [size] [threads] [reps]`
 //!
@@ -110,7 +111,12 @@ fn main() {
     let threads: usize = arg(3).and_then(|s| s.parse().ok()).unwrap_or(1);
     let reps: usize = arg(4).and_then(|s| s.parse().ok()).unwrap_or(5);
     let opts = SolverSettings::default().with_threads(Threads::Fixed(threads));
-    let ctx = rsprobe::Context::new();
+    let level = match std::env::var("RSPROBE_LEVEL").as_deref() {
+        Ok("trace") => rsprobe::Level::TRACE,
+        Ok("debug") => rsprobe::Level::DEBUG,
+        _ => rsprobe::Level::INFO,
+    };
+    let ctx = rsprobe::Context::builder().threshold(level).build();
     let grid = [size; 3];
     let ((times, hash), n, nnz) = match case.as_str() {
         "laplace3d" => {
