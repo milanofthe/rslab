@@ -600,6 +600,7 @@ dependencies = [
  "rslab-metis",
  "rslab-ordering-core",
  "rspool",
+ "rsprobe",
  "serde",
  "serde_json",
  "sysinfo",
@@ -643,15 +644,22 @@ dependencies = [
  "pyo3",
  "rayon",
  "rslab",
+ "rsprobe",
 ]
 
 [[package]]
 name = "rspool"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rspool?rev=126e64c#126e64c45a9234137330e9d2d86cebb699d92227"
+source = "git+https://github.com/milanofthe/rspool?rev=3e652a2#3e652a23a841fe0adef97418acb9265017320098"
 dependencies = [
  "rayon",
+ "rsprobe",
 ]
+
+[[package]]
+name = "rsprobe"
+version = "0.1.0"
+source = "git+https://github.com/milanofthe/rsprobe?rev=91e605d#91e605d6256fcba6ce2bd2d5e4d99bb759da09fa"
 
 [[package]]
 name = "rustc-hash"

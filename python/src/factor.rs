@@ -387,29 +387,27 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         let bvec = vector::<T>(b, "rhs")?;
         let policy = refine_policy(refine, target, measure, system)?;
         let x = crate::logging::run(py, || {
-                if policy.max_steps > 0 {
-                    self.s
-                        .solve_refined(&self.a, &bvec, &policy)
-                        .map(|(x, _)| x)
-                } else {
-                    self.s.solve(&bvec)
-                }
-            })
-            .map_err(map_err)?;
+            if policy.max_steps > 0 {
+                self.s
+                    .solve_refined(&self.a, &bvec, &policy)
+                    .map(|(x, _)| x)
+            } else {
+                self.s.solve(&bvec)
+            }
+        })
+        .map_err(map_err)?;
         Ok(array1(py, x))
     }
 
     pub fn solve_transpose(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         let bvec = vector::<T>(b, "rhs")?;
-        let x = crate::logging::run(py, || self.s.solve_transpose(&bvec))
-            .map_err(map_err)?;
+        let x = crate::logging::run(py, || self.s.solve_transpose(&bvec)).map_err(map_err)?;
         Ok(array1(py, x))
     }
 
     pub fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         let (n, nrhs, cm) = block::<T>(b, "rhs")?;
-        let x = crate::logging::run(py, || self.s.solve_many(&cm, nrhs))
-            .map_err(map_err)?;
+        let x = crate::logging::run(py, || self.s.solve_many(&cm, nrhs)).map_err(map_err)?;
         array2(py, &x, n, nrhs)
     }
 
@@ -424,8 +422,8 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
 
     pub fn inverse(&self, py: Python<'_>) -> PyResult<PyObject> {
         let n = self.n();
-        let x = crate::logging::run(py, || Factorization::<T>::inverse(&self.s))
-            .map_err(map_err)?;
+        let x =
+            crate::logging::run(py, || Factorization::<T>::inverse(&self.s)).map_err(map_err)?;
         array2(py, &x, n, n)
     }
 

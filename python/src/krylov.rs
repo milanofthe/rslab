@@ -173,8 +173,10 @@ pub fn gmres<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
                     "recycle dtype does not match the factor dtype",
                 )
             })?;
-            crate::logging::run(py, || gmres_recycled_core(op, &rhs, pc, &s, x0v.as_deref(), handle))
-                .map_err(map_err)?
+            crate::logging::run(py, || {
+                gmres_recycled_core(op, &rhs, pc, &s, x0v.as_deref(), handle)
+            })
+            .map_err(map_err)?
         }
     };
     single(py, r)
@@ -205,8 +207,10 @@ pub fn gmres_block<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
         }
         None => None,
     };
-    let r = crate::logging::run(py, || gmres_block_core(op, &cm, nrhs, pc, &s, x0v.as_deref(), None))
-        .map_err(map_err)?;
+    let r = crate::logging::run(py, || {
+        gmres_block_core(op, &cm, nrhs, pc, &s, x0v.as_deref(), None)
+    })
+    .map_err(map_err)?;
     blocked(py, r, n, nrhs)
 }
 

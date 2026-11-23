@@ -18,10 +18,7 @@ pub type C32 = Complex<f32>;
 /// per-thread heaps, which is what makes the per-product buffers of the dense
 /// kernels cheap inside one call; the scoped pool's workers exit afterwards and
 /// leave those heaps holding up to the factor size again until forced.
-pub fn heavy<R: pyo3::marker::Ungil>(
-    py: Python<'_>,
-    f: impl pyo3::marker::Ungil + FnOnce() -> R,
-) -> R {
+pub fn heavy<R: Send>(py: Python<'_>, f: impl Send + FnOnce() -> R) -> R {
     let out = crate::logging::run(py, f);
     collect();
     out

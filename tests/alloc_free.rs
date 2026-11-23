@@ -26,21 +26,21 @@ static ALLOC: rsprobe::Alloc = rsprobe::Alloc::new();
 /// work-stealing queues grow and retire buffers now and then.
 const POOL: u64 = 5;
 
-/// Allocations of `f` after two warm-up runs, over a hundred runs, in a
-/// context at `threshold`.
-fn allocs(threshold: Level, mut f: impl FnMut()) -> u64 {
-    f();
-    f();
-    counted(threshold, || (0..100).for_each(|_| f()))
+/// Allocations of `f` over a hundred runs after two warm-up runs.
+fn allocs(threshold: Level, f: impl FnMut()) -> u64 {
+    counted(threshold, 2, 100, f)
 }
 
-/// Allocations of `f`, in a scope of a context at `threshold`.
-fn counted(threshold: Level, f: impl FnOnce()) -> u64 {
+/// Allocations of `f` over `runs` runs after `warm` warm-up runs, in a scope
+/// of a context at `threshold` (the warm-up runs in the context too: the
+/// first entry of a pool's worker into it).
+fn counted(threshold: Level, warm: usize, runs: usize, mut f: impl FnMut()) -> u64 {
     let ctx = Context::builder().threshold(threshold).build();
     let _on = ctx.enter();
+    (0..warm).for_each(|_| f());
     {
         let _s = rsprobe::scope!(ERROR, "runs");
-        f();
+        (0..runs).for_each(|_| f());
     }
     let r = ctx.record();
     let node = r.find(&["runs"]).expect("the runs' scope");
@@ -84,7 +84,7 @@ macro_rules! check_solves {
         let one = allocs($level, || {
             s.solve_into(&b[..n], &mut x[..n], &mut work).unwrap()
         });
-        assert!(one <= $limit, "{}: solve_into allocates", $what);
+        assert!(one <= $limit, "{}: solve_into allocates {one}", $what);
         assert_eq!(
             x[..n],
             s.solve(&b[..n]).unwrap()[..],
@@ -95,7 +95,11 @@ macro_rules! check_solves {
             s.solve_transpose_into(&b[..n], &mut x[..n], &mut work)
                 .unwrap()
         });
-        assert!(tr <= $limit, "{}: solve_transpose_into allocates", $what);
+        assert!(
+            tr <= $limit,
+            "{}: solve_transpose_into allocates {tr}",
+            $what
+        );
         assert_eq!(
             x[..n],
             s.solve_transpose(&b[..n]).unwrap()[..],
@@ -107,7 +111,7 @@ macro_rules! check_solves {
         });
         assert!(
             !$many_free || many <= $limit,
-            "{}: solve_many_into allocates",
+            "{}: solve_many_into allocates {many}",
             $what
         );
         assert_eq!(
@@ -249,11 +253,8 @@ fn block_arnoldi_steps_allocate_nothing() {
         .map(|i| Complex::new(1.0 + i as f64, 0.5))
         .collect();
     let mut ar = BlockArnoldi::new(&r, n, 2, 24, &KrylovSettings::default()).unwrap();
-    ar.step(&op).unwrap();
-    let steps = counted(Level::INFO, || {
-        for _ in 0..20 {
-            ar.step(&op).unwrap();
-        }
+    let steps = counted(Level::INFO, 1, 20, || {
+        ar.step(&op).unwrap();
     });
     assert_eq!(steps, 0, "allocations in 20 steps");
 }

@@ -54,14 +54,14 @@ fn name(level: Option<Level>) -> &'static str {
 
 /// `f` without the GIL in the module's context, then its events to the sink
 /// (or to stderr without one).
-pub fn run<R: pyo3::marker::Ungil>(
-    py: Python<'_>,
-    f: impl pyo3::marker::Ungil + FnOnce() -> R,
-) -> R {
+pub fn run<R: Send>(py: Python<'_>, f: impl Send + FnOnce() -> R) -> R {
     let (ctx, buffer) = state(|s| {
         if s.ctx.is_none() {
             if let Some(level) = s.level {
-                let ctx = Context::builder().threshold(level).sink(s.buffer.clone()).build();
+                let ctx = Context::builder()
+                    .threshold(level)
+                    .sink(s.buffer.clone())
+                    .build();
                 s.ctx = Some(Arc::new(ctx));
             }
         }
