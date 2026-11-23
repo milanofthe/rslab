@@ -109,6 +109,27 @@ impl SupernodalAnalysis {
             .unwrap_or(0)
     }
 
+    /// The counts of this analysis of `nnz` stored entries as measures at the
+    /// current scope, and its decisions as an INFO event there.
+    pub(crate) fn probe(&self, nnz: usize, requested: crate::symbolic::OrderingMethod) {
+        rsprobe::add!("nonzeros", nnz);
+        rsprobe::add!("supernodes", self.n_supernodes());
+        rsprobe::info!("{}", self.describe(nnz, requested));
+    }
+
+    /// The analysis in one line: size, ordering and supernodes.
+    fn describe(&self, nnz: usize, requested: crate::symbolic::OrderingMethod) -> String {
+        let d = self.decisions(requested);
+        let asked = match d.ordering_used == d.ordering_requested {
+            true => String::new(),
+            false => format!(" (requested {})", d.ordering_requested),
+        };
+        format!(
+            "n={} nnz(A)={nnz} ordering={}{asked} supernodes={} max_front={} levels={}",
+            self.n, d.ordering_used, d.n_supernodes, d.max_front, d.tree_levels
+        )
+    }
+
     /// The decisions the analysis took on its own (what `Auto` resolved to),
     /// for the [`Diagnostics`](crate::Diagnostics) of every factorization
     /// reusing it. `requested` is the ordering the caller asked for.
@@ -188,15 +209,14 @@ fn analyze_with_inner(
             nnz,
         });
     }
-    let mut sym = crate::logging::timed(
-        || format!("analysis: symbolic {:?}", opts.ordering.method),
-        || crate::symbolic::analyze_pattern(pattern, &opts.ordering, &opts.amalgamation),
-    )?;
+    let mut sym = crate::symbolic::analyze_pattern(pattern, &opts.ordering, &opts.amalgamation)?;
     // The schedule reads the pattern for the last time: past it the pattern
     // (an index per entry of `A + A^T`, the largest part of the analysis) is
     // dead weight every factorization of the pattern would carry.
-    let ll_schedule =
-        crate::logging::timed(|| "analysis: schedule".into(), || LlSchedule::build(&sym));
+    let ll_schedule = {
+        let _s = rsprobe::scope!(DEBUG, "schedule");
+        LlSchedule::build(&sym)
+    };
     sym.pattern = CscPattern {
         n,
         col_ptr: Vec::new(),

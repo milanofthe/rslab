@@ -6,7 +6,9 @@
 //!
 //! `cargo run --release --example mtx_bench -- <file.mtx> [threads]`
 use num_complex::Complex;
-use rslab::{KluSettings, LdltSolver, LuSolver, MtxLoaded, OrderingMethod, SolverSettings};
+use rslab::{
+    KluSettings, LdltSymbolic, LuSolver, LuSymbolic, MtxLoaded, OrderingMethod, SolverSettings,
+};
 use std::time::Instant;
 
 type C = Complex<f64>;
@@ -21,6 +23,13 @@ fn best<R>(reps: usize, mut f: impl FnMut() -> R) -> (f64, R) {
         out = Some(r);
     }
     (t_best, out.unwrap())
+}
+
+/// Factor throughput: million unknowns and Gflop (the analysis's flop
+/// estimate) per second of the factorization's `secs`.
+fn rates(n: usize, d: &rslab::Diagnostics, secs: f64) -> (f64, f64) {
+    let flops = d.estimate.map_or(0, |e| e.factor_flops) as f64;
+    (n as f64 / secs / 1e6, flops / secs / 1e9)
 }
 
 fn main() {
@@ -98,10 +107,10 @@ fn main() {
                     if let Some(n) = std::env::var("MTX_NEMIN").ok().and_then(|v| v.parse().ok()) {
                         opts = opts.with_nemin(n);
                     }
-                    let (t_all, s) = best(reps, || LdltSolver::factor(&ar, &opts).unwrap());
-                    let d = s.diagnostics();
-                    let r = d.rates();
-                    let ana = d.stage_ms("analyze").unwrap_or(0.0);
+                    let (ta, sym) = best(reps, || LdltSymbolic::analyze(&ar, &opts).unwrap());
+                    let (tf, s) = best(reps, || sym.factor(&ar, &opts).unwrap());
+                    let (t_all, ana) = (ta + tf, ta * 1e3);
+                    let (mdof, gf) = rates(n, &s.diagnostics(), tf);
                     let (ts, x) = best(5, || s.solve(&b).unwrap());
                     let bb: Vec<f64> = (0..n * 8).map(|k| ((k * 11) % 17) as f64 - 8.0).collect();
                     let (t8, _) = best(3, || s.solve_many(&bb, 8).unwrap());
@@ -119,7 +128,7 @@ fn main() {
                         / b.iter().map(|v| v * v).sum::<f64>().sqrt();
                     println!("{name:>7} {:>10} {:>5.1} | {ana:>8.0} {:>8.1} {:>7.2} {:>6.1} | {:>8.2} {:>7.1} {:>9.2} {:>7.1}   total={t_all:.2}s res={rn:.1e}",
                         s.factor_nnz(), s.factor_nnz() as f64 / ar.values.len() as f64,
-                        d.stage_ms("factor").unwrap_or(0.0), r.factor_mdof_s, r.factor_gflops,
+                        tf * 1e3, mdof, gf,
                         ts * 1e3, n as f64 / ts / 1e6, t8 * 1e3, 8.0 * n as f64 / t8 / 1e6);
                 }
                 return;
@@ -155,10 +164,10 @@ fn main() {
                 if threads > 0 {
                     opts = opts.with_threads(threads);
                 }
-                let (t_all, s) = best(reps, || LdltSolver::factor(&a, &opts).unwrap());
-                let d = s.diagnostics();
-                let r = d.rates();
-                let ana = d.stage_ms("analyze").unwrap_or(0.0);
+                let (ta, sym) = best(reps, || LdltSymbolic::analyze(&a, &opts).unwrap());
+                let (tf, s) = best(reps, || sym.factor(&a, &opts).unwrap());
+                let (t_all, ana) = (ta + tf, ta * 1e3);
+                let (mdof, gf) = rates(n, &s.diagnostics(), tf);
                 let (ts, x) = best(5, || s.solve(&b).unwrap());
                 let bb: Vec<C> = (0..n * 8)
                     .map(|k| C::new(((k * 11) % 17) as f64 - 8.0, 0.0))
@@ -178,7 +187,7 @@ fn main() {
                     / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
                 println!("{name:>7} {:>10} {:>5.1} | {ana:>8.0} {:>8.1} {:>7.2} {:>6.1} | {:>8.2} {:>7.1} {:>9.2} {:>7.1}   total={t_all:.2}s res={rn:.1e}",
                     s.factor_nnz(), s.factor_nnz() as f64 / a.values.len() as f64,
-                    d.stage_ms("factor").unwrap_or(0.0), r.factor_mdof_s, r.factor_gflops,
+                    tf * 1e3, mdof, gf,
                     ts * 1e3, n as f64 / ts / 1e6, t8 * 1e3, 8.0 * n as f64 / t8 / 1e6);
             }
         }
@@ -301,23 +310,20 @@ fn main() {
                 if let Some(o) = om {
                     opts = opts.with_ordering(o);
                 }
-                let r = std::panic::catch_unwind(|| LuSolver::factor(&a, &opts).unwrap());
-                let Ok(s) = r else {
+                let r = std::panic::catch_unwind(|| {
+                    let (ta, sym) = best(1, || LuSymbolic::analyze(&a, &opts).unwrap());
+                    let (tf, s) = best(1, || sym.factor(&a, &opts).unwrap());
+                    (ta, tf, s)
+                });
+                let Ok((ta, tf, s)) = r else {
                     println!("{name:>7} lu failed");
                     continue;
                 };
-                let d = s.diagnostics();
-                let rt = d.rates();
+                let (mdof, gf) = rates(n, &s.diagnostics(), tf);
                 let (ts, x) = best(5, || s.solve(&b).unwrap());
-                let plan_mb = d
-                    .stages
-                    .iter()
-                    .find(|st| st.name == "solve-layout")
-                    .map_or(0.0, |st| st.bytes as f64 / 1e6);
-                println!("{:>7} nnzLU={:>9} fill={:>5.1} plan={:>6.1} MB | analyze {:>8.0} ms factor {:>8.1} ms ({:.2} MDOF/s, {:.1} GF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={:.1e}",
-                    format!("lu-{name}"), s.factor_nnz(), s.factor_nnz() as f64 / a.values.len() as f64, plan_mb,
-                    d.stage_ms("analyze").unwrap_or(0.0), d.stage_ms("factor").unwrap_or(0.0), rt.factor_mdof_s, rt.factor_gflops,
-                    ts * 1e3, n as f64 / ts / 1e6, resid(&a, &x, &b));
+                println!("{:>7} nnzLU={:>9} fill={:>5.1} | analyze {:>8.0} ms factor {:>8.1} ms ({mdof:.2} MDOF/s, {gf:.1} GF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={:.1e}",
+                    format!("lu-{name}"), s.factor_nnz(), s.factor_nnz() as f64 / a.values.len() as f64,
+                    ta * 1e3, tf * 1e3, ts * 1e3, n as f64 / ts / 1e6, resid(&a, &x, &b));
             }
         }
     }

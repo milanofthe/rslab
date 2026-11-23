@@ -143,11 +143,19 @@
 //! memory available and for scheduling factorizations side by side.
 //! [`LdltSymbolic::estimate_memory`] condenses it with the flops
 //! ([`MemoryEstimate`]). After it, every factor
-//! answers `diagnostics()` ([`Diagnostics`]): stage times, fill, threads, the
-//! decisions taken (ordering, scaling, pivoting), and the settings the chosen
-//! path did not read. [`logging`] has one level (`RLA_LOG`, default
-//! `warning`) and one replaceable sink. Refined solves report what they
+//! answers `diagnostics()` ([`Diagnostics`]): fill, threads, the decisions
+//! taken (ordering, scaling, pivoting), the pivots, the solve counts and the
+//! settings the chosen path did not read. Refined solves report what they
 //! achieved ([`RefinePolicy`], [`RefineOutcome`]).
+//!
+//! ## Profiling and logging
+//!
+//! The phases are [`rsprobe`] scopes (`analyze`, `factor`, `refactor`,
+//! `solve`, `refine` and their parts, finer ones at DEBUG and TRACE), the
+//! counts a factorization is tuned by are measures at their scope, and the
+//! log lines are events at the scope they belong to. They record into the
+//! `rsprobe::Context` the caller has entered, and only in a binary that
+//! enables `rsprobe/on`; without it they compile to nothing.
 //!
 //! ## Allocator
 //!
@@ -171,7 +179,6 @@ pub(crate) mod diagnostics;
 pub(crate) mod error;
 pub(crate) mod inertia;
 pub(crate) mod io;
-pub mod logging;
 pub(crate) mod memory;
 // Test-matrix generators (feature `matgen`) for the benches and tests;
 // `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
@@ -198,9 +205,7 @@ pub mod symbolic;
 #[doc(hidden)]
 pub mod tuning;
 
-pub use diagnostics::{
-    Decisions, Diagnostics, MemoryEstimate, NumericReport, Rates, SolveStats, StageReport,
-};
+pub use diagnostics::{Decisions, Diagnostics, MemoryEstimate, NumericReport, SolveStats};
 pub use error::RslabError;
 pub use inertia::Inertia;
 pub use io::mtx::{
@@ -208,7 +213,6 @@ pub use io::mtx::{
     parse_mtx_complex_general, read_mtx, read_mtx_any, read_mtx_complex, write_mtx,
     write_mtx_array, write_mtx_symmetric, MtxLoaded, MtxMatrix,
 };
-pub use logging::{LogLevel, LogSink};
 pub use memory::MemoryPlan;
 pub use refine::{
     BackwardError, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy, RefineSystem,

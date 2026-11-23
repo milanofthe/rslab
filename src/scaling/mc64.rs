@@ -180,7 +180,10 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
         u,
         v,
         n_matched,
-    } = crate::logging::timed(|| "mc64: hungarian".into(), || hungarian_match(&graph));
+    } = {
+        let _s = rsprobe::scope!(DEBUG, "hungarian");
+        hungarian_match(&graph)
+    };
     Ok(Mc64Cache {
         perm,
         u,

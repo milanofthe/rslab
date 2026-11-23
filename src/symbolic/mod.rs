@@ -97,11 +97,8 @@ pub fn full_pattern(
     col_ptr: &[usize],
     row_idx: &[usize],
 ) -> Result<CscPattern<i32>, RslabError> {
-    crate::logging::timed(
-        || "analysis: symmetric pattern".into(),
-        || crate::sparse::csc::symmetric_pattern(n, col_ptr, row_idx),
-    )
-    .ok_or_else(|| {
+    let _s = rsprobe::scope!(DEBUG, "pattern");
+    crate::sparse::csc::symmetric_pattern(n, col_ptr, row_idx).ok_or_else(|| {
         RslabError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
     })
 }
@@ -128,6 +125,7 @@ pub fn analyze_pattern(
     // The ordering graph (and the compressed graph it may build) is dropped
     // before the finish.
     let px = {
+        let _s = rsprobe::scope!(DEBUG, "ordering");
         let graph = OrderingGraph::new(&full, ordering);
         if method == OrderingMethod::Auto && ordering.permutation.is_none() {
             race::race(&graph, ordering)?
@@ -135,10 +133,8 @@ pub fn analyze_pattern(
             race::prefix(&graph, ordering, method, ordering.nd.seed)?
         }
     };
-    crate::logging::timed(
-        || "analysis: finish".into(),
-        || race::finish(px, full, amalgamation),
-    )
+    let _s = rsprobe::scope!(DEBUG, "supernodes");
+    race::finish(px, full, amalgamation)
 }
 
 #[cfg(test)]

@@ -102,8 +102,9 @@ def breakdown(data, ax, names):
     for yi, s in enumerate(names):
         ref = med(data[s]["pardiso"], "oneshot")
         rs = data[s]["rslab"]
-        stages = rs["report"].get("stages", {})
-        # Stage times come from the last run; scale them to the median factor call.
+        # Stage times come from the last run (revisions that report them; else the
+        # factor call whole); scale them to the median factor call.
+        stages = rs["report"].get("stages") or {"factor": 1.0}
         in_factor = sum(stages.get(k, 0.0) for k in ("scale", "factor", "solve-layout")) or 1.0
         f = med(rs, "factor") / in_factor
         parts = {"analyze": med(rs, "analyze"), "scale": stages.get("scale", 0.0) * f,

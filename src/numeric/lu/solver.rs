@@ -142,9 +142,8 @@ pub struct LuSymbolic {
     pub(super) n: usize,
     pub(super) nnz: usize,
     pub(super) matching: Option<LuMatching>,
-    /// Wall time of the analysis and the ordering it was asked for, carried
-    /// into the diagnostics of every factorization reusing it.
-    pub(super) analyze_ms: f64,
+    /// The ordering the analysis was asked for, carried into the
+    /// diagnostics of every factorization reusing it.
     pub(super) requested_ordering: crate::symbolic::OrderingMethod,
     /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
     /// size and complexity (the estimate depends on `T` only through them,
@@ -200,14 +199,13 @@ impl LuSymbolic {
                 n: 0,
                 nnz: 0,
                 matching: None,
-                analyze_ms: 0.0,
                 requested_ordering: opts.ordering.method,
                 est_cache: Mutex::new(Vec::new()),
                 input: std::sync::OnceLock::new(),
                 structure: LuStructure::empty(),
             });
         }
-        let t = crate::clock::Instant::now();
+        let _s = rsprobe::scope!("analyze");
         // MC64 row matching: analyze the row-permuted matrix `B` whose
         // diagonal carries the matched entries, where the diagonal of `A`
         // cannot carry the pivots itself.
@@ -216,14 +214,12 @@ impl LuSymbolic {
             || (opts.matching.enabled
                 && diagonal_needs_matching(a, opts.matching.negligible_diagonal))
         {
-            let cache = crate::logging::timed(
-                || "lu analyze: matching".into(),
-                || {
-                    crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
-                        crate::scaling::mc64::compute_matching_general(a)
-                    })
-                },
-            )?;
+            let cache = {
+                let _s = rsprobe::scope!(DEBUG, "matching");
+                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
+                    crate::scaling::mc64::compute_matching_general(a)
+                })?
+            };
             if cache.n_matched == n {
                 let (r, c) = crate::scaling::mc64::unsymmetric_scaling(&cache);
                 // `cache.perm[j]` is the row matched to column `j`: it becomes
@@ -234,61 +230,43 @@ impl LuSymbolic {
                     c,
                 })
             } else {
-                crate::logging::warn(&format!(
-                    "lu analyze: structurally rank-deficient ({} of {n} columns matched); row matching skipped",
+                rsprobe::warn!(
+                    "structurally rank-deficient ({} of {n} columns matched); row matching skipped",
                     cache.n_matched
-                ));
+                );
                 None
             }
         } else {
             None
         };
         // The lower triangle lives only until the full pattern is built.
-        let (pattern, lower_nnz) = crate::logging::timed(
-            || "lu analyze: symmetrized pattern".into(),
-            || {
-                let row_map = matching.as_ref().map(LuMatching::row_map);
-                let (col_ptr, row_idx) =
-                    crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
-                        symmetrized_lower_pattern(a, row_map.as_deref())
-                    });
-                crate::symbolic::full_pattern(n, &col_ptr, &row_idx).map(|p| (p, row_idx.len()))
-            },
-        )?;
+        let (pattern, lower_nnz) = {
+            let _s = rsprobe::scope!(DEBUG, "symmetrize");
+            let row_map = matching.as_ref().map(LuMatching::row_map);
+            let (col_ptr, row_idx) =
+                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
+                    symmetrized_lower_pattern(a, row_map.as_deref())
+                });
+            (
+                crate::symbolic::full_pattern(n, &col_ptr, &row_idx)?,
+                row_idx.len(),
+            )
+        };
         let symb = analyze_with(pattern, lower_nnz, opts)?;
         let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
             (Some((sym, _)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
-                crate::logging::timed(
-                    || "lu analyze: exact structure".into(),
-                    || LuStructure::build(&a.col_ptr, &a.row_idx, row_map.as_deref(), sym, sched),
-                )
+                let _s = rsprobe::scope!(DEBUG, "structure");
+                LuStructure::build(&a.col_ptr, &a.row_idx, row_map.as_deref(), sym, sched)
             }
             _ => LuStructure::empty(),
         };
-        let analyze_ms = crate::clock::ms(t.elapsed());
-        if crate::logging::enabled(crate::logging::LogLevel::Info) {
-            let d = symb.decisions(opts.ordering.method);
-            crate::logging::info(&format!(
-                "lu analyze: n={n} nnz(A)={nnz} ordering={}{} supernodes={} max_front={} \
-                 levels={} {analyze_ms:.1} ms",
-                d.ordering_used,
-                if d.ordering_used != d.ordering_requested {
-                    format!(" (requested {})", d.ordering_requested)
-                } else {
-                    String::new()
-                },
-                d.n_supernodes,
-                d.max_front,
-                d.tree_levels
-            ));
-        }
+        symb.probe(nnz, opts.ordering.method);
         Ok(LuSymbolic {
             symb,
             n,
             nnz,
             matching,
-            analyze_ms,
             requested_ordering: opts.ordering.method,
             est_cache: Mutex::new(Vec::new()),
             input: std::sync::OnceLock::new(),
@@ -311,29 +289,19 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
     ) -> Result<LuSolver<T>, RslabError> {
+        let _s = rsprobe::scope!("factor");
         let pools = super::node::LuPools::new();
-        let (l, ut, factors, nnz, mut diagnostics, opts) = self.numeric(a, opts, None, &pools)?;
+        let (l, ut, factors, nnz, diagnostics, opts) = self.numeric(a, opts, None, &pools)?;
         // Solve layout: supernodal panels of `L` and `U^T` plus the tree
         // schedule; the CSC arrays are released so the factor is held once.
-        let t = crate::clock::Instant::now();
-        let plan_l = crate::numeric::supernodal::solve::SolvePlan::from_panels(
-            l,
-            &factors.supernode_parent,
-            true,
-            opts.solve,
-        );
-        let plan_u = crate::numeric::supernodal::solve::SolvePlan::from_panels(
-            ut,
-            &factors.supernode_parent,
-            false,
-            opts.solve,
-        );
-        diagnostics.push(
-            "solve-layout",
-            crate::clock::ms(t.elapsed()),
-            0,
-            (plan_l.bytes() + plan_u.bytes()) as u64,
-        );
+        let (plan_l, plan_u) = {
+            let _s = rsprobe::scope!("solve layout");
+            let plan = crate::numeric::supernodal::solve::SolvePlan::from_panels;
+            (
+                plan(l, &factors.supernode_parent, true, opts.solve),
+                plan(ut, &factors.supernode_parent, false, opts.solve),
+            )
+        };
         Ok(LuSolver {
             solve_threads: opts.threads,
             factors,
@@ -362,21 +330,18 @@ impl LuSymbolic {
         opts: &SolverSettings,
         lu: &mut LuSolver<T>,
     ) -> Result<(), RslabError> {
+        let _s = rsprobe::scope!("refactor");
         lu.factored = false;
         let storage = (lu.plan_l.take_storage(), lu.plan_u.take_storage());
-        let (l, ut, factors, nnz, mut diagnostics, opts) =
+        let (l, ut, factors, nnz, diagnostics, opts) =
             self.numeric(a, opts, Some(storage), &lu.pools)?;
-        let t = crate::clock::Instant::now();
-        lu.plan_l
-            .refill(l, &factors.supernode_parent, true, opts.solve);
-        lu.plan_u
-            .refill(ut, &factors.supernode_parent, false, opts.solve);
-        diagnostics.push(
-            "solve-layout",
-            crate::clock::ms(t.elapsed()),
-            0,
-            (lu.plan_l.bytes() + lu.plan_u.bytes()) as u64,
-        );
+        {
+            let _s = rsprobe::scope!("solve layout");
+            lu.plan_l
+                .refill(l, &factors.supernode_parent, true, opts.solve);
+            lu.plan_u
+                .refill(ut, &factors.supernode_parent, false, opts.solve);
+        }
         lu.factors = factors;
         lu.nnz = nnz;
         lu.diagnostics = diagnostics;
@@ -413,13 +378,8 @@ impl LuSymbolic {
         });
         let opts = opts.pinned(resolved_threads);
         let mut warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Lu);
-        for w in &warnings {
-            crate::logging::warn(&format!("lu settings: {w}"));
-        }
-        let t = crate::clock::Instant::now();
         let growth = super::factor::delay_growth(&opts);
         let numeric = factor_general_lu_numeric(self, a, &opts, growth, storage, pools)?;
-        let factor_ms = crate::clock::ms(t.elapsed());
         let nnz = numeric.factor_nnz() as u64;
         let factor_bytes = numeric.bytes() as u64;
         let (delayed, forced) = (numeric.delayed, numeric.forced);
@@ -439,11 +399,12 @@ impl LuSymbolic {
         }
         .to_string();
         decisions.method = "LeftLooking".to_string();
-        let mut diagnostics = crate::diagnostics::Diagnostics {
+        let diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
             n: self.n,
             nnz_a: self.nnz as u64,
             factor_nnz: nnz,
+            factor_bytes,
             estimate: Some(estimate),
             decisions,
             numeric: crate::diagnostics::NumericReport {
@@ -458,12 +419,7 @@ impl LuSymbolic {
             warnings,
             ..Default::default()
         };
-        // Bytes per stored entry: the scalar value plus its usize index.
-        diagnostics.push("analyze", self.analyze_ms, 0, 0);
-        diagnostics.push("factor", factor_ms, estimate.factor_flops, factor_bytes);
-        if crate::logging::enabled(crate::logging::LogLevel::Info) {
-            crate::logging::info(&format!("lu factor: {}", diagnostics.summary()));
-        }
+        diagnostics.probe();
         Ok((l, ut, factors, nnz as usize, diagnostics, opts))
     }
 

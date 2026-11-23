@@ -72,17 +72,13 @@ impl<'a> OrderingGraph<'a> {
         let (pattern, ratio) = (self.pattern, self.settings.compress_max_ratio);
         self.compressed
             .get_or_init(|| {
-                crate::logging::timed(
-                    || "analysis: ordering graph".into(),
-                    || {
-                        let groups = Supervariables::of(pattern);
-                        ((groups.len() as f64) <= ratio * pattern.n as f64).then(|| Compressed {
-                            weights: groups.weights(),
-                            graph: groups.compress(pattern),
-                            groups,
-                        })
-                    },
-                )
+                let _s = rsprobe::scope!(DEBUG, "graph");
+                let groups = Supervariables::of(pattern);
+                ((groups.len() as f64) <= ratio * pattern.n as f64).then(|| Compressed {
+                    weights: groups.weights(),
+                    graph: groups.compress(pattern),
+                    groups,
+                })
             })
             .as_ref()
     }
@@ -98,16 +94,25 @@ impl<'a> OrderingGraph<'a> {
         let pat = rslab_ordering_core::CscPattern::new(g.n, &g.col_ptr, &g.row_idx)
             .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
         let entries = g.row_idx.len() as f64;
-        let order = crate::logging::timed(
-            || format!("analysis: ordering {method:?} seed {nd_seed}"),
-            || match method {
-                OrderingMethod::Amd => ORDER_RATE.time(entries, || {
-                    rslab_amd::amd_order_opts(&pat, &self.settings.amd).map(|(perm, _)| perm)
-                }),
-                OrderingMethod::Amf => ORDER_RATE.time(entries, || {
-                    rslab_amf::amf_order_opts(&pat, &self.settings.amf).map(|(perm, _)| perm)
-                }),
+        let order = {
+            match method {
+                OrderingMethod::Amd => {
+                    let _s = rsprobe::scope!(DEBUG, "amd");
+                    rsprobe::add!(DEBUG, "entries", entries);
+                    ORDER_RATE.time(entries, || {
+                        rslab_amd::amd_order_opts(&pat, &self.settings.amd).map(|(perm, _)| perm)
+                    })
+                }
+                OrderingMethod::Amf => {
+                    let _s = rsprobe::scope!(DEBUG, "amf");
+                    rsprobe::add!(DEBUG, "entries", entries);
+                    ORDER_RATE.time(entries, || {
+                        rslab_amf::amf_order_opts(&pat, &self.settings.amf).map(|(perm, _)| perm)
+                    })
+                }
                 OrderingMethod::MetisND => {
+                    let _s = rsprobe::scope!(DEBUG, "nested dissection");
+                    rsprobe::add!(DEBUG, "entries", entries);
                     let mut opts = rslab_metis::MetisOptions {
                         seed: nd_seed,
                         ..self.settings.nd.clone()
@@ -128,24 +133,20 @@ impl<'a> OrderingGraph<'a> {
                     }
                     .map(|(perm, _, _)| perm)
                 }
-                OrderingMethod::Rcm => rslab_ordering_core::rcm_order(&pat),
+                OrderingMethod::Rcm => {
+                    let _s = rsprobe::scope!(DEBUG, "rcm");
+                    rslab_ordering_core::rcm_order(&pat)
+                }
                 OrderingMethod::Auto => unreachable!("the race resolves Auto"),
-            },
-        )
+            }
+        }
         .map_err(|e| RslabError::InvalidInput(format!("ordering failed: {e}")))?;
         let order = checked(&order, g.n)?;
-        let t = crate::clock::Instant::now();
-        let s = match c {
+        let _s = rsprobe::scope!(DEBUG, "etree");
+        Ok(match c {
             Some(c) => grouped_structure(c, &order),
             None => structure(self.pattern, order),
-        };
-        if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-            crate::logging::debug(&format!(
-                "analysis: prefix tail {method:?} (etree, column counts): {:.1} ms",
-                crate::clock::ms(t.elapsed())
-            ));
-        }
-        Ok(s)
+        })
     }
 }
 

@@ -273,7 +273,7 @@ impl<T: Scalar> KluSolver<T> {
     #[allow(clippy::needless_range_loop)]
     pub fn refactor(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         a.validate()?;
-        let t = crate::clock::Instant::now();
+        let _s = rsprobe::scope!("refactor");
         // Cloned out of the factors so the borrow below stays exclusive; the
         // flag is read-only for us either way.
         let int_flag = self.factors.interrupt.clone();
@@ -763,14 +763,6 @@ impl<T: Scalar> KluSolver<T> {
         f.ready = ready;
         f.modes = modes;
         f.picks = picks;
-        let entry = (std::mem::size_of::<T>() + std::mem::size_of::<Ki>()) as u64;
-        let nnz = self.diagnostics.factor_nnz;
-        self.diagnostics.set_latest(
-            "klu-refactor",
-            crate::clock::ms(t.elapsed()),
-            diagnostics_flops(&self.diagnostics),
-            nnz * entry,
-        );
         Ok(())
     }
 }

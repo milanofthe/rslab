@@ -386,33 +386,28 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
     ) -> PyResult<PyObject> {
         let bvec = vector::<T>(b, "rhs")?;
         let policy = refine_policy(refine, target, measure, system)?;
-        let x = py
-            .allow_threads(|| {
-                if policy.max_steps > 0 {
-                    self.s
-                        .solve_refined(&self.a, &bvec, &policy)
-                        .map(|(x, _)| x)
-                } else {
-                    self.s.solve(&bvec)
-                }
-            })
-            .map_err(map_err)?;
+        let x = crate::logging::run(py, || {
+            if policy.max_steps > 0 {
+                self.s
+                    .solve_refined(&self.a, &bvec, &policy)
+                    .map(|(x, _)| x)
+            } else {
+                self.s.solve(&bvec)
+            }
+        })
+        .map_err(map_err)?;
         Ok(array1(py, x))
     }
 
     pub fn solve_transpose(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         let bvec = vector::<T>(b, "rhs")?;
-        let x = py
-            .allow_threads(|| self.s.solve_transpose(&bvec))
-            .map_err(map_err)?;
+        let x = crate::logging::run(py, || self.s.solve_transpose(&bvec)).map_err(map_err)?;
         Ok(array1(py, x))
     }
 
     pub fn solve_many(&self, py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         let (n, nrhs, cm) = block::<T>(b, "rhs")?;
-        let x = py
-            .allow_threads(|| self.s.solve_many(&cm, nrhs))
-            .map_err(map_err)?;
+        let x = crate::logging::run(py, || self.s.solve_many(&cm, nrhs)).map_err(map_err)?;
         array2(py, &x, n, nrhs)
     }
 
@@ -427,9 +422,8 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
 
     pub fn inverse(&self, py: Python<'_>) -> PyResult<PyObject> {
         let n = self.n();
-        let x = py
-            .allow_threads(|| Factorization::<T>::inverse(&self.s))
-            .map_err(map_err)?;
+        let x =
+            crate::logging::run(py, || Factorization::<T>::inverse(&self.s)).map_err(map_err)?;
         array2(py, &x, n, n)
     }
 
@@ -552,7 +546,7 @@ impl<T: Field> Pair<T, KluSolver<T>> {
         }
         self.a.values.copy_from_slice(&d);
         let (s, a) = (&mut self.s, &self.a);
-        py.allow_threads(|| s.refactor(a)).map_err(map_err)
+        crate::logging::run(py, || s.refactor(a)).map_err(map_err)
     }
 }
 
@@ -577,7 +571,7 @@ impl<T: Field> Pair<T, AutoFactor<T>> {
         self.a.values.copy_from_slice(&d);
         self.s.values_mut().copy_from_slice(&d);
         let s = &mut self.s;
-        py.allow_threads(|| s.refactor(settings)).map_err(map_err)?;
+        crate::logging::run(py, || s.refactor(settings)).map_err(map_err)?;
         Ok(())
     }
 
@@ -684,16 +678,13 @@ macro_rules! handle {
                 dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.factor_dtype())
             }
 
-            /// The factorization report as a dictionary: ``stages`` (name,
-            /// wall_ms, flops, bytes per phase), ``decisions`` (ordering,
-            /// scaling, method, supernode counts), ``numeric`` (perturbed
-            /// pivots, 2x2 pivots, inertia), ``solves`` (accumulated solve
-            /// calls, right-hand sides, wall time, refinement steps),
-            /// ``warnings`` (settings that were ignored on this path), the
-            /// throughput ``rates`` (``analyze_mdof_s``, ``factor_mdof_s``,
-            /// ``factor_gflops``, ``factor_mnnz_s``, ``total_mdof_s``,
-            /// ``solve_mdof_s``; million unknowns per second and GFlop/s),
-            /// the a-priori ``estimate`` and a one-line ``summary``.
+            /// The factorization report as a dictionary: sizes and
+            /// ``factor_bytes``, ``decisions`` (ordering, scaling, method,
+            /// supernode counts), ``numeric`` (perturbed pivots, 2x2 pivots,
+            /// inertia), ``solves`` (accumulated solve calls, right-hand
+            /// sides, refinement steps), ``warnings`` (settings that were
+            /// ignored on this path), the a-priori ``estimate`` and a
+            /// one-line ``summary``.
             fn diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
                 dispatch!($any [F64, F32, C64, C32 $(, $mixed)*], &self.inner, |p| p.diagnostics(py))
             }

@@ -262,6 +262,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
             }
         }
     }
+    let _pivot = rsprobe::scope!(TRACE, "pivot");
     ll_cdiv_emit(s, sym, sched, pools, emit, perturb_floor, kt, panel)
 }
 

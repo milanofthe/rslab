@@ -329,16 +329,13 @@ The determinant of `A`, `phase * exp(log_abs)` of
 
 #### `Auto.diagnostics()`
 
-The factorization report as a dictionary: `stages` (name,
-wall_ms, flops, bytes per phase), `decisions` (ordering,
-scaling, method, supernode counts), `numeric` (perturbed
-pivots, 2x2 pivots, inertia), `solves` (accumulated solve
-calls, right-hand sides, wall time, refinement steps),
-`warnings` (settings that were ignored on this path), the
-throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
-`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
-`solve_mdof_s`; million unknowns per second and GFlop/s),
-the a-priori `estimate` and a one-line `summary`.
+The factorization report as a dictionary: sizes and
+`factor_bytes`, `decisions` (ordering, scaling, method,
+supernode counts), `numeric` (perturbed pivots, 2x2 pivots,
+inertia), `solves` (accumulated solve calls, right-hand
+sides, refinement steps), `warnings` (settings that were
+ignored on this path), the a-priori `estimate` and a
+one-line `summary`.
 
 #### `Auto.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
 
@@ -525,16 +522,13 @@ The determinant of `A`, `phase * exp(log_abs)` of
 
 #### `Ldlt.diagnostics()`
 
-The factorization report as a dictionary: `stages` (name,
-wall_ms, flops, bytes per phase), `decisions` (ordering,
-scaling, method, supernode counts), `numeric` (perturbed
-pivots, 2x2 pivots, inertia), `solves` (accumulated solve
-calls, right-hand sides, wall time, refinement steps),
-`warnings` (settings that were ignored on this path), the
-throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
-`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
-`solve_mdof_s`; million unknowns per second and GFlop/s),
-the a-priori `estimate` and a one-line `summary`.
+The factorization report as a dictionary: sizes and
+`factor_bytes`, `decisions` (ordering, scaling, method,
+supernode counts), `numeric` (perturbed pivots, 2x2 pivots,
+inertia), `solves` (accumulated solve calls, right-hand
+sides, refinement steps), `warnings` (settings that were
+ignored on this path), the a-priori `estimate` and a
+one-line `summary`.
 
 #### `Ldlt.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
 
@@ -703,16 +697,13 @@ The determinant of `A`, `phase * exp(log_abs)` of
 
 #### `Lu.diagnostics()`
 
-The factorization report as a dictionary: `stages` (name,
-wall_ms, flops, bytes per phase), `decisions` (ordering,
-scaling, method, supernode counts), `numeric` (perturbed
-pivots, 2x2 pivots, inertia), `solves` (accumulated solve
-calls, right-hand sides, wall time, refinement steps),
-`warnings` (settings that were ignored on this path), the
-throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
-`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
-`solve_mdof_s`; million unknowns per second and GFlop/s),
-the a-priori `estimate` and a one-line `summary`.
+The factorization report as a dictionary: sizes and
+`factor_bytes`, `decisions` (ordering, scaling, method,
+supernode counts), `numeric` (perturbed pivots, 2x2 pivots,
+inertia), `solves` (accumulated solve calls, right-hand
+sides, refinement steps), `warnings` (settings that were
+ignored on this path), the a-priori `estimate` and a
+one-line `summary`.
 
 #### `Lu.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
 
@@ -892,16 +883,13 @@ The determinant of `A`, `phase * exp(log_abs)` of
 
 #### `Klu.diagnostics()`
 
-The factorization report as a dictionary: `stages` (name,
-wall_ms, flops, bytes per phase), `decisions` (ordering,
-scaling, method, supernode counts), `numeric` (perturbed
-pivots, 2x2 pivots, inertia), `solves` (accumulated solve
-calls, right-hand sides, wall time, refinement steps),
-`warnings` (settings that were ignored on this path), the
-throughput `rates` (`analyze_mdof_s`, `factor_mdof_s`,
-`factor_gflops`, `factor_mnnz_s`, `total_mdof_s`,
-`solve_mdof_s`; million unknowns per second and GFlop/s),
-the a-priori `estimate` and a one-line `summary`.
+The factorization report as a dictionary: sizes and
+`factor_bytes`, `decisions` (ordering, scaling, method,
+supernode counts), `numeric` (perturbed pivots, 2x2 pivots,
+inertia), `solves` (accumulated solve calls, right-hand
+sides, refinement steps), `warnings` (settings that were
+ignored on this path), the a-priori `estimate` and a
+one-line `summary`.
 
 #### `Klu.gmres(b, tol=1e-08, maxit=400, restart=None, x0=None, recycle=None, operator=None)`
 
@@ -1572,7 +1560,7 @@ Set the log level of the solver core.
 
 **Parameters**
 
-- `level` (str): `'debug'`, `'info'`, `'warning'` (default), `'error'` or `'off'`. The environment variable `RLA_LOG` sets the initial level.
+- `level` (str): `'trace'`, `'debug'`, `'info'`, `'warning'` (default), `'error'` or `'off'`.
 
 **Returns**
 
@@ -1588,19 +1576,20 @@ The current log level of the solver core.
 
 ### `set_log_sink(sink)`
 
-Route the core's log messages to `sink(level, message)` instead of the
-default stdout / stderr writer; `None` restores the default. The sink
-receives the lowercase level name and the bare message (no timestamp), so
-a `logging.Logger` fits directly::
+Route the core's log messages to `sink(level, message)` instead of
+stderr; `None` restores stderr. The sink receives the lowercase level
+name and the message, prefixed with the solver phase it was emitted in
+(`factor: ...`), so a `logging.Logger` fits directly::
 
     log = logging.getLogger("rslab")
     rslab.set_log_sink(lambda level, msg: log.log(logging.getLevelName(level.upper()), msg))
 
-The sink may be called from solver worker threads.
+The sink is called on the calling thread once the call into the solver
+returns.
 
 **Parameters**
 
-- `sink` (callable or None): `sink(level, message)`; `None` restores the default writer.
+- `sink` (callable or None): `sink(level, message)`; `None` restores stderr.
 
 **Returns**
 

@@ -835,6 +835,7 @@ fn on_own_worker() -> bool {
 /// worker's stack. Such a caller enters through a thread of its own
 /// ([`Hop`]), which waits without taking work, while the caller blocks.
 pub(crate) fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
+    let f = crate::parallel::carried(f);
     if rayon::current_thread_index().is_none() || pool.current_thread_index().is_some() {
         return pool.install(f);
     }

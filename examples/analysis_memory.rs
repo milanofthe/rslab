@@ -2,15 +2,15 @@
 //! pattern of a planar MoM system (`matgen::bem::near_field`), analysed as
 //! rapidmom does: nested dissection, no row matching, zero `f32` values.
 //!
-//! A counting allocator tracks the live heap; every debug record of the
-//! analysis (one per finished stage) prints the peak since the previous one
-//! and the live heap, both above the input matrix, so the peak of a stage
-//! is the line that closes it. The timed reps run with the records off.
+//! A counting allocator tracks the live heap and its peak above the input
+//! matrix, behind `rsprobe::Alloc`: built with `--features rsprobe/alloc`,
+//! the first analysis records its stages at DEBUG with the bytes allocated
+//! and freed in each, written to the path in `RSPROBE_RECORD` for
+//! `python -m rsprobe report`. The timed reps run without a context.
 //! The fingerprint (permutation, fronts, levels, exact `L` + `U` size)
 //! must not change under a memory change.
 //!
-//! `cargo run --release --features matgen --example analysis_memory -- <n> <per_col> [reps] [threads] [ordering]`
-use rslab::logging::{LogLevel, LogSink};
+//! `cargo run --release --features matgen,rsprobe/alloc --example analysis_memory -- <n> <per_col> [reps] [threads] [ordering]`
 use rslab::{GeneralCsc, LuSymbolic, OrderingMethod, SolverSettings, Threads};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -52,7 +52,7 @@ unsafe impl GlobalAlloc for Counting {
 }
 
 #[global_allocator]
-static COUNTING: Counting = Counting;
+static COUNTING: rsprobe::Alloc<Counting> = rsprobe::Alloc::wrap(Counting);
 
 const GB: f64 = (1u64 << 30) as f64;
 
@@ -67,18 +67,6 @@ fn mark() -> (f64, f64) {
     let peak = PEAK.swap(live, Relaxed);
     let above = |b: usize| b.saturating_sub(base) as f64 / GB;
     (above(peak), above(live))
-}
-
-struct StageSink(Instant);
-
-impl LogSink for StageSink {
-    fn emit(&self, _: LogLevel, msg: &str) {
-        let (peak, live) = mark();
-        println!(
-            "{:8.2} s  peak {peak:6.2} GB  live {live:6.2} GB  {msg}",
-            self.0.elapsed().as_secs_f64()
-        );
-    }
 }
 
 /// `VmHWM` / `VmRSS` of the process in GB (Linux; 0 elsewhere).
@@ -137,15 +125,24 @@ fn main() {
 
     BASE.store(LIVE.load(Relaxed), Relaxed);
     mark();
-    rslab::logging::set_sink(Box::new(StageSink(Instant::now())));
-    rslab::logging::set_level(LogLevel::Debug);
+    let ctx = rsprobe::Context::builder()
+        .threshold(rsprobe::Level::DEBUG)
+        .build();
+    ctx.param("n", n);
+    ctx.param("nnz", nnz);
+    ctx.param("threads", threads);
     let t = Instant::now();
-    let s = LuSymbolic::analyze(&a, &opts).unwrap();
+    let s = {
+        let _on = ctx.enter();
+        LuSymbolic::analyze(&a, &opts).unwrap()
+    };
     let ms = t.elapsed().as_secs_f64() * 1e3;
-    rslab::logging::set_level(LogLevel::Warning);
-    let (_, held) = mark();
+    if let Some(path) = std::env::var_os("RSPROBE_RECORD") {
+        std::fs::write(path, ctx.record().to_string()).expect("writing the record");
+    }
+    let (peak, held) = mark();
     println!(
-        "analysis {ms:.0} ms (records on), holds {held:.2} GB (heap_bytes {:.2} GB), \
+        "analysis {ms:.0} ms (recorded), peak {peak:.2} GB, holds {held:.2} GB (heap_bytes {:.2} GB), \
          VmHWM {:.2} GB, VmRSS {:.2} GB, fingerprint {:016x}",
         s.heap_bytes() as f64 / GB,
         rss("VmHWM"),

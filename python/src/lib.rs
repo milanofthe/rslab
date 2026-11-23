@@ -23,7 +23,7 @@ use pyo3::prelude::*;
 /// pick their worker count from the measurement. Returns the measured values.
 #[pyfunction]
 fn install_diagnose(py: Python<'_>) -> PyResult<PyObject> {
-    let c = py.allow_threads(rslab::tuning::install_diagnose);
+    let c = crate::logging::run(py, rslab::tuning::install_diagnose);
     let d = pyo3::types::PyDict::new_bound(py);
     d.set_item("gflops_f64", c.geom_gflops)?;
     d.set_item("gflops_complex", c.geom_gflops_cplx)?;

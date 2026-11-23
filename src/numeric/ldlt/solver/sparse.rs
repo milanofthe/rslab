@@ -54,11 +54,11 @@ impl<T: Scalar> LdltSolver<T> {
     /// thread count.
     pub fn port_matrix(&self, b: &SparseRhs<T>) -> Result<Vec<T>, RslabError> {
         self.check_sparse(b.n())?;
-        let t = crate::clock::Instant::now();
+        let _s = rsprobe::scope!("port matrix");
         let z = self
             .plan
             .port_matrix(&self.factors, &self.scale, b, self.solve_threads)?;
-        crate::numeric::direct::record(self, b.ncols(), t, 0);
+        crate::numeric::direct::record(self, b.ncols(), 0);
         Ok(z)
     }
 

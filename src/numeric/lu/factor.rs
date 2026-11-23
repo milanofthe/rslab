@@ -413,38 +413,24 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     // one: the equilibration setting has nothing left to do there.
     let (d_row, d_col): (Vec<f64>, Vec<f64>) = match &lusym.matching {
         Some(m) => ((0..n).map(|i| m.r[m.row_of[i]]).collect(), m.c.clone()),
-        None => crate::logging::timed(
-            || format!("lu: equilibration {:?}", opts.scaling),
-            || {
-                // on the factorization's workers (its sweeps run in parallel)
-                let (r, c, steps) = opts.threads.run(
-                    0,
-                    |cap| cap,
-                    || {
-                        crate::scaling::equilibrate_general(
-                            a,
-                            &opts.scaling,
-                            opts.pivoting.threshold,
-                        )
-                    },
-                );
-                if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-                    crate::logging::debug(&format!("lu: equilibration in {steps} steps"));
-                }
-                (r, c)
-            },
-        ),
+        None => {
+            let _s = rsprobe::scope!("scale");
+            // on the factorization's workers (its sweeps run in parallel)
+            let (r, c, steps) = opts.threads.run(
+                0,
+                |cap| cap,
+                || crate::scaling::equilibrate_general(a, &opts.scaling, opts.pivoting.threshold),
+            );
+            rsprobe::add!("steps", steps);
+            (r, c)
+        }
     };
 
     let prog = lusym.input.get_or_init(|| {
-        crate::logging::timed(
-            || "lu: input program".into(),
-            || {
-                // `A`'s row `r` is `B`'s row `b_row[r]`
-                let b_row = lusym.matching.as_ref().map(|m| m.row_map());
-                InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym)
-            },
-        )
+        let _s = rsprobe::scope!(DEBUG, "input program");
+        // `A`'s row `r` is `B`'s row `b_row[r]`
+        let b_row = lusym.matching.as_ref().map(|m| m.row_map());
+        InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym)
     });
     // The scaling by elimination index: entry `(g, c)` of `P^T B P` is `A`'s
     // times `d_row[perm[g]] * d_col[perm[c]]` (`d_row` by `B`'s rows).
@@ -491,10 +477,10 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
                     // The delayed pivots would have grown the factor past
                     // their allowance: the factor without them, every pivot
                     // in its own front.
-                    crate::logging::warn(&format!(
-                        "lu: delayed pivots exceed their allowance ({growth}); factored \
-                         without delays"
-                    ));
+                    rsprobe::warn!(
+                        "delayed pivots exceed their allowance ({growth}); factored without \
+                         delays"
+                    );
                     let mut fac = run(0.0, None)?.ok_or_else(|| {
                         RslabError::InvalidInput("internal: no delays, no allowance".to_string())
                     })?;

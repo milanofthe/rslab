@@ -18,11 +18,8 @@ pub type C32 = Complex<f32>;
 /// per-thread heaps, which is what makes the per-product buffers of the dense
 /// kernels cheap inside one call; the scoped pool's workers exit afterwards and
 /// leave those heaps holding up to the factor size again until forced.
-pub fn heavy<R: pyo3::marker::Ungil>(
-    py: Python<'_>,
-    f: impl pyo3::marker::Ungil + FnOnce() -> R,
-) -> R {
-    let out = py.allow_threads(f);
+pub fn heavy<R: Send>(py: Python<'_>, f: impl Send + FnOnce() -> R) -> R {
+    let out = crate::logging::run(py, f);
     collect();
     out
 }
@@ -475,17 +472,7 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     out.set_item("factor_nnz", d.factor_nnz)?;
     out.set_item("fill_ratio", d.fill_ratio())?;
     out.set_item("threads", d.threads)?;
-    let stages = pyo3::types::PyList::empty_bound(py);
-    for s in &d.stages {
-        let st = PyDict::new_bound(py);
-        st.set_item("name", s.name)?;
-        st.set_item("wall_ms", s.wall_ms)?;
-        st.set_item("flops", s.flops)?;
-        st.set_item("bytes", s.bytes)?;
-        stages.append(st)?;
-    }
-    out.set_item("stages", stages)?;
-    out.set_item("total_ms", d.total_ms())?;
+    out.set_item("factor_bytes", d.factor_bytes)?;
     let dec = PyDict::new_bound(py);
     dec.set_item("ordering_requested", &d.decisions.ordering_requested)?;
     dec.set_item("ordering_used", &d.decisions.ordering_used)?;
@@ -508,19 +495,9 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     let sv = PyDict::new_bound(py);
     sv.set_item("calls", d.solves.calls)?;
     sv.set_item("rhs", d.solves.rhs)?;
-    sv.set_item("wall_ms", d.solves.wall_ms)?;
     sv.set_item("refine_steps", d.solves.refine_steps)?;
     out.set_item("solves", sv)?;
     out.set_item("warnings", d.warnings.clone())?;
-    let r = d.rates();
-    let rates = PyDict::new_bound(py);
-    rates.set_item("analyze_mdof_s", r.analyze_mdof_s)?;
-    rates.set_item("factor_mdof_s", r.factor_mdof_s)?;
-    rates.set_item("factor_gflops", r.factor_gflops)?;
-    rates.set_item("factor_mnnz_s", r.factor_mnnz_s)?;
-    rates.set_item("total_mdof_s", r.total_mdof_s)?;
-    rates.set_item("solve_mdof_s", r.solve_mdof_s)?;
-    out.set_item("rates", rates)?;
     match &d.estimate {
         Some(e) => out.set_item("estimate", memory_estimate_dict(py, e)?)?,
         None => out.set_item("estimate", py.None())?,

@@ -29,6 +29,8 @@ impl KluSymbolic {
         settings: &KluSettings,
     ) -> Result<Self, RslabError> {
         a.validate()?;
+        let _s = rsprobe::scope!("analyze");
+        rsprobe::add!("nonzeros", a.nnz());
         let n = a.n;
         // Same 31-bit range gate as factor time (the whole path is Ki-based;
         // checking here lets analyze and the BTF pass use narrow indices).
@@ -48,6 +50,7 @@ impl KluSymbolic {
         // beats guessing. The common MNA case (complete structural
         // diagonal) short-circuits to a single candidate and pays nothing.
         let weighted = if settings.btf && settings.matching {
+            let _s = rsprobe::scope!(DEBUG, "matching");
             let cache = crate::scaling::mc64::compute_matching_general(a)?;
             (cache.n_matched == n).then_some(cache.perm)
         } else {
@@ -495,19 +498,20 @@ impl KluSymbolic {
         // Gilbert-Peierls pass costing about as much as a numeric factor, and
         // factor() must not silently pay it - the solvers never measure (or
         // estimate) implicitly.
+        let _s = rsprobe::scope!("factor");
+        rsprobe::add!("blocks", self.n_blocks());
         let estimate = self.fill.get().map(|_| self.estimate_memory::<T>());
-        let t = crate::clock::Instant::now();
         let factors = factor_impl(self, a, settings)?;
-        let factor_ms = crate::clock::ms(t.elapsed());
         let nnz =
             (factors.l_val.len() + factors.u_val.len() + factors.udiag.len() + factors.f_val.len())
                 as u64;
         let entry = (std::mem::size_of::<T>() + std::mem::size_of::<Ki>()) as u64;
-        let mut diagnostics = crate::diagnostics::Diagnostics {
+        let diagnostics = crate::diagnostics::Diagnostics {
             threads: 1,
             n: a.n,
             nnz_a: a.row_idx.len() as u64,
             factor_nnz: nnz,
+            factor_bytes: nnz * entry,
             estimate,
             decisions: crate::diagnostics::Decisions {
                 ordering_requested: "Amd".to_string(),
@@ -523,15 +527,7 @@ impl KluSymbolic {
             },
             ..Default::default()
         };
-        diagnostics.push(
-            "klu-factor",
-            factor_ms,
-            diagnostics_flops(&diagnostics),
-            nnz * entry,
-        );
-        if crate::logging::enabled(crate::logging::LogLevel::Info) {
-            crate::logging::info(&format!("klu factor: {}", diagnostics.summary()));
-        }
+        diagnostics.probe();
         Ok(KluSolver {
             factors,
             diagnostics,
@@ -569,6 +565,7 @@ fn order_blocks<T: Scalar>(
     a: &GeneralCsc<T>,
     form: btf::BtfForm,
 ) -> Result<OrderedForm, RslabError> {
+    let _s = rsprobe::scope!(DEBUG, "ordering");
     let n = a.n;
     let btf::BtfForm {
         row_perm: mut pre_row_perm,
