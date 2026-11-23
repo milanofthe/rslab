@@ -147,6 +147,7 @@ fn nd_subproblem(
     writer: &IpermWriter,
     acc: &AtomicStats,
 ) -> Result<(), OrderingError> {
+    stopped(opts)?;
     let n = subgraph.nvtxs as usize;
     if n == 0 {
         return Ok(());
@@ -188,7 +189,7 @@ fn nd_subproblem(
     }
 
     let mut rng = SplitMix::new(seed);
-    let labels = multilevel_node_bisection(&subgraph, opts, &mut rng, &mut local);
+    let labels = multilevel_node_bisection(&subgraph, opts, &mut rng, &mut local)?;
     let mut a_verts: Vec<i32> = Vec::new();
     let mut b_verts: Vec<i32> = Vec::new();
     let mut s_verts: Vec<i32> = Vec::new();
@@ -264,9 +265,9 @@ fn multilevel_node_bisection(
     opts: &MetisOptions,
     rng: &mut SplitMix,
     stats: &mut MetisStats,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, OrderingError> {
     let mut counters = CoarsenCounters::default();
-    let mut levels = coarsen(graph, opts, rng, &mut counters);
+    let mut levels = coarsen(graph, opts, rng, &mut counters)?;
     stats.n_two_hop_fallbacks += counters.n_two_hop_fallbacks;
     stats.n_levels += levels.len() as u32;
 
@@ -312,6 +313,7 @@ fn multilevel_node_bisection(
     // previous-graph vertices to level-i graph vertices. A level is dropped
     // once projected: the sibling subproblems coarsen meanwhile.
     while let Some(cg) = levels.pop() {
+        stopped(opts)?;
         let prev_graph: &Graph = levels.last().map_or(graph, |l| &l.graph);
         let prev_n = prev_graph.nvtxs as usize;
         let mut proj: Vec<u8> = vec![PART_A; prev_n];
@@ -325,7 +327,15 @@ fn multilevel_node_bisection(
         stats.n_fm_passes += opts.fm_passes;
     }
 
-    labels
+    Ok(labels)
+}
+
+/// `Err(Stopped)` once the caller's stop flag is set.
+pub(crate) fn stopped(opts: &MetisOptions) -> Result<(), OrderingError> {
+    match &opts.stop {
+        Some(f) if f.load(Ordering::Relaxed) => Err(OrderingError::Stopped),
+        _ => Ok(()),
+    }
 }
 
 /// Hand off to AMD on an uncoarsened subgraph. Writes new positions
@@ -643,6 +653,30 @@ mod tests {
     }
 
     #[test]
+    fn nd_order_stops_on_the_flag_and_only_then() {
+        let t = grid_triples(40, 40);
+        let n = 1600;
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opts = MetisOptions {
+            stop: Some(flag.clone()),
+            ..MetisOptions::default()
+        };
+        let free = nd_order(
+            &pat,
+            None,
+            &MetisOptions::default(),
+            &mut MetisStats::default(),
+        );
+        let armed = nd_order(&pat, None, &opts, &mut MetisStats::default());
+        assert_eq!(free.unwrap(), armed.unwrap());
+        flag.store(true, Ordering::Relaxed);
+        let stopped = nd_order(&pat, None, &opts, &mut MetisStats::default());
+        assert_eq!(stopped, Err(OrderingError::Stopped));
+    }
+
+    #[test]
     fn nd_order_handles_disconnected_graph() {
         // Two separate 6x6 grids.
         let mut t = grid_triples(6, 6);
@@ -693,7 +727,7 @@ mod tests {
         let opts = MetisOptions::default();
         let mut stats = MetisStats::default();
         let mut rng = crate::rng::SplitMix::new(opts.seed);
-        let labels = multilevel_node_bisection(&graph, &opts, &mut rng, &mut stats);
+        let labels = multilevel_node_bisection(&graph, &opts, &mut rng, &mut stats).unwrap();
         let mut na = 0usize;
         let mut nb = 0usize;
         let mut ns = 0usize;
@@ -720,7 +754,7 @@ mod tests {
                 continue;
             }
             let mut st = MetisStats::default();
-            let labels = multilevel_node_bisection(&g, &opts, &mut rng, &mut st);
+            let labels = multilevel_node_bisection(&g, &opts, &mut rng, &mut st).unwrap();
             let mut a_verts: Vec<i32> = Vec::new();
             let mut b_verts: Vec<i32> = Vec::new();
             let mut ns = 0usize;

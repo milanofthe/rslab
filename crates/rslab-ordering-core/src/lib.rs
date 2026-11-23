@@ -181,6 +181,8 @@ pub enum OrderingError {
     /// Crate-specific failure with a short static message. Keep
     /// short - this is a status channel, not a rich diagnostic.
     Internal(&'static str),
+    /// The caller's stop flag was set before the ordering finished.
+    Stopped,
 }
 
 impl fmt::Display for OrderingError {
@@ -193,6 +195,7 @@ impl fmt::Display for OrderingError {
             Self::IndexOverflow => f.write_str("ordering workspace exceeded i32::MAX"),
             Self::DisconnectedGraph => f.write_str("ordering input graph is disconnected"),
             Self::Internal(msg) => write!(f, "ordering internal error: {msg}"),
+            Self::Stopped => f.write_str("ordering stopped by the caller"),
         }
     }
 }

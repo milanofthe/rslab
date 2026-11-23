@@ -13,7 +13,8 @@ use crate::error::RslabError;
 use crate::numeric::settings::OrderingSettings;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::sparse::csc::CscPattern;
-use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
 /// What a minimum-degree ordering costs per entry of the graph it orders,
 /// learned from the orderings: the candidates of the race decide on it
@@ -87,8 +88,14 @@ impl<'a> OrderingGraph<'a> {
     /// `nd_seed`), and return the ordering of the pattern's vertices with its
     /// elimination tree and column counts. On the compressed graph these come
     /// from a count weighted by the group sizes, a fraction of the work on
-    /// the full pattern.
-    pub fn order(&self, method: OrderingMethod, nd_seed: u64) -> Result<Structure, RslabError> {
+    /// the full pattern. Nested dissection returns an error once `stop` is
+    /// set.
+    pub fn order(
+        &self,
+        method: OrderingMethod,
+        nd_seed: u64,
+        stop: Option<&Arc<AtomicBool>>,
+    ) -> Result<Structure, RslabError> {
         let c = self.compressed();
         let g = c.map_or(self.pattern, |c| &c.graph);
         let pat = rslab_ordering_core::CscPattern::new(g.n, &g.col_ptr, &g.row_idx)
@@ -115,6 +122,7 @@ impl<'a> OrderingGraph<'a> {
                     rsprobe::add!(DEBUG, "entries", entries);
                     let mut opts = rslab_metis::MetisOptions {
                         seed: nd_seed,
+                        stop: stop.cloned(),
                         ..self.settings.nd.clone()
                     };
                     // Where unset, its sections go wide from where they are

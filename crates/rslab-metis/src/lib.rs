@@ -97,6 +97,11 @@ pub struct MetisOptions {
     /// parallel blocks. Affects time only, not the permutation. `None`
     /// (default) is [`constants::PAR_MIN_EDGES`].
     pub parallel_min_edges: Option<usize>,
+    /// Set by the caller once the ordering is no longer needed: polled
+    /// before every subproblem and every level of a bisection, the ordering
+    /// then returns [`OrderingError::Stopped`]. `None` (default) runs to
+    /// the end.
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for MetisOptions {
@@ -113,6 +118,7 @@ impl Default for MetisOptions {
             max_overshoot: constants::MAX_OVERSHOOT,
             parallel_min_vertices: None,
             parallel_min_edges: None,
+            stop: None,
         }
     }
 }

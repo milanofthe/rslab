@@ -56,7 +56,6 @@ class Settings:
         race_nd_min_n: int | None = ...,
         race_nd_min_work: int | None = ...,
         race_assumed_workers: int | None = ...,
-        race_eager_nd_min_nnz: int | None = ...,
         race_ensemble_size: int | None = ...,
         race_ensemble_min_flops: int | None = ...,
         nd_seed: int | None = ...,

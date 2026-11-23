@@ -26,6 +26,7 @@
 use crate::graph::Graph;
 use crate::rng::SplitMix;
 use crate::MetisOptions;
+use rslab_ordering_core::OrderingError;
 
 const UNMATCHED: i32 = -1;
 
@@ -126,17 +127,19 @@ pub fn coarsen_level(
 
 /// Run `coarsen_level` in a loop until the graph is small enough or
 /// coarsening stalls (reduction ratio < 5%). Returns the hierarchy
-/// of coarse graphs, finest first.
+/// of coarse graphs, finest first, or `Stopped` once the caller's stop
+/// flag is set.
 pub fn coarsen(
     fine: &Graph,
     opts: &MetisOptions,
     rng: &mut SplitMix,
     counters: &mut CoarsenCounters,
-) -> Vec<CoarseGraph> {
+) -> Result<Vec<CoarseGraph>, OrderingError> {
     let mut levels: Vec<CoarseGraph> = Vec::new();
     let mut prev_nvtxs = fine.nvtxs;
     let mut cur: &Graph = fine;
     loop {
+        crate::node_nd::stopped(opts)?;
         if cur.nvtxs <= opts.coarsen_floor as i32 {
             break;
         }
@@ -167,7 +170,7 @@ pub fn coarsen(
         levels.push(level);
         cur = &levels.last().expect("just pushed").graph;
     }
-    levels
+    Ok(levels)
 }
 
 /// 2-hop matching pass: revisit self-matched vertices and pair them
@@ -568,7 +571,7 @@ mod tests {
         };
         let mut rng = SplitMix::new(1);
         let mut ctr = CoarsenCounters::default();
-        let levels = coarsen(&g, &opts, &mut rng, &mut ctr);
+        let levels = coarsen(&g, &opts, &mut rng, &mut ctr).unwrap();
         assert!(!levels.is_empty(), "must produce at least one level");
         let mut prev = g.nvtxs;
         for (i, lvl) in levels.iter().enumerate() {
@@ -614,7 +617,7 @@ mod tests {
         };
         let mut rng = SplitMix::new(1);
         let mut ctr = CoarsenCounters::default();
-        let levels = coarsen(&g, &opts, &mut rng, &mut ctr);
+        let levels = coarsen(&g, &opts, &mut rng, &mut ctr).unwrap();
         assert!(
             !levels.is_empty(),
             "a first level that shrank 25->24 must be kept, not discarded"
