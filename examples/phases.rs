@@ -10,9 +10,9 @@
 //! `cargo run --release --features matgen --example phases -- <case> [size] [threads] [reps]`
 //!
 //! Cases: `laplace3d` (real SPD, LDL^T), `helmholtz3d` (complex symmetric,
-//! LDL^T), `convdiff3d` (real unsymmetric, LU), `nearfield` (complex
-//! unsymmetric MoM near field, LU), `convdiff2d-klu` (real unsymmetric, KLU).
-//! `size` is the grid edge, or the dimension for `nearfield`.
+//! LDL^T), `convdiff3d` (real unsymmetric, LU), `mom` (complex unsymmetric
+//! BEM near field, LU), `convdiff2d-klu` (real unsymmetric, KLU). `size` is
+//! the grid edge, or the dimension for `mom`.
 use num_complex::Complex;
 use rslab::matgen::{bem, fem, stencil};
 use rslab::{
@@ -27,8 +27,10 @@ type C = Complex<f64>;
 const REFINE_STEPS: usize = 2;
 /// Right-hand sides of the block solve.
 const BLOCK: usize = 8;
-/// Entries per column of the near field.
-const NEAR_PER_COL: usize = 60;
+/// Entries per column of the BEM near field, about.
+const NEAR_PER_COL: f64 = 60.0;
+/// The largest near-field cutoff (the sphere's diameter is 2).
+const NEAR_MAX_CUTOFF: f64 = 1.2;
 
 /// The phases' wall times of one run, ms.
 #[derive(Default)]
@@ -135,8 +137,13 @@ fn main() {
             let (n, nnz) = (a.n, a.row_idx.len());
             (supernodal!(LuSymbolic, a, opts, reps, ctx), n, nnz)
         }
-        "nearfield" => {
-            let a: GeneralCsc<C> = bem::near_field(size, NEAR_PER_COL, 0.2, 1);
+        "mom" => {
+            let cutoff = (2.0 * (NEAR_PER_COL / size as f64).sqrt()).min(NEAR_MAX_CUTOFF);
+            let bem = bem::BemOpts {
+                cutoff,
+                ..Default::default()
+            };
+            let a: GeneralCsc<C> = bem::kernel(size, &bem);
             let (n, nnz) = (a.n, a.row_idx.len());
             (supernodal!(LuSymbolic, a, opts, reps, ctx), n, nnz)
         }
