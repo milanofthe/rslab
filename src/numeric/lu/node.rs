@@ -613,6 +613,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         }
     }
 
+    // The pivots and the emit of the front, timed apart from its updates.
+    let _pivot = rsprobe::scope!(TRACE, "pivot");
     // cdiv: in-place **blocked** panel LU, no trailing update outside the
     // panel: a getrf - an NB-wide panel factored column by column, then the
     // dominant trailing update as a single SIMD GEMM (rank-NB) - restricted to

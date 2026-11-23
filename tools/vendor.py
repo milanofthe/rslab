@@ -18,8 +18,10 @@ earlier vendoring are replaced.
 A dependency upstream takes from git (`name = { git = .., rev = .. }`) is
 vendored along at that revision into `crates/<name>` (its library, README
 and license, no tests, examples or dev-dependencies) and taken by path, so
-the consumer builds without fetching it. Its source is a checkout of it
-next to rslab where that holds the revision, else a clone of its
+the consumer builds without fetching it; so are the git dependencies of a
+vendored crate, each once (a second revision of one is an error), the
+vendored crates taking each other by path too. Its source is a checkout of
+it next to rslab where that holds the revision, else a clone of its
 repository.
 """
 
@@ -58,23 +60,24 @@ def git_deps(dependencies):
     return out
 
 
-def by_path(dependencies, names):
+def by_path(dependencies, names, crates="crates"):
     """`dependencies` with the git source of each of `names` replaced by its
-    vendored path."""
+    vendored path under `crates`."""
 
     def sub(m):
         if m["name"] not in names:
             return m[0]
         keys = [k.strip() for k in re.split(r",(?![^\[]*\])", m["body"])]
         keys = [k for k in keys if k and not re.match(r"(git|rev)\s*=", k)]
-        return f'{m["name"]} = {{ path = "crates/{m["name"]}", {", ".join(keys)} }}'
+        return f'{m["name"]} = {{ path = "{crates}/{m["name"]}", {", ".join(keys)} }}'
 
     return GIT_DEP.sub(sub, dependencies)
 
 
 def vendor_git_dep(dest, name, url, rev):
     """The library of the git dependency `name` at `rev` into
-    `<dest>/crates/<name>`; returns its short commit."""
+    `<dest>/crates/<name>`, its own git dependencies taken from the vendored
+    crates next to it; returns its short commit and those dependencies."""
     with tempfile.TemporaryDirectory() as tmp:
         src = ROOT.parent / name
         try:
@@ -91,8 +94,26 @@ def vendor_git_dep(dest, name, url, rev):
         t.extractall(target, filter="data")
     crate = (target / "Cargo.toml").read_text(encoding="utf-8")
     crate = re.sub(r"^\[dev-dependencies\]\n.*?(?=^\[|\Z)", "", crate, flags=re.M | re.S)
+    deps = git_deps(section(crate, "dependencies"))
+    crate = by_path(crate, [d[0] for d in deps], "..")
     (target / "Cargo.toml").write_text(crate, encoding="utf-8")
-    return short
+    return short, deps
+
+
+def vendor_git_deps(dest, deps):
+    """Every git dependency of `deps` and of the crates vendored for them,
+    once each: `(name, url, short commit)` in the order vendored."""
+    done, queue = {}, list(deps)
+    while queue:
+        name, url, rev = queue.pop(0)
+        if name in done:
+            if done[name][1] != rev:
+                raise SystemExit(f"vendor: {name} is pinned at {done[name][1]} and at {rev}")
+            continue
+        short, more = vendor_git_dep(dest, name, url, rev)
+        done[name] = (url, rev, short)
+        queue.extend(more)
+    return [(name, url, short) for name, (url, _, short) in done.items()]
 
 
 def section(manifest, name):
@@ -199,11 +220,10 @@ def main():
         crate = re.sub(r"^\[dev-dependencies\]\n.*?(?=^\[|\Z)", "", crate, flags=re.M | re.S)
         (dest / "crates" / c / "Cargo.toml").write_text(crate, encoding="utf-8")
     version = field(section(upstream, "package"), "version").strip('"')
-    deps = git_deps(section(upstream, "dependencies"))
+    deps = vendor_git_deps(dest, git_deps(section(upstream, "dependencies")))
     along = "".join(
-        f"\n- Vendored along: `crates/{name}` from {url} at commit "
-        f"`{vendor_git_dep(dest, name, url, drev)}`, taken by path."
-        for name, url, drev in deps
+        f"\n- Vendored along: `crates/{name}` from {url} at commit `{short}`, taken by path."
+        for name, url, short in deps
     )
     (dest / "Cargo.toml").write_text(manifest(upstream, rev, [d[0] for d in deps]), encoding="utf-8")
     try:

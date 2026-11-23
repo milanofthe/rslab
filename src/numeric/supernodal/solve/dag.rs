@@ -41,12 +41,12 @@
 
 use super::{
     bwd_in, bwd_off, chunk_align, chunk_rows, fwd_below, fwd_own, packed_blocks, sub_assign,
-    tri_rows, tri_up, NodeTimes, PlanWork, Shared, SolvePlan, SweepTrace, NONE,
+    tri_rows, tri_up, PlanWork, Shared, SolvePlan, NONE,
 };
 use crate::constants::SOLVE_DIAG_BLOCK;
 use crate::parallel::Scope;
 use crate::scalar::Scalar;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The open inputs of one sweep's tasks ([`SolvePlan::forward_dag`],
 /// [`SolvePlan::backward_dag`]), laid out anew by each sweep and kept across
@@ -137,58 +137,6 @@ fn run<'s, D: Dag>(dag: &'s D, sc: &Scope<'_, 's>, task: D::Task) {
     }
 }
 
-/// The node times of a sweep's DAG where it is traced: per ancestor, its
-/// tasks' times and the span from its first task's start to its last one's
-/// end (`total`).
-struct DagTrace {
-    t0: crate::clock::Instant,
-    nodes: Vec<(NodeTimes, AtomicU64, AtomicU64)>,
-}
-
-impl DagTrace {
-    fn new(trace: Option<&SweepTrace>, nt: usize) -> Option<Self> {
-        trace.map(|_| Self {
-            t0: crate::clock::Instant::now(),
-            nodes: (0..nt)
-                .map(|_| {
-                    let n = NodeTimes::default();
-                    (n, AtomicU64::new(u64::MAX), AtomicU64::new(0))
-                })
-                .collect(),
-        })
-    }
-
-    fn finish(self, trace: Option<&SweepTrace>) {
-        let Some(trace) = trace else { return };
-        for (ti, (times, from, to)) in self.nodes.into_iter().enumerate() {
-            let (from, to) = (from.into_inner(), to.into_inner());
-            if from <= to {
-                times.total.store(to - from, Ordering::Relaxed);
-                trace.add(ti, times);
-            }
-        }
-    }
-}
-
-/// `f()` of ancestor `ti`, timed into its `at` where traced.
-#[inline]
-fn timed<R>(
-    tr: Option<&DagTrace>,
-    ti: usize,
-    at: impl Fn(&NodeTimes) -> &AtomicU64,
-    f: impl FnOnce() -> R,
-) -> R {
-    let Some(tr) = tr else { return f() };
-    let a = tr.t0.elapsed().as_nanos() as u64;
-    let r = f();
-    let b = tr.t0.elapsed().as_nanos() as u64;
-    let (times, from, to) = &tr.nodes[ti];
-    at(times).fetch_add(b - a, Ordering::Relaxed);
-    from.fetch_min(a, Ordering::Relaxed);
-    to.fetch_max(b, Ordering::Relaxed);
-    r
-}
-
 /// The tiles of an ancestor of width `w`.
 fn tiles_of(w: usize) -> usize {
     w.div_ceil(SOLVE_DIAG_BLOCK)
@@ -267,7 +215,6 @@ struct Fwd<'a, T> {
     acc: Shared<T>,
     subs: &'a [super::Scratch<T>],
     dag: &'a DagWork,
-    trace: Option<&'a DagTrace>,
 }
 
 /// The shape of ancestor `ti` in the forward DAG laid out in `dag`.
@@ -383,7 +330,6 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
 
     fn step<'s>(&'s self, task: FwdTask, ready: &mut Ready<'_, '_, 's, Self>) {
         let (plan, nr, dag) = (self.plan, self.nr, self.dag);
-        let tr = self.trace;
         let ti = match task {
             FwdTask::Take(t, ..)
             | FwdTask::Tri(t, ..)
@@ -403,7 +349,10 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                 let (j0, j1) = (b * SOLVE_DIAG_BLOCK, ((b + 1) * SOLVE_DIAG_BLOCK).min(w));
                 // SAFETY: the tile's rows, this task's alone.
                 let yc = unsafe { std::slice::from_raw_parts_mut(yn.add(j0 * nr), (j1 - j0) * nr) };
-                timed(tr, ti, |t| &t.take, || self.take(ti, nd.c0 + j0, yc));
+                {
+                    let _s = rsprobe::scope!(TRACE, "take");
+                    self.take(ti, nd.c0 + j0, yc);
+                }
                 if b == 0 {
                     ready.push(FwdTask::Tri(ti as u32, 0));
                 } else {
@@ -423,12 +372,10 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                 let d = plan.diag_inv.get(nd.c0 + jb..nd.c0 + je).unwrap_or(&[]);
                 // SAFETY: the tile's rows, this task's alone.
                 let v = unsafe { std::slice::from_raw_parts_mut(yn.add(jb * nr), (je - jb) * nr) };
-                timed(
-                    tr,
-                    ti,
-                    |t| &t.tri,
-                    || tri_rows(v, &panel[off..], d, ld, nr, 0, je - jb),
-                );
+                {
+                    let _s = rsprobe::scope!(TRACE, "triangle");
+                    tri_rows(v, &panel[off..], d, ld, nr, 0, je - jb);
+                }
                 // the next tile's product first: it runs here
                 for g in b + 1..nd.nb {
                     if let Some(g) = nd.own_task(g, b) {
@@ -451,12 +398,10 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                 let (jb, je, off, ld) = block(s);
                 let rows = nd.own_rows(g, s);
                 let joined = rows.end > ((g + 1) * SOLVE_DIAG_BLOCK).min(w);
-                timed(
-                    tr,
-                    ti,
-                    |t| &t.pooled,
-                    || unsafe { fwd_own(yn, panel.as_ptr().add(off), ld, jb, je, rows, nr) },
-                );
+                {
+                    let _s = rsprobe::scope!(TRACE, "product");
+                    unsafe { fwd_own(yn, panel.as_ptr().add(off), ld, jb, je, rows, nr) };
+                }
                 if s + 1 == g {
                     ready.push(FwdTask::Tri(ti as u32, g as u32));
                     if joined && dag.close(nd.own(g + 1, g)) {
@@ -471,11 +416,9 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                 let (jb, je, off, ld) = block(s);
                 let rows = chunk_rows(c, nd.nc, m, nr);
                 let acc = unsafe { self.acc.ptr().add(plan.top_acc_off[ti] * nr) };
-                timed(
-                    tr,
-                    ti,
-                    |t| &t.pooled,
-                    || unsafe {
+                {
+                    let _s = rsprobe::scope!(TRACE, "product");
+                    unsafe {
                         fwd_below(
                             acc,
                             panel.as_ptr().add(off),
@@ -488,8 +431,8 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                             nr,
                             s > 0,
                         )
-                    },
-                );
+                    };
+                }
                 if s + 1 < nd.nb {
                     if dag.close(nd.below(c, s + 1)) {
                         ready.push(FwdTask::Below(ti as u32, c as u32, s as u32 + 1));
@@ -517,7 +460,6 @@ struct Bwd<'a, T> {
     x: Shared<T>,
     g: Shared<T>,
     dag: &'a DagWork,
-    trace: Option<&'a DagTrace>,
 }
 
 impl<T: Scalar> Bwd<'_, T> {
@@ -559,7 +501,6 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
 
     fn step<'s>(&'s self, task: BwdTask, ready: &mut Ready<'_, '_, 's, Self>) {
         let (plan, nr, dag) = (self.plan, self.nr, self.dag);
-        let tr = self.trace;
         let ti = match task {
             BwdTask::Start(t) | BwdTask::Off(t, ..) | BwdTask::In(t, ..) | BwdTask::Tri(t, ..) => {
                 t as usize
@@ -576,23 +517,19 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
         let g = unsafe { self.g.ptr().add(plan.top_acc_off[ti] * nr) };
         match task {
             BwdTask::Start(_) => {
-                timed(
-                    tr,
-                    ti,
-                    |t| &t.take,
-                    || {
-                        for (k, &r) in plan.rows[r0..r0 + m].iter().enumerate() {
-                            // SAFETY: the rows below lie in complete ancestors.
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    self.x.ptr().add(r as usize * nr),
-                                    g.add(k * nr),
-                                    nr,
-                                )
-                            }
+                {
+                    let _s = rsprobe::scope!(TRACE, "take");
+                    for (k, &r) in plan.rows[r0..r0 + m].iter().enumerate() {
+                        // SAFETY: the rows below lie in complete ancestors.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                self.x.ptr().add(r as usize * nr),
+                                g.add(k * nr),
+                                nr,
+                            )
                         }
-                    },
-                );
+                    }
+                }
                 if m == 0 {
                     return ready.push(BwdTask::Tri(ti as u32, nb as u32 - 1));
                 }
@@ -608,11 +545,9 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                 let b = b as usize;
                 let (jb, je, off, ld) = block(b);
                 let r = chunk_rows(q as usize, self.chunks(w, m, jb, je).0, je - jb, nr);
-                timed(
-                    tr,
-                    ti,
-                    |t| &t.pooled,
-                    || unsafe {
+                {
+                    let _s = rsprobe::scope!(TRACE, "product");
+                    unsafe {
                         bwd_off(
                             xn,
                             panel.as_ptr().add(off),
@@ -624,8 +559,8 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                             jb + r.start..jb + r.end,
                             nr,
                         )
-                    },
-                );
+                    };
+                }
                 if dag.close(step(b)) {
                     self.stepped(ti, b, ready);
                 }
@@ -634,11 +569,9 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                 let b = b as usize;
                 let (jb, je, off, ld) = block(b);
                 let r = chunk_rows(q as usize, self.chunks(w, m, jb, je).1, je - jb, nr);
-                timed(
-                    tr,
-                    ti,
-                    |t| &t.pooled,
-                    || unsafe {
+                {
+                    let _s = rsprobe::scope!(TRACE, "product");
+                    unsafe {
                         bwd_in(
                             xn,
                             panel.as_ptr().add(off),
@@ -649,8 +582,8 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                             jb + r.start..jb + r.end,
                             nr,
                         )
-                    },
-                );
+                    };
+                }
                 if dag.close(tri_open(b)) {
                     ready.push(BwdTask::Tri(ti as u32, b as u32));
                 }
@@ -661,12 +594,10 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                 let d = plan.diag_inv.get(c0 + jb..c0 + je).unwrap_or(&[]);
                 // SAFETY: the tile's rows, this task's alone.
                 let v = unsafe { std::slice::from_raw_parts_mut(xn.add(jb * nr), (je - jb) * nr) };
-                timed(
-                    tr,
-                    ti,
-                    |t| &t.tri,
-                    || tri_up(v, &panel[off..], d, ld, nr, 0, je - jb),
-                );
+                {
+                    let _s = rsprobe::scope!(TRACE, "triangle");
+                    tri_up(v, &panel[off..], d, ld, nr, 0, je - jb);
+                }
                 if b > 0 {
                     if dag.close(step(b - 1)) {
                         self.stepped(ti, b - 1, ready);
@@ -686,13 +617,7 @@ impl<T: Scalar> SolvePlan<T> {
     /// The forward sweep of the ancestors on the pool as the tile DAG (see
     /// the module), after the leaf subtrees: every ancestor's accumulator is
     /// its rows below, kept to the end of the sweep in one block.
-    pub(super) fn forward_dag(
-        &self,
-        nr: usize,
-        y: &mut [T],
-        work: &mut PlanWork<T>,
-        trace: Option<&SweepTrace>,
-    ) {
+    pub(super) fn forward_dag(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let nt = self.top.len();
         // every slot's first term is stored: no zeroing, only growth
         super::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
@@ -782,7 +707,6 @@ impl<T: Scalar> SolvePlan<T> {
             }
         }
         work.dag.first = first;
-        let tr = DagTrace::new(trace, nt);
         let fwd = Fwd {
             plan: self,
             nr,
@@ -790,7 +714,6 @@ impl<T: Scalar> SolvePlan<T> {
             acc: Shared(work.top_acc.as_mut_ptr(), work.top_acc.len()),
             subs: &work.subtrees,
             dag: &work.dag,
-            trace: tr.as_ref(),
         };
         let fwd = &fwd;
         crate::parallel::scope(crate::parallel::Work::ns(f64::INFINITY), |sc| {
@@ -803,22 +726,13 @@ impl<T: Scalar> SolvePlan<T> {
             work.dag.drained(),
             "solve DAG: a task of the forward sweep did not run once"
         );
-        if let Some(tr) = tr {
-            tr.finish(trace);
-        }
     }
 
     /// The backward sweep of the ancestors on the pool as the tile DAG (see
     /// the module), before the leaf subtrees: an ancestor starts once its
     /// parent is complete, its rows below gathered into the accumulator block
     /// the forward sweep used.
-    pub(super) fn backward_dag(
-        &self,
-        nr: usize,
-        x: &mut [T],
-        work: &mut PlanWork<T>,
-        trace: Option<&SweepTrace>,
-    ) {
+    pub(super) fn backward_dag(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
         let nt = self.top.len();
         super::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
         let dag = &mut work.dag;
@@ -831,14 +745,12 @@ impl<T: Scalar> SolvePlan<T> {
         }
         dag.base.push(at);
         dag.reset(at);
-        let tr = DagTrace::new(trace, nt);
         let bwd = Bwd {
             plan: self,
             nr,
             x: Shared(x.as_mut_ptr(), x.len()),
             g: Shared(work.top_acc.as_mut_ptr(), work.top_acc.len()),
             dag: &work.dag,
-            trace: tr.as_ref(),
         };
         for ti in 0..nt {
             let (_, w, _, m, _, _) = self.node(self.top[ti]);
@@ -860,8 +772,5 @@ impl<T: Scalar> SolvePlan<T> {
             work.dag.drained(),
             "solve DAG: a task of the backward sweep did not run once"
         );
-        if let Some(tr) = tr {
-            tr.finish(trace);
-        }
     }
 }

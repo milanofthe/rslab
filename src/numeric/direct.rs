@@ -208,21 +208,16 @@ pub(crate) fn inverse<T: Scalar, S: SolveCore<T>>(s: &S) -> Result<Vec<T>, Rslab
     solve(s, &e, n, false)
 }
 
-pub(crate) fn record<T: Scalar, S: SolveCore<T>>(
-    s: &S,
-    rhs: usize,
-    t: crate::clock::Instant,
-    steps: usize,
-) {
-    let ms = crate::clock::ms(t.elapsed());
-    s.counter().record(rhs, ms, steps);
-    if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-        crate::logging::debug(&format!(
-            "{} solve: n={} rhs={rhs} refine_steps={steps} {ms:.3} ms",
-            S::NAME,
-            s.dim()
-        ));
-    }
+/// Counts a solve of `rhs` right-hand sides with `steps` refinement steps on
+/// the factor and at the current scope.
+pub(crate) fn record<T: Scalar, S: SolveCore<T>>(s: &S, rhs: usize, steps: usize) {
+    s.counter().record(rhs, steps);
+    rsprobe::add!("rhs", rhs);
+    rsprobe::debug!(
+        "{} solve: n={} rhs={rhs} refine_steps={steps}",
+        S::NAME,
+        s.dim()
+    );
 }
 
 fn check(n: usize, len: usize, nrhs: usize) -> Result<(), RslabError> {
@@ -245,9 +240,9 @@ pub(crate) fn solve_into<T: Scalar, S: SolveCore<T>>(
 ) -> Result<(), RslabError> {
     check(s.dim(), b.len(), nrhs)?;
     check(s.dim(), x.len(), nrhs)?;
-    let t = crate::clock::Instant::now();
+    let _s = rsprobe::scope!("solve");
     s.solve_raw_into(b, nrhs, transpose, x, work)?;
-    record(s, nrhs, t, 0);
+    record(s, nrhs, 0);
     Ok(())
 }
 
@@ -295,9 +290,13 @@ where
     }
     check(n, b.len(), 1)?;
     check(n, x.len(), 1)?;
-    refine_in_place(a, s.perturbations(), b, x, policy, |r| {
+    let _s = rsprobe::scope!("refine");
+    let outcome = refine_in_place(a, s.perturbations(), b, x, policy, |r| {
+        let _s = rsprobe::scope!(DEBUG, "solve");
         s.solve_raw(r, 1, false)
-    })
+    })?;
+    rsprobe::add!("steps", outcome.steps);
+    Ok(outcome)
 }
 
 pub(crate) fn solve_refined<T, S, A>(
@@ -312,10 +311,10 @@ where
     A: RefineOperator<T> + ?Sized,
 {
     check(s.dim(), b.len(), 1)?;
-    let t = crate::clock::Instant::now();
+    let _s = rsprobe::scope!("solve");
     let mut x = s.solve_raw(b, 1, false)?;
     let outcome = refine_into(s, a, b, &mut x, policy)?;
-    record(s, 1, t, outcome.steps);
+    record(s, 1, outcome.steps);
     Ok((x, outcome))
 }
 
@@ -331,9 +330,8 @@ where
     S: SolveCore<T>,
     A: RefineOperator<T> + ?Sized,
 {
-    let t = crate::clock::Instant::now();
     let outcome = refine_into(s, a, b, x, policy)?;
-    record(s, 0, t, outcome.steps);
+    record(s, 0, outcome.steps);
     Ok(outcome)
 }
 

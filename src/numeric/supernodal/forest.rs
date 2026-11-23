@@ -28,6 +28,7 @@ pub(crate) fn ll_forest(
 ) -> Result<(), RslabError> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     const NONE: usize = usize::MAX;
+    let _s = rsprobe::scope!(DEBUG, "tree");
     let failed = AtomicBool::new(false);
     let error = std::sync::Mutex::new(None);
 
@@ -37,6 +38,8 @@ pub(crate) fn ll_forest(
         if failed.load(Ordering::Relaxed) {
             return false;
         }
+        let _front = rsprobe::scope!(TRACE, "front");
+        rsprobe::add!(DEBUG, "fronts", 1);
         if let Err(e) = factor_node(s) {
             failed.store(true, Ordering::Relaxed);
             if let Ok(mut slot) = error.lock() {

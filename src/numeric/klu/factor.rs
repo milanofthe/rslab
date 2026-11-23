@@ -15,11 +15,6 @@ pub(super) static FACTOR_RATE: ScalarRates = ScalarRates::new(KLU_FACTOR_NS_PER_
 /// What the parallel driver's splice costs per factor entry copied.
 static SPLICE_RATE: Rate = Rate::new(SCAN_NS_PER_ENTRY);
 
-/// The GP flop count carried on the attached estimate (0 when absent).
-pub(super) fn diagnostics_flops(d: &crate::diagnostics::Diagnostics) -> u64 {
-    d.estimate.as_ref().map_or(0, |e| e.factor_flops)
-}
-
 /// Whether a block of `bn` columns whose elimination DAG has `nlev` levels
 /// gets a [`BlockPlan`] under `parallel`: one that can replay columns side
 /// by side. The plan and the memory plan decide alike.

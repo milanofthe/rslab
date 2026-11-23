@@ -45,7 +45,7 @@ mod symbolic;
 #[cfg(test)]
 mod tests;
 
-use factor::{diagnostics_flops, factor_csc, factor_impl, row_scale_inv_into};
+use factor::{factor_csc, factor_impl, row_scale_inv_into};
 pub use settings::{KluParallel, KluSettings};
 
 const UNSET: usize = usize::MAX;

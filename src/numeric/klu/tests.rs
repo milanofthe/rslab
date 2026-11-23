@@ -824,14 +824,13 @@ fn klu_diagnostics_phased_vs_oneshot() {
     assert_eq!(d.threads, 1);
     assert_eq!(d.factor_nnz as usize, s.factor_nnz());
     assert!(d.estimate.is_some());
-    assert_eq!(d.stages.len(), 1);
-    assert_eq!(d.stages[0].name, "klu-factor");
+    assert_eq!(d.factor_bytes, s0.diagnostics().factor_bytes);
 
     let mut s2 = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     // the one-shot factor fills its diagnostics like the phased path
-    assert_eq!(s2.diagnostics().stages.last().unwrap().name, "klu-factor");
+    assert_eq!(s2.diagnostics().factor_nnz, d.factor_nnz);
     s2.refactor(&a).unwrap();
-    assert_eq!(s2.diagnostics().stages.last().unwrap().name, "klu-refactor");
+    assert_eq!(s2.diagnostics().factor_nnz, d.factor_nnz);
 }
 
 /// Cascaded stages with one-way inter-stage feeds: `stages` irreducible

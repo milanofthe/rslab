@@ -97,7 +97,7 @@ shows the same text).
 ## Logging
 
 ```python
-rslab.set_log_level("info")          # or the RLA_LOG environment variable
+rslab.set_log_level("info")          # warning by default; trace, debug, info, error, off
 log = logging.getLogger("rslab")
 rslab.set_log_sink(lambda level, msg: log.log(logging.getLevelName(level.upper()), msg))
 ```

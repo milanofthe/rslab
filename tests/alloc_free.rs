@@ -8,71 +8,43 @@
 //! large enough for the thread pool adds only what the pool's own work queues
 //! allocate, now and then.
 //!
-//! The strict counts are per thread, so the tests here run side by side.
+//! The counts are the `allocs` of an rsprobe scope around the runs, in a
+//! context of the test's own (`rsprobe::Alloc`, feature `rsprobe/alloc`).
+//! At INFO, the default threshold, rslab's scopes and measures are active:
+//! the runs on the calling thread count with the instrumentation on. At WARN
+//! none of rslab's scopes is, so the tasks a solve hands to the pool enter
+//! the runs' scope itself and count there too.
 
 use rslab::prelude::*;
 use rslab::{GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSymbolic, LuSymbolic, SolveWork};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-struct Counting;
-static POOLED: AtomicUsize = AtomicUsize::new(0);
-thread_local!(static MINE: Cell<usize> = const { Cell::new(0) });
-thread_local!(static IN_POOL: Cell<bool> = const { Cell::new(false) });
-
-impl Counting {
-    fn count() {
-        MINE.with(|c| c.set(c.get() + 1));
-        if IN_POOL.with(Cell::get) {
-            POOLED.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        Counting::count();
-        System.alloc(l)
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        System.dealloc(p, l)
-    }
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-        Counting::count();
-        System.realloc(p, l, n)
-    }
-}
+use rsprobe::{Context, Level};
 
 #[global_allocator]
-static COUNTING: Counting = Counting;
-
-/// Allocations on the calling thread: the idle workers of the global pool
-/// tidy their queues in the background, on their own threads.
-fn mine() -> usize {
-    MINE.with(Cell::get)
-}
-
-/// Allocations on the threads of the test's pool, for a solve spread over
-/// it.
-fn pooled() -> usize {
-    POOLED.load(Ordering::Relaxed)
-}
+static ALLOC: rsprobe::Alloc = rsprobe::Alloc::new();
 
 /// At most this many allocations over a hundred solves on the pool: its
 /// work-stealing queues grow and retire buffers now and then.
-const POOL: usize = 5;
+const POOL: u64 = 5;
 
-/// Allocations of `f` by `count` after two warm-up runs, over a hundred
-/// runs.
-fn allocs(count: fn() -> usize, mut f: impl FnMut()) -> usize {
+/// Allocations of `f` after two warm-up runs, over a hundred runs, in a
+/// context at `threshold`.
+fn allocs(threshold: Level, mut f: impl FnMut()) -> u64 {
     f();
     f();
-    let before = count();
-    for _ in 0..100 {
+    counted(threshold, || (0..100).for_each(|_| f()))
+}
+
+/// Allocations of `f`, in a scope of a context at `threshold`.
+fn counted(threshold: Level, f: impl FnOnce()) -> u64 {
+    let ctx = Context::builder().threshold(threshold).build();
+    let _on = ctx.enter();
+    {
+        let _s = rsprobe::scope!(ERROR, "runs");
         f();
     }
-    count() - before
+    let r = ctx.record();
+    let node = r.find(&["runs"]).expect("the runs' scope");
+    r.nodes[node as usize].get("allocs")
 }
 
 /// A 5-point stencil on an `m` by `m` grid, as triplets: symmetric (lower
@@ -103,13 +75,13 @@ fn grid(m: usize, lower_only: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<f64>)
 /// Every `*_into` entry point of one solver: at most `$limit` allocations
 /// over a hundred warm solves, and the bits of the allocating twin.
 macro_rules! check_solves {
-    ($what:expr, $s:expr, $n:expr, $count:expr, $limit:expr, $many_free:expr) => {{
+    ($what:expr, $s:expr, $n:expr, $level:expr, $limit:expr, $many_free:expr) => {{
         let (s, n) = (&$s, $n);
         let nrhs = 3;
         let b: Vec<f64> = (0..n * nrhs).map(|i| 1.0 + (i % 7) as f64).collect();
         let mut x = vec![0.0; n * nrhs];
         let mut work = SolveWork::new();
-        let one = allocs($count, || {
+        let one = allocs($level, || {
             s.solve_into(&b[..n], &mut x[..n], &mut work).unwrap()
         });
         assert!(one <= $limit, "{}: solve_into allocates", $what);
@@ -119,7 +91,7 @@ macro_rules! check_solves {
             "{}: solve bits",
             $what
         );
-        let tr = allocs($count, || {
+        let tr = allocs($level, || {
             s.solve_transpose_into(&b[..n], &mut x[..n], &mut work)
                 .unwrap()
         });
@@ -130,7 +102,7 @@ macro_rules! check_solves {
             "{}: transpose bits",
             $what
         );
-        let many = allocs($count, || {
+        let many = allocs($level, || {
             s.solve_many_into(&b, nrhs, &mut x, &mut work).unwrap()
         });
         assert!(
@@ -159,16 +131,16 @@ fn a_warm_newton_loop_allocates_nothing() {
         let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
         let settings = KluSettings::default().with_parallel(KluParallel::Off);
         let mut klu = KluSolver::factor(&a, &settings).unwrap();
-        let refactor = allocs(mine, || klu.refactor(&a).unwrap());
+        let refactor = allocs(Level::INFO, || klu.refactor(&a).unwrap());
         assert_eq!(refactor, 0, "KLU refactor allocates (n = {n})");
-        check_solves!(format!("KLU n={n}"), klu, n, mine, 0, true);
+        check_solves!(format!("KLU n={n}"), klu, n, Level::INFO, 0, true);
 
         // Supernodal LU on the same pattern, its analysis kept.
         let lu = LuSymbolic::analyze(&a, &opts)
             .unwrap()
             .factor(&a, &opts)
             .unwrap();
-        check_solves!(format!("LU n={n}"), lu, n, mine, 0, false);
+        check_solves!(format!("LU n={n}"), lu, n, Level::INFO, 0, false);
 
         // Supernodal LDL^T on the symmetric stencil.
         let (n, r, c, v) = grid(m, true);
@@ -177,7 +149,7 @@ fn a_warm_newton_loop_allocates_nothing() {
             .unwrap()
             .factor(&s, &opts)
             .unwrap();
-        check_solves!(format!("LDLT n={n}"), ldlt, n, mine, 0, false);
+        check_solves!(format!("LDLT n={n}"), ldlt, n, Level::INFO, 0, false);
 
         // The pool's path, forced, entered from a worker of the pool: only
         // the pool's own allocations, and the bits of the calling thread's
@@ -194,16 +166,22 @@ fn a_warm_newton_loop_allocates_nothing() {
             .unwrap();
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(4)
-            .start_handler(|_| IN_POOL.with(|p| p.set(true)))
             .build()
             .unwrap();
         pool.install(|| {
-            check_solves!(format!("LU n={n}, pool"), lu_par, n, pooled, POOL, false);
+            check_solves!(
+                format!("LU n={n}, pool"),
+                lu_par,
+                n,
+                Level::WARN,
+                POOL,
+                false
+            );
             check_solves!(
                 format!("LDLT n={n}, pool"),
                 ldlt_par,
                 n,
-                pooled,
+                Level::WARN,
                 POOL,
                 false
             );
@@ -228,12 +206,12 @@ fn a_warm_supernodal_refactor_allocates_a_fixed_handful() {
         let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
         let sym = LuSymbolic::analyze(&a, &opts).unwrap();
         let mut lu = sym.factor(&a, &opts).unwrap();
-        let lu_count = allocs(mine, || sym.refactor(&a, &opts, &mut lu).unwrap());
+        let lu_count = allocs(Level::INFO, || sym.refactor(&a, &opts, &mut lu).unwrap());
         let (n, r, c, v) = grid(m, true);
         let s = CscMatrix::from_triplets(n, &r, &c, &v).unwrap();
         let dsym = LdltSymbolic::analyze(&s, &opts).unwrap();
         let mut ldlt = dsym.factor(&s, &opts).unwrap();
-        let ldlt_count = allocs(mine, || dsym.refactor(&s, &opts, &mut ldlt).unwrap());
+        let ldlt_count = allocs(Level::INFO, || dsym.refactor(&s, &opts, &mut ldlt).unwrap());
         // 16 and 14 per call today, the same at both sizes.
         assert!(
             lu_count <= 20 * 100,
@@ -272,9 +250,10 @@ fn block_arnoldi_steps_allocate_nothing() {
         .collect();
     let mut ar = BlockArnoldi::new(&r, n, 2, 24, &KrylovSettings::default()).unwrap();
     ar.step(&op).unwrap();
-    let before = mine();
-    for _ in 0..20 {
-        ar.step(&op).unwrap();
-    }
-    assert_eq!(mine() - before, 0, "allocations in 20 steps");
+    let steps = counted(Level::INFO, || {
+        for _ in 0..20 {
+            ar.step(&op).unwrap();
+        }
+    });
+    assert_eq!(steps, 0, "allocations in 20 steps");
 }

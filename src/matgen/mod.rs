@@ -271,12 +271,7 @@ mod integration {
             .unwrap();
         let d = f.diagnostics();
         assert_eq!(d.threads, 3, "thread budget recorded");
-        assert!(
-            d.stages
-                .iter()
-                .any(|s| s.name == "factor" && s.wall_ms >= 0.0),
-            "factor stage"
-        );
+        assert!(d.factor_bytes > 0, "factor bytes");
         assert!(d.factor_nnz > 0);
         let est = d.estimate.expect("a-priori estimate attached");
         assert_eq!(est.value_bytes, 16);

@@ -1,11 +1,7 @@
-//! Every factor path fills its `Diagnostics` (stages, decisions, numeric
-//! outcome, solve accumulators), a setting the chosen path does not read is
-//! reported instead of silently ignored, and the log sink receives the
-//! factorization records.
+//! Every factor path fills its `Diagnostics` (decisions, numeric outcome,
+//! solve accumulators), and a setting the chosen path does not read is
+//! reported instead of silently ignored.
 
-use std::sync::{Arc, Mutex};
-
-use rslab::logging::{self, LogLevel, LogSink};
 use rslab::{
     CscMatrix, GeneralCsc, KluSettings, KluSolver, LdltSolver, LuSolver, OrderingMethod,
     ScalingStrategy, SolverSettings,
@@ -69,9 +65,7 @@ fn ldlt_diagnostics_are_filled() {
     assert_eq!(d.n, a.n);
     assert_eq!(d.nnz_a as usize, a.row_idx.len());
     assert!(d.factor_nnz >= d.nnz_a && d.fill_ratio() >= 1.0);
-    for stage in ["analyze", "scale", "factor"] {
-        assert!(d.stage_ms(stage).is_some(), "stage {stage} missing: {d}");
-    }
+    assert!(d.factor_bytes > 0, "{d}");
     assert_eq!(d.decisions.method, "LeftLooking");
     assert!(!d.decisions.ordering_used.is_empty());
     assert!(d.decisions.n_supernodes > 0 && d.decisions.max_front > 0);
@@ -91,7 +85,7 @@ fn lu_diagnostics_are_filled_on_both_entry_points() {
     let direct = LuSolver::factor(&a, &opts).unwrap();
     let d = direct.diagnostics();
     assert_eq!(d.n, a.n);
-    assert!(d.stage_ms("analyze").is_some() && d.stage_ms("factor").is_some());
+    assert!(d.factor_bytes > 0);
     assert_eq!(d.decisions.ordering_requested, "Amd");
     assert_eq!(d.decisions.ordering_used, "Amd");
     assert_eq!(d.numeric.two_by_two, None);
@@ -108,7 +102,7 @@ fn klu_diagnostics_are_filled() {
     let d = f.diagnostics();
     assert_eq!(d.n, a.n);
     assert_eq!(d.decisions.method, "Klu");
-    assert!(d.stage_ms("klu-factor").is_some());
+    assert!(d.factor_bytes > 0);
     assert!(d.numeric.min_pivot.is_some_and(|p| p > 0.0));
     assert_eq!(d.solves.calls, 1);
 }
@@ -165,35 +159,4 @@ fn settings_ignored_by_a_path_are_reported() {
         .diagnostics()
         .warnings
         .is_empty());
-}
-
-struct Capture(Arc<Mutex<Vec<(LogLevel, String)>>>);
-impl LogSink for Capture {
-    fn emit(&self, level: LogLevel, msg: &str) {
-        self.0.lock().unwrap().push((level, msg.to_string()));
-    }
-}
-
-#[test]
-fn factorizations_log_through_the_sink() {
-    let got = Arc::new(Mutex::new(Vec::new()));
-    logging::set_sink(Box::new(Capture(got.clone())));
-    logging::set_level(LogLevel::Info);
-    let a = grid_lower(12);
-    let f = LdltSolver::factor(&a, &SolverSettings::exact().with_pivot_threshold(0.5)).unwrap();
-    let _ = f.solve(&vec![1.0; a.n]).unwrap();
-    let records = got.lock().unwrap().clone();
-    logging::reset_sink();
-    logging::set_level(LogLevel::Warning);
-    let text: Vec<&str> = records.iter().map(|(_, m)| m.as_str()).collect();
-    assert!(text.iter().any(|m| m.contains("ldlt analyze:")), "{text:?}");
-    assert!(text.iter().any(|m| m.contains("ldlt factor:")), "{text:?}");
-    assert!(
-        records
-            .iter()
-            .any(|(l, m)| *l == LogLevel::Warning && m.contains("pivoting.threshold")),
-        "{text:?}"
-    );
-    // solves log at Debug only
-    assert!(!text.iter().any(|m| m.contains("ldlt solve:")), "{text:?}");
 }

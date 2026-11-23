@@ -1,12 +1,13 @@
 //! Deterministic resource diagnostics: an **a-priori** peak-memory estimate
-//! (computed from the symbolic factorization, before any numeric work) and a
-//! per-stage runtime/memory report collected during factorization.
+//! (computed from the symbolic factorization, before any numeric work) and
+//! the account of a factorization: its decisions, counts and pivots. The
+//! times of the phases are the scopes of the `rsprobe` record.
 //!
 //! The estimate is a pure function of the analyzed structure, so it is fully
 //! reproducible and lets a solver-in-the-loop scheduler decide *before* allocating
 //! whether a factorization fits the memory budget (fail-fast / pick approximation).
 
-use crate::constants::{GIGA, MEGA, MEGA_U64, MS_PER_S, PERCENT, RATE_FLOOR, S_PER_MS, TIME_FLOOR};
+use crate::constants::{GIGA, MEGA, MS_PER_S, RATE_FLOOR};
 use std::fmt;
 
 /// A-priori estimate of the memory a factorization will use, in bytes. All fields
@@ -99,20 +100,6 @@ impl fmt::Display for MemoryEstimate {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-stage runtime/memory report, collected during a factorization.
-// ---------------------------------------------------------------------------
-
-/// One factorization stage's cost. `flops`/`bytes` are deterministic (structural);
-/// `wall_ms` is observability (varies with load/threads).
-#[derive(Debug, Clone)]
-pub struct StageReport {
-    pub name: &'static str,
-    pub wall_ms: f64,
-    pub flops: u64,
-    pub bytes: u64,
-}
-
 /// The choices the solver made on its own for one factorization: what the
 /// `Auto` settings resolved to and what the structure looked like. Plain
 /// strings (the `Debug` form of the enums) so a host can display or serialise
@@ -170,16 +157,14 @@ pub struct SolveStats {
     pub rhs: usize,
     /// `solve*` calls.
     pub calls: usize,
-    pub wall_ms: f64,
     /// Iterative-refinement steps taken over all calls.
     pub refine_steps: usize,
 }
 
 impl SolveStats {
-    pub fn record(&mut self, rhs: usize, wall_ms: f64, refine_steps: usize) {
+    pub fn record(&mut self, rhs: usize, refine_steps: usize) {
         self.rhs += rhs;
         self.calls += 1;
-        self.wall_ms += wall_ms;
         self.refine_steps += refine_steps;
     }
 }
@@ -191,11 +176,11 @@ impl SolveStats {
 pub(crate) struct SolveCounter(std::sync::Mutex<SolveStats>);
 
 impl SolveCounter {
-    pub fn record(&self, rhs: usize, wall_ms: f64, refine_steps: usize) {
+    pub fn record(&self, rhs: usize, refine_steps: usize) {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .record(rhs, wall_ms, refine_steps);
+            .record(rhs, refine_steps);
     }
     pub fn snapshot(&self) -> SolveStats {
         *self.0.lock().unwrap_or_else(|e| e.into_inner())
@@ -208,109 +193,33 @@ impl Clone for SolveCounter {
     }
 }
 
-/// Throughput of a factorization and its solves, derived from the stage
-/// records: the numbers to compare across orderings, thread counts and
-/// machines. Rates are `0.0` where the stage is absent or took no time.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Rates {
-    /// Analysis throughput, million unknowns per second (`n` over the
-    /// `analyze` stage wall time).
-    pub analyze_mdof_s: f64,
-    /// Numeric factorization throughput, million unknowns per second, over
-    /// the latest numeric stage (`factor`, `klu-factor` or `klu-refactor`).
-    pub factor_mdof_s: f64,
-    /// Numeric factorization flop rate in GFlop/s (the numeric stage's flop
-    /// count over its wall time; zero where the path counts no flops).
-    pub factor_gflops: f64,
-    /// Factor entries produced per second, in millions (`nnz(L)` over the
-    /// numeric stage wall time): the memory-side throughput.
-    pub factor_mnnz_s: f64,
-    /// End-to-end throughput of the recorded stages (analysis, scaling and
-    /// the numeric factorization together), million unknowns per second.
-    pub total_mdof_s: f64,
-    /// Solve throughput over every recorded solve, million unknowns per
-    /// second (`rhs * n` over the accumulated solve wall time).
-    pub solve_mdof_s: f64,
-}
-
-/// Everything one factorization can tell about itself: the per-stage cost,
-/// the decisions taken, the numeric outcome, the settings that had no effect
-/// on the chosen path, and the solve-phase accumulators. Per-call and
-/// concurrency-safe (no global state), so a solver-in-the-loop with many
-/// concurrent solves gets correct per-solve numbers. Carries the a-priori
-/// [`MemoryEstimate`] alongside the measured factor time for estimate-vs-actual
-/// feedback. Logged as one `Info` line per factorization (see
+/// Everything one factorization can tell about itself: the decisions taken,
+/// the numeric outcome, the settings that had no effect on the chosen path,
+/// and the solve-phase accumulators. Per-call and concurrency-safe (no global
+/// state), so a solver-in-the-loop with many concurrent solves gets correct
+/// per-solve numbers. Carries the a-priori [`MemoryEstimate`] next to the
+/// factor's actual size. Emitted as one INFO event per factorization (see
 /// [`summary`](Self::summary)) and readable from the factor handle.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
-    /// `analyze` (ordering + symbolic; the analysis time of the reused
-    /// symbolic object), `scale`, `factor`, `refactor` in order.
-    pub stages: Vec<StageReport>,
     pub threads: usize,
     pub n: usize,
     /// Stored nonzeros of the input pattern.
     pub nnz_a: u64,
     pub factor_nnz: u64,
+    /// Heap bytes of the numeric factor: its values and indices.
+    pub factor_bytes: u64,
     pub estimate: Option<MemoryEstimate>,
     pub decisions: Decisions,
     pub numeric: NumericReport,
     /// Settings the caller set to a non-default value that the chosen factor
-    /// path does not read (also emitted as `Warning` log records).
+    /// path does not read (also emitted as WARN events).
     pub warnings: Vec<String>,
     pub solves: SolveStats,
 }
 
 impl Diagnostics {
-    /// Wall time of the recorded stages (the analysis stage included when the
-    /// symbolic object recorded it).
-    pub fn total_ms(&self) -> f64 {
-        self.stages.iter().map(|s| s.wall_ms).sum()
-    }
-    /// Wall time of one stage by name, `None` if not recorded.
-    pub fn stage_ms(&self, name: &str) -> Option<f64> {
-        self.stages
-            .iter()
-            .find(|s| s.name == name)
-            .map(|s| s.wall_ms)
-    }
     /// `nnz(L) / nnz(A)` (`0` without an input count).
-    /// The latest numeric stage (`factor`, `klu-factor` or `klu-refactor`).
-    pub fn numeric_stage(&self) -> Option<&StageReport> {
-        self.stages
-            .iter()
-            .rev()
-            .find(|s| matches!(s.name, "factor" | "klu-factor" | "klu-refactor"))
-    }
-
-    /// Throughput figures derived from the stage records; see [`Rates`].
-    pub fn rates(&self) -> Rates {
-        let mdof = |wall_ms: f64| {
-            if wall_ms > 0.0 {
-                self.n as f64 / (wall_ms * S_PER_MS) / MEGA
-            } else {
-                0.0
-            }
-        };
-        let mut r = Rates {
-            analyze_mdof_s: mdof(self.stage_ms("analyze").unwrap_or(0.0)),
-            total_mdof_s: mdof(self.total_ms()),
-            ..Rates::default()
-        };
-        if let Some(st) = self.numeric_stage() {
-            if st.wall_ms > 0.0 {
-                let secs = st.wall_ms * S_PER_MS;
-                r.factor_mdof_s = mdof(st.wall_ms);
-                r.factor_gflops = st.flops as f64 / secs / GIGA;
-                r.factor_mnnz_s = self.factor_nnz as f64 / secs / MEGA;
-            }
-        }
-        if self.solves.wall_ms > 0.0 && self.solves.rhs > 0 {
-            r.solve_mdof_s =
-                (self.solves.rhs as f64 * self.n as f64) / (self.solves.wall_ms * S_PER_MS) / MEGA;
-        }
-        r
-    }
-
     pub fn fill_ratio(&self) -> f64 {
         if self.nnz_a == 0 {
             0.0
@@ -318,30 +227,30 @@ impl Diagnostics {
             self.factor_nnz as f64 / self.nnz_a as f64
         }
     }
-    pub fn push(&mut self, name: &'static str, wall_ms: f64, flops: u64, bytes: u64) {
-        self.stages.push(StageReport {
-            name,
-            wall_ms,
-            flops,
-            bytes,
-        });
-    }
-    /// Record a stage that repeats (a refactorization per Newton step): its
-    /// latest run replaces the one before, so the record stays one entry
-    /// however often the stage runs.
-    pub fn set_latest(&mut self, name: &'static str, wall_ms: f64, flops: u64, bytes: u64) {
-        let stage = StageReport {
-            name,
-            wall_ms,
-            flops,
-            bytes,
-        };
-        match self.stages.iter_mut().find(|s| s.name == name) {
-            Some(s) => *s = stage,
-            None => self.stages.push(stage),
+    /// The counts of this factorization as measures at the current scope,
+    /// and its [`summary`](Self::summary) as an INFO event there.
+    pub(crate) fn probe(&self) {
+        rsprobe::add!("fill", self.factor_nnz);
+        if let Some(e) = &self.estimate {
+            rsprobe::add!("flops", e.factor_flops);
         }
+        rsprobe::add!("perturbed", self.numeric.perturbed);
+        if let Some(k) = self.numeric.two_by_two {
+            rsprobe::add!("two_by_two", k);
+        }
+        if let Some(k) = self.numeric.delayed {
+            rsprobe::add!("delayed", k);
+        }
+        if let Some(k) = self.numeric.forced {
+            rsprobe::add!("forced", k);
+        }
+        for w in &self.warnings {
+            rsprobe::warn!("settings: {w}");
+        }
+        rsprobe::info!("{}", self.summary());
     }
-    /// The one-line account the `Info` log carries per factorization.
+
+    /// The one-line account of the INFO event per factorization.
     pub fn summary(&self) -> String {
         let mut s = format!(
             "{} n={} nnz(A)={} nnz(L)={} fill={:.2} threads={} ordering={}",
@@ -385,16 +294,6 @@ impl Diagnostics {
         if let Some(p) = self.numeric.min_pivot {
             s.push_str(&format!(" min_pivot={p:.1e}"));
         }
-        for st in &self.stages {
-            s.push_str(&format!(" {}={:.1}ms", st.name, st.wall_ms));
-        }
-        let r = self.rates();
-        if r.factor_mdof_s > 0.0 {
-            s.push_str(&format!(
-                " factor={:.2}MDOF/s {:.1}GF/s",
-                r.factor_mdof_s, r.factor_gflops
-            ));
-        }
         if let Some(e) = &self.estimate {
             s.push_str(&format!(" est_peak={:.0}MB", e.transient_peak_mb()));
         }
@@ -413,70 +312,17 @@ impl fmt::Display for Diagnostics {
         if let Some((p, n, z)) = self.numeric.inertia {
             writeln!(f, "  inertia: +{p} -{n} 0:{z}")?;
         }
-        let tot = self.total_ms().max(TIME_FLOOR);
-        for s in &self.stages {
-            writeln!(
-                f,
-                "  {:<10} {:8.1} ms ({:4.0}%)  {:>10} Mflop  {:>8.0} MB",
-                s.name,
-                s.wall_ms,
-                PERCENT * s.wall_ms / tot,
-                s.flops / MEGA_U64,
-                s.bytes as f64 / MEGA,
-            )?;
-        }
-        let r = self.rates();
-        writeln!(
-            f,
-            "  rates: analyze {:.2} MDOF/s, factor {:.2} MDOF/s ({:.1} GF/s, {:.1} Mnnz/s), total {:.2} MDOF/s",
-            r.analyze_mdof_s, r.factor_mdof_s, r.factor_gflops, r.factor_mnnz_s, r.total_mdof_s
-        )?;
+        writeln!(f, "  factor: {:.1} MB", self.factor_bytes as f64 / MEGA)?;
         if self.solves.calls > 0 {
             writeln!(
                 f,
-                "  solves: {} calls, {} rhs, {:.1} ms, {} refinement steps, {:.1} MDOF/s",
-                self.solves.calls,
-                self.solves.rhs,
-                self.solves.wall_ms,
-                self.solves.refine_steps,
-                r.solve_mdof_s
+                "  solves: {} calls, {} rhs, {} refinement steps",
+                self.solves.calls, self.solves.rhs, self.solves.refine_steps
             )?;
         }
         for w in &self.warnings {
             writeln!(f, "  warning: {w}")?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod rates_tests {
-    use super::*;
-
-    #[test]
-    fn rates_follow_the_latest_numeric_stage_and_the_solve_totals() {
-        let mut d = Diagnostics {
-            n: 1_000_000,
-            factor_nnz: 50_000_000,
-            ..Default::default()
-        };
-        d.push("analyze", 250.0, 0, 0);
-        d.push("factor", 500.0, 40_000_000_000, 0);
-        let mut solves = SolveStats::default();
-        solves.record(8, 100.0, 0);
-        d.solves = solves;
-        let r = d.rates();
-        assert!((r.analyze_mdof_s - 4.0).abs() < 1e-9);
-        assert!((r.factor_mdof_s - 2.0).abs() < 1e-9);
-        assert!((r.factor_gflops - 80.0).abs() < 1e-9);
-        assert!((r.factor_mnnz_s - 100.0).abs() < 1e-9);
-        assert!((r.total_mdof_s - 1_000_000.0 / 0.75 / 1e6).abs() < 1e-9);
-        assert!((r.solve_mdof_s - 80.0).abs() < 1e-9);
-        // A refactor supersedes the first factor stage.
-        d.push("klu-refactor", 100.0, 0, 0);
-        assert!((d.rates().factor_mdof_s - 10.0).abs() < 1e-9);
-        assert_eq!(d.rates().factor_gflops, 0.0);
-        assert!(d.summary().contains("MDOF/s"));
-        assert!(Diagnostics::default().rates() == Rates::default());
     }
 }

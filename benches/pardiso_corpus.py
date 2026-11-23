@@ -13,7 +13,8 @@ then refines the refactorization to a relative residual of 1e-10 (plain
 iterative refinement, the same for both solvers, stopped where a step no
 longer lowers the residual; `to_target` runs from new values to that answer). It records the peak working set above the loaded
 matrix and solver library, PARDISO's own memory report and RSLAB's
-diagnostics (stage times, memory estimate). Both solvers run with the same
+diagnostics (factor size, memory estimate; stage times from revisions before
+the rsprobe record). Both solvers run with the same
 thread count. `pardiso` runs `pardisoinit`'s defaults for the matrix type,
 `pardiso-2l` adds the two-level factorization (`iparm(24) = 1`). Results append
 to `benches/bench_out/pardiso_corpus.jsonl`.
@@ -125,9 +126,11 @@ class Rslab:
     def report(self):
         d = self.factor.diagnostics()
         est = self.sym.estimate_memory(str(np.dtype(self.dtype)))
-        return {'stages': {s['name']: s['wall_ms'] / 1e3 for s in d.get('stages', [])},
+        # `stages` (the stage times) only from the revisions before the rsprobe record.
+        stages = d.get('stages', [])
+        return {'stages': {s['name']: s['wall_ms'] / 1e3 for s in stages},
                 'factor_nnz': d.get('factor_nnz'), 'decisions': d.get('decisions'),
-                'factor_bytes': next((s['bytes'] for s in d.get('stages', []) if s['name'] == 'factor'), None),
+                'factor_bytes': d.get('factor_bytes', next((s['bytes'] for s in stages if s['name'] == 'factor'), None)),
                 'estimate': est, 'numeric': d.get('numeric'), 'warnings': d.get('warnings'),
                 'settings_dropped': self.dropped, 'version': self.rslab.__version__}
 

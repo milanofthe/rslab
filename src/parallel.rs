@@ -374,6 +374,7 @@ fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B
             // each side leaves its sections the whole pool: rayon runs
             // their pieces on free threads only, and halving it kept the
             // threads a short side leaves behind from the long side's
+            let (a, b) = (carried(a), carried(b));
             ::rayon::join(|| as_piece(None, None, a), || as_piece(None, None, b))
         }
     }
@@ -389,7 +390,7 @@ pub(crate) fn enter<R: Send>(work: f64, f: impl FnOnce() -> R + Send) -> R {
     }
     match current() {
         Some(l) => {
-            let (mut f, mut r) = (Some(f), None);
+            let (mut f, mut r) = (Some(carried(f)), None);
             l.pool.enter(&mut || {
                 if let Some(f) = f.take() {
                     r = Some(rspool::install_lent(l.clone(), f));
@@ -401,7 +402,7 @@ pub(crate) fn enter<R: Send>(work: f64, f: impl FnOnce() -> R + Send) -> R {
             }
         }
         None if ::rayon::current_thread_index().is_none() && ::rayon::current_num_threads() > 1 => {
-            ::rayon::join(f, || ()).0
+            ::rayon::join(carried(f), || ()).0
         }
         None => f(),
     }
@@ -426,7 +427,11 @@ impl<'a, 's> Scope<'a, 's> {
     pub(crate) fn spawn(&self, f: impl for<'b> FnOnce(&Scope<'b, 's>) + Send + 's) {
         match self.0 {
             ScopeOn::Rayon(sc) => {
-                sc.spawn(move |sc| as_piece(None, None, || f(&Scope(ScopeOn::Rayon(sc)))))
+                let node = rsprobe::current();
+                sc.spawn(move |sc| {
+                    let _node = node.enter();
+                    as_piece(None, None, || f(&Scope(ScopeOn::Rayon(sc))))
+                })
             }
             ScopeOn::Lent(sp, lent) => {
                 let lent = lent.clone();
@@ -479,7 +484,24 @@ fn scope_on<'s, R: Send>(body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send +
                 None => unreachable!("a pool runs the body of its scope"),
             }
         }
-        None => ::rayon::scope(|sc| body(&Scope(ScopeOn::Rayon(sc)))),
+        None => {
+            let node = rsprobe::current();
+            ::rayon::scope(|sc| {
+                let _node = node.enter();
+                body(&Scope(ScopeOn::Rayon(sc)))
+            })
+        }
+    }
+}
+
+/// `f` under the calling thread's rsprobe node on whichever thread runs it:
+/// the scopes of work handed to another thread hang under the scope that
+/// handed it over, its time is `busy` there.
+pub(crate) fn carried<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R + Send {
+    let node = rsprobe::current();
+    move || {
+        let _node = node.enter();
+        f()
     }
 }
 

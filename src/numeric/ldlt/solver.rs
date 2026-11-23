@@ -326,9 +326,8 @@ fn equilibration<T: Scalar>(
 pub struct LdltSymbolic {
     symbolic: SupernodalAnalysis,
     nnz: usize,
-    /// Wall time of the analysis and the ordering it was asked for, carried
-    /// into the diagnostics of every factorization reusing it.
-    analyze_ms: f64,
+    /// The ordering the analysis was asked for, carried into the diagnostics
+    /// of every factorization reusing it.
     requested_ordering: crate::symbolic::OrderingMethod,
     /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
     /// size and complexity. The estimate is a pure function of the
@@ -352,35 +351,16 @@ impl LdltSymbolic {
     /// target pattern (even a zero-valued template) works.
     pub fn analyze<T: Scalar>(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
         a.validate()?;
-        let t = crate::clock::Instant::now();
+        let _s = rsprobe::scope!("analyze");
         let pattern = crate::symbolic::full_pattern(a.n, &a.col_ptr, &a.row_idx)?;
         let symbolic = analyze_pattern_with(pattern, a.row_idx.len(), opts)?;
-        let analyze_ms = crate::clock::ms(t.elapsed());
         let sym = Self {
             symbolic,
             nnz: a.row_idx.len(),
-            analyze_ms,
             requested_ordering: opts.ordering.method,
             est_cache: std::sync::Mutex::new(Vec::new()),
         };
-        if crate::logging::enabled(crate::logging::LogLevel::Info) {
-            let d = sym.symbolic.decisions(opts.ordering.method);
-            crate::logging::info(&format!(
-                "ldlt analyze: n={} nnz(A)={} ordering={}{} supernodes={} \
-                 max_front={} levels={} {analyze_ms:.1} ms",
-                a.n,
-                sym.nnz,
-                d.ordering_used,
-                if d.ordering_used != d.ordering_requested {
-                    format!(" (requested {})", d.ordering_requested)
-                } else {
-                    String::new()
-                },
-                d.n_supernodes,
-                d.max_front,
-                d.tree_levels
-            ));
-        }
+        sym.symbolic.probe(a.row_idx.len(), opts.ordering.method);
         Ok(sym)
     }
 
@@ -614,24 +594,20 @@ impl LdltSymbolic {
         a: &CscMatrix<T>,
         opts: &SolverSettings,
     ) -> Result<LdltSolver<T>, RslabError> {
+        let _s = rsprobe::scope!("factor");
         let pools = super::bunch_kaufman::BkPools::new();
-        let (factor, factors, scale, mut diagnostics, opts) =
-            self.numeric(a, opts, None, &pools)?;
+        let (factor, factors, scale, diagnostics, opts) = self.numeric(a, opts, None, &pools)?;
         // Solve layout: supernodal panels plus the tree schedule; the CSC
         // arrays are released so the factor is held once.
-        let t = crate::clock::Instant::now();
-        let plan = crate::numeric::supernodal::solve::SolvePlan::from_panels(
-            factor,
-            &factors.supernode_parent,
-            true,
-            opts.solve,
-        );
-        diagnostics.push(
-            "solve-layout",
-            crate::clock::ms(t.elapsed()),
-            0,
-            plan.bytes() as u64,
-        );
+        let plan = {
+            let _s = rsprobe::scope!("solve layout");
+            crate::numeric::supernodal::solve::SolvePlan::from_panels(
+                factor,
+                &factors.supernode_parent,
+                true,
+                opts.solve,
+            )
+        };
         Ok(LdltSolver {
             factors,
             scale,
@@ -659,19 +635,16 @@ impl LdltSymbolic {
         opts: &SolverSettings,
         ldlt: &mut LdltSolver<T>,
     ) -> Result<(), RslabError> {
+        let _s = rsprobe::scope!("refactor");
         ldlt.factored = false;
         let storage = ldlt.plan.take_storage();
-        let (factor, factors, scale, mut diagnostics, opts) =
+        let (factor, factors, scale, diagnostics, opts) =
             self.numeric(a, opts, Some(storage), &ldlt.pools)?;
-        let t = crate::clock::Instant::now();
-        ldlt.plan
-            .refill(factor, &factors.supernode_parent, true, opts.solve);
-        diagnostics.push(
-            "solve-layout",
-            crate::clock::ms(t.elapsed()),
-            0,
-            ldlt.plan.bytes() as u64,
-        );
+        {
+            let _s = rsprobe::scope!("solve layout");
+            ldlt.plan
+                .refill(factor, &factors.supernode_parent, true, opts.solve);
+        }
         ldlt.factors = factors;
         ldlt.scale = scale;
         ldlt.diagnostics = diagnostics;
@@ -709,13 +682,10 @@ impl LdltSymbolic {
         });
         let opts = opts.pinned(resolved_threads);
         let warnings = opts.ignored_on(crate::numeric::settings::FactorPath::Ldlt);
-        for w in &warnings {
-            crate::logging::warn(&format!("ldlt settings: {w}"));
-        }
-        let t = crate::clock::Instant::now();
-        let scale = equilibration(a, &opts.scaling)?;
-        let scale_ms = crate::clock::ms(t.elapsed());
-        let t = crate::clock::Instant::now();
+        let scale = {
+            let _s = rsprobe::scope!("scale");
+            equilibration(a, &opts.scaling)?
+        };
         let numeric = factor_numeric(&self.symbolic, a, scale.as_deref(), &opts, storage, pools)?;
         let scale = scale.unwrap_or_else(|| vec![1.0; a.n]);
         let factor_nnz = (numeric.factor.nnz() - numeric.n_zeros) as u64;
@@ -725,15 +695,15 @@ impl LdltSymbolic {
             pivots: factors,
             ..
         } = numeric;
-        let factor_ms = crate::clock::ms(t.elapsed());
         let mut decisions = self.symbolic.decisions(self.requested_ordering);
         decisions.scaling = format!("{:?}", opts.scaling);
         decisions.method = "LeftLooking".to_string();
-        let mut diagnostics = crate::diagnostics::Diagnostics {
+        let diagnostics = crate::diagnostics::Diagnostics {
             threads: resolved_threads,
             n: a.n,
             nnz_a: self.nnz as u64,
             factor_nnz,
+            factor_bytes,
             estimate: Some(estimate),
             decisions,
             numeric: crate::diagnostics::NumericReport {
@@ -752,13 +722,7 @@ impl LdltSymbolic {
             warnings,
             ..Default::default()
         };
-        // Bytes per stored entry: the scalar value plus its usize row index.
-        diagnostics.push("analyze", self.analyze_ms, 0, 0);
-        diagnostics.push("scale", scale_ms, 0, 0);
-        diagnostics.push("factor", factor_ms, estimate.factor_flops, factor_bytes);
-        if crate::logging::enabled(crate::logging::LogLevel::Info) {
-            crate::logging::info(&format!("ldlt factor: {}", diagnostics.summary()));
-        }
+        diagnostics.probe();
         Ok((factor, factors, scale, diagnostics, opts))
     }
 }

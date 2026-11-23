@@ -312,18 +312,13 @@ def test_handle_krylov_methods_accept_operator_override():
 # ---------------------------------------------------------------------------
 
 
-def test_diagnostics_report_throughput_rates():
+def test_diagnostics_report_counts():
     A = _spd(300)
     f = rslab.ldlt(A)
     f.solve(np.ones(300))
-    r = f.diagnostics()["rates"]
-    for key in ("analyze_mdof_s", "factor_mdof_s", "factor_gflops", "factor_mnnz_s", "total_mdof_s", "solve_mdof_s"):
-        assert r[key] >= 0.0
-    assert r["factor_mdof_s"] > 0 and r["solve_mdof_s"] > 0
-    assert "MDOF/s" in f.diagnostics()["summary"]
-    k = rslab.klu(_circuit(300))
-    k.refactor(rslab._full_csc(_circuit(300)).data)
-    assert k.diagnostics()["rates"]["factor_mdof_s"] > 0
+    d = f.diagnostics()
+    assert d["factor_bytes"] > 0 and d["solves"] == {"calls": 1, "rhs": 1, "refine_steps": 0}
+    assert "nnz(L)=" in d["summary"]
 
 
 def test_solve_refine_target_and_measure():
@@ -384,6 +379,7 @@ def test_log_sink_and_level():
         rslab.lu(_general(200))
         assert seen, "no log messages reached the sink at debug level"
         assert all(lvl in ("debug", "info", "warning", "error") for lvl, _ in seen)
+        assert any(msg.startswith("factor: ") for _, msg in seen), seen
     finally:
         rslab.set_log_level(old)
         rslab.set_log_sink(None)

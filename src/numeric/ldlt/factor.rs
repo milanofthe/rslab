@@ -76,10 +76,8 @@ pub(crate) fn factor_numeric<T: Scalar>(
     // frozen on the first factorization of this pattern; every later
     // (re)factorization reads the values where they are.
     let prog = inner.input.get_or_init(|| {
-        crate::logging::timed(
-            || "ldlt: input program".into(),
-            || InputProgram::symmetric(&a.col_ptr, &a.row_idx, &sym.perm_inv),
-        )
+        let _s = rsprobe::scope!(DEBUG, "input program");
+        InputProgram::symmetric(&a.col_ptr, &a.row_idx, &sym.perm_inv)
     });
     // The scaling by elimination index: entry `(g, c)` of `P^T A P` is `A`'s
     // times `s[perm[g]] * s[perm[c]]`.

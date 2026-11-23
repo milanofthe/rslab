@@ -47,7 +47,6 @@ use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::parallel::{Choice, PerScalar, Pick, Prior, Rate, ScalarRates, Work};
 use crate::scalar::Scalar;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const NONE: u32 = u32::MAX;
 
@@ -692,9 +691,7 @@ impl<T: Scalar> SolvePlan<T> {
             // row pivoting moved rows across subtrees): one sequential chain, every node an ancestor
             // without slots. Levels run from the root, so the deepest level
             // (processed first by the forward sweep) is the first column.
-            if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-                crate::logging::debug("solve layout: structure not tree-nested, sequential sweeps");
-            }
+            rsprobe::debug!("solve layout: structure not tree-nested, sequential sweeps");
             let all: Vec<u32> = (0..ns as u32).collect();
             let levels: Vec<Vec<u32>> = all.iter().rev().map(|&s| vec![s]).collect();
             (Vec::new(), all, levels, vec![NONE; rows.len()])
@@ -827,7 +824,7 @@ impl<T: Scalar> SolvePlan<T> {
             spare_rows: Vec::new(),
             cfg,
         };
-        plan.log_layout();
+        rsprobe::debug!("{}", plan.describe());
         plan
     }
 
@@ -863,9 +860,11 @@ impl<T: Scalar> SolvePlan<T> {
             && factor.row_ptr == self.row_ptr
             && factor.rows == self.rows;
         if !same {
+            rsprobe::add!("layouts rebuilt", 1);
             *self = Self::from_panels(factor, supernode_parent, unit, cfg);
             return;
         }
+        rsprobe::add!("layouts kept", 1);
         // The new row list equals the plan's: kept as the next spare, and the
         // buffer keeps its room for the next factorization to fill again.
         let PanelFactor {
@@ -889,20 +888,12 @@ impl<T: Scalar> SolvePlan<T> {
         self.spare_rows = rows;
     }
 
-    /// Bytes of the panel storage (values plus row indices).
-    pub fn bytes(&self) -> usize {
-        self.vals.len() * std::mem::size_of::<T>() + self.rows.len() * IDX32_BYTES
-    }
-
-    /// The schedule's bounds at the `debug` level, in panel entries (a
-    /// sweep's work per right-hand side): the leaf subtrees' share and their
-    /// balance, the ancestors' share, the longest chain of ancestors to a
-    /// root (the critical path of their task tree), the widths of the top
-    /// levels and the accumulator slots the ancestors take.
-    fn log_layout(&self) {
-        if !crate::logging::enabled(crate::logging::LogLevel::Debug) {
-            return;
-        }
+    /// The schedule's bounds in panel entries (a sweep's work per right-hand
+    /// side): the leaf subtrees' share and their balance, the ancestors'
+    /// share, the longest chain of ancestors to a root (the critical path of
+    /// their task tree), the widths of the top levels and the accumulator
+    /// slots the ancestors take.
+    fn describe(&self) -> String {
         let entries = |s: u32| self.val_rng[s as usize].1 - self.val_rng[s as usize].0;
         let sub: Vec<usize> = (self.subtrees.iter())
             .map(|st| st.nodes.iter().map(|&s| entries(s)).sum())
@@ -929,7 +920,7 @@ impl<T: Scalar> SolvePlan<T> {
             let (_, w, _, m, _, _) = self.node(s);
             format!(" largest ancestor {} entries (w={w} m={m})", entries(s))
         });
-        crate::logging::debug(&format!(
+        format!(
             "solve layout: n={} chain={} entries={} subtrees={} entries={} (max {} mean {:.0}) \
              ancestors={} entries={} levels={} widths={widths:?} critical path={} \
              (triangles {tri}, rows below {off}, wide nodes (w, m) {wide:?}) slots={slots}{big}",
@@ -944,7 +935,7 @@ impl<T: Scalar> SolvePlan<T> {
             top_work,
             self.top_levels.len(),
             critical,
-        ));
+        )
     }
 
     /// The longest chain of ancestors to a root in panel entries, the
@@ -1122,15 +1113,12 @@ impl<T: Scalar> SolvePlan<T> {
                     let pick = kind
                         .ways::<T>(nr)
                         .pick(serial, entries, 2, |o| Some(ways[o]));
-                    if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-                        crate::logging::debug(&format!(
-                            "solve: sweep nr={nr} budget={budget} serial~{:.2} ms pool~{:.2} ms -> {} (measured {})",
-                            crate::clock::ms(std::time::Duration::from_nanos(serial as u64)),
-                            crate::clock::ms(std::time::Duration::from_nanos(ways[1].expected as u64)),
-                            if pick.option == 1 { "pool" } else { "here" },
-                            pick.measured()
-                        ));
-                    }
+                    rsprobe::debug!(
+                        "sweep nr={nr} budget={budget} serial~{serial:.0} ns pool~{:.0} ns -> {} (measured {})",
+                        ways[1].expected,
+                        if pick.option == 1 { "pool" } else { "here" },
+                        pick.measured()
+                    );
                     work.pick = pick.measured().then_some((pick, entries));
                     pick.option == 1
                 }
@@ -1159,13 +1147,7 @@ impl<T: Scalar> SolvePlan<T> {
             if let Some((pick, ops)) = timed {
                 let ns = t.elapsed().as_nanos() as f64;
                 kind.ways::<T>(nr).record(pick, ns, ops);
-                if crate::logging::enabled(crate::logging::LogLevel::Debug) {
-                    crate::logging::debug(&format!(
-                        "solve: sweep way {} took {:.2} ms",
-                        pick.option,
-                        crate::clock::ms(std::time::Duration::from_nanos(ns as u64))
-                    ));
-                }
+                rsprobe::debug!("sweep way {} took {ns:.0} ns", pick.option);
             }
             r
         })
@@ -1224,13 +1206,7 @@ impl<T: Scalar> SolvePlan<T> {
         work.parallel && !self.chain && !self.top.is_empty()
     }
 
-    fn top_forward(
-        &self,
-        nr: usize,
-        y: &mut [T],
-        work: &mut PlanWork<T>,
-        trace: Option<&SweepTrace>,
-    ) {
+    fn top_forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let par = work.parallel;
         let nt = crate::parallel::threads();
         let shared = Shared(y.as_mut_ptr(), y.len());
@@ -1243,10 +1219,8 @@ impl<T: Scalar> SolvePlan<T> {
             let sweep = |i: usize, s: u32, y: &mut [T], par: bool, sc: &mut Scratch<T>| {
                 // SAFETY: node `i` owns its range of the level's block.
                 let acc = unsafe { &mut accs.slice()[ptr[i] * nr..ptr[i + 1] * nr] };
-                let ti = self.top_index[s as usize] as usize;
-                SweepTrace::node(trace, ti, |tr| {
-                    self.fwd_node_gemm(s, nr, y, acc, par, &mut sc.t, tr)
-                });
+                let _s = rsprobe::scope!(TRACE, "node");
+                self.fwd_node_gemm(s, nr, y, acc, par, &mut sc.t);
             };
             if node_par {
                 // a node's own sections nest inside: estimated, not measured
@@ -1285,23 +1259,15 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    fn top_backward(
-        &self,
-        nr: usize,
-        x: &mut [T],
-        work: &mut PlanWork<T>,
-        trace: Option<&SweepTrace>,
-    ) {
+    fn top_backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
         let par = work.parallel;
         let nt = crate::parallel::threads();
         let shared = Shared(x.as_mut_ptr(), x.len());
         for level in &self.top_levels {
             let node_par = !par || level.len() >= nt || nt == 1;
             let sweep = |s: u32, x: &mut [T], par: bool, sc: &mut Scratch<T>| {
-                let ti = self.top_index[s as usize] as usize;
-                SweepTrace::node(trace, ti, |tr| {
-                    self.bwd_node_gemm(s, nr, x, par, &mut sc.g, tr)
-                });
+                let _s = rsprobe::scope!(TRACE, "node");
+                self.bwd_node_gemm(s, nr, x, par, &mut sc.g);
             };
             if node_par {
                 // a node's own sections nest inside: estimated, not measured
@@ -1346,36 +1312,30 @@ impl<T: Scalar> SolvePlan<T> {
         acc: &mut [T],
         par: bool,
         t: &mut Vec<T>,
-        tr: Option<&NodeTimes>,
     ) {
         let (c0, w, r0, m, _, _) = self.node(s);
-        self.fwd_node_core(s, nr, &mut y[c0 * nr..(c0 + w) * nr], par, t, tr);
+        self.fwd_node_core(s, nr, &mut y[c0 * nr..(c0 + w) * nr], par, t);
         if m == 0 {
             return;
         }
         let rows = &self.rows[r0..r0 + m];
         let slots = &self.ext_slot[r0..r0 + m];
-        timed(
-            tr,
-            |t| &t.scatter,
-            || {
-                for (i, ti) in t[..m * nr].chunks_exact(nr).enumerate() {
-                    let sl = slots[i];
-                    if sl == NONE {
-                        let r = rows[i] as usize;
-                        sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
-                    } else {
-                        let a = (sl & !FIRST) as usize;
-                        let to = &mut acc[a * nr..(a + 1) * nr];
-                        if sl & FIRST != 0 {
-                            to.copy_from_slice(ti);
-                        } else {
-                            add_assign(to, ti);
-                        }
-                    }
+        let _s = rsprobe::scope!(TRACE, "scatter");
+        for (i, ti) in t[..m * nr].chunks_exact(nr).enumerate() {
+            let sl = slots[i];
+            if sl == NONE {
+                let r = rows[i] as usize;
+                sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
+            } else {
+                let a = (sl & !FIRST) as usize;
+                let to = &mut acc[a * nr..(a + 1) * nr];
+                if sl & FIRST != 0 {
+                    to.copy_from_slice(ti);
+                } else {
+                    add_assign(to, ti);
                 }
-            },
-        );
+            }
+        }
     }
 
     /// The node part of [`fwd_node_gemm`](Self::fwd_node_gemm), shared with
@@ -1387,42 +1347,30 @@ impl<T: Scalar> SolvePlan<T> {
     /// no off-block rows), each row the blocks' products summed in block order,
     /// in one section of row chunks across all blocks. The products run in row
     /// chunks on the pool when `par` ([`node_chunks`](Self::node_chunks)). The
-    /// caller takes `t` off the rows the node's off-block rows map to. Timed
-    /// into `tr` where traced.
-    pub(super) fn fwd_node_core(
-        &self,
-        s: u32,
-        nr: usize,
-        yb: &mut [T],
-        par: bool,
-        t: &mut Vec<T>,
-        tr: Option<&NodeTimes>,
-    ) {
+    /// caller takes `t` off the rows the node's off-block rows map to.
+    pub(super) fn fwd_node_core(&self, s: u32, nr: usize, yb: &mut [T], par: bool, t: &mut Vec<T>) {
         let (c0, w, _, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         let pp = Shared(panel.as_ptr() as *mut T, panel.len());
         for (jb, je, off, ld) in packed_blocks(w, m) {
             let d = dinv.get(jb..je).unwrap_or(&[]);
-            timed(
-                tr,
-                |t| &t.tri,
-                || {
-                    tri_rows(
-                        &mut yb[jb * nr..je * nr],
-                        &panel[off..],
-                        d,
-                        ld,
-                        nr,
-                        0,
-                        je - jb,
-                    )
-                },
-            );
+            {
+                let _s = rsprobe::scope!(TRACE, "triangle");
+                tri_rows(
+                    &mut yb[jb * nr..je * nr],
+                    &panel[off..],
+                    d,
+                    ld,
+                    nr,
+                    0,
+                    je - jb,
+                );
+            }
             // the node's own rows `je..w` take the block's columns
             let k = je - jb;
             let own = self.node_chunks(par, w - je, k, nr);
             let yp = Shared(yb.as_mut_ptr(), yb.len());
-            run_chunks(own, tr, |i| {
+            run_chunks(own, |i| {
                 let r = chunk_rows(i, own, w - je, nr);
                 // SAFETY: a chunk writes its own rows of `yb` (below `je`); the
                 // block's solved rows `jb..je` and the panel are only read.
@@ -1449,7 +1397,7 @@ impl<T: Scalar> SolvePlan<T> {
             Shared(yb.as_mut_ptr(), yb.len()),
             Shared(t.as_mut_ptr(), t.len()),
         );
-        run_chunks(below, tr, |i| {
+        run_chunks(below, |i| {
             let r = chunk_rows(i, below, m, nr);
             for (b, (jb, je, off, ld)) in packed_blocks(w, m).enumerate() {
                 // SAFETY: a chunk writes its own rows of `t`; the solved rows of `yb`
@@ -1480,28 +1428,15 @@ impl<T: Scalar> SolvePlan<T> {
     /// product and solves its own triangle column by column, last to first, each
     /// column scaled after its terms. The products run in row chunks on the
     /// pool when `par` ([`node_chunks`](Self::node_chunks)), within a block's rows.
-    fn bwd_node_gemm(
-        &self,
-        s: u32,
-        nr: usize,
-        x: &mut [T],
-        par: bool,
-        g: &mut Vec<T>,
-        tr: Option<&NodeTimes>,
-    ) {
+    fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
         let (c0, w, r0, m, _, panel) = self.node(s);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         if m > 0 {
-            timed(
-                tr,
-                |t| &t.take,
-                || {
-                    g.clear();
-                    for &r in &self.rows[r0..r0 + m] {
-                        g.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
-                    }
-                },
-            );
+            let _s = rsprobe::scope!(TRACE, "gather");
+            g.clear();
+            for &r in &self.rows[r0..r0 + m] {
+                g.extend_from_slice(&x[r as usize * nr..(r as usize + 1) * nr]);
+            }
         }
         let xb = &mut x[c0 * nr..(c0 + w) * nr];
         let (pp, gp, xp) = (
@@ -1518,7 +1453,7 @@ impl<T: Scalar> SolvePlan<T> {
                 self.node_chunks(par, SOLVE_DIAG_BLOCK, m, nr),
                 self.node_chunks(par, last_rows, m, nr),
             );
-            run_chunks((nb - 1) * full + last, tr, |i| {
+            run_chunks((nb - 1) * full + last, |i| {
                 let (b, q, count) = match i.checked_sub((nb - 1) * full) {
                     None => (i / full, i % full, full),
                     Some(q) => (nb - 1, q, last),
@@ -1547,7 +1482,7 @@ impl<T: Scalar> SolvePlan<T> {
         for (jb, je, off, ld) in packed_blocks(w, m).rev() {
             if je < w {
                 let count = self.node_chunks(par, je - jb, w - je, nr);
-                run_chunks(count, tr, |q| {
+                run_chunks(count, |q| {
                     let r = chunk_rows(q, count, je - jb, nr);
                     // SAFETY: the chunk writes its own rows of `jb..je`, rows `je..w`
                     // are read: disjoint.
@@ -1565,11 +1500,8 @@ impl<T: Scalar> SolvePlan<T> {
                     }
                 });
             }
-            timed(
-                tr,
-                |t| &t.tri,
-                || tri_up(xb, &panel[off..], dinv, ld, nr, jb, je),
-            );
+            let _s = rsprobe::scope!(TRACE, "triangle");
+            tri_up(xb, &panel[off..], dinv, ld, nr, jb, je);
         }
     }
 
@@ -1596,64 +1528,61 @@ impl<T: Scalar> SolvePlan<T> {
         work: &mut PlanWork<T>,
     ) -> Result<(), RslabError> {
         debug_assert_eq!(y.len(), self.n * nr);
-        let mut phases = PhaseTrace::start();
         self.forward_block(nr, y, work);
-        phases.lap("forward");
-        solve_diagonal(f, y, nr, 0..f.n)?;
-        phases.lap("diag");
+        {
+            let _s = rsprobe::scope!(DEBUG, "diagonal");
+            solve_diagonal(f, y, nr, 0..f.n)?;
+        }
         self.backward_block(nr, y, work);
-        phases.lap("backward");
-        phases.finish("solve-block", work.parallel);
         Ok(())
     }
 
     fn forward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
+        let _s = rsprobe::scope!(DEBUG, "forward");
         let shared = Shared(y.as_mut_ptr(), y.len());
-        let mut phases = PhaseTrace::start();
-        let trace = SweepTrace::start();
-        let sub_tr = trace.as_ref().map(|t| &t.subtrees);
         let par = work.parallel;
         let scratch = &mut work.subtrees[..self.subtrees.len()];
         let sweep_work = Self::sweep_work(self.subtrees_work(), nr);
-        Self::each(par, sweep_work, &self.subtrees, scratch, |_, st, sc| {
-            grow(&mut sc.acc, st.ext.len() * nr);
-            // SAFETY: see `Shared`.
-            let yv = unsafe { shared.slice() };
-            for &s in &st.nodes {
-                self.fwd_node_gemm(s, nr, yv, &mut sc.acc, false, &mut sc.t, sub_tr);
-            }
-        });
-        phases.lap("fwd-subtrees");
+        {
+            let _s = rsprobe::scope!(DEBUG, "subtrees");
+            Self::each(par, sweep_work, &self.subtrees, scratch, |_, st, sc| {
+                grow(&mut sc.acc, st.ext.len() * nr);
+                // SAFETY: see `Shared`.
+                let yv = unsafe { shared.slice() };
+                for &s in &st.nodes {
+                    self.fwd_node_gemm(s, nr, yv, &mut sc.acc, false, &mut sc.t);
+                }
+            });
+        }
         if self.flows(work) {
-            self.forward_dag(nr, y, work, trace.as_ref());
-            phases.lap("fwd-top");
+            let _s = rsprobe::scope!(DEBUG, "ancestors");
+            self.forward_dag(nr, y, work);
         } else {
-            for (st, sc) in self.subtrees.iter().zip(&work.subtrees) {
-                for (i, &c) in st.ext.iter().enumerate() {
-                    let yr = &mut y[c as usize * nr..(c as usize + 1) * nr];
-                    sub_assign(yr, &sc.acc[i * nr..(i + 1) * nr]);
+            {
+                let _s = rsprobe::scope!(DEBUG, "reduce");
+                for (st, sc) in self.subtrees.iter().zip(&work.subtrees) {
+                    for (i, &c) in st.ext.iter().enumerate() {
+                        let yr = &mut y[c as usize * nr..(c as usize + 1) * nr];
+                        sub_assign(yr, &sc.acc[i * nr..(i + 1) * nr]);
+                    }
                 }
             }
-            phases.lap("fwd-reduce");
-            self.top_forward(nr, y, work, trace.as_ref());
-            phases.lap("fwd-top");
-        }
-        phases.finish("forward-block", work.parallel);
-        if let Some(trace) = trace {
-            trace.finish(self, "fwd");
+            let _s = rsprobe::scope!(DEBUG, "ancestors");
+            self.top_forward(nr, y, work);
         }
     }
 
     fn backward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
-        let mut phases = PhaseTrace::start();
-        let trace = SweepTrace::start();
-        let sub_tr = trace.as_ref().map(|t| &t.subtrees);
-        if self.flows(work) {
-            self.backward_dag(nr, y, work, trace.as_ref());
-        } else {
-            self.top_backward(nr, y, work, trace.as_ref());
+        let _s = rsprobe::scope!(DEBUG, "backward");
+        {
+            let _s = rsprobe::scope!(DEBUG, "ancestors");
+            if self.flows(work) {
+                self.backward_dag(nr, y, work);
+            } else {
+                self.top_backward(nr, y, work);
+            }
         }
-        phases.lap("bwd-top");
+        let _s = rsprobe::scope!(DEBUG, "subtrees");
         let shared = Shared(y.as_mut_ptr(), y.len());
         let par = work.parallel;
         let scratch = &mut work.subtrees[..self.subtrees.len()];
@@ -1662,14 +1591,9 @@ impl<T: Scalar> SolvePlan<T> {
             // SAFETY: see `Shared`.
             let xv = unsafe { shared.slice() };
             for &s in st.nodes.iter().rev() {
-                self.bwd_node_gemm(s, nr, xv, false, &mut sc.g, sub_tr);
+                self.bwd_node_gemm(s, nr, xv, false, &mut sc.g);
             }
         });
-        phases.lap("bwd-subtrees");
-        phases.finish("backward-block", work.parallel);
-        if let Some(trace) = trace {
-            trace.finish(self, "bwd");
-        }
     }
 }
 
@@ -1696,163 +1620,6 @@ fn add_assign<T: Scalar>(y: &mut [T], x: &[T]) {
     let n = y.len().min(x.len());
     for (yi, &xi) in y[..n].iter_mut().zip(&x[..n]) {
         *yi = *yi + xi;
-    }
-}
-
-/// Per-phase wall times of one solve, emitted at the `debug` log level
-/// (nothing is measured otherwise).
-struct PhaseTrace {
-    t0: Option<crate::clock::Instant>,
-    laps: Vec<(&'static str, f64)>,
-}
-
-impl PhaseTrace {
-    fn start() -> Self {
-        let on = crate::logging::enabled(crate::logging::LogLevel::Debug);
-        Self {
-            t0: on.then(crate::clock::Instant::now),
-            laps: Vec::new(),
-        }
-    }
-
-    fn lap(&mut self, name: &'static str) {
-        if let Some(t0) = self.t0 {
-            self.laps.push((name, crate::clock::ms(t0.elapsed())));
-            self.t0 = Some(crate::clock::Instant::now());
-        }
-    }
-
-    /// Log the laps of a sweep, run on the pool when `parallel`.
-    fn finish(&self, what: &str, parallel: bool) {
-        if self.t0.is_some() {
-            let total: f64 = self.laps.iter().map(|l| l.1).sum();
-            let parts: Vec<String> = self
-                .laps
-                .iter()
-                .map(|(n, ms)| format!("{n}={ms:.2}ms"))
-                .collect();
-            crate::logging::debug(&format!(
-                "{what}: {total:.2}ms threads={} {}",
-                if parallel {
-                    crate::parallel::threads()
-                } else {
-                    1
-                },
-                parts.join(" ")
-            ));
-        }
-    }
-}
-
-/// Wall times inside a sweep, in ns, of one ancestor or summed over the
-/// leaf subtrees' tasks ([`SweepTrace`]); only at the `debug` log level.
-#[derive(Default)]
-pub(super) struct NodeTimes {
-    /// The node's whole sweep (in the task DAG, from its first task's start
-    /// to its last one's end).
-    total: AtomicU64,
-    /// The take of the terms for its columns (forward) or the gather of its
-    /// rows below (backward).
-    take: AtomicU64,
-    /// The triangles on the node's thread.
-    tri: AtomicU64,
-    /// The products on the node's thread, whole.
-    gemm: AtomicU64,
-    /// The products' chunks in the pool sections (in the task DAG, the
-    /// tile products), summed.
-    pooled: AtomicU64,
-    /// The scatter of `L_off X` into the right-hand sides and accumulators.
-    scatter: AtomicU64,
-    /// The pool sections of the products: their count, wall and chunks.
-    sections: AtomicU64,
-    section: AtomicU64,
-    chunks: AtomicU64,
-}
-
-/// `f()`, its wall time added to the counter `at` of `tr` where traced.
-#[inline]
-fn timed<R>(
-    tr: Option<&NodeTimes>,
-    at: impl Fn(&NodeTimes) -> &AtomicU64,
-    f: impl FnOnce() -> R,
-) -> R {
-    match tr {
-        None => f(),
-        Some(tr) => {
-            let t0 = crate::clock::Instant::now();
-            let r = f();
-            at(tr).fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            r
-        }
-    }
-}
-
-/// The node times of one sweep, emitted at the `debug` log level
-/// (`examples/lu_solve_timing.rs` aggregates them): a line per ancestor
-/// with its shape, entries and whether it lies on the critical path, and a
-/// line for the leaf subtrees.
-#[derive(Default)]
-struct SweepTrace {
-    nodes: std::sync::Mutex<Vec<(usize, NodeTimes)>>,
-    subtrees: NodeTimes,
-}
-
-impl SweepTrace {
-    /// A trace when the `debug` log level is on.
-    fn start() -> Option<Self> {
-        crate::logging::enabled(crate::logging::LogLevel::Debug).then(Self::default)
-    }
-
-    /// `f(times)` for ancestor `ti`, its times kept where traced.
-    fn node(trace: Option<&Self>, ti: usize, f: impl FnOnce(Option<&NodeTimes>)) {
-        let Some(trace) = trace else {
-            return f(None);
-        };
-        let times = NodeTimes::default();
-        timed(Some(&times), |t| &t.total, || f(Some(&times)));
-        trace.add(ti, times);
-    }
-
-    /// The times of ancestor `ti`, kept.
-    fn add(&self, ti: usize, times: NodeTimes) {
-        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        nodes.push((ti, times));
-    }
-
-    fn finish<T: Scalar>(&self, plan: &SolvePlan<T>, what: &str) {
-        let line = |t: &NodeTimes| {
-            let v = |a: &AtomicU64| a.load(Ordering::Relaxed);
-            format!(
-                "total={} take={} tri={} gemm={} pooled={} scatter={} sections={} section={} chunks={}",
-                v(&t.total),
-                v(&t.take),
-                v(&t.tri),
-                v(&t.gemm),
-                v(&t.pooled),
-                v(&t.scatter),
-                v(&t.sections),
-                v(&t.section),
-                v(&t.chunks)
-            )
-        };
-        let path = plan.critical_path();
-        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        for (ti, t) in nodes.iter() {
-            let s = plan.top[*ti];
-            let (_, w, _, m, _, _) = plan.node(s);
-            let (v0, v1) = plan.val_rng[s as usize];
-            crate::logging::debug(&format!(
-                "solve node {what} w={w} m={m} entries={} path={} {}",
-                v1 - v0,
-                u8::from(path.contains(ti)),
-                line(t)
-            ));
-        }
-        crate::logging::debug(&format!(
-            "solve subtrees {what} entries={} {}",
-            plan.subtree_work,
-            line(&self.subtrees)
-        ));
     }
 }
 
@@ -2053,21 +1820,14 @@ fn chunk_rows(i: usize, count: usize, rows: usize, nr: usize) -> std::ops::Range
 
 /// `f(i)` for the `count` chunks of a node's product
 /// ([`node_chunks`](SolvePlan::node_chunks)): each its own task on the pool
-/// where there are several; timed into `tr` where traced.
-fn run_chunks(count: usize, tr: Option<&NodeTimes>, f: impl Fn(usize) + Sync + Send) {
+/// where there are several.
+fn run_chunks(count: usize, f: impl Fn(usize) + Sync + Send) {
+    let _s = rsprobe::scope!(TRACE, "product");
+    rsprobe::add!(TRACE, "chunks", count);
     if count > 1 {
-        let f = |i| timed(tr, |t| &t.pooled, || f(i));
-        timed(
-            tr,
-            |t| &t.section,
-            || crate::parallel::each(count, crate::parallel::Work::ns(f64::INFINITY), f),
-        );
-        if let Some(tr) = tr {
-            tr.sections.fetch_add(1, Ordering::Relaxed);
-            tr.chunks.fetch_add(count as u64, Ordering::Relaxed);
-        }
+        crate::parallel::each(count, crate::parallel::Work::ns(f64::INFINITY), f);
     } else {
-        (0..count).for_each(|i| timed(tr, |t| &t.gemm, || f(i)));
+        (0..count).for_each(f);
     }
 }
 

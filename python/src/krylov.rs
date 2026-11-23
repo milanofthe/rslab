@@ -163,8 +163,7 @@ pub fn gmres<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     let s = settings(tol, maxit, restart);
     let x0v = x0.map(|g| vector::<T>(g, "x0")).transpose()?;
     let r = match recycle {
-        None => py
-            .allow_threads(|| gmres_core(op, &rhs, pc, &s, x0v.as_deref()))
+        None => crate::logging::run(py, || gmres_core(op, &rhs, pc, &s, x0v.as_deref()))
             .map_err(map_err)?,
         Some(rc) => {
             let rc = rc.borrow();
@@ -174,7 +173,7 @@ pub fn gmres<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
                     "recycle dtype does not match the factor dtype",
                 )
             })?;
-            py.allow_threads(|| gmres_recycled_core(op, &rhs, pc, &s, x0v.as_deref(), handle))
+            crate::logging::run(py, || gmres_recycled_core(op, &rhs, pc, &s, x0v.as_deref(), handle))
                 .map_err(map_err)?
         }
     };
@@ -206,8 +205,7 @@ pub fn gmres_block<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
         }
         None => None,
     };
-    let r = py
-        .allow_threads(|| gmres_block_core(op, &cm, nrhs, pc, &s, x0v.as_deref(), None))
+    let r = crate::logging::run(py, || gmres_block_core(op, &cm, nrhs, pc, &s, x0v.as_deref(), None))
         .map_err(map_err)?;
     blocked(py, r, n, nrhs)
 }
@@ -221,8 +219,7 @@ pub fn cocg<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     maxit: usize,
 ) -> PyResult<PyObject> {
     let rhs = vector::<T>(b, "rhs")?;
-    let r = py
-        .allow_threads(|| cocg_core(op, &rhs, pc, &settings(tol, maxit, None)))
+    let r = crate::logging::run(py, || cocg_core(op, &rhs, pc, &settings(tol, maxit, None)))
         .map_err(map_err)?;
     single(py, r)
 }
@@ -236,8 +233,7 @@ pub fn cocr<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     maxit: usize,
 ) -> PyResult<PyObject> {
     let rhs = vector::<T>(b, "rhs")?;
-    let r = py
-        .allow_threads(|| cocr_core(op, &rhs, pc, &settings(tol, maxit, None)))
+    let r = crate::logging::run(py, || cocr_core(op, &rhs, pc, &settings(tol, maxit, None)))
         .map_err(map_err)?;
     single(py, r)
 }
