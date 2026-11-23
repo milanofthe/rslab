@@ -51,7 +51,12 @@ impl KluSymbolic {
         // diagonal) short-circuits to a single candidate and pays nothing.
         let weighted = if settings.btf && settings.matching {
             let _s = rsprobe::scope!(DEBUG, "matching");
-            let cache = crate::scaling::mc64::compute_matching_general(a)?;
+            // The analysis' only sections, on the policy's workers.
+            let cache = (settings.threads).run(
+                0,
+                |cap| cap,
+                || crate::scaling::mc64::compute_matching_general(a),
+            )?;
             (cache.n_matched == n).then_some(cache.perm)
         } else {
             None
@@ -320,7 +325,7 @@ impl KluSymbolic {
                 let total = self.nnz as f64;
                 let pieces = ((total / largest) as usize).min(nblocks);
                 let rate = super::factor::FACTOR_RATE.of::<T>();
-                crate::parallel::width(total * rate.ns_per_op(), pieces) > 1
+                crate::parallel::width_on(settings.workers(), total * rate.ns_per_op(), pieces) > 1
             }
         }
     }
@@ -392,11 +397,7 @@ impl KluSymbolic {
         let price = |(v, o): (u64, u64)| v * vb + o;
         let (idx, word) = (IDX32_BYTES as u64, WORD_BYTES as u64);
         let parallel = self.parallel_blocks::<T>(settings);
-        let threads = if parallel {
-            crate::parallel::threads()
-        } else {
-            1
-        };
+        let threads = if parallel { settings.workers() } else { 1 };
         // `L`, `U` and the off-block entries at their exact sizes (the
         // parallel splice), the diagonal and the three column pointers.
         let entries = fill.l_nnz + fill.u_nnz + fill.f_nnz;
@@ -501,7 +502,13 @@ impl KluSymbolic {
         let _s = rsprobe::scope!("factor");
         rsprobe::add!("blocks", self.n_blocks());
         let estimate = self.fill.get().map(|_| self.estimate_memory::<T>());
-        let factors = factor_impl(self, a, settings)?;
+        let factors = if self.parallel_blocks::<T>(settings) {
+            settings
+                .threads
+                .run(0, |cap| cap, || factor_impl(self, a, settings))
+        } else {
+            factor_impl(self, a, settings)
+        }?;
         let nnz =
             (factors.l_val.len() + factors.u_val.len() + factors.udiag.len() + factors.f_val.len())
                 as u64;

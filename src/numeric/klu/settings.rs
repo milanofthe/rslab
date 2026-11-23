@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::constants::KLU_PIVOT_THRESHOLD;
+use crate::numeric::settings::Threads;
 
 /// Options for the KLU path. Defaults follow SuiteSparse KLU: threshold
 /// partial pivoting with strong diagonal preference (`pivot_threshold =
@@ -38,10 +39,17 @@ pub struct KluSettings {
     /// every refactor with the pool it is given. Real circuits are often one
     /// giant irreducible block plus thousands of singletons, where
     /// distributing blocks cannot help, and small systems refactor faster
-    /// on one thread than on any pool. Run inside a bounded rayon pool to
-    /// cap it for solver-in-the-loop use, or force `Off` for strictly
-    /// sequential execution.
+    /// on one thread than on any pool. The pool is the one of
+    /// [`threads`](Self::threads); force `Off` for strictly sequential
+    /// execution.
     pub parallel: KluParallel,
+    /// The workers of the analysis, the factor and every refactor of its
+    /// factors ([`Threads`]), as for the supernodal paths: a fixed count, a
+    /// cap (`Auto`, which the KLU path takes as the count), or the caller's
+    /// rayon pool (`Ambient`). A factor or refactor that runs on one thread
+    /// (nothing of it worth a section) enters no pool. Default
+    /// [`Threads::default`].
+    pub threads: Threads,
     /// Maximum-product row matching (MC64) as the transversal of the block
     /// triangular form: the matched, largest-product entries become the
     /// diagonal, so the diagonal-preference pivoting rarely has to leave
@@ -108,6 +116,7 @@ impl Default for KluSettings {
             row_scaling: true,
             btf: true,
             parallel: KluParallel::Auto,
+            threads: Threads::default(),
             matching: true,
             par_min_nnz: None,
             par_min_work: None,
@@ -122,6 +131,11 @@ impl KluSettings {
     pub fn with_interrupt(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.interrupt = Some(flag);
         self
+    }
+
+    /// The worker count of [`threads`](Self::threads) (`Auto` at its cap).
+    pub(crate) fn workers(&self) -> usize {
+        self.threads.resolve(|cap| cap)
     }
 
     /// Poll the caller's flag; `Ok(())` when unarmed or clear.
@@ -162,6 +176,13 @@ impl KluSettings {
     /// (see [`parallel`](Self::parallel)).
     pub fn with_parallel(mut self, p: KluParallel) -> Self {
         self.parallel = p;
+        self
+    }
+
+    /// Composable setter for the worker policy (see
+    /// [`threads`](Self::threads)).
+    pub fn with_threads(mut self, threads: impl Into<Threads>) -> Self {
+        self.threads = threads.into();
         self
     }
 }

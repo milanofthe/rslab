@@ -858,12 +858,13 @@ fn run_matrix(
     // matrices; request it via RLA_BENCH_SOLVERS=klu for the circuit family.
     if has("klu") {
         if let Mat::Unsym(a) = mat {
+            let ks = KluSettings::default().with_threads(opts.threads);
             let outcome = (|| -> Result<_, rslab::RslabError> {
                 let t = Instant::now();
-                let sym = KluSymbolic::analyze(a, &KluSettings::default())?;
+                let sym = KluSymbolic::analyze(a, &ks)?;
                 let ana = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();
-                let (fr, mm) = live_peak(|| sym.factor(a, &KluSettings::default()));
+                let (fr, mm) = live_peak(|| sym.factor(a, &ks));
                 let f = fr?;
                 let fac = t.elapsed().as_secs_f64() * 1e3;
                 let t = Instant::now();

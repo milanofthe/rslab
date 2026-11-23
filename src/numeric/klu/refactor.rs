@@ -264,16 +264,27 @@ impl<T: Scalar> KluSolver<T> {
     /// After an error the factorization is invalid; a subsequent successful
     /// `refactor` or a fresh `factor` makes it valid again.
     ///
-    /// Every refactor decides how its blocks replay with the pool it runs on
-    /// ([`KluSettings::parallel`]): sequentially, level by level, pipelined,
-    /// or blocks side by side, as the replay work of the pivot-final pattern
-    /// is worth there.
-    // The replay loops index several parallel arrays at offset positions;
-    // iterator forms would obscure the offset arithmetic.
-    #[allow(clippy::needless_range_loop)]
+    /// Every refactor decides how its blocks replay on the workers of the
+    /// factorization's [`KluSettings::threads`] ([`KluSettings::parallel`]):
+    /// sequentially, level by level, pipelined, or blocks side by side, as
+    /// the replay work of the pivot-final pattern is worth there. A refactor
+    /// none of whose replays can go side by side enters no pool.
     pub fn refactor(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         a.validate()?;
         let _s = rsprobe::scope!("refactor");
+        if self.factors.plan.starts_wide() {
+            let threads = self.factors.threads;
+            threads.run(0, |cap| cap, || self.replay(a))
+        } else {
+            self.replay(a)
+        }
+    }
+
+    /// [`refactor`](Self::refactor) on the workers it runs on.
+    // The replay loops index several parallel arrays at offset positions;
+    // iterator forms would obscure the offset arithmetic.
+    #[allow(clippy::needless_range_loop)]
+    fn replay(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         // Cloned out of the factors so the borrow below stays exclusive; the
         // flag is read-only for us either way.
         let int_flag = self.factors.interrupt.clone();

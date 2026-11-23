@@ -415,20 +415,7 @@ impl PySettings {
         match key {
             "threads" => {
                 self.explicit_threads = true;
-                o.threads = if let Ok(n) = v.extract::<usize>() {
-                    Threads::Fixed(n)
-                } else if let Ok((word, max)) = v.extract::<(String, usize)>() {
-                    if word.to_lowercase() != "auto" {
-                        return Err(bad(key, "an int, 'auto', ('auto', max) or 'ambient'", v));
-                    }
-                    Threads::Auto { max }
-                } else {
-                    match lower(key, v)?.as_str() {
-                        "auto" => Threads::Auto { max: usize::MAX },
-                        "ambient" => Threads::Ambient,
-                        _ => return Err(bad(key, "an int, 'auto', ('auto', max) or 'ambient'", v)),
-                    }
-                };
+                o.threads = parse_threads(key, v)?;
             }
             "preconditioner" => {
                 let floor: f64 = v.extract().map_err(|_| bad(key, "a float", v))?;
@@ -513,13 +500,37 @@ impl PySettings {
     }
 
     fn threads_value(&self, py: Python<'_>) -> PyObject {
-        match self.inner.threads {
-            Threads::Fixed(n) => n.into_py(py),
-            Threads::Auto { max } if max == usize::MAX => "auto".into_py(py),
-            Threads::Auto { max } if self.explicit_threads => ("auto", max).into_py(py),
-            Threads::Auto { .. } => py.None(),
-            Threads::Ambient => "ambient".into_py(py),
+        threads_value(py, self.inner.threads, self.explicit_threads)
+    }
+}
+
+/// A `threads=` value: an int, 'auto', ('auto', max) or 'ambient'.
+fn parse_threads(key: &str, v: &Bound<'_, PyAny>) -> PyResult<Threads> {
+    const EXPECTED: &str = "an int, 'auto', ('auto', max) or 'ambient'";
+    if let Ok(n) = v.extract::<usize>() {
+        return Ok(Threads::Fixed(n));
+    }
+    if let Ok((word, max)) = v.extract::<(String, usize)>() {
+        if word.to_lowercase() != "auto" {
+            return Err(bad(key, EXPECTED, v));
         }
+        return Ok(Threads::Auto { max });
+    }
+    match lower(key, v)?.as_str() {
+        "auto" => Ok(Threads::Auto { max: usize::MAX }),
+        "ambient" => Ok(Threads::Ambient),
+        _ => Err(bad(key, EXPECTED, v)),
+    }
+}
+
+/// `threads` as the keyword takes it; `None` for the default unless given.
+fn threads_value(py: Python<'_>, threads: Threads, explicit: bool) -> PyObject {
+    match threads {
+        Threads::Fixed(n) => n.into_py(py),
+        Threads::Auto { max } if max == usize::MAX => "auto".into_py(py),
+        Threads::Auto { max } if explicit => ("auto", max).into_py(py),
+        Threads::Auto { .. } => py.None(),
+        Threads::Ambient => "ambient".into_py(py),
     }
 }
 
@@ -608,6 +619,13 @@ impl PySettings {
 /// par_min_ratio : float, optional
 ///     With it, the simultaneous work the structure must offer for a
 ///     parallel refactor. Default ``None``.
+/// threads : int or 'auto' or ('auto', int) or 'ambient', optional
+///     Workers of the analysis, the factor and its refactors, as for
+///     :class:`Settings`: ``None`` (default) up to 4, an ``int`` pins the
+///     count (``0`` = all logical cores), ``'auto'`` all cores, ``('auto',
+///     max)`` up to ``max``, ``'ambient'`` the caller's rayon pool. A factor
+///     or refactor with nothing worth a second thread runs on the calling
+///     thread.
 /// interrupt : Interrupt, optional
 ///     A cancellation flag polled by the numeric phase.
 #[pyclass(name = "KluSettings", module = "rslab")]
@@ -615,6 +633,8 @@ impl PySettings {
 pub struct PyKluSettings {
     pub inner: rslab::KluSettings,
     interrupt: Option<PyInterrupt>,
+    /// `threads=` was given.
+    explicit_threads: bool,
 }
 
 impl PyKluSettings {
@@ -622,6 +642,7 @@ impl PyKluSettings {
         let mut s = Self {
             inner: rslab::KluSettings::default(),
             interrupt: None,
+            explicit_threads: false,
         };
         if let Some(kw) = kwargs {
             for (k, v) in kw.iter() {
@@ -655,6 +676,10 @@ impl PyKluSettings {
             "matching" => o.with_matching(v.extract().map_err(|_| bad(key, "a bool", v))?),
             "row_scaling" => o.with_row_scaling(v.extract().map_err(|_| bad(key, "a bool", v))?),
             "btf" => o.with_btf(v.extract().map_err(|_| bad(key, "a bool", v))?),
+            "threads" => {
+                self.explicit_threads = true;
+                o.with_threads(parse_threads(key, v)?)
+            }
             "parallel" => o.with_parallel(match v.extract::<bool>() {
                 Ok(true) => KluParallel::On,
                 Ok(false) => KluParallel::Off,
@@ -703,6 +728,10 @@ impl PyKluSettings {
         d.set_item("par_min_nnz", o.par_min_nnz)?;
         d.set_item("par_min_work", o.par_min_work)?;
         d.set_item("par_min_ratio", o.par_min_ratio)?;
+        d.set_item(
+            "threads",
+            threads_value(py, o.threads, self.explicit_threads),
+        )?;
         d.set_item("interrupt", self.interrupt.clone().map(|i| i.into_py(py)))?;
         Ok(d.into_any().unbind())
     }

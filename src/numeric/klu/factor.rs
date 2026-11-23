@@ -662,8 +662,8 @@ pub(super) fn factor_impl<T: Scalar>(
     // Factor the diagonal blocks: independent by construction, so the
     // parallel driver is bit-identical to the sequential one (each worker is
     // sequential inside; nothing is shared across blocks). It runs on the
-    // current workers ([`crate::parallel`]), so callers cap it with
-    // `with_threads` scoping, matching the solver-in-the-loop contract.
+    // current workers ([`crate::parallel`]): those of `settings.threads`,
+    // whose pool `KluSymbolic::factor` entered where the blocks go wide.
     let nblocks = sym.block_ptr.len() - 1;
     // The first factor decides on the blocks' input entries, the work it
     // knows before the pivot-final pattern; a refactor on the exact replay
@@ -917,6 +917,7 @@ pub(super) fn factor_impl<T: Scalar>(
 
     Ok(KluFactors {
         interrupt: settings.interrupt.clone(),
+        threads: settings.threads,
         n,
         nnz_a: sym.nnz,
         block_ptr: sym.block_ptr.clone(),

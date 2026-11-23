@@ -475,7 +475,10 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
     // sequential replay's, not just the residual.
     let (a, b) = grid_cd(32);
     let seq = KluSettings::default().with_parallel(KluParallel::Off);
-    let par = KluSettings::default().with_parallel(KluParallel::On);
+    // On the caller's pool: the lent one, then rayon's.
+    let par = (KluSettings::default())
+        .with_parallel(KluParallel::On)
+        .with_threads(crate::Threads::Ambient);
 
     let mut s_seq = KluSolver::factor(&a, &seq).unwrap();
     let mut s_par = KluSolver::factor(&a, &par).unwrap();

@@ -15,7 +15,7 @@
 use num_complex::Complex;
 use rslab::{
     CscMatrix, GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSolver, LdltSymbolic, LuSolver,
-    OrderingMethod, SolverSettings,
+    OrderingMethod, SolverSettings, Threads,
 };
 
 /// 3D 7-point Laplacian (k^3 grid, SPD, lower triangle).
@@ -298,7 +298,9 @@ fn lu_with_matching_and_klu_are_bit_identical_across_threads() {
     };
     assert_eq!(bits_f64(&lu(1)), bits_f64(&lu(8)));
     let klu = |t: usize| {
-        let s = KluSettings::default().with_parallel(KluParallel::On);
+        let s = (KluSettings::default())
+            .with_parallel(KluParallel::On)
+            .with_threads(Threads::Ambient);
         in_pool(t, || KluSolver::factor(&a, &s).unwrap().solve(&b).unwrap())
     };
     assert_eq!(bits_f64(&klu(1)), bits_f64(&klu(8)));
