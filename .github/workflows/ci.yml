@@ -55,6 +55,8 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
       - name: test (matgen superset)
-        # Runs the full lib test set plus the matgen-gated tests in one pass.
+        # Runs the full lib test set plus the matgen-gated tests in one pass,
+        # with the rsprobe record and its allocation counts on (the allocation
+        # and record tests need them; clippy and rustdoc build it off).
         # The tuning tests time a calibration and stay local.
-        run: cargo test --features matgen
+        run: cargo test --features matgen,rsprobe/alloc

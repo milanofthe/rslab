@@ -4,16 +4,13 @@
 //! transposed; KLU also several) allocate nothing on the calling thread and
 //! give the bits of the allocating entry points. The supernodal solvers' block
 //! solves of several right-hand sides take their nodes' products as GEMMs,
-//! whose packing buffers the `gemm` crate allocates per product. A factor
-//! large enough for the thread pool adds only what the pool's own work queues
-//! allocate, now and then.
+//! whose packing buffers the `gemm` crate allocates per product. The pool's
+//! path is held to the bits of the calling thread's: its tasks allocate on
+//! the workers they run on.
 //!
 //! The counts are the `allocs` of an rsprobe scope around the runs, in a
-//! context of the test's own (`rsprobe::Alloc`, feature `rsprobe/alloc`).
-//! At INFO, the default threshold, rslab's scopes and measures are active:
-//! the runs on the calling thread count with the instrumentation on. At WARN
-//! none of rslab's scopes is, so the tasks a solve hands to the pool enter
-//! the runs' scope itself and count there too.
+//! context of the test's own (`rsprobe::Alloc`, feature `rsprobe/alloc`), at
+//! INFO, the default threshold: rslab's scopes and measures are active.
 
 use rslab::prelude::*;
 use rslab::{GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSymbolic, LuSymbolic, SolveWork};
@@ -21,10 +18,6 @@ use rsprobe::{Context, Level};
 
 #[global_allocator]
 static ALLOC: rsprobe::Alloc = rsprobe::Alloc::new();
-
-/// At most this many allocations over a hundred solves on the pool: its
-/// work-stealing queues grow and retire buffers now and then.
-const POOL: u64 = 5;
 
 /// Allocations of `f` over a hundred runs after two warm-up runs.
 fn allocs(threshold: Level, f: impl FnMut()) -> u64 {
@@ -155,9 +148,8 @@ fn a_warm_newton_loop_allocates_nothing() {
             .unwrap();
         check_solves!(format!("LDLT n={n}"), ldlt, n, Level::INFO, 0, false);
 
-        // The pool's path, forced, entered from a worker of the pool: only
-        // the pool's own allocations, and the bits of the calling thread's
-        // path.
+        // The pool's path, forced, entered from a worker of the pool: the
+        // bits of the calling thread's path.
         let mut par = opts.clone();
         par.solve.par_min_work = Some(0);
         let lu_par = LuSymbolic::analyze(&a, &par)
@@ -177,16 +169,16 @@ fn a_warm_newton_loop_allocates_nothing() {
                 format!("LU n={n}, pool"),
                 lu_par,
                 n,
-                Level::WARN,
-                POOL,
+                Level::INFO,
+                u64::MAX,
                 false
             );
             check_solves!(
                 format!("LDLT n={n}, pool"),
                 ldlt_par,
                 n,
-                Level::WARN,
-                POOL,
+                Level::INFO,
+                u64::MAX,
                 false
             );
         });
