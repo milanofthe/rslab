@@ -97,6 +97,19 @@ impl<T> LuPools<T> {
 /// in the same order however the rows are split, so the parallel form is
 /// bit-identical to the serial one.
 #[allow(clippy::too_many_arguments)]
+/// What a multiply-subtract of the panel kernels' row passes (the off-block
+/// rows' updates and scaling, the triangular solves of `U`) costs, learned
+/// from their serial runs: their sections go as wide as their work is worth.
+/// Each row takes the same operations however the rows are split, so the
+/// width changes no bits.
+static ROW_PASS_RATE: crate::parallel::ScalarRates =
+    crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
+
+/// The work of `ops` multiply-subtracts of a row pass on `T`.
+fn row_pass<T: Scalar>(ops: usize) -> crate::parallel::Work<'static> {
+    crate::parallel::Work::of(ops as f64, ROW_PASS_RATE.of::<T>())
+}
+
 fn deep_update<T: Scalar>(
     lbuf: &[T],
     ld: usize,
@@ -131,14 +144,10 @@ fn deep_update<T: Scalar>(
         // Non-negative doubles order as their bits.
         let top = AtomicU64::new(0);
         let chunk = x.len().div_ceil(crate::parallel::threads()).max(1);
-        crate::parallel::chunks_mut(
-            x,
-            chunk,
-            crate::parallel::Work::ns(f64::INFINITY),
-            |c, xs| {
-                top.fetch_max(apply(c * chunk, xs).to_bits(), Ordering::Relaxed);
-            },
-        );
+        let work = row_pass::<T>(x.len() * u.len().max(1));
+        crate::parallel::chunks_mut(x, chunk, work, |c, xs| {
+            top.fetch_max(apply(c * chunk, xs).to_bits(), Ordering::Relaxed);
+        });
         f64::from_bits(top.into_inner())
     } else {
         apply(0, x)
@@ -149,12 +158,10 @@ fn deep_update<T: Scalar>(
 fn deep_scale<T: Scalar>(x: &mut [T], pinv: T, par: bool) {
     if par {
         let chunk = x.len().div_ceil(crate::parallel::threads()).max(1);
-        crate::parallel::chunks_mut(
-            x,
-            chunk,
-            crate::parallel::Work::ns(f64::INFINITY),
-            |_, xs| xs.iter_mut().for_each(|v| *v = *v * pinv),
-        );
+        let work = row_pass::<T>(x.len());
+        crate::parallel::chunks_mut(x, chunk, work, |_, xs| {
+            xs.iter_mut().for_each(|v| *v = *v * pinv)
+        });
     } else {
         x.iter_mut().for_each(|v| *v = *v * pinv);
     }
@@ -780,20 +787,16 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         // Profiled at 22% of cdiv CPU when serial (MoM fronts).
         if (nfs - ke) * pw * pw >= ll_cdiv_par {
             let (head, tail) = lbuf.split_at_mut(ke * nrow_l);
-            crate::parallel::chunks_mut(
-                tail,
-                nrow_l,
-                crate::parallel::Work::ns(f64::INFINITY),
-                |_, col| {
-                    for r in (kb + 1)..ke {
-                        let mut acc = col[r];
-                        for i in kb..r {
-                            acc = acc - head[i * nrow_l + r] * col[i];
-                        }
-                        col[r] = acc;
+            let work = row_pass::<T>((nfs - ke) * pw * pw / 2);
+            crate::parallel::chunks_mut(tail, nrow_l, work, |_, col| {
+                for r in (kb + 1)..ke {
+                    let mut acc = col[r];
+                    for i in kb..r {
+                        acc = acc - head[i * nrow_l + r] * col[i];
                     }
-                },
-            );
+                    col[r] = acc;
+                }
+            });
         } else {
             for j in ke..nfs {
                 for r in (kb + 1)..ke {
@@ -828,14 +831,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         if cn_u * pw * pw >= ll_cdiv_par {
             let lref: &[T] = lbuf;
             let run = kt.k.trsm_rows;
-            crate::parallel::for_each(
-                cn_u.div_ceil(run),
-                crate::parallel::Work::ns(f64::INFINITY),
-                |b| {
-                    let t0 = nfs + b * run;
-                    trsm_u(t0, (t0 + run).min(nrow_u), up, lref)
-                },
-            );
+            crate::parallel::for_each(cn_u.div_ceil(run), row_pass::<T>(cn_u * pw * pw / 2), |b| {
+                let t0 = nfs + b * run;
+                trsm_u(t0, (t0 + run).min(nrow_u), up, lref)
+            });
         } else {
             trsm_u(nfs, nrow_u, up, lbuf);
         }
