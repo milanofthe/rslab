@@ -42,15 +42,16 @@ fn a_factorization_reports_its_progress_in_percent() {
         let _on = ctx.enter();
         LdltSolver::factor(&a, &SolverSettings::exact()).unwrap();
     }
-    let mut percent = Vec::new();
+    let steps = rslab::constants::PROGRESS_STEPS;
+    let mut seen = Vec::new();
     buffer.drain(|e, path| {
         if let Kind::Progress { done, total, .. } = e.kind {
-            assert_eq!((path, total), ("factor", 100));
-            percent.push(done);
+            assert_eq!((path, total), ("factor", steps));
+            seen.push(done);
         }
     });
-    assert!(percent.len() > 1 && percent.len() <= 100, "{percent:?}");
-    assert_eq!(percent.iter().max(), Some(&100));
+    assert!(seen.len() > 1 && seen.len() as u64 <= steps, "{seen:?}");
+    assert_eq!(seen.iter().max(), Some(&steps));
 }
 
 #[test]

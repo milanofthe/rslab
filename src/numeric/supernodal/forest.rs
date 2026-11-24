@@ -74,11 +74,12 @@ pub(crate) fn ll_forest(
             emit_free(s);
         }
         if total > 0 {
-            // One event per percent at most, whatever the supernode count.
+            // One event per step at most, whatever the supernode count.
+            let steps = crate::constants::PROGRESS_STEPS;
             let before = done.fetch_add(panel(s), Ordering::Relaxed);
-            let percent = |entries: u64| entries * 100 / total;
-            if percent(before + panel(s)) > percent(before) {
-                rsprobe::progress!(percent(before + panel(s)), 100);
+            let step = |entries: u64| entries * steps / total;
+            if step(before + panel(s)) > step(before) {
+                rsprobe::progress!(step(before + panel(s)), steps);
             }
         }
         true
