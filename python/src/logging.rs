@@ -5,7 +5,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use rsprobe::{Buffer, Context, Level};
+use rslab::rsprobe::{Buffer, Context, Level};
 use std::sync::{Arc, Mutex};
 
 /// The threshold (`None`: off), the sink and the context built for them.

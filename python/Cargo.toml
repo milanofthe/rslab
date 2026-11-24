@@ -28,10 +28,9 @@ alloc-stats = []
 # cached hardware calibration (pure-Rust sysinfo dep): after a one-time
 # `rslab.install_diagnose()` the default factor picks its worker count from
 # this machine's measured speedup curve; without the cache nothing changes.
-rslab = { path = "..", features = ["tuning"] }
-# The core's phases, counts and log events, recorded: the extension is the
-# binary that turns on `rsprobe/on` (`logging::run`).
-rsprobe = { git = "https://github.com/milanofthe/rsprobe", rev = "8a2e758", features = ["on"] }
+# `probe` records the core's phases, counts and log events: the extension is
+# the binary that enters a context of `rslab::rsprobe` (`logging::run`).
+rslab = { path = "..", features = ["tuning", "probe"] }
 # Same complex scalar type the core uses (num-complex 0.4 == numpy's c64/c32).
 num-complex = "0.4"
 # abi3-py39: one wheel for CPython 3.9+ per platform.
