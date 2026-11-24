@@ -156,6 +156,39 @@ fn ll_ldlt_complex_bit_identical_across_threads() {
     );
 }
 
+/// The parallel products of a complex factorization on one thread give the
+/// bits of eight: a one-thread budget runs the kernels on the calling
+/// thread under a lent pool of one, where a product cut into column blocks
+/// rounded otherwise. The gates are lowered so that a small grid's updates
+/// and panel updates take the parallel products.
+#[test]
+fn complex_parallel_products_on_one_thread_match_eight() {
+    let ar = grid3d(K_LDLT_C);
+    let a = CscMatrix::<Complex<f64>> {
+        n: ar.n,
+        col_ptr: ar.col_ptr.clone(),
+        row_idx: ar.row_idx.clone(),
+        values: (ar.values.iter())
+            .map(|&v| Complex::new(v, 0.1 * v))
+            .collect(),
+    };
+    let b: Vec<Complex<f64>> = (0..a.n)
+        .map(|i| Complex::new(((i % 11) as f64) - 5.0, 1.0))
+        .collect();
+    let solve = |t: usize| -> Vec<Complex<f64>> {
+        let mut s = SolverSettings::default().with_threads(t);
+        s.kernels.par_gemm = 0;
+        s.kernels.par_cdiv = 0;
+        s.kernels.fork_min_flops = 0;
+        LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap()
+    };
+    assert_eq!(
+        bits_c64(&solve(1)),
+        bits_c64(&solve(8)),
+        "complex parallel products differ between 1 and 8 threads"
+    );
+}
+
 #[test]
 fn ll_lu_bit_identical_across_threads_and_runs() {
     let a = grid3d_conv(K_LU);

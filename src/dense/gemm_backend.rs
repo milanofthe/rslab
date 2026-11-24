@@ -55,10 +55,23 @@ pub unsafe fn gemm<T: Scalar>(
     mode: GemmMode,
 ) {
     // A parallel product on a lent pool: its columns in blocks, each the
-    // crate's parallel path on one thread (the per-entry sums do not depend
-    // on the column blocking, so the result is the rayon path's).
-    if !matches!(mode.parallelism, gemm::Parallelism::None) && n >= 2 && crate::parallel::is_lent()
-    {
+    // crate's parallel path on one thread. On a pool of one thread (a
+    // one-thread budget, `numeric::settings::in_scoped_pool`) the whole
+    // product on that path: the crate's blocking follows the product's
+    // columns, so a complex product cut into blocks rounds otherwise, and
+    // one thread gives the bits of every other count.
+    let parallel = !matches!(mode.parallelism, gemm::Parallelism::None);
+    if parallel && crate::parallel::is_lent() && crate::parallel::threads() < 2 {
+        let one = GemmMode {
+            parallelism: gemm::Parallelism::Rayon(1),
+            ..mode
+        };
+        return T::gemm(
+            m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+            alpha, beta, conj_dst, conj_lhs, conj_rhs, one,
+        );
+    }
+    if parallel && n >= 2 && crate::parallel::is_lent() {
         let per = n
             .div_ceil(crate::constants::PIECES_PER_WORKER * crate::parallel::threads())
             .max(crate::constants::GEMM_PIECE_MIN_COLS);
