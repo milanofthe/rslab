@@ -88,15 +88,6 @@ impl<T> LuPools<T> {
     }
 }
 
-/// `x -= L[rows, kb..k] u` for the off-block rows of a pivot column: `x` holds
-/// rows `nfs..` of the column, `u` its entries `kb..k` (the `U` of this
-/// panel's pivots so far), `lbuf` the panel's columns before it (column
-/// stride `ld`); with `want` the largest squared magnitude of the result.
-/// Runs of [`LU_DEEP_ROWS`](crate::constants::LU_DEEP_ROWS) rows take every
-/// column in turn, so a run stays in cache; row by row the same operations
-/// in the same order however the rows are split, so the parallel form is
-/// bit-identical to the serial one.
-#[allow(clippy::too_many_arguments)]
 /// What a multiply-subtract of the panel kernels' row passes (the off-block
 /// rows' updates and scaling, the triangular solves of `U`) costs, learned
 /// from their serial runs: their sections go as wide as their work is worth.
@@ -110,6 +101,15 @@ fn row_pass<T: Scalar>(ops: usize) -> crate::parallel::Work<'static> {
     crate::parallel::Work::of(ops as f64, ROW_PASS_RATE.of::<T>())
 }
 
+/// `x -= L[rows, kb..k] u` for the off-block rows of a pivot column: `x` holds
+/// rows `nfs..` of the column, `u` its entries `kb..k` (the `U` of this
+/// panel's pivots so far), `lbuf` the panel's columns before it (column
+/// stride `ld`); with `want` the largest squared magnitude of the result.
+/// Runs of [`LU_DEEP_ROWS`](crate::constants::LU_DEEP_ROWS) rows take every
+/// column in turn, so a run stays in cache; row by row the same operations
+/// in the same order however the rows are split, so the parallel form is
+/// bit-identical to the serial one.
+#[allow(clippy::too_many_arguments)]
 fn deep_update<T: Scalar>(
     lbuf: &[T],
     ld: usize,
