@@ -110,11 +110,12 @@ impl SupernodalAnalysis {
     }
 
     /// The counts of this analysis of `nnz` stored entries as measures at the
-    /// current scope, and its decisions as an INFO event there.
+    /// current scope, and its decisions as a DEBUG event there: a caller
+    /// that analyzes many small systems gets one per analysis.
     pub(crate) fn probe(&self, nnz: usize, requested: crate::symbolic::OrderingMethod) {
         rsprobe::add!("nonzeros", nnz);
         rsprobe::add!("supernodes", self.n_supernodes());
-        rsprobe::info!("{}", self.describe(nnz, requested));
+        rsprobe::debug!("{}", self.describe(nnz, requested));
     }
 
     /// The analysis in one line: size, ordering and supernodes.
