@@ -38,6 +38,12 @@ pub(crate) struct Cells<V>(Vec<std::cell::UnsafeCell<V>>);
 // barrier (see the type doc).
 unsafe impl<V: Send> Sync for Cells<V> {}
 
+impl<V> Default for Cells<V> {
+    fn default() -> Self {
+        Cells(Vec::new())
+    }
+}
+
 impl<V: Default> Cells<V> {
     /// `n` default-initialized cells (for payloads without a cheap `Clone`).
     pub fn new_default(n: usize) -> Self {
@@ -60,6 +66,11 @@ impl<V: Clone> Cells<V> {
 }
 
 impl<V> Cells<V> {
+    /// The number of cells.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// SAFETY: `i` is this caller's exclusively owned index.
     #[inline]
     pub unsafe fn set(&self, i: usize, v: V) {

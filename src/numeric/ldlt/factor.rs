@@ -184,6 +184,7 @@ fn ldlt_emit_and_free<T: Scalar>(
     emit: &LlEmitLdlt<T>,
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
+    pools: &BkPools<T>,
 ) {
     let ncol = sym.supernodes[k].ncol;
     let nrow = sched.rows(k).len();
@@ -198,7 +199,10 @@ fn ldlt_emit_and_free<T: Scalar>(
         *r = unsafe { emit.eg(g as usize) } as u32;
     }
     let (_, _, two) = unsafe { emit.d_of(k, ncol) };
-    let out = unsafe { emit.arena.finish_slot(k, ncol, nrow - ncol, Some(two)) };
+    let out = unsafe {
+        emit.arena
+            .finish_slot(k, ncol, nrow - ncol, Some(two), &pools.finish)
+    };
     unsafe { emit.panels.set(k, out) };
 }
 
@@ -251,7 +255,7 @@ fn factor_left_looking<T: Scalar>(
     let kt = opts.kernel();
     let factor_node =
         |s: usize| ll_factor_node(s, sym, inp, sched, pools, &emit, perturb_floor, kt);
-    let emit_free = |k: usize| ldlt_emit_and_free(k, &emit, sym, sched);
+    let emit_free = |k: usize| ldlt_emit_and_free(k, &emit, sym, sched, pools);
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);
