@@ -649,7 +649,7 @@ dependencies = [
 [[package]]
 name = "rspool"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rspool?rev=3929f2b#3929f2bedcb1480e53c6192b486d5050bf52c7ad"
+source = "git+https://github.com/milanofthe/rspool?rev=cf84bfe#cf84bfe067c87e2f702118fc2da6221ee35fe092"
 dependencies = [
  "rayon",
  "rsprobe",
@@ -658,7 +658,7 @@ dependencies = [
 [[package]]
 name = "rsprobe"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rsprobe?rev=9e2f0de#9e2f0de8236fa1680dc9d9a1385009c159a05ed2"
+source = "git+https://github.com/milanofthe/rsprobe?rev=a5d9c85#a5d9c85528582fb6d458bc892b4c6714f40009c9"
 
 [[package]]
 name = "rustc-hash"
