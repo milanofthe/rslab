@@ -400,7 +400,7 @@ def test_python_logging_bridge():
     rslab.set_log_sink(lambda level, msg: log.log(logging.getLevelName(level.upper()), msg))
     old = rslab.log_level()
     try:
-        rslab.set_log_level("info")
+        rslab.set_log_level("debug")
         rslab.klu(_circuit(300))
     finally:
         rslab.set_log_level(old)
