@@ -1,4 +1,3 @@
-use super::util::*;
 use super::*;
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltSolver;

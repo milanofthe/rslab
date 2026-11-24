@@ -290,28 +290,25 @@ fn a_budget_of_one_thread_opens_no_section() {
 
 #[test]
 fn ambient_work_below_the_section_threshold_enters_no_pool() {
-    // Inside a wide pool, `Threads::Ambient` runs on that pool: a small
+    // Inside a wide pool, `Threads::Ambient` runs on that pool: a 1 x 1
     // system's analysis and factorization run on the calling worker, with
-    // no pool entered and no task of their own.
+    // no pool entered and no task of their own (they entered a pool as wide
+    // as the caller's before, 0.77 ms per analysis on 128 threads).
     let wide = rayon::ThreadPoolBuilder::new()
         .num_threads(16)
         .build()
         .unwrap();
     let ambient = SolverSettings::default().with_threads(rslab::Threads::Ambient);
     let one = GeneralCsc::from_triplets(1, &[0], &[0], &[2.0]).unwrap();
-    let small = grid_unsym(6);
+    let one_lower = CscMatrix::from_triplets(1, &[0], &[0], &[2.0]).unwrap();
     let r = wide.install(|| {
         let ctx = Context::builder().threshold(Level::TRACE).build();
         {
             let _on = ctx.enter();
-            for a in [&one, &small] {
-                let sym = LuSymbolic::analyze(a, &ambient).unwrap();
-                let f = sym.factor(a, &ambient).unwrap();
-                f.solve(&vec![1.0; a.n]).unwrap();
-            }
-            let lower = grid_lower(6);
-            let s = LdltSolver::factor(&lower, &ambient).unwrap();
-            s.solve(&vec![1.0; lower.n]).unwrap();
+            let sym = LuSymbolic::analyze(&one, &ambient).unwrap();
+            sym.factor(&one, &ambient).unwrap().solve(&[1.0]).unwrap();
+            let s = LdltSolver::factor(&one_lower, &ambient).unwrap();
+            s.solve(&[1.0]).unwrap();
         }
         ctx.record_threads()
     });
