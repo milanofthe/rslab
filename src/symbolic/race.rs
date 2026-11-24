@@ -153,9 +153,29 @@ pub(super) fn race(
     let counts =
         |px: &Prefix| n > r.nd_min_n && prefix_work(px, r.assumed_workers) >= r.nd_min_work;
     let is_amd = |m: &OrderingMethod| *m == OrderingMethod::Amd;
+    // The candidates' work, estimated at what an ordering has cost per entry
+    // (learned where an ordering runs, `ordering_graph`): a candidate's
+    // prefix is more than its ordering, so the race is not measured for
+    // that rate.
+    let ordering_ns =
+        graph.pattern.row_idx.len() as f64 * super::ordering_graph::ORDER_RATE.ns_per_op();
+    // One ordering graph for every candidate: built per candidate it cost as
+    // much as a minimum-degree ordering. The given candidate's structure
+    // (at most an ordering's work) is counted beside it.
     let known = match amd {
-        Some(p) if r.candidates.iter().any(is_amd) => Some(given(graph, p, OrderingMethod::Amd)?),
-        _ => None,
+        Some(p) if r.candidates.iter().any(is_amd) => {
+            let work = crate::parallel::Work::ns(ordering_ns);
+            let (known, ()) = crate::parallel::join(
+                work,
+                || given(graph, p, OrderingMethod::Amd),
+                || graph.prepare(),
+            );
+            Some(known?)
+        }
+        _ => {
+            graph.prepare();
+            None
+        }
     };
     let seeded = known.is_some();
     // The candidates stage 1 orders.
@@ -164,20 +184,12 @@ pub(super) fn race(
         .copied()
         .collect();
     // The candidates side by side where their orderings are worth more
-    // than one thread; nested dissection is speculated on only then. Their
-    // work is estimated at what an ordering has cost per entry (learned
-    // where an ordering runs, `ordering_graph`): a candidate's prefix is
-    // more than its ordering, so the race is not measured for that rate.
-    let ordering_ns =
-        graph.pattern.row_idx.len() as f64 * super::ordering_graph::ORDER_RATE.ns_per_op();
+    // than one thread; nested dissection is speculated on only then.
     let all = crate::parallel::Work::ns(ordering_ns * todo.len() as f64);
     let side = crate::parallel::width(all.time(), todo.len()) > 1;
     let speculate = n > r.nd_min_n && side && known.as_ref().is_none_or(counts);
     // Set where stage 1 discards the speculative dissection.
     let stop = Arc::new(AtomicBool::new(false));
-    // One ordering graph for every candidate: built per candidate it cost as
-    // much as a minimum-degree ordering.
-    graph.prepare();
     // One slot per ensemble seed, filled by its (at most one) ND prefix.
     let ensemble = r.ensemble_size.max(1);
     let nd: Vec<OnceLock<Option<Prefix>>> = (0..ensemble).map(|_| OnceLock::new()).collect();
