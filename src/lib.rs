@@ -157,7 +157,9 @@
 //! counts a factorization is tuned by are measures at their scope, and the
 //! log lines are events at the scope they belong to. They record into the
 //! `rsprobe::Context` the caller has entered, and only in a binary that
-//! enables `rsprobe/on`; without it they compile to nothing.
+//! enables the feature `probe` (`rsprobe/on`); without it they compile to
+//! nothing. The crate is re-exported as [`rsprobe`](crate::rsprobe), so a
+//! caller builds its context with the revision rslab records into.
 //!
 //! ## Allocator
 //!
@@ -219,6 +221,7 @@ pub use memory::MemoryPlan;
 pub use refine::{
     BackwardError, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy, RefineSystem,
 };
+pub use rsprobe;
 pub use scalar::Scalar;
 pub use scaling::ScalingStrategy;
 pub use stored::{single_for, Stored};

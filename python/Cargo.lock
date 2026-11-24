@@ -644,13 +644,12 @@ dependencies = [
  "pyo3",
  "rayon",
  "rslab",
- "rsprobe",
 ]
 
 [[package]]
 name = "rspool"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rspool?rev=d5d40b6#d5d40b6c4e190fac5d9ace52f5e31f41bec86bb8"
+source = "git+https://github.com/milanofthe/rspool?rev=4830867#48308673759fd9751895d26f374e8cee175b968b"
 dependencies = [
  "rayon",
  "rsprobe",
@@ -659,7 +658,7 @@ dependencies = [
 [[package]]
 name = "rsprobe"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rsprobe?rev=8a2e758#8a2e758b62e6dc95cd094c24fc84d947b5a028a2"
+source = "git+https://github.com/milanofthe/rsprobe?rev=3202972#3202972cb8443ddefc2d0ff1fc17b5db362ca6a0"
 
 [[package]]
 name = "rustc-hash"
