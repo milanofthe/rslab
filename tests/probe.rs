@@ -35,6 +35,7 @@ fn a_factorization_records_its_phases_counts_and_events() {
     let buffer = Buffer::default();
     let ctx = Context::builder()
         .threshold(Level::INFO)
+        .filter("rslab::diagnostics", Level::DEBUG)
         .sink(buffer.clone())
         .build();
     let a = grid_lower(12);
@@ -70,7 +71,7 @@ fn a_factorization_records_its_phases_counts_and_events() {
     assert!(
         events
             .iter()
-            .any(|(l, p, k)| *l == Level::INFO && p == "factor" && text(k).contains("nnz(L)=")),
+            .any(|(l, p, k)| *l == Level::DEBUG && p == "factor" && text(k).contains("nnz(L)=")),
         "{events:?}"
     );
     assert!(
