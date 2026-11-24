@@ -521,7 +521,15 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph<'_>) -> (Matching, H
     // large near-tree KKTs.
     let mut heap = IndexHeap::new(m, &mut stats);
 
+    // Progress in columns passed.
+    let steps = crate::progress::Steps::new(rsprobe::active!(), n as u64);
+    let report = |step: Option<u64>| {
+        if let Some(step) = step {
+            rsprobe::progress!(step, crate::constants::PROGRESS_STEPS; "matching");
+        }
+    };
     for jord in 0..n {
+        report(steps.as_ref().and_then(|st| st.reach(jord as u64)));
         if jperm[jord] != NONE {
             continue;
         }
@@ -661,6 +669,7 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph<'_>) -> (Matching, H
         stats.touched_total += touched.len() as u64;
         heap.reset(&touched, &mut stats);
     }
+    report(steps.as_ref().and_then(|st| st.finish()));
 
     finalize_duals(cost, &jperm, &u, &mut v);
     (build_matching(cost, iperm, jperm, u, v, num), stats)

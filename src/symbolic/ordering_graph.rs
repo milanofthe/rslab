@@ -7,12 +7,14 @@
 //! The compressed graph is built once per pattern and shared; per candidate
 //! it cost as much as the minimum-degree ordering.
 
+use super::progress::Reports;
 use super::supervariables::Supervariables;
 use super::OrderingMethod;
 use crate::error::RslabError;
 use crate::numeric::settings::OrderingSettings;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::sparse::csc::CscPattern;
+use rslab_ordering_core::{Counter, Progress};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
@@ -89,32 +91,47 @@ impl<'a> OrderingGraph<'a> {
     /// elimination tree and column counts. On the compressed graph these come
     /// from a count weighted by the group sizes, a fraction of the work on
     /// the full pattern. Nested dissection returns an error once `stop` is
-    /// set.
+    /// set. `reports` hears of the vertices ordered and of the columns of
+    /// the structure.
     pub fn order(
         &self,
         method: OrderingMethod,
         nd_seed: u64,
         stop: Option<&Arc<AtomicBool>>,
+        reports: &Reports,
     ) -> Result<Structure, RslabError> {
         let c = self.compressed();
         let g = c.map_or(self.pattern, |c| &c.graph);
         let pat = rslab_ordering_core::CscPattern::new(g.n, &g.col_ptr, &g.row_idx)
             .ok_or_else(|| RslabError::InvalidInput("malformed CSC pattern".to_string()))?;
         let entries = g.row_idx.len() as f64;
+        let progress = &reports.ordering;
         let order = {
             match method {
                 OrderingMethod::Amd => {
                     let _s = rsprobe::scope!(DEBUG, "amd");
                     rsprobe::add!(DEBUG, "entries", entries);
+                    let opts = rslab_amd::AmdOptions {
+                        progress: progress
+                            .clone()
+                            .or_else(|| self.settings.amd.progress.clone()),
+                        ..self.settings.amd.clone()
+                    };
                     ORDER_RATE.time(entries, || {
-                        rslab_amd::amd_order_opts(&pat, &self.settings.amd).map(|(perm, _)| perm)
+                        rslab_amd::amd_order_opts(&pat, &opts).map(|(perm, _)| perm)
                     })
                 }
                 OrderingMethod::Amf => {
                     let _s = rsprobe::scope!(DEBUG, "amf");
                     rsprobe::add!(DEBUG, "entries", entries);
+                    let opts = rslab_amf::AmfOptions {
+                        progress: progress
+                            .clone()
+                            .or_else(|| self.settings.amf.progress.clone()),
+                        ..self.settings.amf.clone()
+                    };
                     ORDER_RATE.time(entries, || {
-                        rslab_amf::amf_order_opts(&pat, &self.settings.amf).map(|(perm, _)| perm)
+                        rslab_amf::amf_order_opts(&pat, &opts).map(|(perm, _)| perm)
                     })
                 }
                 OrderingMethod::MetisND => {
@@ -123,6 +140,9 @@ impl<'a> OrderingGraph<'a> {
                     let mut opts = rslab_metis::MetisOptions {
                         seed: nd_seed,
                         stop: stop.cloned(),
+                        progress: progress
+                            .clone()
+                            .or_else(|| self.settings.nd.progress.clone()),
                         ..self.settings.nd.clone()
                     };
                     // Where unset, its sections go wide from where they are
@@ -150,10 +170,15 @@ impl<'a> OrderingGraph<'a> {
         }
         .map_err(|e| RslabError::InvalidInput(format!("ordering failed: {e}")))?;
         let order = checked(&order, g.n)?;
+        // Every vertex ordered, also where the ordering does not report.
+        if let Some(p) = progress {
+            p.report(g.n, g.n);
+        }
         let _s = rsprobe::scope!(DEBUG, "etree");
+        let progress = reports.structure.as_ref();
         Ok(match c {
-            Some(c) => grouped_structure(c, &order),
-            None => structure(self.pattern, order),
+            Some(c) => grouped_structure(c, &order, progress),
+            None => structure(self.pattern, order, progress),
         })
     }
 }
@@ -169,15 +194,25 @@ pub(super) struct Structure {
 /// The structure under the ordering `perm` of the full `pattern`, read
 /// through the permutation: column `new` is the original column
 /// `perm[new]` with its rows mapped by the inverse, so the permuted pattern
-/// is never built or sorted.
-pub(super) fn structure(pattern: &CscPattern<i32>, perm: Vec<usize>) -> Structure {
+/// is never built or sorted. `progress` hears of the columns read, once by
+/// the tree and once by the counts.
+pub(super) fn structure(
+    pattern: &CscPattern<i32>,
+    perm: Vec<usize>,
+    progress: Option<&Progress>,
+) -> Structure {
     let mut perm_inv = vec![0usize; perm.len()];
     for (new, &old) in perm.iter().enumerate() {
         perm_inv[old] = new;
     }
-    let cols = |new: usize| pattern.col(perm[new]).iter().map(|&r| perm_inv[r as usize]);
+    let read = Counter::new(progress, 2 * pattern.n);
+    let cols = |new: usize| {
+        read.add(1);
+        pattern.col(perm[new]).iter().map(|&r| perm_inv[r as usize])
+    };
     let etree = EliminationTree::from_cols(pattern.n, cols);
     let col_counts = super::column_counts::gnp(pattern.n, &etree, cols, |_| 1);
+    read.finish();
     Structure {
         perm,
         etree,
@@ -190,16 +225,21 @@ pub(super) fn structure(pattern: &CscPattern<i32>, perm: Vec<usize>) -> Structur
 /// consecutively and share their structure, so they form a chain in the
 /// tree whose last member hangs below the first member of the parent group,
 /// and member `t` of a group with weighted count `c` has `c - t` entries.
-fn grouped_structure(c: &Compressed, order: &[usize]) -> Structure {
+fn grouped_structure(c: &Compressed, order: &[usize], progress: Option<&Progress>) -> Structure {
     let (groups, ng) = (&c.groups, order.len());
     let mut inv = vec![0usize; ng];
     for (k, &v) in order.iter().enumerate() {
         inv[v] = k;
     }
-    let cols = |k: usize| c.graph.col(order[k]).iter().map(|&r| inv[r as usize]);
+    let read = Counter::new(progress, 2 * ng);
+    let cols = |k: usize| {
+        read.add(1);
+        c.graph.col(order[k]).iter().map(|&r| inv[r as usize])
+    };
     let etree = EliminationTree::from_cols(ng, cols);
     let size = |k: usize| groups.ptr[order[k] + 1] - groups.ptr[order[k]];
     let counts = super::column_counts::gnp(ng, &etree, cols, |k| size(k) as i64);
+    read.finish();
     let n = groups.members.len();
     let mut start = Vec::with_capacity(ng + 1);
     let mut perm = Vec::with_capacity(n);

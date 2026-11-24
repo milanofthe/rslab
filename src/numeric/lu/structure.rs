@@ -109,6 +109,8 @@ impl LuStructure {
         }
         // Per supernode its `L` rows and `U` columns past its own columns.
         let mut ext: Vec<(Vec<Li>, Vec<Li>)> = (lseed.into_iter()).zip(useed).collect();
+        // Progress in columns, level by level.
+        let steps = crate::progress::Steps::new(rsprobe::active!(), n as u64);
         for level in levels {
             let entries: usize = (level.iter())
                 .map(|&s| {
@@ -141,6 +143,12 @@ impl LuStructure {
             });
             for (&s, lu) in level.iter().zip(built) {
                 ext[s] = lu;
+            }
+            if let Some(step) = steps
+                .as_ref()
+                .and_then(|st| st.add(level.iter().map(|&s| sym.supernodes[s].ncol as u64).sum()))
+            {
+                rsprobe::progress!(step, crate::constants::PROGRESS_STEPS; "LU structure");
             }
         }
         let mut st = Self::empty();

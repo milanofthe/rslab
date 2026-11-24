@@ -10,6 +10,7 @@
 
 use super::column_counts::total_factor_nnz;
 use super::ordering_graph::{structure, OrderingGraph};
+use super::progress::{Parts, Reports};
 use super::supernode::{
     find_supernodes, pick_amalgamation_strategy, predict_merges, AmalgamationStrategy,
 };
@@ -57,24 +58,49 @@ fn prefix_work(px: &Prefix, workers: usize) -> u64 {
     (prefix_flops(px) / workers.max(1) as u64).max(longest)
 }
 
+/// The concrete `method` alone (or the given permutation where the
+/// settings carry one), with its progress.
+pub(super) fn alone(
+    graph: &OrderingGraph,
+    ordering: &OrderingSettings,
+    method: OrderingMethod,
+) -> Result<Prefix, RslabError> {
+    let ordered = ordering.permutation.is_none();
+    let parts = Parts::new(usize::from(ordered), 1, false, 0);
+    let reports = match ordered {
+        true => parts.stage(0),
+        false => parts.known(),
+    };
+    let px = prefix(graph, ordering, method, ordering.nd.seed, None, &reports);
+    parts.finish();
+    px
+}
+
 /// The candidate for the concrete `method` (or the given permutation where
 /// the settings carry one); nested dissection fails once `stop` is set.
-pub(super) fn prefix(
+fn prefix(
     graph: &OrderingGraph,
     ordering: &OrderingSettings,
     method: OrderingMethod,
     nd_seed: u64,
     stop: Option<&Arc<AtomicBool>>,
+    reports: &Reports,
 ) -> Result<Prefix, RslabError> {
     match &ordering.permutation {
-        Some(p) => given(graph, p, method),
-        None => Ok(from(graph.order(method, nd_seed, stop)?, method)),
+        Some(p) => given(graph, p, method, reports),
+        None => Ok(from(graph.order(method, nd_seed, stop, reports)?, method)),
     }
 }
 
 /// The candidate of the given ordering `p` of the pattern, labelled `method`.
-fn given(graph: &OrderingGraph, p: &[usize], method: OrderingMethod) -> Result<Prefix, RslabError> {
-    let s = structure(graph.pattern, checked_permutation(p, graph.pattern.n)?);
+fn given(
+    graph: &OrderingGraph,
+    p: &[usize],
+    method: OrderingMethod,
+    reports: &Reports,
+) -> Result<Prefix, RslabError> {
+    let perm = checked_permutation(p, graph.pattern.n)?;
+    let s = structure(graph.pattern, perm, reports.structure.as_ref());
     Ok(from(s, method))
 }
 
@@ -162,12 +188,21 @@ pub(super) fn race(
     // One ordering graph for every candidate: built per candidate it cost as
     // much as a minimum-degree ordering. The given candidate's structure
     // (at most an ordering's work) is counted beside it.
+    let amd = amd.filter(|_| r.candidates.iter().any(is_amd));
+    let seeded = amd.is_some();
+    let k = r.candidates.len() - usize::from(seeded);
+    // The progress counts the candidates stage 1 orders (the given one
+    // only in its structure) and, where it may join, the dissection; a
+    // speculative seed counts once stage 1 has decided that it does (see
+    // `progress`).
+    let ensemble = r.ensemble_size.max(1);
+    let parts = Parts::new(k, k + usize::from(seeded), n > r.nd_min_n, ensemble);
     let known = match amd {
-        Some(p) if r.candidates.iter().any(is_amd) => {
+        Some(p) => {
             let work = crate::parallel::Work::ns(ordering_ns);
             let (known, ()) = crate::parallel::join(
                 work,
-                || given(graph, p, OrderingMethod::Amd),
+                || given(graph, p, OrderingMethod::Amd, &parts.known()),
                 || graph.prepare(),
             );
             Some(known?)
@@ -177,7 +212,6 @@ pub(super) fn race(
             None
         }
     };
-    let seeded = known.is_some();
     // The candidates stage 1 orders.
     let todo: Vec<OrderingMethod> = (r.candidates.iter())
         .filter(|m| !(seeded && is_amd(m)))
@@ -191,7 +225,6 @@ pub(super) fn race(
     // Set where stage 1 discards the speculative dissection.
     let stop = Arc::new(AtomicBool::new(false));
     // One slot per ensemble seed, filled by its (at most one) ND prefix.
-    let ensemble = r.ensemble_size.max(1);
     let nd: Vec<OnceLock<Option<Prefix>>> = (0..ensemble).map(|_| OnceLock::new()).collect();
     let started: Vec<AtomicBool> = (0..ensemble).map(|_| AtomicBool::new(false)).collect();
     // Nested dissection, where it may run, is worth a scope on its own.
@@ -203,7 +236,7 @@ pub(super) fn race(
     let (mut best, last_err, seeds) = crate::parallel::scope(scoped, |sc| {
         let start = |i: usize| {
             if !started[i].swap(true, Ordering::Relaxed) {
-                let (nd, stop) = (&nd, &stop);
+                let (nd, stop, parts) = (&nd, &stop, &parts);
                 sc.spawn(move |_| {
                     let px = prefix(
                         graph,
@@ -211,6 +244,7 @@ pub(super) fn race(
                         OrderingMethod::MetisND,
                         seed + i as u64,
                         Some(stop),
+                        &parts.seed(i),
                     );
                     let _ = nd[i].set(px.ok());
                 });
@@ -223,11 +257,11 @@ pub(super) fn race(
             Some((&first, rest)) => {
                 let (head, tail) = crate::parallel::join(
                     all,
-                    || prefix(graph, ordering, first, seed, None),
+                    || prefix(graph, ordering, first, seed, None, &parts.stage(0)),
                     || {
                         let work = crate::parallel::Work::ns(ordering_ns * rest.len() as f64);
                         crate::parallel::map(rest.len(), work, |i| {
-                            prefix(graph, ordering, rest[i], seed, None)
+                            prefix(graph, ordering, rest[i], seed, None, &parts.stage(1 + i))
                         })
                     },
                 );
@@ -274,11 +308,13 @@ pub(super) fn race(
         if seeds == 0 {
             stop.store(true, Ordering::Relaxed);
         }
+        parts.decide(seeds);
         for i in 0..seeds {
             start(i);
         }
         (best, last_err, seeds)
     });
+    parts.finish();
     // The ensemble's pick: the smallest exact factor nnz, the lowest seed
     // breaking ties; it replaces the cheap champion only when smaller.
     let nd = nd
@@ -340,7 +376,7 @@ pub(super) fn finish(
         perm_inv[old] = new;
     }
     debug_assert!({
-        let s = structure(&full, perm.clone());
+        let s = structure(&full, perm.clone(), None);
         s.etree.parent == etree.parent && s.col_counts == col_counts
     });
     let supernodes = find_supernodes(&etree, &col_counts, &params);

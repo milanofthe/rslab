@@ -3,7 +3,8 @@
 //! setting the chosen path does not read is a WARN event the record keeps.
 
 use rslab::{
-    CscMatrix, GeneralCsc, KluParallel, KluSettings, KluSymbolic, LdltSolver, SolverSettings,
+    CscMatrix, GeneralCsc, KluParallel, KluSettings, KluSymbolic, LdltSolver, LdltSymbolic,
+    OrderingMethod, SolverSettings,
 };
 use rsprobe::{Buffer, Context, Kind, Level};
 
@@ -45,13 +46,67 @@ fn a_factorization_reports_its_progress_in_percent() {
     let steps = rslab::constants::PROGRESS_STEPS;
     let mut seen = Vec::new();
     buffer.drain(|e, path| {
-        if let Kind::Progress { done, total, .. } = e.kind {
-            assert_eq!((path, total), ("factor", steps));
-            seen.push(done);
+        // The analysis parts report with their name.
+        if let Kind::Progress { done, total, text } = &e.kind {
+            if text.is_empty() {
+                assert_eq!((path, *total), ("factor", steps));
+                seen.push(*done);
+            }
         }
     });
     assert!(seen.len() > 1 && seen.len() as u64 <= steps, "{seen:?}");
     assert_eq!(seen.iter().max(), Some(&steps));
+}
+
+/// The progress events of the analysis of `a` under `opts`, per part named.
+fn analysis_progress(a: &CscMatrix<f64>, opts: &SolverSettings, part: &str) -> Vec<u64> {
+    let buffer = Buffer::default();
+    let ctx = Context::builder()
+        .progress_interval(0)
+        .sink(buffer.clone())
+        .build();
+    {
+        let _on = ctx.enter();
+        LdltSymbolic::analyze(a, opts).unwrap();
+    }
+    let steps = rslab::constants::PROGRESS_STEPS;
+    let mut seen = Vec::new();
+    buffer.drain(|e, path| {
+        if let Kind::Progress { done, total, text } = &e.kind {
+            if text == part {
+                assert_eq!((path, *total), ("analyze", steps));
+                seen.push(*done);
+            }
+        }
+    });
+    seen
+}
+
+/// Nested dissection joining the ordering race (its gates opened) and AMD
+/// alone each report the ordering in percent, ending at the total, with at
+/// most one event per step.
+#[test]
+fn an_analysis_reports_its_ordering_in_percent() {
+    let steps = rslab::constants::PROGRESS_STEPS;
+    let a = grid_lower(60);
+    let mut nd = SolverSettings::default();
+    nd.ordering.race.nd_min_n = 0;
+    nd.ordering.race.nd_min_work = 0;
+    let mut amd = SolverSettings::default();
+    amd.ordering.method = OrderingMethod::Amd;
+    for (opts, part) in [
+        (&nd, "ordering"),
+        (&nd, "elimination tree"),
+        (&amd, "ordering"),
+        (&amd, "elimination tree"),
+    ] {
+        let seen = analysis_progress(&a, opts, part);
+        assert!(
+            seen.len() > 1 && seen.len() as u64 <= steps,
+            "{part}: {seen:?}"
+        );
+        assert_eq!(seen.iter().max(), Some(&steps), "{part}");
+    }
 }
 
 #[test]

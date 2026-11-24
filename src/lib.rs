@@ -194,6 +194,8 @@ pub mod parallel;
 // Ordering internals the benches and tests reach by path.
 #[doc(hidden)]
 pub mod ordering;
+// Progress of the long parts of a solve, in steps.
+pub(crate) mod progress;
 pub(crate) mod refine;
 pub(crate) mod scalar;
 // Values stored in single precision where their accuracy allows.
