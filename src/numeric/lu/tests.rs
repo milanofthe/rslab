@@ -1074,7 +1074,10 @@ fn analyses_match_the_recorded_fingerprints() {
     let lower = |s: &SolverSettings| {
         let mut h = fingerprint::Fnv::new();
         let full = crate::symbolic::full_pattern(lap.n, &lap.col_ptr, &lap.row_idx).unwrap();
-        fingerprint::analysis(&mut h, &analyze_with(full, lap.row_idx.len(), s).unwrap());
+        fingerprint::analysis(
+            &mut h,
+            &analyze_with(full, lap.row_idx.len(), s, None).unwrap(),
+        );
         h.0
     };
     let got = [

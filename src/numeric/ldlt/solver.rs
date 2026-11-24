@@ -350,10 +350,20 @@ impl LdltSymbolic {
     /// amalgamation settings. The values are ignored, so any matrix with the
     /// target pattern (even a zero-valued template) works.
     pub fn analyze<T: Scalar>(a: &CscMatrix<T>, opts: &SolverSettings) -> Result<Self, RslabError> {
+        Self::analyze_from(a, opts, None)
+    }
+
+    /// [`analyze`](Self::analyze) with the ordering race's minimum-degree
+    /// candidate given (`amd`, an ordering of the columns of `a`).
+    pub(crate) fn analyze_from<T: Scalar>(
+        a: &CscMatrix<T>,
+        opts: &SolverSettings,
+        amd: Option<&[usize]>,
+    ) -> Result<Self, RslabError> {
         a.validate()?;
         let _s = rsprobe::scope!("analyze");
         let pattern = crate::symbolic::full_pattern(a.n, &a.col_ptr, &a.row_idx)?;
-        let symbolic = analyze_pattern_with(pattern, a.row_idx.len(), opts)?;
+        let symbolic = analyze_pattern_with(pattern, a.row_idx.len(), opts, amd)?;
         let sym = Self {
             symbolic,
             nnz: a.row_idx.len(),

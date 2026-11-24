@@ -175,10 +175,12 @@ impl SupernodalAnalysis {
 /// Analyze a full symmetric sparsity pattern
 /// ([`full_pattern`](crate::symbolic::full_pattern)) of an input with `nnz`
 /// entries: value-independent, reused by every factorization of the pattern.
+/// `amd`, where given, is the ordering race's minimum-degree candidate.
 pub(crate) fn analyze_with(
     pattern: CscPattern<i32>,
     nnz: usize,
     opts: &SolverSettings,
+    amd: Option<&[usize]>,
 ) -> Result<SupernodalAnalysis, RslabError> {
     // The symbolic build (ordering, elimination tree, supernode amalgamation,
     // postorder) can recurse to O(n) on pathological patterns - dense/random
@@ -193,7 +195,7 @@ pub(crate) fn analyze_with(
     // configured worker count instead of grabbing all cores.
     let n = pattern.n;
     in_scoped_pool(opts.resolved_threads(), stack_for_depth(n), || {
-        analyze_with_inner(pattern, nnz, opts)
+        analyze_with_inner(pattern, nnz, opts, amd)
     })
 }
 
@@ -201,6 +203,7 @@ fn analyze_with_inner(
     pattern: CscPattern<i32>,
     nnz: usize,
     opts: &SolverSettings,
+    amd: Option<&[usize]>,
 ) -> Result<SupernodalAnalysis, RslabError> {
     let n = pattern.n;
     if n == 0 {
@@ -210,7 +213,8 @@ fn analyze_with_inner(
             nnz,
         });
     }
-    let mut sym = crate::symbolic::analyze_pattern(pattern, &opts.ordering, &opts.amalgamation)?;
+    let mut sym =
+        crate::symbolic::analyze_pattern_from(pattern, &opts.ordering, &opts.amalgamation, amd)?;
     // The schedule reads the pattern for the last time: past it the pattern
     // (an index per entry of `A + A^T`, the largest part of the analysis) is
     // dead weight every factorization of the pattern would carry.

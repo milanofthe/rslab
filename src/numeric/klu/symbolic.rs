@@ -478,6 +478,14 @@ impl KluSymbolic {
             .unwrap_or(0)
     }
 
+    /// The fill-reducing ordering of a pattern this analysis found
+    /// irreducible (one block): its column permutation (new-to-old), the
+    /// minimum-degree ordering of the symmetrized, row-matched pattern.
+    /// `None` with more than one block.
+    pub(crate) fn irreducible_ordering(&self) -> Option<&[usize]> {
+        (self.n_blocks() == 1).then_some(&self.col_perm[..])
+    }
+
     /// Diagonal-block boundaries (`n_blocks + 1` entries).
     pub fn block_ptr(&self) -> &[usize] {
         &self.block_ptr
