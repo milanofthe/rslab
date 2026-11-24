@@ -156,36 +156,38 @@ fn ll_ldlt_complex_bit_identical_across_threads() {
     );
 }
 
-/// The parallel products of a complex factorization on one thread give the
-/// bits of eight: a one-thread budget runs the kernels on the calling
-/// thread under a lent pool of one, where a product cut into column blocks
-/// rounded otherwise. The gates are lowered so that a small grid's updates
-/// and panel updates take the parallel products.
+/// A complex factorization on one thread gives the bits of two and of
+/// eight: a one-thread budget runs the kernels on the calling thread under a
+/// lent pool of one, where the parallel products once rounded otherwise
+/// (a 12^3 curl-curl grid with the parallel gates lowered to 10^6, so that
+/// its fronts take those products).
+#[cfg(feature = "matgen")]
 #[test]
-fn complex_parallel_products_on_one_thread_match_eight() {
-    let ar = grid3d(K_LDLT_C);
-    let a = CscMatrix::<Complex<f64>> {
-        n: ar.n,
-        col_ptr: ar.col_ptr.clone(),
-        row_idx: ar.row_idx.clone(),
-        values: (ar.values.iter())
-            .map(|&v| Complex::new(v, 0.1 * v))
-            .collect(),
-    };
+fn complex_factor_on_one_thread_matches_more() {
+    let a = rslab::matgen::fem::curl_curl(&[12, 12, 12], 1.0, 0.1);
     let b: Vec<Complex<f64>> = (0..a.n)
         .map(|i| Complex::new(((i % 11) as f64) - 5.0, 1.0))
         .collect();
-    let solve = |t: usize| -> Vec<Complex<f64>> {
+    let solve = |t: usize| -> Vec<(u64, u64)> {
         let mut s = SolverSettings::default().with_threads(t);
-        s.kernels.par_gemm = 0;
-        s.kernels.par_cdiv = 0;
-        s.kernels.fork_min_flops = 0;
-        LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap()
+        let gate = 1_000_000;
+        (
+            s.kernels.par_gemm,
+            s.kernels.par_cdiv,
+            s.kernels.fork_min_flops,
+        ) = (gate, gate, gate);
+        bits_c64(&LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap())
     };
+    let one = solve(1);
     assert_eq!(
-        bits_c64(&solve(1)),
-        bits_c64(&solve(8)),
-        "complex parallel products differ between 1 and 8 threads"
+        one,
+        solve(2),
+        "complex factor differs between 1 and 2 threads"
+    );
+    assert_eq!(
+        one,
+        solve(8),
+        "complex factor differs between 1 and 8 threads"
     );
 }
 

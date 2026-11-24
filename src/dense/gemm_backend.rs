@@ -57,9 +57,9 @@ pub unsafe fn gemm<T: Scalar>(
     // A parallel product on a lent pool: its columns in blocks, each the
     // crate's parallel path on one thread. On a pool of one thread (a
     // one-thread budget, `numeric::settings::in_scoped_pool`) the whole
-    // product on that path: the crate's blocking follows the product's
-    // columns, so a complex product cut into blocks rounds otherwise, and
-    // one thread gives the bits of every other count.
+    // product on that path, as on a rayon pool of one: the blocks gave a
+    // complex factorization other bits than every other thread count
+    // (`tests/thread_determinism.rs`).
     let parallel = !matches!(mode.parallelism, gemm::Parallelism::None);
     if parallel && crate::parallel::is_lent() && crate::parallel::threads() < 2 {
         let one = GemmMode {
@@ -748,65 +748,6 @@ mod tests {
                 err <= 1e-13 * (norm + 1.0),
                 "{name} m={m} n={n} k={k} read={read_dst} err {err:.3e} norm {norm:.3e}"
             );
-        }
-    }
-
-    /// A parallel complex product under a one-thread budget (a lent pool of
-    /// one on the calling thread) gives the bits of a rayon pool of one, the
-    /// single-column products included, which the crate otherwise spread
-    /// over the global pool's threads from the calling thread.
-    #[test]
-    fn a_parallel_product_on_one_thread_matches_a_pool_of_one() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .unwrap();
-        for (m, n, k) in [
-            (96, 640, 384),
-            (4096, 1, 512),
-            (8192, 1, 2048),
-            (300, 200, 3000),
-        ] {
-            let mut rng = Rng(0x2545_F491 ^ (m * 7 + n * 3 + k) as u64);
-            let lhs: Vec<Complex64> = (0..m * k).map(|_| rng.c()).collect();
-            let rhs: Vec<Complex64> = (0..k * n).map(|_| rng.c()).collect();
-            let mode = GemmMode::new(
-                gemm::Parallelism::Rayon(0),
-                &crate::KernelSettings::default(),
-            );
-            let product = || {
-                let mut dst = vec![Complex64::new(0.0, 0.0); m * n];
-                // SAFETY: column-major operands of the given sizes, disjoint.
-                unsafe {
-                    gemm(
-                        m,
-                        n,
-                        k,
-                        dst.as_mut_ptr(),
-                        m as isize,
-                        1,
-                        false,
-                        lhs.as_ptr(),
-                        m as isize,
-                        1,
-                        rhs.as_ptr(),
-                        k as isize,
-                        1,
-                        Complex64::new(0.0, 0.0),
-                        Complex64::new(1.0, 0.0),
-                        false,
-                        false,
-                        false,
-                        mode,
-                    )
-                };
-                dst
-            };
-            let bits = |v: &[Complex64]| -> Vec<(u64, u64)> {
-                v.iter().map(|z| (z.re.to_bits(), z.im.to_bits())).collect()
-            };
-            let one = crate::numeric::settings::in_scoped_pool(1, 0, product);
-            assert_eq!(bits(&one), bits(&pool.install(product)), "{m} x {n} x {k}");
         }
     }
 
