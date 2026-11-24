@@ -156,20 +156,21 @@ fn ll_ldlt_complex_bit_identical_across_threads() {
     );
 }
 
-/// A complex factorization on one thread gives the bits of two: a
-/// one-thread budget runs the kernels on the calling thread under a lent
-/// pool of one, where the parallel products once rounded otherwise (a 12^3
-/// curl-curl grid with the parallel gates lowered to 10^6, so that its
-/// fronts take those products).
+/// A complex factorization under a one-thread budget gives the bits it
+/// gives on a rayon pool of one (`Threads::Ambient` inside it, the kernels
+/// on that pool's worker): the budget runs the kernels on the calling
+/// thread under a lent pool of one, where the parallel products once ran
+/// in column blocks and rounded otherwise. A 12^3 curl-curl grid with the
+/// parallel gates lowered to 10^6, so that its fronts take those products.
 #[cfg(feature = "matgen")]
 #[test]
-fn complex_factor_on_one_thread_matches_two() {
+fn complex_factor_on_a_one_thread_budget_matches_a_pool_of_one() {
     let a = rslab::matgen::fem::curl_curl(&[12, 12, 12], 1.0, 0.1);
     let b: Vec<Complex<f64>> = (0..a.n)
         .map(|i| Complex::new(((i % 11) as f64) - 5.0, 1.0))
         .collect();
-    let solve = |t: usize| -> Vec<(u64, u64)> {
-        let mut s = SolverSettings::default().with_threads(t);
+    let solve = |threads: Threads| -> Vec<(u64, u64)> {
+        let mut s = SolverSettings::default().with_threads(threads);
         let gate = 1_000_000;
         (
             s.kernels.par_gemm,
@@ -179,9 +180,9 @@ fn complex_factor_on_one_thread_matches_two() {
         bits_c64(&LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap())
     };
     assert_eq!(
-        solve(1),
-        solve(2),
-        "complex factor differs between 1 and 2 threads"
+        solve(Threads::Fixed(1)),
+        in_pool(1, || solve(Threads::Ambient)),
+        "complex factor differs between a one-thread budget and a pool of one"
     );
 }
 
