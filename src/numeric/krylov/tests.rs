@@ -1,4 +1,3 @@
-use super::util::*;
 use super::*;
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltSolver;
@@ -755,12 +754,10 @@ fn block_gmres_orthogonalization_respects_factor_thread_cap() {
         Threads::Fixed(2),
         "factor must carry its resolved solve-phase thread budget"
     );
-    // The pool the orthogonalization installs caps the worker count to 2,
-    // regardless of a wider ambient pool around it.
-    let pool = solve_thread_pool(Preconditioner::<C>::solve_threads(&lu));
-    let seen = with_threads(8, || {
-        pool.as_ref().unwrap().install(rayon::current_num_threads)
-    });
+    // The orthogonalization's policy caps the worker count to 2, regardless
+    // of a wider ambient pool around it.
+    let policy = Preconditioner::<C>::solve_threads(&lu);
+    let seen = with_threads(8, || policy.run(0, |cap| cap, rayon::current_num_threads));
     assert_eq!(
         seen, 2,
         "the ortho pool must cap to the factor's 2-worker budget"

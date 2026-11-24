@@ -226,9 +226,11 @@ impl LuSymbolic {
         {
             let cache = {
                 let _s = rsprobe::scope!(DEBUG, "matching");
-                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
-                    crate::scaling::mc64::compute_matching_general(a)
-                })?
+                opts.threads.run(
+                    0,
+                    |cap| cap,
+                    || crate::scaling::mc64::compute_matching_general(a),
+                )?
             };
             if cache.n_matched == n {
                 let (r, c) = crate::scaling::mc64::unsymmetric_scaling(&cache);
@@ -253,10 +255,11 @@ impl LuSymbolic {
         let (pattern, lower_nnz) = {
             let _s = rsprobe::scope!(DEBUG, "symmetrize");
             let row_map = matching.as_ref().map(LuMatching::row_map);
-            let (col_ptr, row_idx) =
-                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
-                    symmetrized_lower_pattern(a, row_map.as_deref())
-                });
+            let (col_ptr, row_idx) = opts.threads.run(
+                0,
+                |cap| cap,
+                || symmetrized_lower_pattern(a, row_map.as_deref()),
+            );
             (
                 crate::symbolic::full_pattern(n, &col_ptr, &row_idx)?,
                 row_idx.len(),
@@ -267,16 +270,20 @@ impl LuSymbolic {
             (Some((sym, levels)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);
                 let _s = rsprobe::scope!(DEBUG, "structure");
-                crate::numeric::settings::in_scoped_pool(opts.resolved_threads(), 0, || {
-                    LuStructure::build(
-                        &a.col_ptr,
-                        &a.row_idx,
-                        row_map.as_deref(),
-                        sym,
-                        levels,
-                        sched,
-                    )
-                })
+                opts.threads.run(
+                    0,
+                    |cap| cap,
+                    || {
+                        LuStructure::build(
+                            &a.col_ptr,
+                            &a.row_idx,
+                            row_map.as_deref(),
+                            sym,
+                            levels,
+                            sched,
+                        )
+                    },
+                )
             }
             _ => LuStructure::empty(),
         };

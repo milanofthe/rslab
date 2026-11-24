@@ -332,7 +332,10 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     max_iter: usize,
     reorth_eta: f64,
     chunk: usize,
-    ortho_pool: Option<std::sync::Arc<rayon::ThreadPool>>,
+    /// The worker policy the orthogonalization runs under: the one the
+    /// preconditioner was factored with, so factor and solve share one
+    /// budget ([`Threads::run`](crate::Threads)).
+    ortho_threads: crate::Threads,
     bnorm: Vec<f64>,
     /// Per column the solution its open cycle started from (its current one
     /// without an open cycle), column-major `n x s`.
@@ -454,10 +457,7 @@ where
             max_iter: settings.max_iter,
             reorth_eta: settings.reorth_eta,
             chunk,
-            // Orthogonalize in a pool of the width the preconditioner was factored
-            // with, so factor and solve share one concurrency budget (`None`:
-            // the caller's pool).
-            ortho_pool: solve_thread_pool(precond.solve_threads()),
+            ortho_threads: precond.solve_threads(),
             bnorm,
             out: x.clone(),
             x,
@@ -1101,7 +1101,7 @@ where
             proj1,
             proj2,
             proj_scratch,
-            ortho_pool,
+            ortho_threads,
             chunk,
             reorth,
             wnorm0,
@@ -1116,19 +1116,27 @@ where
         let w = &mut w[..sa * n];
         // deflating: the panel's components in `range(C)` first, kept per step
         if let Some(rec) = &*rec {
-            ortho_in_pool(ortho_pool, || {
-                panel_project(&rec.c, rec.k, w, sa, n, chunk, rproj, rscratch)
-            });
-            ortho_in_pool(ortho_pool, || {
-                panel_subtract(&rec.c, rec.k, w, sa, n, chunk, rproj)
-            });
+            ortho_threads.run(
+                0,
+                |cap| cap,
+                || panel_project(&rec.c, rec.k, w, sa, n, chunk, rproj, rscratch),
+            );
+            ortho_threads.run(
+                0,
+                |cap| cap,
+                || panel_subtract(&rec.c, rec.k, w, sa, n, chunk, rproj),
+            );
         }
-        ortho_in_pool(ortho_pool, || {
-            column_project(&layers, off, w, n, chunk, proj1, proj_scratch)
-        });
-        ortho_in_pool(ortho_pool, || {
-            column_subtract(&layers, off, w, n, chunk, proj1)
-        });
+        ortho_threads.run(
+            0,
+            |cap| cap,
+            || column_project(&layers, off, w, n, chunk, proj1, proj_scratch),
+        );
+        ortho_threads.run(
+            0,
+            |cap| cap,
+            || column_subtract(&layers, off, w, n, chunk, proj1),
+        );
         // The second pass, per column: only a column whose norm collapsed in the
         // first takes it (decided on serial norms, so thread-count independent).
         let mut any = false;
@@ -1137,9 +1145,11 @@ where
             any |= reorth[a];
         }
         if any {
-            ortho_in_pool(ortho_pool, || {
-                column_project(&layers, off, w, n, chunk, proj2, proj_scratch)
-            });
+            ortho_threads.run(
+                0,
+                |cap| cap,
+                || column_project(&layers, off, w, n, chunk, proj2, proj_scratch),
+            );
             for a in 0..sa {
                 if !reorth[a] {
                     proj2[off[a]..off[a + 1]]
@@ -1147,9 +1157,11 @@ where
                         .for_each(|e| *e = T::zero());
                 }
             }
-            ortho_in_pool(ortho_pool, || {
-                column_subtract(&layers, off, w, n, chunk, proj2)
-            });
+            ortho_threads.run(
+                0,
+                |cap| cap,
+                || column_subtract(&layers, off, w, n, chunk, proj2),
+            );
         }
         for a in 0..sa {
             let (c, j) = self.act[a];

@@ -4,7 +4,7 @@
 
 use rslab::{
     CscMatrix, GeneralCsc, KluParallel, KluSettings, KluSymbolic, LdltSolver, LdltSymbolic,
-    OrderingMethod, SolverSettings,
+    LuSymbolic, OrderingMethod, SolverSettings,
 };
 use rsprobe::{Buffer, Context, Kind, Level};
 
@@ -285,5 +285,43 @@ fn a_budget_of_one_thread_opens_no_section() {
             width, sections,
             "a section wider than one thread at {path:?}"
         );
+    }
+}
+
+#[test]
+fn ambient_work_below_the_section_threshold_enters_no_pool() {
+    // Inside a wide pool, `Threads::Ambient` runs on that pool: a 1 x 1
+    // system's analysis and factorization run on the calling worker, with
+    // no pool entered and no task of their own (they entered a pool as wide
+    // as the caller's before, 0.77 ms per analysis on 128 threads).
+    let wide = rayon::ThreadPoolBuilder::new()
+        .num_threads(16)
+        .build()
+        .unwrap();
+    let ambient = SolverSettings::default().with_threads(rslab::Threads::Ambient);
+    let one = GeneralCsc::from_triplets(1, &[0], &[0], &[2.0]).unwrap();
+    let one_lower = CscMatrix::from_triplets(1, &[0], &[0], &[2.0]).unwrap();
+    let run = || {
+        let sym = LuSymbolic::analyze(&one, &ambient).unwrap();
+        sym.factor(&one, &ambient).unwrap().solve(&[1.0]).unwrap();
+        let s = LdltSolver::factor(&one_lower, &ambient).unwrap();
+        s.solve(&[1.0]).unwrap();
+    };
+    let r = wide.install(|| {
+        // once before: the first section decision on a pool measures what a
+        // section costs there, in sections of its own
+        run();
+        let ctx = Context::builder().threshold(Level::TRACE).build();
+        {
+            let _on = ctx.enter();
+            run();
+        }
+        ctx.record_threads()
+    });
+    for (i, node) in r.nodes.iter().enumerate() {
+        let path = r.path(i as u32);
+        for measure in ["tasks", "pool", "worker_calls"] {
+            assert_eq!(node.get(measure), 0, "{measure} at {path:?}");
+        }
     }
 }

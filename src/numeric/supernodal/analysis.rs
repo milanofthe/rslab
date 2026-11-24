@@ -8,7 +8,7 @@ use crate::constants::{
     THIN_PATTERN_THREADS,
 };
 use crate::error::RslabError;
-use crate::numeric::settings::{in_scoped_pool, stack_for_depth, SolverSettings};
+use crate::numeric::settings::{stack_for_depth, SolverSettings};
 use crate::numeric::supernodal::LlSchedule;
 use crate::sparse::csc::CscPattern;
 use crate::symbolic::SymbolicFactorization;
@@ -194,9 +194,11 @@ pub(crate) fn analyze_with(
     // step inside the analysis - notably the ND seed ensemble - respects the
     // configured worker count instead of grabbing all cores.
     let n = pattern.n;
-    in_scoped_pool(opts.resolved_threads(), stack_for_depth(n), || {
-        analyze_with_inner(pattern, nnz, opts, amd)
-    })
+    opts.threads.run(
+        stack_for_depth(n),
+        |cap| cap,
+        || analyze_with_inner(pattern, nnz, opts, amd),
+    )
 }
 
 fn analyze_with_inner(
