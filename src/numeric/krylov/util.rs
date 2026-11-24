@@ -2,7 +2,6 @@
 //! products, Givens rotations, the least-squares rank guard and the batched
 //! Gram-Schmidt passes of the block solver.
 
-use crate::numeric::settings::Threads;
 use crate::scalar::Scalar;
 use crate::stored::{axpy_as, dotc_as, Stored};
 
@@ -107,48 +106,6 @@ pub(super) fn well_conditioned_dim<T: Scalar>(h: &[T], stride: usize, jdim: usiz
 /// the reductions.
 static ORTHO_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
-
-/// The scoped rayon pool for the block-GMRES orthogonalization reductions,
-/// from the preconditioner's [`Threads`] policy. `Ambient`
-/// returns `None` - the reductions then run on the caller's current pool (the
-/// solver-in-the-loop path, where the caller has already installed one bounded
-/// rayon pool). Any concrete policy takes the calling thread's pool of that
-/// width (the one the factorizations and solves of that width run in, see
-/// [`scoped_pool`](crate::numeric::settings::scoped_pool)) **once** per
-/// solve; the projection and subtraction calls of every step enter
-/// it, so factor and solve share one concurrency budget instead of the solve
-/// fanning out over the global pool. The chunk-order reduction fold is
-/// thread-count independent, so the pool never perturbs the
-/// bit-identical-across-thread-counts guarantee.
-pub(super) fn solve_thread_pool(policy: Threads) -> Option<std::sync::Arc<rayon::ThreadPool>> {
-    match policy {
-        // A lent pool serves every section (see `crate::parallel`).
-        _ if crate::parallel::is_lent() => None,
-        Threads::Ambient => None,
-        // `Fixed(k)` (the resolved factor budget): a `k`-worker pool (`0` = all
-        // cores). `Auto` never reaches here - factors resolve it to `Fixed` up
-        // front - but the `|cap| cap` fallback keeps this total.
-        p => crate::numeric::settings::scoped_pool(p.resolve(|cap| cap), 0),
-    }
-}
-
-/// Run an orthogonalization reduction `f` in the solve pool if there is one,
-/// else on the current pool. The pool is entered as the factorizations enter
-/// theirs ([`enter`](crate::numeric::settings::enter)): a worker of another
-/// pool waits for it without taking its own pool's work. Confined to closures
-/// capturing only Krylov *data* (basis / panel slices) - never the operator
-/// or preconditioner - so it never imposes a `Send`/`Sync` bound on the
-/// matrix-free (`FnOperator`/`FnPreconditioner`) call path.
-#[inline]
-pub(super) fn ortho_in_pool<R: Send>(
-    pool: &Option<std::sync::Arc<rayon::ThreadPool>>,
-    f: impl FnOnce() -> R + Send,
-) -> R {
-    match pool {
-        Some(p) => crate::numeric::settings::enter(p, f),
-        None => f(),
-    }
-}
 
 /// Each panel column projected onto its **own** basis: `proj[off[a] + i] =
 /// <V_a[:, i], W[:, a]>` for the `off[a+1] - off[a]` vectors of column `a`'s
