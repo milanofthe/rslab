@@ -301,14 +301,20 @@ fn ambient_work_below_the_section_threshold_enters_no_pool() {
     let ambient = SolverSettings::default().with_threads(rslab::Threads::Ambient);
     let one = GeneralCsc::from_triplets(1, &[0], &[0], &[2.0]).unwrap();
     let one_lower = CscMatrix::from_triplets(1, &[0], &[0], &[2.0]).unwrap();
+    let run = || {
+        let sym = LuSymbolic::analyze(&one, &ambient).unwrap();
+        sym.factor(&one, &ambient).unwrap().solve(&[1.0]).unwrap();
+        let s = LdltSolver::factor(&one_lower, &ambient).unwrap();
+        s.solve(&[1.0]).unwrap();
+    };
     let r = wide.install(|| {
+        // once before: the first section decision on a pool measures what a
+        // section costs there, in sections of its own
+        run();
         let ctx = Context::builder().threshold(Level::TRACE).build();
         {
             let _on = ctx.enter();
-            let sym = LuSymbolic::analyze(&one, &ambient).unwrap();
-            sym.factor(&one, &ambient).unwrap().solve(&[1.0]).unwrap();
-            let s = LdltSolver::factor(&one_lower, &ambient).unwrap();
-            s.solve(&[1.0]).unwrap();
+            run();
         }
         ctx.record_threads()
     });
