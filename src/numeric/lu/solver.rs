@@ -825,14 +825,7 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         };
         // The sweeps take the block row-major: y[e * nrhs + c].
         let y = &mut work.y;
-        y.clear();
-        y.resize(n * nrhs, T::zero());
-        for (e, &orig) in gather.iter().enumerate() {
-            let s = T::from_real(g_scale[orig]);
-            for c in 0..nrhs {
-                y[e * nrhs + c] = b[c * n + orig] * s;
-            }
-        }
+        crate::numeric::direct::gather_scaled(b, nrhs, gather, g_scale, y, self.solve_threads);
         let plan = &mut work.plan;
         if transpose {
             self.plan_u.forward(nrhs, y, plan, self.solve_threads);
@@ -841,12 +834,8 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
             self.plan_l.forward(nrhs, y, plan, self.solve_threads);
             self.plan_u.backward(nrhs, y, plan, self.solve_threads);
         }
-        for (e, &orig) in scatter.iter().enumerate() {
-            let s = T::from_real(s_scale[orig]);
-            for c in 0..nrhs {
-                x[c * n + orig] = y[e * nrhs + c] * s;
-            }
-        }
+        crate::numeric::direct::scatter_scaled(y, nrhs, scatter, s_scale, x, self.solve_threads);
+        debug_assert_eq!(scatter.len(), n);
         Ok(())
     }
 }

@@ -8,6 +8,7 @@
 
 use crate::diagnostics::SolveCounter;
 use crate::error::RslabError;
+use crate::numeric::settings::Threads;
 use crate::refine::{refine_in_place, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy};
 use crate::scalar::Scalar;
 
@@ -228,6 +229,125 @@ fn check(n: usize, len: usize, nrhs: usize) -> Result<(), RslabError> {
         });
     }
     Ok(())
+}
+
+/// What a permuted, scaled copy costs per entry, learned from its serial
+/// runs.
+static PERMUTE_RATE: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
+
+/// `copy(out, work)` of `entries` entries on the workers of `threads`
+/// where the copy is worth more than one of them, else `serial(out)` on
+/// this thread.
+fn permute_on<S: Send>(
+    threads: Threads,
+    entries: usize,
+    out: S,
+    copy: impl FnOnce(S, crate::parallel::Work<'_>) + Send,
+    serial: impl FnOnce(S),
+) {
+    let work = crate::parallel::Work::of(entries as f64, &PERMUTE_RATE);
+    let pieces = entries.div_ceil(crate::constants::SOLVE_PERMUTE_TASK);
+    let workers = threads.resolve(|cap| cap);
+    if pieces > 1 && crate::parallel::width_on(workers, work.time(), pieces) > 1 {
+        threads.run(
+            0,
+            |cap| cap,
+            || {
+                copy(
+                    out,
+                    crate::parallel::Work::of(entries as f64, &PERMUTE_RATE),
+                )
+            },
+        )
+    } else {
+        work.serial(|| serial(out))
+    }
+}
+
+/// The block a solve's sweeps take, row-major (`y[e * nrhs + c]`), from the
+/// column-major right-hand sides `b`: row `e` is row `rows[e]` of `b`
+/// times `scale[rows[e]]`. On the workers of `threads` where it is worth it;
+/// every entry is the same product either way.
+pub(crate) fn gather_scaled<T: Scalar>(
+    b: &[T],
+    nrhs: usize,
+    rows: &[usize],
+    scale: &[f64],
+    y: &mut Vec<T>,
+    threads: Threads,
+) {
+    let n = rows.len();
+    y.clear();
+    if nrhs == 0 {
+        return;
+    }
+    y.reserve(n * nrhs);
+    let fill = |e0: usize, out: &mut [std::mem::MaybeUninit<T>]| {
+        for (i, row) in out.chunks_mut(nrhs).enumerate() {
+            let p = rows[e0 + i];
+            let s = T::from_real(scale[p]);
+            for (c, v) in row.iter_mut().enumerate() {
+                v.write(b[c * n + p] * s);
+            }
+        }
+    };
+    let task = (crate::constants::SOLVE_PERMUTE_TASK / nrhs).max(1);
+    permute_on(
+        threads,
+        n * nrhs,
+        &mut y.spare_capacity_mut()[..n * nrhs],
+        |out, work| {
+            crate::parallel::chunks_mut(out, task * nrhs, work, |k, chunk| fill(k * task, chunk))
+        },
+        |out| fill(0, out),
+    );
+    // SAFETY: every one of the first `n * nrhs` entries was written above.
+    unsafe { y.set_len(n * nrhs) };
+}
+
+/// The solution from a solve's sweeps' block `y` (row-major, see
+/// [`gather_scaled`]): row `rows[e]` of the column-major `x` is row `e` of
+/// `y` times `scale[rows[e]]`. On the workers of `threads` where it is
+/// worth it; every entry is the same product either way.
+pub(crate) fn scatter_scaled<T: Scalar>(
+    y: &[T],
+    nrhs: usize,
+    rows: &[usize],
+    scale: &[f64],
+    x: &mut [T],
+    threads: Threads,
+) {
+    let n = rows.len();
+    if nrhs == 0 {
+        return;
+    }
+    assert!(x.len() >= n * nrhs && y.len() >= n * nrhs);
+    let base = crate::numeric::supernodal::PanelPtr(x.as_mut_ptr());
+    let put = move |e0: usize, e1: usize| {
+        let x = base.get();
+        for e in e0..e1 {
+            let p = rows[e];
+            let s = T::from_real(scale[p]);
+            for c in 0..nrhs {
+                // SAFETY: `rows` is a permutation, so row `p` of every column
+                // is written by row `e` alone; in bounds by the check above.
+                unsafe { *x.add(c * n + p) = y[e * nrhs + c] * s };
+            }
+        }
+    };
+    let task = (crate::constants::SOLVE_PERMUTE_TASK / nrhs).max(1);
+    permute_on(
+        threads,
+        n * nrhs,
+        (),
+        |(), work| {
+            crate::parallel::for_each(n.div_ceil(task), work, |k| {
+                put(k * task, ((k + 1) * task).min(n))
+            })
+        },
+        |()| put(0, n),
+    );
 }
 
 pub(crate) fn solve_into<T: Scalar, S: SolveCore<T>>(

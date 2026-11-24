@@ -208,14 +208,8 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
         let n = self.factors.n;
         // The sweeps take the block row-major: y[i * nrhs + c].
         let y = &mut work.y;
-        y.clear();
-        y.resize(n * nrhs, T::zero());
-        for (i, &p) in self.factors.perm.iter().enumerate() {
-            let sp = T::from_real(self.scale[p]);
-            for c in 0..nrhs {
-                y[i * nrhs + c] = b[c * n + p] * sp;
-            }
-        }
+        let (perm, scale) = (&self.factors.perm[..], &self.scale[..]);
+        crate::numeric::direct::gather_scaled(b, nrhs, perm, scale, y, self.solve_threads);
         if nrhs == 1 {
             self.plan
                 .solve_in_place(&self.factors, y, &mut work.plan, self.solve_threads)?;
@@ -228,12 +222,8 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
                 self.solve_threads,
             )?;
         }
-        for (i, &p) in self.factors.perm.iter().enumerate() {
-            let sp = T::from_real(self.scale[p]);
-            for c in 0..nrhs {
-                x[c * n + p] = y[i * nrhs + c] * sp;
-            }
-        }
+        crate::numeric::direct::scatter_scaled(y, nrhs, perm, scale, x, self.solve_threads);
+        debug_assert_eq!(perm.len(), n);
         Ok(())
     }
 }
