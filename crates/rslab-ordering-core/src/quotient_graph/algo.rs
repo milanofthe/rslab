@@ -23,7 +23,7 @@
 //! counterparts (see `metric.rs`).
 
 use super::workspace::{clear_flag, flip, Workspace, NONE};
-use crate::OrderingError;
+use crate::{Counter, OrderingError, Progress};
 
 /// Flop-counter deltas produced by a single elimination step.
 /// Matches faer's `amd.rs:547-557` accounting so `AmdStats` can
@@ -1264,19 +1264,24 @@ pub fn finalize_step_amf(
 pub fn run_elimination_amf(
     ws: &mut Workspace,
     aggressive: bool,
+    progress: Option<&Progress>,
 ) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
+    let eliminated = Counter::new(progress, ws.n);
+    eliminated.add(ws.nel);
     while ws.nel < ws.n {
         let me = match select_pivot_amf(ws) {
             Some(m) => m,
             None => break,
         };
-        let elenme = ws.elen[me];
+        let (elenme, before) = (ws.elen[me], ws.nel);
         let (pme1, pme2, nvpiv, degme) = create_element_amf(ws, me)?;
         flops.accumulate(finalize_step_amf(
             ws, me, pme1, pme2, nvpiv, degme, elenme, aggressive,
         ));
+        eliminated.add(ws.nel - before);
     }
+    eliminated.finish();
     let f = ws.ndense as f64;
     let lnzme = (f - 1.0) * f / 2.0;
     let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
@@ -1298,20 +1303,29 @@ pub fn run_elimination_amf(
 ///
 /// At exit: `ws.nel == ws.n`, every `pe[i]` either points to a
 /// live parent (to be path-compressed by the postorder phase) or
-/// is `NONE` / `flip(parent)`.
-pub fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError> {
+/// is `NONE` / `flip(parent)`. `progress` hears of the eliminated
+/// variables.
+pub fn run_elimination(
+    ws: &mut Workspace,
+    aggressive: bool,
+    progress: Option<&Progress>,
+) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
+    let eliminated = Counter::new(progress, ws.n);
+    eliminated.add(ws.nel);
     while ws.nel < ws.n {
         let me = match select_pivot(ws) {
             Some(m) => m,
             None => break, // only dense-deferred survivors remain
         };
-        let elenme = ws.elen[me];
+        let (elenme, before) = (ws.elen[me], ws.nel);
         let (pme1, pme2, nvpiv, degme) = create_element(ws, me)?;
         flops.accumulate(finalize_step(
             ws, me, pme1, pme2, nvpiv, degme, elenme, aggressive,
         ));
+        eliminated.add(ws.nel - before);
     }
+    eliminated.finish();
     // Dense-phase flop contribution (amd.rs:559-566).
     let f = ws.ndense as f64;
     let lnzme = (f - 1.0) * f / 2.0;
@@ -1688,7 +1702,7 @@ mod tests {
         let cp = [0, 1, 2, 3, 4];
         let ri = [0, 1, 2, 3];
         let mut ws = ws_for(4, &cp, &ri);
-        let flops = run_elimination(&mut ws, true).unwrap();
+        let flops = run_elimination(&mut ws, true, None).unwrap();
         assert_eq!(ws.nel, 4);
         assert_eq!(flops.ndiv, 0.0);
     }
@@ -1701,7 +1715,7 @@ mod tests {
         let cp = [0, 5, 7, 9, 11, 13];
         let ri = [0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4];
         let mut ws = ws_for(5, &cp, &ri);
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         assert_eq!(ws.nel, 5);
         // Every var was pivoted exactly once => nv[i] > 0 everywhere
         // (the pivot restores nv to +nvpiv).
@@ -1729,7 +1743,7 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         assert_eq!(ws.nel, n);
     }
 
@@ -1769,7 +1783,7 @@ mod tests {
         }
         let p = CscPattern::new(total, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         assert_eq!(ws.nel, total);
     }
 
@@ -1792,7 +1806,7 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         assert_eq!(ws.nel, n);
         assert!(
             ws.ncmpa >= 1,
@@ -1820,7 +1834,7 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         assert_eq!(ws.ndense, 1);
         assert_eq!(ws.nel, n);
     }
@@ -1881,7 +1895,7 @@ mod tests {
         let cp = [0, 1, 2, 3, 4];
         let ri = [0, 1, 2, 3];
         let mut ws = ws_for(4, &cp, &ri);
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), 4);
         assert!(is_permutation(&perm));
@@ -1897,7 +1911,7 @@ mod tests {
         let cp = [0, 5, 7, 9, 11, 13];
         let ri = [0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4];
         let mut ws = ws_for(5, &cp, &ri);
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), 5);
         assert!(is_permutation(&perm));
@@ -1922,7 +1936,7 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), n);
         assert!(is_permutation(&perm));
@@ -1948,7 +1962,7 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), n);
         assert!(is_permutation(&perm));
@@ -1993,7 +2007,7 @@ mod tests {
         }
         let p = CscPattern::new(total, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), total);
         assert!(is_permutation(&perm));
@@ -2017,7 +2031,7 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), n);
         assert!(is_permutation(&perm));
@@ -2030,7 +2044,7 @@ mod tests {
         let ri: [i32; 0] = [];
         let p = CscPattern::new(0, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        run_elimination(&mut ws, true).unwrap();
+        run_elimination(&mut ws, true, None).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert!(perm.is_empty());
     }

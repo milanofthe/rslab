@@ -12,6 +12,7 @@
 //! - [`CscPattern`] - borrowed, full-symmetric, 0-based, `i32`-indexed.
 //! - [`OrderingStats`] - producer-agnostic diagnostic counters.
 //! - [`OrderingError`] - shared error shape.
+//! - [`Progress`] - the caller's progress callback of an ordering.
 //! - [`CONTRACT_VERSION`] - bumped on any breaking change.
 //!
 //! Each ordering crate exposes exactly one contract-conforming
@@ -39,9 +40,11 @@ pub mod clock;
 /// The numbers the minimum-degree orderings are defined by.
 #[doc(hidden)]
 pub mod constants;
+pub mod progress;
 pub mod quotient_graph;
 pub mod rcm;
 
+pub use progress::{Counter, Progress};
 pub use rcm::rcm_order;
 
 use core::fmt;

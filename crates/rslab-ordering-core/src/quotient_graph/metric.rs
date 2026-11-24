@@ -33,6 +33,7 @@
 use super::algo::{run_elimination as run_elimination_amd, run_elimination_amf, StepFlops};
 use super::workspace::Workspace;
 use crate::OrderingError;
+use crate::Progress;
 
 /// Selection metric for an AMD-family bottom-up ordering.
 ///
@@ -76,7 +77,11 @@ pub trait Metric {
     ///
     /// MinDegree dispatches to `run_elimination` (the AMD-specific
     /// loop); MinFill dispatches to `run_elimination_amf`.
-    fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError>;
+    fn run_elimination(
+        ws: &mut Workspace,
+        aggressive: bool,
+        progress: Option<&Progress>,
+    ) -> Result<StepFlops, OrderingError>;
 }
 
 /// Minimum-degree metric - the AMD selection rule of Amestoy, Davis,
@@ -120,8 +125,12 @@ impl Metric for MinDegree {
     }
 
     #[inline(always)]
-    fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError> {
-        run_elimination_amd(ws, aggressive)
+    fn run_elimination(
+        ws: &mut Workspace,
+        aggressive: bool,
+        progress: Option<&Progress>,
+    ) -> Result<StepFlops, OrderingError> {
+        run_elimination_amd(ws, aggressive, progress)
     }
 }
 
@@ -211,7 +220,11 @@ impl Metric for MinFill {
         }
     }
 
-    fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError> {
-        run_elimination_amf(ws, aggressive)
+    fn run_elimination(
+        ws: &mut Workspace,
+        aggressive: bool,
+        progress: Option<&Progress>,
+    ) -> Result<StepFlops, OrderingError> {
+        run_elimination_amf(ws, aggressive, progress)
     }
 }

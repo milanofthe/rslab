@@ -51,12 +51,17 @@ pub struct AmfOptions {
     /// clamps; for `n >= 18` that is exactly `n - 2`, suppressing
     /// deferral for all but true hubs of degree `n - 1`.
     pub dense_alpha: f64,
+    /// Called with the variables eliminated so far out of `n`, at most
+    /// about a hundred times per ordering, the last time with `n`. `None`
+    /// (default) counts nothing.
+    pub progress: Option<rslab_ordering_core::Progress>,
 }
 
 impl Default for AmfOptions {
     fn default() -> Self {
         Self {
             dense_alpha: rslab_ordering_core::constants::DENSE_ALPHA,
+            progress: None,
         }
     }
 }
@@ -118,7 +123,7 @@ pub fn amf_order_full(
     // unconditionally. The flag only gates the AMD-specific
     // `(p3 == pn) && (elen[i] == 1)` mass-elimination branch which
     // the AMF loop reuses with the same semantics.
-    let (perm, diag) = order::<MinFill>(pattern, &ws_opts, true)?;
+    let (perm, diag) = order::<MinFill>(pattern, &ws_opts, true, opts.progress.as_ref())?;
     let amf_stats = AmfStats {
         ncmpa: diag.ncmpa,
         n_clear_flag: 0,

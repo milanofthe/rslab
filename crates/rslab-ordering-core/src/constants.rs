@@ -1,5 +1,6 @@
 //! The numbers the minimum-degree orderings (AMD, AMF) are defined by,
-//! shared by `rslab-amd` and `rslab-amf` so the two cannot drift apart.
+//! shared by `rslab-amd` and `rslab-amf` so the two cannot drift apart, and
+//! the resolution of the progress every ordering reports.
 //!
 //! Each constant states its unit, what reads it, why it has its value, and
 //! its contract: **results** (changing it changes the permutation).
@@ -34,6 +35,13 @@ pub const ELBOW_DIV: usize = 5;
 /// Why: tuned default; fill scores above `n` need only coarse buckets.
 /// Contract: results (ties between equal-bucket candidates).
 pub const BUCKET_STEP_DIV: usize = 8;
+
+/// Calls of an ordering's progress callback, at most, per ordering (calls).
+/// Used by: `progress::Counter` (AMD, AMF, nested dissection).
+/// Why: one call per percent of the vertices; the callee is never called
+/// per vertex.
+/// Contract: output.
+pub const PROGRESS_CALLS: u64 = 100;
 
 /// Most hops of the George-Liu pseudo-peripheral node search of RCM
 /// (hops).
