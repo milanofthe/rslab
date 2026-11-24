@@ -168,8 +168,6 @@ pub(crate) struct PanelArena<T> {
     cursor: std::sync::atomic::AtomicUsize,
     lazy_rows: Cells<Vec<u32>>,
     lazy: bool,
-    /// The scratch of [`finish_slot`](Self::finish_slot), per running call.
-    scratch: ScratchPool<PanelScratch<T>>,
     /// Buffers handed in for reuse keep their capacity through
     /// [`finish`](Self::finish), for the next factorization to fill again.
     reused: bool,
@@ -273,7 +271,6 @@ impl<T: Scalar> PanelArena<T> {
             cursor: std::sync::atomic::AtomicUsize::new(0),
             lazy_rows: Cells::new_default(if lazy { ns } else { 0 }),
             lazy,
-            scratch: ScratchPool::new(),
             reused,
         }
     }
@@ -366,7 +363,8 @@ impl<T: Scalar> PanelArena<T> {
 
     /// Finish supernode `s`'s panel of `w` columns and `m` off-block rows in
     /// its slots, the first `m` entries of its row slot filled
-    /// ([`finish_panel`]).
+    /// ([`finish_panel`]), its buffers from `scratch`, the factorization's
+    /// pool that every refactorization reuses.
     ///
     /// # Safety
     /// As [`slot_mut`](Self::slot_mut): only the owner of `s`, once.
@@ -376,8 +374,9 @@ impl<T: Scalar> PanelArena<T> {
         w: usize,
         m: usize,
         two_by_two: Option<&[bool]>,
+        scratch: &ScratchPool<PanelScratch<T>>,
     ) -> PanelOut {
-        let mut scratch = self.scratch.take();
+        let mut scratch = scratch.take();
         finish_panel(
             self.slot_mut(s),
             &mut self.rows_mut(s)[..m],
@@ -660,6 +659,7 @@ mod tests {
         // Supernode 0: w=1, rows {1, 2}; supernode 1: w=1, row {2}; supernode 2: w=1.
         let shapes = [(1usize, 2usize), (1, 1), (1, 0)];
         let arena = PanelArena::<f64>::new(shapes.into_iter().map(|(w, m)| slot_sizes(w, m)));
+        let sc = ScratchPool::new();
         unsafe {
             arena.slot_mut(0).copy_from_slice(&[1.0, 0.0, 5.0]); // row 1 is empty
             arena.slot_mut(1).copy_from_slice(&[1.0, 6.0]);
@@ -669,9 +669,9 @@ mod tests {
         }
         let outs = unsafe {
             [
-                arena.finish_slot(0, 1, 2, None),
-                arena.finish_slot(1, 1, 1, None),
-                arena.finish_slot(2, 1, 0, None),
+                arena.finish_slot(0, 1, 2, None, &sc),
+                arena.finish_slot(1, 1, 1, None, &sc),
+                arena.finish_slot(2, 1, 0, None, &sc),
             ]
         };
         // Rows come in as {2, 1}: sorted to {1, 2}, and row 2 (the zero) is dropped.

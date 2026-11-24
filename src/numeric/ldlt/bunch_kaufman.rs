@@ -84,6 +84,8 @@ pub(super) struct BkPools<T> {
     pub(super) node: ScratchPool<BkScratch<T>>,
     pub(super) w: ScratchPool<Vec<T>>,
     pub(super) cmod: ScratchPool<(Vec<T>, Vec<T>, Vec<T>)>,
+    /// The buffers of the emit's [`finish_panel`](crate::numeric::supernodal::panel::finish_panel).
+    pub(super) finish: ScratchPool<crate::numeric::supernodal::panel::PanelScratch<T>>,
 }
 
 /// A copy of a factor starts with scratch of its own, grown by its first
@@ -100,6 +102,7 @@ impl<T> BkPools<T> {
             node: ScratchPool::new(),
             w: ScratchPool::new(),
             cmod: ScratchPool::new(),
+            finish: ScratchPool::new(),
         }
     }
 }

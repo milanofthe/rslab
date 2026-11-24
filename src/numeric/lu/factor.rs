@@ -12,8 +12,10 @@ use crate::numeric::supernodal::{Input, InputProgram};
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::settings::{SolverSettings, ZeroPivotAction};
-use crate::numeric::supernodal::panel::{PanelArena, PanelFactor, PanelOut, PanelStorage};
-use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule};
+use crate::numeric::supernodal::panel::{
+    PanelArena, PanelFactor, PanelOut, PanelScratch, PanelStorage,
+};
+use crate::numeric::supernodal::{emit_refcount_offsets, Cells, LlSchedule, ScratchPool};
 use crate::refine::PivotFloor;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
@@ -74,6 +76,7 @@ impl<T: Scalar> LlEmit<T> {
         st: &LuStructure,
         delay_growth: f64,
         storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
+        pivots: Cells<NodePivots>,
     ) -> Self {
         let n = sym.n;
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
@@ -109,7 +112,12 @@ impl<T: Scalar> LlEmit<T> {
             l_arena,
             u_arena,
             panels: Cells::new_default(ns),
-            pivots: Cells::new_default(ns),
+            // An earlier factorization's records, their buffers filled again.
+            pivots: if pivots.len() == ns {
+                pivots
+            } else {
+                Cells::new_default(ns)
+            },
             delays,
             overflowed: Default::default(),
             e_of_g: Cells::new(n, usize::MAX),
@@ -195,6 +203,7 @@ fn emit_and_free<T: Scalar>(
     emit: &LlEmit<T>,
     sym: &SymbolicFactorization,
     st: &LuStructure,
+    finish: &ScratchPool<PanelScratch<T>>,
 ) {
     // SAFETY (the slot and record accesses below): the owner of supernode
     // `k` emits it exactly once, after its last updater has read the slots
@@ -225,8 +234,8 @@ fn emit_and_free<T: Scalar>(
     for (r, &g) in u_rows.iter_mut().zip(ou) {
         *r = unsafe { emit.eg(g as usize) } as u32;
     }
-    let l_out = unsafe { emit.l_arena.finish_slot(k, npiv, ol.len(), None) };
-    let u_out = unsafe { emit.u_arena.finish_slot(k, npiv, ou.len(), None) };
+    let l_out = unsafe { emit.l_arena.finish_slot(k, npiv, ol.len(), None, finish) };
+    let u_out = unsafe { emit.u_arena.finish_slot(k, npiv, ou.len(), None, finish) };
     unsafe { emit.panels.set(k, (l_out, u_out)) };
 }
 
@@ -250,12 +259,21 @@ fn factor_lu_left_looking<T: Scalar>(
 ) -> Result<Option<LuNumeric<T>>, RslabError> {
     let n = sym.n;
     let ns = sym.supernodes.len();
-    let emit = LlEmit::<T>::new(sym, sched, st, delay_growth, storage);
+    // The pivot records from the pool, put back when the factor is built.
+    let mut records = pools.pivots.take();
+    let emit = LlEmit::<T>::new(
+        sym,
+        sched,
+        st,
+        delay_growth,
+        storage,
+        std::mem::take(&mut *records),
+    );
     let factor_node =
         |s: usize| lu_ll_factor_node(s, sym, inp, sched, st, pools, &emit, perturb_floor, kt);
     let emit_free = |k: usize| {
         if !emit.delays {
-            emit_and_free(k, &emit, sym, st)
+            emit_and_free(k, &emit, sym, st, &pools.finish)
         }
     };
     let forest =
@@ -282,7 +300,7 @@ fn factor_lu_left_looking<T: Scalar>(
             unsafe { emit.place(s, eoff) };
         }
         crate::parallel::for_each(ns, crate::parallel::Work::ns(f64::INFINITY), |k| {
-            emit_and_free(k, &emit, sym, st)
+            emit_and_free(k, &emit, sym, st, &pools.finish)
         });
     }
     let delayed = (0..ns)
@@ -306,8 +324,10 @@ fn factor_lu_left_looking<T: Scalar>(
         u_arena,
         panels,
         floors,
+        pivots,
         ..
     } = emit;
+    *records = pivots;
     let (l, zeros_l) = l_arena.finish(n, widths.iter().copied(), |s| unsafe {
         std::mem::take(&mut panels.get_mut(s).0)
     });
