@@ -1,22 +1,96 @@
-//! Bit-identity of the analysis, the factorizations and the solves across
-//! thread counts and across repeated runs at the same thread count.
-//!
-//! Regression test for the racy tiled-cmod mode pick: the `chain_phase`
-//! signal (nodes currently in flight, a timing artifact) must never select
-//! between the tiled and the sequential cmod path, because the sequential
-//! path routes sub-`scalar_gate` updates through the scalar kernel (plain
-//! mul+add) while the tiled path runs everything through FMA GEMM
-//! micro-kernels - different rounding, different bits. The 3D grid below
-//! places its separator nodes squarely in the once-racy dispatch zone
-//! (`cmod_flops` between `par_gemm` and the deterministic fork gate), where
-//! the drift was measured at up to ~1800 last-ulp entries between 1 and 8
-//! threads and a few hundred entries run-to-run at 8 threads.
+//! What every thread count gives: a factorization whose solves meet the
+//! error bound of the problem, and at a fixed thread count the same result
+//! from run to run. The tiles of a node's updates follow the workers
+//! (`KernelSettings::update_tile`), so different thread counts round
+//! differently; each is held to the normwise backward error of a stable
+//! solve, `|A x - b| / (|A| |x| + |b|) <= GROWTH * gamma_m` with
+//! `gamma_m = m u / (1 - m u)`, `u` the unit roundoff and `m` the dimension
+//! (twice it for complex arithmetic). The test matrices are diagonally
+//! dominant, where elimination grows the entries at most by `GROWTH`.
 
 use num_complex::Complex;
 use rslab::{
     CscMatrix, GeneralCsc, KluParallel, KluSettings, KluSolver, LdltSolver, LdltSymbolic, LuSolver,
-    OrderingMethod, SolverSettings, Threads,
+    OrderingMethod, Scalar, SolverSettings, Threads,
 };
+
+/// The most a diagonally dominant matrix's entries grow under elimination.
+const GROWTH: f64 = 2.0;
+
+/// The thread counts every solve is checked at.
+const THREADS: [usize; 3] = [1, 2, 8];
+
+/// The backward error bound of a solve of dimension `n` in `T`.
+fn bound<T: Scalar>(n: usize) -> f64 {
+    let u = f64::EPSILON / 2.0;
+    let m = (if T::COMPLEX { 2 * n } else { n }) as f64;
+    GROWTH * m * u / (1.0 - m * u)
+}
+
+/// `|A x - b|_inf / (|A|_inf |x|_inf + |b|_inf)` for `A` given by its
+/// entries `(row, column, value)`.
+fn backward_error<T: Scalar>(n: usize, entries: &[(usize, usize, T)], x: &[T], b: &[T]) -> f64 {
+    let (mut r, mut rows) = (
+        b.iter().map(|&v| T::zero() - v).collect::<Vec<T>>(),
+        vec![0.0; n],
+    );
+    for &(i, j, v) in entries {
+        r[i] = r[i] + v * x[j];
+        rows[i] += v.magnitude();
+    }
+    let inf = |v: &[T]| v.iter().map(|z| z.magnitude()).fold(0.0, f64::max);
+    let a = rows.iter().copied().fold(0.0, f64::max);
+    inf(&r) / (a * inf(x) + inf(b))
+}
+
+/// The entries of the symmetric matrix whose lower triangle is `a`.
+fn symmetric<T: Scalar>(a: &CscMatrix<T>) -> Vec<(usize, usize, T)> {
+    let mut e = Vec::new();
+    for j in 0..a.n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            e.push((i, j, a.values[k]));
+            if i != j {
+                e.push((j, i, a.values[k]));
+            }
+        }
+    }
+    e
+}
+
+fn general<T: Scalar>(a: &GeneralCsc<T>) -> Vec<(usize, usize, T)> {
+    (0..a.n)
+        .flat_map(|j| (a.col_ptr[j]..a.col_ptr[j + 1]).map(move |k| (a.row_idx[k], j, a.values[k])))
+        .collect()
+}
+
+/// Every thread count of [`THREADS`] solves within the bound, and the last
+/// one gives the same bits run after run.
+fn check<T: Scalar>(
+    what: &str,
+    entries: &[(usize, usize, T)],
+    b: &[T],
+    solve: impl Fn(usize) -> Vec<T>,
+) {
+    let n = b.len();
+    for t in THREADS {
+        let x = solve(t);
+        let eta = backward_error(n, entries, &x, b);
+        assert!(
+            eta <= bound::<T>(n),
+            "{what}: backward error {eta:e} at {t} threads over {:e}",
+            bound::<T>(n)
+        );
+    }
+    let last = THREADS[THREADS.len() - 1];
+    let x = solve(last);
+    for _ in 0..2 {
+        assert!(
+            solve(last) == x,
+            "{what}: other bits run to run at {last} threads"
+        );
+    }
+}
 
 /// 3D 7-point Laplacian (k^3 grid, SPD, lower triangle).
 fn grid3d(k: usize) -> CscMatrix<f64> {
@@ -86,74 +160,41 @@ fn grid3d_conv(k: usize) -> GeneralCsc<f64> {
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-fn bits_f64(x: &[f64]) -> Vec<u64> {
-    x.iter().map(|v| v.to_bits()).collect()
-}
-
-fn bits_c64(x: &[Complex<f64>]) -> Vec<(u64, u64)> {
-    x.iter().map(|v| (v.re.to_bits(), v.im.to_bits())).collect()
-}
-
-/// Grid edge sizes: release runs the sizes the original drift was measured
-/// at; debug (the CI profile) shrinks the f64 grids so the numeric-heavy
-/// factors fit the runner budget. Every size below was verified to
-/// reproduce the original racy-dispatch drift in its profile (the shrunk
-/// debug sizes included), so the test discriminates on both.
+/// Grid edge sizes: larger in release; debug (the CI profile) shrinks them
+/// so the factors fit the runner budget. Every size has nodes whose updates
+/// run in tiles at eight threads.
 const K_LDLT: usize = if cfg!(debug_assertions) { 16 } else { 24 };
 const K_LDLT_C: usize = 16;
 const K_LU: usize = if cfg!(debug_assertions) { 14 } else { 22 };
 
 #[test]
-fn ll_ldlt_bit_identical_across_threads_and_runs() {
+fn ldlt_meets_the_bound_at_every_thread_count() {
     let a = grid3d(K_LDLT);
     let b: Vec<f64> = (0..a.n).map(|i| ((i % 11) as f64) - 5.0).collect();
-    let solve = |t: usize| -> Vec<f64> {
+    check("LDL^T", &symmetric(&a), &b, |t| {
         let s = SolverSettings::default().with_threads(t);
         LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap()
-    };
-    let x1 = solve(1);
-    let x8 = solve(8);
-    assert_eq!(
-        bits_f64(&x1),
-        bits_f64(&x8),
-        "LL LDLT solution differs between 1 and 8 threads"
-    );
-    for _ in 0..3 {
-        assert_eq!(
-            bits_f64(&x8),
-            bits_f64(&solve(8)),
-            "LL LDLT solution differs run-to-run at 8 threads"
-        );
-    }
+    });
 }
 
 #[test]
-fn ll_ldlt_complex_bit_identical_across_threads() {
-    // Complex-typed variant of the same grid: the complex kernels dispatch
-    // through the same racy-prone gates.
+fn complex_ldlt_meets_the_bound_at_every_thread_count() {
     let ar = grid3d(K_LDLT_C);
     let a = CscMatrix::<Complex<f64>> {
         n: ar.n,
         col_ptr: ar.col_ptr.clone(),
         row_idx: ar.row_idx.clone(),
-        values: ar
-            .values
-            .iter()
+        values: (ar.values.iter())
             .map(|&v| Complex::new(v, 0.1 * v))
             .collect(),
     };
     let b: Vec<Complex<f64>> = (0..a.n)
         .map(|i| Complex::new(((i % 11) as f64) - 5.0, 1.0))
         .collect();
-    let solve = |t: usize| -> Vec<Complex<f64>> {
+    check("complex LDL^T", &symmetric(&a), &b, |t| {
         let s = SolverSettings::default().with_threads(t);
         LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap()
-    };
-    assert_eq!(
-        bits_c64(&solve(1)),
-        bits_c64(&solve(8)),
-        "LL complex LDLT solution differs between 1 and 8 threads"
-    );
+    });
 }
 
 /// A complex factorization under a one-thread budget gives the bits it
@@ -169,7 +210,7 @@ fn complex_factor_on_a_one_thread_budget_matches_a_pool_of_one() {
     let b: Vec<Complex<f64>> = (0..a.n)
         .map(|i| Complex::new(((i % 11) as f64) - 5.0, 1.0))
         .collect();
-    let solve = |threads: Threads| -> Vec<(u64, u64)> {
+    let solve = |threads: Threads| -> Vec<Complex<f64>> {
         let mut s = SolverSettings::default().with_threads(threads);
         let gate = 1_000_000;
         (
@@ -177,75 +218,45 @@ fn complex_factor_on_a_one_thread_budget_matches_a_pool_of_one() {
             s.kernels.par_cdiv,
             s.kernels.fork_min_flops,
         ) = (gate, gate, gate);
-        bits_c64(&LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap())
+        LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap()
     };
-    assert_eq!(
-        solve(Threads::Fixed(1)),
-        in_pool(1, || solve(Threads::Ambient)),
+    assert!(
+        solve(Threads::Fixed(1)) == in_pool(1, || solve(Threads::Ambient)),
         "complex factor differs between a one-thread budget and a pool of one"
     );
 }
 
 #[test]
-fn ll_lu_bit_identical_across_threads_and_runs() {
+fn lu_meets_the_bound_at_every_thread_count() {
     let a = grid3d_conv(K_LU);
     let b: Vec<f64> = (0..a.n).map(|i| ((i % 11) as f64) - 5.0).collect();
-    let solve = |t: usize| -> Vec<f64> {
+    check("LU", &general(&a), &b, |t| {
         let s = SolverSettings::default().with_threads(t);
         LuSolver::<f64>::factor(&a, &s).unwrap().solve(&b).unwrap()
-    };
-    let x1 = solve(1);
-    let x8 = solve(8);
-    assert_eq!(
-        bits_f64(&x1),
-        bits_f64(&x8),
-        "LL LU solution differs between 1 and 8 threads"
-    );
-    for _ in 0..3 {
-        let xr = solve(8);
-        assert_eq!(
-            bits_f64(&x8),
-            bits_f64(&xr),
-            "LL LU solution differs run-to-run at 8 threads"
-        );
-    }
+    });
 }
 
 #[test]
-fn ll_lu_complex_bit_identical_across_threads_and_runs() {
-    // The complex twin: its GEMMs are not bit-identical between the serial and the
-    // parallel mode, so a timing-dependent choice between them (the former chain-phase
-    // gates) made the factor differ run to run.
+fn complex_lu_meets_the_bound_at_every_thread_count() {
     let ar = grid3d_conv(K_LU);
     let a = GeneralCsc::<Complex<f64>> {
         n: ar.n,
         col_ptr: ar.col_ptr.clone(),
         row_idx: ar.row_idx.clone(),
-        values: ar
-            .values
-            .iter()
-            .enumerate()
+        values: (ar.values.iter().enumerate())
             .map(|(k, &v)| Complex::new(v, 0.1 * v + 0.01 * (k % 7) as f64))
             .collect(),
     };
     let b: Vec<Complex<f64>> = (0..a.n)
         .map(|i| Complex::new(((i % 11) as f64) - 5.0, (i % 3) as f64))
         .collect();
-    let solve = |t: usize| -> Vec<Complex<f64>> {
+    check("complex LU", &general(&a), &b, |t| {
         let s = SolverSettings::default().with_threads(t);
         LuSolver::<Complex<f64>>::factor(&a, &s)
             .unwrap()
             .solve(&b)
             .unwrap()
-    };
-    let x1 = solve(1);
-    for _ in 0..4 {
-        assert_eq!(
-            bits_c64(&x1),
-            bits_c64(&solve(8)),
-            "LL complex LU solution differs between 1 and 8 threads or run to run"
-        );
-    }
+    });
 }
 
 /// A random unsymmetric matrix with a dominant diagonal; with `holes` every
@@ -308,29 +319,29 @@ fn the_race_is_thread_count_invariant() {
             .solve(&b)
             .unwrap()
     };
-    assert_eq!(bits_f64(&solve(1)), bits_f64(&solve(8)));
+    assert!(solve(1) == solve(8));
 }
 
-/// The LU path with the row matching and the KLU path with parallel blocks
-/// are bit-identical at one and eight workers.
+/// The LU path with the row matching meets the bound at every thread count;
+/// the KLU path with parallel blocks factors every block on one thread, so
+/// its bits are the same at one and eight workers.
 #[test]
-fn lu_with_matching_and_klu_are_bit_identical_across_threads() {
+fn lu_with_matching_and_klu_across_threads() {
     let a = unsymmetric(if cfg!(debug_assertions) { 2000 } else { 20_000 }, true);
     let b: Vec<f64> = (0..a.n).map(|i| ((i % 11) as f64) - 5.0).collect();
-    let lu = |t: usize| {
+    check("LU with matching", &general(&a), &b, |t| {
         let s = SolverSettings::default()
             .with_threads(t)
             .with_ordering(OrderingMethod::Amd);
         let f = LuSolver::factor(&a, &s).unwrap();
         assert!(f.diagnostics().decisions.scaling.contains("Mc64"));
         f.solve(&b).unwrap()
-    };
-    assert_eq!(bits_f64(&lu(1)), bits_f64(&lu(8)));
+    });
     let klu = |t: usize| {
         let s = (KluSettings::default())
             .with_parallel(KluParallel::On)
             .with_threads(Threads::Ambient);
         in_pool(t, || KluSolver::factor(&a, &s).unwrap().solve(&b).unwrap())
     };
-    assert_eq!(bits_f64(&klu(1)), bits_f64(&klu(8)));
+    assert!(klu(1) == klu(8));
 }
