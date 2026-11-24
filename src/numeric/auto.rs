@@ -310,7 +310,7 @@ impl AutoSymbolic {
         let klu = KluSymbolic::analyze(a, &settings.klu)?;
         let per_entry = klu.estimated_flops() as f64 / klu.estimated_factor_nnz().max(1) as f64;
         let supernodal = per_entry >= settings.supernodal_flops_per_entry;
-        rsprobe::info!(
+        rsprobe::debug!(
             "auto: n={} nnz={} flops/entry={per_entry:.1} -> {}",
             a.n,
             a.nnz(),
