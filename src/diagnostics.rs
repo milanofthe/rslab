@@ -198,7 +198,7 @@ impl Clone for SolveCounter {
 /// and the solve-phase accumulators. Per-call and concurrency-safe (no global
 /// state), so a solver-in-the-loop with many concurrent solves gets correct
 /// per-solve numbers. Carries the a-priori [`MemoryEstimate`] next to the
-/// factor's actual size. Emitted as one INFO event per factorization (see
+/// factor's actual size. Emitted as one DEBUG event per factorization (see
 /// [`summary`](Self::summary)) and readable from the factor handle.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
@@ -228,7 +228,8 @@ impl Diagnostics {
         }
     }
     /// The counts of this factorization as measures at the current scope,
-    /// and its [`summary`](Self::summary) as an INFO event there.
+    /// and its [`summary`](Self::summary) as a DEBUG event there: a caller
+    /// that factors per step gets one per factorization.
     pub(crate) fn probe(&self) {
         rsprobe::add!("fill", self.factor_nnz);
         if let Some(e) = &self.estimate {
@@ -247,10 +248,10 @@ impl Diagnostics {
         for w in &self.warnings {
             rsprobe::warn!("settings: {w}");
         }
-        rsprobe::info!("{}", self.summary());
+        rsprobe::debug!("{}", self.summary());
     }
 
-    /// The one-line account of the INFO event per factorization.
+    /// The one-line account of the DEBUG event per factorization.
     pub fn summary(&self) -> String {
         let mut s = format!(
             "{} n={} nnz(A)={} nnz(L)={} fill={:.2} threads={} ordering={}",
