@@ -272,11 +272,11 @@ impl<T: Scalar> KluSolver<T> {
     pub fn refactor(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
         a.validate()?;
         let _s = rsprobe::scope!("refactor");
+        let threads = self.factors.threads;
         if self.factors.plan.starts_wide() {
-            let threads = self.factors.threads;
             threads.run(0, |cap| cap, || self.replay(a))
         } else {
-            self.replay(a)
+            threads.here(|| self.replay(a))
         }
     }
 

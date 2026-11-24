@@ -197,3 +197,38 @@ fn klu_runs_on_the_workers_its_settings_set() {
         );
     }
 }
+
+#[test]
+fn a_budget_of_one_thread_opens_no_section() {
+    // Systems large enough that their phases go wide at more threads; with
+    // one thread every phase runs on the calling thread: no task reaches a
+    // pool and every section is one thread wide.
+    let ctx = Context::builder().threshold(Level::DEBUG).build();
+    let (sym, unsym) = (grid_lower(150), grid_unsym(150));
+    let b = vec![1.0; sym.n];
+    {
+        let _on = ctx.enter();
+        let f = LdltSolver::factor(&sym, &SolverSettings::default().with_threads(1)).unwrap();
+        f.solve(&b).unwrap();
+        f.solve(&b).unwrap();
+        let s = KluSettings::default().with_threads(1);
+        let mut k = KluSymbolic::analyze(&unsym, &s)
+            .unwrap()
+            .factor(&unsym, &s)
+            .unwrap();
+        k.refactor(&unsym).unwrap();
+        k.solve(&b).unwrap();
+    }
+    let r = ctx.record();
+    for (i, node) in r.nodes.iter().enumerate() {
+        let path = r.path(i as u32);
+        for measure in ["tasks", "pool", "worker_calls"] {
+            assert_eq!(node.get(measure), 0, "{measure} at {path:?}");
+        }
+        let (sections, width) = (node.get("sections"), node.get("width"));
+        assert_eq!(
+            width, sections,
+            "a section wider than one thread at {path:?}"
+        );
+    }
+}

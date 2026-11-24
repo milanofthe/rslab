@@ -514,7 +514,7 @@ impl KluSymbolic {
                 .threads
                 .run(0, |cap| cap, || factor_impl(self, a, settings))
         } else {
-            factor_impl(self, a, settings)
+            settings.threads.here(|| factor_impl(self, a, settings))
         }?;
         let nnz =
             (factors.l_val.len() + factors.u_val.len() + factors.udiag.len() + factors.f_val.len())

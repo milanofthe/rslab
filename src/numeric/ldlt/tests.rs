@@ -24,9 +24,14 @@ fn deep_chain_tree_does_not_overflow_stack() {
         }
     }
     let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
-    let s = SolverSettings::default().with_nemin(1).with_threads(0);
-    let f = LdltSolver::factor(&a, &s).expect("deep chain factors without overflow");
-    assert_eq!(f.n(), n);
+    // On all cores, and on one, where it runs on the calling thread.
+    for threads in [0, 1] {
+        let s = SolverSettings::default()
+            .with_nemin(1)
+            .with_threads(threads);
+        let f = LdltSolver::factor(&a, &s).expect("deep chain factors without overflow");
+        assert_eq!(f.n(), n);
+    }
 }
 
 #[test]
