@@ -10,8 +10,9 @@ use crate::numeric::supernodal::Input;
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
+use crate::numeric::supernodal::panel::PanelScratch;
 use crate::numeric::supernodal::perturb_pivot;
-use crate::numeric::supernodal::ScratchPool;
+use crate::numeric::supernodal::{Cells, ScratchPool};
 use crate::numeric::supernodal::{Gloc, Li, LlSchedule, PanelPtr};
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
@@ -62,6 +63,10 @@ impl<T> Default for LuScratch<T> {
 pub(super) struct LuPools<T> {
     pub(super) node: ScratchPool<LuScratch<T>>,
     pub(super) slab: ScratchPool<Vec<T>>,
+    /// The buffers of the emit's [`finish_panel`](crate::numeric::supernodal::panel::finish_panel).
+    pub(super) finish: ScratchPool<PanelScratch<T>>,
+    /// The supernodes' pivot records, filled again by each factorization.
+    pub(super) pivots: ScratchPool<Cells<NodePivots>>,
 }
 
 /// A copy of a factor starts with scratch of its own, grown by its first
@@ -77,6 +82,8 @@ impl<T> LuPools<T> {
         LuPools {
             node: ScratchPool::new(),
             slab: ScratchPool::new(),
+            finish: ScratchPool::new(),
+            pivots: ScratchPool::new(),
         }
     }
 }
@@ -909,26 +916,22 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     }
     // What the node leaves: its pivots, the pivots it passes on (the rows and
     // columns past its pivots, as its ancestors read them, start with them).
+    // Into the record an earlier factorization left, its buffers kept.
     let own_lists = npiv < nfs || extras;
-    let pivots = NodePivots {
-        npiv,
-        rows: rows[..nfs].to_vec(),
-        cols: cols[..nfs].to_vec(),
-        off_l: if own_lists {
-            rows[npiv..].to_vec()
-        } else {
-            Vec::new()
-        },
-        off_u: if own_lists {
-            cols[npiv..].to_vec()
-        } else {
-            Vec::new()
-        },
-        extras,
-        forced,
+    // SAFETY: each supernode's record is written by its own task, once,
+    // before any reader.
+    let pv: &mut NodePivots = unsafe { emit.pivots.get_mut(s) };
+    let fill = |v: &mut Vec<Li>, from: &[Li]| {
+        v.clear();
+        v.extend_from_slice(from);
     };
-    // SAFETY: each supernode's record is written by its own task, once.
-    unsafe { emit.pivots.set(s, pivots) };
+    pv.npiv = npiv;
+    fill(&mut pv.rows, &rows[..nfs]);
+    fill(&mut pv.cols, &cols[..nfs]);
+    fill(&mut pv.off_l, if own_lists { &rows[npiv..] } else { &[] });
+    fill(&mut pv.off_u, if own_lists { &cols[npiv..] } else { &[] });
+    pv.extras = extras;
+    pv.forced = forced;
     if !emit.delays {
         // Without delayed pivots every position is the analysis's.
         // SAFETY: this node's own indices.

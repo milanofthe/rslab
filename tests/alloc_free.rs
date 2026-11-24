@@ -188,16 +188,23 @@ fn a_warm_newton_loop_allocates_nothing() {
     }
 }
 
-/// A warm supernodal refactor allocates a fixed handful per call (its
-/// result tables, the pivot vectors, the diagnostics), however many
-/// supernodes it walks: the kernels' scratch lives in the solver.
+/// The allocations of a warm supernodal refactor do not grow with the
+/// number of supernodes: the node kernels' scratch, the pivot records and
+/// the emit's scratch live in the solver's pools. The count is the whole
+/// refactor: at `Fixed(1)` it runs on the calling thread (before, it ran on
+/// a one-worker pool whose thread the counter did not see, and the count
+/// held only the caller's part). The count compared against is the one at
+/// the smallest size. Larger grids are left out: there the dense kernel
+/// (the `gemm` crate) allocates packing buffers for its large products, at
+/// a threshold internal to the crate, so their number cannot be derived
+/// independently of the observed total. What remains per refactor is #254.
 #[test]
-fn a_warm_supernodal_refactor_allocates_a_fixed_handful() {
+fn a_warm_supernodal_refactor_allocates_the_same_at_every_size() {
     let opts = SolverSettings {
         threads: rslab::Threads::Fixed(1),
         ..SolverSettings::default()
     };
-    for m in [6, 12] {
+    let count = |m: usize| {
         let (n, r, c, v) = grid(m, false);
         let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
         let sym = LuSymbolic::analyze(&a, &opts).unwrap();
@@ -208,16 +215,15 @@ fn a_warm_supernodal_refactor_allocates_a_fixed_handful() {
         let dsym = LdltSymbolic::analyze(&s, &opts).unwrap();
         let mut ldlt = dsym.factor(&s, &opts).unwrap();
         let ldlt_count = allocs(Level::INFO, || dsym.refactor(&s, &opts, &mut ldlt).unwrap());
-        // 16 and 14 per call today, the same at both sizes.
-        assert!(
-            lu_count <= 20 * 100,
-            "LU n={n}: {lu_count} per 100 refactors"
-        );
-        assert!(
-            ldlt_count <= 20 * 100,
-            "LDLT n={n}: {ldlt_count} per 100 refactors"
-        );
-    }
+        (lu_count, ldlt_count)
+    };
+    // n = 36 and n = 144: no product reaches the dense kernel's packing.
+    let (lu, ldlt) = count(6);
+    assert_eq!(
+        count(12),
+        (lu, ldlt),
+        "per 100 refactors, n = 144 against n = 36"
+    );
 }
 
 /// A block Arnoldi step writes into the basis it reserved at its start and

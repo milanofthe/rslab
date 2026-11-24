@@ -767,6 +767,27 @@ impl Threads {
             policy => in_scoped_pool(policy.resolve(recommend), stack_bytes, f),
         }
     }
+
+    /// Run `f` on the calling thread under this policy, where nothing of it
+    /// is worth entering a pool: a budget of one thread keeps every section
+    /// `f` opens on this thread (see [`in_scoped_pool`]), any other leaves
+    /// them to the current pool.
+    pub(crate) fn here<R>(self, f: impl FnOnce() -> R) -> R {
+        match self {
+            _ if crate::parallel::is_lent() => f(),
+            Threads::Ambient => f(),
+            policy if policy.resolve(|cap| cap) == 1 => serial(f),
+            _ => f(),
+        }
+    }
+}
+
+/// `f` with the pool of the calling thread alone lent: every section it
+/// opens runs in order where it is opened, and no pool is offered one.
+fn serial<R>(f: impl FnOnce() -> R) -> R {
+    static SERIAL: std::sync::LazyLock<crate::parallel::Lent> =
+        std::sync::LazyLock::new(|| crate::parallel::Lent::new(Arc::new(crate::parallel::Serial)));
+    crate::parallel::install_lent(SERIAL.clone(), f)
 }
 
 /// Run `f` inside a **scoped** rayon thread pool of `threads` workers, so this
@@ -777,6 +798,11 @@ impl Threads {
 /// The pool is the calling thread's own, built on its first use and kept (see
 /// [`POOLS`]): a factorization per Newton step would otherwise start and join
 /// its workers every time, tens of microseconds per worker.
+///
+/// A budget of one thread opens no section: `f` runs on the calling thread
+/// with every section kept there ([`serial`]), so nothing starts or wakes a
+/// pool, the global rayon pool included. The drivers it runs do not recurse
+/// with the tree depth (`stack_bytes` sizes the workers of wider pools).
 ///
 /// Work that needs no stack of its own (`stack_bytes == 0`, the solves)
 /// called on a worker of one of these pools runs there: it is part of the
@@ -799,6 +825,9 @@ pub(crate) fn in_scoped_pool<R: Send>(
     } else {
         threads
     };
+    if n == 1 {
+        return serial(f);
+    }
     match scoped_pool(n, stack_bytes) {
         // The pool's section cost is measured on its first use, before any
         // work keeps its workers busy.

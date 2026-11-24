@@ -999,10 +999,11 @@ impl<T: Scalar> SolvePlan<T> {
     /// Run `f` inside a pool when `par`: the factor's scoped pool of its
     /// worker budget, or under [`Threads::Ambient`] the current one. Every
     /// parallel section is cheap to start from a worker and expensive to
-    /// inject from outside, so a solve enters the pool once.
+    /// inject from outside, so a solve enters the pool once. Otherwise here,
+    /// under the budget ([`Threads::here`]).
     fn in_pool<R: Send>(par: bool, threads: Threads, f: impl FnOnce() -> R + Send) -> R {
         if !par {
-            return f();
+            return threads.here(f);
         }
         match threads {
             _ if crate::parallel::is_lent() => crate::parallel::enter(f64::INFINITY, f),

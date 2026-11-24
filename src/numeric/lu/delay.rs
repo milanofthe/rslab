@@ -54,6 +54,21 @@ pub(super) struct NodePivots {
     pub forced: usize,
 }
 
+impl crate::memory::HeapBytes for crate::numeric::supernodal::Cells<NodePivots> {
+    fn heap_bytes(&self) -> u64 {
+        use crate::memory::vec_bytes as b;
+        let records = (self.len() * std::mem::size_of::<NodePivots>()) as u64;
+        // SAFETY: called on a pool's own object, no factorization fills it.
+        records
+            + (0..self.len())
+                .map(|s| {
+                    let p = unsafe { self.get(s) };
+                    b(&p.rows) + b(&p.cols) + b(&p.off_l) + b(&p.off_u)
+                })
+                .sum::<u64>()
+    }
+}
+
 impl NodePivots {
     /// Pivots passed to the parent.
     #[inline]
