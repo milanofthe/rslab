@@ -213,10 +213,8 @@ impl Default for OrderingSettings {
 /// exact factor wins, candidate order breaking ties.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RaceSettings {
-    /// The cheap candidates, run concurrently. The first one also decides,
-    /// on smaller patterns, whether nested dissection starts before the
-    /// others finish. Default AMD, AMF, RCM; nested dissection and `Auto`
-    /// are not allowed here.
+    /// The cheap candidates, run concurrently. Default AMD, AMF, RCM;
+    /// nested dissection and `Auto` are not allowed here.
     pub candidates: Vec<OrderingMethod>,
     /// Nested dissection joins only above this many unknowns. Default
     /// `10_000`.

@@ -190,12 +190,22 @@ impl LuSymbolic {
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
     ) -> Result<LuSymbolic, RslabError> {
+        Self::analyze_from(a, opts, None)
+    }
+
+    /// [`analyze`](Self::analyze) with the ordering race's minimum-degree
+    /// candidate given (`amd`, an ordering of the columns of `a`).
+    pub(crate) fn analyze_from<T: Scalar>(
+        a: &GeneralCsc<T>,
+        opts: &SolverSettings,
+        amd: Option<&[usize]>,
+    ) -> Result<LuSymbolic, RslabError> {
         a.validate()?;
         let n = a.n;
         let nnz = a.row_idx.len();
         if n == 0 {
             return Ok(LuSymbolic {
-                symb: analyze_with(crate::symbolic::full_pattern(0, &[0], &[])?, 0, opts)?,
+                symb: analyze_with(crate::symbolic::full_pattern(0, &[0], &[])?, 0, opts, None)?,
                 n: 0,
                 nnz: 0,
                 matching: None,
@@ -252,7 +262,7 @@ impl LuSymbolic {
                 row_idx.len(),
             )
         };
-        let symb = analyze_with(pattern, lower_nnz, opts)?;
+        let symb = analyze_with(pattern, lower_nnz, opts, amd)?;
         let structure = match (symb.sym_and_levels(), symb.ll_schedule()) {
             (Some((sym, levels)), Some(sched)) => {
                 let row_map = matching.as_ref().map(LuMatching::row_map);

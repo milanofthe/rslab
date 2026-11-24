@@ -111,8 +111,9 @@ struct LdltCandidate {
 
 impl LdltCandidate {
     /// `None` if the pattern is structurally unsymmetric or its lower
-    /// triangle fails to analyze.
-    fn build(layout: &CscLayout, opts: &SolverSettings) -> Option<Self> {
+    /// triangle fails to analyze. `amd` is the analysis' minimum-degree
+    /// candidate.
+    fn build(layout: &CscLayout, opts: &SolverSettings, amd: &[usize]) -> Option<Self> {
         let tpair = layout.transpose_slots()?;
         let (n, cp, ri) = (layout.n(), layout.col_ptr(), layout.row_idx());
         let mut col_ptr = Vec::with_capacity(n + 1);
@@ -133,7 +134,7 @@ impl LdltCandidate {
             row_idx: row_idx.clone(),
             values: vec![1.0; row_idx.len()],
         };
-        let sym = LdltSymbolic::analyze(&skeleton, opts).ok()?;
+        let sym = LdltSymbolic::analyze_from(&skeleton, opts, Some(amd)).ok()?;
         Some(Self {
             tpair,
             lower_from,
@@ -186,6 +187,11 @@ enum Route {
         /// Made when a value set first needs it (eagerly by
         /// [`AutoSymbolic::analyze`]).
         lu: OnceLock<Box<LuSymbolic>>,
+        /// The routing KLU analysis' ordering (minimum degree within its
+        /// blocks): the minimum-degree candidate of the supernodal analyses'
+        /// ordering race, which therefore does not order the pattern so
+        /// again.
+        amd: Vec<usize>,
     },
 }
 
@@ -254,9 +260,10 @@ impl AutoSymbolic {
             + match self.route.get() {
                 None => 0,
                 Some(Route::Klu(k)) => k.heap_bytes(),
-                Some(Route::Supernodal { ldlt, lu }) => {
+                Some(Route::Supernodal { ldlt, lu, amd }) => {
                     ldlt.as_ref().map_or(0, |c| c.heap_bytes())
                         + lu.get().map_or(0, |s| s.heap_bytes())
+                        + crate::memory::vec_bytes(amd)
                 }
             }
     }
@@ -274,7 +281,7 @@ impl AutoSymbolic {
     ) -> Option<crate::MemoryPlan> {
         match self.route.get()? {
             Route::Klu(k) => Some(k.memory_plan::<T>(&settings.klu, nrhs)),
-            Route::Supernodal { ldlt, lu } => {
+            Route::Supernodal { ldlt, lu, .. } => {
                 let opts = &settings.supernodal;
                 let a = ldlt.as_ref().map(|c| c.sym.memory_plan::<T>(opts, nrhs));
                 let b = lu.get().map(|s| s.memory_plan::<T>(opts, nrhs));
@@ -300,7 +307,9 @@ impl AutoSymbolic {
         AutoSolver::over(Analysis::Borrowed(self))
     }
 
-    /// The analysis of `a`'s pattern in the path its work selects.
+    /// The analysis of `a`'s pattern in the path its work selects. KLU's
+    /// analysis predicts the work; on the supernodal paths its ordering is
+    /// their race's minimum-degree candidate.
     fn route<T: Scalar>(
         &self,
         a: &GeneralCsc<T>,
@@ -319,13 +328,16 @@ impl AutoSymbolic {
         if !supernodal {
             return Ok(Route::Klu(Box::new(klu)));
         }
+        let amd = klu.into_ordering();
+        let opts = &settings.supernodal;
         let lu = OnceLock::new();
         if eager {
-            let _ = lu.set(Box::new(LuSymbolic::analyze(a, &settings.supernodal)?));
+            let _ = lu.set(Box::new(LuSymbolic::analyze_from(a, opts, Some(&amd))?));
         }
         Ok(Route::Supernodal {
-            ldlt: LdltCandidate::build(&self.layout, &settings.supernodal).map(Box::new),
+            ldlt: LdltCandidate::build(&self.layout, opts, &amd).map(Box::new),
             lu,
+            amd,
         })
     }
 }
@@ -554,7 +566,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                 self.klu = Some(ks.factor(csc, &settings.klu)?);
                 Ok(AutoBackend::Klu)
             }
-            Route::Supernodal { ldlt, lu } => {
+            Route::Supernodal { ldlt, lu, amd } => {
                 let opts = &settings.supernodal;
                 if let Some(cand) = ldlt {
                     if cand.symmetric(&csc.values, settings.symmetry_tol) {
@@ -574,7 +586,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                 let ls = match lu.get() {
                     Some(s) => s,
                     None => {
-                        let s = LuSymbolic::analyze(csc, opts)?;
+                        let s = LuSymbolic::analyze_from(csc, opts, Some(amd))?;
                         lu.get_or_init(|| Box::new(s))
                     }
                 };

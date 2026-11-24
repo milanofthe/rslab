@@ -478,6 +478,13 @@ impl KluSymbolic {
             .unwrap_or(0)
     }
 
+    /// The column permutation (new-to-old): the blocks in their order, each
+    /// in the minimum-degree ordering of its symmetrized, row-matched
+    /// pattern.
+    pub(crate) fn into_ordering(self) -> Vec<usize> {
+        self.col_perm
+    }
+
     /// Diagonal-block boundaries (`n_blocks + 1` entries).
     pub fn block_ptr(&self) -> &[usize] {
         &self.block_ptr

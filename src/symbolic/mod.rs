@@ -121,6 +121,17 @@ pub fn analyze_pattern(
     ordering: &OrderingSettings,
     amalgamation: &AmalgamationSettings,
 ) -> Result<SymbolicFactorization, RslabError> {
+    analyze_pattern_from(full, ordering, amalgamation, None)
+}
+
+/// [`analyze_pattern`] with the race's minimum-degree candidate given (see
+/// `race::race`).
+pub(crate) fn analyze_pattern_from(
+    full: CscPattern<i32>,
+    ordering: &OrderingSettings,
+    amalgamation: &AmalgamationSettings,
+    amd: Option<&[usize]>,
+) -> Result<SymbolicFactorization, RslabError> {
     let method = ordering.method;
     // The ordering graph (and the compressed graph it may build) is dropped
     // before the finish.
@@ -128,7 +139,7 @@ pub fn analyze_pattern(
         let _s = rsprobe::scope!(DEBUG, "ordering");
         let graph = OrderingGraph::new(&full, ordering);
         if method == OrderingMethod::Auto && ordering.permutation.is_none() {
-            race::race(&graph, ordering)?
+            race::race(&graph, ordering, amd)?
         } else {
             race::prefix(&graph, ordering, method, ordering.nd.seed, None)?
         }
@@ -229,6 +240,29 @@ mod tests {
         ] {
             assert!(raced <= run(&a, &SolverSettings::default(), method).factor_nnz);
         }
+    }
+
+    /// A given minimum-degree ordering takes the place of the race's own:
+    /// given the one the race computes, the analysis is the same; given
+    /// another, the race still keeps the smallest factor.
+    #[test]
+    fn a_given_minimum_degree_ordering_runs_in_its_place() {
+        let a = grid(40);
+        let s = SolverSettings::default();
+        let full = full_pattern(a.n, &a.col_ptr, &a.row_idx).unwrap();
+        let own = OrderingGraph::new(&full, &s.ordering)
+            .order(OrderingMethod::Amd, s.ordering.nd.seed, None)
+            .unwrap();
+        let analyze = |amd: Option<&[usize]>| {
+            analyze_pattern_from(full.clone(), &s.ordering, &s.amalgamation, amd).unwrap()
+        };
+        let (raced, given) = (analyze(None), analyze(Some(&own.perm)));
+        assert_eq!(raced.perm, given.perm);
+        assert_eq!(raced.factor_nnz, given.factor_nnz);
+        let natural: Vec<usize> = (0..a.n).collect();
+        let other = analyze(Some(&natural));
+        assert_permutation(&other.perm, a.n);
+        assert!(other.factor_nnz <= run(&a, &s, OrderingMethod::Amf).factor_nnz);
     }
 
     /// With the gates opened, nested dissection joins a small race and the
