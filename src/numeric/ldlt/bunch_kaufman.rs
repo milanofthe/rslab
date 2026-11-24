@@ -753,6 +753,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     while kb < ncol {
         let ke = (kb + nb).min(ncol);
         if kb >= done_through {
+            let _p = rsprobe::scope!(TRACE, "panel");
             let r = ll_bk_panel_step(
                 panel,
                 nrow,
@@ -828,6 +829,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 (kt.k.schur_tile, mt)
             };
             let schur = |dst: *mut T, range: (usize, usize)| {
+                let _s = rsprobe::scope!(TRACE, "schur");
                 // SAFETY: `dst` addresses the trailing rows of the columns in
                 // `range`, the caller's own; `gbuf` and `l21buf` hold `mt * pw`.
                 unsafe {
@@ -861,6 +863,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 let (step_res, ()) = crate::parallel::join(
                     crate::parallel::Work::ns(f64::INFINITY),
                     || {
+                        let _p = rsprobe::scope!(TRACE, "panel");
                         ll_bk_panel_step(
                             left,
                             nrow,

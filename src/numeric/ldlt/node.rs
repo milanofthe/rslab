@@ -64,6 +64,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
         false,
         &kt.k,
     );
+    let cmod = rsprobe::scope!(TRACE, "cmod");
     let (spans, tile_w, tiled) = (&plan.spans, plan.tile_w, plan.tiled);
     let seq_gemm_par = if plan.forks { ll_gemm_par } else { usize::MAX };
     if tiled {
@@ -262,6 +263,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
             }
         }
     }
+    drop(cmod);
     let _pivot = rsprobe::scope!(TRACE, "pivot");
     ll_cdiv_emit(s, sym, sched, pools, emit, perturb_floor, kt, panel)
 }

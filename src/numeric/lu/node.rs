@@ -331,6 +331,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             true,
             &kt.k,
         );
+        let cmod = rsprobe::scope!(TRACE, "cmod");
         let (spans, forks, tile_w, tiled) = (&plan.spans, plan.forks, plan.tile_w, plan.tiled);
         let tile_u = kt.k.cmod_tile(cn_u);
 
@@ -676,6 +677,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     while npiv < live {
         kt.interrupted()?;
         let kb = npiv;
+        let panel_scope = rsprobe::scope!(TRACE, "panel");
         while npiv < live && npiv - kb < nb_cdiv {
             let k = npiv;
             // Column `k` from row `kb` down, brought up to date with this
@@ -775,11 +777,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             deep_scale(deep, pinv, deep_par);
             npiv += 1;
         }
+        drop(panel_scope);
         let ke = npiv;
         let pw = ke - kb;
         if pw == 0 {
             continue;
         }
+        let _update = rsprobe::scope!(TRACE, "schur");
         // TRSM: U = L11^-1 * (trailing panel columns of lbuf) and the U12 rows.
         // Each trailing column is an independent forward substitution reading
         // only the finished panel columns [kb, ke), so the block parallelizes
