@@ -751,20 +751,20 @@ mod tests {
         }
     }
 
-    /// A parallel complex product gives the same bits on a lent pool of one
-    /// thread (a one-thread budget) as on a rayon pool of several, the
-    /// update shapes of a factorization's large fronts included (a deep
-    /// inner dimension, which the kernel blocks).
+    /// A parallel complex product under a one-thread budget (a lent pool of
+    /// one on the calling thread) gives the bits of a rayon pool of one, the
+    /// single-column products included, which the crate otherwise spread
+    /// over the global pool's threads from the calling thread.
     #[test]
-    fn a_parallel_product_on_one_thread_matches_a_pool() {
+    fn a_parallel_product_on_one_thread_matches_a_pool_of_one() {
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
+            .num_threads(1)
             .build()
             .unwrap();
         for (m, n, k) in [
             (96, 640, 384),
-            (512, 256, 2048),
-            (1024, 128, 1024),
+            (4096, 1, 512),
+            (8192, 1, 2048),
             (300, 200, 3000),
         ] {
             let mut rng = Rng(0x2545_F491 ^ (m * 7 + n * 3 + k) as u64);
