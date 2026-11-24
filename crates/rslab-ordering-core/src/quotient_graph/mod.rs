@@ -36,7 +36,7 @@ pub use algo::{
 pub use metric::{Metric, MinDegree, MinFill};
 pub use workspace::{clear_flag, flip, Workspace, NONE};
 
-use crate::{CscPattern, OrderingError};
+use crate::{CscPattern, OrderingError, Progress};
 
 /// Tunable parameters for the shared quotient-graph workspace.
 ///
@@ -85,20 +85,22 @@ pub struct OrderDiagnostics {
 ///
 /// ```ignore
 /// let mut ws = Workspace::new(pattern, opts)?;
-/// let flops = M::run_elimination(&mut ws, aggressive)?;
+/// let flops = M::run_elimination(&mut ws, aggressive, progress)?;
 /// let perm = finalize_permutation(&mut ws);
 /// ```
 ///
 /// `M` selects the metric (and, transitively, the elimination loop).
-/// AMD uses [`MinDegree`], AMF uses [`MinFill`].
+/// AMD uses [`MinDegree`], AMF uses [`MinFill`]. `progress` hears of
+/// the eliminated variables.
 pub fn order<M: Metric>(
     pattern: &CscPattern<'_>,
     opts: &WorkspaceOptions,
     aggressive: bool,
+    progress: Option<&Progress>,
 ) -> Result<(Vec<i32>, OrderDiagnostics), OrderingError> {
     let n_buckets = M::n_buckets(pattern.n);
     let mut ws = Workspace::new_with_n_buckets(pattern, opts, n_buckets)?;
-    let flops = M::run_elimination(&mut ws, aggressive)?;
+    let flops = M::run_elimination(&mut ws, aggressive, progress)?;
     let diag = OrderDiagnostics {
         ncmpa: ws.ncmpa,
         n_mass_elim: ws.n_mass_elim,

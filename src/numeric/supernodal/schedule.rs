@@ -91,8 +91,13 @@ impl LlSchedule {
         rs_off.push(0usize);
         let mut rs: Vec<Li> = Vec::new();
         let mut trailing: Vec<Li> = Vec::new();
+        // Progress in columns, the supernodes' widths.
+        let steps = crate::progress::Steps::new(rsprobe::active!(), sym.n as u64);
         for s in 0..nsuper {
             let snode = &sym.supernodes[s];
+            if let Some(step) = steps.as_ref().and_then(|st| st.add(snode.ncol as u64)) {
+                rsprobe::progress!(step, crate::constants::PROGRESS_STEPS; "supernode structure");
+            }
             let own_last = snode.first_col + snode.ncol;
             trailing.clear();
             for j in snode.first_col..own_last {

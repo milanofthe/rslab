@@ -8,6 +8,7 @@
 
 pub mod column_counts;
 mod ordering_graph;
+mod progress;
 mod race;
 pub mod supernode;
 pub(crate) mod supervariables;
@@ -141,7 +142,7 @@ pub(crate) fn analyze_pattern_from(
         if method == OrderingMethod::Auto && ordering.permutation.is_none() {
             race::race(&graph, ordering, amd)?
         } else {
-            race::prefix(&graph, ordering, method, ordering.nd.seed, None)?
+            race::alone(&graph, ordering, method)?
         }
     };
     let _s = rsprobe::scope!(DEBUG, "supernodes");
@@ -251,7 +252,12 @@ mod tests {
         let s = SolverSettings::default();
         let full = full_pattern(a.n, &a.col_ptr, &a.row_idx).unwrap();
         let own = OrderingGraph::new(&full, &s.ordering)
-            .order(OrderingMethod::Amd, s.ordering.nd.seed, None)
+            .order(
+                OrderingMethod::Amd,
+                s.ordering.nd.seed,
+                None,
+                &Default::default(),
+            )
             .unwrap();
         let analyze = |amd: Option<&[usize]>| {
             analyze_pattern_from(full.clone(), &s.ordering, &s.amalgamation, amd).unwrap()
@@ -374,8 +380,8 @@ mod tests {
             OrderingMethod::MetisND,
             OrderingMethod::Rcm,
         ] {
-            let grouped = graph.order(method, 1, None).unwrap();
-            let direct = ordering_graph::structure(&full, grouped.perm.clone());
+            let grouped = graph.order(method, 1, None, &Default::default()).unwrap();
+            let direct = ordering_graph::structure(&full, grouped.perm.clone(), None);
             assert_eq!(grouped.etree.parent, direct.etree.parent, "{method:?}");
             assert_eq!(grouped.col_counts, direct.col_counts, "{method:?}");
         }

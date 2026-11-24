@@ -33,11 +33,12 @@ pub(crate) fn ll_forest(
     // follow the work closer than the count of supernodes: most supernodes
     // are small leaves, most entries sit near the roots.
     let panel = |s: usize| (sym.supernodes[s].nrow * sym.supernodes[s].ncol) as u64;
-    let total: u64 = match rsprobe::active!() {
+    let active = rsprobe::active!();
+    let total: u64 = match active {
         true => (0..sym.supernodes.len()).map(panel).sum(),
         false => 0,
     };
-    let done = std::sync::atomic::AtomicU64::new(0);
+    let steps = crate::progress::Steps::new(active, total);
     let failed = AtomicBool::new(false);
     let error = std::sync::Mutex::new(None);
 
@@ -73,14 +74,9 @@ pub(crate) fn ll_forest(
         if refcount[s].load(Ordering::Relaxed) == 0 {
             emit_free(s);
         }
-        if total > 0 {
-            // One event per step at most, whatever the supernode count.
-            let steps = crate::constants::PROGRESS_STEPS;
-            let before = done.fetch_add(panel(s), Ordering::Relaxed);
-            let step = |entries: u64| entries * steps / total;
-            if step(before + panel(s)) > step(before) {
-                rsprobe::progress!(step(before + panel(s)), steps);
-            }
+        // One event per step at most, whatever the supernode count.
+        if let Some(step) = steps.as_ref().and_then(|st| st.add(panel(s))) {
+            rsprobe::progress!(step, crate::constants::PROGRESS_STEPS);
         }
         true
     };

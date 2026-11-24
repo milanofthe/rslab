@@ -23,7 +23,7 @@ use crate::rng::SplitMix;
 use crate::sep_refine::{balance_node_separator, refine_node_separator};
 use crate::separator::construct_separator;
 use crate::{MetisOptions, MetisStats};
-use rslab_ordering_core::{CscPattern, OrderingError};
+use rslab_ordering_core::{Counter, CscPattern, OrderingError, Progress};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 /// Entry point. Produces a permutation `perm` where `perm[i]` is the
@@ -31,21 +31,29 @@ use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 /// The inverse permutation under construction, written concurrently by
 /// the independent subproblems of the recursion. Every original vertex is
 /// assigned exactly once (the subproblems partition the vertex set), so
-/// relaxed atomic stores suffice.
-struct IpermWriter(Vec<AtomicI32>);
+/// relaxed atomic stores suffice. The vertices placed are counted for the
+/// caller's progress, per separator and per leaf.
+struct IpermWriter<'a> {
+    pos: Vec<AtomicI32>,
+    placed: Counter<'a>,
+}
 
-impl IpermWriter {
-    fn new(n: usize) -> Self {
-        Self((0..n).map(|_| AtomicI32::new(-1)).collect())
+impl<'a> IpermWriter<'a> {
+    fn new(n: usize, progress: Option<&'a Progress>) -> Self {
+        Self {
+            pos: (0..n).map(|_| AtomicI32::new(-1)).collect(),
+            placed: Counter::new(progress, n),
+        }
     }
 
     #[inline]
     fn set(&self, orig: usize, pos: i32) {
-        self.0[orig].store(pos, Ordering::Relaxed);
+        self.pos[orig].store(pos, Ordering::Relaxed);
     }
 
     fn into_vec(self) -> Vec<i32> {
-        self.0.into_iter().map(|a| a.into_inner()).collect()
+        self.placed.finish();
+        self.pos.into_iter().map(|a| a.into_inner()).collect()
     }
 }
 
@@ -93,7 +101,7 @@ pub(crate) fn nd_order(
         graph.vwgt = w.to_vec();
     }
     let n = graph.nvtxs as usize;
-    let writer = IpermWriter::new(n);
+    let writer = IpermWriter::new(n, opts.progress.as_ref());
     let acc = AtomicStats::default();
 
     let (cc_label, ncc) = connected_components(&graph);
@@ -154,6 +162,7 @@ fn nd_subproblem(
     }
     if n == 1 {
         writer.set(vtx_map[0] as usize, offset as i32);
+        writer.placed.add(1);
         return Ok(());
     }
     let mut local = MetisStats::default();
@@ -217,6 +226,7 @@ fn nd_subproblem(
     for (i, &v) in s_verts.iter().enumerate() {
         writer.set(vtx_map[v as usize] as usize, (offset + na + nb + i) as i32);
     }
+    writer.placed.add(s_verts.len());
 
     let (sub_a, map_a_local) = extract_by_list(&subgraph, &a_verts);
     let map_a: Vec<i32> = map_a_local
@@ -360,6 +370,7 @@ fn amd_leaf(
         let orig = vtx_map[local_id as usize];
         iperm.set(orig as usize, (offset + new_pos) as i32);
     }
+    iperm.placed.add(n);
     Ok(())
 }
 

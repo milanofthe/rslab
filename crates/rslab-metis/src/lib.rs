@@ -102,6 +102,11 @@ pub struct MetisOptions {
     /// then returns [`OrderingError::Stopped`]. `None` (default) runs to
     /// the end.
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Called with the vertices placed so far (separators and leaves) out
+    /// of `n`, from whichever thread places them, at most about a hundred
+    /// times per ordering, the last time with `n`. `None` (default) counts
+    /// nothing.
+    pub progress: Option<rslab_ordering_core::Progress>,
 }
 
 impl Default for MetisOptions {
@@ -119,6 +124,7 @@ impl Default for MetisOptions {
             parallel_min_vertices: None,
             parallel_min_edges: None,
             stop: None,
+            progress: None,
         }
     }
 }

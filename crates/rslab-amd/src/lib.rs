@@ -46,6 +46,10 @@ pub struct AmdOptions {
     /// `n - 2`, suppressing deferral for all but true hubs of degree
     /// `n - 1`.
     pub dense_alpha: f64,
+    /// Called with the variables eliminated so far out of `n`, at most
+    /// about a hundred times per ordering, the last time with `n`. `None`
+    /// (default) counts nothing.
+    pub progress: Option<rslab_ordering_core::Progress>,
 }
 
 impl Default for AmdOptions {
@@ -53,6 +57,7 @@ impl Default for AmdOptions {
         Self {
             aggressive: true,
             dense_alpha: rslab_ordering_core::constants::DENSE_ALPHA,
+            progress: None,
         }
     }
 }
@@ -110,7 +115,8 @@ pub fn amd_order_full(
     let ws_opts = WorkspaceOptions {
         dense_alpha: opts.dense_alpha,
     };
-    let (perm, diag) = order::<MinDegree>(pattern, &ws_opts, opts.aggressive)?;
+    let (perm, diag) =
+        order::<MinDegree>(pattern, &ws_opts, opts.aggressive, opts.progress.as_ref())?;
     let amd_stats = AmdStats {
         ncmpa: diag.ncmpa,
         n_clear_flag: 0,
@@ -175,7 +181,7 @@ pub fn amd_order_substages(
     let workspace_new_us = t.elapsed().as_micros() as u64;
 
     let t = Instant::now();
-    let _flops = run_elimination(&mut ws, opts.aggressive)?;
+    let _flops = run_elimination(&mut ws, opts.aggressive, opts.progress.as_ref())?;
     let run_elimination_us = t.elapsed().as_micros() as u64;
 
     let t = Instant::now();
