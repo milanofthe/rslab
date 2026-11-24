@@ -124,6 +124,14 @@ pub const SORT_NS_PER_ENTRY: f32 = 10.0;
 /// Contract: timing.
 pub const FREE_PAR_MIN_UPDATERS: usize = 64;
 
+/// Steps a factorization's progress is reported in (percent of its panel
+/// entries).
+/// Used by: `supernodal::forest::ll_forest`.
+/// Why: one event per step at most, so the count of events does not grow
+/// with the count of supernodes; a hundredth is finer than a reader follows.
+/// Contract: output.
+pub const PROGRESS_STEPS: u64 = 100;
+
 /// ns per entry of the symmetrized pattern a fill-reducing ordering takes,
 /// before any is measured (ns per entry).
 /// Used by: `symbolic::race` (whether the candidates run side by side),

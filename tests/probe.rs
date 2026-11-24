@@ -31,6 +31,30 @@ fn grid_lower(k: usize) -> CscMatrix<f64> {
 }
 
 #[test]
+fn a_factorization_reports_its_progress_in_percent() {
+    let buffer = Buffer::default();
+    let ctx = Context::builder()
+        .progress_interval(0)
+        .sink(buffer.clone())
+        .build();
+    let a = grid_lower(12);
+    {
+        let _on = ctx.enter();
+        LdltSolver::factor(&a, &SolverSettings::exact()).unwrap();
+    }
+    let steps = rslab::constants::PROGRESS_STEPS;
+    let mut seen = Vec::new();
+    buffer.drain(|e, path| {
+        if let Kind::Progress { done, total, .. } = e.kind {
+            assert_eq!((path, total), ("factor", steps));
+            seen.push(done);
+        }
+    });
+    assert!(seen.len() > 1 && seen.len() as u64 <= steps, "{seen:?}");
+    assert_eq!(seen.iter().max(), Some(&steps));
+}
+
+#[test]
 fn a_factorization_records_its_phases_counts_and_events() {
     let buffer = Buffer::default();
     let ctx = Context::builder()
