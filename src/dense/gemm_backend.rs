@@ -751,6 +751,57 @@ mod tests {
         }
     }
 
+    /// A parallel complex product gives the same bits on a lent pool of one
+    /// thread (a one-thread budget) as on a rayon pool of several.
+    #[test]
+    fn a_parallel_product_on_one_thread_matches_a_pool() {
+        let (m, n, k) = (96, 640, 384);
+        let mut rng = Rng(0x2545_F491);
+        let lhs: Vec<Complex64> = (0..m * k).map(|_| rng.c()).collect();
+        let rhs: Vec<Complex64> = (0..k * n).map(|_| rng.c()).collect();
+        let mode = GemmMode::new(
+            gemm::Parallelism::Rayon(0),
+            &crate::KernelSettings::default(),
+        );
+        let product = || {
+            let mut dst = vec![Complex64::new(0.0, 0.0); m * n];
+            // SAFETY: column-major operands of the given sizes, disjoint.
+            unsafe {
+                gemm(
+                    m,
+                    n,
+                    k,
+                    dst.as_mut_ptr(),
+                    m as isize,
+                    1,
+                    false,
+                    lhs.as_ptr(),
+                    m as isize,
+                    1,
+                    rhs.as_ptr(),
+                    k as isize,
+                    1,
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(1.0, 0.0),
+                    false,
+                    false,
+                    false,
+                    mode,
+                )
+            };
+            dst
+        };
+        let bits = |v: &[Complex64]| -> Vec<(u64, u64)> {
+            v.iter().map(|z| (z.re.to_bits(), z.im.to_bits())).collect()
+        };
+        let one = crate::numeric::settings::in_scoped_pool(1, 0, product);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        assert_eq!(bits(&one), bits(&pool.install(product)));
+    }
+
     #[test]
     fn split_products_match_the_direct_kernel() {
         let one = Complex64::new(1.0, 0.0);
