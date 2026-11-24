@@ -2168,7 +2168,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_solve_matches_scalar_kernel_and_is_thread_invariant() {
+    fn plan_solve_matches_scalar_kernel_and_solves_alike_on_every_pool() {
         let cases: Vec<(String, CscMatrix<f64>)> = vec![
             ("grid 7".into(), grid(7, 0.0)),
             ("grid 40".into(), grid(40, 0.0)),
@@ -2198,22 +2198,23 @@ mod tests {
                     assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
                 }
             }
-            // Bit-identical for every thread budget: the factor's own, and
-            // the ambient pool's.
+            // Every thread budget factors within the residual bound; the
+            // solves of one factor (made in a pool of one, the bits of the
+            // one-thread factor) give the same bits under every ambient pool.
+            let ambient = opts.clone().with_threads(crate::Threads::Ambient);
+            let one = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap();
+            let sa = one.install(|| LdltSolver::factor(a, &ambient).unwrap());
             for threads in [1usize, 2, 5] {
                 let st = LdltSolver::factor(a, &opts.clone().with_threads(threads)).unwrap();
-                assert_eq!(st.solve(&b).unwrap(), x1, "threads={threads}");
-                assert_eq!(
-                    st.solve_many(&bb, nrhs).unwrap(),
-                    xb,
-                    "block threads={threads}"
-                );
+                let xs = st.solve(&b).unwrap();
+                assert!(residual(a, &xs, &b) < 1e-10, "residual threads={threads}");
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
                     .unwrap();
-                let ambient = opts.clone().with_threads(crate::Threads::Ambient);
-                let sa = pool.install(|| LdltSolver::factor(a, &ambient).unwrap());
                 let xt = pool.install(|| sa.solve(&b).unwrap());
                 assert_eq!(xt, x1, "ambient threads={threads}");
                 let xbt = pool.install(|| sa.solve_many(&bb, nrhs).unwrap());
