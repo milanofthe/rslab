@@ -31,6 +31,29 @@ fn grid_lower(k: usize) -> CscMatrix<f64> {
 }
 
 #[test]
+fn a_factorization_reports_its_progress_in_percent() {
+    let buffer = Buffer::default();
+    let ctx = Context::builder()
+        .progress_interval(0)
+        .sink(buffer.clone())
+        .build();
+    let a = grid_lower(12);
+    {
+        let _on = ctx.enter();
+        LdltSolver::factor(&a, &SolverSettings::exact()).unwrap();
+    }
+    let mut percent = Vec::new();
+    buffer.drain(|e, path| {
+        if let Kind::Progress { done, total, .. } = e.kind {
+            assert_eq!((path, total), ("factor", 100));
+            percent.push(done);
+        }
+    });
+    assert!(percent.len() > 1 && percent.len() <= 100, "{percent:?}");
+    assert_eq!(percent.iter().max(), Some(&100));
+}
+
+#[test]
 fn a_factorization_records_its_phases_counts_and_events() {
     let buffer = Buffer::default();
     let ctx = Context::builder()

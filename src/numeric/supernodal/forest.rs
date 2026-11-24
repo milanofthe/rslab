@@ -29,6 +29,15 @@ pub(crate) fn ll_forest(
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     const NONE: usize = usize::MAX;
     let _s = rsprobe::scope!(DEBUG, "tree");
+    // Progress in panel entries (rows times columns of a supernode), which
+    // follow the work closer than the count of supernodes: most supernodes
+    // are small leaves, most entries sit near the roots.
+    let panel = |s: usize| (sym.supernodes[s].nrow * sym.supernodes[s].ncol) as u64;
+    let total: u64 = match rsprobe::active!() {
+        true => (0..sym.supernodes.len()).map(panel).sum(),
+        false => 0,
+    };
+    let done = std::sync::atomic::AtomicU64::new(0);
     let failed = AtomicBool::new(false);
     let error = std::sync::Mutex::new(None);
 
@@ -63,6 +72,14 @@ pub(crate) fn ll_forest(
         }
         if refcount[s].load(Ordering::Relaxed) == 0 {
             emit_free(s);
+        }
+        if total > 0 {
+            // One event per percent at most, whatever the supernode count.
+            let before = done.fetch_add(panel(s), Ordering::Relaxed);
+            let percent = |entries: u64| entries * 100 / total;
+            if percent(before + panel(s)) > percent(before) {
+                rsprobe::progress!(percent(before + panel(s)), 100);
+            }
         }
         true
     };
