@@ -17,10 +17,10 @@ earlier vendoring are replaced.
 
 A dependency upstream takes from git (`name = { git = .., rev = .. }`) is
 vendored along at that revision into `crates/<name>` (its library, README
-and license, no tests, examples or dev-dependencies) and taken by path, so
-the consumer builds without fetching it; so are the git dependencies of a
-vendored crate, each once (a second revision of one is an error), the
-vendored crates taking each other by path too. Its source is a checkout of
+and license, no tests, examples, dev-dependencies or workspace table) and
+taken by path, so the consumer builds without fetching it; so are the git
+dependencies of a vendored crate, each once (a second revision of one is an
+error), the vendored crates taking each other by path too. Its source is a checkout of
 it next to rslab where that holds the revision, else a clone of its
 repository.
 """
@@ -93,7 +93,9 @@ def vendor_git_dep(dest, name, url, rev):
     with tarfile.open(fileobj=io.BytesIO(tar)) as t:
         t.extractall(target, filter="data")
     crate = (target / "Cargo.toml").read_text(encoding="utf-8")
-    crate = re.sub(r"^\[dev-dependencies\]\n.*?(?=^\[|\Z)", "", crate, flags=re.M | re.S)
+    # Its dev-dependencies are not vendored, and a workspace of its own
+    # would be a second root inside the vendored tree.
+    crate = re.sub(r"^\[(dev-dependencies|workspace)\]\n.*?(?=^\[|\Z)", "", crate, flags=re.M | re.S)
     deps = git_deps(section(crate, "dependencies"))
     crate = by_path(crate, [d[0] for d in deps], "..")
     (target / "Cargo.toml").write_text(crate, encoding="utf-8")
