@@ -437,9 +437,7 @@ pub struct SolveSettings {
     /// A fixed gate in place of the time gate: the work of a triangular
     /// sweep from which it runs on the thread pool, in the factor's panel
     /// entries times the right-hand sides, up to four (not the fmadds of
-    /// [`KluSettings::par_min_work`](crate::KluSettings::par_min_work)),
-    /// and of the permuted copies of the right-hand sides into the sweeps
-    /// and back, in entries times right-hand sides.
+    /// [`KluSettings::par_min_work`](crate::KluSettings::par_min_work)).
     /// Default `None`: a sweep runs the way the sweeps of its work were
     /// measured fastest, on the pool or on the calling thread
     /// ([`crate::parallel`]), starting on the pool from

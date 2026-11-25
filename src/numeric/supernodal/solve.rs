@@ -475,11 +475,6 @@ impl<T: Scalar> SolvePlan<T> {
         &self.diag_inv
     }
 
-    /// The settings of the sweeps.
-    pub(crate) fn settings(&self) -> &crate::SolveSettings {
-        &self.cfg
-    }
-
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::{nested_bytes, vec_bytes};
         vec_bytes(&self.sn_col)
