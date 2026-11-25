@@ -1351,7 +1351,7 @@ tuned values, listed by `to_dict`.
 - `panel_nb, trailing_block, schur_tile` (int): Bunch-Kaufman panel width (64), its trailing sub-block (16) and the Schur tile (256).
 - `scalar_gate, par_gemm, par_cdiv, fork_min_flops` (int): Update flops below which the scalar loop runs (4096), from which an update GEMM (1e6) and a panel's trailing update (8e6) run in parallel, and from which a supernode's updates and panel factorization fork (1e8).
 - `wide_panel_min_ncol, wide_panel_nb, lu_panel_nb` (int): Nodes from 512 columns factor in panels of at least 128 columns; the LU panel width below that (32).
-- `cmod_tiles, cmod_tile_min, cmod_tile_max, trsm_rows` (int): A parallel update splits a node into about 16 column tiles of 32 to 256 columns; rows per task of the LU panel's triangular solve (256).
+- `trsm_rows` (int): Rows per task of the LU panel's triangular solve (256).
 - `complex_split_min_ratio, complex_split_tile` (int): Complex products run as real products when their flops are this many times their plane copies (64), in tiles of this edge (256).
 - `use_gemm_schur` (bool, default True): SIMD GEMM (vs the scalar loop) for the LDL^T Schur update.
 - `solve_leaf_subtrees` (int): Triangular solves: leaf subtrees of the parallel sweeps (128).

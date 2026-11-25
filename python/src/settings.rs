@@ -213,9 +213,6 @@ plain_knobs! {
     "wide_panel_min_ncol": usize => kernels.wide_panel_min_ncol;
     "wide_panel_nb": usize => kernels.wide_panel_nb;
     "lu_panel_nb": usize => kernels.lu_panel_nb;
-    "cmod_tiles": usize => kernels.cmod_tiles;
-    "cmod_tile_min": usize => kernels.cmod_tile_min;
-    "cmod_tile_max": usize => kernels.cmod_tile_max;
     "trsm_rows": usize => kernels.trsm_rows;
     "solve_leaf_subtrees": usize => solve.leaf_subtrees;
     "solve_par_min_work": Option<usize> => solve.par_min_work;
@@ -357,9 +354,8 @@ plain_knobs! {
 /// wide_panel_min_ncol, wide_panel_nb, lu_panel_nb : int
 ///     Nodes from 512 columns factor in panels of at least 128 columns; the
 ///     LU panel width below that (32).
-/// cmod_tiles, cmod_tile_min, cmod_tile_max, trsm_rows : int
-///     A parallel update splits a node into about 16 column tiles of 32 to
-///     256 columns; rows per task of the LU panel's triangular solve (256).
+/// trsm_rows : int
+///     Rows per task of the LU panel's triangular solve (256).
 /// complex_split_min_ratio, complex_split_tile : int
 ///     Complex products run as real products when their flops are this many
 ///     times their plane copies (64), in tiles of this edge (256).
