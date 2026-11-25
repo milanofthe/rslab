@@ -439,7 +439,7 @@ impl<T: Scalar> SolvePlan<T> {
 mod tests {
     use super::*;
     use crate::numeric::settings::SolverSettings;
-    use crate::numeric::supernodal::solve::PlanWork;
+    use crate::numeric::supernodal::solve::{PlanWork, Sweep};
     use crate::sparse::csc::CscMatrix;
     use crate::LdltSolver;
     use num_complex::Complex;
@@ -470,7 +470,10 @@ mod tests {
             // the full forward sweep of the same scaled, permuted column
             let mut y = vec![C::new(0.0, 0.0); a.n];
             y[maps.elim_of[row]] = C::new(1.0, 0.5) * scale[row];
-            plan.forward(1, &mut y, &mut PlanWork::default(), Threads::Fixed(1));
+            let mut work = PlanWork::default();
+            plan.sweep(&mut work, 1, Threads::Fixed(1), Sweep::Forward, |w| {
+                plan.forward_block(1, &mut y, w)
+            });
             let mut covered = vec![false; a.n];
             for (&s, &base) in blk.nodes.iter().zip(&blk.offsets) {
                 let c0 = plan.sn_col[s as usize] as usize;

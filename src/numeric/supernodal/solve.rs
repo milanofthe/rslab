@@ -75,7 +75,7 @@ static SWEEP_WAYS: [[PerScalar<Choice>; 2]; 3] = [
 
 /// What a sweep does: its own measured ways ([`SWEEP_WAYS`]).
 #[derive(Clone, Copy)]
-enum Sweep {
+pub(crate) enum Sweep {
     Forward,
     Backward,
     /// The forward and backward sweeps of an `L D L^T` solve in one.
@@ -238,6 +238,11 @@ impl<T> Default for PlanWork<T> {
 }
 
 impl<T> PlanWork<T> {
+    /// Whether the sweep this work is fitted for runs on the pool.
+    pub(crate) fn on_pool(&self) -> bool {
+        self.parallel
+    }
+
     /// At least a scratch per subtree and per node of the widest level of
     /// `plan`; never shrinks, so one work serves several plans.
     fn fit(&mut self, subtrees: usize, widest: usize) {
@@ -1129,8 +1134,11 @@ impl<T: Scalar> SolvePlan<T> {
 
     /// `sweep` of `nr` right-hand sides on `work` fitted for it, on the pool
     /// or on the calling thread as decided, timed for the way it ran where
-    /// that is to be measured (once there).
-    fn sweep<R: Send>(
+    /// that is to be measured (once there). The solve's other passes over
+    /// its right-hand sides (the permuted copies) go inside `sweep`, so a
+    /// solve enters the pool once; `work.on_pool()` tells them where they
+    /// run.
+    pub(crate) fn sweep<R: Send>(
         &self,
         work: &mut PlanWork<T>,
         nr: usize,
@@ -1151,37 +1159,6 @@ impl<T: Scalar> SolvePlan<T> {
                 rsprobe::debug!("sweep way {} took {ns:.0} ns", pick.option);
             }
             r
-        })
-    }
-
-    /// Forward sweep `L y = y` in place on `nr` row-major right-hand sides,
-    /// on at most `threads` workers.
-    pub fn forward(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        self.sweep(work, nr, threads, Sweep::Forward, |work| {
-            self.forward_block(nr, y, work)
-        })
-    }
-
-    /// Backward sweep `L^T x = x` (or `U x = x` for a non-unit factor) in
-    /// place on `nr` row-major right-hand sides, on at most `threads`
-    /// workers.
-    pub fn backward(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>, threads: Threads) {
-        self.sweep(work, nr, threads, Sweep::Backward, |work| {
-            self.backward_block(nr, x, work)
-        })
-    }
-
-    /// Solve `L D L^T y = y` in place on the permuted, scaled right-hand
-    /// side, on at most `threads` workers.
-    pub fn solve_in_place(
-        &self,
-        f: &LdltPivots<T>,
-        y: &mut [T],
-        work: &mut PlanWork<T>,
-        threads: Threads,
-    ) -> Result<(), RslabError> {
-        self.sweep(work, 1, threads, Sweep::Whole, |work| {
-            self.solve_block_inner(f, y, 1, work)
         })
     }
 
@@ -1506,22 +1483,9 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// Solve `L D L^T Y = Y` in place on a row-major `n x nrhs` block, on at
-    /// most `threads` workers.
-    pub fn solve_block_in_place(
-        &self,
-        f: &LdltPivots<T>,
-        y: &mut [T],
-        nr: usize,
-        work: &mut PlanWork<T>,
-        threads: Threads,
-    ) -> Result<(), RslabError> {
-        self.sweep(work, nr, threads, Sweep::Whole, |work| {
-            self.solve_block_inner(f, y, nr, work)
-        })
-    }
-
-    fn solve_block_inner(
+    /// `L D L^T Y = Y` in place on a row-major `n x nr` block, inside a
+    /// [`sweep`](Self::sweep) of kind [`Sweep::Whole`].
+    pub(crate) fn solve_block_inner(
         &self,
         f: &LdltPivots<T>,
         y: &mut [T],
@@ -1538,7 +1502,8 @@ impl<T: Scalar> SolvePlan<T> {
         Ok(())
     }
 
-    fn forward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
+    /// `L Y = Y` inside a [`sweep`](Self::sweep) of kind [`Sweep::Forward`].
+    pub(crate) fn forward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let _s = rsprobe::scope!(DEBUG, "forward");
         let shared = Shared(y.as_mut_ptr(), y.len());
         let par = work.parallel;
@@ -1573,7 +1538,9 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    fn backward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
+    /// `L^T Y = Y` (`U Y = Y`) inside a [`sweep`](Self::sweep) of kind
+    /// [`Sweep::Backward`].
+    pub(crate) fn backward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let _s = rsprobe::scope!(DEBUG, "backward");
         {
             let _s = rsprobe::scope!(DEBUG, "ancestors");
@@ -2255,10 +2222,15 @@ mod tests {
         let mut work = PlanWork::default();
         // L x = b and L^T x = c for x = [1, 2, 3].
         let mut y = vec![1.0, 2.5, -0.75];
-        plan.forward(1, &mut y, &mut work, crate::Threads::Fixed(1));
+        let one = crate::Threads::Fixed(1);
+        plan.sweep(&mut work, 1, one, super::Sweep::Forward, |w| {
+            plan.forward_block(1, &mut y, w)
+        });
         assert_eq!(y, [1.0, 2.0, 3.0]);
         let mut y = vec![2.75, -4.0, 3.0];
-        plan.backward(1, &mut y, &mut work, crate::Threads::Fixed(1));
+        plan.sweep(&mut work, 1, one, super::Sweep::Backward, |w| {
+            plan.backward_block(1, &mut y, w)
+        });
         assert_eq!(y, [1.0, 2.0, 3.0]);
     }
 

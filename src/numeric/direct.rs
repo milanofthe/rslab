@@ -8,7 +8,6 @@
 
 use crate::diagnostics::SolveCounter;
 use crate::error::RslabError;
-use crate::numeric::settings::Threads;
 use crate::refine::{refine_in_place, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy};
 use crate::scalar::Scalar;
 
@@ -236,47 +235,18 @@ fn check(n: usize, len: usize, nrhs: usize) -> Result<(), RslabError> {
 static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
-/// `copy(out, work)` of `rows` rows of `nrhs` entries on the workers of
-/// `threads` where the copy is worth more than one of them, else
-/// `serial(out)` on this thread.
-fn permute_on<S: Send>(
-    threads: Threads,
-    rows: usize,
-    nrhs: usize,
-    out: S,
-    copy: impl FnOnce(S, crate::parallel::Work<'_>) + Send,
-    serial: impl FnOnce(S),
-) {
-    let entries = rows * nrhs;
-    let work = crate::parallel::Work::of(entries as f64, &PERMUTE_RATE);
-    let workers = threads.resolve(|cap| cap);
-    if crate::parallel::width_on(workers, work.time(), rows) > 1 {
-        threads.run(
-            0,
-            |cap| cap,
-            || {
-                copy(
-                    out,
-                    crate::parallel::Work::of(entries as f64, &PERMUTE_RATE),
-                )
-            },
-        )
-    } else {
-        work.serial(|| serial(out))
-    }
-}
-
 /// The block a solve's sweeps take, row-major (`y[e * nrhs + c]`), from the
 /// column-major right-hand sides `b`: row `e` is row `rows[e]` of `b`
-/// times `scale[rows[e]]`. On the workers of `threads` where it is worth it;
-/// every entry is the same product either way.
+/// times `scale[rows[e]]`. On the pool its solve runs on (`pool`), as wide as
+/// the copy is worth there, else on this thread; every entry is the same
+/// product either way.
 pub(crate) fn gather_scaled<T: Scalar>(
     b: &[T],
     nrhs: usize,
     rows: &[usize],
     scale: &[f64],
     y: &mut Vec<T>,
-    threads: Threads,
+    pool: bool,
 ) {
     let n = rows.len();
     y.clear();
@@ -291,33 +261,32 @@ pub(crate) fn gather_scaled<T: Scalar>(
             v.write(b[c * n + p] * s);
         }
     };
-    permute_on(
-        threads,
-        n,
-        nrhs,
-        &mut y.spare_capacity_mut()[..n * nrhs],
-        |out, work| crate::parallel::chunks_mut(out, nrhs, work, fill),
-        |out| {
+    let out = &mut y.spare_capacity_mut()[..n * nrhs];
+    let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
+    if pool {
+        crate::parallel::chunks_mut(out, nrhs, work, fill);
+    } else {
+        work.serial(|| {
             out.chunks_mut(nrhs)
                 .enumerate()
                 .for_each(|(e, row)| fill(e, row))
-        },
-    );
+        });
+    }
     // SAFETY: every one of the first `n * nrhs` entries was written above.
     unsafe { y.set_len(n * nrhs) };
 }
 
 /// The solution from a solve's sweeps' block `y` (row-major, see
 /// [`gather_scaled`]): row `rows[e]` of the column-major `x` is row `e` of
-/// `y` times `scale[rows[e]]`. On the workers of `threads` where it is
-/// worth it; every entry is the same product either way.
+/// `y` times `scale[rows[e]]`. On the pool its solve runs on (`pool`), as
+/// [`gather_scaled`]; every entry is the same product either way.
 pub(crate) fn scatter_scaled<T: Scalar>(
     y: &[T],
     nrhs: usize,
     rows: &[usize],
     scale: &[f64],
     x: &mut [T],
-    threads: Threads,
+    pool: bool,
 ) {
     let n = rows.len();
     if nrhs == 0 {
@@ -334,14 +303,12 @@ pub(crate) fn scatter_scaled<T: Scalar>(
             unsafe { *x.add(c * n + p) = y[e * nrhs + c] * s };
         }
     };
-    permute_on(
-        threads,
-        n,
-        nrhs,
-        (),
-        |(), work| crate::parallel::for_each(n, work, put),
-        |()| (0..n).for_each(put),
-    );
+    let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
+    if pool {
+        crate::parallel::for_each(n, work, put);
+    } else {
+        work.serial(|| (0..n).for_each(put));
+    }
 }
 
 pub(crate) fn solve_into<T: Scalar, S: SolveCore<T>>(

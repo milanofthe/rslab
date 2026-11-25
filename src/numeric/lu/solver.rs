@@ -830,18 +830,26 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         } else {
             (&f.perm_row, &f.d_row, &f.perm, &f.d_col)
         };
-        // The sweeps take the block row-major: y[e * nrhs + c].
+        // The sweeps take the block row-major: y[e * nrhs + c]; the copies
+        // inside the first sweep and the last.
         let y = &mut work.y;
-        crate::numeric::direct::gather_scaled(b, nrhs, gather, g_scale, y, self.solve_threads);
-        let plan = &mut work.plan;
-        if transpose {
-            self.plan_u.forward(nrhs, y, plan, self.solve_threads);
-            self.plan_l.backward(nrhs, y, plan, self.solve_threads);
+        let (first, last) = if transpose {
+            (&self.plan_u, &self.plan_l)
         } else {
-            self.plan_l.forward(nrhs, y, plan, self.solve_threads);
-            self.plan_u.backward(nrhs, y, plan, self.solve_threads);
-        }
-        crate::numeric::direct::scatter_scaled(y, nrhs, scatter, s_scale, x, self.solve_threads);
+            (&self.plan_l, &self.plan_u)
+        };
+        let threads = self.solve_threads;
+        use crate::numeric::supernodal::solve::Sweep;
+        first.sweep(&mut work.plan, nrhs, threads, Sweep::Forward, |pw| {
+            let pool = pw.on_pool();
+            crate::numeric::direct::gather_scaled(b, nrhs, gather, g_scale, y, pool);
+            first.forward_block(nrhs, y, pw);
+        });
+        last.sweep(&mut work.plan, nrhs, threads, Sweep::Backward, |pw| {
+            last.backward_block(nrhs, y, pw);
+            let pool = pw.on_pool();
+            crate::numeric::direct::scatter_scaled(y, nrhs, scatter, s_scale, x, pool);
+        });
         debug_assert_eq!(scatter.len(), n);
         Ok(())
     }
