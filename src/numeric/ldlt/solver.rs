@@ -209,7 +209,8 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
         // The sweeps take the block row-major: y[i * nrhs + c].
         let y = &mut work.y;
         let (perm, scale) = (&self.factors.perm[..], &self.scale[..]);
-        crate::numeric::direct::gather_scaled(b, nrhs, perm, scale, y, self.solve_threads);
+        let gate = self.plan.settings().par_min_work;
+        crate::numeric::direct::gather_scaled(b, nrhs, perm, scale, y, self.solve_threads, gate);
         if nrhs == 1 {
             self.plan
                 .solve_in_place(&self.factors, y, &mut work.plan, self.solve_threads)?;
@@ -222,7 +223,7 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
                 self.solve_threads,
             )?;
         }
-        crate::numeric::direct::scatter_scaled(y, nrhs, perm, scale, x, self.solve_threads);
+        crate::numeric::direct::scatter_scaled(y, nrhs, perm, scale, x, self.solve_threads, gate);
         debug_assert_eq!(perm.len(), n);
         Ok(())
     }

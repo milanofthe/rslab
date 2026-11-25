@@ -237,10 +237,12 @@ static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
 /// `copy(out, work)` of `rows` rows of `nrhs` entries on the workers of
-/// `threads` where the copy is worth more than one of them, else
+/// `threads` where the copy is worth more than one of them (or, with the
+/// solve's fixed gate `gate`, where its entries reach it), else
 /// `serial(out)` on this thread.
 fn permute_on<S: Send>(
     threads: Threads,
+    gate: Option<usize>,
     rows: usize,
     nrhs: usize,
     out: S,
@@ -250,7 +252,11 @@ fn permute_on<S: Send>(
     let entries = rows * nrhs;
     let work = crate::parallel::Work::of(entries as f64, &PERMUTE_RATE);
     let workers = threads.resolve(|cap| cap);
-    if crate::parallel::width_on(workers, work.time(), rows) > 1 {
+    let wide = match gate {
+        Some(min) => workers > 1 && entries >= min,
+        None => crate::parallel::width_on(workers, work.time(), rows) > 1,
+    };
+    if wide {
         threads.run(
             0,
             |cap| cap,
@@ -268,7 +274,8 @@ fn permute_on<S: Send>(
 
 /// The block a solve's sweeps take, row-major (`y[e * nrhs + c]`), from the
 /// column-major right-hand sides `b`: row `e` is row `rows[e]` of `b`
-/// times `scale[rows[e]]`. On the workers of `threads` where it is worth it;
+/// times `scale[rows[e]]`. On the workers of `threads` where it is worth it
+/// (`gate`: the solve's [`par_min_work`](crate::SolveSettings::par_min_work));
 /// every entry is the same product either way.
 pub(crate) fn gather_scaled<T: Scalar>(
     b: &[T],
@@ -277,6 +284,7 @@ pub(crate) fn gather_scaled<T: Scalar>(
     scale: &[f64],
     y: &mut Vec<T>,
     threads: Threads,
+    gate: Option<usize>,
 ) {
     let n = rows.len();
     y.clear();
@@ -293,6 +301,7 @@ pub(crate) fn gather_scaled<T: Scalar>(
     };
     permute_on(
         threads,
+        gate,
         n,
         nrhs,
         &mut y.spare_capacity_mut()[..n * nrhs],
@@ -310,7 +319,8 @@ pub(crate) fn gather_scaled<T: Scalar>(
 /// The solution from a solve's sweeps' block `y` (row-major, see
 /// [`gather_scaled`]): row `rows[e]` of the column-major `x` is row `e` of
 /// `y` times `scale[rows[e]]`. On the workers of `threads` where it is
-/// worth it; every entry is the same product either way.
+/// worth it (`gate` as in [`gather_scaled`]); every entry is the same
+/// product either way.
 pub(crate) fn scatter_scaled<T: Scalar>(
     y: &[T],
     nrhs: usize,
@@ -318,6 +328,7 @@ pub(crate) fn scatter_scaled<T: Scalar>(
     scale: &[f64],
     x: &mut [T],
     threads: Threads,
+    gate: Option<usize>,
 ) {
     let n = rows.len();
     if nrhs == 0 {
@@ -336,6 +347,7 @@ pub(crate) fn scatter_scaled<T: Scalar>(
     };
     permute_on(
         threads,
+        gate,
         n,
         nrhs,
         (),
