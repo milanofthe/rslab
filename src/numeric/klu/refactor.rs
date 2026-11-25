@@ -146,7 +146,8 @@ impl Decide {
             )
         };
         // the fastest way it starts with, and the fastest of all
-        let (mut first, mut any): (Option<(Mode, f64)>, Option<(Mode, f64)>) = (None, None);
+        let mut first: Option<(Mode, f64)> = None;
+        let mut any = first;
         let mut offer = |m: Mode, t: f64| {
             let faster = |b: Option<(Mode, f64)>| b.is_none_or(|(_, bt)| t < bt);
             if started(m) && faster(first) {
@@ -166,15 +167,15 @@ impl Decide {
                 (0..bp.level_work.len()).map(|l| self.level(bp, l).1).sum(),
             );
         }
+        let pipelined =
+            |k: usize| serial * bn.div_ceil(k) as f64 / bn as f64 + self.dispatch.cost(k);
         let mut k = 2;
-        while cap >= 2 {
-            k = k.min(cap);
-            let share = serial * bn.div_ceil(k) as f64 / bn as f64;
-            offer(Mode::Pipelined(k), share + self.dispatch.cost(k));
-            if k == cap {
-                break;
-            }
+        while k < cap {
+            offer(Mode::Pipelined(k), pipelined(k));
             k *= 2;
+        }
+        if cap >= 2 {
+            offer(Mode::Pipelined(cap), pipelined(cap));
         }
         first.or(any).map_or(Mode::Serial, |b| b.0)
     }
