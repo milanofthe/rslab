@@ -236,20 +236,21 @@ fn check(n: usize, len: usize, nrhs: usize) -> Result<(), RslabError> {
 static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
-/// `copy(out, work)` of `entries` entries on the workers of `threads`
-/// where the copy is worth more than one of them, else `serial(out)` on
-/// this thread.
+/// `copy(out, work)` of `rows` rows of `nrhs` entries on the workers of
+/// `threads` where the copy is worth more than one of them, else
+/// `serial(out)` on this thread.
 fn permute_on<S: Send>(
     threads: Threads,
-    entries: usize,
+    rows: usize,
+    nrhs: usize,
     out: S,
     copy: impl FnOnce(S, crate::parallel::Work<'_>) + Send,
     serial: impl FnOnce(S),
 ) {
+    let entries = rows * nrhs;
     let work = crate::parallel::Work::of(entries as f64, &PERMUTE_RATE);
-    let pieces = entries.div_ceil(crate::constants::SOLVE_PERMUTE_TASK);
     let workers = threads.resolve(|cap| cap);
-    if pieces > 1 && crate::parallel::width_on(workers, work.time(), pieces) > 1 {
+    if crate::parallel::width_on(workers, work.time(), rows) > 1 {
         threads.run(
             0,
             |cap| cap,
@@ -283,24 +284,24 @@ pub(crate) fn gather_scaled<T: Scalar>(
         return;
     }
     y.reserve(n * nrhs);
-    let fill = |e0: usize, out: &mut [std::mem::MaybeUninit<T>]| {
-        for (i, row) in out.chunks_mut(nrhs).enumerate() {
-            let p = rows[e0 + i];
-            let s = T::from_real(scale[p]);
-            for (c, v) in row.iter_mut().enumerate() {
-                v.write(b[c * n + p] * s);
-            }
+    let fill = |e: usize, row: &mut [std::mem::MaybeUninit<T>]| {
+        let p = rows[e];
+        let s = T::from_real(scale[p]);
+        for (c, v) in row.iter_mut().enumerate() {
+            v.write(b[c * n + p] * s);
         }
     };
-    let task = (crate::constants::SOLVE_PERMUTE_TASK / nrhs).max(1);
     permute_on(
         threads,
-        n * nrhs,
+        n,
+        nrhs,
         &mut y.spare_capacity_mut()[..n * nrhs],
-        |out, work| {
-            crate::parallel::chunks_mut(out, task * nrhs, work, |k, chunk| fill(k * task, chunk))
+        |out, work| crate::parallel::chunks_mut(out, nrhs, work, fill),
+        |out| {
+            out.chunks_mut(nrhs)
+                .enumerate()
+                .for_each(|(e, row)| fill(e, row))
         },
-        |out| fill(0, out),
     );
     // SAFETY: every one of the first `n * nrhs` entries was written above.
     unsafe { y.set_len(n * nrhs) };
@@ -324,29 +325,22 @@ pub(crate) fn scatter_scaled<T: Scalar>(
     }
     assert!(x.len() >= n * nrhs && y.len() >= n * nrhs);
     let base = crate::numeric::supernodal::PanelPtr(x.as_mut_ptr());
-    let put = move |e0: usize, e1: usize| {
-        let x = base.get();
-        for e in e0..e1 {
-            let p = rows[e];
-            let s = T::from_real(scale[p]);
-            for c in 0..nrhs {
-                // SAFETY: `rows` is a permutation, so row `p` of every column
-                // is written by row `e` alone; in bounds by the check above.
-                unsafe { *x.add(c * n + p) = y[e * nrhs + c] * s };
-            }
+    let put = move |e: usize| {
+        let (x, p) = (base.get(), rows[e]);
+        let s = T::from_real(scale[p]);
+        for c in 0..nrhs {
+            // SAFETY: `rows` is a permutation, so row `p` of every column is
+            // written by row `e` alone; in bounds by the check above.
+            unsafe { *x.add(c * n + p) = y[e * nrhs + c] * s };
         }
     };
-    let task = (crate::constants::SOLVE_PERMUTE_TASK / nrhs).max(1);
     permute_on(
         threads,
-        n * nrhs,
+        n,
+        nrhs,
         (),
-        |(), work| {
-            crate::parallel::for_each(n.div_ceil(task), work, |k| {
-                put(k * task, ((k + 1) * task).min(n))
-            })
-        },
-        |()| put(0, n),
+        |(), work| crate::parallel::for_each(n, work, put),
+        |()| (0..n).for_each(put),
     );
 }
 

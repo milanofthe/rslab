@@ -122,12 +122,3 @@ pub const SOLVE_GEMV_ROWS: usize = 16;
 /// Flat from 4 to 16; 8 is within 15% of the best in every row.
 /// Contract: timing (`Z` has the same bits for every thread count).
 pub const SOLVE_PORT_BLOCK: usize = 8;
-
-/// Entries per task of the permuted, scaled copies a supernodal solve makes
-/// of its right-hand sides into the sweeps' block and back (entries times
-/// right-hand sides).
-/// Used by: `numeric::direct::gather_scaled`, `numeric::direct::scatter_scaled`.
-/// Why: each entry is a random read or write; 64k of them per task keep the
-/// scheduling negligible against the copy (as `ZERO_FILL_CHUNK`).
-/// Contract: timing (every entry is the same product in any task).
-pub const SOLVE_PERMUTE_TASK: usize = 1 << 16;
