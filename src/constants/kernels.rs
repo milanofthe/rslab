@@ -157,3 +157,17 @@ pub const SPLIT_PLANES: usize = 3;
 /// Why: a 2x2 pivot reads two columns, the lookahead holds the next two.
 /// Contract: estimate.
 pub const BK_ROW_BUFFERS: usize = 4;
+
+/// Columns per block of the diagonal part of a supernode's panel, the one
+/// layout the factorizations write and the solves read
+/// (`supernodal::panel::Layout`): each block holds its columns' rows from
+/// its first column to the panel's width, the off-block rows of all columns
+/// form one rectangle after the blocks (columns).
+/// Used by: `supernodal::panel::Layout`, the sweeps' triangles in column
+/// blocks (`supernodal::solve`), the tiles of the trailing updates.
+/// Why: each block's triangle runs on the register tiles of the sweeps and
+/// the rows below it take one product; 64 keeps the triangles a small share
+/// (the unused upper part of a block's own square) and the products wide
+/// enough for the SIMD GEMM.
+/// Contract: rounding.
+pub const PANEL_BLOCK: usize = 64;

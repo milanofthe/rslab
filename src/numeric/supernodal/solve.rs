@@ -3,11 +3,11 @@
 //! A scalar CSC factor is the wrong layout for a solve: every entry costs a
 //! value, a `usize` row index and a random access into the right-hand side,
 //! on one core. The plan works on the factor in *supernodal panel form*
-//! ([`PanelFactor`]): one dense column-major panel per supernode (unit-lower
-//! diagonal block on top, the off-block rows below) with a single shared
-//! list of `u32` row indices. The LDL^T drivers produce that form directly,
-//! so the plan takes the panels as its storage without a copy; a CSC factor
-//! (the LU path) is converted once. A forward or backward sweep then streams
+//! ([`PanelFactor`], laid out as [`Layout`]): per supernode its diagonal
+//! part in column blocks and its off-block rows as one rectangle, with a
+//! single shared list of `u32` row indices. The factorizations write that
+//! layout, so the plan takes the panels as its storage as they are. A
+//! forward or backward sweep then streams
 //! contiguous panels, touches each row index once per panel instead of once
 //! per entry, and runs the inner loops over contiguous memory. Every node
 //! takes all right-hand sides at once, its dense parts as GEMMs: its
@@ -37,14 +37,14 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
-    GEMM_NS_PER_FLOP, IDX32_BYTES, SOLVE_BUILD_NODE_BYTES, SOLVE_DIAG_BLOCK, SOLVE_GEMV_ROWS,
+    GEMM_NS_PER_FLOP, IDX32_BYTES, PANEL_BLOCK, SOLVE_BUILD_NODE_BYTES, SOLVE_GEMV_ROWS,
     SOLVE_NS_PER_ENTRY, SOLVE_PAR_MIN_ENTRY_RHS, SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES,
     WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
-use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
+use crate::numeric::supernodal::panel::{Layout, PanelFactor, PanelStorage};
 use crate::parallel::{Choice, PerScalar, Pick, Prior, Rate, ScalarRates, Work};
 use crate::scalar::Scalar;
 
@@ -126,9 +126,8 @@ pub(crate) struct SolvePlan<T> {
     /// the slot (every slot of an ancestor's own accumulator, and in a leaf
     /// subtree the first of its nodes in order that reaches the row).
     ext_slot: Vec<u32>,
-    /// The panels in the factor's own storage ([`PanelFactor`]), packed in
-    /// place by column blocks ([`packed_blocks`]): supernode `s` is
-    /// `vals[val_rng[s].0..val_rng[s].1]`.
+    /// The panels in the factor's own storage ([`PanelFactor`], each in its
+    /// [`Layout`]): supernode `s` is `vals[val_rng[s].0..val_rng[s].1]`.
     val_rng: Vec<(usize, usize)>,
     vals: Vec<T>,
     /// A row list of the factor's size, the buffer the next refactorization
@@ -529,18 +528,24 @@ impl<T: Scalar> SolvePlan<T> {
         } else {
             let mut d = Vec::with_capacity(n);
             for s in 0..ns {
-                let (_, w, m) = factor.shape(s);
-                let ld = w + m;
-                for k in 0..w {
-                    d.push(factor.panel(s)[k * ld + k].recip());
+                let lay = factor.layout(s);
+                for k in 0..lay.w {
+                    d.push(factor.panel(s)[lay.at(k, k)].recip());
                 }
             }
             d
         };
+        let val_rng: Vec<(usize, usize)> = (0..ns)
+            .map(|s| {
+                (
+                    factor.val_off[s],
+                    factor.val_off[s] + factor.layout(s).len(),
+                )
+            })
+            .collect();
         let PanelFactor {
             rows,
             row_ptr,
-            val_off,
             mut vals,
             ..
         } = factor;
@@ -550,7 +555,6 @@ impl<T: Scalar> SolvePlan<T> {
                 .all(|p| p[0] < p[1])),
             "off-block rows ascending"
         );
-        let val_rng = pack_panels(&mut vals, &sn_col, &row_ptr, &val_off);
         super::panel::release_room(&mut vals);
         let known = supernode_parent.len() == ns;
 
@@ -852,7 +856,7 @@ impl<T: Scalar> SolvePlan<T> {
     ) {
         let cfg_now = cfg;
         let ns = factor.n_supernodes();
-        // (the supernodes and their rows fix the panels' shapes, packed or not)
+        // (the supernodes and their rows fix the panels' layouts)
         let same = cfg_now == self.cfg
             && factor.n == self.n
             && unit == self.diag_inv.is_empty()
@@ -867,23 +871,21 @@ impl<T: Scalar> SolvePlan<T> {
         rsprobe::add!("layouts kept", 1);
         // The new row list equals the plan's: kept as the next spare, and the
         // buffer keeps its room for the next factorization to fill again.
-        let PanelFactor {
-            mut vals,
-            rows,
-            val_off,
-            ..
-        } = factor;
         if !unit {
             for s in 0..ns {
-                let (c0, c1) = (self.sn_col[s] as usize, self.sn_col[s + 1] as usize);
-                let ld = c1 - c0 + self.row_ptr[s + 1] - self.row_ptr[s];
-                let panel = &vals[val_off[s]..];
-                for k in 0..c1 - c0 {
-                    self.diag_inv[c0 + k] = panel[k * ld + k].recip();
+                let (c0, lay) = (self.sn_col[s] as usize, factor.layout(s));
+                for k in 0..lay.w {
+                    self.diag_inv[c0 + k] = factor.panel(s)[lay.at(k, k)].recip();
                 }
             }
         }
-        self.val_rng = pack_panels(&mut vals, &self.sn_col, &self.row_ptr, &val_off);
+        for s in 0..ns {
+            self.val_rng[s] = (
+                factor.val_off[s],
+                factor.val_off[s] + factor.layout(s).len(),
+            );
+        }
+        let PanelFactor { vals, rows, .. } = factor;
         self.vals = vals;
         self.spare_rows = rows;
     }
@@ -909,7 +911,7 @@ impl<T: Scalar> SolvePlan<T> {
             let (_, w, _, m, _, _) = self.node(self.top[t]);
             tri += w * (w + 1) / 2;
             off += w * m;
-            if w >= SOLVE_DIAG_BLOCK {
+            if w >= PANEL_BLOCK {
                 wide.push((w, m));
             }
         }
@@ -1341,7 +1343,7 @@ impl<T: Scalar> SolvePlan<T> {
 
     /// The node part of [`fwd_node_gemm`](Self::fwd_node_gemm), shared with
     /// the reach-limited sweep of sparse right-hand sides, block by block of
-    /// the packed panel ([`packed_blocks`]): each block's triangle on the
+    /// the panel ([`Layout`]): each block's triangle on the
     /// register tiles on the node's own rows `yb` (`nr` wide), then the node's
     /// own rows below it take its columns in one product; once the triangle is
     /// solved, `L_off X` into `t[..m * nr]` (left untouched when the node has
@@ -1351,9 +1353,10 @@ impl<T: Scalar> SolvePlan<T> {
     /// caller takes `t` off the rows the node's off-block rows map to.
     pub(super) fn fwd_node_core(&self, s: u32, nr: usize, yb: &mut [T], par: bool, t: &mut Vec<T>) {
         let (c0, w, _, m, _, panel) = self.node(s);
+        let lay = Layout::new(w, m);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         let pp = Shared(panel.as_ptr() as *mut T, panel.len());
-        for (jb, je, off, ld) in packed_blocks(w, m) {
+        for (jb, je, off, ld) in lay.blocks() {
             let d = dinv.get(jb..je).unwrap_or(&[]);
             {
                 let _s = rsprobe::scope!(TRACE, "triangle");
@@ -1400,15 +1403,14 @@ impl<T: Scalar> SolvePlan<T> {
         );
         run_chunks(below, |i| {
             let r = chunk_rows(i, below, m, nr);
-            for (b, (jb, je, off, ld)) in packed_blocks(w, m).enumerate() {
+            for (b, (jb, je, _, _)) in lay.blocks().enumerate() {
                 // SAFETY: a chunk writes its own rows of `t`; the solved rows of `yb`
                 // and the panel are only read.
                 unsafe {
                     fwd_below(
                         tp.ptr(),
-                        pp.ptr().add(off),
-                        ld,
-                        w,
+                        pp.ptr().add(lay.rect()),
+                        m,
                         jb,
                         je,
                         yp.ptr(),
@@ -1422,7 +1424,7 @@ impl<T: Scalar> SolvePlan<T> {
     }
 
     /// The backward sweep of node `s` for `nr` right-hand sides with its dense
-    /// products as GEMMs, block by block of the packed panel ([`packed_blocks`]):
+    /// products as GEMMs, block by block of the panel ([`Layout`]):
     /// the final values of the rows below the node gathered and taken off the
     /// node's rows as one product `L_off^T G`, then the triangle from the last
     /// block up: each block takes off the rows below it in the node by one
@@ -1431,6 +1433,7 @@ impl<T: Scalar> SolvePlan<T> {
     /// pool when `par` ([`node_chunks`](Self::node_chunks)), within a block's rows.
     fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
         let (c0, w, r0, m, _, panel) = self.node(s);
+        let lay = Layout::new(w, m);
         let dinv = self.diag_inv.get(c0..c0 + w).unwrap_or(&[]);
         if m > 0 {
             let _s = rsprobe::scope!(TRACE, "gather");
@@ -1448,10 +1451,10 @@ impl<T: Scalar> SolvePlan<T> {
         if m > 0 {
             // the node's rows `X[i] -= sum_r L[r, i] G[r]`, each block's rows in its
             // chunks: every full block cut alike, the last one by its own rows
-            let nb = w.div_ceil(SOLVE_DIAG_BLOCK);
-            let last_rows = w - (nb - 1) * SOLVE_DIAG_BLOCK;
+            let nb = w.div_ceil(PANEL_BLOCK);
+            let last_rows = w - (nb - 1) * PANEL_BLOCK;
             let (full, last) = (
-                self.node_chunks(par, SOLVE_DIAG_BLOCK, m, nr),
+                self.node_chunks(par, PANEL_BLOCK, m, nr),
                 self.node_chunks(par, last_rows, m, nr),
             );
             run_chunks((nb - 1) * full + last, |i| {
@@ -1459,7 +1462,7 @@ impl<T: Scalar> SolvePlan<T> {
                     None => (i / full, i % full, full),
                     Some(q) => (nb - 1, q, last),
                 };
-                let Some((jb, je, off, ld)) = packed_blocks(w, m).nth(b) else {
+                let Some((jb, je, _, _)) = lay.blocks().nth(b) else {
                     return;
                 };
                 let r = chunk_rows(q, count, je - jb, nr);
@@ -1468,11 +1471,8 @@ impl<T: Scalar> SolvePlan<T> {
                 unsafe {
                     bwd_off(
                         xp.ptr(),
-                        pp.ptr().add(off),
-                        ld,
-                        w,
+                        pp.ptr().add(lay.rect()),
                         m,
-                        jb,
                         gp.ptr(),
                         jb + r.start..jb + r.end,
                         nr,
@@ -1480,7 +1480,7 @@ impl<T: Scalar> SolvePlan<T> {
                 }
             });
         }
-        for (jb, je, off, ld) in packed_blocks(w, m).rev() {
+        for (jb, je, off, ld) in lay.blocks().rev() {
             if je < w {
                 let count = self.node_chunks(par, je - jb, w - je, nr);
                 run_chunks(count, |q| {
@@ -1769,25 +1769,6 @@ fn tri_up_tile<T: Scalar, const W: usize>(
     }
 }
 
-/// The column blocks of a node of width `w` with `m` off-block rows in the plan's packed
-/// panel: `(jb, je, offset, ld)`, block `jb..je` the dense column-major `ld x (je - jb)`
-/// block at `offset` from the node's start, holding rows `jb..w + m` of its columns (`ld = w +
-/// m - jb`). A sweep reads no entry above a block's rows (the triangle in column blocks, the
-/// rows below in products), so those are not stored: of the diagonal block's unused upper
-/// triangle only the part inside each block's own square remains.
-fn packed_blocks(
-    w: usize,
-    m: usize,
-) -> impl DoubleEndedIterator<Item = (usize, usize, usize, usize)> + ExactSizeIterator {
-    let nb = SOLVE_DIAG_BLOCK;
-    // `k` full blocks before block `k`: `sum_{i < k} nb (w + m - i nb)`
-    let before = move |k: usize| k * nb * (w + m) - nb * nb * (k * k.saturating_sub(1) / 2);
-    (0..w.div_ceil(nb)).map(move |k| {
-        let (jb, je) = (k * nb, ((k + 1) * nb).min(w));
-        (jb, je, before(k), w + m - jb)
-    })
-}
-
 /// The rows a chunk of a product of `nr` right-hand sides starts at a multiple
 /// of, and its least rows. For one right-hand side the GEMM runs a matrix-vector
 /// product: a column's rows in SIMD lanes from the product's first row, the rows
@@ -1845,7 +1826,7 @@ fn node_mode() -> crate::dense::gemm_backend::GemmMode {
 
 /// Forward, a node's own rows `rows` (from `je` on) take the solved block
 /// `jb..je`: `y[rows] -= L[rows, jb..je] y[jb..je]`, `y` the node's rows (`nr`
-/// wide), `block` the packed block ([`packed_blocks`], `ld`).
+/// wide), `block` the diagonal block ([`Layout::blocks`], `ld`).
 ///
 /// SAFETY: `y` holds the node's rows and `block` its block; rows `rows` are
 /// written by this call alone, rows `jb..je` and the block only read.
@@ -1890,9 +1871,8 @@ unsafe fn fwd_own<T: Scalar>(
 #[allow(clippy::too_many_arguments)]
 unsafe fn fwd_below<T: Scalar>(
     t: *mut T,
-    block: *const T,
-    ld: usize,
-    w: usize,
+    rect: *const T,
+    m: usize,
     jb: usize,
     je: usize,
     y: *const T,
@@ -1908,8 +1888,8 @@ unsafe fn fwd_below<T: Scalar>(
         1,
         nr as isize,
         add,
-        block.add(w - jb + rows.start),
-        ld as isize,
+        rect.add(jb * m + rows.start),
+        m as isize,
         1,
         y.add(jb * nr),
         1,
@@ -1927,14 +1907,10 @@ unsafe fn fwd_below<T: Scalar>(
 /// `x[rows] -= L_off[.., rows]^T g`, `g` their final values gathered (`nr` wide).
 ///
 /// SAFETY: as [`fwd_own`]; `g` holds `m` rows.
-#[allow(clippy::too_many_arguments)]
 unsafe fn bwd_off<T: Scalar>(
     x: *mut T,
-    block: *const T,
-    ld: usize,
-    w: usize,
+    rect: *const T,
     m: usize,
-    jb: usize,
     g: *const T,
     rows: std::ops::Range<usize>,
     nr: usize,
@@ -1947,9 +1923,9 @@ unsafe fn bwd_off<T: Scalar>(
         1,
         nr as isize,
         true,
-        block.add(w - jb + (rows.start - jb) * ld),
+        rect.add(rows.start * m),
         1,
-        ld as isize,
+        m as isize,
         g,
         1,
         nr as isize,
@@ -1998,48 +1974,6 @@ unsafe fn bwd_in<T: Scalar>(
         false,
         node_mode(),
     );
-}
-
-/// Entries of a node's packed panel ([`packed_blocks`]).
-pub(crate) fn packed_len(w: usize, m: usize) -> usize {
-    packed_blocks(w, m)
-        .map(|(jb, je, _, ld)| ld * (je - jb))
-        .sum()
-}
-
-/// Pack the panels of `vals` (supernode `s` the column-major `(w + m) x w` block at
-/// `full_off[s]`, `sn_col` and `row_ptr` giving `w` and `m`) in place into the plan's layout
-/// ([`packed_blocks`]) and return each one's packed range. The panels go in the order they
-/// lie in, every column moves to an offset no larger than its own and the columns go in
-/// order, so no source is overwritten before it is read. The buffer keeps its room.
-fn pack_panels<T: Copy>(
-    vals: &mut Vec<T>,
-    sn_col: &[u32],
-    row_ptr: &[usize],
-    full_off: &[usize],
-) -> Vec<(usize, usize)> {
-    let ns = sn_col.len() - 1;
-    let mut order: Vec<usize> = (0..ns).collect();
-    if full_off.windows(2).any(|p| p[0] > p[1]) {
-        order.sort_unstable_by_key(|&s| full_off[s]);
-    }
-    let mut rng = vec![(0usize, 0usize); ns];
-    let mut at = 0usize;
-    for s in order {
-        let w = (sn_col[s + 1] - sn_col[s]) as usize;
-        let m = row_ptr[s + 1] - row_ptr[s];
-        let ld = w + m;
-        for (jb, je, off, ldb) in packed_blocks(w, m) {
-            for k in jb..je {
-                let src = full_off[s] + k * ld + jb;
-                vals.copy_within(src..src + ldb, at + off + (k - jb) * ldb);
-            }
-        }
-        rng[s] = (at, at + packed_len(w, m));
-        at = rng[s].1;
-    }
-    vals.truncate(at);
-    rng
 }
 
 /// `D z = y` for the block diagonal (1x1 and 2x2 pivots) of the columns
@@ -2391,8 +2325,8 @@ mod tests {
             "a tree above the cut"
         );
         assert!(chunked(&ld.plan), "LDL^T products in chunks");
-        let tiled = (ld.plan.top.iter())
-            .any(|&s| ld.plan.node(s).1 > 2 * crate::constants::SOLVE_DIAG_BLOCK);
+        let tiled =
+            (ld.plan.top.iter()).any(|&s| ld.plan.node(s).1 > 2 * crate::constants::PANEL_BLOCK);
         assert!(tiled, "an ancestor of three tiles or more");
         let (g1, gb1) =
             on(1).install(|| (ld.solve(&gb).unwrap(), ld.solve_many(&gbb, nrhs).unwrap()));

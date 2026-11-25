@@ -32,8 +32,7 @@ use crate::numeric::supernodal::Li;
 
 /// What a factored supernode leaves for its parent, its ancestors' updates
 /// and the emit.
-#[derive(Default)]
-pub(super) struct NodePivots {
+pub(super) struct NodePivots<T> {
     /// Pivots taken: the columns of the finished panel.
     pub npiv: usize,
     /// Fully-summed rows and columns (global indices), the pivots first in
@@ -52,24 +51,52 @@ pub(super) struct NodePivots {
     /// Pivots that failed the threshold over their whole column and could
     /// not be delayed.
     pub forced: usize,
+    /// The passed pivots as they stand after this front's pivots, for the
+    /// parent to take: per passed column its entries over the rows past
+    /// the pivots (`off_l`'s order), then per passed row its entries over
+    /// the columns past the fully-summed ones (`off_u` past the passed
+    /// columns).
+    pub passed_cols: Vec<T>,
+    pub passed_rows: Vec<T>,
 }
 
-impl crate::memory::HeapBytes for crate::numeric::supernodal::Cells<NodePivots> {
+impl<T> Default for NodePivots<T> {
+    fn default() -> Self {
+        NodePivots {
+            npiv: 0,
+            rows: Vec::new(),
+            cols: Vec::new(),
+            off_l: Vec::new(),
+            off_u: Vec::new(),
+            extras: false,
+            forced: 0,
+            passed_cols: Vec::new(),
+            passed_rows: Vec::new(),
+        }
+    }
+}
+
+impl<T> crate::memory::HeapBytes for crate::numeric::supernodal::Cells<NodePivots<T>> {
     fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes as b;
-        let records = (self.len() * std::mem::size_of::<NodePivots>()) as u64;
+        let records = (self.len() * std::mem::size_of::<NodePivots<T>>()) as u64;
         // SAFETY: called on a pool's own object, no factorization fills it.
         records
             + (0..self.len())
                 .map(|s| {
                     let p = unsafe { self.get(s) };
-                    b(&p.rows) + b(&p.cols) + b(&p.off_l) + b(&p.off_u)
+                    b(&p.rows)
+                        + b(&p.cols)
+                        + b(&p.off_l)
+                        + b(&p.off_u)
+                        + b(&p.passed_cols)
+                        + b(&p.passed_rows)
                 })
                 .sum::<u64>()
     }
 }
 
-impl NodePivots {
+impl<T> NodePivots<T> {
     /// Pivots passed to the parent.
     #[inline]
     pub(super) fn passed(&self) -> usize {

@@ -95,13 +95,14 @@ pub const LU_INPUT_BUILD_BYTES_PER_COL: usize = 48;
 pub const LDLT_NODE_CELL_BYTES: usize = 8 + 8 + 40 + 96 + 8 + 8 + 8;
 
 /// Per supernode while an LU forest is factored: the emit cells (refcount,
-/// offset, panel records, the supernode's pivot record with its four lists
-/// and two counts, positions and permutations) and the forest's lists
+/// offset, panel records, the supernode's pivot record with its four lists,
+/// its two buffers of passed values and two counts, positions and
+/// permutations) and the forest's lists
 /// (bytes per supernode).
 /// Used by: `LuSymbolic::memory_plan`.
 /// Why: the cells' sizes as the model counts them.
 /// Contract: estimate.
-pub const LU_NODE_CELL_BYTES: usize = 8 + 8 + 80 + 24 + 8 + 8 + 8 + (4 * VEC_HEADER_BYTES + 16);
+pub const LU_NODE_CELL_BYTES: usize = 8 + 8 + 80 + 24 + 8 + 8 + 8 + (6 * VEC_HEADER_BYTES + 16);
 
 /// Per column while an LU forest is factored: the positions and
 /// permutations of the emit cells, and the pivot records' row and column

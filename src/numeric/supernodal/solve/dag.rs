@@ -1,6 +1,6 @@
 //! The ancestors' sweeps on the pool: a task DAG over the tiles of their dense
-//! nodes, each tile [`SOLVE_DIAG_BLOCK`] columns of a node's packed panel
-//! ([`packed_blocks`]).
+//! nodes, each tile [`PANEL_BLOCK`] columns of a node's panel
+//! ([`Layout`]).
 //!
 //! Forward, per ancestor with `nb` tiles and `nc` row chunks below it
 //! ([`SolvePlan::node_chunks`] at the depth of one tile):
@@ -40,10 +40,11 @@
 //! inputs were made.
 
 use super::{
-    bwd_in, bwd_off, chunk_align, chunk_rows, fwd_below, fwd_own, packed_blocks, sub_assign,
-    tri_rows, tri_up, PlanWork, Shared, SolvePlan, NONE,
+    bwd_in, bwd_off, chunk_align, chunk_rows, fwd_below, fwd_own, sub_assign, tri_rows, tri_up,
+    PlanWork, Shared, SolvePlan, NONE,
 };
-use crate::constants::SOLVE_DIAG_BLOCK;
+use crate::constants::PANEL_BLOCK;
+use crate::numeric::supernodal::panel::Layout;
 use crate::parallel::Scope;
 use crate::scalar::Scalar;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -139,7 +140,7 @@ fn run<'s, D: Dag>(dag: &'s D, sc: &Scope<'_, 's>, task: D::Task) {
 
 /// The tiles of an ancestor of width `w`.
 fn tiles_of(w: usize) -> usize {
-    w.div_ceil(SOLVE_DIAG_BLOCK)
+    w.div_ceil(PANEL_BLOCK)
 }
 
 /// A forward task ([`Fwd`]): the ancestor's `top` index first.
@@ -199,7 +200,7 @@ impl FwdNode {
 
     /// The node rows of the product of tile `s` into tile `g`.
     fn own_rows(&self, g: usize, s: usize) -> std::ops::Range<usize> {
-        let b = SOLVE_DIAG_BLOCK;
+        let b = PANEL_BLOCK;
         if self.merged && g + 2 == self.nb && s < g {
             g * b..self.w
         } else {
@@ -227,7 +228,7 @@ fn fwd_node<T: Scalar>(plan: &SolvePlan<T>, dag: &DagWork, nr: usize, ti: usize)
         m,
         nb,
         nc: dag.chunk_ptr[ti + 1] - dag.chunk_ptr[ti],
-        merged: nb > 2 && w - (nb - 1) * SOLVE_DIAG_BLOCK < chunk_align(nr),
+        merged: nb > 2 && w - (nb - 1) * PANEL_BLOCK < chunk_align(nr),
         base: dag.base[ti],
     }
 }
@@ -338,7 +339,8 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
         };
         let nd = self.node(ti);
         let (_, w, _, m, _, panel) = plan.node(plan.top[ti]);
-        let block = |b: usize| packed_blocks(w, m).nth(b).unwrap_or((0, 0, 0, 0));
+        let lay = Layout::new(w, m);
+        let block = |b: usize| lay.blocks().nth(b).unwrap_or((0, 0, 0, 0));
         // SAFETY: the node's rows; every task of the node writes rows of it no
         // other task writes meanwhile, and reads only rows that are final
         // (the open inputs order them).
@@ -346,7 +348,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
         match task {
             FwdTask::Take(_, b) => {
                 let b = b as usize;
-                let (j0, j1) = (b * SOLVE_DIAG_BLOCK, ((b + 1) * SOLVE_DIAG_BLOCK).min(w));
+                let (j0, j1) = (b * PANEL_BLOCK, ((b + 1) * PANEL_BLOCK).min(w));
                 // SAFETY: the tile's rows, this task's alone.
                 let yc = unsafe { std::slice::from_raw_parts_mut(yn.add(j0 * nr), (j1 - j0) * nr) };
                 {
@@ -397,7 +399,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                 let (g, s) = (g as usize, s as usize);
                 let (jb, je, off, ld) = block(s);
                 let rows = nd.own_rows(g, s);
-                let joined = rows.end > ((g + 1) * SOLVE_DIAG_BLOCK).min(w);
+                let joined = rows.end > ((g + 1) * PANEL_BLOCK).min(w);
                 {
                     let _s = rsprobe::scope!(TRACE, "product");
                     unsafe { fwd_own(yn, panel.as_ptr().add(off), ld, jb, je, rows, nr) };
@@ -413,7 +415,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
             }
             FwdTask::Below(_, c, s) => {
                 let (c, s) = (c as usize, s as usize);
-                let (jb, je, off, ld) = block(s);
+                let (jb, je, _, _) = block(s);
                 let rows = chunk_rows(c, nd.nc, m, nr);
                 let acc = unsafe { self.acc.ptr().add(plan.top_acc_off[ti] * nr) };
                 {
@@ -421,9 +423,8 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                     unsafe {
                         fwd_below(
                             acc,
-                            panel.as_ptr().add(off),
-                            ld,
-                            w,
+                            panel.as_ptr().add(lay.rect()),
+                            m,
                             jb,
                             je,
                             yn,
@@ -485,7 +486,7 @@ impl<T: Scalar> Bwd<'_, T> {
     /// product of those.
     fn stepped<'s>(&'s self, ti: usize, b: usize, ready: &mut Ready<'_, '_, 's, Self>) {
         let (_, w, _, m, _, _) = self.plan.node(self.plan.top[ti]);
-        let (jb, je, _, _) = packed_blocks(w, m).nth(b).unwrap_or((0, 0, 0, 0));
+        let (jb, je, _, _) = Layout::new(w, m).blocks().nth(b).unwrap_or((0, 0, 0, 0));
         let (_, inner) = self.chunks(w, m, jb, je);
         if inner == 0 {
             return ready.push(BwdTask::Tri(ti as u32, b as u32));
@@ -510,7 +511,8 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
         let nb = tiles_of(w);
         let base = dag.base[ti];
         let (step, tri_open) = (|b: usize| base + b, |b: usize| base + nb + b);
-        let block = |b: usize| packed_blocks(w, m).nth(b).unwrap_or((0, 0, 0, 0));
+        let lay = Layout::new(w, m);
+        let block = |b: usize| lay.blocks().nth(b).unwrap_or((0, 0, 0, 0));
         // SAFETY: as in the forward DAG; the rows below (`g`) are written by
         // `Start` alone, before any task reads them.
         let xn = unsafe { self.x.ptr().add(c0 * nr) };
@@ -543,18 +545,15 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
             }
             BwdTask::Off(_, b, q) => {
                 let b = b as usize;
-                let (jb, je, off, ld) = block(b);
+                let (jb, je, _, _) = block(b);
                 let r = chunk_rows(q as usize, self.chunks(w, m, jb, je).0, je - jb, nr);
                 {
                     let _s = rsprobe::scope!(TRACE, "product");
                     unsafe {
                         bwd_off(
                             xn,
-                            panel.as_ptr().add(off),
-                            ld,
-                            w,
+                            panel.as_ptr().add(lay.rect()),
                             m,
-                            jb,
                             g,
                             jb + r.start..jb + r.end,
                             nr,
@@ -628,7 +627,7 @@ impl<T: Scalar> SolvePlan<T> {
         for ti in 0..nt {
             let (_, w, _, m, _, _) = self.node(self.top[ti]);
             let nb = tiles_of(w);
-            let nc = self.node_chunks(true, m, w.min(SOLVE_DIAG_BLOCK), nr);
+            let nc = self.node_chunks(true, m, w.min(PANEL_BLOCK), nr);
             dag.base.push(at);
             dag.chunk_ptr.push(chunks);
             at += nb * (nb + 1) / 2 + nc * nb + 2;
@@ -680,7 +679,7 @@ impl<T: Scalar> SolvePlan<T> {
                     let a = list.partition_point(|&x| (x as usize) < pn.c0);
                     let e = list.partition_point(|&x| (x as usize) < pn.c0 + pn.w);
                     if a < e {
-                        let tile = |x: u32| ((x as usize - pn.c0) / SOLVE_DIAG_BLOCK) as u32;
+                        let tile = |x: u32| ((x as usize - pn.c0) / PANEL_BLOCK) as u32;
                         reach = (tile(list[a]), tile(list[e - 1]) + 1);
                     }
                     for b in reach.0..reach.1 {
@@ -755,7 +754,7 @@ impl<T: Scalar> SolvePlan<T> {
         for ti in 0..nt {
             let (_, w, _, m, _, _) = self.node(self.top[ti]);
             let (nb, base) = (tiles_of(w), bwd.dag.base[ti]);
-            for (b, (jb, je, _, _)) in packed_blocks(w, m).enumerate() {
+            for (b, (jb, je, _, _)) in Layout::new(w, m).blocks().enumerate() {
                 let (off, inner) = bwd.chunks(w, m, jb, je);
                 let set = |i: usize, v: usize| bwd.dag.open[i].store(v as u32, Ordering::Relaxed);
                 set(base + b, off + usize::from(b + 1 < nb));

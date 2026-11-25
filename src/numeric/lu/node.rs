@@ -10,8 +10,10 @@ use crate::numeric::supernodal::Input;
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
+use crate::numeric::supernodal::panel::Layout;
 use crate::numeric::supernodal::panel::PanelScratch;
 use crate::numeric::supernodal::perturb_pivot;
+use crate::numeric::supernodal::schur_tiles;
 use crate::numeric::supernodal::{Cells, ScratchPool};
 use crate::numeric::supernodal::{Gloc, Li, LlSchedule, PanelPtr};
 use crate::scalar::Scalar;
@@ -29,6 +31,8 @@ pub(super) struct LuScratch<T> {
     col: Vec<T>,
     lupd: Vec<T>,
     uupd: Vec<T>,
+    lb: Vec<usize>,
+    ub: Vec<usize>,
 }
 
 impl<T> crate::memory::HeapBytes for LuScratch<T> {
@@ -41,6 +45,8 @@ impl<T> crate::memory::HeapBytes for LuScratch<T> {
             + b(&self.col)
             + b(&self.lupd)
             + b(&self.uupd)
+            + b(&self.lb)
+            + b(&self.ub)
     }
 }
 
@@ -54,6 +60,8 @@ impl<T> Default for LuScratch<T> {
             col: Vec::new(),
             lupd: Vec::new(),
             uupd: Vec::new(),
+            lb: Vec::new(),
+            ub: Vec::new(),
         }
     }
 }
@@ -66,7 +74,7 @@ pub(super) struct LuPools<T> {
     /// The buffers of the emit's [`finish_panel`](crate::numeric::supernodal::panel::finish_panel).
     pub(super) finish: ScratchPool<PanelScratch<T>>,
     /// The supernodes' pivot records, filled again by each factorization.
-    pub(super) pivots: ScratchPool<Cells<NodePivots>>,
+    pub(super) pivots: ScratchPool<Cells<NodePivots<T>>>,
 }
 
 /// A copy of a factor starts with scratch of its own, grown by its first
@@ -102,18 +110,16 @@ fn row_pass<T: Scalar>(ops: usize) -> crate::parallel::Work<'static> {
 }
 
 /// `x -= L[rows, kb..k] u` for the off-block rows of a pivot column: `x` holds
-/// rows `nfs..` of the column, `u` its entries `kb..k` (the `U` of this
-/// panel's pivots so far), `lbuf` the panel's columns before it (column
-/// stride `ld`); with `want` the largest squared magnitude of the result.
+/// the column's off-block rows, `u` its entries `kb..k` (the `U` of this
+/// panel's pivots so far), `lrect` the panel's off-block rows (column `j` at
+/// `j * ld`); with `want` the largest squared magnitude of the result.
 /// Runs of [`LU_DEEP_ROWS`](crate::constants::LU_DEEP_ROWS) rows take every
 /// column in turn, so a run stays in cache; row by row the same operations
 /// in the same order however the rows are split, so the parallel form is
 /// bit-identical to the serial one.
-#[allow(clippy::too_many_arguments)]
 fn deep_update<T: Scalar>(
-    lbuf: &[T],
+    lrect: &[T],
     ld: usize,
-    nfs: usize,
     kb: usize,
     u: &[T],
     x: &mut [T],
@@ -125,10 +131,10 @@ fn deep_update<T: Scalar>(
     let apply = |r0: usize, xs: &mut [T]| -> f64 {
         let mut top = 0.0f64;
         for (q, chunk) in xs.chunks_mut(run).enumerate() {
-            let at = nfs + r0 + q * run;
+            let at = r0 + q * run;
             for (jj, &uj) in u.iter().enumerate() {
                 if uj != T::zero() {
-                    let lj = &lbuf[(kb + jj) * ld + at..(kb + jj) * ld + at + chunk.len()];
+                    let lj = &lrect[(kb + jj) * ld + at..(kb + jj) * ld + at + chunk.len()];
                     for (v, &l) in chunk.iter_mut().zip(lj) {
                         *v = *v - l * uj;
                     }
@@ -203,6 +209,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         col,
         lupd,
         uupd,
+        lb,
+        ub,
     } = &mut *lent;
     // The off-block rows and columns: the structure's, and those beyond it
     // that the delayed pivots of the children carry or that an updater with
@@ -257,24 +265,25 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     }
     rows.extend_from_slice(off_l);
     cols.extend_from_slice(off_u);
-    // `lbuf`: the `L` panel, `nrow_l x nfs` (the diagonal block holds `L11`
-    // below and `U11` on and above the diagonal). `ut`: the `U^T` panel,
-    // `nrow_u x nfs`; the factorization writes its off-block rows, `U12[p, t]`
-    // at `ut[p * nrow_u + nfs + t]` (row `p` of `U` is column `p` of the
-    // panel), and the emit fills the diagonal block. The node's slots: the
-    // analysis's, or, where pivots may be delayed, claimed now at the size
-    // the front has, within the arenas' room (the factorization stops when
-    // it is spent).
+    // The front's two panels: `lbuf` the `L` panel and `ut` the `U^T` panel,
+    // each of the `nfs` fully-summed columns and the rows (columns) past
+    // them ([`Layout`]). The front's entry `(i, j)` lies in `lbuf` on and
+    // below the diagonal and in `ut` above it (its entry `(j, i)`, [`Front`]):
+    // `U` above the diagonal, `U11` and `U12`, is written in `ut` as the
+    // factorization goes and the emit adds `U`'s diagonal. The node's slots:
+    // the analysis's, or, where pivots may be delayed, claimed now at the
+    // size the front has, within the arenas' room (the factorization stops
+    // when it is spent).
+    let front = Front::new(Layout::new(nfs, cn_l), Layout::new(nfs, cn_u), lb, ub);
     // SAFETY: this task owns supernode `s`; nobody reads its slots before the
     // node is done (its ancestors start after it).
     let (lbuf, ut): (&mut [T], &mut [T]) = unsafe {
-        let (vl, vu) = (nrow_l * nfs, nrow_u * nfs);
         // Room for the rows past the pivots: past all of the block without
         // delays, else past at least one pivot.
         let past = |nrow: usize| if emit.delays { nrow } else { nrow - nfs };
         match (
-            emit.l_arena.claim(s, vl, past(nrow_l)),
-            emit.u_arena.claim(s, vu, past(nrow_u)),
+            emit.l_arena.claim(s, front.l.len(), past(nrow_l)),
+            emit.u_arena.claim(s, front.u.len(), past(nrow_u)),
         ) {
             (Some(l), Some(u)) => (l, u),
             _ => {
@@ -285,34 +294,53 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             }
         }
     };
-    debug_assert!(lbuf.len() == nrow_l * nfs && ut.len() == nrow_u * nfs);
+    debug_assert!(lbuf.len() == front.l.len() && ut.len() == front.u.len());
+    let (lp, up) = (PanelPtr(lbuf.as_mut_ptr()), PanelPtr(ut.as_mut_ptr()));
+    // The front's entry `(i, j)`.
+    // SAFETY (its callers): an entry of this node's slots, which this task
+    // alone writes, a section's pieces at disjoint entries.
+    let at = |i: usize, j: usize| -> *mut T { unsafe { front.ptr(lp.get(), up.get(), i, j) } };
+    // `U12`: the front's entry `(r, t)`, `r` a fully-summed row and `t` past
+    // them, at `urect + r * cn_u + t - nfs` of `ut`.
+    let urect = front.u.rect();
 
-    // The finished panels of a factored descendant `k` (its pivot count, the
-    // rows and columns past its pivots, its panels and their heights).
+    // The finished panels of a factored descendant `k`: its pivot count, the
+    // rows and columns past its pivots, and its off-block rows of `L` and of
+    // `U^T` (column-major, `ol.len()` and `ou.len()` apart).
     let updater = |k: usize| {
         let (nck, ol, ou) = done(k).off(st, k, sym.supernodes[k].ncol);
         // SAFETY: `k` is a factored descendant of `s`; its slots are published
         // and never written again.
         let (lk, uk): (&[T], &[T]) = unsafe { (emit.l_arena.slot(k), emit.u_arena.slot(k)) };
-        (nck, ol, ou, lk, uk, nck + ol.len(), nck + ou.len())
+        let (rl, ru) = (
+            Layout::new(nck, ol.len()).rect(),
+            Layout::new(nck, ou.len()).rect(),
+        );
+        (nck, ol, ou, &lk[rl..], &uk[ru..])
     };
     {
         // Global to local: `L` rows into `lbuf`, `U` columns into `ut`.
         let gloc = Gloc::new(n, rows);
         let gloc_u = Gloc::second(n, cols);
-        // Assemble columns of s (full) into lbuf, and the U12 rows into ut. The
-        // exact structure holds every entry of `B`.
+        // Assemble the columns of s and the U12 rows. The exact structure
+        // holds every entry of `B`.
         for p in 0..ncol {
             let c = first + p;
             for (g, v) in inp.col(c) {
                 debug_assert!(gloc[g] != Li::MAX, "entry outside the L structure");
-                let li = gloc[g] as usize;
-                lbuf[p * nrow_l + li] = lbuf[p * nrow_l + li] + v;
+                // SAFETY: an entry of the front.
+                unsafe {
+                    let e = at(gloc[g] as usize, p);
+                    *e = *e + v;
+                }
             }
             for (g, v) in inp.row(c) {
                 debug_assert!(gloc_u[g] != Li::MAX, "entry outside the U structure");
-                let lc = gloc_u[g] as usize;
-                ut[p * nrow_u + lc] = ut[p * nrow_u + lc] + v;
+                // SAFETY: an entry of the front.
+                unsafe {
+                    let e = at(p, gloc_u[g] as usize);
+                    *e = *e + v;
+                }
             }
         }
         // cmod from every factored descendant, into this supernode's own
@@ -335,21 +363,20 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         let (spans, forks, tile_w, tiled) = (&plan.spans, plan.forks, plan.tile_w, plan.tiled);
         let tile_u = kt.k.cmod_tile(cn_u);
 
-        // Column-tiled parallel cmod: disjoint `&mut` slabs of the target
-        // buffers; per slab every updater's contribution in updater order with a
-        // serial GEMM (see `CmodPlan::tiled`). The LU node has two target buffers,
-        // so the tiling runs as two phases: `lbuf` slabs (the `L`/`U11` updates),
-        // then runs of `U12` columns in `ut`.
+        // Column-tiled parallel cmod: disjoint column slabs of the front; per
+        // slab every updater's contribution in updater order with a serial
+        // GEMM (see `CmodPlan::tiled`). Two phases: the slabs of the front's
+        // own columns (the `L` and `U11` updates), then runs of `U12`'s
+        // columns.
         if tiled {
             let (gloc_ref, gloc_u_ref) = (&gloc, &gloc_u);
             let work = crate::parallel::Work::ns(f64::INFINITY);
-            let lslab = &mut lbuf[..nrow_l * ncol];
-            crate::parallel::chunks_mut(lslab, nrow_l * tile_w, work, |ti, slab| {
+            crate::parallel::for_each(ncol.div_ceil(tile_w), work, |ti| {
                 let c0 = ti * tile_w;
                 let c1 = (c0 + tile_w).min(ncol);
                 let mut lupd = pools.slab.take();
                 for sp in spans {
-                    let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
+                    let (nck, ol, ou, lk, uk) = updater(sp.k);
                     let (p0l, (p0u, p1u)) = (sp.l.0, sp.u);
                     let q0 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c0);
                     let q1 = p0u + ou[p0u..p1u].partition_point(|&g| (g as usize) < first + c1);
@@ -370,12 +397,12 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             mrows as isize,
                             1,
                             false,
-                            lk.as_ptr().add(nck + p0l),
-                            nrk_l as isize,
+                            lk.as_ptr().add(p0l),
+                            ol.len() as isize,
                             1,
-                            uk.as_ptr().add(nck + q0),
+                            uk.as_ptr().add(q0),
                             1,
-                            nrk_u as isize,
+                            ou.len() as isize,
                             T::zero(),
                             T::one(),
                             false,
@@ -387,20 +414,22 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             ),
                         );
                     }
-                    for jj in 0..npk {
-                        let cbase = (ou[q0 + jj] as usize - first - c0) * nrow_l;
-                        let ucol = &lupd[jj * mrows..jj * mrows + mrows];
-                        for i in 0..mrows {
-                            let dst = cbase + gloc_ref[ol[p0l + i] as usize] as usize;
-                            slab[dst] = slab[dst] - ucol[i];
-                        }
-                    }
+                    // SAFETY: the columns of the front in this slab.
+                    unsafe {
+                        scatter(
+                            &front,
+                            (lp.get(), up.get()),
+                            &lupd[..mrows * npk],
+                            (mrows, npk),
+                            |i| gloc_ref[ol[p0l + i] as usize] as usize,
+                            |jj| ou[q0 + jj] as usize - first,
+                        )
+                    };
                 }
             });
             if cn_u > 0 {
-                // A slab is the run `[u0, u1)` of U12's columns: rows `nfs + u0..nfs + u1`
-                // of every `ut` column, disjoint between slabs.
-                let up = PanelPtr(ut.as_mut_ptr());
+                // A run is the columns `[u0, u1)` of U12: the front's columns
+                // `nfs + u0..nfs + u1`, disjoint between runs.
                 crate::parallel::for_each(cn_u.div_ceil(tile_u), work, |ti| {
                     let u0 = ti * tile_u;
                     let u1 = (u0 + tile_u).min(cn_u);
@@ -408,7 +437,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     let g1 = if u1 < cn_u { off_u[u1] } else { Li::MAX };
                     let mut uupd = pools.slab.take();
                     for sp in spans {
-                        let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
+                        let (nck, ol, ou, lk, uk) = updater(sp.k);
                         let ((p0l, p1l), p1u) = (sp.l, sp.u.1);
                         let t0 = p1u + ou[p1u..].partition_point(|&g| g < g0);
                         let t1 = p1u + ou[p1u..].partition_point(|&g| g < g1);
@@ -428,12 +457,12 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                                 npk as isize,
                                 1,
                                 false,
-                                lk.as_ptr().add(nck + p0l),
-                                nrk_l as isize,
+                                lk.as_ptr().add(p0l),
+                                ol.len() as isize,
                                 1,
-                                uk.as_ptr().add(nck + t0),
+                                uk.as_ptr().add(t0),
                                 1,
-                                nrk_u as isize,
+                                ou.len() as isize,
                                 T::zero(),
                                 T::one(),
                                 false,
@@ -449,10 +478,11 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             let lt = gloc_u_ref[ou[t0 + jj] as usize] as usize;
                             let ucol = &uupd[jj * npk..jj * npk + npk];
                             for i in 0..npk {
-                                // SAFETY: row `lt` lies in this slab's run.
+                                // SAFETY: column `lt` lies in this run.
                                 unsafe {
-                                    let d =
-                                        up.get().add((ol[p0l + i] as usize - first) * nrow_u + lt);
+                                    let d = up.get().add(
+                                        urect + (ol[p0l + i] as usize - first) * cn_u + lt - nfs,
+                                    );
                                     *d = *d - ucol[i];
                                 }
                             }
@@ -464,7 +494,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
 
         // Sequential per-update cmod (small nodes / narrow panels).
         for sp in spans.iter().filter(|_| !tiled) {
-            let (nck, ol, ou, lk, uk, nrk_l, nrk_u) = updater(sp.k);
+            let (nck, ol, ou, lk, uk) = updater(sp.k);
+            let (ml, mu) = (ol.len(), ou.len());
             let ((p0l, p1l), (p0u, p1u)) = (sp.l, sp.u);
             // L update: rows `ol[p0l..]` times the `U` columns landing here;
             // U12 update: the `L` rows landing here times the `U` columns past here.
@@ -477,12 +508,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     for i in 0..mrows {
                         let mut acc = T::zero();
                         for ck in 0..nck {
-                            acc = acc
-                                + lk[(nck + p0l + i) + ck * nrk_l]
-                                    * uk[ck * nrk_u + nck + p0u + jj];
+                            acc = acc + lk[p0l + i + ck * ml] * uk[ck * mu + p0u + jj];
                         }
-                        let trow = gloc[ol[p0l + i] as usize] as usize;
-                        lbuf[tcol * nrow_l + trow] = lbuf[tcol * nrow_l + trow] - acc;
+                        // SAFETY: an entry of the front.
+                        unsafe {
+                            let d = at(gloc[ol[p0l + i] as usize] as usize, tcol);
+                            *d = *d - acc;
+                        }
                     }
                 }
                 for jj in 0..ntrail {
@@ -490,12 +522,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     for i in 0..npk_l {
                         let mut acc = T::zero();
                         for ck in 0..nck {
-                            acc = acc
-                                + lk[(nck + p0l + i) + ck * nrk_l]
-                                    * uk[ck * nrk_u + nck + p1u + jj];
+                            acc = acc + lk[p0l + i + ck * ml] * uk[ck * mu + p1u + jj];
                         }
-                        let urow = ol[p0l + i] as usize - first;
-                        ut[urow * nrow_u + tu] = ut[urow * nrow_u + tu] - acc;
+                        // SAFETY: an entry of the front.
+                        unsafe {
+                            let d = at(ol[p0l + i] as usize - first, tu);
+                            *d = *d - acc;
+                        }
                     }
                 }
                 continue;
@@ -523,12 +556,12 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         mrows as isize,
                         1,
                         false,
-                        lk.as_ptr().add(nck + p0l),
-                        nrk_l as isize,
+                        lk.as_ptr().add(p0l),
+                        ml as isize,
                         1,
-                        uk.as_ptr().add(nck + p0u),
+                        uk.as_ptr().add(p0u),
                         1,
-                        nrk_u as isize,
+                        mu as isize,
                         T::zero(),
                         T::one(),
                         false,
@@ -537,14 +570,17 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         crate::dense::gemm_backend::GemmMode::new(par(mrows * npk_u * nck), &kt.k),
                     );
                 }
-                for jj in 0..npk_u {
-                    let cbase = (ou[p0u + jj] as usize - first) * nrow_l;
-                    let ucol = &lupd[jj * mrows..jj * mrows + mrows];
-                    for i in 0..mrows {
-                        let dst = cbase + gloc[ol[p0l + i] as usize] as usize;
-                        lbuf[dst] = lbuf[dst] - ucol[i];
-                    }
-                }
+                // SAFETY: entries of the front.
+                unsafe {
+                    scatter(
+                        &front,
+                        (lp.get(), up.get()),
+                        &lupd[..mrows * npk_u],
+                        (mrows, npk_u),
+                        |i| gloc[ol[p0l + i] as usize] as usize,
+                        |jj| ou[p0u + jj] as usize - first,
+                    )
+                };
             }
             if npk_l > 0 && ntrail > 0 {
                 // Uupd(npk_l x ntrail) = L_k[landing rows, :] * U_k[:, columns past s].
@@ -560,12 +596,12 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         npk_l as isize,
                         1,
                         false,
-                        lk.as_ptr().add(nck + p0l),
-                        nrk_l as isize,
+                        lk.as_ptr().add(p0l),
+                        ml as isize,
                         1,
-                        uk.as_ptr().add(nck + p1u),
+                        uk.as_ptr().add(p1u),
                         1,
-                        nrk_u as isize,
+                        mu as isize,
                         T::zero(),
                         T::one(),
                         false,
@@ -578,50 +614,57 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     let lt = gloc_u[ou[p1u + jj] as usize] as usize;
                     let ucol = &uupd[jj * npk_l..jj * npk_l + npk_l];
                     for i in 0..npk_l {
-                        let dst = (ol[p0l + i] as usize - first) * nrow_u + lt;
-                        ut[dst] = ut[dst] - ucol[i];
+                        // SAFETY: an entry of the front.
+                        unsafe {
+                            let d = up
+                                .get()
+                                .add(urect + (ol[p0l + i] as usize - first) * cn_u + lt - nfs);
+                            *d = *d - ucol[i];
+                        }
                     }
                 }
             }
         }
 
-        // The delayed pivots of the children, as they left them: the Schur
-        // complement of each delayed column over the child's rows past its
-        // pivots, and of each delayed row over its columns past them. Every
-        // update from below is in (descendants reach a delayed index only
-        // through the child that delayed it), and every row and column lies
-        // in this front (the children's ones past it were added above).
+        // The delayed pivots of the children, as they left them in their
+        // records: each delayed column over the child's rows past its
+        // pivots, and each delayed row over its columns past the delayed
+        // ones. Every update from below is in (descendants reach a delayed
+        // index only through the child that delayed it), and every row and
+        // column lies in this front (the children's ones past it were added
+        // above).
         for &c in &snode.children {
             let pc = done(c);
-            if pc.passed() == 0 {
+            let passed = pc.passed();
+            if passed == 0 {
                 continue;
             }
             let (npc, olc, ouc) = pc.off(st, c, sym.supernodes[c].ncol);
-            let (ldc, lduc, nfs_c) = (npc + olc.len(), npc + ouc.len(), pc.rows.len());
-            // SAFETY: `c` is factored; its slots are published and never
-            // written again before the emit, which runs after this node.
-            let (lc, uc): (&[T], &[T]) = unsafe { (emit.l_arena.slot(c), emit.u_arena.slot(c)) };
+            let (ml, mu) = (olc.len(), ouc.len() - passed);
             for (j, &gc) in pc.cols[npc..].iter().enumerate() {
-                let dst = gloc_u[gc as usize] as usize * nrow_l;
-                let src = &lc[(npc + j) * ldc + npc..(npc + j + 1) * ldc];
+                let col = gloc_u[gc as usize] as usize;
+                let src = &pc.passed_cols[j * ml..(j + 1) * ml];
                 for (&g, &v) in olc.iter().zip(src) {
                     debug_assert!(gloc[g as usize] != Li::MAX, "delayed row outside the front");
-                    let li = dst + gloc[g as usize] as usize;
-                    lbuf[li] = lbuf[li] + v;
+                    // SAFETY: an entry of the front.
+                    unsafe {
+                        let d = at(gloc[g as usize] as usize, col);
+                        *d = *d + v;
+                    }
                 }
             }
             for (i, &gr) in pc.rows[npc..].iter().enumerate() {
                 let r = gloc[gr as usize] as usize;
-                let src = &uc[(npc + i) * lduc + nfs_c..(npc + i + 1) * lduc];
-                for (&g, &v) in ouc[nfs_c - npc..].iter().zip(src) {
-                    let g = g as usize;
-                    if g < first + ncol {
-                        let li = (g - first) * nrow_l + r;
-                        lbuf[li] = lbuf[li] + v;
-                    } else {
-                        debug_assert!(gloc_u[g] != Li::MAX, "delayed column outside the front");
-                        let li = r * nrow_u + gloc_u[g] as usize;
-                        ut[li] = ut[li] + v;
+                let src = &pc.passed_rows[i * mu..(i + 1) * mu];
+                for (&g, &v) in ouc[passed..].iter().zip(src) {
+                    debug_assert!(
+                        gloc_u[g as usize] != Li::MAX,
+                        "delayed column outside the front"
+                    );
+                    // SAFETY: an entry of the front.
+                    unsafe {
+                        let d = at(r, gloc_u[g as usize] as usize);
+                        *d = *d + v;
                     }
                 }
             }
@@ -632,15 +675,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     let _pivot = rsprobe::scope!(TRACE, "pivot");
     // cdiv: in-place **blocked** panel LU, no trailing update outside the
     // panel: a getrf - an NB-wide panel factored column by column, then the
-    // dominant trailing update as a single SIMD GEMM (rank-NB) - restricted to
-    // the panel: the trailing is the remaining panel columns (`lbuf`) plus the
-    // `U12` rows (in `ut`), with no `A22`/CB. This routes the
-    // `O(nfs^2*nrow_l)` cdiv work (the measured 77 % of the left-looking
-    // factor) through BLAS-3. Within an NB panel the columns are brought up to
-    // date one at a time from its earlier pivots (left-looking, a GEMV for
-    // the off-block rows), so each pivot is decided on the column as it
-    // stands, its off-block rows included, while every column still to come
-    // keeps the state of the panel's start.
+    // dominant trailing update as SIMD GEMMs (rank-NB) - restricted to the
+    // front's fully-summed columns and the `U12` rows, with no `A22`/CB.
+    // Within an NB panel the columns are brought up to date one at a time
+    // from its earlier pivots (left-looking, a GEMV for the off-block rows),
+    // so each pivot is decided on the column as it stands, its off-block rows
+    // included, while every column still to come keeps the state of the
+    // panel's start.
     // Panel width. Swept 32/48/64/96 on the MoM fronts: 32 optimal for typical
     // panels - but root-class WIDE panels want a fatter deferred-GEMM inner
     // dimension (k = nb), the same lever as the LDLT twin's adaptive nb. Pure
@@ -672,6 +713,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // Any front with a parent may delay.
     let may_delay = emit.delays && sched.parent[s] != usize::MAX;
     let (mut forced, mut floors) = (0usize, Vec::<(usize, T)>::new());
+    // The off-block rows of `L`: column `j` at `lrect + j * cn_l`.
+    let lrect = front.l.rect();
     // Columns `[npiv, live)` are still to pivot, `[live, nfs)` delayed.
     let (mut npiv, mut live) = (0usize, nfs);
     while npiv < live {
@@ -682,31 +725,36 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             while npiv < live && npiv - kb < nb_cdiv {
                 let k = npiv;
                 // Column `k` from row `kb` down, brought up to date with this
-                // panel's pivots `kb..k`. Where it may be delayed, in a copy, so a
-                // delayed column keeps the state of the columns still to come.
+                // panel's pivots `kb..k`: its fully-summed rows in a copy
+                // (`U`'s in `ut`, `L`'s in `lbuf`), its off-block rows in
+                // place, or in the copy too where the column may be delayed,
+                // so a delayed column keeps the state of the columns still
+                // to come.
+                col.clear();
+                // SAFETY: entries of the front.
+                col.extend((kb..k).map(|i| unsafe { *at(i, k) }));
+                let dk = front.l.at(k, k);
+                col.extend_from_slice(&lbuf[dk..dk + nfs - k]);
+                if may_delay {
+                    col.extend_from_slice(&lbuf[lrect + k * cn_l..lrect + (k + 1) * cn_l]);
+                }
                 let (stable, p, best, deep) = {
-                    let (before, rest) = lbuf.split_at_mut(k * nrow_l);
-                    let own = &mut rest[kb..nrow_l];
-                    let x: &mut [T] = if may_delay {
-                        col.clear();
-                        col.extend_from_slice(own);
-                        col
-                    } else {
-                        own
-                    };
-                    let (fs, offb) = x.split_at_mut(nfs - kb);
+                    let (ldiag, lrect_s) = lbuf.split_at_mut(lrect);
+                    let (before, rest) = lrect_s.split_at_mut(k * cn_l);
+                    let (fs, offb) = col.split_at_mut(nfs - kb);
+                    let offb = if may_delay { offb } else { &mut rest[..cn_l] };
                     for j in kb..k {
                         let u = fs[j - kb];
                         if u != T::zero() {
-                            let lj = &before[j * nrow_l + j + 1..j * nrow_l + nfs];
+                            let l0 = front.l.at(j + 1, j);
+                            let lj = &ldiag[l0..l0 + nfs - j - 1];
                             for (v, &l) in fs[j + 1 - kb..].iter_mut().zip(lj) {
                                 *v = *v - l * u;
                             }
                         }
                     }
                     let want = thresh_sq > 0.0;
-                    let deep =
-                        deep_update(before, nrow_l, nfs, kb, &fs[..k - kb], offb, want, deep_par);
+                    let deep = deep_update(before, cn_l, kb, &fs[..k - kb], offb, want, deep_par);
                     // The largest fully-summed candidate.
                     let cand = &fs[k - kb..];
                     let (mut p, mut best) = (0, cand[0].magnitude_sq());
@@ -730,7 +778,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             // panel's pivots have not touched either.
                             live -= 1;
                             for i in 0..nrow_l {
-                                lbuf.swap(k * nrow_l + i, live * nrow_l + i);
+                                // SAFETY: entries of the front.
+                                unsafe { std::ptr::swap(at(i, k), at(i, live)) };
                             }
                             cols.swap(k, live);
                             continue;
@@ -738,28 +787,28 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         forced += 1;
                     }
                     let reference = if stable { best.max(deep) } else { best };
-                    let diag = if may_delay {
-                        col[k - kb]
-                    } else {
-                        lbuf[k * nrow_l + k]
-                    };
-                    if p != 0 && diag.magnitude_sq() < thresh_sq * reference {
+                    if p != 0 && col[k - kb].magnitude_sq() < thresh_sq * reference {
                         piv_row = k + p;
                     }
                 }
+                for (i, &v) in (kb..k).zip(col.iter()) {
+                    // SAFETY: an entry of the front.
+                    unsafe { *at(i, k) = v };
+                }
+                let dk = front.l.at(k, k);
+                lbuf[dk..dk + nfs - k].copy_from_slice(&col[k - kb..nfs - kb]);
                 if may_delay {
-                    lbuf[k * nrow_l + kb..(k + 1) * nrow_l].copy_from_slice(col);
+                    lbuf[lrect + k * cn_l..lrect + (k + 1) * cn_l]
+                        .copy_from_slice(&col[nfs - kb..]);
                 }
                 if piv_row != k {
-                    for c in 0..nfs {
-                        lbuf.swap(c * nrow_l + k, c * nrow_l + piv_row);
-                    }
-                    for t in nfs..nrow_u {
-                        ut.swap(k * nrow_u + t, piv_row * nrow_u + t);
+                    for c in 0..nrow_u {
+                        // SAFETY: entries of the front.
+                        unsafe { std::ptr::swap(at(k, c), at(piv_row, c)) };
                     }
                     rows.swap(k, piv_row);
                 }
-                let mut piv = lbuf[k * nrow_l + k];
+                let mut piv = lbuf[dk];
                 match perturb_floor {
                     Some(floor) if piv.magnitude() < floor => {
                         let lifted = perturb_pivot(piv, floor);
@@ -771,12 +820,16 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     }
                     _ => {}
                 }
-                lbuf[k * nrow_l + k] = piv;
+                lbuf[dk] = piv;
                 let pinv = piv.recip();
-                let (fs, deep) =
-                    lbuf[k * nrow_l + k + 1..(k + 1) * nrow_l].split_at_mut(nfs - k - 1);
-                fs.iter_mut().for_each(|v| *v = *v * pinv);
-                deep_scale(deep, pinv, deep_par);
+                lbuf[dk + 1..dk + nfs - k]
+                    .iter_mut()
+                    .for_each(|v| *v = *v * pinv);
+                deep_scale(
+                    &mut lbuf[lrect + k * cn_l..lrect + (k + 1) * cn_l],
+                    pinv,
+                    deep_par,
+                );
                 npiv += 1;
             }
         }
@@ -786,131 +839,101 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             continue;
         }
         let _update = rsprobe::scope!(TRACE, "schur");
-        // TRSM: U = L11^-1 * (trailing panel columns of lbuf) and the U12 rows.
-        // Each trailing column is an independent forward substitution reading
-        // only the finished panel columns [kb, ke), so the block parallelizes
-        // over disjoint column chunks - bit-identical per-column op order.
-        // Profiled at 22% of cdiv CPU when serial (MoM fronts).
-        if (nfs - ke) * pw * pw >= ll_cdiv_par {
-            let (head, tail) = lbuf.split_at_mut(ke * nrow_l);
-            let work = row_pass::<T>((nfs - ke) * pw * pw / 2);
-            crate::parallel::chunks_mut(tail, nrow_l, work, |_, col| {
-                for r in (kb + 1)..ke {
-                    let mut acc = col[r];
-                    for i in kb..r {
-                        acc = acc - head[i * nrow_l + r] * col[i];
-                    }
-                    col[r] = acc;
-                }
-            });
-        } else {
-            for j in ke..nfs {
-                for r in (kb + 1)..ke {
-                    let mut acc = lbuf[j * nrow_l + r];
-                    for i in kb..r {
-                        acc = acc - lbuf[i * nrow_l + r] * lbuf[j * nrow_l + i];
-                    }
-                    lbuf[j * nrow_l + r] = acc;
-                }
-            }
-        }
-        // U12 rows (the `cn_u` contribution columns of U): the forward substitution
-        // over the panel rows, `x_r -= L[r, i] x_i` for `i` ascending, on whole rows
-        // of U12 (the contiguous runs `ut[r * nrow_u + nfs..(r + 1) * nrow_u]`), so every
-        // entry sees the operations of its own column's substitution in order;
-        // parallel over disjoint runs of the columns.
-        let trsm_u = |t0: usize, t1: usize, u: PanelPtr<T>, lref: &[T]| {
+        // TRSM: the rows `kb..ke` of `U` past the panel, `U[r, t]` for the
+        // front's columns `t` in `ke..nrow_u` (the trailing fully-summed ones
+        // and U12), `x_r -= L[r, i] x_i` for `i` ascending, on whole rows of
+        // `U` (contiguous in `ut`, once in its diagonal part and once in its
+        // rectangle), so every entry sees the operations of its own column's
+        // substitution in order; parallel over disjoint runs of the columns.
+        let trsm = |t0: usize, t1: usize| {
             for r in (kb + 1)..ke {
                 for i in kb..r {
-                    let l = lref[i * nrow_l + r];
-                    // SAFETY: rows `r != i` of `ut`, the caller's columns `[t0, t1)`.
+                    let l = lbuf[front.l.at(r, i)];
+                    // SAFETY: rows `r != i` of `U`, the caller's columns `[t0, t1)`,
+                    // all in one part of `ut`.
                     unsafe {
-                        let (xr, xi) = (u.get().add(r * nrow_u), u.get().add(i * nrow_u));
-                        for t in t0..t1 {
+                        let (xr, xi) = (at(r, t0), at(i, t0));
+                        for t in 0..t1 - t0 {
                             *xr.add(t) = *xr.add(t) - l * *xi.add(t);
                         }
                     }
                 }
             }
         };
-        let up = PanelPtr(ut.as_mut_ptr());
-        if cn_u * pw * pw >= ll_cdiv_par {
-            let lref: &[T] = lbuf;
+        let parts = [(ke, nfs), (nfs.max(ke), nrow_u)];
+        if (nrow_u - ke) * pw * pw >= ll_cdiv_par {
             let run = kt.k.trsm_rows;
-            crate::parallel::for_each(cn_u.div_ceil(run), row_pass::<T>(cn_u * pw * pw / 2), |b| {
-                let t0 = nfs + b * run;
-                trsm_u(t0, (t0 + run).min(nrow_u), up, lref)
-            });
+            let runs: Vec<(usize, usize)> = (parts.iter())
+                .flat_map(|&(p0, p1)| (p0..p1).step_by(run).map(move |t| (t, (t + run).min(p1))))
+                .collect();
+            crate::parallel::for_each(
+                runs.len(),
+                row_pass::<T>((nrow_u - ke) * pw * pw / 2),
+                |q| trsm(runs[q].0, runs[q].1),
+            );
         } else {
-            trsm_u(nfs, nrow_u, up, lbuf);
-        }
-        // GEMM: lbuf[ke.., ke..nfs] -= L21[ke.., kb..ke] * U[kb..ke, ke..nfs].
-        let mt = nrow_l - ke;
-        let nt = nfs - ke;
-        if mt > 0 && nt > 0 {
-            let par = if (mt * nt * pw) >= ll_cdiv_par {
-                gemm::Parallelism::Rayon(0)
-            } else {
-                gemm::Parallelism::None
-            };
-            let base = lbuf.as_mut_ptr();
-            // SAFETY: the three sub-blocks of `lbuf` are disjoint; strides in bounds.
-            unsafe {
-                crate::dense::gemm_backend::gemm(
-                    mt,
-                    nt,
-                    pw,
-                    base.add(ke * nrow_l + ke),
-                    nrow_l as isize,
-                    1,
-                    true,
-                    base.add(kb * nrow_l + ke),
-                    nrow_l as isize,
-                    1,
-                    base.add(ke * nrow_l + kb),
-                    nrow_l as isize,
-                    1,
-                    T::one(),
-                    T::zero() - T::one(),
-                    false,
-                    false,
-                    false,
-                    crate::dense::gemm_backend::GemmMode::new(par, &kt.k),
-                );
+            for &(p0, p1) in &parts {
+                if p1 > p0 {
+                    trsm(p0, p1);
+                }
             }
         }
-        // GEMM: U12[ke..nfs, :] -= L[ke..nfs, kb..ke] * U12[kb..ke, :].
-        if cn_u > 0 && nt > 0 {
-            let par = if (nt * cn_u * pw) >= ll_cdiv_par {
-                gemm::Parallelism::Rayon(0)
-            } else {
-                gemm::Parallelism::None
+        // The trailing update of the front's columns `ke..nfs`: on and below
+        // the diagonal in `lbuf`, `L[i, c] -= L[i, kb..ke] U[kb..ke, c]`, and
+        // above it in `ut`, `U^T[t, c] -= U^T[t, kb..ke] L[c, kb..ke]^T`
+        // (U11 and U12): two lower updates of the step's blocks, `G_l` the
+        // `L` rows past the panel and `G_u` the `U^T` rows past it.
+        let (mt_l, mt_u, cw) = (nrow_l - ke, nrow_u - ke, nfs - ke);
+        if cw > 0 {
+            let gather = |g: &mut Vec<T>, buf: &[T], lay: Layout, mt: usize| {
+                g.clear();
+                g.resize(mt * pw, T::zero());
+                for q in 0..pw {
+                    for r in lay.runs(ke..ke + mt, kb + q..kb + q + 1) {
+                        let (r0, len) = (r.rows.start - ke, r.rows.len());
+                        g[r0 + q * mt..r0 + len + q * mt].copy_from_slice(&buf[r.off..r.off + len]);
+                    }
+                }
             };
-            let lptr = lbuf.as_ptr();
-            let uptr = ut.as_mut_ptr();
-            // SAFETY: dst (U12 rows `ke..nfs`, `ut` columns) is disjoint from the
-            // read sub-blocks of `lbuf` and U12 (rows `kb..ke`); strides in bounds.
+            gather(lupd, lbuf, front.l, mt_l);
+            gather(uupd, ut, front.u, mt_u);
+            let tiles = |mt: usize| {
+                if mt * cw * pw >= ll_cdiv_par {
+                    (kt.k.cmod_tile(cw), kt.k.cmod_tile(mt))
+                } else {
+                    (kt.k.schur_tile, mt)
+                }
+            };
+            // SAFETY: the trailing columns of this node's own slots; the
+            // operands are its scratch.
             unsafe {
-                crate::dense::gemm_backend::gemm(
-                    nt,
-                    cn_u,
+                schur_tiles(
+                    lp.get(),
+                    front.l,
+                    ke,
+                    mt_l,
                     pw,
-                    uptr.add(ke * nrow_u + nfs),
-                    1,
-                    nrow_u as isize,
-                    true,
-                    lptr.add(kb * nrow_l + ke),
-                    nrow_l as isize,
-                    1,
-                    uptr.add(kb * nrow_u + nfs),
-                    1,
-                    nrow_u as isize,
-                    T::one(),
-                    T::zero() - T::one(),
-                    false,
-                    false,
-                    false,
-                    crate::dense::gemm_backend::GemmMode::new(par, &kt.k),
+                    &lupd[..],
+                    (&uupd[..], mt_u),
+                    (0, cw),
+                    tiles(mt_l),
+                    mt_l * cw * pw >= ll_cdiv_par,
+                    &pools.slab,
+                    &kt.k,
+                );
+                schur_tiles(
+                    up.get(),
+                    front.u,
+                    ke,
+                    mt_u,
+                    pw,
+                    &uupd[..],
+                    (&lupd[..], mt_l),
+                    (0, cw),
+                    tiles(mt_u),
+                    mt_u * cw * pw >= ll_cdiv_par,
+                    &pools.slab,
+                    &kt.k,
                 );
             }
         }
@@ -925,7 +948,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     let own_lists = npiv < nfs || extras;
     // SAFETY: each supernode's record is written by its own task, once,
     // before any reader.
-    let pv: &mut NodePivots = unsafe { emit.pivots.get_mut(s) };
+    let pv: &mut NodePivots<T> = unsafe { emit.pivots.get_mut(s) };
     let fill = |v: &mut Vec<Li>, from: &[Li]| {
         v.clear();
         v.extend_from_slice(from);
@@ -937,12 +960,128 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     fill(&mut pv.off_u, if own_lists { &cols[npiv..] } else { &[] });
     pv.extras = extras;
     pv.forced = forced;
+    pv.passed_cols.clear();
+    pv.passed_rows.clear();
+    if npiv < nfs {
+        // The passed pivots into the record, then the panels of the pivots
+        // taken in the layouts of `npiv` columns, the passed rows and columns
+        // the first ones past them, as the ancestors and the emit read them.
+        for j in npiv..nfs {
+            // SAFETY: entries of the front.
+            pv.passed_cols
+                .extend((npiv..nrow_l).map(|i| unsafe { *at(i, j) }));
+        }
+        for i in npiv..nfs {
+            // SAFETY: entries of the front.
+            pv.passed_rows
+                .extend((nfs..nrow_u).map(|t| unsafe { *at(i, t) }));
+        }
+        let mut tmp = pools.slab.take();
+        for (buf, from, m) in [(&mut *lbuf, front.l, nrow_l), (&mut *ut, front.u, nrow_u)] {
+            tmp.clear();
+            tmp.extend_from_slice(buf);
+            relayout(&tmp, from, buf, Layout::new(npiv, m - npiv));
+        }
+    }
     if !emit.delays {
         // Without delayed pivots every position is the analysis's.
         // SAFETY: this node's own indices.
         unsafe { emit.place(s, emit.e_offset[s]) };
     }
     Ok(())
+}
+
+/// The front of an LU node: its `L` panel (laid out as `l`) holds the
+/// entries on and below the diagonal, its `U^T` panel (laid out as `u`) the
+/// ones above it, transposed. `lb[j]` and `ub[j]` place column `j`'s rows of
+/// the fully-summed block: row `i` of `L`'s column `j` at `lb[j] + i`, of
+/// `U^T`'s at `ub[j] + i`.
+#[derive(Clone, Copy)]
+struct Front<'a> {
+    l: Layout,
+    u: Layout,
+    lb: &'a [usize],
+    ub: &'a [usize],
+}
+
+impl<'a> Front<'a> {
+    /// The front laid out as `l` and `u`, its tables in `lb` and `ub`.
+    fn new(l: Layout, u: Layout, lb: &'a mut Vec<usize>, ub: &'a mut Vec<usize>) -> Self {
+        lb.clear();
+        lb.extend((0..l.w).map(|j| l.at(j, j) - j));
+        ub.clear();
+        ub.extend((0..u.w).map(|j| u.at(j, j) - j));
+        Front { l, u, lb, ub }
+    }
+
+    /// Entry `(i, j)` of the front in the panels `lp` and `up`.
+    ///
+    /// # Safety
+    /// `lp` and `up` are the panels laid out as `self`.
+    #[inline]
+    unsafe fn ptr<T>(&self, lp: *mut T, up: *mut T, i: usize, j: usize) -> *mut T {
+        let nfs = self.l.w;
+        if i >= j {
+            if i < nfs {
+                lp.add(self.lb[j] + i)
+            } else {
+                lp.add(self.l.rect() + j * self.l.m + i - nfs)
+            }
+        } else if j < nfs {
+            up.add(self.ub[i] + j)
+        } else {
+            up.add(self.u.rect() + i * self.u.m + j - nfs)
+        }
+    }
+}
+
+/// `front(row(i), col(j)) -= upd[i + j * m]` for the `m x n` update
+/// `upd`, `col(j)` a fully-summed column: column by column, each column's
+/// places in the panels taken once.
+///
+/// # Safety
+/// `lp` and `up` are the front's panels; its entries addressed are the
+/// caller's.
+unsafe fn scatter<T: Scalar>(
+    front: &Front<'_>,
+    (lp, up): (*mut T, *mut T),
+    upd: &[T],
+    (m, n): (usize, usize),
+    row: impl Fn(usize) -> usize,
+    col: impl Fn(usize) -> usize,
+) {
+    let nfs = front.l.w;
+    for j in 0..n {
+        let c = col(j);
+        debug_assert!(c < nfs);
+        // rows `r` of column `c`: `L`'s fully-summed at `ld + r`, its
+        // off-block ones at `lr + r`, `U`'s above the diagonal in `ut`
+        let (ld, lr) = (front.lb[c], front.l.rect() + c * front.l.m - nfs);
+        let u = &upd[j * m..(j + 1) * m];
+        for (i, &v) in u.iter().enumerate() {
+            let r = row(i);
+            let d = if r >= nfs {
+                lp.add(lr + r)
+            } else if r >= c {
+                lp.add(ld + r)
+            } else {
+                up.add(front.ub[r] + c)
+            };
+            *d = *d - v;
+        }
+    }
+}
+
+/// The first `to.w` columns of the panel `src` (laid out as `from`, the same
+/// rows) laid out as `to` in `dst`.
+fn relayout<T: Copy>(src: &[T], from: Layout, dst: &mut [T], to: Layout) {
+    debug_assert!(to.w <= from.w && to.w + to.m == from.w + from.m);
+    for j in 0..to.w {
+        let jb = j / crate::constants::PANEL_BLOCK * crate::constants::PANEL_BLOCK;
+        for i in jb..to.w + to.m {
+            dst[to.at(i, j)] = src[from.at(i, j)];
+        }
+    }
 }
 
 /// Heap bytes [`lu_ll_factor_node`] allocates for supernode `s` while it
@@ -969,7 +1108,10 @@ pub(super) fn lu_node_scratch<T: Scalar>(
     let (nrow_l, cn_u) = (st.rows_l(s).len(), cols_u.len() - ncol);
     let nb = k.panel_width(k.lu_panel_nb, ncol);
     let lists = (nrow_l + cols_u.len()) * crate::constants::IDX32_BYTES;
-    let cdiv = nrow_l * vb + lists;
+    // The pivot column, the step's `L` and `U^T` rows past each panel, and
+    // the trailing updates' diagonal tiles on up to `workers` threads.
+    let tile = k.cmod_tile(ncol).max(k.schur_tile).min(ncol);
+    let cdiv = (nrow_l + (nrow_l + cols_u.len()) * nb + tile * tile * workers.max(1)) * vb + lists;
     // The cdiv's two GEMMs per panel: the trailing `L` update and the `U12` rows.
     let mut planes = 0;
     if T::COMPLEX {

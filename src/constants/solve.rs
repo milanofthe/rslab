@@ -51,15 +51,6 @@ pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
 /// the tile width only groups them).
 pub const SOLVE_RHS_TILE: usize = 4;
 
-/// Columns per block of a node's diagonal triangle in the sweeps through
-/// GEMMs (columns).
-/// Used by: `supernodal::solve::SolvePlan::fwd_node_gemm`, `bwd_node_gemm`.
-/// Why: each block's triangle runs on the register tiles and the rows below it
-/// in the block take one product; 64 keeps the triangles a small share and
-/// the products wide enough for the SIMD GEMM.
-/// Contract: rounding.
-pub const SOLVE_DIAG_BLOCK: usize = 64;
-
 /// Work of a row chunk of a node's products in the sweeps, in panel entries
 /// times right-hand sides: a product of more is cut into row chunks, which
 /// an ancestor runs on the pool.
