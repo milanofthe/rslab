@@ -1138,10 +1138,26 @@ fn a_posteriori<T: Scalar>(
     let (lp, up) = (b.lp, b.up);
     // SAFETY (every use): entries of the node's own slots.
     let at = |i: usize, j: usize| unsafe { front.ptr(lp.get(), up.get(), i, j) };
+    // Column `j`'s entries from row `r0` on: those above the diagonal one
+    // by one, those on and below it in its runs of the `L` panel.
+    let runs = |j: usize, r0: usize| {
+        let col = front.l.col(j);
+        let fs = (col.at(j), nfs - j);
+        let off = (col.at(nfs.max(j)), nrow_l - nfs.max(j));
+        (r0..j, [fs, off])
+    };
+    // SAFETY: a run of column `j` of the `L` panel.
+    let run = |(at, len): (usize, usize)| unsafe {
+        std::slice::from_raw_parts_mut(lp.get().add(at), len)
+    };
     sc.backup.clear();
     for j in kb..ke {
+        let (upper, lower) = runs(j, kb);
         // SAFETY: as above.
-        sc.backup.extend((kb..nrow_l).map(|i| unsafe { *at(i, j) }));
+        sc.backup.extend(upper.map(|i| unsafe { *at(i, j) }));
+        for r in lower {
+            sc.backup.extend_from_slice(run(r));
+        }
     }
     let floors0 = floors.len();
     // The diagonal block, dense: an LU without interchanges.
@@ -1149,7 +1165,8 @@ fn a_posteriori<T: Scalar>(
     blk.clear();
     for j in 0..pw {
         // SAFETY: as above.
-        blk.extend((0..pw).map(|i| unsafe { *at(kb + i, kb + j) }));
+        blk.extend((0..j).map(|i| unsafe { *at(kb + i, kb + j) }));
+        blk.extend_from_slice(&run(runs(kb + j, kb).1[0])[..pw - j]);
     }
     let mut good = pw;
     sc.pinv.clear();
@@ -1224,10 +1241,11 @@ fn a_posteriori<T: Scalar>(
     // The block's columns into the panels: `L` on and below the diagonal,
     // `U` above it.
     for j in 0..good {
-        for i in 0..pw {
+        for i in 0..j {
             // SAFETY: as above.
             unsafe { *at(kb + i, kb + j) = blk[i + j * pw] };
         }
+        run(runs(kb + j, kb).1[0])[..pw - j].copy_from_slice(&blk[j + j * pw..(j + 1) * pw]);
     }
     // Each column's largest squared multiplier, its rows in the block and
     // below it.
@@ -1252,10 +1270,16 @@ fn a_posteriori<T: Scalar>(
     let f = kb + sc.cmax.iter().position(|&m| !passes(m)).unwrap_or(good);
     if f < ke {
         for j in f..ke {
-            let col = &sc.backup[(j - kb) * (nrow_l - kb)..(j - kb + 1) * (nrow_l - kb)];
-            for (i, &v) in (kb..nrow_l).zip(col) {
+            let mut col = &sc.backup[(j - kb) * (nrow_l - kb)..(j - kb + 1) * (nrow_l - kb)];
+            let (upper, lower) = runs(j, kb);
+            for i in upper {
                 // SAFETY: as above.
-                unsafe { *at(i, j) = v };
+                unsafe { *at(i, j) = col[0] };
+                col = &col[1..];
+            }
+            for r in lower {
+                run(r).copy_from_slice(&col[..r.1]);
+                col = &col[r.1..];
             }
         }
         let mut kept = floors0;
