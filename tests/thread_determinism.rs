@@ -1,9 +1,9 @@
 //! What every thread count gives: a factorization whose solves meet the
 //! error bound of the problem, and at a fixed thread count the same result
-//! from run to run. The tiles of a node's updates follow the workers
-//! (`KernelSettings::update_tile`), so different thread counts round
-//! differently; each is held to the normwise backward error of a stable
-//! solve, `|A x - b| / (|A| |x| + |b|) <= GROWTH * gamma_m` with
+//! from run to run. Equal bits across thread counts are not part of the
+//! contract (a division of the work that follows the workers rounds
+//! otherwise); each count is held to the normwise backward error of a
+//! stable solve, `|A x - b| / (|A| |x| + |b|) <= GROWTH * gamma_m` with
 //! `gamma_m = m u / (1 - m u)`, `u` the unit roundoff and `m` the dimension
 //! (twice it for complex arithmetic). The test matrices are diagonally
 //! dominant, where elimination grows the entries at most by `GROWTH`.
@@ -161,8 +161,7 @@ fn grid3d_conv(k: usize) -> GeneralCsc<f64> {
 }
 
 /// Grid edge sizes: larger in release; debug (the CI profile) shrinks them
-/// so the factors fit the runner budget. Every size has nodes whose updates
-/// run in tiles at eight threads.
+/// so the factors fit the runner budget.
 const K_LDLT: usize = if cfg!(debug_assertions) { 16 } else { 24 };
 const K_LDLT_C: usize = 16;
 const K_LU: usize = if cfg!(debug_assertions) { 14 } else { 22 };
