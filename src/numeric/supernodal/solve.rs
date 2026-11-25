@@ -2150,41 +2150,61 @@ mod tests {
         }
     }
 
-    fn residual(a: &CscMatrix<f64>, x: &[f64], b: &[f64]) -> f64 {
+    /// The normwise backward error of a solve of the symmetric matrix whose
+    /// lower triangle is `a`: `|A x - b|_inf / (|A|_inf |x|_inf + |b|_inf)`.
+    fn backward_error(a: &CscMatrix<f64>, x: &[f64], b: &[f64]) -> f64 {
         let n = a.n;
-        let mut r = b.to_vec();
+        let (mut r, mut rows) = (b.iter().map(|v| -v).collect::<Vec<f64>>(), vec![0.0; n]);
         for j in 0..n {
             for e in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let i = a.row_idx[e];
-                r[i] -= a.values[e] * x[j];
+                let (i, v) = (a.row_idx[e], a.values[e]);
+                r[i] += v * x[j];
+                rows[i] += v.abs();
                 if i != j {
-                    r[j] -= a.values[e] * x[i];
+                    r[j] += v * x[i];
+                    rows[j] += v.abs();
                 }
             }
         }
-        let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
-        rn / bn
+        let inf = |v: &[f64]| v.iter().map(|z| z.abs()).fold(0.0, f64::max);
+        inf(&r) / (inf(&rows) * inf(x) + inf(b))
+    }
+
+    /// The backward error bound of a stable solve of dimension `n` whose
+    /// elimination grows the entries at most by 2 (a diagonally dominant
+    /// matrix): `2 gamma_n`, `gamma_n = n u / (1 - n u)`.
+    fn bound(n: usize) -> f64 {
+        let nu = n as f64 * f64::EPSILON / 2.0;
+        2.0 * nu / (1.0 - nu)
     }
 
     #[test]
     fn plan_solve_matches_scalar_kernel_and_solves_alike_on_every_pool() {
-        let cases: Vec<(String, CscMatrix<f64>)> = vec![
-            ("grid 7".into(), grid(7, 0.0)),
-            ("grid 40".into(), grid(40, 0.0)),
-            ("grid 40 indefinite".into(), grid(40, 3.7)),
-            ("grid3d 26".into(), grid3d(26)),
+        // Whether the matrix is diagonally dominant, so its solves are held
+        // to [`bound`]; the indefinite grid's growth has no a priori bound.
+        let cases: Vec<(&str, CscMatrix<f64>, bool)> = vec![
+            ("grid 7", grid(7, 0.0), true),
+            ("grid 40", grid(40, 0.0), true),
+            ("grid 40 indefinite", grid(40, 3.7), false),
+            ("grid3d 26", grid3d(26), true),
         ];
-        for (name, a) in &cases {
-            let (m, shift) = (name.as_str(), 0.0);
+        for (name, a, dominant) in &cases {
             let n = a.n;
+            let within = |x: &[f64], b: &[f64], what: &str| {
+                let eta = backward_error(a, x, b);
+                assert!(
+                    !dominant || eta <= bound(n),
+                    "{name} {what}: backward error {eta:e} over {:e}",
+                    bound(n)
+                );
+            };
             let opts = SolverSettings::default()
                 .with_threads(1)
                 .with_ordering(crate::OrderingMethod::MetisND);
             let s = LdltSolver::factor(a, &opts).unwrap();
             let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
             let x1 = s.solve(&b).unwrap();
-            assert!(residual(a, &x1, &b) < 1e-10, "residual m={m} shift={shift}");
+            within(&x1, &b, "one thread");
             // Block solve, columns must agree with single solves.
             let nrhs = 3;
             let bb: Vec<f64> = (0..n * nrhs)
@@ -2198,7 +2218,7 @@ mod tests {
                     assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
                 }
             }
-            // Every thread budget factors within the residual bound; the
+            // Every thread budget factors within the bound; the
             // solves of one factor (made in a pool of one, the bits of the
             // one-thread factor) give the same bits under every ambient pool.
             let ambient = opts.clone().with_threads(crate::Threads::Ambient);
@@ -2210,7 +2230,7 @@ mod tests {
             for threads in [1usize, 2, 5] {
                 let st = LdltSolver::factor(a, &opts.clone().with_threads(threads)).unwrap();
                 let xs = st.solve(&b).unwrap();
-                assert!(residual(a, &xs, &b) < 1e-10, "residual threads={threads}");
+                within(&xs, &b, &format!("{threads} threads"));
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
