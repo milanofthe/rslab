@@ -61,6 +61,10 @@ tool=$(git -C "$REPO" stash create)
 tool=${tool:-$(git -C "$REPO" rev-parse HEAD)}
 mkdir -p "$stage/rslab"
 git -C "$REPO" archive --format=tar "$tool" -- benches ':(exclude)benches/bench_out' | tar -x -C "$stage/rslab"
+# the private sources of this machine (corpus.py LOCAL and its modules), not versioned
+for f in "$HERE"/*.local.*; do
+  if [ -e "$f" ]; then cp "$f" "$stage/rslab/benches/corpus/"; fi
+done
 
 caches=(--cache "$CACHE")
 for a in "$@"; do

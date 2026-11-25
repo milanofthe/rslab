@@ -49,6 +49,9 @@ benches/bench_out/*
 !benches/bench_out/fgmres_accounting.jsonl
 !benches/bench_out/adaptive_restart.jsonl
 
+# The corpus' private sources of a machine (benches/corpus/sources.example.toml)
+benches/corpus/*.local.*
+
 # Local calibration cache (the `tuning` feature also writes this to the OS temp dir)
 rslab-calib/
 rla-calib/

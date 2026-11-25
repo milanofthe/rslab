@@ -1,0 +1,13 @@
+# Sources of the corpus from repositories that are not public: copy to sources.local.toml
+# (not versioned) and fill in. `module` is a Python file next to it (name it *.local.py,
+# also not versioned) with `build(src, out, work, only, reuse)`: it builds the shipped tree
+# src/<source>, dumps its matrices into work and writes each with corpus.save (`from corpus
+# import save, pinned, run, venv, wheel`). `ships` names other pinned trees the build reads.
+
+[sources.mysolver]
+repo = "owner/mysolver"
+commit = "0123456789abcdef0123456789abcdef01234567"
+paths = ["."]
+feeds = ["mom"]
+ships = ["circuits"]
+module = "mysolver.local.py"
