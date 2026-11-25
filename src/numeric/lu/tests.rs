@@ -1266,12 +1266,11 @@ fn delays_past_their_allowance_fall_back() {
     assert!(dropped.delays_dropped && dropped.delayed == 0);
 }
 
-#[test]
-fn delayed_pivots_carry_rows_beyond_the_structure() {
-    // The grid with one direction of every third coupling dropped: a
-    // structurally unsymmetric pattern, where the rows a delayed pivot
-    // carries may lie outside its parent's exact structure.
-    let g = off_diagonal_pivots(26, 1e-9, 11);
+/// [`off_diagonal_pivots`] with one direction of every third coupling
+/// dropped: a structurally unsymmetric pattern, where the rows a delayed
+/// pivot carries may lie outside its parent's exact structure.
+fn unsymmetric_off_diagonal_pivots(k: usize, diag: f64, seed: u64) -> GeneralCsc<f64> {
+    let g = off_diagonal_pivots(k, diag, seed);
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..g.n {
         for p in g.col_ptr[j]..g.col_ptr[j + 1] {
@@ -1284,7 +1283,12 @@ fn delayed_pivots_carry_rows_beyond_the_structure() {
             v.push(g.values[p]);
         }
     }
-    let a = GeneralCsc::<f64>::from_triplets(g.n, &r, &c, &v).unwrap();
+    GeneralCsc::<f64>::from_triplets(g.n, &r, &c, &v).unwrap()
+}
+
+#[test]
+fn delayed_pivots_carry_rows_beyond_the_structure() {
+    let a = unsymmetric_off_diagonal_pivots(26, 1e-9, 11);
     let b: Vec<f64> = (0..a.n).map(|i| ((i * 5 % 11) as f64) - 5.0).collect();
     let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let confined = LuSolver::factor(&a, &delays_settings(false)).unwrap();
@@ -1298,4 +1302,53 @@ fn delayed_pivots_carry_rows_beyond_the_structure() {
         rel < 1e-8 && rel < 1e-3 * rel0,
         "residual {rel:.1e} with delays, {rel0:.1e} without"
     );
+}
+
+/// The update of a node in units of its layout (the forking path, which a
+/// node of enough update work takes; here every node) solves the system
+/// as the sequential update does on structurally unsymmetric patterns:
+/// there an updater whose `U` columns alone reach a node carries columns
+/// past it that the node's structure lacks. Without and with the row
+/// matching, and with delayed pivots that carry rows and columns beyond
+/// the structure.
+#[test]
+fn forked_update_on_unsymmetric_structures() {
+    use crate::numeric::settings::{KernelSettings, Threads};
+    let forked = |s: &SolverSettings| SolverSettings {
+        kernels: KernelSettings {
+            fork_min_flops: 0,
+            par_gemm: 0,
+            ..s.kernels
+        },
+        ..s.clone()
+    };
+    // (the bounds: dense partial pivoting on the diagonally dominant
+    // matrices 1e-15, on the grid 1e-9)
+    let cases = [
+        (
+            unsymmetric_holes(600, 3, 7, false),
+            SolverSettings::default().with_matching(false),
+            1e-12,
+        ),
+        (
+            unsymmetric_holes(600, 3, 11, true),
+            SolverSettings::default().with_matching(true),
+            1e-12,
+        ),
+        (
+            unsymmetric_off_diagonal_pivots(26, 1e-9, 11),
+            delays_settings(true),
+            1e-8,
+        ),
+    ];
+    for (c, (a, s, bound)) in cases.iter().enumerate() {
+        let s = s.clone().with_threads(Threads::Fixed(4));
+        let b: Vec<f64> = (0..a.n).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
+        let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for (path, s) in [("sequential", s.clone()), ("forked", forked(&s))] {
+            let f = LuSolver::factor(a, &s).unwrap();
+            let rel = resid(a, &f.solve(&b).unwrap(), &b) / bnorm;
+            assert!(rel < *bound, "case {c}, {path} update: residual {rel:.1e}");
+        }
+    }
 }

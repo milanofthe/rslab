@@ -390,8 +390,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 for &g in &ou[p0u..p1u] {
                     wl[(g as usize - first) / nb] += ((ol.len() - p0l) * nck) as f64;
                 }
-                for &g in &ou[p1u..] {
-                    wu[(gloc_u[g as usize] as usize - nfs) / nb] += ((p1l - p0l) * nck) as f64;
+                // `U12` takes the columns past `s` of an updater whose `L`
+                // rows land here, the structure's rule; those of one whose
+                // `U` columns alone reach `s` may lie outside the front.
+                if p1l > p0l {
+                    for &g in &ou[p1u..] {
+                        wu[(gloc_u[g as usize] as usize - nfs) / nb] += ((p1l - p0l) * nck) as f64;
+                    }
                 }
             }
             let rate = UPDATE_RATE.of::<T>();
