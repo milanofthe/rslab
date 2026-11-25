@@ -12,7 +12,7 @@ An automatic path over them factors one pattern for many value sets (Newton
 loops, sweeps) in the path its predicted work calls for, refactoring in place.
 
 Generic over `f64`, `f32`, `Complex<f64>` and `Complex<f32>`. The factor is
-bit-identical for every thread count, memory and flops are estimated from the
+reproducible for a fixed thread count, memory and flops are estimated from the
 analysis before any numeric work, and every factor doubles as a preconditioner
 for the built-in Krylov solvers (GMRES, block GMRES, COCG, COCR). For methods
 on top of a solver, a block Arnoldi iteration on any operator

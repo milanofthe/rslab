@@ -16,7 +16,7 @@
 //! | [`KluSolver`] | block triangular form, per-block Gilbert-Peierls LU | circuit-shaped matrices |
 //!
 //! The LDL^T and LU paths are left-looking supernodal and run in parallel over
-//! the elimination tree; the factor is bit-identical for every thread count.
+//! the elimination tree; the factor is reproducible for a fixed thread count.
 //! Every factor is also a [`Preconditioner`] for the Krylov solvers.
 //!
 //! ## Analyze once, factor many
