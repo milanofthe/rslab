@@ -2,6 +2,17 @@
 //! of its factored descendants (`cmod`, into both `L` and `U12`), the
 //! delayed pivots its children pass, then the blocked panel LU with
 //! threshold partial pivoting, which may delay pivots in turn (`delay`).
+//!
+//! The panel is factored by a posteriori threshold pivoting (Duff, Hogg and
+//! Lopez, "A new sparse LDL^T solver using a posteriori threshold
+//! pivoting", SIAM J. Sci. Comput. 42(2), 2020; Hogg, Ovtchinnikov and
+//! Scott, ACM TOMS 42(1), 2016, for the symmetric case): a block of columns
+//! on its diagonal pivots, the rows below it by one triangular solve, and
+//! each column's multipliers checked against the threshold afterwards
+//! ([`a_posteriori`]). The columns up to the first that fails are kept; that
+//! one is decided as it stands, by an interchange, a delay or a forced pivot,
+//! and the next block starts after it. The pivots chosen are the ones the
+//! threshold test of each column takes.
 
 use super::delay::NodePivots;
 use super::factor::LlEmit;
@@ -34,6 +45,7 @@ pub(super) struct LuScratch<T> {
     uupd: Vec<T>,
     lb: Vec<usize>,
     ub: Vec<usize>,
+    a_post: APost<T>,
 }
 
 impl<T> crate::memory::HeapBytes for LuScratch<T> {
@@ -48,6 +60,11 @@ impl<T> crate::memory::HeapBytes for LuScratch<T> {
             + b(&self.uupd)
             + b(&self.lb)
             + b(&self.ub)
+            + b(&self.a_post.backup)
+            + b(&self.a_post.block)
+            + b(&self.a_post.pinv)
+            + b(&self.a_post.cmax)
+            + b(&self.a_post.bases)
     }
 }
 
@@ -63,6 +80,7 @@ impl<T> Default for LuScratch<T> {
             uupd: Vec::new(),
             lb: Vec::new(),
             ub: Vec::new(),
+            a_post: APost::default(),
         }
     }
 }
@@ -218,6 +236,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         uupd,
         lb,
         ub,
+        a_post,
     } = &mut *lent;
     // The off-block rows and columns: the structure's, and those beyond it
     // that the delayed pivots of the children carry or that an updater with
@@ -707,14 +726,14 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // The pivots and the emit of the front, timed apart from its updates.
     let _pivot = rsprobe::scope!(TRACE, "pivot");
     // cdiv: in-place **blocked** panel LU, no trailing update outside the
-    // panel: a getrf - an NB-wide panel factored column by column, then the
-    // dominant trailing update as SIMD GEMMs (rank-NB) - restricted to the
-    // front's fully-summed columns and the `U12` rows, with no `A22`/CB.
-    // Within an NB panel the columns are brought up to date one at a time
-    // from its earlier pivots (left-looking, a GEMV for the off-block rows),
-    // so each pivot is decided on the column as it stands, its off-block rows
-    // included, while every column still to come keeps the state of the
-    // panel's start.
+    // panel: a getrf - an NB-wide panel factored on its diagonal pivots and
+    // checked a posteriori (see the module docs), then the dominant trailing
+    // update as SIMD GEMMs (rank-NB) - restricted to the front's
+    // fully-summed columns and the `U12` rows, with no `A22`/CB. A column
+    // that fails the check is brought up to date from the panel's earlier
+    // pivots (left-looking, a GEMV for the off-block rows) and decided on as
+    // it stands, its off-block rows included, while every column still to
+    // come keeps the state of the panel's start.
     // Panel width. Swept 32/48/64/96 on the MoM fronts: 32 optimal for typical
     // panels - but root-class WIDE panels want a fatter deferred-GEMM inner
     // dimension (k = nb), the same lever as the LDLT twin's adaptive nb. Pure
@@ -755,7 +774,36 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         let kb = npiv;
         {
             let _panel = rsprobe::scope!(TRACE, "panel");
-            while npiv < live && npiv - kb < nb_cdiv {
+            // The block of the next columns factored on its diagonal pivots
+            // and checked afterwards; its columns up to the first one that
+            // fails the test are kept.
+            let ke_try = (kb + nb_cdiv).min(live);
+            let f = a_posteriori(
+                &mut Block {
+                    kb,
+                    ke: ke_try,
+                    nfs,
+                    nrow_l,
+                    front,
+                    lp,
+                    up,
+                    thresh_sq,
+                    perturb_floor,
+                },
+                a_post,
+                &mut floors,
+            );
+            rsprobe::add!("lu blocks", 1);
+            npiv = f;
+            // The failing column decided as it stands, by an interchange, a
+            // delay or a forced pivot; the block ends there.
+            let stop = if f < ke_try {
+                rsprobe::add!("lu blocks rolled back", 1);
+                f + 1
+            } else {
+                f
+            };
+            while npiv < live && npiv < stop {
                 let k = npiv;
                 // Column `k` from row `kb` down, brought up to date with this
                 // panel's pivots `kb..k`: its fully-summed rows in a copy
@@ -1024,6 +1072,204 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     Ok(())
 }
 
+/// The buffers of [`a_posteriori`]: the block's columns as they were, its
+/// diagonal block, each column's largest multiplier and where its rows lie.
+pub(super) struct APost<T> {
+    backup: Vec<T>,
+    block: Vec<T>,
+    pinv: Vec<T>,
+    cmax: Vec<f64>,
+    bases: Vec<(usize, usize)>,
+}
+
+impl<T> Default for APost<T> {
+    fn default() -> Self {
+        APost {
+            backup: Vec::new(),
+            block: Vec::new(),
+            pinv: Vec::new(),
+            cmax: Vec::new(),
+            bases: Vec::new(),
+        }
+    }
+}
+
+/// A block of a front's columns `kb..ke` to factor ([`a_posteriori`]).
+struct Block<'a, T> {
+    kb: usize,
+    ke: usize,
+    nfs: usize,
+    nrow_l: usize,
+    front: Front<'a>,
+    lp: PanelPtr<T>,
+    up: PanelPtr<T>,
+    thresh_sq: f64,
+    perturb_floor: Option<f64>,
+}
+
+/// Factor the columns `kb..ke` of a front on their diagonal pivots and check
+/// each afterwards (a posteriori threshold pivoting, Duff, Hogg and Lopez,
+/// SIAM J. Sci. Comput. 42(2), 2020; Hogg, Ovtchinnikov and Scott, ACM TOMS
+/// 42(1), 2016): the block's diagonal block by an LU without interchanges,
+/// the rows below it, the rest of the fully-summed rows and the off-block
+/// rows, by one triangular solve over all of them on the pool, then each
+/// column's largest multiplier against the threshold, the test the column
+/// path makes before it pivots: a diagonal pivot is kept where
+/// `|a_kk| >= u |a_ik|` for every row `i` below it, so where every
+/// multiplier `|l_ik| <= 1 / u`. Returns the first column that fails (or
+/// whose pivot is zero), `ke` where none does; the columns from it on are
+/// put back as they were, the ones before it are factored (pivot floors
+/// pushed to `floors`), with the same operations in the same order as the
+/// column path would take on them.
+fn a_posteriori<T: Scalar>(
+    b: &mut Block<'_, T>,
+    sc: &mut APost<T>,
+    floors: &mut Vec<(usize, T)>,
+) -> usize {
+    let Block {
+        kb,
+        ke,
+        nfs,
+        nrow_l,
+        front,
+        ..
+    } = *b;
+    let pw = ke - kb;
+    let (lp, up) = (b.lp, b.up);
+    // SAFETY (every use): entries of the node's own slots.
+    let at = |i: usize, j: usize| unsafe { front.ptr(lp.get(), up.get(), i, j) };
+    sc.backup.clear();
+    for j in kb..ke {
+        // SAFETY: as above.
+        sc.backup.extend((kb..nrow_l).map(|i| unsafe { *at(i, j) }));
+    }
+    let floors0 = floors.len();
+    // The diagonal block, dense: an LU without interchanges.
+    let blk = &mut sc.block;
+    blk.clear();
+    for j in 0..pw {
+        // SAFETY: as above.
+        blk.extend((0..pw).map(|i| unsafe { *at(kb + i, kb + j) }));
+    }
+    let mut good = pw;
+    sc.pinv.clear();
+    for k in 0..pw {
+        let mut piv = blk[k + k * pw];
+        match b.perturb_floor {
+            Some(floor) if piv.magnitude() < floor => {
+                let lifted = perturb_pivot(piv, floor);
+                floors.push((kb + k, lifted - piv));
+                piv = lifted;
+            }
+            None if piv == T::zero() => {
+                good = k;
+                break;
+            }
+            _ => {}
+        }
+        blk[k + k * pw] = piv;
+        let pinv = piv.recip();
+        sc.pinv.push(pinv);
+        for i in k + 1..pw {
+            blk[i + k * pw] = blk[i + k * pw] * pinv;
+        }
+        for j in k + 1..pw {
+            let u = blk[k + j * pw];
+            if u != T::zero() {
+                for i in k + 1..pw {
+                    blk[i + j * pw] = blk[i + j * pw] - blk[i + k * pw] * u;
+                }
+            }
+        }
+    }
+    // The rows below the block: `x_j -= l_k u_kj` in `k` order, each column
+    // scaled at its turn, row by row on the pool.
+    let below = nrow_l - ke;
+    sc.bases.clear();
+    sc.bases.extend((kb..kb + good).map(|j| {
+        let lay = front.l;
+        (
+            if ke < nfs { lay.at(ke, j) } else { 0 },
+            if nrow_l > nfs { lay.at(nfs, j) } else { 0 },
+        )
+    }));
+    let (bases, blk, pinv) = (&sc.bases[..], &sc.block[..], &sc.pinv[..]);
+    let solve_row = |r: usize| {
+        let i = ke + r;
+        let off = |k: usize| {
+            if i < nfs {
+                bases[k].0 + i - ke
+            } else {
+                bases[k].1 + i - nfs
+            }
+        };
+        // SAFETY: row `i` of the block's columns, this call's alone.
+        unsafe {
+            for k in 0..good {
+                let xk = lp.get().add(off(k));
+                let v = *xk * pinv[k];
+                *xk = v;
+                for j in k + 1..good {
+                    let u = blk[k + j * pw];
+                    if u != T::zero() {
+                        let xj = lp.get().add(off(j));
+                        *xj = *xj - v * u;
+                    }
+                }
+            }
+        }
+    };
+    let ops = below * good * good / 2;
+    crate::parallel::for_each(below, row_pass::<T>(ops.max(below)), solve_row);
+    // The block's columns into the panels: `L` on and below the diagonal,
+    // `U` above it.
+    for j in 0..good {
+        for i in 0..pw {
+            // SAFETY: as above.
+            unsafe { *at(kb + i, kb + j) = blk[i + j * pw] };
+        }
+    }
+    // Each column's largest squared multiplier, its rows in the block and
+    // below it.
+    sc.cmax.clear();
+    sc.cmax.resize(good, 0.0);
+    let cm = PanelPtr(sc.cmax.as_mut_ptr());
+    let lbuf = lp;
+    crate::parallel::for_each(good, row_pass::<T>((good * (nrow_l - kb)).max(1)), |k| {
+        let j = kb + k;
+        let mut top = (k + 1..pw)
+            .map(|i| blk[i + k * pw].magnitude_sq())
+            .fold(0.0f64, f64::max);
+        for run in front.l.runs(ke..nrow_l, j..j + 1) {
+            // SAFETY: a column of the node's `L` panel, only read here.
+            let v = unsafe { std::slice::from_raw_parts(lbuf.get().add(run.off), run.rows.len()) };
+            top = v.iter().map(|x| x.magnitude_sq()).fold(top, f64::max);
+        }
+        // SAFETY: entry `k`, this call's alone.
+        unsafe { *cm.get().add(k) = top };
+    });
+    let passes = |m: f64| b.thresh_sq <= 0.0 || b.thresh_sq * m <= 1.0;
+    let f = kb + sc.cmax.iter().position(|&m| !passes(m)).unwrap_or(good);
+    if f < ke {
+        for j in f..ke {
+            let col = &sc.backup[(j - kb) * (nrow_l - kb)..(j - kb + 1) * (nrow_l - kb)];
+            for (i, &v) in (kb..nrow_l).zip(col) {
+                // SAFETY: as above.
+                unsafe { *at(i, j) = v };
+            }
+        }
+        let mut kept = floors0;
+        for q in floors0..floors.len() {
+            if floors[q].0 < f {
+                floors.swap(kept, q);
+                kept += 1;
+            }
+        }
+        floors.truncate(kept);
+    }
+    f
+}
+
 /// The front of an LU node: its `L` panel (laid out as `l`) holds the
 /// entries on and below the diagonal, its `U^T` panel (laid out as `u`) the
 /// ones above it, transposed. `lb[j]` and `ub[j]` place column `j`'s rows of
@@ -1144,7 +1390,16 @@ pub(super) fn lu_node_scratch<T: Scalar>(
     // The pivot column, the step's `L` and `U^T` rows past each panel, and
     // the trailing updates' diagonal tiles on up to `workers` threads.
     let tile = PANEL_BLOCK.max(k.schur_tile).min(ncol);
-    let cdiv = (nrow_l + (nrow_l + cols_u.len()) * nb + tile * tile * workers.max(1)) * vb + lists;
+    // and the a posteriori block's copy of its columns and its diagonal block.
+    let cdiv = (nrow_l
+        + (nrow_l + cols_u.len()) * nb
+        + tile * tile * workers.max(1)
+        + nb * nrow_l
+        + nb * nb
+        + nb)
+        * vb
+        + nb * (std::mem::size_of::<f64>() + 2 * crate::constants::WORD_BYTES)
+        + lists;
     // The cdiv's two GEMMs per panel: the trailing `L` update and the `U12` rows.
     let mut planes = 0;
     if T::COMPLEX {
