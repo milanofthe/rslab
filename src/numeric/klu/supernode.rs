@@ -25,19 +25,22 @@ use crate::scalar::{fmadd, Scalar};
 /// `t = w (w - 1) / 2` entries in its triangle and `w s` below it:
 ///
 /// ```text
-/// column by column  4 (t + w s)       index, L value, x read, x write
-/// dense kernel      3 t               L value, x read, x write
-///                 + w s (1 + 2 / P)   L value; `tmp` read and write a pass
-///                 + 7 s               gather: index, x read, tmp write;
-///                                     scatter: index, tmp read, x write,
-///                                     tmp clear
+/// column by column  4 (t + w s)          index, L value, x read, x write
+/// dense kernel      3 t                  L value, x read, x write
+///                 + w s                  L value
+///                 + 2 s (w / P + w % P)  `tmp` read and write a pass
+///                 + 7 s                  gather: index, x read, tmp write;
+///                                        scatter: index, tmp read, x write,
+///                                        tmp clear
 /// ```
 ///
-/// with `P` = [`KLU_SN_PASS`] columns a pass, both times `P`.
+/// with `P` = [`KLU_SN_PASS`] columns a full pass, the rest one a pass: a
+/// supernode of three columns never pays, one of four or more always does,
+/// one of two only without shared rows.
 fn dense_pays(w: usize, s: usize) -> bool {
-    let (t, ws, p) = (w * (w - 1) / 2, w * s, KLU_SN_PASS);
-    let column = 4 * (t + ws) * p; // lit: index, L value, x read, x write
-    let dense = (3 * t + ws + 7 * s) * p + 2 * ws; // lit: the accesses counted above
+    let (t, p) = (w * (w - 1) / 2, KLU_SN_PASS);
+    let column = 4 * (t + w * s); // lit: index, L value, x read, x write
+    let dense = 3 * t + w * s + 2 * s * (w / p + w % p) + 7 * s; // lit: the accesses counted above
     dense < column
 }
 
@@ -150,6 +153,7 @@ pub(super) fn layout<T: Scalar>(
 /// (row `i` at `x[i - off]`): the triangle `x[c + 1 ..= e] -= L(c + 1 ..= e,
 /// c) x[c]` column after column, then `x[R] -= L(R, r ..= e) x[r ..= e]`
 /// over the shared rows `R` (the rows of `L(:, e)`), gathered into `tmp`.
+/// A triangle column whose `x[c]` is zero adds nothing and is passed over.
 /// The `L` value at storage position `k` is at `lv + k - lbase`. `tmp` is
 /// left all-zero, as it is found.
 ///
@@ -170,6 +174,9 @@ pub(super) unsafe fn apply<T: Scalar>(
 ) {
     for (c, &start) in (r..e).zip(&l_colptr[r..e]) {
         let xc = T::zero() - *x.get_unchecked(c - off);
+        if xc == T::zero() {
+            continue;
+        }
         let base = start - lbase;
         for i in 0..e - c {
             let t = x.get_unchecked_mut(c + 1 + i - off);
