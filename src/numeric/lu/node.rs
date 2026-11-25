@@ -713,34 +713,36 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             while npiv < live && npiv - kb < nb_cdiv {
                 let k = npiv;
                 // Column `k` from row `kb` down, brought up to date with this
-                // panel's pivots `kb..k`, in a copy, so a delayed column keeps
-                // the state of the columns still to come.
+                // panel's pivots `kb..k`: its fully-summed rows in a copy
+                // (`U`'s in `ut`, `L`'s in `lbuf`), its off-block rows in
+                // place, or in the copy too where the column may be delayed,
+                // so a delayed column keeps the state of the columns still
+                // to come.
                 col.clear();
                 // SAFETY: entries of the front.
-                col.extend((kb..nfs).map(|i| unsafe { *at(i, k) }));
-                col.extend_from_slice(&lbuf[lrect + k * cn_l..lrect + (k + 1) * cn_l]);
+                col.extend((kb..k).map(|i| unsafe { *at(i, k) }));
+                let dk = front.l.at(k, k);
+                col.extend_from_slice(&lbuf[dk..dk + nfs - k]);
+                if may_delay {
+                    col.extend_from_slice(&lbuf[lrect + k * cn_l..lrect + (k + 1) * cn_l]);
+                }
                 let (stable, p, best, deep) = {
+                    let (ldiag, lrect_s) = lbuf.split_at_mut(lrect);
+                    let (before, rest) = lrect_s.split_at_mut(k * cn_l);
                     let (fs, offb) = col.split_at_mut(nfs - kb);
+                    let offb = if may_delay { offb } else { &mut rest[..cn_l] };
                     for j in kb..k {
                         let u = fs[j - kb];
                         if u != T::zero() {
                             let l0 = front.l.at(j + 1, j);
-                            let lj = &lbuf[l0..l0 + nfs - j - 1];
+                            let lj = &ldiag[l0..l0 + nfs - j - 1];
                             for (v, &l) in fs[j + 1 - kb..].iter_mut().zip(lj) {
                                 *v = *v - l * u;
                             }
                         }
                     }
                     let want = thresh_sq > 0.0;
-                    let deep = deep_update(
-                        &lbuf[lrect..],
-                        cn_l,
-                        kb,
-                        &fs[..k - kb],
-                        offb,
-                        want,
-                        deep_par,
-                    );
+                    let deep = deep_update(before, cn_l, kb, &fs[..k - kb], offb, want, deep_par);
                     // The largest fully-summed candidate.
                     let cand = &fs[k - kb..];
                     let (mut p, mut best) = (0, cand[0].magnitude_sq());
@@ -777,11 +779,16 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         piv_row = k + p;
                     }
                 }
-                for (i, &v) in (kb..nfs).zip(col.iter()) {
+                for (i, &v) in (kb..k).zip(col.iter()) {
                     // SAFETY: an entry of the front.
                     unsafe { *at(i, k) = v };
                 }
-                lbuf[lrect + k * cn_l..lrect + (k + 1) * cn_l].copy_from_slice(&col[nfs - kb..]);
+                let dk = front.l.at(k, k);
+                lbuf[dk..dk + nfs - k].copy_from_slice(&col[k - kb..nfs - kb]);
+                if may_delay {
+                    lbuf[lrect + k * cn_l..lrect + (k + 1) * cn_l]
+                        .copy_from_slice(&col[nfs - kb..]);
+                }
                 if piv_row != k {
                     for c in 0..nrow_u {
                         // SAFETY: entries of the front.
@@ -789,7 +796,6 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     }
                     rows.swap(k, piv_row);
                 }
-                let dk = front.l.at(k, k);
                 let mut piv = lbuf[dk];
                 match perturb_floor {
                     Some(floor) if piv.magnitude() < floor => {
