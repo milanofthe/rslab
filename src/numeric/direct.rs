@@ -25,6 +25,8 @@ pub struct SolveWork<T> {
     pub(crate) row: Vec<T>,
     /// The supernodal sweeps' scratch.
     pub(crate) plan: crate::numeric::supernodal::solve::PlanWork<T>,
+    /// The KLU supernode kernel's gather, all-zero between its uses.
+    pub(crate) gather: Vec<T>,
 }
 
 impl<T> Default for SolveWork<T> {
@@ -33,6 +35,7 @@ impl<T> Default for SolveWork<T> {
             y: Vec::new(),
             row: Vec::new(),
             plan: Default::default(),
+            gather: Vec::new(),
         }
     }
 }

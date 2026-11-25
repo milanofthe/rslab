@@ -55,7 +55,7 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
                 self.solve_transpose_one(&b[cols.clone()], &mut x[cols], &mut work.y);
             }
         } else if nrhs == 1 {
-            self.solve_one(b, x, &mut work.y);
+            self.solve_one(b, x, work);
         } else {
             self.solve_block(b, nrhs, x, work);
         }
@@ -199,24 +199,20 @@ impl<T: Scalar> KluSolver<T> {
         &self.factors.rs_inv
     }
 
-    fn solve_one(&self, b: &[T], x: &mut [T], w: &mut Vec<T>) {
+    fn solve_one(&self, b: &[T], x: &mut [T], work: &mut crate::SolveWork<T>) {
         let f = &self.factors;
-        {
-            let _s = rsprobe::scope!(DEBUG, "permute");
-            w.clear();
-            w.extend(
-                f.row_perm
-                    .iter()
-                    .map(|&orig| b[orig] * T::from_real(f.rs_inv[orig])),
-            );
-            // the supernode kernel's gather
-            w.resize(f.n + f.l_widest, T::zero());
+        let w = &mut work.y;
+        w.clear();
+        w.extend(
+            f.row_perm
+                .iter()
+                .map(|&orig| b[orig] * T::from_real(f.rs_inv[orig])),
+        );
+        // all-zero, only ever grown: the supernode kernel leaves it as found
+        if work.gather.len() < f.l_widest {
+            work.gather.resize(f.l_widest, T::zero());
         }
-        {
-            let _s = rsprobe::scope!(DEBUG, "sweeps");
-            self.solve_permuted(w);
-        }
-        let _s = rsprobe::scope!(DEBUG, "unpermute");
+        self.solve_permuted(w, &mut work.gather);
         for (k, &c) in f.col_perm.iter().enumerate() {
             x[c] = w[k];
         }
@@ -361,13 +357,12 @@ impl<T: Scalar> KluSolver<T> {
     }
 
     /// The block forward/backward substitution on the permuted/scaled vector
-    /// (`n` entries, then the supernode kernel's gather of `l_widest`).
-    /// The axpys run through `fmadd` with the loop-invariant operand negated
-    /// once per column; the supernodes of `L` are applied by the dense kernel,
+    /// `w`, `tmp` the supernode kernel's gather (all-zero, left so). The
+    /// axpys run through `fmadd` with the loop-invariant operand negated once
+    /// per column; the supernodes of `L` are applied by the dense kernel,
     /// whose sums `solve_many` (column by column) forms in another order.
-    fn solve_permuted(&self, w: &mut [T]) {
+    fn solve_permuted(&self, w: &mut [T], tmp: &mut [T]) {
         let f = &self.factors;
-        let (w, tmp) = w.split_at_mut(f.n);
         for b in (0..f.block_ptr.len() - 1).rev() {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
             // L (unit lower) forward within the block, a supernode worth the
