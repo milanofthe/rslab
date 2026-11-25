@@ -142,14 +142,12 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     };
                     for c in 0..npk {
                         let tcol = ok[q0 + c] as usize - first;
-                        let ucol = &u_buf[c * mrows..c * mrows + mrows];
+                        let (ucol, col) = (&u_buf[c * mrows..c * mrows + mrows], lay.col(tcol));
                         for r in (q0 + c)..nok {
                             // SAFETY: column `tcol` lies in this slab, its rows
                             // on or below the diagonal.
                             unsafe {
-                                let dst = base
-                                    .get()
-                                    .add(lay.at(gloc_ref[ok[r] as usize] as usize, tcol));
+                                let dst = base.get().add(col.at(gloc_ref[ok[r] as usize] as usize));
                                 *dst = *dst - ucol[r - q0];
                             }
                         }
@@ -266,9 +264,9 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 };
                 for c in 0..npk {
                     let tcol = ok[p0 + c] as usize - first;
-                    let ucol = &u_buf[c * mrows..c * mrows + mrows];
+                    let (ucol, col) = (&u_buf[c * mrows..c * mrows + mrows], lay.col(tcol));
                     for r in (p0 + c)..nok {
-                        let dst = lay.at(gloc[ok[r] as usize] as usize, tcol);
+                        let dst = col.at(gloc[ok[r] as usize] as usize);
                         panel[dst] = panel[dst] - ucol[r - p0];
                     }
                 }

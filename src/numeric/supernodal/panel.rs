@@ -43,6 +43,26 @@ pub(crate) struct Run {
     pub cols: std::ops::Range<usize>,
 }
 
+/// One column of a [`Layout`] ([`Layout::col`]).
+#[derive(Clone, Copy)]
+pub(crate) struct ColAt {
+    w: usize,
+    diag: usize,
+    rect: usize,
+}
+
+impl ColAt {
+    /// The offset of the column's entry in row `i`.
+    #[inline]
+    pub(crate) fn at(&self, i: usize) -> usize {
+        if i < self.w {
+            self.diag + i
+        } else {
+            self.rect + i
+        }
+    }
+}
+
 impl Layout {
     #[inline]
     pub(crate) const fn new(w: usize, m: usize) -> Self {
@@ -95,6 +115,19 @@ impl Layout {
             self.before(k) + (j - jb) * (self.w - jb) + i - jb
         } else {
             self.rect() + j * self.m + i - self.w
+        }
+    }
+
+    /// Where column `j`'s entries lie: entry `(i, j)` at
+    /// [`ColAt::at`]`(i)`, for `i` from `j`'s block's first column on.
+    #[inline]
+    pub(crate) fn col(&self, j: usize) -> ColAt {
+        let k = j / PANEL_BLOCK;
+        let jb = k * PANEL_BLOCK;
+        ColAt {
+            w: self.w,
+            diag: self.before(k) + (j - jb) * (self.w - jb) - jb,
+            rect: self.rect() + j * self.m - self.w,
         }
     }
 
@@ -767,6 +800,12 @@ mod tests {
                 }
             }
             assert!(seen.iter().all(|&b| b), "w={w} m={m}: a slot of no entry");
+            for j in 0..w {
+                let col = lay.col(j);
+                for i in j / PANEL_BLOCK * PANEL_BLOCK..w + m {
+                    assert_eq!(col.at(i), lay.at(i, j));
+                }
+            }
             let (r0, c0) = (w / 3, w / 4);
             let mut covered = 0;
             for run in lay.runs(r0.max(c0 / PANEL_BLOCK * PANEL_BLOCK)..w + m, c0..w) {
