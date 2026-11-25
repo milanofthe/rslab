@@ -16,20 +16,42 @@ pub(crate) struct CmodPlan {
     /// The updaters with work for this node, in updater order.
     pub spans: Vec<Span>,
     /// The node's update work is large enough to fork (see
-    /// [`CMOD_FORK_MIN_FLOPS`], raised to the parallel-GEMM threshold).
+    /// [`CMOD_FORK_MIN_FLOPS`], raised to the parallel-GEMM threshold): it
+    /// runs in the column blocks of the node's layout, on the pool as wide
+    /// as their work is worth. Not bit-identical to the sequential mode
+    /// (that one routes small updates through the scalar kernel and cuts no
+    /// update at the blocks), which is why the pick is a pure function of
+    /// the node.
     pub forks: bool,
-    /// Width of the column slabs of the tiled mode.
-    pub tile_w: usize,
-    /// Tiled mode: the panel is cut into column slabs (disjoint `&mut`
-    /// chunks) and each slab receives every updater's contribution in updater
-    /// order with a serial GEMM. One fan-out per node instead of one per
-    /// update, the slab stays cache-hot across the updaters, and a root
-    /// separator running alone with hundreds of updaters still parallelizes.
-    /// Not bit-identical to the sequential mode (that one routes small updates
-    /// through the scalar kernel, and cutting an update at slab boundaries
-    /// changes the GEMM shapes, whose per-element bits are shape-dependent),
-    /// which is why the pick is a pure function of the node.
-    pub tiled: bool,
+}
+
+/// The work of one unit of a node's update of `total` multiply-adds on
+/// `workers` threads: about rspool's pieces per worker of them per thread.
+/// The cut depends on the pool's thread count and the node alone, never on
+/// timing, so a thread count reproduces its bits; at one thread the units
+/// are as coarse as the cache bound of [`cut`] allows.
+pub(crate) fn unit_share(total: f64, workers: usize) -> f64 {
+    total / (workers.max(1) * rspool::PIECES_PER_WORKER) as f64
+}
+
+/// The blocks `0..w.len()` of weights `w` cut into consecutive ranges of
+/// about `share` weight each: at most `max` blocks and at least one, the
+/// first one ending at or past block `first_end`.
+pub(crate) fn cut(w: &[f64], share: f64, max: usize, first_end: usize) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let (mut start, mut acc) = (0usize, 0.0f64);
+    for (b, &x) in w.iter().enumerate() {
+        let len = b - start;
+        if len > 0 && b >= first_end.min(w.len()) && (len >= max || acc + x > share) {
+            ranges.push((start, b));
+            (start, acc) = (b, 0.0);
+        }
+        acc += x;
+    }
+    if start < w.len() {
+        ranges.push((start, w.len()));
+    }
+    ranges
 }
 
 /// One updater of a node: `l` is the landing range of its off-block `L` rows
@@ -90,13 +112,7 @@ impl CmodPlan {
             spans.push(Span { k, l, u });
         }
         let forks = flops >= k.fork_min_flops.max(k.par_gemm);
-        let tile_w = k.cmod_tile(ncol);
-        CmodPlan {
-            spans,
-            forks,
-            tile_w,
-            tiled: forks && ncol >= 2 * tile_w,
-        }
+        CmodPlan { spans, forks }
     }
 }
 

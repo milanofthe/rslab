@@ -8,6 +8,7 @@ use super::factor::LlEmit;
 use super::structure::LuStructure;
 use crate::numeric::supernodal::Input;
 
+use crate::constants::PANEL_BLOCK;
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
 use crate::numeric::supernodal::panel::Layout;
@@ -95,6 +96,12 @@ impl<T> LuPools<T> {
         }
     }
 }
+
+/// What a multiply-add of the descendants' updates costs, learned from
+/// their serial runs: the update of a large node goes as wide as its work is
+/// worth.
+static UPDATE_RATE: crate::parallel::ScalarRates =
+    crate::parallel::ScalarRates::new(crate::constants::GEMM_NS_PER_FLOP);
 
 /// What a multiply-subtract of the panel kernels' row passes (the off-block
 /// rows' updates and scaling, the triangular solves of `U`) costs, learned
@@ -360,20 +367,44 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             &kt.k,
         );
         let _cmod = rsprobe::scope!(TRACE, "cmod");
-        let (spans, forks, tile_w, tiled) = (&plan.spans, plan.forks, plan.tile_w, plan.tiled);
-        let tile_u = kt.k.cmod_tile(cn_u);
+        let (spans, forks, tiled) = (&plan.spans, plan.forks, plan.forks);
 
-        // Column-tiled parallel cmod: disjoint column slabs of the front; per
-        // slab every updater's contribution in updater order with a serial
-        // GEMM (see `CmodPlan::tiled`). Two phases: the slabs of the front's
-        // own columns (the `L` and `U11` updates), then runs of `U12`'s
-        // columns.
+        // The update in units of the front's layout: ranges of its column
+        // blocks of about rspool's pieces per worker of them per worker of
+        // the pool ([`unit_share`]), at most the Schur tile wide. Each unit
+        // takes every updater's contribution in updater order, one product
+        // per updater, over all its rows: an updater's rows are not in the
+        // front's order where children pass pivots, so a range of the front's
+        // rows is no range of an updater's. Two phases: the units of the
+        // front's own columns (the `L` and `U11` updates), then those of
+        // `U12`'s columns. The units go to the pool as pieces of their own.
         if tiled {
             let (gloc_ref, gloc_u_ref) = (&gloc, &gloc_u);
-            let work = crate::parallel::Work::ns(f64::INFINITY);
-            crate::parallel::for_each(ncol.div_ceil(tile_w), work, |ti| {
-                let c0 = ti * tile_w;
-                let c1 = (c0 + tile_w).min(ncol);
+            let nb = PANEL_BLOCK;
+            let (ncb, nub) = (ncol.div_ceil(nb), cn_u.div_ceil(nb));
+            // Each block's multiply-adds.
+            let (mut wl, mut wu) = (vec![0.0f64; ncb], vec![0.0f64; nub]);
+            for sp in spans {
+                let (nck, ol, ou, _, _) = updater(sp.k);
+                let ((p0l, p1l), (p0u, p1u)) = (sp.l, sp.u);
+                for &g in &ou[p0u..p1u] {
+                    wl[(g as usize - first) / nb] += ((ol.len() - p0l) * nck) as f64;
+                }
+                for &g in &ou[p1u..] {
+                    wu[(gloc_u[g as usize] as usize - nfs) / nb] += ((p1l - p0l) * nck) as f64;
+                }
+            }
+            let rate = UPDATE_RATE.of::<T>();
+            let work = |w: &[f64]| crate::parallel::Work::of(w.iter().sum(), rate);
+            let widest = (kt.k.schur_tile / nb).max(1);
+            let units = |w: &[f64]| {
+                let share = crate::numeric::supernodal::unit_share(w.iter().sum(), kt.workers);
+                crate::numeric::supernodal::cut(w, share, widest, 0)
+            };
+            let (lunits, uunits) = (units(&wl), units(&wu));
+            let lblock = |u: usize| {
+                let c0 = lunits[u].0 * nb;
+                let c1 = (lunits[u].1 * nb).min(ncol);
                 let mut lupd = pools.slab.take();
                 for sp in spans {
                     let (nck, ol, ou, lk, uk) = updater(sp.k);
@@ -414,7 +445,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             ),
                         );
                     }
-                    // SAFETY: the columns of the front in this slab.
+                    // SAFETY: the columns of the front in this block.
                     unsafe {
                         scatter(
                             &front,
@@ -426,13 +457,14 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         )
                     };
                 }
-            });
+            };
+            crate::parallel::each(lunits.len(), work(&wl), lblock);
             if cn_u > 0 {
-                // A run is the columns `[u0, u1)` of U12: the front's columns
-                // `nfs + u0..nfs + u1`, disjoint between runs.
-                crate::parallel::for_each(cn_u.div_ceil(tile_u), work, |ti| {
-                    let u0 = ti * tile_u;
-                    let u1 = (u0 + tile_u).min(cn_u);
+                // A block of U12's columns `[u0, u1)`: the front's columns
+                // `nfs + u0..nfs + u1`, disjoint between blocks.
+                let ublock = |u: usize| {
+                    let u0 = uunits[u].0 * nb;
+                    let u1 = (uunits[u].1 * nb).min(cn_u);
                     let g0 = off_u[u0];
                     let g1 = if u1 < cn_u { off_u[u1] } else { Li::MAX };
                     let mut uupd = pools.slab.take();
@@ -488,7 +520,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             }
                         }
                     }
-                });
+                };
+                crate::parallel::each(uunits.len(), work(&wu), ublock);
             }
         }
 
@@ -899,7 +932,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             gather(uupd, ut, front.u, mt_u);
             let tiles = |mt: usize| {
                 if mt * cw * pw >= ll_cdiv_par {
-                    (kt.k.cmod_tile(cw), kt.k.cmod_tile(mt))
+                    (PANEL_BLOCK, PANEL_BLOCK)
                 } else {
                     (kt.k.schur_tile, mt)
                 }
@@ -1110,7 +1143,7 @@ pub(super) fn lu_node_scratch<T: Scalar>(
     let lists = (nrow_l + cols_u.len()) * crate::constants::IDX32_BYTES;
     // The pivot column, the step's `L` and `U^T` rows past each panel, and
     // the trailing updates' diagonal tiles on up to `workers` threads.
-    let tile = k.cmod_tile(ncol).max(k.schur_tile).min(ncol);
+    let tile = PANEL_BLOCK.max(k.schur_tile).min(ncol);
     let cdiv = (nrow_l + (nrow_l + cols_u.len()) * nb + tile * tile * workers.max(1)) * vb + lists;
     // The cdiv's two GEMMs per panel: the trailing `L` update and the `U12` rows.
     let mut planes = 0;
@@ -1151,8 +1184,9 @@ pub(super) fn lu_node_scratch<T: Scalar>(
         (nck, &st.rows_l(kk)[nck..], &st.cols_u(kk)[nck..])
     };
     let workers = workers.max(1);
-    if plan.tiled {
-        let tw = plan.tile_w;
+    if plan.forks {
+        // a unit at most the Schur tile wide
+        let tw = (k.schur_tile / PANEL_BLOCK).max(1) * PANEL_BLOCK;
         let slabs = ncol.div_ceil(tw);
         let (mut worst_l, mut slab_planes) = (0, 0);
         for ti in 0..slabs {
@@ -1171,7 +1205,7 @@ pub(super) fn lu_node_scratch<T: Scalar>(
             }
             worst_l = worst_l.max(lupd);
         }
-        let tile_u = k.cmod_tile(cn_u);
+        let tile_u = tw;
         let runs = cn_u.div_ceil(tile_u);
         let mut worst_u = 0;
         for ti in 0..runs {
