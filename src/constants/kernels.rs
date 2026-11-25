@@ -115,26 +115,6 @@ pub const WIDE_PANEL_NB: usize = 128;
 /// Contract: results (the pivot window).
 pub const LU_PANEL_NB: usize = 32;
 
-/// A tiled cmod splits the target's columns into about this many tiles,
-/// within [`CMOD_TILE_MIN`] and [`CMOD_TILE_MAX`] columns each (tiles).
-/// Used by: `KernelSettings::cmod_tiles` (the `L` tiles of both paths and
-/// the `U` tiles of LU).
-/// Why: tuned default; enough tiles to spread a wide node over the workers.
-/// Contract: rounding (the tile fixes the per-tile GEMM shapes).
-pub const CMOD_TILES: usize = 16;
-
-/// Narrowest cmod tile (columns).
-/// Used by: `KernelSettings::cmod_tile_min`.
-/// Why: tuned default; narrower tiles lose GEMM rate.
-/// Contract: rounding.
-pub const CMOD_TILE_MIN: usize = 32;
-
-/// Widest cmod tile (columns).
-/// Used by: `KernelSettings::cmod_tile_max`.
-/// Why: tuned default.
-/// Contract: rounding.
-pub const CMOD_TILE_MAX: usize = 256;
-
 /// Rows per task of the parallel `U12` triangular solve in the LU cdiv
 /// (rows).
 /// Used by: `KernelSettings::trsm_rows`.

@@ -355,14 +355,6 @@ pub struct KernelSettings {
     /// is [`panel_nb`](Self::panel_nb)). Changes the pivot window. Default
     /// `32`, at least 1.
     pub lu_panel_nb: usize,
-    /// A parallel update of a node splits its columns into about this many
-    /// tiles of [`cmod_tile_min`](Self::cmod_tile_min) to
-    /// [`cmod_tile_max`](Self::cmod_tile_max) columns. Default `16`.
-    pub cmod_tiles: usize,
-    /// The narrowest such tile. Default `32`, at least 1.
-    pub cmod_tile_min: usize,
-    /// The widest such tile. Default `256`.
-    pub cmod_tile_max: usize,
     /// Rows per task of the parallel `U12` triangular solve in the LU
     /// panel factorization. Default `256`.
     pub trsm_rows: usize,
@@ -391,13 +383,6 @@ impl KernelSettings {
             usize::MAX
         }
     }
-
-    /// The column tile of a parallel update over `width` columns.
-    pub(crate) fn cmod_tile(&self, width: usize) -> usize {
-        (width / self.cmod_tiles.max(1))
-            .max(self.cmod_tile_min)
-            .min(self.cmod_tile_max)
-    }
 }
 
 impl Default for KernelSettings {
@@ -416,9 +401,6 @@ impl Default for KernelSettings {
             wide_panel_min_ncol: WIDE_PANEL_MIN_NCOL,
             wide_panel_nb: WIDE_PANEL_NB,
             lu_panel_nb: LU_PANEL_NB,
-            cmod_tiles: CMOD_TILES,
-            cmod_tile_min: CMOD_TILE_MIN,
-            cmod_tile_max: CMOD_TILE_MAX,
             trsm_rows: TRSM_ROWS,
         }
     }
@@ -587,13 +569,19 @@ impl SolverSettings {
             k: KernelSettings {
                 panel_nb: self.kernels.panel_nb.max(PANEL_NB_MIN),
                 lu_panel_nb: self.kernels.lu_panel_nb.max(1),
-                cmod_tile_min: self.kernels.cmod_tile_min.max(1),
-                cmod_tile_max: self.kernels.cmod_tile_max.max(1),
                 trsm_rows: self.kernels.trsm_rows.max(1),
                 ..self.kernels
             },
             pivot_threshold: self.pivoting.threshold.clamp(0.0, 1.0),
             interrupt: self.interrupt.as_deref(),
+            workers: match self.threads {
+                _ if crate::parallel::is_lent() => {
+                    <crate::parallel::Rayon as rspool::Place>::threads()
+                }
+                Threads::Ambient => rayon::current_num_threads(),
+                _ => self.resolved_threads(),
+            }
+            .max(1),
         }
     }
 

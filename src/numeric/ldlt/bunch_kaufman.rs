@@ -4,7 +4,7 @@
 //! the deep rows, and the deferred trailing update with panel lookahead.
 
 use super::factor::LlEmitLdlt;
-use crate::constants::GROWTH_EPS;
+use crate::constants::{GROWTH_EPS, PANEL_BLOCK};
 use crate::numeric::supernodal::perturb_pivot;
 use crate::numeric::supernodal::schur_tiles;
 
@@ -649,7 +649,7 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
             l21 = grown(l21, mt * pw);
             let par = mt * cw * pw >= par_cdiv;
             let tiles = if par {
-                (k.cmod_tile(cw), k.cmod_tile(mt))
+                (PANEL_BLOCK, PANEL_BLOCK)
             } else {
                 (k.schur_tile, mt)
             };
@@ -865,7 +865,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             // matrix; `ll_thread_determinism` holds.
             let par = mt * cw * pw >= ll_cdiv_par;
             let tiles = if par {
-                (kt.k.cmod_tile(cw), kt.k.cmod_tile(mt))
+                (PANEL_BLOCK, PANEL_BLOCK)
             } else {
                 (kt.k.schur_tile, mt)
             };
