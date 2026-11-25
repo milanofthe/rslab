@@ -64,7 +64,6 @@ impl<T> crate::memory::HeapBytes for LuScratch<T> {
             + b(&self.a_post.block)
             + b(&self.a_post.pinv)
             + b(&self.a_post.cmax)
-            + b(&self.a_post.bases)
     }
 }
 
@@ -1073,13 +1072,13 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
 }
 
 /// The buffers of [`a_posteriori`]: the block's columns as they were, its
-/// diagonal block, each column's largest multiplier and where its rows lie.
+/// diagonal block, its pivots' reciprocals and each column's largest
+/// multiplier.
 pub(super) struct APost<T> {
     backup: Vec<T>,
     block: Vec<T>,
     pinv: Vec<T>,
     cmax: Vec<f64>,
-    bases: Vec<(usize, usize)>,
 }
 
 impl<T> Default for APost<T> {
@@ -1089,7 +1088,6 @@ impl<T> Default for APost<T> {
             block: Vec::new(),
             pinv: Vec::new(),
             cmax: Vec::new(),
-            bases: Vec::new(),
         }
     }
 }
@@ -1200,44 +1198,53 @@ fn a_posteriori<T: Scalar>(
         }
     }
     // The rows below the block: `x_j -= l_k u_kj` in `k` order, each column
-    // scaled at its turn, row by row on the pool.
+    // scaled at its turn, column by column over runs of rows (a run within
+    // the fully-summed rows or within the off-block ones), on the pool.
     let below = nrow_l - ke;
-    sc.bases.clear();
-    sc.bases.extend((kb..kb + good).map(|j| {
-        let lay = front.l;
-        (
-            if ke < nfs { lay.at(ke, j) } else { 0 },
-            if nrow_l > nfs { lay.at(nfs, j) } else { 0 },
-        )
-    }));
-    let (bases, blk, pinv) = (&sc.bases[..], &sc.block[..], &sc.pinv[..]);
-    let solve_row = |r: usize| {
-        let i = ke + r;
-        let off = |k: usize| {
-            if i < nfs {
-                bases[k].0 + i - ke
-            } else {
-                bases[k].1 + i - nfs
-            }
+    let (blk, pinv) = (&sc.block[..], &sc.pinv[..]);
+    // Column `j`'s rows from `i` on, `len` of them in one part of `L`.
+    // SAFETY (its callers): rows of the block's columns, the caller's alone.
+    let rows_of = |j: usize, i: usize, len: usize| unsafe {
+        let at = if i < nfs {
+            front.lb[j] + i
+        } else {
+            front.l.rect() + j * front.l.m + i - nfs
         };
-        // SAFETY: row `i` of the block's columns, this call's alone.
-        unsafe {
+        std::slice::from_raw_parts_mut(lp.get().add(at), len)
+    };
+    let solve = |a: usize, b: usize| {
+        for c0 in (a..b).step_by(crate::constants::LU_DEEP_ROWS) {
+            let len = (c0 + crate::constants::LU_DEEP_ROWS).min(b) - c0;
             for k in 0..good {
-                let xk = lp.get().add(off(k));
-                let v = *xk * pinv[k];
-                *xk = v;
+                let xk = rows_of(kb + k, c0, len);
+                xk.iter_mut().for_each(|v| *v = *v * pinv[k]);
                 for j in k + 1..good {
                     let u = blk[k + j * pw];
                     if u != T::zero() {
-                        let xj = lp.get().add(off(j));
-                        *xj = *xj - v * u;
+                        let xj = rows_of(kb + j, c0, len);
+                        for (x, &l) in xj.iter_mut().zip(xk.iter()) {
+                            *x = *x - l * u;
+                        }
                     }
                 }
             }
         }
     };
     let ops = below * good * good / 2;
-    crate::parallel::for_each(below, row_pass::<T>(ops.max(below)), solve_row);
+    crate::parallel::ranges(
+        below,
+        |_| 1.0,
+        row_pass::<T>(ops.max(below)),
+        |r| {
+            let (a, b) = (ke + r.start, ke + r.end);
+            if a < nfs {
+                solve(a, b.min(nfs));
+            }
+            if b > nfs {
+                solve(a.max(nfs), b);
+            }
+        },
+    );
     // The block's columns into the panels: `L` on and below the diagonal,
     // `U` above it.
     for j in 0..good {
@@ -1422,7 +1429,7 @@ pub(super) fn lu_node_scratch<T: Scalar>(
         + nb * nb
         + nb)
         * vb
-        + nb * (std::mem::size_of::<f64>() + 2 * crate::constants::WORD_BYTES)
+        + nb * std::mem::size_of::<f64>()
         + lists;
     // The cdiv's two GEMMs per panel: the trailing `L` update and the `U12` rows.
     let mut planes = 0;

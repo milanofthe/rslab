@@ -101,6 +101,35 @@ pub(crate) fn for_each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send
     });
 }
 
+/// `f(range)` over consecutive ranges of the items `0..n` of `weight(i)`
+/// each (any unit), `work` all of them: on as many threads as the work is
+/// worth, in ranges of about an equal share of the weight,
+/// [`PIECES_PER_WORKER`] per thread; serially in one range `0..n`.
+pub(crate) fn ranges(
+    n: usize,
+    weight: impl Fn(usize) -> f64,
+    work: Work<'_>,
+    f: impl Fn(std::ops::Range<usize>) + Sync + Send,
+) {
+    let k = match work.go::<Rayon>(n) {
+        Go::Wide(k) => k,
+        _ => return work.serial(|| f(0..n)),
+    };
+    let total: f64 = (0..n).map(&weight).sum();
+    let share = total / (PIECES_PER_WORKER * k) as f64;
+    let mut cuts = vec![0usize];
+    let mut acc = 0.0;
+    for i in 0..n {
+        acc += weight(i);
+        if acc >= share && i + 1 < n {
+            cuts.push(i + 1);
+            acc = 0.0;
+        }
+    }
+    cuts.push(n);
+    work.wide::<Rayon>(cuts.len() - 1, k, &|p| f(cuts[p]..cuts[p + 1]));
+}
+
 /// `f(i)` for every `i` in `0..n`, each its own piece (pieces of very
 /// unequal work, such as the walks of a task tree), `work` all of them.
 pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
