@@ -53,3 +53,7 @@ pub use precision::*;
 pub use scaling::*;
 pub use solve::*;
 pub use tuning::*;
+
+/// The steps every progress is reported in, the ordering crates' and this
+/// crate's alike.
+pub use rslab_ordering_core::constants::PROGRESS_STEPS;

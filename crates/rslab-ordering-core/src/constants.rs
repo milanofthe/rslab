@@ -36,12 +36,15 @@ pub const ELBOW_DIV: usize = 5;
 /// Contract: results (ties between equal-bucket candidates).
 pub const BUCKET_STEP_DIV: usize = 8;
 
-/// Calls of an ordering's progress callback, at most, per ordering (calls).
-/// Used by: `progress::Counter` (AMD, AMF, nested dissection).
-/// Why: one call per percent of the vertices; the callee is never called
-/// per vertex.
+/// Steps a progress is reported in (percent of its units: vertices of an
+/// ordering, panel entries of a factorization, columns of an analysis part).
+/// Used by: `progress::Counter` (AMD, AMF, nested dissection, at most one
+/// callback call per step) and rslab's `progress::Steps` (the factorization
+/// and the parts of the analysis, at most one event per step).
+/// Why: the count of calls and events does not grow with the problem; a
+/// hundredth is finer than a reader follows.
 /// Contract: output.
-pub const PROGRESS_CALLS: u64 = 100;
+pub const PROGRESS_STEPS: u64 = 100;
 
 /// Most hops of the George-Liu pseudo-peripheral node search of RCM
 /// (hops).
