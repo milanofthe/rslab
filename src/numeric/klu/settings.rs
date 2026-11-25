@@ -32,11 +32,10 @@ pub struct KluSettings {
     /// `Auto` goes side by side, and on as many threads, as the work is
     /// worth on the pool it runs on: the work (input entries for a factor,
     /// the exact replay work of the pivot-final pattern for a refactor) at
-    /// the rates measured on earlier runs, against what a section costs on
-    /// the pool ([`crate::parallel::Dispatch`]); a refactor replays a block
-    /// the way, and its blocks side by side on the width, its replays of
-    /// that size were fastest ([`crate::parallel::Choice`]), decided anew by
-    /// every refactor with the pool it is given. Real circuits are often one
+    /// a constant rate, against what a section costs on the pool
+    /// ([`crate::parallel::Dispatch`]); a refactor replays a block the way
+    /// predicted fastest, decided anew by every refactor with the pool it
+    /// is given. Real circuits are often one
     /// giant irreducible block plus thousands of singletons, where
     /// distributing blocks cannot help, and small systems refactor faster
     /// on one thread than on any pool. The pool is the one of
@@ -71,17 +70,16 @@ pub struct KluSettings {
     /// side by side (not the panel entries of
     /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work)).
     /// Where it passes, the replay goes as wide as the pool. Default
-    /// `None`: as the replays measure it is worth on the pool, a block
-    /// starting side by side (before any of its ways is measured) where it
-    /// carries [`KLU_PAR_MIN_FMADDS`](crate::constants::KLU_PAR_MIN_FMADDS).
+    /// `None`: as it is worth on the pool, a block starting side by side
+    /// where it carries [`KLU_PAR_MIN_FMADDS`](crate::constants::KLU_PAR_MIN_FMADDS).
     pub par_min_work: Option<u64>,
     /// With [`par_min_work`](Self::par_min_work), the simultaneous work the
-    /// structure must offer for a parallel refactor: across blocks `sum
-    /// work / max block work`, inside a block the mean level width of its
-    /// elimination DAG. Default `None`: as the replays measure it is worth
-    /// on the pool, a block starting side by side where its levels are
-    /// [`KLU_PAR_MIN_RATIO`](crate::constants::KLU_PAR_MIN_RATIO) columns
-    /// wide on average.
+    /// structure must offer for a parallel refactor: across blocks `sum work /
+    /// max block work`, inside a block the mean level width of its elimination
+    /// DAG. Default `None`: as it is worth on the pool, a block starting side by
+    /// side where its levels are
+    /// [`KLU_PAR_MIN_RATIO`](crate::constants::KLU_PAR_MIN_RATIO) columns wide
+    /// on average.
     pub par_min_ratio: Option<f64>,
     /// Caller-owned cancellation flag for the numeric phase, read and never
     /// written, polled at block boundaries and inside the pipelined refactor at

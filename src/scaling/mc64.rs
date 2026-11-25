@@ -91,12 +91,11 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, RslabErr
     })
 }
 
-/// What the cost graph's logarithm costs per entry, learned from the passes.
+/// What the cost graph's logarithm costs per entry.
 static LOG_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// What the column maxima of the cost graph cost per entry, learned from the
-/// passes.
+/// What the column maxima of the cost graph cost per entry.
 static COLMAX_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 

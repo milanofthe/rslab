@@ -10,12 +10,11 @@ use crate::constants::{
     LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 
-/// What the symmetrized pattern costs per entry (its bucket sorts), learned
-/// from the analyses.
+/// What the symmetrized pattern costs per entry (its bucket sorts).
 static SYMMETRIZE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// What the diagonal check costs per entry, learned from the analyses.
+/// What the diagonal check costs per entry.
 static DIAGONAL_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
@@ -149,9 +148,11 @@ pub struct LuSymbolic {
     /// size and complexity (the estimate depends on `T` only through them,
     /// and walking every node's updaters per call is expensive).
     pub(super) est_cache: Mutex<Vec<((usize, bool), crate::diagnostics::MemoryEstimate)>>,
-    /// The split permuted input's program ([`InputProgram::general`](crate::numeric::supernodal::InputProgram)), built at the first
-    /// factorization: every (re)factorization reads the values where they are
-    /// through it (row matching and equilibration applied on the way).
+    /// The split permuted input's program
+    /// ([`InputProgram::general`](crate::numeric::supernodal::InputProgram)),
+    /// built at the first factorization: every (re)factorization reads the
+    /// values where they are through it (row matching and equilibration applied
+    /// on the way).
     pub(super) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
     /// The exact structures of `L` and `U`, tighter than the analysis's
     /// symmetric one on an unsymmetric pattern.
@@ -827,13 +828,12 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
             (&self.plan_l, &self.plan_u)
         };
         let threads = self.solve_threads;
-        use crate::numeric::supernodal::solve::Sweep;
-        first.sweep(&mut work.plan, nrhs, threads, Sweep::Forward, |pw| {
+        first.sweep(&mut work.plan, nrhs, threads, |pw| {
             let pool = pw.on_pool();
             crate::numeric::direct::gather_scaled(b, nrhs, gather, g_scale, y, pool);
             first.forward_block(nrhs, y, pw);
         });
-        last.sweep(&mut work.plan, nrhs, threads, Sweep::Backward, |pw| {
+        last.sweep(&mut work.plan, nrhs, threads, |pw| {
             last.backward_block(nrhs, y, pw);
             let pool = pw.on_pool();
             crate::numeric::direct::scatter_scaled(y, nrhs, scatter, s_scale, x, pool);

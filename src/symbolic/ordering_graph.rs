@@ -18,9 +18,8 @@ use rslab_ordering_core::{Counter, Progress};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
-/// What a minimum-degree ordering costs per entry of the graph it orders,
-/// learned from the orderings: the candidates of the race decide on it
-/// whether they run side by side.
+/// What a minimum-degree ordering costs per entry of the graph it orders:
+/// the candidates of the race decide on it whether they run side by side.
 pub(super) static ORDER_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::ORDER_NS_PER_ENTRY);
 
@@ -117,9 +116,7 @@ impl<'a> OrderingGraph<'a> {
                             .or_else(|| self.settings.amd.progress.clone()),
                         ..self.settings.amd.clone()
                     };
-                    ORDER_RATE.time(entries, || {
-                        rslab_amd::amd_order_opts(&pat, &opts).map(|(perm, _)| perm)
-                    })
+                    rslab_amd::amd_order_opts(&pat, &opts).map(|(perm, _)| perm)
                 }
                 OrderingMethod::Amf => {
                     let _s = rsprobe::scope!(DEBUG, "amf");
@@ -130,9 +127,7 @@ impl<'a> OrderingGraph<'a> {
                             .or_else(|| self.settings.amf.progress.clone()),
                         ..self.settings.amf.clone()
                     };
-                    ORDER_RATE.time(entries, || {
-                        rslab_amf::amf_order_opts(&pat, &opts).map(|(perm, _)| perm)
-                    })
+                    rslab_amf::amf_order_opts(&pat, &opts).map(|(perm, _)| perm)
                 }
                 OrderingMethod::MetisND => {
                     let _s = rsprobe::scope!(DEBUG, "nested dissection");

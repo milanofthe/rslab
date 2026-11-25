@@ -233,8 +233,7 @@ fn check(n: usize, len: usize, nrhs: usize) -> Result<(), RslabError> {
     Ok(())
 }
 
-/// What a permuted, scaled copy costs per entry, learned from its serial
-/// runs.
+/// What a permuted, scaled copy costs per entry.
 static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
@@ -265,15 +264,13 @@ pub(crate) fn gather_scaled<T: Scalar>(
         }
     };
     let out = &mut y.spare_capacity_mut()[..n * nrhs];
-    let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
     if pool {
+        let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
         crate::parallel::chunks_mut(out, nrhs, work, fill);
     } else {
-        work.serial(|| {
-            out.chunks_mut(nrhs)
-                .enumerate()
-                .for_each(|(e, row)| fill(e, row))
-        });
+        out.chunks_mut(nrhs)
+            .enumerate()
+            .for_each(|(e, row)| fill(e, row));
     }
     // SAFETY: every one of the first `n * nrhs` entries was written above.
     unsafe { y.set_len(n * nrhs) };
@@ -306,11 +303,11 @@ pub(crate) fn scatter_scaled<T: Scalar>(
             unsafe { *x.add(c * n + p) = y[e * nrhs + c] * s };
         }
     };
-    let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
     if pool {
+        let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
         crate::parallel::for_each(n, work, put);
     } else {
-        work.serial(|| (0..n).for_each(put));
+        (0..n).for_each(put);
     }
 }
 

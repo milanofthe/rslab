@@ -244,10 +244,8 @@ struct KluFactors<T> {
     replay_xs: Vec<Vec<T>>,
     /// Which columns the current pipelined replay has done.
     ready: Ready,
-    /// How the last refactor replayed each block of `plan.blocks`, and the
-    /// picks among the ways it measured them for.
+    /// How the last refactor replayed each block of `plan.blocks`.
     modes: Vec<Mode>,
-    picks: Vec<Option<crate::parallel::Pick>>,
 }
 
 /// How a refactor replays a block of the [`ReplayPlan`].

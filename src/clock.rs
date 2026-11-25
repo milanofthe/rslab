@@ -1,5 +1,5 @@
-//! Monotonic clock of the measured dispatch decisions (the learned rates of
-//! `parallel`, the calibration of `tuning`), portable to targets without an
+//! Monotonic clock of the measured dispatch decisions (the calibration of
+//! `tuning`), portable to targets without an
 //! OS clock (wasm32-unknown-unknown: `std::time::Instant::now()` panics with
 //! "time not implemented on this platform"). Native builds re-export
 //! [`std::time::Instant`] unchanged. On wasm32 the instant is inert: every

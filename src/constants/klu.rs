@@ -25,8 +25,7 @@ pub const KLU_SN_PASS: usize = 4;
 pub const PIPE_RUN: usize = 1;
 
 /// Mean replay work of a block's columns from which a refactor starts it
-/// pipelined rather than level by level, before any of its ways is
-/// measured (fmadds per column): a pipelined column costs a claim and a
+/// pipelined rather than level by level (fmadds per column): a pipelined column costs a claim and a
 /// wait per `L` column it reads, which lighter columns do not repay, while a
 /// level costs a parallel section, which a deep elimination DAG of heavy
 /// columns pays far too often.
@@ -37,42 +36,42 @@ pub const PIPE_RUN: usize = 1;
 /// slower than it) or at least about 1700 (rajat15, the ASICs, onetone2,
 /// twotone: pipelined 3 to 7x, level by level barely faster than
 /// sequential); 512 separates the two classes.
-/// Machine: a prior, replaced by what the replays measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const PIPE_COL_WORK: u64 = 512;
 
-/// Replay work from which a refactor starts a block side by side, before
-/// any of its ways is measured, where the user set no floor (fmadds plus
+/// Replay work from which a refactor starts a block side by side, where
+/// the user set no floor (fmadds plus
 /// [`COL_WORK`] a column).
 /// Used by: `KluSolver::refactor` (the ways a block starts from).
 /// Why: below it starting the parallel section costs more than the overlap
 /// gains (the default floor of 1.13).
-/// Machine: a prior, replaced by what the replays measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const KLU_PAR_MIN_FMADDS: u64 = 200_000;
 
 /// Mean level width of a block's elimination DAG from which a refactor
-/// starts it side by side, before any of its ways is measured, where the
+/// starts it side by side, where the
 /// user set no ratio (columns).
 /// Used by: `KluSolver::refactor` (the ways a block starts from).
 /// Why: at least two units of work side by side.
-/// Machine: a prior, replaced by what the replays measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const KLU_PAR_MIN_RATIO: f64 = 2.0;
 
 /// ns per unit of replay work (an fmadd, [`COL_WORK`] a column) of a real
-/// refactorization, before any is measured (ns per fmadd).
+/// refactorization (ns per fmadd).
 /// Used by: `KluSolver::refactor`.
 /// Why: a scattered multiply-add with its index load.
-/// Machine: a prior, replaced by what the replays measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const KLU_REPLAY_NS_PER_WORK: f32 = 0.5;
 
 /// ns per input entry of a block's first factorization (the reach, the
-/// pivot search, the fill), before any is measured (ns per entry).
+/// pivot search, the fill), in ns per entry.
 /// Used by: `KluSymbolic::factor` (whether its blocks factor side by side).
 /// Why: a few fmadds of fill and a depth-first reach per entry.
-/// Machine: a prior, replaced by what the factorizations measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const KLU_FACTOR_NS_PER_ENTRY: f32 = 25.0;
 

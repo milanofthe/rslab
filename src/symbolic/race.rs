@@ -179,10 +179,8 @@ pub(super) fn race(
     let counts =
         |px: &Prefix| n > r.nd_min_n && prefix_work(px, r.assumed_workers) >= r.nd_min_work;
     let is_amd = |m: &OrderingMethod| *m == OrderingMethod::Amd;
-    // The candidates' work, estimated at what an ordering has cost per entry
-    // (learned where an ordering runs, `ordering_graph`): a candidate's
-    // prefix is more than its ordering, so the race is not measured for
-    // that rate.
+    // The candidates' work, estimated at what an ordering costs per entry
+    // (`ordering_graph`).
     let ordering_ns =
         graph.pattern.row_idx.len() as f64 * super::ordering_graph::ORDER_RATE.ns_per_op();
     // One ordering graph for every candidate: built per candidate it cost as

@@ -174,6 +174,6 @@ impl LuStructure {
 }
 
 /// What an entry of the sets costs their build (collected, sorted and
-/// deduplicated), learned from the serial builds.
+/// deduplicated).
 static STRUCTURE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
