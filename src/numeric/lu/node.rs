@@ -1036,8 +1036,8 @@ impl<'a> Front<'a> {
 }
 
 /// `front(row(i), col(j)) -= upd[i + j * m]` for the `m x n` update
-/// `upd`: on and below the diagonal column by column (in `L`), above it row
-/// by row (in `U^T`, where a row of `U` is contiguous).
+/// `upd`, `col(j)` a fully-summed column: column by column, each column's
+/// places in the panels taken once.
 ///
 /// # Safety
 /// `lp` and `up` are the front's panels; its entries addressed are the
@@ -1050,24 +1050,24 @@ unsafe fn scatter<T: Scalar>(
     row: impl Fn(usize) -> usize,
     col: impl Fn(usize) -> usize,
 ) {
+    let nfs = front.l.w;
     for j in 0..n {
         let c = col(j);
-        for i in 0..m {
+        debug_assert!(c < nfs);
+        // rows `r` of column `c`: `L`'s fully-summed at `ld + r`, its
+        // off-block ones at `lr + r`, `U`'s above the diagonal in `ut`
+        let (ld, lr) = (front.lb[c], front.l.rect() + c * front.l.m - nfs);
+        let u = &upd[j * m..(j + 1) * m];
+        for (i, &v) in u.iter().enumerate() {
             let r = row(i);
-            if r >= c {
-                let d = front.ptr(lp, up, r, c);
-                *d = *d - upd[i + j * m];
-            }
-        }
-    }
-    for i in 0..m {
-        let r = row(i);
-        for j in 0..n {
-            let c = col(j);
-            if c > r {
-                let d = front.ptr(lp, up, r, c);
-                *d = *d - upd[i + j * m];
-            }
+            let d = if r >= nfs {
+                lp.add(lr + r)
+            } else if r >= c {
+                lp.add(ld + r)
+            } else {
+                up.add(front.ub[r] + c)
+            };
+            *d = *d - v;
         }
     }
 }
