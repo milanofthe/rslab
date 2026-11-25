@@ -331,6 +331,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             true,
             &kt.k,
         );
+        let _cmod = rsprobe::scope!(TRACE, "cmod");
         let (spans, forks, tile_w, tiled) = (&plan.spans, plan.forks, plan.tile_w, plan.tiled);
         let tile_u = kt.k.cmod_tile(cn_u);
 
@@ -676,110 +677,115 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     while npiv < live {
         kt.interrupted()?;
         let kb = npiv;
-        while npiv < live && npiv - kb < nb_cdiv {
-            let k = npiv;
-            // Column `k` from row `kb` down, brought up to date with this
-            // panel's pivots `kb..k`. Where it may be delayed, in a copy, so a
-            // delayed column keeps the state of the columns still to come.
-            let (stable, p, best, deep) = {
-                let (before, rest) = lbuf.split_at_mut(k * nrow_l);
-                let own = &mut rest[kb..nrow_l];
-                let x: &mut [T] = if may_delay {
-                    col.clear();
-                    col.extend_from_slice(own);
-                    col
-                } else {
-                    own
+        {
+            let _panel = rsprobe::scope!(TRACE, "panel");
+            while npiv < live && npiv - kb < nb_cdiv {
+                let k = npiv;
+                // Column `k` from row `kb` down, brought up to date with this
+                // panel's pivots `kb..k`. Where it may be delayed, in a copy, so a
+                // delayed column keeps the state of the columns still to come.
+                let (stable, p, best, deep) = {
+                    let (before, rest) = lbuf.split_at_mut(k * nrow_l);
+                    let own = &mut rest[kb..nrow_l];
+                    let x: &mut [T] = if may_delay {
+                        col.clear();
+                        col.extend_from_slice(own);
+                        col
+                    } else {
+                        own
+                    };
+                    let (fs, offb) = x.split_at_mut(nfs - kb);
+                    for j in kb..k {
+                        let u = fs[j - kb];
+                        if u != T::zero() {
+                            let lj = &before[j * nrow_l + j + 1..j * nrow_l + nfs];
+                            for (v, &l) in fs[j + 1 - kb..].iter_mut().zip(lj) {
+                                *v = *v - l * u;
+                            }
+                        }
+                    }
+                    let want = thresh_sq > 0.0;
+                    let deep =
+                        deep_update(before, nrow_l, nfs, kb, &fs[..k - kb], offb, want, deep_par);
+                    // The largest fully-summed candidate.
+                    let cand = &fs[k - kb..];
+                    let (mut p, mut best) = (0, cand[0].magnitude_sq());
+                    if want {
+                        for (i, v) in cand.iter().enumerate().skip(1) {
+                            let m = v.magnitude_sq();
+                            if m > best {
+                                best = m;
+                                p = i;
+                            }
+                        }
+                    }
+                    // Some fully-summed row passes the test over the whole column.
+                    (best >= thresh_sq * deep, p, best, deep)
                 };
-                let (fs, offb) = x.split_at_mut(nfs - kb);
-                for j in kb..k {
-                    let u = fs[j - kb];
-                    if u != T::zero() {
-                        let lj = &before[j * nrow_l + j + 1..j * nrow_l + nfs];
-                        for (v, &l) in fs[j + 1 - kb..].iter_mut().zip(lj) {
-                            *v = *v - l * u;
+                let mut piv_row = k;
+                if thresh_sq > 0.0 {
+                    if !stable {
+                        if may_delay {
+                            // Delayed: to the end of the live columns, which this
+                            // panel's pivots have not touched either.
+                            live -= 1;
+                            for i in 0..nrow_l {
+                                lbuf.swap(k * nrow_l + i, live * nrow_l + i);
+                            }
+                            cols.swap(k, live);
+                            continue;
                         }
+                        forced += 1;
+                    }
+                    let reference = if stable { best.max(deep) } else { best };
+                    let diag = if may_delay {
+                        col[k - kb]
+                    } else {
+                        lbuf[k * nrow_l + k]
+                    };
+                    if p != 0 && diag.magnitude_sq() < thresh_sq * reference {
+                        piv_row = k + p;
                     }
                 }
-                let want = thresh_sq > 0.0;
-                let deep =
-                    deep_update(before, nrow_l, nfs, kb, &fs[..k - kb], offb, want, deep_par);
-                // The largest fully-summed candidate.
-                let cand = &fs[k - kb..];
-                let (mut p, mut best) = (0, cand[0].magnitude_sq());
-                if want {
-                    for (i, v) in cand.iter().enumerate().skip(1) {
-                        let m = v.magnitude_sq();
-                        if m > best {
-                            best = m;
-                            p = i;
-                        }
+                if may_delay {
+                    lbuf[k * nrow_l + kb..(k + 1) * nrow_l].copy_from_slice(col);
+                }
+                if piv_row != k {
+                    for c in 0..nfs {
+                        lbuf.swap(c * nrow_l + k, c * nrow_l + piv_row);
                     }
-                }
-                // Some fully-summed row passes the test over the whole column.
-                (best >= thresh_sq * deep, p, best, deep)
-            };
-            let mut piv_row = k;
-            if thresh_sq > 0.0 {
-                if !stable {
-                    if may_delay {
-                        // Delayed: to the end of the live columns, which this
-                        // panel's pivots have not touched either.
-                        live -= 1;
-                        for i in 0..nrow_l {
-                            lbuf.swap(k * nrow_l + i, live * nrow_l + i);
-                        }
-                        cols.swap(k, live);
-                        continue;
+                    for t in nfs..nrow_u {
+                        ut.swap(k * nrow_u + t, piv_row * nrow_u + t);
                     }
-                    forced += 1;
+                    rows.swap(k, piv_row);
                 }
-                let reference = if stable { best.max(deep) } else { best };
-                let diag = if may_delay {
-                    col[k - kb]
-                } else {
-                    lbuf[k * nrow_l + k]
-                };
-                if p != 0 && diag.magnitude_sq() < thresh_sq * reference {
-                    piv_row = k + p;
+                let mut piv = lbuf[k * nrow_l + k];
+                match perturb_floor {
+                    Some(floor) if piv.magnitude() < floor => {
+                        let lifted = perturb_pivot(piv, floor);
+                        floors.push((k, lifted - piv));
+                        piv = lifted;
+                    }
+                    None if piv == T::zero() => {
+                        return Err(RslabError::NumericallyRankDeficient);
+                    }
+                    _ => {}
                 }
+                lbuf[k * nrow_l + k] = piv;
+                let pinv = piv.recip();
+                let (fs, deep) =
+                    lbuf[k * nrow_l + k + 1..(k + 1) * nrow_l].split_at_mut(nfs - k - 1);
+                fs.iter_mut().for_each(|v| *v = *v * pinv);
+                deep_scale(deep, pinv, deep_par);
+                npiv += 1;
             }
-            if may_delay {
-                lbuf[k * nrow_l + kb..(k + 1) * nrow_l].copy_from_slice(col);
-            }
-            if piv_row != k {
-                for c in 0..nfs {
-                    lbuf.swap(c * nrow_l + k, c * nrow_l + piv_row);
-                }
-                for t in nfs..nrow_u {
-                    ut.swap(k * nrow_u + t, piv_row * nrow_u + t);
-                }
-                rows.swap(k, piv_row);
-            }
-            let mut piv = lbuf[k * nrow_l + k];
-            match perturb_floor {
-                Some(floor) if piv.magnitude() < floor => {
-                    let lifted = perturb_pivot(piv, floor);
-                    floors.push((k, lifted - piv));
-                    piv = lifted;
-                }
-                None if piv == T::zero() => {
-                    return Err(RslabError::NumericallyRankDeficient);
-                }
-                _ => {}
-            }
-            lbuf[k * nrow_l + k] = piv;
-            let pinv = piv.recip();
-            let (fs, deep) = lbuf[k * nrow_l + k + 1..(k + 1) * nrow_l].split_at_mut(nfs - k - 1);
-            fs.iter_mut().for_each(|v| *v = *v * pinv);
-            deep_scale(deep, pinv, deep_par);
-            npiv += 1;
         }
         let ke = npiv;
         let pw = ke - kb;
         if pw == 0 {
             continue;
         }
+        let _update = rsprobe::scope!(TRACE, "schur");
         // TRSM: U = L11^-1 * (trailing panel columns of lbuf) and the U12 rows.
         // Each trailing column is an independent forward substitution reading
         // only the finished panel columns [kb, ke), so the block parallelizes
