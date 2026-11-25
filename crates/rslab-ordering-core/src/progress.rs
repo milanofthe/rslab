@@ -1,6 +1,6 @@
 //! Progress of an ordering for its caller: a callback in the options of an
 //! ordering, called with the vertices ordered so far out of the vertex count,
-//! at most [`PROGRESS_CALLS`](crate::constants::PROGRESS_CALLS) times per
+//! at most [`PROGRESS_STEPS`](crate::constants::PROGRESS_STEPS) times per
 //! ordering.
 
 use core::fmt;
@@ -36,7 +36,7 @@ impl fmt::Debug for Progress {
 
 /// The vertices of an ordering placed so far, counted from any thread. The
 /// callback is called where the count crosses into the next of
-/// [`PROGRESS_CALLS`](crate::constants::PROGRESS_CALLS) equal parts of `n`;
+/// [`PROGRESS_STEPS`](crate::constants::PROGRESS_STEPS) equal parts of `n`;
 /// without a callback nothing is counted.
 pub struct Counter<'a> {
     progress: Option<&'a Progress>,
@@ -60,7 +60,7 @@ impl<'a> Counter<'a> {
         if let Some(p) = self.progress {
             let before = self.done.fetch_add(k as u64, Ordering::Relaxed);
             let after = (before + k as u64).min(self.n);
-            let part = |d: u64| d * crate::constants::PROGRESS_CALLS / self.n.max(1);
+            let part = |d: u64| d * crate::constants::PROGRESS_STEPS / self.n.max(1);
             if part(after) > part(before.min(self.n)) {
                 p.report(after as usize, self.n as usize);
             }
@@ -94,7 +94,7 @@ mod tests {
         }
         c.finish();
         let seen = seen.lock().unwrap();
-        assert!(seen.len() as u64 <= crate::constants::PROGRESS_CALLS);
+        assert!(seen.len() as u64 <= crate::constants::PROGRESS_STEPS);
         assert!(seen.windows(2).all(|w| w[0].0 < w[1].0));
         assert_eq!(seen.last(), Some(&(n, n)));
     }

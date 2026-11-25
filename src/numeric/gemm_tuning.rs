@@ -9,6 +9,10 @@ pub(crate) struct KernelTuning<'a> {
     pub k: KernelSettings,
     pub pivot_threshold: f64,
     pub interrupt: Option<&'a std::sync::atomic::AtomicBool>,
+    /// The workers of the pool the factorization runs on (the whole pool,
+    /// never a share of it): what the update of a large node is cut for
+    /// ([`unit_share`](crate::numeric::supernodal::unit_share)).
+    pub workers: usize,
 }
 
 impl KernelTuning<'_> {

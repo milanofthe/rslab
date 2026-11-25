@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 OUT = HERE.parent / "docs" / "figures"
 RSLAB, PARDISO = st.SOLVERS["auto"][1], st.SOLVERS["pardiso"][1]
 CLASSES = [("fem_", "FEM, curl-curl (rapidfem)"), ("sane_", "power grid (SANE)"),
-           ("mom_", "MoM near field (rapidmom)"), ("ss_", "circuit, KLU path (SuiteSparse)")]
+           ("mom_", "MoM near field"), ("ss_", "circuit, KLU path (SuiteSparse)")]
 METRICS = [("factor", "factor"), ("refactor", "refactor (new values)"), ("solve", "solve"),
            ("oneshot", "one-shot (analysis + factor + solve)")]
 # The share card of the breakdown: one or two systems per class, small to large.

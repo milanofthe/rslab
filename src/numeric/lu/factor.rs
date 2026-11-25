@@ -43,13 +43,13 @@ pub(super) struct LlEmit<T> {
     /// First elimination position of each supernode without delayed pivots
     /// (symbolic prefix sum of ncol).
     pub(super) e_offset: Vec<usize>,
-    /// The factors' buffers: every supernode factors `L` straight into its
-    /// slot of `l_arena`; `U^T` is gathered into `u_arena` at the emit.
+    /// The factors' buffers: every supernode factors `L` and `U^T` straight
+    /// into its slots of `l_arena` and `u_arena`.
     pub(super) l_arena: PanelArena<T>,
     pub(super) u_arena: PanelArena<T>,
     pub(super) panels: Cells<(PanelOut, PanelOut)>,
     /// What each factored supernode leaves (its pivots, those it delays).
-    pub(super) pivots: Cells<NodePivots>,
+    pub(super) pivots: Cells<NodePivots<T>>,
     /// Whether pivots may be delayed (`delay`): the positions are then
     /// known, and the supernodes emitted, only once the whole forest is
     /// factored.
@@ -76,7 +76,7 @@ impl<T: Scalar> LlEmit<T> {
         st: &LuStructure,
         delay_growth: f64,
         storage: Option<(PanelStorage<T>, PanelStorage<T>)>,
-        pivots: Cells<NodePivots>,
+        pivots: Cells<NodePivots<T>>,
     ) -> Self {
         let n = sym.n;
         let (refcount, e_offset) = emit_refcount_offsets(sym, sched);
@@ -192,12 +192,10 @@ pub(super) fn delay_allowance(l_slots: &[Slot], u_slots: &[Slot], delay_growth: 
 }
 
 /// Emit supernode `k` once its last updater is done (or, with delayed pivots,
-/// once the forest is): the left-looking panel `lbuf` (`L` strictly below the
-/// diagonal, `U`'s diagonal block on and above it) becomes the `L` panel as
-/// it is, its pivot columns, and `U^T`'s panel, whose off-block rows the
-/// factorization wrote in place (`U12`), gets its diagonal block and the
-/// rows of the delayed columns from the upper triangle. Both get their rows
-/// past the pivots in elimination order.
+/// once the forest is): the `L` panel (`L` strictly below the diagonal, `U`'s
+/// diagonal on it) and the `U^T` panel, which the factorization wrote above
+/// the diagonal, become the factor's panels as they are, `U^T` with `U`'s
+/// diagonal. Both get their rows past the pivots in elimination order.
 fn emit_and_free<T: Scalar>(
     k: usize,
     emit: &LlEmit<T>,
@@ -213,16 +211,14 @@ fn emit_and_free<T: Scalar>(
     if npiv == 0 {
         return;
     }
-    let (nrow_l, nrow_u, nfs) = (npiv + ol.len(), npiv + ou.len(), pv.rows.len());
-    // `U^T`'s diagonal block and delayed columns from the upper triangle of
-    // the `L` slot.
+    // `U`'s diagonal, on the `L` panel's.
     {
+        use crate::numeric::supernodal::panel::Layout;
+        let (ll, lu) = (Layout::new(npiv, ol.len()), Layout::new(npiv, ou.len()));
         let lbuf: &[T] = unsafe { emit.l_arena.slot(k) };
         let ut = unsafe { emit.u_arena.slot_mut(k) };
         for p in 0..npiv {
-            for i in p..nfs {
-                ut[p * nrow_u + i] = lbuf[i * nrow_l + p];
-            }
+            ut[lu.at(p, p)] = lbuf[ll.at(p, p)];
         }
     }
     // The rows past the pivots in elimination indices, into the arenas' row slots.

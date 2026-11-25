@@ -1228,7 +1228,7 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
         "corpus" => build_corpus(),
         "real" => {
             let dir = std::env::var("RLA_BENCH_REAL_DIR")
-                .unwrap_or_else(|_| r"C:\Repositories\rapidmom\precond_matrices".into());
+                .expect("the real suite reads its .mtx files from RLA_BENCH_REAL_DIR");
             let count: usize = std::env::var("RLA_BENCH_REAL_N")
                 .ok()
                 .and_then(|v| v.parse().ok())

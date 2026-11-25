@@ -55,7 +55,7 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
                 self.solve_transpose_one(&b[cols.clone()], &mut x[cols], &mut work.y);
             }
         } else if nrhs == 1 {
-            self.solve_one(b, x, &mut work.y);
+            self.solve_one(b, x, work);
         } else {
             self.solve_block(b, nrhs, x, work);
         }
@@ -84,6 +84,8 @@ impl<T: Scalar> KluSolver<T> {
             + vec_bytes(&f.u_rowidx)
             + vec_bytes(&f.u_val)
             + vec_bytes(&f.udiag)
+            + vec_bytes(&f.sn_last)
+            + vec_bytes(&f.u_dense)
             + vec_bytes(&f.f_colptr)
             + vec_bytes(&f.f_rowidx)
             + vec_bytes(&f.f_val)
@@ -197,15 +199,20 @@ impl<T: Scalar> KluSolver<T> {
         &self.factors.rs_inv
     }
 
-    fn solve_one(&self, b: &[T], x: &mut [T], w: &mut Vec<T>) {
+    fn solve_one(&self, b: &[T], x: &mut [T], work: &mut crate::SolveWork<T>) {
         let f = &self.factors;
+        let w = &mut work.y;
         w.clear();
         w.extend(
             f.row_perm
                 .iter()
                 .map(|&orig| b[orig] * T::from_real(f.rs_inv[orig])),
         );
-        self.solve_permuted(w);
+        // all-zero, only ever grown: the supernode kernel leaves it as found
+        if work.gather.len() < f.l_widest {
+            work.gather.resize(f.l_widest, T::zero());
+        }
+        self.solve_permuted(w, &mut work.gather);
         for (k, &c) in f.col_perm.iter().enumerate() {
             x[c] = w[k];
         }
@@ -300,10 +307,7 @@ impl<T: Scalar> KluSolver<T> {
         let xj = work.row.as_mut_slice();
         for blk in (0..f.block_ptr.len() - 1).rev() {
             let (bs, be) = (f.block_ptr[blk], f.block_ptr[blk + 1]);
-            // L (unit lower) forward within the block. Negating the factor
-            // value (loop-invariant here) instead of `xj` keeps each column's
-            // FMA product bitwise equal to `solve_permuted`'s
-            // (`(-a)*b == a*(-b)` exactly per real FMA).
+            // L (unit lower) forward within the block, column by column.
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
@@ -314,8 +318,7 @@ impl<T: Scalar> KluSolver<T> {
                     }
                 }
             }
-            // U backward within the block. Per-element division (not
-            // reciprocal-multiply) keeps each column bit-identical to `solve`.
+            // U backward within the block.
             for j in (bs..be).rev() {
                 let d = f.udiag[j];
                 {
@@ -353,18 +356,38 @@ impl<T: Scalar> KluSolver<T> {
         }
     }
 
-    /// The block forward/backward substitution on the permuted/scaled vector.
-    /// The axpys run through `fmadd` with the loop-invariant operand negated
-    /// once per column, `solve_many` negates the per-entry factor value
-    /// instead, which is bitwise the same product (`(-a)*b == a*(-b)` holds
-    /// exactly per real FMA), so the two stay bit-identical per column.
-    fn solve_permuted(&self, w: &mut [T]) {
+    /// The block forward/backward substitution on the permuted/scaled vector
+    /// `w`, `tmp` the supernode kernel's gather (all-zero, left so). The
+    /// axpys run through `fmadd` with the loop-invariant operand negated once
+    /// per column; the supernodes of `L` are applied by the dense kernel,
+    /// whose sums `solve_many` (column by column) forms in another order.
+    fn solve_permuted(&self, w: &mut [T], tmp: &mut [T]) {
         let f = &self.factors;
         for b in (0..f.block_ptr.len() - 1).rev() {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
-            // L (unit lower) forward within the block. Unchecked: all row
+            // L (unit lower) forward within the block, a supernode worth the
+            // dense kernel as one ([`super::supernode`]). Unchecked: all row
             // indices are final positions `< n` by construction.
-            for j in bs..be {
+            let mut j = bs;
+            while j < be {
+                let q = f.sn_last[j] as usize;
+                if q > j {
+                    // SAFETY: the rows of `L(:, q)` are final positions in
+                    // `w`, `tmp` holds `l_widest` entries.
+                    unsafe {
+                        super::supernode::apply(
+                            w,
+                            0,
+                            tmp,
+                            &f.l_colptr,
+                            &f.l_rowidx,
+                            (f.l_val.as_ptr(), 0),
+                            (j, q),
+                        );
+                    }
+                    j = q + 1;
+                    continue;
+                }
                 let xj = w[j];
                 if xj != T::zero() {
                     let nxj = T::zero() - xj;
@@ -376,6 +399,7 @@ impl<T: Scalar> KluSolver<T> {
                         }
                     }
                 }
+                j += 1;
             }
             // U backward within the block.
             for j in (bs..be).rev() {

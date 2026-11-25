@@ -115,26 +115,6 @@ pub const WIDE_PANEL_NB: usize = 128;
 /// Contract: results (the pivot window).
 pub const LU_PANEL_NB: usize = 32;
 
-/// A tiled cmod splits the target's columns into about this many tiles,
-/// within [`CMOD_TILE_MIN`] and [`CMOD_TILE_MAX`] columns each (tiles).
-/// Used by: `KernelSettings::cmod_tiles` (the `L` tiles of both paths and
-/// the `U` tiles of LU).
-/// Why: tuned default; enough tiles to spread a wide node over the workers.
-/// Contract: rounding (the tile fixes the per-tile GEMM shapes).
-pub const CMOD_TILES: usize = 16;
-
-/// Narrowest cmod tile (columns).
-/// Used by: `KernelSettings::cmod_tile_min`.
-/// Why: tuned default; narrower tiles lose GEMM rate.
-/// Contract: rounding.
-pub const CMOD_TILE_MIN: usize = 32;
-
-/// Widest cmod tile (columns).
-/// Used by: `KernelSettings::cmod_tile_max`.
-/// Why: tuned default.
-/// Contract: rounding.
-pub const CMOD_TILE_MAX: usize = 256;
-
 /// Rows per task of the parallel `U12` triangular solve in the LU cdiv
 /// (rows).
 /// Used by: `KernelSettings::trsm_rows`.
@@ -157,3 +137,17 @@ pub const SPLIT_PLANES: usize = 3;
 /// Why: a 2x2 pivot reads two columns, the lookahead holds the next two.
 /// Contract: estimate.
 pub const BK_ROW_BUFFERS: usize = 4;
+
+/// Columns per block of the diagonal part of a supernode's panel, the one
+/// layout the factorizations write and the solves read
+/// (`supernodal::panel::Layout`): each block holds its columns' rows from
+/// its first column to the panel's width, the off-block rows of all columns
+/// form one rectangle after the blocks (columns).
+/// Used by: `supernodal::panel::Layout`, the sweeps' triangles in column
+/// blocks (`supernodal::solve`), the tiles of the trailing updates.
+/// Why: each block's triangle runs on the register tiles of the sweeps and
+/// the rows below it take one product; 64 keeps the triangles a small share
+/// (the unused upper part of a block's own square) and the products wide
+/// enough for the SIMD GEMM.
+/// Contract: rounding.
+pub const PANEL_BLOCK: usize = 64;

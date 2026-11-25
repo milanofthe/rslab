@@ -41,6 +41,7 @@ mod factor;
 mod refactor;
 mod settings;
 mod solver;
+mod supernode;
 mod symbolic;
 #[cfg(test)]
 mod tests;
@@ -197,16 +198,26 @@ struct KluFactors<T> {
     parallel: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
     /// Row indices are final positions within the column's block (narrow
-    /// [`Ki`] indices: the solve/refactor loops are index-bound).
+    /// [`Ki`] indices: the solve/refactor loops are index-bound), in the
+    /// order of the column's supernode ([`supernode`]).
     l_colptr: Vec<usize>,
     l_rowidx: Vec<Ki>,
     l_val: Vec<T>,
-    /// U: strictly-above-diagonal within-block entries per column, stored in
-    /// elimination (topological) order, the refactor replay order.
+    /// U: strictly-above-diagonal within-block entries per column, in the
+    /// refactor replay order: topological, rows ascending in a column that
+    /// applies a supernode of `L` ([`supernode`]).
     u_colptr: Vec<usize>,
     u_rowidx: Vec<Ki>,
     u_val: Vec<T>,
     udiag: Vec<T>,
+    /// Per column the last column of its supernode of `L`, whose columns
+    /// the replay and the solve apply densely ([`supernode`]), and the most
+    /// entries of an `L` column (the dense kernel's gather).
+    sn_last: Vec<Ki>,
+    /// Per column whether its replay reads two columns of one supernode or
+    /// more; the others replay column by column without looking.
+    u_dense: Vec<bool>,
+    l_widest: usize,
     /// Off-block entries (rows in earlier blocks, final positions), per
     /// column in the input's storage order. Not factored; applied in the
     /// block back-substitution.

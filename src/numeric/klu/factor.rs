@@ -911,6 +911,20 @@ pub(super) fn factor_impl<T: Scalar>(
         pinv[orig] = fin as usize;
     }
 
+    let (sn_last, u_dense) = super::supernode::layout(
+        &sym.block_ptr,
+        &l_colptr,
+        &mut l_rowidx,
+        &mut l_val,
+        &u_colptr,
+        &mut u_rowidx,
+        &mut u_val,
+    );
+    let l_widest = (0..n)
+        .map(|j| l_colptr[j + 1] - l_colptr[j])
+        .max()
+        .unwrap_or(0);
+
     // The exact replay work from the now-frozen pattern, which every
     // refactor decides its parallel replay on ([`compute_replay_plan`]).
     let plan = compute_replay_plan(&sym.block_ptr, &l_colptr, &u_colptr, &u_rowidx, settings);
@@ -934,6 +948,9 @@ pub(super) fn factor_impl<T: Scalar>(
         u_rowidx,
         u_val,
         udiag,
+        sn_last,
+        u_dense,
+        l_widest,
         f_colptr,
         f_rowidx,
         f_val,

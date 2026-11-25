@@ -2,27 +2,173 @@
 //! the numeric drivers write and the solves read.
 //!
 //! A factor `L` (unit lower triangular, or a general lower triangular `U^T`)
-//! is stored per supernode as one dense column-major panel of `(w + m) x w`
-//! entries with leading dimension `w + m`: `w` columns of the supernode, the
-//! `w x w` diagonal block on top (only its lower triangle is meaningful, the
-//! unit diagonal is implicit for a unit factor), the `m` off-block rows below
-//! in ascending elimination order. The row list is shared by the panel's
-//! columns, so the index overhead is `m` words per supernode rather than one
-//! per entry, and the values are exactly the dense panels the factorization
-//! kernels produce. All panels live in **one buffer**, in supernode order
-//! (or, where fronts outgrew the analysis, the order they were factored in)
-//! (the [`PanelArena`] the drivers factor into), so a sweep streams through
-//! memory the way the elimination tree is walked -- a left-looking driver
-//! hands its panel over without a copy, and the solves run BLAS-3 style on
-//! the same memory. Compared with a compressed-column factor with one `usize` index
-//! per entry (24 bytes per complex entry, and a second copy for the solve
-//! layout) this is the whole factor at 16 bytes per complex entry, once.
-//!
-//! [`PanelFactor::to_csc`] materializes the compressed-column form on demand
-//! for the reference solves and the public CSC factor types.
+//! is stored per supernode as one panel of `w` columns and `m` off-block
+//! rows ([`Layout`]): the diagonal part in column blocks of
+//! [`PANEL_BLOCK`](crate::constants::PANEL_BLOCK) columns, each block its
+//! columns' rows from the block's first column to `w` (column-major, leading
+//! dimension `w - jb`), so of the diagonal block's unused upper triangle only
+//! the part inside each block's own square is stored; then the `m x w`
+//! rectangle of the off-block rows of all columns (column-major, leading
+//! dimension `m`), the rows in ascending elimination order. The row list is
+//! shared by the panel's columns, so the index overhead is `m` words per
+//! supernode rather than one per entry. All panels live in **one buffer**
+//! (the [`PanelArena`] the drivers factor into), each at its own offset, in
+//! supernode order (or, where fronts outgrew the analysis, the order they
+//! started in): the factorization writes this layout in place and the
+//! solves read it as it is, so a sweep streams through memory the way the
+//! elimination tree is walked. A descendant's update reads its off-block
+//! rows as one rectangle of uniform stride.
 
+use crate::constants::PANEL_BLOCK;
 use crate::numeric::supernodal::{Cells, PanelPtr, ScratchPool};
 use crate::scalar::Scalar;
+
+/// Where the entries of a panel of `w` columns and `m` off-block rows lie in
+/// its slot (see the module docs): entry `(i, j)` of the panel (row `i` of
+/// `0..w + m`, column `j` of `0..w`) is stored for `i >= jb`, `jb` the first
+/// column of `j`'s block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Layout {
+    pub w: usize,
+    pub m: usize,
+}
+
+/// A column-major run of a panel's entries: rows `rows` of columns `cols`,
+/// the entry `(rows.start, cols.start)` at `off`, columns `ld` apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Run {
+    pub off: usize,
+    pub ld: usize,
+    pub rows: std::ops::Range<usize>,
+    pub cols: std::ops::Range<usize>,
+}
+
+/// One column of a [`Layout`] ([`Layout::col`]).
+#[derive(Clone, Copy)]
+pub(crate) struct ColAt {
+    w: usize,
+    diag: usize,
+    rect: usize,
+}
+
+impl ColAt {
+    /// The offset of the column's entry in row `i`.
+    #[inline]
+    pub(crate) fn at(&self, i: usize) -> usize {
+        if i < self.w {
+            self.diag + i
+        } else {
+            self.rect + i
+        }
+    }
+}
+
+impl Layout {
+    #[inline]
+    pub(crate) const fn new(w: usize, m: usize) -> Self {
+        Layout { w, m }
+    }
+
+    /// Entries of the full diagonal blocks before block `k`:
+    /// `sum_{i < k} nb (w - i nb)`.
+    #[inline]
+    fn before(&self, k: usize) -> usize {
+        let nb = PANEL_BLOCK;
+        k * nb * self.w - nb * nb * (k * k.saturating_sub(1) / 2)
+    }
+
+    /// Where the off-block rectangle starts: the entries of the diagonal
+    /// blocks.
+    #[inline]
+    pub(crate) fn rect(&self) -> usize {
+        let full = self.w / PANEL_BLOCK;
+        let last = self.w - full * PANEL_BLOCK;
+        self.before(full) + last * last
+    }
+
+    /// The panel's entries.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.rect() + self.m * self.w
+    }
+
+    /// The diagonal blocks: `(jb, je, offset, ld)`, block `jb..je` the
+    /// column-major `(w - jb) x (je - jb)` block of rows `jb..w` at `offset`.
+    pub(crate) fn blocks(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (usize, usize, usize, usize)> + ExactSizeIterator {
+        let l = *self;
+        (0..l.w.div_ceil(PANEL_BLOCK)).map(move |k| {
+            let (jb, je) = (k * PANEL_BLOCK, ((k + 1) * PANEL_BLOCK).min(l.w));
+            (jb, je, l.before(k), l.w - jb)
+        })
+    }
+
+    /// The offset of entry `(i, j)`.
+    #[inline]
+    pub(crate) fn at(&self, i: usize, j: usize) -> usize {
+        debug_assert!(j < self.w && i < self.w + self.m);
+        if i < self.w {
+            let k = j / PANEL_BLOCK;
+            let jb = k * PANEL_BLOCK;
+            debug_assert!(i >= jb, "entry ({i}, {j}) above its block");
+            self.before(k) + (j - jb) * (self.w - jb) + i - jb
+        } else {
+            self.rect() + j * self.m + i - self.w
+        }
+    }
+
+    /// Where column `j`'s entries lie: entry `(i, j)` at
+    /// [`ColAt::at`]`(i)`, for `i` from `j`'s block's first column on.
+    #[inline]
+    pub(crate) fn col(&self, j: usize) -> ColAt {
+        let k = j / PANEL_BLOCK;
+        let jb = k * PANEL_BLOCK;
+        ColAt {
+            w: self.w,
+            diag: self.before(k) + (j - jb) * (self.w - jb) - jb,
+            rect: self.rect() + j * self.m - self.w,
+        }
+    }
+
+    /// The column-major runs that hold rows `rows` of columns `cols`: in the
+    /// diagonal part one per block the columns reach (rows from `rows.start`,
+    /// at least the block's first column, to `w`), then one in the off-block
+    /// rectangle.
+    pub(crate) fn runs(
+        &self,
+        rows: std::ops::Range<usize>,
+        cols: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = Run> {
+        let l = *self;
+        let diag_end = rows.end.min(l.w);
+        let first = cols.start / PANEL_BLOCK;
+        let last = if cols.is_empty() {
+            first
+        } else {
+            cols.end.div_ceil(PANEL_BLOCK)
+        };
+        let diag = (first..last).filter_map(move |k| {
+            let c0 = cols.start.max(k * PANEL_BLOCK);
+            let c1 = cols.end.min((k + 1) * PANEL_BLOCK);
+            let r0 = rows.start.max(k * PANEL_BLOCK);
+            (c0 < c1 && r0 < diag_end).then(|| Run {
+                off: l.at(r0, c0),
+                ld: l.w - k * PANEL_BLOCK,
+                rows: r0..diag_end,
+                cols: c0..c1,
+            })
+        });
+        let r0 = rows.start.max(l.w);
+        let rect = (r0 < rows.end && !cols.is_empty()).then(|| Run {
+            off: l.at(r0, cols.start),
+            ld: l.m,
+            rows: r0..rows.end,
+            cols: cols.clone(),
+        });
+        diag.chain(rect)
+    }
+}
 
 /// A lower triangular factor in supernodal panel form (see the module docs).
 #[derive(Clone, Debug)]
@@ -38,11 +184,10 @@ pub struct PanelFactor<T> {
     pub row_ptr: Vec<usize>,
     /// Panel starts into `vals`, `ns` entries.
     pub val_off: Vec<usize>,
-    /// The panels back to back, in supernode order or, where fronts outgrew
-    /// the analysis (delayed pivots), in the order they were factored:
-    /// supernode `s` is the `(w + m) x w` column-major block from
-    /// `vals[val_off[s]]` (leading dimension `w + m`); entries above the
-    /// diagonal of the diagonal block are unused.
+    /// The panels, each at its offset ([`Layout`] of its `w` and `m` from
+    /// `vals[val_off[s]]`), in supernode order or, where fronts outgrew the
+    /// analysis (delayed pivots), in the order they started; a panel that
+    /// dropped rows or pivots leaves the rest of its slot unused.
     pub vals: Vec<T>,
 }
 
@@ -73,11 +218,17 @@ impl<T: Scalar> PanelFactor<T> {
         (c0, w, self.row_ptr[s + 1] - self.row_ptr[s])
     }
 
-    /// The panel of supernode `s`.
+    /// The layout of supernode `s`'s panel.
+    #[inline]
+    pub(crate) fn layout(&self, s: usize) -> Layout {
+        let (_, w, m) = self.shape(s);
+        Layout::new(w, m)
+    }
+
+    /// The panel of supernode `s` ([`layout`](Self::layout)).
     #[inline]
     pub fn panel(&self, s: usize) -> &[T] {
-        let (_, w, m) = self.shape(s);
-        &self.vals[self.val_off[s]..self.val_off[s] + (w + m) * w]
+        &self.vals[self.val_off[s]..self.val_off[s] + self.layout(s).len()]
     }
 
     /// Structural entry count of the factor: the lower triangles of the
@@ -147,14 +298,14 @@ pub fn permute_panel_rows<T: Copy>(
 /// [`finish`](Self::finish) then closes the gaps left by dropped rows and
 /// yields the [`PanelFactor`].
 ///
-/// The slots are fixed by the analysis, `(w + m) x w` from each
-/// supernode's symbolic shape, back to back in supernode order and zeroed
-/// up front ([`new`](Self::new)); or, where fronts may outgrow the analysis
-/// (an LU with delayed pivots), [`lazy`](Self::lazy): each owner claims a
-/// slot of the size its front has when it starts, from a buffer of fixed
-/// room, zeroed then. The slots then lie in the order the fronts started,
-/// with no holes, so only the values the factor holds are ever resident and
-/// closing the gaps moves every panel down.
+/// The slots are fixed by the analysis, the [`Layout`] of each supernode's
+/// symbolic shape, back to back in supernode order and zeroed up front
+/// ([`new`](Self::new)); or, where fronts may outgrow the analysis (an LU
+/// with delayed pivots), [`lazy`](Self::lazy): each owner claims a slot of
+/// the size its front has when it starts, from a buffer of fixed room,
+/// zeroed then. The slots then lie in the order the fronts started, so only
+/// the values the factor holds are ever resident. A panel stays where it was
+/// factored: the factor takes the buffer as it is.
 pub(crate) struct PanelArena<T> {
     /// Each supernode's value slot `(start, length)`.
     slots: Cells<(usize, usize)>,
@@ -388,12 +539,11 @@ impl<T: Scalar> PanelArena<T> {
 
     /// Close the arena into the factor: `ncols` gives the column count of
     /// every supernode's finished panel (0 skipped), `outs(s)` the finished
-    /// panel's row count and compacted length. The panels move down in the
-    /// order of their slots to close the gaps of dropped rows and delayed
-    /// pivots, so the factor's buffers are exact. Returns the factor and the
-    /// zero-slot count.
+    /// panel's row count and length. Every panel stays in its slot (a slot
+    /// whose panel dropped rows or pivots keeps the rest unused); the rows
+    /// close up. Returns the factor and the zero-slot count.
     pub fn finish(
-        mut self,
+        self,
         n: usize,
         ncols: impl Iterator<Item = usize>,
         mut outs: impl FnMut(usize) -> PanelOut,
@@ -411,7 +561,7 @@ impl<T: Scalar> PanelArena<T> {
                 continue;
             }
             let out = outs(s);
-            debug_assert_eq!(out.len, (w + out.m) * w);
+            debug_assert_eq!(out.len, Layout::new(w, out.m).len());
             debug_assert!(out.len <= self.slot_len(s));
             kept.push((s, out.len, out.m));
             sn_col.push(sn_col.last().copied().unwrap_or(0) + w as u32);
@@ -419,36 +569,23 @@ impl<T: Scalar> PanelArena<T> {
             zeros += out.zeros;
         }
         debug_assert_eq!(sn_col.last().copied(), Some(n as u32));
-        // The values in the order of the slots, each panel moved down to the
-        // end of the ones before it (reads stay ahead of writes).
         // SAFETY (the slot reads): every slot is finished and unshared.
-        let start = |i: usize| unsafe { self.slots.get(kept[i].0) }.0;
-        let mut order: Vec<usize> = (0..kept.len()).collect();
-        if self.lazy {
-            order.sort_unstable_by_key(|&i| start(i));
-        }
-        let mut val_off = vec![0usize; kept.len()];
-        let (base, mut at) = (self.vals.as_mut_ptr(), 0usize);
-        let mut moved = false;
-        for &i in &order {
-            let (src, len) = (start(i), kept[i].1);
-            debug_assert!(at <= src);
-            if at != src {
-                // SAFETY: both ranges lie in the buffer's capacity, the source
-                // holds the finished panel; `copy` handles the overlap.
-                unsafe { std::ptr::copy(base.add(src), base.add(at), len) };
-                moved = true;
-            }
-            val_off[i] = at;
-            at += len;
-        }
-        let total = at;
+        let val_off: Vec<usize> = (kept.iter())
+            .map(|&(s, _, _)| unsafe { self.slots.get(s) }.0)
+            .collect();
+        // The values the slots hold: a fixed arena's whole buffer, a lazy
+        // one's claimed part.
+        let total = if self.lazy {
+            self.cursor.load(std::sync::atomic::Ordering::Acquire)
+        } else {
+            self.vals.len()
+        };
         let total_rows = row_ptr.last().copied().unwrap_or(0);
         let (mut vals, mut rows) = (self.vals, self.rows);
-        // SAFETY: the first `total` values are the panels written above (a
-        // fixed arena's whole buffer was initialized up front).
+        // SAFETY: the first `total` values are the slots, every one zeroed
+        // when made or claimed.
         unsafe { vals.set_len(total) };
-        if (moved || total < vals.capacity()) && !self.reused {
+        if total < vals.capacity() && !self.reused {
             release_room(&mut vals);
         }
         if self.lazy {
@@ -498,19 +635,19 @@ pub(crate) fn release_room<T>(v: &mut Vec<T>) {
     }
 }
 
-/// The arena slot `(values, rows)` of a supernode whose panel is `(w + m) x
-/// w` (`w` columns, `m` off-block rows): none for an empty supernode.
+/// The arena slot `(values, rows)` of a supernode whose panel has `w`
+/// columns and `m` off-block rows ([`Layout`]): none for an empty supernode.
 pub(crate) fn slot_sizes(w: usize, m: usize) -> (usize, usize) {
     if w == 0 {
         (0, 0)
     } else {
-        ((w + m) * w, m)
+        (Layout::new(w, m).len(), m)
     }
 }
 
 /// One supernode's finished panel, as left in its arena slots: its
 /// off-block row count `m` (the rows in the row slot, elimination indices,
-/// ascending), the compacted panel length `(w + m) * w`, and the zero-slot
+/// ascending), the panel's length (its [`Layout`]), and the zero-slot
 /// count.
 #[derive(Default)]
 pub(crate) struct PanelOut {
@@ -526,7 +663,6 @@ pub(crate) struct PanelOut {
 /// The buffers of one [`finish_panel`] call.
 pub(crate) struct PanelScratch<T> {
     order: Vec<u32>,
-    full: Vec<u32>,
     sorted: Vec<u32>,
     tmp: Vec<T>,
     row_nz: Vec<bool>,
@@ -535,7 +671,7 @@ pub(crate) struct PanelScratch<T> {
 impl<T> crate::memory::HeapBytes for PanelScratch<T> {
     fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes as b;
-        b(&self.order) + b(&self.full) + b(&self.sorted) + b(&self.tmp) + b(&self.row_nz)
+        b(&self.order) + b(&self.sorted) + b(&self.tmp) + b(&self.row_nz)
     }
 }
 
@@ -543,7 +679,6 @@ impl<T> Default for PanelScratch<T> {
     fn default() -> Self {
         PanelScratch {
             order: Vec::new(),
-            full: Vec::new(),
             sorted: Vec::new(),
             tmp: Vec::new(),
             row_nz: Vec::new(),
@@ -551,14 +686,14 @@ impl<T> Default for PanelScratch<T> {
     }
 }
 
-/// Finish one supernode's panel in its slot: rows `0..w` are the supernode's
-/// own columns in elimination order, the `m` rows below are permuted into
-/// ascending elimination order (`rows[i]` is the elimination index of panel
-/// row `w + i` on entry, and ascending on exit), for an LDL^T factor the
-/// `(p+1, p)` entry of each 2x2 pivot is cleared (that coupling lives in
+/// Finish one supernode's panel ([`Layout`] of `w` columns and `rows.len()`
+/// off-block rows) in its slot: the off-block rows are permuted into
+/// ascending elimination order (`rows[i]` is the elimination index of
+/// off-block row `i` on entry, and ascending on exit), for an LDL^T factor
+/// the `(p+1, p)` entry of each 2x2 pivot is cleared (that coupling lives in
 /// `D`), and off-block rows without a nonzero in any column are dropped
-/// from the panel and from `rows` (compacted in place, the tails of the
-/// slots are left behind).
+/// from the rectangle and from `rows` (compacted in place, the tail of the
+/// slot is left behind).
 pub(crate) fn finish_panel<T: Scalar>(
     panel: &mut [T],
     rows: &mut [u32],
@@ -567,18 +702,14 @@ pub(crate) fn finish_panel<T: Scalar>(
     sc: &mut PanelScratch<T>,
 ) -> PanelOut {
     let m = rows.len();
-    let ld = w + m;
-    debug_assert!(panel.len() >= ld * w);
-    let panel = &mut panel[..ld * w];
-    let sorted = rows.windows(2).all(|p| p[0] < p[1]);
-    if !sorted {
+    let lay = Layout::new(w, m);
+    debug_assert!(panel.len() >= lay.len());
+    let (diag, rect) = panel[..lay.len()].split_at_mut(lay.rect());
+    if !rows.windows(2).all(|p| p[0] < p[1]) {
         sc.order.clear();
         sc.order.extend(0..m as u32);
         sc.order.sort_unstable_by_key(|&i| rows[i as usize]);
-        sc.full.clear();
-        sc.full.extend(0..w as u32);
-        sc.full.extend(sc.order.iter().map(|&i| w as u32 + i));
-        permute_panel_rows(panel, ld, w, &sc.full, &mut sc.tmp);
+        permute_panel_rows(rect, m, w, &sc.order, &mut sc.tmp);
         sc.sorted.clear();
         sc.sorted.extend(sc.order.iter().map(|&i| rows[i as usize]));
         rows.copy_from_slice(&sc.sorted);
@@ -587,7 +718,7 @@ pub(crate) fn finish_panel<T: Scalar>(
     if let Some(two_by_two) = two_by_two {
         for p in 0..w {
             if two_by_two[p] && p + 1 < w {
-                panel[p * ld + p + 1] = zero;
+                diag[lay.at(p + 1, p)] = zero;
             }
         }
     }
@@ -595,13 +726,18 @@ pub(crate) fn finish_panel<T: Scalar>(
     // the off-block rows without a nonzero in any column (the symmetrized
     // pattern of an unsymmetric matrix, relaxed amalgamation).
     let mut zeros = 0usize;
+    for p in 0..w {
+        let at = lay.at(p, p);
+        zeros += diag[at + 1..at + w - p]
+            .iter()
+            .filter(|&&v| v == zero)
+            .count();
+    }
     let row_nz = &mut sc.row_nz;
     row_nz.clear();
     row_nz.resize(m, false);
-    for p in 0..w {
-        let col = &panel[p * ld..(p + 1) * ld];
-        zeros += col[p + 1..w].iter().filter(|&&v| v == zero).count();
-        for (i, &v) in col[w..].iter().enumerate() {
+    for col in rect.chunks_exact(m.max(1)).take(if m == 0 { 0 } else { w }) {
+        for (i, &v) in col.iter().enumerate() {
             if v == zero {
                 zeros += 1;
             } else {
@@ -610,25 +746,18 @@ pub(crate) fn finish_panel<T: Scalar>(
         }
     }
     let m2 = row_nz.iter().filter(|&&b| b).count();
-    let mut len = ld * w;
     if m2 < m {
-        let ld2 = w + m2;
+        // Reads stay ahead of writes: the kept row `i` of column `p` lands
+        // at an offset no larger than its source.
         let mut dst = 0;
         for p in 0..w {
-            let src = p * ld;
-            // Reads stay ahead of writes: `dst <= src` and the kept row `i`
-            // lands at an offset no larger than its source.
-            panel.copy_within(src..src + w, dst);
-            let mut k = w;
-            for (i, &keep) in row_nz.iter().enumerate() {
-                if keep {
-                    panel[dst + k] = panel[src + w + i];
-                    k += 1;
+            for i in 0..m {
+                if row_nz[i] {
+                    rect[dst] = rect[p * m + i];
+                    dst += 1;
                 }
             }
-            dst += ld2;
         }
-        len = ld2 * w;
         let mut k = 0;
         for i in 0..m {
             if row_nz[i] {
@@ -638,7 +767,11 @@ pub(crate) fn finish_panel<T: Scalar>(
         }
         zeros -= (m - m2) * w;
     }
-    PanelOut { m: m2, len, zeros }
+    PanelOut {
+        m: m2,
+        len: Layout::new(w, m2).len(),
+        zeros,
+    }
 }
 
 #[cfg(test)]
@@ -655,7 +788,48 @@ mod tests {
     }
 
     #[test]
-    fn arena_finish_closes_gaps_and_drops_empty_rows() {
+    fn layout_places_every_entry_once_and_runs_cover_them() {
+        for (w, m) in [(1, 0), (1, 3), (63, 5), (64, 0), (65, 7), (200, 13)] {
+            let lay = Layout::new(w, m);
+            let mut seen = vec![false; lay.len()];
+            for j in 0..w {
+                let jb = j / PANEL_BLOCK * PANEL_BLOCK;
+                for i in jb..w + m {
+                    let at = lay.at(i, j);
+                    assert!(!std::mem::replace(&mut seen[at], true), "({i}, {j}) twice");
+                }
+            }
+            assert!(seen.iter().all(|&b| b), "w={w} m={m}: a slot of no entry");
+            for j in 0..w {
+                let col = lay.col(j);
+                for i in j / PANEL_BLOCK * PANEL_BLOCK..w + m {
+                    assert_eq!(col.at(i), lay.at(i, j));
+                }
+            }
+            let (r0, c0) = (w / 3, w / 4);
+            let mut covered = 0;
+            for run in lay.runs(r0.max(c0 / PANEL_BLOCK * PANEL_BLOCK)..w + m, c0..w) {
+                for j in run.cols.clone() {
+                    for i in run.rows.clone() {
+                        let off = run.off + (j - run.cols.start) * run.ld + i - run.rows.start;
+                        assert_eq!(off, lay.at(i, j));
+                        covered += 1;
+                    }
+                }
+            }
+            let want: usize = (c0..w)
+                .map(|j| {
+                    w + m
+                        - r0.max(c0 / PANEL_BLOCK * PANEL_BLOCK)
+                            .max(j / PANEL_BLOCK * PANEL_BLOCK)
+                })
+                .sum();
+            assert_eq!(covered, want, "w={w} m={m}");
+        }
+    }
+
+    #[test]
+    fn arena_finish_keeps_slots_and_drops_empty_rows() {
         // Supernode 0: w=1, rows {1, 2}; supernode 1: w=1, row {2}; supernode 2: w=1.
         let shapes = [(1usize, 2usize), (1, 1), (1, 0)];
         let arena = PanelArena::<f64>::new(shapes.into_iter().map(|(w, m)| slot_sizes(w, m)));
@@ -681,8 +855,9 @@ mod tests {
         let mut outs = outs.into_iter();
         let (f, zeros) = arena.finish(3, [1usize, 1, 1].into_iter(), |_| outs.next().unwrap());
         assert_eq!(zeros, 0);
-        assert_eq!(f.vals, vec![1.0, 5.0, 1.0, 6.0, 1.0]);
-        assert_eq!(f.val_off, vec![0, 2, 4]);
+        // The panels stay in their slots; the dropped row leaves a hole.
+        assert_eq!(f.vals, vec![1.0, 5.0, 0.0, 1.0, 6.0, 1.0]);
+        assert_eq!(f.val_off, vec![0, 3, 5]);
         assert_eq!(f.rows, vec![1, 2]);
         assert_eq!(f.row_ptr, vec![0, 1, 2, 2]);
     }

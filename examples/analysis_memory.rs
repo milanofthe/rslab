@@ -1,6 +1,6 @@
 //! Heap peak and wall time of the LU analysis by stage, on the near-field
 //! pattern of a planar MoM system (`matgen::bem::near_field`), analysed as
-//! rapidmom does: nested dissection, no row matching, zero `f32` values.
+//! a MoM solver does: nested dissection, no row matching, zero `f32` values.
 //!
 //! A counting allocator tracks the live heap and its peak above the input
 //! matrix, behind `rsprobe::Alloc`: built with `--features rsprobe/alloc`,
