@@ -1592,7 +1592,7 @@ version = "1.14.0"
 [[package]]
 name = "rspool"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rspool?rev=d6c7ae3#d6c7ae3787e96df3d03536e4d077e921602e4143"
+source = "git+https://github.com/milanofthe/rspool?rev=06f5e17#06f5e17c58f81c8ccf6a8bbc0793ad4a1c9a5ab2"
 dependencies = [
  "rayon",
  "rsprobe",
@@ -1601,7 +1601,7 @@ dependencies = [
 [[package]]
 name = "rsprobe"
 version = "0.1.0"
-source = "git+https://github.com/milanofthe/rsprobe?rev=c2269fe#c2269fe9a333438651dd360d445942e4c80d450e"
+source = "git+https://github.com/milanofthe/rsprobe?rev=d11d43db0#d11d43db0179bc2d47d25d6f879d41e67d81b6af"
 
 [[package]]
 name = "rustix"

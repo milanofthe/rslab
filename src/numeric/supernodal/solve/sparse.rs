@@ -439,7 +439,7 @@ impl<T: Scalar> SolvePlan<T> {
 mod tests {
     use super::*;
     use crate::numeric::settings::SolverSettings;
-    use crate::numeric::supernodal::solve::{PlanWork, Sweep};
+    use crate::numeric::supernodal::solve::PlanWork;
     use crate::sparse::csc::CscMatrix;
     use crate::LdltSolver;
     use num_complex::Complex;
@@ -471,7 +471,7 @@ mod tests {
             let mut y = vec![C::new(0.0, 0.0); a.n];
             y[maps.elim_of[row]] = C::new(1.0, 0.5) * scale[row];
             let mut work = PlanWork::default();
-            plan.sweep(&mut work, 1, Threads::Fixed(1), Sweep::Forward, |w| {
+            plan.sweep(&mut work, 1, Threads::Fixed(1), |w| {
                 plan.forward_block(1, &mut y, w)
             });
             let mut covered = vec![false; a.n];

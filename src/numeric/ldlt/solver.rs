@@ -209,9 +209,8 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
         // The sweeps take the block row-major: y[i * nrhs + c].
         let y = &mut work.y;
         let (perm, scale) = (&self.factors.perm[..], &self.scale[..]);
-        let kind = crate::numeric::supernodal::solve::Sweep::Whole;
         self.plan
-            .sweep(&mut work.plan, nrhs, self.solve_threads, kind, |pw| {
+            .sweep(&mut work.plan, nrhs, self.solve_threads, |pw| {
                 let pool = pw.on_pool();
                 crate::numeric::direct::gather_scaled(b, nrhs, perm, scale, y, pool);
                 self.plan.solve_block_inner(&self.factors, y, nrhs, pw)?;

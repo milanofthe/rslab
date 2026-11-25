@@ -102,8 +102,7 @@ pub(super) fn well_conditioned_dim<T: Scalar>(h: &[T], stride: usize, jdim: usiz
     jdim
 }
 
-/// What a multiply-add of the orthogonalization costs a thread, learned from
-/// the reductions.
+/// What a multiply-add of the orthogonalization costs a thread.
 static ORTHO_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
 

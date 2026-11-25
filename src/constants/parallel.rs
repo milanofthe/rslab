@@ -75,44 +75,34 @@ pub const FINE_PIECES_PER_WORKER: usize = 8;
 pub const GEMM_PIECE_MIN_COLS: usize = 16;
 
 /// What a complex multiply-add costs against a real one, the factor
-/// between the real and the complex prior of every rate (1).
+/// between the real and the complex cost of every rate (1).
 /// Used by: `parallel::ScalarRates`.
 /// Why: four real multiply-adds make one complex one.
 /// Contract: timing.
 pub const COMPLEX_OPS: f32 = 4.0;
 
-/// ns per multiply-add of a dense product (`m n k` of a GEMM), before any
-/// is measured (ns per multiply-add).
-/// Used by: `supernodal::solve` (the sweeps of a block of right-hand
-/// sides, whose node kernels are products).
+/// ns per multiply-add of a dense product (`m n k` of a GEMM).
+/// Used by: `lu::node`, `ldlt::node` (the descendants' updates).
 /// Why: a SIMD kernel's rate with its packing.
-/// Machine: a prior, replaced by what the sequential sweeps measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const GEMM_NS_PER_FLOP: f32 = 0.05;
 
-/// ns per panel entry and right-hand side of a supernodal triangular sweep,
-/// before any is measured (ns per entry).
-/// Used by: `supernodal::solve`.
-/// Why: one multiply-add on a streamed panel entry.
-/// Machine: a prior, replaced by what the sweeps measure.
-/// Contract: timing.
-pub const SOLVE_NS_PER_ENTRY: f32 = 0.5;
-
 /// ns per entry of a pass over a pattern or a vector (a scan, a copy, a
-/// transpose, a fill, a comparison), before any is measured (ns per entry).
+/// transpose, a fill, a comparison), in ns per entry.
 /// Used by: the analysis passes (`ordering::amd`, `scaling::mc64`,
 /// `scaling::twosided`, `lu::solver`, `symbolic::supervariables`), the
 /// splice of a KLU factor, the Krylov reductions.
 /// Why: a streamed entry and a random access.
-/// Machine: a prior, replaced by what the passes measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const SCAN_NS_PER_ENTRY: f32 = 1.0;
 
 /// ns per entry of a pass that sorts, hashes or takes a logarithm per
-/// entry, before any is measured (ns per entry).
+/// entry, in ns per entry.
 /// Used by: `scaling::mc64`, `lu::solver`, `symbolic::supervariables`.
 /// Why: a comparison sort's few passes, a hash, a `ln`.
-/// Machine: a prior, replaced by what the passes measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const SORT_NS_PER_ENTRY: f32 = 10.0;
 
@@ -124,12 +114,11 @@ pub const SORT_NS_PER_ENTRY: f32 = 10.0;
 /// Contract: timing.
 pub const FREE_PAR_MIN_UPDATERS: usize = 64;
 
-/// ns per entry of the symmetrized pattern a fill-reducing ordering takes,
-/// before any is measured (ns per entry).
-/// Used by: `symbolic::race` (whether the candidates run side by side),
-/// `symbolic::ordering_graph` (what it learns from).
+/// ns per entry of the symmetrized pattern a fill-reducing ordering takes
+/// (ns per entry).
+/// Used by: `symbolic::race` (whether the candidates run side by side).
 /// Why: a minimum-degree ordering's quotient-graph updates.
-/// Machine: a prior, replaced by what the orderings measure.
+/// Machine: an estimate, not measured at run time.
 /// Contract: timing.
 pub const ORDER_NS_PER_ENTRY: f32 = 50.0;
 

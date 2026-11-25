@@ -8,26 +8,25 @@
 //! the factorizations and solves called inside then runs on them, the
 //! `Threads` policies defer to them, and no rayon pool is entered. A host
 //! that lends the same workers to other libraries (a model's evaluations
-//! between the factorizations) has one set of threads, one cost model and
-//! one rate learning for all of them.
+//! between the factorizations) has one set of threads and one cost model
+//! for all of them.
 //!
-//! A section runs on as many threads as its work is worth, one included:
-//! its work in ns (a count of work at a [`Rate`] learned from the serial
-//! runs) against what a section costs the pool on `k` threads (its
-//! [`Dispatch`]). Every helper here decides so ([`Work::go`] at
-//! [`Rayon`]). Every result is the same however a section runs: no
-//! section's arithmetic depends on how its pieces are scheduled or on how
-//! many threads run them.
+//! A section runs on as many threads as its work is worth, one included: its
+//! work in ns (a count of work at a constant [`Rate`]) against what a section
+//! costs the pool on `k` threads (its [`Dispatch`]). Every helper here decides
+//! so ([`Work::go`] at [`Rayon`]). Every result is the same however a section
+//! runs: no section's arithmetic depends on how its pieces are scheduled or on
+//! how many threads run them.
 
 use std::sync::atomic::Ordering::Relaxed;
 
 pub use rspool::rayon::{
-    dispatch, kept, pool_dispatch as rayon_dispatch, prepare, run, run_rated, run_width, threads,
-    width, width_on, Rayon,
+    dispatch, kept, pool_dispatch as rayon_dispatch, prepare, run_width, threads, width, width_on,
+    Rayon,
 };
 pub use rspool::{
-    as_piece, current, install, install_lent, is_lent, share_of, Choice, Dispatch, Go, Lent, Pick,
-    Piece, Pool, Prior, Rate, Serial, Spawn, Task, Timing, Work,
+    as_piece, current, install, install_lent, is_lent, share_of, Dispatch, Go, Lent, Piece, Pool,
+    Rate, Serial, Spawn, Task, Work,
 };
 
 use crate::constants::{COMPLEX_OPS, PIECES_PER_WORKER};
@@ -63,18 +62,6 @@ impl PerScalar<Rate> {
     }
 }
 
-impl PerScalar<Choice> {
-    /// Nothing measured yet.
-    pub(crate) const fn choices() -> Self {
-        PerScalar {
-            real: Choice::new(),
-            complex: Choice::new(),
-            real32: Choice::new(),
-            complex32: Choice::new(),
-        }
-    }
-}
-
 impl<X> PerScalar<X> {
     /// The one of `T`.
     pub(crate) fn of<T: crate::scalar::Scalar>(&self) -> &X {
@@ -93,10 +80,10 @@ impl<X> PerScalar<X> {
 pub(crate) fn for_each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
-        _ => return work.serial(|| (0..n).for_each(&f)),
+        _ => return (0..n).for_each(&f),
     };
     let len = piece_len(n, k);
-    work.wide::<Rayon>(n.div_ceil(len), k, &|p| {
+    run_width(n.div_ceil(len), k, &|p| {
         (p * len..((p + 1) * len).min(n)).for_each(&f)
     });
 }
@@ -105,8 +92,8 @@ pub(crate) fn for_each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send
 /// unequal work, such as the walks of a task tree), `work` all of them.
 pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
     match work.go::<Rayon>(n) {
-        Go::Wide(k) => work.wide::<Rayon>(n, k, &f),
-        _ => work.serial(|| (0..n).for_each(&f)),
+        Go::Wide(k) => run_width(n, k, &f),
+        _ => (0..n).for_each(&f),
     }
 }
 
@@ -120,8 +107,8 @@ pub(crate) fn chunks_mut<T: Send>(
 ) {
     let size = size.max(1);
     match work.go::<Rayon>(v.len().div_ceil(size)) {
-        Go::Wide(k) => chunks_on(v, size, k, work, f),
-        _ => work.serial(|| v.chunks_mut(size).enumerate().for_each(|(i, c)| f(i, c))),
+        Go::Wide(k) => chunks_on(v, size, k, f),
+        _ => v.chunks_mut(size).enumerate().for_each(|(i, c)| f(i, c)),
     }
 }
 
@@ -130,14 +117,13 @@ pub(crate) fn chunks_on<T: Send>(
     v: &mut [T],
     size: usize,
     k: usize,
-    work: Work<'_>,
     f: impl Fn(usize, &mut [T]) + Sync + Send,
 ) {
     let size = size.max(1);
     let (len, n) = (v.len(), v.len().div_ceil(size));
     let base = SendPtr(v.as_mut_ptr());
     let per = piece_len(n, k);
-    work.wide::<Rayon>(n.div_ceil(per), k, &|q| {
+    run_width(n.div_ceil(per), k, &|q| {
         for c in q * per..((q + 1) * per).min(n) {
             let (a, b) = (c * size, ((c + 1) * size).min(len));
             // SAFETY: the chunks are disjoint ranges of `v`, which outlives
@@ -160,15 +146,14 @@ pub(crate) fn zip_mut<A: Sync, S: Send>(
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
         Go::Here => {
-            return work.serial(|| {
-                for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
-                    f(i, a, s);
-                }
-            })
+            for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
+                f(i, a, s);
+            }
+            return;
         }
     };
     let base = SendPtr(scratch.as_mut_ptr());
-    work.wide::<Rayon>(n, k, &|i| {
+    run_width(n, k, &|i| {
         // SAFETY: piece `i` alone holds `scratch[i]`.
         f(i, &items[i], unsafe { &mut *base.get().add(i) })
     });
@@ -181,24 +166,19 @@ pub(crate) fn map<R: Send>(
     f: impl Fn(usize) -> R + Sync + Send,
 ) -> Vec<R> {
     match work.go::<Rayon>(n) {
-        Go::Wide(k) => map_on(n, k, work, f),
-        _ => work.serial(|| (0..n).map(f).collect()),
+        Go::Wide(k) => map_on(n, k, f),
+        _ => (0..n).map(f).collect(),
     }
 }
 
 /// [`map`] on `k` threads, the decision taken ([`Work::go`]).
-pub(crate) fn map_on<R: Send>(
-    n: usize,
-    k: usize,
-    work: Work<'_>,
-    f: impl Fn(usize) -> R + Sync + Send,
-) -> Vec<R> {
+pub(crate) fn map_on<R: Send>(n: usize, k: usize, f: impl Fn(usize) -> R + Sync + Send) -> Vec<R> {
     let mut out: Vec<std::mem::MaybeUninit<R>> = Vec::with_capacity(n);
     // SAFETY: every slot is written below before it is read.
     unsafe { out.set_len(n) };
     let base = SendPtr(out.as_mut_ptr());
     let len = piece_len(n, k);
-    work.wide::<Rayon>(n.div_ceil(len), k, &|p| {
+    run_width(n.div_ceil(len), k, &|p| {
         for i in p * len..((p + 1) * len).min(n) {
             // SAFETY: piece `p` alone writes slot `i`.
             unsafe { (*base.get().add(i)).write(f(i)) };
@@ -217,13 +197,13 @@ pub(crate) fn map_owned<A: Send, R: Send>(
 ) -> Vec<R> {
     let k = match work.go::<Rayon>(items.len()) {
         Go::Wide(k) => k,
-        _ => return work.serial(|| items.into_iter().map(f).collect()),
+        _ => return items.into_iter().map(f).collect(),
     };
     let slots: Vec<std::sync::Mutex<Option<A>>> = items
         .into_iter()
         .map(|a| std::sync::Mutex::new(Some(a)))
         .collect();
-    map_on(slots.len(), k, work, |i| match lock(&slots[i]).take() {
+    map_on(slots.len(), k, |i| match lock(&slots[i]).take() {
         Some(a) => f(a),
         None => unreachable!("every item is taken once"),
     })
@@ -239,17 +219,15 @@ pub(crate) fn map_init<S, R: Send>(
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
         Go::Here => {
-            return work.serial(|| {
-                let mut s = init();
-                (0..n).map(|i| f(&mut s, i)).collect()
-            })
+            let mut s = init();
+            return (0..n).map(|i| f(&mut s, i)).collect();
         }
     };
     let len = piece_len(n, k);
     let pieces = n.div_ceil(len);
     let mut out: Vec<Vec<R>> = (0..pieces).map(|_| Vec::new()).collect();
     let base = SendPtr(out.as_mut_ptr());
-    work.wide::<Rayon>(pieces, k, &|p| {
+    run_width(pieces, k, &|p| {
         let mut s = init();
         let part: Vec<R> = (p * len..((p + 1) * len).min(n))
             .map(|i| f(&mut s, i))
@@ -263,25 +241,20 @@ pub(crate) fn map_init<S, R: Send>(
 /// `f(item)` for every item of `items`, consumed, `work` all of them.
 pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(A) + Sync + Send) {
     match work.go::<Rayon>(items.len()) {
-        Go::Wide(k) => for_each_owned_on(items, k, work, f),
-        _ => work.serial(|| items.into_iter().for_each(f)),
+        Go::Wide(k) => for_each_owned_on(items, k, f),
+        _ => items.into_iter().for_each(f),
     }
 }
 
 /// [`for_each_owned`] on `k` threads, the decision taken ([`Work::go`]).
-pub(crate) fn for_each_owned_on<A: Send>(
-    items: Vec<A>,
-    k: usize,
-    work: Work<'_>,
-    f: impl Fn(A) + Sync + Send,
-) {
+pub(crate) fn for_each_owned_on<A: Send>(items: Vec<A>, k: usize, f: impl Fn(A) + Sync + Send) {
     let slots: Vec<std::sync::Mutex<Option<A>>> = items
         .into_iter()
         .map(|a| std::sync::Mutex::new(Some(a)))
         .collect();
     let n = slots.len();
     let len = piece_len(n, k);
-    work.wide::<Rayon>(n.div_ceil(len), k, &|p| {
+    run_width(n.div_ceil(len), k, &|p| {
         for slot in &slots[p * len..((p + 1) * len).min(n)] {
             if let Some(a) = lock(slot).take() {
                 f(a);
@@ -302,23 +275,22 @@ pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
     } else {
         work.go::<Rayon>(v.len())
     };
-    let Go::Wide(k) = go else {
-        return work.serial(|| v.sort_unstable_by_key(key));
-    };
+    if go == Go::Here {
+        return v.sort_unstable_by_key(key);
+    }
     use ::rayon::prelude::*;
-    let n = v.len();
-    work.watch::<Rayon, _>(n, k, || v.par_sort_unstable_by_key(key))
+    v.par_sort_unstable_by_key(key)
 }
 
 /// Whether `f(i)` holds for some `i` in `0..n`, `work` all of them.
 pub(crate) fn any(n: usize, work: Work<'_>, f: impl Fn(usize) -> bool + Sync + Send) -> bool {
     let k = match work.go::<Rayon>(n) {
         Go::Wide(k) => k,
-        _ => return work.serial(|| (0..n).any(f)),
+        _ => return (0..n).any(f),
     };
     let found = std::sync::atomic::AtomicBool::new(false);
     let len = piece_len(n, k);
-    work.wide::<Rayon>(n.div_ceil(len), k, &|p| {
+    run_width(n.div_ceil(len), k, &|p| {
         for i in p * len..((p + 1) * len).min(n) {
             if found.load(Relaxed) {
                 return;
@@ -338,11 +310,10 @@ pub(crate) fn join<A: Send, B: Send>(
     a: impl FnOnce() -> A + Send,
     b: impl FnOnce() -> B + Send,
 ) -> (A, B) {
-    let go = work.go::<Rayon>(2);
-    if !matches!(go, Go::Wide(_)) {
-        return work.serial(|| (a(), b()));
+    if work.go::<Rayon>(2) == Go::Here {
+        return (a(), b());
     }
-    work.watch::<Rayon, _>(2, 2, || join_on(a, b))
+    join_on(a, b)
 }
 
 /// [`join`] side by side.
@@ -452,21 +423,18 @@ pub(crate) fn scope<'s, R: Send>(
     work: Work<'_>,
     body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send + 's,
 ) -> R {
-    let go = work.go::<Rayon>(usize::MAX);
-    let Go::Wide(k) = go else {
-        return work.serial(|| {
-            let queue = std::sync::Mutex::new(std::collections::VecDeque::new());
-            let r = body(&Scope(ScopeOn::Here(&queue)));
-            loop {
-                let task = lock(&queue).pop_front();
-                match task {
-                    Some(task) => task(&Scope(ScopeOn::Here(&queue))),
-                    None => return r,
-                }
-            }
-        });
-    };
-    work.watch::<Rayon, _>(usize::MAX, k, || scope_on(body))
+    if work.go::<Rayon>(usize::MAX) != Go::Here {
+        return scope_on(body);
+    }
+    let queue = std::sync::Mutex::new(std::collections::VecDeque::new());
+    let r = body(&Scope(ScopeOn::Here(&queue)));
+    loop {
+        let task = lock(&queue).pop_front();
+        match task {
+            Some(task) => task(&Scope(ScopeOn::Here(&queue))),
+            None => return r,
+        }
+    }
 }
 
 /// [`scope`] on the pool.
@@ -579,7 +547,7 @@ mod tests {
             assert_eq!(away.load(Relaxed), 0, "tiny work left the thread");
             let v = map(1000, Work::ns(1e9), |i| i * 2);
             assert!(v.iter().enumerate().all(|(i, &x)| x == 2 * i));
-            // large work at a learned rate goes wide and computes the same
+            // large work at a rate goes wide and computes the same
             let r = Rate::new(1e6);
             let w = map(1000, Work::of(1e9, &r), |i| i * 3);
             assert!(w.iter().enumerate().all(|(i, &x)| x == 3 * i));

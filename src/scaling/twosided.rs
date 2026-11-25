@@ -49,7 +49,7 @@ fn steps_bound(spread: f64, tol: f64) -> usize {
     (ln_s / ln_t).log2().ceil() as usize + 1
 }
 
-/// What a maximum costs per entry, learned from the passes.
+/// What a maximum costs per entry.
 static MAXIMA_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 

@@ -1,7 +1,7 @@
 use crate::sparse::csc::CscPattern;
 
 /// What a permuted pattern costs per entry (its gather and its column
-/// sorts), learned from the permutations.
+/// sorts).
 static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
@@ -83,9 +83,9 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
             rest = tail;
             j0 = j1;
         }
-        crate::parallel::for_each_owned_on(blocks, k, work, |(j0, j1, out)| fill(j0, j1, out));
+        crate::parallel::for_each_owned_on(blocks, k, |(j0, j1, out)| fill(j0, j1, out));
     } else {
-        work.serial(|| fill(0, n, &mut row_idx));
+        fill(0, n, &mut row_idx);
     }
 
     CscPattern {

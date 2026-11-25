@@ -97,17 +97,15 @@ impl<T> LuPools<T> {
     }
 }
 
-/// What a multiply-add of the descendants' updates costs, learned from
-/// their serial runs: the update of a large node goes as wide as its work is
-/// worth.
+/// What a multiply-add of the descendants' updates costs: the update of a large
+/// node goes as wide as its work is worth.
 static UPDATE_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::GEMM_NS_PER_FLOP);
 
 /// What a multiply-subtract of the panel kernels' row passes (the off-block
-/// rows' updates and scaling, the triangular solves of `U`) costs, learned
-/// from their serial runs: their sections go as wide as their work is worth.
-/// Each row takes the same operations however the rows are split, so the
-/// width changes no bits.
+/// rows' updates and scaling, the triangular solves of `U`) costs: their
+/// sections go as wide as their work is worth. Each row takes the same
+/// operations however the rows are split, so the width changes no bits.
 static ROW_PASS_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
 

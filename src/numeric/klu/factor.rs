@@ -8,8 +8,7 @@ use crate::constants::{
 };
 use crate::parallel::{Rate, ScalarRates, Work};
 
-/// What a block's first factorization costs per input entry, learned from
-/// the factorizations.
+/// What a block's first factorization costs per input entry.
 pub(super) static FACTOR_RATE: ScalarRates = ScalarRates::new(KLU_FACTOR_NS_PER_ENTRY);
 
 /// What the parallel driver's splice costs per factor entry copied.
@@ -672,16 +671,10 @@ pub(super) fn factor_impl<T: Scalar>(
     let max_bn = sym.max_block_size();
     let rate = FACTOR_RATE.of::<T>();
     let entries = sym.nnz as f64;
-    // The parallel driver decides on the rate and measures it where it
-    // runs serially ([`crate::parallel`]); the sequential one is sampled
-    // for it. `On` goes as wide as the pool.
+    // The parallel driver decides on the rate ([`crate::parallel`]). `On`
+    // goes as wide as the pool.
     let forced = settings.parallel == KluParallel::On;
     let side = parallel;
-    let timing = if side {
-        None
-    } else {
-        rate.begin(entries, false)
-    };
 
     // Numeric output buffers, filled either incrementally block-by-block
     // (sequential: one reused scratch + one reused block buffer, no
@@ -770,9 +763,6 @@ pub(super) fn factor_impl<T: Scalar>(
                 scatter_expect[k as usize] = fin;
                 scatter_target[k as usize] = fin;
             }
-        }
-        if let Some(t) = timing {
-            rate.end(t, entries);
         }
     } else {
         let blocks: Vec<Result<BlockOut<T>, RslabError>> = crate::parallel::map_init(
@@ -962,6 +952,5 @@ pub(super) fn factor_impl<T: Scalar>(
         replay_xs: Vec::new(),
         ready: Ready::default(),
         modes: Vec::new(),
-        picks: Vec::new(),
     })
 }

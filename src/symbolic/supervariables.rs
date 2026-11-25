@@ -16,17 +16,15 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a 64 prime (published constant of the hash).
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// What the adjacency hash costs per entry, learned from the detections.
+/// What the adjacency hash costs per entry.
 static KEY_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// What sorting and splitting the vertices by key costs per vertex, learned
-/// from the detections.
+/// What sorting and splitting the vertices by key costs per vertex.
 static SORT_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// What the compressed graph costs per entry of the pattern, learned from
-/// the compressions.
+/// What the compressed graph costs per entry of the pattern.
 static COMPRESS_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
@@ -222,8 +220,8 @@ impl Supervariables {
             (lens, rows)
         };
         let parts: Vec<(Vec<i32>, Vec<i32>)> = match go {
-            crate::parallel::Go::Wide(k) => crate::parallel::map_on(blocks, k, work, part),
-            _ => work.serial(|| (0..blocks).map(part).collect()),
+            crate::parallel::Go::Wide(k) => crate::parallel::map_on(blocks, k, part),
+            _ => (0..blocks).map(part).collect(),
         };
         let mut col_ptr = Vec::with_capacity(n_groups + 1);
         col_ptr.push(0i32);

@@ -382,7 +382,7 @@ def test_log_sink_and_level():
         rslab.lu(_general(200))
         assert seen, "no log messages reached the sink at debug level"
         assert all(lvl in ("debug", "info", "warning", "error") for lvl, _ in seen)
-        assert any(msg.startswith("factor: ") for _, msg in seen), seen
+        assert any(msg.startswith("factor  ") for _, msg in seen), seen
     finally:
         rslab.set_log_level(old)
         rslab.set_log_sink(None)

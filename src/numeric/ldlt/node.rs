@@ -16,9 +16,8 @@ use crate::numeric::supernodal::LlSchedule;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
 
-/// What a multiply-add of the descendants' updates costs, learned from
-/// their serial runs: the update of a large node goes as wide as its work is
-/// worth.
+/// What a multiply-add of the descendants' updates costs: the update of a large
+/// node goes as wide as its work is worth.
 static UPDATE_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::GEMM_NS_PER_FLOP);
 
