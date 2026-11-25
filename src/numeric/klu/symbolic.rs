@@ -412,8 +412,10 @@ impl KluSymbolic {
         // inverse, copies of the column permutation and the block pointers,
         // the refactorization's scatter program and its replay plan (per
         // block whose columns can replay side by side, its columns, level
-        // bounds and level work).
-        let around = word * n
+        // bounds and level work), and per column the last column of its
+        // supernode and whether it applies one.
+        let around = (idx + 1) * n
+            + word * n
             + 2 * word * n
             + word * n
             + word * (nblocks + 1)
@@ -453,8 +455,9 @@ impl KluSymbolic {
             analysis_growth_bytes: 0,
             factor_bytes: factor,
             factor_peak_bytes: during.max(factor + word * n) + crate::constants::BOOKKEEPING,
-            // The solution and the permuted work vector.
-            solve_bytes: 2 * n * nrhs as u64 * vb,
+            // The solution and the permuted work vector, and the supernode
+            // kernel's gather (at most a block).
+            solve_bytes: 2 * n * nrhs as u64 * vb + max_bn * vb,
             // Its buffers belong to the factor.
             kept_bytes: 0,
         }

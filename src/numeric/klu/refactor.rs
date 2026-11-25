@@ -301,11 +301,15 @@ impl<T: Scalar> KluSolver<T> {
         }
         // Into the kept buffer; it becomes `rs_inv` once the replay succeeds.
         let mut rs_inv = std::mem::take(&mut f.rs_next);
-        row_scale_inv_into(a, f.scaled, &mut rs_inv);
+        {
+            let _s = rsprobe::scope!(DEBUG, "row scaling");
+            row_scale_inv_into(a, f.scaled, &mut rs_inv);
+        }
 
         // Branch-free pattern verification against the recorded program: every
         // entry must map to the exact final position it had at factor time.
         {
+            let _s = rsprobe::scope!(DEBUG, "pattern check");
             let mut acc: Ki = 0;
             for (k, &r) in a.row_idx.iter().enumerate() {
                 acc |= (f.pinv[r] as Ki) ^ f.scatter_expect[k];
@@ -371,6 +375,13 @@ impl<T: Scalar> KluSolver<T> {
             }
         };
         let wide = width_blocks > 1 || modes.iter().any(|m| *m != Mode::Serial);
+        let _replay = rsprobe::scope!(DEBUG, "replay");
+        rsprobe::add!(DEBUG, "work", plan.total);
+        rsprobe::add!(
+            DEBUG,
+            "factor_nnz",
+            f.l_val.len() + f.u_val.len() + f.udiag.len()
+        );
         // The pipelined replays: this refactor's number on the columns; and
         // for every parallel replay a zero work vector per worker, kept
         // across refactors.
@@ -414,6 +425,7 @@ impl<T: Scalar> KluSolver<T> {
         let (u_colptr, u_rowidx) = (&f.u_colptr, &f.u_rowidx);
         let f_colptr = &f.f_colptr;
         let scatter_target = &f.scatter_target;
+        let (sn_last, u_dense, l_widest) = (&f.sn_last, &f.u_dense, f.l_widest);
         let rs_inv_ref = &rs_inv;
         // Raw column-disjoint views of one block's value arrays for the
         // parallel replays: every column writes only its own L/U/F/diag
@@ -433,12 +445,31 @@ impl<T: Scalar> KluSolver<T> {
         }
         impl<T> Copy for BlockPtrs<T> {}
 
+        // In a pipelined replay: wait until the `L` columns `lo ..= hi` carry
+        // the refactor's number.
+        type Wait<'w> = (&'w [std::sync::atomic::AtomicU32], u32);
+        let await_cols = |(done, epoch): Wait<'_>, lo: usize, hi: usize| {
+            for c in lo..=hi {
+                // Acquire pairs with the Release that published it.
+                let mut spins = 0u32;
+                while done[c].load(std::sync::atomic::Ordering::Acquire) != epoch {
+                    spins += 1;
+                    if spins & crate::constants::SPIN_YIELD_MASK == 0 {
+                        std::thread::yield_now();
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
+        };
         // Replay one column through the recorded program: scatter, eliminate
-        // in the stored topological order (bit-identical to `factor_impl`'s
-        // pass 3: same `fmadd`, same per-column order), pivot, emit L.
+        // against the `U` rows in their stored order, the columns of a supernode densely
+        // ([`super::supernode`]), pivot, emit L.
         // SAFETY: caller guarantees exclusive ownership of column `j`'s output
         // slots and completed dependency columns (see `BlockPtrs`); `x` is this
-        // caller's scratch, all-zero on entry and left all-zero.
+        // caller's scratch, the block's work vector and the supernode
+        // kernel's gather (`l_widest` behind it), all-zero on entry and left
+        // all-zero.
         // With `wait`, the column runs in a pipelined replay: it consumes `L`
         // column `pr` only once `wait.0[pr]` carries the refactor's number
         // `wait.1`, so the elimination against the columns done long ago
@@ -448,9 +479,10 @@ impl<T: Scalar> KluSolver<T> {
                           bases: (usize, usize, usize),
                           p: BlockPtrs<T>,
                           x: &mut [T],
-                          wait: Option<(&[std::sync::atomic::AtomicU32], u32)>|
+                          wait: Option<Wait<'_>>|
          -> Result<(), RslabError> {
             let (l_base, u_base, f_base) = bases;
+            let (x, tmp) = x.split_at_mut(x.len() - l_widest);
             let c = col_perm[j];
             unsafe {
                 for k in a.col_ptr[c]..a.col_ptr[c + 1] {
@@ -463,29 +495,37 @@ impl<T: Scalar> KluSolver<T> {
                         x[tv as usize - bs] = sv;
                     }
                 }
-                for k in u_colptr[j]..u_colptr[j + 1] {
-                    let pr = u_rowidx[k] as usize;
-                    if let Some((done, epoch)) = wait {
-                        // Acquire pairs with the Release that published it.
-                        let mut spins = 0u32;
-                        while done[pr].load(std::sync::atomic::Ordering::Acquire) != epoch {
-                            spins += 1;
-                            if spins & crate::constants::SPIN_YIELD_MASK == 0 {
-                                std::thread::yield_now();
-                            } else {
-                                std::hint::spin_loop();
+                if u_dense[j] {
+                    // out of line, so this loop stays as small as it was
+                    super::supernode::eliminate(
+                        (&mut *x, &mut *tmp),
+                        (j, bs),
+                        (&u_rowidx[..], u_colptr[j]..u_colptr[j + 1], sn_last),
+                        (l_colptr, l_rowidx),
+                        (p.l_v.get(), l_base),
+                        (p.u_v.get(), u_base),
+                        |lo: usize, hi: usize| {
+                            if let Some(wait) = wait {
+                                await_cols(wait, lo, hi);
                             }
+                        },
+                    );
+                } else {
+                    for k in u_colptr[j]..u_colptr[j + 1] {
+                        let pr = u_rowidx[k] as usize;
+                        if let Some(wait) = wait {
+                            await_cols(wait, pr, pr);
                         }
-                    }
-                    let xu = x[pr - bs];
-                    x[pr - bs] = T::zero();
-                    *p.u_v.get().add(k - u_base) = xu;
-                    let nxu = T::zero() - xu;
-                    for kl in l_colptr[pr]..l_colptr[pr + 1] {
-                        let lr = l_rowidx[kl] as usize - bs;
-                        debug_assert!(lr < x.len());
-                        *x.get_unchecked_mut(lr) =
-                            fmadd(nxu, *p.l_v.get().add(kl - l_base), *x.get_unchecked(lr));
+                        let xu = x[pr - bs];
+                        x[pr - bs] = T::zero();
+                        *p.u_v.get().add(k - u_base) = xu;
+                        let nxu = T::zero() - xu;
+                        for kl in l_colptr[pr]..l_colptr[pr + 1] {
+                            let lr = l_rowidx[kl] as usize - bs;
+                            debug_assert!(lr < x.len());
+                            *x.get_unchecked_mut(lr) =
+                                fmadd(nxu, *p.l_v.get().add(kl - l_base), *x.get_unchecked(lr));
+                        }
                     }
                 }
                 let d = x[j - bs];
@@ -598,11 +638,11 @@ impl<T: Scalar> KluSolver<T> {
                                 k: usize|
          -> Result<(), RslabError> {
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AOrd};
-            let (bn, epoch, done) = (be - bs, ready_ref.epoch, &ready_ref.done);
+            let (bn, epoch, done) = (be - bs + l_widest, ready_ref.epoch, &ready_ref.done);
             let next = AtomicUsize::new(bs);
             let stop = AtomicBool::new(false);
             let failed: std::sync::Mutex<Option<RslabError>> = std::sync::Mutex::new(None);
-            let pieces = k.min(bn.div_ceil(PIPE_RUN)).max(1);
+            let pieces = k.min((be - bs).div_ceil(PIPE_RUN)).max(1);
             crate::parallel::run_width(pieces, pieces, &|q| {
                 with_work(q, &mut |w: &mut Vec<T>| {
                     if w.len() < bn {
@@ -668,18 +708,33 @@ impl<T: Scalar> KluSolver<T> {
                 f_v: PanelPtr(job.f_v.as_mut_ptr()),
             };
             let mode = at.map(|i| (&plan.blocks[i], modes_ref[i]));
-            if let Some((_, Mode::Pipelined(k))) = mode {
+            if let Some((bp, Mode::Pipelined(k))) = mode {
+                let _s = rsprobe::scope!(DEBUG, "pipelined");
+                rsprobe::add!(DEBUG, "work", bp.work);
                 return replay_pipelined((bs, be), bases, ptrs, k);
             }
-            x.clear();
-            x.resize(be - bs, T::zero());
+            // all-zero, kept across blocks and refactors (cleared on an error)
+            let need = be - bs + l_widest;
+            if x.len() < need {
+                x.resize(need, T::zero());
+            }
+            let x = &mut x[..need];
             if let Some((bp, Mode::Levels)) = mode {
+                let _s = rsprobe::scope!(DEBUG, "levels");
+                rsprobe::add!(DEBUG, "work", bp.work);
                 return replay_levels(bp, bs, bases, ptrs, x);
+            }
+            let _s = at.map(|_| rsprobe::scope!(DEBUG, "serial block"));
+            if let Some(i) = at {
+                rsprobe::add!(DEBUG, "work", plan.blocks[i].work);
             }
             let mut run = || -> Result<(), RslabError> {
                 for j in bs..be {
                     // SAFETY: this closure exclusively owns the whole block.
-                    replay_col(j, bs, bases, ptrs, x, None)?;
+                    if let Err(e) = replay_col(j, bs, bases, ptrs, x, None) {
+                        x.fill(T::zero());
+                        return Err(e);
+                    }
                 }
                 Ok(())
             };
