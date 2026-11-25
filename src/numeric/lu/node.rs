@@ -414,17 +414,17 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             ),
                         );
                     }
-                    for jj in 0..npk {
-                        let tcol = ou[q0 + jj] as usize - first;
-                        let ucol = &lupd[jj * mrows..jj * mrows + mrows];
-                        for i in 0..mrows {
-                            // SAFETY: column `tcol` of the front lies in this slab.
-                            unsafe {
-                                let d = at(gloc_ref[ol[p0l + i] as usize] as usize, tcol);
-                                *d = *d - ucol[i];
-                            }
-                        }
-                    }
+                    // SAFETY: the columns of the front in this slab.
+                    unsafe {
+                        scatter(
+                            &front,
+                            (lp.get(), up.get()),
+                            &lupd[..mrows * npk],
+                            (mrows, npk),
+                            |i| gloc_ref[ol[p0l + i] as usize] as usize,
+                            |jj| ou[q0 + jj] as usize - first,
+                        )
+                    };
                 }
             });
             if cn_u > 0 {
@@ -570,17 +570,17 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         crate::dense::gemm_backend::GemmMode::new(par(mrows * npk_u * nck), &kt.k),
                     );
                 }
-                for jj in 0..npk_u {
-                    let tcol = ou[p0u + jj] as usize - first;
-                    let ucol = &lupd[jj * mrows..jj * mrows + mrows];
-                    for i in 0..mrows {
-                        // SAFETY: an entry of the front.
-                        unsafe {
-                            let d = at(gloc[ol[p0l + i] as usize] as usize, tcol);
-                            *d = *d - ucol[i];
-                        }
-                    }
-                }
+                // SAFETY: entries of the front.
+                unsafe {
+                    scatter(
+                        &front,
+                        (lp.get(), up.get()),
+                        &lupd[..mrows * npk_u],
+                        (mrows, npk_u),
+                        |i| gloc[ol[p0l + i] as usize] as usize,
+                        |jj| ou[p0u + jj] as usize - first,
+                    )
+                };
             }
             if npk_l > 0 && ntrail > 0 {
                 // Uupd(npk_l x ntrail) = L_k[landing rows, :] * U_k[:, columns past s].
@@ -1031,6 +1031,43 @@ impl<'a> Front<'a> {
             up.add(self.ub[i] + j)
         } else {
             up.add(self.u.rect() + i * self.u.m + j - nfs)
+        }
+    }
+}
+
+/// `front(row(i), col(j)) -= upd[i + j * m]` for the `m x n` update
+/// `upd`: on and below the diagonal column by column (in `L`), above it row
+/// by row (in `U^T`, where a row of `U` is contiguous).
+///
+/// # Safety
+/// `lp` and `up` are the front's panels; its entries addressed are the
+/// caller's.
+unsafe fn scatter<T: Scalar>(
+    front: &Front<'_>,
+    (lp, up): (*mut T, *mut T),
+    upd: &[T],
+    (m, n): (usize, usize),
+    row: impl Fn(usize) -> usize,
+    col: impl Fn(usize) -> usize,
+) {
+    for j in 0..n {
+        let c = col(j);
+        for i in 0..m {
+            let r = row(i);
+            if r >= c {
+                let d = front.ptr(lp, up, r, c);
+                *d = *d - upd[i + j * m];
+            }
+        }
+    }
+    for i in 0..m {
+        let r = row(i);
+        for j in 0..n {
+            let c = col(j);
+            if c > r {
+                let d = front.ptr(lp, up, r, c);
+                *d = *d - upd[i + j * m];
+            }
         }
     }
 }
