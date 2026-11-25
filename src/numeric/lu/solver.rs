@@ -586,8 +586,6 @@ impl LuSymbolic {
         let (n, nnz, ns) = (sym.n, self.nnz, sym.supernodes.len());
         let w = |s: usize| sym.supernodes[s].ncol;
         let widths: Vec<usize> = (0..ns).map(w).collect();
-        let off_l: Vec<usize> = (0..ns).map(|s| st.rows_l(s).len() - w(s)).collect();
-        let off_u: Vec<usize> = (0..ns).map(|s| st.cols_u(s).len() - w(s)).collect();
         // The arenas' slots, and with delayed pivots the values they may add
         // over them (`delay`): the grown fronts' buffers while the forest is
         // factored, the factor's growth after it.
@@ -598,14 +596,6 @@ impl LuSymbolic {
             .iter()
             .chain(&u_slots)
             .map(|&(v, _)| v)
-            .sum::<usize>()
-            + allowance;
-        // the same panels packed as the solve plans hold them
-        let packed: usize = (0..ns)
-            .map(|s| {
-                use crate::numeric::supernodal::solve::packed_len;
-                packed_len(w(s), off_l[s]) + packed_len(w(s), off_u[s])
-            })
             .sum::<usize>()
             + allowance;
         let rows: usize = l_slots.iter().chain(&u_slots).map(|&(_, m)| m).sum();
@@ -647,8 +637,7 @@ impl LuSymbolic {
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
-        // Held by the factor: the `L` and `U^T` panels (packed by the solve
-        // plans) with their schedules, `U`'s reciprocal diagonal, both
+        // Held by the factor: the `L` and `U^T` panels with their schedules, `U`'s reciprocal diagonal, both
         // permutations and scalings, and the supernode tree.
         let factor_with = |panels: usize| {
             vb * (panels + n)
@@ -656,7 +645,7 @@ impl LuSymbolic {
                 + LU_PERM_SCALE_BYTES_PER_COL * n
                 + WORD_BYTES * ns
         };
-        let factor = factor_with(packed);
+        let factor = factor_with(panels);
         // While the forest is factored: the scalings (by `A`'s and by
         // elimination index), both arenas, the emit cells (refcounts, offsets, panel records,
         // positions and permutations) and the forest's lists, every node's
@@ -679,9 +668,8 @@ impl LuSymbolic {
             + workers
             + pooled
             + nodes;
-        // After it: the factor with its panels as factored (the plans pack
-        // them in place), the emitted row lists until the plans have copied
-        // them, and a plan's build.
+        // After it: the factor, the emitted row lists until the plans have
+        // copied them, and a plan's build.
         let after = factor_with(panels) as u64
             + (IDX32_BYTES * rows + 2 * VEC_HEADER_BYTES * ns) as u64
             + layout_l.build.max(layout_u.build);

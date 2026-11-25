@@ -6,6 +6,7 @@ use super::bunch_kaufman::ll_cdiv_emit;
 use super::bunch_kaufman::BkPools;
 use super::factor::LlEmitLdlt;
 use super::gemm::{grow_scratch, lower_tile_gemm};
+use crate::numeric::supernodal::panel::Layout;
 use crate::numeric::supernodal::{Input, Span};
 
 use crate::error::RslabError;
@@ -40,7 +41,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
     // SAFETY: this task owns supernode `s`; nobody reads its slot before the
     // node is done (its ancestors start after it).
     let panel: &mut [T] = unsafe { emit.arena.slot_mut(s) };
-    debug_assert_eq!(panel.len(), nrow * ncol);
+    let lay = Layout::new(ncol, nrow - ncol);
+    debug_assert_eq!(panel.len(), lay.len());
 
     // Global-to-local rows (narrow entries halve the table's random-access
     // footprint); restored when the node returns.
@@ -49,8 +51,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
     for p in 0..ncol {
         let c = first + p;
         for (g, v) in inp.col(c) {
-            let li = gloc[g] as usize;
-            panel[li + p * nrow] = panel[li + p * nrow] + v;
+            let at = lay.at(gloc[g] as usize, p);
+            panel[at] = panel[at] + v;
         }
     }
     let plan = crate::numeric::supernodal::CmodPlan::new(
@@ -72,7 +74,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
             let gloc_ref = &gloc;
             let spans_ref = spans;
             let work = crate::parallel::Work::ns(f64::INFINITY);
-            crate::parallel::chunks_mut(&mut *panel, nrow * tile_w, work, |ti, tile| {
+            let base = crate::numeric::supernodal::PanelPtr(panel.as_mut_ptr());
+            crate::parallel::for_each(ncol.div_ceil(tile_w), work, |ti| {
                 let c0 = ti * tile_w;
                 let c1 = (c0 + tile_w).min(ncol);
                 let mut bufs = pools.cmod.take();
@@ -82,9 +85,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 } in spans_ref
                 {
                     let nck = sym.supernodes[kk].ncol;
-                    let nrk = sched.rows(kk).len();
                     let ok = &sched.rows(kk)[nck..];
                     let nok = ok.len();
+                    // The updater's off-block rows, column `ck` at `rk + ck * nok`.
+                    let rk = Layout::new(nck, nok).rect();
                     // Updater columns landing in this slab.
                     let q0 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c0);
                     let q1 = p0 + ok[p0..p1].partition_point(|&g| (g as usize) < first + c1);
@@ -103,8 +107,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
                         if two_k[ck] {
                             let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
                             for i in 0..npk {
-                                let a = pk[(nck + q0 + i) + ck * nrk];
-                                let b = pk[(nck + q0 + i) + (ck + 1) * nrk];
+                                let a = pk[rk + q0 + i + ck * nok];
+                                let b = pk[rk + q0 + i + (ck + 1) * nok];
                                 vd_buf[i + ck * npk] = d11 * a + d21 * b;
                                 vd_buf[i + (ck + 1) * npk] = d21 * a + d22 * b;
                             }
@@ -112,7 +116,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                         } else {
                             let dkc = dk[ck];
                             for i in 0..npk {
-                                vd_buf[i + ck * npk] = pk[(nck + q0 + i) + ck * nrk] * dkc;
+                                vd_buf[i + ck * npk] = pk[rk + q0 + i + ck * nok] * dkc;
                             }
                             ck += 1;
                         }
@@ -128,8 +132,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
                             mrows,
                             npk,
                             nck,
-                            pk.as_ptr().add(nck + q0),
-                            nrk as isize,
+                            pk.as_ptr().add(rk + q0),
+                            nok as isize,
                             vd_buf.as_ptr(),
                             npk as isize,
                             usize::MAX,
@@ -139,10 +143,15 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     for c in 0..npk {
                         let tcol = ok[q0 + c] as usize - first;
                         let ucol = &u_buf[c * mrows..c * mrows + mrows];
-                        let dst_col = &mut tile[(tcol - c0) * nrow..(tcol - c0 + 1) * nrow];
                         for r in (q0 + c)..nok {
-                            let dst = gloc_ref[ok[r] as usize] as usize;
-                            dst_col[dst] = dst_col[dst] - ucol[r - q0];
+                            // SAFETY: column `tcol` lies in this slab, its rows
+                            // on or below the diagonal.
+                            unsafe {
+                                let dst = base
+                                    .get()
+                                    .add(lay.at(gloc_ref[ok[r] as usize] as usize, tcol));
+                                *dst = *dst - ucol[r - q0];
+                            }
                         }
                     }
                 }
@@ -157,9 +166,9 @@ pub(super) fn ll_factor_node<T: Scalar>(
         } in spans.iter().filter(|_| !tiled)
         {
             let nck = sym.supernodes[kk].ncol;
-            let nrk = sched.rows(kk).len();
             let ok = &sched.rows(kk)[nck..];
             let nok = ok.len();
+            let rk = Layout::new(nck, nok).rect();
             // SAFETY: `kk` is a factored descendant of `s` (its update reaches `s`),
             // so its panel/dval cells are written and never mutated again.
             let pk: &[T] = unsafe { emit.arena.slot(kk) };
@@ -178,10 +187,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     // block-diagonal (1x1 and complex-symmetric 2x2 blocks).
                     let mut ck = 0;
                     while ck < nck {
-                        let a = pk[(nck + c_idx) + ck * nrk];
+                        let a = pk[rk + c_idx + ck * nok];
                         if two_k[ck] {
                             let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
-                            let b = pk[(nck + c_idx) + (ck + 1) * nrk];
+                            let b = pk[rk + c_idx + (ck + 1) * nok];
                             vc[ck] = d11 * a + d21 * b;
                             vc[ck + 1] = d21 * a + d22 * b;
                             ck += 2;
@@ -194,9 +203,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
                         let trow = gloc[ok[r_idx] as usize] as usize;
                         let mut acc = T::zero();
                         for ck in 0..nck {
-                            acc = acc + pk[(nck + r_idx) + ck * nrk] * vc[ck];
+                            acc = acc + pk[rk + r_idx + ck * nok] * vc[ck];
                         }
-                        panel[trow + tcol * nrow] = panel[trow + tcol * nrow] - acc;
+                        let at = lay.at(trow, tcol);
+                        panel[at] = panel[at] - acc;
                     }
                 }
             } else {
@@ -209,8 +219,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     if two_k[ck] {
                         let (d11, d21, d22) = (dk[ck], dsub_k[ck], dk[ck + 1]);
                         for i in 0..npk {
-                            let a = pk[(nck + p0 + i) + ck * nrk];
-                            let b = pk[(nck + p0 + i) + (ck + 1) * nrk];
+                            let a = pk[rk + p0 + i + ck * nok];
+                            let b = pk[rk + p0 + i + (ck + 1) * nok];
                             vd_buf[i + ck * npk] = d11 * a + d21 * b;
                             vd_buf[i + (ck + 1) * npk] = d21 * a + d22 * b;
                         }
@@ -218,7 +228,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     } else {
                         let dkc = dk[ck];
                         for i in 0..npk {
-                            vd_buf[i + ck * npk] = pk[(nck + p0 + i) + ck * nrk] * dkc;
+                            vd_buf[i + ck * npk] = pk[rk + p0 + i + ck * nok] * dkc;
                         }
                         ck += 1;
                     }
@@ -246,8 +256,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
                         mrows,
                         npk,
                         nck,
-                        pk.as_ptr().add(nck + p0),
-                        nrk as isize,
+                        pk.as_ptr().add(rk + p0),
+                        nok as isize,
                         vd_buf.as_ptr(),
                         npk as isize,
                         seq_gemm_par,
@@ -258,7 +268,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     let tcol = ok[p0 + c] as usize - first;
                     let ucol = &u_buf[c * mrows..c * mrows + mrows];
                     for r in (p0 + c)..nok {
-                        let dst = gloc[ok[r] as usize] as usize + tcol * nrow;
+                        let dst = lay.at(gloc[ok[r] as usize] as usize, tcol);
                         panel[dst] = panel[dst] - ucol[r - p0];
                     }
                 }

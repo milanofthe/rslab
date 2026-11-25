@@ -4,12 +4,13 @@
 //! the deep rows, and the deferred trailing update with panel lookahead.
 
 use super::factor::LlEmitLdlt;
-use super::gemm::schur_tiles;
 use crate::constants::GROWTH_EPS;
 use crate::numeric::supernodal::perturb_pivot;
+use crate::numeric::supernodal::schur_tiles;
 
 use crate::error::RslabError;
 use crate::numeric::gemm_tuning::KernelTuning;
+use crate::numeric::supernodal::panel::Layout;
 use crate::numeric::supernodal::LlSchedule;
 use crate::numeric::supernodal::PanelPtr as LdltPanelPtr;
 use crate::numeric::supernodal::ScratchPool;
@@ -114,7 +115,8 @@ fn reset<V: Clone>(v: &mut Vec<V>, len: usize, x: V) {
 }
 
 /// Apply a factored Bunch-Kaufman panel's transform sequence to rows
-/// `[r0, r1)` of the column-major `panel` (stride `nrow`), for pivot steps
+/// `[r0, r1)` of the panel `base` (laid out as `lay`; the rows all in its
+/// diagonal part or all in its off-block rectangle), for pivot steps
 /// `[kb, ke)`. Bit-identical to the corresponding rows of the full-height
 /// panel factorization: per 1x1 step the in-panel updates use the **final**
 /// column-`k` multipliers (`w_j*d^-1` is exactly the stored `L(j,k)`), then
@@ -137,12 +139,12 @@ fn reset<V: Clone>(v: &mut Vec<V>, len: usize, x: V) {
 /// later symmetric interchanges permute the rows of earlier multiplier
 /// columns (unlike LU, where produced pivot rows never move again).
 ///
-/// SAFETY: `[r0, r1)` must be this caller's exclusive rows and within the
-/// buffer; columns `[kb, ke)` must be in bounds under stride `nrow`.
+/// SAFETY: `[r0, r1)` must be this caller's exclusive rows of the panel
+/// `base`, at or below row `ke`.
 #[allow(clippy::too_many_arguments)]
 unsafe fn apply_bk_panel_trailing<T: Scalar>(
     base: *mut T,
-    nrow: usize,
+    lay: Layout,
     kb: usize,
     ke: usize,
     d_diag: &[T],
@@ -172,6 +174,9 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     if deep == 0 || ke <= kb {
         return;
     }
+    debug_assert!(r1 <= lay.w || r0 >= lay.w, "rows in one part of the panel");
+    // Column `j`'s entry of row `r0`; its rows follow it.
+    let col = |j: usize| base.add(lay.at(r0, j));
     // One spare column: a 2x2 pivot that starts on a sub-block's last
     // column extends the sub-block by one, the pair is never split.
     let sb = sb.max(1);
@@ -190,14 +195,13 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
             if kp != usize::MAX {
                 if kp >= ke2 {
                     flush_trailing(
-                        base, nrow, kb, ke, kb2, ke2, pend0, k, w, deep, mult_snap, nb, r0,
+                        base, lay, kb, ke, kb2, ke2, pend0, k, w, deep, mult_snap, nb, r0,
                     );
                     pend0 = k;
                 }
                 let src = if two_by_two[k] { k + 1 } else { k };
-                let ca = base.add(src * nrow);
-                let cb = base.add(kp * nrow);
-                for i in r0..r1 {
+                let (ca, cb) = (col(src), col(kp));
+                for i in 0..deep {
                     core::ptr::swap(ca.add(i), cb.add(i));
                 }
             }
@@ -205,51 +209,51 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
                 let (d11, d21, d22) = (d_diag[k], d_subdiag[k], d_diag[k + 1]);
                 let det = d11 * d22 - d21 * d21;
                 let detinv = det.recip();
-                let colk = base.add(k * nrow);
-                let colk1 = base.add((k + 1) * nrow);
+                let colk = col(k);
+                let colk1 = col(k + 1);
                 for j in (k + 2)..ke2 {
                     let l1j = mult_snap[(k - kb) * nb + (j - kb)];
                     let l2j = mult_snap[(k + 1 - kb) * nb + (j - kb)];
-                    let colj = base.add(j * nrow);
-                    for i in r0..r1 {
+                    let colj = col(j);
+                    for i in 0..deep {
                         *colj.add(i) = *colj.add(i) - *colk.add(i) * l1j - *colk1.add(i) * l2j;
                     }
                 }
                 let (head, tail) = w.split_at_mut((k + 1 - kb2) * deep);
                 let wk = &mut head[(k - kb2) * deep..];
                 let wk1 = &mut tail[..deep];
-                for i in r0..r1 {
+                for i in 0..deep {
                     let wik = *colk.add(i);
                     let wik1 = *colk1.add(i);
-                    wk[i - r0] = wik;
-                    wk1[i - r0] = wik1;
+                    wk[i] = wik;
+                    wk1[i] = wik1;
                     *colk.add(i) = (d22 * wik - d21 * wik1) * detinv;
                     *colk1.add(i) = (d11 * wik1 - d21 * wik) * detinv;
                 }
                 k += 2;
             } else {
                 let dinv = d_diag[k].recip();
-                let colk = base.add(k * nrow);
+                let colk = col(k);
                 for j in (k + 1)..ke2 {
                     let wj_dinv = mult_snap[(k - kb) * nb + (j - kb)];
                     if wj_dinv != T::zero() {
-                        let colj = base.add(j * nrow);
-                        for i in r0..r1 {
+                        let colj = col(j);
+                        for i in 0..deep {
                             *colj.add(i) = *colj.add(i) - *colk.add(i) * wj_dinv;
                         }
                     }
                 }
                 let wk = &mut w[(k - kb2) * deep..(k - kb2 + 1) * deep];
-                for i in r0..r1 {
+                for (i, wi) in wk.iter_mut().enumerate() {
                     let v = *colk.add(i);
-                    wk[i - r0] = v;
+                    *wi = v;
                     *colk.add(i) = v * dinv;
                 }
                 k += 1;
             }
         }
         flush_trailing(
-            base, nrow, kb, ke, kb2, ke2, pend0, ke2, w, deep, mult_snap, nb, r0,
+            base, lay, kb, ke, kb2, ke2, pend0, ke2, w, deep, mult_snap, nb, r0,
         );
         kb2 = ke2;
     }
@@ -261,12 +265,12 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
 /// `B[:, ke2..ke] -= W[:, p0..p1] * M[p0..p1, ke2..ke]`.
 ///
 /// # Safety
-/// `base` is the panel with leading dimension `nrow`; the row range is
-/// this task's own.
+/// `base` is the panel laid out as `lay`; the row range is this task's own,
+/// in one part of the panel.
 #[allow(clippy::too_many_arguments)]
 unsafe fn flush_trailing<T: Scalar>(
     base: *mut T,
-    nrow: usize,
+    lay: Layout,
     kb: usize,
     ke: usize,
     kb2: usize,
@@ -285,46 +289,55 @@ unsafe fn flush_trailing<T: Scalar>(
         return;
     }
     let lhs = w.as_ptr().add((p0 - kb2) * deep);
-    // M rows p0..p1, columns ke2..ke: row-major with stride `nb`.
-    let rhs = mult_snap.as_ptr().add((p0 - kb) * nb + (ke2 - kb));
-    let dst = base.add(ke2 * nrow + r0);
     // The direct kernel, not the backend entry: these products are skinny
     // (k = trailing_block), where the complex split's plane copies cost more
-    // than they save (measured: 1.84 s against 1.98 s single-core).
-    gemm::gemm(
-        deep,
-        ncols,
-        npend,
-        dst,
-        nrow as isize,
-        1,
-        true,
-        lhs,
-        deep as isize,
-        1,
-        rhs,
-        1,
-        nb as isize,
-        T::one(),
-        T::zero() - T::one(),
-        false,
-        false,
-        false,
-        gemm::Parallelism::None,
-    );
+    // than they save (measured: 1.84 s against 1.98 s single-core). One per
+    // run of the columns `[ke2, ke)` of uniform stride.
+    for run in lay.runs(r0..r0 + deep, ke2..ke) {
+        // M rows p0..p1, the run's columns: row-major with stride `nb`.
+        let rhs = mult_snap
+            .as_ptr()
+            .add((p0 - kb) * nb + (run.cols.start - kb));
+        gemm::gemm(
+            deep,
+            run.cols.len(),
+            npend,
+            base.add(run.off),
+            run.ld as isize,
+            1,
+            true,
+            lhs,
+            deep as isize,
+            1,
+            rhs,
+            1,
+            nb as isize,
+            T::one(),
+            T::zero() - T::one(),
+            false,
+            false,
+            false,
+            gemm::Parallelism::None,
+        );
+    }
 }
 
 /// One blocked Bunch-Kaufman panel step of the left-looking cdiv over the
 /// fully-summed columns `[kb, ke)`: the in-panel getf2 (rows `< ke`) plus the
 /// row-parallel deep replay. Touches ONLY panel columns `[kb, ke)` (their full
-/// `nrow` height), which is what makes the cdiv panel lookahead sound: the
+/// height), which is what makes the cdiv panel lookahead sound: the
 /// step for panel `p+1` may run concurrently with the wide part of panel
 /// `p`'s deferred Schur update (columns `>= ke2`), the two column ranges are
 /// disjoint. Pushes each pivot floor, `(column of the node, what the floor
 /// added to the diagonal)`, to `floors`.
+///
+/// # Safety
+/// `base` is the panel laid out as `lay`, of `nrow` rows; nobody else
+/// touches its columns `[kb, ke)` meanwhile.
 #[allow(clippy::too_many_arguments)]
-fn ll_bk_panel_step<T: Scalar>(
-    panel: &mut [T],
+unsafe fn ll_bk_panel_step<T: Scalar>(
+    base: *mut T,
+    lay: Layout,
     nrow: usize,
     kb: usize,
     ke: usize,
@@ -353,14 +366,16 @@ fn ll_bk_panel_step<T: Scalar>(
     for ds in deep_swaps.iter_mut() {
         *ds = usize::MAX;
     }
+    // Entry `(i, j)`, on or below the diagonal.
+    let a = |i: usize, j: usize| base.add(lay.at(i, j));
     let mut k = kb;
     while k < ke {
-        let absakk = panel[k + k * nrow].magnitude();
+        let absakk = (*a(k, k)).magnitude();
         // colmax over the in-panel candidate rows (k+1)..ke.
         let mut colmax_sq = 0.0;
         let mut imax = k;
         for i in (k + 1)..ke {
-            let m = panel[k * nrow + i].magnitude_sq();
+            let m = (*a(i, k)).magnitude_sq();
             if m > colmax_sq {
                 colmax_sq = m;
                 imax = i;
@@ -383,13 +398,13 @@ fn ll_bk_panel_step<T: Scalar>(
             // rowmax in row `imax`, restricted to the panel.
             let mut rowmax_sq = 0.0;
             for j in k..imax {
-                let m = panel[j * nrow + imax].magnitude_sq();
+                let m = (*a(imax, j)).magnitude_sq();
                 if m > rowmax_sq {
                     rowmax_sq = m;
                 }
             }
             for i in (imax + 1)..ke {
-                let m = panel[imax * nrow + i].magnitude_sq();
+                let m = (*a(i, imax)).magnitude_sq();
                 if m > rowmax_sq {
                     rowmax_sq = m;
                 }
@@ -398,7 +413,7 @@ fn ll_bk_panel_step<T: Scalar>(
             if absakk >= alpha * colmax * (colmax / rowmax) {
                 kstep = 1;
                 kp = k;
-            } else if panel[imax * nrow + imax].magnitude() >= alpha * rowmax {
+            } else if (*a(imax, imax)).magnitude() >= alpha * rowmax {
                 kstep = 1;
                 kp = imax;
             } else {
@@ -409,17 +424,17 @@ fn ll_bk_panel_step<T: Scalar>(
 
         if kstep == 1 {
             if kp != k {
-                swap_sym_lower_bounded(panel, nrow, k, kp, ke);
+                swap_sym_lower_bounded(base, lay, k, kp, ke);
                 lperm.swap(k, kp);
                 deep_swaps[k - kb] = kp;
             }
-            let mut dk = panel[k + k * nrow];
+            let mut dk = *a(k, k);
             match perturb_floor {
                 Some(floor) if dk.magnitude() < floor => {
                     let lifted = perturb_pivot(dk, floor);
                     floors.push((k, lifted - dk));
                     dk = lifted;
-                    panel[k + k * nrow] = dk;
+                    *a(k, k) = dk;
                 }
                 None if dk == T::zero() => {
                     return Err(RslabError::NumericallyRankDeficient);
@@ -431,28 +446,30 @@ fn ll_bk_panel_step<T: Scalar>(
             // Update the in-panel trailing columns (k+1)..ke over the
             // panel rows, then scale column k's panel rows (deep rows
             // replayed in the parallel apply).
+            let ck = a(k, k);
             for j in (k + 1)..ke {
-                let wj_dinv = panel[k * nrow + j] * dinv;
+                let wj_dinv = *ck.add(j - k) * dinv;
                 mult_snap[(k - kb) * nb + (j - kb)] = wj_dinv;
                 if wj_dinv != T::zero() {
-                    for i in j..ke {
-                        panel[j * nrow + i] = panel[j * nrow + i] - panel[k * nrow + i] * wj_dinv;
+                    let cj = a(j, j);
+                    for i in 0..ke - j {
+                        *cj.add(i) = *cj.add(i) - *ck.add(j - k + i) * wj_dinv;
                     }
                 }
             }
-            for i in (k + 1)..ke {
-                panel[k * nrow + i] = panel[k * nrow + i] * dinv;
+            for i in 1..ke - k {
+                *ck.add(i) = *ck.add(i) * dinv;
             }
             k += 1;
         } else {
             if kp != k + 1 {
-                swap_sym_lower_bounded(panel, nrow, k + 1, kp, ke);
+                swap_sym_lower_bounded(base, lay, k + 1, kp, ke);
                 lperm.swap(k + 1, kp);
                 deep_swaps[k - kb] = kp;
             }
-            let mut d11 = panel[k + k * nrow];
-            let d21 = panel[k * nrow + (k + 1)];
-            let mut d22 = panel[(k + 1) + (k + 1) * nrow];
+            let mut d11 = *a(k, k);
+            let d21 = *a(k + 1, k);
+            let mut d22 = *a(k + 1, k + 1);
             let mut det = d11 * d22 - d21 * d21;
             let scale = d11.magnitude().max(d22.magnitude()).max(d21.magnitude());
             let growth_floor = GROWTH_EPS * scale * scale;
@@ -492,25 +509,26 @@ fn ll_bk_panel_step<T: Scalar>(
             d[k + 1] = d22;
             two_by_two[k] = true;
             for i in (k + 2)..ke {
-                let wik = panel[k * nrow + i];
-                let wik1 = panel[(k + 1) * nrow + i];
+                let wik = *a(i, k);
+                let wik1 = *a(i, k + 1);
                 l1[i] = (d22 * wik - d21 * wik1) * detinv;
                 l2[i] = (d11 * wik1 - d21 * wik) * detinv;
                 mult_snap[(k - kb) * nb + (i - kb)] = l1[i];
                 mult_snap[(k + 1 - kb) * nb + (i - kb)] = l2[i];
             }
+            let (ck, ck1) = (a(k, k), a(k + 1, k + 1));
             for j in (k + 2)..ke {
                 let l1j = l1[j];
                 let l2j = l2[j];
-                for i in j..ke {
-                    panel[j * nrow + i] = panel[j * nrow + i]
-                        - panel[k * nrow + i] * l1j
-                        - panel[(k + 1) * nrow + i] * l2j;
+                let cj = a(j, j);
+                for i in 0..ke - j {
+                    *cj.add(i) =
+                        *cj.add(i) - *ck.add(j - k + i) * l1j - *ck1.add(j - k - 1 + i) * l2j;
                 }
             }
             for i in (k + 2)..ke {
-                panel[k * nrow + i] = l1[i];
-                panel[(k + 1) * nrow + i] = l2[i];
+                *a(i, k) = l1[i];
+                *a(i, k + 1) = l2[i];
             }
             k += 2;
         }
@@ -523,50 +541,15 @@ fn ll_bk_panel_step<T: Scalar>(
     if nrow > ke {
         let deep = nrow - ke;
         let pw = ke - kb;
-        let par = deep * pw * pw >= ll_cdiv_par;
-        if par {
-            let pp = LdltPanelPtr(panel.as_mut_ptr());
-            let nthreads = crate::parallel::threads();
-            let cs = deep.div_ceil(nthreads).max(1);
-            crate::parallel::for_each(nthreads, crate::parallel::Work::ns(f64::INFINITY), |c| {
-                let r0 = (ke + c * cs).min(nrow);
-                let r1 = (r0 + cs).min(nrow);
-                if r0 >= r1 {
-                    return;
-                }
-                let mut w = wpool.take();
-                // SAFETY: disjoint row chunk; see `apply_bk_panel_trailing`.
-                unsafe {
-                    apply_bk_panel_trailing(
-                        pp.get(),
-                        nrow,
-                        kb,
-                        ke,
-                        d,
-                        d_subdiag,
-                        two_by_two,
-                        deep_swaps,
-                        mult_snap,
-                        nb,
-                        r0,
-                        r1,
-                        trailing_block,
-                        &mut w,
-                    )
-                };
-            });
-        } else {
-            // Row chunks that keep a chunk of every panel column in L1 across
-            // the whole pivot sweep (the sweep streams each column once per
-            // pivot; unchunked, a deep panel is re-read from L2 `pw` times).
-            // Rows are independent, so every row's arithmetic is unchanged:
-            // bit-identical to one call over all rows.
-            let mut w = wpool.take();
-            // SAFETY: single task over all deep rows.
+        // The deep rows in chunks within one part of the panel each: its
+        // diagonal part's rows past the step, then the off-block rows.
+        let parts = [(ke, lay.w.max(ke)), (lay.w.max(ke), nrow)];
+        let replay = |r0: usize, r1: usize, w: &mut Vec<T>| {
+            // SAFETY: disjoint row chunk; see `apply_bk_panel_trailing`.
             unsafe {
                 apply_bk_panel_trailing(
-                    panel.as_mut_ptr(),
-                    nrow,
+                    base,
+                    lay,
                     kb,
                     ke,
                     d,
@@ -575,12 +558,61 @@ fn ll_bk_panel_step<T: Scalar>(
                     deep_swaps,
                     mult_snap,
                     nb,
-                    ke,
-                    nrow,
+                    r0,
+                    r1,
                     trailing_block,
-                    &mut w,
+                    w,
                 )
-            };
+            }
+        };
+        if deep * pw * pw >= ll_cdiv_par {
+            let pp = LdltPanelPtr(base);
+            let nthreads = crate::parallel::threads();
+            let cs = deep.div_ceil(nthreads).max(1);
+            let chunks: Vec<(usize, usize)> = (parts.iter())
+                .flat_map(|&(p0, p1)| (p0..p1).step_by(cs).map(move |r| (r, (r + cs).min(p1))))
+                .collect();
+            let (d, d_subdiag, two_by_two) = (&*d, &*d_subdiag, &*two_by_two);
+            let (deep_swaps, mult_snap) = (&*deep_swaps, &*mult_snap);
+            crate::parallel::for_each(
+                chunks.len(),
+                crate::parallel::Work::ns(f64::INFINITY),
+                |c| {
+                    let (r0, r1) = chunks[c];
+                    let mut w = wpool.take();
+                    // SAFETY: disjoint row chunk; see `apply_bk_panel_trailing`.
+                    unsafe {
+                        apply_bk_panel_trailing(
+                            pp.get(),
+                            lay,
+                            kb,
+                            ke,
+                            d,
+                            d_subdiag,
+                            two_by_two,
+                            deep_swaps,
+                            mult_snap,
+                            nb,
+                            r0,
+                            r1,
+                            trailing_block,
+                            &mut w,
+                        )
+                    };
+                },
+            );
+        } else {
+            // Row chunks that keep a chunk of every panel column in L1 across
+            // the whole pivot sweep (the sweep streams each column once per
+            // pivot; unchunked, a deep panel is re-read from L2 `pw` times).
+            // Rows are independent, so every row's arithmetic is unchanged:
+            // bit-identical to one call over all rows.
+            let mut w = wpool.take();
+            for &(p0, p1) in &parts {
+                if p1 > p0 {
+                    replay(p0, p1, &mut w);
+                }
+            }
         }
     }
 
@@ -699,6 +731,9 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     // work ~ nrow*ncol^2 (panel + trailing updates).
     let ll_cdiv_par = kt.k.cdiv_par(nrow, ncol);
     let alpha = bk_alpha();
+    let lay = Layout::new(ncol, nrow - ncol);
+    debug_assert!(panel.len() >= lay.len());
+    let base = LdltPanelPtr(panel.as_mut_ptr());
     // The node's buffers, on loan from the factorization's pool and reset
     // to the values they start from: the pivot outputs (`D`, the 2x2 flags,
     // the row permutation; read back through the emit cells), the 2x2
@@ -754,27 +789,31 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
         let ke = (kb + nb).min(ncol);
         if kb >= done_through {
             let _p = rsprobe::scope!(TRACE, "panel");
-            let r = ll_bk_panel_step(
-                panel,
-                nrow,
-                kb,
-                ke,
-                nb,
-                alpha,
-                perturb_floor,
-                ll_cdiv_par,
-                kt.k.trailing_block,
-                &mut *d,
-                &mut *d_subdiag,
-                &mut *two_by_two,
-                &mut *lperm,
-                &mut *l1,
-                &mut *l2,
-                &mut *deep_swaps,
-                &mut *mult_snap,
-                &pools.w,
-                &mut floors,
-            );
+            // SAFETY: the node's own slot, no other task touches it.
+            let r = unsafe {
+                ll_bk_panel_step(
+                    base.get(),
+                    lay,
+                    nrow,
+                    kb,
+                    ke,
+                    nb,
+                    alpha,
+                    perturb_floor,
+                    ll_cdiv_par,
+                    kt.k.trailing_block,
+                    &mut *d,
+                    &mut *d_subdiag,
+                    &mut *two_by_two,
+                    &mut *lperm,
+                    &mut *l1,
+                    &mut *l2,
+                    &mut *deep_swaps,
+                    &mut *mult_snap,
+                    &pools.w,
+                    &mut floors,
+                )
+            };
             r?;
         }
         // Deferred panel trailing update: panel[ke.., ke..ncol] -= L21*D*R^T, where
@@ -790,8 +829,10 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             l21buf.resize(mt * pw, T::zero());
             for cc in 0..pw {
                 let c = kb + cc;
-                for rr in 0..mt {
-                    l21buf[rr + cc * mt] = panel[(ke + rr) + c * nrow];
+                for run in lay.runs(ke..nrow, c..c + 1) {
+                    let (r0, len) = (run.rows.start - ke, run.rows.len());
+                    l21buf[r0 + cc * mt..r0 + len + cc * mt]
+                        .copy_from_slice(&panel[run.off..run.off + len]);
                 }
             }
             gbuf.clear();
@@ -828,18 +869,19 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             } else {
                 (kt.k.schur_tile, mt)
             };
-            let schur = |dst: *mut T, range: (usize, usize)| {
+            let schur = |range: (usize, usize)| {
                 let _s = rsprobe::scope!(TRACE, "schur");
-                // SAFETY: `dst` addresses the trailing rows of the columns in
-                // `range`, the caller's own; `gbuf` and `l21buf` hold `mt * pw`.
+                // SAFETY: the trailing rows of the columns in `range`, the
+                // caller's own; `gbuf` and `l21buf` hold `mt * pw`.
                 unsafe {
                     schur_tiles(
-                        dst,
-                        nrow,
+                        base.get(),
+                        lay,
+                        ke,
                         mt,
                         pw,
                         &gbuf[..],
-                        &l21buf[..],
+                        (&l21buf[..], mt),
                         range,
                         tiles,
                         par,
@@ -856,42 +898,45 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             let wide = cw - cw_n;
             let look = kt.k.use_gemm_schur && wide > 0 && mt * wide * pw >= kt.k.par_cdiv;
             if look {
-                schur(panel[ke * nrow + ke..].as_mut_ptr(), (0, cw_n));
-                let (left, right) = panel.split_at_mut(ke2 * nrow);
-                let right = LdltPanelPtr(right[ke..].as_mut_ptr());
+                schur((0, cw_n));
                 let floors_ref = &mut floors;
                 let (step_res, ()) = crate::parallel::join(
                     crate::parallel::Work::ns(f64::INFINITY),
                     || {
                         let _p = rsprobe::scope!(TRACE, "panel");
-                        ll_bk_panel_step(
-                            left,
-                            nrow,
-                            ke,
-                            ke2,
-                            nb,
-                            alpha,
-                            perturb_floor,
-                            ll_cdiv_par,
-                            kt.k.trailing_block,
-                            &mut *d,
-                            &mut *d_subdiag,
-                            &mut *two_by_two,
-                            &mut *lperm,
-                            &mut *l1b,
-                            &mut *l2b,
-                            &mut *deep_swaps_b,
-                            &mut *mult_snap_b,
-                            &pools.w,
-                            floors_ref,
-                        )
+                        // SAFETY: the columns `[ke, ke2)`, which the update
+                        // beside it does not touch.
+                        unsafe {
+                            ll_bk_panel_step(
+                                base.get(),
+                                lay,
+                                nrow,
+                                ke,
+                                ke2,
+                                nb,
+                                alpha,
+                                perturb_floor,
+                                ll_cdiv_par,
+                                kt.k.trailing_block,
+                                &mut *d,
+                                &mut *d_subdiag,
+                                &mut *two_by_two,
+                                &mut *lperm,
+                                &mut *l1b,
+                                &mut *l2b,
+                                &mut *deep_swaps_b,
+                                &mut *mult_snap_b,
+                                &pools.w,
+                                floors_ref,
+                            )
+                        }
                     },
-                    || schur(right.get(), (cw_n, cw)),
+                    || schur((cw_n, cw)),
                 );
                 step_res?;
                 done_through = ke2;
             } else if kt.k.use_gemm_schur {
-                schur(panel[ke * nrow + ke..].as_mut_ptr(), (0, cw));
+                schur((0, cw));
             } else {
                 for cc2 in 0..cw {
                     let c = ke + cc2;
@@ -900,7 +945,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                         for kk2 in 0..pw {
                             acc = acc + gbuf[rr + kk2 * mt] * l21buf[cc2 + kk2 * mt];
                         }
-                        let dst = (ke + rr) + c * nrow;
+                        let dst = lay.at(ke + rr, c);
                         panel[dst] = panel[dst] - acc;
                     }
                 }
@@ -987,32 +1032,36 @@ pub(crate) fn bk_alpha() -> f64 {
     (1.0 + 17.0_f64.sqrt()) / 8.0
 }
 
-/// Symmetric interchange of rows and columns `p < q` in a column-major
-/// lower-triangle panel of leading dimension `n`, with the below-`q`
+/// Symmetric interchange of rows and columns `p < q` in the lower triangle
+/// of the panel `base` (laid out as `lay`), with the below-`q`
 /// column-segment swap bounded to rows `< row_limit`. The blocked Bunch-Kaufman panel kernels keep their pivot
 /// interchanges inside the panel rows and replay the deep-row segments later
 /// in the parallel trailing apply (`apply_bk_panel_trailing`), so the
 /// interchange sequence reaches every row exactly once, in step order.
-pub(crate) fn swap_sym_lower_bounded<T: Scalar>(
-    a: &mut [T],
-    n: usize,
+///
+/// # Safety
+/// `base` is the panel laid out as `lay`, `row_limit <= lay.w`.
+pub(crate) unsafe fn swap_sym_lower_bounded<T: Scalar>(
+    base: *mut T,
+    lay: Layout,
     p: usize,
     q: usize,
     row_limit: usize,
 ) {
-    debug_assert!(p < q && q < n && q < row_limit);
+    debug_assert!(p < q && q < lay.w && q < row_limit && row_limit <= lay.w);
+    let a = |i: usize, j: usize| base.add(lay.at(i, j));
     // Column segment strictly below q: (i, p) <-> (i, q) for i > q.
     for i in (q + 1)..row_limit {
-        a.swap(p * n + i, q * n + i);
+        std::ptr::swap(a(i, p), a(i, q));
     }
     // Middle cross strip: (i, p) <-> (q, i) for p < i < q.
     for i in (p + 1)..q {
-        a.swap(p * n + i, i * n + q);
+        std::ptr::swap(a(i, p), a(q, i));
     }
     // Diagonal: (p, p) <-> (q, q).
-    a.swap(p * n + p, q * n + q);
+    std::ptr::swap(a(p, p), a(q, q));
     // Left row segments: (p, j) <-> (q, j) for j < p.
     for j in 0..p {
-        a.swap(j * n + p, j * n + q);
+        std::ptr::swap(a(p, j), a(q, j));
     }
 }
