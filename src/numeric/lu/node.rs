@@ -31,6 +31,8 @@ pub(super) struct LuScratch<T> {
     col: Vec<T>,
     lupd: Vec<T>,
     uupd: Vec<T>,
+    lb: Vec<usize>,
+    ub: Vec<usize>,
 }
 
 impl<T> crate::memory::HeapBytes for LuScratch<T> {
@@ -43,6 +45,8 @@ impl<T> crate::memory::HeapBytes for LuScratch<T> {
             + b(&self.col)
             + b(&self.lupd)
             + b(&self.uupd)
+            + b(&self.lb)
+            + b(&self.ub)
     }
 }
 
@@ -56,6 +60,8 @@ impl<T> Default for LuScratch<T> {
             col: Vec::new(),
             lupd: Vec::new(),
             uupd: Vec::new(),
+            lb: Vec::new(),
+            ub: Vec::new(),
         }
     }
 }
@@ -203,6 +209,8 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         col,
         lupd,
         uupd,
+        lb,
+        ub,
     } = &mut *lent;
     // The off-block rows and columns: the structure's, and those beyond it
     // that the delayed pivots of the children carry or that an updater with
@@ -266,10 +274,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
     // the analysis's, or, where pivots may be delayed, claimed now at the
     // size the front has, within the arenas' room (the factorization stops
     // when it is spent).
-    let front = Front {
-        l: Layout::new(nfs, cn_l),
-        u: Layout::new(nfs, cn_u),
-    };
+    let front = Front::new(Layout::new(nfs, cn_l), Layout::new(nfs, cn_u), lb, ub);
     // SAFETY: this task owns supernode `s`; nobody reads its slots before the
     // node is done (its ancestors start after it).
     let (lbuf, ut): (&mut [T], &mut [T]) = unsafe {
@@ -410,16 +415,12 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                         );
                     }
                     for jj in 0..npk {
-                        let fc = front.col(ou[q0 + jj] as usize - first);
+                        let tcol = ou[q0 + jj] as usize - first;
                         let ucol = &lupd[jj * mrows..jj * mrows + mrows];
                         for i in 0..mrows {
                             // SAFETY: column `tcol` of the front lies in this slab.
                             unsafe {
-                                let d = fc.ptr(
-                                    lp.get(),
-                                    up.get(),
-                                    gloc_ref[ol[p0l + i] as usize] as usize,
-                                );
+                                let d = at(gloc_ref[ol[p0l + i] as usize] as usize, tcol);
                                 *d = *d - ucol[i];
                             }
                         }
@@ -570,12 +571,12 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                     );
                 }
                 for jj in 0..npk_u {
-                    let fc = front.col(ou[p0u + jj] as usize - first);
+                    let tcol = ou[p0u + jj] as usize - first;
                     let ucol = &lupd[jj * mrows..jj * mrows + mrows];
                     for i in 0..mrows {
                         // SAFETY: an entry of the front.
                         unsafe {
-                            let d = fc.ptr(lp.get(), up.get(), gloc[ol[p0l + i] as usize] as usize);
+                            let d = at(gloc[ol[p0l + i] as usize] as usize, tcol);
                             *d = *d - ucol[i];
                         }
                     }
@@ -992,45 +993,25 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
 
 /// The front of an LU node: its `L` panel (laid out as `l`) holds the
 /// entries on and below the diagonal, its `U^T` panel (laid out as `u`) the
-/// ones above it, transposed.
+/// ones above it, transposed. `lb[j]` and `ub[j]` place column `j`'s rows of
+/// the fully-summed block: row `i` of `L`'s column `j` at `lb[j] + i`, of
+/// `U^T`'s at `ub[j] + i`.
 #[derive(Clone, Copy)]
-struct Front {
+struct Front<'a> {
     l: Layout,
     u: Layout,
+    lb: &'a [usize],
+    ub: &'a [usize],
 }
 
-/// One column of a [`Front`] ([`Front::col`]).
-#[derive(Clone, Copy)]
-struct FrontCol {
-    j: usize,
-    l: crate::numeric::supernodal::panel::ColAt,
-    u: Layout,
-}
-
-impl FrontCol {
-    /// Entry `(i, j)` of the front in the panels `lp` and `up`.
-    ///
-    /// # Safety
-    /// `lp` and `up` are the panels laid out as the front.
-    #[inline]
-    unsafe fn ptr<T>(&self, lp: *mut T, up: *mut T, i: usize) -> *mut T {
-        if i >= self.j {
-            lp.add(self.l.at(i))
-        } else {
-            up.add(self.u.at(self.j, i))
-        }
-    }
-}
-
-impl Front {
-    /// Where column `j`'s entries lie.
-    #[inline]
-    fn col(&self, j: usize) -> FrontCol {
-        FrontCol {
-            j,
-            l: self.l.col(j),
-            u: self.u,
-        }
+impl<'a> Front<'a> {
+    /// The front laid out as `l` and `u`, its tables in `lb` and `ub`.
+    fn new(l: Layout, u: Layout, lb: &'a mut Vec<usize>, ub: &'a mut Vec<usize>) -> Self {
+        lb.clear();
+        lb.extend((0..l.w).map(|j| l.at(j, j) - j));
+        ub.clear();
+        ub.extend((0..u.w).map(|j| u.at(j, j) - j));
+        Front { l, u, lb, ub }
     }
 
     /// Entry `(i, j)` of the front in the panels `lp` and `up`.
@@ -1039,10 +1020,17 @@ impl Front {
     /// `lp` and `up` are the panels laid out as `self`.
     #[inline]
     unsafe fn ptr<T>(&self, lp: *mut T, up: *mut T, i: usize, j: usize) -> *mut T {
+        let nfs = self.l.w;
         if i >= j {
-            lp.add(self.l.at(i, j))
+            if i < nfs {
+                lp.add(self.lb[j] + i)
+            } else {
+                lp.add(self.l.rect() + j * self.l.m + i - nfs)
+            }
+        } else if j < nfs {
+            up.add(self.ub[i] + j)
         } else {
-            up.add(self.u.at(j, i))
+            up.add(self.u.rect() + i * self.u.m + j - nfs)
         }
     }
 }
