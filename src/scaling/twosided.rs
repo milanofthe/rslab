@@ -20,7 +20,7 @@
 //! pivot within a factor `u` of its column's largest entry, so scales known to
 //! within a factor `1 + u` move no decision by more than the margin the test
 //! itself grants, and further steps change the factor in its rounding only.
-//! Measured on MoM near-field saddles (rapidmom exp/cond-lu: tia130a and
+//! Measured on MoM near-field saddles (tia130a and
 //! pa180a, 1 and 180 GHz): the floored pivots and the backward error at
 //! `1 + u = 1.1` (7 to 8 steps) are those at `1e-8` (31 steps).
 //!

@@ -1,4 +1,4 @@
-//! Ordering bake-off on a dumped complex unsymmetric matrix (rapidmom near-field
+//! Ordering bake-off on a dumped complex unsymmetric matrix (MoM near-field
 //! preconditioner): fill, factor time and multi-RHS solve time per `OrderingMethod`.
 //!
 //! File format (little endian): u64 n, u64 nnz, u32 rows[nnz], u32 cols[nnz], (f64 re, f64 im)[nnz].

@@ -18,7 +18,7 @@ pub const LU_PIVOT_THRESHOLD: f64 = 0.1;
 /// predicts (1). The memory plan reserves it; a factorization that would
 /// need more is redone without delays.
 /// Used by: `numeric::lu::factor` (with `PivotSettings::delayed`).
-/// Why: measured with the row matching on every column on the rapidmom
+/// Why: measured with the row matching on every column on MoM
 /// near matrices (rslab#204): 5 to 6 percent on pa180a (74.6k unknowns,
 /// 3.1k to 3.8k delays) and tia130a (15.8k, 0.6k to 0.7k delays) at 1 and
 /// 170 to 180 GHz, 1 percent on the kit spiral and momstack; four times the
