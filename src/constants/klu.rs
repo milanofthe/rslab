@@ -8,6 +8,15 @@
 /// same bits).
 pub const COL_WORK: u64 = 32;
 
+/// Columns of a supernode the dense kernel of the KLU refactorization and
+/// solve applies in one pass over the gathered rows (columns): the kernel's
+/// unroll, part of its structure, not a tuned gate.
+/// Used by: `klu::supernode::apply`, `klu::supernode::dense_pays`.
+/// Why: the gathered rows are loaded and stored once per pass; four
+/// multiply-adds a row keep the pass bound by the `L` values it reads.
+/// Contract: timing (the order of the additions into a row, last bits).
+pub const KLU_SN_PASS: usize = 4;
+
 /// Columns one worker claims at a time in the pipelined replay (columns).
 /// Used by: `KluSolver::refactor` (pipelined replay).
 /// Why: a column waits on the `L` columns it reads, so a longer run only
