@@ -32,26 +32,14 @@ impl KluSymbolic {
         let _s = rsprobe::scope!("analyze");
         rsprobe::add!("nonzeros", a.nnz());
         let n = a.n;
-        // Same 31-bit range gate as factor time (the whole path is Ki-based;
-        // checking here lets analyze and the BTF pass use narrow indices).
         if n as u64 >= KI_FBIT as u64 || a.nnz() as u64 >= KI_FBIT as u64 {
             return Err(RslabError::InvalidInput(
                 "klu: dimension/nnz exceeds the 31-bit index range of this path".to_string(),
             ));
         }
 
-        // Matching bakeoff (BTF on): deterministic maximum-matching
-        // candidates (see `btf::matching_candidates`); with more than one,
-        // each candidate's AMD-ordered blocks are scored by exact Cholesky
-        // lnz (Gilbert-Ng-Peyton column counts on the ordered symmetrized
-        // pattern) and the cheapest matching wins. Different maximum
-        // matchings differ by several-x fill on the harmonic-balance class
-        // (onetone/twotone), in matrix-dependent directions - measuring
-        // beats guessing. The common MNA case (complete structural
-        // diagonal) short-circuits to a single candidate and pays nothing.
         let weighted = if settings.btf && settings.matching {
             let _s = rsprobe::scope!(DEBUG, "matching");
-            // The analysis' only sections, on the policy's workers.
             let cache = (settings.threads).run(
                 0,
                 |cap| cap,
@@ -62,8 +50,6 @@ impl KluSymbolic {
             None
         };
         let ordered = if let Some(m) = weighted {
-            // The weighted matching decides the transversal; the blocks are
-            // its strongly connected components.
             let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
             order_blocks(a, form)?
         } else if settings.btf {
@@ -79,8 +65,6 @@ impl KluSymbolic {
                 };
             }
             let Some(of) = best else {
-                // Unreachable: `matching_candidates` returns at least one
-                // matching or `None` (handled above as StructurallySingular).
                 return Err(RslabError::InvalidInput(
                     "klu: no matching candidate".to_string(),
                 ));
@@ -104,9 +88,6 @@ impl KluSymbolic {
             ..
         } = ordered;
 
-        // Freeze the analyzed pattern in the (final) pre-pivot space for the
-        // a-priori estimators. Narrow inverse permutation: the gather is
-        // bound by the random `pinv_pre[r]` reads.
         let mut pinv_pre = vec![0 as Ki; n];
         for (k, &r) in pre_row_perm.iter().enumerate() {
             pinv_pre[r] = k as Ki;
@@ -120,8 +101,6 @@ impl KluSymbolic {
             }
             pat_col_ptr.push(pat_row_idx.len());
         }
-        // The off-block entries (rows of earlier blocks) join the predicted
-        // factor as they are: they take no part in the elimination.
         for b in 0..block_ptr.len() - 1 {
             let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
             for k in bs..be {
@@ -143,10 +122,6 @@ impl KluSymbolic {
         })
     }
 
-    /// Symbolic Gilbert-Peierls pass over the stored pattern assuming
-    /// diagonal pivots: exact per-path fill and flop counts, no values.
-    /// Computed once and cached, the pass costs about as much as a numeric
-    /// factor, so repeated `factor`/`estimate_memory` calls must not repay it.
     fn symbolic_fill(&self) -> &KluFill {
         self.fill.get_or_init(|| self.symbolic_fill_uncached())
     }
@@ -160,14 +135,8 @@ impl KluSymbolic {
         let mut l_rowidx: Vec<usize> = Vec::new();
         let mut leaves: Vec<usize> = Vec::new();
         let (mut u_nnz, mut f_nnz, mut flops) = (0u64, 0u64, 0u64);
-        // Each column's level in its block's elimination DAG, and per block
-        // its replay work and levels.
         let mut level = vec![0usize; n];
         let mut replay = Vec::new();
-        // The drivers' buffers, block by block (see `BlockCaps`): the
-        // sequential driver appends to arrays reserved at 4, 2 and 1/4 times
-        // the input and reuses one block buffer; the parallel one gives
-        // every block a fresh buffer.
         let nblocks = self.block_ptr.len() - 1;
         let (mut seq, mut par) = (BlockCaps::default(), (0u64, 0u64));
         let mut cap = [
@@ -226,7 +195,6 @@ impl KluSymbolic {
                         if descended {
                             continue;
                         }
-                        // u finished: one U entry, applying its L column.
                         u_nnz += 1;
                         flops += 2 * (l_colptr[u + 1] - l_colptr[u]) as u64;
                         w_b += (l_colptr[u + 1] - l_colptr[u]) as u64;
@@ -242,7 +210,7 @@ impl KluSymbolic {
                         l_rowidx.push(lv);
                     }
                 }
-                flops += (l_rowidx.len() - l_colptr[j]) as u64; // divisions
+                flops += (l_rowidx.len() - l_colptr[j]) as u64;
                 l_colptr.push(l_rowidx.len());
                 level[j] = lj;
                 nlev = nlev.max(lj + 1);
@@ -267,8 +235,6 @@ impl KluSymbolic {
         let n1 = (n + 1) as u64;
         let (idx, word) = (IDX32_BYTES as u64, WORD_BYTES as u64);
         let (seq_arrays, seq_block) = if nblocks == 1 {
-            // The one block's `L`, `U`, diagonal and their column pointers
-            // move out of the block buffer into the factor.
             let moved = (
                 (seq.l + seq.u + seq.diag) as u64,
                 (IDX32_BYTES * (seq.l + seq.u) + WORD_BYTES * (seq.colptr[0] + seq.colptr[1]))
@@ -299,10 +265,6 @@ impl KluSymbolic {
         }
     }
 
-    /// Whether the first factorization runs its blocks in parallel: forced
-    /// by the setting, or under `Auto` when the input is large enough and no
-    /// block holds half the matrix (the a-priori work floor and Amdahl ratio;
-    /// the refactorization decides from the exact plan instead).
     pub(super) fn parallel_blocks<T: Scalar>(&self, settings: &KluSettings) -> bool {
         let nblocks = self.block_ptr.len() - 1;
         if nblocks < 2 {
@@ -314,8 +276,6 @@ impl KluSymbolic {
             (KluParallel::Auto, Some(min)) => {
                 self.nnz >= min && self.max_block_size() * 2 <= self.n
             }
-            // The blocks' input entries at what an entry has cost, in as
-            // many equal pieces as the largest block leaves room for.
             (KluParallel::Auto, None) => {
                 let entries = |b: usize| {
                     (self.pat_col_ptr[self.block_ptr[b + 1]] - self.pat_col_ptr[self.block_ptr[b]])
@@ -364,9 +324,9 @@ impl KluSymbolic {
     ///
     /// KLU specifics: the fill is exact under diagonal pivoting (threshold
     /// pivoting can shift it slightly); `factor_flops` is the Gilbert-Peierls
-    /// flop count (not the supernodal `nrow^2*ncol` proxy); the path is
-    /// strictly sequential, so `critical_path_flops == factor_flops` and
-    /// `max_tree_width == 1`; there are no dense panels.
+    /// flop count (not the supernodal `nrow^2*ncol` proxy); the estimate
+    /// counts the factorization as sequential, so `critical_path_flops ==
+    /// factor_flops` and `max_tree_width == 1`; there are no dense panels.
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let fill = self.symbolic_fill();
         let plan = self.memory_plan::<T>(&KluSettings::default(), 1);
@@ -398,8 +358,6 @@ impl KluSymbolic {
         let (idx, word) = (IDX32_BYTES as u64, WORD_BYTES as u64);
         let parallel = self.parallel_blocks::<T>(settings);
         let threads = if parallel { settings.workers() } else { 1 };
-        // `L`, `U` and the off-block entries at their exact sizes (the
-        // parallel splice), the diagonal and the three column pointers.
         let entries = fill.l_nnz + fill.u_nnz + fill.f_nnz;
         let colptrs = (KLU_FACTOR_ARRAYS * WORD_BYTES) as u64;
         let exact = (entries + n) * vb + idx * entries + colptrs * (n + 1);
@@ -408,18 +366,18 @@ impl KluSymbolic {
         } else {
             price(fill.seq_arrays)
         };
-        // Held besides: the row scaling, the final row permutation and its
-        // inverse, copies of the column permutation and the block pointers,
-        // the refactorization's scatter program and its replay plan (per
-        // block whose columns can replay side by side, its columns, level
-        // bounds and level work), and per column the last column of its
-        // supernode and whether it applies one.
-        let around = (idx + 1) * n
-            + word * n
-            + 2 * word * n
-            + word * n
-            + word * (nblocks + 1)
-            + word * nnz
+        let supernode_layout = (idx + 1) * n;
+        let row_scaling = word * n;
+        let row_perm_and_inverse = 2 * word * n;
+        let col_perm = word * n;
+        let block_ptr = word * (nblocks + 1);
+        let scatter_program = word * nnz;
+        let around = supernode_layout
+            + row_scaling
+            + row_perm_and_inverse
+            + col_perm
+            + block_ptr
+            + scatter_program
             + 2 * word * nblocks;
         let (mut planned, mut levels) = (0usize, 0u64);
         for (b, &(_, nlev)) in fill.replay.iter().enumerate() {
@@ -434,9 +392,6 @@ impl KluSymbolic {
         let entry = std::mem::size_of::<BlockPlan>();
         let around = around + (crate::memory::pushed(planned) * entry) as u64 + levels;
         let factor = arrays + around;
-        // While the blocks are factored: the scaling, the scatter program,
-        // the pre-pivot inverse and final positions, the arrays, the block
-        // buffers and each worker's DFS scratch (sized to the largest block).
         let max_bn = self.max_block_size() as u64;
         let scratch = max_bn * (KLU_DFS_BYTES_PER_COL + vb);
         let base = word * n + word * nnz + word * n;
@@ -455,10 +410,7 @@ impl KluSymbolic {
             analysis_growth_bytes: 0,
             factor_bytes: factor,
             factor_peak_bytes: during.max(factor + word * n) + crate::constants::BOOKKEEPING,
-            // The solution and the permuted work vector, and the supernode
-            // kernel's gather (at most a block).
             solve_bytes: 2 * n * nrhs as u64 * vb + max_bn * vb,
-            // Its buffers belong to the factor.
             kept_bytes: 0,
         }
     }
@@ -481,9 +433,6 @@ impl KluSymbolic {
             .unwrap_or(0)
     }
 
-    /// The column permutation (new-to-old): the blocks in their order, each
-    /// in the minimum-degree ordering of its symmetrized, row-matched
-    /// pattern.
     pub(crate) fn into_ordering(self) -> Vec<usize> {
         self.col_perm
     }
@@ -504,11 +453,6 @@ impl KluSymbolic {
         a: &GeneralCsc<T>,
         settings: &KluSettings,
     ) -> Result<KluSolver<T>, RslabError> {
-        // Attach the a-priori estimate only when it has already been computed
-        // (an explicit `estimate_memory` call): the estimator is a pattern-only
-        // Gilbert-Peierls pass costing about as much as a numeric factor, and
-        // factor() must not silently pay it - the solvers never measure (or
-        // estimate) implicitly.
         let _s = rsprobe::scope!("factor");
         rsprobe::add!("blocks", self.n_blocks());
         let estimate = self.fill.get().map(|_| self.estimate_memory::<T>());
@@ -555,29 +499,14 @@ impl KluSymbolic {
     }
 }
 
-/// One matching candidate after SCC + per-block AMD, with the exact
-/// Cholesky-lnz score of its ordered symmetrized blocks (only computed in a
-/// multi-candidate bakeoff).
 struct OrderedForm {
     pre_row_perm: Vec<usize>,
     col_perm: Vec<usize>,
     block_ptr: Vec<usize>,
-    /// The matching bakeoff's score: the nontrivial blocks' Cholesky lnz.
     score: u64,
-    /// The factor the ordered blocks predict (see
-    /// [`KluSymbolic::estimated_factor_nnz`]), the off-block entries not yet
-    /// counted.
     estimate: KluEstimate,
 }
 
-/// Per-block AMD on the symmetrized block pattern (B + B^T, with diagonal,
-/// as the supernodal paths feed rslab-amd), applied
-/// symmetrically to the form's permutations. Blocks of size <= 2 have
-/// nothing to reorder. Accumulates the exact Cholesky lnz of each
-/// AMD-ordered block pattern (Gilbert-Ng-Peyton column counts,
-/// near-linear): over the nontrivial blocks the bakeoff score - the trivial
-/// blocks are identical across candidates and are skipped consistently -
-/// and with them, taken dense, the predicted factor.
 fn order_blocks<T: Scalar>(
     a: &GeneralCsc<T>,
     form: btf::BtfForm,
@@ -589,10 +518,6 @@ fn order_blocks<T: Scalar>(
         mut col_perm,
         block_ptr,
     } = form;
-    // Narrow inverse permutation: this stage is bound by the random
-    // `pinv0[r]` lookups over the matrix entries; 32-bit halves the lookup
-    // table's cache footprint (n < 2^31 is enforced at factor time and the
-    // KLU design point is far below).
     let mut pinv0 = vec![0 as Ki; n];
     for (k, &r) in pre_row_perm.iter().enumerate() {
         pinv0[r] = k as Ki;
@@ -603,35 +528,17 @@ fn order_blocks<T: Scalar>(
         let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
         let bn = be - bs;
         if bn <= 2 {
-            // dense: a 2 x 2 block's one division and multiply-subtract
             let c = (bn - 1) as u64;
             estimate.factor_nnz += (bn * bn) as u64;
             estimate.flops += c + c * c;
             continue;
         }
-        // Symmetrized block adjacency (B + B^T + diagonal), canonical form
-        // (sorted, deduplicated columns). Built as: the off-diagonal
-        // in-block entries B column by column (sequential writes, one random
-        // `pinv0` read per entry), a per-column sort of B's short columns,
-        // B^T by counting transpose (whose columns come out sorted for
-        // free), then a linear three-way sorted merge per column. One
-        // random counting/scatter pass over the entries instead of the two
-        // of the old both-directions scatter - the random writes, not the
-        // short-column sorts, dominate this stage.
-        // 1) B: off-diagonal in-block entries, block-local coordinates.
-        // Single pass over the matrix (the random `pinv0` reads are this
-        // stage's bottleneck - no separate counting pass), sequential
-        // pushes, then a short per-column sort.
         let cap: usize = (bs..be)
             .map(|j| {
                 let c = col_perm[j];
                 a.col_ptr[c + 1] - a.col_ptr[c]
             })
             .sum();
-        // The block's off-diagonal pattern by column (`bri`, rows ascending)
-        // and by row (`tri`, columns ascending) from counting passes: the
-        // input columns are sorted by original row, not by block row, so the
-        // transpose is taken twice rather than sorting every column.
         let mut bcol = Vec::with_capacity(bn + 1);
         bcol.push(0usize);
         let mut bri: Vec<i32> = Vec::with_capacity(cap);
@@ -664,7 +571,6 @@ fn order_blocks<T: Scalar>(
             }
         }
         {
-            // Transpose back: rows ascending within every column.
             let mut cur = bcol[..bn].to_vec();
             for li in 0..bn {
                 for &lj in &tri[tcol[li]..tcol[li + 1]] {
@@ -706,10 +612,6 @@ fn order_blocks<T: Scalar>(
         let lperm = rslab_amd::amd_order(&pat)
             .map_err(|e| RslabError::InvalidInput(format!("klu: AMD ordering failed: {e:?}")))?;
         {
-            // Exact Cholesky lnz of the AMD-ordered block: permute the full
-            // symmetric pattern, then etree + GNP column counts. Both accept
-            // a full symmetric pattern with unsorted columns (etree uses the
-            // upper entries, GNP the lower).
             let mut newpos = vec![0usize; bn];
             for (k, &lp) in lperm.iter().enumerate() {
                 newpos[lp as usize] = k;
@@ -733,15 +635,12 @@ fn order_blocks<T: Scalar>(
             let cc = crate::symbolic::column_counts_gnp(&pat_p, &etree);
             let lnz = crate::symbolic::total_factor_nnz(&cc) as u64;
             score += lnz;
-            // `L` and its transpose `U`, the diagonal once.
             estimate.factor_nnz += 2 * lnz - bn as u64;
             for &count in &cc {
                 let c = count.saturating_sub(1) as u64;
                 estimate.flops += c + c * c;
             }
         }
-        // Apply the local (new-to-old) perm symmetrically to the block's
-        // segment of both permutations.
         let old_rows: Vec<usize> = pre_row_perm[bs..be].to_vec();
         let old_cols: Vec<usize> = col_perm[bs..be].to_vec();
         for (i, &lp) in lperm.iter().enumerate() {
