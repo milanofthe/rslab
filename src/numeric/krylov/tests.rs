@@ -12,7 +12,6 @@ use num_complex::Complex;
 
 type C = Complex<f64>;
 
-/// 2D complex-symmetric Helmholtz-style grid (lower triangle).
 fn grid(m: usize, diag: C, off: C) -> CscMatrix<C> {
     let n = m * m;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -105,13 +104,10 @@ fn cocg_unpreconditioned_solves_complex_symmetric() {
     let res = cocg(&a, &b, &NoPreconditioner, &settings).unwrap();
     assert!(res.converged, "COCG should converge, res={}", res.final_res);
     assert_eq!(res.stop, StopReason::Converged);
-    // Verify against the actual residual.
     let (r, bound) = residual_bound(&a, &res.x, &b, settings.tol);
     let drift = cocg_drift(&a, &b, &NoPreconditioner, &settings, res.iters);
     assert!(r <= bound + drift, "residual {}", r);
 
-    // Starve the budget: the same solve capped at one iteration must report
-    // `MaxIter`, not a false `Converged`.
     let capped = cocg(
         &a,
         &b,
@@ -132,7 +128,6 @@ fn cocr_solves_complex_symmetric_pre_and_unpre() {
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
 
-    // Unpreconditioned COCR converges to the true solution.
     let un = cocr(
         &a,
         &b,
@@ -148,7 +143,6 @@ fn cocr_solves_complex_symmetric_pre_and_unpre() {
     let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
     assert!(res < 1e-7, "COCR residual {}", res);
 
-    // RLA-preconditioned COCR collapses to a handful of iterations.
     let m = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let pre = cocr(
         &a,
@@ -166,7 +160,6 @@ fn cocr_solves_complex_symmetric_pre_and_unpre() {
 fn gmres_solves_unsymmetric_with_lu_preconditioner() {
     use crate::numeric::lu::LuSolver;
     use crate::sparse::general::GeneralCsc;
-    // Genuinely unsymmetric complex 2D grid (right != left couplings).
     let c = |re, im| Complex::new(re, im);
     let m = 8;
     let n = m * m;
@@ -201,7 +194,6 @@ fn gmres_solves_unsymmetric_with_lu_preconditioner() {
     let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
 
-    // Unpreconditioned GMRES converges (well-conditioned).
     let un = gmres(
         &a,
         &b,
@@ -215,7 +207,6 @@ fn gmres_solves_unsymmetric_with_lu_preconditioner() {
     .unwrap();
     assert!(un.converged, "GMRES res={}", un.final_res);
 
-    // LU factor as preconditioner -> 1-2 iterations.
     let lu = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let settings = crate::KrylovSettings::default()
         .with_tol(1e-10)
@@ -228,25 +219,14 @@ fn gmres_solves_unsymmetric_with_lu_preconditioner() {
         "LU-preconditioned GMRES iters {}",
         pre.iters
     );
-    // Verify the true residual.
     let (res, bound) = residual_bound(&a, &pre.x, &b, settings.tol);
     assert!(res <= bound, "residual {}", res);
 }
 
 #[test]
 fn gmres_singular_operator_breaks_down_without_nan() {
-    // Rank-deficient operator: A = diag(1, 1, 0) is singular and
-    // `b = (1,1,1)` has a component in the null space (e_2), so GMRES cannot
-    // drive the residual to zero - it stagnates. The Krylov subspace is
-    // A-invariant with a *singular* restriction (eigenvalue 0), so the upper-
-    // triangular Hessenberg factor acquires a ~0 diagonal. The unguarded
-    // back-substitution would divide by it and emit NaN/Inf into `x` and the
-    // reported residual; the guard must instead truncate to the well-
-    // conditioned block, giving a deterministic breakdown: a finite iterate and
-    // a truthful non-convergence report.
     use crate::sparse::general::GeneralCsc;
     let c = |re: f64, im: f64| Complex::new(re, im);
-    // Only the (0,0) and (1,1) entries; row/col 2 is all-zero -> A e_2 = 0.
     let a =
         GeneralCsc::<C>::from_triplets(3, &[0, 1], &[0, 1], &[c(1.0, 0.0), c(1.0, 0.0)]).unwrap();
     let b = vec![c(1.0, 0.0), c(1.0, 0.0), c(1.0, 0.0)];
@@ -261,7 +241,6 @@ fn gmres_singular_operator_breaks_down_without_nan() {
         None,
     )
     .unwrap();
-    // No NaN/Inf reached the solution or the residual.
     assert!(
         res.x.iter().all(|z| z.re.is_finite() && z.im.is_finite()),
         "solution has NaN/Inf: {:?}",
@@ -272,9 +251,6 @@ fn gmres_singular_operator_breaks_down_without_nan() {
         "residual is NaN/Inf: {}",
         res.final_res
     );
-    // Deterministic breakdown: reported as non-converged with a sane residual
-    // (the singular direction pins the relative residual near 1/sqrt3 ~ 0.577 - it
-    // is bounded well below the blow-up an unguarded divide would produce).
     assert!(
         !res.converged,
         "singular system must not report convergence"
@@ -287,7 +263,6 @@ fn gmres_singular_operator_breaks_down_without_nan() {
     );
 }
 
-/// Build the genuinely unsymmetric complex grid used by the GMRES tests.
 fn unsym_grid(m: usize) -> crate::sparse::general::GeneralCsc<C> {
     use crate::sparse::general::GeneralCsc;
     let c = |re, im| Complex::new(re, im);
@@ -323,7 +298,6 @@ fn unsym_grid(m: usize) -> crate::sparse::general::GeneralCsc<C> {
     GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap()
 }
 
-/// The diagonal of `a`: its factor is a deliberately weak preconditioner.
 fn diagonal_part(
     a: &crate::sparse::general::GeneralCsc<C>,
 ) -> crate::sparse::general::GeneralCsc<C> {
@@ -339,7 +313,6 @@ fn diagonal_part(
     crate::sparse::general::GeneralCsc::from_triplets(a.n, &idx, &idx, &vals).unwrap()
 }
 
-/// Wraps a preconditioner and counts every scalar `apply` (the `M^-1` solves).
 struct CountingPc<'a, M: ?Sized> {
     inner: &'a M,
     applies: std::sync::atomic::AtomicUsize,
@@ -354,19 +327,11 @@ impl<T: Scalar, M: Preconditioner<T> + ?Sized> Preconditioner<T> for CountingPc<
 
 #[test]
 fn fgmres_saves_one_precond_apply_per_restart_cycle() {
-    // FGMRES: the preconditioned basis `Z` is kept, so the restart
-    // update `x += Z y` costs **no** extra `M^-1` solve. The loop applies `M^-1`
-    // exactly once per inner iteration and never at the restart, so over a
-    // multi-cycle solve the total preconditioner-apply count equals the total
-    // iteration count. Plain right-preconditioned GMRES would spend one extra
-    // `M^-1` per cycle (rebuilding `M^-1(V y)`), i.e. `iters + n_cycles`.
     use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
-    let a = unsym_grid(10); // n = 100
+    let a = unsym_grid(10);
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
-    // Weak preconditioner so the solve needs several restart cycles at a
-    // short restart length - exercising the per-cycle update path.
     let lu = LuSolver::factor(&diagonal_part(&a), &SolverSettings::default()).unwrap();
     let restart = 5;
     let counting = CountingPc {
@@ -386,13 +351,11 @@ fn fgmres_saves_one_precond_apply_per_restart_cycle() {
     .unwrap();
     assert!(res.converged, "FGMRES must converge, res={}", res.final_res);
     let applies = counting.applies.load(std::sync::atomic::Ordering::Relaxed);
-    // Multiple restart cycles actually occurred (proves the saving is nonzero).
     assert!(
         res.iters > restart,
         "expected multiple cycles, iters={}",
         res.iters
     );
-    // FGMRES: exactly one apply per inner iteration, none at restart.
     assert_eq!(
         applies, res.iters,
         "FGMRES precond applies {} must equal iters {} (no per-cycle extra solve)",
@@ -402,15 +365,9 @@ fn fgmres_saves_one_precond_apply_per_restart_cycle() {
 
 #[test]
 fn gmres_warm_start_cuts_total_iterations_on_related_sequence() {
-    // Warm start: a sequence of related systems `A x = b_k` with a
-    // slowly rotating right-hand side. Cold-starting every solve from 0 pays
-    // the full iteration count each time; seeding each solve with the previous
-    // solution (which is close, because the RHS barely moved) collapses the
-    // per-solve count. Total iterations must drop by a clear margin.
-    let a = unsym_grid(12); // n = 144
+    let a = unsym_grid(12);
     let n = a.n;
     let c = |re: f64, im: f64| Complex::new(re, im);
-    // Two fixed directions; b_k interpolates between them by a small angle step.
     let b0: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     let b1: Vec<C> = (0..n)
         .map(|i| c(((i * 3) % 7) as f64 - 3.0, ((i % 3) as f64) - 1.0))
@@ -419,14 +376,13 @@ fn gmres_warm_start_cuts_total_iterations_on_related_sequence() {
     let (tol, maxit, restart) = (1e-8, 4000, 60);
 
     let bk = |k: usize| -> Vec<C> {
-        let th = 5e-5 * k as f64; // slow rotation
+        let th = 5e-5 * k as f64;
         let (ct, st) = (th.cos(), th.sin());
         (0..n)
             .map(|i| b0[i] * c(ct, 0.0) + b1[i] * c(st, 0.0))
             .collect()
     };
 
-    // Cold: every solve from x0 = 0.
     let mut cold_total = 0usize;
     for k in 0..steps {
         let r = gmres(
@@ -444,7 +400,6 @@ fn gmres_warm_start_cuts_total_iterations_on_related_sequence() {
         cold_total += r.iters;
     }
 
-    // Warm: first solve from 0, each subsequent seeded with the previous x.
     let mut warm_total = 0usize;
     let mut prev: Option<Vec<C>> = None;
     for k in 0..steps {
@@ -464,8 +419,6 @@ fn gmres_warm_start_cuts_total_iterations_on_related_sequence() {
         prev = Some(r.x);
     }
 
-    // A meaningful reduction (well beyond noise): warm start must cut the total
-    // iteration count by at least 30% over the sequence.
     assert!(
         (warm_total as f64) < 0.7 * (cold_total as f64),
         "warm start did not help enough: cold={cold_total}, warm={warm_total}"
@@ -474,13 +427,6 @@ fn gmres_warm_start_cuts_total_iterations_on_related_sequence() {
 
 #[test]
 fn gmres_block_single_rhs_matches_scalar_gmres() {
-    // s = 1 block GMRES reduces to the single-RHS path (same Arnoldi, same
-    // Givens, default block apply = one single apply): same solution to the
-    // requested tolerance, same iteration count up to a +/-1 boundary effect.
-    // The paths are NOT bit-identical - block uses DCGS2, single uses MGS+DGKS,
-    // so the projections sum in a different order and the true residual can
-    // straddle `tol` by a rounding ULP. This is documented as a design point in
-    // the module-level "Orthogonalization" note, not a defect.
     use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(8);
@@ -513,14 +459,11 @@ fn gmres_block_single_rhs_matches_scalar_gmres() {
 
 #[test]
 fn gmres_block_multi_rhs_solves_each_column() {
-    // Several distinct right-hand sides solved in one block iteration; every
-    // column must reach its own system's true residual.
     use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
     let a = unsym_grid(10);
     let n = a.n;
     let s = 5;
-    // Column-major nxs block: RHS `k` is shifted/scaled so columns differ.
     let mut bblk = vec![C::default(); n * s];
     for k in 0..s {
         for i in 0..n {
@@ -538,13 +481,11 @@ fn gmres_block_multi_rhs_solves_each_column() {
         "block GMRES must converge; res={:?}",
         res.final_res
     );
-    // True residual per column.
     for k in 0..s {
         let col = k * n..k * n + n;
         let (r, bound) = residual_bound(&a, &res.x[col.clone()], &bblk[col], settings.tol);
         assert!(r <= bound, "column {k} residual {r}");
     }
-    // Each column must equal the single-RHS solve of that column.
     let inv = inverse_norm(&a);
     for k in 0..s {
         let col = k * n..k * n + n;
@@ -563,21 +504,11 @@ fn gmres_block_multi_rhs_solves_each_column() {
 
 #[test]
 fn gmres_block_within_cycle_deflation_shrinks_applies() {
-    // Different-convergence-rate regime: a diagonal operator with
-    // distinct eigenvalues, unpreconditioned, with RHS `k` supported on `k+1`
-    // distinct eigenvalues. GMRES on such a RHS converges in exactly `k+1`
-    // steps, so the columns finish at staggered steps within a *single* cycle.
-    // The fix must (i) still solve every column exactly like single-RHS GMRES
-    // and (ii) actually shrink the batched operator applies as columns deflate
-    // mid-cycle - not only at restart. A counting operator records the width
-    // of every `apply_block`, and we assert the panel narrows.
     use std::sync::Mutex;
 
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 8;
     let s = 4;
-    // Diagonal operator with distinct entries -> the minimal polynomial degree
-    // of a RHS equals the number of distinct diagonal entries in its support.
     let (mut rr, mut cc, mut vv) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
         rr.push(i);
@@ -585,7 +516,6 @@ fn gmres_block_within_cycle_deflation_shrinks_applies() {
         vv.push(c(2.0 + i as f64, 0.5 + 0.1 * i as f64));
     }
     let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
-    // RHS `k` = sum of the first `k+1` unit vectors -> converges in `k+1` steps.
     let mut bblk = vec![C::default(); n * s];
     for k in 0..s {
         for i in 0..=k {
@@ -608,7 +538,6 @@ fn gmres_block_within_cycle_deflation_shrinks_applies() {
         res.final_res
     );
 
-    // (i) Every column matches the single-RHS GMRES solve of that column.
     let inv = inverse_norm(&a);
     for k in 0..s {
         let col = k * n..k * n + n;
@@ -624,11 +553,6 @@ fn gmres_block_within_cycle_deflation_shrinks_applies() {
         );
     }
 
-    // (ii) The batched applies actually shrank mid-cycle. Without within-cycle
-    // deflation every `apply_block` would run at full width `s`; with it, later
-    // steps run narrower. Assert a full-width apply happened (the first step),
-    // that some apply narrowed below `s`, that the panel drained to width 1,
-    // and that the total column-applies fell below the full-width bound.
     let widths = op.widths.into_inner().unwrap();
     let ncalls = widths.len();
     let total_cols: usize = widths.iter().sum();
@@ -654,13 +578,8 @@ fn gmres_block_within_cycle_deflation_shrinks_applies() {
 
 #[test]
 fn gmres_block_dcgs2_bit_identical_across_thread_counts() {
-    // The block DCGS2 orthogonalization reduces over fixed row-chunks folded in
-    // chunk order, so the whole block solve is **bit-identical regardless of
-    // the thread count** - the determinism guarantee. Solve the same block in
-    // a 1-thread and an 8-thread rayon pool and require exact equality.
     use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
-    // Wide enough that a chunked reduction actually spans several chunks.
     let a = unsym_grid(60);
     let n = a.n;
     let s = 5;
@@ -708,14 +627,6 @@ fn gmres_block_dcgs2_bit_identical_across_thread_counts() {
 
 #[test]
 fn block_gmres_orthogonalization_respects_factor_thread_cap() {
-    // The block-GMRES orthogonalization must run in a pool derived
-    // from the *factor's* Threads policy, not the ambient global pool. Factor
-    // with a hard cap of 2 workers; the factor then reports `Fixed(2)` as its
-    // solve-phase policy, and the pool built from it caps `current_num_threads`
-    // to 2 - even when the surrounding (ambient) pool is far wider. The solve
-    // stays bit-identical whether run bare or inside a wide ambient pool (the
-    // chunk-order reduction is thread-count independent), so the cap changes
-    // only the concurrency, never the numbers.
     use crate::numeric::lu::LuSolver;
     use crate::numeric::settings::Threads;
     let c = |re, im| Complex::new(re, im);
@@ -728,15 +639,12 @@ fn block_gmres_orthogonalization_respects_factor_thread_cap() {
             bblk[k * n + i] = c(((i + k) % 7) as f64 - 3.0, ((i + 2 * k) % 5) as f64 - 2.0);
         }
     }
-    // Factor capped to exactly 2 workers -> solve policy is Fixed(2).
     let lu = LuSolver::factor(&a, &SolverSettings::default().with_threads(2)).unwrap();
     assert_eq!(
         Preconditioner::<C>::solve_threads(&lu),
         Threads::Fixed(2),
         "factor must carry its resolved solve-phase thread budget"
     );
-    // The orthogonalization's policy caps the worker count to 2, regardless
-    // of a wider ambient pool around it.
     let policy = Preconditioner::<C>::solve_threads(&lu);
     let seen = with_threads(8, || policy.run(0, |cap| cap, rayon::current_num_threads));
     assert_eq!(
@@ -744,8 +652,6 @@ fn block_gmres_orthogonalization_respects_factor_thread_cap() {
         "the ortho pool must cap to the factor's 2-worker budget"
     );
 
-    // The full solve is identical bare vs. inside a wide ambient pool: the
-    // internal cap governs concurrency only, never the result.
     let bare = gmres_block(
         &a,
         &bblk,
@@ -783,10 +689,6 @@ fn block_gmres_orthogonalization_respects_factor_thread_cap() {
 
 #[test]
 fn ambient_threads_factor_matches_default_and_runs_on_shared_pool() {
-    // `Threads::Ambient` factors on the current pool (no new spawn) - the
-    // re-factor-in-loop path. Inside a `with_threads(2)` pool the factor must be
-    // bit-identical to the normal (scoped-pool) factor: the numeric result is
-    // independent of the thread policy.
     use crate::numeric::lu::LuSolver;
     use crate::numeric::settings::Threads;
     let c = |re, im| Complex::new(re, im);
@@ -833,7 +735,6 @@ fn ambient_threads_factor_matches_default_and_runs_on_shared_pool() {
 
 #[test]
 fn default_thread_policy_caps_at_four() {
-    // The pareto-optimal embedded default: predict per matrix, never exceed 4.
     use crate::numeric::settings::Threads;
     assert_eq!(SolverSettings::default().threads, Threads::Auto { max: 4 });
 }
@@ -851,7 +752,7 @@ fn f32_lu_preconditioner_keeps_f64_accuracy_in_gmres() {
             let p = idx(a, b);
             rr.push(p);
             cc.push(p);
-            vv.push(c(20.0, 2.0)); // strongly diagonally dominant -> f32 factor is accurate
+            vv.push(c(20.0, 2.0));
             if b + 1 < m {
                 rr.push(p);
                 cc.push(idx(a, b + 1));
@@ -872,11 +773,6 @@ fn f32_lu_preconditioner_keeps_f64_accuracy_in_gmres() {
     }
     let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<C> = (0..n).map(|i| c((i % 7) as f64 - 3.0, 0.5)).collect();
-    // The f32 LU factor is a half-memory preconditioner accurate to ~1e-6
-    // (the f32 apply floor). f64 GMRES reaches that floor in a couple of
-    // iterations - ample for a MoM/FEM Krylov tolerance, at half the factor
-    // memory. (A residual below ~1e-6 is not attainable with an f32 apply;
-    // use the f64 factor for tighter tolerances.)
     let pc = LowPrecisionLu::factor(&a, &SolverSettings::default()).unwrap();
     assert!(pc.factor_nnz() > 0);
     let settings = crate::KrylovSettings::default()
@@ -892,9 +788,6 @@ fn f32_lu_preconditioner_keeps_f64_accuracy_in_gmres() {
 
 #[test]
 fn cocr_handles_indefinite_helmholtz() {
-    // Indefinite complex-symmetric: high-frequency 2D Helmholtz with a
-    // negative-real diagonal shift (`diag = -1 + 0.3i`). A robust
-    // preconditioner (static-pivoted RLA) plus COCR must still converge.
     let c = |re, im| Complex::new(re, im);
     let a = grid(10, c(-1.0, 0.3), c(1.0, 0.05));
     let n = a.n;
@@ -923,9 +816,6 @@ fn cocr_handles_indefinite_helmholtz() {
 
 #[test]
 fn f32_preconditioner_keeps_f64_accuracy() {
-    // Factor the preconditioner in Complex<f32> (half memory) but iterate in
-    // f64: the solution must still reach f64-level residual, and the f32
-    // factor - though approximate - keeps the iteration count tiny.
     let c = |re, im| Complex::new(re, im);
     let a = grid(14, c(4.0, 1.0), c(-1.0, 0.2));
     let n = a.n;
@@ -937,9 +827,7 @@ fn f32_preconditioner_keeps_f64_accuracy() {
         .with_max_iter(500);
     let res = cocg(&a, &b, &m, &settings).unwrap();
     assert!(res.converged, "mixed-precision COCG res={}", res.final_res);
-    // A few iterations suffice; the f32 factor is a strong preconditioner.
     assert!(res.iters <= 12, "f32-preconditioned iters {}", res.iters);
-    // Full f64 accuracy recovered despite the single-precision factor.
     let (r, bound) = residual_bound(&a, &res.x, &b, settings.tol);
     let drift = cocg_drift(&a, &b, &m, &settings, res.iters);
     assert!(r <= bound + drift, "mixed-precision residual {}", r);
@@ -948,8 +836,6 @@ fn f32_preconditioner_keeps_f64_accuracy() {
 
 #[test]
 fn rla_preconditioner_collapses_iteration_count() {
-    // A complete RLA factorization is ~ A^-1, so preconditioned COCG must
-    // converge in a handful of iterations - vastly fewer than without.
     let c = |re, im| Complex::new(re, im);
     let a = grid(12, c(4.0, 1.0), c(-1.0, 0.2));
     let n = a.n;
@@ -989,12 +875,6 @@ fn rla_preconditioner_collapses_iteration_count() {
     );
 }
 
-/// Strongly **non-normal** 1D convection-diffusion operator as a general
-/// complex matrix: tridiagonal `diag = 2 (+ tiny damping)`, super `= -1+gamma`,
-/// sub `= -1-gamma`. For `gamma != 0` it is far from normal - the classic GMRES-hard
-/// regime where the residual stagnates for many steps before converging - yet
-/// remains (weakly) diagonally dominant, so unpreconditioned GMRES does
-/// converge, only after many iterations / restart cycles.
 fn convection_diffusion(n: usize, gamma: f64) -> crate::sparse::general::GeneralCsc<C> {
     use crate::sparse::general::GeneralCsc;
     let c = |re: f64, im: f64| Complex::new(re, im);
@@ -1015,9 +895,6 @@ fn convection_diffusion(n: usize, gamma: f64) -> crate::sparse::general::General
     GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap()
 }
 
-/// Wraps an operator and records the width `s` of every block apply - the
-/// deflation probe: a shrinking width proves the batched
-/// applies narrow as columns converge.
 struct WidthCountingOp<'a> {
     inner: &'a GeneralCsc<C>,
     widths: std::sync::Mutex<Vec<usize>>,
@@ -1038,10 +915,6 @@ impl LinearOperator<C> for WidthCountingOp<'_> {
 
 #[test]
 fn gmres_unpreconditioned_nonnormal_needs_many_restarts() {
-    // Unpreconditioned GMRES on a strongly non-normal operator:
-    // it must survive the non-normal stagnation phase and multiple restart
-    // cycles, then converge to the true solution. Exercises the restart /
-    // outer-loop machinery that the diagonally dominant tests never stress.
     let a = convection_diffusion(120, 0.9);
     let n = a.n;
     let c = |re: f64, im: f64| Complex::new(re, im);
@@ -1069,14 +942,6 @@ fn gmres_unpreconditioned_nonnormal_needs_many_restarts() {
 
 #[test]
 fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
-    // A near-defective, strongly non-normal operator (bidiagonal
-    // Jordan-like block: clustered diagonal, dominant super-diagonal) drives
-    // the Arnoldi vectors toward linear dependence, so a single MGS sweep
-    // collapses the norm and the conditional DGKS second pass (`hn < eta*||w_0||`)
-    // must fire to restore orthogonality. Asserting the trigger directly needs
-    // an intrusive probe; instead we certify the *effect*: GMRES still drives
-    // the true residual to `tol`, which it could not if the ill-conditioned
-    // basis went uncorrected.
     use crate::sparse::general::GeneralCsc;
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 32;
@@ -1085,17 +950,15 @@ fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
     for i in 0..n {
         rr.push(i);
         cc.push(i);
-        vv.push(c(diag, 0.0)); // clustered diagonal -> non-normal, near-defective
+        vv.push(c(diag, 0.0));
         if i + 1 < n {
             rr.push(i);
             cc.push(i + 1);
-            vv.push(c(sup, 0.0)); // dominant super-diagonal
+            vv.push(c(sup, 0.0));
         }
     }
     let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
     let b: Vec<C> = (0..n).map(|_| c(1.0, 0.2)).collect();
-    // Long restart (single cycle) so the ill-conditioned basis is not masked by
-    // a restart - the reorthogonalization alone keeps it usable.
     let settings = crate::KrylovSettings::default()
         .with_tol(1e-10)
         .with_max_iter(4000)
@@ -1115,10 +978,6 @@ fn gmres_reorthogonalization_keeps_illconditioned_arnoldi_accurate() {
 
 #[test]
 fn gmres_happy_breakdown_on_eigenvector_rhs() {
-    // Happy breakdown: `b` is an eigenvector of the operator, so
-    // the Krylov space `K_1 = span{b}` is already `A`-invariant. The Arnoldi
-    // step-1 subdiagonal `h[1][0]` is exactly `0` (the invariant-subspace
-    // branch), and GMRES must produce the exact solution in a single iteration.
     use crate::sparse::general::GeneralCsc;
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 12;
@@ -1126,10 +985,9 @@ fn gmres_happy_breakdown_on_eigenvector_rhs() {
     for i in 0..n {
         rr.push(i);
         cc.push(i);
-        vv.push(c(2.0 + i as f64, 0.5 - 0.05 * i as f64)); // distinct diagonal
+        vv.push(c(2.0 + i as f64, 0.5 - 0.05 * i as f64));
     }
     let a = GeneralCsc::<C>::from_triplets(n, &rr, &cc, &vv).unwrap();
-    // `e_0` is an eigenvector (eigenvalue `a[0][0]`); its Krylov space is 1-D.
     let mut b = vec![C::default(); n];
     b[0] = c(1.0, 0.0);
     let settings = crate::KrylovSettings::default()
@@ -1153,23 +1011,11 @@ fn gmres_happy_breakdown_on_eigenvector_rhs() {
 
 #[test]
 fn gmres_block_nearby_factor_multirate_deflation() {
-    // Multi-rate within-cycle deflation under a genuine
-    // **factor-based** preconditioner. The operator is diagonal with
-    // distinct entries `d_i`; the preconditioner is an LU factor of a
-    // *different* diagonal matrix `diag(p_i)` - a deliberately imperfect
-    // approximate inverse, so the preconditioned operator `M^-1A = diag(d_i/p_i)`
-    // still has distinct eigenvalues. Right-hand side `k` is supported on the
-    // first `k+1` unit vectors, so its GMRES converges in **exactly** `k+1`
-    // steps: the columns finish at staggered steps *within one cycle*. The
-    // within-cycle deflation must finalize each fast column and shrink the
-    // batched applies to the still-active width, draining the panel to 1 - while
-    // every column still matches its single-RHS solve.
     use crate::numeric::lu::LuSolver;
     use crate::sparse::general::GeneralCsc;
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 8;
     let s = 4;
-    // Operator D = diag(d_i), d_i distinct.
     let (mut dr, mut dc, mut dv) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
         dr.push(i);
@@ -1177,8 +1023,6 @@ fn gmres_block_nearby_factor_multirate_deflation() {
         dv.push(c(2.0 + i as f64, 0.3));
     }
     let a = GeneralCsc::<C>::from_triplets(n, &dr, &dc, &dv).unwrap();
-    // Preconditioning matrix P = diag(p_i), p_i chosen so d_i/p_i stay distinct
-    // (p_i = 1+i => ratios 2, 1.5, 1.33, ... all different): an imperfect factor.
     let (mut pr, mut pc_, mut pv) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
         pr.push(i);
@@ -1188,7 +1032,6 @@ fn gmres_block_nearby_factor_multirate_deflation() {
     let pmat = GeneralCsc::<C>::from_triplets(n, &pr, &pc_, &pv).unwrap();
     let lu = LuSolver::factor(&pmat, &SolverSettings::default()).unwrap();
 
-    // RHS k = sum of the first k+1 unit vectors -> converges in exactly k+1 steps.
     let mut bblk = vec![C::default(); n * s];
     for k in 0..s {
         for i in 0..=k {
@@ -1211,7 +1054,6 @@ fn gmres_block_nearby_factor_multirate_deflation() {
         res.final_res
     );
 
-    // Every column equals its single-RHS solve (deflation must not corrupt it).
     let inv = inverse_norm(&a);
     for k in 0..s {
         let col = k * n..k * n + n;
@@ -1227,8 +1069,6 @@ fn gmres_block_nearby_factor_multirate_deflation() {
         );
     }
 
-    // Within-cycle deflation fired: the panel opened at full width `s`, narrowed
-    // as fast columns deflated, and drained to a single active column.
     let widths = op.widths.into_inner().unwrap();
     assert!(!widths.is_empty());
     assert_eq!(
@@ -1246,11 +1086,6 @@ fn gmres_block_nearby_factor_multirate_deflation() {
     );
 }
 
-/// A general complex diagonal operator with a prescribed spectrum - the
-/// canonical GMRES-DR / GCRO-DR demonstrator: a handful of tiny eigenvalues
-/// (which restarted GMRES keeps re-discovering and discarding) sitting far
-/// below a cluster of larger ones. Unpreconditioned restarted GMRES stagnates
-/// on the small cluster; deflating it is exactly what recycling does.
 fn diag_op(eigs: &[C]) -> crate::sparse::general::GeneralCsc<C> {
     use crate::sparse::general::GeneralCsc;
     let n = eigs.len();
@@ -1258,16 +1093,13 @@ fn diag_op(eigs: &[C]) -> crate::sparse::general::GeneralCsc<C> {
     GeneralCsc::<C>::from_triplets(n, &idx, &idx, eigs).unwrap()
 }
 
-/// A spectrum with `n_small` tiny eigenvalues far below a spread cluster.
 fn stagnation_spectrum(n: usize, n_small: usize) -> Vec<C> {
     let c = |re: f64, im: f64| Complex::new(re, im);
     (0..n)
         .map(|i| {
             if i < n_small {
-                // Tiny, tightly clustered near the origin - the stagnation drivers.
                 c(0.01 + 0.004 * i as f64, 0.002 * i as f64)
             } else {
-                // Larger eigenvalues spread over [1, 11], mildly complex.
                 let t = (i - n_small) as f64 / (n - n_small) as f64;
                 c(1.0 + 10.0 * t, 0.3 * (i as f64).sin())
             }
@@ -1277,12 +1109,9 @@ fn stagnation_spectrum(n: usize, n_small: usize) -> Vec<C> {
 
 #[test]
 fn gmres_recycled_matches_plain_on_hard_matrix() {
-    // Correctness: the recycled solve must reach the SAME solution as plain
-    // FGMRES on a hard preconditioned system (weak diagonal factor, short
-    // restart -> many cycles), to the same tolerance.
     use crate::numeric::lu::LuSolver;
     let c = |re, im| Complex::new(re, im);
-    let a = unsym_grid(12); // n = 144
+    let a = unsym_grid(12);
     let n = a.n;
     let b: Vec<C> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     let lu = LuSolver::factor(&diagonal_part(&a), &SolverSettings::default()).unwrap();
@@ -1321,17 +1150,11 @@ fn gmres_recycled_matches_plain_on_hard_matrix() {
         diff <= inverse_norm(&a) * gap,
         "recycled solution differs from plain by {diff}"
     );
-    // The recycle handle came back populated for the next solve.
     assert!(rec.active() > 0, "recycle subspace was not populated");
 }
 
 #[test]
 fn gmres_recycled_within_solve_reduces_restarts() {
-    // Within-solve deflated restarting: on a stagnating, restart-limited solve
-    // (tiny eigenvalue cluster, unpreconditioned, short restart) carrying the
-    // harmonic-Ritz subspace across restarts must cut total iterations by a
-    // real margin versus plain FGMRES - on a SINGLE solve (fresh handle, no
-    // cross-solve benefit).
     let eigs = stagnation_spectrum(40, 4);
     let a = diag_op(&eigs);
     let n = a.n;
@@ -1365,13 +1188,11 @@ fn gmres_recycled_within_solve_reduces_restarts() {
     .unwrap();
     assert!(plain.converged, "plain did not converge ({})", plain.iters);
     assert!(recd.converged, "recycled did not converge ({})", recd.iters);
-    // Both hit the same true solution.
     let diff = (0..n)
         .map(|i| (plain.x[i] - recd.x[i]).norm())
         .fold(0.0, f64::max);
     let gap = residual_bound(&a, &plain.x, &b, tol).1 + residual_bound(&a, &recd.x, &b, tol).1;
     assert!(diff <= inverse_norm(&a) * gap, "solutions differ by {diff}");
-    // Deflated restarting must shave a clear margin off the iteration count.
     eprintln!(
         "[within-solve] plain FGMRES(10)={} iters, GCRO-DR(k=6)={} iters",
         plain.iters, recd.iters
@@ -1386,11 +1207,6 @@ fn gmres_recycled_within_solve_reduces_restarts() {
 
 #[test]
 fn gmres_recycled_cross_solve_beats_warm_and_cold() {
-    // Cross-solve recycling on a sequence of related systems: A gets a small
-    // diagonal perturbation each step and b rotates slowly. Compare total
-    // iterations over the sequence for cold (x0=0), warm (x0=prev x), and
-    // recycled+warm (handle carried across solves). Must order
-    // recycled < warm < cold, each by a meaningful margin.
     let base = stagnation_spectrum(48, 5);
     let n = base.len();
     let c = |re: f64, im: f64| Complex::new(re, im);
@@ -1399,7 +1215,6 @@ fn gmres_recycled_cross_solve_beats_warm_and_cold() {
     let steps = 8;
     let (tol, maxit, restart) = (1e-9, 6000, 12);
 
-    // Slowly varying operator: base spectrum + eps_k on each diagonal entry.
     let ak = |kk: usize| -> crate::sparse::general::GeneralCsc<C> {
         let eps = 2e-3 * kk as f64;
         let eigs: Vec<C> = base
@@ -1417,7 +1232,6 @@ fn gmres_recycled_cross_solve_beats_warm_and_cold() {
             .collect()
     };
 
-    // Cold.
     let mut cold = 0usize;
     for kk in 0..steps {
         let a = ak(kk);
@@ -1435,7 +1249,6 @@ fn gmres_recycled_cross_solve_beats_warm_and_cold() {
         assert!(r.converged, "cold {kk} stalled");
         cold += r.iters;
     }
-    // Warm.
     let mut warm = 0usize;
     let mut prev: Option<Vec<C>> = None;
     for kk in 0..steps {
@@ -1455,7 +1268,6 @@ fn gmres_recycled_cross_solve_beats_warm_and_cold() {
         warm += r.iters;
         prev = Some(r.x);
     }
-    // Recycled (+ warm start, the intended combined use).
     let mut recycled = 0usize;
     let mut rec = Recycle::new(8);
     let mut prevr: Option<Vec<C>> = None;
@@ -1486,7 +1298,6 @@ fn gmres_recycled_cross_solve_beats_warm_and_cold() {
         recycled < warm,
         "recycled ({recycled}) not below warm ({warm})"
     );
-    // Meaningful reduction, not noise.
     assert!(
         (recycled as f64) < 0.7 * (cold as f64),
         "recycled ({recycled}) did not beat cold ({cold}) by a clear margin"
@@ -1495,9 +1306,6 @@ fn gmres_recycled_cross_solve_beats_warm_and_cold() {
 
 #[test]
 fn gmres_recycled_composes_with_warm_start() {
-    // Recycle + x0 warm start together: on a related second solve, seeding from
-    // the previous solution AND recycling its stagnation subspace must converge
-    // to the correct solution and take no more iterations than warm-start alone.
     let eigs = stagnation_spectrum(40, 4);
     let a = diag_op(&eigs);
     let n = a.n;
@@ -1506,7 +1314,6 @@ fn gmres_recycled_composes_with_warm_start() {
     let b1: Vec<C> = (0..n).map(|i| c(1.0 + 0.02 * i as f64, 0.1)).collect();
     let (tol, maxit, restart) = (1e-9, 5000, 10);
 
-    // First solve seeds both the warm start and the recycle handle.
     let mut rec = Recycle::new(6);
     let first = gmres_recycled(
         &a,
@@ -1522,7 +1329,6 @@ fn gmres_recycled_composes_with_warm_start() {
     .unwrap();
     assert!(first.converged);
 
-    // Second, related solve: warm-only vs warm+recycle.
     let warm_only = gmres(
         &a,
         &b1,
@@ -1547,10 +1353,8 @@ fn gmres_recycled_composes_with_warm_start() {
     )
     .unwrap();
     assert!(warm_only.converged && warm_rec.converged);
-    // Same true solution.
     let (res, bound) = residual_bound(&a, &warm_rec.x, &b1, tol);
     assert!(res <= bound, "warm+recycle residual {res}");
-    // Composed use is no worse than warm-start alone (typically better).
     assert!(
         warm_rec.iters <= warm_only.iters,
         "warm+recycle ({}) worse than warm-only ({})",
@@ -1561,10 +1365,6 @@ fn gmres_recycled_composes_with_warm_start() {
 
 #[test]
 fn gmres_recycled_real_scalar_path() {
-    // The real f64 field exercises the conjugate-pair reconstruction in
-    // `combine_ritz` (a real diagonal has real eigenvalues, but a real
-    // unsymmetric grid produces complex harmonic-Ritz pairs). Must converge to
-    // the true solution - correctness of the real recycle path.
     use crate::sparse::general::GeneralCsc;
     let m = 8;
     let n = m * m;
@@ -1583,7 +1383,7 @@ fn gmres_recycled_real_scalar_path() {
                 vv.push(-1.0);
                 rr.push(q);
                 cc.push(p);
-                vv.push(-1.8); // asymmetric => complex spectrum
+                vv.push(-1.8);
             }
             if a + 1 < m {
                 let q = idx(a + 1, b);
@@ -1609,7 +1409,6 @@ fn gmres_recycled_real_scalar_path() {
     assert!(res <= bound, "real recycled residual {res}");
 }
 
-/// Run `f` in a fresh rayon pool of `threads` workers.
 fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -1618,7 +1417,6 @@ fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
         .install(f)
 }
 
-/// The right-hand sides of the continuation tests: `s` distinct columns.
 fn ladder_rhs(n: usize, s: usize) -> Vec<C> {
     let mut b = vec![C::default(); n * s];
     for k in 0..s {
@@ -1629,9 +1427,6 @@ fn ladder_rhs(n: usize, s: usize) -> Vec<C> {
     b
 }
 
-/// A solve continued to a tighter tolerance carries on in its Krylov space:
-/// one column's ladder `1e-4 -> 1e-10` is the straight solve to `1e-10`, step
-/// for step and bit for bit, and every rung hands out solutions that meet it.
 #[test]
 fn block_gmres_continued_is_the_straight_solve() {
     let a = unsym_grid(20);
@@ -1672,11 +1467,6 @@ fn block_gmres_continued_is_the_straight_solve() {
     );
 }
 
-/// Continuing beats restarting: on an indefinite Helmholtz grid (GMRES
-/// converges superlinearly once its space resolves the eigenvalues near zero)
-/// the rung `1e-6 -> 1e-10` of several columns takes fewer iterations continued
-/// than a fresh solve from the first rung's solutions, and the solutions meet
-/// the rung's tolerance.
 #[test]
 fn block_gmres_continued_rung_beats_a_restart() {
     let c = |re, im| Complex::new(re, im);
@@ -1715,13 +1505,7 @@ fn block_gmres_continued_rung_beats_a_restart() {
     }
 }
 
-/// Delayed CGS2 keeps a block GMRES basis orthonormal to the rounding, as CGS2
-/// does (`O(eps)`, the bound `c(k, n) eps` of Giraud, Langou, Rozloznik 2005
-/// taken as `k n eps` for `k` vectors of length `n`): on an indefinite Helmholtz
-/// grid without a preconditioner, a cycle of 200 steps whose first Gram-Schmidt
-/// pass cancels most of every image, in full precision and flexible or not; the
-/// least-squares estimate of the open cycle is its true residual to the same
-/// bound (relative to `||b||`).
+// https://doi.org/10.1016/j.camwa.2005.08.009
 #[test]
 fn block_gmres_delayed_cgs2_keeps_the_basis_orthonormal() {
     let c = |re, im| Complex::new(re, im);
@@ -1751,9 +1535,6 @@ fn block_gmres_delayed_cgs2_keeps_the_basis_orthonormal() {
     }
 }
 
-/// The memory plan of a block GMRES ([`KrylovSettings::block_bytes`]) is what a
-/// solve holds at the depth it reached: exactly for one column, a bound for
-/// several (they stop at different depths), its bases in full precision or single.
 #[test]
 fn block_gmres_memory_plan_matches_the_solve() {
     let a = unsym_grid(16);
@@ -1776,10 +1557,6 @@ fn block_gmres_memory_plan_matches_the_solve() {
     }
 }
 
-/// Deflating what a solve of the same operator found slowest pays: on an
-/// indefinite Helmholtz grid a second block of right-hand sides solves in fewer
-/// iterations with the first solve's harmonic-Ritz subspace, to the same
-/// tolerance (true residuals), and a deflating solve harvests nothing.
 #[test]
 fn block_gmres_deflating_a_harvest_saves_iterations() {
     let c = |re, im| Complex::new(re, im);
@@ -1812,7 +1589,6 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
             eprintln!("rec {i}: |Au - c| {e:.2e}, |c| {cn:.3}");
         }
     }
-    // other right-hand sides on the same operator
     let second: Vec<C> = (0..n * s)
         .map(|i| c(((i * 7) % 11) as f64 - 5.0, ((i * 3) % 13) as f64 - 6.0))
         .collect();
@@ -1847,8 +1623,6 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
         d.harvest(20).is_none(),
         "a deflating solve harvests nothing"
     );
-    // the harvest applies the operator no wider than the solve does: a one-column solve's
-    // harvest of many directions through an operator that takes one column at a time
     struct OneAtATime<'a>(&'a CscMatrix<C>);
     impl LinearOperator<C> for OneAtATime<'_> {
         fn n(&self) -> usize {
@@ -1867,7 +1641,6 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
     let one_column = g1.solve(tol, None).unwrap();
     assert!(one_column.converged);
     assert!(g1.harvest(20).is_some_and(|r| r.dim() > 1));
-    // the memory it holds is the plan's, the deflation included
     let plan =
         set.block_bytes::<C>(n, s, d.deepest()) + set.deflation_bytes::<C>(n, s, d.rec_dim());
     assert!(
@@ -1877,11 +1650,6 @@ fn block_gmres_deflating_a_harvest_saves_iterations() {
     );
 }
 
-/// A fixed preconditioner (an LU) needs no preconditioned basis
-/// ([`KrylovSettings::flexible`] `false`): the block GMRES keeps `V` alone and
-/// forms `x0 + M^-1 (V y)`. It reaches the same tolerance in the same steps as the
-/// flexible solve, its solutions agree with that solve's to the tolerance, it
-/// holds less, and the memory plan is what it holds.
 #[test]
 fn block_gmres_fixed_preconditioner_keeps_one_basis() {
     use crate::numeric::lu::LuSolver;
@@ -1924,9 +1692,6 @@ fn block_gmres_fixed_preconditioner_keeps_one_basis() {
     assert!(plan < set.block_bytes::<C>(n, s, fixed.deepest()));
 }
 
-/// A solve without the preconditioned basis harvests as the flexible one does:
-/// its Ritz vectors `M^-1 (V g)` (here `M` the identity) span a subspace whose
-/// deflation pays on further right-hand sides.
 #[test]
 fn block_gmres_fixed_preconditioner_harvests() {
     let c = |re, im| Complex::new(re, im);
@@ -1969,12 +1734,6 @@ fn block_gmres_fixed_preconditioner_harvests() {
     );
 }
 
-/// A block GMRES in a room ([`KrylovSettings::room_bytes`]) that holds two of its
-/// columns at the restart's depth: the columns with the worst estimates close
-/// their cycles and wait while the others run on, every column converges, the
-/// solutions agree with the unbounded solve's to the tolerance, and the solve
-/// never holds more than the room and a step of one column; the waves take
-/// at most the unbounded iterations each.
 #[test]
 fn block_gmres_room_runs_the_columns_in_waves() {
     let c = |re, im| Complex::new(re, im);
@@ -2000,7 +1759,6 @@ fn block_gmres_room_runs_the_columns_in_waves() {
     let mut mon = |p: &BlockProgress<'_>| {
         peak = peak.max(p.resident);
         waited = waited.max(p.waiting);
-        // a column closing for memory is one of the checked
         assert!(p.closing.iter().all(|c| p.checked.contains(c)));
         closings += p.closing.len();
         true
@@ -2019,7 +1777,6 @@ fn block_gmres_room_runs_the_columns_in_waves() {
     );
     let step = (n * std::mem::size_of::<C>()) as u64;
     assert!(peak <= room + step, "peak {peak} room {room}");
-    // two columns at a time: three waves, each no longer than the unbounded solve
     assert!(r.iters <= s / 2 * rf.iters, "{} {}", r.iters, rf.iters);
     assert!(tight.block_bytes::<C>(n, s, 41) <= room);
     for k in 0..s {
@@ -2031,8 +1788,6 @@ fn block_gmres_room_runs_the_columns_in_waves() {
     }
 }
 
-/// The identity preconditioner, recording the widest block it applied: the most
-/// columns a flexible block GMRES stepped at once (it applies it in its steps alone).
 #[derive(Default)]
 struct Widest(std::sync::atomic::AtomicUsize);
 
@@ -2047,13 +1802,6 @@ impl Preconditioner<C> for Widest {
     }
 }
 
-/// A block GMRES within a live memory probe ([`BlockGmres::within`]) that says the
-/// process may take three steps of a column more: at most three columns step at
-/// once, the others waiting (one at first, more once finished columns give their
-/// bases up); every column converges and the solutions agree with the unbounded
-/// solve's to the tolerance.
-/// A probe that knows nothing (`None`) bounds nothing: the solve is the unbounded
-/// one, bit for bit.
 #[test]
 fn block_gmres_within_a_probe_runs_the_columns_in_waves() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2080,7 +1828,6 @@ fn block_gmres_within_a_probe_runs_the_columns_in_waves() {
     assert_eq!(r.x, rf.x);
 
     let asked = AtomicUsize::new(0);
-    // a step of a flexible column: a vector of `V` and one of `Z`
     let step = (2 * n * std::mem::size_of::<C>()) as u64;
     let probe = || {
         asked.fetch_add(1, Ordering::Relaxed);
@@ -2120,14 +1867,10 @@ fn block_gmres_within_a_probe_runs_the_columns_in_waves() {
     }
 }
 
-/// A block GMRES solve with its bases in full or single precision
-/// ([`KrylovSettings::basis_single`]): what it reached and held.
 struct BasisRun {
     iters: usize,
     converged: bool,
     worst: f64,
-    /// The worst true residual of the first check after a step: where the cycles'
-    /// solutions stood when their estimates first met the tolerance.
     first: f64,
     resident: u64,
     plan: u64,
@@ -2167,7 +1910,6 @@ fn basis_run<A: LinearOperator<C> + ?Sized, M: Preconditioner<C> + ?Sized>(
     }
 }
 
-/// The largest relative difference of the columns of two solutions.
 fn column_gap(x: &[C], y: &[C], n: usize) -> f64 {
     (0..x.len() / n)
         .map(|k| {
@@ -2183,20 +1925,6 @@ fn column_gap(x: &[C], y: &[C], n: usize) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Bases stored in single precision ([`KrylovSettings::basis_single`]) reach the
-/// tolerance: on the unsymmetric grid unpreconditioned and with a weak (diagonal)
-/// LU, on the indefinite Helmholtz grid, and with a single-precision LU of the
-/// operator, flexible and not, to `1e-8` and `1e-10`. Their solutions agree with
-/// the full-precision ones to the tolerance, the bases take half the bytes and the
-/// memory plan covers what the solve holds.
-///
-/// A cycle's true residual stalls at the rounding of its stored vectors (about
-/// `3e-8` here, [`block_gmres_single_basis_cycle_stalls_at_its_rounding`]), so
-/// below it a column restarts from its true residual once more: measured
-/// iterations full -> single, flexible and fixed alike, `1e-8` / `1e-10`: unsym
-/// 22 -> 24 / 28 -> 34, unsym diag-lu 22 -> 24 / 28 -> 35, helmholtz (restarting
-/// every 40 steps anyway) 1025 -> 1076 / 1305 -> 1367, unsym c32-lu 2 -> 3 (flexible),
-/// 3 -> 3 (fixed: the single-precision factor stalls the cycle at 2e-7 either way).
 #[test]
 fn block_gmres_single_basis_reaches_the_tolerance() {
     use crate::numeric::lu::LuSolver;
@@ -2242,7 +1970,6 @@ fn block_gmres_single_basis_reaches_the_tolerance() {
                     f.worst,
                     g.worst
                 );
-                // at most a quarter more and the one restart (35 of 28 the most)
                 assert!(
                     g.iters <= f.iters + f.iters / 4 + 2,
                     "{name}: {} {}",
@@ -2258,7 +1985,6 @@ fn block_gmres_single_basis_reaches_the_tolerance() {
                 );
                 assert!(g.resident < f.resident);
             }
-            // the bases at any depth: half the bytes
             let bases = |t: &crate::KrylovSettings| {
                 t.block_bytes::<C>(n, s, m + 1) - t.block_bytes::<C>(n, s, 0)
             };
@@ -2267,12 +1993,6 @@ fn block_gmres_single_basis_reaches_the_tolerance() {
     }
 }
 
-/// One cycle of single-precision bases (a restart long enough for the whole solve):
-/// once its estimate passes far below single precision, its true residual stands at
-/// the rounding of the stored vectors, `1.3e-8` flexible and fixed alike (full
-/// bases: `3.2e-14`), below the tolerance from which the bases are stored single
-/// without a cost ([`single_for`](crate::single_for), `9.5e-7`). One restart from
-/// the true residual carries it on to `6.3e-14`, 49 iterations against 35.
 #[test]
 fn block_gmres_single_basis_cycle_stalls_at_its_rounding() {
     let u = unsym_grid(20);
@@ -2310,11 +2030,6 @@ fn block_gmres_single_basis_cycle_stalls_at_its_rounding() {
     }
 }
 
-/// Single-precision bases continue a ladder of tolerances in their Krylov space:
-/// `1e-6`, then `1e-8`, then `1e-10`. At `1e-6`, above the tolerance from which
-/// [`single_for`](crate::single_for) stores single, the solve steps as the full one
-/// does (16 iterations each); below, a cycle stalling at its rounding restarts once:
-/// 8 iterations against 6 to `1e-8`, 6 against 6 on to `1e-10`.
 #[test]
 fn block_gmres_single_basis_continues_a_ladder() {
     let u = unsym_grid(20);
@@ -2343,15 +2058,6 @@ fn block_gmres_single_basis_continues_a_ladder() {
     assert!(gi <= fi + 4, "{fi} {gi}");
 }
 
-/// A block GMRES that may lower its bases ([`KrylovSettings::downgrade`], here with the
-/// diagonal LU, a fixed operator) in rooms that force each rung of the ladder: a room
-/// that holds the flexible bases at the restart's depth changes nothing (bit for bit
-/// the unbounded flexible solve); one that holds `V` alone drops `Z`; one that holds
-/// `V` in single precision rounds it there too (only where the tolerance allows it);
-/// a smaller one then runs the columns in waves. Every solve converges, its solutions
-/// agree with the unbounded one's to the tolerance, it holds no more than the room and
-/// a step of one column, and the plan within the room is the plan of the bases it
-/// ended in.
 #[test]
 fn block_gmres_lowers_its_bases_before_waves() {
     use crate::numeric::lu::LuSolver;
@@ -2375,7 +2081,6 @@ fn block_gmres_lowers_its_bases_before_waves() {
         flexible: false,
         single: true,
     };
-    // the plan of the bases as `basis` stores them, unbounded
     let plan = |basis: BlockBasis, d: usize| {
         set.clone()
             .with_flexible(basis.flexible)
@@ -2433,7 +2138,6 @@ fn block_gmres_lowers_its_bases_before_waves() {
                 assert_eq!((r.iters, &r.x), (rf.iters, &rf.x));
             }
             assert!(gap <= 10.0 * tol, "gap {gap:e}");
-            // the plan within the room: the bases the solve ended in
             let within = tight.block_bytes::<C>(n, s, deep);
             if waves {
                 assert!(within <= room, "plan {within} room {room}");
@@ -2444,11 +2148,6 @@ fn block_gmres_lowers_its_bases_before_waves() {
     }
 }
 
-/// The step monitor sees the open cycles' estimates after every step and ends a
-/// call where it says so; after a [`BlockGmres::restart`] the next call starts
-/// new cycles from the solutions handed out, here on a changed preconditioner.
-/// With flexible bases and with `V` alone the solutions meet the tolerance in
-/// true residual, in fewer steps than the weak preconditioner alone takes.
 #[test]
 fn block_gmres_restarts_on_a_changed_preconditioner() {
     use crate::numeric::lu::LuSolver;

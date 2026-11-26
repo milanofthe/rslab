@@ -471,7 +471,7 @@ mod tests {
             assert_eq!(ar.basis(), four.basis(), "p {p}: thread count");
             orthonormal(ar.basis(), n, 1e-12);
             relation(&ar, &a, n, p, 1e-10);
-                    let (v, s) = (ar.basis(), ar.start());
+            let (v, s) = (ar.basis(), ar.start());
             for c in 0..p {
                 let r_norm = dot(&r[c * n..(c + 1) * n], &r[c * n..(c + 1) * n])
                     .re
