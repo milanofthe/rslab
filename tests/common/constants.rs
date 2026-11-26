@@ -306,3 +306,15 @@ pub fn givens_drift(rotations: usize) -> f64 {
 pub fn bilinear_error(omega: f64, a_norm: f64, x_one: f64, x_inf: f64, b_inf: f64) -> f64 {
     omega * x_one * (a_norm * x_inf + b_inf)
 }
+
+/// Bound on the factor by which a count of work grows from the size `small`
+/// to the size `large` if the work is linear-logarithmic in the size. Work W(s)
+/// = a + b s + c s ln s with a, b, c >= 0 grows by at most the factor of its
+/// fastest term, (large ln large) / (small ln small), which is r (1 + ln r / ln
+/// small) for r = large / small. Quadratic work grows by r^2, which is larger
+/// for every r > 1 and small > e. For r = 8 from 3000 the bound is 10.1, and
+/// quadratic work grows by 64.
+pub fn linearithmic_growth(small: usize, large: usize) -> f64 {
+    let s_ln_s = |s: usize| s as f64 * (s as f64).ln();
+    s_ln_s(large) / s_ln_s(small)
+}

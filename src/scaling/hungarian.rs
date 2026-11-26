@@ -95,6 +95,7 @@ struct IndexHeap {
 
 impl IndexHeap {
     fn new(m: usize) -> Self {
+        rsprobe::add!(DEBUG, "heap slots", m);
         IndexHeap {
             heap: vec![0; m + 1],
             pos: vec![0; m],
@@ -111,6 +112,7 @@ impl IndexHeap {
     /// the per-iteration `IndexHeap::new(m)` (O(m) alloc+zero per
     /// unmatched column, i.e. O(n*m) overall) into O(|touched|).
     fn reset(&mut self, rows: &[usize]) {
+        rsprobe::add!(DEBUG, "heap slots", rows.len());
         for &i in rows {
             self.pos[i] = 0;
         }
@@ -307,6 +309,7 @@ fn hungarian_init_heuristic(
     }
 
     // Phase 3: scan unmatched columns for improvement augmentations.
+    let mut length2_scans = 0u64;
     'improve_assign: for j in 0..n {
         if jperm[j] != NONE {
             continue;
@@ -358,6 +361,7 @@ fn hungarian_init_heuristic(
             }
             let jj_end = cost.col_ptr[jj + 1];
             for kk in search_from[jj]..jj_end {
+                length2_scans += 1;
                 let ii = cost.row_idx[kk];
                 if iperm[ii] != NONE {
                     continue;
@@ -376,6 +380,7 @@ fn hungarian_init_heuristic(
             search_from[jj] = jj_end;
         }
     }
+    rsprobe::add!(DEBUG, "length-2 scans", length2_scans);
 
     num
 }
@@ -461,6 +466,7 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
     // column would cost O(n*m) alloc+zeroing, which dominates MC64 on
     // large near-tree KKTs.
     let mut heap = IndexHeap::new(m);
+    let (mut searches, mut touched_rows, mut edge_scans) = (0u64, 0u64, 0u64);
 
     // Progress in columns passed.
     let steps = crate::progress::Steps::new(rsprobe::active!(), n as u64);
@@ -474,6 +480,7 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
         if jperm[jord] != NONE {
             continue;
         }
+        searches += 1;
 
         // Per-iteration working state.
         let mut csp = RINF; // cost of the shortest augmenting path
@@ -489,6 +496,7 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
         // Scan the root column: each entry is either a direct
         // augmenting-path terminator (if the row is unmatched) or
         // a seed for the open set (if the row is matched).
+        edge_scans += (cost.col_ptr[j + 1] - cost.col_ptr[j]) as u64;
         for k in cost.col_ptr[j]..cost.col_ptr[j + 1] {
             let i = cost.row_idx[k];
             let dnew = cost.cost[k] - u[i];
@@ -535,6 +543,7 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
             // This is the accumulated reduced-cost offset to apply
             // to each outgoing edge.
             let vj = dq0 - cost.cost[jperm[j2]] + u[q0];
+            edge_scans += (cost.col_ptr[j2 + 1] - cost.col_ptr[j2]) as u64;
             for k in cost.col_ptr[j2]..cost.col_ptr[j2 + 1] {
                 let i = cost.row_idx[k];
                 if visited[i] {
@@ -604,9 +613,13 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
         // Return the heap to empty for the next search. Every heap member
         // is in `touched`, so clearing their `pos` (plus `len = 0`) is a
         // complete reset.
+        touched_rows += touched.len() as u64;
         heap.reset(&touched);
     }
     report(steps.as_ref().and_then(|st| st.finish()));
+    rsprobe::add!(DEBUG, "searches", searches);
+    rsprobe::add!(DEBUG, "touched", touched_rows);
+    rsprobe::add!(DEBUG, "edge scans", edge_scans);
 
     finalize_duals(cost, &jperm, &u, &mut v);
     build_matching(cost, iperm, jperm, u, v, num)
@@ -676,6 +689,7 @@ mod tests {
     //! `sum(u) + sum(v)` equal to `sum(cost[matched])` is optimal.
 
     use super::*;
+    use crate::test_constants::linearithmic_growth;
 
     /// Build a `CostGraph` from dense (row, col, cost) triples.
     /// Only used in tests - converts a small list of entries into
@@ -954,6 +968,51 @@ mod tests {
             row_idx: row_idx.into(),
             cost,
         }
+    }
+
+    fn matching_work(cost: &CostGraph<'_>) -> Option<rsprobe::Record> {
+        let ctx = rsprobe::Context::builder()
+            .threshold(rsprobe::Level::DEBUG)
+            .build();
+        let _on = ctx.enter();
+        if !rsprobe::active!(DEBUG) {
+            return None;
+        }
+        {
+            let _s = rsprobe::scope!(ERROR, "matching");
+            hungarian_match(cost);
+        }
+        Some(ctx.record())
+    }
+
+    #[test]
+    fn matching_work_is_linearithmic() {
+        let mut length2 = Vec::new();
+        let mut nnz = Vec::new();
+        for n in [1000usize, 2000, 4000, 8000] {
+            let cost = gen_random_sparse(n, 3, 0x1234_5678);
+            let Some(r) = matching_work(&cost) else {
+                return;
+            };
+            let node = &r.nodes[r.find(&["matching"]).expect("the matching's scope") as usize];
+            assert!(node.get("searches") > 0, "n={n}: no augmenting search ran");
+            assert_eq!(
+                node.get("heap slots"),
+                n as u64 + node.get("touched"),
+                "n={n}: the heap zeroes more than n plus the touched rows"
+            );
+            length2.push(node.get("length-2 scans") as f64);
+            nnz.push(cost.row_idx.len());
+        }
+        assert!(length2[0] > 0.0, "the length-2 augmentation never ran");
+        let growth = length2[3] / length2[0];
+        let bound = linearithmic_growth(nnz[0], nnz[3]);
+        assert!(
+            growth <= bound,
+            "length-2 scans grew {growth:.2}x over nnz {} -> {}, bound {bound:.2}x",
+            nnz[0],
+            nnz[3]
+        );
     }
 
     #[test]
