@@ -25,6 +25,7 @@
 //! [`RefineSystem`].
 
 use crate::error::RslabError;
+use crate::numeric::krylov::LinearOperator;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
@@ -158,24 +159,15 @@ pub struct RefineOutcome {
     pub certified: bool,
 }
 
-/// The two matrix products refinement needs: the residual, and the
-/// componentwise denominator `|A| |x|`. Implemented for both storage forms so
-/// the refinement core is written once.
-pub trait RefineOperator<T: Scalar> {
-    fn dim(&self) -> usize;
-    /// `y <- A x`.
-    fn apply(&self, x: &[T], y: &mut [T]);
+/// The two matrix products refinement needs: the residual through
+/// [`LinearOperator::apply`], and the componentwise denominator `|A| |x|`.
+/// Implemented for both storage forms so the refinement core is written once.
+pub trait RefineOperator<T: Scalar>: LinearOperator<T> {
     /// `y <- |A| |x|`, in magnitudes.
     fn apply_abs(&self, x: &[T], y: &mut [f64]);
 }
 
 impl<T: Scalar> RefineOperator<T> for CscMatrix<T> {
-    fn dim(&self) -> usize {
-        self.n
-    }
-    fn apply(&self, x: &[T], y: &mut [T]) {
-        self.symv(x, y);
-    }
     fn apply_abs(&self, x: &[T], y: &mut [f64]) {
         for v in y.iter_mut().take(self.n) {
             *v = 0.0;
@@ -196,12 +188,6 @@ impl<T: Scalar> RefineOperator<T> for CscMatrix<T> {
 }
 
 impl<T: Scalar> RefineOperator<T> for GeneralCsc<T> {
-    fn dim(&self) -> usize {
-        self.n
-    }
-    fn apply(&self, x: &[T], y: &mut [T]) {
-        self.matvec(x, y);
-    }
     fn apply_abs(&self, x: &[T], y: &mut [f64]) {
         for v in y.iter_mut().take(self.n) {
             *v = 0.0;
@@ -221,9 +207,9 @@ struct Floored<'a, T, A: ?Sized> {
     floors: &'a [PivotFloor<T>],
 }
 
-impl<T: Scalar, A: RefineOperator<T> + ?Sized> RefineOperator<T> for Floored<'_, T, A> {
-    fn dim(&self) -> usize {
-        self.a.dim()
+impl<T: Scalar, A: RefineOperator<T> + ?Sized> LinearOperator<T> for Floored<'_, T, A> {
+    fn n(&self) -> usize {
+        self.a.n()
     }
     fn apply(&self, x: &[T], y: &mut [T]) {
         self.a.apply(x, y);
@@ -231,6 +217,9 @@ impl<T: Scalar, A: RefineOperator<T> + ?Sized> RefineOperator<T> for Floored<'_,
             y[f.row] = y[f.row] + f.delta * x[f.col];
         }
     }
+}
+
+impl<T: Scalar, A: RefineOperator<T> + ?Sized> RefineOperator<T> for Floored<'_, T, A> {
     /// `(|A| + |E|) |x|`: the magnitudes of the two parts, not of their sum,
     /// which only the factor's frame knows.
     fn apply_abs(&self, x: &[T], y: &mut [f64]) {
@@ -307,7 +296,7 @@ where
     A: RefineOperator<T> + ?Sized,
     S: FnMut(&[T]) -> Result<Vec<T>, RslabError>,
 {
-    let n = a.dim();
+    let n = a.n();
     debug_assert_eq!(b.len(), n);
     let a_inf = match policy.measure {
         BackwardError::Normwise => {

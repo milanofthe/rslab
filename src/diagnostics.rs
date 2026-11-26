@@ -193,6 +193,34 @@ impl Clone for SolveCounter {
     }
 }
 
+/// [`MemoryEstimate`]s of one analysis, keyed by scalar size and complexity.
+/// The estimate is a pure function of the structure and the scalar type, but
+/// computing it walks every node's updaters, expensive enough to pay only
+/// once per scalar type.
+#[derive(Debug, Default)]
+pub(crate) struct EstimateCache(std::sync::Mutex<Vec<((usize, bool), MemoryEstimate)>>);
+
+impl EstimateCache {
+    pub fn get<T: crate::scalar::Scalar>(
+        &self,
+        estimate: impl FnOnce() -> MemoryEstimate,
+    ) -> MemoryEstimate {
+        let key = (std::mem::size_of::<T>(), T::COMPLEX);
+        if let Ok(cache) = self.0.lock() {
+            if let Some(&(_, est)) = cache.iter().find(|&&(k, _)| k == key) {
+                return est;
+            }
+        }
+        let est = estimate();
+        if let Ok(mut cache) = self.0.lock() {
+            if !cache.iter().any(|&(k, _)| k == key) {
+                cache.push((key, est));
+            }
+        }
+        est
+    }
+}
+
 /// Everything one factorization can tell about itself: the decisions taken,
 /// the numeric outcome, the settings that had no effect on the chosen path,
 /// and the solve-phase accumulators. Per-call and concurrency-safe (no global

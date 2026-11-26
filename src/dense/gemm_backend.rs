@@ -216,28 +216,23 @@ fn with_taken<R: SplitReal, Ret>(
     });
     out
 }
-impl SplitReal for f64 {
-    fn zero() -> Self {
-        0.0
-    }
-    fn one() -> Self {
-        1.0
-    }
-    fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret {
-        with_taken(&PLANES_F64, f)
-    }
+macro_rules! split_real {
+    ($real:ty, $planes:ident) => {
+        impl SplitReal for $real {
+            fn zero() -> Self {
+                0.0
+            }
+            fn one() -> Self {
+                1.0
+            }
+            fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret {
+                with_taken(&$planes, f)
+            }
+        }
+    };
 }
-impl SplitReal for f32 {
-    fn zero() -> Self {
-        0.0
-    }
-    fn one() -> Self {
-        1.0
-    }
-    fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret {
-        with_taken(&PLANES_F32, f)
-    }
-}
+split_real!(f64, PLANES_F64);
+split_real!(f32, PLANES_F32);
 
 /// `a * b` for complex numbers over a [`SplitReal`] (no trait bound on the
 /// complex type needed).

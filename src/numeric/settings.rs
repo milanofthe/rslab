@@ -910,7 +910,7 @@ impl Hop {
         // until the hop reports the job done, so the closure outlives every
         // use the hop makes of it.
         let job: *mut (dyn FnMut() + Send + 'static) = unsafe { std::mem::transmute(job) };
-        let mut slot = lock(&shared.slot);
+        let mut slot = crate::parallel::lock(&shared.slot);
         *slot = HopSlot::Job(HopJob(job));
         shared.signal.notify_all();
         loop {
@@ -930,7 +930,7 @@ impl Hop {
 impl Drop for Hop {
     fn drop(&mut self) {
         if let Some(Some(shared)) = self.shared.get() {
-            *lock(&shared.slot) = HopSlot::Quit;
+            *crate::parallel::lock(&shared.slot) = HopSlot::Quit;
             shared.signal.notify_all();
         }
     }
@@ -956,7 +956,7 @@ impl HopShared {
     /// The hop thread: run each job handed over and report it done, until
     /// told to quit.
     fn serve(&self) {
-        let mut slot = lock(&self.slot);
+        let mut slot = crate::parallel::lock(&self.slot);
         loop {
             match std::mem::replace(&mut *slot, HopSlot::Empty) {
                 HopSlot::Job(HopJob(job)) => {
@@ -965,7 +965,7 @@ impl HopShared {
                     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                         (*job)()
                     }));
-                    slot = lock(&self.slot);
+                    slot = crate::parallel::lock(&self.slot);
                     *slot = HopSlot::Done(done);
                     self.signal.notify_all();
                 }
@@ -975,12 +975,6 @@ impl HopShared {
             slot = self.signal.wait(slot).unwrap_or_else(|e| e.into_inner());
         }
     }
-}
-
-/// `m` locked: a lock is poisoned only by a panic, which its holder carries
-/// on.
-fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 thread_local! {

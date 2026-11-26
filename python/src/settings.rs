@@ -386,20 +386,6 @@ pub struct PySettings {
 }
 
 impl PySettings {
-    /// Build from a keyword dictionary; `None` values keep the default.
-    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut s = Self::default();
-        if let Some(kw) = kwargs {
-            for (k, v) in kw.iter() {
-                let key: String = k.extract()?;
-                if !v.is_none() {
-                    s.apply(&key, &v)?;
-                }
-            }
-        }
-        Ok(s)
-    }
-
     fn apply(&mut self, key: &str, v: &Bound<'_, PyAny>) -> PyResult<()> {
         if set_plain(&mut self.inner, key, v)? {
             return Ok(());
@@ -529,10 +515,20 @@ fn threads_value(py: Python<'_>, threads: Threads, explicit: bool) -> PyObject {
 
 #[pymethods]
 impl PySettings {
+    /// Build from a keyword dictionary; `None` values keep the default.
     #[new]
     #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        Self::from_kwargs(kwargs)
+    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut s = Self::default();
+        if let Some(kw) = kwargs {
+            for (k, v) in kw.iter() {
+                let key: String = k.extract()?;
+                if !v.is_none() {
+                    s.apply(&key, &v)?;
+                }
+            }
+        }
+        Ok(s)
     }
 
     /// The settings as a plain dictionary, one key per keyword argument.
@@ -631,23 +627,6 @@ pub struct PyKluSettings {
 }
 
 impl PyKluSettings {
-    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut s = Self {
-            inner: rslab::KluSettings::default(),
-            interrupt: None,
-            explicit_threads: false,
-        };
-        if let Some(kw) = kwargs {
-            for (k, v) in kw.iter() {
-                let key: String = k.extract()?;
-                if !v.is_none() {
-                    s.apply(&key, &v)?;
-                }
-            }
-        }
-        Ok(s)
-    }
-
     fn apply(&mut self, key: &str, v: &Bound<'_, PyAny>) -> PyResult<()> {
         let o = std::mem::take(&mut self.inner);
         self.inner = match key {
@@ -698,8 +677,21 @@ impl PyKluSettings {
 impl PyKluSettings {
     #[new]
     #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        Self::from_kwargs(kwargs)
+    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut s = Self {
+            inner: rslab::KluSettings::default(),
+            interrupt: None,
+            explicit_threads: false,
+        };
+        if let Some(kw) = kwargs {
+            for (k, v) in kw.iter() {
+                let key: String = k.extract()?;
+                if !v.is_none() {
+                    s.apply(&key, &v)?;
+                }
+            }
+        }
+        Ok(s)
     }
 
     /// The settings as a plain dictionary, one key per keyword argument.

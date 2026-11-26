@@ -5,10 +5,7 @@
 use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use rslab::{
-    CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSymbolic, LuSymbolic, RslabError,
-    SolverSettings,
-};
+use rslab::{KluSolver, KluSymbolic, LdltSymbolic, LuSymbolic, SolverSettings};
 
 use crate::common::{
     heavy, map_err, memory_estimate_dict, memory_plan_dict, vector, with_dtype, with_dtype_name,
@@ -29,14 +26,6 @@ pub struct PyLdltSymbolic {
     sym: LdltSymbolic,
     pattern: Pattern,
     settings: PySettings,
-}
-
-fn analyze_ldlt_core<T: Field>(
-    a: &CscMatrix<T>,
-    st: &PySettings,
-) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-    let opts = st.resolved();
-    Ok((LdltSymbolic::analyze(a, &opts)?, opts))
 }
 
 fn adopt(st: &PySettings, opts: SolverSettings) -> PySettings {
@@ -243,7 +232,8 @@ pub fn analyze_ldlt(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.csc::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LdltSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(PyLdltSymbolic {
             sym,
             pattern,
@@ -268,7 +258,8 @@ pub fn ldlt_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.csc::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LdltSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(Ldlt {
             inner: T::ldlt_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
         })
@@ -287,14 +278,6 @@ pub struct PyLuSymbolic {
     sym: LuSymbolic,
     pattern: Pattern,
     settings: PySettings,
-}
-
-fn analyze_lu_core<T: Field>(
-    a: &GeneralCsc<T>,
-    st: &PySettings,
-) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-    let opts = st.resolved();
-    Ok((LuSymbolic::analyze(a, &opts)?, opts))
 }
 
 #[pymethods]
@@ -492,7 +475,8 @@ pub fn analyze_lu(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.general::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LuSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(PyLuSymbolic {
             sym,
             pattern,
@@ -517,7 +501,8 @@ pub fn lu_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.general::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LuSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(Lu {
             inner: T::lu_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
         })

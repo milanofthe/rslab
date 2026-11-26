@@ -15,16 +15,9 @@ use std::time::Instant;
 
 use rslab::{GeneralCsc, KluSettings, KluSymbolic, LuSolver, SolverSettings};
 
-/// Deterministic xorshift.
-struct Rng(u64);
-impl Rng {
-    fn next_f64(&mut self) -> f64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        (self.0 >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-    }
-}
+#[path = "xorshift.rs"]
+mod xorshift;
+use xorshift::Rng;
 
 /// MNA-like circuit matrix: n nodes in `n_stages` cascaded stages (signal
 /// flows one way between stages -> reducible), each stage internally coupled
@@ -92,18 +85,7 @@ fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
 // MKL / Accelerate shims.
 #[path = "ss_klu_ref.rs"]
 mod ss_klu_ref;
-use ss_klu_ref::SsKlu;
-
-fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
-    let mut ax = vec![0.0; a.n];
-    a.matvec(x, &mut ax);
-    let num = b
-        .iter()
-        .zip(&ax)
-        .map(|(bi, axi)| (bi - axi).abs())
-        .fold(0.0, f64::max);
-    num / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300)
-}
+use ss_klu_ref::{resid, SsKlu};
 
 /// Settings sweep (`RLA_KLU_SWEEP=1`): grid over the three KLU knobs on the
 /// circuit family plus a badly row-scaled variant, warm best-of-3 per config.

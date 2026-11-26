@@ -367,10 +367,10 @@ where
     A: RefineOperator<T> + ?Sized,
 {
     let n = s.dim();
-    if a.dim() != n {
+    if a.n() != n {
         return Err(RslabError::DimensionMismatch {
             expected: n,
-            got: a.dim(),
+            got: a.n(),
         });
     }
     check(n, b.len(), 1)?;

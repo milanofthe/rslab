@@ -40,12 +40,13 @@ def load(path):
     return dict(sorted(pairs.items(), key=lambda kv: kv[1]["rslab"]["n"]))
 
 
+def knum(n):
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else (f"{n / 1e3:.0f}k" if n >= 1e3 else str(n))
+
+
 def two_panel_bars(data):
     st.setup()
     fig, (ax_fac, ax_sweep) = st.two_panel()
-    def knum(n):
-        return f"{n / 1e6:.1f}M" if n >= 1e6 else (f"{n / 1e3:.0f}k" if n >= 1e3 else str(n))
-
     names = [f"{name} ({knum(v['rslab']['n'])})" for (_, name), v in data.items()]
     xs = np.arange(len(data))
     w = 0.38
@@ -78,9 +79,6 @@ def social_card(data):
     (same grouped wall-time bars, no speedup axis), on an opaque background
     so it renders on any feed."""
     st.setup()
-
-    def knum(n):
-        return f"{n / 1e6:.1f}M" if n >= 1e6 else (f"{n / 1e3:.0f}k" if n >= 1e3 else str(n))
 
     names = [f"{name} ({knum(v['rslab']['n'])})" for (_, name), v in data.items()]
     xs = np.arange(len(data))

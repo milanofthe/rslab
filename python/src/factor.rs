@@ -231,34 +231,23 @@ pub trait Direct<T: Field>: Factorization<T> + Send + Sync + Sized {
     }
 }
 
-impl<T: Field> Direct<T> for LdltSolver<T> {
-    type Matrix = CscMatrix<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
+macro_rules! direct {
+    ($solver:ident, $matrix:ident) => {
+        impl<T: Field> Direct<T> for $solver<T> {
+            type Matrix = $matrix<T>;
+            fn held_bytes(&self, a: &Self::Matrix) -> u64 {
+                self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
+            }
+        }
+    };
 }
-impl<T: Field> Direct<T> for LuSolver<T> {
-    type Matrix = GeneralCsc<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
-}
-impl<T: Field> Direct<T> for KluSolver<T> {
-    type Matrix = GeneralCsc<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
-}
+direct!(LdltSolver, CscMatrix);
+direct!(LuSolver, GeneralCsc);
+direct!(KluSolver, GeneralCsc);
 
 /// The automatic path's factor, holding (a share of) its analysis.
 pub type AutoFactor<T> = rslab::AutoSolver<'static, T>;
-
-impl<T: Field> Direct<T> for AutoFactor<T> {
-    type Matrix = GeneralCsc<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
-}
+direct!(AutoFactor, GeneralCsc);
 
 /// A factor in the lower-precision twin under a full-precision handle: the
 /// handle keeps the full-precision matrix, so refinement and the Krylov

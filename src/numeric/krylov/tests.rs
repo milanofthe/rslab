@@ -560,24 +560,6 @@ fn gmres_block_within_cycle_deflation_shrinks_applies() {
     // of every `apply_block`, and we assert the panel narrows.
     use std::sync::Mutex;
 
-    struct CountingOp<'a> {
-        inner: &'a GeneralCsc<C>,
-        widths: Mutex<Vec<usize>>,
-    }
-    impl LinearOperator<C> for CountingOp<'_> {
-        fn n(&self) -> usize {
-            self.inner.n()
-        }
-        fn apply(&self, x: &[C], y: &mut [C]) {
-            self.widths.lock().unwrap().push(1);
-            self.inner.apply(x, y);
-        }
-        fn apply_block(&self, x: &[C], y: &mut [C], s: usize) {
-            self.widths.lock().unwrap().push(s);
-            self.inner.apply_block(x, y, s);
-        }
-    }
-
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 8;
     let s = 4;
@@ -598,7 +580,7 @@ fn gmres_block_within_cycle_deflation_shrinks_applies() {
         }
     }
 
-    let op = CountingOp {
+    let op = WidthCountingOp {
         inner: &a,
         widths: Mutex::new(Vec::new()),
     };

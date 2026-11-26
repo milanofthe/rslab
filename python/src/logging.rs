@@ -72,16 +72,14 @@ pub fn run<R: Send>(py: Python<'_>, f: impl Send + FnOnce() -> R) -> R {
         f()
     });
     let sink = state(|s| s.sink.as_ref().map(|f| f.clone_ref(py)));
-    buffer.drain(|event, path| {
-        match &sink {
-            Some(f) => {
-                let level = name(Some(event.level));
-                if let Err(e) = f.call1(py, (level, event.text(&path).to_string())) {
-                    e.print(py);
-                }
+    buffer.drain(|event, path| match &sink {
+        Some(f) => {
+            let level = name(Some(event.level));
+            if let Err(e) = f.call1(py, (level, event.text(&path).to_string())) {
+                e.print(py);
             }
-            None => eprintln!("rslab {}", event.line(&path)),
         }
+        None => eprintln!("rslab {}", event.line(&path)),
     });
     out
 }

@@ -448,16 +448,9 @@ impl Mat {
     }
 }
 
-/// Deterministic xorshift (the klu_circuit generator's RNG).
-struct Rng(u64);
-impl Rng {
-    fn next_f64(&mut self) -> f64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        (self.0 >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-    }
-}
+#[path = "xorshift.rs"]
+mod xorshift;
+use xorshift::Rng;
 
 /// MNA-like circuit matrix (see `benches/klu_circuit.rs`): `n` nodes in
 /// `n_stages` cascaded stages (one-way inter-stage feed -> reducible BTF),

@@ -313,11 +313,8 @@ pub struct LdltSymbolic {
     /// The ordering the analysis was asked for, carried into the diagnostics
     /// of every factorization reusing it.
     requested_ordering: crate::symbolic::OrderingMethod,
-    /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
-    /// size and complexity. The estimate is a pure function of the
-    /// structure and the scalar type, but computing it walks every node's
-    /// updaters, expensive enough to pay only once per scalar type.
-    est_cache: std::sync::Mutex<Vec<((usize, bool), crate::diagnostics::MemoryEstimate)>>,
+    /// [`estimate_memory`](Self::estimate_memory) results.
+    est_cache: crate::diagnostics::EstimateCache,
 }
 
 impl LdltSymbolic {
@@ -352,7 +349,7 @@ impl LdltSymbolic {
             symbolic,
             nnz: a.row_idx.len(),
             requested_ordering: opts.ordering.method,
-            est_cache: std::sync::Mutex::new(Vec::new()),
+            est_cache: Default::default(),
         };
         sym.symbolic.probe(a.row_idx.len(), opts.ordering.method);
         Ok(sym)
@@ -398,22 +395,7 @@ impl LdltSymbolic {
     }
 
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
-        // The estimate depends on `T` only through its size and whether it is
-        // complex, so cache per kind: the auto-tune pipeline asks for the
-        // same estimate repeatedly.
-        let key = (std::mem::size_of::<T>(), T::COMPLEX);
-        if let Ok(cache) = self.est_cache.lock() {
-            if let Some(&(_, est)) = cache.iter().find(|&&(k, _)| k == key) {
-                return est;
-            }
-        }
-        let est = self.estimate_memory_for::<T>();
-        if let Ok(mut cache) = self.est_cache.lock() {
-            if !cache.iter().any(|&(k, _)| k == key) {
-                cache.push((key, est));
-            }
-        }
-        est
+        self.est_cache.get::<T>(|| self.estimate_memory_for::<T>())
     }
 
     /// The uncached estimate body, a pure function of the symbolic structure
@@ -722,6 +704,7 @@ impl LdltSymbolic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric::ldlt::tests::residual_inf;
     use num_complex::Complex;
 
     /// 7-point 3D grid Laplacian (SPD-shifted), the canonical pattern where
@@ -804,14 +787,6 @@ mod tests {
             (sym.symbolic_factor_nnz() as f64) < amd_fill as f64 * 0.75,
             "race missed the ND-class fill win"
         );
-    }
-
-    fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
-        let mut ax = vec![T::zero(); a.n];
-        a.symv(x, &mut ax);
-        (0..a.n)
-            .map(|i| (ax[i] - b[i]).magnitude())
-            .fold(0.0, f64::max)
     }
 
     #[test]

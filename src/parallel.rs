@@ -332,7 +332,7 @@ pub(crate) fn carried<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R + S
 
 /// `m` locked: a lock is poisoned only by a panic, which its section
 /// carries on.
-fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 

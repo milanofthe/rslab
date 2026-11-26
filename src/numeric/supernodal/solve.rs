@@ -41,6 +41,7 @@ use crate::constants::{
     SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
+use crate::memory::grow;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{Layout, PanelFactor, PanelStorage};
@@ -1421,14 +1422,6 @@ impl<T: Scalar> SolvePlan<T> {
                 self.bwd_node_gemm(s, nr, xv, false, &mut sc.g);
             }
         });
-    }
-}
-
-/// `v` at least `len` long, only grown: every entry a sweep reads it writes
-/// first.
-fn grow<T: Scalar>(v: &mut Vec<T>, len: usize) {
-    if v.len() < len {
-        v.resize(len, T::zero());
     }
 }
 

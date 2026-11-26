@@ -527,32 +527,8 @@ fn build_induced(graph: &Graph, vtx_map: &[i32], local_id: &[i32]) -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::csc_from_triples;
     use rslab_ordering_core::CscPattern;
-    use std::collections::BTreeSet;
-
-    fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = vec![0];
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
 
     fn grid_triples(m: usize, n: usize) -> Vec<(usize, usize)> {
         let idx = |r: usize, c: usize| r * n + c;

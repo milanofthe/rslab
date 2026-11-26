@@ -23,7 +23,7 @@ use rslab::{read_mtx_any, GeneralCsc, KluSettings, KluSymbolic, MtxLoaded};
 
 #[path = "ss_klu_ref.rs"]
 mod ss_klu_ref;
-use ss_klu_ref::SsKlu;
+use ss_klu_ref::{resid, SsKlu};
 
 /// Real circuit / post-layout simulation matrices, ascending size. The core
 /// set matches the families benchmarked in the KLU paper (Davis & Palamadai
@@ -47,17 +47,6 @@ const CORPUS: &[(&str, &str)] = &[
 const CORPUS_BIG: &[(&str, &str)] = &[("Freescale", "memchip")];
 
 const SWEEP: usize = 20;
-
-fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
-    let mut ax = vec![0.0; a.n];
-    a.matvec(x, &mut ax);
-    let num = b
-        .iter()
-        .zip(&ax)
-        .map(|(bi, axi)| (bi - axi).abs())
-        .fold(0.0, f64::max);
-    num / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300)
-}
 
 /// Load `<group>/<name>` as a real general CSC, or explain why not.
 fn load(group: &str, name: &str) -> Result<GeneralCsc<f64>, String> {

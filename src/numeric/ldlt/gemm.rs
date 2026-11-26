@@ -3,16 +3,6 @@
 
 use crate::scalar::Scalar;
 
-/// Grow `buf` to at least `len` entries without clearing what it holds: the
-/// cmod callers overwrite the prefix they read (the D-apply loops fill `vc` and
-/// `vd_buf`, and `lower_tile_gemm` writes `u_buf` with `read_dst = false`), so
-/// zeroing it before every update only cost bandwidth.
-pub(super) fn grow_scratch<T: Scalar>(buf: &mut Vec<T>, len: usize) {
-    if buf.len() < len {
-        buf.resize(len, T::zero());
-    }
-}
-
 /// The largest [`split_plane_entries`](crate::dense::gemm_backend::split_plane_entries)
 /// of a [`lower_tile_gemm`] call with these arguments, one per tile.
 pub(super) fn lower_tile_planes(

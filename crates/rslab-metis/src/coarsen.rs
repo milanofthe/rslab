@@ -358,32 +358,8 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::{csc_from_triples, grid};
     use rslab_ordering_core::CscPattern;
-    use std::collections::BTreeSet;
-
-    fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = vec![0];
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
 
     #[test]
     fn parallel_contract_matches_serial() {
@@ -409,27 +385,6 @@ mod tests {
         assert_eq!(a.graph.adjncy, b.graph.adjncy);
         assert_eq!(a.graph.adjwgt, b.graph.adjwgt);
         assert_eq!(a.graph.vwgt, b.graph.vwgt);
-    }
-
-    fn grid(m: usize, n: usize) -> Graph {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        let (cp, ri) = csc_from_triples(total, &t);
-        let pat = CscPattern::new(total, &cp, &ri).unwrap();
-        Graph::from_csc_pattern(&pat).unwrap()
     }
 
     fn tridiag(n: usize) -> Graph {

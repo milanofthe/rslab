@@ -20,6 +20,17 @@
 
 use rslab::GeneralCsc;
 
+pub fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
+    let mut ax = vec![0.0; a.n];
+    a.matvec(x, &mut ax);
+    let num = b
+        .iter()
+        .zip(&ax)
+        .map(|(bi, axi)| (bi - axi).abs())
+        .fold(0.0, f64::max);
+    num / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300)
+}
+
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct SsKluResult {

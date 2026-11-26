@@ -2,6 +2,7 @@
 
 use super::util::*;
 use super::*;
+use crate::memory::grow;
 
 use crate::error::RslabError;
 use crate::scalar::Scalar;

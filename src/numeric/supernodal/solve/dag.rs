@@ -619,7 +619,7 @@ impl<T: Scalar> SolvePlan<T> {
     pub(super) fn forward_dag(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let nt = self.top.len();
         // every slot's first term is stored: no zeroing, only growth
-        super::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
+        crate::memory::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
         let dag = &mut work.dag;
         dag.base.clear();
         dag.chunk_ptr.clear();
@@ -733,7 +733,7 @@ impl<T: Scalar> SolvePlan<T> {
     /// the forward sweep used.
     pub(super) fn backward_dag(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
         let nt = self.top.len();
-        super::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
+        crate::memory::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
         let dag = &mut work.dag;
         dag.base.clear();
         let mut at = 0;

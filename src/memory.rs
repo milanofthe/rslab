@@ -65,6 +65,15 @@ pub(crate) fn pushed(len: usize) -> usize {
     }
 }
 
+/// Grow `v` to at least `len` scalars, zero filled, without clearing what it
+/// holds; inside the reserved capacity nothing moves.
+#[inline]
+pub(crate) fn grow<T: crate::Scalar>(v: &mut Vec<T>, len: usize) {
+    if v.len() < len {
+        v.resize(len, T::zero());
+    }
+}
+
 /// The heap one factorization needs, in bytes, predicted from the analysis
 /// before any numeric work: for a preflight check against the memory
 /// available, and for scheduling several factorizations side by side.

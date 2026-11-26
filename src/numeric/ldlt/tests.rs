@@ -78,7 +78,7 @@ fn two_by_two<T: Scalar>(f: &LdltSolver<T>) -> usize {
     f.diagnostics().numeric.two_by_two.unwrap_or(0)
 }
 
-fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
+pub(super) fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
     let mut ax = vec![T::zero(); a.n];
     a.symv(x, &mut ax);
     (0..a.n)

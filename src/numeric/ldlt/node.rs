@@ -5,7 +5,7 @@
 use super::bunch_kaufman::ll_cdiv_emit;
 use super::bunch_kaufman::BkPools;
 use super::factor::LlEmitLdlt;
-use super::gemm::{grow_scratch, lower_tile_gemm};
+use super::gemm::lower_tile_gemm;
 use crate::constants::PANEL_BLOCK;
 use crate::numeric::supernodal::panel::Layout;
 use crate::numeric::supernodal::{Input, Span};
@@ -215,7 +215,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     let pk: &[T] = unsafe { emit.arena.slot(kk) };
                     let (dk, dsub_k, two_k) = unsafe { emit.d_of(kk, nck) };
                     // G = (kk's rows q0..q1) * D, column-major npk x nck.
-                    grow_scratch(vd_buf, npk * nck);
+                    crate::memory::grow(vd_buf, npk * nck);
                     let mut ck = 0;
                     while ck < nck {
                         if two_k[ck] {
@@ -236,7 +236,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                         }
                     }
                     let mrows = b - a;
-                    grow_scratch(u_buf, mrows * npk);
+                    crate::memory::grow(u_buf, mrows * npk);
                     // SAFETY: lhs (read), rhs (read), dst (write) pairwise
                     // disjoint; strides in bounds.
                     unsafe {
@@ -321,7 +321,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
             // Gate on the REAL work (rows >= p0); the scalar path already
             // iterates from the target block, so small tails route there.
             if (nok - p0) * npk * nck < ll_gemm_gate {
-                grow_scratch(vc, nck);
+                crate::memory::grow(vc, nck);
                 for c_idx in p0..p1 {
                     let tcol = ok[c_idx] as usize - first;
                     // vc = D * (column `c_idx` of kk's off-diagonal block), with D
@@ -351,7 +351,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     }
                 }
             } else {
-                grow_scratch(vd_buf, npk * nck);
+                crate::memory::grow(vd_buf, npk * nck);
                 // G = (kk's in-panel off-diagonal block) * D, stored column-major as
                 // `vd_buf[c + ck*npk]`. D is block-diagonal (1x1 and 2x2 blocks); a
                 // 2x2 block mixes its two columns. GEMM below is unchanged.
@@ -387,7 +387,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 // updates into the topmost supernodes (`mrows ~ npk`) the full
                 // rectangle wasted another ~half of the flops.
                 let mrows = nok - p0;
-                grow_scratch(u_buf, mrows * npk);
+                crate::memory::grow(u_buf, mrows * npk);
                 // SAFETY: lhs (`pk` off-diag block from row p0, read), rhs
                 // (`vd_buf`, read), dst (`u_buf`, write) are pairwise-disjoint;
                 // strides in bounds.

@@ -24,7 +24,6 @@ use crate::numeric::supernodal::analysis::analyze_with;
 use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
-use std::sync::Mutex;
 
 /// Lower triangle of the symmetrized pattern `B union B^T` as CSC `(col_ptr,
 /// row_idx)`, `B` the pattern of `a` with row `r` renamed `row_map[r]` (the
@@ -144,10 +143,8 @@ pub struct LuSymbolic {
     /// The ordering the analysis was asked for, carried into the
     /// diagnostics of every factorization reusing it.
     pub(super) requested_ordering: crate::symbolic::OrderingMethod,
-    /// [`estimate_memory`](Self::estimate_memory) results, keyed by scalar
-    /// size and complexity (the estimate depends on `T` only through them,
-    /// and walking every node's updaters per call is expensive).
-    pub(super) est_cache: Mutex<Vec<((usize, bool), crate::diagnostics::MemoryEstimate)>>,
+    /// [`estimate_memory`](Self::estimate_memory) results.
+    pub(super) est_cache: crate::diagnostics::EstimateCache,
     /// The split permuted input's program
     /// ([`InputProgram::general`](crate::numeric::supernodal::InputProgram)),
     /// built at the first factorization: every (re)factorization reads the
@@ -211,7 +208,7 @@ impl LuSymbolic {
                 nnz: 0,
                 matching: None,
                 requested_ordering: opts.ordering.method,
-                est_cache: Mutex::new(Vec::new()),
+                est_cache: Default::default(),
                 input: std::sync::OnceLock::new(),
                 structure: LuStructure::empty(),
             });
@@ -295,7 +292,7 @@ impl LuSymbolic {
             nnz,
             matching,
             requested_ordering: opts.ordering.method,
-            est_cache: Mutex::new(Vec::new()),
+            est_cache: Default::default(),
             input: std::sync::OnceLock::new(),
             structure,
         })
@@ -502,22 +499,7 @@ impl LuSymbolic {
     }
 
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
-        // Cache per scalar kind (size and complexity): the estimate is a pure
-        // function of the structure and the scalar type, and `tuned` + phased
-        // `factor` ask for it repeatedly.
-        let key = (std::mem::size_of::<T>(), T::COMPLEX);
-        if let Ok(cache) = self.est_cache.lock() {
-            if let Some(&(_, est)) = cache.iter().find(|&&(k, _)| k == key) {
-                return est;
-            }
-        }
-        let est = self.estimate_memory_for::<T>();
-        if let Ok(mut cache) = self.est_cache.lock() {
-            if !cache.iter().any(|&(k, _)| k == key) {
-                cache.push((key, est));
-            }
-        }
-        est
+        self.est_cache.get::<T>(|| self.estimate_memory_for::<T>())
     }
 
     /// The uncached estimate body, a pure function of the symbolic structure
