@@ -3,63 +3,11 @@
 use super::util::*;
 use super::*;
 
+use crate::constants::RECYCLE_BASES;
 use crate::error::RslabError;
 use crate::scalar::Scalar;
 use num_complex::Complex;
 
-// ===========================================================================
-// GCRO-DR: Krylov subspace recycling for sequences of related solves
-// ===========================================================================
-//
-// **When it helps.** RSLAB targets solver-in-the-loop workloads: many solves of
-// a slowly varying `A` / `M` / `b`. On *stagnating* systems (a cluster of small
-// eigenvalues that restarted GMRES keeps re-discovering and discarding), plain
-// FGMRES(`m`) throws away the near-invariant subspace at every restart. GCRO-DR
-// (Parks, de Sturler, Mackey, Johnson, Maiti, SISC 2006) keeps `k` harmonic-Ritz
-// vectors `U` approximating that subspace and (a) *deflates* it within a solve -
-// carrying `U` across restarts, which cuts restart counts on a single hard solve -
-// and (b) *recycles* it across solves through an opaque [`Recycle`] handle, so the
-// next related system starts already knowing where the trouble is.
-//
-// **Scope.** Recycling is implemented for the single-RHS FGMRES [`gmres`] path
-// ([`gmres_recycled`]). The block path is out of scope: its within-cycle deflation
-// + basis compaction remap the per-column Arnoldi state mid-cycle, which does not
-// compose cleanly with a shared recycle subspace, and warrants its own design pass.
-//
-// **The split (right-preconditioned / flexible).** The Krylov space is built on
-// the preconditioned operator `A_tilde = A M^-1` (FGMRES stores `Z = M^-1 V`, updates
-// `x += Z y`), so `U` lives in the *preconditioned* space (approximate smallest
-// eigenvectors of `A_tilde`). Each cycle recomputes `P = M^-1 U` (`k` preconditioner
-// solves) and `C = A P = A_tilde U` (`k` matvecs), orthonormalizes `C = Q R` (updating
-// `P, U <- *R^-1` so `C = A_tilde U` and `P = M^-1 U` still hold), then runs the GCRO
-// split: project the residual onto `range(C)` (`x += P C^H r`, `r -= C C^H r`)
-// and build the rest of the Krylov space **orthogonal to `C`** (each Arnoldi
-// vector has its `C` component removed, recorded in `B = C^H A Z`). The restart
-// least-squares problem then decouples: `y` is the ordinary GMRES solution of the
-// Hessenberg system and the recycle coordinate is `z_1 = -B y`, giving
-// `x += P z_1 + Z y`. Recomputing `C` each solve (the default) is `k` matvecs +
-// `k` M-solves and keeps the invariant exact when `A` / `M` change between solves.
-//
-// **The budget.** A cycle runs `restart` Arnoldi steps orthogonal to `C`, as many
-// as a plain FGMRES cycle, so every cycle minimizes over `range(C)` plus a Krylov
-// space of the plain cycle's size. Taking the `k` vectors out of the restart
-// instead left `restart - k` fresh directions: a recycled GMRES(10) with `k = 5`
-// took as many iterations as plain GMRES(5) and lost to plain GMRES(10) on a weak
-// preconditioner (#182).
-//
-// **Memory.** `U` and `C` are each `n*k` extra scalars (plus the same-size `P`),
-// on top of the FGMRES `V`+`Z` bases; the default restart leaves them out of the
-// basis budget.
-//
-// **Correctness is independent of `U`'s quality.** `U` only shapes the Krylov
-// space to *accelerate* convergence; the outer true-residual stop test is
-// authoritative, so an inaccurate / rank-deficient recycle subspace can only make
-// a solve slower, never wrong. Every recycle step is accordingly guarded (rank
-// dropping, singular-projection fallbacks) and degrades gracefully to plain FGMRES.
-
-/// Sealing for [`RecycleScalar`]: only the two fields RSLAB's Krylov solvers run
-/// in (`f64`, `Complex<f64>`) may carry a recycle subspace, so downstream crates
-/// cannot add ill-defined implementations.
 mod recycle_sealed {
     pub trait Sealed {}
     impl Sealed for f64 {}
@@ -96,12 +44,6 @@ pub trait RecycleScalar: Scalar + recycle_sealed::Sealed {
     ) -> Vec<Self>;
 }
 
-/// Real-field recycle reconstruction (`f64` / `f32`): a real `U` cannot hold a
-/// complex eigenvector, so each **complex** conjugate Ritz pair contributes its
-/// `Re g` and `Im g` (two real vectors spanning the real 2-D invariant subspace),
-/// while a real Ritz value contributes one. Multiplies columns only by the real
-/// coefficient parts via [`Scalar::from_real`], so it is generic over the real
-/// field. Emits at most `kmax` vectors.
 fn combine_ritz_real<T: Scalar>(
     col: &dyn Fn(usize, T, &mut [T]),
     n: usize,
@@ -137,10 +79,6 @@ fn combine_ritz_real<T: Scalar>(
     out
 }
 
-/// Complex-field recycle reconstruction (`Complex<f64>` / `Complex<f32>`): the
-/// harmonic-Ritz vectors are genuinely complex, so `U <- [U, V] g_i` directly, one
-/// vector per pair. `mk` casts a `Complex<f64>` coefficient into the working field
-/// (identity for `Complex<f64>`, [`Scalar::demote`] for `Complex<f32>`).
 fn combine_ritz_complex<T: Scalar>(
     col: &dyn Fn(usize, T, &mut [T]),
     n: usize,
@@ -243,13 +181,9 @@ impl RecycleScalar for Complex<f32> {
 /// (another `2*n*k`) live only for the duration of a solve.
 #[derive(Debug, Clone)]
 pub struct Recycle<T> {
-    /// Target subspace dimension.
     k: usize,
-    /// Recycle vectors, column-major `n x kc` (`kc <= k`), in preconditioned space.
     u: Vec<T>,
-    /// Current number of stored recycle vectors.
     kc: usize,
-    /// Dimension the stored vectors belong to (`0` when empty).
     n: usize,
 }
 
@@ -294,12 +228,6 @@ impl<T: Scalar> Recycle<T> {
     }
 }
 
-/// Modified-Gram-Schmidt orthonormalization of the recycle triple `(C, P, U)`
-/// (each column-major `n x kc`), maintaining the invariants `C = A P` and
-/// `P = M^-1 U`: the same linear combination applied to `C`'s columns is applied
-/// to `P` and `U`, so after `C <- Q` (orthonormal) the scaled `P, U` still satisfy
-/// them. Rank-deficient columns (norm collapses under the projection) are
-/// **dropped** and the survivors compacted forward. Returns the surviving count.
 fn orthonormalize_recycle<T: Scalar>(
     c: &mut [T],
     p: &mut [T],
@@ -326,7 +254,7 @@ fn orthonormalize_recycle<T: Scalar>(
         }
         let nrm = norm2(&ccol);
         if nrm <= crate::constants::RECYCLE_RANK_TOL * orig {
-            continue; // rank-deficient direction: drop it
+            continue;
         }
         let inv = T::from_real(1.0 / nrm);
         for kk in 0..n {
@@ -339,9 +267,6 @@ fn orthonormalize_recycle<T: Scalar>(
     w
 }
 
-/// Modified-Gram-Schmidt orthonormalization of `nc` column-major `n`-vectors in
-/// place, dropping rank-deficient columns (the guard for a defective harmonic-Ritz
-/// reconstruction, requirement #4). Returns the surviving orthonormal count.
 fn orthonormalize_columns<T: Scalar>(v: &mut [T], n: usize, nc: usize) -> usize {
     let mut w = 0usize;
     for src in 0..nc {
@@ -369,13 +294,7 @@ fn orthonormalize_columns<T: Scalar>(v: &mut [T], n: usize, nc: usize) -> usize 
     w
 }
 
-/// Recompute the recycle subspace `U` from this cycle's search space by GCRO-DR
-/// harmonic-Ritz extraction. Forms the small `(d+1) x d` matrix
-/// `G_bar = [[I_k, B], [0, H_bar]]` and the orthonormal image basis `W_hat = [C, V_{p+1}]`
-/// (`d = k + p`, `p = jdim` Arnoldi steps), solves the generalized eigenproblem
-/// `G_bar^H G_bar g = theta G_bar^H (W_hat^H [U, V]) g` for the `k` smallest `|theta|`, and reconstructs
-/// `U <- [U, V] G_k` (orthonormalized, rank-guarded). Returns `(U, count)` or
-/// `None` (keep the previous subspace) on a singular projection / empty spectrum.
+// https://doi.org/10.1137/040607277
 #[allow(clippy::too_many_arguments)]
 fn recompute_recycle<T: RecycleScalar>(
     cmat: &[T],
@@ -396,22 +315,20 @@ fn recompute_recycle<T: RecycleScalar>(
     let rows = d + 1;
     let c0 = Complex::new(0.0, 0.0);
     let c1 = Complex::new(1.0, 0.0);
-    // G_bar (rows x d), row-major, in Complex<f64>.
     let mut ghat = vec![c0; rows * d];
     for i in 0..ncur {
-        ghat[i * d + i] = c1; // I_k block
+        ghat[i * d + i] = c1;
     }
     for i in 0..ncur {
         for j in 0..jdim {
-            ghat[i * d + (ncur + j)] = bmat[i * p_arn + j].to_c(); // B block
+            ghat[i * d + (ncur + j)] = bmat[i * p_arn + j].to_c();
         }
     }
     for r in 0..(jdim + 1) {
         for j in 0..jdim {
-            ghat[(ncur + r) * d + (ncur + j)] = hbar[r * p_arn + j].to_c(); // H_bar block
+            ghat[(ncur + r) * d + (ncur + j)] = hbar[r * p_arn + j].to_c();
         }
     }
-    // W_hat^H [U, V]  (rows x d): [[C^H U, 0], [V^H U, [I_p; 0]]].
     let mut whatu = vec![c0; rows * d];
     for i in 0..ncur {
         for a in 0..ncur {
@@ -426,7 +343,6 @@ fn recompute_recycle<T: RecycleScalar>(
     for j in 0..jdim {
         whatu[(ncur + j) * d + (ncur + j)] = c1;
     }
-    // M1 = G_bar^H G_bar,  M2 = G_bar^H (W_hat^H [U, V]).
     let mut m1 = vec![c0; d * d];
     let mut m2 = vec![c0; d * d];
     for a in 0..d {
@@ -446,7 +362,6 @@ fn recompute_recycle<T: RecycleScalar>(
     if pairs.is_empty() {
         return None;
     }
-    // Search-space columns [U | V_p]  (n x d), column-major.
     let mut space = vec![T::zero(); n * d];
     for a in 0..ncur {
         space[a * n..a * n + n].copy_from_slice(&u[a * n..a * n + n]);
@@ -470,8 +385,8 @@ fn recompute_recycle<T: RecycleScalar>(
 /// companion to [`gmres`]: identical convergence semantics and diagnostics, plus
 /// a [`Recycle`] handle that (a) deflates a `k`-dimensional near-invariant
 /// subspace *across restarts within this solve* and (b) *carries it to the next
-/// solve*. See the module-level "GCRO-DR" section for the algorithm and when it
-/// pays (stagnating, restart-limited, or slowly-varying-sequence solves).
+/// solve*. It helps on stagnating and restart-limited solves and on sequences of
+/// slowly varying systems.
 ///
 /// `recycle.dim()` = `k`, on top of the `restart` Arnoldi steps of a cycle (the
 /// default restart leaves the `3 k` vectors of `U`, `P = M^-1 U` and `C = A P`
@@ -502,15 +417,16 @@ where
         });
     }
     let (tol, max_iter, reorth_eta) = (settings.tol, settings.max_iter, settings.reorth_eta);
-    // `k = 0` (or an empty handle) degrades to plain FGMRES. The default restart
-    // keeps the basis budget for `V` and `Z` once `U`, `P` and `C` are held.
     let k = recycle.k;
     let vb = std::mem::size_of::<T>();
+    let flexible_bases = 2;
     let m = KrylovSettings {
-        basis_budget_bytes: settings.basis_budget_bytes.saturating_sub(3 * k * n * vb), // lit: the three recycle bases U, P and C
+        basis_budget_bytes: settings
+            .basis_budget_bytes
+            .saturating_sub(RECYCLE_BASES * k * n * vb),
         ..settings.clone()
     }
-    .restart_for(n, 1, vb, 2);
+    .restart_for(n, 1, vb, flexible_bases);
     let bnorm = norm2(b);
     let mut x = match x0 {
         Some(g) => {
@@ -538,7 +454,6 @@ where
         });
     }
 
-    // Recycle subspace carried in: reset if the dimension changed.
     if recycle.n != n {
         recycle.u.clear();
         recycle.kc = 0;
@@ -553,7 +468,6 @@ where
     let mut final_res;
 
     loop {
-        // Top-of-cycle TRUE residual (authoritative stop test).
         op.apply(&x, &mut ax);
         let mut r: Vec<T> = (0..n).map(|i| b[i] - ax[i]).collect();
         let beta0 = norm2(&r);
@@ -562,7 +476,6 @@ where
             break;
         }
 
-        // --- Recycle refresh: C = A M^-1 U, orthonormalize, GCRO project. ---
         let mut cmat = vec![T::zero(); n * ncur];
         let mut pmat = vec![T::zero(); n * ncur];
         if ncur > 0 {
@@ -571,7 +484,6 @@ where
                 op.apply(&pmat[i * n..i * n + n], &mut cmat[i * n..i * n + n]);
             }
             ncur = orthonormalize_recycle(&mut cmat, &mut pmat, &mut u, n, ncur);
-            // Outer minimization over range(C): x += P (C^H r), r -= C (C^H r).
             for i in 0..ncur {
                 let di = dotc(&cmat[i * n..i * n + n], &r);
                 for kk in 0..n {
@@ -582,10 +494,9 @@ where
         }
         let beta = norm2(&r);
         if beta == 0.0 {
-            continue; // exact in the recycle space; loop top confirms convergence
+            continue;
         }
 
-        // Arnoldi dimension this cycle (orthogonal to C): a plain cycle's.
         let p_arn = m;
         let inv_beta = T::from_real(1.0 / beta);
         let mut vb = vec![T::zero(); n * (p_arn + 1)];
@@ -593,10 +504,9 @@ where
         for kk in 0..n {
             vb[kk] = r[kk] * inv_beta;
         }
-        // Raw (unrotated) Hessenberg for harmonic Ritz; rotated copy for the LS.
         let mut hbar = vec![T::zero(); (p_arn + 1) * p_arn];
         let mut rmat = vec![T::zero(); (p_arn + 1) * p_arn];
-        let mut bmat = vec![T::zero(); ncur.max(1) * p_arn]; // C-projection coeffs
+        let mut bmat = vec![T::zero(); ncur.max(1) * p_arn];
         let mut cs = vec![T::zero(); p_arn];
         let mut sn = vec![T::zero(); p_arn];
         let mut g = vec![T::zero(); p_arn + 1];
@@ -610,7 +520,6 @@ where
             precond.apply(&vb[j * n..j * n + n], &mut zb[j * n..j * n + n])?;
             op.apply(&zb[j * n..j * n + n], &mut w);
             let wnorm0 = norm2(&w);
-            // Project the new direction orthogonal to C (record B[:,j] = C^H w).
             for i in 0..ncur {
                 let bij = dotc(&cmat[i * n..i * n + n], &w);
                 bmat[i * p_arn + j] = bij;
@@ -618,7 +527,6 @@ where
                     w[kk] = w[kk] - cmat[i * n + kk] * bij;
                 }
             }
-            // Modified Gram-Schmidt against V_0..V_j.
             for i in 0..=j {
                 let hij = dotc(&vb[i * n..i * n + n], &w);
                 hbar[i * p_arn + j] = hij;
@@ -627,7 +535,6 @@ where
                 }
             }
             let mut hn = norm2(&w);
-            // Conditional DGKS second pass (against C and V).
             if hn < reorth_eta * wnorm0 {
                 for i in 0..ncur {
                     let s = dotc(&cmat[i * n..i * n + n], &w);
@@ -656,7 +563,6 @@ where
                     vb[(j + 1) * n + kk] = T::zero();
                 }
             }
-            // Copy the raw column into the rotated buffer and apply Givens for LS.
             for i in 0..=(j + 1) {
                 rmat[i * p_arn + j] = hbar[i * p_arn + j];
             }
@@ -683,7 +589,6 @@ where
             }
         }
 
-        // Least-squares solve on the well-conditioned leading block.
         let jd = well_conditioned_dim(&rmat, p_arn, jdim);
         for i in (0..jd).rev() {
             let mut s = g[i];
@@ -692,14 +597,12 @@ where
             }
             y[i] = s * rmat[i * p_arn + i].recip();
         }
-        // x += Z y   (FGMRES: preconditioned basis, no extra M-solve).
         for i in 0..jd {
             let yi = y[i];
             for kk in 0..n {
                 x[kk] = x[kk] + zb[i * n + kk] * yi;
             }
         }
-        // x += P z_1 with z_1 = -B y   (the recycle-coordinate update).
         for i in 0..ncur {
             let mut z1i = T::zero();
             for j in 0..jd {
@@ -710,7 +613,6 @@ where
             }
         }
 
-        // --- Refresh the recycle subspace from this cycle's harmonic Ritz. ---
         if k > 0 && jdim > 0 {
             if let Some((newu, cnt)) =
                 recompute_recycle(&cmat, &u, &vb, &hbar, &bmat, n, ncur, jdim, p_arn, k)
@@ -721,7 +623,6 @@ where
         }
     }
 
-    // Persist the freshest recycle subspace for the next related solve.
     recycle.u = u;
     recycle.kc = ncur;
     recycle.n = n;
@@ -731,8 +632,6 @@ where
         iters: total,
         converged: final_res <= tol,
         final_res,
-        // GMRES-family: converged (residual met, incl. happy breakdown) or the
-        // iteration budget ran out. No non-converged breakdown state.
         stop: if final_res <= tol {
             StopReason::Converged
         } else {

@@ -33,6 +33,7 @@ fn rslab_contract_constants() {
     assert_eq!(c::KRYLOV_RESTART_MAX, 80);
     assert_eq!(c::KRYLOV_REORTH_ETA.to_bits(), 0x3fe6a09e667f3bcd);
     assert_eq!(c::KRYLOV_ORTHO_CHUNK, 2048);
+    assert_eq!(c::RECYCLE_BASES, 3);
     // numeric
     assert_eq!(c::TINY.to_bits(), 0x01a56e1fc2f8f359);
     assert_eq!(c::DENSE_SINGULAR_TOL.to_bits(), 0x3d06849b86a12b9b);
