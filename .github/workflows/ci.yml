@@ -5,7 +5,7 @@ name: ci
 # crate. The workspace is 100% pure Rust (the vendored ordering crates carry
 # no C/build.rs), so it builds on a stock ubuntu runner with no system libraries.
 #
-# COST POLICY: CI is a fast static + unit gate ONLY — hard 5-minute budget.
+# COST POLICY: CI is a fast static + unit gate ONLY; hard 5-minute budget.
 # Benchmarks and study runs (benches/, report data) are local-only via make;
 # they never run on CI. The matgen feature is a strict superset of the default
 # build, so one clippy pass and one test pass with it cover both configurations.
