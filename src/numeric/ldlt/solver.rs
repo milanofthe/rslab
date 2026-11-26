@@ -722,6 +722,8 @@ impl LdltSymbolic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric::ldlt::tests::backward_error;
+    use crate::test_constants::{fixed_refinement, gamma, solve_backward_error, U64, UC64};
     use num_complex::Complex;
 
     /// 7-point 3D grid Laplacian (SPD-shifted), the canonical pattern where
@@ -777,7 +779,7 @@ mod tests {
         let solver = sym_pick.factor(&a, &s_pick).unwrap();
         let b: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();
         let x = solver.solve(&b).unwrap();
-        assert!(residual_inf(&a, &x, &b) < 1e-8);
+        assert!(backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64));
     }
 
     /// End-to-end guarantee on the default analysis for a large curl-curl
@@ -806,14 +808,6 @@ mod tests {
         );
     }
 
-    fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
-        let mut ax = vec![T::zero(); a.n];
-        a.symv(x, &mut ax);
-        (0..a.n)
-            .map(|i| (ax[i] - b[i]).magnitude())
-            .fold(0.0, f64::max)
-    }
-
     #[test]
     fn f64_badly_scaled_diagonal() {
         // Diagonal entries spanning ~10 orders of magnitude. Equilibration
@@ -836,13 +830,21 @@ mod tests {
         let b: Vec<f64> = (0..n).map(|i| (i as f64) + 1.0).collect();
         let solver = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
         let x = solver.solve(&b).unwrap();
-        // Relative residual (the absolute one is dominated by the 1e5 row).
         let mut ax = vec![0.0; n];
         a.symv(&x, &mut ax);
-        let rel = (0..n)
-            .map(|i| (ax[i] - b[i]).abs() / b[i].abs().max(1.0))
+        let mut abs_ax = vec![0.0; n];
+        let abs_a = CscMatrix {
+            values: a.values.iter().map(|v| v.abs()).collect(),
+            ..a.clone()
+        };
+        abs_a.symv(&x.iter().map(|v| v.abs()).collect::<Vec<_>>(), &mut abs_ax);
+        let omega = (0..n)
+            .map(|i| (ax[i] - b[i]).abs() / (abs_ax[i] + b[i].abs()))
             .fold(0.0, f64::max);
-        assert!(rel < 1e-10, "relative residual {}", rel);
+        assert!(
+            omega <= solve_backward_error(n, U64),
+            "componentwise backward error {omega}"
+        );
     }
 
     #[test]
@@ -897,9 +899,9 @@ mod tests {
         let rate1 = 2.0; // gflops
         let floor_ms = est.critical_path_flops as f64 / (rate1 * 1e9) * 1e3;
         let t_huge = est.est_runtime_ms_threaded(rate1, 1e9);
-        assert!(
-            (t_huge - floor_ms).abs() < floor_ms * 1e-6 + 1e-9,
-            "thread-aware runtime hits the critical-path floor: {t_huge} vs {floor_ms}"
+        assert_eq!(
+            t_huge, floor_ms,
+            "thread-aware runtime hits the critical-path floor"
         );
         // The plain model would keep shrinking with speedup (no floor).
         assert!(
@@ -949,8 +951,11 @@ mod tests {
             let opts = SolverSettings::default().with_scaling(strat.clone());
             let solver = sym.factor(&a, &opts).unwrap();
             let x = solver.solve(&b).unwrap();
-            let res = residual_inf(&a, &x, &b);
-            assert!(res < 1e-9, "strategy {strat:?} residual {res}");
+            let omega = backward_error(&a, &x, &b);
+            assert!(
+                omega <= solve_backward_error(n, U64),
+                "strategy {strat:?} backward error {omega}"
+            );
         }
         // Default preserves the historical one-pass scaling exactly.
         assert_eq!(
@@ -983,7 +988,7 @@ mod tests {
             let bc: Vec<f64> = (0..n).map(|i| b[c * n + i]).collect();
             let xc = f.solve(&bc).unwrap();
             for i in 0..n {
-                assert!((x[c * n + i] - xc[i]).abs() < 1e-10, "rhs {c} row {i}");
+                assert_eq!(x[c * n + i], xc[i], "rhs {c} row {i}");
             }
         }
     }
@@ -1066,10 +1071,8 @@ mod tests {
             let x_one = one_shot.solve(&b).unwrap();
 
             // Same factor -> identical solve.
-            for (p, o) in x_phased.iter().zip(&x_one) {
-                assert!((p - o).norm() < 1e-12);
-            }
-            assert!(residual_inf(&a, &x_phased, &b) < 1e-9);
+            assert_eq!(x_phased, x_one);
+            assert!(backward_error(&a, &x_phased, &b) <= solve_backward_error(n, UC64));
         }
     }
 
@@ -1184,7 +1187,7 @@ mod tests {
                 .unwrap();
             let x = f.solve(&b).unwrap();
             assert!(
-                residual_inf(&a, &x, &b) < 1e-9,
+                backward_error(&a, &x, &b) <= solve_backward_error(n, UC64),
                 "opts {opts:?} residual too large"
             );
         }
@@ -1244,10 +1247,10 @@ mod tests {
         for shift in [0.0, 1.0] {
             let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 10.0 + shift, 1.0)).collect();
             let x = solver.solve(&b).unwrap();
+            let omega = backward_error(&a, &x, &b);
             assert!(
-                residual_inf(&a, &x, &b) < 1e-9,
-                "residual {}",
-                residual_inf(&a, &x, &b)
+                omega <= solve_backward_error(n, UC64),
+                "backward error {omega}"
             );
         }
     }
@@ -1280,15 +1283,15 @@ mod tests {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(3))
             .unwrap()
             .0;
-        let r_plain = residual_inf(&a, &x_plain, &b);
-        let r_ref = residual_inf(&a, &x_ref, &b);
+        let r_plain = backward_error(&a, &x_plain, &b);
+        let r_ref = backward_error(&a, &x_ref, &b);
+        assert!(r_ref <= r_plain, "refined {} vs plain {}", r_ref, r_plain);
+        let row_len = 3;
         assert!(
-            r_ref <= r_plain.max(1e-300),
-            "refined {} vs plain {}",
-            r_ref,
-            r_plain
+            r_ref <= fixed_refinement(n, UC64) + gamma(row_len + 1, UC64),
+            "refined backward error {}",
+            r_ref
         );
-        assert!(r_ref < 1e-12, "refined residual {}", r_ref);
     }
 
     #[test]

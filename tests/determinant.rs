@@ -1,6 +1,9 @@
 //! The determinant, the inverse and the dense constructors of the direct
 //! solvers against a dense LU with partial pivoting.
 
+pub mod common;
+
+use common::constants::{exp_of_logs, gamma, log_det_error, solve_backward_error, U64, UC64};
 use num_complex::Complex;
 use rslab::*;
 
@@ -21,14 +24,17 @@ impl Lcg {
 /// The two fields the tests run over, built from a complex value (the
 /// real one takes its real part).
 trait Field: Scalar {
+    const U: f64;
     fn make(v: C) -> Self;
 }
 impl Field for f64 {
+    const U: f64 = U64;
     fn make(v: C) -> Self {
         v.re
     }
 }
 impl Field for C {
+    const U: f64 = UC64;
     fn make(v: C) -> Self {
         v
     }
@@ -206,25 +212,39 @@ fn det_sign_of_a_real_symmetric_matrix_is_its_inertia() {
 fn small_determinants_are_exact_in_form() {
     // det [[2, 1], [1, 3]] = 5, det [[0, 1], [1, 0]] = -1 (a row swap),
     // det of a complex 1x1 is the entry.
+    let within = |err: f64, det: f64, n: usize, a_norm: f64, inverse_sum: f64, u: f64| {
+        let log_err = log_det_error(solve_backward_error(n, u), a_norm, inverse_sum);
+        err <= det.abs() * (log_err + exp_of_logs(det.abs().ln()) + u)
+    };
     let g = GeneralCsc::<f64>::from_dense_row_major(2, &[2.0, 1.0, 1.0, 3.0]).unwrap();
     let d = LuSolver::factor(&g, &SolverSettings::default())
         .unwrap()
         .det()
         .unwrap();
-    assert!((d - 5.0).abs() < 1e-14, "{d}");
+    assert!(within((d - 5.0).abs(), 5.0, 2, 4.0, 7.0 / 5.0, U64), "{d}");
     let p = GeneralCsc::<f64>::from_dense_row_major(2, &[0.0, 1.0, 1.0, 0.0]).unwrap();
     let d = KluSolver::factor(&p, &KluSettings::default())
         .unwrap()
         .det()
         .unwrap();
-    assert!((d + 1.0).abs() < 1e-14, "{d}");
+    assert!(within((d + 1.0).abs(), 1.0, 2, 1.0, 2.0, U64), "{d}");
     let z = C::new(-3.0, 4.0);
     let g = GeneralCsc::from_dense_row_major(1, &[z]).unwrap();
     let d = LuSolver::factor(&g, &SolverSettings::default())
         .unwrap()
         .det()
         .unwrap();
-    assert!((d - z).norm() < 1e-14, "{d}");
+    assert!(
+        within(
+            (d - z).norm(),
+            z.norm(),
+            1,
+            z.norm(),
+            z.norm().recip(),
+            UC64
+        ),
+        "{d}"
+    );
 }
 
 #[test]
@@ -237,7 +257,7 @@ fn a_perturbed_factor_refuses_its_determinant() {
     assert!(matches!(f.log_det(), Err(RslabError::InvalidInput(_))));
 }
 
-/// `max |A X - I|` and the 1-norm condition `||A||_1 ||X||_1`.
+/// `max |A X - I|` and `||A||_inf max |X|`.
 fn inverse_error<T: Scalar>(n: usize, a: &[T], x: &[T]) -> (f64, f64) {
     let mut err = 0.0f64;
     for i in 0..n {
@@ -250,17 +270,17 @@ fn inverse_error<T: Scalar>(n: usize, a: &[T], x: &[T]) -> (f64, f64) {
             err = err.max(e.magnitude());
         }
     }
-    let norm1 = |m: &dyn Fn(usize, usize) -> T| {
-        (0..n)
-            .map(|j| (0..n).map(|i| m(i, j).magnitude()).sum::<f64>())
-            .fold(0.0, f64::max)
-    };
-    let cond = norm1(&|i, j| a[i * n + j]) * norm1(&|i, j| x[j * n + i]);
-    (err, cond)
+    let norm_inf = (0..n)
+        .map(|i| (0..n).map(|j| a[i * n + j].magnitude()).sum::<f64>())
+        .fold(0.0, f64::max);
+    let x_max = x.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+    (err, norm_inf * x_max)
 }
 
 fn inverse_cases<T: Field>() {
     for (s, &n) in SIZES.iter().enumerate() {
+        let omega = solve_backward_error(n, T::U);
+        let per_scale = omega + gamma(n, T::U);
         let a = dense::<T>(n, 71 + s as u64, 1.0, false);
         let g = GeneralCsc::from_dense_row_major(n, &a).unwrap();
         for (name, x) in [
@@ -279,8 +299,11 @@ fn inverse_cases<T: Field>() {
                     .unwrap(),
             ),
         ] {
-            let (err, cond) = inverse_error(n, &a, &x);
-            assert!(err <= 1e-12 * cond, "{name} n={n}: {err:e} (cond {cond:e})");
+            let (err, scale) = inverse_error(n, &a, &x);
+            assert!(
+                err <= per_scale * scale + omega,
+                "{name} n={n}: {err:e} (scale {scale:e})"
+            );
         }
         let a = dense::<T>(n, 91 + s as u64, 1.0, true);
         let m = CscMatrix::from_dense_row_major(n, &a).unwrap();
@@ -288,8 +311,11 @@ fn inverse_cases<T: Field>() {
             .unwrap()
             .inverse()
             .unwrap();
-        let (err, cond) = inverse_error(n, &a, &x);
-        assert!(err <= 1e-12 * cond, "ldlt n={n}: {err:e} (cond {cond:e})");
+        let (err, scale) = inverse_error(n, &a, &x);
+        assert!(
+            err <= per_scale * scale + omega,
+            "ldlt n={n}: {err:e} (scale {scale:e})"
+        );
     }
 }
 

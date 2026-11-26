@@ -3,6 +3,7 @@ use crate::numeric::settings::SolverSettings;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::OrderingMethod;
+use crate::test_constants::{solve_backward_error, U64, UC64};
 use num_complex::Complex;
 
 /// A tridiagonal (chain) matrix with no amalgamation (`nemin = 1`) builds an
@@ -66,9 +67,9 @@ fn rcm_and_autorace_orderings_factor_and_solve() {
         let opts = SolverSettings::default().with_ordering(ord);
         let x = LdltSolver::factor(&a, &opts).unwrap().solve(&b).unwrap();
         assert!(
-            residual_inf(&a, &x, &b) < 1e-9,
+            backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
             "ordering {ord:?} residual {}",
-            residual_inf(&a, &x, &b)
+            backward_error(&a, &x, &b)
         );
     }
 }
@@ -78,12 +79,24 @@ fn two_by_two<T: Scalar>(f: &LdltSolver<T>) -> usize {
     f.diagnostics().numeric.two_by_two.unwrap_or(0)
 }
 
-fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
+pub(super) fn backward_error<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
     let mut ax = vec![T::zero(); a.n];
     a.symv(x, &mut ax);
-    (0..a.n)
+    let mut rows = vec![0.0f64; a.n];
+    for j in 0..a.n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            rows[i] += a.values[k].magnitude();
+            if i != j {
+                rows[j] += a.values[k].magnitude();
+            }
+        }
+    }
+    let inf = |v: &[T]| v.iter().map(|e| e.magnitude()).fold(0.0, f64::max);
+    let r = (0..a.n)
         .map(|i| (ax[i] - b[i]).magnitude())
-        .fold(0.0, f64::max)
+        .fold(0.0, f64::max);
+    r / (rows.iter().fold(0.0f64, |m, &v| m.max(v)) * inf(x) + inf(b))
 }
 
 /// 1D Laplacian-style SPD tridiagonal of size n (diag 2+something, off -1).
@@ -110,7 +123,7 @@ fn f64_sparse_tridiag_residual() {
     let b: Vec<f64> = (0..20).map(|i| (i as f64) - 9.5).collect();
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    assert!(residual_inf(&a, &x, &b) < 1e-10);
+    assert!(backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64));
 }
 
 /// 2D 5-point grid (mxm), lower triangle, complex-symmetric, diagonally
@@ -158,7 +171,10 @@ fn indefinite_2x2_inertia() {
     );
     let b = [1.0_f64, -2.0];
     let x = ll.solve(&b).unwrap();
-    assert!(residual_inf(&a, &x, &b) < 1e-12, "2x2 residual");
+    assert!(
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
+        "2x2 backward error"
+    );
 }
 
 #[test]
@@ -181,7 +197,7 @@ fn indefinite_2d_grid_solves() {
     );
     let xl = ll.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &xl, &b) < 1e-9,
+        backward_error(&a, &xl, &b) <= solve_backward_error(n, U64),
         "left-looking indefinite residual"
     );
 }
@@ -207,7 +223,7 @@ fn indefinite_complex_symmetric() {
     );
     let xl = ll.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &xl, &b) < 1e-9,
+        backward_error(&a, &xl, &b) <= solve_backward_error(n, UC64),
         "complex left-looking indefinite residual"
     );
 }
@@ -235,9 +251,9 @@ fn f64_dense_front_blocked_multi_panel() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
@@ -262,7 +278,7 @@ fn complex_dense_front_blocked_multi_panel() {
     let b = vec![c(1.0, 0.5); n];
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    assert!(residual_inf(&a, &x, &b) < 1e-9);
+    assert!(backward_error(&a, &x, &b) <= solve_backward_error(a.n, UC64));
 }
 
 #[test]
@@ -302,9 +318,9 @@ fn f64_sparse_2d_grid_residual() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
@@ -333,9 +349,9 @@ fn complex_sparse_tridiag_residual() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-10,
+        backward_error(&a, &x, &b) <= solve_backward_error(n, UC64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
@@ -377,9 +393,9 @@ fn complex_sparse_large_grid_parallel() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, UC64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
@@ -482,8 +498,8 @@ fn complex_sparse_2d_grid_residual() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, UC64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
