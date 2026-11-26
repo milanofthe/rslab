@@ -1,25 +1,4 @@
 #!/usr/bin/env bash
-# The pool entry of RSLAB's benchmark corpus, run from an rslab checkout.
-#
-#   benches/corpus/pool.sh corpus SOURCE [corpus.py build options]
-#       One source of the corpus (benches/corpus/corpus.py) built into the cache of each
-#       machine that holds a family it feeds (corpus.py PLACEMENT): the source ships at its
-#       pinned commit, archived from a local clone (CORPUS_SRC_<NAME>=DIR, e.g.
-#       CORPUS_SRC_SANE) or from a fresh clone of GitHub. A path /cache/<name>/... among the
-#       options mounts that cache too (--reuse). CORPUS_INPUTS=DIR ships DIR into the
-#       corpus' inputs/ (the MoM project cases).
-#
-#   benches/corpus/pool.sh ab REF_A REF_B [REF ...] [pardiso_corpus.py options]
-#       RSLAB revisions against REF_A (benches/pardiso_corpus.py --rslab) with MKL PARDISO
-#       beside them: one job per family (--family, default all) on the machine that holds
-#       it, as many cores as the measurement has threads and the memory of PLACEMENT; e.g.
-#       `pool.sh ab main main feat/x` (main twice: the noise next to the change). Three
-#       rounds of one warm repeat per side unless the options say otherwise (the runs that
-#       measured the noise of each family). Results: falllow fetch RUN (ab.jsonl).
-#
-# Env: CORPUS_CACHE (rslab-corpus), CORPUS_CPU (6, the physical cores of the pool machines),
-# CORPUS_MEMORY (a corpus build: a source's build and dumps can need more than the A/B),
-# CORPUS_DISK. Every job is submitted detached; follow it with falllow logs -f RUN.
 set -euo pipefail
 
 CACHE=${CORPUS_CACHE:-rslab-corpus}
@@ -27,13 +6,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 mode=${1:?usage: pool.sh corpus SOURCE [options] | ab REF_A REF_B [options]}
 shift
 
-# --- inside the job ------------------------------------------------------------------------
 
 if [ "$mode" = job-corpus ]; then
   source=$1; shift
   [ -d inputs ] && mkdir -p "/cache/$CACHE/inputs" && cp -rn inputs/. "/cache/$CACHE/inputs/"
   uv venv -q /scratch/venv-corpus
-  # rslab for the routing of SANE's systems (rslab.analyze(path='auto').route)
   uv pip install -q --python /scratch/venv-corpus/bin/python numpy scipy rslab==1.12.0
   exec /scratch/venv-corpus/bin/python -u rslab/benches/corpus/corpus.py build "$source" --src src \
     --out "/cache/$CACHE" --work /scratch/corpus "$@"
@@ -51,17 +28,14 @@ if [ "$mode" = job-ab ]; then
     --build-dir /scratch/revisions --out /artifacts/ab.jsonl --rounds 3 --warmup 1 --repeats 1 "$@"
 fi
 
-# --- on this machine: stage and submit --------------------------------------------------------
 
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
 stage=$(mktemp -d "${TMPDIR:-/tmp}/rslab-corpus.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
-# the tool as it is in this checkout, uncommitted changes included
 tool=$(git -C "$REPO" stash create)
 tool=${tool:-$(git -C "$REPO" rev-parse HEAD)}
 mkdir -p "$stage/rslab"
 git -C "$REPO" archive --format=tar "$tool" -- benches ':(exclude)benches/bench_out' | tar -x -C "$stage/rslab"
-# the private sources of this machine (corpus.py LOCAL and its modules), not versioned
 for f in "$HERE"/*.local.*; do
   if [ -e "$f" ]; then cp "$f" "$stage/rslab/benches/corpus/"; fi
 done
@@ -101,7 +75,6 @@ ab)
   refs=()
   while [ $# -gt 0 ] && [[ $1 != -* ]]; do refs+=("$1"); shift; done
   [ ${#refs[@]} -ge 2 ] || { echo "usage: pool.sh ab REF_A REF_B [REF ...] [options]" >&2; exit 2; }
-  # the families asked for (--family), the rest of the options passed on
   families=() rest=()
   while [ $# -gt 0 ]; do
     if [ "$1" = --family ]; then

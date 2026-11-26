@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# Apple-Silicon bench: RSLAB shipped default (auto) vs Apple Accelerate Sparse
-# Solvers (macOS 15.5+), same-run over the full corpus - the two generator
-# families (sym 8-class complex-symmetric EM/FEM, unsym convection-diffusion +
-# MoM) on the historical 1k-110k log grid, plus the SuiteSparse corpus. Time and
-# memory passes per dataset; sequential, one solver at a time, so the ratios are
-# drift-free. Outputs benches/bench_out/apple_{sym,unsym,corpus}.jsonl.
-#
-# RSLAB runs its shipped heuristic pick (calibrated via `cargo xtask calibrate`);
-# Accelerate runs its vendor defaults (no thread knob - internal parallelism).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,8 +23,6 @@ for fam in sym unsym; do
   RLA_BENCH_FAMILY=$fam RLA_BENCH_SIZES=$SIZES RLA_BENCH_MEM=1 RLA_BENCH_OUT=$OUT "$BIN"
 done
 
-# Circuit-shaped family (KLU path): RSLAB KLU + multifrontal-LU context vs
-# Accelerate LU, on the klu_circuit size range (2k-200k).
 CSIZES=$(python3 -c "
 import math
 lo, hi, k = 2000, 200000, 15
