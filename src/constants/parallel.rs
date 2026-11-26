@@ -49,23 +49,23 @@ pub const STACK_MAX: usize = if usize::BITS >= 64 { 8 << 30 } else { 1 << 30 };
 /// Contract: timing.
 pub const DEFAULT_MAX_THREADS: usize = 4;
 
-/// Pieces a parallel loop is cut into per worker (pieces per worker).
-/// Used by: `parallel::piece_len` (every `crate::parallel` loop, per
-/// thread it runs on), the column blocks of a GEMM on a lent pool
-/// (`dense::gemm_backend::gemm`), the row chunks of the blocked ancestor
-/// sweep (`supernodal::solve::SolvePlan::apex_forward`), the pieces of a
-/// KLU refactor's levels and blocks (`KluSolver::refactor`).
-/// Why: a few pieces per worker balance uneven pieces while keeping the
-/// per-piece overhead small.
-/// Contract: timing.
-pub const PIECES_PER_WORKER: usize = 4;
+/// Units a supernode's update is cut into per worker (units per worker).
+/// Used by: `supernodal::unit_share` (the units of the updates in
+/// `lu::node` and `ldlt::node`).
+/// Why: a few units per worker balance uneven units while each keeps the
+/// GEMM kernel's rate. The cut sets the products a unit computes, so it is
+/// a function of the thread count and the node, not of the measured
+/// section cost the loops of `crate::parallel` are cut by: a thread count
+/// reproduces its bits.
+/// Contract: bits per thread count, and timing.
+pub const UPDATE_UNITS_PER_WORKER: usize = 4;
 
-/// Pieces per worker of the loops whose pieces are blocks of a pattern with
-/// uneven columns (pieces per worker).
-/// Used by: `ordering::amd::permute_pattern`,
-/// `symbolic::supervariables::Supervariables::compress`.
-/// Why: finer than [`PIECES_PER_WORKER`]: the work per column varies more.
-/// Contract: timing (the blocks are concatenated in order).
+/// Blocks per worker `rslab_metis` cuts the contraction of nested
+/// dissection into (its own `FINE_PIECES_PER_WORKER`), for the least work
+/// worth a parallel contraction (pieces per worker).
+/// Used by: `symbolic::ordering_graph` (`MetisOptions::parallel_min_edges`
+/// where unset).
+/// Contract: timing.
 pub const FINE_PIECES_PER_WORKER: usize = 8;
 
 /// Fewest columns per block of a GEMM split on a lent pool (columns).

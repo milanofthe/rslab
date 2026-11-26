@@ -154,10 +154,9 @@ fn deep_update<T: Scalar>(
     if par {
         // Non-negative doubles order as their bits.
         let top = AtomicU64::new(0);
-        let chunk = x.len().div_ceil(crate::parallel::threads()).max(1);
         let work = row_pass::<T>(x.len() * u.len().max(1));
-        crate::parallel::chunks_mut(x, chunk, work, |c, xs| {
-            top.fetch_max(apply(c * chunk, xs).to_bits(), Ordering::Relaxed);
+        crate::parallel::chunks_mut::<crate::parallel::Rayon, _>(x, run, work, |i, xs| {
+            top.fetch_max(apply(i * run, xs).to_bits(), Ordering::Relaxed);
         });
         f64::from_bits(top.into_inner())
     } else {
@@ -168,9 +167,8 @@ fn deep_update<T: Scalar>(
 /// Scale the off-block rows of a pivot column by the pivot's reciprocal.
 fn deep_scale<T: Scalar>(x: &mut [T], pinv: T, par: bool) {
     if par {
-        let chunk = x.len().div_ceil(crate::parallel::threads()).max(1);
         let work = row_pass::<T>(x.len());
-        crate::parallel::chunks_mut(x, chunk, work, |_, xs| {
+        crate::parallel::chunks_mut::<crate::parallel::Rayon, _>(x, 1, work, |_, xs| {
             xs.iter_mut().for_each(|v| *v = *v * pinv)
         });
     } else {
@@ -902,10 +900,10 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             let runs: Vec<(usize, usize)> = (parts.iter())
                 .flat_map(|&(p0, p1)| (p0..p1).step_by(run).map(move |t| (t, (t + run).min(p1))))
                 .collect();
-            crate::parallel::for_each(
+            crate::parallel::ranges::<crate::parallel::Rayon>(
                 runs.len(),
                 row_pass::<T>((nrow_u - ke) * pw * pw / 2),
-                |q| trsm(runs[q].0, runs[q].1),
+                |r| r.for_each(|q| trsm(runs[q].0, runs[q].1)),
             );
         } else {
             for &(p0, p1) in &parts {

@@ -2,8 +2,7 @@
 
 use super::*;
 use crate::constants::{
-    KLU_PAR_MIN_FMADDS, KLU_PAR_MIN_RATIO, KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER,
-    PIPE_COL_WORK, PIPE_RUN,
+    KLU_PAR_MIN_FMADDS, KLU_PAR_MIN_RATIO, KLU_REPLAY_NS_PER_WORK, PIPE_COL_WORK, PIPE_RUN,
 };
 use crate::parallel::{Dispatch, Go, Rayon, ScalarRates, Work};
 
@@ -125,6 +124,15 @@ impl Decide {
             ),
             _ => (1, work),
         }
+    }
+
+    /// Columns per piece of level `l` of `bp` on `k` threads: its work cut
+    /// into ranges as the section cost makes them worth
+    /// ([`Dispatch::ranges`]).
+    fn level_per(&self, bp: &BlockPlan, l: usize, k: usize) -> usize {
+        let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
+        let work = bp.level_work[l] as f64 * self.seq;
+        p.div_ceil(self.dispatch.ranges(work, p, k).max(1))
     }
 
     /// How block `bp` of `bn` columns, `serial` ns sequentially, replays,
@@ -538,7 +546,7 @@ impl<T: Scalar> KluSolver<T> {
                     }
                     continue;
                 }
-                let per = cols.len().div_ceil(cols.len().min(k * PIECES_PER_WORKER));
+                let per = decide_ref.level_per(bp, l, k);
                 let failed: std::sync::Mutex<Option<RslabError>> = std::sync::Mutex::new(None);
                 crate::parallel::run_width(cols.len().div_ceil(per), k, &|q| {
                     with_work(q, &mut |w: &mut Vec<T>| {
@@ -675,9 +683,11 @@ impl<T: Scalar> KluSolver<T> {
                 Ok(())
             };
         if width_blocks > 1 {
-            // Runs of consecutive blocks of about equal columns, a few per
-            // thread, each replayed in order over one work vector.
-            let target = f.n.div_ceil(width_blocks * PIECES_PER_WORKER).max(1);
+            // Runs of consecutive blocks of about equal columns, as many as
+            // the replay's work is worth ranges ([`Dispatch::ranges`]), each
+            // replayed in order over one work vector.
+            let runs = decide.dispatch.ranges(serial, f.n, width_blocks).max(1);
+            let target = f.n.div_ceil(runs).max(1);
             let mut pieces: Vec<std::sync::Mutex<Vec<RJob<'_, T>>>> = Vec::new();
             let mut run: Vec<RJob<'_, T>> = Vec::new();
             let mut run_start = 0;

@@ -2,7 +2,7 @@
 //! products, Givens rotations, the least-squares rank guard and the batched
 //! Gram-Schmidt passes of the block solvers.
 
-use crate::parallel::SendPtr;
+use crate::parallel::{Disjoint, Rayon};
 use crate::scalar::Scalar;
 use crate::stored::{axpy_as, dotc_as, Rows, Stored};
 
@@ -118,9 +118,11 @@ pub(super) fn column_chunks<T: Scalar>(
 ) {
     let nchunks = n.div_ceil(chunk);
     let work = crate::parallel::Work::of(count as f64, ORTHO_RATE.of::<T>());
-    crate::parallel::for_each(cols * nchunks, work, |p| {
-        let (a, ci) = (p / nchunks, p % nchunks);
-        f(a, ci * chunk, ((ci + 1) * chunk).min(n));
+    crate::parallel::ranges::<Rayon>(cols * nchunks, work, |r| {
+        for p in r {
+            let (a, ci) = (p / nchunks, p % nchunks);
+            f(a, ci * chunk, ((ci + 1) * chunk).min(n));
+        }
     });
 }
 
@@ -130,11 +132,10 @@ pub(super) fn column_chunks<T: Scalar>(
 fn fold<T: Scalar>(part: &[T], width: usize, out: &mut [T]) {
     let nchunks = part.len() / width;
     let work = crate::parallel::Work::of((nchunks * width) as f64, ORTHO_RATE.of::<T>());
-    let op = SendPtr::of(&mut out[..width]);
-    crate::parallel::for_each(width, work, |t| {
-        let sum = (0..nchunks).fold(T::zero(), |e, ci| e + part[ci * width + t]);
-        // SAFETY: item `t` alone writes `out[t]`.
-        unsafe { op.part(t, 1)[0] = sum };
+    crate::parallel::chunks_mut::<Rayon, _>(&mut out[..width], 1, work, |t0, o| {
+        for (t, o) in (t0..).zip(o) {
+            *o = (0..nchunks).fold(T::zero(), |e, ci| e + part[ci * width + t]);
+        }
     });
 }
 
@@ -168,17 +169,19 @@ pub(super) fn delayed_project<'v, T: Scalar>(
     let nchunks = n.div_ceil(chunk);
     let part = &mut scratch[..nchunks * width];
     let work = crate::parallel::Work::of((n * width) as f64, ORTHO_RATE.of::<T>());
-    crate::parallel::chunks_mut(part, width, work, |ci, out| {
-        let (r0, r1) = (ci * chunk, ((ci + 1) * chunk).min(n));
-        for a in 0..off.len() - 1 {
-            let v = layers(a);
-            let k = (off[a + 1] - off[a]) / 2 - 1;
-            let (ua, wa) = (&u[a * n + r0..a * n + r1], &w[a * n + r0..a * n + r1]);
-            let o = &mut out[off[a]..off[a + 1]];
-            for i in 0..k {
-                (o[i], o[k + i]) = v.dotc2(i * n + r0, ua, wa);
+    crate::parallel::chunks_mut::<Rayon, _>(part, width, work, |c0, outs| {
+        for (ci, out) in (c0..).zip(outs.chunks_mut(width)) {
+            let (r0, r1) = (ci * chunk, ((ci + 1) * chunk).min(n));
+            for a in 0..off.len() - 1 {
+                let v = layers(a);
+                let k = (off[a + 1] - off[a]) / 2 - 1;
+                let (ua, wa) = (&u[a * n + r0..a * n + r1], &w[a * n + r0..a * n + r1]);
+                let o = &mut out[off[a]..off[a + 1]];
+                for i in 0..k {
+                    (o[i], o[k + i]) = v.dotc2(i * n + r0, ua, wa);
+                }
+                (o[2 * k], o[2 * k + 1]) = (dotc(ua, ua), dotc(ua, wa));
             }
-            (o[2 * k], o[2 * k + 1]) = (dotc(ua, ua), dotc(ua, wa));
         }
     });
     fold(part, width, proj);
@@ -219,18 +222,19 @@ pub(super) unsafe fn delayed_update<T: Scalar>(
 ) {
     let sa = cols.len();
     let nchunks = n.div_ceil(chunk);
-    let (up, zp, wp) = (SendPtr::of(u), SendPtr::of(z), SendPtr::of(w));
-    let sp = SendPtr::of(&mut scratch[..sa * nchunks]);
+    let (up, zp, wp) = (Disjoint::new(u), Disjoint::new(z), Disjoint::new(w));
+    let sp = Disjoint::new(&mut scratch[..sa * nchunks]);
     // the basis read once and the three vectors of the panel (`u`, `w`, `z`) per column
     let count = cols.iter().map(|c| c.k + 3).sum::<usize>() * n; // lit: three panel vectors
     column_chunks::<T>(sa, n, chunk, count, |a, r0, r1| {
         let d = &cols[a];
-        let (k, len) = (d.k, r1 - r0);
+        let k = d.k;
         let s = &proj[off[a]..off[a] + k];
         let q = &proj[off[a] + k..off[a] + 2 * k];
         // SAFETY: piece (a, chunk) alone holds these rows of column `a` (and of its layers
         // `k` and `k + 1`, the layers before it only read).
-        let (ua, wa) = unsafe { (up.part(a * n + r0, len), wp.part(a * n + r0, len)) };
+        let at = a * n + r0..a * n + r1;
+        let (ua, wa) = unsafe { (up.range(at.clone()), wp.range(at.clone())) };
         for i in 0..k {
             unsafe { d.v.axpy2(i * n + r0, (-s[i], &mut *ua), (-q[i], &mut *wa)) };
         }
@@ -245,11 +249,12 @@ pub(super) unsafe fn delayed_update<T: Scalar>(
             d.v.write(k * n + r0, ua);
             d.v.write((k + 1) * n + r0, wa);
             if let Some(zr) = d.z {
-                let za = zp.part(a * n + r0, len);
+                let za = zp.range(at);
                 za.iter_mut().for_each(|e| *e = *e * iu);
                 zr.write(k * n + r0, za);
             }
-            sp.part(a * nchunks + r0 / chunk, 1)[0] = nn;
+            let c = a * nchunks + r0 / chunk;
+            sp.range(c..c + 1)[0] = nn;
         }
     });
     for a in 0..sa {
@@ -304,7 +309,11 @@ pub(super) fn panel_project<T: Scalar>(
         sums(0, part);
     } else {
         let work = crate::parallel::Work::of((n * width) as f64, ORTHO_RATE.of::<T>());
-        crate::parallel::chunks_mut(part, width, work, sums);
+        crate::parallel::chunks_mut::<Rayon, _>(part, width, work, |c0, outs| {
+            for (ci, out) in (c0..).zip(outs.chunks_mut(width)) {
+                sums(ci, out);
+            }
+        });
     }
     fold(part, width, proj);
 }
@@ -341,7 +350,11 @@ pub(super) fn panel_subtract<T: Scalar>(
             update(0, wc);
         } else {
             let work = crate::parallel::Work::of((n * cols) as f64, ORTHO_RATE.of::<T>());
-            crate::parallel::chunks_mut(wc, chunk, work, update);
+            crate::parallel::chunks_mut::<Rayon, _>(wc, chunk, work, |c0, parts| {
+                for (ci, part) in (c0..).zip(parts.chunks_mut(chunk)) {
+                    update(ci, part);
+                }
+            });
         }
     }
 }

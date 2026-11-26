@@ -65,9 +65,11 @@ pub(crate) fn ll_forest(
         };
         let up = sched.updaters(s);
         if up.len() >= crate::constants::FREE_PAR_MIN_UPDATERS {
-            crate::parallel::for_each(up.len(), crate::parallel::Work::ns(f64::INFINITY), |i| {
-                free(up[i] as usize)
-            });
+            crate::parallel::ranges::<crate::parallel::Rayon>(
+                up.len(),
+                crate::parallel::Work::ns(f64::INFINITY),
+                |r| r.for_each(|i| free(up[i] as usize)),
+            );
         } else {
             up.iter().for_each(|&k| free(k as usize));
         }

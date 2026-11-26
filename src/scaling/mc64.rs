@@ -121,14 +121,15 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
     // non-finite entries (NaN marks) are dropped afterwards.
     let entries = a.values.len() as f64;
     let logs = crate::parallel::Work::of(entries, &LOG_RATE);
-    let mut cost: Vec<f64> = crate::parallel::map(a.values.len(), logs, |k| {
-        let m = a.values[k].magnitude();
-        if m == 0.0 || !m.is_finite() {
-            f64::NAN
-        } else {
-            m.ln()
-        }
-    });
+    let mut cost: Vec<f64> =
+        crate::parallel::map::<crate::parallel::Rayon, _>(a.values.len(), logs, |k| {
+            let m = a.values[k].magnitude();
+            if m == 0.0 || !m.is_finite() {
+                f64::NAN
+            } else {
+                m.ln()
+            }
+        });
     let mut cols: Vec<&mut [f64]> = Vec::with_capacity(n);
     let mut rest: &mut [f64] = &mut cost;
     for j in 0..n {

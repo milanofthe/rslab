@@ -362,7 +362,7 @@ impl<T: Scalar> PanelArena<T> {
         // pool rather than on one thread (41 ms serial on a 465 MB factor).
         vals.clear();
         vals.reserve(total);
-        crate::parallel::chunks_mut(
+        crate::parallel::chunks_mut::<crate::parallel::Rayon, _>(
             &mut vals.spare_capacity_mut()[..total],
             crate::constants::ZERO_FILL_CHUNK,
             crate::parallel::Work::ns(f64::INFINITY),
@@ -459,13 +459,15 @@ impl<T: Scalar> PanelArena<T> {
         if vals <= chunk {
             std::ptr::write_bytes(at.get(), 0, vals);
         } else {
-            crate::parallel::for_each(
+            crate::parallel::ranges::<crate::parallel::Rayon>(
                 vals.div_ceil(chunk),
                 crate::parallel::Work::ns(f64::INFINITY),
-                |c| {
-                    let c0 = c * chunk;
-                    // SAFETY: the claimed range, in the buffer's capacity.
-                    unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(vals - c0)) };
+                |r| {
+                    r.for_each(|c| {
+                        let c0 = c * chunk;
+                        // SAFETY: the claimed range, in the buffer's capacity.
+                        unsafe { std::ptr::write_bytes(at.get().add(c0), 0, chunk.min(vals - c0)) };
+                    })
                 },
             );
         }

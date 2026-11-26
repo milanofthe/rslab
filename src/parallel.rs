@@ -18,24 +18,16 @@
 //! runs: no section's arithmetic depends on how its pieces are scheduled or on
 //! how many threads run them.
 
-use std::sync::atomic::Ordering::Relaxed;
-
 pub use rspool::rayon::{
     dispatch, kept, pool_dispatch as rayon_dispatch, prepare, run_width, threads, width, width_on,
     Rayon,
 };
 pub use rspool::{
-    as_piece, current, install, install_lent, is_lent, share_of, Dispatch, Go, Lent, Piece, Pool,
-    Rate, Serial, Spawn, Task, Work,
+    as_piece, chunks_mut, current, install, install_lent, is_lent, map, map_init, ranges, share_of,
+    Disjoint, Dispatch, Go, Lent, Piece, Pool, Rate, Serial, Spawn, Task, Work,
 };
 
-use crate::constants::{COMPLEX_OPS, PIECES_PER_WORKER};
-
-/// Items per piece for `n` items on `k` threads: about
-/// [`PIECES_PER_WORKER`] pieces per thread.
-fn piece_len(n: usize, k: usize) -> usize {
-    n.div_ceil(PIECES_PER_WORKER * k.max(1)).max(1)
-}
+use crate::constants::COMPLEX_OPS;
 
 /// One `X` per scalar type of a kind of work: real and complex, double and
 /// single precision.
@@ -76,18 +68,6 @@ impl<X> PerScalar<X> {
     }
 }
 
-/// `f(i)` for every `i` in `0..n`, `work` all of them.
-pub(crate) fn for_each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
-    let k = match work.go::<Rayon>(n) {
-        Go::Wide(k) => k,
-        _ => return (0..n).for_each(&f),
-    };
-    let len = piece_len(n, k);
-    run_width(n.div_ceil(len), k, &|p| {
-        (p * len..((p + 1) * len).min(n)).for_each(&f)
-    });
-}
-
 /// `f(i)` for every `i` in `0..n`, each its own piece (pieces of very
 /// unequal work, such as the walks of a task tree), `work` all of them.
 pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
@@ -97,45 +77,8 @@ pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
     }
 }
 
-/// `f(k, chunk)` for every chunk of `size` entries of `v` (the last one
-/// shorter), `k` its index, `work` all of them.
-pub(crate) fn chunks_mut<T: Send>(
-    v: &mut [T],
-    size: usize,
-    work: Work<'_>,
-    f: impl Fn(usize, &mut [T]) + Sync + Send,
-) {
-    let size = size.max(1);
-    match work.go::<Rayon>(v.len().div_ceil(size)) {
-        Go::Wide(k) => chunks_on(v, size, k, f),
-        _ => v.chunks_mut(size).enumerate().for_each(|(i, c)| f(i, c)),
-    }
-}
-
-/// [`chunks_mut`] on `k` threads, the decision taken ([`Work::go`]).
-pub(crate) fn chunks_on<T: Send>(
-    v: &mut [T],
-    size: usize,
-    k: usize,
-    f: impl Fn(usize, &mut [T]) + Sync + Send,
-) {
-    let size = size.max(1);
-    let (len, n) = (v.len(), v.len().div_ceil(size));
-    let base = SendPtr(v.as_mut_ptr());
-    let per = piece_len(n, k);
-    run_width(n.div_ceil(per), k, &|q| {
-        for c in q * per..((q + 1) * per).min(n) {
-            let (a, b) = (c * size, ((c + 1) * size).min(len));
-            // SAFETY: the chunks are disjoint ranges of `v`, which outlives
-            // the section.
-            let chunk = unsafe { std::slice::from_raw_parts_mut(base.get().add(a), b - a) };
-            f(c, chunk);
-        }
-    });
-}
-
-/// `f(i, &items[i], &mut scratch[i])` for every item and its scratch, an
-/// item a piece, `work` all of them.
+/// `f(i, &items[i], &mut scratch[i])` for every item and its scratch,
+/// `work` all of them.
 pub(crate) fn zip_mut<A: Sync, S: Send>(
     items: &[A],
     scratch: &mut [S],
@@ -143,49 +86,11 @@ pub(crate) fn zip_mut<A: Sync, S: Send>(
     f: impl Fn(usize, &A, &mut S) + Sync + Send,
 ) {
     let n = items.len().min(scratch.len());
-    let k = match work.go::<Rayon>(n) {
-        Go::Wide(k) => k,
-        Go::Here => {
-            for (i, (a, s)) in items.iter().zip(scratch.iter_mut()).enumerate() {
-                f(i, a, s);
-            }
-            return;
-        }
-    };
-    let base = SendPtr(scratch.as_mut_ptr());
-    run_width(n, k, &|i| {
-        // SAFETY: piece `i` alone holds `scratch[i]`.
-        f(i, &items[i], unsafe { &mut *base.get().add(i) })
-    });
-}
-
-/// `f(i)` for `i` in `0..n`, in order, `work` all of them.
-pub(crate) fn map<R: Send>(
-    n: usize,
-    work: Work<'_>,
-    f: impl Fn(usize) -> R + Sync + Send,
-) -> Vec<R> {
-    match work.go::<Rayon>(n) {
-        Go::Wide(k) => map_on(n, k, f),
-        _ => (0..n).map(f).collect(),
-    }
-}
-
-/// [`map`] on `k` threads, the decision taken ([`Work::go`]).
-pub(crate) fn map_on<R: Send>(n: usize, k: usize, f: impl Fn(usize) -> R + Sync + Send) -> Vec<R> {
-    let mut out: Vec<std::mem::MaybeUninit<R>> = Vec::with_capacity(n);
-    // SAFETY: every slot is written below before it is read.
-    unsafe { out.set_len(n) };
-    let base = SendPtr(out.as_mut_ptr());
-    let len = piece_len(n, k);
-    run_width(n.div_ceil(len), k, &|p| {
-        for i in p * len..((p + 1) * len).min(n) {
-            // SAFETY: piece `p` alone writes slot `i`.
-            unsafe { (*base.get().add(i)).write(f(i)) };
+    chunks_mut::<Rayon, _>(&mut scratch[..n], 1, work, |i0, part| {
+        for (j, s) in part.iter_mut().enumerate() {
+            f(i0 + j, &items[i0 + j], s);
         }
     });
-    // SAFETY: all `n` slots written (a panic unwinds past this).
-    unsafe { std::mem::transmute::<Vec<std::mem::MaybeUninit<R>>, Vec<R>>(out) }
 }
 
 /// `f(item)` for every item of `items`, consumed, in order, `work` all of
@@ -195,71 +100,26 @@ pub(crate) fn map_owned<A: Send, R: Send>(
     work: Work<'_>,
     f: impl Fn(A) -> R + Sync + Send,
 ) -> Vec<R> {
-    let k = match work.go::<Rayon>(items.len()) {
-        Go::Wide(k) => k,
-        _ => return items.into_iter().map(f).collect(),
-    };
-    let slots: Vec<std::sync::Mutex<Option<A>>> = items
-        .into_iter()
-        .map(|a| std::sync::Mutex::new(Some(a)))
-        .collect();
-    map_on(slots.len(), k, |i| match lock(&slots[i]).take() {
-        Some(a) => f(a),
-        None => unreachable!("every item is taken once"),
-    })
-}
-
-/// [`map`] with a state per piece, made by `init`.
-pub(crate) fn map_init<S, R: Send>(
-    n: usize,
-    work: Work<'_>,
-    init: impl Fn() -> S + Sync + Send,
-    f: impl Fn(&mut S, usize) -> R + Sync + Send,
-) -> Vec<R> {
-    let k = match work.go::<Rayon>(n) {
-        Go::Wide(k) => k,
-        Go::Here => {
-            let mut s = init();
-            return (0..n).map(|i| f(&mut s, i)).collect();
+    let mut slots: Vec<(Option<A>, Option<R>)> =
+        items.into_iter().map(|a| (Some(a), None)).collect();
+    chunks_mut::<Rayon, _>(&mut slots, 1, work, |_, part| {
+        for (a, r) in part {
+            *r = a.take().map(&f);
         }
-    };
-    let len = piece_len(n, k);
-    let pieces = n.div_ceil(len);
-    let mut out: Vec<Vec<R>> = (0..pieces).map(|_| Vec::new()).collect();
-    let base = SendPtr(out.as_mut_ptr());
-    run_width(pieces, k, &|p| {
-        let mut s = init();
-        let part: Vec<R> = (p * len..((p + 1) * len).min(n))
-            .map(|i| f(&mut s, i))
-            .collect();
-        // SAFETY: piece `p` alone writes slot `p`.
-        unsafe { *base.get().add(p) = part };
     });
-    out.into_iter().flatten().collect()
+    (slots.into_iter())
+        .map(|(_, r)| match r {
+            Some(r) => r,
+            None => unreachable!("every item is mapped"),
+        })
+        .collect()
 }
 
 /// `f(item)` for every item of `items`, consumed, `work` all of them.
 pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(A) + Sync + Send) {
-    match work.go::<Rayon>(items.len()) {
-        Go::Wide(k) => for_each_owned_on(items, k, f),
-        _ => items.into_iter().for_each(f),
-    }
-}
-
-/// [`for_each_owned`] on `k` threads, the decision taken ([`Work::go`]).
-pub(crate) fn for_each_owned_on<A: Send>(items: Vec<A>, k: usize, f: impl Fn(A) + Sync + Send) {
-    let slots: Vec<std::sync::Mutex<Option<A>>> = items
-        .into_iter()
-        .map(|a| std::sync::Mutex::new(Some(a)))
-        .collect();
-    let n = slots.len();
-    let len = piece_len(n, k);
-    run_width(n.div_ceil(len), k, &|p| {
-        for slot in &slots[p * len..((p + 1) * len).min(n)] {
-            if let Some(a) = lock(slot).take() {
-                f(a);
-            }
-        }
+    let mut slots: Vec<Option<A>> = items.into_iter().map(Some).collect();
+    chunks_mut::<Rayon, _>(&mut slots, 1, work, |_, part| {
+        part.iter_mut().filter_map(Option::take).for_each(&f)
     });
 }
 
@@ -284,19 +144,16 @@ pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
 
 /// Whether `f(i)` holds for some `i` in `0..n`, `work` all of them.
 pub(crate) fn any(n: usize, work: Work<'_>, f: impl Fn(usize) -> bool + Sync + Send) -> bool {
-    let k = match work.go::<Rayon>(n) {
-        Go::Wide(k) => k,
-        _ => return (0..n).any(f),
-    };
-    let found = std::sync::atomic::AtomicBool::new(false);
-    let len = piece_len(n, k);
-    run_width(n.div_ceil(len), k, &|p| {
-        for i in p * len..((p + 1) * len).min(n) {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let found = AtomicBool::new(false);
+    ranges::<Rayon>(n, work, |r| {
+        for i in r {
             if found.load(Relaxed) {
                 return;
             }
             if f(i) {
                 found.store(true, Relaxed);
+                return;
             }
         }
     });
@@ -479,42 +336,10 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A pointer the pieces of a section share, each to its own part.
-pub(crate) struct SendPtr<T>(*mut T);
-impl<T> Clone for SendPtr<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<T> Copy for SendPtr<T> {}
-// SAFETY: the sections hand every piece a part no other piece touches.
-unsafe impl<T: Send> Send for SendPtr<T> {}
-unsafe impl<T: Send> Sync for SendPtr<T> {}
-impl<T> SendPtr<T> {
-    /// The pointer to `v`'s values, for the pieces of a section.
-    pub(crate) fn of(v: &mut [T]) -> Self {
-        SendPtr(v.as_mut_ptr())
-    }
-
-    fn get(self) -> *mut T {
-        self.0
-    }
-
-    /// Values `[from, from + len)`.
-    ///
-    /// # Safety
-    /// They lie in the slice it was taken of, which outlives the use, and no other piece
-    /// reads or writes them meanwhile.
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) unsafe fn part<'a>(self, from: usize, len: usize) -> &'a mut [T] {
-        std::slice::from_raw_parts_mut(self.0.add(from), len)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
     #[test]
     fn scalar_rates_price_complex_work_higher() {
@@ -554,17 +379,17 @@ mod tests {
         pool.install(|| {
             let me = std::thread::current().id();
             let away = AtomicUsize::new(0);
-            for_each(64, Work::ns(1.0), |_| {
+            ranges::<Rayon>(64, Work::ns(1.0), |_| {
                 if std::thread::current().id() != me {
                     away.fetch_add(1, Relaxed);
                 }
             });
             assert_eq!(away.load(Relaxed), 0, "tiny work left the thread");
-            let v = map(1000, Work::ns(1e9), |i| i * 2);
+            let v = map::<Rayon, _>(1000, Work::ns(1e9), |i| i * 2);
             assert!(v.iter().enumerate().all(|(i, &x)| x == 2 * i));
             // large work at a rate goes wide and computes the same
             let r = Rate::new(1e6);
-            let w = map(1000, Work::of(1e9, &r), |i| i * 3);
+            let w = map::<Rayon, _>(1000, Work::of(1e9, &r), |i| i * 3);
             assert!(w.iter().enumerate().all(|(i, &x)| x == 3 * i));
         });
     }

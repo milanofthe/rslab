@@ -301,7 +301,7 @@ impl<T: Scalar> SolvePlan<T> {
             return (0..n).map(|i| f(&mut sc, i)).collect();
         }
         Self::in_pool(true, threads, || {
-            crate::parallel::map_init(
+            crate::parallel::map_init::<crate::parallel::Rayon, _, _>(
                 n,
                 Work::ns(f64::INFINITY),
                 ReachScratch::default,
