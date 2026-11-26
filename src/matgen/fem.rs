@@ -319,6 +319,8 @@ pub fn convection_diffusion<T: Scalar>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matgen::integration::{sym_error, unsym_error};
+    use crate::test_constants::{fixed_refinement, gamma, solve_backward_error, U64, UC64};
     use crate::{LdltSymbolic, SolverSettings, ZeroPivotAction};
 
     fn cube(k: usize) -> [usize; 3] {
@@ -345,11 +347,9 @@ mod tests {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(40))
             .unwrap()
             .0;
-        let mut ax = vec![Complex::new(0.0, 0.0); n];
-        a.symv(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max)
-            / b.iter().map(|v| v.norm()).fold(0.0, f64::max).max(1e-30);
-        assert!(res < 1e-6, "curl-curl refined residual {res}");
+        let omega = sym_error(&a, &x, &b);
+        let bound = fixed_refinement(n, UC64) + gamma(n + 1, UC64);
+        assert!(omega <= bound, "curl-curl refined backward error {omega}");
     }
 
     #[test]
@@ -367,11 +367,12 @@ mod tests {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(40))
             .unwrap()
             .0;
-        let mut ax = vec![0.0; n];
-        a.symv(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max)
-            / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-30);
-        assert!(res < 1e-6, "saddle-point refined residual {res}");
+        let omega = sym_error(&a, &x, &b);
+        let bound = fixed_refinement(n, U64) + gamma(n + 1, U64);
+        assert!(
+            omega <= bound,
+            "saddle-point refined backward error {omega}"
+        );
     }
 
     #[test]
@@ -393,7 +394,7 @@ mod tests {
         for j in 0..a.n {
             for k in a.col_ptr[j]..a.col_ptr[j + 1] {
                 let i = a.row_idx[k];
-                if i != j && (a.values[k] - get(j, i)).abs() > 1e-12 {
+                if i != j && a.values[k] != get(j, i) {
                     asymmetric = true;
                 }
             }
@@ -405,10 +406,10 @@ mod tests {
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
         let x = solver.solve(&b).unwrap();
-        let mut ax = vec![0.0; n];
-        a.matvec(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max)
-            / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-30);
-        assert!(res < 1e-8, "convection-diffusion LU residual {res}");
+        let omega = unsym_error(&a, &x, &b);
+        assert!(
+            omega <= solve_backward_error(n, U64),
+            "convection-diffusion LU backward error {omega}"
+        );
     }
 }

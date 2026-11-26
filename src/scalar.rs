@@ -570,12 +570,10 @@ mod tests {
         let z: Complex<f64> = Complex::new(1.0, 1.0);
         // 1/(1+i) = (1-i)/2 = 0.5 - 0.5i
         let r = z.recip();
-        assert!((r.re - 0.5).abs() < 1e-15);
-        assert!((r.im + 0.5).abs() < 1e-15);
+        assert_eq!(r, Complex::new(0.5, -0.5));
         // z * (1/z) == 1
         let prod = z * r;
-        assert!((prod.re - 1.0).abs() < 1e-15);
-        assert!(prod.im.abs() < 1e-15);
+        assert_eq!(prod, Complex::new(1.0, 0.0));
     }
 
     #[test]
@@ -595,8 +593,7 @@ mod tests {
         let z: Complex<f64> = Complex::new(1.0, 1.0);
         // (1+i)*(1+i) + 1 = (1 + 2i - 1) + 1 = 1 + 2i
         let r = z.mul_add(Complex::new(1.0, 1.0), Complex::new(1.0, 0.0));
-        assert!((r.re - 1.0).abs() < 1e-15);
-        assert!((r.im - 2.0).abs() < 1e-15);
+        assert_eq!(r, Complex::new(1.0, 2.0));
     }
 
     /// The twin: a double rounds to it and widens back exactly, a single is its own.

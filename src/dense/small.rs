@@ -213,6 +213,9 @@ pub fn eigen(a: &[C], d: usize) -> Result<Eigen, RslabError> {
 mod tests {
     use super::*;
     use crate::numeric::dense_eig::eigenvalues;
+    use crate::test_constants::{
+        eig_backward_error, eigenvalue_error, gamma, solve_backward_error, U64, UC64,
+    };
 
     fn random(d: usize, seed: u64) -> Vec<C> {
         let mut state = seed;
@@ -231,8 +234,52 @@ mod tests {
             .collect()
     }
 
+    fn mul(a: &[C], b: &[C], d: usize) -> Vec<C> {
+        (0..d * d)
+            .map(|q| (0..d).map(|k| a[q / d * d + k] * b[k * d + q % d]).sum())
+            .collect()
+    }
+
+    fn identity(d: usize) -> Vec<C> {
+        (0..d * d)
+            .map(|q| C::new(if q / d == q % d { 1.0 } else { 0.0 }, 0.0))
+            .collect()
+    }
+
+    fn mags(a: &[C]) -> Vec<C> {
+        a.iter().map(|v| C::new(v.norm(), 0.0)).collect()
+    }
+
     fn norm(v: &[C]) -> f64 {
         v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()
+    }
+
+    fn norm1(v: &[C]) -> f64 {
+        v.iter().map(|z| z.norm()).sum()
+    }
+
+    fn mat_norm1(a: &[C], d: usize) -> f64 {
+        (0..d)
+            .map(|j| (0..d).map(|i| a[i * d + j].norm()).sum::<f64>())
+            .fold(0.0, f64::max)
+    }
+
+    fn mat_norm_inf(a: &[C], d: usize) -> f64 {
+        (0..d)
+            .map(|i| norm1(&a[i * d..(i + 1) * d]))
+            .fold(0.0, f64::max)
+    }
+
+    fn nearest(g: C, w: &[C]) -> f64 {
+        w.iter()
+            .map(|v| (g - v).norm())
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    fn eigenvalue_cond(s: &Schur, k: usize) -> f64 {
+        let (x, l) = s.eigenvectors(k).expect("a simple eigenvalue");
+        let lx: C = l.iter().zip(&x).map(|(u, v)| u * v).sum();
+        norm(&x) * norm(&l) / lx.norm()
     }
 
     /// `U J U^H` for the unitary `U` of a random matrix's Schur form.
@@ -252,11 +299,6 @@ mod tests {
             .collect()
     }
 
-    fn sorted(mut v: Vec<C>) -> Vec<C> {
-        v.sort_by(|a, b| a.re.total_cmp(&b.re).then(a.im.total_cmp(&b.im)));
-        v
-    }
-
     /// The Schur form reproduces the matrix (`Q T Q^H = A`), `Q` is unitary and `T`
     /// upper triangular with the eigenvalues of the best-effort routine.
     #[test]
@@ -265,31 +307,45 @@ mod tests {
             let a = random(d, seed);
             let s = Schur::new(&a, d).expect("converges");
             let (t, q) = (s.t(), s.q());
-            let anorm = a.iter().map(|v| v.norm()).fold(0.0f64, f64::max);
+            let a1 = mat_norm1(&a, d);
+            let omega = eig_backward_error(d, U64);
             for i in 0..d {
                 for j in 0..i {
                     assert_eq!(t[i * d + j], C::new(0.0, 0.0), "T below the diagonal");
                 }
-                for j in 0..d {
-                    let qtq: C = (0..d)
-                        .map(|k| {
-                            (0..d)
-                                .map(|l| q[i * d + k] * t[k * d + l] * q[j * d + l].conj())
-                                .sum::<C>()
-                        })
-                        .sum();
-                    assert!((qtq - a[i * d + j]).norm() < 1e-12 * anorm * d as f64);
-                    let qhq: C = (0..d).map(|k| q[k * d + i].conj() * q[k * d + j]).sum();
-                    let id = if i == j { 1.0 } else { 0.0 };
-                    assert!((qhq - id).norm() < 1e-12 * d as f64);
-                }
             }
-            for (g, w) in sorted(s.eigenvalues())
+            let qh: Vec<C> = (0..d * d).map(|p| q[p % d * d + p / d].conj()).collect();
+            let qtq = mul(&mul(q, t, d), &qh, d);
+            let e: Vec<C> = qtq.iter().zip(&a).map(|(g, w)| g - w).collect();
+            assert!(mat_norm1(&e, d) <= omega * a1, "d {d}: Q T Q^H - A");
+            let f: Vec<C> = mul(&qh, q, d)
                 .iter()
-                .zip(sorted(eigenvalues(&a, d)))
-            {
-                assert!((g - w).norm() < 1e-9 * anorm.max(1.0));
+                .zip(identity(d))
+                .map(|(g, w)| g - w)
+                .collect();
+            assert!(mat_norm1(&f, d) <= omega, "d {d}: Q^H Q - I");
+            let best = eigenvalues(&a, d);
+            for (k, g) in s.eigenvalues().into_iter().enumerate() {
+                let bound = eigenvalue_error(d, eigenvalue_cond(&s, k), omega * a1 + omega * a1);
+                assert!(nearest(g, &best) <= bound, "d {d}: eigenvalue {k}");
             }
+        }
+    }
+
+    #[test]
+    fn eigenvalues_sum_to_the_trace() {
+        for (d, seed) in [(8, 6), (40, 7)] {
+            let a = random(d, seed);
+            let e = eigenvalues(&a, d);
+            let sum: C = e.iter().sum();
+            let trace: C = (0..d).map(|i| a[i * d + i]).sum();
+            let magnitudes = norm1(&e) + (0..d).map(|i| a[i * d + i].norm()).sum::<f64>();
+            let bound = d as f64 * eig_backward_error(d, U64) * mat_norm1(&a, d)
+                + gamma(d, UC64) * magnitudes;
+            assert!(
+                (sum - trace).norm() <= bound,
+                "d {d}: {sum} against {trace}"
+            );
         }
     }
 
@@ -300,40 +356,36 @@ mod tests {
         for (d, seed) in [(3, 11), (30, 12), (90, 13)] {
             let a = random(d, seed);
             let s = Schur::new(&a, d).unwrap();
-            let anorm = a.iter().map(|v| v.norm()).fold(0.0f64, f64::max);
+            let (a1, ainf) = (mat_norm1(&a, d), mat_norm_inf(&a, d));
+            let omega = eig_backward_error(d, U64);
             for (k, lam) in s.eigenvalues().into_iter().enumerate() {
                 let (x, l) = s.eigenvectors(k).expect("finite");
-                assert!((norm(&x) - 1.0).abs() < 1e-12);
+                assert!((norm(&x) - 1.0).abs() <= omega);
                 let r: Vec<C> = matvec(&a, d, &x)
                     .iter()
                     .zip(&x)
                     .map(|(u, v)| u - lam * v)
                     .collect();
                 assert!(
-                    norm(&r) < 1e-11 * anorm * d as f64,
+                    norm1(&r) <= omega * a1 * norm1(&x),
                     "right {k}: {:e}",
-                    norm(&r)
+                    norm1(&r)
                 );
-                // l^T A = lam l^T
                 let la: Vec<C> = (0..d)
                     .map(|j| (0..d).map(|i| l[i] * a[i * d + j]).sum::<C>() - lam * l[j])
                     .collect();
-                assert!(norm(&la) < 1e-10 * anorm * d as f64 * norm(&l), "left {k}");
+                assert!(norm1(&la) <= omega * ainf * norm1(&l), "left {k}");
                 let lx: C = l.iter().zip(&x).map(|(u, v)| u * v).sum();
-                assert!((lx - 1.0).norm() < 1e-12);
+                let lx_abs: f64 = l.iter().zip(&x).map(|(u, v)| u.norm() * v.norm()).sum();
+                assert!((lx - 1.0).norm() <= gamma(2 * d + 1, UC64) * lx_abs);
             }
             let e = eigen(&a, d).unwrap();
             assert_eq!(e.values, s.eigenvalues());
         }
-        // a known spectrum: W diag W^-1
         let d = 12;
         let w = random(d, 21);
         let lam: Vec<C> = (0..d).map(|k| C::new(k as f64, -0.1 * k as f64)).collect();
-        let mut id = vec![C::new(0.0, 0.0); d * d];
-        for i in 0..d {
-            id[i * d + i] = C::new(1.0, 0.0);
-        }
-        let winv = lu_solve(&w, d, &id, d).unwrap();
+        let winv = lu_solve(&w, d, &identity(d), d).unwrap();
         let a: Vec<C> = (0..d * d)
             .map(|q| {
                 let (i, j) = (q / d, q % d);
@@ -342,8 +394,23 @@ mod tests {
                     .sum()
             })
             .collect();
-        for (g, w) in sorted(eigen(&a, d).unwrap().values).iter().zip(sorted(lam)) {
-            assert!((g - w).norm() < 1e-9, "{g} against {w}");
+        let inverse_gap: Vec<C> = mul(&w, &winv, d)
+            .iter()
+            .zip(identity(d))
+            .map(|(g, v)| g - v)
+            .collect();
+        let gap = mat_norm1(&inverse_gap, d)
+            + gamma(d, UC64) * mat_norm1(&mul(&mags(&w), &mags(&winv), d), d);
+        let w_lam: Vec<C> = (0..d * d)
+            .map(|q| C::new(w[q].norm() * lam[q % d].norm(), 0.0))
+            .collect();
+        let rounding = gamma(d + 2, UC64) * mat_norm1(&mul(&w_lam, &mags(&winv), d), d);
+        let a1 = mat_norm1(&a, d);
+        let s = Schur::new(&a, d).unwrap();
+        let perturbation = (a1 + rounding) * gap + rounding + eig_backward_error(d, U64) * a1;
+        for (k, g) in s.eigenvalues().into_iter().enumerate() {
+            let bound = eigenvalue_error(d, eigenvalue_cond(&s, k), perturbation);
+            assert!(nearest(g, &lam) <= bound, "{g}: bound {bound:e}");
         }
     }
 
@@ -383,15 +450,25 @@ mod tests {
                     .collect()
             };
             for k in 0..d {
-                assert!(
-                    (s.eigenvalues()[k] - lam).norm() < f64::EPSILON.powf(1.0 / d as f64) * 10.0
-                );
+                let mu = s.eigenvalues()[k];
+                assert!((mu - lam).norm() < f64::EPSILON.powf(1.0 / d as f64) * 10.0);
                 let x: Vec<C> = (0..d).map(|i| e.vectors[i * d + k]).collect();
                 assert!(x.iter().all(|v| v.re.is_finite() && v.im.is_finite()));
+                let r: Vec<C> = matvec(&a, d, &x)
+                    .iter()
+                    .zip(&x)
+                    .map(|(u, v)| u - mu * v)
+                    .collect();
+                let r_abs: Vec<C> = matvec(&mags(&a), d, &mags(&x))
+                    .iter()
+                    .zip(&x)
+                    .map(|(u, v)| u + mu.norm() * v.norm())
+                    .collect();
+                let rho = (mu - lam).norm() + norm(&r) + gamma(d + 1, UC64) * norm(&r_abs);
                 let along: C = v0.iter().zip(&x).map(|(u, v)| u.conj() * v).sum();
                 assert!(
-                    along.norm() > 1.0 - 1e-3,
-                    "d {d} vector {k}: {}",
+                    along.norm() >= (1.0 - rho * rho).max(0.0).sqrt() - eig_backward_error(d, U64),
+                    "d {d} vector {k}: {} at rho {rho:e}",
                     along.norm()
                 );
             }
@@ -410,6 +487,7 @@ mod tests {
         }
         let a = similar(&j, d, 41);
         let s = Schur::new(&a, d).unwrap();
+        let bound = eig_backward_error(d, U64) * mat_norm1(&a, d);
         for (k, lam) in s.eigenvalues().into_iter().enumerate() {
             let (x, _) = s.eigenvectors(k).unwrap();
             let r: Vec<C> = matvec(&a, d, &x)
@@ -417,7 +495,7 @@ mod tests {
                 .zip(&x)
                 .map(|(u, v)| u - lam * v)
                 .collect();
-            assert!(norm(&r) < 1e-12, "{k}: {:e}", norm(&r));
+            assert!(norm1(&r) <= bound * norm1(&x), "{k}: {:e}", norm1(&r));
         }
     }
 
@@ -433,8 +511,9 @@ mod tests {
             a[((i + 1) % d) * d + i] = C::new(1.0, 0.0);
         }
         let s = Schur::new(&a, d).expect("the exceptional shifts converge");
+        let bound = eigenvalue_error(d, 1.0, eig_backward_error(d, U64) * mat_norm1(&a, d));
         for lam in s.eigenvalues() {
-            assert!((lam.norm() - 1.0).abs() < 1e-10, "{lam}");
+            assert!((lam.norm() - 1.0).abs() <= bound, "{lam}");
         }
         assert!(matches!(
             Schur::with_budget(&random(6, 3), 6, 0),
@@ -473,8 +552,25 @@ mod tests {
             })
             .collect();
         let want = lu_solve(&m, d, &b, 3).unwrap();
-        for (g, w) in x.iter().zip(&want) {
-            assert!((g - w).norm() < 1e-11, "{g} against {w}");
+        let m1 = mat_norm1(&m, d);
+        let omega_lu = solve_backward_error(d, UC64);
+        let omega_schur = eig_backward_error(d, U64) * (beta.norm() * mat_norm1(&a, d) + m1) / m1
+            + omega_lu
+            + gamma(2, UC64);
+        for c in 0..3 {
+            let column = |v: &[C]| (0..d).map(|i| v[i * 3 + c]).collect::<Vec<C>>();
+            let bc = column(&b);
+            let omega = |v: &[C]| {
+                let r: Vec<C> = matvec(&m, d, v)
+                    .iter()
+                    .zip(&bc)
+                    .map(|(p, q)| p - q)
+                    .collect();
+                norm1(&r) / (m1 * norm1(v) + norm1(&bc))
+            };
+            let (ws, wl) = (omega(&column(&x)), omega(&column(&want)));
+            assert!(ws <= omega_schur, "column {c}: Schur backward error {ws:e}");
+            assert!(wl <= omega_lu, "column {c}: LU backward error {wl:e}");
         }
     }
 }

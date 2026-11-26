@@ -191,10 +191,11 @@ mod tests {
         let a = csc(2, &[&[(0, 1.0), (1, 1e-2)], &[(0, 1e6), (1, 1.0)]]);
         let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::OnePassInfNorm, 0.1);
         assert_eq!(steps, 1);
-        assert_eq!(r, vec![1e-3, 1.0]);
-        assert_eq!(c, vec![1.0, 1e-3]);
+        let small = 1.0 / a.values[2].sqrt();
+        assert_eq!(r, vec![small, 1.0]);
+        assert_eq!(c, vec![1.0, small]);
         let (rm, _) = maxima_of(&a, &r, &c);
-        assert!(rm[1] < 1e-1, "row 1 max {}", rm[1]);
+        assert_eq!(rm[1], a.values[1], "row 1 max {}", rm[1]);
     }
 
     /// The iteration brings every row and column maximum within a factor
@@ -220,10 +221,7 @@ mod tests {
             let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::InfNorm, tol);
             let (rm, cm) = maxima_of(&a, &r, &c);
             for m in rm.iter().chain(&cm) {
-                assert!(
-                    m.ln().abs() <= tol.ln_1p() * (1.0 + 1e-12),
-                    "max {m} at {tol}"
-                );
+                assert!(m.ln().abs() <= tol.ln_1p(), "max {m} at {tol}");
             }
             // the maxima converged (above) within the steps the rate one half allows
             assert!(steps <= steps_bound(spread, tol), "{steps} steps at {tol}");
@@ -235,11 +233,12 @@ mod tests {
     #[test]
     fn zero_row_stays_unscaled() {
         let a = csc(3, &[&[(0, 1e4), (2, 1.0)], &[(0, 1e-3)], &[(2, 5.0)]]);
-        let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::InfNorm, 1e-8);
+        let tol = crate::constants::INFNORM_TOL;
+        let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::InfNorm, tol);
         assert_eq!(r[1], 1.0);
         assert!(steps >= 1);
         let (rm, _) = maxima_of(&a, &r, &c);
-        assert!((rm[0] - 1.0).abs() < 1e-6 && (rm[2] - 1.0).abs() < 1e-6);
+        assert!(rm[0].ln().abs() <= tol.ln_1p() && rm[2].ln().abs() <= tol.ln_1p());
     }
 
     #[test]

@@ -451,6 +451,7 @@ fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph<'static>, Vec<f64>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::{exp_of_logs, gamma, U64};
 
     /// Diagonal SPD: expansion is a no-op, cost is all zero after
     /// normalization, Hungarian returns identity matching with
@@ -467,8 +468,10 @@ mod tests {
             1.0 / 5.0_f64.sqrt(),
         ];
         for i in 0..3 {
+            let y = csc.values[i].ln() / 2.0;
+            let bound = (exp_of_logs(y) + gamma(2, U64)) * expected[i];
             assert!(
-                (s[i] - expected[i]).abs() < 1e-12,
+                (s[i] - expected[i]).abs() <= bound,
                 "s[{}] = {}, expected {}",
                 i,
                 s[i],
@@ -511,14 +514,14 @@ mod tests {
         };
         let (s, info) = scaling_from_cache(&cache);
         assert_eq!(info, ScalingInfo::PartialSingular { n_unmatched: 1 });
-        assert!(
-            (s[0] - 1.0).abs() < 1e-12,
+        assert_eq!(
+            s[0], 1.0,
             "index 0's ROW is unmatched; the contract requires identity \
              scaling, got {}",
             s[0]
         );
-        assert!(
-            (s[1] - 1.0).abs() < 1e-12,
+        assert_eq!(
+            s[1], 1.0,
             "index 1's column is unmatched; must be identity, got {}",
             s[1]
         );

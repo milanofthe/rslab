@@ -140,7 +140,9 @@ pub fn compute_onepass(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::INFNORM_TOL;
     use crate::sparse::csc::CscMatrix;
+    use crate::test_constants::knight_ruiz_deviation;
 
     /// The guarded Knight-Ruiz step applies `d/sqrt(m)`
     /// only when it stays finite and positive, else holds `d`. Healthy inputs
@@ -151,7 +153,10 @@ mod tests {
         assert_eq!(crate::scaling::kr_guarded_update(1.0, 4.0), 0.5);
         assert_eq!(crate::scaling::kr_guarded_update(6.0, 9.0), 2.0);
         // Overflow: 1e300/sqrt(1e-40) = 1e320 -> Inf -> held.
-        assert_eq!(crate::scaling::kr_guarded_update(1e300, 1e-40), 1e300);
+        assert_eq!(
+            crate::scaling::kr_guarded_update(f64::MAX, f64::MIN_POSITIVE),
+            f64::MAX
+        );
         // m = Inf => d/Inf = 0 (not > 0) -> held.
         assert_eq!(crate::scaling::kr_guarded_update(1.0, f64::INFINITY), 1.0);
         // m = NaN => NaN (not finite) -> held.
@@ -197,14 +202,14 @@ mod tests {
     fn diag_3x3() {
         let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
         let (d, _info) = compute_infnorm(&m);
-        let expected = [1.0 / 2f64.sqrt(), 1.0 / 3f64.sqrt(), 1.0 / 5f64.sqrt()];
         for i in 0..3 {
+            let scaled = d[i] * m.values[i] * d[i];
             assert!(
-                (d[i] - expected[i]).abs() < 1e-12,
-                "d[{}] = {} != {}",
+                (scaled - 1.0).abs() <= knight_ruiz_deviation(INFNORM_TOL),
+                "d[{}] = {} scales the diagonal to {}",
                 i,
                 d[i],
-                expected[i]
+                scaled
             );
         }
     }
@@ -224,8 +229,9 @@ mod tests {
         let a11 = d[1] * d[1] * 9.0;
         let row0 = a00.abs().max(a01.abs());
         let row1 = a01.abs().max(a11.abs());
-        assert!((row0 - 1.0).abs() < 1e-6, "row0 max = {}", row0);
-        assert!((row1 - 1.0).abs() < 1e-6, "row1 max = {}", row1);
+        let bound = knight_ruiz_deviation(INFNORM_TOL);
+        assert!((row0 - 1.0).abs() <= bound, "row0 max = {}", row0);
+        assert!((row1 - 1.0).abs() <= bound, "row1 max = {}", row1);
     }
 
     /// Arrow matrix: diagonal [2, 3, 4, 5, 6, 7] with (5, 0..=4) = 1.
@@ -269,7 +275,7 @@ mod tests {
                 }
             }
             assert!(
-                (row_max - 1.0).abs() < 1e-6,
+                (row_max - 1.0).abs() <= knight_ruiz_deviation(INFNORM_TOL),
                 "row {} max = {}, expected 1",
                 i,
                 row_max

@@ -145,7 +145,7 @@ mod tests {
                 let i = a.row_idx[k];
                 assert!(i >= j, "lower triangle only");
                 if i == j {
-                    assert!(a.values[k] >= 4.0 - 1e-12, "Dirichlet diagonal >= 2*ndim");
+                    assert!(a.values[k] >= 4.0, "Dirichlet diagonal >= 2*ndim");
                 } else {
                     assert!(a.values[k] < 0.0, "off-diagonal is -w");
                 }
@@ -161,7 +161,7 @@ mod tests {
         // Diagonal of node 0 (a corner): 6 stencil arms (3 dims x both signs) of
         // weight 1 => 6, minus k^2.
         let diag0 = a.values[a.col_ptr[0]];
-        assert!((diag0 - (Complex::new(6.0, 0.0) - k2)).norm() < 1e-12);
+        assert_eq!(diag0, Complex::new(6.0, 0.0) - k2);
     }
 
     #[test]
