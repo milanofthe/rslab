@@ -233,6 +233,7 @@ def measure(name, first, second, repeats, warmup, threads):
     a2, b2, _ = load(second)
     path = meta['path']
     runs, report = [], {}
+    # https://github.com/milanofthe/rslab/issues/294
     SOLVERS[name.split('@')[0]](path, {}, threads)
     base_mb = working_set_mb()[0]
     for round_ in range(warmup + repeats):
@@ -249,6 +250,7 @@ def measure(name, first, second, repeats, warmup, threads):
         t4 = clock(); x2 = solver.solve(b2)
         t5 = clock()
         steps, res = 0, residual(a2, x2, b2)
+        # https://github.com/milanofthe/rslab/issues/294
         while res > TARGET and steps < 50:
             x_next = x2 + solver.solve(b2 - a2 @ x2)
             res_next = residual(a2, x_next, b2)

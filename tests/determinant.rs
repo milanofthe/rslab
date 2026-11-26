@@ -86,6 +86,7 @@ fn reference_log_det<T: Scalar>(n: usize, a: &[T]) -> (C, f64) {
     (phase, log_abs)
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 fn check_log_det<T: Scalar>(what: &str, n: usize, got: (T, f64), want: (C, f64)) {
     let (tol_per_unknown, tol_floor) = (2e-14, 1e-12);
     let tol = (tol_per_unknown * n as f64).max(tol_floor);

@@ -151,6 +151,7 @@ fn grid3d_conv(k: usize) -> GeneralCsc<f64> {
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 const K_LDLT: usize = if cfg!(debug_assertions) { 16 } else { 24 };
 const K_LDLT_C: usize = 16;
 const K_LU: usize = if cfg!(debug_assertions) { 14 } else { 22 };
@@ -185,6 +186,7 @@ fn complex_ldlt_meets_the_bound_at_every_thread_count() {
     });
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 #[cfg(feature = "matgen")]
 #[test]
 fn complex_factor_on_a_one_thread_budget_matches_a_pool_of_one() {

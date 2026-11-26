@@ -76,6 +76,7 @@ use ss_klu_ref::{resid, SsKlu};
 pub mod constants;
 use constants::{solve_backward_error, U64};
 
+// https://github.com/milanofthe/rslab/issues/294
 fn settings_sweep() {
     println!(
         "{:>10} {:>8} {:>5} {:>5} | {:>9} {:>9} {:>9} {:>10} {:>7} {:>9}",

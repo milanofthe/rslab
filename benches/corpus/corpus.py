@@ -53,9 +53,11 @@ HERE = Path(__file__).resolve().parent
 LOCAL = HERE / 'sources.local.toml'
 FAMILIES = {'mom', 'circuit', 'fem'}
 
+# https://github.com/milanofthe/rslab/issues/294
 PLACEMENT = {'mom': ('euler', '13G'), 'circuit': ('kutta', '8G'), 'fem': ('runge', '8G')}
 SUITESPARSE_MIRRORS = ['https://sparse.tamu.edu/MM', 'https://www.cise.ufl.edu/research/sparse/MM']
 
+# https://github.com/milanofthe/rslab/issues/294
 FEM_EXAMPLES = ['wr90', 'wr90_pml', 'pyramidal_horn', 'patch_antenna', 'microstrip_line']
 FEM_DUMPS = 2
 

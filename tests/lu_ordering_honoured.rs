@@ -39,6 +39,7 @@ fn factor_honours_the_ordering_in_the_settings() {
         fill(OrderingMethod::MetisND),
         fill(OrderingMethod::Rcm),
     );
+    // https://github.com/milanofthe/rslab/issues/294
     assert!(
         rcm > amd * 3 / 2 && rcm > nd * 3 / 2,
         "the band ordering RCM does not fill far above AMD and ND on a 2D grid, so the ordering is ignored: amd {amd} nd {nd} rcm {rcm}"

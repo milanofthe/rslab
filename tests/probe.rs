@@ -277,6 +277,7 @@ fn a_budget_of_one_thread_opens_no_section() {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 #[test]
 fn ambient_work_below_the_section_threshold_enters_no_pool() {
     let wide = rayon::ThreadPoolBuilder::new()

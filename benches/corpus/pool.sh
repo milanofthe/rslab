@@ -71,6 +71,7 @@ corpus)
       -- bash rslab/benches/corpus/pool.sh job-corpus "$source" --family "$family" "$@" < /dev/null
   done < <(python3 "$HERE/corpus.py" placement "$source")
   ;;
+# https://github.com/milanofthe/rslab/issues/294
 ab)
   refs=()
   while [ $# -gt 0 ] && [[ $1 != -* ]]; do refs+=("$1"); shift; done

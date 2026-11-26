@@ -181,6 +181,7 @@ fn a_warm_newton_loop_allocates_nothing() {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 #[test]
 fn a_warm_supernodal_refactor_allocates_the_same_at_every_size() {
     let opts = SolverSettings {

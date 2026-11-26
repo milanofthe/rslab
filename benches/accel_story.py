@@ -191,6 +191,7 @@ def timeline(rows, ax, metric, annotate=True):
     lo = np.nanmin([y for ys in series.values() for y in ys])
     hi = np.nanmax([y for ys in series.values() for y in ys])
     if annotate:
+        # https://github.com/milanofthe/rslab/issues/294
         for i, v in enumerate(vers):
             note = RELEASE_NOTES.get(v)
             if not note:
@@ -242,6 +243,7 @@ def scaling(rows, ax, metric="factor"):
                     ha="left")
 
     ax.axhline(1.0, color=st.GRAY, lw=1.0, ls="--")
+    # https://github.com/milanofthe/rslab/issues/294
     ax.text(0.01, 1.0, " Accelerate", color=st.GRAY, fontsize=7, va="bottom",
             ha="left", transform=ax.get_yaxis_transform())
     ax.set_xscale("log")

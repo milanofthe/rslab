@@ -675,6 +675,7 @@ fn run_matrix(
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/294
     let faer_max: usize = std::env::var("RLA_BENCH_FAER_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -766,6 +767,7 @@ fn run_matrix(
                 let e3 = ps.call(33, ni, &ia, &ja, &va, &mut bb, &mut x);
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 if e3 == 0 {
+                    // https://github.com/milanofthe/rslab/issues/294
                     let (symbolic_peak_kb, symbolic_permanent_kb, numeric_kb) =
                         (ps.iparm[14], ps.iparm[15], ps.iparm[16]);
                     let peak_kb = symbolic_peak_kb.max(symbolic_permanent_kb + numeric_kb);
@@ -840,8 +842,10 @@ fn run_matrix(
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/294
     if has("accel") {
         if let Some(ac) = Accel::try_new() {
+            // https://github.com/milanofthe/rslab/issues/294
             let order: i32 = match std::env::var("RLA_BENCH_ACCEL_ORDER").ok().as_deref() {
                 Some("default") => -1,
                 Some("amd") => 2,
@@ -853,6 +857,7 @@ fn run_matrix(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(-1.0);
+            // https://github.com/milanofthe/rslab/issues/294
             let gate_bytes: i64 = (std::env::var("RLA_BENCH_ACCEL_EST_MB")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
@@ -947,6 +952,7 @@ fn run_matrix(
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/294
     if has("pc") {
         let envf = |k: &str, d: f64| {
             std::env::var(k)
@@ -1030,6 +1036,7 @@ fn run_matrix(
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
     match family {
         "sym" => sizes
@@ -1150,6 +1157,7 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 #[cfg(feature = "matgen-download")]
 fn build_corpus() -> Vec<(String, Mat)> {
     const DEFAULT: &str = "\
