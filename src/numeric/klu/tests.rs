@@ -509,7 +509,7 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
         "Off must plan nothing"
     );
     assert!(
-        matches!(&s_par.factors.plan.blocks[..], [bp] if bp.b == 0),
+        matches!(&s_par.factors.plan.blocks[..], [bp] if bp.block == 0),
         "On must plan its one block"
     );
     let mut a2 = a.clone();
@@ -964,7 +964,7 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
     // On a free pool a block goes wide where nothing says otherwise.
     let plan = &s.factors.plan;
     let bp = &plan.blocks[0];
-    let bn = s.factors.block_ptr[bp.b + 1] - s.factors.block_ptr[bp.b];
+    let bn = s.factors.block_ptr[bp.block + 1] - s.factors.block_ptr[bp.block];
     let decide = super::refactor::Decide::on(Dispatch::free(4), 4);
     assert_ne!(
         install(on(Dispatch::free(4)), || decide.mode(plan, bp, bn)),

@@ -51,7 +51,7 @@ impl ReplayPlan {
                 >= self.min_ratio.unwrap_or(KLU_PAR_MIN_RATIO) * self.largest as f64;
         self.policy == KluParallel::On
             || blocks
-            || (self.blocks.iter()).any(|bp| self.start(bp, bp.cols.len()).is_some())
+            || (self.blocks.iter()).any(|bp| self.start(bp, bp.level_cols.len()).is_some())
     }
 
     /// Whether the blocks together clear the user's floors.
@@ -124,7 +124,7 @@ impl Decide {
     /// The threads level `l` of `bp` replays on, and its time on them.
     fn level(&self, bp: &BlockPlan, l: usize) -> (usize, f64) {
         let work = bp.level_work[l] as f64 * self.seq;
-        let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
+        let p = (bp.level_ptr[l + 1] - bp.level_ptr[l]) as usize;
         match self.width(work, p) {
             k if k >= 2 => (
                 k,
@@ -138,7 +138,7 @@ impl Decide {
     /// into ranges as the section cost makes them worth
     /// ([`Dispatch::ranges`]).
     fn level_per(&self, bp: &BlockPlan, l: usize, k: usize) -> usize {
-        let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
+        let p = (bp.level_ptr[l + 1] - bp.level_ptr[l]) as usize;
         let work = bp.level_work[l] as f64 * self.seq;
         p.div_ceil(self.cut.ranges(work, p, k).max(1))
     }
@@ -311,7 +311,7 @@ impl<T: Scalar> KluSolver<T> {
             modes.push(if cheap {
                 Mode::Serial
             } else {
-                let bn = f.block_ptr[bp.b + 1] - f.block_ptr[bp.b];
+                let bn = f.block_ptr[bp.block + 1] - f.block_ptr[bp.block];
                 decide.mode(plan, bp, bn)
             });
         }
@@ -543,7 +543,7 @@ impl<T: Scalar> KluSolver<T> {
             let bn = x.len();
             for l in 0..bp.level_work.len() {
                 interrupt_check(int_flag)?;
-                let cols = &bp.cols[bp.ptr[l] as usize..bp.ptr[l + 1] as usize];
+                let cols = &bp.level_cols[bp.level_ptr[l] as usize..bp.level_ptr[l + 1] as usize];
                 let (k, _) = decide_ref.level(bp, l);
                 if k < 2 {
                     for &j in cols {
@@ -639,12 +639,12 @@ impl<T: Scalar> KluSolver<T> {
         // passed: blocks replay in order, so a cursor finds every plan in
         // one walk (most blocks of a circuit are singletons without one).
         let plan_at = |cursor: &mut usize, b: usize| -> Option<usize> {
-            while plan.blocks.get(*cursor).is_some_and(|p| p.b < b) {
+            while plan.blocks.get(*cursor).is_some_and(|p| p.block < b) {
                 *cursor += 1;
             }
             plan.blocks
                 .get(*cursor)
-                .is_some_and(|p| p.b == b)
+                .is_some_and(|p| p.block == b)
                 .then_some(*cursor)
         };
         // One block, as decided (`at` its plan).
