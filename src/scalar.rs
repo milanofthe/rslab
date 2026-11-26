@@ -248,6 +248,48 @@ impl Scalar for f64 {
     }
 }
 
+macro_rules! complex_methods {
+    () => {
+        unsafe fn gemm(
+            m: usize,
+            n: usize,
+            k: usize,
+            dst: *mut Self,
+            dst_cs: isize,
+            dst_rs: isize,
+            read_dst: bool,
+            lhs: *const Self,
+            lhs_cs: isize,
+            lhs_rs: isize,
+            rhs: *const Self,
+            rhs_cs: isize,
+            rhs_rs: isize,
+            alpha: Self,
+            beta: Self,
+            conj_dst: bool,
+            conj_lhs: bool,
+            conj_rhs: bool,
+            mode: crate::dense::gemm_backend::GemmMode,
+        ) {
+            crate::dense::gemm_backend::complex_gemm(
+                m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+                alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
+            )
+        }
+
+        #[inline]
+        fn is_finite(self) -> bool {
+            self.re.is_finite() && self.im.is_finite()
+        }
+
+        #[inline]
+        fn le_bytes(self, out: &mut Vec<u8>) {
+            out.extend_from_slice(&self.re.to_le_bytes());
+            out.extend_from_slice(&self.im.to_le_bytes());
+        }
+    };
+}
+
 impl Scalar for Complex<f64> {
     const COMPLEX: bool = true;
     type Low = Complex<f32>;
@@ -260,33 +302,6 @@ impl Scalar for Complex<f64> {
     #[inline]
     fn promote(low: Complex<f32>) -> Self {
         Complex::new(low.re as f64, low.im as f64)
-    }
-
-    unsafe fn gemm(
-        m: usize,
-        n: usize,
-        k: usize,
-        dst: *mut Self,
-        dst_cs: isize,
-        dst_rs: isize,
-        read_dst: bool,
-        lhs: *const Self,
-        lhs_cs: isize,
-        lhs_rs: isize,
-        rhs: *const Self,
-        rhs_cs: isize,
-        rhs_rs: isize,
-        alpha: Self,
-        beta: Self,
-        conj_dst: bool,
-        conj_lhs: bool,
-        conj_rhs: bool,
-        mode: crate::dense::gemm_backend::GemmMode,
-    ) {
-        crate::dense::gemm_backend::complex_gemm(
-            m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
-            alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
-        )
     }
 
     #[inline]
@@ -348,16 +363,7 @@ impl Scalar for Complex<f64> {
         Complex::new(re, im)
     }
 
-    #[inline]
-    fn is_finite(self) -> bool {
-        self.re.is_finite() && self.im.is_finite()
-    }
-
-    #[inline]
-    fn le_bytes(self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.re.to_le_bytes());
-        out.extend_from_slice(&self.im.to_le_bytes());
-    }
+    complex_methods!();
 }
 
 impl Scalar for f32 {
@@ -445,33 +451,6 @@ impl Scalar for Complex<f32> {
         low
     }
 
-    unsafe fn gemm(
-        m: usize,
-        n: usize,
-        k: usize,
-        dst: *mut Self,
-        dst_cs: isize,
-        dst_rs: isize,
-        read_dst: bool,
-        lhs: *const Self,
-        lhs_cs: isize,
-        lhs_rs: isize,
-        rhs: *const Self,
-        rhs_cs: isize,
-        rhs_rs: isize,
-        alpha: Self,
-        beta: Self,
-        conj_dst: bool,
-        conj_lhs: bool,
-        conj_rhs: bool,
-        mode: crate::dense::gemm_backend::GemmMode,
-    ) {
-        crate::dense::gemm_backend::complex_gemm(
-            m, n, k, dst, dst_cs, dst_rs, read_dst, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
-            alpha, beta, conj_dst, conj_lhs, conj_rhs, mode,
-        )
-    }
-
     #[inline]
     fn zero() -> Self {
         Complex::new(0.0, 0.0)
@@ -528,16 +507,7 @@ impl Scalar for Complex<f32> {
         Complex::new(re, im)
     }
 
-    #[inline]
-    fn is_finite(self) -> bool {
-        self.re.is_finite() && self.im.is_finite()
-    }
-
-    #[inline]
-    fn le_bytes(self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.re.to_le_bytes());
-        out.extend_from_slice(&self.im.to_le_bytes());
-    }
+    complex_methods!();
 }
 
 #[cfg(test)]

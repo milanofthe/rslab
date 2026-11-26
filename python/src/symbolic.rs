@@ -14,6 +14,45 @@ use crate::common::{
 use crate::factor::{Auto, Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
 
+macro_rules! analysis_methods {
+    ($hash:tt $pymethods:tt impl $name:ident $([$estimate_memory:ident])? { $($methods:tt)* }) => {
+        $hash $pymethods
+        impl $name {
+            /// Heap bytes this analysis holds on the Rust side, the stored pattern
+            /// included.
+            #[getter]
+            fn heap_bytes(&self) -> u64 {
+                let p = &self.pattern;
+                self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
+            }
+
+            $(
+                /// A-priori memory and work estimate for a factor in the given dtype.
+                ///
+                /// Parameters
+                /// ----------
+                /// dtype : str, default 'float64'
+                ///     The value type the factor will use (``'float64'``, ``'complex128'``,
+                ///     ``'float32'``, ``'complex64'``).
+                ///
+                /// Returns
+                /// -------
+                /// dict
+                ///     ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
+                ///     ``transient_peak_mb`` (the peak during the factorization),
+                ///     ``factor_flops``, ``critical_path_flops``.
+                #[pyo3(signature = (dtype = "float64"))]
+                fn $estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
+                    let e = with_dtype_name!(dtype, |T| self.sym.estimate_memory::<T>())?;
+                    memory_estimate_dict(py, &e)
+                }
+            )?
+
+            $($methods)*
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // LDL^T
 // ---------------------------------------------------------------------------
@@ -34,184 +73,161 @@ fn adopt(st: &PySettings, opts: SolverSettings) -> PySettings {
     s
 }
 
-#[pymethods]
-impl PyLdltSymbolic {
-    /// Matrix dimension ``n``.
-    #[getter]
-    fn n(&self) -> usize {
-        self.sym.n()
-    }
+analysis_methods! {
+    #[pymethods]
+    impl PyLdltSymbolic [estimate_memory] {
+        /// Matrix dimension ``n``.
+        #[getter]
+        fn n(&self) -> usize {
+            self.sym.n()
+        }
 
-    /// Predicted factor entries (the fill of ``L``).
-    #[getter]
-    fn factor_nnz(&self) -> usize {
-        self.sym.symbolic_factor_nnz()
-    }
+        /// Predicted factor entries (the fill of ``L``).
+        #[getter]
+        fn factor_nnz(&self) -> usize {
+            self.sym.symbolic_factor_nnz()
+        }
 
-    /// Heap bytes this analysis holds on the Rust side, the stored pattern
-    /// included.
-    #[getter]
-    fn heap_bytes(&self) -> u64 {
-        let p = &self.pattern;
-        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
-    }
 
-    /// Levels of the supernodal elimination tree.
-    #[getter]
-    fn n_levels(&self) -> usize {
-        self.sym.n_levels()
-    }
+        /// Levels of the supernodal elimination tree.
+        #[getter]
+        fn n_levels(&self) -> usize {
+            self.sym.n_levels()
+        }
 
-    /// Supernodes per tree level, root level first.
-    #[getter]
-    fn level_widths(&self) -> Vec<usize> {
-        self.sym.level_widths()
-    }
+        /// Supernodes per tree level, root level first.
+        #[getter]
+        fn level_widths(&self) -> Vec<usize> {
+            self.sym.level_widths()
+        }
 
-    /// ``(columns, rows)`` of every front.
-    #[getter]
-    fn front_dims(&self) -> Vec<(usize, usize)> {
-        self.sym.front_dims()
-    }
+        /// ``(columns, rows)`` of every front.
+        #[getter]
+        fn front_dims(&self) -> Vec<(usize, usize)> {
+            self.sym.front_dims()
+        }
 
-    /// The settings of the analysis; the defaults for :meth:`factor`.
-    #[getter]
-    fn settings(&self) -> PySettings {
-        self.settings.clone()
-    }
+        /// The settings of the analysis; the defaults for :meth:`factor`.
+        #[getter]
+        fn settings(&self) -> PySettings {
+            self.settings.clone()
+        }
 
-    /// A-priori memory and work estimate for a factor in the given dtype.
-    ///
-    /// Parameters
-    /// ----------
-    /// dtype : str, default 'float64'
-    ///     The value type the factor will use (``'float64'``, ``'complex128'``,
-    ///     ``'float32'``, ``'complex64'``).
-    ///
-    /// Returns
-    /// -------
-    /// dict
-    ///     ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
-    ///     ``transient_peak_mb`` (the peak during the factorization),
-    ///     ``factor_flops``, ``critical_path_flops``.
-    #[pyo3(signature = (dtype = "float64"))]
-    fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
-        let e = with_dtype_name!(dtype, |T| self.sym.estimate_memory::<T>())?;
-        memory_estimate_dict(py, &e)
-    }
 
-    /// The heap a factorization needs, predicted from the analysis before
-    /// any numeric work: for a preflight check against the memory available
-    /// and for scheduling factorizations side by side.
-    ///
-    /// Parameters
-    /// ----------
-    /// dtype : str, default 'float64'
-    ///     The value type the factor will use.
-    /// nrhs : int, default 1
-    ///     Right-hand sides per solve.
-    /// settings : Settings, optional
-    ///     The settings :meth:`factor` will run with (the threads matter: the kernels' scratch grows with them); the
-    ///     analysis settings by default.
-    /// **kwargs
-    ///     Any settings keyword, overriding ``settings``.
-    ///
-    /// Returns
-    /// -------
-    /// dict
-    ///     ``peak_bytes``, the heap peak from here through a factorization
-    ///     and a solve (the number to compare against the memory available),
-    ///     ``resident_bytes``, what stays held while the factor is kept, and
-    ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
-    ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
-    ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
-    ///     (what the worker threads, and a refactorized factor's scratch,
-    ///     keep for the next factorization), with ``threads``
-    ///     and ``nrhs``. The copies this binding keeps (the pattern, the
-    ///     matrix in the factor, a solve's right-hand sides) are included;
-    ///     NumPy's own arrays are not.
-    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
-    fn memory_plan(
-        &self,
-        py: Python<'_>,
-        dtype: &str,
-        nrhs: usize,
-        settings: Option<PySettings>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
-        let st = settings_from(
-            Some(settings.unwrap_or_else(|| self.settings.clone())),
-            kwargs,
-        )?;
-        let opts = st.resolved();
-        let (plan, vb) = with_dtype_name!(dtype, |T| (
-            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
-            std::mem::size_of::<T>()
-        ))?;
-        memory_plan_dict(py, plan, &self.pattern, vb)
-    }
 
-    /// Numeric factorization of ``data`` (the CSC value array of the lower
-    /// triangle, in the analyzed pattern's order, in any supported dtype).
-    /// Numeric settings (``threads``, ``preconditioner``,
-    /// ``pivot_threshold``, ``scaling`` ...) may be overridden per call.
-    #[pyo3(signature = (data, settings = None, **kwargs))]
+        /// The heap a factorization needs, predicted from the analysis before
+        /// any numeric work: for a preflight check against the memory available
+        /// and for scheduling factorizations side by side.
+        ///
+        /// Parameters
+        /// ----------
+        /// dtype : str, default 'float64'
+        ///     The value type the factor will use.
+        /// nrhs : int, default 1
+        ///     Right-hand sides per solve.
+        /// settings : Settings, optional
+        ///     The settings :meth:`factor` will run with (the threads matter: the kernels' scratch grows with them); the
+        ///     analysis settings by default.
+        /// **kwargs
+        ///     Any settings keyword, overriding ``settings``.
+        ///
+        /// Returns
+        /// -------
+        /// dict
+        ///     ``peak_bytes``, the heap peak from here through a factorization
+        ///     and a solve (the number to compare against the memory available),
+        ///     ``resident_bytes``, what stays held while the factor is kept, and
+        ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
+        ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
+        ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
+        ///     (what the worker threads, and a refactorized factor's scratch,
+        ///     keep for the next factorization), with ``threads``
+        ///     and ``nrhs``. The copies this binding keeps (the pattern, the
+        ///     matrix in the factor, a solve's right-hand sides) are included;
+        ///     NumPy's own arrays are not.
+        #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+        fn memory_plan(
+            &self,
+            py: Python<'_>,
+            dtype: &str,
+            nrhs: usize,
+            settings: Option<PySettings>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<PyObject> {
+            let st = settings_from(
+                Some(settings.unwrap_or_else(|| self.settings.clone())),
+                kwargs,
+            )?;
+            let opts = st.resolved();
+            let (plan, vb) = with_dtype_name!(dtype, |T| (
+                heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+                std::mem::size_of::<T>()
+            ))?;
+            memory_plan_dict(py, plan, &self.pattern, vb)
+        }
 
-    /// Numeric factorization of new values on the analyzed pattern.
-    ///
-    /// Parameters
-    /// ----------
-    /// data : scipy.sparse matrix or ndarray
-    ///     The matrix itself (any SciPy sparse matrix with the analyzed
-    ///     pattern: its lower triangle is taken, sorted and summed like at analysis
-    ///     time, and the pattern is checked entry by entry), or the CSC value
-    ///     array of that lower triangle in the order of the analysis.
-    /// settings : Settings, optional
-    ///     Numeric settings for this factorization; the analysis settings by
-    ///     default.
-    /// **kwargs
-    ///     Any settings keyword, overriding ``settings``.
-    ///
-    /// Returns
-    /// -------
-    /// factor handle
-    ///     The numeric factor with the solve methods and diagnostics.
-    ///
-    /// Raises
-    /// ------
-    /// ValueError
-    ///     If the pattern or the value count differs from the analysis.
-    /// RuntimeError
-    ///     If a pivot is numerically zero in exact mode.
-    fn factor(
-        &self,
-        py: Python<'_>,
-        data: &Bound<'_, PyAny>,
-        settings: Option<PySettings>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Ldlt> {
-        let st = settings_from(
-            Some(settings.unwrap_or_else(|| self.settings.clone())),
-            kwargs,
-        )?;
-        let opts = st.resolved();
-        let p = &self.pattern;
-        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, true)?;
-        with_dtype!(values.data(), |T| {
-            let a = p.csc::<T>(values.read()?)?;
-            Ok(Ldlt {
-                inner: T::ldlt_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
+        /// Numeric factorization of ``data`` (the CSC value array of the lower
+        /// triangle, in the analyzed pattern's order, in any supported dtype).
+        /// Numeric settings (``threads``, ``preconditioner``,
+        /// ``pivot_threshold``, ``scaling`` ...) may be overridden per call.
+        #[pyo3(signature = (data, settings = None, **kwargs))]
+
+        /// Numeric factorization of new values on the analyzed pattern.
+        ///
+        /// Parameters
+        /// ----------
+        /// data : scipy.sparse matrix or ndarray
+        ///     The matrix itself (any SciPy sparse matrix with the analyzed
+        ///     pattern: its lower triangle is taken, sorted and summed like at analysis
+        ///     time, and the pattern is checked entry by entry), or the CSC value
+        ///     array of that lower triangle in the order of the analysis.
+        /// settings : Settings, optional
+        ///     Numeric settings for this factorization; the analysis settings by
+        ///     default.
+        /// **kwargs
+        ///     Any settings keyword, overriding ``settings``.
+        ///
+        /// Returns
+        /// -------
+        /// factor handle
+        ///     The numeric factor with the solve methods and diagnostics.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError
+        ///     If the pattern or the value count differs from the analysis.
+        /// RuntimeError
+        ///     If a pivot is numerically zero in exact mode.
+        fn factor(
+            &self,
+            py: Python<'_>,
+            data: &Bound<'_, PyAny>,
+            settings: Option<PySettings>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Ldlt> {
+            let st = settings_from(
+                Some(settings.unwrap_or_else(|| self.settings.clone())),
+                kwargs,
+            )?;
+            let opts = st.resolved();
+            let p = &self.pattern;
+            let values = Values::of(py, data, &p.col_ptr, &p.row_idx, true)?;
+            with_dtype!(values.data(), |T| {
+                let a = p.csc::<T>(values.read()?)?;
+                Ok(Ldlt {
+                    inner: T::ldlt_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
+                })
             })
-        })
-    }
+        }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "LdltSymbolic(n={}, factor_nnz={}, n_levels={})",
-            self.n(),
-            self.factor_nnz(),
-            self.n_levels()
-        )
+        fn __repr__(&self) -> String {
+            format!(
+                "LdltSymbolic(n={}, factor_nnz={}, n_levels={})",
+                self.n(),
+                self.factor_nnz(),
+                self.n_levels()
+            )
+        }
     }
 }
 
@@ -280,182 +296,159 @@ pub struct PyLuSymbolic {
     settings: PySettings,
 }
 
-#[pymethods]
-impl PyLuSymbolic {
-    /// Matrix dimension ``n``.
-    #[getter]
-    fn n(&self) -> usize {
-        self.sym.n()
-    }
+analysis_methods! {
+    #[pymethods]
+    impl PyLuSymbolic [estimate_memory] {
+        /// Matrix dimension ``n``.
+        #[getter]
+        fn n(&self) -> usize {
+            self.sym.n()
+        }
 
-    /// Predicted factor entries, ``nnz(L) + nnz(U)``.
-    #[getter]
-    fn factor_nnz(&self) -> usize {
-        self.sym.symbolic_factor_nnz()
-    }
+        /// Predicted factor entries, ``nnz(L) + nnz(U)``.
+        #[getter]
+        fn factor_nnz(&self) -> usize {
+            self.sym.symbolic_factor_nnz()
+        }
 
-    /// Heap bytes this analysis holds on the Rust side, the stored pattern
-    /// included.
-    #[getter]
-    fn heap_bytes(&self) -> u64 {
-        let p = &self.pattern;
-        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
-    }
 
-    /// Levels of the supernodal elimination tree.
-    #[getter]
-    fn n_levels(&self) -> usize {
-        self.sym.n_levels()
-    }
+        /// Levels of the supernodal elimination tree.
+        #[getter]
+        fn n_levels(&self) -> usize {
+            self.sym.n_levels()
+        }
 
-    /// Supernodes per tree level, root level first.
-    #[getter]
-    fn level_widths(&self) -> Vec<usize> {
-        self.sym.level_widths()
-    }
+        /// Supernodes per tree level, root level first.
+        #[getter]
+        fn level_widths(&self) -> Vec<usize> {
+            self.sym.level_widths()
+        }
 
-    /// ``(columns, rows)`` of every front.
-    #[getter]
-    fn front_dims(&self) -> Vec<(usize, usize)> {
-        self.sym.front_dims()
-    }
+        /// ``(columns, rows)`` of every front.
+        #[getter]
+        fn front_dims(&self) -> Vec<(usize, usize)> {
+            self.sym.front_dims()
+        }
 
-    /// The settings the analysis adopted; the defaults for :meth:`factor`.
-    #[getter]
-    fn settings(&self) -> PySettings {
-        self.settings.clone()
-    }
+        /// The settings the analysis adopted; the defaults for :meth:`factor`.
+        #[getter]
+        fn settings(&self) -> PySettings {
+            self.settings.clone()
+        }
 
-    /// A-priori memory and work estimate for a factor in the given dtype.
-    ///
-    /// Parameters
-    /// ----------
-    /// dtype : str, default 'float64'
-    ///     The value type the factor will use (``'float64'``, ``'complex128'``,
-    ///     ``'float32'``, ``'complex64'``).
-    ///
-    /// Returns
-    /// -------
-    /// dict
-    ///     ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
-    ///     ``transient_peak_mb`` (the peak during the factorization),
-    ///     ``factor_flops``, ``critical_path_flops``.
-    #[pyo3(signature = (dtype = "float64"))]
-    fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
-        let e = with_dtype_name!(dtype, |T| self.sym.estimate_memory::<T>())?;
-        memory_estimate_dict(py, &e)
-    }
 
-    /// The heap a factorization needs, predicted from the analysis before
-    /// any numeric work: for a preflight check against the memory available
-    /// and for scheduling factorizations side by side.
-    ///
-    /// Parameters
-    /// ----------
-    /// dtype : str, default 'float64'
-    ///     The value type the factor will use.
-    /// nrhs : int, default 1
-    ///     Right-hand sides per solve.
-    /// settings : Settings, optional
-    ///     The settings :meth:`factor` will run with (the threads matter: the kernels' scratch grows with them); the
-    ///     analysis settings by default.
-    /// **kwargs
-    ///     Any settings keyword, overriding ``settings``.
-    ///
-    /// Returns
-    /// -------
-    /// dict
-    ///     ``peak_bytes``, the heap peak from here through a factorization
-    ///     and a solve (the number to compare against the memory available),
-    ///     ``resident_bytes``, what stays held while the factor is kept, and
-    ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
-    ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
-    ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
-    ///     (what the worker threads, and a refactorized factor's scratch,
-    ///     keep for the next factorization), with ``threads``
-    ///     and ``nrhs``. The copies this binding keeps (the pattern, the
-    ///     matrix in the factor, a solve's right-hand sides) are included;
-    ///     NumPy's own arrays are not.
-    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
-    fn memory_plan(
-        &self,
-        py: Python<'_>,
-        dtype: &str,
-        nrhs: usize,
-        settings: Option<PySettings>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
-        let st = settings_from(
-            Some(settings.unwrap_or_else(|| self.settings.clone())),
-            kwargs,
-        )?;
-        let opts = st.resolved();
-        let (plan, vb) = with_dtype_name!(dtype, |T| (
-            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
-            std::mem::size_of::<T>()
-        ))?;
-        memory_plan_dict(py, plan, &self.pattern, vb)
-    }
 
-    /// Numeric factorization of ``data`` (the full CSC value array in the
-    /// analyzed pattern's order). Numeric settings may be overridden per call.
-    #[pyo3(signature = (data, settings = None, **kwargs))]
+        /// The heap a factorization needs, predicted from the analysis before
+        /// any numeric work: for a preflight check against the memory available
+        /// and for scheduling factorizations side by side.
+        ///
+        /// Parameters
+        /// ----------
+        /// dtype : str, default 'float64'
+        ///     The value type the factor will use.
+        /// nrhs : int, default 1
+        ///     Right-hand sides per solve.
+        /// settings : Settings, optional
+        ///     The settings :meth:`factor` will run with (the threads matter: the kernels' scratch grows with them); the
+        ///     analysis settings by default.
+        /// **kwargs
+        ///     Any settings keyword, overriding ``settings``.
+        ///
+        /// Returns
+        /// -------
+        /// dict
+        ///     ``peak_bytes``, the heap peak from here through a factorization
+        ///     and a solve (the number to compare against the memory available),
+        ///     ``resident_bytes``, what stays held while the factor is kept, and
+        ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
+        ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
+        ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
+        ///     (what the worker threads, and a refactorized factor's scratch,
+        ///     keep for the next factorization), with ``threads``
+        ///     and ``nrhs``. The copies this binding keeps (the pattern, the
+        ///     matrix in the factor, a solve's right-hand sides) are included;
+        ///     NumPy's own arrays are not.
+        #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+        fn memory_plan(
+            &self,
+            py: Python<'_>,
+            dtype: &str,
+            nrhs: usize,
+            settings: Option<PySettings>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<PyObject> {
+            let st = settings_from(
+                Some(settings.unwrap_or_else(|| self.settings.clone())),
+                kwargs,
+            )?;
+            let opts = st.resolved();
+            let (plan, vb) = with_dtype_name!(dtype, |T| (
+                heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+                std::mem::size_of::<T>()
+            ))?;
+            memory_plan_dict(py, plan, &self.pattern, vb)
+        }
 
-    /// Numeric factorization of new values on the analyzed pattern.
-    ///
-    /// Parameters
-    /// ----------
-    /// data : scipy.sparse matrix or ndarray
-    ///     The matrix itself (any SciPy sparse matrix with the analyzed
-    ///     pattern: its matrix is taken, sorted and summed like at analysis
-    ///     time, and the pattern is checked entry by entry), or the CSC value
-    ///     array of that matrix in the order of the analysis.
-    /// settings : Settings, optional
-    ///     Numeric settings for this factorization; the analysis settings by
-    ///     default.
-    /// **kwargs
-    ///     Any settings keyword, overriding ``settings``.
-    ///
-    /// Returns
-    /// -------
-    /// factor handle
-    ///     The numeric factor with the solve methods and diagnostics.
-    ///
-    /// Raises
-    /// ------
-    /// ValueError
-    ///     If the pattern or the value count differs from the analysis.
-    /// RuntimeError
-    ///     If a pivot is numerically zero in exact mode.
-    fn factor(
-        &self,
-        py: Python<'_>,
-        data: &Bound<'_, PyAny>,
-        settings: Option<PySettings>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Lu> {
-        let st = settings_from(
-            Some(settings.unwrap_or_else(|| self.settings.clone())),
-            kwargs,
-        )?;
-        let opts = st.resolved();
-        let p = &self.pattern;
-        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
-        with_dtype!(values.data(), |T| {
-            let a = p.general::<T>(values.read()?)?;
-            Ok(Lu {
-                inner: T::lu_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
+        /// Numeric factorization of ``data`` (the full CSC value array in the
+        /// analyzed pattern's order). Numeric settings may be overridden per call.
+        #[pyo3(signature = (data, settings = None, **kwargs))]
+
+        /// Numeric factorization of new values on the analyzed pattern.
+        ///
+        /// Parameters
+        /// ----------
+        /// data : scipy.sparse matrix or ndarray
+        ///     The matrix itself (any SciPy sparse matrix with the analyzed
+        ///     pattern: its matrix is taken, sorted and summed like at analysis
+        ///     time, and the pattern is checked entry by entry), or the CSC value
+        ///     array of that matrix in the order of the analysis.
+        /// settings : Settings, optional
+        ///     Numeric settings for this factorization; the analysis settings by
+        ///     default.
+        /// **kwargs
+        ///     Any settings keyword, overriding ``settings``.
+        ///
+        /// Returns
+        /// -------
+        /// factor handle
+        ///     The numeric factor with the solve methods and diagnostics.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError
+        ///     If the pattern or the value count differs from the analysis.
+        /// RuntimeError
+        ///     If a pivot is numerically zero in exact mode.
+        fn factor(
+            &self,
+            py: Python<'_>,
+            data: &Bound<'_, PyAny>,
+            settings: Option<PySettings>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Lu> {
+            let st = settings_from(
+                Some(settings.unwrap_or_else(|| self.settings.clone())),
+                kwargs,
+            )?;
+            let opts = st.resolved();
+            let p = &self.pattern;
+            let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
+            with_dtype!(values.data(), |T| {
+                let a = p.general::<T>(values.read()?)?;
+                Ok(Lu {
+                    inner: T::lu_factor(py, &self.sym, a, &opts, st.factor_dtype.as_deref())?,
+                })
             })
-        })
-    }
+        }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "LuSymbolic(n={}, factor_nnz={}, n_levels={})",
-            self.n(),
-            self.factor_nnz(),
-            self.n_levels()
-        )
+        fn __repr__(&self) -> String {
+            format!(
+                "LuSymbolic(n={}, factor_nnz={}, n_levels={})",
+                self.n(),
+                self.factor_nnz(),
+                self.n_levels()
+            )
+        }
     }
 }
 
@@ -523,182 +516,158 @@ pub struct PyKluSymbolic {
     settings: PyKluSettings,
 }
 
-#[pymethods]
-impl PyKluSymbolic {
-    /// Matrix dimension ``n``.
-    #[getter]
-    fn n(&self) -> usize {
-        self.sym.n()
-    }
+analysis_methods! {
+    #[pymethods]
+    impl PyKluSymbolic [estimate_memory] {
+        /// Matrix dimension ``n``.
+        #[getter]
+        fn n(&self) -> usize {
+            self.sym.n()
+        }
 
-    /// Number of diagonal blocks of the block triangular form.
-    #[getter]
-    fn n_blocks(&self) -> usize {
-        self.sym.n_blocks()
-    }
+        /// Number of diagonal blocks of the block triangular form.
+        #[getter]
+        fn n_blocks(&self) -> usize {
+            self.sym.n_blocks()
+        }
 
-    /// Dimension of the largest diagonal block.
-    #[getter]
-    fn max_block_size(&self) -> usize {
-        self.sym.max_block_size()
-    }
+        /// Dimension of the largest diagonal block.
+        #[getter]
+        fn max_block_size(&self) -> usize {
+            self.sym.max_block_size()
+        }
 
-    /// Block boundaries in the permuted order (``n_blocks + 1`` entries).
-    #[getter]
-    fn block_ptr(&self) -> Vec<usize> {
-        self.sym.block_ptr().to_vec()
-    }
+        /// Block boundaries in the permuted order (``n_blocks + 1`` entries).
+        #[getter]
+        fn block_ptr(&self) -> Vec<usize> {
+            self.sym.block_ptr().to_vec()
+        }
 
-    /// Predicted factor entries.
-    #[getter]
-    fn factor_nnz(&self) -> usize {
-        self.sym.symbolic_factor_nnz()
-    }
+        /// Predicted factor entries.
+        #[getter]
+        fn factor_nnz(&self) -> usize {
+            self.sym.symbolic_factor_nnz()
+        }
 
-    /// Heap bytes this analysis holds on the Rust side, the stored pattern
-    /// included.
-    #[getter]
-    fn heap_bytes(&self) -> u64 {
-        let p = &self.pattern;
-        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
-    }
 
-    /// The settings the analysis adopted; the defaults for :meth:`factor`.
-    #[getter]
-    fn settings(&self) -> PyKluSettings {
-        self.settings.clone()
-    }
+        /// The settings the analysis adopted; the defaults for :meth:`factor`.
+        #[getter]
+        fn settings(&self) -> PyKluSettings {
+            self.settings.clone()
+        }
 
-    /// A-priori memory and work estimate for a factor in the given dtype.
-    ///
-    /// Parameters
-    /// ----------
-    /// dtype : str, default 'float64'
-    ///     The value type the factor will use (``'float64'``, ``'complex128'``,
-    ///     ``'float32'``, ``'complex64'``).
-    ///
-    /// Returns
-    /// -------
-    /// dict
-    ///     ``factor_bytes`` / ``factor_mb``, ``transient_peak_bytes`` /
-    ///     ``transient_peak_mb`` (the peak during the factorization),
-    ///     ``factor_flops``, ``critical_path_flops``.
-    #[pyo3(signature = (dtype = "float64"))]
-    fn estimate_memory(&self, py: Python<'_>, dtype: &str) -> PyResult<PyObject> {
-        let e = with_dtype_name!(dtype, |T| self.sym.estimate_memory::<T>())?;
-        memory_estimate_dict(py, &e)
-    }
 
-    /// The heap a factorization needs, predicted from the analysis before
-    /// any numeric work: for a preflight check against the memory available
-    /// and for scheduling factorizations side by side.
-    ///
-    /// Parameters
-    /// ----------
-    /// dtype : str, default 'float64'
-    ///     The value type the factor will use.
-    /// nrhs : int, default 1
-    ///     Right-hand sides per solve.
-    /// settings : KluSettings, optional
-    ///     The settings :meth:`factor` will run with (``parallel`` decides the block buffers); the
-    ///     analysis settings by default.
-    /// **kwargs
-    ///     Any settings keyword, overriding ``settings``.
-    ///
-    /// Returns
-    /// -------
-    /// dict
-    ///     ``peak_bytes``, the heap peak from here through a factorization
-    ///     and a solve (the number to compare against the memory available),
-    ///     ``resident_bytes``, what stays held while the factor is kept, and
-    ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
-    ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
-    ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
-    ///     (what the worker threads, and a refactorized factor's scratch,
-    ///     keep for the next factorization), with ``threads``
-    ///     and ``nrhs``. The copies this binding keeps (the pattern, the
-    ///     matrix in the factor, a solve's right-hand sides) are included;
-    ///     NumPy's own arrays are not.
-    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
-    fn memory_plan(
-        &self,
-        py: Python<'_>,
-        dtype: &str,
-        nrhs: usize,
-        settings: Option<PyKluSettings>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
-        let st = klu_settings_from(
-            Some(settings.unwrap_or_else(|| self.settings.clone())),
-            kwargs,
-        )?;
-        let opts = st.inner.clone();
-        let (plan, vb) = with_dtype_name!(dtype, |T| (
-            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
-            std::mem::size_of::<T>()
-        ))?;
-        memory_plan_dict(py, plan, &self.pattern, vb)
-    }
+        /// The heap a factorization needs, predicted from the analysis before
+        /// any numeric work: for a preflight check against the memory available
+        /// and for scheduling factorizations side by side.
+        ///
+        /// Parameters
+        /// ----------
+        /// dtype : str, default 'float64'
+        ///     The value type the factor will use.
+        /// nrhs : int, default 1
+        ///     Right-hand sides per solve.
+        /// settings : KluSettings, optional
+        ///     The settings :meth:`factor` will run with (``parallel`` decides the block buffers); the
+        ///     analysis settings by default.
+        /// **kwargs
+        ///     Any settings keyword, overriding ``settings``.
+        ///
+        /// Returns
+        /// -------
+        /// dict
+        ///     ``peak_bytes``, the heap peak from here through a factorization
+        ///     and a solve (the number to compare against the memory available),
+        ///     ``resident_bytes``, what stays held while the factor is kept, and
+        ///     their parts: ``analysis_bytes``, ``analysis_growth_bytes``,
+        ///     ``factor_bytes``, ``factor_peak_bytes`` (above what was live when
+        ///     the factorization began), ``solve_bytes`` and ``kept_bytes``
+        ///     (what the worker threads, and a refactorized factor's scratch,
+        ///     keep for the next factorization), with ``threads``
+        ///     and ``nrhs``. The copies this binding keeps (the pattern, the
+        ///     matrix in the factor, a solve's right-hand sides) are included;
+        ///     NumPy's own arrays are not.
+        #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+        fn memory_plan(
+            &self,
+            py: Python<'_>,
+            dtype: &str,
+            nrhs: usize,
+            settings: Option<PyKluSettings>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<PyObject> {
+            let st = klu_settings_from(
+                Some(settings.unwrap_or_else(|| self.settings.clone())),
+                kwargs,
+            )?;
+            let opts = st.inner.clone();
+            let (plan, vb) = with_dtype_name!(dtype, |T| (
+                heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+                std::mem::size_of::<T>()
+            ))?;
+            memory_plan_dict(py, plan, &self.pattern, vb)
+        }
 
-    /// Numeric factorization of ``data`` (the full CSC value array in the
-    /// analyzed pattern's order). KLU settings may be overridden per call.
-    #[pyo3(signature = (data, settings = None, **kwargs))]
+        /// Numeric factorization of ``data`` (the full CSC value array in the
+        /// analyzed pattern's order). KLU settings may be overridden per call.
+        #[pyo3(signature = (data, settings = None, **kwargs))]
 
-    /// Numeric factorization of new values on the analyzed pattern.
-    ///
-    /// Parameters
-    /// ----------
-    /// data : scipy.sparse matrix or ndarray
-    ///     The matrix itself (any SciPy sparse matrix with the analyzed
-    ///     pattern: its matrix is taken, sorted and summed like at analysis
-    ///     time, and the pattern is checked entry by entry), or the CSC value
-    ///     array of that matrix in the order of the analysis.
-    /// settings : Settings, optional
-    ///     Numeric settings for this factorization; the analysis settings by
-    ///     default.
-    /// **kwargs
-    ///     Any settings keyword, overriding ``settings``.
-    ///
-    /// Returns
-    /// -------
-    /// factor handle
-    ///     The numeric factor with the solve methods and diagnostics.
-    ///
-    /// Raises
-    /// ------
-    /// ValueError
-    ///     If the pattern or the value count differs from the analysis.
-    /// RuntimeError
-    ///     If a pivot is numerically zero in exact mode.
-    fn factor(
-        &self,
-        py: Python<'_>,
-        data: &Bound<'_, PyAny>,
-        settings: Option<PyKluSettings>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Klu> {
-        let st = klu_settings_from(
-            Some(settings.unwrap_or_else(|| self.settings.clone())),
-            kwargs,
-        )?;
-        let p = &self.pattern;
-        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
-        with_dtype!(values.data(), |T| {
-            let a = p.general::<T>(values.read()?)?;
-            let s = heavy(py, || self.sym.factor(&a, &st.inner)).map_err(map_err)?;
-            Ok(Klu {
-                inner: T::klu(Pair::new(s, a)),
+        /// Numeric factorization of new values on the analyzed pattern.
+        ///
+        /// Parameters
+        /// ----------
+        /// data : scipy.sparse matrix or ndarray
+        ///     The matrix itself (any SciPy sparse matrix with the analyzed
+        ///     pattern: its matrix is taken, sorted and summed like at analysis
+        ///     time, and the pattern is checked entry by entry), or the CSC value
+        ///     array of that matrix in the order of the analysis.
+        /// settings : Settings, optional
+        ///     Numeric settings for this factorization; the analysis settings by
+        ///     default.
+        /// **kwargs
+        ///     Any settings keyword, overriding ``settings``.
+        ///
+        /// Returns
+        /// -------
+        /// factor handle
+        ///     The numeric factor with the solve methods and diagnostics.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError
+        ///     If the pattern or the value count differs from the analysis.
+        /// RuntimeError
+        ///     If a pivot is numerically zero in exact mode.
+        fn factor(
+            &self,
+            py: Python<'_>,
+            data: &Bound<'_, PyAny>,
+            settings: Option<PyKluSettings>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Klu> {
+            let st = klu_settings_from(
+                Some(settings.unwrap_or_else(|| self.settings.clone())),
+                kwargs,
+            )?;
+            let p = &self.pattern;
+            let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
+            with_dtype!(values.data(), |T| {
+                let a = p.general::<T>(values.read()?)?;
+                let s = heavy(py, || self.sym.factor(&a, &st.inner)).map_err(map_err)?;
+                Ok(Klu {
+                    inner: T::klu(Pair::new(s, a)),
+                })
             })
-        })
-    }
+        }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "KluSymbolic(n={}, n_blocks={}, factor_nnz={})",
-            self.n(),
-            self.n_blocks(),
-            self.factor_nnz()
-        )
+        fn __repr__(&self) -> String {
+            format!(
+                "KluSymbolic(n={}, n_blocks={}, factor_nnz={})",
+                self.n(),
+                self.n_blocks(),
+                self.factor_nnz()
+            )
+        }
     }
 }
 
@@ -790,109 +759,104 @@ pub struct PyAutoSymbolic {
     supernodal: PySettings,
 }
 
-#[pymethods]
-impl PyAutoSymbolic {
-    /// Matrix dimension ``n``.
-    #[getter]
-    fn n(&self) -> usize {
-        self.sym.n()
-    }
-
-    /// The path family the pattern's work selected: ``'klu'`` or
-    /// ``'supernodal'`` (whose factors are ``'ldlt'`` or ``'lu'`` by the
-    /// values).
-    #[getter]
-    fn route(&self) -> &'static str {
-        match self.sym.is_supernodal() {
-            Some(true) => "supernodal",
-            _ => "klu",
+analysis_methods! {
+    #[pymethods]
+    impl PyAutoSymbolic {
+        /// Matrix dimension ``n``.
+        #[getter]
+        fn n(&self) -> usize {
+            self.sym.n()
         }
-    }
 
-    /// Heap bytes this analysis holds on the Rust side, the stored pattern
-    /// included.
-    #[getter]
-    fn heap_bytes(&self) -> u64 {
-        let p = &self.pattern;
-        self.sym.heap_bytes() + crate::common::csc_bytes(&p.col_ptr, &p.row_idx, &Vec::<u8>::new())
-    }
+        /// The path family the pattern's work selected: ``'klu'`` or
+        /// ``'supernodal'`` (whose factors are ``'ldlt'`` or ``'lu'`` by the
+        /// values).
+        #[getter]
+        fn route(&self) -> &'static str {
+            match self.sym.is_supernodal() {
+                Some(true) => "supernodal",
+                _ => "klu",
+            }
+        }
 
-    /// The heap a factorization needs, predicted from the analysis (see
-    /// :meth:`LuSymbolic.memory_plan`). On the supernodal paths a factor
-    /// keeps the ``L D L^T`` and the ``L U`` side by side once value sets of
-    /// both kinds came, and the plan counts both.
-    ///
-    /// Parameters
-    /// ----------
-    /// dtype : str, default 'float64'
-    ///     The value type the factor will use.
-    /// nrhs : int, default 1
-    ///     Right-hand sides per solve.
-    /// settings : Settings, optional
-    ///     The supernodal settings the factorization will run with; the
-    ///     analysis settings by default.
-    /// **kwargs
-    ///     Any settings keyword, overriding ``settings``.
-    #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
-    fn memory_plan(
-        &self,
-        py: Python<'_>,
-        dtype: &str,
-        nrhs: usize,
-        settings: Option<PySettings>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
-        let st = settings_from(
-            Some(settings.unwrap_or_else(|| self.supernodal.clone())),
-            kwargs,
-        )?;
-        let opts = self.settings.clone().with_supernodal(st.inner);
-        let (plan, vb) = with_dtype_name!(dtype, |T| (
-            heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
-            std::mem::size_of::<T>()
-        ))?;
-        let plan = plan.ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("the pattern is not analyzed yet")
-        })?;
-        memory_plan_dict(py, plan, &self.pattern, vb)
-    }
 
-    /// Numeric factorization of ``data`` on the analyzed pattern.
-    ///
-    /// Parameters
-    /// ----------
-    /// data : scipy.sparse matrix or ndarray
-    ///     The matrix itself (with the analyzed pattern) or its CSC value
-    ///     array in the order of the analysis.
-    ///
-    /// Returns
-    /// -------
-    /// Auto
-    ///     The factor, sharing this analysis.
-    ///
-    /// Raises
-    /// ------
-    /// ValueError
-    ///     If the pattern or the value count differs from the analysis.
-    /// RuntimeError
-    ///     If the matrix is numerically singular.
-    fn factor(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Auto> {
-        let p = &self.pattern;
-        let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
-        with_dtype!(values.data(), |T| {
-            let a = p.general::<T>(values.read()?)?;
-            let mut s = rslab::AutoSolver::<T>::new(self.sym.clone());
-            s.values_mut().copy_from_slice(&a.values);
-            heavy(py, || s.refactor(&self.settings)).map_err(map_err)?;
-            Ok(Auto {
-                inner: T::auto(Pair::new(s, a)),
-                settings: self.settings.clone(),
+        /// The heap a factorization needs, predicted from the analysis (see
+        /// :meth:`LuSymbolic.memory_plan`). On the supernodal paths a factor
+        /// keeps the ``L D L^T`` and the ``L U`` side by side once value sets of
+        /// both kinds came, and the plan counts both.
+        ///
+        /// Parameters
+        /// ----------
+        /// dtype : str, default 'float64'
+        ///     The value type the factor will use.
+        /// nrhs : int, default 1
+        ///     Right-hand sides per solve.
+        /// settings : Settings, optional
+        ///     The supernodal settings the factorization will run with; the
+        ///     analysis settings by default.
+        /// **kwargs
+        ///     Any settings keyword, overriding ``settings``.
+        #[pyo3(signature = (dtype = "float64", nrhs = 1, settings = None, **kwargs))]
+        fn memory_plan(
+            &self,
+            py: Python<'_>,
+            dtype: &str,
+            nrhs: usize,
+            settings: Option<PySettings>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<PyObject> {
+            let st = settings_from(
+                Some(settings.unwrap_or_else(|| self.supernodal.clone())),
+                kwargs,
+            )?;
+            let opts = self.settings.clone().with_supernodal(st.inner);
+            let (plan, vb) = with_dtype_name!(dtype, |T| (
+                heavy(py, || self.sym.memory_plan::<T>(&opts, nrhs)),
+                std::mem::size_of::<T>()
+            ))?;
+            let plan = plan.ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("the pattern is not analyzed yet")
+            })?;
+            memory_plan_dict(py, plan, &self.pattern, vb)
+        }
+
+        /// Numeric factorization of ``data`` on the analyzed pattern.
+        ///
+        /// Parameters
+        /// ----------
+        /// data : scipy.sparse matrix or ndarray
+        ///     The matrix itself (with the analyzed pattern) or its CSC value
+        ///     array in the order of the analysis.
+        ///
+        /// Returns
+        /// -------
+        /// Auto
+        ///     The factor, sharing this analysis.
+        ///
+        /// Raises
+        /// ------
+        /// ValueError
+        ///     If the pattern or the value count differs from the analysis.
+        /// RuntimeError
+        ///     If the matrix is numerically singular.
+        fn factor(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Auto> {
+            let p = &self.pattern;
+            let values = Values::of(py, data, &p.col_ptr, &p.row_idx, false)?;
+            with_dtype!(values.data(), |T| {
+                let a = p.general::<T>(values.read()?)?;
+                let mut s = rslab::AutoSolver::<T>::new(self.sym.clone());
+                s.values_mut().copy_from_slice(&a.values);
+                heavy(py, || s.refactor(&self.settings)).map_err(map_err)?;
+                Ok(Auto {
+                    inner: T::auto(Pair::new(s, a)),
+                    settings: self.settings.clone(),
+                })
             })
-        })
-    }
+        }
 
-    fn __repr__(&self) -> String {
-        format!("AutoSymbolic(n={}, route='{}')", self.n(), self.route())
+        fn __repr__(&self) -> String {
+            format!("AutoSymbolic(n={}, route='{}')", self.n(), self.route())
+        }
     }
 }
 
