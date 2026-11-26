@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use rslab::{
     cocg as cocg_core, cocr as cocr_core, gmres as gmres_core, gmres_block as gmres_block_core,
     gmres_recycled as gmres_recycled_core, BlockKrylovResult, KrylovResult, KrylovSettings,
-    LinearOperator, NoPreconditioner, Preconditioner,
+    LinearOperator, NoPreconditioner, Preconditioner, RslabError,
 };
 
 use crate::common::{array1, array2, block, map_err, vector, with_dtype, Pattern};
@@ -212,6 +212,27 @@ pub fn gmres_block<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     blocked(py, r, n, nrhs)
 }
 
+type Recurrence<A, T, M> = fn(&A, &[T], &M, &KrylovSettings) -> Result<KrylovResult<T>, RslabError>;
+
+fn recurrence<
+    T: Field,
+    A: LinearOperator<T> + Sync + ?Sized,
+    M: Preconditioner<T> + Sync + ?Sized,
+>(
+    py: Python<'_>,
+    op: &A,
+    pc: &M,
+    b: &Bound<'_, PyAny>,
+    tol: f64,
+    maxit: usize,
+    method: Recurrence<A, T, M>,
+) -> PyResult<PyObject> {
+    let rhs = vector::<T>(b, "rhs")?;
+    let r = crate::logging::run(py, || method(op, &rhs, pc, &settings(tol, maxit, None)))
+        .map_err(map_err)?;
+    single(py, r)
+}
+
 pub fn cocg<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     py: Python<'_>,
     op: &(dyn LinearOperator<T> + Sync),
@@ -220,10 +241,7 @@ pub fn cocg<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     tol: f64,
     maxit: usize,
 ) -> PyResult<PyObject> {
-    let rhs = vector::<T>(b, "rhs")?;
-    let r = crate::logging::run(py, || cocg_core(op, &rhs, pc, &settings(tol, maxit, None)))
-        .map_err(map_err)?;
-    single(py, r)
+    recurrence(py, op, pc, b, tol, maxit, cocg_core)
 }
 
 pub fn cocr<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
@@ -234,10 +252,47 @@ pub fn cocr<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     tol: f64,
     maxit: usize,
 ) -> PyResult<PyObject> {
-    let rhs = vector::<T>(b, "rhs")?;
-    let r = crate::logging::run(py, || cocr_core(op, &rhs, pc, &settings(tol, maxit, None)))
-        .map_err(map_err)?;
-    single(py, r)
+    recurrence(py, op, pc, b, tol, maxit, cocr_core)
+}
+
+enum Method<'a, 'py> {
+    Gmres {
+        restart: Option<usize>,
+        x0: Option<&'a Bound<'py, PyAny>>,
+    },
+    GmresBlock {
+        restart: Option<usize>,
+        x0: Option<&'a Bound<'py, PyAny>>,
+    },
+    Cocg,
+    Cocr,
+}
+
+fn plain(
+    py: Python<'_>,
+    operator: Operator<'_>,
+    b: &Bound<'_, PyAny>,
+    tol: f64,
+    maxit: usize,
+    method: Method<'_, '_>,
+) -> PyResult<PyObject> {
+    let (n, indptr, indices, data) = operator;
+    let pat = Pattern::from_py(n, &indptr, &indices)?;
+    let data = &data;
+    with_dtype!(data, |T| {
+        let a = pat.operator::<T>(vector(data, "data")?)?;
+        let pc = &NoPreconditioner;
+        match method {
+            Method::Gmres { restart, x0 } => {
+                gmres::<T, _>(py, &a, pc, b, tol, maxit, restart, x0, None)
+            }
+            Method::GmresBlock { restart, x0 } => {
+                gmres_block::<T, _>(py, &a, pc, b, tol, maxit, restart, x0)
+            }
+            Method::Cocg => cocg::<T, _>(py, &a, pc, b, tol, maxit),
+            Method::Cocr => cocr::<T, _>(py, &a, pc, b, tol, maxit),
+        }
+    })
 }
 
 /// Unpreconditioned flexible GMRES on the CSC matrix ``(n, indptr, indices, data)``.
@@ -259,21 +314,18 @@ pub fn gmres_plain(
     restart: Option<usize>,
     x0: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
-    let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |T| {
-        let a = pat.operator::<T>(vector(data, "data")?)?;
-        gmres::<T, _>(
-            py,
-            &a,
-            &NoPreconditioner,
-            b,
-            tol,
-            maxit,
-            restart,
-            x0.as_ref(),
-            None,
-        )
-    })
+    let method = Method::Gmres {
+        restart,
+        x0: x0.as_ref(),
+    };
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        method,
+    )
 }
 
 /// Unpreconditioned block GMRES on the CSC matrix ``(n, indptr, indices, data)``.
@@ -295,20 +347,18 @@ pub fn gmres_block_plain(
     restart: Option<usize>,
     x0: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
-    let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |T| {
-        let a = pat.operator::<T>(vector(data, "data")?)?;
-        gmres_block::<T, _>(
-            py,
-            &a,
-            &NoPreconditioner,
-            b,
-            tol,
-            maxit,
-            restart,
-            x0.as_ref(),
-        )
-    })
+    let method = Method::GmresBlock {
+        restart,
+        x0: x0.as_ref(),
+    };
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        method,
+    )
 }
 
 /// Unpreconditioned COCG on the CSC matrix ``(n, indptr, indices, data)``.
@@ -328,11 +378,14 @@ pub fn cocg_plain(
     tol: f64,
     maxit: usize,
 ) -> PyResult<PyObject> {
-    let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |T| {
-        let a = pat.operator::<T>(vector(data, "data")?)?;
-        cocg::<T, _>(py, &a, &NoPreconditioner, b, tol, maxit)
-    })
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        Method::Cocg,
+    )
 }
 
 /// Unpreconditioned COCR on the CSC matrix ``(n, indptr, indices, data)``.
@@ -352,9 +405,12 @@ pub fn cocr_plain(
     tol: f64,
     maxit: usize,
 ) -> PyResult<PyObject> {
-    let pat = Pattern::from_py(n, &indptr, &indices)?;
-    with_dtype!(data, |T| {
-        let a = pat.operator::<T>(vector(data, "data")?)?;
-        cocr::<T, _>(py, &a, &NoPreconditioner, b, tol, maxit)
-    })
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        Method::Cocr,
+    )
 }

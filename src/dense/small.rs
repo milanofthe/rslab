@@ -215,14 +215,7 @@ mod tests {
     };
 
     fn random(d: usize, seed: u64) -> Vec<C> {
-        let mut state = seed;
-        let mut next = move || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-        };
-        (0..d * d).map(|_| C::new(next(), next())).collect()
+        crate::test_lcg::complex(d * d, seed)
     }
 
     fn matvec(a: &[C], d: usize, x: &[C]) -> Vec<C> {

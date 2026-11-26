@@ -381,21 +381,11 @@ fn replace<T: Scalar>(
 mod tests {
     use super::*;
     use crate::test_constants::{gamma, gram_schmidt, ritz_value, UC32, UC64};
+    use crate::test_lcg::complex as random;
     use crate::FnOperator;
     use num_complex::Complex;
 
     type C = Complex<f64>;
-
-    fn random(len: usize, seed: u64) -> Vec<C> {
-        let mut state = seed;
-        let mut next = move || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-        };
-        (0..len).map(|_| C::new(next(), next())).collect()
-    }
 
     fn dense(a: &[C], n: usize) -> impl FnMut(&[C], &mut [C], usize) + '_ {
         move |x: &[C], y: &mut [C], p: usize| {

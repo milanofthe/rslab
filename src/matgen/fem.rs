@@ -298,7 +298,7 @@ pub fn convection_diffusion<T: Scalar>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matgen::integration::{sym_error, unsym_error};
+    use crate::matgen::integration::backward_error;
     use crate::test_constants::{fixed_refinement, gamma, solve_backward_error, U64, UC64};
     use crate::{LdltSymbolic, SolverSettings, ZeroPivotAction};
 
@@ -323,7 +323,7 @@ mod tests {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(40))
             .unwrap()
             .0;
-        let omega = sym_error(&a, &x, &b);
+        let omega = backward_error(&a, &x, &b);
         let bound = fixed_refinement(n, UC64) + gamma(n + 1, UC64);
         assert!(omega <= bound, "curl-curl refined backward error {omega}");
     }
@@ -341,7 +341,7 @@ mod tests {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(40))
             .unwrap()
             .0;
-        let omega = sym_error(&a, &x, &b);
+        let omega = backward_error(&a, &x, &b);
         let bound = fixed_refinement(n, U64) + gamma(n + 1, U64);
         assert!(
             omega <= bound,
@@ -376,7 +376,7 @@ mod tests {
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
         let x = solver.solve(&b).unwrap();
-        let omega = unsym_error(&a, &x, &b);
+        let omega = backward_error(&a, &x, &b);
         assert!(
             omega <= solve_backward_error(n, U64),
             "convection-diffusion LU backward error {omega}"

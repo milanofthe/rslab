@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: milanofthe/negentropy@v1.10.0
+      - uses: milanofthe/negentropy@v1.13.0
       - name: toolchain as pinned in rust-toolchain.toml
         uses: dtolnay/rust-toolchain@stable
         with:

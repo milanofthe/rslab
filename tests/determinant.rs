@@ -106,41 +106,36 @@ fn check_log_det<T: Scalar>(what: &str, n: usize, got: (T, f64), want: (C, f64))
 
 const SIZES: [usize; 6] = [1, 2, 3, 10, 100, 300];
 
-fn general_cases<T: Field>() {
-    for (s, &n) in SIZES.iter().enumerate() {
-        let a = dense::<T>(n, 11 + s as u64, 1.0, false);
-        let g = GeneralCsc::from_dense_row_major(n, &a).unwrap();
-        let want = reference_log_det(n, &a);
-        let lu = LuSolver::factor(&g, &SolverSettings::default()).unwrap();
-        check_log_det(&format!("lu n={n}"), n, lu.log_det().unwrap(), want);
-        let klu = KluSolver::factor(&g, &KluSettings::default()).unwrap();
-        check_log_det(&format!("klu n={n}"), n, klu.log_det().unwrap(), want);
-    }
-}
-
-fn symmetric_cases<T: Field>() {
-    for (s, &n) in SIZES.iter().enumerate() {
-        let a = dense::<T>(n, 31 + s as u64, 1.0, true);
-        let m = CscMatrix::from_dense_row_major(n, &a).unwrap();
-        let want = reference_log_det(n, &a);
-        let f = LdltSolver::factor(&m, &SolverSettings::default()).unwrap();
-        check_log_det(&format!("ldlt n={n}"), n, f.log_det().unwrap(), want);
-        let g = GeneralCsc::from_dense_row_major(n, &a).unwrap();
-        let lu = LuSolver::factor(&g, &SolverSettings::default()).unwrap();
-        check_log_det(&format!("lu sym n={n}"), n, lu.log_det().unwrap(), want);
+fn log_det_cases<T: Field>() {
+    for (symmetric, seed) in [(false, 11), (true, 31)] {
+        for (s, &n) in SIZES.iter().enumerate() {
+            let a = dense::<T>(n, seed + s as u64, 1.0, symmetric);
+            let want = reference_log_det(n, &a);
+            if symmetric {
+                let m = CscMatrix::from_dense_row_major(n, &a).unwrap();
+                let f = LdltSolver::factor(&m, &SolverSettings::default()).unwrap();
+                check_log_det(&format!("ldlt n={n}"), n, f.log_det().unwrap(), want);
+            }
+            let g = GeneralCsc::from_dense_row_major(n, &a).unwrap();
+            let lu = LuSolver::factor(&g, &SolverSettings::default()).unwrap();
+            let what = if symmetric { "lu sym" } else { "lu" };
+            check_log_det(&format!("{what} n={n}"), n, lu.log_det().unwrap(), want);
+            if !symmetric {
+                let klu = KluSolver::factor(&g, &KluSettings::default()).unwrap();
+                check_log_det(&format!("klu n={n}"), n, klu.log_det().unwrap(), want);
+            }
+        }
     }
 }
 
 #[test]
 fn log_det_matches_a_dense_lu_real() {
-    general_cases::<f64>();
-    symmetric_cases::<f64>();
+    log_det_cases::<f64>();
 }
 
 #[test]
 fn log_det_matches_a_dense_lu_complex() {
-    general_cases::<C>();
-    symmetric_cases::<C>();
+    log_det_cases::<C>();
 }
 
 #[test]

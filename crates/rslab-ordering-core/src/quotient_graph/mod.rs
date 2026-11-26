@@ -9,11 +9,11 @@
 //! supervariable hash bucket detection, and the inline garbage
 //! collector. They differ only in the *selection metric* -
 //! approximate degree (AMD) vs approximate fill (AMF) - which is
-//! abstracted behind the [`Metric`] trait: [`MinDegree`] drives the
-//! AMD loop, [`MinFill`] the parallel `run_elimination_amf` /
-//! `create_element_amf` / `select_pivot_amf` / `finalize_step_amf`
-//! family in `algo.rs`. The duplicated inner loops trade LoC for
-//! keeping the AMD path bit-identical to SuiteSparse.
+//! abstracted behind the [`Metric`] trait: [`MinDegree`] selects the
+//! AMD step functions, [`MinFill`] the parallel `create_element_amf` /
+//! `select_pivot_amf` / `finalize_step_amf` family in `algo.rs`. The
+//! parallel step functions keep the AMD path bit-identical to
+//! SuiteSparse.
 //!
 //! Reference: Amestoy, Davis, Duff (1996) "An approximate minimum
 //! degree ordering algorithm," SIAM J. Matrix Analysis 17:886-905;
@@ -27,7 +27,7 @@ mod workspace;
 
 pub use algo::{
     create_element, create_element_amf, finalize_permutation, finalize_step, finalize_step_amf,
-    run_elimination, run_elimination_amf, select_pivot, select_pivot_amf, StepFlops,
+    run_elimination, select_pivot, select_pivot_amf, StepFlops,
 };
 pub use metric::{Metric, MinDegree, MinFill};
 pub use workspace::{clear_flag, flip, Workspace, NONE};
@@ -81,11 +81,12 @@ pub struct OrderDiagnostics {
 ///
 /// ```ignore
 /// let mut ws = Workspace::new(pattern, opts)?;
-/// let flops = M::run_elimination(&mut ws, aggressive, progress)?;
+/// let flops = run_elimination::<M>(&mut ws, aggressive, progress)?;
 /// let perm = finalize_permutation(&mut ws);
 /// ```
 ///
-/// `M` selects the metric (and, transitively, the elimination loop).
+/// `M` selects the metric (and, transitively, the step functions of the
+/// elimination loop).
 /// AMD uses [`MinDegree`], AMF uses [`MinFill`]. `progress` hears of
 /// the eliminated variables.
 pub fn order<M: Metric>(
@@ -96,7 +97,7 @@ pub fn order<M: Metric>(
 ) -> Result<(Vec<i32>, OrderDiagnostics), OrderingError> {
     let n_buckets = M::n_buckets(pattern.n);
     let mut ws = Workspace::new_with_n_buckets(pattern, opts, n_buckets)?;
-    let flops = M::run_elimination(&mut ws, aggressive, progress)?;
+    let flops = run_elimination::<M>(&mut ws, aggressive, progress)?;
     let diag = OrderDiagnostics {
         ncmpa: ws.ncmpa,
         n_mass_elim: ws.n_mass_elim,
