@@ -19,14 +19,6 @@ fn analyze(m: &CscMatrix<f64>, params: &AmalgamationSettings) -> SymbolicFactori
     rslab::symbolic::analyze(m.n, &m.col_ptr, &m.row_idx, &ordering, params).unwrap()
 }
 
-/// Arrow matrix: variables 0..n-2 are coupled only to variable n-1
-/// (the "tip" of the arrow). With nemin=32, the SSIDS size rule
-/// admits all sibling-merges into the parent - but the adjacency
-/// check at supernode.rs blocks every merge except the one whose
-/// last column equals parent_first - 1.
-///
-/// Construction: lower-triangle entries are `(j, j)` and `(n-1, j)`
-/// for each j in 0..n-1, plus `(n-1, n-1)`.
 fn arrow_matrix(n: usize) -> CscMatrix {
     let mut rows = Vec::new();
     let mut cols = Vec::new();
@@ -45,18 +37,10 @@ fn arrow_matrix(n: usize) -> CscMatrix {
     CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
 }
 
-/// A bushy fan: same as arrow_matrix but verifies the fundamental
-/// supernode/amalgamation count is collapsed all the way to 1
-/// supernode. Distinct from `arrow_matrix_collapses` because the
-/// arrow matrix is also a valid fan.
 fn bushy_fan(n: usize) -> CscMatrix {
     arrow_matrix(n)
 }
 
-/// Tridiagonal: parent of j-1 is j, in a single chain. Postorder
-/// already places columns adjacently, so renumbering should be a
-/// no-op (identity bias). Both strategies must produce the same
-/// supernode list.
 fn tridiagonal(n: usize) -> CscMatrix {
     let mut rows = Vec::new();
     let mut cols = Vec::new();
@@ -76,12 +60,12 @@ fn tridiagonal(n: usize) -> CscMatrix {
 
 #[test]
 fn arrow_matrix_collapses_under_renumber() {
-    let m = arrow_matrix(8);
-
-    // Adjacency strategy: only one merge possible. Expect >=3
-    // supernodes (specifically: many leaf singletons + the root).
+    let n = 8;
+    let nemin = 32;
+    assert!(nemin >= n, "every merge stays within the size rule");
+    let m = arrow_matrix(n);
     let adj_params = AmalgamationSettings {
-        nemin: 32,
+        nemin,
         strategy: AmalgamationStrategy::Adjacency,
         ..Default::default()
     };
@@ -91,12 +75,8 @@ fn arrow_matrix_collapses_under_renumber() {
         "adjacency strategy on arrow matrix should under-merge; got {} supernodes",
         adj_sym.supernodes.len()
     );
-
-    // Renumber strategy: with nemin=32 >= n=8, every fundamental
-    // supernode is a candidate to merge into its parent -> 1
-    // supernode covering all 8 columns.
     let renum_params = AmalgamationSettings {
-        nemin: 32,
+        nemin,
         strategy: AmalgamationStrategy::Renumber,
         ..Default::default()
     };
@@ -106,14 +86,11 @@ fn arrow_matrix_collapses_under_renumber() {
         1,
         "renumber strategy on arrow matrix should collapse to 1 supernode"
     );
-    assert_eq!(renum_sym.supernodes[0].ncol, 8);
+    assert_eq!(renum_sym.supernodes[0].ncol, n);
 }
 
 #[test]
 fn bushy_fan_collapses_under_renumber() {
-    // Same shape as the arrow matrix at larger n. Catches the case
-    // where the bias-emit-late traversal needs to handle multiple
-    // (>=10) sibling subtrees correctly.
     let m = bushy_fan(33);
     let params = AmalgamationSettings {
         nemin: 64,
@@ -131,9 +108,6 @@ fn bushy_fan_collapses_under_renumber() {
 
 #[test]
 fn tridiagonal_renumber_is_at_least_as_aggressive() {
-    // Tridiagonal under both strategies must total to n columns.
-    // Renumber is strictly more aggressive (reverse iteration +
-    // bias) so its supernode count must be <= Adjacency's.
     let m = tridiagonal(8);
     let adj_params = AmalgamationSettings {
         nemin: 32,
@@ -157,12 +131,17 @@ fn tridiagonal_renumber_is_at_least_as_aggressive() {
     let renum_total: usize = renum.supernodes.iter().map(|s| s.ncol).sum();
     assert_eq!(adj_total, 8);
     assert_eq!(renum_total, 8);
+    let ncols =
+        |sym: &SymbolicFactorization| sym.supernodes.iter().map(|s| s.ncol).collect::<Vec<_>>();
+    assert_eq!(
+        ncols(&renum),
+        ncols(&adj),
+        "renumbering a chain whose postorder is already adjacent changes the supernodes"
+    );
 }
 
 #[test]
 fn perm_is_valid_bijection_under_renumber() {
-    // Whatever the renumbering does, the resulting perm must be a
-    // bijection on 0..n.
     for n in [4, 8, 33, 64] {
         let m = arrow_matrix(n);
         let params = AmalgamationSettings {

@@ -13,8 +13,6 @@ use rslab::{
     SolverSettings,
 };
 
-/// 2D grid (k x k) with a complex shift, full (`sym = false`, a small skew on
-/// the couplings) or the lower triangle of the symmetric one.
 fn grid<T: Scalar>(
     k: usize,
     sym: bool,
@@ -91,7 +89,6 @@ fn block_gmres_with_a_single_precision_lu_reaches_double_accuracy() {
     let (n, r, cc, v) = grid(40, false, c(4.0, 0.5), c(-1.0, 0.1));
     let a = GeneralCsc::from_triplets(n, &r, &cc, &v).unwrap();
     let opts = SolverSettings::default();
-    // One analysis for both precisions.
     let sym = LuSymbolic::analyze(&a, &opts).unwrap();
     let m = MixedPrecision::new(sym.factor(&a.demoted(), &opts).unwrap());
     let nrhs = 3;
@@ -99,8 +96,6 @@ fn block_gmres_with_a_single_precision_lu_reaches_double_accuracy() {
         .map(|i| c((i % 7) as f64 - 3.0, 0.5))
         .collect();
 
-    // The block apply solves the columns together and agrees with the column
-    // loop to single precision (its products sum in their own order).
     let mut z = vec![Complex64::default(); n * nrhs];
     m.apply_block(&b, &mut z, nrhs, n).unwrap();
     for col in 0..nrhs {
@@ -138,7 +133,6 @@ fn refinement_against_the_double_matrix_recovers_double_accuracy() {
         measure: BackwardError::Normwise,
         ..Default::default()
     };
-    // Real symmetric: LDL^T in f32 under f64 refinement.
     let (n, r, c, v) = grid(40, true, 4.5f64, -1.0);
     let a = CscMatrix::from_triplets(n, &r, &c, &v).unwrap();
     let sym = LdltSymbolic::analyze(&a, &SolverSettings::default()).unwrap();

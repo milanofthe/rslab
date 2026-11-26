@@ -10,8 +10,6 @@ use num_complex::Complex;
 use rslab::parallel::{install, Dispatch, Pool};
 use rslab::{CscMatrix, GeneralCsc, KluSettings, KluSolver, LdltSolver, LuSolver, SolverSettings};
 
-/// Pieces one after the other on the calling thread, forwards or backwards;
-/// every section free, so every section worth anything goes to the pool.
 struct Serial {
     reverse: bool,
 }
@@ -32,7 +30,6 @@ impl Pool for Serial {
     }
 }
 
-/// Pieces on `threads` threads started per run, each taking the next one.
 struct Threaded(usize);
 
 impl Pool for Threaded {
@@ -66,7 +63,6 @@ fn pools() -> Vec<(&'static str, Arc<dyn Pool>)> {
     ]
 }
 
-/// 3D 7-point Laplacian (k^3 grid, SPD, lower triangle).
 fn grid3d(k: usize) -> CscMatrix<f64> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
@@ -95,7 +91,6 @@ fn grid3d(k: usize) -> CscMatrix<f64> {
     CscMatrix::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-/// 3D convection-diffusion grid (unsymmetric).
 fn grid3d_conv(k: usize) -> GeneralCsc<f64> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
@@ -130,7 +125,6 @@ fn bits<T: Copy>(x: &[T]) -> Vec<u8> {
         .to_vec()
 }
 
-/// `solve` on rayon at 8 threads, then on every lent pool, the same bits.
 fn same_on_every_pool<T: Copy>(what: &str, solve: impl Fn() -> Vec<T>) {
     let reference = bits(&solve());
     for (name, pool) in pools() {
@@ -198,8 +192,6 @@ fn klu_on_a_lent_pool() {
     });
 }
 
-/// A dense matrix in sparse form, diagonally dominant: one front, whose
-/// products are large enough to split.
 fn dense(n: usize, lower: bool) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..n {

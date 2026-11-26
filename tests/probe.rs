@@ -8,7 +8,6 @@ use rslab::{
 };
 use rsprobe::{Buffer, Context, Kind, Level};
 
-/// 2D 5-point grid Laplacian (k x k), SPD-shifted, lower triangle.
 fn grid_lower(k: usize) -> CscMatrix<f64> {
     let n = k * k;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -46,9 +45,9 @@ fn a_factorization_reports_its_progress_in_percent() {
     let steps = rslab::constants::PROGRESS_STEPS;
     let mut seen = Vec::new();
     buffer.drain(|e, path| {
-        // The analysis parts report with their name.
         if let Kind::Progress { done, total, text } = &e.kind {
-            if text.is_empty() {
+            let unnamed_part = text.is_empty();
+            if unnamed_part {
                 assert_eq!((path, *total), ("factor", steps));
                 seen.push(*done);
             }
@@ -58,7 +57,6 @@ fn a_factorization_reports_its_progress_in_percent() {
     assert_eq!(seen.iter().max(), Some(&steps));
 }
 
-/// The progress events of the analysis of `a` under `opts`, per part named.
 fn analysis_progress(a: &CscMatrix<f64>, opts: &SolverSettings, part: &str) -> Vec<u64> {
     let buffer = Buffer::default();
     let ctx = Context::builder()
@@ -82,9 +80,6 @@ fn analysis_progress(a: &CscMatrix<f64>, opts: &SolverSettings, part: &str) -> V
     seen
 }
 
-/// Nested dissection joining the ordering race (its gates opened) and AMD
-/// alone each report the ordering in percent, ending at the total, with at
-/// most one event per step.
 #[test]
 fn an_analysis_reports_its_ordering_in_percent() {
     let steps = rslab::constants::PROGRESS_STEPS;
@@ -141,8 +136,10 @@ fn a_factorization_records_its_phases_counts_and_events() {
     assert_eq!(at(&["factor", "scale"], "calls"), 1);
     assert_eq!(at(&["factor", "solve layout"], "calls"), 1);
     assert_eq!(at(&["solve"], "rhs"), 1);
-    // DEBUG scopes stay out at INFO
-    assert!(r.find(&["solve", "forward"]).is_none());
+    assert!(
+        r.find(&["solve", "forward"]).is_none(),
+        "a DEBUG scope is recorded at INFO"
+    );
 
     let mut events = Vec::new();
     buffer.drain(|e, path| events.push((e.level, path.to_string(), e.kind.clone())));
@@ -190,13 +187,11 @@ fn finer_scopes_open_with_the_threshold() {
     assert_eq!(fronts, f_supernodes(&a));
 }
 
-/// The supernodes of `a`'s analysis: one front each.
 fn f_supernodes(a: &CscMatrix<f64>) -> u64 {
     let f = LdltSolver::factor(a, &SolverSettings::exact()).unwrap();
     f.diagnostics().decisions.n_supernodes as u64
 }
 
-/// Unsymmetric 2D convection-diffusion grid (k x k), one irreducible block.
 fn grid_unsym(k: usize) -> GeneralCsc<f64> {
     let n = k * k;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -221,9 +216,6 @@ fn grid_unsym(k: usize) -> GeneralCsc<f64> {
 
 #[test]
 fn klu_runs_on_the_workers_its_settings_set() {
-    // Called from a worker of a wider pool, with every replay forced side by
-    // side: the threads busy under each phase are those of the policy, not
-    // the caller's pool.
     let width = 2;
     let ctx = Context::builder().threshold(Level::INFO).build();
     let a = grid_unsym(120);
@@ -255,9 +247,6 @@ fn klu_runs_on_the_workers_its_settings_set() {
 
 #[test]
 fn a_budget_of_one_thread_opens_no_section() {
-    // Systems large enough that their phases go wide at more threads; with
-    // one thread every phase runs on the calling thread: no task reaches a
-    // pool and every section is one thread wide.
     let ctx = Context::builder().threshold(Level::DEBUG).build();
     let (sym, unsym) = (grid_lower(150), grid_unsym(150));
     let b = vec![1.0; sym.n];
@@ -290,13 +279,6 @@ fn a_budget_of_one_thread_opens_no_section() {
 
 #[test]
 fn ambient_work_below_the_section_threshold_enters_no_pool() {
-    // Inside a wide pool, `Threads::Ambient` runs on that pool: a 1 x 1
-    // system's analysis and factorization run on the calling worker, with
-    // no pool entered and no task of their own (they entered a pool as wide
-    // as the caller's before, 0.77 ms per analysis on 128 threads). The
-    // walk of the assembly forest (`tree`) spawns its leaf as a task on any
-    // pool of more than one thread, which the calling worker or another one
-    // runs: its nodes are not checked.
     let wide = rayon::ThreadPoolBuilder::new()
         .num_threads(16)
         .build()
@@ -311,8 +293,6 @@ fn ambient_work_below_the_section_threshold_enters_no_pool() {
         s.solve(&[1.0]).unwrap();
     };
     let r = wide.install(|| {
-        // once before: the first section decision on a pool measures what a
-        // section costs there, in sections of its own
         run();
         let ctx = Context::builder().threshold(Level::TRACE).build();
         {

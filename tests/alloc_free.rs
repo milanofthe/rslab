@@ -19,14 +19,10 @@ use rsprobe::{Context, Level};
 #[global_allocator]
 static ALLOC: rsprobe::Alloc = rsprobe::Alloc::new();
 
-/// Allocations of `f` over a hundred runs after two warm-up runs.
 fn allocs(threshold: Level, f: impl FnMut()) -> u64 {
     counted(threshold, 2, 100, f)
 }
 
-/// Allocations of `f` over `runs` runs after `warm` warm-up runs, in a scope
-/// of a context at `threshold` (the warm-up runs in the context too: the
-/// first entry of a pool's worker into it).
 fn counted(threshold: Level, warm: usize, runs: usize, mut f: impl FnMut()) -> u64 {
     let ctx = Context::builder().threshold(threshold).build();
     let _on = ctx.enter();
@@ -40,9 +36,7 @@ fn counted(threshold: Level, warm: usize, runs: usize, mut f: impl FnMut()) -> u
     r.nodes[node as usize].get("allocs")
 }
 
-/// A 5-point stencil on an `m` by `m` grid, as triplets: symmetric (lower
-/// triangle only) or with an unsymmetric coupling.
-fn grid(m: usize, lower_only: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<f64>) {
+fn five_point_grid(m: usize, lower_only: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<f64>) {
     let n = m * m;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
@@ -65,8 +59,6 @@ fn grid(m: usize, lower_only: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<f64>)
     (n, r, c, v)
 }
 
-/// Every `*_into` entry point of one solver: at most `$limit` allocations
-/// over a hundred warm solves, and the bits of the allocating twin.
 macro_rules! check_solves {
     ($what:expr, $s:expr, $n:expr, $level:expr, $limit:expr, $many_free:expr) => {{
         let (s, n) = (&$s, $n);
@@ -118,13 +110,10 @@ macro_rules! check_solves {
 
 #[test]
 fn a_warm_newton_loop_allocates_nothing() {
-    // The calling thread's path: sweeps pinned to it (a sweep worth the
-    // pool enters it, and the pool's queues allocate now and then).
     let mut opts = SolverSettings::default();
     opts.solve.par_min_work = Some(usize::MAX);
     for m in [6, 40] {
-        // KLU: the refactor and the solves.
-        let (n, r, c, v) = grid(m, false);
+        let (n, r, c, v) = five_point_grid(m, false);
         let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
         let settings = KluSettings::default().with_parallel(KluParallel::Off);
         let mut klu = KluSolver::factor(&a, &settings).unwrap();
@@ -132,15 +121,13 @@ fn a_warm_newton_loop_allocates_nothing() {
         assert_eq!(refactor, 0, "KLU refactor allocates (n = {n})");
         check_solves!(format!("KLU n={n}"), klu, n, Level::INFO, 0, true);
 
-        // Supernodal LU on the same pattern, its analysis kept.
         let lu = LuSymbolic::analyze(&a, &opts)
             .unwrap()
             .factor(&a, &opts)
             .unwrap();
         check_solves!(format!("LU n={n}"), lu, n, Level::INFO, 0, false);
 
-        // Supernodal LDL^T on the symmetric stencil.
-        let (n, r, c, v) = grid(m, true);
+        let (n, r, c, v) = five_point_grid(m, true);
         let s = CscMatrix::from_triplets(n, &r, &c, &v).unwrap();
         let ldlt = LdltSymbolic::analyze(&s, &opts)
             .unwrap()
@@ -148,8 +135,6 @@ fn a_warm_newton_loop_allocates_nothing() {
             .unwrap();
         check_solves!(format!("LDLT n={n}"), ldlt, n, Level::INFO, 0, false);
 
-        // The pool's path, forced, entered from a worker of the pool: the
-        // bits of the calling thread's path.
         let mut par = opts.clone();
         par.solve.par_min_work = Some(0);
         let lu_par = LuSymbolic::analyze(&a, &par)
@@ -183,21 +168,19 @@ fn a_warm_newton_loop_allocates_nothing() {
             );
         });
         let b: Vec<f64> = (0..n).map(|i| 1.0 - (i % 5) as f64).collect();
-        assert_eq!(lu_par.solve(&b).unwrap(), lu.solve(&b).unwrap());
-        assert_eq!(ldlt_par.solve(&b).unwrap(), ldlt.solve(&b).unwrap());
+        assert_eq!(
+            lu_par.solve(&b).unwrap(),
+            lu.solve(&b).unwrap(),
+            "LU n={n}: the pool's path differs from the calling thread's bits"
+        );
+        assert_eq!(
+            ldlt_par.solve(&b).unwrap(),
+            ldlt.solve(&b).unwrap(),
+            "LDLT n={n}: the pool's path differs from the calling thread's bits"
+        );
     }
 }
 
-/// The allocations of a warm supernodal refactor do not grow with the
-/// number of supernodes: the node kernels' scratch, the pivot records and
-/// the emit's scratch live in the solver's pools. The count is the whole
-/// refactor: at `Fixed(1)` it runs on the calling thread (before, it ran on
-/// a one-worker pool whose thread the counter did not see, and the count
-/// held only the caller's part). The count compared against is the one at
-/// the smallest size. Larger grids are left out: there the dense kernel
-/// (the `gemm` crate) allocates packing buffers for its large products, at
-/// a threshold internal to the crate, so their number cannot be derived
-/// independently of the observed total. What remains per refactor is #254.
 #[test]
 fn a_warm_supernodal_refactor_allocates_the_same_at_every_size() {
     let opts = SolverSettings {
@@ -205,29 +188,27 @@ fn a_warm_supernodal_refactor_allocates_the_same_at_every_size() {
         ..SolverSettings::default()
     };
     let count = |m: usize| {
-        let (n, r, c, v) = grid(m, false);
+        let (n, r, c, v) = five_point_grid(m, false);
         let a = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
         let sym = LuSymbolic::analyze(&a, &opts).unwrap();
         let mut lu = sym.factor(&a, &opts).unwrap();
         let lu_count = allocs(Level::INFO, || sym.refactor(&a, &opts, &mut lu).unwrap());
-        let (n, r, c, v) = grid(m, true);
+        let (n, r, c, v) = five_point_grid(m, true);
         let s = CscMatrix::from_triplets(n, &r, &c, &v).unwrap();
         let dsym = LdltSymbolic::analyze(&s, &opts).unwrap();
         let mut ldlt = dsym.factor(&s, &opts).unwrap();
         let ldlt_count = allocs(Level::INFO, || dsym.refactor(&s, &opts, &mut ldlt).unwrap());
         (lu_count, ldlt_count)
     };
-    // n = 36 and n = 144: no product reaches the dense kernel's packing.
-    let (lu, ldlt) = count(6);
+    let (smallest_side, larger_side) = (6, 12);
+    let (lu, ldlt) = count(smallest_side);
     assert_eq!(
-        count(12),
+        count(larger_side),
         (lu, ldlt),
         "per 100 refactors, n = 144 against n = 36"
     );
 }
 
-/// A block Arnoldi step writes into the basis it reserved at its start and
-/// allocates nothing (the operator here neither).
 #[test]
 fn block_arnoldi_steps_allocate_nothing() {
     use num_complex::Complex;

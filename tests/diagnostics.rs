@@ -7,7 +7,6 @@ use rslab::{
     ScalingStrategy, SolverSettings,
 };
 
-/// 2D 5-point grid Laplacian (k x k), SPD-shifted; lower triangle for LDLT.
 fn grid_lower(k: usize) -> CscMatrix<f64> {
     let n = k * k;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -31,7 +30,6 @@ fn grid_lower(k: usize) -> CscMatrix<f64> {
     CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
 }
 
-/// The same grid as a full unsymmetric matrix (a small skew on the couplings).
 fn grid_full(k: usize) -> GeneralCsc<f64> {
     let n = k * k;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -107,8 +105,6 @@ fn klu_diagnostics_are_filled() {
     assert_eq!(d.solves.calls, 1);
 }
 
-/// A pivot the static floor lifted shows as the floor: the smallest pivot
-/// of a singular matrix's factor.
 #[test]
 fn min_pivot_is_the_floor_a_singular_pivot_was_lifted_to() {
     let floor = 1e-8;
@@ -121,14 +117,16 @@ fn min_pivot_is_the_floor_a_singular_pivot_was_lifted_to() {
         GeneralCsc::from_triplets(2, &[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 2.0, 2.0, 4.0]).unwrap();
     let f = LuSolver::factor(&full, &s).unwrap();
     assert_eq!(f.n_perturbed(), 1);
-    // held as its reciprocal, the floor comes back to rounding
     let p = f.diagnostics().numeric.min_pivot.unwrap();
-    assert!((p - floor).abs() <= 4.0 * f64::EPSILON * floor, "{p:e}");
+    let reciprocal_rounding = 4.0 * f64::EPSILON * floor;
+    assert!(
+        (p - floor).abs() <= reciprocal_rounding,
+        "LU min pivot {p:e} is not the floor up to the rounding of its reciprocal"
+    );
 }
 
 #[test]
 fn settings_ignored_by_a_path_are_reported() {
-    // the pivot threshold belongs to the LU: the LDL^T path reports it.
     let (sym, full) = (grid_lower(12), grid_full(12));
     let ldlt = SolverSettings::exact().with_pivot_threshold(0.5);
     let w = LdltSolver::factor(&sym, &ldlt)
@@ -136,27 +134,40 @@ fn settings_ignored_by_a_path_are_reported() {
         .diagnostics()
         .warnings;
     assert_eq!(w.len(), 1, "{w:?}");
-    assert!(w[0].contains("pivoting.threshold"));
-    assert!(LuSolver::factor(&full, &ldlt)
-        .unwrap()
-        .diagnostics()
-        .warnings
-        .is_empty());
-    // a symmetric scaling has no two-sided form: the LU path reports it.
+    assert!(
+        w[0].contains("pivoting.threshold"),
+        "the LDL^T path does not report the pivot threshold of the LU: {w:?}"
+    );
+    assert!(
+        LuSolver::factor(&full, &ldlt)
+            .unwrap()
+            .diagnostics()
+            .warnings
+            .is_empty(),
+        "the LU path reports its own pivot threshold"
+    );
     let lu = SolverSettings::exact().with_scaling(ScalingStrategy::Mc64Symmetric);
     let w = LuSolver::factor(&full, &lu).unwrap().diagnostics().warnings;
     assert_eq!(w.len(), 1, "{w:?}");
-    assert!(w[0].contains("scaling"));
-    assert!(LdltSolver::factor(&sym, &lu)
-        .unwrap()
-        .diagnostics()
-        .warnings
-        .is_empty());
-    // defaults are honoured everywhere
+    assert!(
+        w[0].contains("scaling"),
+        "the LU path does not report the symmetric scaling it has no two-sided form of: {w:?}"
+    );
+    assert!(
+        LdltSolver::factor(&sym, &lu)
+            .unwrap()
+            .diagnostics()
+            .warnings
+            .is_empty(),
+        "the LDL^T path reports the symmetric scaling it reads"
+    );
     let d = SolverSettings::default();
-    assert!(LuSolver::factor(&full, &d)
-        .unwrap()
-        .diagnostics()
-        .warnings
-        .is_empty());
+    assert!(
+        LuSolver::factor(&full, &d)
+            .unwrap()
+            .diagnostics()
+            .warnings
+            .is_empty(),
+        "the default settings report an ignored setting"
+    );
 }

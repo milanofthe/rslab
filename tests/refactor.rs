@@ -5,8 +5,6 @@
 use rslab::prelude::*;
 use rslab::{GeneralCsc, LdltSymbolic, LuSymbolic, SolveWork};
 
-/// A 5-point stencil on an `m` by `m` grid with an unsymmetric coupling,
-/// its values moved by `shift`.
 fn grid(m: usize, shift: f64) -> GeneralCsc<f64> {
     let n = m * m;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -67,7 +65,6 @@ fn a_failed_refactor_refuses_to_solve_until_the_next_succeeds() {
     );
 }
 
-/// The symmetric stencil (lower triangle), its values moved by `shift`.
 fn sym_grid(m: usize, shift: f64) -> CscMatrix<f64> {
     let n = m * m;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());

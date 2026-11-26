@@ -4,7 +4,6 @@
 use num_complex::Complex;
 use rslab::{GeneralCsc, LuSolver, OrderingMethod, SolverSettings};
 
-/// 2D 5-point grid Laplacian (k x k), shifted to be unsymmetric-safe, as GeneralCsc.
 fn grid(k: usize) -> GeneralCsc<Complex<f64>> {
     let n = k * k;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -40,19 +39,16 @@ fn factor_honours_the_ordering_in_the_settings() {
         fill(OrderingMethod::MetisND),
         fill(OrderingMethod::Rcm),
     );
-    // RCM is a band ordering: on a 2D grid its fill is far above minimum-degree /
-    // nested dissection. Identical fills mean the setting was ignored.
     assert!(
         rcm > amd * 3 / 2 && rcm > nd * 3 / 2,
-        "orderings must change the fill: amd {amd} nd {nd} rcm {rcm}"
+        "the band ordering RCM does not fill far above AMD and ND on a 2D grid,          so the ordering setting is ignored: amd {amd} nd {nd} rcm {rcm}"
     );
-    assert_ne!(amd, rcm);
+    assert_ne!(amd, rcm, "the ordering setting is ignored");
 }
 
 #[test]
 fn ldlt_factor_with_honours_the_ordering_in_the_settings() {
     use rslab::{CscMatrix, LdltSolver};
-    // Lower triangle of the same grid (CscMatrix stores the lower triangle only).
     let k = 60usize;
     let n = k * k;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -81,6 +77,6 @@ fn ldlt_factor_with_honours_the_ordering_in_the_settings() {
     let (amd, rcm) = (fill(OrderingMethod::Amd), fill(OrderingMethod::Rcm));
     assert!(
         rcm > amd * 3 / 2,
-        "orderings must change the fill: amd {amd} rcm {rcm}"
+        "the band ordering RCM does not fill far above AMD on a 2D grid,          so the ordering setting is ignored: amd {amd} rcm {rcm}"
     );
 }
