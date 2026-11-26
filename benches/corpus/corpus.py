@@ -59,7 +59,7 @@ FAMILIES = {'mom', 'circuit', 'fem'}
 # job asks for: the measured peak of the run with headroom (mom 10.1 GB, circuit 1.1 GB, fem
 # 2.8 GB), but no less than the cold wheel builds need: their resident set stays below 1 GB,
 # yet within a 2 or 4 GB limit they crawled for half an hour on the page cache (40 s at 8 GB).
-PLACEMENT = {'mom': ('meadow', '13G'), 'circuit': ('croft-2', '8G'), 'fem': ('croft-1', '8G')}
+PLACEMENT = {'mom': ('euler', '13G'), 'circuit': ('kutta', '8G'), 'fem': ('runge', '8G')}
 # SuiteSparse's file server first, the old University of Florida mirror after it.
 SUITESPARSE_MIRRORS = ['https://sparse.tamu.edu/MM', 'https://www.cise.ufl.edu/research/sparse/MM']
 
