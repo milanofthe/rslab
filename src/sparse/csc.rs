@@ -66,7 +66,6 @@ impl PatternIndex for i32 {
 }
 
 impl<I: PatternIndex> CscPattern<I> {
-    /// The rows of column `j`.
     #[inline]
     pub(crate) fn col(&self, j: usize) -> &[I] {
         &self.row_idx[self.col_ptr[j].get()..self.col_ptr[j + 1].get()]
@@ -178,11 +177,6 @@ impl<T: Scalar> CscMatrix<T> {
                 "row_idx and values length mismatch".to_string(),
             ));
         }
-        // `col_ptr` must start at 0. A monotone `col_ptr` beginning at `k > 0` with
-        // `col_ptr[n] == nnz` passes every other check (length, monotone,
-        // in-bounds, sorted, lower-triangle) while positions `0..k` of
-        // `row_idx`/`values` are never covered by any column range -
-        // silently dropped and never factored.
         if self.col_ptr[0] != 0 {
             return Err(RslabError::InvalidInput(format!(
                 "col_ptr[0] must be 0, got {}",
@@ -192,13 +186,6 @@ impl<T: Scalar> CscMatrix<T> {
         if self.col_ptr[self.n] != self.row_idx.len() {
             return Err(RslabError::InvalidInput("col_ptr[n] != nnz".to_string()));
         }
-        // col_ptr must be monotonically non-decreasing (X6). Without this a
-        // non-monotone `ia` whose endpoints line up (col_ptr[0] == 0,
-        // col_ptr[n] == nnz) passes every check below - in-bounds, sorted,
-        // lower-triangle - yet `col_ptr[j] > col_ptr[j+1]` makes column j's
-        // range empty and overlaps adjacent columns, silently dropping entries
-        // and factoring the wrong matrix. Checked up front so the `start..end`
-        // ranges used below are well-formed.
         for j in 0..self.n {
             if self.col_ptr[j + 1] < self.col_ptr[j] {
                 return Err(RslabError::InvalidInput(format!(
@@ -227,7 +214,6 @@ impl<T: Scalar> CscMatrix<T> {
                     )));
                 }
             }
-            // Check sorted
             for k in (start + 1)..end {
                 if self.row_idx[k] <= self.row_idx[k - 1] {
                     return Err(RslabError::InvalidInput(format!(
@@ -272,17 +258,14 @@ impl<T: Scalar> CscMatrix<T> {
         }
     }
 
-    /// Convert to dense symmetric matrix.
     #[cfg(test)]
     pub(crate) fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix<T> {
         let mut buf = vec![T::zero(); self.n * self.n];
-        // `from_triplets` guarantees all stored entries are lower-
-        // triangle (row >= col), so every `(i, j)` lands at
-        // `data[j*n + i]`.
         for j in 0..self.n {
             let col = j * self.n;
             for k in self.col_ptr[j]..self.col_ptr[j + 1] {
                 let i = self.row_idx[k];
+                debug_assert!(i >= j);
                 buf[col + i] = self.values[k];
             }
         }
@@ -315,9 +298,7 @@ pub fn symmetric_pattern<I: PatternIndex>(
 }
 
 enum ColumnCounts {
-    // `above[c]`: entries of row `c` left of the diagonal.
     Lower { above: Vec<usize> },
-    // Not a lower triangle: place and sort.
     Unsorted { col_counts: Vec<usize> },
 }
 
@@ -353,9 +334,9 @@ fn unsorted_counts(
     col_counts.fill(0);
     for j in 0..n {
         for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
-            col_counts[j] += 1; // lower triangle entry in column j
+            col_counts[j] += 1;
             if i != j {
-                col_counts[i] += 1; // transpose entry in column i
+                col_counts[i] += 1;
             }
         }
     }
@@ -412,21 +393,17 @@ fn symmetric_fill<I: PatternIndex>(
             }
             let mut pat_row_idx = vec![I::of(0); counts.total];
 
-            // Place entries
             for j in 0..n {
                 for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
-                    // (i, j) in lower triangle
                     pat_row_idx[offsets[j]] = I::of(i);
                     offsets[j] += 1;
                     if i != j {
-                        // (j, i) - transpose
                         pat_row_idx[offsets[i]] = I::of(j);
                         offsets[i] += 1;
                     }
                 }
             }
 
-            // Sort row indices within each column
             for j in 0..n {
                 let start = pat_col_ptr[j].get();
                 let end = pat_col_ptr[j + 1].get();
@@ -448,9 +425,6 @@ mod tests {
     use crate::test_constants::{gamma, U64};
 
     fn sample_3x3() -> CscMatrix {
-        // [ 2 -1  0 ]
-        // [-1  3 -1 ]
-        // [ 0 -1  4 ]
         CscMatrix::from_triplets(
             3,
             &[0, 1, 1, 2, 2],
@@ -472,7 +446,7 @@ mod tests {
     fn test_from_triplets_duplicate_summing() {
         let m = CscMatrix::from_triplets(2, &[0, 0, 1], &[0, 0, 1], &[1.0, 2.0, 3.0]).unwrap();
         assert_eq!(m.nnz(), 2);
-        assert_eq!(m.values[0], 3.0); // 1.0 + 2.0
+        assert_eq!(m.values[0], 3.0);
         assert_eq!(m.values[1], 3.0);
     }
 
@@ -481,15 +455,10 @@ mod tests {
         let m = sample_3x3();
         let pat = m.symmetric_pattern();
         assert_eq!(pat.n, 3);
-        // Full pattern: (0,0), (1,0), (0,1), (1,1), (2,1), (1,2), (2,2)
-        // = 7 entries total
         assert_eq!(pat.col_ptr[3], 7);
 
-        // Column 0: rows 0, 1
         assert_eq!(&pat.row_idx[pat.col_ptr[0]..pat.col_ptr[1]], &[0, 1]);
-        // Column 1: rows 0, 1, 2
         assert_eq!(&pat.row_idx[pat.col_ptr[1]..pat.col_ptr[2]], &[0, 1, 2]);
-        // Column 2: rows 1, 2
         assert_eq!(&pat.row_idx[pat.col_ptr[2]..pat.col_ptr[3]], &[1, 2]);
     }
 
@@ -499,7 +468,6 @@ mod tests {
         let x = [1.0, 2.0, 3.0];
         let mut y = [0.0; 3];
         m.symv(&x, &mut y);
-        // A * x = [2-2, -1+6-3, -2+12] = [0, 2, 10]
         assert_eq!(y, [0.0, 2.0, 10.0]);
     }
 
@@ -520,20 +488,15 @@ mod tests {
     #[test]
     fn test_validate_rejects_bad_input() {
         let mut m = sample_3x3();
-        m.row_idx[0] = 5; // out of bounds
+        m.row_idx[0] = 5;
         assert!(m.validate().is_err());
     }
 
-    /// Upper-triangle triplets are rejected, not silently accepted. The two
-    /// matrices below describe the same symmetric system.
     #[test]
     fn test_from_triplets_rejects_upper_triangle() {
-        // Lower-triangle form: (0,0)=2, (1,0)=1, (1,1)=2
         let lower = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[2.0, 1.0, 2.0]).unwrap();
         lower.validate().unwrap();
 
-        // Upper-triangle form of the same matrix: (0,0)=2, (0,1)=1, (1,1)=2.
-        // Must be rejected.
         let err = CscMatrix::from_triplets(2, &[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, 2.0])
             .expect_err("upper-triangle triplet must be rejected");
         let msg = format!("{}", err);
@@ -544,14 +507,9 @@ mod tests {
         );
     }
 
-    /// `validate()` must also reject upper-triangle row indices, in case
-    /// a `CscMatrix` is constructed by a path that bypasses
-    /// `from_triplets` (e.g. direct field assignment in tests).
     #[test]
     fn test_validate_rejects_upper_triangle_row() {
         let mut m = sample_3x3();
-        // Force an upper-triangle entry: column 1's first row becomes 0
-        // (row 0, col 1 is upper-triangle).
         m.row_idx[2] = 0;
         let err = m
             .validate()
@@ -564,15 +522,10 @@ mod tests {
         );
     }
 
-    /// The storage layer must hold a complex-symmetric matrix (A = A^T with
-    /// complex entries), not just `f64`. This is the point of the generic
-    /// threading: structure code is shared, only `values` carries the field.
-    /// Oracle hand-computed below.
     #[test]
     fn complex_storage_symv_and_dense() {
         use num_complex::Complex;
         let c = |re, im| Complex::new(re, im);
-        // Lower triangle of A = [[1+i, 2], [2, 3-i]] (symmetric, A = A^T).
         let m: CscMatrix<Complex<f64>> = CscMatrix::from_triplets(
             2,
             &[0, 1, 1],
@@ -583,20 +536,16 @@ mod tests {
         m.validate().unwrap();
         assert_eq!(m.nnz(), 3);
 
-        // y = A*x with x = [1, i].
-        //   y0 = (1+i)*1 + 2*i        = 1 + 3i
-        //   y1 = 2*1     + (3-i)*i    = 3 + 3i   (since -i^2 = +1)
         let x = [c(1.0, 0.0), c(0.0, 1.0)];
         let mut y = [c(0.0, 0.0); 2];
         m.symv(&x, &mut y);
         assert_eq!(y[0], c(1.0, 3.0));
         assert_eq!(y[1], c(3.0, 3.0));
 
-        // Densify and read back, including the symmetric upper-triangle access.
         let dense = m.to_dense();
         assert_eq!(dense.get(0, 0), c(1.0, 1.0));
         assert_eq!(dense.get(1, 0), c(2.0, 0.0));
-        assert_eq!(dense.get(0, 1), c(2.0, 0.0)); // symmetry
+        assert_eq!(dense.get(0, 1), c(2.0, 0.0));
         assert_eq!(dense.get(1, 1), c(3.0, -1.0));
     }
 
@@ -606,7 +555,7 @@ mod tests {
             CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 2.0, 3.0]).unwrap();
         assert_eq!(m.nnz(), 3);
         let pat = m.symmetric_pattern();
-        assert_eq!(pat.col_ptr[3], 3); // no off-diagonal, so 3 entries total
+        assert_eq!(pat.col_ptr[3], 3);
     }
 
     #[test]
@@ -620,12 +569,6 @@ mod tests {
 
     #[test]
     fn test_kkt_structure() {
-        // Small KKT: [H  A^T; A  -delta*I]
-        // H = [2 0; 0 3], A = [1 1], delta = 1e-8
-        // Full matrix (3x3):
-        // [ 2    0    1  ]
-        // [ 0    3    1  ]
-        // [ 1    1  -1e-8]
         let m: CscMatrix<f64> = CscMatrix::from_triplets(
             3,
             &[0, 1, 2, 2, 2],
@@ -636,7 +579,6 @@ mod tests {
         assert_eq!(m.nnz(), 5);
         m.validate().unwrap();
 
-        // symv check
         let x = [1.0, 1.0, 1.0];
         let mut y = [0.0; 3];
         m.symv(&x, &mut y);
@@ -646,26 +588,11 @@ mod tests {
         assert!((y[2] - (2.0 + small)).abs() <= gamma(2, U64) * (2.0 - small));
     }
 
-    /// `validate()` must reject a
-    /// non-monotone `col_ptr`. A valid CSC requires `col_ptr` to be
-    /// monotonically non-decreasing (the standard column-pointer contract);
-    /// without that check a non-monotone `ia` whose endpoints line up
-    /// (`col_ptr[0] == 0`, `col_ptr[n] == nnz`) passes every other check yet
-    /// produces empty/overlapping column ranges, so entries are silently
-    /// dropped and the wrong matrix is factored.
-    ///
-    /// Witness: n = 3, nnz = 2, `col_ptr = [0, 2, 1, 2]`. The endpoints line up
-    /// (`col_ptr[3] == 2 == nnz`), every row index is in-bounds, lower-triangle
-    /// and sorted within its (non-empty) range, but `col_ptr[1] = 2 >
-    /// col_ptr[2] = 1`, so column 1's range `[2, 1)` is empty and column 2
-    /// re-reads index 1. Pre-fix `validate()` returned `Ok`.
     #[test]
     fn validate_rejects_non_monotone_col_ptr() {
         let m = CscMatrix {
             n: 3,
             col_ptr: vec![0, 2, 1, 2],
-            // index 0 -> (row 0, col 0); index 1 -> (row 2, col 0 and re-read
-            // as col 2). Both lower-triangle and in-bounds.
             row_idx: vec![0, 2],
             values: vec![1.0, 1.0],
         };
@@ -680,17 +607,6 @@ mod tests {
         );
     }
 
-    /// `validate()` must reject a `col_ptr` that does not start at 0. A monotone
-    /// `col_ptr` beginning at `k > 0` with `col_ptr[n] == nnz` passes the
-    /// length, monotonicity, `col_ptr[n] == nnz`, in-bounds, sorted and
-    /// lower-triangle checks, yet positions `0..k` of `row_idx`/`values`
-    /// fall outside every column range and are silently dropped - the
-    /// matrix factored is missing those entries.
-    ///
-    /// Witness: n = 2, nnz = 2, `col_ptr = [1, 1, 2]`. Monotone,
-    /// `col_ptr[2] == 2 == nnz`; column 0's range `[1, 1)` is empty and
-    /// column 1's range `[1, 2)` reads only index 1, so `row_idx[0]` /
-    /// `values[0]` are never covered.
     #[test]
     fn validate_rejects_nonzero_col_ptr_start() {
         let m = CscMatrix {

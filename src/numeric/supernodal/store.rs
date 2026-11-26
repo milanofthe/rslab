@@ -5,9 +5,6 @@
 use crate::constants::SCRATCH_KEEP;
 use crate::memory::HeapBytes;
 
-/// Raw base pointer of a panel buffer, smuggled across rayon workers so each
-/// task can write its own **disjoint row range** of a column-major panel. Safe
-/// only because callers partition the rows so no two tasks touch the same cell.
 pub(crate) struct PanelPtr<T>(pub *mut T);
 impl<T> Clone for PanelPtr<T> {
     fn clone(&self) -> Self {
@@ -28,14 +25,11 @@ impl<T> PanelPtr<T> {
     }
 }
 
-/// A fixed-size array of independently written cells: each index is written by
-/// exactly one owner (disjoint indices) and read only after a happens-before
-/// barrier (subtree join / refcount Acquire-Release). Centralizes the
-/// `Vec<UnsafeCell<V>>` pattern of the left-looking emit state.
 pub(crate) struct Cells<V>(Vec<std::cell::UnsafeCell<V>>);
 
-// SAFETY: disjoint-index writes; cross-thread visibility is the caller's
-// barrier (see the type doc).
+// SAFETY: each index is written by exactly one owner, and every read of it
+// follows a happens-before barrier of the caller (a subtree join or a
+// refcount Acquire-Release).
 unsafe impl<V: Send> Sync for Cells<V> {}
 
 impl<V> Default for Cells<V> {
@@ -101,11 +95,6 @@ impl<V> Cells<V> {
     }
 }
 
-/// Scratch the node kernels borrow, one object per running kernel: taken on
-/// entry and given back on exit, so the kernels of one factorization share
-/// a handful of objects (about one per worker) whose buffers stay grown,
-/// instead of allocating their own per supernode. An object heavier than
-/// [`SCRATCH_KEEP`](crate::constants::SCRATCH_KEEP) is freed instead of kept.
 pub(crate) struct ScratchPool<S>(std::sync::Mutex<Vec<S>>);
 
 impl<S: Default + HeapBytes> ScratchPool<S> {
@@ -128,7 +117,6 @@ impl<S: Default + HeapBytes> ScratchPool<S> {
     }
 }
 
-/// A [`ScratchPool`] object on loan, returned when dropped.
 pub(crate) struct Lent<'p, S: HeapBytes> {
     pool: &'p ScratchPool<S>,
     s: std::mem::ManuallyDrop<S>,

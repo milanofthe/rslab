@@ -96,13 +96,11 @@ impl Schur {
         let d = self.d;
         let x = self.right_eigenvector(k)?;
         let u = triangular_eigenvector(&self.t, d, k, true)?;
-        // l^T = u^T Q^H
         let mut l: Vec<C> = (0..d)
             .map(|i| (k..d).map(|j| u[j] * self.q[i * d + j].conj()).sum())
             .collect();
         let lx: C = l.iter().zip(&x).map(|(a, b)| a * b).sum();
         let lnorm = l.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-        // `x` has unit norm: `l^T x` below the precision of `l` is zero
         if !(lx.re.is_finite() && lx.im.is_finite()) || lx.norm() <= f64::EPSILON * lnorm {
             return None;
         }
@@ -145,7 +143,6 @@ impl Schur {
         let zero = C::new(0.0, 0.0);
         let tmax = self.t.iter().map(|v| v.norm()).fold(0.0f64, f64::max);
         let thresh = crate::constants::DENSE_SINGULAR_TOL * (alpha.norm() + beta.norm() * tmax);
-        // Y = Q^H B
         let mut y = vec![zero; d * nrhs];
         for i in 0..d {
             for c in 0..nrhs {
@@ -282,7 +279,6 @@ mod tests {
         norm(&x) * norm(&l) / lx.norm()
     }
 
-    /// `U J U^H` for the unitary `U` of a random matrix's Schur form.
     fn similar(j: &[C], d: usize, seed: u64) -> Vec<C> {
         let u = Schur::new(&random(d, seed), d).unwrap().q().to_vec();
         (0..d * d)
@@ -299,8 +295,6 @@ mod tests {
             .collect()
     }
 
-    /// The Schur form reproduces the matrix (`Q T Q^H = A`), `Q` is unitary and `T`
-    /// upper triangular with the eigenvalues of the best-effort routine.
     #[test]
     fn schur_reproduces_the_matrix() {
         for (d, seed) in [(1, 1), (2, 2), (7, 3), (40, 4), (120, 5)] {
@@ -349,8 +343,6 @@ mod tests {
         }
     }
 
-    /// Every right and left eigenpair satisfies its eigenproblem to the working
-    /// precision, `l^T x = 1`, and a matrix with a known spectrum gives it.
     #[test]
     fn eigenpairs_satisfy_the_eigenproblem() {
         for (d, seed) in [(3, 11), (30, 12), (90, 13)] {
@@ -414,10 +406,6 @@ mod tests {
         }
     }
 
-    /// A defective matrix (a Jordan block under a unitary similarity): the
-    /// eigenvalue to the accuracy a Jordan block allows (`eps^(1/d)`), every
-    /// vector finite and along the one eigenvector `U e_0`; a Jordan block of 30
-    /// (whose back substitution would overflow without rescaling) stays finite.
     #[test]
     fn a_defective_matrix_gives_finite_vectors() {
         let lam = C::new(2.0, 1.0);
@@ -475,8 +463,6 @@ mod tests {
         }
     }
 
-    /// Clustered eigenvalues (three within 1e-10) under a similarity: every pair
-    /// is still an eigenpair to the working precision.
     #[test]
     fn clustered_eigenvalues_give_eigenpairs() {
         let d = 6;
@@ -499,10 +485,6 @@ mod tests {
         }
     }
 
-    /// The cyclic permutation (eigenvalues the roots of unity) does not move
-    /// under QR with Wilkinson shifts alone; the exceptional shifts get it
-    /// moving. A budget spent before convergence is `NotConverged`, and wrong
-    /// lengths are `DimensionMismatch`.
     #[test]
     fn exceptional_shifts_and_errors() {
         let d = 8;
@@ -532,7 +514,6 @@ mod tests {
         ));
     }
 
-    /// `(alpha I + beta A)^-1 B` through the Schur form agrees with the LU solve.
     #[test]
     fn the_shifted_solve_agrees_with_lu() {
         let d = 25;

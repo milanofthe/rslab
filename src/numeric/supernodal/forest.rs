@@ -3,22 +3,6 @@
 use super::LlSchedule;
 use crate::error::RslabError;
 
-/// The left-looking factorization of the whole assembly forest, shared
-/// by the LDLT/LU twins and scheduled by dependency counts instead of fork-join:
-/// every node is one task, started by whichever thread finishes its last child.
-/// `factor_node` and `emit_free` carry the path-specific kernels.
-///
-/// Under fork-join a parent runs on the thread that forked its children, after
-/// that thread's wait returns - and a rayon wait executes other ready work
-/// meanwhile, often a whole unrelated subtree, so the parent started long after
-/// its last child had finished. On a 338k FEM system that gap was more than
-/// half of the critical chain (1.0 to 1.1 s of 1.8 s at 12 threads). Here
-/// nobody waits: a finished node counts down its parent and, as the last child,
-/// hands the parent on as the next task. A stolen task is one node, never a
-/// subtree. Per node the work is unchanged (factor, free every updater whose
-/// last consumer it was, emit itself if nothing above reads it), and what a
-/// node computes does not depend on the thread running it. There is no
-/// recursion either, so deep chain trees need no large worker stacks here.
 pub(crate) fn ll_forest(
     sym: &crate::symbolic::SymbolicFactorization,
     sched: &LlSchedule,
@@ -29,21 +13,16 @@ pub(crate) fn ll_forest(
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     const NONE: usize = usize::MAX;
     let _s = rsprobe::scope!(DEBUG, "tree");
-    // Progress in panel entries (rows times columns of a supernode), which
-    // follow the work closer than the count of supernodes: most supernodes
-    // are small leaves, most entries sit near the roots.
-    let panel = |s: usize| (sym.supernodes[s].nrow * sym.supernodes[s].ncol) as u64;
+    let panel_entries = |s: usize| (sym.supernodes[s].nrow * sym.supernodes[s].ncol) as u64;
     let active = rsprobe::active!();
     let total: u64 = match active {
-        true => (0..sym.supernodes.len()).map(panel).sum(),
+        true => (0..sym.supernodes.len()).map(panel_entries).sum(),
         false => 0,
     };
     let steps = crate::progress::Steps::new(active, total);
     let failed = AtomicBool::new(false);
     let error = std::sync::Mutex::new(None);
 
-    // Factor `s` and release what it was the last consumer of; the parent's
-    // task is the caller's to start when this was its last child.
     let node = |s: usize| -> bool {
         if failed.load(Ordering::Relaxed) {
             return false;
@@ -57,13 +36,13 @@ pub(crate) fn ll_forest(
             }
             return false;
         }
-        // Disjoint `k`, so the wide top-of-tree free runs in parallel.
         let free = |k: usize| {
             if refcount[k].fetch_sub(1, Ordering::AcqRel) == 1 {
                 emit_free(k);
             }
         };
         let up = sched.updaters(s);
+        debug_assert!(up.windows(2).all(|w| w[0] < w[1]));
         if up.len() >= crate::constants::FREE_PAR_MIN_UPDATERS {
             crate::parallel::ranges::<crate::parallel::Rayon>(
                 up.len(),
@@ -76,16 +55,14 @@ pub(crate) fn ll_forest(
         if refcount[s].load(Ordering::Relaxed) == 0 {
             emit_free(s);
         }
-        // One event per step at most, whatever the supernode count.
-        if let Some(step) = steps.as_ref().and_then(|st| st.add(panel(s))) {
+        if let Some(step) = steps.as_ref().and_then(|st| st.add(panel_entries(s))) {
             rsprobe::progress!(step, crate::constants::PROGRESS_STEPS);
         }
         true
     };
     if crate::parallel::threads() == 1 {
-        // One worker: the supernodes in index order, children before their
-        // parents, with no task per node.
         for s in 0..sym.supernodes.len() {
+            debug_assert!(sym.supernodes[s].children.iter().all(|&c| c < s));
             if !node(s) {
                 break;
             }

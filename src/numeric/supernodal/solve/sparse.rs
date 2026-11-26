@@ -69,22 +69,16 @@ pub struct SparseReach {
     pub total_panel_entries: usize,
 }
 
-/// The column maps of one call: supernode of every factor column, and the
-/// factor column of every original row.
 pub(crate) struct ColumnMaps {
     sn_of: Vec<u32>,
     elim_of: Vec<usize>,
 }
 
-/// One worker's marks and buffers.
 struct ReachScratch<T> {
-    /// `mark[s] == stamp` once supernode `s` is in the current reach.
     mark: Vec<u32>,
     stamp: u32,
     stack: Vec<u32>,
-    /// Factor column -> compact row of the current block (`NONE` outside).
     map: Vec<u32>,
-    /// A node's products of its off-block rows.
     t: Vec<T>,
 }
 
@@ -112,21 +106,14 @@ impl<T> ReachScratch<T> {
     }
 }
 
-/// `Y` of one block of sparse columns on the union of their reaches.
 struct ForwardBlock<T> {
-    /// Columns of `B` in lane order.
     cols: Vec<usize>,
-    /// Supernodes of the reach, ascending.
     nodes: Vec<u32>,
-    /// Compact row of each node's first column; a node's columns are
-    /// consecutive rows.
     offsets: Vec<usize>,
-    /// Row-major `rows x lanes` (`y[q * lanes + c]`).
     y: Vec<T>,
 }
 
 impl<T: Scalar> SolvePlan<T> {
-    /// The maps of one call over the elimination order `perm`.
     pub(crate) fn column_maps(&self, perm: &[usize]) -> ColumnMaps {
         let mut sn_of = vec![0u32; self.n];
         for s in 0..self.sn_col.len() - 1 {
@@ -139,7 +126,6 @@ impl<T: Scalar> SolvePlan<T> {
         ColumnMaps { sn_of, elim_of }
     }
 
-    /// The reach of the factor columns `cols` into `out`, ascending.
     fn reach_into(
         &self,
         maps: &ColumnMaps,
@@ -179,7 +165,6 @@ impl<T: Scalar> SolvePlan<T> {
         out.sort_unstable();
     }
 
-    /// Reach statistics of the original rows `rows`.
     pub(crate) fn sparse_reach(&self, perm: &[usize], rows: &[usize]) -> SparseReach {
         let maps = self.column_maps(perm);
         let mut sc = ReachScratch::<T>::default();
@@ -203,10 +188,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// The forward sweep of node `s` on the compact buffer `y` (`nr` lanes,
-    /// the node's columns at rows `base..`): the plan's node kernel
-    /// ([`fwd_node_core`](Self::fwd_node_core)) on the node's rows, its
-    /// off-block products taken off the rows `map` gives them.
     fn fwd_node_compact(
         &self,
         s: u32,
@@ -216,7 +197,6 @@ impl<T: Scalar> SolvePlan<T> {
         map: &[u32],
         t: &mut Vec<T>,
     ) {
-        // An `LDL^T` plan has a unit-diagonal `L` (no scaling in the sweep).
         debug_assert!(self.diag_inv.is_empty(), "the plan is not unit-diagonal");
         let (_, w, r0, m, _, _) = self.node(s);
         self.fwd_node_core(s, nr, &mut y[base * nr..(base + w) * nr], false, t);
@@ -226,8 +206,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// `Y` of the columns `cols` of `b`: their reach, the scaled, permuted
-    /// entries placed in a compact buffer, and the forward sweep over it.
     fn sparse_forward(
         &self,
         maps: &ColumnMaps,
@@ -276,8 +254,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// The task budget and whether a call over sparse columns runs on the
-    /// pool: the plan's gate for a sweep of `nr` right-hand sides.
     fn sparse_parallel(&self, nr: usize, threads: Threads) -> bool {
         let budget = threads.resolve(|cap| cap);
         let ops = self.vals.len().saturating_mul(nr.min(SOLVE_RHS_TILE));
@@ -288,8 +264,6 @@ impl<T: Scalar> SolvePlan<T> {
             }
     }
 
-    /// `f(i)` for every block index, on the pool when `par`, each piece with
-    /// its own scratch; results in order.
     fn map_blocks<R: Send>(
         par: bool,
         threads: Threads,
@@ -310,8 +284,6 @@ impl<T: Scalar> SolvePlan<T> {
         })
     }
 
-    /// The columns of `b` in the order the blocks take them: by the first
-    /// supernode each one reaches, then by index; empty columns last.
     fn sparse_order(&self, maps: &ColumnMaps, b: &SparseRhs<T>) -> Vec<usize> {
         let key = |c: usize| {
             (b.column(c).0.iter())
@@ -324,8 +296,6 @@ impl<T: Scalar> SolvePlan<T> {
         order.into_iter().map(|(_, c)| c).collect()
     }
 
-    /// `Z = B^T A^-1 B` (column-major `ncols x ncols`, exactly symmetric) by
-    /// forward sweeps only; see the module docs.
     pub(crate) fn port_matrix(
         &self,
         f: &LdltPivots<T>,
@@ -368,10 +338,6 @@ impl<T: Scalar> SolvePlan<T> {
         Ok(z)
     }
 
-    /// `Y_I^T D^-1 Y_J` over the nodes both blocks reach, ascending;
-    /// row-major `lanes_I x lanes_J`. Per shared node, `D^-1` is applied to
-    /// `Y_J`'s rows of it in `v` (a node holds its 2x2 blocks whole) and the
-    /// node's rows go in as one GEMM.
     fn block_product(
         &self,
         f: &LdltPivots<T>,
@@ -379,6 +345,8 @@ impl<T: Scalar> SolvePlan<T> {
         bj: &ForwardBlock<T>,
         v: &mut Vec<T>,
     ) -> Result<Vec<T>, RslabError> {
+        debug_assert!(bi.nodes.windows(2).all(|n| n[0] < n[1]));
+        debug_assert!(bj.nodes.windows(2).all(|n| n[0] < n[1]));
         let (li, lj) = (bi.cols.len(), bj.cols.len());
         let mut out = vec![T::zero(); li * lj];
         let mode = crate::dense::gemm_backend::GemmMode::new(
@@ -446,7 +414,6 @@ mod tests {
 
     type C = Complex<f64>;
 
-    /// A complex-symmetric 2D 5-point Helmholtz grid (lower triangle).
     fn grid(m: usize) -> CscMatrix<C> {
         crate::matgen::stencil::helmholtz(
             &[m, m],
@@ -455,8 +422,6 @@ mod tests {
         )
     }
 
-    /// The reach holds every nonzero of the full forward sweep, and the
-    /// compact sweep equals the plan's own forward sweep on it to rounding.
     #[test]
     fn reach_holds_the_forward_sweep_and_compact_equals_full() {
         let a = grid(18);
@@ -467,7 +432,6 @@ mod tests {
         for &row in &[0usize, 17, 150, 323] {
             let b = SparseRhs::from_columns(a.n, &[vec![(row, C::new(1.0, 0.5))]]).unwrap();
             let blk = plan.sparse_forward(&maps, scale, &b, &[0], &mut sc);
-            // the full forward sweep of the same scaled, permuted column
             let mut y = vec![C::new(0.0, 0.0); a.n];
             y[maps.elim_of[row]] = C::new(1.0, 0.5) * scale[row];
             let mut work = PlanWork::default();
