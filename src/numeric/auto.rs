@@ -31,6 +31,7 @@ use crate::numeric::klu::{KluSettings, KluSolver, KluSymbolic};
 use crate::numeric::ldlt::{LdltSolver, LdltSymbolic};
 use crate::numeric::lu::{LuSolver, LuSymbolic};
 use crate::numeric::settings::{SolverSettings, Threads};
+use crate::pencil::Pencil;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
@@ -382,7 +383,8 @@ fn in_place<S>(
 ///
 /// [`AutoSymbolic::factorizer`] makes one over a shared analysis for a
 /// solve loop ([`assemble`](Self::assemble) or
-/// [`values_mut`](Self::values_mut), then [`refactor`](Self::refactor));
+/// [`values_mut`](Self::values_mut), then [`refactor`](Self::refactor);
+/// or a member of a [`Pencil`] with [`factor_member`](Self::factor_member));
 /// [`AutoSolver::factor`] analyzes and factors one matrix, like the
 /// one-shot forms of the other solvers. The solves are theirs: `solve`,
 /// `solve_many`, `solve_transpose`, the `_into` forms in lent
@@ -397,8 +399,14 @@ pub struct AutoSolver<'s, T> {
     lu: Option<LuSolver<T>>,
     /// The path holding the factor of the last successful factorization.
     active: Option<AutoBackend>,
-    /// The values of the last successful factorization; empty without one.
+    /// The values of the last successful factorization; empty without one
+    /// or when it was a pencil member's.
     prev: Vec<T>,
+    /// The pencil member of the last successful factorization, `(pencil,
+    /// generation, alpha)` with its extra values in `member_extra`; `None`
+    /// without one or when other values were factored.
+    member: Option<(u64, u64, T)>,
+    member_extra: Vec<T>,
     /// The worker policy of the active factor, which a Krylov solve
     /// preconditioned by it orthogonalizes under.
     solve_threads: Threads,
@@ -442,6 +450,8 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
             lu: None,
             active: None,
             prev: Vec::new(),
+            member: None,
+            member_extra: Vec::new(),
             solve_threads: Threads::Ambient,
             solves: Default::default(),
             works: Default::default(),
@@ -466,6 +476,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
             // the origin's last factor was its own: the fork holds the order
             f.active = None;
             f.prev.clear();
+            f.member = None;
         }
         f
     }
@@ -478,6 +489,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// The values the next [`refactor`](Self::refactor) factors, one per
     /// slot of the layout.
     pub fn values_mut(&mut self) -> &mut [T] {
+        self.member = None;
         &mut self.csc.values
     }
 
@@ -489,14 +501,44 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// Load the entry values `entries` (the layout's entry order,
     /// duplicates summed), see [`CscLayout::scatter`].
     pub fn assemble(&mut self, entries: &[T]) {
+        self.member = None;
         let layout = self.sym.get().layout();
         layout.scatter(entries, &mut self.csc.values);
     }
 
-    /// Load scaled runs of entry values, see [`CscLayout::scatter_scaled`].
-    pub fn assemble_scaled(&mut self, parts: &[(&[T], T)], rest: T) {
-        let layout = self.sym.get().layout();
-        layout.scatter_scaled(parts, rest, &mut self.csc.values);
+    /// Factor member `(alpha, extra)` of `pencil` (whose layout this
+    /// analysis is over, see [`Pencil::fill`]) in place, as
+    /// [`refactor`](Self::refactor) does. The factor is kept, with no fill
+    /// and no comparison of values, when the pencil, its generation (see
+    /// [`Pencil::update`]), `alpha` and `extra` equal those of the last
+    /// successful factorization. `Ok(true)`: numeric work ran. After an
+    /// error no factor is held.
+    pub fn factor_member(
+        &mut self,
+        pencil: &Pencil,
+        alpha: T,
+        extra: &[T],
+        settings: &AutoSettings,
+    ) -> Result<bool, RslabError> {
+        let (id, generation) = pencil.key();
+        if self.active.is_some()
+            && self.member == Some((id, generation, alpha))
+            && self.member_extra == extra
+        {
+            return Ok(false);
+        }
+        if pencil.layout().nnz() != self.csc.values.len() || extra.len() != pencil.extras() {
+            return Err(RslabError::DimensionMismatch {
+                expected: self.csc.values.len(),
+                got: pencil.layout().nnz(),
+            });
+        }
+        pencil.fill(alpha, extra, &mut self.csc.values);
+        self.factor_now(settings)?;
+        self.member = Some((id, generation, alpha));
+        self.member_extra.clear();
+        self.member_extra.extend_from_slice(extra);
+        Ok(true)
     }
 
     /// The path of the last successful factorization; `None` without one.
@@ -514,8 +556,16 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                 return Ok(b);
             }
         }
+        let b = self.factor_now(settings)?;
+        self.prev.extend_from_slice(&self.csc.values);
+        Ok(b)
+    }
+
+    /// Factor the loaded values, the last factored ones forgotten.
+    fn factor_now(&mut self, settings: &AutoSettings) -> Result<AutoBackend, RslabError> {
         self.active = None;
         self.prev.clear();
+        self.member = None;
         let b = self.factor_values(settings)?;
         self.active = Some(b);
         self.solve_threads = match b {
@@ -532,7 +582,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                 .map(crate::Preconditioner::<T>::solve_threads),
         }
         .unwrap_or(Threads::Ambient);
-        self.prev.extend_from_slice(&self.csc.values);
         Ok(b)
     }
 
@@ -642,6 +691,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
             + vec_bytes(&self.csc.row_idx)
             + vec_bytes(&self.csc.values)
             + vec_bytes(&self.prev)
+            + vec_bytes(&self.member_extra)
             + self.lower.as_ref().map_or(0, |m| {
                 vec_bytes(&m.col_ptr) + vec_bytes(&m.row_idx) + vec_bytes(&m.values)
             })
