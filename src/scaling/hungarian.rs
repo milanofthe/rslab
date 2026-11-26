@@ -570,9 +570,17 @@ mod tests {
         let mut matched_row = vec![false; n];
         for j in 0..n {
             if m.perm[j] != usize::MAX {
+                assert!(!matched_row[m.perm[j]], "row {} matched twice", m.perm[j]);
                 matched_row[m.perm[j]] = true;
             }
         }
+        let matched = matched_row.iter().filter(|&&r| r).count();
+        assert_eq!(matched, m.n_matched);
+        let rank = crate::ordering::btf::max_transversal(n, &cost.col_ptr, &cost.row_idx).1;
+        assert_eq!(
+            m.n_matched, rank,
+            "the matching is not of maximum cardinality"
+        );
 
         for j in 0..n {
             for k in cost.col_ptr[j]..cost.col_ptr[j + 1] {
