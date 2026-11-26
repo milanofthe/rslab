@@ -31,8 +31,8 @@ pub const COARSEN_FLOOR: u32 = 120;
 /// Contract: results.
 pub const ND_TO_AMD_SWITCH: u32 = 200;
 
-/// Reduction ratio below which heavy-edge matching falls back to 2-hop
-/// matching (1).
+/// Heavy-edge matching falls back to 2-hop matching when the coarse graph
+/// keeps more than this share of the fine vertices (1).
 /// Used by: `MetisOptions::two_hop_ratio_threshold`.
 /// Why: METIS 5.2.0 default.
 /// Contract: results.

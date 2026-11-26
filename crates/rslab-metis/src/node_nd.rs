@@ -26,13 +26,6 @@ use crate::{MetisOptions, MetisStats};
 use rslab_ordering_core::{Counter, CscPattern, OrderingError, Progress};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-/// Entry point. Produces a permutation `perm` where `perm[i]` is the
-/// old vertex id placed at new position `i` (new-to-old).
-/// The inverse permutation under construction, written concurrently by
-/// the independent subproblems of the recursion. Every original vertex is
-/// assigned exactly once (the subproblems partition the vertex set), so
-/// relaxed atomic stores suffice. The vertices placed are counted for the
-/// caller's progress, per separator and per leaf.
 struct IpermWriter<'a> {
     pos: Vec<AtomicI32>,
     placed: Counter<'a>,
@@ -48,6 +41,7 @@ impl<'a> IpermWriter<'a> {
 
     #[inline]
     fn set(&self, orig: usize, pos: i32) {
+        debug_assert_eq!(self.pos[orig].load(Ordering::Relaxed), -1);
         self.pos[orig].store(pos, Ordering::Relaxed);
     }
 
@@ -57,7 +51,6 @@ impl<'a> IpermWriter<'a> {
     }
 }
 
-/// Counters accumulated across the parallel recursion.
 #[derive(Default)]
 struct AtomicStats {
     n_levels: AtomicU32,
@@ -80,9 +73,6 @@ impl AtomicStats {
     }
 }
 
-/// A child's seed: derived from the parent's seed and the child's place, so
-/// the ordering is a function of the seed alone, however the subproblems
-/// are scheduled.
 fn child_seed(seed: u64, which: u64) -> u64 {
     SplitMix::new(seed ^ which.wrapping_mul(crate::rng::GOLDEN_GAMMA)).next_u64()
 }
@@ -108,7 +98,6 @@ pub(crate) fn nd_order(
     stats.n_components = ncc as u32;
     let mut work: Vec<(Graph, Vec<i32>, usize, u64)> = Vec::new();
     if ncc == 1 {
-        // The one component is the graph itself, ordered without a copy.
         let vtx_map = (0..graph.nvtxs).collect();
         work.push((graph, vtx_map, 0, child_seed(opts.seed, 0)));
     } else {
@@ -123,7 +112,6 @@ pub(crate) fn nd_order(
         }
         drop(graph);
     }
-    // Components are independent as well.
     let results: Vec<Result<(), OrderingError>> = {
         use rayon::prelude::*;
         work.into_par_iter()
@@ -143,9 +131,6 @@ pub(crate) fn nd_order(
     invert_iperm(&writer.into_vec(), n)
 }
 
-/// Order one connected subgraph: AMD below the switch, else a multilevel
-/// node bisection with the separator numbered last and the two sides
-/// ordered recursively, in parallel when they are large.
 fn nd_subproblem(
     subgraph: Graph,
     vtx_map: Vec<i32>,
@@ -169,8 +154,6 @@ fn nd_subproblem(
 
     let (cc_label, ncc) = connected_components(&subgraph);
     if ncc > 1 {
-        // The components are extracted first, so the subgraph is gone
-        // before they are ordered.
         let mut parts = Vec::with_capacity(ncc);
         let mut off = offset;
         for c in 0..ncc {
@@ -259,17 +242,6 @@ fn nd_subproblem(
     }
 }
 
-/// Multilevel node bisection, METIS `MlevelNodeBisectionL1` structure:
-/// coarsen -> initial *edge* bisection with niparts trials (best
-/// post-FM cut) -> convert to a node separator once, at the coarsest
-/// level (Konig min vertex cover) -> refine the **node separator**
-/// itself at the coarsest level and at every uncoarsening step
-/// (balance + one-sided node FM). Returns labels in {PART_A, PART_B,
-/// PART_SEP}.
-///
-/// Refining the node separator through the hierarchy - instead of
-/// refining the edge bisection and converting at the finest level - is
-/// what closes the fill gap on 3D meshes.
 fn multilevel_node_bisection(
     graph: &Graph,
     opts: &MetisOptions,
@@ -281,7 +253,6 @@ fn multilevel_node_bisection(
     stats.n_two_hop_fallbacks += counters.n_two_hop_fallbacks;
     stats.n_levels += levels.len() as u32;
 
-    // Coarsest graph for initial bisection.
     let coarsest: &Graph = match levels.last() {
         Some(cg) => &cg.graph,
         None => graph,
@@ -289,7 +260,6 @@ fn multilevel_node_bisection(
     let total: i64 = coarsest.vwgt.iter().map(|&w| w as i64).sum();
     let target = total / 2;
 
-    // niparts trials; keep best post-FM edge cut (METIS iptype=EDGE).
     let mut best_labels: Vec<u8> = vec![PART_A; coarsest.nvtxs as usize];
     let mut best_cut: i32 = i32::MAX;
     for trial in 0..opts.niparts {
@@ -312,16 +282,10 @@ fn multilevel_node_bisection(
     }
     let mut labels = best_labels;
 
-    // Convert the edge bisection to a node separator at the coarsest
-    // level and refine it there (METIS InitSeparator tail).
     construct_separator(coarsest, &mut labels);
     refine_node_separator(coarsest, &mut labels, opts, rng);
     stats.n_fm_passes += opts.fm_passes;
 
-    // Uncoarsen: project the tri-section and refine the node separator
-    // at each level (METIS Refine2WayNode). `cmap` at level i maps
-    // previous-graph vertices to level-i graph vertices. A level is dropped
-    // once projected: the sibling subproblems coarsen meanwhile.
     while let Some(cg) = levels.pop() {
         stopped(opts)?;
         let prev_graph: &Graph = levels.last().map_or(graph, |l| &l.graph);
@@ -340,7 +304,6 @@ fn multilevel_node_bisection(
     Ok(labels)
 }
 
-/// `Err(Stopped)` once the caller's stop flag is set.
 pub(crate) fn stopped(opts: &MetisOptions) -> Result<(), OrderingError> {
     match &opts.stop {
         Some(f) if f.load(Ordering::Relaxed) => Err(OrderingError::Stopped),
@@ -348,8 +311,6 @@ pub(crate) fn stopped(opts: &MetisOptions) -> Result<(), OrderingError> {
     }
 }
 
-/// Hand off to AMD on an uncoarsened subgraph. Writes new positions
-/// `[offset, offset + n)` into `iperm`.
 fn amd_leaf(
     subgraph: &Graph,
     vtx_map: &[i32],
@@ -374,10 +335,6 @@ fn amd_leaf(
     Ok(())
 }
 
-/// Build a full-symmetric CSC pattern from an internal `Graph`.
-/// Adjacency in `Graph` is already full-symmetric with diagonal
-/// dropped; we reinsert the diagonal for downstream consumers that
-/// expect it. Row indices within each column remain sorted.
 fn graph_to_csc_pattern(graph: &Graph) -> (Vec<i32>, Vec<i32>) {
     let n = graph.nvtxs as usize;
     let mut col_ptr: Vec<i32> = Vec::with_capacity(n + 1);
@@ -386,8 +343,6 @@ fn graph_to_csc_pattern(graph: &Graph) -> (Vec<i32>, Vec<i32>) {
     for v in 0..n {
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
-        // Insert neighbors keeping sorted order, splicing in the
-        // diagonal at its correct position.
         let mut diag_inserted = false;
         for &u in &graph.adjncy[lo..hi] {
             if !diag_inserted && u as usize > v {
@@ -404,11 +359,6 @@ fn graph_to_csc_pattern(graph: &Graph) -> (Vec<i32>, Vec<i32>) {
     (col_ptr, row_idx)
 }
 
-/// Invert the new->old position map `iperm` (where `iperm[old] = new_pos`)
-/// into the old->new permutation `perm` (where `perm[new_pos] = old`).
-///
-/// Rejects an out-of-range or duplicated target position rather than
-/// silently emitting a non-bijection.
 fn invert_iperm(iperm: &[i32], n: usize) -> Result<Vec<i32>, OrderingError> {
     let mut perm: Vec<i32> = vec![-1; n];
     for (old, &new_pos) in iperm.iter().enumerate() {
@@ -428,8 +378,6 @@ fn invert_iperm(iperm: &[i32], n: usize) -> Result<Vec<i32>, OrderingError> {
     Ok(perm)
 }
 
-/// Connected-component labeling via BFS. Returns `(cc_label, ncc)`
-/// where `cc_label[v] in 0..ncc`.
 fn connected_components(graph: &Graph) -> (Vec<i32>, usize) {
     let n = graph.nvtxs as usize;
     let mut cc: Vec<i32> = vec![-1; n];
@@ -458,8 +406,6 @@ fn connected_components(graph: &Graph) -> (Vec<i32>, usize) {
     (cc, ncc as usize)
 }
 
-/// Extract the induced subgraph on the vertex set `{v : label[v] == c}`.
-/// Returns the subgraph and the mapping `local_id -> original_id`.
 fn extract_by_label(graph: &Graph, label: &[i32], c: i32) -> (Graph, Vec<i32>) {
     let n = graph.nvtxs as usize;
     let mut vtx_map: Vec<i32> = Vec::new();
@@ -473,7 +419,6 @@ fn extract_by_label(graph: &Graph, label: &[i32], c: i32) -> (Graph, Vec<i32>) {
     (build_induced(graph, &vtx_map, &local_id), vtx_map)
 }
 
-/// Extract the induced subgraph on the given list of vertex ids.
 fn extract_by_list(graph: &Graph, verts: &[i32]) -> (Graph, Vec<i32>) {
     let n = graph.nvtxs as usize;
     let mut local_id: Vec<i32> = vec![-1; n];
@@ -484,9 +429,6 @@ fn extract_by_list(graph: &Graph, verts: &[i32]) -> (Graph, Vec<i32>) {
     (build_induced(graph, &vtx_map, &local_id), vtx_map)
 }
 
-/// The subgraph induced by `vtx_map`, `local_id` its inverse (`-1` off it).
-/// Its adjacency is allocated at the degree sum of its vertices, which
-/// exceeds it by the edges leaving the subgraph (to a separator).
 fn build_induced(graph: &Graph, vtx_map: &[i32], local_id: &[i32]) -> Graph {
     let sub_n = vtx_map.len();
     let bound: usize = vtx_map.iter().map(|&v| graph.degree(v) as usize).sum();
@@ -561,16 +503,11 @@ mod tests {
 
     #[test]
     fn invert_iperm_rejects_duplicate_positions() {
-        // A valid new->old inversion of a bijection.
-        // iperm[old] = new_pos: old0->2, old1->0, old2->1 => perm = [1, 2, 0].
         assert_eq!(invert_iperm(&[2, 0, 1], 3).unwrap(), vec![1, 2, 0]);
-        // Two olds claiming the same position must be rejected, not
-        // silently overwritten into a non-bijection.
         assert!(matches!(
             invert_iperm(&[0, 0, 2], 3),
             Err(OrderingError::Internal(_))
         ));
-        // Out-of-range target position is rejected.
         assert!(matches!(
             invert_iperm(&[3, 0, 1], 3),
             Err(OrderingError::Internal(_))
@@ -579,9 +516,7 @@ mod tests {
 
     #[test]
     fn cc_disconnected_blocks() {
-        // Two disconnected 3x3 grids.
         let mut t = grid_triples(3, 3);
-        // second block at ids 9..18
         for &(i, j) in grid_triples(3, 3).iter() {
             t.push((i + 9, j + 9));
         }
@@ -594,8 +529,6 @@ mod tests {
 
     #[test]
     fn nd_order_small_grid_is_permutation() {
-        // 10x10 grid, 100 vertices. With defaults (nd_to_amd_switch=200)
-        // this falls into the AMD leaf branch at the top level.
         let t = grid_triples(10, 10);
         let (cp, ri) = csc_from_triples(100, &t);
         let pat = CscPattern::new(100, &cp, &ri).unwrap();
@@ -609,8 +542,6 @@ mod tests {
 
     #[test]
     fn nd_order_large_grid_uses_multilevel() {
-        // 20x20 grid, 400 vertices > 200 (nd_to_amd_switch) so the top
-        // level runs a real multilevel bisection.
         let t = grid_triples(20, 20);
         let (cp, ri) = csc_from_triples(400, &t);
         let pat = CscPattern::new(400, &cp, &ri).unwrap();
@@ -665,7 +596,6 @@ mod tests {
 
     #[test]
     fn nd_order_handles_disconnected_graph() {
-        // Two separate 6x6 grids.
         let mut t = grid_triples(6, 6);
         for &(i, j) in grid_triples(6, 6).iter() {
             t.push((i + 36, j + 36));
@@ -680,10 +610,6 @@ mod tests {
         assert_eq!(stats.n_components, 2);
     }
 
-    /// Diagnostic probe (not a regression test): top-level separator
-    /// quality on the 40^3 7-point grid. The ideal planar separator is
-    /// a 40x40 plane = 1600 vertices. Run with
-    /// `cargo test --release -p rslab-metis grid3d_separator -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn grid3d_separator_probe() {
@@ -730,10 +656,8 @@ mod tests {
             na, nb, ns, stats.n_levels
         );
 
-        // Recursive drill-down mirroring nd_order's driver: log every
-        // bisection as (depth, n, sep, balance, sep/n^(2/3)).
         let mut work: Vec<(Graph, usize)> = vec![(graph, 0)];
-        let mut per_depth: Vec<(usize, f64, f64)> = Vec::new(); // (count, sum_ratio, sum_fill_proxy)
+        let mut per_depth: Vec<(usize, f64, f64)> = Vec::new();
         let mut fill_proxy: f64 = 0.0;
         while let Some((g, depth)) = work.pop() {
             let gn = g.nvtxs as usize;
@@ -753,7 +677,10 @@ mod tests {
                 }
             }
             let big = a_verts.len().max(b_verts.len());
-            if a_verts.is_empty() || b_verts.is_empty() || big as f64 >= 0.9 * gn as f64 {
+            if a_verts.is_empty()
+                || b_verts.is_empty()
+                || big as f64 >= crate::constants::UNBALANCED_SPLIT_FRACTION * gn as f64
+            {
                 continue;
             }
             let ratio = ns as f64 / (gn as f64).powf(2.0 / 3.0);
@@ -790,7 +717,6 @@ mod tests {
         }
         println!("sep-clique fill proxy: {:.3e}", fill_proxy);
 
-        // Full ND for the total separator count.
         let mut stats2 = MetisStats::default();
         let perm = nd_order(&pat, None, &opts, &mut stats2).unwrap();
         assert_eq!(perm.len(), n);
@@ -805,7 +731,6 @@ mod tests {
 
     #[test]
     fn extract_induced_preserves_edges() {
-        // 3x3 grid, extract top row {0,1,2}.
         let t = grid_triples(3, 3);
         let (cp, ri) = csc_from_triples(9, &t);
         let pat = CscPattern::new(9, &cp, &ri).unwrap();
@@ -813,7 +738,6 @@ mod tests {
         let (sub, map) = extract_by_list(&g, &[0, 1, 2]);
         assert_eq!(sub.nvtxs, 3);
         assert_eq!(map, vec![0, 1, 2]);
-        // Top row: 0-1, 1-2 -> 2 edges, each stored twice.
         assert_eq!(sub.adjncy.len(), 4);
     }
 }
