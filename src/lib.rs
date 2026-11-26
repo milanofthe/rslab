@@ -166,7 +166,6 @@
 //! `mimalloc` as the global allocator speeds up the factorization, most on
 //! Windows, whose system heap maps large blocks afresh each time.
 
-pub(crate) mod clock;
 #[doc(hidden)]
 pub mod constants;
 pub mod dense;
