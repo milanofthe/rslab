@@ -87,6 +87,10 @@ fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
 mod ss_klu_ref;
 use ss_klu_ref::{resid, SsKlu};
 
+#[path = "../tests/common/constants.rs"]
+pub mod constants;
+use constants::{solve_backward_error, U64};
+
 /// Settings sweep (`RLA_KLU_SWEEP=1`): grid over the three KLU knobs on the
 /// circuit family plus a badly row-scaled variant, warm best-of-3 per config.
 /// Evidence base for the KLU default-settings choice (heuristic defaults work,
@@ -236,10 +240,13 @@ fn main() {
         let mf_res = resid(&a, &xm, &b);
         let mf_nnz = f.factor_nnz();
         assert!(
-            klu_res < 1e-8,
+            klu_res <= solve_backward_error(a.n, U64),
             "klu residual {klu_res} (mf residual {mf_res})"
         );
-        assert!(mf_res < 1e-8, "supernodal residual {mf_res}");
+        assert!(
+            mf_res <= solve_backward_error(a.n, U64),
+            "supernodal residual {mf_res}"
+        );
 
         // --- sweep proxy: 20 value sets, same pattern ---
         let t = Instant::now();
@@ -331,7 +338,10 @@ fn main() {
         if let Some(ss) = SsKlu::try_new() {
             if let Some((r, xs)) = ss.run(&a, &b, SWEEP) {
                 let ss_res = resid(&a, &xs, &b);
-                assert!(ss_res < 1e-8, "suitesparse klu residual {ss_res}");
+                assert!(
+                    ss_res <= solve_backward_error(a.n, U64),
+                    "suitesparse klu residual {ss_res}"
+                );
                 println!(
                     "{:>8} suitesparse-klu: ana {:>8.2?} fac {:>8.2?} refac {:>8.2?} solve {:>8.2?} lnz+unz {:>9} blocks {:>5} sweep {:>8.2?} res {:.1e}",
                     "",

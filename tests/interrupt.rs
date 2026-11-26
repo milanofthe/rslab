@@ -62,15 +62,12 @@ fn cleared_flag_factors_cleanly() {
         .expect("re-factor after clearing the flag");
     let rhs = vec![C::new(1.0, 0.0); a.n];
     let x = f.solve(&rhs).unwrap();
-    let mut ax = vec![C::new(0.0, 0.0); a.n];
-    a.symv(&x, &mut ax);
-    let num: f64 = ax
-        .iter()
-        .zip(&rhs)
-        .map(|(p, q)| (*p - *q).norm_sqr())
-        .sum::<f64>()
-        .sqrt();
-    assert!(num.sqrt() < 1e-6, "residual after the clean re-factor");
+    let clean = sym.factor(&a, &SolverSettings::default()).unwrap();
+    assert_eq!(
+        x,
+        clean.solve(&rhs).unwrap(),
+        "the re-factor solves as a factor that was never interrupted"
+    );
 }
 
 /// Armed mid-flight from another thread: the factor must return `Interrupted`

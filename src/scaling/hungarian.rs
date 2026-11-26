@@ -726,7 +726,7 @@ mod tests {
                 let c = cost.cost[k];
                 let reduced = m.u[i] + m.v[j];
                 assert!(
-                    reduced <= c + 1e-10,
+                    reduced <= c,
                     "edge ({},{}) has cost {} but u+v={} (reduced > cost)",
                     i,
                     j,
@@ -734,13 +734,10 @@ mod tests {
                     reduced
                 );
                 if m.perm[j] == i {
-                    assert!(
-                        (reduced - c).abs() < 1e-10,
+                    assert_eq!(
+                        reduced, c,
                         "matched edge ({},{}) has cost {} but u+v={} (not tight)",
-                        i,
-                        j,
-                        c,
-                        reduced
+                        i, j, c, reduced
                     );
                 }
             }
@@ -807,8 +804,8 @@ mod tests {
         assert_eq!(m.perm[2], 2, "col 2 matches row 2 (cost 0)");
         assert_matching_optimal(&cost, &m);
         let total: f64 = (0..3).map(|j| m.u[m.perm[j]] + m.v[j]).sum();
-        assert!(
-            (total - 3.0).abs() < 1e-10,
+        assert_eq!(
+            total, 3.0,
             "total matching cost should be 3 (1+2+0), got {}",
             total
         );
@@ -848,11 +845,10 @@ mod tests {
         assert_eq!(m.n_matched, n);
         assert_matching_optimal(&cost, &m);
         let total: f64 = (0..n).map(|j| mat[m.perm[j]][j]).sum();
-        assert!(
-            (total - 6.0).abs() < 1e-10,
+        assert_eq!(
+            total, 6.0,
             "total matching cost should be 6, got {} with perm {:?}",
-            total,
-            m.perm
+            total, m.perm
         );
     }
 
@@ -896,11 +892,10 @@ mod tests {
                 }
             }
         }
-        assert!(
-            (total - 5.0).abs() < 1e-10,
+        assert_eq!(
+            total, 5.0,
             "total matching cost should be 5, got {} with perm {:?}",
-            total,
-            m.perm
+            total, m.perm
         );
     }
 

@@ -208,6 +208,9 @@ pub(crate) mod sparse;
 // Symbolic analysis internals the tests and examples reach by path.
 #[doc(hidden)]
 pub mod symbolic;
+#[cfg(test)]
+#[path = "../tests/common/constants.rs"]
+pub mod test_constants;
 // Hardware calibration (feature `tuning`), driven by xtask.
 #[cfg(feature = "tuning")]
 #[doc(hidden)]

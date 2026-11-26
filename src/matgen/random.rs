@@ -145,6 +145,7 @@ pub fn spectral<T: Scalar>(n: usize, kappa: f64, indefinite: bool, seed: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::{gamma, givens_drift, U64};
 
     #[test]
     fn random_spd_diagonally_dominant() {
@@ -178,8 +179,10 @@ mod tests {
         }
         // endpoint correction
         eigsum += kappa - 10f64.powf(lk);
+        let rotations = 3 * n;
+        let bound = gamma(3 * n, U64) + givens_drift(rotations);
         assert!(
-            (trace - eigsum).abs() / eigsum < 1e-9,
+            (trace - eigsum).abs() / eigsum <= bound,
             "trace = sumlambda (spectrum preserved)"
         );
     }

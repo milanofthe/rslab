@@ -29,8 +29,30 @@ impl KernelTuning<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_constants::{solve_backward_error, UC64};
     use crate::{CscMatrix, KernelSettings, LdltSolver, SolverSettings};
     use num_complex::Complex;
+
+    fn inf_norm(v: &[Complex<f64>]) -> f64 {
+        v.iter().map(|z| z.norm()).fold(0.0, f64::max)
+    }
+
+    fn row_sums(a: &CscMatrix<Complex<f64>>) -> Vec<Complex<f64>> {
+        let mut abs = a.clone();
+        abs.values
+            .iter_mut()
+            .for_each(|v| *v = Complex::new(v.norm(), 0.0));
+        let mut sums = vec![Complex::new(0.0, 0.0); a.n];
+        abs.symv(&vec![Complex::new(1.0, 0.0); a.n], &mut sums);
+        sums
+    }
+
+    fn backward_error(a: &CscMatrix<Complex<f64>>, x: &[Complex<f64>], b: &[Complex<f64>]) -> f64 {
+        let mut ax = vec![Complex::new(0.0, 0.0); a.n];
+        a.symv(x, &mut ax);
+        let r: Vec<Complex<f64>> = ax.iter().zip(b).map(|(p, q)| p - q).collect();
+        inf_norm(&r) / (inf_norm(&row_sums(a)) * inf_norm(x) + inf_norm(b))
+    }
 
     fn helmholtz(m: usize) -> (CscMatrix<Complex<f64>>, Vec<Complex<f64>>) {
         let c = |re, im| Complex::new(re, im);
@@ -88,15 +110,14 @@ mod tests {
             },
             ..SolverSettings::default().with_threads(0)
         });
-        for i in 0..x_def.len() {
-            assert!(
-                (x_def[i] - x_scalar[i]).norm() < 1e-9,
-                "scalar path diverged at {i}"
-            );
-            assert!(
-                (x_def[i] - x_par[i]).norm() < 1e-9,
-                "parallel path diverged at {i}"
-            );
+        let bound = solve_backward_error(a.n, UC64);
+        for (name, x) in [
+            ("default", &x_def),
+            ("scalar", &x_scalar),
+            ("parallel", &x_par),
+        ] {
+            let omega = backward_error(&a, x, &b);
+            assert!(omega <= bound, "{name} path: backward error {omega:e}");
         }
     }
 
@@ -110,14 +131,11 @@ mod tests {
             let mut s = SolverSettings::default();
             s.kernels.panel_nb = nb;
             let x = LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap();
-            let mut ax = vec![Complex::new(0.0, 0.0); a.n];
-            a.symv(&x, &mut ax);
-            let res: f64 = (0..a.n)
-                .map(|i| (ax[i] - b[i]).norm_sqr())
-                .sum::<f64>()
-                .sqrt()
-                / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-            assert!(res < 1e-9, "NB={nb} residual {res:.2e}");
+            let omega = backward_error(&a, &x, &b);
+            assert!(
+                omega <= solve_backward_error(a.n, UC64),
+                "NB={nb} backward error {omega:.2e}"
+            );
         }
     }
 }

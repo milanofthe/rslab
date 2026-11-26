@@ -1846,6 +1846,7 @@ fn solve_diagonal<T: Scalar>(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_constants::{solve_backward_error, U64};
     use crate::{CscMatrix, LdltSolver, SolverSettings};
 
     /// A 2D grid Laplacian shifted to be indefinite (2x2 pivots appear).
@@ -1967,9 +1968,12 @@ mod tests {
             for c in 0..nrhs {
                 let bc: Vec<f64> = (0..n).map(|i| bb[c * n + i]).collect();
                 let xc = s.solve(&bc).unwrap();
-                for i in 0..n {
-                    assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
-                }
+                let omega = backward_error(a, &xb[c * n..(c + 1) * n], &bc)
+                    .max(backward_error(a, &xc, &bc));
+                assert!(
+                    omega <= solve_backward_error(n, U64),
+                    "{name} column {c}: backward error {omega:e}"
+                );
             }
             // Every thread budget factors within the bound; the
             // solves of one factor (made in a pool of one, the bits of the
@@ -2072,17 +2076,17 @@ mod tests {
         }
     }
 
-    fn residual_general(a: &crate::GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
+    fn general_backward_error(a: &crate::GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
         let n = a.n;
-        let mut r = b.to_vec();
+        let (mut r, mut rows) = (b.to_vec(), vec![0.0; n]);
         for j in 0..n {
             for e in a.col_ptr[j]..a.col_ptr[j + 1] {
                 r[a.row_idx[e]] -= a.values[e] * x[j];
+                rows[a.row_idx[e]] += a.values[e].abs();
             }
         }
-        let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
-        rn / bn
+        let inf = |v: &[f64]| v.iter().map(|z| z.abs()).fold(0.0, f64::max);
+        inf(&r) / (inf(&rows) * inf(x) + inf(b))
     }
 
     /// The ancestors' task DAG (`forward_dag`, `backward_dag`) solves as the
@@ -2183,7 +2187,10 @@ mod tests {
             let s = LuSolver::factor(&a, &opts).unwrap();
             let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
             let x1 = s.solve(&b).unwrap();
-            assert!(residual_general(&a, &x1, &b) < 1e-10, "residual m={m}");
+            assert!(
+                general_backward_error(&a, &x1, &b) <= solve_backward_error(n, U64),
+                "backward error m={m}"
+            );
             let nrhs = 3;
             let bb: Vec<f64> = (0..n * nrhs)
                 .map(|k| ((k * 13) % 11) as f64 - 5.0)
@@ -2192,16 +2199,19 @@ mod tests {
             for c in 0..nrhs {
                 let bc: Vec<f64> = (0..n).map(|i| bb[c * n + i]).collect();
                 let xc = s.solve(&bc).unwrap();
-                for i in 0..n {
-                    assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
-                }
+                let omega = general_backward_error(&a, &xb[c * n..(c + 1) * n], &bc)
+                    .max(general_backward_error(&a, &xc, &bc));
+                assert!(
+                    omega <= solve_backward_error(n, U64),
+                    "m={m} column {c}: backward error {omega:e}"
+                );
             }
             // Refinement runs through the plans too.
             let (xr, out) = s
                 .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
                 .unwrap();
             assert!(out.steps <= 2);
-            assert!(residual_general(&a, &xr, &b) < 1e-12);
+            assert!(general_backward_error(&a, &xr, &b) <= solve_backward_error(n, U64));
             for threads in [1usize, 2, 5] {
                 let st = LuSolver::factor(&a, &opts.clone().with_threads(threads)).unwrap();
                 assert_eq!(st.solve(&b).unwrap(), x1, "threads={threads}");

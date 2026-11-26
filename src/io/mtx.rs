@@ -711,16 +711,16 @@ mod tests {
 
     #[test]
     fn test_parse_scientific_notation() {
-        let mtx = "\
-%%MatrixMarket matrix coordinate real symmetric
-2 2 2
-1 1 1.23456789012345678e+02
-2 1 -9.87654321098765432e-03
-";
-        let m = parse_mtx(mtx, "test").unwrap();
+        let values = ["1.23456789012345678e+02", "-9.87654321098765432e-03"];
+        let mtx = format!(
+            "%%MatrixMarket matrix coordinate real symmetric\n2 2 2\n1 1 {}\n2 1 {}\n",
+            values[0], values[1]
+        );
+        let m = parse_mtx(&mtx, "test").unwrap();
         assert_eq!(m.entries.len(), 2);
-        assert!((m.entries[0].2 - 123.456_789_012_345_68).abs() < 1e-10);
-        assert!((m.entries[1].2 - (-0.009_876_543_210_987_654)).abs() < 1e-16);
+        for (entry, text) in m.entries.iter().zip(values) {
+            assert_eq!(entry.2, text.parse::<f64>().unwrap());
+        }
     }
 
     #[test]
@@ -842,7 +842,20 @@ mod tests {
         let mut ax = vec![Complex::new(0.0, 0.0); 3];
         a.symv(&x, &mut ax);
         let res = (0..3).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
-        assert!(res < 1e-12, "residual {}", res);
+        let mut abs = a.clone();
+        abs.values = a
+            .values
+            .iter()
+            .map(|v| Complex::new(v.norm(), 0.0))
+            .collect();
+        let mut row_sums = vec![Complex::new(0.0, 0.0); 3];
+        abs.symv(&[Complex::new(1.0, 0.0); 3], &mut row_sums);
+        let max = |v: &[Complex<f64>]| v.iter().map(|z| z.norm()).fold(0.0, f64::max);
+        let omega = res / (max(&row_sums) * max(&x) + max(&b));
+        assert!(
+            omega <= crate::test_constants::solve_backward_error(3, crate::test_constants::UC64),
+            "backward error {omega}"
+        );
     }
 
     #[test]

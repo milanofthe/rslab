@@ -1,6 +1,9 @@
 //! The refinement contract: what "converged" means, what is reported, and that
 //! the in-place entry points agree with the allocating ones.
 
+pub mod common;
+
+use common::constants::{gamma, recomputed_residual, U64};
 use num_complex::Complex64 as Z;
 use rslab::prelude::*;
 use rslab::{
@@ -31,6 +34,7 @@ fn normwise_certifies_what_componentwise_rejects() {
     };
 
     let mut x = vec![1.0, 1.0, 1.0 + 1e-4];
+    let delta = x[2] - 1.0;
     let norm = f
         .refine_into(&a, &b, &mut x, &measure_only(BackwardError::Normwise))
         .unwrap();
@@ -45,7 +49,10 @@ fn normwise_certifies_what_componentwise_rejects() {
         norm.omega
     );
     assert!(
-        !comp.certified && comp.omega > 1e-6,
+        !comp.certified
+            && comp.omega
+                >= (delta - gamma(2, U64) * (1.0 + delta))
+                    / ((2.0 + delta) * (1.0 + gamma(2, U64))),
         "componentwise should reject it: omega {:.3e}",
         comp.omega
     );
@@ -89,7 +96,18 @@ fn default_policy_stops_at_the_target() {
         .zip(&b)
         .map(|(p, q)| (p - q).abs())
         .fold(0.0, f64::max);
-    assert!(res < 1e-10, "residual {res:.3e}");
+    let mut abs_ax = vec![0.0; n];
+    a.apply_abs(&x, &mut abs_ax);
+    let abs_norm = abs_ax
+        .iter()
+        .zip(&b)
+        .map(|(p, q)| p + q.abs())
+        .fold(0.0, f64::max);
+    let row_len = 3;
+    assert!(
+        res <= recomputed_residual(policy.target, abs_norm, abs_norm, n, row_len, U64),
+        "residual {res:.3e}"
+    );
 }
 
 /// In-place refinement and the allocating entry point produce the same bits,

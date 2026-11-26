@@ -539,6 +539,7 @@ impl<T> Ptr<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::complex_gemm;
     use num_complex::Complex64;
 
     struct Rng(u64);
@@ -617,7 +618,26 @@ mod tests {
                 256,
             );
         }
-        let norm = direct.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+        let split = |z: &Complex64| z.re.abs() + z.im.abs();
+        let allowed = (0..m * n)
+            .map(|q| {
+                let (i, j) = (q % m, q / m);
+                let product: f64 = (0..k)
+                    .map(|l| {
+                        let a = lhs[if transposed_lhs { i * k + l } else { l * m + i }];
+                        split(&a) * split(&rhs[j * k + l])
+                    })
+                    .sum();
+                let scale = if read_dst {
+                    alpha.norm() * dst0[q].norm()
+                } else {
+                    0.0
+                };
+                let entry = complex_gemm(k) * (scale + beta.norm() * product);
+                (entry + entry).powi(2)
+            })
+            .sum::<f64>()
+            .sqrt();
         let err = d3
             .iter()
             .zip(&direct)
@@ -625,8 +645,8 @@ mod tests {
             .sum::<f64>()
             .sqrt();
         assert!(
-            err <= 1e-13 * (norm + 1.0),
-            "3m m={m} n={n} k={k} read={read_dst} err {err:.3e} norm {norm:.3e}"
+            err <= allowed,
+            "3m m={m} n={n} k={k} read={read_dst} err {err:.3e} bound {allowed:.3e}"
         );
     }
 

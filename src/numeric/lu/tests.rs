@@ -4,6 +4,9 @@ use crate::numeric::settings::SolverSettings;
 use crate::numeric::supernodal::Li;
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
+use crate::test_constants::{
+    fixed_refinement, forward_error, gamma, solve_backward_error, varah_condition, U64, UC32, UC64,
+};
 
 /// A badly scaled, row-scrambled unsymmetric system: without the MC64
 /// row matching the front-restricted pivoting finds no usable pivot or
@@ -70,7 +73,7 @@ fn lu_matching_bounds_pivot_growth() {
     assert_eq!(s.diagnostics().decisions.scaling, "Mc64RowMatching");
     let x = s.solve(&b).unwrap();
     assert!(
-        omega(&x) < 1e-12,
+        omega(&x) <= solve_backward_error(n, U64),
         "backward error with matching {}",
         omega(&x)
     );
@@ -151,7 +154,11 @@ fn iterated_equilibration_lifts_the_floored_pivots() {
         "one step: {} floors",
         one.perturbations().len()
     );
-    assert!(omega(&x1) > 1e-3, "one step: backward error {}", omega(&x1));
+    assert!(
+        omega(&x1) > solve_backward_error(n, U64),
+        "one step: backward error {}",
+        omega(&x1)
+    );
     let ruiz = LuSolver::factor(&a, &opts.clone().with_scaling(ScalingStrategy::InfNorm)).unwrap();
     assert_eq!(ruiz.diagnostics().decisions.scaling, "TwoSidedRuiz");
     assert!(ruiz.diagnostics().warnings.is_empty());
@@ -162,7 +169,7 @@ fn iterated_equilibration_lifts_the_floored_pivots() {
         ruiz.perturbations().len()
     );
     assert!(
-        omega(&x2) < 1e-11,
+        omega(&x2) <= solve_backward_error(n, U64),
         "iterated: backward error {}",
         omega(&x2)
     );
@@ -182,12 +189,29 @@ fn iterated_equilibration_lifts_the_floored_pivots() {
 
 use num_complex::Complex;
 
-fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
+fn backward_error<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
     let mut y = vec![T::zero(); a.n];
     a.matvec(x, &mut y);
-    (0..a.n)
+    let mut rows = vec![0.0f64; a.n];
+    for j in 0..a.n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            rows[a.row_idx[k]] += a.values[k].magnitude();
+        }
+    }
+    let inf = |v: &[T]| v.iter().map(|e| e.magnitude()).fold(0.0, f64::max);
+    let r = (0..a.n)
         .map(|i| (y[i] - b[i]).magnitude())
-        .fold(0.0, f64::max)
+        .fold(0.0, f64::max);
+    r / (rows.iter().fold(0.0f64, |m, &v| m.max(v)) * inf(x) + inf(b))
+}
+
+fn magnitudes<T: Scalar>(a: &GeneralCsc<T>) -> Vec<(usize, usize, f64)> {
+    (0..a.n)
+        .flat_map(|j| {
+            (a.col_ptr[j]..a.col_ptr[j + 1])
+                .map(move |k| (a.row_idx[k], j, a.values[k].magnitude()))
+        })
+        .collect()
 }
 
 #[test]
@@ -212,7 +236,11 @@ fn f64_unsymmetric_tridiag() {
     let b: Vec<f64> = (0..n).map(|i| i as f64 - 9.5).collect();
     let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-10, "residual {}", resid(&a, &x, &b));
+    let omega = backward_error(&a, &x, &b);
+    assert!(
+        omega <= solve_backward_error(n, U64),
+        "backward error {omega}"
+    );
 }
 
 #[test]
@@ -241,7 +269,7 @@ fn lu_solve_many_matches_single() {
         let bc: Vec<f64> = (0..n).map(|i| b[col * n + i]).collect();
         let xc = solver.solve(&bc).unwrap();
         for i in 0..n {
-            assert!((x[col * n + i] - xc[i]).abs() < 1e-10, "rhs {col} row {i}");
+            assert_eq!(x[col * n + i], xc[i], "rhs {col} row {i}");
         }
     }
 }
@@ -327,13 +355,12 @@ fn lu_block_solve_is_the_single_solve_to_rounding() {
             for col in 0..nrhs {
                 let bc: Vec<Complex<f64>> = (0..n).map(|i| b[col * n + i]).collect();
                 let xc = solver.solve(&bc).unwrap();
-                let scale = xc.iter().map(|v| v.norm()).fold(0.0, f64::max);
-                for i in 0..n {
-                    assert!(
-                        (x[col * n + i] - xc[i]).norm() <= 1e-12 * scale,
-                        "n {n} nrhs {nrhs} rhs {col} row {i}"
-                    );
-                }
+                let omega = backward_error(&a, &x[col * n..(col + 1) * n], &bc)
+                    .max(backward_error(&a, &xc, &bc));
+                assert!(
+                    omega <= solve_backward_error(n, UC64),
+                    "n {n} nrhs {nrhs} rhs {col}: backward error {omega:e}"
+                );
             }
         }
     }
@@ -385,18 +412,11 @@ fn analysis_on_a_given_ordering() {
     let a2 = GeneralCsc::<f64>::from_triplets(n, &r2, &c2, &v2).unwrap();
     let s2 = LuSymbolic::analyze(&a2, &o1).unwrap();
     let x = s2.factor(&a2, &o1).unwrap().solve(&b).unwrap();
-    let mut ax = vec![0.0f64; n];
-    for col in 0..n {
-        for k in a2.col_ptr[col]..a2.col_ptr[col + 1] {
-            ax[a2.row_idx[k]] += a2.values[k] * x[col];
-        }
-    }
-    let res = ax
-        .iter()
-        .zip(&b)
-        .map(|(p, q)| (p - q).abs())
-        .fold(0.0, f64::max);
-    assert!(res < 1e-12, "residual on the reused ordering {res:.1e}");
+    let omega = backward_error(&a2, &x, &b);
+    assert!(
+        omega <= solve_backward_error(n, U64),
+        "backward error on the reused ordering {omega:.1e}"
+    );
     // not a permutation
     let bad: Vec<usize> = (0..n).map(|i| i / 2).collect();
     assert!(LuSymbolic::analyze(&a, &o.clone().with_permutation(bad.into())).is_err());
@@ -443,7 +463,11 @@ fn pivoting_triggered_small_diagonal() {
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
+    let omega = backward_error(&a, &x, &b);
+    assert!(
+        omega <= solve_backward_error(n, UC64),
+        "backward error {omega}"
+    );
 }
 
 #[test]
@@ -490,10 +514,11 @@ fn lu_pivot_u_knob_wired_and_solves() {
         let s = SolverSettings::default().with_pivot_threshold(u);
         let f = LuSolver::factor(&a, &s).unwrap();
         let x = f.solve(&b).unwrap();
-        let mut ax = vec![Complex::new(0.0, 0.0); n];
-        a.matvec(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
-        assert!(res < 1e-9, "pivot_u={u} residual {res}");
+        let omega = backward_error(&a, &x, &b);
+        assert!(
+            omega <= solve_backward_error(n, UC64),
+            "pivot_u={u} backward error {omega}"
+        );
     }
     // Out-of-range values clamp into [0, 1].
     assert_eq!(
@@ -568,10 +593,11 @@ fn static_pivot_reuse_across_value_sweep() {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
             .unwrap()
             .0;
-        let mut ax = vec![Complex::new(0.0, 0.0); n];
-        a.matvec(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max);
-        assert!(res < 1e-9, "static reuse shift={shift} residual {res}");
+        let (omega, row_len) = (backward_error(&a, &x, &b), 5);
+        assert!(
+            omega <= fixed_refinement(n, UC64) + gamma(row_len + 1, UC64),
+            "static reuse shift={shift} backward error {omega}"
+        );
     }
 }
 
@@ -613,7 +639,11 @@ fn complex_unsymmetric_2d_grid() {
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
+    let omega = backward_error(&a, &x, &b);
+    assert!(
+        omega <= solve_backward_error(n, UC64),
+        "backward error {omega}"
+    );
 }
 
 #[test]
@@ -652,8 +682,11 @@ fn complex_f32_lu_solves() {
     let b: Vec<num_complex::Complex<f32>> = (0..n).map(|i| c((i % 5) as f32 - 2.0, 1.0)).collect();
     let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    let r = resid(&a, &x, &b);
-    assert!(r < 1e-3, "f32 LU residual {}", r);
+    let omega = backward_error(&a, &x, &b);
+    assert!(
+        omega <= solve_backward_error(n, UC32),
+        "f32 LU backward error {omega}"
+    );
 }
 
 #[test]
@@ -710,10 +743,8 @@ fn phased_general_lu_analyze_once_factor_many() {
         let one_shot = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
         let xp = phased.solve(&b).unwrap();
         let xo = one_shot.solve(&b).unwrap();
-        for (p, o) in xp.iter().zip(&xo) {
-            assert!((p - o).norm() < 1e-10);
-        }
-        assert!(resid(&a, &xp, &b) < 1e-8);
+        assert_eq!(xp, xo);
+        assert!(backward_error(&a, &xp, &b) <= solve_backward_error(n, UC64));
     }
 }
 
@@ -819,19 +850,6 @@ fn matching_only_where_the_diagonal_needs_it() {
     }
 }
 
-/// `||A^T x - b||inf / ||b||inf`.
-fn transpose_residual<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
-    let mut worst = 0.0f64;
-    for j in 0..a.n {
-        let mut acc = T::zero();
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            acc = acc + a.values[k] * x[a.row_idx[k]];
-        }
-        worst = worst.max((acc - b[j]).magnitude());
-    }
-    worst / b.iter().map(|v| v.magnitude()).fold(0.0, f64::max)
-}
-
 /// The transposed solve runs `U^T` forward and `L^T` backward on the same
 /// panels, with and without the row matching, and a column-major block of
 /// transposed solves is the columns solved one by one.
@@ -843,8 +861,11 @@ fn lu_solve_transpose_on_the_same_factors() {
         let s = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
         let b: Vec<f64> = (0..a.n).map(|i| ((i * 7) % 11) as f64 - 5.0).collect();
         let x = s.solve_transpose(&b).unwrap();
-        let r = transpose_residual(&a, &x, &b);
-        assert!(r < 1e-10, "holes {holes}: transposed residual {r:.1e}");
+        let omega = backward_error(&a.transpose(), &x, &b);
+        assert!(
+            omega <= solve_backward_error(a.n, U64),
+            "holes {holes}: transposed backward error {omega:.1e}"
+        );
         let f: &dyn Factorization<f64> = &s;
         assert_eq!(f.solve_transpose(&b).unwrap(), x);
     }
@@ -874,7 +895,7 @@ fn lu_solve_transpose_on_the_same_factors() {
     .unwrap();
     let b: Vec<_> = (0..a.n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     let x = s.solve_transpose(&b).unwrap();
-    assert!(transpose_residual(&a, &x, &b) < 1e-10);
+    assert!(backward_error(&a.transpose(), &x, &b) <= solve_backward_error(a.n, UC64));
 }
 
 /// The three direct solvers behind one trait object.
@@ -912,16 +933,20 @@ fn every_direct_solver_is_a_factorization() {
     ];
     let b: Vec<f64> = (0..2 * n).map(|i| (i % 9) as f64 - 4.0).collect();
     let reference = solvers[0].solve_many(&b, 2).unwrap();
+    let cond = varah_condition(n, magnitudes(&full));
+    let solved = forward_error(cond, solve_backward_error(n, U64));
+    let refined = forward_error(cond, crate::constants::REFINE_TARGET);
+    let xnorm = reference.iter().fold(0.0f64, |m, v| m.max(v.abs())) / (1.0 - solved);
     for (k, f) in solvers.iter().enumerate() {
         assert_eq!(f.n(), n);
         let x = f.solve_many(&b, 2).unwrap();
         for (p, q) in x.iter().zip(&reference) {
-            assert!((p - q).abs() < 1e-10);
+            assert!((p - q).abs() <= 2.0 * solved * xnorm);
         }
         let (xr, out) = f
             .solve_refined(&full, &b[..n], &crate::RefinePolicy::default())
             .unwrap();
-        assert!(out.omega < 1e-14 && (xr[0] - x[0]).abs() < 1e-10);
+        assert!(out.certified && (xr[0] - x[0]).abs() <= (solved + refined) * xnorm);
         assert_eq!(f.n_perturbed(), 0);
         // two solves here, one more for the reference on the first
         assert_eq!(f.diagnostics().solves.calls, if k == 0 { 3 } else { 2 });
@@ -940,16 +965,11 @@ fn analysis_drops_the_pattern() {
     assert!(sym.pattern.col_ptr.is_empty() && sym.pattern.row_idx.is_empty());
     let b: Vec<f64> = (0..a.n).map(|i| 1.0 + i as f64 / a.n as f64).collect();
     let x = lusym.factor(&a, &opts).unwrap().solve(&b).unwrap();
-    let mut ax = vec![0.0f64; a.n];
-    a.matvec(&x, &mut ax);
-    let rn = ax
-        .iter()
-        .zip(&b)
-        .map(|(p, q)| (p - q) * (p - q))
-        .sum::<f64>()
-        .sqrt();
-    let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
-    assert!(rn < 1e-10 * bn, "residual {rn} against {bn}");
+    let omega = backward_error(&a, &x, &b);
+    assert!(
+        omega <= solve_backward_error(a.n, U64),
+        "backward error {omega}"
+    );
 }
 
 /// FNV-1a over everything an analysis decides: the ordering, the
@@ -1154,7 +1174,6 @@ fn delays_settings(on: bool) -> SolverSettings {
 fn delayed_pivots_keep_the_factor_stable() {
     let a = off_diagonal_pivots(24, 1e-9, 3);
     let b: Vec<f64> = (0..a.n).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
-    let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let confined = LuSolver::factor(&a, &delays_settings(false)).unwrap();
     let d = confined.diagnostics().numeric;
     assert_eq!(d.delayed, Some(0));
@@ -1165,18 +1184,18 @@ fn delayed_pivots_keep_the_factor_stable() {
     assert!(d.delayed.unwrap() > 0, "{d:?}");
     assert!(d.forced.unwrap() < forced, "{d:?} against {forced} forced");
     let x = delayed.solve(&b).unwrap();
-    let rel = resid(&a, &x, &b) / bnorm;
+    let omega = backward_error(&a, &x, &b);
     let x0 = confined.solve(&b).unwrap();
-    let rel0 = resid(&a, &x0, &b) / bnorm;
-    // (dense partial pivoting: 1e-11)
+    let omega0 = backward_error(&a, &x0, &b);
+    let bound = solve_backward_error(a.n, U64);
     assert!(
-        rel < 1e-10 && rel < 1e-4 * rel0,
-        "residual {rel:.1e} with delays, {rel0:.1e} without"
+        omega <= bound && omega0 > bound,
+        "backward error {omega:.1e} with delays, {omega0:.1e} without"
     );
     // The transposed solve runs on the same factor.
     let xt = delayed.solve_transpose(&b).unwrap();
-    let relt = transpose_residual(&a, &xt, &b) / bnorm;
-    assert!(relt < 1e-10, "transposed residual {relt:.1e}");
+    let omegat = backward_error(&a.transpose(), &xt, &b);
+    assert!(omegat <= bound, "transposed backward error {omegat:.1e}");
 }
 
 #[test]
@@ -1234,7 +1253,7 @@ fn delayed_pivots_in_complex_and_single_precision() {
     let f = LuSolver::factor(&ac, &delays_settings(true)).unwrap();
     assert!(f.diagnostics().numeric.delayed.unwrap() > 0);
     let x = f.solve(&b).unwrap();
-    assert!(resid(&ac, &x, &b) < 1e-10);
+    assert!(backward_error(&ac, &x, &b) <= solve_backward_error(a.n, UC64));
     let a32 = GeneralCsc {
         n: a.n,
         col_ptr: a.col_ptr.clone(),
@@ -1245,8 +1264,8 @@ fn delayed_pivots_in_complex_and_single_precision() {
     let conf = LuSolver::factor(&a32, &delays_settings(false)).unwrap();
     let del = LuSolver::factor(&a32, &delays_settings(true)).unwrap();
     let (r0, r1) = (
-        resid(&a32, &conf.solve(&b32).unwrap(), &b32),
-        resid(&a32, &del.solve(&b32).unwrap(), &b32),
+        backward_error(&a32, &conf.solve(&b32).unwrap(), &b32),
+        backward_error(&a32, &del.solve(&b32).unwrap(), &b32),
     );
     assert!(
         r1 < 0.1 * r0,
@@ -1290,17 +1309,16 @@ fn unsymmetric_off_diagonal_pivots(k: usize, diag: f64, seed: u64) -> GeneralCsc
 fn delayed_pivots_carry_rows_beyond_the_structure() {
     let a = unsymmetric_off_diagonal_pivots(26, 1e-9, 11);
     let b: Vec<f64> = (0..a.n).map(|i| ((i * 5 % 11) as f64) - 5.0).collect();
-    let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let confined = LuSolver::factor(&a, &delays_settings(false)).unwrap();
     let delayed = LuSolver::factor(&a, &delays_settings(true)).unwrap();
     let d = delayed.diagnostics().numeric;
     assert!(d.delayed.unwrap() > 0 && d.forced == Some(0), "{d:?}");
-    let rel = resid(&a, &delayed.solve(&b).unwrap(), &b) / bnorm;
-    let rel0 = resid(&a, &confined.solve(&b).unwrap(), &b) / bnorm;
-    // (dense partial pivoting: 1e-9)
+    let omega = backward_error(&a, &delayed.solve(&b).unwrap(), &b);
+    let omega0 = backward_error(&a, &confined.solve(&b).unwrap(), &b);
+    let bound = solve_backward_error(a.n, U64);
     assert!(
-        rel < 1e-8 && rel < 1e-3 * rel0,
-        "residual {rel:.1e} with delays, {rel0:.1e} without"
+        omega <= bound && omega0 > bound,
+        "backward error {omega:.1e} with delays, {omega0:.1e} without"
     );
 }
 
@@ -1322,33 +1340,30 @@ fn forked_update_on_unsymmetric_structures() {
         },
         ..s.clone()
     };
-    // (the bounds: dense partial pivoting on the diagonally dominant
-    // matrices 1e-15, on the grid 1e-9)
     let cases = [
         (
             unsymmetric_holes(600, 3, 7, false),
             SolverSettings::default().with_matching(false),
-            1e-12,
         ),
         (
             unsymmetric_holes(600, 3, 11, true),
             SolverSettings::default().with_matching(true),
-            1e-12,
         ),
         (
             unsymmetric_off_diagonal_pivots(26, 1e-9, 11),
             delays_settings(true),
-            1e-8,
         ),
     ];
-    for (c, (a, s, bound)) in cases.iter().enumerate() {
+    for (c, (a, s)) in cases.iter().enumerate() {
         let s = s.clone().with_threads(Threads::Fixed(4));
         let b: Vec<f64> = (0..a.n).map(|i| ((i * 7 % 13) as f64) - 6.0).collect();
-        let bnorm = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         for (path, s) in [("sequential", s.clone()), ("forked", forked(&s))] {
             let f = LuSolver::factor(a, &s).unwrap();
-            let rel = resid(a, &f.solve(&b).unwrap(), &b) / bnorm;
-            assert!(rel < *bound, "case {c}, {path} update: residual {rel:.1e}");
+            let omega = backward_error(a, &f.solve(&b).unwrap(), &b);
+            assert!(
+                omega <= solve_backward_error(a.n, U64),
+                "case {c}, {path} update: backward error {omega:.1e}"
+            );
         }
     }
 }

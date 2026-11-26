@@ -8,6 +8,8 @@ import scipy.sparse as sp
 import pytest
 
 import rslab
+from constants import U64, gamma, log_det_error, solve_backward_error
+from residuals import backward_error, inf_norm, krylov_bound, residual_norm, unit_roundoff
 
 
 def _spd(n, seed=0):
@@ -26,10 +28,6 @@ def _complex_sym(n, seed=1):
     return A.tocsc()
 
 
-def _residual(A, x, b):
-    return np.linalg.norm(A @ x - b) / max(np.linalg.norm(b), 1.0)
-
-
 def _nearby_factor(A, eta, seed=0):
     # The factor of a nearby matrix, every entry of A scaled by a random
     # 1 +- eta: a weak preconditioner of A.
@@ -45,7 +43,7 @@ def test_ldlt_real(dtype):
     f = rslab.ldlt(A)
     assert f.dtype == np.dtype(dtype).name
     x = f.solve(b)
-    assert _residual(A, x, b) < 1e-4
+    assert backward_error(A, x, b) <= solve_backward_error(200, unit_roundoff(dtype))
 
 
 def test_ldlt_complex():
@@ -54,7 +52,7 @@ def test_ldlt_complex():
     f = rslab.ldlt(A)
     assert f.dtype == "complex128"
     x = f.solve(b)
-    assert _residual(A, x, b) < 1e-8
+    assert backward_error(A, x, b) <= solve_backward_error(200, unit_roundoff(A.dtype))
     assert f.n == 200
     assert f.factor_nnz > 0
 
@@ -67,14 +65,14 @@ def test_lu_unsymmetric():
     b = np.arange(n, dtype=np.float64)
     f = rslab.lu(A)
     x = f.solve(b)
-    assert _residual(A, x, b) < 1e-8
+    assert backward_error(A, x, b) <= solve_backward_error(n, U64)
 
 
 def test_spsolve_autodetect():
     A = _spd(150)
     b = np.random.default_rng(3).standard_normal(150)
     x = rslab.spsolve(A, b)
-    assert _residual(A, x, b) < 1e-6
+    assert backward_error(A, x, b) <= solve_backward_error(150, U64)
 
 
 def test_solve_many():
@@ -84,7 +82,7 @@ def test_solve_many():
     X = f.solve_many(np.ascontiguousarray(B))
     assert X.shape == (120, 5)
     for c in range(5):
-        assert _residual(A, X[:, c], B[:, c]) < 1e-6
+        assert backward_error(A, X[:, c], B[:, c]) <= solve_backward_error(120, U64)
 
 
 @pytest.mark.parametrize("layout", ["C", "F", "strided"])
@@ -98,10 +96,11 @@ def test_block_memory_order(layout):
     f = rslab.ldlt(A)
     X = f.solve_many(B)
     for c in range(B.shape[1]):
-        assert _residual(A, X[:, c], B[:, c]) < 1e-6
-    Xg = f.gmres_block(B, tol=1e-10, maxit=50)[0]
+        assert backward_error(A, X[:, c], B[:, c]) <= solve_backward_error(120, U64)
+    tol = 1e-10
+    Xg = f.gmres_block(B, tol=tol, maxit=50)[0]
     for c in range(B.shape[1]):
-        assert _residual(A, Xg[:, c], B[:, c]) < 1e-8
+        assert residual_norm(A, Xg[:, c], B[:, c]) <= krylov_bound(A, Xg[:, c], B[:, c], tol)
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
@@ -136,7 +135,7 @@ def test_preconditioner_refine():
     b = np.ones(200)
     f = rslab.ldlt(A, preconditioner=1e-4)
     x = f.solve(b, refine=20)
-    assert _residual(A, x, b) < 1e-6
+    assert backward_error(A, x, b) <= solve_backward_error(200, U64)
 
 
 def test_lu_gmres_block_preconditioned():
@@ -148,17 +147,18 @@ def test_lu_gmres_block_preconditioned():
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
     A = A.tocsc()
     B = rng.standard_normal((n, 6))
+    tol = 1e-10
     X, converged, iters, final_res, stop = rslab.lu(A).gmres_block(
-        B, tol=1e-10, maxit=400, restart=80
+        B, tol=tol, maxit=400, restart=80
     )
     assert X.shape == (n, 6)
     assert converged is True
     assert stop == "converged"
     assert isinstance(iters, int) and iters > 0
     assert final_res.shape == (6,)
-    assert np.all(final_res <= 1e-10)
+    assert np.all(final_res <= tol)
     for c in range(6):
-        assert _residual(A, X[:, c], B[:, c]) < 1e-8
+        assert residual_norm(A, X[:, c], B[:, c]) <= krylov_bound(A, X[:, c], B[:, c], tol)
 
 
 def test_ldlt_gmres_block_complex():
@@ -166,15 +166,16 @@ def test_ldlt_gmres_block_complex():
     A = _complex_sym(200)
     B = (np.random.default_rng(6).standard_normal((200, 4))
          + 1j * np.random.default_rng(7).standard_normal((200, 4)))
+    tol = 1e-10
     X, converged, iters, final_res, stop = rslab.ldlt(A).gmres_block(
-        B.astype(np.complex128), tol=1e-10
+        B.astype(np.complex128), tol=tol
     )
     assert X.shape == (200, 4)
     assert converged is True
     assert stop == "converged"
     assert final_res.shape == (4,)
     for c in range(4):
-        assert _residual(A, X[:, c], B[:, c]) < 1e-8
+        assert residual_norm(A, X[:, c], B[:, c]) <= krylov_bound(A, X[:, c], B[:, c], tol)
 
 
 def test_lu_gmres_single_rhs():
@@ -185,15 +186,16 @@ def test_lu_gmres_single_rhs():
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
     A = A.tocsc()
     b = rng.standard_normal(n)
+    tol = 1e-10
     x, converged, iters, final_res, stop = rslab.lu(A).gmres(
-        b, tol=1e-10, maxit=400, restart=80
+        b, tol=tol, maxit=400, restart=80
     )
     assert x.shape == (n,)
     assert converged is True
     assert stop == "converged"
     assert isinstance(iters, int) and iters > 0
-    assert float(final_res) <= 1e-10
-    assert _residual(A, x, b) < 1e-8
+    assert float(final_res) <= tol
+    assert residual_norm(A, x, b) <= krylov_bound(A, x, b, tol)
 
 
 def test_gmres_reports_non_convergence():
@@ -205,12 +207,13 @@ def test_gmres_reports_non_convergence():
     A = A.tocsc()
     b = rng.standard_normal(n)
     # A single iteration cannot reach 1e-12 with the identity-ish weak setup here.
+    tol = 1e-12
     x, converged, iters, final_res, stop = rslab.gmres(
-        A, b, _nearby_factor(A, 0.5), tol=1e-12, maxit=1, restart=1
+        A, b, _nearby_factor(A, 0.5), tol=tol, maxit=1, restart=1
     )
     assert converged is False
     assert stop == "max_iter"
-    assert float(final_res) > 1e-12
+    assert float(final_res) > tol
 
 
 def test_gmres_warm_start_cuts_iterations():
@@ -296,7 +299,7 @@ def test_gmres_recycle_cross_solve_beats_warm_and_cold():
                 A, bk(k), fac, tol=tol, maxit=maxit, restart=restart, **kw
             )
             assert converged, f"{mode} solve {k} did not converge"
-            assert _residual(A, x, bk(k)) < 1e-7
+            assert residual_norm(A, x, bk(k)) <= krylov_bound(A, x, bk(k), tol)
             total += iters
             prev = x
         return total, rec
@@ -326,14 +329,15 @@ def test_gmres_recycle_complex_handle_and_compose():
     rec = fac.recycle(8)
     assert rec.k == 8 and rec.active == 0 and rec.dtype == "complex128"
 
-    x1, c1, _, _, _ = rslab.gmres(A, b, fac, tol=1e-9, maxit=50000, restart=10, recycle=rec)
-    assert c1 and _residual(A, x1, b) < 1e-7
+    tol = 1e-9
+    x1, c1, _, _, _ = rslab.gmres(A, b, fac, tol=tol, maxit=50000, restart=10, recycle=rec)
+    assert c1 and residual_norm(A, x1, b) <= krylov_bound(A, x1, b, tol)
     assert rec.active > 0, "handle not refreshed after first solve"
 
     # Compose recycle with an x0 warm start on a related RHS.
     b2 = b * (0.99 + 0.01j)
-    x2, c2, _, _, _ = rslab.gmres(A, b2, fac, tol=1e-9, maxit=50000, restart=10, x0=x1, recycle=rec)
-    assert c2 and _residual(A, x2, b2) < 1e-7
+    x2, c2, _, _, _ = rslab.gmres(A, b2, fac, tol=tol, maxit=50000, restart=10, x0=x1, recycle=rec)
+    assert c2 and residual_norm(A, x2, b2) <= krylov_bound(A, x2, b2, tol)
 
     rec.clear()
     assert rec.active == 0 and rec.k == 8
@@ -361,14 +365,15 @@ def test_gmres_block_warm_start_matches_and_helps():
     A = A.tocsc()
     fac = rslab.lu(A)
     B = rng.standard_normal((n, 4))
-    X, converged, iters, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80)
+    tol = 1e-10
+    X, converged, iters, _, _ = fac.gmres_block(B, tol=tol, maxit=400, restart=80)
     assert converged
     # Re-solve warm-started from the converged solution: must need no iterations.
-    X2, conv2, iters2, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400, restart=80, x0=X)
+    X2, conv2, iters2, _, _ = fac.gmres_block(B, tol=tol, maxit=400, restart=80, x0=X)
     assert conv2
     assert iters2 == 0, f"warm start from exact solution should take 0 iters, got {iters2}"
     for c in range(4):
-        assert _residual(A, X2[:, c], B[:, c]) < 1e-8
+        assert residual_norm(A, X2[:, c], B[:, c]) <= krylov_bound(A, X2[:, c], B[:, c], tol)
 
 
 def test_gmres_explicit_restart_is_honored():
@@ -408,15 +413,16 @@ def test_gmres_default_restart_is_adaptive():
     B = rng.standard_normal((n, 4))
     fac = rslab.lu(A)
 
-    x, conv, iters, res, _ = fac.gmres(b, tol=1e-10, maxit=400)  # restart defaulted
-    assert conv and _residual(A, x, b) < 1e-8
-    xe, conve, iterse, _, _ = fac.gmres(b, tol=1e-10, maxit=400, restart=80)
+    tol = 1e-10
+    x, conv, iters, res, _ = fac.gmres(b, tol=tol, maxit=400)  # restart defaulted
+    assert conv and residual_norm(A, x, b) <= krylov_bound(A, x, b, tol)
+    xe, conve, iterse, _, _ = fac.gmres(b, tol=tol, maxit=400, restart=80)
     assert conve and iters == iterse  # cap not binding here -> same as explicit 80
 
-    X, convb, _, _, _ = fac.gmres_block(B, tol=1e-10, maxit=400)  # block, restart defaulted
+    X, convb, _, _, _ = fac.gmres_block(B, tol=tol, maxit=400)  # block, restart defaulted
     assert convb
     for c in range(4):
-        assert _residual(A, X[:, c], B[:, c]) < 1e-8
+        assert residual_norm(A, X[:, c], B[:, c]) <= krylov_bound(A, X[:, c], B[:, c], tol)
 
 
 # ---------------------------------------------------------------------------
@@ -445,9 +451,9 @@ def test_klu_factor_solve(dtype):
     assert f.n_perturbed == 0
     assert f.factor_nnz > 0
     x = f.solve(b)
-    assert _residual(A, x, b) < 1e-10
+    assert backward_error(A, x, b) <= solve_backward_error(300, unit_roundoff(dtype))
     X = f.solve_many(np.column_stack([b, 2 * b]))
-    assert _residual(A, X[:, 1], 2 * b) < 1e-10
+    assert backward_error(A, X[:, 1], 2 * b) <= solve_backward_error(300, unit_roundoff(dtype))
 
 
 def test_klu_refactor_sweep():
@@ -460,7 +466,7 @@ def test_klu_refactor_sweep():
     A2.data *= 1.7
     f.refactor(A2.data)
     x2 = f.solve(b)
-    assert _residual(A2, x2, b) < 1e-10
+    assert backward_error(A2, x2, b) <= solve_backward_error(300, U64)
     assert np.allclose(x2, x0 / 1.7)
     # wrong length must raise, factor must recover via full refactor
     with pytest.raises(ValueError):
@@ -472,18 +478,19 @@ def test_klu_solve_transpose(dtype):
     A = _circuit(300, seed=13).astype(dtype)
     b = (np.linspace(-1, 1, 300) + (1j if np.dtype(dtype).kind == "c" else 0)).astype(dtype)
     f = rslab.klu(A)
+    bound = solve_backward_error(300, unit_roundoff(dtype))
     x = f.solve_transpose(b)
-    assert _residual(A.T, x, b) < 1e-10
+    assert backward_error(A.T, x, b) <= bound
     # plain transpose, not conjugate: the adjoint solve is the conjugation recipe
     if np.dtype(dtype).kind == "c":
         xh = f.solve_transpose(b.conj()).conj()
-        assert _residual(A.conj().T, xh, b) < 1e-10
+        assert backward_error(A.conj().T, xh, b) <= bound
     # transpose solve reads refactored values
     A2 = A.copy()
     A2.data *= 1.7
     f.refactor(A2.data)
     x2 = f.solve_transpose(b)
-    assert _residual(A2.T, x2, b) < 1e-10
+    assert backward_error(A2.T, x2, b) <= bound
 
 
 def test_klu_structurally_singular_raises():
@@ -526,10 +533,11 @@ def test_klu_gmres_composes():
     A = _circuit(300, seed=13)
     b = np.ones(300)
     f = rslab.klu(A)
-    x, conv, iters, res, stop = f.gmres(b, tol=1e-12)
+    tol = 1e-12
+    x, conv, iters, res, stop = f.gmres(b, tol=tol)
     assert conv and stop == "converged"
     assert iters <= 2  # exact preconditioner
-    assert _residual(A, x, b) < 1e-10
+    assert residual_norm(A, x, b) <= krylov_bound(A, x, b, tol)
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
@@ -549,15 +557,18 @@ def test_klu_factors_reproduce_the_matrix(dtype, row_scaling):
     assert np.all(L.diagonal() == 1) and sp.triu(L, 1).nnz == 0
     assert sp.tril(U, -1).nnz == 0 and sp.tril(F).nnz == 0
 
-    def reconstruction_error():
-        B = (sp.diags(f.row_scale) @ A).tocsr()[f.perm_r][:, f.perm_c]
-        return abs(f.L @ f.U + f.F - B).max() / abs(B).max()
+    u = unit_roundoff(dtype)
 
-    tol = 1e-5 if np.finfo(dtype).bits == 32 else 1e-12
-    assert reconstruction_error() < tol
+    def reconstruction_excess():
+        B = (sp.diags(f.row_scale) @ A).tocsr()[f.perm_r][:, f.perm_c].toarray()
+        L, U, F = f.L.toarray(), f.U.toarray(), f.F.toarray()
+        bound = gamma(n, u) * (abs(L) @ abs(U)) + gamma(2, u) * abs(B)
+        return np.max(abs(L @ U + F - B) - bound)
+
+    assert reconstruction_excess() <= 0
     f.refactor(A.data * 2.0)
     A = A * 2.0
-    assert reconstruction_error() < tol
+    assert reconstruction_excess() <= 0
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.complex128])
@@ -568,16 +579,20 @@ def test_det_and_inverse_match_numpy(dtype):
     if np.iscomplexobj(A):
         A += 1j * rng.standard_normal((n, n))
     S = A + A.T
+    omega = solve_backward_error(n, unit_roundoff(dtype))
     sign, logabs = np.linalg.slogdet(A)
+    log_bound = 2 * log_det_error(omega, inf_norm(A), np.abs(np.linalg.inv(A)).sum())
     for f in (rslab.lu(sp.csc_matrix(A)), rslab.klu(sp.csc_matrix(A))):
         phase, log_abs = f.log_det()
-        assert abs(log_abs - logabs) < 1e-12 and abs(phase - sign) < 1e-12
-        assert abs(f.det() - np.linalg.det(A)) <= 1e-10 * abs(np.linalg.det(A))
+        assert abs(log_abs - logabs) <= log_bound and abs(phase - sign) <= log_bound
+        assert abs(f.det() - np.linalg.det(A)) <= np.expm1(log_bound) * abs(np.linalg.det(A))
         X = f.inverse()
-        assert X.shape == (n, n) and np.abs(A @ X - np.eye(n)).max() < 1e-10
+        inverse_bound = omega * (inf_norm(A) * np.max(abs(X)) + 1)
+        assert X.shape == (n, n) and np.abs(A @ X - np.eye(n)).max() <= inverse_bound
     phase, log_abs = rslab.ldlt(sp.csc_matrix(S)).log_det()
     sign, logabs = np.linalg.slogdet(S)
-    assert abs(log_abs - logabs) < 1e-12 and abs(phase - sign) < 1e-12
+    log_bound = 2 * log_det_error(omega, inf_norm(S), np.abs(np.linalg.inv(S)).sum())
+    assert abs(log_abs - logabs) <= log_bound and abs(phase - sign) <= log_bound
 
 
 def test_log_det_refuses_a_perturbed_factor():

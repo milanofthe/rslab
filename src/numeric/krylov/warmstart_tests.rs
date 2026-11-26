@@ -71,9 +71,7 @@ fn closure_warm_start_converges_immediately() {
     )
     .expect("warm");
     assert_eq!(warm.iters, 0, "exact seed must converge immediately");
-    for k in 0..n * s {
-        assert!((warm.x[k] - xs[k]).norm() < 1e-8);
-    }
+    assert_eq!(warm.x, xs);
 
     // Perturbed seed: strictly fewer iterations than cold.
     let near: Vec<C> = xs.iter().map(|v| v * C::new(1.001, 0.0)).collect();

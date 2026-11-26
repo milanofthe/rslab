@@ -413,6 +413,7 @@ fn symmetric_pattern_sorted<I: PatternIndex>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::{gamma, U64};
 
     fn sample_3x3() -> CscMatrix {
         // [ 2 -1  0 ]
@@ -467,9 +468,7 @@ mod tests {
         let mut y = [0.0; 3];
         m.symv(&x, &mut y);
         // A * x = [2-2, -1+6-3, -2+12] = [0, 2, 10]
-        assert!((y[0] - 0.0).abs() < 1e-14);
-        assert!((y[1] - 2.0).abs() < 1e-14);
-        assert!((y[2] - 10.0).abs() < 1e-14);
+        assert_eq!(y, [0.0, 2.0, 10.0]);
     }
 
     #[test]
@@ -609,9 +608,10 @@ mod tests {
         let x = [1.0, 1.0, 1.0];
         let mut y = [0.0; 3];
         m.symv(&x, &mut y);
-        assert!((y[0] - 3.0).abs() < 1e-14); // 2 + 0 + 1
-        assert!((y[1] - 4.0).abs() < 1e-14); // 0 + 3 + 1
-        assert!((y[2] - (2.0 - 1e-8)).abs() < 1e-14); // 1 + 1 - 1e-8
+        assert_eq!(y[0], 3.0);
+        assert_eq!(y[1], 4.0);
+        let small = m.values[m.col_ptr[2]];
+        assert!((y[2] - (2.0 + small)).abs() <= gamma(2, U64) * (2.0 - small));
     }
 
     /// `validate()` must reject a

@@ -336,6 +336,7 @@ impl<T: Scalar> Rows<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::U32;
     use num_complex::Complex;
 
     type C = Complex<f64>;
@@ -410,8 +411,9 @@ mod tests {
     /// The precision rule: single from sixteen units of the twin's roundoff on.
     #[test]
     fn single_from_sixteen_roundoffs_on() {
-        let edge = SINGLE_MARGIN * f32::EPSILON as f64 / 2.0;
-        assert!(single_for::<C>(edge) && single_for::<C>(1e-6));
-        assert!(!single_for::<C>(edge * 0.99) && !single_for::<f64>(1e-8));
+        let edge = SINGLE_MARGIN * U32;
+        assert!(single_for::<C>(edge) && single_for::<C>(edge * 2.0));
+        assert!(single_for::<f64>(edge) && single_for::<f32>(edge));
+        assert!(!single_for::<C>(edge * 0.99) && !single_for::<f64>(edge * 0.5));
     }
 }

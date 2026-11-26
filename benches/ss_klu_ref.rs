@@ -18,17 +18,18 @@
 //! Consumed by `klu_circuit.rs` and `klu_realworld.rs` via `#[path]` module
 //! include (benches cannot share a crate-internal module).
 
-use rslab::GeneralCsc;
+use rslab::{GeneralCsc, RefineOperator};
 
 pub fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
     let mut ax = vec![0.0; a.n];
     a.matvec(x, &mut ax);
-    let num = b
-        .iter()
-        .zip(&ax)
-        .map(|(bi, axi)| (bi - axi).abs())
-        .fold(0.0, f64::max);
-    num / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300)
+    let inf = |v: &mut dyn Iterator<Item = f64>| v.fold(0.0, f64::max);
+    let num = inf(&mut b.iter().zip(&ax).map(|(bi, axi)| (bi - axi).abs()));
+    let mut rows = vec![0.0; a.n];
+    a.apply_abs(&vec![1.0; a.n], &mut rows);
+    let x_norm = inf(&mut x.iter().map(|v| v.abs()));
+    let b_norm = inf(&mut b.iter().map(|v| v.abs()));
+    num / (inf(&mut rows.into_iter()) * x_norm + b_norm)
 }
 
 #[repr(C)]

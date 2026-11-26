@@ -4,6 +4,9 @@
 //! near-singular one, empty and duplicate columns, a refactor; and its bits
 //! across thread counts.
 
+pub mod common;
+
+use common::constants::{bilinear_error, gamma, solve_backward_error, UC64};
 use num_complex::Complex;
 use rslab::matgen::stencil::{self, StencilOpts};
 use rslab::matgen::Rng;
@@ -152,6 +155,53 @@ fn max_rel_diff<T: Scalar>(a: &[T], b: &[T]) -> f64 {
     diff / scale.max(f64::MIN_POSITIVE)
 }
 
+fn checked_port_bound(
+    a: &CscMatrix<C>,
+    f: &LdltSolver<C>,
+    b: &SparseRhs<C>,
+    per_port: usize,
+) -> f64 {
+    let mut rows = vec![0.0f64; a.n];
+    for j in 0..a.n {
+        for e in a.col_ptr[j]..a.col_ptr[j + 1] {
+            rows[a.row_idx[e]] += a.values[e].norm();
+            if a.row_idx[e] != j {
+                rows[j] += a.values[e].norm();
+            }
+        }
+    }
+    let a_norm = rows.iter().fold(0.0f64, |m, &v| m.max(v));
+    let (dense, p) = (b.to_dense(), b.ncols());
+    let x = f.solve_many(&dense, p).unwrap();
+    let col = |v: &[C], j: usize| -> Vec<f64> {
+        v[j * a.n..(j + 1) * a.n].iter().map(|e| e.norm()).collect()
+    };
+    let max_of = |v: Vec<f64>| v.into_iter().fold(0.0f64, f64::max);
+    let x_one = max_of((0..p).map(|j| col(&x, j).iter().sum()).collect());
+    let x_inf = max_of((0..p).map(|j| max_of(col(&x, j))).collect());
+    let b_inf = max_of((0..p).map(|j| max_of(col(&dense, j))).collect());
+    let products = max_of(
+        (0..p)
+            .flat_map(|i| (0..p).map(move |j| (i, j)))
+            .map(|(i, j)| (col(&dense, i).iter().zip(col(&x, j)).map(|(u, v)| u * v)).sum())
+            .collect(),
+    );
+    let omega = solve_backward_error(a.n, UC64);
+    for j in 0..p {
+        let mut ax = vec![C::new(0.0, 0.0); a.n];
+        a.symv(&x[j * a.n..(j + 1) * a.n], &mut ax);
+        let r = max_of(
+            (0..a.n)
+                .map(|i| (ax[i] - dense[j * a.n + i]).norm())
+                .collect(),
+        );
+        let w = r / (a_norm * max_of(col(&x, j)) + max_of(col(&dense, j)));
+        assert!(w <= omega, "column {j}: backward error {w:e}");
+    }
+    2.0 * bilinear_error(omega, a_norm, x_one, x_inf, b_inf)
+        + 2.0 * gamma(per_port, UC64) * products
+}
+
 fn assert_symmetric<T: Scalar>(z: &[T], p: usize) {
     for i in 0..p {
         for j in 0..p {
@@ -276,7 +326,7 @@ fn empty_and_duplicate_columns() {
     }
     // columns 0 and 2 are the same right-hand side
     for j in 0..p {
-        assert!((z[j] - z[2 * p + j]).norm() <= 1e-12 * z[j].norm().max(1.0));
+        assert_eq!(z[j], z[2 * p + j], "duplicate column");
     }
     // no columns at all
     let none = SparseRhs::<C>::from_columns(400, &[]).unwrap();
@@ -305,7 +355,8 @@ fn same_bits_for_every_thread_count() {
 /// the new values: the bits of a fresh factor's, and `B^T X` to rounding.
 #[test]
 fn refactor_with_new_values() {
-    let b = ports::<C>(1600, 30, 6, 11);
+    let per_port = 6;
+    let b = ports::<C>(1600, 30, per_port, 11);
     let sym =
         rslab::LdltSymbolic::analyze(&helmholtz(40, C::new(0.7, 0.02)), &settings(2)).unwrap();
     let mut f = sym
@@ -322,9 +373,13 @@ fn refactor_with_new_values() {
         z == fresh.port_matrix(&b).unwrap(),
         "refactor and fresh factor differ"
     );
-    let d = max_rel_diff(&z, &reference(&f, &b));
+    let bound = checked_port_bound(&a, &f, &b, per_port);
+    let r = reference(&f, &b);
+    let d = (z.iter().zip(&r))
+        .map(|(p, q)| (p - q).norm())
+        .fold(0.0, f64::max);
     assert!(
-        d <= 1e-11,
+        d <= bound,
         "refactored port matrix differs from B^T X by {d:e}"
     );
 }

@@ -94,6 +94,7 @@ mod integration {
     //! Every family must produce matrices the solver actually factors and solves -
     //! the whole point. Small instances, exact factorization, true residual.
     use super::*;
+    use crate::test_constants::{solve_backward_error, U32, U64, UC32, UC64};
     use crate::{LdltSymbolic, LuSymbolic, SolverSettings};
     use num_complex::Complex;
 
@@ -105,6 +106,57 @@ mod integration {
             .collect()
     }
 
+    fn backward_error<T: crate::Scalar>(
+        x: &[T],
+        b: &[T],
+        apply: impl Fn(bool, &[T], &mut [T]),
+    ) -> f64 {
+        let n = b.len();
+        let mut ax = vec![T::zero(); n];
+        apply(false, x, &mut ax);
+        let mut sums = vec![T::zero(); n];
+        apply(true, &vec![T::one(); n], &mut sums);
+        let max = |v: &[T]| v.iter().map(|z| z.magnitude()).fold(0.0, f64::max);
+        let r: Vec<T> = ax.iter().zip(b).map(|(&p, &q)| p - q).collect();
+        max(&r) / (max(&sums) * max(x) + max(b))
+    }
+
+    pub(super) fn sym_error<T: crate::Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
+        let mut abs = a.clone();
+        abs.values = a
+            .values
+            .iter()
+            .map(|v| T::from_real(v.magnitude()))
+            .collect();
+        backward_error(
+            x,
+            b,
+            |m, v, out| {
+                if m {
+                    abs.symv(v, out)
+                } else {
+                    a.symv(v, out)
+                }
+            },
+        )
+    }
+
+    pub(super) fn unsym_error<T: crate::Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
+        let mut abs = a.clone();
+        abs.values = a
+            .values
+            .iter()
+            .map(|v| T::from_real(v.magnitude()))
+            .collect();
+        backward_error(x, b, |m, v, out| {
+            if m {
+                abs.matvec(v, out)
+            } else {
+                a.matvec(v, out)
+            }
+        })
+    }
+
     fn ldlt_resid(a: &CscMatrix<C>) -> f64 {
         let b = rhs(a.n);
         let f = LdltSymbolic::analyze(a, &SolverSettings::default())
@@ -112,14 +164,7 @@ mod integration {
             .factor(a, &SolverSettings::default())
             .unwrap();
         let x = f.solve(&b).unwrap();
-        let mut ax = vec![Complex::new(0.0, 0.0); a.n];
-        a.symv(&x, &mut ax);
-        let num: f64 = (0..a.n)
-            .map(|i| (ax[i] - b[i]).norm_sqr())
-            .sum::<f64>()
-            .sqrt();
-        let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-        num / den.max(1e-300)
+        sym_error(a, &x, &b)
     }
 
     fn lu_resid(a: &GeneralCsc<C>) -> f64 {
@@ -129,14 +174,7 @@ mod integration {
             .factor(a, &SolverSettings::default())
             .unwrap();
         let x = f.solve(&b).unwrap();
-        let mut ax = vec![Complex::new(0.0, 0.0); a.n];
-        a.matvec(&x, &mut ax);
-        let num: f64 = (0..a.n)
-            .map(|i| (ax[i] - b[i]).norm_sqr())
-            .sum::<f64>()
-            .sqrt();
-        let den: f64 = b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-        num / den.max(1e-300)
+        unsym_error(a, &x, &b)
     }
 
     #[test]
@@ -163,18 +201,24 @@ mod integration {
         ];
         for (name, a) in cases {
             let r = ldlt_resid(&a);
-            assert!(r < 1e-6, "{name}: LDL^T residual {r:.1e} too large");
+            assert!(
+                r <= solve_backward_error(a.n, UC64),
+                "{name}: LDL^T backward error {r:.1e} too large"
+            );
         }
     }
 
     #[test]
     fn unsymmetric_families_factor_and_solve() {
         let bem = bem::kernel(600, &bem::BemOpts::default());
-        assert!(lu_resid(&bem) < 1e-6, "BEM LU residual too large");
+        assert!(
+            lu_resid(&bem) <= solve_backward_error(bem.n, UC64),
+            "BEM LU backward error too large"
+        );
         let r = random::random_unsym::<C>(500, 12, 2.0, 1);
         assert!(
-            lu_resid(&r) < 1e-6,
-            "random unsymmetric LU residual too large"
+            lu_resid(&r) <= solve_backward_error(r.n, UC64),
+            "random unsymmetric LU backward error too large"
         );
     }
 
@@ -185,7 +229,7 @@ mod integration {
         // monomorphization gap (e.g. a GEMM only specialized for f64/c64) would fail
         // to compile or solve here.
         use crate::Scalar;
-        fn sym_ok<T: Scalar>(tol: f64) {
+        fn sym_ok<T: Scalar>(u: f64) {
             let a = structured::banded::<T>(200, 6, 1.0, 1);
             let b: Vec<T> = (0..a.n)
                 .map(|i| T::from_real((i % 7) as f64 - 3.0))
@@ -195,21 +239,15 @@ mod integration {
                 .factor(&a, &SolverSettings::default())
                 .unwrap();
             let x = f.solve(&b).unwrap();
-            let mut ax = vec![T::zero(); a.n];
-            a.symv(&x, &mut ax);
-            let num: f64 = (0..a.n)
-                .map(|i| (ax[i] - b[i]).magnitude().powi(2))
-                .sum::<f64>()
-                .sqrt();
-            let den: f64 = b.iter().map(|v| v.magnitude().powi(2)).sum::<f64>().sqrt();
+            let omega = sym_error(&a, &x, &b);
             assert!(
-                num / den.max(1e-30) < tol,
-                "sym {} residual {:.2e}",
+                omega <= solve_backward_error(a.n, u),
+                "sym {} backward error {:.2e}",
                 std::any::type_name::<T>(),
-                num / den
+                omega
             );
         }
-        fn unsym_ok<T: Scalar>(tol: f64) {
+        fn unsym_ok<T: Scalar>(u: f64) {
             let a = random::random_unsym::<T>(200, 12, 3.0, 1);
             let b: Vec<T> = (0..a.n)
                 .map(|i| T::from_real((i % 5) as f64 - 2.0))
@@ -219,29 +257,23 @@ mod integration {
                 .factor(&a, &SolverSettings::default())
                 .unwrap();
             let x = f.solve(&b).unwrap();
-            let mut ax = vec![T::zero(); a.n];
-            a.matvec(&x, &mut ax);
-            let num: f64 = (0..a.n)
-                .map(|i| (ax[i] - b[i]).magnitude().powi(2))
-                .sum::<f64>()
-                .sqrt();
-            let den: f64 = b.iter().map(|v| v.magnitude().powi(2)).sum::<f64>().sqrt();
+            let omega = unsym_error(&a, &x, &b);
             assert!(
-                num / den.max(1e-30) < tol,
-                "unsym {} residual {:.2e}",
+                omega <= solve_backward_error(a.n, u),
+                "unsym {} backward error {:.2e}",
                 std::any::type_name::<T>(),
-                num / den
+                omega
             );
         }
         // f64 / f32 / Complex<f64> / Complex<f32> - the four Scalar impls.
-        sym_ok::<f64>(1e-10);
-        sym_ok::<f32>(1e-2);
-        sym_ok::<C>(1e-10);
-        sym_ok::<Complex<f32>>(1e-2);
-        unsym_ok::<f64>(1e-10);
-        unsym_ok::<f32>(1e-2);
-        unsym_ok::<C>(1e-10);
-        unsym_ok::<Complex<f32>>(1e-2);
+        sym_ok::<f64>(U64);
+        sym_ok::<f32>(U32);
+        sym_ok::<C>(UC64);
+        sym_ok::<Complex<f32>>(UC32);
+        unsym_ok::<f64>(U64);
+        unsym_ok::<f32>(U32);
+        unsym_ok::<C>(UC64);
+        unsym_ok::<Complex<f32>>(UC32);
 
         // The memory estimator scales with the scalar size - agnostic too.
         let a32 = random::random_unsym::<f32>(150, 8, 2.0, 1);

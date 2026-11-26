@@ -777,6 +777,7 @@ crate::numeric::direct::direct_solver!(AutoSolver<'s>);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::{solve_backward_error, U64, UC64};
     use num_complex::Complex;
 
     fn layout(n: usize, rows: &[usize], cols: &[usize]) -> AutoSymbolic {
@@ -921,6 +922,32 @@ mod tests {
         b
     }
 
+    fn abs_row_sums<T: Scalar>(n: usize, rows: &[usize], vals: &[T]) -> Vec<f64> {
+        let mut s = vec![0.0f64; n];
+        for (&r, v) in rows.iter().zip(vals) {
+            s[r] += v.magnitude();
+        }
+        s
+    }
+
+    fn backward_error<T: Scalar>(
+        rows: &[usize],
+        cols: &[usize],
+        vals: &[T],
+        x: &[T],
+        b: &[T],
+    ) -> f64 {
+        let mut r = b.to_vec();
+        for ((&i, &j), &v) in rows.iter().zip(cols).zip(vals) {
+            r[i] = r[i] - v * x[j];
+        }
+        let inf = |v: &[T]| v.iter().map(|e| e.magnitude()).fold(0.0, f64::max);
+        let a_norm = abs_row_sums(b.len(), rows, vals)
+            .into_iter()
+            .fold(0.0, f64::max);
+        inf(&r) / (a_norm * inf(x) + inf(b))
+    }
+
     #[test]
     fn sparse_work_takes_klu_at_any_size() {
         // A 20k chain: large, but no dense work.
@@ -1005,7 +1032,8 @@ mod tests {
         let (rows, cols) = grid(130);
         let n = 130 * 130;
         let mut vals = laplacian(&rows, &cols);
-        vals[1] *= 1.0 + 1e-14; // one mirror pair off by a rounding
+        let skew = 1e-14;
+        vals[1] *= 1.0 + skew;
         let sym = Arc::new(layout(n, &rows, &cols));
         let mut exact = AutoSolver::<f64>::new(sym.clone());
         exact.assemble(&vals);
@@ -1019,7 +1047,20 @@ mod tests {
         assert_eq!(within.refactor(&s).unwrap(), AutoBackend::Ldlt);
         let b = row_sums(n, &rows, &vals);
         let (x1, x2) = (exact.solve(&b).unwrap(), within.solve(&b).unwrap());
-        assert!(x1.iter().zip(&x2).all(|(a, b)| (a - b).abs() < 1e-10));
+        let a_norm = abs_row_sums(n, &rows, &vals)
+            .into_iter()
+            .fold(0.0, f64::max);
+        let omega = solve_backward_error(n, U64);
+        let symmetrized = omega + vals[1].abs() * skew / a_norm;
+        let (e1, e2) = (
+            backward_error(&rows, &cols, &vals, &x1, &b),
+            backward_error(&rows, &cols, &vals, &x2, &b),
+        );
+        assert!(e1 <= omega, "exact symmetry: backward error {e1:e}");
+        assert!(
+            e2 <= symmetrized,
+            "within the tolerance: backward error {e2:e}"
+        );
     }
 
     #[test]
@@ -1062,7 +1103,12 @@ mod tests {
             f.refactor(&AutoSettings::default()).unwrap(),
             AutoBackend::Ldlt
         );
-        let x = f.solve(&row_sums(n, &rows, &vals)).unwrap();
-        assert!(x.iter().all(|v| (v - c(1.0, 0.0)).norm() < 1e-10));
+        let b = row_sums(n, &rows, &vals);
+        let x = f.solve(&b).unwrap();
+        let omega = backward_error(&rows, &cols, &vals, &x, &b);
+        assert!(
+            omega <= solve_backward_error(n, UC64),
+            "backward error {omega:e}"
+        );
     }
 }
