@@ -2,7 +2,7 @@
 
 /// Diagnostic counters collected during AMF ordering.
 ///
-/// Mirrors [`rslab_amd::AmdStats`] field-by-field; the AMF inner
+/// Mirrors `AmdStats` of `rslab-amd` field-by-field; the AMF inner
 /// loop populates the same `OrderDiagnostics` surface from the
 /// shared `rslab-ordering-core` workspace.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
