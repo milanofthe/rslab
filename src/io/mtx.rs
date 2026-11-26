@@ -18,11 +18,6 @@ pub struct MtxMatrix<T = f64> {
 }
 
 impl<T: Scalar> MtxMatrix<T> {
-    /// Convert to a dense symmetric matrix.
-    ///
-    /// Duplicate coordinates are **summed**, matching `to_csc`
-    /// (which sums via `CscMatrix::from_triplets`) and the Matrix Market /
-    /// COO convention used by scipy and MATLAB.
     #[cfg(test)]
     pub(crate) fn to_dense(&self) -> SymmetricMatrix<T> {
         let mut mat = SymmetricMatrix::zeros(self.n);
@@ -232,7 +227,6 @@ fn field_of<T: Scalar>() -> &'static str {
 
 fn push_value<T: Scalar>(out: &mut String, x: T) {
     use std::fmt::Write;
-    // Writing into a String cannot fail.
     let _ = if T::COMPLEX {
         write!(out, "{:e} {:e}", x.real(), x.imag())
     } else {
@@ -263,13 +257,6 @@ fn format_coordinate<T: Scalar>(
     out
 }
 
-/// Generic Matrix Market coordinate parser. `field` is the expected header
-/// field token (`"real"` / `"complex"`); `symmetry` is the structure token
-/// (`"symmetric"` folds upper-triangle entries to the lower triangle;
-/// `"general"` keeps every entry as given). `n_value_tokens` is how many
-/// whitespace tokens the value spans (1 real, 2 complex); `parse_val` builds the
-/// scalar. All the hardening (banner tokenization, untrusted `nnz` clamp +
-/// validation, bounds, non-finite rejection) is shared.
 fn parse_mtx_with<T: Scalar>(
     contents: &str,
     source: &str,
@@ -281,14 +268,10 @@ fn parse_mtx_with<T: Scalar>(
     let fold_to_lower = symmetry == "symmetric";
     let mut lines = contents.lines().enumerate();
 
-    // Header line
     let (_, header) = lines
         .next()
         .ok_or_else(|| RslabError::IoError(format!("{}: empty file", source)))?;
-    // Compare the banner token by token (case-insensitive). The Matrix
-    // Market spec and the reference NIST `mmio` reader tokenize the banner
-    // on arbitrary whitespace, so fields separated by multiple spaces or
-    // tabs are legal.
+    // https://math.nist.gov/MatrixMarket/formats.html
     let banner: [&str; 5] = ["%%matrixmarket", "matrix", "coordinate", field, symmetry];
     let mut header_tokens = header.split_whitespace();
     let banner_ok = banner.iter().all(|expected| {
@@ -306,7 +289,6 @@ fn parse_mtx_with<T: Scalar>(
         )));
     }
 
-    // Skip comment lines (start with %)
     let mut size_line: Option<(usize, String)> = None;
     for (line_no, line) in &mut lines {
         let trimmed = line.trim();
@@ -320,7 +302,6 @@ fn parse_mtx_with<T: Scalar>(
     let (size_line_no, size_text) =
         size_line.ok_or_else(|| RslabError::IoError(format!("{}: missing size line", source)))?;
 
-    // Parse "rows cols nnz"
     let parts: Vec<&str> = size_text.split_whitespace().collect();
     if parts.len() != crate::constants::MTX_SIZE_FIELDS {
         return Err(RslabError::IoError(format!(
@@ -363,16 +344,6 @@ fn parse_mtx_with<T: Scalar>(
     }
     let n = rows;
 
-    // Parse entries.
-    //
-    // Do not trust the header's `nnz` for the up-front allocation. A
-    // corrupt header (e.g. nnz = 10^17) would make this a multi-exabyte
-    // request; the allocator returns null and `handle_alloc_error` aborts
-    // the process instead of returning an `Err`. The reservation is clamped
-    // to the source byte length: each entry occupies at least one byte in
-    // the file, so that is a hard upper bound on the true count. Valid
-    // files (where `nnz <= contents.len()` always holds) reserve exactly
-    // `nnz`. The count itself is validated after the loop.
     let mut entries = Vec::with_capacity(nnz.min(contents.len()));
     for (line_no, line) in lines {
         let trimmed = line.trim();
@@ -418,9 +389,6 @@ fn parse_mtx_with<T: Scalar>(
                 parts[2..].join(" ")
             ))
         })?;
-        // f64::from_str silently accepts "nan", "inf", "-inf"; such a value
-        // would build an MtxMatrix carrying a non-finite entry that poisons any
-        // downstream factorization. Reject it (for complex, either part).
         if !v.is_finite() {
             return Err(RslabError::IoError(format!(
                 "{}: line {}: non-finite value '{}'",
@@ -430,7 +398,6 @@ fn parse_mtx_with<T: Scalar>(
             )));
         }
 
-        // Validate bounds (1-indexed in MTX)
         if i == 0 || j == 0 || i > n || j > n {
             return Err(RslabError::IoError(format!(
                 "{}: line {}: index ({}, {}) out of bounds for {}x{} matrix",
@@ -443,8 +410,6 @@ fn parse_mtx_with<T: Scalar>(
             )));
         }
 
-        // Convert to 0-indexed. For `symmetric` files fold the upper triangle
-        // down to the lower (i >= j); for `general` keep the entry as given.
         let (i0, j0) = (i - 1, j - 1);
         if fold_to_lower && i0 < j0 {
             entries.push((j0, i0, v));
@@ -453,11 +418,6 @@ fn parse_mtx_with<T: Scalar>(
         }
     }
 
-    // The Matrix Market spec defines the size line's `nnz` as the number
-    // of entries that follow, so a body with more or fewer data lines than
-    // the header declares is a malformed file (a truncated file would
-    // otherwise read as a valid smaller matrix). A bogus huge `nnz` also
-    // ends here, as a recoverable count-mismatch `Err`.
     if entries.len() != nnz {
         return Err(RslabError::IoError(format!(
             "{}: declared nnz {} does not match the {} entries in the file",
@@ -533,19 +493,12 @@ mod tests {
         let dense = m.to_dense();
         assert_eq!(dense.get(0, 0), 2.0);
         assert_eq!(dense.get(1, 0), -1.0);
-        assert_eq!(dense.get(0, 1), -1.0); // symmetric
+        assert_eq!(dense.get(0, 1), -1.0);
         assert_eq!(dense.get(1, 1), 3.0);
         assert_eq!(dense.get(2, 2), 1.5);
-        assert_eq!(dense.get(2, 0), 0.0); // not set
+        assert_eq!(dense.get(2, 0), 0.0);
     }
 
-    /// A corrupt header declaring an enormous nnz must not turn into a
-    /// multi-exabyte reservation: the allocator returns null and Rust's
-    /// `handle_alloc_error` aborts the process, which a library caller
-    /// cannot guard against. This file (10^17 declared, two real) returns
-    /// a recoverable count-mismatch `Err`, which it can only do by
-    /// surviving the clamped `with_capacity` (an unclamped reservation
-    /// would abort before the count check runs).
     #[test]
     fn huge_nnz_header_does_not_abort() {
         let mtx = "\
@@ -565,11 +518,6 @@ mod tests {
         }
     }
 
-    /// The size line's declared nnz is checked against the number of data
-    /// lines, so a truncated or corrupt file is rejected. Oracle: the
-    /// Matrix Market spec, where the size line's third field is the number
-    /// of entries that follow. Here the header declares 4 entries but the
-    /// body has 2.
     #[test]
     fn declared_nnz_must_match_entry_count() {
         let mtx = "\
@@ -590,10 +538,6 @@ mod tests {
         }
     }
 
-    /// Duplicate coordinates are summed by both conversion paths, so the
-    /// same file gives one matrix. Oracle: the Matrix Market / COO
-    /// duplicate-summing convention (scipy, MATLAB). Here (1,1) is listed
-    /// as 2.0 then 1.0, and both paths give 3.0.
     #[test]
     fn duplicate_entries_summed_consistently_by_both_paths() {
         let mtx = "\
@@ -613,9 +557,7 @@ mod tests {
         );
         assert_eq!(dense.get(1, 1), 5.0);
 
-        // to_csc collapses the duplicate to a single summed entry too.
         let csc = m.to_csc().expect("to_csc");
-        // Column 0 holds (row 0, col 0); find its value.
         let mut v00 = None;
         for k in csc.col_ptr[0]..csc.col_ptr[1] {
             if csc.row_idx[k] == 0 {
@@ -629,9 +571,6 @@ mod tests {
         );
     }
 
-    /// A legal MTX banner separates its five fields with arbitrary
-    /// whitespace; the NIST `mmio` reference tokenizes it. A multi-space
-    /// banner is accepted.
     #[test]
     fn multispace_banner_is_accepted() {
         let mtx = "\
@@ -646,7 +585,6 @@ mod tests {
         assert_eq!(m.entries.len(), 2);
     }
 
-    /// A banner whose fields are separated by tabs is equally legal.
     #[test]
     fn tab_separated_banner_is_accepted() {
         let mtx = "%%MatrixMarket\tmatrix\tcoordinate\treal\tsymmetric\n2 2 1\n1 1 7.0\n";
@@ -655,8 +593,6 @@ mod tests {
         assert_eq!(m.entries.len(), 1);
     }
 
-    /// `f64::from_str` accepts "nan"; a NaN entry would poison any
-    /// downstream factorization, so a non-finite value is rejected.
     #[test]
     fn nan_value_is_rejected() {
         let mtx = "\
@@ -675,7 +611,6 @@ mod tests {
         }
     }
 
-    /// Likewise "inf" is accepted by `f64::from_str` and rejected here.
     #[test]
     fn inf_value_is_rejected() {
         let mtx = "\
@@ -725,7 +660,6 @@ mod tests {
 
     #[test]
     fn test_upper_triangle_normalized() {
-        // Entry (1,2) with 1 < 2 should be flipped to (1,0) in 0-indexed
         let mtx = "\
 %%MatrixMarket matrix coordinate real symmetric
 2 2 1
@@ -733,7 +667,7 @@ mod tests {
 ";
         let m = parse_mtx(mtx, "test").unwrap();
         assert_eq!(m.entries.len(), 1);
-        assert_eq!(m.entries[0], (1, 0, 7.0)); // normalized to lower triangle
+        assert_eq!(m.entries[0], (1, 0, 7.0));
     }
 
     #[test]
@@ -750,7 +684,6 @@ mod tests {
 
     #[test]
     fn test_real_parser_rejects_complex_header() {
-        // The real parser must still reject a complex file (use parse_mtx_complex).
         let mtx = "\
 %%MatrixMarket matrix coordinate complex symmetric
 2 2 1
@@ -763,7 +696,6 @@ mod tests {
 
     #[test]
     fn complex_parser_reads_complex_symmetric() {
-        // mtype 6: `i j re im`. Upper-triangle entry normalized to lower.
         let mtx = "\
 %%MatrixMarket matrix coordinate complex symmetric
 3 3 4
@@ -778,8 +710,7 @@ mod tests {
         let dense = m.to_dense();
         assert_eq!(dense.get(0, 0), Complex::new(2.0, 1.0));
         assert_eq!(dense.get(1, 0), Complex::new(-1.0, 0.3));
-        assert_eq!(dense.get(0, 1), Complex::new(-1.0, 0.3)); // symmetric (no conj)
-                                                              // (1,3) -> normalized to lower (2,0).
+        assert_eq!(dense.get(0, 1), Complex::new(-1.0, 0.3));
         assert_eq!(dense.get(2, 0), Complex::new(0.5, 0.2));
     }
 
@@ -796,7 +727,6 @@ mod tests {
 
     #[test]
     fn complex_parser_rejects_wrong_token_count() {
-        // A complex line needs two value tokens; one is malformed.
         let mtx = "\
 %%MatrixMarket matrix coordinate complex symmetric
 2 2 1
@@ -820,8 +750,6 @@ mod tests {
     #[test]
     fn complex_mtx_round_trips_through_solver() {
         use crate::LdltSolver;
-        // A small diagonally-dominant complex-symmetric system read from MTX,
-        // factored and solved - the end-to-end PARDISO-style path.
         let mtx = "\
 %%MatrixMarket matrix coordinate complex symmetric
 3 3 5

@@ -158,19 +158,6 @@ pub trait Scalar:
     fn le_bytes(self, out: &mut Vec<u8>);
 }
 
-/// `a*b + c` through the hardware FMA **when the build enables it**
-/// (`-C target-cpu=native` or `-C target-feature=+fma`; see
-/// `.cargo/config.toml`), else as a plain multiply-add. The guard is
-/// load-bearing: a bare [`Scalar::mul_add`] on a baseline x86-64 build lowers
-/// to a libm software-fma call, bit-exact but far slower than mul+add, so
-/// the hot scalar kernels (triangular solves, Gilbert-Peierls updates) must
-/// only ever reach `mul_add` through this switch. `cfg!` resolves at compile
-/// time; the untaken branch folds away.
-///
-/// Numerical note: with FMA the product is not rounded before the add, so
-/// results differ from the plain path in the last ulp. Determinism within a
-/// build is unaffected (every run takes the same branch); cross-build
-/// bit-identity was never guaranteed.
 #[inline(always)]
 pub(crate) fn fmadd<T: Scalar>(a: T, b: T, c: T) -> T {
     if cfg!(target_feature = "fma") {
@@ -252,8 +239,6 @@ macro_rules! complex_methods {
     ($real:ident) => {
         #[inline]
         fn mul_add(self, a: Self, b: Self) -> Self {
-            // (self*a + b) lowered to four real FMAs - uses the hardware FMA pipes
-            // and halves the rounding versus `self * a + b` on `num_complex`.
             let re = $real::mul_add(self.re, a.re, $real::mul_add(-self.im, a.im, b.re));
             let im = $real::mul_add(self.re, a.im, $real::mul_add(self.im, a.re, b.im));
             Complex::new(re, im)
@@ -330,8 +315,6 @@ impl Scalar for Complex<f64> {
 
     #[inline]
     fn magnitude(self) -> f64 {
-        // `norm` is the Euclidean modulus sqrt(re^2 + im^2), computed via
-        // `hypot` to avoid spurious overflow.
         self.norm()
     }
 
@@ -357,9 +340,6 @@ impl Scalar for Complex<f64> {
 
     #[inline]
     fn recip(self) -> Self {
-        // True algebraic reciprocal 1/z = conj(z) / |z|^2. This is the value
-        // used to eliminate with a complex-symmetric pivot; it is NOT a
-        // Hermitian operation.
         Complex::inv(&self)
     }
 
@@ -468,8 +448,6 @@ impl Scalar for Complex<f32> {
 
     #[inline]
     fn magnitude(self) -> f64 {
-        // Compute the modulus in f64 to keep pivot thresholds accurate and
-        // avoid f32 overflow on extreme inputs.
         (self.re as f64).hypot(self.im as f64)
     }
 
@@ -507,8 +485,6 @@ impl Scalar for Complex<f32> {
 mod tests {
     use super::*;
 
-    // Oracles below are hand-computed: |3+4i| = 5, 1/(1+i) = (1-i)/2, etc.
-
     #[test]
     fn f64_magnitude_and_recip() {
         assert_eq!((-3.0_f64).magnitude(), 3.0);
@@ -531,10 +507,8 @@ mod tests {
     #[test]
     fn complex_recip_is_algebraic_inverse() {
         let z: Complex<f64> = Complex::new(1.0, 1.0);
-        // 1/(1+i) = (1-i)/2 = 0.5 - 0.5i
         let r = z.recip();
         assert_eq!(r, Complex::new(0.5, -0.5));
-        // z * (1/z) == 1
         let prod = z * r;
         assert_eq!(prod, Complex::new(1.0, 0.0));
     }
@@ -554,12 +528,10 @@ mod tests {
     #[test]
     fn complex_mul_add() {
         let z: Complex<f64> = Complex::new(1.0, 1.0);
-        // (1+i)*(1+i) + 1 = (1 + 2i - 1) + 1 = 1 + 2i
         let r = z.mul_add(Complex::new(1.0, 1.0), Complex::new(1.0, 0.0));
         assert_eq!(r, Complex::new(1.0, 2.0));
     }
 
-    /// The twin: a double rounds to it and widens back exactly, a single is its own.
     #[test]
     fn low_twin_rounds_and_widens() {
         let z = Complex::new(1.0 / 3.0, -0.1);
@@ -572,6 +544,13 @@ mod tests {
         assert_eq!(f64::promote(0.25f64.demote()), 0.25);
         assert_eq!(low.demote(), low);
         assert_eq!(f32::promote(0.1f32), 0.1f32);
+    }
+
+    #[test]
+    fn complex_f32_magnitude_does_not_overflow() {
+        let big = Complex::new(f32::MAX, f32::MAX);
+        assert!(big.magnitude().is_finite());
+        assert!(big.magnitude() > f32::MAX as f64);
     }
 
     #[test]

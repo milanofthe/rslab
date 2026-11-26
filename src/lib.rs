@@ -1,4 +1,3 @@
-// No `.unwrap()` or `.expect()` outside the tests.
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::expect_used))]
 #![cfg_attr(test, allow(clippy::needless_range_loop))]
@@ -167,45 +166,29 @@
 //! `mimalloc` as the global allocator speeds up the factorization, most on
 //! Windows, whose system heap maps large blocks afresh each time.
 
-// The public API is the root `pub use` set below. Modules are `pub(crate)`
-// except those the in-tree benches, tests and xtask reach by path: those are
-// `pub` but `#[doc(hidden)]`, not part of the API.
-
-// Monotonic clock shim: std Instant natively, inert on wasm32.
 pub(crate) mod clock;
-// The numbers the solver is tuned and defined by; reached by the bindings
-// and the contract tests.
 #[doc(hidden)]
 pub mod constants;
-// Small dense complex linear algebra for the projected matrices of Krylov methods.
 pub mod dense;
 pub(crate) mod diagnostics;
 pub(crate) mod error;
 pub(crate) mod inertia;
 pub(crate) mod io;
-pub(crate) mod memory;
-// Test-matrix generators (feature `matgen`) for the benches and tests;
-// `matgen-download` adds a SuiteSparse / Matrix Market fetcher.
 #[cfg(feature = "matgen")]
 #[doc(hidden)]
 pub mod matgen;
+pub(crate) mod memory;
 pub(crate) mod numeric;
-// Matrix families A0 + alpha*A1 + E on one layout.
-pub mod parallel;
-pub(crate) mod pencil;
-// Ordering internals the benches and tests reach by path.
 #[doc(hidden)]
 pub mod ordering;
-// Progress of the long parts of a solve, in steps.
+pub mod parallel;
+pub(crate) mod pencil;
 pub(crate) mod progress;
 pub(crate) mod refine;
 pub(crate) mod scalar;
-// Values stored in single precision where their accuracy allows.
-pub(crate) mod stored;
-// MC64 max-product matching and the equilibrations of the factor paths.
 pub(crate) mod scaling;
 pub(crate) mod sparse;
-// Symbolic analysis internals the tests and examples reach by path.
+pub(crate) mod stored;
 #[doc(hidden)]
 pub mod symbolic;
 #[cfg(test)]
@@ -217,7 +200,6 @@ pub mod test_grid;
 #[cfg(test)]
 #[path = "../tests/common/xorshift.rs"]
 pub mod test_xorshift;
-// Hardware calibration (feature `tuning`), driven by xtask.
 #[cfg(feature = "tuning")]
 #[doc(hidden)]
 pub mod tuning;
@@ -231,18 +213,16 @@ pub use io::mtx::{
     write_mtx_array, write_mtx_symmetric, MtxLoaded, MtxMatrix,
 };
 pub use memory::MemoryPlan;
-pub use refine::{
-    BackwardError, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy, RefineSystem,
-};
-pub use rsprobe;
-pub use scalar::Scalar;
-pub use scaling::ScalingStrategy;
-pub use stored::{single_for, Stored};
-// The three direct solvers: `XSymbolic::analyze -> .factor -> XSolver`,
-// and the automatic path over them.
 pub use numeric::auto::{AutoBackend, AutoSettings, AutoSolver, AutoSymbolic};
 pub use numeric::direct::SolveWork;
 pub use numeric::klu::{KluParallel, KluSettings, KluSolver, KluSymbolic};
+pub use numeric::krylov::{
+    cocg, cocr, gmres, gmres_block, gmres_recycled, BasisSwitch, BlockArnoldi, BlockBasis,
+    BlockGmres, BlockKrylovResult, BlockProgress, BlockRecycle, Factorization, FnOperator,
+    FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator, LowPrecisionLu,
+    LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner, Preconditioner, Recycle,
+    RecycleScalar, StepProgress, StopReason,
+};
 pub use numeric::ldlt::{LdltSolver, LdltSymbolic};
 pub use numeric::lu::{LuSolver, LuSymbolic};
 pub use numeric::settings::{
@@ -252,18 +232,17 @@ pub use numeric::settings::{
 };
 pub use numeric::supernodal::solve::SparseReach;
 pub use pencil::{EntryRows, Pencil};
-// The Krylov solvers and their operator and preconditioner traits.
-pub use numeric::krylov::{
-    cocg, cocr, gmres, gmres_block, gmres_recycled, BasisSwitch, BlockArnoldi, BlockBasis,
-    BlockGmres, BlockKrylovResult, BlockProgress, BlockRecycle, Factorization, FnOperator,
-    FnPreconditioner, KrylovResult, KrylovSettings, LinearOperator, LowPrecisionLu,
-    LowPrecisionPreconditioner, MixedPrecision, NoPreconditioner, Preconditioner, Recycle,
-    RecycleScalar, StepProgress, StopReason,
+pub use refine::{
+    BackwardError, PivotFloor, RefineOperator, RefineOutcome, RefinePolicy, RefineSystem,
 };
+pub use rsprobe;
+pub use scalar::Scalar;
+pub use scaling::ScalingStrategy;
 pub use sparse::csc::{CscMatrix, CscPattern};
 pub use sparse::general::GeneralCsc;
 pub use sparse::layout::{CscLayout, Triplets};
 pub use sparse::rhs::SparseRhs;
+pub use stored::{single_for, Stored};
 pub use symbolic::{AmalgamationStrategy, OrderingMethod, RelaxAmalgamation};
 
 /// Ergonomic imports for embedding RSLAB as a PARDISO-style sparse solver /
@@ -272,45 +251,11 @@ pub use symbolic::{AmalgamationStrategy, OrderingMethod, RelaxAmalgamation};
 /// options enums, and the Matrix Market loaders.
 pub mod prelude {
     pub use crate::{
-        // iterative solvers, operators, preconditioners (solver-in-the-loop)
-        cocg,
-        cocr,
-        gmres,
-        // Matrix Market loaders + error type
-        parse_mtx,
-        parse_mtx_complex,
-        parse_mtx_complex_general,
-        read_mtx,
-        read_mtx_complex,
-        // high-level phased solvers: `XSymbolic::analyze -> .factor -> XSolver`
-        AutoSettings,
-        AutoSymbolic,
-        CscLayout,
-        // matrices, options, scalar field
-        CscMatrix,
-        Factorization,
-        GeneralCsc,
-        KluSettings,
-        KluSolver,
-        KluSymbolic,
-        KrylovResult,
-        KrylovSettings,
-        LdltSolver,
-        LdltSymbolic,
-        LinearOperator,
-        LowPrecisionLu,
-        LowPrecisionPreconditioner,
-        LuSolver,
-        LuSymbolic,
-        MixedPrecision,
-        MtxMatrix,
-        NoPreconditioner,
-        Preconditioner,
-        RslabError,
-        Scalar,
-        SolveWork,
-        SolverSettings,
-        Triplets,
-        ZeroPivotAction,
+        cocg, cocr, gmres, parse_mtx, parse_mtx_complex, parse_mtx_complex_general, read_mtx,
+        read_mtx_complex, AutoSettings, AutoSymbolic, CscLayout, CscMatrix, Factorization,
+        GeneralCsc, KluSettings, KluSolver, KluSymbolic, KrylovResult, KrylovSettings, LdltSolver,
+        LdltSymbolic, LinearOperator, LowPrecisionLu, LowPrecisionPreconditioner, LuSolver,
+        LuSymbolic, MixedPrecision, MtxMatrix, NoPreconditioner, Preconditioner, RslabError,
+        Scalar, SolveWork, SolverSettings, Triplets, ZeroPivotAction,
     };
 }
