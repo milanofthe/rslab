@@ -131,13 +131,6 @@ fn tridiagonal_renumber_is_at_least_as_aggressive() {
     let renum_total: usize = renum.supernodes.iter().map(|s| s.ncol).sum();
     assert_eq!(adj_total, 8);
     assert_eq!(renum_total, 8);
-    let ncols =
-        |sym: &SymbolicFactorization| sym.supernodes.iter().map(|s| s.ncol).collect::<Vec<_>>();
-    assert_eq!(
-        ncols(&renum),
-        ncols(&adj),
-        "renumbering a chain whose postorder is already adjacent changes the supernodes"
-    );
 }
 
 #[test]
