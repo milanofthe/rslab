@@ -23,8 +23,6 @@ use rslab_amd::{amd_order_with_stats, CscPattern};
 mod patterns;
 use patterns::{arrow, csc_from_triples, grid_2d};
 
-// ---- pattern generators (mirror the oracle harness) --------------
-
 fn band(n: usize, b: usize) -> (Vec<i32>, Vec<i32>) {
     let mut t = Vec::new();
     for i in 0..n {
@@ -37,8 +35,6 @@ fn band(n: usize, b: usize) -> (Vec<i32>, Vec<i32>) {
     }
     csc_from_triples(n, &t)
 }
-
-// ---- oracle parser -----------------------------------------------
 
 struct Oracle {
     n: usize,
@@ -107,8 +103,6 @@ fn run_fixture(name: &str, cp: &[i32], ri: &[i32]) {
     assert_eq!(stats.nms_lu, oracle.nms_lu, "{}: nms_lu mismatch", name);
 }
 
-// ---- tests -------------------------------------------------------
-
 #[test]
 fn oracle_diag_4() {
     let (cp, ri) = band(4, 0);
@@ -150,11 +144,6 @@ fn oracle_amd_demo_24() {
     let (cp, ri) = grid_2d(6, 4);
     run_fixture("amd_demo_24", &cp, &ri);
 }
-
-// ---- mass elimination / supervariable counter checks -------------
-// Oracle files don't record n_mass_elim / n_supervar_merge (the
-// external `amd` crate does not expose them), so we assert
-// positivity on patterns known to exercise both branches.
 
 #[test]
 fn mass_elim_fires_on_tridiag_10() {

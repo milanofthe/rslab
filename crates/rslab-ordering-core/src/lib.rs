@@ -117,12 +117,6 @@ impl<'a> CscPattern<'a> {
                 return None;
             }
         }
-        // Row indices within each column must be sorted ascending. This is a
-        // documented precondition that downstream consumers silently rely on:
-        // rslab-metis's adjacency builder dedups only *adjacent* duplicates
-        // (graph.rs). Unsorted rows would let a non-adjacent duplicate survive
-        // as a spurious edge, corrupting the graph. Enforce it here (O(nnz))
-        // so every consumer can trust it.
         for w in col_ptr.windows(2) {
             let lo = w[0] as usize;
             let hi = w[1] as usize;
@@ -270,10 +264,6 @@ mod tests {
 
     #[test]
     fn rejects_unsorted_rows_within_column() {
-        // Column 0 has rows [1, 0] - descending, violating the documented
-        // ascending-order invariant. `new` must reject it: rslab-metis's
-        // adjacency builder dedups only *adjacent* duplicates, so unsorted
-        // rows would let a non-adjacent duplicate survive as a spurious edge.
         let cp = [0i32, 2, 2];
         let ri = [1i32, 0];
         assert!(CscPattern::new(2, &cp, &ri).is_none());
@@ -281,9 +271,6 @@ mod tests {
 
     #[test]
     fn accepts_sorted_rows_with_adjacent_duplicate() {
-        // Ascending order permits adjacent duplicates; rslab-metis drops them
-        // in its adjacency builder. `new` enforces sortedness, not
-        // strict-increase, so this must still be accepted.
         let cp = [0i32, 3, 3];
         let ri = [0i32, 0, 1];
         assert!(CscPattern::new(2, &cp, &ri).is_some());
@@ -291,7 +278,6 @@ mod tests {
 
     #[test]
     fn rejects_negative_col_ptr_tail() {
-        // col_ptr.last() is negative -> nnz would be invalid.
         let cp = [0i32, -1];
         let ri: [i32; 0] = [];
         assert!(CscPattern::new(1, &cp, &ri).is_none());

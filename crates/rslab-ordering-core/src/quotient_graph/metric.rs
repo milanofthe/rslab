@@ -118,11 +118,7 @@ impl Metric for MinDegree {
     }
 
     #[inline(always)]
-    fn merge_supervariable(_parent: &mut i32, _child: i32) {
-        // AMD does not maintain a per-supervariable score; degree
-        // bookkeeping flows entirely through `nv[i]` and the
-        // re-insertion loop's loose-degree formula.
-    }
+    fn merge_supervariable(_parent: &mut i32, _child: i32) {}
 
     #[inline(always)]
     fn run_elimination(
@@ -159,34 +155,16 @@ pub struct MinFill;
 impl Metric for MinFill {
     type Score = i32;
 
-    /// AMF needs `2 * n + 2` slots: `0..=NORIG` for one-per-score
-    /// fine buckets, `NORIG+1..=NBBUCK` (`NBBUCK = 2 * n`) for
-    /// coarse-stride buckets, and one halo slot at `NBBUCK + 1`
-    /// reserved for HAMF4's boundary (halo) variables, inert here
-    /// because no halo is ever passed in.
     #[inline(always)]
     fn n_buckets(n: usize) -> usize {
         2 * n + 2
     }
 
-    /// Seed the per-supervariable score with the row's adjacency
-    /// length `len(i)`. Same seeding as AMD; the AMF metric only
-    /// diverges once the elimination loop starts producing elements.
     #[inline(always)]
     fn init_score(len: i32) -> i32 {
         len
     }
 
-    /// Quantize `score` into a bucket index.
-    ///
-    /// `0..=n` are fine buckets (one per integer score). Above `n`
-    /// the buckets are coarse with stride `PAS = max(n / 8, 1)`,
-    /// capped at `NBBUCK = 2 * n`. Negative scores (which should not
-    /// occur in a well-formed AMF run, but we defend against
-    /// truncation underflow on `RMF / (NVI + 1)`) clamp to bucket 0.
-    ///
-    /// Bucket layout follows the HAMF4 quantization described in
-    /// Amestoy's 1999 habilitation thesis and used by MUMPS HAMF4.
     #[inline]
     fn bucket(score: i32, n: usize) -> usize {
         if score <= 0 {
@@ -202,17 +180,11 @@ impl Metric for MinFill {
         coarse.min(nbbuck)
     }
 
-    /// Coarse buckets are those above `NORIG = n`. `select_pivot`
-    /// must walk the bucket chain and pick the entry with the
-    /// smallest *exact* score (coarse buckets only sort
-    /// approximately; validated against the HAMF4 oracle).
     #[inline(always)]
     fn coarse_bucket(idx: usize, n: usize) -> bool {
         idx > n
     }
 
-    /// On supervariable merge `j -> i`, update the surviving anchor's
-    /// score with `max(WF(i), WF(j))` (the HAMF4 merge rule).
     #[inline(always)]
     fn merge_supervariable(parent: &mut i32, child: i32) {
         if child > *parent {

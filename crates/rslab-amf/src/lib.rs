@@ -119,11 +119,8 @@ pub fn amf_order_full(
     let ws_opts = WorkspaceOptions {
         dense_alpha: opts.dense_alpha,
     };
-    // HAMF4 always aggressively absorbs; pass `aggressive = true`
-    // unconditionally. The flag only gates the AMD-specific
-    // `(p3 == pn) && (elen[i] == 1)` mass-elimination branch which
-    // the AMF loop reuses with the same semantics.
-    let (perm, diag) = order::<MinFill>(pattern, &ws_opts, true, opts.progress.as_ref())?;
+    let aggressive = true;
+    let (perm, diag) = order::<MinFill>(pattern, &ws_opts, aggressive, opts.progress.as_ref())?;
     let amf_stats = AmfStats {
         ncmpa: diag.ncmpa,
         n_clear_flag: 0,

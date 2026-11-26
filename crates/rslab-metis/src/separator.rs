@@ -34,7 +34,6 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
     let n = graph.nvtxs as usize;
     debug_assert_eq!(labels.len(), n);
 
-    // 1. Identify boundaries.
     let mut is_bnd_a: Vec<bool> = vec![false; n];
     let mut is_bnd_b: Vec<bool> = vec![false; n];
     for v in 0..n {
@@ -57,9 +56,6 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
         }
     }
 
-    // 2. Collect A-boundary and B-boundary vertices and index them.
-    //    a_idx[v] = slot in left bipartite side, or -1.
-    //    b_idx[v] = slot in right bipartite side, or -1.
     let mut a_list: Vec<i32> = Vec::new();
     let mut b_list: Vec<i32> = Vec::new();
     let mut a_idx: Vec<i32> = vec![-1; n];
@@ -78,8 +74,6 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
         return 0;
     }
 
-    // 3. Build bipartite adjacency: for each A-boundary vertex, list its
-    //    B-boundary neighbors (by slot).
     let na = a_list.len();
     let nb = b_list.len();
     let mut adj: Vec<Vec<i32>> = vec![Vec::new(); na];
@@ -96,18 +90,13 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
         }
     }
 
-    // 4. Kuhn's algorithm for maximum bipartite matching.
-    let mut match_a: Vec<i32> = vec![-1; na]; // match_a[ai] = bi or -1
-    let mut match_b: Vec<i32> = vec![-1; nb]; // match_b[bi] = ai or -1
+    let mut match_a: Vec<i32> = vec![-1; na];
+    let mut match_b: Vec<i32> = vec![-1; nb];
     for ai in 0..na {
         let mut visited: Vec<bool> = vec![false; nb];
         try_augment(ai as i32, &adj, &mut match_a, &mut match_b, &mut visited);
     }
 
-    // 5. Konig's construction. Starting from unmatched A-vertices,
-    //    alternately walk unmatched edges (A->B) and matched edges (B->A).
-    //    Let Z be the set of reachable vertices.
-    //    Min vertex cover = (A \ Z) union (B intersect Z).
     let mut in_z_a: Vec<bool> = vec![false; na];
     let mut in_z_b: Vec<bool> = vec![false; nb];
     let mut stack: Vec<i32> = Vec::new();
@@ -130,7 +119,6 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
         }
     }
 
-    // 6. Mark cover vertices as separator.
     let mut sep_count: usize = 0;
     for (ai, &v) in a_list.iter().enumerate() {
         if !in_z_a[ai] {
@@ -147,7 +135,6 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
     sep_count
 }
 
-/// Iterative augmenting-path search used by Kuhn's algorithm.
 fn try_augment(
     start: i32,
     adj: &[Vec<i32>],
@@ -155,9 +142,6 @@ fn try_augment(
     match_b: &mut [i32],
     visited: &mut [bool],
 ) -> bool {
-    // Recursive form is idiomatic here; recursion depth is bounded by
-    // min(|A|, |B|) which is bounded by the boundary size at the
-    // coarsest graph (small).
     fn dfs(
         u: i32,
         adj: &[Vec<i32>],
@@ -224,7 +208,6 @@ mod tests {
     #[test]
     fn separator_empty_if_no_cut() {
         let g = grid(3, 3);
-        // All on one side -> no crossing edges -> no separator.
         let mut labels: Vec<u8> = vec![PART_A; 9];
         let sep_count = construct_separator(&g, &mut labels);
         assert_eq!(sep_count, 0);
@@ -234,7 +217,6 @@ mod tests {
     #[test]
     fn separator_on_4x4_grid_balanced() {
         let g = grid(4, 4);
-        // Hand-built balanced cut: left 2 cols = A, right 2 cols = B.
         let mut labels: Vec<u8> = (0..16u8)
             .map(|k| if (k % 4) < 2 { PART_A } else { PART_B })
             .collect();
@@ -243,8 +225,6 @@ mod tests {
         let sep_count = construct_separator(&g, &mut labels);
         assert!(sep_count > 0);
         assert!(is_valid_separator(&g, &labels));
-        // Remaining A and B must both be non-empty (we have some
-        // vertices left on each side after carving out the cover).
         let a = part_weight(&g, &labels, PART_A);
         let b = part_weight(&g, &labels, PART_B);
         assert!(a > 0 && b > 0);
@@ -252,13 +232,10 @@ mod tests {
 
     #[test]
     fn min_cover_no_larger_than_lighter_boundary() {
-        // Konig guarantees |cover| = |max matching| <= min(|bnd_a|, |bnd_b|).
-        // So a trivial "take the lighter boundary" upper bound must hold.
         let g = grid(8, 8);
         let total: i64 = g.vwgt.iter().map(|&w| w as i64).sum();
         let mut rng = SplitMix::new(33);
         let labels_init = initial_bisect_ggp(&g, &mut rng, total / 2);
-        // Count boundaries.
         let n = g.nvtxs as usize;
         let mut bnd_a = 0usize;
         let mut bnd_b = 0usize;
