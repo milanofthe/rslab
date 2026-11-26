@@ -1,0 +1,7 @@
+markdown = ["python/docs/api.md"]
+
+[allow]
+environment = [
+    '^src/matgen/download\.rs: .*"RLA_MATGEN_CACHE"',
+    '^src/tuning\.rs: .*"RLA_CALIB_CACHE"',
+]
