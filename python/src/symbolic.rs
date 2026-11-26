@@ -1,6 +1,6 @@
 //! Symbolic analysis as first-class Python objects: analyze a pattern once,
 //! factor many value sets on it. Also the one-shot factor functions, which
-//! are analyze + factor under one GIL release.
+//! are the analysis and the factorization of one value set.
 
 use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
@@ -457,7 +457,7 @@ pub fn analyze_ldlt(
         .map(|inner| PyLdltSymbolic { inner })
 }
 
-/// Analyze and factor in one step (one GIL release).
+/// Analyze and factor in one step.
 #[pyfunction]
 #[pyo3(signature = (n, indptr, indices, data, settings = None, **kwargs))]
 pub fn ldlt_factor(
@@ -653,7 +653,7 @@ pub fn analyze_lu(
         .map(|inner| PyLuSymbolic { inner })
 }
 
-/// Analyze and factor in one step (one GIL release).
+/// Analyze and factor in one step.
 #[pyfunction]
 #[pyo3(signature = (n, indptr, indices, data, settings = None, **kwargs))]
 pub fn lu_factor(
@@ -849,7 +849,7 @@ pub fn analyze_klu(
         .map(|inner| PyKluSymbolic { inner })
 }
 
-/// Analyze and factor in one step (one GIL release).
+/// Analyze and factor in one step.
 #[pyfunction]
 #[pyo3(signature = (n, indptr, indices, data, settings = None, **kwargs))]
 pub fn klu_factor(
