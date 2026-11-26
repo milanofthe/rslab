@@ -283,19 +283,6 @@ pub fn complex_gemm(k: usize) -> f64 {
     gamma(k + 7, UC64)
 }
 
-/// Upper bound on the condition number ||A||_inf ||A^-1||_inf of the
-/// five-point Laplacian with Dirichlet boundary, 4 on the diagonal and -1 for
-/// each of the at most four grid neighbours, on an m x m grid. ||A||_inf <= 8.
-/// A is an M-matrix, so A^-1 >= 0 and ||A^-1||_inf = ||A^-1 1||_inf. The
-/// vector w with w = i (m + 1 - i) / 2 at grid row i satisfies A w >= 1
-/// entrywise, because the second difference of w across the rows is -1 and
-/// the difference along a row is at least 0, so A^-1 1 <= w by the discrete
-/// maximum principle, and max w <= (m + 1)^2 / 8. The bound is (m + 1)^2.
-pub fn laplacian_condition(m: usize) -> f64 {
-    let side = (m + 1) as f64;
-    side * side
-}
-
 /// Bound on the relative change of the squared 2-norm of a column of a matrix
 /// that starts as the identity and is multiplied by `rotations` Givens
 /// rotations whose cosine and sine come from `cos` and `sin` of the math
