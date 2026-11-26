@@ -68,6 +68,9 @@ impl ReplayPlan {
 /// yet.
 pub(super) struct Decide {
     dispatch: Dispatch,
+    /// What a section costs on the pool, also where `dispatch` is free:
+    /// what the pieces of a replay are cut by ([`Dispatch::ranges`]).
+    cut: Dispatch,
     threads: usize,
     /// `On`, or floors the user set: every section is free, and the time
     /// picks only how a block replays side by side, not whether.
@@ -84,14 +87,18 @@ impl Decide {
         } else {
             1
         };
+        let cut = if threads < 2 {
+            Dispatch::never()
+        } else {
+            crate::parallel::dispatch()
+        };
         Decide {
-            dispatch: if threads < 2 {
-                Dispatch::never()
-            } else if forced {
+            dispatch: if forced && threads >= 2 {
                 crate::parallel::kept(true, threads)
             } else {
-                crate::parallel::dispatch()
+                cut.clone()
             },
+            cut,
             threads,
             forced,
             seq: REPLAY_RATE.of::<T>().ns_per_op(),
@@ -102,6 +109,7 @@ impl Decide {
     #[cfg(test)]
     pub(super) fn on(dispatch: Dispatch, threads: usize) -> Self {
         Decide {
+            cut: dispatch.clone(),
             dispatch,
             threads,
             forced: false,
@@ -132,7 +140,7 @@ impl Decide {
     fn level_per(&self, bp: &BlockPlan, l: usize, k: usize) -> usize {
         let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
         let work = bp.level_work[l] as f64 * self.seq;
-        p.div_ceil(self.dispatch.ranges(work, p, k).max(1))
+        p.div_ceil(self.cut.ranges(work, p, k).max(1))
     }
 
     /// How block `bp` of `bn` columns, `serial` ns sequentially, replays,
@@ -686,7 +694,7 @@ impl<T: Scalar> KluSolver<T> {
             // Runs of consecutive blocks of about equal columns, as many as
             // the replay's work is worth ranges ([`Dispatch::ranges`]), each
             // replayed in order over one work vector.
-            let runs = decide.dispatch.ranges(serial, f.n, width_blocks).max(1);
+            let runs = decide.cut.ranges(serial, f.n, width_blocks).max(1);
             let target = f.n.div_ceil(runs).max(1);
             let mut pieces: Vec<std::sync::Mutex<Vec<RJob<'_, T>>>> = Vec::new();
             let mut run: Vec<RJob<'_, T>> = Vec::new();
