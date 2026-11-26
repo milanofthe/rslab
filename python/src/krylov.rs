@@ -212,6 +212,8 @@ pub fn gmres_block<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
     blocked(py, r, n, nrhs)
 }
 
+type Recurrence<A, T, M> = fn(&A, &[T], &M, &KrylovSettings) -> Result<KrylovResult<T>, RslabError>;
+
 fn recurrence<
     T: Field,
     A: LinearOperator<T> + Sync + ?Sized,
@@ -223,7 +225,7 @@ fn recurrence<
     b: &Bound<'_, PyAny>,
     tol: f64,
     maxit: usize,
-    method: fn(&A, &[T], &M, &KrylovSettings) -> Result<KrylovResult<T>, RslabError>,
+    method: Recurrence<A, T, M>,
 ) -> PyResult<PyObject> {
     let rhs = vector::<T>(b, "rhs")?;
     let r = crate::logging::run(py, || method(op, &rhs, pc, &settings(tol, maxit, None)))
