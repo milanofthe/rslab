@@ -62,7 +62,6 @@ impl<T: Scalar> LdltSolver<T> {
         Ok(z)
     }
 
-    /// The solve plan, the block diagonal and the equilibration (tests).
     #[cfg(test)]
     pub(crate) fn parts(&self) -> (&SolvePlan<T>, &LdltPivots<T>, &[f64]) {
         (&self.plan, &self.factors, &self.scale)

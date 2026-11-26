@@ -3,8 +3,6 @@
 
 use crate::scalar::Scalar;
 
-/// The largest [`split_plane_entries`](crate::dense::gemm_backend::split_plane_entries)
-/// of a [`lower_tile_gemm`] call with these arguments, one per tile.
 pub(super) fn lower_tile_planes(
     m: usize,
     ncols: usize,
@@ -26,26 +24,6 @@ pub(super) fn lower_tile_planes(
     worst
 }
 
-/// Symmetric trailing-update GEMM computed **only on and below the tile
-/// diagonal**: `TMP[:, j] = G * L21^T[:, j]` for rows `>= tile start`. The
-/// consumers (the front Schur subtraction and the left-looking panel
-/// subtraction) read only entries with `row >= col`, so the full `m x ncols`
-/// product wastes up to half the flops (exactly half for the square front
-/// Schur, approaching half for wide root panels where `ncols ~ m`). Tiling
-/// the columns and starting each tile's rows at its own diagonal keeps the
-/// per-element summation deterministic while cutting the waste to
-/// `< schur_tile / 2` rows per tile ([`KernelSettings::schur_tile`](crate::KernelSettings::schur_tile)).
-///
-/// Layouts: `tmp` is `m x ncols` column-major (column stride `m`, row
-/// stride 1); `lhs` is `m x k` with column stride `lhs_cs` (row stride 1);
-/// `rhs` is read as `k x ncols` with strides `(rhs_cs = 1, rhs_rs)` -
-/// element `(kk, j)` at `rhs[j + kk*rhs_rs]`. Each tile's GEMM goes
-/// rayon-parallel at/above the `par_cdiv` flop bar.
-///
-/// SAFETY: the three buffers must be pairwise-disjoint allocations sized
-/// for the strides passed (`tmp` >= `m*ncols`; `lhs` rows `[0, m)` x cols
-/// `[0, k)` under `lhs_cs`; `rhs` valid at `j + kk*rhs_rs` for `j < ncols`,
-/// `kk < k`).
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
     tmp: &mut [T],
@@ -70,8 +48,6 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
         } else {
             gemm::Parallelism::None
         };
-        // Dst tile = columns [c0, c0+tw) rows [c0, m) of `tmp`; lhs = rows
-        // [c0, m); rhs = columns [c0, c0+tw).
         crate::dense::gemm_backend::gemm(
             mrows,
             tw,
@@ -97,9 +73,6 @@ pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
     }
 }
 
-/// The largest split planes ([`split_plane_entries`](crate::dense::gemm_backend::split_plane_entries))
-/// a [`schur_tiles`] call over the columns `[c0, c1)` takes on one worker,
-/// and its piece count.
 pub(super) fn schur_tile_planes(
     mt: usize,
     (c0, c1): (usize, usize),

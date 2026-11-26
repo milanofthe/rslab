@@ -19,10 +19,6 @@ use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The numeric result of a sparse LDL^T factorization: the unit lower factor
-/// `L` in supernodal panel form (the storage the solves run on, written by
-/// the drivers without a copy) plus the block diagonal, the pivot
-/// permutation and the numeric outcome.
 pub(crate) struct LdltNumeric<T> {
     /// `L` in panel form, in elimination order.
     pub factor: PanelFactor<T>,
@@ -33,7 +29,6 @@ pub(crate) struct LdltNumeric<T> {
     pub n_zeros: usize,
 }
 
-/// The numeric factorization of `a` (validated by the caller) on `symb`.
 pub(crate) fn factor_numeric<T: Scalar>(
     symb: &SupernodalAnalysis,
     a: &CscMatrix<T>,
@@ -68,41 +63,28 @@ pub(crate) fn factor_numeric<T: Scalar>(
         Some(i) => i,
     };
     let sym = &inner.sym;
-    // Worker stack sized to the assembly-tree depth so the recursive tree
-    // factorization never overflows on deep chain trees (banded / 1D + low nemin).
     let stack = stack_for_depth(supernode_tree_depth(sym));
 
-    // P^T A P (lower fold) through the cached input program: the structure is
-    // frozen on the first factorization of this pattern; every later
-    // (re)factorization reads the values where they are.
     let prog = inner.input.get_or_init(|| {
         let _s = rsprobe::scope!(DEBUG, "input program");
         InputProgram::symmetric(&a.col_ptr, &a.row_idx, &sym.perm_inv)
     });
-    // The scaling by elimination index: entry `(g, c)` of `P^T A P` is `A`'s
-    // times `s[perm[g]] * s[perm[c]]`.
-    let s_perm: Option<Vec<f64>> = scale.map(|s| sym.perm.iter().map(|&i| s[i]).collect());
+    let scale_elim: Option<Vec<f64>> = scale.map(|s| sym.perm.iter().map(|&i| s[i]).collect());
 
-    // Run in a scoped pool of `opts.threads` so concurrent solves don't
-    // oversubscribe.
     let sched = inner.schedule();
     opts.threads.run(
         stack,
         |cap| recommend_threads_for_sym(symb, cap),
         || {
-            let inp = Input::new(prog, &a.values, s_perm.as_deref().map(|s| (s, s)));
+            let inp = Input::new(prog, &a.values, scale_elim.as_deref().map(|s| (s, s)));
             factor_left_looking(sym, sched, inp, scale, opts, storage, pools)
         },
     )
 }
 
-/// Compact (CSC-fragment) form of one supernode's L factor, produced the moment
-/// its last consumer pulls from it so the dense panel can be freed during
-/// factorization. Row indices are already final elimination positions.
 pub(super) struct LlEmitLdlt<T> {
     pub(super) refcount: Vec<AtomicUsize>,
     pub(super) e_offset: Vec<usize>,
-    /// The factor's buffer: every supernode factors into its own slot.
     pub(super) arena: PanelArena<T>,
     pub(super) panels: Cells<PanelOut>,
     pub(super) e_of_g: Cells<usize>,
@@ -110,18 +92,13 @@ pub(super) struct LlEmitLdlt<T> {
     pub(super) d_diag: Cells<T>,
     pub(super) d_subdiag: Cells<T>,
     pub(super) two_by_two: Cells<bool>,
-    // Inertia accumulated across supernodes (block-aware).
     pub(super) inertia_pos: AtomicUsize,
     pub(super) inertia_neg: AtomicUsize,
     pub(super) inertia_zero: AtomicUsize,
-    /// The pivot floors, `(elimination position, what the floor added to
-    /// the diagonal)`, each node's pushed once it is factored.
     pub(super) floors: std::sync::Mutex<Vec<(usize, T)>>,
 }
 
 impl<T: Scalar> LlEmitLdlt<T> {
-    /// The emit state, the arena in `storage` (the buffer of an earlier
-    /// factor of this analysis) when given.
     fn new(
         sym: &SymbolicFactorization,
         sched: &LlSchedule,
@@ -159,12 +136,6 @@ impl<T: Scalar> LlEmitLdlt<T> {
         *self.e_of_g.get(g)
     }
 
-    /// Supernode `k`'s `D` in its pivoted column order: the diagonal, the
-    /// sub-diagonal of the 2x2 blocks and the flags marking each block's
-    /// first column.
-    ///
-    /// # Safety
-    /// `k` (of `ncol` columns) is factored: its writes happened-before.
     #[inline]
     pub(super) unsafe fn d_of(&self, k: usize, ncol: usize) -> (&[T], &[T], &[bool]) {
         let r = self.e_offset[k]..self.e_offset[k] + ncol;
@@ -176,9 +147,6 @@ impl<T: Scalar> LlEmitLdlt<T> {
     }
 }
 
-/// Compact supernode `k`'s L factor and free its dense panel + D/lperm. Called the
-/// instant `k`'s last consumer pulled from it. Mirrors the per-supernode body of
-/// the legacy L emit (unit diagonal, skip the 2x2 `d21` coupling row).
 fn ldlt_emit_and_free<T: Scalar>(
     k: usize,
     emit: &LlEmitLdlt<T>,
@@ -188,15 +156,13 @@ fn ldlt_emit_and_free<T: Scalar>(
 ) {
     let ncol = sym.supernodes[k].ncol;
     let nrow = sched.rows(k).len();
-    // SAFETY (the slot accesses below): the owner of supernode `k` emits it
-    // exactly once, after its last updater has read the panel (refcount
-    // zero); nobody reads it afterwards.
     debug_assert_eq!(
         emit.arena.slot_len(k),
         crate::numeric::supernodal::panel::Layout::new(ncol, nrow - ncol).len()
     );
-    // The pivoting stays inside the diagonal block, so the off-diagonal rows
-    // are in the schedule's order; the 2x2 flags are in the emit cells.
+    // SAFETY: the owner of supernode `k` emits it exactly once, after its
+    // last updater has read the panel (refcount zero), and nobody reads it
+    // afterwards.
     let rows = unsafe { emit.arena.rows_mut(k) };
     for (r, &g) in rows.iter_mut().zip(&sched.rows(k)[ncol..nrow]) {
         *r = unsafe { emit.eg(g as usize) } as u32;
@@ -209,10 +175,6 @@ fn ldlt_emit_and_free<T: Scalar>(
     unsafe { emit.panels.set(k, out) };
 }
 
-/// Static-pivot floor (absolute), translated from rslab's ZeroPivotAction.
-/// `PerturbToEps { abs_floor }` is taken as given (rslab convention: an
-/// absolute floor, typically `eps_rel * ||A||inf`); `Fail` disables
-/// perturbation. `values` are the values being factored.
 fn static_pivot_floor<T: Scalar>(
     values: impl Iterator<Item = T>,
     opts: &SolverSettings,
@@ -227,17 +189,6 @@ fn static_pivot_floor<T: Scalar>(
     }
 }
 
-/// Supernodal **left-looking** LDL^T with **Bunch-Kaufman 1x1/2x2 pivoting**. Each
-/// supernode's dense panel is assembled from `A`, updated by every previously
-/// factored descendant (`cmod`: pull the descendant's contribution columns that
-/// land in this panel, applying its block-diagonal `D`), then factored in place
-/// (`cdiv`: partial Bunch-Kaufman, no trailing update). Pivoting is bounded to
-/// each panel's fully-summed block, so the off-diagonal rows keep their identity
-/// and the descendant->ancestor `cmod` is unaffected by a panel's internal
-/// permutation. There is **no contribution-block stack and no extract copy-out**
-/// (the panels are the factor), so the transient is just the factor itself (the
-/// PARDISO memory profile), including indefinite (zero-/tiny-diagonal) systems
-/// via the 2x2 blocks. `inp` is the matrix scaled by `scale` when given.
 fn factor_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
     sched: &LlSchedule,
@@ -250,10 +201,6 @@ fn factor_left_looking<T: Scalar>(
     let n = sym.n;
     let perturb_floor = static_pivot_floor(inp.values(), opts);
 
-    // Factor in parallel over the assembly forest: sibling subtrees concurrently,
-    // each node after its subtree (whose panels are its only updaters). Panels are
-    // written once and read only by ancestors -> no synchronization needed beyond
-    // the forest's dependency order.
     let emit = LlEmitLdlt::<T>::new(sym, sched, storage);
     let kt = opts.kernel();
     let factor_node =
@@ -282,9 +229,6 @@ fn factor_left_looking<T: Scalar>(
     let d_diag: Vec<T> = (0..n).map(|e| unsafe { *d_diag.get(e) }).collect();
     let d_subdiag: Vec<T> = (0..n).map(|e| unsafe { *d_subdiag.get(e) }).collect();
     let two_by_two: Vec<bool> = (0..n).map(|e| unsafe { *two_by_two.get(e) }).collect();
-    // The factor is of `S A S + Delta` (`S` the scaling) with `Delta` on the
-    // diagonal in elimination order: of `A + E`, `E = S^-1 Delta S^-1` at
-    // each position's original index.
     let mut floors = floors.into_inner().unwrap_or_else(|e| e.into_inner());
     floors.sort_unstable_by_key(|&(e, _)| e);
     let floors = floors
