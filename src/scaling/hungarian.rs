@@ -251,10 +251,8 @@ fn hungarian_init_heuristic(
             if di > vj {
                 continue;
             }
-            if di == vj && di != RINF {
-                if iperm[i] != NONE || iperm[i0] == NONE {
-                    continue;
-                }
+            if di == vj && di != RINF && (iperm[i] != NONE || iperm[i0] == NONE) {
+                continue;
             }
             vj = di;
             i0 = i;
