@@ -36,7 +36,8 @@ pub(crate) fn cut(w: &[f64], share: f64, max: usize, first_end: usize) -> Vec<(u
     if start < w.len() {
         ranges.push((start, w.len()));
     }
-    debug_assert!(ranges.iter().all(|&(a, b)| a < b && b - a <= max.max(1)));
+    debug_assert!(ranges.iter().all(|&(a, b)| a < b));
+    debug_assert!(ranges.iter().skip(1).all(|&(a, b)| b - a <= max.max(1)));
     debug_assert!(ranges
         .first()
         .map_or(w.is_empty(), |&(_, end)| end >= first_end.min(w.len())));
