@@ -249,7 +249,16 @@ impl Scalar for f64 {
 }
 
 macro_rules! complex_methods {
-    () => {
+    ($real:ident) => {
+        #[inline]
+        fn mul_add(self, a: Self, b: Self) -> Self {
+            // (self*a + b) lowered to four real FMAs - uses the hardware FMA pipes
+            // and halves the rounding versus `self * a + b` on `num_complex`.
+            let re = $real::mul_add(self.re, a.re, $real::mul_add(-self.im, a.im, b.re));
+            let im = $real::mul_add(self.re, a.im, $real::mul_add(self.im, a.re, b.im));
+            Complex::new(re, im)
+        }
+
         unsafe fn gemm(
             m: usize,
             n: usize,
@@ -354,16 +363,7 @@ impl Scalar for Complex<f64> {
         Complex::inv(&self)
     }
 
-    #[inline]
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        // (self*a + b) lowered to four real FMAs - uses the hardware FMA pipes
-        // and halves the rounding versus `self * a + b` on `num_complex`.
-        let re = f64::mul_add(self.re, a.re, f64::mul_add(-self.im, a.im, b.re));
-        let im = f64::mul_add(self.re, a.im, f64::mul_add(self.im, a.re, b.im));
-        Complex::new(re, im)
-    }
-
-    complex_methods!();
+    complex_methods!(f64);
 }
 
 impl Scalar for f32 {
@@ -500,14 +500,7 @@ impl Scalar for Complex<f32> {
         Complex::inv(&self)
     }
 
-    #[inline]
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        let re = f32::mul_add(self.re, a.re, f32::mul_add(-self.im, a.im, b.re));
-        let im = f32::mul_add(self.re, a.im, f32::mul_add(self.im, a.re, b.im));
-        Complex::new(re, im)
-    }
-
-    complex_methods!();
+    complex_methods!(f32);
 }
 
 #[cfg(test)]
