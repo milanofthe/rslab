@@ -62,8 +62,8 @@ pub(crate) fn ll_forest(
         true
     };
     if crate::parallel::threads() == 1 {
-        for s in 0..sym.supernodes.len() {
-            debug_assert!(sym.supernodes[s].children.iter().all(|&c| c < s));
+        for (s, supernode) in sym.supernodes.iter().enumerate() {
+            debug_assert!(supernode.children.iter().all(|&c| c < s));
             if !node(s) {
                 break;
             }
