@@ -55,13 +55,9 @@ pub enum ZeroPivotAction {
     PerturbToEps { abs_floor: f64 },
 }
 
-/// The factor path a [`SolverSettings`] is applied to; each reads a different
-/// subset of the settings (see [`SolverSettings::ignored_on`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FactorPath {
-    /// Symmetric `LDL^T` ([`LdltSolver`](crate::LdltSolver)).
     Ldlt,
-    /// Unsymmetric LU ([`LuSolver`](crate::LuSolver)).
     Lu,
 }
 
@@ -361,9 +357,6 @@ pub struct KernelSettings {
 }
 
 impl KernelSettings {
-    /// The panel width of a node of `ncol` columns whose kernel's own width
-    /// is `base`: at least [`wide_panel_nb`](Self::wide_panel_nb) from
-    /// [`wide_panel_min_ncol`](Self::wide_panel_min_ncol) columns.
     pub(crate) fn panel_width(&self, base: usize, ncol: usize) -> usize {
         if ncol >= self.wide_panel_min_ncol {
             base.max(self.wide_panel_nb)
@@ -372,10 +365,6 @@ impl KernelSettings {
         }
     }
 
-    /// The parallel threshold of the panel factorization of an `nrow x ncol`
-    /// node: [`par_cdiv`](Self::par_cdiv) from
-    /// [`fork_min_flops`](Self::fork_min_flops) of work `nrow * ncol^2`,
-    /// else never, so a small node does not fork inside its cdiv either.
     pub(crate) fn cdiv_par(&self, nrow: usize, ncol: usize) -> usize {
         if nrow * ncol * ncol >= self.fork_min_flops {
             self.par_cdiv
@@ -550,9 +539,6 @@ impl SolverSettings {
         self
     }
 
-    /// These settings with the worker count resolved to `threads` (an
-    /// `Ambient` policy stays ambient), so every stage of one factorization
-    /// uses the same count.
     pub(crate) fn pinned(&self, threads: usize) -> Self {
         Self {
             threads: match self.threads {
@@ -563,7 +549,6 @@ impl SolverSettings {
         }
     }
 
-    /// The kernel knobs as the `Copy` bundle the kernels take.
     pub(crate) fn kernel(&self) -> crate::numeric::gemm_tuning::KernelTuning<'_> {
         crate::numeric::gemm_tuning::KernelTuning {
             k: KernelSettings {
@@ -599,11 +584,6 @@ impl SolverSettings {
         }
     }
 
-    /// The settings set to a non-default value that `path` does not read, each
-    /// as one sentence naming the field and why. A factorization logs them as
-    /// `Warning` records and carries them in its
-    /// [`Diagnostics::warnings`](crate::Diagnostics::warnings), so a setting
-    /// with no effect is never silent.
     pub(crate) fn ignored_on(&self, path: FactorPath) -> Vec<String> {
         let d = SolverSettings::default();
         let mut out = Vec::new();
@@ -714,7 +694,6 @@ impl From<usize> for Threads {
     }
 }
 
-/// All logical cores (the `0` sentinel resolution).
 pub(crate) fn all_cores() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
@@ -722,13 +701,8 @@ pub(crate) fn all_cores() -> usize {
 }
 
 impl Threads {
-    /// Resolve to a concrete worker count. `recommend(cap)` is the structural
-    /// predictor (already clamped to `cap`); it is only invoked in [`Auto`] mode.
-    ///
-    /// [`Auto`]: Threads::Auto
     pub(crate) fn resolve(self, recommend: impl FnOnce(usize) -> usize) -> usize {
         match self {
-            // A lent pool's workers, whatever the policy asked for.
             _ if crate::parallel::is_lent() => crate::parallel::threads(),
             Threads::Fixed(0) => all_cores(),
             Threads::Fixed(n) => n,
@@ -737,11 +711,6 @@ impl Threads {
         }
     }
 
-    /// Run `f` under this thread policy. [`Ambient`](Threads::Ambient) runs on the
-    /// current rayon pool with **no new pool spawned** (solver-in-the-loop); every
-    /// other policy resolves a worker count and runs `f` in a scoped pool of that
-    /// width with a `stack_bytes` worker stack. Centralizes the dispatch so all
-    /// factorization paths honour `Ambient` identically.
     pub(crate) fn run<R: Send>(
         self,
         stack_bytes: usize,
@@ -749,17 +718,12 @@ impl Threads {
         f: impl FnOnce() -> R + Send,
     ) -> R {
         match self {
-            // On a lent pool (see `crate::parallel`), or the caller's rayon pool.
             _ if crate::parallel::is_lent() => f(),
             Threads::Ambient => f(),
             policy => in_scoped_pool(policy.resolve(recommend), stack_bytes, f),
         }
     }
 
-    /// Run `f` on the calling thread under this policy, where nothing of it
-    /// is worth entering a pool: a budget of one thread keeps every section
-    /// `f` opens on this thread (see [`in_scoped_pool`]), any other leaves
-    /// them to the current pool.
     pub(crate) fn here<R>(self, f: impl FnOnce() -> R) -> R {
         match self {
             _ if crate::parallel::is_lent() => f(),
@@ -770,34 +734,12 @@ impl Threads {
     }
 }
 
-/// `f` with the pool of the calling thread alone lent: every section it
-/// opens runs in order where it is opened, and no pool is offered one.
 fn serial<R>(f: impl FnOnce() -> R) -> R {
     static SERIAL: std::sync::LazyLock<crate::parallel::Lent> =
         std::sync::LazyLock::new(|| crate::parallel::Lent::new(Arc::new(crate::parallel::Serial)));
     crate::parallel::install_lent(SERIAL.clone(), f)
 }
 
-/// Run `f` inside a **scoped** rayon thread pool of `threads` workers, so this
-/// factorization's parallelism is bounded and concurrent solves coexist instead of
-/// each grabbing the global pool. Falls back to running on the current pool if the
-/// build fails. `threads == 0` means all logical cores.
-///
-/// The pool is the calling thread's own, built on its first use and kept (see
-/// [`POOLS`]): a factorization per Newton step would otherwise start and join
-/// its workers every time, tens of microseconds per worker.
-///
-/// A budget of one thread opens no section: `f` runs on the calling thread
-/// with every section kept there ([`serial`]), so nothing starts or wakes a
-/// pool, the global rayon pool included. The drivers it runs do not recurse
-/// with the tree depth (`stack_bytes` sizes the workers of wider pools).
-///
-/// Work that needs no stack of its own (`stack_bytes == 0`, the solves)
-/// called on a worker of one of these pools runs there: it is part of the
-/// work the pool was entered for. Called on a worker of any other rayon
-/// pool, it enters a pool of its own like the factorizations do (see
-/// [`enter`]): run on the caller's pool, its sections would make the worker
-/// wait inside the caller's task and take the caller's other tasks meanwhile.
 pub(crate) fn in_scoped_pool<R: Send>(
     threads: usize,
     stack_bytes: usize,
@@ -817,8 +759,6 @@ pub(crate) fn in_scoped_pool<R: Send>(
         return serial(f);
     }
     match scoped_pool(n, stack_bytes) {
-        // The pool's section cost is measured on its first use, before any
-        // work keeps its workers busy.
         Some(pool) => enter(&pool, || {
             crate::parallel::prepare();
             f()
@@ -828,22 +768,13 @@ pub(crate) fn in_scoped_pool<R: Send>(
 }
 
 thread_local! {
-    /// Whether this thread is a worker of a pool of rslab's own
-    /// ([`scoped_pool`]).
     static OWN_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether the calling thread is a worker of a pool of rslab's own.
 fn on_own_worker() -> bool {
     OWN_WORKER.with(std::cell::Cell::get)
 }
 
-/// Run `f` on `pool`, the calling thread waiting for it. A worker of another
-/// rayon pool waiting in `install` keeps taking its own pool's jobs (rayon's
-/// cross-pool wait), and each of those may enter here again: a parallel
-/// sweep of factorizations then nests without bound and overflows the
-/// worker's stack. Such a caller enters through a thread of its own
-/// ([`Hop`]), which waits without taking work, while the caller blocks.
 pub(crate) fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
     let f = crate::parallel::carried(f);
     if rayon::current_thread_index().is_none() || pool.current_thread_index().is_some() {
@@ -859,39 +790,28 @@ pub(crate) fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + S
     });
     match (entered, r, f) {
         (true, Some(r), _) => r,
-        // No thread to enter through: the waiting worker may take work.
         (false, _, Some(f)) => pool.install(f),
         _ => unreachable!("a hop runs the job it takes, or panics"),
     }
 }
 
 thread_local! {
-    /// The calling thread's [`Hop`], its thread started on the first entry.
     static HOP: Hop = const { Hop { shared: std::cell::OnceCell::new() } };
 }
 
-/// A thread a worker of a foreign rayon pool enters rslab's pools through:
-/// it takes one job at a time from its worker and runs it, the worker
-/// blocked until it is done. Kept for the worker's life, so an entry costs
-/// a hand-over and back, no thread start and no allocation.
 struct Hop {
     shared: std::cell::OnceCell<Option<Arc<HopShared>>>,
 }
 
-/// What a worker and its hop thread share: the slot of the job in hand and
-/// the signal both wait on.
 struct HopShared {
     slot: std::sync::Mutex<HopSlot>,
     signal: std::sync::Condvar,
 }
 
-/// A job handed to a hop thread: the worker's closure, valid until the
-/// worker sees [`HopSlot::Done`] (it blocks until then).
 struct HopJob(*mut (dyn FnMut() + Send + 'static));
 // SAFETY: the closure is `Send`; the worker blocks while the hop runs it.
 unsafe impl Send for HopJob {}
 
-/// The state of a hop's slot.
 enum HopSlot {
     Empty,
     Job(HopJob),
@@ -900,8 +820,6 @@ enum HopSlot {
 }
 
 impl Hop {
-    /// Run `job` on this thread's hop, blocking until it ran (its panic
-    /// resumed here); `false` if no hop thread could be started.
     fn run(&self, job: &mut (dyn FnMut() + Send)) -> bool {
         let Some(shared) = self.shared.get_or_init(HopShared::start) else {
             return false;
@@ -937,8 +855,6 @@ impl Drop for Hop {
 }
 
 impl HopShared {
-    /// The shared slot with its hop thread running; `None` if the thread
-    /// does not start.
     fn start() -> Option<Arc<HopShared>> {
         let shared = Arc::new(HopShared {
             slot: std::sync::Mutex::new(HopSlot::Empty),
@@ -953,8 +869,6 @@ impl HopShared {
         Some(shared)
     }
 
-    /// The hop thread: run each job handed over and report it done, until
-    /// told to quit.
     fn serve(&self) {
         let mut slot = crate::parallel::lock(&self.slot);
         loop {
@@ -978,21 +892,14 @@ impl HopShared {
 }
 
 thread_local! {
-    /// The scoped pools of this thread by worker count and stack size, most
-    /// recently used last. Per thread, so concurrent callers keep separate
-    /// pools as before; a pool with a larger stack serves a smaller need.
     static POOLS: std::cell::RefCell<Vec<(usize, usize, std::sync::Arc<rayon::ThreadPool>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// This thread's pool of `n` workers with at least `stack_bytes` of stack
-/// (`0` for rayon's default), built when it has none; `None` if the build
-/// fails. Its workers know they are rslab's ([`on_own_worker`]).
 pub(crate) fn scoped_pool(
     n: usize,
     stack_bytes: usize,
 ) -> Option<std::sync::Arc<rayon::ThreadPool>> {
-    // Stacks by powers of two, so a few pools serve every depth.
     let stack = if stack_bytes == 0 {
         0
     } else {
@@ -1025,10 +932,6 @@ pub(crate) fn scoped_pool(
     })
 }
 
-/// Maximum supernode-tree height (root-to-leaf), the recursion depth of the tree
-/// factorization. Computed by an **iterative** post-order DFS (its own heap stack,
-/// so it never recurses) and so is correct for any supernode numbering - not
-/// assuming children precede their parent. O(#supernodes).
 pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
     let nsuper = sym.supernodes.len();
     let mut height = vec![0usize; nsuper];
@@ -1039,19 +942,19 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
         }
     }
     let mut max_h = 0;
-    let mut stack: Vec<(usize, usize)> = Vec::new(); // (node, next child index)
+    let mut stack: Vec<(usize, usize)> = Vec::new();
     for (r, &child) in is_child.iter().enumerate() {
         if child {
             continue;
         }
         stack.push((r, 0));
-        while let Some(&(node, ci)) = stack.last() {
+        while let Some(&(node, next_child)) = stack.last() {
             let children = &sym.supernodes[node].children;
-            if ci < children.len() {
+            if next_child < children.len() {
                 if let Some(top) = stack.last_mut() {
                     top.1 += 1;
                 }
-                stack.push((children[ci], 0));
+                stack.push((children[next_child], 0));
             } else {
                 let mut h = 1;
                 for &c in children {
@@ -1066,18 +969,7 @@ pub(crate) fn supernode_tree_depth(sym: &SymbolicFactorization) -> usize {
     max_h
 }
 
-/// Worker-thread stack size for a tree of the given depth. The recursive tree
-/// factorization (`factor_subtree` / `ll_factor_subtree` and the LU twins) uses
-/// O(depth) native stack; depth is O(log n) for nested-dissection orderings but
-/// O(#supernodes) for deep chain trees - banded / 1D-like patterns, especially
-/// with low `nemin`. Sizing the worker stack to the analyzed depth keeps the
-/// factorization robust for every knob setting (the address space is reserved,
-/// committed only as the recursion descends), instead of a fixed guess that a
-/// deep enough chain overflows. `0` (shallow trees) keeps the rayon default.
 pub(crate) fn stack_for_depth(depth: usize) -> usize {
-    // Always set an explicit, depth-proportional stack - never fall back to the
-    // small rayon default, which a moderate depth (a few hundred supernodes, as a
-    // banded matrix amalgamates to) already overflows.
     depth
         .saturating_mul(STACK_PER_LEVEL)
         .clamp(STACK_MIN, STACK_MAX)
