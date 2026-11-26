@@ -434,7 +434,7 @@ fn gmres_block_single_rhs_matches_scalar_gmres() {
     // s = 1 block GMRES reduces to the single-RHS path (same Arnoldi, same
     // Givens, default block apply = one single apply): same solution to the
     // requested tolerance, same iteration count up to a +/-1 boundary effect.
-    // The paths are NOT bit-identical - block uses CGS2, single uses MGS+DGKS,
+    // The paths are NOT bit-identical - block uses DCGS2, single uses MGS+DGKS,
     // so the projections sum in a different order and the true residual can
     // straddle `tol` by a rounding ULP. This is documented as a design point in
     // the module-level "Orthogonalization" note, not a defect.
@@ -672,8 +672,8 @@ fn gmres_block_within_cycle_deflation_shrinks_applies() {
 }
 
 #[test]
-fn gmres_block_bcgs2_bit_identical_across_thread_counts() {
-    // The block-CGS2 orthogonalization reduces over fixed row-chunks folded in
+fn gmres_block_dcgs2_bit_identical_across_thread_counts() {
+    // The block DCGS2 orthogonalization reduces over fixed row-chunks folded in
     // chunk order, so the whole block solve is **bit-identical regardless of
     // the thread count** - the determinism guarantee. Solve the same block in
     // a 1-thread and an 8-thread rayon pool and require exact equality.
@@ -1802,6 +1802,42 @@ fn block_gmres_continued_rung_beats_a_restart() {
             .sum::<f64>()
             .sqrt();
         assert!(rn <= 1e-10 * bn * (1.0 + 1e-6), "column {k}: {}", rn / bn);
+    }
+}
+
+/// Delayed CGS2 keeps a block GMRES basis orthonormal to the rounding, as CGS2
+/// does (`O(eps)`, the bound `c(k, n) eps` of Giraud, Langou, Rozloznik 2005
+/// taken as `k n eps` for `k` vectors of length `n`): on an indefinite Helmholtz
+/// grid without a preconditioner, a cycle of 200 steps whose first Gram-Schmidt
+/// pass cancels most of every image, in full precision and flexible or not; the
+/// least-squares estimate of the open cycle is its true residual to the same
+/// bound (relative to `||b||`).
+#[test]
+fn block_gmres_delayed_cgs2_keeps_the_basis_orthonormal() {
+    let c = |re, im| Complex::new(re, im);
+    let a = grid(20, c(0.6, 0.02), c(-1.0, 0.0));
+    let n = a.n;
+    let (s, k) = (2, 200);
+    let b = ladder_rhs(n, s);
+    for flexible in [true, false] {
+        let set = crate::KrylovSettings::default()
+            .with_max_iter(k)
+            .with_restart(k)
+            .with_flexible(flexible);
+        let mut g = BlockGmres::new(&a, &b, s, &NoPreconditioner, &set, None).unwrap();
+        let r = g.solve(1e-15, None).unwrap();
+        assert_eq!(r.iters, k);
+        let loss = g.orthogonality_loss(k);
+        eprintln!("flexible {flexible}: ||V^H V - I||_F = {loss:.3e} over {k} vectors");
+        let bound = (k * n) as f64 * f64::EPSILON;
+        assert!(loss <= bound, "loss {loss:.3e}");
+        for (col, &res) in r.final_res.iter().enumerate() {
+            let est = g.estimate(col);
+            assert!(
+                (est - res).abs() <= bound,
+                "column {col}: estimate {est:.3e} true {res:.3e}"
+            );
+        }
     }
 }
 

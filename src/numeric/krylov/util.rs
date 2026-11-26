@@ -1,9 +1,10 @@
 //! Arithmetic shared by the Krylov solvers: the bilinear and sesquilinear
 //! products, Givens rotations, the least-squares rank guard and the batched
-//! Gram-Schmidt passes of the block solver.
+//! Gram-Schmidt passes of the block solvers.
 
+use crate::parallel::SendPtr;
 use crate::scalar::Scalar;
-use crate::stored::{axpy_as, dotc_as, Stored};
+use crate::stored::{axpy_as, dotc_as, Rows, Stored};
 
 /// A Krylov basis of up to `cap` scalars: the capacity reserved (address space alone), its
 /// length grown by [`grow`] as the iteration writes it, so a solve that stops after `k` steps
@@ -106,21 +107,53 @@ pub(super) fn well_conditioned_dim<T: Scalar>(h: &[T], stride: usize, jdim: usiz
 static ORTHO_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::SCAN_NS_PER_ENTRY);
 
-/// Each panel column projected onto its **own** basis: `proj[off[a] + i] =
-/// <V_a[:, i], W[:, a]>` for the `off[a+1] - off[a]` vectors of column `a`'s
-/// basis `layers(a)` (vector `i` the slice `[i*n, (i+1)*n)`), `W` column `a` the
-/// slice `w[a*n..(a+1)*n]`.
+/// `f(a, r0, r1)` for the rows `r0..r1` of every row chunk of `chunk` rows of every one of
+/// `cols` columns of `n` rows, as one parallel section of `count` multiply-adds.
+pub(super) fn column_chunks<T: Scalar>(
+    cols: usize,
+    n: usize,
+    chunk: usize,
+    count: usize,
+    f: impl Fn(usize, usize, usize) + Sync + Send,
+) {
+    let nchunks = n.div_ceil(chunk);
+    let work = crate::parallel::Work::of(count as f64, ORTHO_RATE.of::<T>());
+    crate::parallel::for_each(cols * nchunks, work, |p| {
+        let (a, ci) = (p / nchunks, p % nchunks);
+        f(a, ci * chunk, ((ci + 1) * chunk).min(n));
+    });
+}
+
+/// `out[t] = sum_ci part[ci * width + t]` over the `part.len() / width` row chunks in chunk
+/// order: the partial sums of a reduction folded, in parallel over `t`, so the result does not
+/// depend on the thread count.
+fn fold<T: Scalar>(part: &[T], width: usize, out: &mut [T]) {
+    let nchunks = part.len() / width;
+    let work = crate::parallel::Work::of((nchunks * width) as f64, ORTHO_RATE.of::<T>());
+    let op = SendPtr::of(&mut out[..width]);
+    crate::parallel::for_each(width, work, |t| {
+        let sum = (0..nchunks).fold(T::zero(), |e, ci| e + part[ci * width + t]);
+        // SAFETY: item `t` alone writes `out[t]`.
+        unsafe { op.part(t, 1)[0] = sum };
+    });
+}
+
+/// The one pass over the bases of a delayed CGS2 step (Bielich, Langou, Thomas, Swirydowicz,
+/// Yamazaki, Boman 2022): panel column `a` holds its pending vector `u` (in `u`) and the
+/// operator's image of it (in `w`), its basis `layers(a)` the `k` finished vectors `V` before
+/// `u`, `2 k + 2 = off[a+1] - off[a]`. Into `proj[off[a]..off[a+1]]`: `V^H u` (the delayed
+/// second pass of `u`), `V^H w` (the first pass of `w`), `u^H u` and `u^H w`; each basis
+/// vector read once for both.
 ///
-/// The classical (block) Gram-Schmidt projection: all projections are taken
-/// against the same `W`, so the inner products are independent and computed in
-/// one sweep over row chunks instead of sequential, latency-bound BLAS-1
-/// reductions. Each chunk writes its partial sums into its own slice of
-/// `scratch` (`>= ceil(n / chunk) * off[last]`), folded in chunk order: the
-/// result does not depend on the thread count.
+/// The products of all columns are independent and summed over row chunks in one section,
+/// each chunk into its own slice of `scratch` (`>= ceil(n / chunk) * off[last]`), folded in
+/// chunk order: the result does not depend on the thread count.
 #[inline]
-pub(super) fn column_project<'v, T: Scalar>(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn delayed_project<'v, T: Scalar>(
     layers: &(dyn Fn(usize) -> &'v Stored<T> + Sync),
     off: &[usize],
+    u: &[T],
     w: &[T],
     n: usize,
     chunk: usize,
@@ -128,8 +161,8 @@ pub(super) fn column_project<'v, T: Scalar>(
     scratch: &mut [T],
 ) {
     let width = off[off.len() - 1];
-    proj[..width].iter_mut().for_each(|p| *p = T::zero());
     if width == 0 || n == 0 {
+        proj[..width].iter_mut().for_each(|p| *p = T::zero());
         return;
     }
     let nchunks = n.div_ceil(chunk);
@@ -139,46 +172,90 @@ pub(super) fn column_project<'v, T: Scalar>(
         let (r0, r1) = (ci * chunk, ((ci + 1) * chunk).min(n));
         for a in 0..off.len() - 1 {
             let v = layers(a);
-            let wa = &w[a * n + r0..a * n + r1];
-            for i in 0..off[a + 1] - off[a] {
-                out[off[a] + i] = v.dotc(i * n + r0, wa);
+            let k = (off[a + 1] - off[a]) / 2 - 1;
+            let (ua, wa) = (&u[a * n + r0..a * n + r1], &w[a * n + r0..a * n + r1]);
+            let o = &mut out[off[a]..off[a + 1]];
+            for i in 0..k {
+                (o[i], o[k + i]) = v.dotc2(i * n + r0, ua, wa);
             }
+            (o[2 * k], o[2 * k + 1]) = (dotc(ua, ua), dotc(ua, wa));
         }
     });
-    for ci in 0..nchunks {
-        let base = ci * width;
-        for t in 0..width {
-            proj[t] = proj[t] + part[base + t];
-        }
-    }
+    fold(part, width, proj);
 }
 
-/// Subtract the projected components from each panel column in place:
-/// `W[:, a] -= sum_i proj[off[a] + i] * V_a[:, i]` (see [`column_project`]),
-/// accumulated in basis order at every entry. Parallel over fixed row chunks
-/// within each column, so the update is thread-count independent.
-#[inline]
-pub(super) fn column_subtract<'v, T: Scalar>(
-    layers: &(dyn Fn(usize) -> &'v Stored<T> + Sync),
+/// What the update of a delayed CGS2 step ([`delayed_update`]) does to one panel column:
+/// with `s = proj[off..off+k]` and `q = proj[off+k..off+2k]` of [`delayed_project`], its
+/// pending vector `u` becomes the next basis vector `v = (u - V s) inv_u inv_nrm` (layer `k`
+/// of `v`), `w` becomes `(w - V q) inv_u - h v` (layer `k + 1`), and the preconditioned
+/// vector `z` (scaled by `inv_u`) goes to layer `k` of `z` where kept.
+pub(super) struct Delayed<T: Scalar> {
+    pub k: usize,
+    pub inv_u: f64,
+    pub inv_nrm: f64,
+    pub h: T,
+    pub v: Rows<T>,
+    pub z: Option<Rows<T>>,
+}
+
+/// The one update pass of a delayed CGS2 step over the bases, every panel column `a` as
+/// `cols[a]` says ([`Delayed`]), each basis vector read once for `u` and `w`; the written
+/// layers stored in the same pass. `norms[a]` the norm of the new `w`, summed over row
+/// chunks in chunk order (`scratch >= cols.len() * ceil(n / chunk)`).
+///
+/// # Safety
+/// Every column's `v` and `z` ([`Stored::rows`]) reach their layers `k + 1` and `k`, and no
+/// two columns share them.
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn delayed_update<T: Scalar>(
+    cols: &[Delayed<T>],
     off: &[usize],
-    w: &mut [T],
+    proj: &[T],
+    (u, z, w): (&mut [T], &mut [T], &mut [T]),
     n: usize,
     chunk: usize,
-    proj: &[T],
+    norms: &mut [f64],
+    scratch: &mut [f64],
 ) {
-    for a in 0..off.len() - 1 {
-        let v = layers(a);
-        let coef = &proj[off[a]..off[a + 1]];
-        let wa = &mut w[a * n..(a + 1) * n];
-        let work = crate::parallel::Work::of((n * coef.len()) as f64, ORTHO_RATE.of::<T>());
-        crate::parallel::chunks_mut(wa, chunk, work, |ci, part| {
-            let r0 = ci * chunk;
-            for (i, &h) in coef.iter().enumerate() {
-                if h != T::zero() {
-                    v.axpy(i * n + r0, -h, part);
-                }
+    let sa = cols.len();
+    let nchunks = n.div_ceil(chunk);
+    let (up, zp, wp) = (SendPtr::of(u), SendPtr::of(z), SendPtr::of(w));
+    let sp = SendPtr::of(&mut scratch[..sa * nchunks]);
+    let count = cols.iter().map(|c| c.k + 3).sum::<usize>() * n;
+    column_chunks::<T>(sa, n, chunk, count, |a, r0, r1| {
+        let d = &cols[a];
+        let (k, len) = (d.k, r1 - r0);
+        let s = &proj[off[a]..off[a] + k];
+        let q = &proj[off[a] + k..off[a] + 2 * k];
+        // SAFETY: piece (a, chunk) alone holds these rows of column `a` (and of its layers
+        // `k` and `k + 1`, the layers before it only read).
+        let (ua, wa) = unsafe { (up.part(a * n + r0, len), wp.part(a * n + r0, len)) };
+        for i in 0..k {
+            unsafe { d.v.axpy2(i * n + r0, (-s[i], &mut *ua), (-q[i], &mut *wa)) };
+        }
+        let (su, iu) = (T::from_real(d.inv_u * d.inv_nrm), T::from_real(d.inv_u));
+        let mut nn = 0.0;
+        for (x, y) in ua.iter_mut().zip(wa.iter_mut()) {
+            *x = *x * su;
+            *y = *y * iu - d.h * *x;
+            nn += y.magnitude_sq();
+        }
+        unsafe {
+            d.v.write(k * n + r0, ua);
+            d.v.write((k + 1) * n + r0, wa);
+            if let Some(zr) = d.z {
+                let za = zp.part(a * n + r0, len);
+                za.iter_mut().for_each(|e| *e = *e * iu);
+                zr.write(k * n + r0, za);
             }
-        });
+            sp.part(a * nchunks + r0 / chunk, 1)[0] = nn;
+        }
+    });
+    for a in 0..sa {
+        norms[a] = scratch[a * nchunks..(a + 1) * nchunks]
+            .iter()
+            .sum::<f64>()
+            .sqrt();
     }
 }
 
@@ -200,10 +277,8 @@ pub(super) fn panel_project<T: Scalar>(
     scratch: &mut [T],
 ) {
     let width = cols * q;
-    for p in proj[..width].iter_mut() {
-        *p = T::zero();
-    }
     if width == 0 || n == 0 {
+        proj[..width].iter_mut().for_each(|p| *p = T::zero());
         return;
     }
     let nchunks = n.div_ceil(chunk);
@@ -230,12 +305,7 @@ pub(super) fn panel_project<T: Scalar>(
         let work = crate::parallel::Work::of((n * width) as f64, ORTHO_RATE.of::<T>());
         crate::parallel::chunks_mut(part, width, work, sums);
     }
-    for ci in 0..nchunks {
-        let base = ci * width;
-        for t in 0..width {
-            proj[t] = proj[t] + part[base + t];
-        }
-    }
+    fold(part, width, proj);
 }
 
 /// `W_c -= sum_j coef[j * q + c] V_j` over the first `cols` basis columns, in

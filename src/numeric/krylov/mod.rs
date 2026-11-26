@@ -23,15 +23,18 @@
 //! - **Single-RHS [`gmres`]:** *modified* Gram-Schmidt (each projection updates
 //!   `w` before the next is taken) with a conditional DGKS second pass, triggered
 //!   when one MGS sweep cancels more than `1/sqrt2` of `||w||`.
-//! - **Block [`gmres_block`]:** *classical* Gram-Schmidt with a conditional second
-//!   pass = **CGS2**, batched over the whole panel for BLAS-3 arithmetic
-//!   intensity; the DGKS second pass is decided and applied **per column**.
+//! - **Block [`gmres_block`]:** *classical* Gram-Schmidt with an unconditional
+//!   second pass, delayed to the next step (**DCGS2**, Bielich, Langou, Thomas,
+//!   Swirydowicz, Yamazaki, Boman, Parallel Computing 2022): the second pass of a
+//!   step's vector and the first pass of the next one share one pass over the
+//!   basis for their products and one for their update, batched over the whole
+//!   panel.
 //!
 //! Consequently a **block solve with `s = 1` is *not* bit-identical to the single-
 //! RHS [`gmres`]**: MGS and CGS accumulate the projections in a different order, so
 //! the two can differ by a rounding ULP per step and hence by up to +/-1 iteration
 //! at a residual that straddles `tol`. Both converge to the same solution within
-//! the requested tolerance. This is a deliberate design point (CGS2's panel-wide
+//! the requested tolerance. This is a deliberate design point (DCGS2's panel-wide
 //! reductions are what make the multi-RHS path fast and thread-count deterministic),
 //! not a bug; see the `gmres_block_single_rhs_matches_scalar_gmres` test.
 

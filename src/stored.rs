@@ -172,6 +172,45 @@ impl<T: Scalar> Stored<T> {
         }
     }
 
+    /// Both conjugated inner products `sum conj(self[from + i]) * u[i]` and
+    /// `... * w[i]` in one read of the values, each in order.
+    #[inline]
+    pub(crate) fn dotc2(&self, from: usize, u: &[T], w: &[T]) -> (T, T) {
+        let to = from + u.len();
+        match &self.repr {
+            Repr::Full(v) => dotc2_as(&v[from..to], u, w, |a| a),
+            Repr::Single(v) => dotc2_as(&v[from..to], u, w, T::promote),
+        }
+    }
+
+    /// Its values up to `to` for the pieces of a parallel section ([`Rows`]): the
+    /// capacity reserved to `to`, the values from its length on not written yet
+    /// (the section writes them, [`written`](Self::written) then counts them).
+    pub(crate) fn rows(&mut self, to: usize) -> Rows<T> {
+        match &mut self.repr {
+            Repr::Full(v) => {
+                v.reserve(to.saturating_sub(v.len()));
+                Rows::Full(v.as_mut_ptr())
+            }
+            Repr::Single(v) => {
+                v.reserve(to.saturating_sub(v.len()));
+                Rows::Single(v.as_mut_ptr())
+            }
+        }
+    }
+
+    /// Count the values up to `to` as written (it grows to `to` where it ends before).
+    ///
+    /// # Safety
+    /// Every value below `to` was written, through [`rows`](Self::rows) or before.
+    pub(crate) unsafe fn written(&mut self, to: usize) {
+        match &mut self.repr {
+            Repr::Full(v) if v.len() < to => v.set_len(to),
+            Repr::Single(v) if v.len() < to => v.set_len(to),
+            _ => {}
+        }
+    }
+
     /// Store the values in the twin from now on: those written are rounded, the
     /// capacity is kept. They are copied, so while it runs the values are held twice.
     pub fn round_to_single(&mut self) {
@@ -206,6 +245,91 @@ pub(crate) fn dotc_as<T: Scalar, E: Copy>(x: &[E], y: &[T], load: impl Fn(E) -> 
 pub(crate) fn axpy_as<T: Scalar, E: Copy>(x: &[E], a: T, out: &mut [T], load: impl Fn(E) -> T) {
     for (o, &xi) in out.iter_mut().zip(x) {
         *o = *o + a * load(xi);
+    }
+}
+
+/// `(sum conj(x[i]) * u[i], sum conj(x[i]) * w[i])` in order, `x` stored in `E`, widened by
+/// `load` and read once.
+#[inline]
+fn dotc2_as<T: Scalar, E: Copy>(x: &[E], u: &[T], w: &[T], load: impl Fn(E) -> T) -> (T, T) {
+    let (mut s, mut t) = (T::zero(), T::zero());
+    for ((&xi, &ui), &wi) in x.iter().zip(u).zip(w) {
+        let c = load(xi).conj();
+        s = s + c * ui;
+        t = t + c * wi;
+    }
+    (s, t)
+}
+
+/// `u[i] += a * x[i]` and `w[i] += b * x[i]`, `x` stored in `E`, widened by `load` and read
+/// once.
+#[inline]
+fn axpy2_as<T: Scalar, E: Copy>(
+    x: &[E],
+    (a, u): (T, &mut [T]),
+    (b, w): (T, &mut [T]),
+    load: impl Fn(E) -> T,
+) {
+    for ((&xi, ui), wi) in x.iter().zip(u.iter_mut()).zip(w.iter_mut()) {
+        let v = load(xi);
+        *ui = *ui + a * v;
+        *wi = *wi + b * v;
+    }
+}
+
+/// The values of a [`Stored`] ([`Stored::rows`]) shared by the pieces of a parallel section,
+/// each piece reading and writing values no other piece writes meanwhile. It holds no borrow:
+/// the [`Stored`] stays where it is (no write, no growth past the capacity) while it is used.
+#[derive(Debug)]
+pub(crate) enum Rows<T: Scalar> {
+    Full(*mut T),
+    Single(*mut T::Low),
+}
+
+impl<T: Scalar> Clone for Rows<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: Scalar> Copy for Rows<T> {}
+// SAFETY: the sections hand every piece values no other piece writes.
+unsafe impl<T: Scalar> Send for Rows<T> {}
+unsafe impl<T: Scalar> Sync for Rows<T> {}
+
+impl<T: Scalar> Rows<T> {
+    /// `u[i] += a * self[from + i]` and `w[i] += b * self[from + i]`, the values read once.
+    ///
+    /// # Safety
+    /// The values `[from, from + u.len())` are written and no piece writes them meanwhile.
+    #[inline]
+    pub(crate) unsafe fn axpy2(self, from: usize, u: (T, &mut [T]), w: (T, &mut [T])) {
+        let len = u.1.len();
+        match self {
+            Rows::Full(p) => axpy2_as(std::slice::from_raw_parts(p.add(from), len), u, w, |a| a),
+            Rows::Single(p) => axpy2_as(
+                std::slice::from_raw_parts(p.add(from), len),
+                u,
+                w,
+                T::promote,
+            ),
+        }
+    }
+
+    /// `self[from + i] = x[i]`, rounded to the storage.
+    ///
+    /// # Safety
+    /// The values `[from, from + x.len())` lie within the capacity and no other piece reads
+    /// or writes them meanwhile.
+    #[inline]
+    pub(crate) unsafe fn write(self, from: usize, x: &[T]) {
+        match self {
+            Rows::Full(p) => std::ptr::copy_nonoverlapping(x.as_ptr(), p.add(from), x.len()),
+            Rows::Single(p) => {
+                for (i, &a) in x.iter().enumerate() {
+                    p.add(from + i).write(a.demote());
+                }
+            }
+        }
     }
 }
 
