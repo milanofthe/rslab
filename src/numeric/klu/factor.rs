@@ -931,7 +931,6 @@ pub(super) fn factor_impl<T: Scalar>(
         col_perm: sym.col_perm.clone(),
         rs_inv,
         scaled: settings.row_scaling,
-        parallel,
         l_colptr,
         l_rowidx,
         l_val,

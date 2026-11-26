@@ -191,11 +191,6 @@ struct KluFactors<T> {
     /// Per-original-row reciprocal scale factor (all 1 when scaling is off).
     rs_inv: Vec<f64>,
     scaled: bool,
-    /// Whether the first factor's blocks were worth factoring side by side
-    /// (decided on the blocks' input entries; a refactor decides on the
-    /// exact replay work in `plan` instead). Read by tests only.
-    #[cfg_attr(not(test), allow(dead_code))]
-    parallel: bool,
     /// L: strictly-below-diagonal entries per column, unit diagonal implicit.
     /// Row indices are final positions within the column's block (narrow
     /// [`Ki`] indices: the solve/refactor loops are index-bound), in the

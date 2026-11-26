@@ -9,8 +9,7 @@
 //! its interleaved complex microkernel reaches about 80% of the real
 //! kernel's flop rate, so a complex product is split into real products of
 //! the real and imaginary planes in the Gauss form ([`complex_gemm_3m`]:
-//! three real products of the same size, 6/8 of the direct flop count; the
-//! textbook four-product form [`complex_gemm_4m`] is kept for reference).
+//! three real products of the same size, 6/8 of the direct flop count).
 //! The split trades flops for memory traffic (the planes are copied), which
 //! pays on a compute-bound core and not on a bandwidth-bound machine, so
 //! products that run in parallel take the direct kernel; on a 102k-DOF
@@ -345,98 +344,6 @@ unsafe fn combine<R: SplitReal>(
     }
 }
 
-/// The four-product form: `Cr = Ar Br - Ai Bi`, `Ci = Ar Bi + Ai Br`.
-///
-/// # Safety
-/// As `gemm::gemm`.
-#[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub unsafe fn complex_gemm_4m<R: SplitReal>(
-    m: usize,
-    n: usize,
-    k: usize,
-    dst: *mut Complex<R>,
-    dst_cs: isize,
-    dst_rs: isize,
-    read_dst: bool,
-    lhs: *const Complex<R>,
-    lhs_cs: isize,
-    lhs_rs: isize,
-    rhs: *const Complex<R>,
-    rhs_cs: isize,
-    rhs_rs: isize,
-    alpha: Complex<R>,
-    beta: Complex<R>,
-    parallelism: gemm::Parallelism,
-) {
-    R::with_planes(|buf| {
-        let (mk, kn, mn) = (m * k, k * n, m * n);
-        buf.clear();
-        buf.resize(2 * mk + 2 * kn + 2 * mn, R::zero());
-        let (ar, rest) = buf.split_at_mut(mk);
-        let (ai, rest) = rest.split_at_mut(mk);
-        let (br, rest) = rest.split_at_mut(kn);
-        let (bi, rest) = rest.split_at_mut(kn);
-        let (cr, ci) = rest.split_at_mut(mn);
-        split_planes(lhs, lhs_cs, lhs_rs, m, k, ar, ai);
-        split_planes(rhs, rhs_cs, rhs_rs, k, n, br, bi);
-        let (one, neg) = (R::one(), -R::one());
-        // Cr = Ar Br - Ai Bi
-        real_gemm(
-            m,
-            n,
-            k,
-            cr.as_mut_ptr(),
-            false,
-            ar.as_ptr(),
-            br.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        real_gemm(
-            m,
-            n,
-            k,
-            cr.as_mut_ptr(),
-            true,
-            ai.as_ptr(),
-            bi.as_ptr(),
-            one,
-            neg,
-            parallelism,
-        );
-        // Ci = Ar Bi + Ai Br
-        real_gemm(
-            m,
-            n,
-            k,
-            ci.as_mut_ptr(),
-            false,
-            ar.as_ptr(),
-            bi.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        real_gemm(
-            m,
-            n,
-            k,
-            ci.as_mut_ptr(),
-            true,
-            ai.as_ptr(),
-            br.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        combine(m, n, dst, dst_cs, dst_rs, read_dst, alpha, beta, |e| {
-            Complex::new(cr[e], ci[e])
-        });
-    })
-}
-
 /// The three-product (Gauss) form: `T1 = Ar Br`, `T2 = Ai Bi`,
 /// `T3 = (Ar + Ai)(Br + Bi)`, `Cr = T1 - T2`, `Ci = T3 - T1 - T2`, per
 /// `split_tile` block of the product (the inner dimension whole, so every
@@ -673,7 +580,6 @@ mod tests {
         };
         let mut direct = dst0.clone();
         let mut d3 = dst0.clone();
-        let mut d4 = dst0.clone();
         unsafe {
             gemm::gemm(
                 m,
@@ -715,38 +621,18 @@ mod tests {
                 gemm::Parallelism::None,
                 256,
             );
-            complex_gemm_4m(
-                m,
-                n,
-                k,
-                d4.as_mut_ptr(),
-                m as isize,
-                1,
-                read_dst,
-                lhs.as_ptr(),
-                lcs,
-                lrs,
-                rhs.as_ptr(),
-                k as isize,
-                1,
-                alpha,
-                beta,
-                gemm::Parallelism::None,
-            );
         }
         let norm = direct.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-        for (name, got) in [("3m", &d3), ("4m", &d4)] {
-            let err = got
-                .iter()
-                .zip(&direct)
-                .map(|(a, b)| (a - b).norm_sqr())
-                .sum::<f64>()
-                .sqrt();
-            assert!(
-                err <= 1e-13 * (norm + 1.0),
-                "{name} m={m} n={n} k={k} read={read_dst} err {err:.3e} norm {norm:.3e}"
-            );
-        }
+        let err = d3
+            .iter()
+            .zip(&direct)
+            .map(|(a, b)| (a - b).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            err <= 1e-13 * (norm + 1.0),
+            "3m m={m} n={n} k={k} read={read_dst} err {err:.3e} norm {norm:.3e}"
+        );
     }
 
     #[test]

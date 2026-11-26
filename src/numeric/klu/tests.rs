@@ -893,42 +893,34 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
     // Many blocks: wide where sections are free, serial where they cost
     // more than any work, and Off always wins.
     let a = cascaded(4000, 6, 9);
-    let factor = |s: &KluSettings| KluSolver::factor(&a, s).unwrap();
-    let free = install(on(Dispatch::free(4)), || factor(&KluSettings::default()));
-    assert!(free.factors.block_ptr.len() > 4);
-    assert!(free.factors.parallel, "free sections: the blocks go wide");
-    let never = install(on(Dispatch::never()), || factor(&KluSettings::default()));
-    assert!(!never.factors.parallel, "no pool to go wide on");
+    let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
+    let wide = |s: &KluSettings| sym.parallel_blocks::<f64>(s);
+    let free = install(on(Dispatch::free(4)), || wide(&KluSettings::default()));
+    assert!(sym.block_ptr().len() > 4);
+    assert!(free, "free sections: the blocks go wide");
+    let never = install(on(Dispatch::never()), || wide(&KluSettings::default()));
+    assert!(!never, "no pool to go wide on");
     let costly = install(on(Dispatch::new(vec![1e12; 5])), || {
-        factor(&KluSettings::default())
+        wide(&KluSettings::default())
     });
-    assert!(
-        !costly.factors.parallel,
-        "sections costing more than the work"
-    );
+    assert!(!costly, "sections costing more than the work");
     let off = install(on(Dispatch::free(4)), || {
-        factor(&KluSettings::default().with_parallel(KluParallel::Off))
+        wide(&KluSettings::default().with_parallel(KluParallel::Off))
     });
-    assert!(!off.factors.parallel);
+    assert!(!off);
     // The user's structural floor in place of the time: the old gate.
     let floor = KluSettings {
         par_min_nnz: Some(usize::MAX),
         ..KluSettings::default()
     };
-    let s = install(on(Dispatch::free(4)), || factor(&floor));
-    assert!(
-        !s.factors.parallel,
-        "a floor above the matrix keeps it serial"
-    );
+    let s = install(on(Dispatch::free(4)), || wide(&floor));
+    assert!(!s, "a floor above the matrix keeps it serial");
     let floor = KluSettings {
         par_min_nnz: Some(0),
         ..KluSettings::default()
     };
-    let s = install(on(Dispatch::never()), || factor(&floor));
-    assert!(
-        s.factors.parallel,
-        "a floor below it goes wide whatever the cost"
-    );
+    let s = install(on(Dispatch::never()), || wide(&floor));
+    assert!(s, "a floor below it goes wide whatever the cost");
 
     // A refactor decides on the pool it runs on, every time: one block of
     // 1024 columns whose DAG offers wide levels.
