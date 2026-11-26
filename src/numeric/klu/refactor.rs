@@ -6,30 +6,19 @@ use crate::constants::{
 };
 use crate::parallel::{Dispatch, Go, Rayon, ScalarRates, Work};
 
-/// What a unit of replay work costs a thread: what the blocks' replays and
-/// how wide they go side by side are decided on ([`Work`]).
 static REPLAY_RATE: ScalarRates = ScalarRates::new(KLU_REPLAY_NS_PER_WORK);
 
 impl ReplayPlan {
-    /// Whether the user's structural floors decide in place of the time.
     fn floors(&self) -> bool {
         self.min_work.is_some() || self.min_ratio.is_some()
     }
 
-    /// Whether block `bp` of `bn` columns clears the user's floors.
     fn block_pays(&self, bp: &BlockPlan, bn: usize) -> bool {
         let nlev = bp.level_work.len().max(1);
         self.min_work.is_none_or(|w| bp.work >= w)
             && self.min_ratio.is_none_or(|r| bn as f64 / nlev as f64 >= r)
     }
 
-    /// How block `bp` of `bn` columns starts (`None` sequentially): side by side
-    /// where its work clears the floor and its mean level width the ratio (the
-    /// user's, else [`KLU_PAR_MIN_FMADDS`] and [`KLU_PAR_MIN_RATIO`]) or the
-    /// policy is `On`, then pipelined (`Some(true)`) where its columns carry
-    /// [`PIPE_COL_WORK`] on average and level by level where they are lighter,
-    /// under `Auto` that only on a lent pool, whose workers wait awake between
-    /// the levels (a rayon pool's sleep; sequentially there).
     fn start(&self, bp: &BlockPlan, bn: usize) -> Option<bool> {
         let nlev = bp.level_work.len().max(1);
         let pays = bp.work >= self.min_work.unwrap_or(KLU_PAR_MIN_FMADDS)
@@ -40,21 +29,15 @@ impl ReplayPlan {
             .filter(|&pipelined| pipelined || on || crate::parallel::is_lent())
     }
 
-    /// Whether anything of a refactor starts side by side: a block
-    /// ([`start`](Self::start)), or the blocks together, where their work
-    /// clears the floor and no block holds more than its share of the ratio
-    /// (the user's, else the defaults), or the policy is `On`. Where nothing
-    /// does, a refactor replays sequentially without looking at the pool.
     fn starts_wide(&self) -> bool {
         let blocks = self.total >= self.min_work.unwrap_or(KLU_PAR_MIN_FMADDS)
             && self.total as f64
                 >= self.min_ratio.unwrap_or(KLU_PAR_MIN_RATIO) * self.largest as f64;
         self.policy == KluParallel::On
             || blocks
-            || (self.blocks.iter()).any(|bp| self.start(bp, bp.cols.len()).is_some())
+            || (self.blocks.iter()).any(|bp| self.start(bp, bp.level_cols.len()).is_some())
     }
 
-    /// Whether the blocks together clear the user's floors.
     fn blocks_pay(&self) -> bool {
         self.min_work.is_none_or(|w| self.total >= w)
             && self
@@ -63,20 +46,12 @@ impl ReplayPlan {
     }
 }
 
-/// What a refactor decides its replay on: the section cost of the pool it
-/// runs on and the replay rate, for the gates and for the ways not measured
-/// yet.
 pub(super) struct Decide {
     dispatch: Dispatch,
-    /// What a section costs on the pool, also where `dispatch` is free:
-    /// what the pieces of a replay are cut by ([`Dispatch::ranges`]).
     cut: Dispatch,
     threads: usize,
-    /// `On`, or floors the user set: every section is free, and the time
-    /// picks only how a block replays side by side, not whether.
     forced: bool,
-    /// ns per unit of replay work.
-    seq: f64,
+    ns_per_work: f64,
 }
 
 impl Decide {
@@ -101,11 +76,10 @@ impl Decide {
             cut,
             threads,
             forced,
-            seq: REPLAY_RATE.of::<T>().ns_per_op(),
+            ns_per_work: REPLAY_RATE.of::<T>().ns_per_op(),
         }
     }
 
-    /// On `dispatch` and `threads`, a unit of replay work a ns (tests).
     #[cfg(test)]
     pub(super) fn on(dispatch: Dispatch, threads: usize) -> Self {
         Decide {
@@ -113,7 +87,7 @@ impl Decide {
             dispatch,
             threads,
             forced: false,
-            seq: 1.0,
+            ns_per_work: 1.0,
         }
     }
 
@@ -121,10 +95,9 @@ impl Decide {
         self.dispatch.width(work, pieces).min(self.threads).max(1)
     }
 
-    /// The threads level `l` of `bp` replays on, and its time on them.
     fn level(&self, bp: &BlockPlan, l: usize) -> (usize, f64) {
-        let work = bp.level_work[l] as f64 * self.seq;
-        let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
+        let work = bp.level_work[l] as f64 * self.ns_per_work;
+        let p = (bp.level_ptr[l + 1] - bp.level_ptr[l]) as usize;
         match self.width(work, p) {
             k if k >= 2 => (
                 k,
@@ -134,26 +107,12 @@ impl Decide {
         }
     }
 
-    /// Columns per piece of level `l` of `bp` on `k` threads: its work cut
-    /// into ranges as the section cost makes them worth
-    /// ([`Dispatch::ranges`]).
     fn level_per(&self, bp: &BlockPlan, l: usize, k: usize) -> usize {
-        let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
-        let work = bp.level_work[l] as f64 * self.seq;
+        let p = (bp.level_ptr[l + 1] - bp.level_ptr[l]) as usize;
+        let work = bp.level_work[l] as f64 * self.ns_per_work;
         p.div_ceil(self.cut.ranges(work, p, k).max(1))
     }
 
-    /// How block `bp` of `bn` columns, `serial` ns sequentially, replays,
-    /// where its structure starts it (`start`, see [`ReplayPlan::start`]):
-    /// the way predicted fastest among those it starts with, or among all
-    /// offered where it starts with none of them. The ways: sequentially
-    /// (unless every section is free), level by level (where a level is
-    /// worth a section), pipelined on 2, 4, ... threads, the last one on all
-    /// the pool's, at its share of the work and the section. No chain of the
-    /// elimination DAG bounds a pipeline from below: a column eliminates
-    /// against the columns it reads as they finish, so the chain of whole
-    /// columns overstates its critical path (ASIC_100ks: a chain ratio below
-    /// two, pipelined over three times faster).
     fn fastest(&self, bp: &BlockPlan, bn: usize, serial: f64, start: Option<bool>) -> Mode {
         let started = |m: Mode| {
             matches!(
@@ -161,7 +120,6 @@ impl Decide {
                 (_, Mode::Serial) | (Some(false), Mode::Levels) | (Some(true), Mode::Pipelined(_))
             )
         };
-        // the fastest way it starts with, and the fastest of all
         let mut first: Option<(Mode, f64)> = None;
         let mut any = first;
         let mut offer = |m: Mode, t: f64| {
@@ -177,7 +135,7 @@ impl Decide {
             offer(Mode::Serial, serial);
         }
         let cap = self.threads.min(bn);
-        if (bp.widest as f64 * self.seq) >= self.dispatch.break_even() {
+        if (bp.widest as f64 * self.ns_per_work) >= self.dispatch.break_even() {
             offer(
                 Mode::Levels,
                 (0..bp.level_work.len()).map(|l| self.level(bp, l).1).sum(),
@@ -196,11 +154,8 @@ impl Decide {
         first.or(any).map_or(Mode::Serial, |b| b.0)
     }
 
-    /// How block `bp` of `bn` columns replays: sequentially below the
-    /// user's floors and below what any section is worth on the pool; else
-    /// the way predicted fastest ([`fastest`](Self::fastest)).
     pub(super) fn mode(&self, plan: &ReplayPlan, bp: &BlockPlan, bn: usize) -> Mode {
-        let serial = bp.work as f64 * self.seq;
+        let serial = bp.work as f64 * self.ns_per_work;
         if plan.policy != KluParallel::On && plan.floors() && !plan.block_pays(bp, bn) {
             return Mode::Serial;
         }
@@ -210,8 +165,6 @@ impl Decide {
         self.fastest(bp, bn, serial, plan.start(bp, bn))
     }
 
-    /// Whether the blocks may replay side by side at all: two of them or
-    /// more, under a policy that allows it and the user's floors.
     fn blocks_may(&self, plan: &ReplayPlan, nblocks: usize) -> bool {
         nblocks >= 2
             && plan.policy != KluParallel::Off
@@ -245,13 +198,8 @@ impl<T: Scalar> KluSolver<T> {
         }
     }
 
-    /// [`refactor`](Self::refactor) on the workers it runs on.
-    // The replay loops index several parallel arrays at offset positions;
-    // iterator forms would obscure the offset arithmetic.
     #[allow(clippy::needless_range_loop)]
     fn replay(&mut self, a: &GeneralCsc<T>) -> Result<(), RslabError> {
-        // Cloned out of the factors so the borrow below stays exclusive; the
-        // flag is read-only for us either way.
         let int_flag = self.factors.interrupt.clone();
         let int_flag = int_flag.as_deref();
         let f = &mut self.factors;
@@ -264,15 +212,12 @@ impl<T: Scalar> KluSolver<T> {
         if a.nnz() != f.nnz_a {
             return Err(pattern_mismatch());
         }
-        // Into the kept buffer; it becomes `rs_inv` once the replay succeeds.
         let mut rs_inv = std::mem::take(&mut f.rs_next);
         {
             let _s = rsprobe::scope!(DEBUG, "row scaling");
             row_scale_inv_into(a, f.scaled, &mut rs_inv);
         }
 
-        // Branch-free pattern verification against the recorded program: every
-        // entry must map to the exact final position it had at factor time.
         {
             let _s = rsprobe::scope!(DEBUG, "pattern check");
             let mut acc: Ki = 0;
@@ -284,11 +229,6 @@ impl<T: Scalar> KluSolver<T> {
             }
         }
 
-        // Per-block replay jobs over disjoint value ranges: L/U/F entries and
-        // `udiag` of a block are contiguous (`colptr[bs]..colptr[be]`), so the
-        // mutable arrays split cleanly and the blocks replay independently,
-        // side by side where it pays (bit-identical: per-block work is
-        // sequential and shares nothing).
         struct RJob<'s, T> {
             b: usize,
             l_v: &'s mut [T],
@@ -298,12 +238,10 @@ impl<T: Scalar> KluSolver<T> {
         }
         let nblocks = f.block_ptr.len() - 1;
         let mut x = std::mem::take(&mut f.replay_x);
-        // How each planned block replays this time, on the pool this
-        // refactor runs on.
         let plan = &f.plan;
         let decide = Decide::new::<T>(plan);
         let rate = REPLAY_RATE.of::<T>();
-        let serial = plan.total as f64 * decide.seq;
+        let serial = plan.total as f64 * decide.ns_per_work;
         let cheap = serial.is_nan() || serial < decide.dispatch.break_even();
         let mut modes = std::mem::take(&mut f.modes);
         modes.clear();
@@ -311,7 +249,7 @@ impl<T: Scalar> KluSolver<T> {
             modes.push(if cheap {
                 Mode::Serial
             } else {
-                let bn = f.block_ptr[bp.b + 1] - f.block_ptr[bp.b];
+                let bn = f.block_ptr[bp.block + 1] - f.block_ptr[bp.block];
                 decide.mode(plan, bp, bn)
             });
         }
@@ -319,8 +257,6 @@ impl<T: Scalar> KluSolver<T> {
         if let Some(m) = plan.forced {
             modes.iter_mut().for_each(|x| *x = m);
         }
-        // The blocks side by side, on the width their work is worth (as
-        // wide as they go where every section is free).
         let work = Work::of(plan.total as f64, rate);
         let pieces = ((plan.total / plan.largest.max(1)) as usize).min(nblocks);
         let width_blocks = if cheap || !decide.blocks_may(plan, nblocks) {
@@ -341,9 +277,6 @@ impl<T: Scalar> KluSolver<T> {
             "factor_nnz",
             f.l_val.len() + f.u_val.len() + f.udiag.len()
         );
-        // The pipelined replays: this refactor's number on the columns; and
-        // for every parallel replay a zero work vector per worker, kept
-        // across refactors.
         let mut ready = std::mem::take(&mut f.ready);
         let mut kept_xs = std::mem::take(&mut f.replay_xs);
         if modes.iter().any(|m| matches!(m, Mode::Pipelined(_))) {
@@ -354,7 +287,6 @@ impl<T: Scalar> KluSolver<T> {
         }
         let xs: Vec<std::sync::Mutex<Vec<T>>> =
             kept_xs.into_iter().map(std::sync::Mutex::new).collect();
-        // The jobs in block order, each split off the front of the rest.
         let mut next_job = {
             let (mut lv, mut uv) = (f.l_val.as_mut_slice(), f.u_val.as_mut_slice());
             let (mut ud, mut fv) = (f.udiag.as_mut_slice(), f.f_val.as_mut_slice());
@@ -386,11 +318,6 @@ impl<T: Scalar> KluSolver<T> {
         let scatter_target = &f.scatter_target;
         let (sn_last, u_dense, l_widest) = (&f.sn_last, &f.u_dense, f.l_widest);
         let rs_inv_ref = &rs_inv;
-        // Raw column-disjoint views of one block's value arrays for the
-        // parallel replays: every column writes only its own L/U/F/diag
-        // slots and reads L columns complete before it (fenced by the
-        // per-level join, or awaited by the pipeline), so the shared-mutable
-        // access is race-free.
         struct BlockPtrs<T> {
             l_v: PanelPtr<T>,
             u_v: PanelPtr<T>,
@@ -404,12 +331,9 @@ impl<T: Scalar> KluSolver<T> {
         }
         impl<T> Copy for BlockPtrs<T> {}
 
-        // In a pipelined replay: wait until the `L` columns `lo ..= hi` carry
-        // the refactor's number.
         type Wait<'w> = (&'w [std::sync::atomic::AtomicU32], u32);
         let await_cols = |(done, epoch): Wait<'_>, lo: usize, hi: usize| {
             for c in lo..=hi {
-                // Acquire pairs with the Release that published it.
                 let mut spins = 0u32;
                 while done[c].load(std::sync::atomic::Ordering::Acquire) != epoch {
                     spins += 1;
@@ -421,18 +345,6 @@ impl<T: Scalar> KluSolver<T> {
                 }
             }
         };
-        // Replay one column through the recorded program: scatter, eliminate
-        // against the `U` rows in their stored order, the columns of a supernode densely
-        // ([`super::supernode`]), pivot, emit L.
-        // SAFETY: caller guarantees exclusive ownership of column `j`'s output
-        // slots and completed dependency columns (see `BlockPtrs`); `x` is this
-        // caller's scratch, the block's work vector and the supernode
-        // kernel's gather (`l_widest` behind it), all-zero on entry and left
-        // all-zero.
-        // With `wait`, the column runs in a pipelined replay: it consumes `L`
-        // column `pr` only once `wait.0[pr]` carries the refactor's number
-        // `wait.1`, so the elimination against the columns done long ago
-        // overlaps the ones still being replayed.
         let replay_col = |j: usize,
                           bs: usize,
                           bases: (usize, usize, usize),
@@ -443,6 +355,17 @@ impl<T: Scalar> KluSolver<T> {
             let (l_base, u_base, f_base) = bases;
             let (x, tmp) = x.split_at_mut(x.len() - l_widest);
             let c = col_perm[j];
+            // SAFETY: the caller owns the output slots of column `j`
+            // exclusively and every `L` column that `j` reads is complete:
+            // a block replayed column by column is owned whole by its
+            // closure; the columns of a level write disjoint slots and read
+            // `L` columns of earlier levels, complete before the level
+            // started; a pipelined column writes only its own slots and,
+            // with `wait`, reads `L` column `pr` only once `wait.0[pr]`
+            // carries the refactor's number `wait.1`. `x` is this caller's
+            // scratch, the block's work vector and the supernode kernel's
+            // gather (`l_widest` behind it), all-zero on entry and left
+            // all-zero.
             unsafe {
                 for k in a.col_ptr[c]..a.col_ptr[c + 1] {
                     let r = a.row_idx[k];
@@ -455,7 +378,6 @@ impl<T: Scalar> KluSolver<T> {
                     }
                 }
                 if u_dense[j] {
-                    // out of line, so this loop stays as small as it was
                     super::supernode::eliminate(
                         (&mut *x, &mut *tmp),
                         (j, bs),
@@ -502,9 +424,6 @@ impl<T: Scalar> KluSolver<T> {
             Ok(())
         };
 
-        // The lower of two errors of side-by-side columns: the replay reports
-        // what the sequential one does, the lowest failing column (an
-        // interrupt before any).
         let keep_lowest = |slot: &std::sync::Mutex<Option<RslabError>>, e: RslabError| {
             let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
             let lower = match (&e, &*slot) {
@@ -520,7 +439,6 @@ impl<T: Scalar> KluSolver<T> {
                 *slot = Some(e);
             }
         };
-        // A work vector of this worker's: a free kept one, else a fresh one.
         let xs_ref = &xs;
         let with_work = |k: usize, run: &mut dyn FnMut(&mut Vec<T>)| {
             let free =
@@ -530,9 +448,6 @@ impl<T: Scalar> KluSolver<T> {
                 None => run(&mut Vec::new()),
             }
         };
-        // Level by level: each level on as many threads as it is worth, a
-        // level not worth two on the calling thread; on an error the level's
-        // lowest failing column is reported.
         let decide_ref = &decide;
         let replay_levels = |bp: &BlockPlan,
                              bs: usize,
@@ -543,7 +458,7 @@ impl<T: Scalar> KluSolver<T> {
             let bn = x.len();
             for l in 0..bp.level_work.len() {
                 interrupt_check(int_flag)?;
-                let cols = &bp.cols[bp.ptr[l] as usize..bp.ptr[l + 1] as usize];
+                let cols = &bp.level_cols[bp.level_ptr[l] as usize..bp.level_ptr[l + 1] as usize];
                 let (k, _) = decide_ref.level(bp, l);
                 if k < 2 {
                     for &j in cols {
@@ -563,9 +478,6 @@ impl<T: Scalar> KluSolver<T> {
                         }
                         let n = cols.len();
                         for &j in &cols[(q * per).min(n)..((q + 1) * per).min(n)] {
-                            // SAFETY: the columns of a level write disjoint
-                            // slots and read `L` columns of earlier levels,
-                            // complete before this level started.
                             if let Err(e) = replay_col(j as usize, bs, bases, p, &mut w[..bn], None)
                             {
                                 w.fill(T::zero());
@@ -581,15 +493,7 @@ impl<T: Scalar> KluSolver<T> {
             }
             Ok(())
         };
-        // A pipelined block's columns side by side on `k` threads (NICSLU's
-        // pipeline mode, Chen, Wang and Yang, TCAD 2013), taken in order, one
-        // at a time, from a shared counter: a column waits until every `L`
-        // column it reads is replayed, all of them earlier columns, taken
-        // before it by pieces that run. So the replay completes on any pool,
-        // one that runs its pieces one after the other included. A failing
-        // column still releases its dependants, and the lowest failing column
-        // is reported, as by the sequential replay; an interrupt stops the
-        // pieces between runs.
+        // https://doi.org/10.1109/TCAD.2012.2217964
         let ready_ref = &ready;
         let replay_pipelined = |(bs, be): (usize, usize),
                                 bases: (usize, usize, usize),
@@ -619,8 +523,6 @@ impl<T: Scalar> KluSolver<T> {
                             return;
                         }
                         for j in j0..(j0 + PIPE_RUN).min(be) {
-                            // SAFETY: column `j` writes only its own slots
-                            // and reads `L` columns once published.
                             if let Err(e) = replay_col(j, bs, bases, p, w, Some((done, epoch))) {
                                 w.fill(T::zero());
                                 keep_lowest(&failed, e);
@@ -635,19 +537,15 @@ impl<T: Scalar> KluSolver<T> {
                 None => Ok(()),
             }
         };
-        // The plan of block `b`, if it has one, the plans before `*cursor`
-        // passed: blocks replay in order, so a cursor finds every plan in
-        // one walk (most blocks of a circuit are singletons without one).
         let plan_at = |cursor: &mut usize, b: usize| -> Option<usize> {
-            while plan.blocks.get(*cursor).is_some_and(|p| p.b < b) {
+            while plan.blocks.get(*cursor).is_some_and(|p| p.block < b) {
                 *cursor += 1;
             }
             plan.blocks
                 .get(*cursor)
-                .is_some_and(|p| p.b == b)
+                .is_some_and(|p| p.block == b)
                 .then_some(*cursor)
         };
-        // One block, as decided (`at` its plan).
         let modes_ref = &modes;
         let replay_block =
             |job: RJob<'_, T>, x: &mut Vec<T>, at: Option<usize>| -> Result<(), RslabError> {
@@ -666,7 +564,6 @@ impl<T: Scalar> KluSolver<T> {
                     rsprobe::add!(DEBUG, "work", bp.work);
                     return replay_pipelined((bs, be), bases, ptrs, k);
                 }
-                // all-zero, kept across blocks and refactors (cleared on an error)
                 let need = be - bs + l_widest;
                 if x.len() < need {
                     x.resize(need, T::zero());
@@ -682,7 +579,6 @@ impl<T: Scalar> KluSolver<T> {
                     rsprobe::add!(DEBUG, "work", plan.blocks[i].work);
                 }
                 for j in bs..be {
-                    // SAFETY: this closure exclusively owns the whole block.
                     if let Err(e) = replay_col(j, bs, bases, ptrs, x, None) {
                         x.fill(T::zero());
                         return Err(e);
@@ -691,9 +587,6 @@ impl<T: Scalar> KluSolver<T> {
                 Ok(())
             };
         if width_blocks > 1 {
-            // Runs of consecutive blocks of about equal columns, as many as
-            // the replay's work is worth ranges ([`Dispatch::ranges`]), each
-            // replayed in order over one work vector.
             let runs = decide.cut.ranges(serial, f.n, width_blocks).max(1);
             let target = f.n.div_ceil(runs).max(1);
             let mut pieces: Vec<std::sync::Mutex<Vec<RJob<'_, T>>>> = Vec::new();
@@ -715,7 +608,6 @@ impl<T: Scalar> KluSolver<T> {
                 let mut jobs = Some(std::mem::take(
                     &mut *pieces[q].lock().unwrap_or_else(|e| e.into_inner()),
                 ));
-                // a kept zero work vector of this worker's, not one per run
                 with_work(q, &mut |x: &mut Vec<T>| {
                     let mut cursor = 0;
                     for job in jobs.take().into_iter().flatten() {
@@ -736,7 +628,6 @@ impl<T: Scalar> KluSolver<T> {
                 return Err(e);
             }
         } else {
-            // One block after the other.
             let mut cursor = 0;
             for b in 0..nblocks {
                 interrupt_check(int_flag)?;

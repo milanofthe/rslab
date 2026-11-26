@@ -17,6 +17,45 @@ pub const COL_WORK: u64 = 32;
 /// Contract: timing (the order of the additions into a row, last bits).
 pub const KLU_SN_PASS: usize = 4;
 
+/// Memory accesses of one `L` entry in the column-by-column replay of a
+/// supernode (accesses): its row index, its `L` value, the read and the
+/// write of the work vector entry.
+/// Used by: `klu::supernode::dense_pays`, which charges `4 (t + w s)` for a
+/// supernode of `w` columns over `s` shared rows with `t = w (w - 1) / 2`
+/// entries in its triangle.
+/// Why: the count of the accesses of the replay loop.
+/// Contract: timing (the order of the additions into a row, last bits).
+pub const KLU_SN_COLUMN_ACCESSES: usize = 4;
+
+/// Memory accesses of one triangle entry in the dense kernel of a
+/// supernode (accesses): its `L` value, the read and the write of the work
+/// vector entry. A shared-row entry costs only its `L` value.
+/// Used by: `klu::supernode::dense_pays`.
+/// Why: the count of the accesses of the triangle loop of
+/// `klu::supernode::apply`.
+/// Contract: timing (the order of the additions into a row, last bits).
+pub const KLU_SN_TRIANGLE_ACCESSES: usize = 3;
+
+/// Memory accesses of one shared row of a supernode in one pass of the
+/// dense kernel (accesses): the read and the write of `tmp`. A supernode of
+/// `w` columns takes `w / P + w % P` passes with `P` = [`KLU_SN_PASS`].
+/// Used by: `klu::supernode::dense_pays`.
+/// Why: the count of the accesses of a pass of `klu::supernode::apply`.
+/// Contract: timing (the order of the additions into a row, last bits).
+pub const KLU_SN_PASS_ACCESSES: usize = 2;
+
+/// Memory accesses of one shared row of a supernode for its gather and its
+/// scatter in the dense kernel (accesses): the gather reads the index and
+/// the work vector entry and writes `tmp`, the scatter reads the index and
+/// `tmp`, writes the work vector entry and clears `tmp`.
+/// Used by: `klu::supernode::dense_pays`. With the other access counts a
+/// supernode of four columns or more is always applied densely, and one of
+/// two or three columns only without shared rows.
+/// Why: the count of the accesses of the gather and the scatter of
+/// `klu::supernode::apply`.
+/// Contract: timing (the order of the additions into a row, last bits).
+pub const KLU_SN_GATHER_SCATTER_ACCESSES: usize = 7;
+
 /// Columns one worker claims at a time in the pipelined replay (columns).
 /// Used by: `KluSolver::refactor` (pipelined replay).
 /// Why: a column waits on the `L` columns it reads, so a longer run only

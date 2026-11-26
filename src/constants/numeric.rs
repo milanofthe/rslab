@@ -52,6 +52,13 @@ pub const QR_EXCEPTIONAL_PERIOD: usize = 10;
 /// Contract: results (only where exceptional shifts are taken).
 pub const QR_EXCEPTIONAL_SHIFT: f64 = 0.75;
 
+/// The factor of `b c` in the discriminant `(a - d)^2 + 4 b c` of the
+/// characteristic polynomial of a `2x2` block `[[a, b], [c, d]]` (1).
+/// Used by: `dense_eig::wilkinson_shift`.
+/// Why: the quadratic formula.
+/// Contract: definition.
+pub const DISCRIMINANT_FACTOR: f64 = 4.0;
+
 /// Relative perturbation of the shift of the inverse iteration, so the
 /// shifted matrix is not exactly singular at a converged eigenvalue (1, of
 /// the largest entry magnitude, at least 1).

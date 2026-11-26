@@ -2,8 +2,6 @@
 
 use crate::numeric::settings::KernelSettings;
 
-/// [`KernelSettings`] plus the pivot threshold and the interrupt flag,
-/// threaded by value into the dense kernels.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KernelTuning<'a> {
     pub k: KernelSettings,
@@ -81,13 +79,8 @@ mod tests {
         (a, b)
     }
 
-    /// Moving the per-call thresholds changes only the serial/parallel and
-    /// scalar/GEMM kernel selection - never the answer. Factor the same matrix
-    /// under all-scalar/serial, all-GEMM/parallel, and the default, and confirm
-    /// the solutions agree to working precision. No global state, so this is a
-    /// pure per-call comparison (no serializing guard needed).
     #[test]
-    fn thresholds_do_not_change_the_result() {
+    fn scalar_serial_and_gemm_parallel_kernels_solve_alike() {
         let (a, b) = helmholtz(10);
         let solve = |s: &SolverSettings| LdltSolver::factor(&a, s).unwrap().solve(&b).unwrap();
 
@@ -121,11 +114,8 @@ mod tests {
         }
     }
 
-    /// The panel width changes the pivot sequence (a different but valid factor),
-    /// so the factor is not bit-identical across NB - but every width must still
-    /// produce a correct solve.
     #[test]
-    fn panel_nb_preserves_correctness() {
+    fn every_panel_width_gives_a_backward_stable_solve() {
         let (a, b) = helmholtz(9);
         for nb in [16usize, 32, 64, 100, 200] {
             let mut s = SolverSettings::default();

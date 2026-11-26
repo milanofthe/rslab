@@ -131,12 +131,10 @@ impl KluSettings {
         self
     }
 
-    /// The worker count of [`threads`](Self::threads) (`Auto` at its cap).
     pub(crate) fn workers(&self) -> usize {
         self.threads.resolve(|cap| cap)
     }
 
-    /// Poll the caller's flag; `Ok(())` when unarmed or clear.
     #[inline]
     pub(crate) fn interrupted(&self) -> Result<(), RslabError> {
         interrupt_check(self.interrupt.as_deref())
