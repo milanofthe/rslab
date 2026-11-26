@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# https://github.com/milanofthe/rslab/issues/294
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD

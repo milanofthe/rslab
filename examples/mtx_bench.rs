@@ -222,6 +222,7 @@ fn main() {
                 println!("{label:>9} nnzLU={:>9} blocks={:>6} | analyze {:>7.2} ms factor {:>8.2} ms ({:.2} MDOF/s) refactor {:>8.2} ms ({:.2} MDOF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={res:.1e}",
                     k.factor_nnz(), k.n_blocks(), ta * 1e3, tf * 1e3, n as f64 / tf / 1e6, tr * 1e3, n as f64 / tr / 1e6, ts * 1e3, n as f64 / ts / 1e6);
             }
+            // https://github.com/milanofthe/rslab/issues/294
             if a.values.iter().all(|v| v.im == 0.0) {
                 let ar = rslab::GeneralCsc {
                     n: a.n,

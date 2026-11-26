@@ -16,6 +16,7 @@ fn tiny_row_system() -> (CscMatrix<f64>, Vec<f64>) {
     (a, b)
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 #[test]
 fn normwise_certifies_what_componentwise_rejects() {
     let (a, b) = tiny_row_system();
@@ -289,6 +290,7 @@ fn ldlt_perturbations_are_the_factored_matrix() {
     assert!(be < ROUNDOFF, "|b - (A + E) x|/|b| = {be:.1e}");
 }
 
+// https://github.com/milanofthe/rslab/issues/294
 #[test]
 fn refinement_against_the_factored_matrix_converges() {
     let policy = RefinePolicy {

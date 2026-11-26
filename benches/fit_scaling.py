@@ -23,6 +23,7 @@ import bench_style
 from bench_style import GRAY, SOLVERS
 
 ORDER = ["auto", "faer", "pardiso", "superlu"]
+# https://github.com/milanofthe/rslab/issues/294
 MEM_ORDER = ["auto", "faer", "pardiso"]
 
 
