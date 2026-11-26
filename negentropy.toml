@@ -10,10 +10,6 @@ unwrap = [
     '^src/matgen/mod\.rs: .*panic!\("matgen: internal invariant - invalid triplets: \{e\}"\)',
 ]
 duplicate = [
-    '^python/src/symbolic\.rs: .*fn heap_bytes\(&self\) -> u64',
-    '^python/src/symbolic\.rs: .*fn estimate_memory\(&self, py: Python<..>, dtype: &str\) -> PyResult<PyObject>',
-    '^python/src/symbolic\.rs: .*fn memory_plan\($',
-    '^python/src/krylov\.rs: .*pub fn cocr_plain\($',
     '^python/src/lib\.rs: .*fn grow\(bytes: usize\)',
     '^examples/pool_bench\.rs: .*fn lu<T: Scalar>\(a: &GeneralCsc<T>, s: &SolverSettings, reps: usize\) -> f64',
     '^src/io/mtx\.rs: .*pub fn to_general_csc\(&self\) -> Result<GeneralCsc<T>, RslabError>',

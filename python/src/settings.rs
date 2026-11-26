@@ -562,13 +562,7 @@ impl PySettings {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let d = self.to_dict(py)?;
-        let d = d.bind(py).downcast::<PyDict>()?;
-        let mut parts = Vec::new();
-        for (k, v) in d.iter() {
-            parts.push(format!("{}={}", k.extract::<String>()?, v.repr()?));
-        }
-        Ok(format!("Settings({})", parts.join(", ")))
+        repr(py, "Settings", self.to_dict(py)?)
     }
 }
 
@@ -717,14 +711,17 @@ impl PyKluSettings {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let d = self.to_dict(py)?;
-        let d = d.bind(py).downcast::<PyDict>()?;
-        let mut parts = Vec::new();
-        for (k, v) in d.iter() {
-            parts.push(format!("{}={}", k.extract::<String>()?, v.repr()?));
-        }
-        Ok(format!("KluSettings({})", parts.join(", ")))
+        repr(py, "KluSettings", self.to_dict(py)?)
     }
+}
+
+fn repr(py: Python<'_>, name: &str, dict: PyObject) -> PyResult<String> {
+    let d = dict.bind(py).downcast::<PyDict>()?;
+    let mut parts = Vec::new();
+    for (k, v) in d.iter() {
+        parts.push(format!("{}={}", k.extract::<String>()?, v.repr()?));
+    }
+    Ok(format!("{name}({})", parts.join(", ")))
 }
 
 /// Resolve `settings=` plus keyword overrides into one `Settings`.

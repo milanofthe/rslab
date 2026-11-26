@@ -510,13 +510,8 @@ def gmres(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _rslab.K
         x, ok, iters, res, stop = rslab.gmres(A, b, M, tol=1e-10)
         r = rslab.gmres(A2, b, M)                         # M reused on a nearby A2
     """
-    parts = _csc_parts(A, "lu")
-    if M is None:
-        b = np.ascontiguousarray(b, dtype=parts[3].dtype)
-        return _rslab.gmres_plain(*parts, b, tol=tol, maxit=maxit, restart=restart, x0=x0)
-    b = _match_dtype(b, M.dtype)
-    return M.gmres(b, tol=tol, maxit=maxit, restart=restart, x0=x0, recycle=recycle,
-                   operator=_cast_operator(parts, M.dtype))
+    handle_only = {} if M is None else {"recycle": recycle}
+    return _krylov("gmres", A, b, M, tol=tol, maxit=maxit, restart=restart, x0=x0, **handle_only)
 
 
 def gmres_block(A, B, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _rslab.KRYLOV_MAX_ITER,
@@ -546,13 +541,7 @@ def gmres_block(A, B, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _r
         ``x`` of shape ``(n, nrhs)``, ``converged``, ``iters``, ``final_res``
         (one residual per column), ``stop``.
     """
-    parts = _csc_parts(A, "lu")
-    if M is None:
-        B = np.ascontiguousarray(B, dtype=parts[3].dtype)
-        return _rslab.gmres_block_plain(*parts, B, tol=tol, maxit=maxit, restart=restart, x0=x0)
-    B = _match_dtype(B, M.dtype)
-    return M.gmres_block(B, tol=tol, maxit=maxit, restart=restart, x0=x0,
-                         operator=_cast_operator(parts, M.dtype))
+    return _krylov("gmres_block", A, B, M, tol=tol, maxit=maxit, restart=restart, x0=x0)
 
 
 def cocg(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
@@ -582,12 +571,7 @@ def cocg(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
     KrylovResult
         ``x``, ``converged``, ``iters``, ``final_res``, ``stop``.
     """
-    parts = _csc_parts(A, "lu")
-    if M is None:
-        b = np.ascontiguousarray(b, dtype=parts[3].dtype)
-        return _rslab.cocg_plain(*parts, b, tol=tol, maxit=maxit)
-    b = _match_dtype(b, M.dtype)
-    return M.cocg(b, tol=tol, maxit=maxit, operator=_cast_operator(parts, M.dtype))
+    return _krylov("cocg", A, b, M, tol=tol, maxit=maxit)
 
 
 def cocr(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
@@ -615,12 +599,16 @@ def cocr(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
     KrylovResult
         ``x``, ``converged``, ``iters``, ``final_res``, ``stop``.
     """
+    return _krylov("cocr", A, b, M, tol=tol, maxit=maxit)
+
+
+def _krylov(method: str, A, b, M, **options) -> KrylovResult:
     parts = _csc_parts(A, "lu")
     if M is None:
         b = np.ascontiguousarray(b, dtype=parts[3].dtype)
-        return _rslab.cocr_plain(*parts, b, tol=tol, maxit=maxit)
+        return getattr(_rslab, method + "_plain")(*parts, b, **options)
     b = _match_dtype(b, M.dtype)
-    return M.cocr(b, tol=tol, maxit=maxit, operator=_cast_operator(parts, M.dtype))
+    return getattr(M, method)(b, operator=_cast_operator(parts, M.dtype), **options)
 
 
 def _cast_operator(parts, dtype_name: str):

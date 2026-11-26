@@ -47,26 +47,27 @@ pub enum RecycleAny {
     C32(Recycle<C32>),
 }
 
+impl RecycleAny {
+    fn sizes(&self) -> (usize, usize) {
+        match self {
+            RecycleAny::F64(r) => (r.dim(), r.active()),
+            RecycleAny::F32(r) => (r.dim(), r.active()),
+            RecycleAny::C64(r) => (r.dim(), r.active()),
+            RecycleAny::C32(r) => (r.dim(), r.active()),
+        }
+    }
+}
+
 #[pymethods]
 impl PyRecycle {
     #[getter]
     fn k(&self) -> usize {
-        match &*self.inner.borrow() {
-            RecycleAny::F64(r) => r.dim(),
-            RecycleAny::F32(r) => r.dim(),
-            RecycleAny::C64(r) => r.dim(),
-            RecycleAny::C32(r) => r.dim(),
-        }
+        self.inner.borrow().sizes().0
     }
 
     #[getter]
     fn active(&self) -> usize {
-        match &*self.inner.borrow() {
-            RecycleAny::F64(r) => r.active(),
-            RecycleAny::F32(r) => r.active(),
-            RecycleAny::C64(r) => r.active(),
-            RecycleAny::C32(r) => r.active(),
-        }
+        self.inner.borrow().sizes().1
     }
 
     #[getter]
@@ -404,13 +405,21 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         array2(py, &x, n, n)
     }
 
-    fn operator(&self, operator: Option<Operator<'_>>) -> PyResult<Option<GeneralCsc<T>>> {
-        match operator {
-            None => Ok(None),
+    fn on_operator<R>(
+        &self,
+        operator: Option<Operator<'_>>,
+        f: impl FnOnce(&(dyn LinearOperator<T> + Sync)) -> PyResult<R>,
+    ) -> PyResult<R> {
+        let ext = match operator {
+            None => None,
             Some((n, indptr, indices, data)) => {
                 let pat = Pattern::from_py(n, &indptr, &indices)?;
-                Ok(Some(pat.operator(vector::<T>(&data, "operator data")?)?))
+                Some(pat.operator(vector::<T>(&data, "operator data")?)?)
             }
+        };
+        match &ext {
+            Some(g) => f(g),
+            None => f(&self.a),
         }
     }
 
@@ -426,12 +435,9 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         recycle: Option<&Bound<'_, PyRecycle>>,
         operator: Option<Operator<'_>>,
     ) -> PyResult<PyObject> {
-        let ext = self.operator(operator)?;
-        let op: &(dyn LinearOperator<T> + Sync) = match &ext {
-            Some(g) => g,
-            None => &self.a,
-        };
-        krylov::gmres(py, op, &self.s, b, tol, maxit, restart, x0, recycle)
+        self.on_operator(operator, |op| {
+            krylov::gmres(py, op, &self.s, b, tol, maxit, restart, x0, recycle)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -445,12 +451,9 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         x0: Option<&Bound<'_, PyAny>>,
         operator: Option<Operator<'_>>,
     ) -> PyResult<PyObject> {
-        let ext = self.operator(operator)?;
-        let op: &(dyn LinearOperator<T> + Sync) = match &ext {
-            Some(g) => g,
-            None => &self.a,
-        };
-        krylov::gmres_block(py, op, &self.s, b, tol, maxit, restart, x0)
+        self.on_operator(operator, |op| {
+            krylov::gmres_block(py, op, &self.s, b, tol, maxit, restart, x0)
+        })
     }
 
     pub fn cocg(
@@ -461,12 +464,7 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         maxit: usize,
         operator: Option<Operator<'_>>,
     ) -> PyResult<PyObject> {
-        let ext = self.operator(operator)?;
-        let op: &(dyn LinearOperator<T> + Sync) = match &ext {
-            Some(g) => g,
-            None => &self.a,
-        };
-        krylov::cocg(py, op, &self.s, b, tol, maxit)
+        self.on_operator(operator, |op| krylov::cocg(py, op, &self.s, b, tol, maxit))
     }
 
     pub fn cocr(
@@ -477,12 +475,7 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         maxit: usize,
         operator: Option<Operator<'_>>,
     ) -> PyResult<PyObject> {
-        let ext = self.operator(operator)?;
-        let op: &(dyn LinearOperator<T> + Sync) = match &ext {
-            Some(g) => g,
-            None => &self.a,
-        };
-        krylov::cocr(py, op, &self.s, b, tol, maxit)
+        self.on_operator(operator, |op| krylov::cocr(py, op, &self.s, b, tol, maxit))
     }
 
     pub fn recycle(&self, k: usize) -> PyRecycle {
