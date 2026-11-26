@@ -970,12 +970,12 @@ impl<T: Scalar> SolvePlan<T> {
     /// `rows x depth` factor part, so the pieces are shaped to read the least of
     /// both: about `sqrt(p rows / nr)` row chunks by `sqrt(p nr / rows)` column
     /// groups for `p` pieces. One piece, the whole product, on the calling
-    /// thread; none for no rows. The GEMM blocks a product's depth by the depth
+    /// thread; none for no rows or no depth. The GEMM blocks a product's depth by the depth
     /// alone and sums every entry of the result alike wherever it lies, so an
     /// entry's sums are the same in a piece as in the whole product, and a node's
     /// are the same on one thread as on many.
     fn cut(&self, par: bool, rows: usize, depth: usize, nr: usize) -> Cut {
-        if rows == 0 {
+        if rows == 0 || depth == 0 {
             return Cut { rows: 0, cols: 1 };
         }
         if !par {
