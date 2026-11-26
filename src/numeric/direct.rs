@@ -266,7 +266,11 @@ pub(crate) fn gather_scaled<T: Scalar>(
     let out = &mut y.spare_capacity_mut()[..n * nrhs];
     if pool {
         let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
-        crate::parallel::chunks_mut(out, nrhs, work, fill);
+        crate::parallel::chunks_mut::<crate::parallel::Rayon, _>(out, nrhs, work, |e0, rows| {
+            for (e, row) in (e0..).zip(rows.chunks_mut(nrhs)) {
+                fill(e, row);
+            }
+        });
     } else {
         out.chunks_mut(nrhs)
             .enumerate()
@@ -305,7 +309,7 @@ pub(crate) fn scatter_scaled<T: Scalar>(
     };
     if pool {
         let work = crate::parallel::Work::of((n * nrhs) as f64, &PERMUTE_RATE);
-        crate::parallel::for_each(n, work, put);
+        crate::parallel::ranges::<crate::parallel::Rayon>(n, work, |r| r.for_each(&put));
     } else {
         (0..n).for_each(put);
     }

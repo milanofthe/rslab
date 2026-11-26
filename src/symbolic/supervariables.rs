@@ -86,7 +86,8 @@ impl Supervariables {
 
         let entries = pattern.row_idx.len() as f64;
         let hashes = crate::parallel::Work::of(entries, &KEY_RATE);
-        let keys: Vec<(usize, u64)> = crate::parallel::map(n, hashes, key);
+        let keys: Vec<(usize, u64)> =
+            crate::parallel::map::<crate::parallel::Rayon, _>(n, hashes, key);
         let mut by_key: Vec<usize> = (0..n).collect();
         let sort = crate::parallel::Work::of(n as f64, &SORT_RATE);
         crate::parallel::sort_unstable_by_key(&mut by_key, sort, |&v| (keys[v], v));
@@ -191,12 +192,13 @@ impl Supervariables {
     pub fn compress(&self, pattern: &CscPattern<i32>) -> CscPattern<i32> {
         let n_groups = self.len();
         let work = crate::parallel::Work::of(pattern.row_idx.len() as f64, &COMPRESS_RATE);
-        let go = work.go::<crate::parallel::Rayon>(n_groups);
-        let k = match go {
-            crate::parallel::Go::Wide(k) => k,
+        let blocks = match work.go::<crate::parallel::Rayon>(n_groups) {
+            crate::parallel::Go::Wide(k) => {
+                crate::parallel::dispatch().ranges(work.time(), n_groups, k)
+            }
             _ => 1,
-        };
-        let blocks = (crate::constants::FINE_PIECES_PER_WORKER * k).clamp(1, n_groups.max(1));
+        }
+        .max(1);
         let part = |b: usize| {
             let (g0, g1) = (b * n_groups / blocks, (b + 1) * n_groups / blocks);
             let (mut lens, mut rows) = (Vec::with_capacity(g1 - g0), Vec::new());
@@ -219,10 +221,8 @@ impl Supervariables {
             }
             (lens, rows)
         };
-        let parts: Vec<(Vec<i32>, Vec<i32>)> = match go {
-            crate::parallel::Go::Wide(k) => crate::parallel::map_on(blocks, k, part),
-            _ => (0..blocks).map(part).collect(),
-        };
+        let parts: Vec<(Vec<i32>, Vec<i32>)> =
+            crate::parallel::map::<crate::parallel::Rayon, _>(blocks, work, part);
         let mut col_ptr = Vec::with_capacity(n_groups + 1);
         col_ptr.push(0i32);
         let mut row_idx = Vec::with_capacity(parts.iter().map(|p| p.1.len()).sum());

@@ -171,10 +171,11 @@ pub fn near_field<T: Scalar>(n: usize, per_col: usize, spread: f64, seed: u64) -
     };
     // A generator: every section as wide as the pool.
     let all = crate::parallel::Work::ns(f64::INFINITY);
-    let counts = crate::parallel::map_init(n, all, Vec::new, |buf, j| {
-        near(j, buf);
-        buf.len()
-    });
+    let counts =
+        crate::parallel::map_init::<crate::parallel::Rayon, _, _>(n, all, Vec::new, |buf, j| {
+            near(j, buf);
+            buf.len()
+        });
     let mut col_ptr = Vec::with_capacity(n + 1);
     col_ptr.push(0);
     for &c in &counts {

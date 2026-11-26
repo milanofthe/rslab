@@ -26,12 +26,13 @@ pub(crate) struct CmodPlan {
 }
 
 /// The work of one unit of a node's update of `total` multiply-adds on
-/// `workers` threads: about rspool's pieces per worker of them per thread.
+/// `workers` threads: about [`UPDATE_UNITS_PER_WORKER`](
+/// crate::constants::UPDATE_UNITS_PER_WORKER) of them per thread.
 /// The cut depends on the pool's thread count and the node alone, never on
 /// timing, so a thread count reproduces its bits; at one thread the units
 /// are as coarse as the cache bound of [`cut`] allows.
 pub(crate) fn unit_share(total: f64, workers: usize) -> f64 {
-    total / (workers.max(1) * rspool::PIECES_PER_WORKER) as f64
+    total / (workers.max(1) * crate::constants::UPDATE_UNITS_PER_WORKER) as f64
 }
 
 /// The blocks `0..w.len()` of weights `w` cut into consecutive ranges of
@@ -331,7 +332,11 @@ pub(crate) unsafe fn schur_tiles<T: Scalar>(
     };
     let total = pieces.len();
     if par && total > 1 {
-        crate::parallel::for_each(total, crate::parallel::Work::ns(f64::INFINITY), piece);
+        crate::parallel::ranges::<crate::parallel::Rayon>(
+            total,
+            crate::parallel::Work::ns(f64::INFINITY),
+            |r| r.for_each(&piece),
+        );
     } else {
         (0..total).for_each(piece);
     }

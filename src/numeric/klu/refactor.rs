@@ -2,8 +2,7 @@
 
 use super::*;
 use crate::constants::{
-    KLU_PAR_MIN_FMADDS, KLU_PAR_MIN_RATIO, KLU_REPLAY_NS_PER_WORK, PIECES_PER_WORKER,
-    PIPE_COL_WORK, PIPE_RUN,
+    KLU_PAR_MIN_FMADDS, KLU_PAR_MIN_RATIO, KLU_REPLAY_NS_PER_WORK, PIPE_COL_WORK, PIPE_RUN,
 };
 use crate::parallel::{Dispatch, Go, Rayon, ScalarRates, Work};
 
@@ -69,6 +68,9 @@ impl ReplayPlan {
 /// yet.
 pub(super) struct Decide {
     dispatch: Dispatch,
+    /// What a section costs on the pool, also where `dispatch` is free:
+    /// what the pieces of a replay are cut by ([`Dispatch::ranges`]).
+    cut: Dispatch,
     threads: usize,
     /// `On`, or floors the user set: every section is free, and the time
     /// picks only how a block replays side by side, not whether.
@@ -85,14 +87,18 @@ impl Decide {
         } else {
             1
         };
+        let cut = if threads < 2 {
+            Dispatch::never()
+        } else {
+            crate::parallel::dispatch()
+        };
         Decide {
-            dispatch: if threads < 2 {
-                Dispatch::never()
-            } else if forced {
+            dispatch: if forced && threads >= 2 {
                 crate::parallel::kept(true, threads)
             } else {
-                crate::parallel::dispatch()
+                cut.clone()
             },
+            cut,
             threads,
             forced,
             seq: REPLAY_RATE.of::<T>().ns_per_op(),
@@ -103,6 +109,7 @@ impl Decide {
     #[cfg(test)]
     pub(super) fn on(dispatch: Dispatch, threads: usize) -> Self {
         Decide {
+            cut: dispatch.clone(),
             dispatch,
             threads,
             forced: false,
@@ -125,6 +132,15 @@ impl Decide {
             ),
             _ => (1, work),
         }
+    }
+
+    /// Columns per piece of level `l` of `bp` on `k` threads: its work cut
+    /// into ranges as the section cost makes them worth
+    /// ([`Dispatch::ranges`]).
+    fn level_per(&self, bp: &BlockPlan, l: usize, k: usize) -> usize {
+        let p = (bp.ptr[l + 1] - bp.ptr[l]) as usize;
+        let work = bp.level_work[l] as f64 * self.seq;
+        p.div_ceil(self.cut.ranges(work, p, k).max(1))
     }
 
     /// How block `bp` of `bn` columns, `serial` ns sequentially, replays,
@@ -538,7 +554,7 @@ impl<T: Scalar> KluSolver<T> {
                     }
                     continue;
                 }
-                let per = cols.len().div_ceil(cols.len().min(k * PIECES_PER_WORKER));
+                let per = decide_ref.level_per(bp, l, k);
                 let failed: std::sync::Mutex<Option<RslabError>> = std::sync::Mutex::new(None);
                 crate::parallel::run_width(cols.len().div_ceil(per), k, &|q| {
                     with_work(q, &mut |w: &mut Vec<T>| {
@@ -675,9 +691,11 @@ impl<T: Scalar> KluSolver<T> {
                 Ok(())
             };
         if width_blocks > 1 {
-            // Runs of consecutive blocks of about equal columns, a few per
-            // thread, each replayed in order over one work vector.
-            let target = f.n.div_ceil(width_blocks * PIECES_PER_WORKER).max(1);
+            // Runs of consecutive blocks of about equal columns, as many as
+            // the replay's work is worth ranges ([`Dispatch::ranges`]), each
+            // replayed in order over one work vector.
+            let runs = decide.cut.ranges(serial, f.n, width_blocks).max(1);
+            let target = f.n.div_ceil(runs).max(1);
             let mut pieces: Vec<std::sync::Mutex<Vec<RJob<'_, T>>>> = Vec::new();
             let mut run: Vec<RJob<'_, T>> = Vec::new();
             let mut run_start = 0;
@@ -694,22 +712,25 @@ impl<T: Scalar> KluSolver<T> {
             pieces.push(std::sync::Mutex::new(run));
             let failed: std::sync::Mutex<Option<(usize, RslabError)>> = std::sync::Mutex::new(None);
             crate::parallel::run_width(pieces.len(), width_blocks, &|q| {
-                let jobs =
-                    std::mem::take(&mut *pieces[q].lock().unwrap_or_else(|e| e.into_inner()));
-                let mut x = Vec::new();
-                let mut cursor = 0;
-                for job in jobs {
-                    let b = job.b;
-                    let at = plan_at(&mut cursor, b);
-                    let r = interrupt_check(int_flag).and_then(|()| replay_block(job, &mut x, at));
-                    if let Err(e) = r {
-                        let mut slot = failed.lock().unwrap_or_else(|e| e.into_inner());
-                        if slot.as_ref().is_none_or(|(b0, _)| b < *b0) {
-                            *slot = Some((b, e));
+                let mut jobs = Some(std::mem::take(
+                    &mut *pieces[q].lock().unwrap_or_else(|e| e.into_inner()),
+                ));
+                // a kept zero work vector of this worker's, not one per run
+                with_work(q, &mut |x: &mut Vec<T>| {
+                    let mut cursor = 0;
+                    for job in jobs.take().into_iter().flatten() {
+                        let b = job.b;
+                        let at = plan_at(&mut cursor, b);
+                        let r = interrupt_check(int_flag).and_then(|()| replay_block(job, x, at));
+                        if let Err(e) = r {
+                            let mut slot = failed.lock().unwrap_or_else(|e| e.into_inner());
+                            if slot.as_ref().is_none_or(|(b0, _)| b < *b0) {
+                                *slot = Some((b, e));
+                            }
+                            return;
                         }
-                        return;
                     }
-                }
+                });
             });
             if let Some((_, e)) = failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
                 return Err(e);

@@ -8,7 +8,7 @@ use super::*;
 use super::recycle::RecycleScalar;
 use super::settings::{BasisSwitch, BlockBasis};
 use crate::error::RslabError;
-use crate::parallel::SendPtr;
+use crate::parallel::Disjoint;
 use crate::scalar::Scalar;
 use crate::stored::Stored;
 
@@ -998,15 +998,23 @@ where
         }
         let (cols, chk, jds, y, t) = (&self.cols, &self.chk, &self.jd, &self.y, &self.rproj);
         let (x, rec) = (&self.x, self.rec);
-        let (pp, op) = (SendPtr::of(&mut self.panel), SendPtr::of(&mut self.out));
         let depth: usize = (0..k).map(|a| jds[a] + kd + 1).sum();
         // `out = x + Z y - U t` from the stored preconditioned basis, or `x + z - U t` from
         // `z = M^-1 (V S y)`; the panel a copy
-        let form = |a: usize, r0: usize, r1: usize, z: Option<&[T]>| {
-            let (c, len) = (chk[a], r1 - r0);
+        let form = |(op, pp): (&Disjoint<T>, &Disjoint<T>),
+                    a: usize,
+                    r0: usize,
+                    r1: usize,
+                    z: Option<&[T]>| {
+            let c = chk[a];
             // SAFETY: piece (a, chunk) alone holds these rows of column `c` of `out` and of
             // column `a` of the panel.
-            let (o, p) = unsafe { (op.part(c * n + r0, len), pp.part(a * n + r0, len)) };
+            let (o, p) = unsafe {
+                (
+                    op.range(c * n + r0..c * n + r1),
+                    pp.range(a * n + r0..a * n + r1),
+                )
+            };
             o.copy_from_slice(&x[c * n + r0..c * n + r1]);
             match z {
                 Some(z) => o
@@ -1030,19 +1038,25 @@ where
         };
         let threads = self.ortho_threads;
         if self.basis.flexible {
+            let (op, pp) = (Disjoint::new(&mut self.out), Disjoint::new(&mut self.panel));
             threads.run(
                 0,
                 |cap| cap,
-                || column_chunks::<T>(k, n, chunk, n * depth, |a, r0, r1| form(a, r0, r1, None)),
+                || {
+                    column_chunks::<T>(k, n, chunk, n * depth, |a, r0, r1| {
+                        form((&op, &pp), a, r0, r1, None)
+                    })
+                },
             );
         } else {
+            let pp = Disjoint::new(&mut self.panel);
             threads.run(
                 0,
                 |cap| cap,
                 || {
                     column_chunks::<T>(k, n, chunk, n * depth, |a, r0, r1| {
                         // SAFETY: piece (a, chunk) alone holds these rows of column `a`.
-                        let p = unsafe { pp.part(a * n + r0, r1 - r0) };
+                        let p = unsafe { pp.range(a * n + r0..a * n + r1) };
                         p.iter_mut().for_each(|e| *e = T::zero());
                         for i in 0..jds[a] {
                             cols[chk[a]].v.axpy(i * n + r0, y[a * m + i], p);
@@ -1053,12 +1067,13 @@ where
             self.precond
                 .apply_block(&self.panel[..k * n], &mut self.z[..k * n], k, n)?;
             let z = &self.z;
+            let (op, pp) = (Disjoint::new(&mut self.out), Disjoint::new(&mut self.panel));
             threads.run(
                 0,
                 |cap| cap,
                 || {
                     column_chunks::<T>(k, n, chunk, n * (kd + 2), |a, r0, r1| {
-                        form(a, r0, r1, Some(z))
+                        form((&op, &pp), a, r0, r1, Some(z))
                     })
                 },
             );
@@ -1067,8 +1082,8 @@ where
         self.op
             .apply_block(&self.panel[..k * n], &mut self.w[..k * n], k);
         let nchunks = n.div_ceil(chunk);
-        let (b, wp) = (self.b, SendPtr::of(&mut self.w));
-        let sp = SendPtr::of(&mut self.norm_scratch[..k * nchunks]);
+        let (b, wp) = (self.b, Disjoint::new(&mut self.w));
+        let sp = Disjoint::new(&mut self.norm_scratch[..k * nchunks]);
         threads.run(
             0,
             |cap| cap,
@@ -1076,13 +1091,14 @@ where
                 column_chunks::<T>(k, n, chunk, 2 * k * n, |a, r0, r1| {
                     let cb = chk[a] * n;
                     // SAFETY: piece (a, chunk) alone holds these rows of column `a` and its sum.
-                    let wa = unsafe { wp.part(a * n + r0, r1 - r0) };
+                    let wa = unsafe { wp.range(a * n + r0..a * n + r1) };
                     let mut rn = 0.0;
                     for (wi, &bi) in wa.iter_mut().zip(&b[cb + r0..cb + r1]) {
                         *wi = bi - *wi;
                         rn += wi.magnitude_sq();
                     }
-                    unsafe { sp.part(a * nchunks + r0 / chunk, 1)[0] = rn };
+                    let c = a * nchunks + r0 / chunk;
+                    unsafe { sp.range(c..c + 1)[0] = rn };
                 })
             },
         );
@@ -1161,7 +1177,7 @@ where
         let (n, m, sa, chunk) = (self.n, self.m, self.act.len(), self.chunk);
         {
             let (cols, act) = (&self.cols, &self.act);
-            let pp = SendPtr::of(&mut self.panel[..sa * n]);
+            let pp = Disjoint::new(&mut self.panel[..sa * n]);
             self.ortho_threads.run(
                 0,
                 |cap| cap,
@@ -1171,7 +1187,7 @@ where
                         // SAFETY: piece (a, chunk) alone writes these rows of column `a`.
                         cols[c]
                             .v
-                            .read(j * n + r0, unsafe { pp.part(a * n + r0, r1 - r0) });
+                            .read(j * n + r0, unsafe { pp.range(a * n + r0..a * n + r1) });
                     })
                 },
             );

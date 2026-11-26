@@ -258,7 +258,7 @@ pub(super) fn race(
                     || prefix(graph, ordering, first, seed, None, &parts.stage(0)),
                     || {
                         let work = crate::parallel::Work::ns(ordering_ns * rest.len() as f64);
-                        crate::parallel::map(rest.len(), work, |i| {
+                        crate::parallel::map::<crate::parallel::Rayon, _>(rest.len(), work, |i| {
                             prefix(graph, ordering, rest[i], seed, None, &parts.stage(1 + i))
                         })
                     },

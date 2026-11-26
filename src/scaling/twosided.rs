@@ -92,7 +92,7 @@ fn maxima<T: Scalar>(a: &GeneralCsc<T>, r: &[f64], c: &[f64], rm: &mut [f64], cm
     };
     rm.fill(0.0);
     let work = crate::parallel::Work::of(nnz as f64, &MAXIMA_RATE);
-    for (j0, rows, cols) in crate::parallel::map(pieces, work, part) {
+    for (j0, rows, cols) in crate::parallel::map::<crate::parallel::Rayon, _>(pieces, work, part) {
         cm[j0..j0 + cols.len()].copy_from_slice(&cols);
         for (x, y) in rm.iter_mut().zip(&rows) {
             if *y > *x {

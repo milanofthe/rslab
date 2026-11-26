@@ -72,19 +72,17 @@ pub unsafe fn gemm<T: Scalar>(
         );
     }
     if parallel && n >= 2 && crate::parallel::is_lent() {
-        let per = n
-            .div_ceil(crate::constants::PIECES_PER_WORKER * crate::parallel::threads())
-            .max(crate::constants::GEMM_PIECE_MIN_COLS);
+        let per = crate::constants::GEMM_PIECE_MIN_COLS;
         let one = GemmMode {
             parallelism: gemm::Parallelism::Rayon(1),
             ..mode
         };
         let (dst, lhs, rhs) = (Ptr(dst), Ptr(lhs as *mut T), Ptr(rhs as *mut T));
-        crate::parallel::for_each(
+        crate::parallel::ranges::<crate::parallel::Rayon>(
             n.div_ceil(per),
             crate::parallel::Work::ns(f64::INFINITY),
-            |b| {
-                let (j0, j1) = (b * per, ((b + 1) * per).min(n));
+            |r| {
+                let (j0, j1) = (r.start * per, (r.end * per).min(n));
                 // SAFETY: the blocks write disjoint columns of `dst`, within
                 // the caller's bounds.
                 unsafe {

@@ -574,31 +574,33 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
                 .collect();
             let (d, d_subdiag, two_by_two) = (&*d, &*d_subdiag, &*two_by_two);
             let (deep_swaps, mult_snap) = (&*deep_swaps, &*mult_snap);
-            crate::parallel::for_each(
+            crate::parallel::ranges::<crate::parallel::Rayon>(
                 chunks.len(),
                 crate::parallel::Work::ns(f64::INFINITY),
-                |c| {
-                    let (r0, r1) = chunks[c];
-                    let mut w = wpool.take();
-                    // SAFETY: disjoint row chunk; see `apply_bk_panel_trailing`.
-                    unsafe {
-                        apply_bk_panel_trailing(
-                            pp.get(),
-                            lay,
-                            kb,
-                            ke,
-                            d,
-                            d_subdiag,
-                            two_by_two,
-                            deep_swaps,
-                            mult_snap,
-                            nb,
-                            r0,
-                            r1,
-                            trailing_block,
-                            &mut w,
-                        )
-                    };
+                |r| {
+                    r.for_each(|c| {
+                        let (r0, r1) = chunks[c];
+                        let mut w = wpool.take();
+                        // SAFETY: disjoint row chunk; see `apply_bk_panel_trailing`.
+                        unsafe {
+                            apply_bk_panel_trailing(
+                                pp.get(),
+                                lay,
+                                kb,
+                                ke,
+                                d,
+                                d_subdiag,
+                                two_by_two,
+                                deep_swaps,
+                                mult_snap,
+                                nb,
+                                r0,
+                                r1,
+                                trailing_block,
+                                &mut w,
+                            )
+                        };
+                    })
                 },
             );
         } else {

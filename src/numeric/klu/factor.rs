@@ -765,31 +765,32 @@ pub(super) fn factor_impl<T: Scalar>(
             }
         }
     } else {
-        let blocks: Vec<Result<BlockOut<T>, RslabError>> = crate::parallel::map_init(
-            nblocks,
-            if forced {
-                Work::ns(f64::INFINITY)
-            } else {
-                Work::of(entries, rate)
-            },
-            || KluScratch::<T>::new(max_bn),
-            |scratch, b| {
-                settings.interrupted()?;
-                let mut out = BlockOut::<T>::default();
-                factor_block(
-                    sym,
-                    a,
-                    settings,
-                    &rs_inv,
-                    &pinv_pre,
-                    sym.block_ptr[b],
-                    sym.block_ptr[b + 1],
-                    scratch,
-                    &mut out,
-                )?;
-                Ok(out)
-            },
-        );
+        let blocks: Vec<Result<BlockOut<T>, RslabError>> =
+            crate::parallel::map_init::<crate::parallel::Rayon, _, _>(
+                nblocks,
+                if forced {
+                    Work::ns(f64::INFINITY)
+                } else {
+                    Work::of(entries, rate)
+                },
+                || KluScratch::<T>::new(max_bn),
+                |scratch, b| {
+                    settings.interrupted()?;
+                    let mut out = BlockOut::<T>::default();
+                    factor_block(
+                        sym,
+                        a,
+                        settings,
+                        &rs_inv,
+                        &pinv_pre,
+                        sym.block_ptr[b],
+                        sym.block_ptr[b + 1],
+                        scratch,
+                        &mut out,
+                    )?;
+                    Ok(out)
+                },
+            );
 
         // Splice the per-block outputs. Two phases: exact-size global arrays are
         // carved into disjoint per-block chunks (offsets by prefix sums) and the
