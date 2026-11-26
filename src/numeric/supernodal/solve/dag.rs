@@ -49,33 +49,19 @@ use crate::parallel::Scope;
 use crate::scalar::Scalar;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// The open inputs of one sweep's tasks ([`SolvePlan::forward_dag`],
-/// [`SolvePlan::backward_dag`]), laid out anew by each sweep and kept across
-/// them, so a warm sweep allocates nothing.
 #[derive(Default)]
 pub(crate) struct DagWork {
     open: Vec<AtomicU32>,
-    /// Per ancestor, the start of its counters in `open` (`top.len() + 1`).
     base: Vec<usize>,
-    /// Forward: per ancestor, the start of its row chunks in `tiles`
-    /// (`top.len() + 1`).
     chunk_ptr: Vec<usize>,
-    /// Forward: per row chunk, the parent's tiles its rows lie in, `lo..hi`.
     tiles: Vec<(u32, u32)>,
-    /// Forward: the takes with no open input, `(top index, tile)`, collected
-    /// before any task runs (a running task may make others ready, which it
-    /// then runs itself).
     first: Vec<(u32, u32)>,
-    /// The counters of the sweep laid out last, `open[..len]`.
     len: usize,
 }
 
 impl DagWork {
-    /// `open[i]` closed once: whether that was its last open input.
     #[inline]
     fn close(&self, i: usize) -> bool {
-        // acquire-release: the writes of every input happen before the task
-        // that the last one starts
         self.open[i].fetch_sub(1, Ordering::AcqRel) == 1
     }
 
@@ -89,24 +75,17 @@ impl DagWork {
         }
     }
 
-    /// Whether every counter of the sweep is closed: each task had all its
-    /// inputs and ran once. A counter left open is a task that never started,
-    /// one closed once too often has wrapped; either way the sweep's result is
-    /// not the solution, so the sweeps check it after their scope.
     fn drained(&self) -> bool {
         (self.open[..self.len].iter()).all(|o| o.load(Ordering::Relaxed) == 0)
     }
 }
 
-/// A DAG of tasks of kind `Task`, run in a scope.
 trait Dag: Sync {
     type Task: Copy + Send + Sync;
     /// Run `task`, handing every task it makes ready to `ready`.
     fn step<'s>(&'s self, task: Self::Task, ready: &mut Ready<'_, '_, 's, Self>);
 }
 
-/// The tasks a task made ready: the first one runs next on this thread, the
-/// rest are spawned.
 struct Ready<'r, 'b, 's, D: Dag + ?Sized> {
     sc: &'r Scope<'b, 's>,
     dag: &'s D,
@@ -124,7 +103,6 @@ impl<'s, D: Dag> Ready<'_, '_, 's, D> {
     }
 }
 
-/// `task` and every task it makes ready that runs on this thread after it.
 fn run<'s, D: Dag>(dag: &'s D, sc: &Scope<'_, 's>, task: D::Task) {
     let mut next = Some(task);
     while let Some(t) = next {
@@ -138,12 +116,10 @@ fn run<'s, D: Dag>(dag: &'s D, sc: &Scope<'_, 's>, task: D::Task) {
     }
 }
 
-/// The tiles of an ancestor of width `w`.
 fn tiles_of(w: usize) -> usize {
     w.div_ceil(PANEL_BLOCK)
 }
 
-/// A forward task ([`Fwd`]): the ancestor's `top` index first.
 #[derive(Clone, Copy)]
 enum FwdTask {
     Take(u32, u32),
@@ -152,7 +128,6 @@ enum FwdTask {
     Below(u32, u32, u32),
 }
 
-/// The shape of an ancestor in the forward DAG.
 #[derive(Clone, Copy)]
 struct FwdNode {
     c0: usize,
@@ -160,10 +135,7 @@ struct FwdNode {
     m: usize,
     nb: usize,
     nc: usize,
-    /// The last tile has fewer rows than a product's least ([`chunk_align`]):
-    /// its rows join the tile before it in the products of the tiles before
-    /// that (in the level sweeps they lie inside one product of more rows).
-    merged: bool,
+    last_tile_merged: bool,
     base: usize,
 }
 
@@ -192,16 +164,13 @@ impl FwdNode {
         self.nb * (self.nb + 1) / 2 + self.nc * self.nb + 2
     }
 
-    /// The task tile `g`'s product of tile `s` is part of: `g` itself, or
-    /// none where it joined the tile before it.
     fn own_task(&self, g: usize, s: usize) -> Option<usize> {
-        (!(self.merged && g == self.nb - 1 && s + 2 < self.nb)).then_some(g)
+        (!(self.last_tile_merged && g == self.nb - 1 && s + 2 < self.nb)).then_some(g)
     }
 
-    /// The node rows of the product of tile `s` into tile `g`.
     fn own_rows(&self, g: usize, s: usize) -> std::ops::Range<usize> {
         let b = PANEL_BLOCK;
-        if self.merged && g + 2 == self.nb && s < g {
+        if self.last_tile_merged && g + 2 == self.nb && s < g {
             g * b..self.w
         } else {
             g * b..((g + 1) * b).min(self.w)
@@ -218,7 +187,6 @@ struct Fwd<'a, T> {
     dag: &'a DagWork,
 }
 
-/// The shape of ancestor `ti` in the forward DAG laid out in `dag`.
 fn fwd_node<T: Scalar>(plan: &SolvePlan<T>, dag: &DagWork, nr: usize, ti: usize) -> FwdNode {
     let (c0, w, _, m, _, _) = plan.node(plan.top[ti]);
     let nb = tiles_of(w);
@@ -228,7 +196,7 @@ fn fwd_node<T: Scalar>(plan: &SolvePlan<T>, dag: &DagWork, nr: usize, ti: usize)
         m,
         nb,
         nc: dag.chunk_ptr[ti + 1] - dag.chunk_ptr[ti],
-        merged: nb > 2 && w - (nb - 1) * PANEL_BLOCK < chunk_align(nr),
+        last_tile_merged: nb > 2 && w - (nb - 1) * PANEL_BLOCK < chunk_align(nr),
         base: dag.base[ti],
     }
 }
@@ -238,9 +206,6 @@ impl<T: Scalar> Fwd<'_, T> {
         fwd_node(self.plan, self.dag, self.nr, ti)
     }
 
-    /// The columns `j0..` of ancestor `ti` (`yc`, from column `j0` of the
-    /// factor) take every source's terms for them: of a source's run, the
-    /// slots whose rows lie in those columns.
     fn take(&self, ti: usize, j0: usize, yc: &mut [T]) {
         let (p, nr) = (self.plan, self.nr);
         let nsub = p.subtrees.len();
@@ -273,7 +238,6 @@ impl<T: Scalar> Fwd<'_, T> {
         }
     }
 
-    /// Chunk `c` of ancestor `ti`'s rows below is done.
     fn chunk_done<'s>(
         &'s self,
         ti: usize,
@@ -296,7 +260,6 @@ impl<T: Scalar> Fwd<'_, T> {
         }
     }
 
-    /// Ancestor `ti` is complete: its chunks and its descendants are done.
     fn complete<'s>(&'s self, mut ti: usize, ready: &mut Ready<'_, '_, 's, Self>) {
         loop {
             let p = self.plan.top_parent[ti];
@@ -307,8 +270,6 @@ impl<T: Scalar> Fwd<'_, T> {
             if !self.dag.close(pn.kids()) {
                 return;
             }
-            // every descendant of `p` is complete: its parent's tiles take
-            // from them
             let pp = self.plan.top_parent[p as usize];
             if pp != NONE {
                 let ppn = self.node(pp as usize);
@@ -358,7 +319,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                 if b == 0 {
                     ready.push(FwdTask::Tri(ti as u32, 0));
                 } else {
-                    let g = if nd.merged && b + 1 == nd.nb {
+                    let g = if nd.last_tile_merged && b + 1 == nd.nb {
                         b - 1
                     } else {
                         b
@@ -378,7 +339,6 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                     let _s = rsprobe::scope!(TRACE, "triangle");
                     tri_rows(v, &panel[off..], d, ld, nr, 0, je - jb);
                 }
-                // the next tile's product first: it runs here
                 for g in b + 1..nd.nb {
                     if let Some(g) = nd.own_task(g, b) {
                         if dag.close(nd.own(g, b)) {
@@ -446,7 +406,6 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
     }
 }
 
-/// A backward task ([`Bwd`]): the ancestor's `top` index first.
 #[derive(Clone, Copy)]
 enum BwdTask {
     Start(u32),
@@ -464,9 +423,6 @@ struct Bwd<'a, T> {
 }
 
 impl<T: Scalar> Bwd<'_, T> {
-    /// The row chunks of tile `jb..je` of a node with `m` rows below: of its
-    /// product of the rows below, and of its product of the tiles after it
-    /// (as [`bwd_node_gemm`](SolvePlan::bwd_node_gemm) cuts them).
     fn chunks(&self, w: usize, m: usize, jb: usize, je: usize) -> (usize, usize) {
         let p = self.plan;
         let off = if m > 0 {
@@ -482,8 +438,6 @@ impl<T: Scalar> Bwd<'_, T> {
         (off, inner)
     }
 
-    /// Tile `b` took its rows below and the tiles after it are solved: its
-    /// product of those.
     fn stepped<'s>(&'s self, ti: usize, b: usize, ready: &mut Ready<'_, '_, 's, Self>) {
         let (_, w, _, m, _, _) = self.plan.node(self.plan.top[ti]);
         let (jb, je, _, _) = Layout::new(w, m).blocks().nth(b).unwrap_or((0, 0, 0, 0));
@@ -535,7 +489,6 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                 if m == 0 {
                     return ready.push(BwdTask::Tri(ti as u32, nb as u32 - 1));
                 }
-                // the last tile's chunks first: they lead to its triangle
                 for b in (0..nb).rev() {
                     let (jb, je, _, _) = block(b);
                     for q in 0..self.chunks(w, m, jb, je).0 {
@@ -613,12 +566,8 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
 }
 
 impl<T: Scalar> SolvePlan<T> {
-    /// The forward sweep of the ancestors on the pool as the tile DAG (see
-    /// the module), after the leaf subtrees: every ancestor's accumulator is
-    /// its rows below, kept to the end of the sweep in one block.
     pub(super) fn forward_dag(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let nt = self.top.len();
-        // every slot's first term is stored: no zeroing, only growth
         crate::memory::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
         let dag = &mut work.dag;
         dag.base.clear();
@@ -636,7 +585,6 @@ impl<T: Scalar> SolvePlan<T> {
         dag.base.push(at);
         dag.chunk_ptr.push(chunks);
         dag.reset(at);
-        // the open inputs, and per row chunk the parent's tiles it reaches
         let mut tiles = std::mem::take(&mut dag.tiles);
         tiles.clear();
         let dag = &work.dag;
@@ -647,15 +595,12 @@ impl<T: Scalar> SolvePlan<T> {
             let add = |i: usize| dag.open[i].fetch_add(1, Ordering::Relaxed);
             for g in 1..nd.nb {
                 for s in 0..g {
-                    // (a merged last tile has no product of its own there: no
-                    // task, no open input)
                     if nd.own_task(g, s).is_some() {
                         set(nd.own(g, s), 2);
                     }
                 }
             }
-            if nd.merged {
-                // the last tile's take as well
+            if nd.last_tile_merged {
                 add(nd.own(nd.nb - 2, 0));
             }
             for c in 0..nd.nc {
@@ -666,7 +611,6 @@ impl<T: Scalar> SolvePlan<T> {
             }
             let kids = self.top_kids_ptr[ti + 1] - self.top_kids_ptr[ti];
             set(nd.kids(), kids);
-            // its chunks, its descendants, and without chunks its last triangle
             set(nd.done(), nd.nc.max(1) + usize::from(kids > 0));
             let p = self.top_parent[ti];
             let pn = (p != NONE).then(|| fwd_node(self, dag, nr, p as usize));
@@ -727,10 +671,6 @@ impl<T: Scalar> SolvePlan<T> {
         );
     }
 
-    /// The backward sweep of the ancestors on the pool as the tile DAG (see
-    /// the module), before the leaf subtrees: an ancestor starts once its
-    /// parent is complete, its rows below gathered into the accumulator block
-    /// the forward sweep used.
     pub(super) fn backward_dag(&self, nr: usize, x: &mut [T], work: &mut PlanWork<T>) {
         let nt = self.top.len();
         crate::memory::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
