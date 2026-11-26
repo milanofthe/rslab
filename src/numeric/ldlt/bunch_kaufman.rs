@@ -498,7 +498,6 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
         if deep * pw * pw >= ll_cdiv_par {
             let pp = LdltPanelPtr(base);
             let nthreads = crate::parallel::threads();
-            // https://github.com/milanofthe/rslab/issues/288
             let cs = deep.div_ceil(nthreads).max(1);
             let chunks: Vec<(usize, usize)> = (parts.iter())
                 .flat_map(|&(p0, p1)| (p0..p1).step_by(cs).map(move |r| (r, (r + cs).min(p1))))
