@@ -486,20 +486,12 @@ pub(crate) fn btf_from_matching(
             // v is finished: emit its SCC if it is a root.
             if lowlink[v] == index[v] {
                 let block_start = col_perm.len();
-                loop {
-                    // Tarjan invariant: `v` was pushed when discovered and is
-                    // still on the stack, so the pop cannot fail. A violation
-                    // is a bug in this function - it must NOT be reported as
-                    // structural singularity (the `None` return means that).
-                    let Some(w) = scc_stack.pop() else {
-                        unreachable!("Tarjan: v is on the stack");
-                    };
+                // The stack holds its nodes in discovery order, so the SCC of
+                // the root `v` is every node on it discovered at or after `v`.
+                while let Some(w) = scc_stack.pop_if(|w| index[*w as usize] >= index[v]) {
                     let w = w as usize;
                     on_stack[w] = false;
                     col_perm.push(w);
-                    if w == v {
-                        break;
-                    }
                 }
                 // Tarjan pops the SCC in reverse discovery order; restore
                 // discovery order inside the block so the permutation is

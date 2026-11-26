@@ -104,19 +104,15 @@ fn pseudo_peripheral(
     touched: &mut Vec<usize>,
 ) -> usize {
     let mut u = seed;
-    let (mut ecc, mut last) = level_structure(u, col_ptr, row_idx, dist, touched);
+    // Candidate: minimum-degree vertex in the last (deepest) level.
+    let (mut ecc, mut cand) = level_structure(u, col_ptr, row_idx, deg, dist, touched);
     // Bounded: George-Liu terminates in a handful of hops; cap for safety.
     for _ in 0..crate::constants::RCM_PERIPHERAL_MAX_HOPS {
-        // Candidate: minimum-degree vertex in the last (deepest) level.
-        let cand = *last
-            .iter()
-            .min_by_key(|&&w| deg[w])
-            .expect("last level is non-empty");
-        let (ecc2, last2) = level_structure(cand, col_ptr, row_idx, dist, touched);
+        let (ecc2, cand2) = level_structure(cand, col_ptr, row_idx, deg, dist, touched);
         if ecc2 > ecc {
             u = cand;
             ecc = ecc2;
-            last = last2;
+            cand = cand2;
         } else {
             break;
         }
@@ -125,25 +121,29 @@ fn pseudo_peripheral(
 }
 
 /// Rooted level structure of a BFS from `start`: returns the eccentricity
-/// (deepest level index) and the set of vertices in that deepest level. Fills
-/// and then restores `dist` (touched vertices reset to `-1`).
+/// (deepest level index) and the minimum-degree vertex of that deepest level,
+/// the first in BFS order among equal degrees. Fills and then restores `dist`
+/// (touched vertices reset to `-1`).
 fn level_structure(
     start: usize,
     col_ptr: &[i32],
     row_idx: &[i32],
+    deg: &[i32],
     dist: &mut [i32],
     touched: &mut Vec<usize>,
-) -> (i32, Vec<usize>) {
+) -> (i32, usize) {
     touched.clear();
     let mut q: VecDeque<usize> = VecDeque::new();
     dist[start] = 0;
     touched.push(start);
     q.push_back(start);
     let mut ecc = 0i32;
+    let mut cand = start;
     while let Some(v) = q.pop_front() {
         let dv = dist[v];
-        if dv > ecc {
+        if dv > ecc || (dv == ecc && deg[v] < deg[cand]) {
             ecc = dv;
+            cand = v;
         }
         let (s, e) = (col_ptr[v] as usize, col_ptr[v + 1] as usize);
         for &r in &row_idx[s..e] {
@@ -155,15 +155,10 @@ fn level_structure(
             }
         }
     }
-    let last: Vec<usize> = touched
-        .iter()
-        .copied()
-        .filter(|&w| dist[w] == ecc)
-        .collect();
     for &w in touched.iter() {
         dist[w] = -1;
     }
-    (ecc, last)
+    (ecc, cand)
 }
 
 #[cfg(test)]

@@ -151,11 +151,13 @@ impl GainHeap {
 
     /// Remove and return the vertex with the largest key.
     pub fn pop(&mut self) -> Option<usize> {
-        let top = *self.heap.first()?;
-        let last = self.heap.pop().expect("non-empty");
+        let last = self.heap.pop()?;
+        let top = match self.heap.first_mut() {
+            Some(root) => std::mem::replace(root, last),
+            None => last,
+        };
         self.pos[top as usize] = NONE;
         if !self.heap.is_empty() {
-            self.heap[0] = last;
             self.pos[last as usize] = 0;
             self.sift_down(0);
         }
@@ -254,8 +256,10 @@ fn unwind(
     ws: &mut Workspace,
     keep: usize,
 ) {
-    while ws.journal.len() > keep {
-        let t = ws.journal.pop().expect("journal non-empty");
+    if keep >= ws.journal.len() {
+        return;
+    }
+    for t in ws.journal.drain(keep..).rev() {
         let v = t.vertex as usize;
         let wv = graph.vwgt[v] as i64;
         class_w[labels[v] as usize] -= wv;

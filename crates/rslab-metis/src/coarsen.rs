@@ -137,8 +137,8 @@ pub fn coarsen(
 ) -> Result<Vec<CoarseGraph>, OrderingError> {
     let mut levels: Vec<CoarseGraph> = Vec::new();
     let mut prev_nvtxs = fine.nvtxs;
-    let mut cur: &Graph = fine;
     loop {
+        let cur = levels.last().map_or(fine, |level| &level.graph);
         crate::node_nd::stopped(opts)?;
         if cur.nvtxs <= opts.coarsen_floor as i32 {
             break;
@@ -168,7 +168,6 @@ pub fn coarsen(
         }
         prev_nvtxs = new_nvtxs;
         levels.push(level);
-        cur = &levels.last().expect("just pushed").graph;
     }
     Ok(levels)
 }
