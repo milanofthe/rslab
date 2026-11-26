@@ -211,6 +211,12 @@ pub mod symbolic;
 #[cfg(test)]
 #[path = "../tests/common/constants.rs"]
 pub mod test_constants;
+#[cfg(test)]
+#[path = "../tests/common/grid.rs"]
+pub mod test_grid;
+#[cfg(test)]
+#[path = "../tests/common/xorshift.rs"]
+pub mod test_xorshift;
 // Hardware calibration (feature `tuning`), driven by xtask.
 #[cfg(feature = "tuning")]
 #[doc(hidden)]

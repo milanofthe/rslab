@@ -219,8 +219,9 @@ pub fn separator_weight(graph: &Graph, labels: &[u8]) -> i64 {
 mod tests {
     use super::*;
     use crate::initial_partition::initial_bisect_ggp;
+    use crate::patterns::csc_from_triples;
     use crate::rng::SplitMix;
-    use crate::tests::{csc_from_triples, grid};
+    use crate::tests::grid;
     use rslab_ordering_core::CscPattern;
 
     /// Regression test for the sign of the FM neighbour gain update.

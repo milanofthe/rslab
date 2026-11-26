@@ -527,7 +527,7 @@ fn build_induced(graph: &Graph, vtx_map: &[i32], local_id: &[i32]) -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::csc_from_triples;
+    use crate::patterns::csc_from_triples;
     use rslab_ordering_core::CscPattern;
 
     fn grid_triples(m: usize, n: usize) -> Vec<(usize, usize)> {

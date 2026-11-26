@@ -357,7 +357,8 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{csc_from_triples, grid};
+    use crate::patterns::csc_from_triples;
+    use crate::tests::grid;
     use rslab_ordering_core::CscPattern;
 
     #[test]

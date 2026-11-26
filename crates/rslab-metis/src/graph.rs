@@ -132,7 +132,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::csc_from_triples;
+    use crate::patterns::{arrow, csc_from_triples, grid_2d};
 
     // -- small pattern generators (full symmetric, diagonal included) --
 
@@ -140,17 +140,6 @@ mod tests {
         let mut t = Vec::new();
         for i in 0..n {
             t.push((i, i));
-        }
-        csc_from_triples(n, &t)
-    }
-
-    fn arrow(n: usize) -> (Vec<i32>, Vec<i32>) {
-        let mut t = Vec::new();
-        for i in 0..n {
-            t.push((i, i));
-        }
-        for i in 1..n {
-            t.push((0, i));
         }
         csc_from_triples(n, &t)
     }
@@ -164,25 +153,6 @@ mod tests {
             }
         }
         csc_from_triples(n, &t)
-    }
-
-    fn grid_2d(m: usize, n: usize) -> (Vec<i32>, Vec<i32>) {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        csc_from_triples(total, &t)
     }
 
     // -- invariant helpers --

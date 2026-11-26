@@ -70,6 +70,7 @@ use crate::test_constants::{
     factor_product, fixed_refinement, forward_error, recomputed_residual, solve_backward_error,
     varah_condition, U64, UC64,
 };
+use crate::test_xorshift::Rng;
 use num_complex::Complex;
 
 fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
@@ -107,17 +108,6 @@ fn solution_gap(a: &GeneralCsc<f64>, x: &[f64]) -> f64 {
         solve_backward_error(a.n, U64),
     );
     2.0 * fe * x.iter().map(|v| v.abs()).fold(0.0, f64::max) / (1.0 - fe)
-}
-
-/// Deterministic xorshift for value generation (no rand dependency).
-struct Rng(u64);
-impl Rng {
-    fn next_f64(&mut self) -> f64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        (self.0 >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-    }
 }
 
 /// Circuit-shaped test matrix: sparse, unsymmetric, diagonally weighted,

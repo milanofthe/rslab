@@ -227,53 +227,18 @@ pub fn metis_order_weighted(
 }
 
 #[cfg(test)]
+#[path = "../../rslab-amd/tests/common/patterns.rs"]
+mod patterns;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use std::collections::BTreeSet;
-
-    pub(crate) fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = vec![0];
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
+    use crate::patterns::grid_2d;
 
     pub(crate) fn grid(m: usize, n: usize) -> Graph {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        let (cp, ri) = csc_from_triples(total, &t);
-        let pat = CscPattern::new(total, &cp, &ri).unwrap();
+        let (cp, ri) = grid_2d(m, n);
+        let pat = CscPattern::new(m * n, &cp, &ri).unwrap();
         Graph::from_csc_pattern(&pat).unwrap()
     }
 

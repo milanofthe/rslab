@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use rslab::{GeneralCsc, KluSettings, KluSymbolic, LuSolver, SolverSettings};
 
-#[path = "xorshift.rs"]
+#[path = "../tests/common/xorshift.rs"]
 mod xorshift;
 use xorshift::Rng;
 

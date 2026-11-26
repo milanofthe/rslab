@@ -448,7 +448,7 @@ impl Mat {
     }
 }
 
-#[path = "xorshift.rs"]
+#[path = "../tests/common/xorshift.rs"]
 mod xorshift;
 use xorshift::Rng;
 

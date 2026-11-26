@@ -14,6 +14,9 @@ use rslab::{
     gmres_block, AutoBackend, AutoSettings, AutoSymbolic, CscLayout, GeneralCsc, KrylovSettings,
     LuSolver, SolverSettings, Threads,
 };
+#[path = "common/grid.rs"]
+mod grid;
+use grid::grid;
 use std::cell::Cell;
 use std::sync::Mutex;
 
@@ -40,22 +43,6 @@ impl Drop for InProgress {
     fn drop(&mut self) {
         IN_PROGRESS.with(|d| d.set(d.get() - 1));
     }
-}
-
-/// The `(rows, cols)` of an `m x m` grid Laplacian's pattern.
-fn grid(m: usize) -> (Vec<usize>, Vec<usize>) {
-    let (mut rows, mut cols) = (Vec::new(), Vec::new());
-    for i in 0..m * m {
-        rows.push(i);
-        cols.push(i);
-        for j in [i + 1, i + m] {
-            if j < m * m && (j != i + 1 || j % m != 0) {
-                rows.extend([i, j]);
-                cols.extend([j, i]);
-            }
-        }
-    }
-    (rows, cols)
 }
 
 /// The entries of the grid Laplacian plus `shift` on the diagonal, in the
