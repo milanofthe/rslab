@@ -467,7 +467,8 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// order. So what a fork makes of a value set depends on the value set
     /// and the origin alone, never on what the fork factored before: forks
     /// of one origin factor the points in any grouping, on any threads, to
-    /// the same bits. (The supernodal paths factor every value set as a
+    /// the same bits. A fork of an origin without a factor factors every
+    /// value set afresh. (The supernodal paths factor every value set as a
     /// fresh factorization would, a fork or not.)
     pub fn fork(&self) -> Self {
         let mut f = self.clone();
@@ -603,13 +604,14 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                         self.own = None;
                         return Ok(AutoBackend::Klu);
                     }
-                    if self.pinned {
-                        // a fork keeps the order (a failed replay leaves it
-                        // in place), the fresh factor for this value set only
-                        self.own = None;
-                        self.own = Some(ks.factor(csc, &settings.klu)?);
-                        return Ok(AutoBackend::Klu);
-                    }
+                }
+                if self.pinned {
+                    // a fork keeps its origin's order (a failed replay
+                    // leaves it in place), or none where the origin had
+                    // none: the fresh factor for this value set only
+                    self.own = None;
+                    self.own = Some(ks.factor(csc, &settings.klu)?);
+                    return Ok(AutoBackend::Klu);
                 }
                 self.klu = None;
                 self.klu = Some(ks.factor(csc, &settings.klu)?);
@@ -831,6 +833,33 @@ mod tests {
         let bits = |x: &[f64]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&xa), bits(&xf));
         assert!(close(&xa, &[0.2, 0.6]));
+    }
+
+    #[test]
+    fn forks_of_an_origin_without_a_factor_factor_every_value_set_afresh() {
+        let sym = layout(2, &[0, 0, 1, 1], &[0, 1, 0, 1]);
+        let s = AutoSettings::default();
+        let mut origin = sym.factorizer::<f64>();
+        origin.assemble(&[0.0, 0.0, 0.0, 0.0]);
+        assert!(origin.refactor(&s).is_err());
+        // a small (0, 0) the order of the first value set would pivot on
+        let (first, point) = ([4.0, 1.0, 1.0, 3.0], [1e-5, 1.0, 1.0, 3.0]);
+        let b = [1.0, 2.0];
+        let mut a = origin.fork();
+        a.assemble(&first);
+        a.refactor(&s).unwrap();
+        a.assemble(&point);
+        a.refactor(&s).unwrap();
+        let mut fresh = origin.fork();
+        fresh.assemble(&point);
+        fresh.refactor(&s).unwrap();
+        let mut own = sym.factorizer::<f64>();
+        own.assemble(&point);
+        own.refactor(&s).unwrap();
+        let bits = |x: &[f64]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let xo = bits(&own.solve(&b).unwrap());
+        assert_eq!(bits(&a.solve(&b).unwrap()), xo);
+        assert_eq!(bits(&fresh.solve(&b).unwrap()), xo);
     }
 
     #[test]
