@@ -221,7 +221,8 @@ pub(super) unsafe fn delayed_update<T: Scalar>(
     let nchunks = n.div_ceil(chunk);
     let (up, zp, wp) = (SendPtr::of(u), SendPtr::of(z), SendPtr::of(w));
     let sp = SendPtr::of(&mut scratch[..sa * nchunks]);
-    let count = cols.iter().map(|c| c.k + 3).sum::<usize>() * n;
+    // the basis read once and the three vectors of the panel (`u`, `w`, `z`) per column
+    let count = cols.iter().map(|c| c.k + 3).sum::<usize>() * n; // lit: three panel vectors
     column_chunks::<T>(sa, n, chunk, count, |a, r0, r1| {
         let d = &cols[a];
         let (k, len) = (d.k, r1 - r0);
