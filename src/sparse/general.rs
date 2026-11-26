@@ -54,9 +54,21 @@ impl<T: Scalar> GeneralCsc<T> {
     /// The dense `n x n` matrix `a` in row-major order (`a[i * n + j]` is
     /// entry `(i, j)`), its exact zeros left out of the pattern.
     pub fn from_dense_row_major(n: usize, a: &[T]) -> Result<Self, RslabError> {
+        Self::from_dense_row_major_with(n, a, |_| 0, "GeneralCsc")
+    }
+
+    /// [`from_dense_row_major`](Self::from_dense_row_major) with column `j`
+    /// read from row `first_row(j)` on (`|j| j` for a lower triangle); `ty`
+    /// names the calling type in the error.
+    pub(crate) fn from_dense_row_major_with(
+        n: usize,
+        a: &[T],
+        first_row: impl Fn(usize) -> usize,
+        ty: &str,
+    ) -> Result<Self, RslabError> {
         if a.len() != n * n {
             return Err(RslabError::InvalidInput(format!(
-                "GeneralCsc::from_dense_row_major: {} entries for n = {n}",
+                "{ty}::from_dense_row_major: {} entries for n = {n}",
                 a.len()
             )));
         }
@@ -68,7 +80,7 @@ impl<T: Scalar> GeneralCsc<T> {
         };
         m.col_ptr.push(0);
         for j in 0..n {
-            for i in 0..n {
+            for i in first_row(j)..n {
                 let v = a[i * n + j];
                 if v != T::zero() {
                     m.row_idx.push(i);

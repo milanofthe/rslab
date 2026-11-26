@@ -22,10 +22,7 @@ pub(crate) fn build_sym<T: Scalar>(
     cols: &[usize],
     vals: &[T],
 ) -> CscMatrix<T> {
-    match CscMatrix::from_triplets(n, rows, cols, vals) {
-        Ok(m) => m,
-        Err(e) => panic!("matgen: internal invariant - invalid symmetric triplets: {e}"),
-    }
+    built(CscMatrix::from_triplets(n, rows, cols, vals))
 }
 
 pub(crate) fn build_gen<T: Scalar>(
@@ -34,7 +31,13 @@ pub(crate) fn build_gen<T: Scalar>(
     cols: &[usize],
     vals: &[T],
 ) -> GeneralCsc<T> {
-    match GeneralCsc::from_triplets(n, rows, cols, vals) {
+    built(GeneralCsc::from_triplets(n, rows, cols, vals))
+}
+
+/// The matrix a generator assembled from its triplets; an error is a bug of
+/// the generator.
+fn built<M>(m: Result<M, crate::error::RslabError>) -> M {
+    match m {
         Ok(m) => m,
         Err(e) => panic!("matgen: internal invariant - invalid triplets: {e}"),
     }
@@ -91,7 +94,8 @@ mod integration {
     //! the whole point. Small instances, exact factorization, true residual.
     use super::*;
     use crate::test_constants::{solve_backward_error, U32, U64, UC32, UC64};
-    use crate::{LdltSymbolic, LuSymbolic, SolverSettings};
+    use crate::refine::RefineOperator;
+    use crate::{Factorization, LdltSymbolic, LuSymbolic, SolverSettings};
     use num_complex::Complex;
 
     type C = Complex<f64>;
@@ -102,75 +106,37 @@ mod integration {
             .collect()
     }
 
-    fn backward_error<T: crate::Scalar>(
+    /// The normwise backward error `max|A x - b| / (||A||_inf max|x| + max|b|)`.
+    pub(super) fn backward_error<T: crate::Scalar>(
+        a: &impl RefineOperator<T>,
         x: &[T],
         b: &[T],
-        apply: impl Fn(bool, &[T], &mut [T]),
     ) -> f64 {
         let n = b.len();
         let mut ax = vec![T::zero(); n];
-        apply(false, x, &mut ax);
-        let mut sums = vec![T::zero(); n];
-        apply(true, &vec![T::one(); n], &mut sums);
+        a.apply(x, &mut ax);
+        let mut sums = vec![0.0; n];
+        a.apply_abs(&vec![T::one(); n], &mut sums);
         let max = |v: &[T]| v.iter().map(|z| z.magnitude()).fold(0.0, f64::max);
         let r: Vec<T> = ax.iter().zip(b).map(|(&p, &q)| p - q).collect();
-        max(&r) / (max(&sums) * max(x) + max(b))
+        max(&r) / (sums.iter().copied().fold(0.0, f64::max) * max(x) + max(b))
     }
 
-    pub(super) fn sym_error<T: crate::Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
-        let mut abs = a.clone();
-        abs.values = a
-            .values
-            .iter()
-            .map(|v| T::from_real(v.magnitude()))
-            .collect();
-        backward_error(
-            x,
-            b,
-            |m, v, out| {
-                if m {
-                    abs.symv(v, out)
-                } else {
-                    a.symv(v, out)
-                }
-            },
-        )
-    }
-
-    pub(super) fn unsym_error<T: crate::Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
-        let mut abs = a.clone();
-        abs.values = a
-            .values
-            .iter()
-            .map(|v| T::from_real(v.magnitude()))
-            .collect();
-        backward_error(x, b, |m, v, out| {
-            if m {
-                abs.matvec(v, out)
-            } else {
-                a.matvec(v, out)
-            }
-        })
+    /// The backward error of the solve of `rhs` with the factor `f` of `a`.
+    fn resid(a: &impl RefineOperator<C>, f: impl Factorization<C>) -> f64 {
+        let b = rhs(a.n());
+        let x = f.solve(&b).unwrap();
+        backward_error(a, &x, &b)
     }
 
     fn ldlt_resid(a: &CscMatrix<C>) -> f64 {
-        let b = rhs(a.n);
-        let f = LdltSymbolic::analyze(a, &SolverSettings::default())
-            .unwrap()
-            .factor(a, &SolverSettings::default())
-            .unwrap();
-        let x = f.solve(&b).unwrap();
-        sym_error(a, &x, &b)
+        let s = SolverSettings::default();
+        resid(a, LdltSymbolic::analyze(a, &s).unwrap().factor(a, &s).unwrap())
     }
 
     fn lu_resid(a: &GeneralCsc<C>) -> f64 {
-        let b = rhs(a.n);
-        let f = LuSymbolic::analyze(a, &SolverSettings::default())
-            .unwrap()
-            .factor(a, &SolverSettings::default())
-            .unwrap();
-        let x = f.solve(&b).unwrap();
-        unsym_error(a, &x, &b)
+        let s = SolverSettings::default();
+        resid(a, LuSymbolic::analyze(a, &s).unwrap().factor(a, &s).unwrap())
     }
 
     #[test]
@@ -229,7 +195,7 @@ mod integration {
                 .factor(&a, &SolverSettings::default())
                 .unwrap();
             let x = f.solve(&b).unwrap();
-            let omega = sym_error(&a, &x, &b);
+            let omega = backward_error(&a, &x, &b);
             assert!(
                 omega <= solve_backward_error(a.n, u),
                 "sym {} backward error {:.2e}",
@@ -247,7 +213,7 @@ mod integration {
                 .factor(&a, &SolverSettings::default())
                 .unwrap();
             let x = f.solve(&b).unwrap();
-            let omega = unsym_error(&a, &x, &b);
+            let omega = backward_error(&a, &x, &b);
             assert!(
                 omega <= solve_backward_error(a.n, u),
                 "unsym {} backward error {:.2e}",

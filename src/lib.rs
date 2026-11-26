@@ -197,6 +197,9 @@ pub mod test_constants;
 #[path = "../tests/common/grid.rs"]
 pub mod test_grid;
 #[cfg(test)]
+#[path = "../tests/common/lcg.rs"]
+pub mod test_lcg;
+#[cfg(test)]
 #[path = "../tests/common/xorshift.rs"]
 pub mod test_xorshift;
 #[cfg(feature = "tuning")]

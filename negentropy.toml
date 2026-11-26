@@ -7,7 +7,6 @@ environment = [
 ]
 print = ['^python/src/logging\.rs: .*eprintln!\("rslab \{\}", event\.line\(&path\)\)']
 unwrap = [
-    '^src/matgen/mod\.rs: .*panic!\("matgen: internal invariant - invalid symmetric triplets: \{e\}"\)',
     '^src/matgen/mod\.rs: .*panic!\("matgen: internal invariant - invalid triplets: \{e\}"\)',
 ]
 duplicate = [
