@@ -62,3 +62,18 @@ pub const DELAYED_UPDATE_PANEL_VECTORS: usize = 3;
 /// Why: the three bases of the method.
 /// Contract: results (the restart length on large systems).
 pub const RECYCLE_BASES: usize = 3;
+
+/// Panels of `n x s` scalars that a block GMRES allocates in
+/// `BlockGmres::new`: the solutions `x` and `out`, the `panel`, its
+/// preconditioned image `z` and the operator's image `w` (panels).
+/// Used by: `block_bytes`, the memory a block GMRES is predicted to hold.
+/// Why: counts the panels of `BlockGmres::new`.
+/// Contract: estimate.
+pub const BLOCK_GMRES_PANELS: usize = 5;
+
+/// Index vectors of one entry per right-hand side that a block GMRES holds:
+/// `jd`, `off`, `chk` and `closing` (vectors).
+/// Used by: `block_bytes`, the memory a block GMRES is predicted to hold.
+/// Why: counts the index vectors of `BlockGmres::new`.
+/// Contract: estimate.
+pub const BLOCK_GMRES_INDEX_VECTORS: usize = 4;

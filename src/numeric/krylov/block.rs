@@ -7,6 +7,7 @@ use super::*;
 
 use super::recycle::RecycleScalar;
 use super::settings::{BasisSwitch, BlockBasis};
+use crate::constants::{BLOCK_GMRES_INDEX_VECTORS, BLOCK_GMRES_PANELS};
 use crate::error::RslabError;
 use crate::parallel::Disjoint;
 use crate::scalar::Scalar;
@@ -87,58 +88,24 @@ pub struct StepProgress<'p> {
     pub basis: BlockBasis,
 }
 
-/// One right-hand side's Arnoldi state: its basis, the Hessenberg matrix under
-/// its Givens rotations and the rotated least-squares right-hand side of the
-/// open restart cycle.
-///
-/// The basis is orthogonalized by delayed CGS2: after `j` steps of a cycle the
-/// layers `0..j` hold the orthonormal `v_0..v_{j-1}` and layer `j` the pending
-/// `u_j`, the residual of `A z_{j-1}` after one Gram-Schmidt pass. A step applies
-/// the operator to `u_j / ||u_j||` as it is; its second pass, the projection
-/// `s_j = V^H u_j / ||u_j||` that turns it into `v_j`, is taken in the same pass
-/// over the basis as the first pass of the new vector. The Hessenberg matrix
-/// relates the vectors the operator was applied to: `A Z = V H_bar` with
-/// `z_i = M^-1 u_i / ||u_i||`, the last column (step `j - 1`) with `u_j` taken as
-/// orthogonal to `V` until the next step finishes it.
 struct Column<T: Scalar> {
-    /// The basis, layer `i` the scalars `[i*n, (i+1)*n)`: the restart's layers
-    /// reserved, the ones the cycle has written resident ([`Stored`]).
     v: Stored<T>,
-    /// The preconditioned vectors `z_i = M^-1 u_i / ||u_i||` of the steps taken,
-    /// laid out as `v`: the solution is formed from the vectors the Arnoldi
-    /// relation holds. Empty when the preconditioner is fixed
-    /// ([`KrylovSettings::flexible`] `false`): `Z y = M^-1 (V S y)` then.
     zb: Stored<T>,
-    /// Row-major `(m+1) x m`, entry `(i, j)` at `h[i*m + j]`.
     h: Vec<T>,
-    /// The same before the Givens rotations: `A Z = V H_bar` of the open cycle
-    /// (`+ C B` when deflating), the matrix [`BlockGmres::harvest`] reads.
     hraw: Vec<T>,
-    /// Row-major `m x m` upper triangular, `u_i / ||u_i|| = V S[:, i]`: the
-    /// vectors the operator was applied to in the basis.
     su: Vec<T>,
-    /// The least-squares right-hand side's entry of the last step before its
-    /// rotation, kept to rotate again once the step is finished.
     gp: T,
-    /// Deflating ([`BlockRecycle`] of dimension `k`): step `j`'s components
-    /// `C^H A z_j` at `bm[j*k..(j+1)*k]`.
     bm: Vec<T>,
     cs: Vec<T>,
     sn: Vec<T>,
     g: Vec<T>,
-    /// Steps of the open cycle; `None` before the first and after a cycle closed.
     steps: Option<usize>,
-    /// Steps taken in the current [`BlockGmres::solve`] call.
     stepped: usize,
-    /// Its cycle closed for room: it waits, its basis released, for the next
-    /// wave ([`BlockGmres::evict`]).
     waits: bool,
-    /// Its cycle closes at the next check, its basis released.
     evict: bool,
 }
 
 impl<T: Scalar> Column<T> {
-    /// No basis yet: [`open`](Self::open) reserves it.
     fn new(m: usize, k: usize) -> Self {
         Column {
             v: Stored::default(),
@@ -158,40 +125,30 @@ impl<T: Scalar> Column<T> {
         }
     }
 
-    /// Whether it holds a basis.
     fn holds(&self) -> bool {
         self.v.capacity() > 0
     }
 
-    /// Heap bytes of its bases as written.
     fn basis_bytes(&self) -> u64 {
         self.v.bytes() + self.zb.bytes()
     }
 
-    /// The bytes its bases grow by from `j` steps of the open cycle to `to`, of
-    /// `per` bytes a step: the layers an earlier cycle wrote are reused.
     fn growth(&self, n: usize, j: usize, to: usize, per: u64) -> u64 {
         let written = (self.v.len() / n).saturating_sub(1).max(j);
         to.saturating_sub(written) as u64 * per
     }
 
-    /// Release its bases: no cycle open.
     fn release(&mut self) {
         self.v = Stored::default();
         self.zb = Stored::default();
         self.steps = None;
     }
 
-    /// The least-squares residual of the open cycle relative to `bnorm`: the
-    /// residual of the solution it would hand out now, in exact arithmetic.
     fn estimate(&self, bnorm: f64) -> f64 {
         self.steps
             .map_or(f64::INFINITY, |j| self.g[j].magnitude() / bnorm)
     }
 
-    /// Open a cycle on the residual `r` of norm `beta > 0` (the pending first basis
-    /// vector, normalized by the first step), the restart's layers of its bases
-    /// reserved where it holds none (as `basis` stores them).
     fn open(&mut self, r: &[T], beta: f64, basis: BlockBasis) {
         let n = r.len();
         if !self.holds() {
@@ -208,9 +165,6 @@ impl<T: Scalar> Column<T> {
         self.steps = Some(0);
     }
 
-    /// The open cycle's coefficients `y` (back substitution on the leading
-    /// well-conditioned block, so a rank-deficient Hessenberg breaks down
-    /// deterministically instead of dividing by about zero); returns how many.
     #[allow(clippy::needless_range_loop)]
     fn coefficients(&self, m: usize, y: &mut [T]) -> usize {
         let jd = well_conditioned_dim(&self.h, m, self.steps.unwrap_or(0));
@@ -224,25 +178,18 @@ impl<T: Scalar> Column<T> {
         jd
     }
 
-    /// `y <- S y` for the leading `jd` coefficients: those of `Z y` taken to the basis
-    /// `V` (`Z = M^-1 V S` for a fixed preconditioner).
     fn lift(&self, m: usize, jd: usize, y: &mut [T]) {
         for i in 0..jd {
             y[i] = (i..jd).fold(T::zero(), |a, k| a + self.su[i * m + k] * y[k]);
         }
     }
 
-    /// `t = B y` for the subspace `rec` deflated (`k` entries): the open cycle's
-    /// correction in its directions is `- U t`.
     fn deflation_terms(&self, k: usize, jd: usize, y: &[T], t: &mut [T]) {
         for (i, ti) in t.iter_mut().enumerate().take(k) {
             *ti = (0..jd).fold(T::zero(), |a, j| a + self.bm[j * k + i] * y[j]);
         }
     }
 
-    /// Rotate Hessenberg column `j` (taken from `hraw`) by the rotations before it
-    /// and a new one zeroing its subdiagonal, the least-squares right-hand side's
-    /// entries `j` and `j + 1` from `gp`, its entry `j` before.
     fn rotate(&mut self, m: usize, j: usize) {
         for i in 0..=j + 1 {
             self.h[i * m + j] = self.hraw[i * m + j];
@@ -340,82 +287,41 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     b: &'a [T],
     n: usize,
     s: usize,
-    /// The restart: the most steps of one cycle.
     m: usize,
-    /// Iterations one [`solve`](Self::solve) may take.
     max_iter: usize,
     reorth_eta: f64,
     chunk: usize,
-    /// The worker policy the orthogonalization runs under: the one the
-    /// preconditioner was factored with, so factor and solve share one
-    /// budget ([`Threads::run`](crate::Threads)).
     ortho_threads: crate::Threads,
     bnorm: Vec<f64>,
-    /// Per column the solution its open cycle started from (its current one
-    /// without an open cycle), column-major `n x s`.
     x: Vec<T>,
-    /// Per column the solution as last formed: `x` plus the open cycle's
-    /// correction at the last residual check.
     out: Vec<T>,
-    /// The true relative residual of `out`, `None` once the column stepped since.
     res: Vec<Option<f64>>,
     cols: Vec<Column<T>>,
     iters: usize,
     deepest: usize,
-    // Scratch, reused by every step and check (the hot loop allocates nothing).
-    /// Compact `n x s` panel: the active columns' newest basis vectors, the
-    /// solutions whose residual is checked.
     panel: Vec<T>,
-    /// `M^-1` of the panel.
     z: Vec<T>,
-    /// `A M^-1` of the panel, orthogonalized in place; `b - A x` in a check.
     w: Vec<T>,
-    /// A step's products of the pass over the bases ([`delayed_project`]),
-    /// `off[a]..off[a+1]` column `a`'s.
     proj: Vec<T>,
-    /// The projections' row-chunk partial sums.
     proj_scratch: Vec<T>,
     off: Vec<usize>,
-    /// A step's update per column ([`delayed_update`]).
     delayed: Vec<Delayed<T>>,
-    /// Per column a norm (the new vectors of a step, the residuals of a check) and
-    /// its row-chunk partial sums.
     norms: Vec<f64>,
     norm_scratch: Vec<f64>,
-    /// The least-squares coefficients of the columns of a check, `m` each.
     y: Vec<T>,
-    /// Their leading well-conditioned dimensions.
     jd: Vec<usize>,
-    /// The columns of a step with their open cycles' steps, in column order.
     act: Vec<(usize, usize)>,
-    /// The columns of the last residual check, in column order (their residual
-    /// vectors in `w` at these positions).
     chk: Vec<usize>,
-    /// The columns of `chk` closing for memory ([`BlockProgress::closing`]).
     closing: Vec<usize>,
-    /// Per column its estimate for the step monitor ([`StepProgress::estimates`]).
     est: Vec<Option<f64>>,
-    /// How the bases are stored now ([`KrylovSettings::flexible`],
-    /// [`KrylovSettings::basis_single`]).
     basis: BlockBasis,
-    /// They may be lowered for memory ([`KrylovSettings::downgrade`]).
     downgrade: bool,
-    /// The representations they were lowered to ([`BlockKrylovResult::lowered`]).
     lowered: Vec<BasisSwitch>,
-    /// The bytes a step adds to a column's bases.
     layer: u64,
-    /// The bytes the columns' bases may hold together: the room set less what the
-    /// solve holds besides ([`KrylovSettings::room_bytes`]); `None`: no bound.
     room: Option<u64>,
-    /// Cycles closed for room ([`BlockKrylovResult::closed`]).
     closed: usize,
-    /// The memory the process may still take ([`within`](Self::within)).
     probe: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
-    /// The most the process grew by over a step beside the bases' growth, as the
-    /// probe saw it.
     side: u64,
-    /// The subspace deflated ([`deflating`](Self::deflating)), with its
-    /// projections of a panel and their partial sums.
     rec: Option<&'a BlockRecycle<T>>,
     rproj: Vec<T>,
     rscratch: Vec<T>,
@@ -463,7 +369,6 @@ where
         let mut res = vec![None; s];
         for c in 0..s {
             if bnorm[c] == 0.0 {
-                // `A x = 0` is solved by zero exactly; a warm start's seed is dropped.
                 x[c * n..c * n + n].iter_mut().for_each(|v| *v = T::zero());
                 res[c] = Some(0.0);
             }
@@ -513,7 +418,7 @@ where
             rproj: Vec::new(),
             rscratch: Vec::new(),
         };
-        // (no basis is written yet: what it holds now is what it holds besides them)
+        debug_assert_eq!(gm.basis_bytes(), 0);
         gm.room = settings
             .room_bytes
             .map(|r| r.saturating_sub(gm.resident_bytes()));
@@ -655,7 +560,6 @@ where
         let mut stalled = false;
         for (c, col) in self.cols.iter_mut().enumerate() {
             col.stepped = 0;
-            // a column a call before closed above this tolerance starts again
             if col.steps.is_none() && !col.waits && self.res[c].is_some_and(|r| r > tol) {
                 self.res[c] = None;
             }
@@ -667,13 +571,9 @@ where
             }
             self.evict(tol);
             let stepping = !self.act.is_empty();
-            // The residual check: with columns stepping, only the full cycles
-            // (they restart from their true residual); else every column that
-            // stepped since its last check.
             let checked = self.check(!stepping)?;
             if checked {
                 if let Some(mo) = mon.as_mut() {
-                    // NaN-honest: a non-finite residual is the worst one
                     let worst = (0..self.s)
                         .filter(|&c| !self.cols[c].waits)
                         .map(|c| match self.res[c] {
@@ -747,7 +647,6 @@ where
                 }
             }
         }
-        // A cancel leaves the columns stepped since their last check unformed.
         self.check(true)?;
         let final_res: Vec<f64> = self
             .res
@@ -787,14 +686,11 @@ where
         for c in 0..self.s {
             if self.cols[c].steps.is_some() && self.res[c].is_some() {
                 self.close(c);
-                // checked again (its true residual) before a new cycle opens
                 self.res[c] = None;
             }
         }
     }
 
-    /// `act`: the columns that can step toward `tol`, an open cycle short of the
-    /// restart with its estimate above `tol` and steps left in the budget.
     fn select_active(&mut self, tol: f64) {
         self.act.clear();
         for c in 0..self.s {
@@ -807,8 +703,6 @@ where
         }
     }
 
-    /// The next wave: once no column steps and none waits for its restart, the
-    /// columns waiting for room start again from their solutions (checked first).
     fn admit(&mut self) {
         let m = self.m;
         if (0..self.s).any(|c| self.cols[c].steps == Some(m) && self.res[c].is_none()) {
@@ -822,10 +716,6 @@ where
         }
     }
 
-    /// The memory the bases may still grow by: what the room left
-    /// ([`KrylovSettings::room_bytes`]) and what the probe says the process may
-    /// still take, less the most a step took beside the bases ([`within`](Self::within));
-    /// `None` without either.
     fn free(&self) -> Option<u64> {
         let room = self.room.map(|r| r.saturating_sub(self.basis_bytes()));
         let live = self
@@ -838,29 +728,15 @@ where
         }
     }
 
-    /// Heap bytes of the columns' bases as written.
     fn basis_bytes(&self) -> u64 {
         self.cols.iter().map(Column::basis_bytes).sum()
     }
 
-    /// Keep the bases within the memory ([`free`](Self::free)): where the next step
-    /// of the columns in `act` would not fit, the bases are lowered first where they
-    /// may be ([`lower`](Self::lower), toward `tol`); where it still does not fit, the
-    /// columns not stepping give their
-    /// bases up (a finished one at once, a paused one closes its cycle at the next
-    /// check), then the stepping ones with the worst estimates close theirs until
-    /// the rest reach the restart in what is free (at once where no step was taken
-    /// since their check, else at the next check). The columns closed wait for the
-    /// next wave ([`admit`](Self::admit)): the easy ones finish together, the hard
-    /// ones then have the memory. At least one column steps on; one alone closes
-    /// only once its cycle took a step and its next does not fit (a restart at the
-    /// depth the memory holds).
     fn evict(&mut self, tol: f64) {
         let Some(mut free) = self.free() else {
             return;
         };
         let (n, m) = (self.n, self.m);
-        // what the columns in `act` grow by to step `to(j)` of their cycles
         let grow = |g: &Self, i: usize, to: &dyn Fn(usize) -> usize| {
             let (c, j) = g.act[i];
             g.cols[c].growth(n, j, to(j), g.layer)
@@ -872,7 +748,6 @@ where
             let Some(to) = self.basis.lower::<T>(tol).filter(|_| self.downgrade) else {
                 break;
             };
-            // what the bases give up is free (a live probe may not see it yet)
             let held = self.basis_bytes();
             self.lower(to);
             free += held - self.basis_bytes();
@@ -894,7 +769,6 @@ where
                 self.cols[c].evict = true;
             }
         }
-        // the stepping columns, the worst estimate first (a non-finite one first)
         let est = |g: &Self, i: usize| {
             let c = g.act[i].0;
             g.cols[c].estimate(g.bnorm[c])
@@ -918,7 +792,6 @@ where
             need -= ahead(self, i);
             self.closed += 1;
             if self.res[c].is_some() {
-                // checked and not stepped since (a cycle just opened): it waits at once
                 self.close(c);
                 self.cols[c].waits = true;
             } else {
@@ -932,10 +805,6 @@ where
         });
     }
 
-    /// Store the bases as `to` from now on, every column's open cycle carried on: `Z`
-    /// dropped (the solutions then `x + M^-1 (V y)`, the preconditioner a fixed
-    /// operator, [`KrylovSettings::downgrade`]), the bases rounded to single
-    /// precision (a column at a time).
     fn lower(&mut self, to: BlockBasis) {
         for col in &mut self.cols {
             if !to.flexible {
@@ -954,25 +823,17 @@ where
         });
     }
 
-    /// Close column `c`'s cycle on the solution formed (`x <- out`), its bases
-    /// released.
     fn close(&mut self, c: usize) {
         let (cb, n) = (c * self.n, self.n);
         self.x[cb..cb + n].copy_from_slice(&self.out[cb..cb + n]);
         self.cols[c].release();
     }
 
-    /// Form the solutions of the unchecked columns (all of them with `all`, else
-    /// those whose cycle reached the restart) and their true residuals; the
-    /// residual vectors stay in `w` (compact, in the order of `chk`).
-    /// Whether any column was checked.
     fn check(&mut self, all: bool) -> Result<bool, RslabError> {
         let (n, m) = (self.n, self.m);
         self.chk.clear();
         for c in 0..self.s {
             let col = &self.cols[c];
-            // with every one: a cycle at the restart, one closing for room, one
-            // starting (none open)
             if self.res[c].is_none()
                 && (all || col.evict || col.steps == Some(m) || col.steps.is_none())
             {
@@ -985,7 +846,6 @@ where
         }
         let chunk = self.chunk;
         let kd = self.rec.map_or(0, |r| r.k);
-        // every column's coefficients, and `B y` of the subspace deflated
         for (a, &c) in self.chk.iter().enumerate() {
             let col = &self.cols[c];
             let y = &mut self.y[a * m..(a + 1) * m];
@@ -999,8 +859,6 @@ where
         let (cols, chk, jds, y, t) = (&self.cols, &self.chk, &self.jd, &self.y, &self.rproj);
         let (x, rec) = (&self.x, self.rec);
         let depth: usize = (0..k).map(|a| jds[a] + kd + 1).sum();
-        // `out = x + Z y - U t` from the stored preconditioned basis, or `x + z - U t` from
-        // `z = M^-1 (V S y)`; the panel a copy
         let form = |(op, pp): (&Disjoint<T>, &Disjoint<T>),
                     a: usize,
                     r0: usize,
@@ -1078,7 +936,6 @@ where
                 },
             );
         }
-        // Their true residuals, one batched operator apply.
         self.op
             .apply_block(&self.panel[..k * n], &mut self.w[..k * n], k);
         let nchunks = n.div_ceil(chunk);
@@ -1111,10 +968,6 @@ where
         Ok(true)
     }
 
-    /// Restart every column the last check left above `tol` with steps left: its
-    /// cycle closes on the solution formed (`x <- out`) and a new one opens on its
-    /// true residual (in `w` at its position in `chk`). A column closing for room
-    /// closes alone, its bases released, and waits where it is above `tol`.
     fn restart_above(&mut self, tol: f64) {
         let n = self.n;
         for a in 0..self.chk.len() {
@@ -1134,8 +987,6 @@ where
             self.x[cb..cb + n].copy_from_slice(&self.out[cb..cb + n]);
             let rv = &mut self.w[a * n..(a + 1) * n];
             let beta = match &self.rec {
-                // deflating: the residual's part in `range(C)` first (`x += U C^H r`,
-                // `r -= C C^H r`), the solution handed out moving with it
                 Some(rec) => {
                     for i in 0..rec.k {
                         let ci = &rec.c[i * n..(i + 1) * n];
@@ -1150,7 +1001,6 @@ where
                     }
                     self.out[cb..cb + n].copy_from_slice(&self.x[cb..cb + n]);
                     let beta = norm2(rv);
-                    // its residual is the projected one: checked again before it counts
                     self.res[c] = if beta == 0.0 { Some(0.0) } else { None };
                     beta
                 }
@@ -1163,15 +1013,6 @@ where
         }
     }
 
-    /// One block step of the columns in `act`: their pending basis vectors through
-    /// the preconditioner and the operator in one batched apply each, then delayed
-    /// CGS2 over the whole panel in one pass over the bases for the products
-    /// ([`delayed_project`]) and one for the update ([`delayed_update`]): every
-    /// pending vector orthogonalized a second time and normalized to its column's
-    /// next basis vector, the operator's image orthogonalized once against the
-    /// basis so extended and left pending. The step before is finished in the
-    /// Hessenberg matrix, the new one entered with its pending vector taken as
-    /// orthogonal, and the least-squares residual estimated from both.
     #[allow(clippy::needless_range_loop)]
     fn step(&mut self) -> Result<(), RslabError> {
         let (n, m, sa, chunk) = (self.n, self.m, self.act.len(), self.chunk);
@@ -1220,7 +1061,6 @@ where
         } = self;
         let off = &off[..=sa];
         let (panel, z, w) = (&mut panel[..sa * n], &mut z[..sa * n], &mut w[..sa * n]);
-        // deflating: the panel's components in `range(C)` first, kept per step
         if let Some(rec) = &*rec {
             ortho_threads.run(
                 0,
@@ -1242,10 +1082,6 @@ where
                 || delayed_project(&layers, off, panel, w, n, chunk, proj, proj_scratch),
             );
         }
-        // Per column from the products: the pending vector `u` scaled to unit norm, its
-        // components `s` in the basis and the norm `nrm` of the rest (Pythagoras), the
-        // first pass `q` of the image `w` against the basis and `h` against the next basis
-        // vector `(u - V s) / nrm`, all from one pass.
         let kd = rec.map_or(0, |r| r.k);
         delayed.clear();
         for a in 0..sa {
@@ -1267,7 +1103,6 @@ where
             if k == 0 {
                 col.g[0] = T::from_real(unorm);
             } else {
-                // The step before finished: its image's remainder `u = unorm (V s' + nrm v)`.
                 for i in 0..k {
                     col.hraw[i * m + k - 1] = col.hraw[i * m + k - 1] + o[i];
                 }
@@ -1321,7 +1156,6 @@ where
                     col.zb.written((k + 1) * n);
                 }
             }
-            // The new step, its pending vector taken as orthogonal to the basis.
             col.hraw[(k + 1) * m + k] = T::from_real(self.norms[a]);
             col.gp = col.g[k];
             col.rotate(m, k);
@@ -1342,8 +1176,6 @@ where
     A: LinearOperator<T> + ?Sized,
     M: Preconditioner<T> + ?Sized,
 {
-    /// The worst `||V^H V - I||_F` over the open cycles of the first `k` vectors of
-    /// their bases (as many as written and finished).
     pub(super) fn orthogonality_loss(&self, k: usize) -> f64 {
         let n = self.n;
         let (mut p, mut q) = (vec![T::zero(); n], vec![T::zero(); n]);
@@ -1364,7 +1196,6 @@ where
         worst
     }
 
-    /// Column `c`'s least-squares residual estimate, relative.
     pub(super) fn estimate(&self, c: usize) -> f64 {
         self.cols[c].estimate(self.bnorm[c])
     }
@@ -1396,7 +1227,6 @@ where
             return None;
         }
         let (n, m) = (self.n, self.m);
-        // every column's candidates: (|theta|, column, theta, g)
         let mut cands: Vec<(f64, usize, Cx, Vec<Cx>)> = Vec::new();
         for (c, col) in self.cols.iter().enumerate() {
             let Some(d) = col.steps.filter(|&d| d > 0) else {
@@ -1404,8 +1234,6 @@ where
             };
             let hb = |i: usize, j: usize| col.hraw[i * m + j].to_c();
             let sb = |i: usize, j: usize| col.su[i * m + j].to_c();
-            // `M1 = H_bar^H H_bar`, `M2 = H^H S` (row-major `d x d`): the vectors the operator
-            // was applied to are `V S`
             let mut m1 = vec![Cx::new(0.0, 0.0); d * d];
             let mut m2 = vec![Cx::new(0.0, 0.0); d * d];
             for i in 0..d {
@@ -1414,16 +1242,12 @@ where
                     m2[i * d + j] = (0..=j).map(|r| hb(r, i).conj() * sb(r, j)).sum();
                 }
             }
-            // at most half the cycle's depth from one column: the harmonic Ritz pairs of a
-            // short cycle are crude, and deflating crude directions slows the solves it serves
-            // (GCRO-DR's rule, as `gmres_recycled` caps its subspace at half the restart)
             for (theta, g) in harmonic_ritz_smallest(&m1, &m2, d, k.min(d / 2)) {
                 cands.push((theta.norm(), c, theta, g));
             }
         }
         cands.sort_by(|a, b| a.0.total_cmp(&b.0));
         let col_s = |c: usize, i: usize, j: usize| self.cols[c].su[i * m + j].to_c();
-        // the directions, orthonormal
         let mut u: Vec<T> = Vec::new();
         for (_, c, theta, g) in cands {
             let kept = u.len() / n;
@@ -1431,8 +1255,6 @@ where
                 break;
             }
             let d = g.len();
-            // the Ritz vectors in the solution space: `Z g`, as `M^-1 (V S g)` where `Z`
-            // is not kept
             let ritz = |b: &Stored<T>, g: Vec<Cx>| {
                 let pairs = [(theta, g)];
                 T::combine_ritz(&|j, a, out| b.axpy(j * n, a, out), n, d, &pairs, k - kept)
@@ -1445,7 +1267,6 @@ where
                     .collect();
                 let vg = ritz(&self.cols[c].v, sg);
                 let mut zg = vec![T::zero(); vg.len()];
-                // (no wider than the solve applies it)
                 let width = self.s * n;
                 let applied = vg
                     .chunks(width)
@@ -1456,8 +1277,6 @@ where
                 }
                 zg
             };
-            // a column's Ritz vector the others found too is not new: kept only
-            // where most of it lies outside the kept ones (the DGKS ratio)
             for v in cand.chunks_exact(n) {
                 orthonormal_into(&mut u, None, v, n, self.reorth_eta);
             }
@@ -1466,9 +1285,6 @@ where
         if kept == 0 {
             return None;
         }
-        // their images, orthonormalized with the directions along (`C = A U` stays)
-        // in blocks of at most the solve's width: the operator is applied as the solve applies
-        // it (a matrix-free operator sizes its scratch for that)
         let mut au = vec![T::zero(); kept * n];
         for (ui, ai) in u.chunks(self.s * n).zip(au.chunks_mut(self.s * n)) {
             self.op.apply_block(ui, ai, ui.len() / n);
@@ -1488,11 +1304,6 @@ where
     }
 }
 
-/// Append `v` to the orthonormal columns `q` (column-major, length `n` each) by
-/// modified Gram-Schmidt, unless it keeps no more than `keep` of its norm (it
-/// lies in their span to that degree). With `along = (p, w)` the same
-/// combination of `w` and `p`'s columns goes to `p`, so a relation
-/// `q_i = A p_i` holds for the appended column too.
 fn orthonormal_into<T: Scalar>(
     q: &mut Vec<T>,
     along: Option<(&mut Vec<T>, &[T])>,
@@ -1529,11 +1340,6 @@ fn orthonormal_into<T: Scalar>(
     }
 }
 
-/// Heap bytes of a [`BlockGmres`] of `s` right-hand sides of length `n` at
-/// restart `m` and reduction chunk `chunk` once its columns' bases are `depth`
-/// vectors deep, of `stored` bytes a basis scalar: the allocations of
-/// [`BlockGmres::new`] and the written bases ([`BlockGmres::resident_bytes`] of a
-/// solve at that depth in every column).
 pub(super) fn block_bytes<T: Scalar>(
     n: usize,
     s: usize,
@@ -1544,36 +1350,25 @@ pub(super) fn block_bytes<T: Scalar>(
     stored: usize,
 ) -> u64 {
     let sz = std::mem::size_of::<T>();
-    // per column: the basis and its preconditioned steps (flexible only), then the
-    // Hessenberg matrix rotated and as built, the two rotations, `g`
     let z = if flexible {
         n * depth.saturating_sub(1)
     } else {
         0
     };
     let bases = n * depth + z;
-    // the Hessenberg matrix rotated and as built, `S`, the two rotations, `g`
     let column = 2 * (m + 1) * m + m * m + 2 * m + (m + 1);
-    // the panels `x`, `out`, `panel`, `z`, `w`; a step's products and their partial
-    // sums; the coefficients of a check
-    let panels = 5 * n * s; // lit: the five n x s panels of `BlockGmres::new`
+    let panels = BLOCK_GMRES_PANELS * n * s;
     let nchunks = n.div_ceil(chunk.max(1));
     let shared = panels + 2 * s * (m + 1) * (1 + nchunks) + s * m;
-    // `bnorm`, `norms`, their partial sums, `res`, `jd`, `off` (one more), `chk`,
-    // `closing`, `act`, `delayed`
     let per_rhs = (2 + nchunks) * std::mem::size_of::<f64>()
         + std::mem::size_of::<Option<f64>>()
-        + 4 * std::mem::size_of::<usize>() // lit: `jd`, `off`, `chk` and `closing`
+        + BLOCK_GMRES_INDEX_VECTORS * std::mem::size_of::<usize>()
         + std::mem::size_of::<(usize, usize)>()
         + std::mem::size_of::<Delayed<T>>();
     ((s * column + shared) * sz + s * bases * stored + s * per_rhs + std::mem::size_of::<usize>())
         as u64
 }
 
-/// Heap bytes [`BlockGmres::deflating`] adds to a solve of `s` right-hand sides
-/// of length `n` at restart `m` and reduction chunk `chunk` for a subspace of
-/// dimension `k`: the subspace, every column's components on it per step, and
-/// a panel's projections with their partial sums.
 pub(super) fn deflation_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, k: usize) -> u64 {
     let sz = std::mem::size_of::<T>();
     ((2 * n * k + s * m * k + k * s + n.div_ceil(chunk.max(1)) * k * s) * sz) as u64
