@@ -5,13 +5,6 @@ use super::Li;
 use crate::numeric::supernodal::panel::Layout;
 use crate::scalar::Scalar;
 
-/// How a node applies its descendants' updates (`cmod`), shared by the LDL^T
-/// and LU kernels. Every field is a pure function of the node and the
-/// kernel thresholds, never of the thread count or of timing: a
-/// timing-dependent choice broke bit-identity twice (a chain-phase-dependent
-/// `tiled`, and a fork below the gate while few nodes were in flight, which
-/// switched GEMMs between serial and parallel mode, not bit-identical for
-/// complex scalars); see `tests/ll_thread_determinism.rs`.
 pub(crate) struct CmodPlan {
     /// The updaters with work for this node, in updater order.
     pub spans: Vec<Span>,
@@ -25,19 +18,10 @@ pub(crate) struct CmodPlan {
     pub forks: bool,
 }
 
-/// The work of one unit of a node's update of `total` multiply-adds on
-/// `workers` threads: about [`UPDATE_UNITS_PER_WORKER`](
-/// crate::constants::UPDATE_UNITS_PER_WORKER) of them per thread.
-/// The cut depends on the pool's thread count and the node alone, never on
-/// timing, so a thread count reproduces its bits; at one thread the units
-/// are as coarse as the cache bound of [`cut`] allows.
 pub(crate) fn unit_share(total: f64, workers: usize) -> f64 {
     total / (workers.max(1) * crate::constants::UPDATE_UNITS_PER_WORKER) as f64
 }
 
-/// The blocks `0..w.len()` of weights `w` cut into consecutive ranges of
-/// about `share` weight each: at most `max` blocks and at least one, the
-/// first one ending at or past block `first_end`.
 pub(crate) fn cut(w: &[f64], share: f64, max: usize, first_end: usize) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let (mut start, mut acc) = (0usize, 0.0f64);
@@ -52,12 +36,13 @@ pub(crate) fn cut(w: &[f64], share: f64, max: usize, first_end: usize) -> Vec<(u
     if start < w.len() {
         ranges.push((start, w.len()));
     }
+    debug_assert!(ranges.iter().all(|&(a, b)| a < b && b - a <= max.max(1)));
+    debug_assert!(ranges
+        .first()
+        .map_or(w.is_empty(), |&(_, end)| end >= first_end.min(w.len())));
     ranges
 }
 
-/// One updater of a node: `l` is the landing range of its off-block `L` rows
-/// (`[p0, p1)` within the node's columns), `u` the same for its off-block `U`
-/// columns. The symmetric path has one structure, so `l == u` there.
 #[derive(Clone, Copy)]
 pub(crate) struct Span {
     pub k: usize,
@@ -86,7 +71,6 @@ impl CmodPlan {
                 p0 + v[p0..].partition_point(|&g| (g as usize) < first + ncol),
             )
         };
-        // A list a finished plan on this thread left behind, when there is one.
         let mut spans = SPANS
             .try_with(|v| v.borrow_mut().pop())
             .ok()
@@ -98,8 +82,6 @@ impl CmodPlan {
             let k = k as usize;
             let (nck, ol, ou) = lists(k);
             let (l, u) = (landing(ol), landing(ou));
-            // `L` rows from the landing range down times the `U` columns landing
-            // here, and (LU) the landing `L` rows times the `U` columns past here.
             let lwork = (ol.len() - l.0) * (u.1 - u.0) * nck;
             let uwork = if count_u {
                 (l.1 - l.0) * (ou.len() - u.1) * nck
@@ -125,23 +107,14 @@ impl Drop for CmodPlan {
 }
 
 thread_local! {
-    /// The span lists of this thread's finished plans, for its next ones: a
-    /// stack, since a node's plan can be alive while the thread runs another
-    /// node it stole.
     static SPANS: std::cell::RefCell<Vec<Vec<Span>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 thread_local! {
-    /// Per-worker global-to-local maps, held at all-`Li::MAX` between nodes;
-    /// two, so a node can map its `L` rows and its `U` columns at once.
     static GLOC_SCRATCH: [std::cell::RefCell<Vec<Li>>; 2] =
         const { [std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new())] };
 }
 
-/// Global-to-local row map of one supernode: `map[rows[li]] == li`, every other
-/// global index maps to `Li::MAX`. Borrows the worker's scratch and restores
-/// it on drop, so every way out of a node (errors included) leaves the
-/// invariant intact for the next node on this thread.
 pub(crate) struct Gloc<'a> {
     map: Vec<Li>,
     rows: &'a [Li],
@@ -164,6 +137,7 @@ impl<'a> Gloc<'a> {
             map.resize(n, Li::MAX);
         }
         for (li, &g) in rows.iter().enumerate() {
+            debug_assert_eq!(map[g as usize], Li::MAX);
             map[g as usize] = li as Li;
         }
         Gloc { map, rows, slot }
@@ -187,10 +161,6 @@ impl Drop for Gloc<'_> {
     }
 }
 
-/// Static-pivot perturbation, the complex-symmetric analogue of rslab's f64
-/// `perturb_to_floor` (`dense::factor`): lift a pivot whose magnitude is below
-/// `abs_floor` up to that floor, preserving phase. For `T = f64` this reduces
-/// to `sign(d)*max(|d|, abs_floor)`, matching the real kernel.
 #[inline]
 pub(crate) fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
     let mag = d.magnitude();
@@ -203,26 +173,6 @@ pub(crate) fn perturb_pivot<T: Scalar>(d: T, abs_floor: f64) -> T {
     }
 }
 
-/// The trailing update of one panel step on and below the diagonal, straight
-/// into the panel: `B[r, c] -= G[r, :] R[c, :]^T` for the trailing columns
-/// `c` in `[c0, c1)` and the rows `r >= c`, indices relative to the first
-/// trailing row and column `k0` of the panel (`base`, laid out as `lay`).
-/// `G` is the `mt x pw` column-major block of the step (leading dimension
-/// `mt`), `R` the `pw` columns of the trailing columns' rows (leading
-/// dimension `r_ld`).
-///
-/// The columns go in tiles of `tw`, cut where the panel's column blocks
-/// end, the rows below a tile's diagonal block in blocks of `rb`, cut where
-/// the diagonal part ends: each block is one GEMM into the panel, the
-/// diagonal block one GEMM into a buffer of `pool` whose lower triangle is
-/// then subtracted, so the panel's upper triangle is never written. With
-/// `par` the pieces run on the pool, each a sequential GEMM; a piece
-/// computes the same bits either way.
-///
-/// # Safety
-/// `base` must be the panel of layout `lay`, whose trailing rows of the
-/// columns `k0 + [c0, c1)` no one else touches meanwhile; `g` holds
-/// `mt * pw` entries and `r` the rows `[c0, c1)` of `pw` columns.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn schur_tiles<T: Scalar>(
     base: *mut T,
@@ -241,9 +191,8 @@ pub(crate) unsafe fn schur_tiles<T: Scalar>(
     use crate::constants::PANEL_BLOCK;
     use crate::dense::gemm_backend::{gemm, GemmMode};
     debug_assert!(g.len() >= mt * pw && c1 <= mt);
+    debug_assert!(pw == 0 || c1 <= c0 || r.len() >= (pw - 1) * r_ld + c1);
     let (tw, rb) = (tw.max(1), rb.max(1));
-    // The pieces `(a, b, r0, r1)`: columns `a..b` of a tile, rows `r0..r1`
-    // (`r0 == a`: the tile's diagonal block), relative to `k0`.
     let diag_end = lay.w.saturating_sub(k0).min(mt);
     let mut pieces = Vec::new();
     let mut a = c0;
@@ -265,10 +214,11 @@ pub(crate) unsafe fn schur_tiles<T: Scalar>(
     let piece = |q: usize| {
         let (a, b, r0, r1) = pieces[q];
         let w = b - a;
+        let is_diagonal_block = r0 == a;
         // SAFETY: entries of the caller's columns on or below the diagonal;
         // the operands are the caller's blocks, disjoint from the panel.
         unsafe {
-            if r0 == a {
+            if is_diagonal_block {
                 let mut diag = pool.take();
                 diag.clear();
                 diag.resize(w * w, T::zero());
