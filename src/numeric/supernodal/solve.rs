@@ -11,7 +11,9 @@
 //! contiguous panels, touches each row index once per panel instead of once
 //! per entry, and runs the inner loops over contiguous memory. Every node
 //! takes all right-hand sides at once, its dense parts as GEMMs: its
-//! triangle in column blocks, the rows below it in one product. A column of
+//! triangle in column blocks, each block halved down to register tiles with
+//! the products between the halves in the GEMM, the rows below it in one
+//! product. A column of
 //! a block solve therefore agrees with the solve of that column alone to
 //! rounding, the products summing in their own order (on a 95 k near-field
 //! LU about 4e-10 relative), not to the bit.
@@ -22,12 +24,14 @@
 //! forward sweep the subtrees run in parallel; updates that leave a subtree
 //! (into ancestor rows) go to a per-subtree accumulator. The ancestors then
 //! run as a task DAG over the 64-column tiles of their dense nodes: in the
-//! forward sweep a tile of an ancestor starts once the row chunks of its
-//! children that reach it are done, takes in the accumulations for its
+//! forward sweep a tile of an ancestor starts once the pieces of its
+//! children's products that reach it are done, takes in the accumulations for its
 //! columns in the order a level-by-level sweep reduces them, and the products
 //! of a solved tile run while the next tile solves its triangle; in the
 //! backward sweep an ancestor starts when its parent is done, and the
-//! subtrees follow in parallel reading only final values. Every sum is formed
+//! subtrees follow in parallel reading only final values. A product runs in as
+//! many pieces as its work is worth on the pool, of rows and of groups of
+//! right-hand sides, shaped to read the least ([`SolvePlan::cut`]). Every sum is formed
 //! in the same order for every thread count, so the solution is
 //! bit-identical from one thread to many.
 

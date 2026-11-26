@@ -1,9 +1,11 @@
 //! The supernodal triangular solves.
 
-/// Rows per register tile of the panel products of the solves (rows).
-/// Used by: `supernodal::solve::tri_tile`.
+/// Rows of the triangles the solves' blocked triangles end in, solved on the
+/// register tiles (rows): a triangle is halved until its halves hold at most
+/// this many rows, the products between the halves in the GEMM.
+/// Used by: `supernodal::solve` (`tri_rows`, `tri_up`, `tri_tile`, `tri_up_tile`).
 /// Why: a tile of four rows by up to four right-hand sides stays in registers.
-/// Contract: results (the tile fixes the summation order).
+/// Contract: results (where the halving stops fixes the summation order).
 pub const TILE_ROWS: usize = 4;
 
 /// Independent leaf subtrees the tree is cut into for the parallel sweeps
@@ -44,7 +46,7 @@ pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
 /// Right-hand sides per register tile of the solve kernels, and how many of
 /// them count toward a sweep's work where it starts on the pool (right-hand
 /// sides).
-/// Used by: `supernodal::solve` (`tri_rows`, `tri_up`, `SolvePlan::fit`).
+/// Used by: `supernodal::solve` (`tri_rows`, `tri_up`, `col_groups`, `SolvePlan::fit`).
 /// Why: a tile of [`TILE_ROWS`] rows by four right-hand sides stays in
 /// registers; the kernels are instantiated for tiles of 1 to 4.
 /// Contract: rounding (each right-hand side is summed alike in any tile;
