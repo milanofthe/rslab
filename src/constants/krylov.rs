@@ -46,3 +46,19 @@ pub const KRYLOV_REORTH_ETA: f64 = std::f64::consts::FRAC_1_SQRT_2;
 /// Why: tuned default.
 /// Contract: results (the summation order; not the thread count).
 pub const KRYLOV_ORTHO_CHUNK: usize = 2048;
+
+/// Panel vectors that the update of a delayed CGS2 step passes over per
+/// column besides its basis: the pending vector `u`, the operator's image
+/// `w` and the preconditioned vector `z` (vectors).
+/// Used by: the work estimate of `delayed_update` in block GMRES.
+/// Why: counts the vectors that the update reads and writes.
+/// Contract: timing.
+pub const DELAYED_UPDATE_PANEL_VECTORS: usize = 3;
+
+/// Recycle bases that GCRO-DR holds beside its Krylov bases: `U`, `P = M^-1 U`
+/// and `C = A P`, each `n x k` (vectors per recycle dimension).
+/// Used by: `gmres_recycled`, which takes them out of the basis budget before
+/// it sizes the default restart.
+/// Why: the three bases of the method.
+/// Contract: results (the restart length on large systems).
+pub const RECYCLE_BASES: usize = 3;

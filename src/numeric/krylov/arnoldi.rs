@@ -39,23 +39,13 @@ pub struct BlockArnoldi<T> {
     max_steps: usize,
     chunk: usize,
     reorth_eta: f64,
-    /// The orthonormal basis, `n x (steps + 1) p` column-major (`n x steps p`
-    /// once invariant); capacity for `max_steps + 1` blocks.
     basis: Vec<T>,
-    /// The columns of `Hbar`, packed: column `j` of step `s = j / p` holds its
-    /// `(s + 2) p` entries from row 0 down.
     h: Vec<T>,
-    /// `R = V_1 S`: the start block's triangular factor, `p x p` row-major.
     start: Vec<T>,
-    /// Independent columns of the start block and of every step's block.
     start_rank: usize,
     ranks: Vec<usize>,
     steps: usize,
     invariant: bool,
-    /// Scratch, sized at `new`: the block's coefficients on the basis
-    /// (`cols x p`), a column's second-pass coefficients, its coefficients on the
-    /// block's columns before it, the block's triangular factor, the columns'
-    /// norms, and the panel sums.
     proj: Vec<T>,
     again: Vec<T>,
     own: Vec<T>,
@@ -64,7 +54,6 @@ pub struct BlockArnoldi<T> {
     scratch: Vec<T>,
 }
 
-/// A vector with the contents and the capacity of `v`.
 fn with_capacity_of<U: Clone>(v: &Vec<U>) -> Vec<U> {
     let mut out = Vec::with_capacity(v.capacity());
     out.extend_from_slice(v);
@@ -153,9 +142,8 @@ impl<T: Scalar> BlockArnoldi<T> {
         Ok(a)
     }
 
-    /// `H`'s packed length for `max_steps` steps: `p^2 m (m + 3) / 2`.
     fn h_len(p: usize, max_steps: usize) -> usize {
-        p * p * max_steps * (max_steps + 3) / 2 // lit: the sum of s + 2 over the steps
+        (0..max_steps).map(|step| (step + 2) * p * p).sum()
     }
 
     /// The bytes the iteration takes for `max_steps` steps of `n x p` blocks
@@ -188,18 +176,12 @@ impl<T: Scalar> BlockArnoldi<T> {
             + self.norms.capacity() * std::mem::size_of::<f64>()
     }
 
-    /// Orthonormalize the block of `p` columns after the first `cols` basis
-    /// columns in place (module doc), without allocating: its triangular factor
-    /// goes to `self.sub` (`p x p` row-major, the coefficients on the block's own
-    /// columns, zero diagonal for a replaced column), its coefficients on the basis
-    /// before it to `self.proj` (`cols x p`, row `j` column `c`). Returns its rank.
     fn orthonormalize_block(&mut self, cols: usize) -> usize {
         let (n, p, chunk) = (self.n, self.p, self.chunk);
         self.sub.iter_mut().for_each(|v| *v = T::zero());
         for c in 0..p {
             self.norms[c] = norm2(&self.basis[(cols + c) * n..(cols + c + 1) * n]);
         }
-        // pass 1 against the basis, the whole block at once
         {
             let (v, w) = self.basis.split_at_mut(cols * n);
             panel_project(v, cols, w, p, n, chunk, &mut self.proj, &mut self.scratch);
@@ -210,12 +192,10 @@ impl<T: Scalar> BlockArnoldi<T> {
             let k = cols + c;
             let (vq, rest) = self.basis.split_at_mut(k * n);
             let wc = &mut rest[..n];
-            // pass 1 against the block's columns before it
             let own = &mut self.own[..c];
             panel_project(&vq[cols * n..], c, wc, 1, n, chunk, own, &mut self.scratch);
             panel_subtract(&vq[cols * n..], c, wc, 1, n, chunk, own);
             if norm2(wc) < self.reorth_eta * self.norms[c] {
-                // pass 2 against all k columns
                 let again = &mut self.again[..k];
                 panel_project(vq, k, wc, 1, n, chunk, again, &mut self.scratch);
                 panel_subtract(vq, k, wc, 1, n, chunk, again);
@@ -230,8 +210,8 @@ impl<T: Scalar> BlockArnoldi<T> {
                 self.sub[a * p + c] = o;
             }
             let nrm = norm2(wc);
-            // dependent: within the rounding of its k projections
-            if nrm.is_nan() || nrm <= T::EPSILON * k.max(1) as f64 * self.norms[c] {
+            let projection_rounding = T::EPSILON * k.max(1) as f64 * self.norms[c];
+            if nrm.is_nan() || nrm <= projection_rounding {
                 let again = &mut self.again[..k];
                 replace(
                     vq,
@@ -277,7 +257,7 @@ impl<T: Scalar> BlockArnoldi<T> {
         }
         let (n, p) = (self.n, self.p);
         let cols = (self.steps + 1) * p;
-        // within the capacity reserved at new: no reallocation
+        debug_assert!(self.basis.capacity() >= n * (cols + p));
         self.basis.resize(n * (cols + p), T::zero());
         {
             let (v, w) = self.basis.split_at_mut(cols * n);
@@ -369,10 +349,6 @@ impl<T: Scalar> BlockArnoldi<T> {
     }
 }
 
-/// Replace the dependent column `wc` by the first unit vector `e_i` that keeps at
-/// least `eta` of its norm against the `k` columns `vq` (two Gram-Schmidt passes),
-/// normalized, `coef` (`k`) and `scratch` the sweeps' buffers. A basis of all
-/// `n` dimensions leaves `wc` zero.
 #[allow(clippy::too_many_arguments)]
 fn replace<T: Scalar>(
     vq: &[T],
@@ -421,7 +397,6 @@ mod tests {
         (0..len).map(|_| C::new(next(), next())).collect()
     }
 
-    /// A dense `n x n` operator (row-major) applied to a column-major block.
     fn dense(a: &[C], n: usize) -> impl FnMut(&[C], &mut [C], usize) + '_ {
         move |x: &[C], y: &mut [C], p: usize| {
             for c in 0..p {
@@ -436,7 +411,6 @@ mod tests {
         a.iter().zip(b).map(|(x, y)| x.conj() * y).sum()
     }
 
-    /// The basis is orthonormal to `tol`.
     fn orthonormal(v: &[C], n: usize, tol: f64) {
         let k = v.len() / n;
         for i in 0..k {
@@ -448,7 +422,6 @@ mod tests {
         }
     }
 
-    /// `T V_m = V_m H_m + V_(m+1) H_(m+1,m) E_m^T` to `tol`.
     fn relation(ar: &BlockArnoldi<C>, a: &[C], n: usize, p: usize, tol: f64) {
         let m = ar.steps() * p;
         let v = ar.basis();
@@ -470,9 +443,6 @@ mod tests {
         }
     }
 
-    /// The Arnoldi relation holds, the basis is orthonormal, `R = V_1 S`, for one
-    /// and for several start columns, and the basis is the same on one thread and
-    /// on four (the sweeps' chunk order is fixed).
     #[test]
     fn the_arnoldi_relation_holds() {
         let n = 300;
@@ -501,8 +471,7 @@ mod tests {
             assert_eq!(ar.basis(), four.basis(), "p {p}: thread count");
             orthonormal(ar.basis(), n, 1e-12);
             relation(&ar, &a, n, p, 1e-10);
-            // R = V_1 S
-            let (v, s) = (ar.basis(), ar.start());
+                    let (v, s) = (ar.basis(), ar.start());
             for c in 0..p {
                 let r_norm = dot(&r[c * n..(c + 1) * n], &r[c * n..(c + 1) * n])
                     .re
@@ -521,9 +490,6 @@ mod tests {
         }
     }
 
-    /// An invariant space containing the start vector (a diagonal operator with
-    /// 4 distinct values) ends the iteration after 4 steps, its Ritz values the 4
-    /// values; `next_block` is `None` before a step.
     #[test]
     fn an_invariant_space_ends_the_iteration() {
         let n = 50;
@@ -563,16 +529,10 @@ mod tests {
         assert_eq!(ar.step(&op).unwrap(), 0, "a step on an invariant space");
     }
 
-    /// One column of a block dependent (an eigenvector of the operator in the
-    /// start block: its image lies in the basis), the others not: that column is
-    /// replaced, the step's rank is `p - 1`, the iteration goes on with an
-    /// orthonormal basis and the relation holds. A start block with two equal
-    /// columns has rank 1 and an orthonormal first block.
     #[test]
     fn a_dependent_column_is_deflated_alone() {
         let n = 60;
         let mut a = random(n * n, 5);
-        // e_0 an eigenvector: column 0 of A is 2 e_0
         for i in 0..n {
             a[i * n] = C::new(if i == 0 { 2.0 } else { 0.0 }, 0.0);
         }
@@ -588,7 +548,6 @@ mod tests {
         }
         orthonormal(ar.basis(), n, 1e-12);
         relation(&ar, &a, n, 2, 1e-10);
-        // equal columns
         let col = random(n, 8);
         let twice: Vec<C> = col.iter().chain(col.iter()).copied().collect();
         let ar = BlockArnoldi::new(&twice, n, 2, 2, &KrylovSettings::default()).unwrap();
@@ -600,20 +559,16 @@ mod tests {
         );
     }
 
-    /// A nearly dependent block (a column in the basis to 1e-9): the second pass
-    /// keeps it orthogonal to the basis to the working precision.
     #[test]
     fn a_near_dependent_column_stays_orthogonal() {
         let n = 80;
         let a = random(n * n, 11);
         let r = random(n, 12);
         let mut ar = BlockArnoldi::new(&r, n, 1, 4, &KrylovSettings::default()).unwrap();
-        let mut first = true;
-        // the operator returns its input's own direction plus 1e-9 of a random one on
-        // the first step, then A
+        let mut first_step = true;
         let noise = random(n, 13);
         let op = FnOperator::new(n, |x: &[C], y: &mut [C], _p: usize| {
-            if std::mem::take(&mut first) {
+            if std::mem::take(&mut first_step) {
                 for i in 0..n {
                     y[i] = x[i] + noise[i] * 1e-9;
                 }
@@ -627,7 +582,6 @@ mod tests {
         orthonormal(ar.basis(), n, 1e-13);
     }
 
-    /// In single precision the relation holds to its own roundoff.
     #[test]
     fn single_precision() {
         let n = 100;
@@ -670,7 +624,6 @@ mod tests {
         }
     }
 
-    /// Wrong sizes are errors, not panics.
     #[test]
     fn wrong_sizes_are_errors() {
         let s = KrylovSettings::default();
@@ -693,10 +646,6 @@ mod tests {
         ));
     }
 
-    /// Two new columns of a block nearly parallel (their images under the
-    /// operator differ by 1e-9): the second is orthogonalized against the first
-    /// twice (the in-block DGKS pass) and comes out orthonormal to it and to the
-    /// basis; a clone keeps the reserved capacity.
     #[test]
     fn nearly_parallel_columns_of_a_block_stay_orthogonal() {
         let n = 70;
@@ -716,8 +665,6 @@ mod tests {
         assert_eq!(c.basis(), ar.basis());
     }
 
-    /// In single precision an invariant space is detected as in double: the ranks
-    /// of a diagonal operator with 4 distinct values are 1, 1, 1, 0.
     #[test]
     fn single_precision_detects_an_invariant_space() {
         let n = 40;
