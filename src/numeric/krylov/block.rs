@@ -1,5 +1,6 @@
-//! Block GMRES for many right-hand sides with CGS2 over the whole panel, as a
-//! solve that can be continued to a tighter tolerance in the same Krylov space.
+//! Block GMRES for many right-hand sides with delayed CGS2 over the whole panel,
+//! as a solve that can be continued to a tighter tolerance in the same Krylov
+//! space.
 
 use super::util::*;
 use super::*;
@@ -7,6 +8,7 @@ use super::*;
 use super::recycle::RecycleScalar;
 use super::settings::{BasisSwitch, BlockBasis};
 use crate::error::RslabError;
+use crate::parallel::SendPtr;
 use crate::scalar::Scalar;
 use crate::stored::Stored;
 
@@ -88,20 +90,36 @@ pub struct StepProgress<'p> {
 /// One right-hand side's Arnoldi state: its basis, the Hessenberg matrix under
 /// its Givens rotations and the rotated least-squares right-hand side of the
 /// open restart cycle.
+///
+/// The basis is orthogonalized by delayed CGS2: after `j` steps of a cycle the
+/// layers `0..j` hold the orthonormal `v_0..v_{j-1}` and layer `j` the pending
+/// `u_j`, the residual of `A z_{j-1}` after one Gram-Schmidt pass. A step applies
+/// the operator to `u_j / ||u_j||` as it is; its second pass, the projection
+/// `s_j = V^H u_j / ||u_j||` that turns it into `v_j`, is taken in the same pass
+/// over the basis as the first pass of the new vector. The Hessenberg matrix
+/// relates the vectors the operator was applied to: `A Z = V H_bar` with
+/// `z_i = M^-1 u_i / ||u_i||`, the last column (step `j - 1`) with `u_j` taken as
+/// orthogonal to `V` until the next step finishes it.
 struct Column<T: Scalar> {
     /// The basis, layer `i` the scalars `[i*n, (i+1)*n)`: the restart's layers
     /// reserved, the ones the cycle has written resident ([`Stored`]).
     v: Stored<T>,
-    /// The preconditioned basis `z_i = M^-1 v_i` of the steps taken, laid out as
-    /// `v`: the solution is formed from the vectors the Arnoldi relation holds.
-    /// Empty when the preconditioner is fixed ([`KrylovSettings::flexible`]
-    /// `false`): `Z y = M^-1 (V y)` then.
+    /// The preconditioned vectors `z_i = M^-1 u_i / ||u_i||` of the steps taken,
+    /// laid out as `v`: the solution is formed from the vectors the Arnoldi
+    /// relation holds. Empty when the preconditioner is fixed
+    /// ([`KrylovSettings::flexible`] `false`): `Z y = M^-1 (V S y)` then.
     zb: Stored<T>,
     /// Row-major `(m+1) x m`, entry `(i, j)` at `h[i*m + j]`.
     h: Vec<T>,
     /// The same before the Givens rotations: `A Z = V H_bar` of the open cycle
     /// (`+ C B` when deflating), the matrix [`BlockGmres::harvest`] reads.
     hraw: Vec<T>,
+    /// Row-major `m x m` upper triangular, `u_i / ||u_i|| = V S[:, i]`: the
+    /// vectors the operator was applied to in the basis.
+    su: Vec<T>,
+    /// The least-squares right-hand side's entry of the last step before its
+    /// rotation, kept to rotate again once the step is finished.
+    gp: T,
     /// Deflating ([`BlockRecycle`] of dimension `k`): step `j`'s components
     /// `C^H A z_j` at `bm[j*k..(j+1)*k]`.
     bm: Vec<T>,
@@ -127,6 +145,8 @@ impl<T: Scalar> Column<T> {
             zb: Stored::default(),
             h: vec![T::zero(); (m + 1) * m],
             hraw: vec![T::zero(); (m + 1) * m],
+            su: vec![T::zero(); m * m],
+            gp: T::zero(),
             bm: vec![T::zero(); m * k],
             cs: vec![T::zero(); m],
             sn: vec![T::zero(); m],
@@ -169,10 +189,10 @@ impl<T: Scalar> Column<T> {
             .map_or(f64::INFINITY, |j| self.g[j].magnitude() / bnorm)
     }
 
-    /// Open a cycle on the residual `r` of norm `beta > 0` (scaled to the first basis
-    /// vector in place), the restart's layers of its bases reserved where it holds
-    /// none (as `basis` stores them).
-    fn open(&mut self, r: &mut [T], beta: f64, basis: BlockBasis) {
+    /// Open a cycle on the residual `r` of norm `beta > 0` (the pending first basis
+    /// vector, normalized by the first step), the restart's layers of its bases
+    /// reserved where it holds none (as `basis` stores them).
+    fn open(&mut self, r: &[T], beta: f64, basis: BlockBasis) {
         let n = r.len();
         if !self.holds() {
             let m = self.cs.len();
@@ -184,8 +204,6 @@ impl<T: Scalar> Column<T> {
         self.h.iter_mut().for_each(|e| *e = T::zero());
         self.g.iter_mut().for_each(|e| *e = T::zero());
         self.g[0] = T::from_real(beta);
-        let inv = T::from_real(1.0 / beta);
-        r.iter_mut().for_each(|ri| *ri = *ri * inv);
         self.v.write(0, r);
         self.steps = Some(0);
     }
@@ -206,45 +224,41 @@ impl<T: Scalar> Column<T> {
         jd
     }
 
-    /// `out += B y`: the first `jd` vectors of the basis `b` combined by `y`.
-    fn combine(b: &Stored<T>, jd: usize, y: &[T], out: &mut [T]) {
-        let n = out.len();
-        for (i, &yi) in y.iter().enumerate().take(jd) {
-            b.axpy(i * n, yi, out);
+    /// `y <- S y` for the leading `jd` coefficients: those of `Z y` taken to the basis
+    /// `V` (`Z = M^-1 V S` for a fixed preconditioner).
+    fn lift(&self, m: usize, jd: usize, y: &mut [T]) {
+        for i in 0..jd {
+            y[i] = (i..jd).fold(T::zero(), |a, k| a + self.su[i * m + k] * y[k]);
         }
     }
 
-    /// `out -= U B y` for the subspace `rec` deflated: the part of the open
-    /// cycle's correction in its directions.
-    fn deflated(&self, rec: &BlockRecycle<T>, jd: usize, y: &[T], out: &mut [T]) {
-        let n = out.len();
-        let k = rec.k;
-        for i in 0..k {
-            let t = (0..jd).fold(T::zero(), |a, j| a + self.bm[j * k + i] * y[j]);
-            if t != T::zero() {
-                for (o, &u) in out.iter_mut().zip(&rec.u[i * n..(i + 1) * n]) {
-                    *o = *o - u * t;
-                }
-            }
+    /// `t = B y` for the subspace `rec` deflated (`k` entries): the open cycle's
+    /// correction in its directions is `- U t`.
+    fn deflation_terms(&self, k: usize, jd: usize, y: &[T], t: &mut [T]) {
+        for (i, ti) in t.iter_mut().enumerate().take(k) {
+            *ti = (0..jd).fold(T::zero(), |a, j| a + self.bm[j * k + i] * y[j]);
         }
     }
 
-    /// The open cycle's solution `x0 + Z y` into `out` from the stored
-    /// preconditioned basis, deflating `rec`: `x0 + Z y - U B y`.
-    fn correction(
-        &self,
-        m: usize,
-        rec: Option<&BlockRecycle<T>>,
-        y: &mut [T],
-        x0: &[T],
-        out: &mut [T],
-    ) {
-        out.copy_from_slice(x0);
-        let jd = self.coefficients(m, y);
-        Self::combine(&self.zb, jd, y, out);
-        if let Some(rec) = rec {
-            self.deflated(rec, jd, y, out);
+    /// Rotate Hessenberg column `j` (taken from `hraw`) by the rotations before it
+    /// and a new one zeroing its subdiagonal, the least-squares right-hand side's
+    /// entries `j` and `j + 1` from `gp`, its entry `j` before.
+    fn rotate(&mut self, m: usize, j: usize) {
+        for i in 0..=j + 1 {
+            self.h[i * m + j] = self.hraw[i * m + j];
         }
+        for i in 0..j {
+            let (hi, hi1) = (self.h[i * m + j], self.h[(i + 1) * m + j]);
+            self.h[i * m + j] = self.cs[i].conj() * hi + self.sn[i].conj() * hi1;
+            self.h[(i + 1) * m + j] = -self.sn[i] * hi + self.cs[i] * hi1;
+        }
+        let (cj, sj) = givens(self.h[j * m + j], self.h[(j + 1) * m + j]);
+        self.cs[j] = cj;
+        self.sn[j] = sj;
+        self.h[j * m + j] = cj.conj() * self.h[j * m + j] + sj.conj() * self.h[(j + 1) * m + j];
+        self.h[(j + 1) * m + j] = T::zero();
+        self.g[j + 1] = -sj * self.gp;
+        self.g[j] = cj.conj() * self.gp;
     }
 }
 
@@ -356,15 +370,22 @@ pub struct BlockGmres<'a, T: Scalar, A: ?Sized, M: ?Sized> {
     z: Vec<T>,
     /// `A M^-1` of the panel, orthogonalized in place; `b - A x` in a check.
     w: Vec<T>,
-    /// The two Gram-Schmidt passes' projections, `off[a]..off[a+1]` column `a`'s.
-    proj1: Vec<T>,
-    proj2: Vec<T>,
+    /// A step's products of the pass over the bases ([`delayed_project`]),
+    /// `off[a]..off[a+1]` column `a`'s.
+    proj: Vec<T>,
     /// The projections' row-chunk partial sums.
     proj_scratch: Vec<T>,
     off: Vec<usize>,
-    wnorm0: Vec<f64>,
-    reorth: Vec<bool>,
+    /// A step's update per column ([`delayed_update`]).
+    delayed: Vec<Delayed<T>>,
+    /// Per column a norm (the new vectors of a step, the residuals of a check) and
+    /// its row-chunk partial sums.
+    norms: Vec<f64>,
+    norm_scratch: Vec<f64>,
+    /// The least-squares coefficients of the columns of a check, `m` each.
     y: Vec<T>,
+    /// Their leading well-conditioned dimensions.
+    jd: Vec<usize>,
     /// The columns of a step with their open cycles' steps, in column order.
     act: Vec<(usize, usize)>,
     /// The columns of the last residual check, in column order (their residual
@@ -408,9 +429,9 @@ where
 {
     /// A solve of the `s` right-hand sides `b` (column-major `n x s`) from `x0`
     /// (column-major `n x s`, default zero), nothing computed yet. The restart,
-    /// the iteration budget of every [`solve`](Self::solve) call, the
-    /// reorthogonalization threshold and the reduction chunk come from
-    /// `settings`; its `tol` is not read (each call names its own).
+    /// the iteration budget of every [`solve`](Self::solve) call and the
+    /// reduction chunk come from `settings`; its `tol` is not read (each call
+    /// names its own).
     pub fn new(
         op: &'a A,
         b: &'a [T],
@@ -477,13 +498,14 @@ where
             panel: vec![T::zero(); n * s],
             z: vec![T::zero(); n * s],
             w: vec![T::zero(); n * s],
-            proj1: vec![T::zero(); s * (m + 1)],
-            proj2: vec![T::zero(); s * (m + 1)],
-            proj_scratch: vec![T::zero(); n.div_ceil(chunk) * s * (m + 1)],
+            proj: vec![T::zero(); 2 * s * (m + 1)],
+            proj_scratch: vec![T::zero(); n.div_ceil(chunk) * 2 * s * (m + 1)],
             off: vec![0; s + 1],
-            wnorm0: vec![0.0; s],
-            reorth: vec![false; s],
-            y: vec![T::zero(); m],
+            delayed: Vec::with_capacity(s),
+            norms: vec![0.0; s],
+            norm_scratch: vec![0.0; n.div_ceil(chunk) * s],
+            y: vec![T::zero(); s * m],
+            jd: vec![0; s],
             act: Vec::with_capacity(s),
             chk: Vec::with_capacity(s),
             closing: Vec::with_capacity(s),
@@ -541,7 +563,7 @@ where
             .iter()
             .map(|c| {
                 c.basis_bytes()
-                    + [&c.h, &c.hraw, &c.bm, &c.cs, &c.sn, &c.g]
+                    + [&c.h, &c.hraw, &c.su, &c.bm, &c.cs, &c.sn, &c.g]
                         .into_iter()
                         .map(vec_bytes)
                         .sum::<u64>()
@@ -553,8 +575,7 @@ where
             &self.panel,
             &self.z,
             &self.w,
-            &self.proj1,
-            &self.proj2,
+            &self.proj,
             &self.proj_scratch,
             &self.y,
             &self.rproj,
@@ -566,8 +587,10 @@ where
             + self.rec.map_or(0, BlockRecycle::heap_bytes)
             + vec_bytes(&self.bnorm)
             + vec_bytes(&self.res)
-            + vec_bytes(&self.wnorm0)
-            + vec_bytes(&self.reorth)
+            + vec_bytes(&self.norms)
+            + vec_bytes(&self.norm_scratch)
+            + vec_bytes(&self.jd)
+            + vec_bytes(&self.delayed)
             + vec_bytes(&self.off)
             + vec_bytes(&self.act)
             + vec_bytes(&self.chk)
@@ -960,61 +983,113 @@ where
         if k == 0 {
             return Ok(false);
         }
+        let chunk = self.chunk;
+        let kd = self.rec.map_or(0, |r| r.k);
+        // every column's coefficients, and `B y` of the subspace deflated
+        for (a, &c) in self.chk.iter().enumerate() {
+            let col = &self.cols[c];
+            let y = &mut self.y[a * m..(a + 1) * m];
+            let jd = col.coefficients(m, y);
+            self.jd[a] = jd;
+            col.deflation_terms(kd, jd, y, &mut self.rproj[a * kd..(a + 1) * kd]);
+            if !self.basis.flexible {
+                col.lift(m, jd, y);
+            }
+        }
+        let (cols, chk, jds, y, t) = (&self.cols, &self.chk, &self.jd, &self.y, &self.rproj);
+        let (x, rec) = (&self.x, self.rec);
+        let (pp, op) = (SendPtr::of(&mut self.panel), SendPtr::of(&mut self.out));
+        let depth: usize = (0..k).map(|a| jds[a] + kd + 1).sum();
+        // `out = x + Z y - U t` from the stored preconditioned basis, or `x + z - U t` from
+        // `z = M^-1 (V S y)`; the panel a copy
+        let form = |a: usize, r0: usize, r1: usize, z: Option<&[T]>| {
+            let (c, len) = (chk[a], r1 - r0);
+            // SAFETY: piece (a, chunk) alone holds these rows of column `c` of `out` and of
+            // column `a` of the panel.
+            let (o, p) = unsafe { (op.part(c * n + r0, len), pp.part(a * n + r0, len)) };
+            o.copy_from_slice(&x[c * n + r0..c * n + r1]);
+            match z {
+                Some(z) => o
+                    .iter_mut()
+                    .zip(&z[a * n + r0..a * n + r1])
+                    .for_each(|(o, &z)| *o = *o + z),
+                None => {
+                    for i in 0..jds[a] {
+                        cols[c].zb.axpy(i * n + r0, y[a * m + i], o);
+                    }
+                }
+            }
+            if let Some(rec) = rec {
+                for i in 0..kd {
+                    let u = &rec.u[i * n + r0..i * n + r1];
+                    let ti = t[a * kd + i];
+                    o.iter_mut().zip(u).for_each(|(o, &u)| *o = *o - u * ti);
+                }
+            }
+            p.copy_from_slice(o);
+        };
+        let threads = self.ortho_threads;
         if self.basis.flexible {
-            // The open cycles' solutions `x + Z y`, from the stored preconditioned basis.
-            for (a, &c) in self.chk.iter().enumerate() {
-                let (cb, pb) = (c * n, a * n);
-                self.cols[c].correction(
-                    m,
-                    self.rec,
-                    &mut self.y,
-                    &self.x[cb..cb + n],
-                    &mut self.out[cb..cb + n],
-                );
-                self.panel[pb..pb + n].copy_from_slice(&self.out[cb..cb + n]);
-            }
+            threads.run(
+                0,
+                |cap| cap,
+                || column_chunks::<T>(k, n, chunk, n * depth, |a, r0, r1| form(a, r0, r1, None)),
+            );
         } else {
-            // The open cycles' solutions `x + M^-1 (V y)`: every column's `V y`, one
-            // batched preconditioner apply, then `x` and the deflated part.
-            for (a, &c) in self.chk.iter().enumerate() {
-                let pb = a * n;
-                let col = &self.cols[c];
-                let jd = col.coefficients(m, &mut self.y);
-                let p = &mut self.panel[pb..pb + n];
-                p.iter_mut().for_each(|e| *e = T::zero());
-                Column::combine(&col.v, jd, &self.y, p);
-            }
+            threads.run(
+                0,
+                |cap| cap,
+                || {
+                    column_chunks::<T>(k, n, chunk, n * depth, |a, r0, r1| {
+                        // SAFETY: piece (a, chunk) alone holds these rows of column `a`.
+                        let p = unsafe { pp.part(a * n + r0, r1 - r0) };
+                        p.iter_mut().for_each(|e| *e = T::zero());
+                        for i in 0..jds[a] {
+                            cols[chk[a]].v.axpy(i * n + r0, y[a * m + i], p);
+                        }
+                    })
+                },
+            );
             self.precond
                 .apply_block(&self.panel[..k * n], &mut self.z[..k * n], k, n)?;
-            for (a, &c) in self.chk.iter().enumerate() {
-                let (cb, pb) = (c * n, a * n);
-                let col = &self.cols[c];
-                let out = &mut self.out[cb..cb + n];
-                for ((o, &x), &z) in out
-                    .iter_mut()
-                    .zip(&self.x[cb..cb + n])
-                    .zip(&self.z[pb..pb + n])
-                {
-                    *o = x + z;
-                }
-                if let Some(rec) = self.rec {
-                    let jd = col.coefficients(m, &mut self.y);
-                    col.deflated(rec, jd, &self.y, out);
-                }
-                self.panel[pb..pb + n].copy_from_slice(out);
-            }
+            let z = &self.z;
+            threads.run(
+                0,
+                |cap| cap,
+                || {
+                    column_chunks::<T>(k, n, chunk, n * (kd + 2), |a, r0, r1| {
+                        form(a, r0, r1, Some(z))
+                    })
+                },
+            );
         }
         // Their true residuals, one batched operator apply.
         self.op
             .apply_block(&self.panel[..k * n], &mut self.w[..k * n], k);
+        let nchunks = n.div_ceil(chunk);
+        let (b, wp) = (self.b, SendPtr::of(&mut self.w));
+        let sp = SendPtr::of(&mut self.norm_scratch[..k * nchunks]);
+        threads.run(
+            0,
+            |cap| cap,
+            || {
+                column_chunks::<T>(k, n, chunk, 2 * k * n, |a, r0, r1| {
+                    let cb = chk[a] * n;
+                    // SAFETY: piece (a, chunk) alone holds these rows of column `a` and its sum.
+                    let wa = unsafe { wp.part(a * n + r0, r1 - r0) };
+                    let mut rn = 0.0;
+                    for (wi, &bi) in wa.iter_mut().zip(&b[cb + r0..cb + r1]) {
+                        *wi = bi - *wi;
+                        rn += wi.magnitude_sq();
+                    }
+                    unsafe { sp.part(a * nchunks + r0 / chunk, 1)[0] = rn };
+                })
+            },
+        );
         for (a, &c) in self.chk.iter().enumerate() {
-            let (cb, pb) = (c * n, a * n);
-            let mut rn = 0.0;
-            for i in 0..n {
-                let r = self.b[cb + i] - self.w[pb + i];
-                self.w[pb + i] = r;
-                rn += r.magnitude_sq();
-            }
+            let rn: f64 = self.norm_scratch[a * nchunks..(a + 1) * nchunks]
+                .iter()
+                .sum();
             self.res[c] = Some(rn.sqrt() / self.bnorm[c]);
         }
         Ok(true)
@@ -1066,54 +1141,69 @@ where
                 None => r * self.bnorm[c],
             };
             if beta > 0.0 {
-                self.cols[c].open(&mut self.w[a * n..(a + 1) * n], beta, self.basis);
+                self.cols[c].open(&self.w[a * n..(a + 1) * n], beta, self.basis);
                 self.deepest = self.deepest.max(1);
             }
         }
     }
 
-    /// One block step of the columns in `act`: their newest basis vectors through
-    /// the preconditioner and the operator in one batched apply each, each
-    /// result orthogonalized against its column's own basis by CGS2 (a
-    /// projection pass over the whole panel, a second one for the columns whose
-    /// norm collapsed), the Hessenberg columns rotated and the bases extended.
+    /// One block step of the columns in `act`: their pending basis vectors through
+    /// the preconditioner and the operator in one batched apply each, then delayed
+    /// CGS2 over the whole panel in one pass over the bases for the products
+    /// ([`delayed_project`]) and one for the update ([`delayed_update`]): every
+    /// pending vector orthogonalized a second time and normalized to its column's
+    /// next basis vector, the operator's image orthogonalized once against the
+    /// basis so extended and left pending. The step before is finished in the
+    /// Hessenberg matrix, the new one entered with its pending vector taken as
+    /// orthogonal, and the least-squares residual estimated from both.
     #[allow(clippy::needless_range_loop)]
     fn step(&mut self) -> Result<(), RslabError> {
-        let (n, m, sa) = (self.n, self.m, self.act.len());
-        for (a, &(c, j)) in self.act.iter().enumerate() {
-            self.cols[c]
-                .v
-                .read(j * n, &mut self.panel[a * n..(a + 1) * n]);
-            self.off[a + 1] = self.off[a] + j + 1;
+        let (n, m, sa, chunk) = (self.n, self.m, self.act.len(), self.chunk);
+        {
+            let (cols, act) = (&self.cols, &self.act);
+            let pp = SendPtr::of(&mut self.panel[..sa * n]);
+            self.ortho_threads.run(
+                0,
+                |cap| cap,
+                || {
+                    column_chunks::<T>(sa, n, chunk, sa * n, |a, r0, r1| {
+                        let (c, j) = act[a];
+                        // SAFETY: piece (a, chunk) alone writes these rows of column `a`.
+                        cols[c]
+                            .v
+                            .read(j * n + r0, unsafe { pp.part(a * n + r0, r1 - r0) });
+                    })
+                },
+            );
+        }
+        for a in 0..sa {
+            self.off[a + 1] = self.off[a] + 2 * self.act[a].1 + 2;
         }
         self.precond
             .apply_block(&self.panel[..sa * n], &mut self.z[..sa * n], sa, n)?;
         self.op
             .apply_block(&self.z[..sa * n], &mut self.w[..sa * n], sa);
-        for a in 0..sa {
-            self.wnorm0[a] = norm2(&self.w[a * n..(a + 1) * n]);
-        }
         let Self {
             cols,
             act,
             off,
+            panel,
+            z,
             w,
-            proj1,
-            proj2,
+            proj,
             proj_scratch,
             ortho_threads,
-            chunk,
-            reorth,
-            wnorm0,
-            reorth_eta,
             rec,
             rproj,
             rscratch,
+            delayed,
+            norms,
+            norm_scratch,
+            basis,
             ..
         } = self;
-        let (cols, act, off, chunk) = (&*cols, &*act, &off[..=sa], *chunk);
-        let layers = |a: usize| &cols[act[a].0].v;
-        let w = &mut w[..sa * n];
+        let off = &off[..=sa];
+        let (panel, z, w) = (&mut panel[..sa * n], &mut z[..sa * n], &mut w[..sa * n]);
         // deflating: the panel's components in `range(C)` first, kept per step
         if let Some(rec) = &*rec {
             ortho_threads.run(
@@ -1127,94 +1217,140 @@ where
                 || panel_subtract(&rec.c, rec.k, w, sa, n, chunk, rproj),
             );
         }
-        ortho_threads.run(
-            0,
-            |cap| cap,
-            || column_project(&layers, off, w, n, chunk, proj1, proj_scratch),
-        );
-        ortho_threads.run(
-            0,
-            |cap| cap,
-            || column_subtract(&layers, off, w, n, chunk, proj1),
-        );
-        // The second pass, per column: only a column whose norm collapsed in the
-        // first takes it (decided on serial norms, so thread-count independent).
-        let mut any = false;
-        for a in 0..sa {
-            reorth[a] = norm2(&w[a * n..(a + 1) * n]) < *reorth_eta * wnorm0[a];
-            any |= reorth[a];
-        }
-        if any {
+        {
+            let (cols, act) = (&*cols, &*act);
+            let layers = |a: usize| &cols[act[a].0].v;
             ortho_threads.run(
                 0,
                 |cap| cap,
-                || column_project(&layers, off, w, n, chunk, proj2, proj_scratch),
-            );
-            for a in 0..sa {
-                if !reorth[a] {
-                    proj2[off[a]..off[a + 1]]
-                        .iter_mut()
-                        .for_each(|e| *e = T::zero());
-                }
-            }
-            ortho_threads.run(
-                0,
-                |cap| cap,
-                || column_subtract(&layers, off, w, n, chunk, proj2),
+                || delayed_project(&layers, off, panel, w, n, chunk, proj, proj_scratch),
             );
         }
+        // Per column from the products: the pending vector `u` scaled to unit norm, its
+        // components `s` in the basis and the norm `nrm` of the rest (Pythagoras), the
+        // first pass `q` of the image `w` against the basis and `h` against the next basis
+        // vector `(u - V s) / nrm`, all from one pass.
+        let kd = rec.map_or(0, |r| r.k);
+        delayed.clear();
         for a in 0..sa {
-            let (c, j) = self.act[a];
-            let col = &mut self.cols[c];
-            if let Some(rec) = &self.rec {
-                for i in 0..rec.k {
-                    col.bm[j * rec.k + i] = self.rproj[i * sa + a];
-                }
+            let (c, k) = act[a];
+            let o = &proj[off[a]..off[a + 1]];
+            let unorm = o[2 * k].real().max(0.0).sqrt();
+            let inv_u = if unorm > 0.0 { 1.0 / unorm } else { 0.0 };
+            let iu = T::from_real(inv_u);
+            let ss: f64 = o[..k].iter().map(|e| e.magnitude_sq()).sum::<f64>() * inv_u * inv_u;
+            let nrm = (1.0 - ss).max(0.0).sqrt();
+            let inv_nrm = if nrm > 0.0 { 1.0 / nrm } else { 0.0 };
+            let sq = (0..k).fold(T::zero(), |acc, i| acc + o[i].conj() * o[k + i]);
+            let h = (o[2 * k + 1] - sq) * T::from_real(inv_u * inv_u * inv_nrm);
+            let col = &mut cols[c];
+            for i in 0..k {
+                col.su[i * m + k] = o[i] * iu;
             }
-            for i in 0..=j {
-                let p = self.off[a] + i;
-                col.h[i * m + j] = if any {
-                    self.proj1[p] + self.proj2[p]
-                } else {
-                    self.proj1[p]
-                };
-                col.hraw[i * m + j] = col.h[i * m + j];
-            }
-            if self.basis.flexible {
-                col.zb.write(j * n, &self.z[a * n..(a + 1) * n]);
-            }
-            let wa = &mut self.w[a * n..(a + 1) * n];
-            let hn = norm2(wa);
-            col.h[(j + 1) * m + j] = T::from_real(hn);
-            col.hraw[(j + 1) * m + j] = col.h[(j + 1) * m + j];
-            // the next basis vector, scaled in the panel
-            if hn > 0.0 {
-                let inv = T::from_real(1.0 / hn);
-                wa.iter_mut().for_each(|wi| *wi = *wi * inv);
+            col.su[k * m + k] = T::from_real(nrm);
+            if k == 0 {
+                col.g[0] = T::from_real(unorm);
             } else {
-                wa.iter_mut().for_each(|wi| *wi = T::zero());
+                // The step before finished: its image's remainder `u = unorm (V s' + nrm v)`.
+                for i in 0..k {
+                    col.hraw[i * m + k - 1] = col.hraw[i * m + k - 1] + o[i];
+                }
+                col.hraw[k * m + k - 1] = T::from_real(unorm * nrm);
+                col.rotate(m, k - 1);
             }
-            col.v.write((j + 1) * n, wa);
-            // The earlier rotations, then a new one zeroing `h[j+1][j]`.
-            for i in 0..j {
-                let (hi, hi1) = (col.h[i * m + j], col.h[(i + 1) * m + j]);
-                col.h[i * m + j] = col.cs[i].conj() * hi + col.sn[i].conj() * hi1;
-                col.h[(i + 1) * m + j] = -col.sn[i] * hi + col.cs[i] * hi1;
+            for i in 0..k {
+                col.hraw[i * m + k] = o[k + i] * iu;
             }
-            let (cj, sj) = givens(col.h[j * m + j], col.h[(j + 1) * m + j]);
-            col.cs[j] = cj;
-            col.sn[j] = sj;
-            col.h[j * m + j] = cj.conj() * col.h[j * m + j] + sj.conj() * col.h[(j + 1) * m + j];
-            col.h[(j + 1) * m + j] = T::zero();
-            col.g[j + 1] = -sj * col.g[j];
-            col.g[j] = cj.conj() * col.g[j];
-            col.steps = Some(j + 1);
+            col.hraw[k * m + k] = h;
+            for i in 0..kd {
+                col.bm[k * kd + i] = rproj[i * sa + a] * iu;
+            }
+            delayed.push(Delayed {
+                k,
+                inv_u,
+                inv_nrm,
+                h,
+                v: col.v.rows((k + 2) * n),
+                z: basis.flexible.then(|| col.zb.rows((k + 1) * n)),
+            });
+        }
+        {
+            let delayed = &*delayed;
+            ortho_threads.run(
+                0,
+                |cap| cap,
+                // SAFETY: every column's rows reach its layers `k + 1` of `v` and `k` of
+                // `z` (just taken), and the columns of a step are distinct.
+                || unsafe {
+                    delayed_update(
+                        delayed,
+                        off,
+                        proj,
+                        (panel, z, w),
+                        n,
+                        chunk,
+                        norms,
+                        norm_scratch,
+                    )
+                },
+            );
+        }
+        for a in 0..sa {
+            let (c, k) = self.act[a];
+            let col = &mut self.cols[c];
+            // SAFETY: the update wrote layers `k` and `k + 1` of `v` and layer `k` of `z`.
+            unsafe {
+                col.v.written((k + 2) * n);
+                if self.basis.flexible {
+                    col.zb.written((k + 1) * n);
+                }
+            }
+            // The new step, its pending vector taken as orthogonal to the basis.
+            col.hraw[(k + 1) * m + k] = T::from_real(self.norms[a]);
+            col.gp = col.g[k];
+            col.rotate(m, k);
+            col.steps = Some(k + 1);
             col.stepped += 1;
             self.res[c] = None;
-            self.deepest = self.deepest.max(j + 2);
+            self.deepest = self.deepest.max(k + 2);
         }
         self.iters += 1;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl<T, A, M> BlockGmres<'_, T, A, M>
+where
+    T: Scalar,
+    A: LinearOperator<T> + ?Sized,
+    M: Preconditioner<T> + ?Sized,
+{
+    /// The worst `||V^H V - I||_F` over the open cycles of the first `k` vectors of
+    /// their bases (as many as written and finished).
+    pub(super) fn orthogonality_loss(&self, k: usize) -> f64 {
+        let n = self.n;
+        let (mut p, mut q) = (vec![T::zero(); n], vec![T::zero(); n]);
+        let mut worst = 0.0_f64;
+        for col in &self.cols {
+            let Some(j) = col.steps else { continue };
+            let mut f = 0.0;
+            for i in 0..j.min(k) {
+                col.v.read(i * n, &mut p);
+                for l in 0..j.min(k) {
+                    col.v.read(l * n, &mut q);
+                    let e = if i == l { T::one() } else { T::zero() };
+                    f += (dotc(&p, &q) - e).magnitude_sq();
+                }
+            }
+            worst = worst.max(f.sqrt());
+        }
+        worst
+    }
+
+    /// Column `c`'s least-squares residual estimate, relative.
+    pub(super) fn estimate(&self, c: usize) -> f64 {
+        self.cols[c].estimate(self.bnorm[c])
     }
 }
 
@@ -1251,13 +1387,15 @@ where
                 continue;
             };
             let hb = |i: usize, j: usize| col.hraw[i * m + j].to_c();
-            // `M1 = H_bar^H H_bar`, `M2 = H^H` (row-major `d x d`)
+            let sb = |i: usize, j: usize| col.su[i * m + j].to_c();
+            // `M1 = H_bar^H H_bar`, `M2 = H^H S` (row-major `d x d`): the vectors the operator
+            // was applied to are `V S`
             let mut m1 = vec![Cx::new(0.0, 0.0); d * d];
             let mut m2 = vec![Cx::new(0.0, 0.0); d * d];
             for i in 0..d {
                 for j in 0..d {
                     m1[i * d + j] = (0..=d).map(|r| hb(r, i).conj() * hb(r, j)).sum();
-                    m2[i * d + j] = hb(j, i).conj();
+                    m2[i * d + j] = (0..=j).map(|r| hb(r, i).conj() * sb(r, j)).sum();
                 }
             }
             // at most half the cycle's depth from one column: the harmonic Ritz pairs of a
@@ -1268,6 +1406,7 @@ where
             }
         }
         cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let col_s = |c: usize, i: usize, j: usize| self.cols[c].su[i * m + j].to_c();
         // the directions, orthonormal
         let mut u: Vec<T> = Vec::new();
         for (_, c, theta, g) in cands {
@@ -1276,16 +1415,19 @@ where
                 break;
             }
             let d = g.len();
-            // the Ritz vectors in the solution space: `Z g`, as `M^-1 (V g)` where `Z`
+            // the Ritz vectors in the solution space: `Z g`, as `M^-1 (V S g)` where `Z`
             // is not kept
-            let pairs = [(theta, g)];
-            let ritz = |b: &Stored<T>| {
+            let ritz = |b: &Stored<T>, g: Vec<Cx>| {
+                let pairs = [(theta, g)];
                 T::combine_ritz(&|j, a, out| b.axpy(j * n, a, out), n, d, &pairs, k - kept)
             };
             let cand = if self.basis.flexible {
-                ritz(&self.cols[c].zb)
+                ritz(&self.cols[c].zb, g)
             } else {
-                let vg = ritz(&self.cols[c].v);
+                let sg = (0..d)
+                    .map(|i| (i..d).map(|j| col_s(c, i, j) * g[j]).sum())
+                    .collect();
+                let vg = ritz(&self.cols[c].v, sg);
                 let mut zg = vec![T::zero(); vg.len()];
                 // (no wider than the solve applies it)
                 let width = self.s * n;
@@ -1376,7 +1518,7 @@ fn orthonormal_into<T: Scalar>(
 /// vectors deep, of `stored` bytes a basis scalar: the allocations of
 /// [`BlockGmres::new`] and the written bases ([`BlockGmres::resident_bytes`] of a
 /// solve at that depth in every column).
-pub(super) fn block_bytes<T>(
+pub(super) fn block_bytes<T: Scalar>(
     n: usize,
     s: usize,
     m: usize,
@@ -1394,17 +1536,20 @@ pub(super) fn block_bytes<T>(
         0
     };
     let bases = n * depth + z;
-    let column = 2 * (m + 1) * m + 2 * m + (m + 1);
-    // the panels `x`, `out`, `panel`, `z`, `w`; the two projections and their partial
-    // sums; `y`
+    // the Hessenberg matrix rotated and as built, `S`, the two rotations, `g`
+    let column = 2 * (m + 1) * m + m * m + 2 * m + (m + 1);
+    // the panels `x`, `out`, `panel`, `z`, `w`; a step's products and their partial
+    // sums; the coefficients of a check
     let panels = 5 * n * s; // lit: the five n x s panels of `BlockGmres::new`
-    let shared = panels + 2 * s * (m + 1) + n.div_ceil(chunk.max(1)) * s * (m + 1) + m;
-    // `bnorm`, `wnorm0`, `res`, `reorth`, `off` (one more), `act`, `chk`, `closing`
-    let per_rhs = 2 * std::mem::size_of::<f64>()
+    let nchunks = n.div_ceil(chunk.max(1));
+    let shared = panels + 2 * s * (m + 1) * (1 + nchunks) + s * m;
+    // `bnorm`, `norms`, their partial sums, `res`, `jd`, `off` (one more), `chk`,
+    // `closing`, `act`, `delayed`
+    let per_rhs = (2 + nchunks) * std::mem::size_of::<f64>()
         + std::mem::size_of::<Option<f64>>()
-        + std::mem::size_of::<bool>()
-        + 3 * std::mem::size_of::<usize>() // lit: `act`, `chk` and `closing`
-        + std::mem::size_of::<(usize, usize)>();
+        + 4 * std::mem::size_of::<usize>() // lit: `jd`, `off`, `chk` and `closing`
+        + std::mem::size_of::<(usize, usize)>()
+        + std::mem::size_of::<Delayed<T>>();
     ((s * column + shared) * sz + s * bases * stored + s * per_rhs + std::mem::size_of::<usize>())
         as u64
 }
@@ -1453,8 +1598,9 @@ pub(super) fn deflation_bytes<T>(n: usize, s: usize, m: usize, chunk: usize, k: 
 /// [`NoPreconditioner`]) leaves them on the caller's pool. The row-chunk fold is
 /// thread-count independent, so the result is too.
 ///
-/// **Orthogonalization:** block CGS2 (classical Gram-Schmidt with a conditional,
-/// per-column second pass), not the MGS+DGKS of the single-RHS [`gmres`]: a block
+/// **Orthogonalization:** delayed CGS2 (classical Gram-Schmidt with an
+/// unconditional second pass taken in the next step's pass over the basis, see
+/// the module-level note), not the MGS+DGKS of the single-RHS [`gmres`]: a block
 /// solve with `s = 1` is not bit-identical to [`gmres`] and may differ by +/-1
 /// iteration (see the module-level note).
 ///

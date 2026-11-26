@@ -480,7 +480,7 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// A pointer the pieces of a section share, each to its own part.
-struct SendPtr<T>(*mut T);
+pub(crate) struct SendPtr<T>(*mut T);
 impl<T> Clone for SendPtr<T> {
     fn clone(&self) -> Self {
         *self
@@ -491,8 +491,23 @@ impl<T> Copy for SendPtr<T> {}
 unsafe impl<T: Send> Send for SendPtr<T> {}
 unsafe impl<T: Send> Sync for SendPtr<T> {}
 impl<T> SendPtr<T> {
+    /// The pointer to `v`'s values, for the pieces of a section.
+    pub(crate) fn of(v: &mut [T]) -> Self {
+        SendPtr(v.as_mut_ptr())
+    }
+
     fn get(self) -> *mut T {
         self.0
+    }
+
+    /// Values `[from, from + len)`.
+    ///
+    /// # Safety
+    /// They lie in the slice it was taken of, which outlives the use, and no other piece
+    /// reads or writes them meanwhile.
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) unsafe fn part<'a>(self, from: usize, len: usize) -> &'a mut [T] {
+        std::slice::from_raw_parts_mut(self.0.add(from), len)
     }
 }
 
