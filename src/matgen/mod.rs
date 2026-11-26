@@ -34,8 +34,6 @@ pub(crate) fn build_gen<T: Scalar>(
     built(GeneralCsc::from_triplets(n, rows, cols, vals))
 }
 
-/// The matrix a generator assembled from its triplets; an error is a bug of
-/// the generator.
 fn built<M>(m: Result<M, crate::error::RslabError>) -> M {
     match m {
         Ok(m) => m,
@@ -93,8 +91,8 @@ mod integration {
     //! Every family must produce matrices the solver actually factors and solves -
     //! the whole point. Small instances, exact factorization, true residual.
     use super::*;
-    use crate::test_constants::{solve_backward_error, U32, U64, UC32, UC64};
     use crate::refine::RefineOperator;
+    use crate::test_constants::{solve_backward_error, U32, U64, UC32, UC64};
     use crate::{Factorization, LdltSymbolic, LuSymbolic, SolverSettings};
     use num_complex::Complex;
 
@@ -106,7 +104,6 @@ mod integration {
             .collect()
     }
 
-    /// The normwise backward error `max|A x - b| / (||A||_inf max|x| + max|b|)`.
     pub(super) fn backward_error<T: crate::Scalar>(
         a: &impl RefineOperator<T>,
         x: &[T],
@@ -122,21 +119,25 @@ mod integration {
         max(&r) / (sums.iter().copied().fold(0.0, f64::max) * max(x) + max(b))
     }
 
-    /// The backward error of the solve of `rhs` with the factor `f` of `a`.
-    fn resid(a: &impl RefineOperator<C>, f: impl Factorization<C>) -> f64 {
+    fn resid<A: RefineOperator<C>, F: Factorization<C>>(
+        a: &A,
+        factor: impl FnOnce(&A, &SolverSettings) -> F,
+    ) -> f64 {
         let b = rhs(a.n());
-        let x = f.solve(&b).unwrap();
+        let x = factor(a, &SolverSettings::default()).solve(&b).unwrap();
         backward_error(a, &x, &b)
     }
 
     fn ldlt_resid(a: &CscMatrix<C>) -> f64 {
-        let s = SolverSettings::default();
-        resid(a, LdltSymbolic::analyze(a, &s).unwrap().factor(a, &s).unwrap())
+        resid(a, |a, s| {
+            LdltSymbolic::analyze(a, s).unwrap().factor(a, s).unwrap()
+        })
     }
 
     fn lu_resid(a: &GeneralCsc<C>) -> f64 {
-        let s = SolverSettings::default();
-        resid(a, LuSymbolic::analyze(a, &s).unwrap().factor(a, &s).unwrap())
+        resid(a, |a, s| {
+            LuSymbolic::analyze(a, s).unwrap().factor(a, s).unwrap()
+        })
     }
 
     #[test]

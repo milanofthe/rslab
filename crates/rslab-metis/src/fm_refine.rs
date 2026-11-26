@@ -296,7 +296,6 @@ mod tests {
         assert_eq!(separator_weight(&g, &labels), 3);
     }
 
-    /// The graph on `n` vertices with the given edges (plus the diagonal).
     fn graph(n: usize, edges: impl IntoIterator<Item = (usize, usize)>) -> Graph {
         let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
         t.extend(edges);

@@ -304,6 +304,75 @@ impl Scan<'_> {
         f(self);
         self.ctx.pop();
     }
+
+    fn unless_test<'ast, N: Attrs>(
+        &mut self,
+        node: &'ast N,
+        visit: impl FnOnce(&mut Self, &'ast N),
+    ) {
+        if !is_test(node.attrs()) {
+            visit(self, node);
+        }
+    }
+}
+
+trait Attrs {
+    fn attrs(&self) -> &[syn::Attribute];
+}
+
+impl Attrs for syn::Item {
+    fn attrs(&self) -> &[syn::Attribute] {
+        match self {
+            syn::Item::Const(x) => &x.attrs,
+            syn::Item::Enum(x) => &x.attrs,
+            syn::Item::Fn(x) => &x.attrs,
+            syn::Item::Impl(x) => &x.attrs,
+            syn::Item::Macro(x) => &x.attrs,
+            syn::Item::Mod(x) => &x.attrs,
+            syn::Item::Static(x) => &x.attrs,
+            syn::Item::Struct(x) => &x.attrs,
+            syn::Item::Trait(x) => &x.attrs,
+            syn::Item::Use(x) => &x.attrs,
+            _ => &[],
+        }
+    }
+}
+
+impl Attrs for syn::ImplItem {
+    fn attrs(&self) -> &[syn::Attribute] {
+        match self {
+            syn::ImplItem::Fn(f) => &f.attrs,
+            syn::ImplItem::Const(c) => &c.attrs,
+            _ => &[],
+        }
+    }
+}
+
+impl Attrs for syn::TraitItemFn {
+    fn attrs(&self) -> &[syn::Attribute] {
+        &self.attrs
+    }
+}
+
+impl Attrs for syn::Stmt {
+    fn attrs(&self) -> &[syn::Attribute] {
+        match self {
+            syn::Stmt::Local(l) => &l.attrs,
+            syn::Stmt::Macro(m) => &m.attrs,
+            _ => &[],
+        }
+    }
+}
+
+impl Attrs for syn::Expr {
+    fn attrs(&self) -> &[syn::Attribute] {
+        match self {
+            syn::Expr::Block(b) => &b.attrs,
+            syn::Expr::Call(c) => &c.attrs,
+            syn::Expr::MethodCall(c) => &c.attrs,
+            _ => &[],
+        }
+    }
 }
 
 impl Scan<'_> {
@@ -371,22 +440,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_item(&mut self, i: &'ast syn::Item) {
-        let attrs = match i {
-            syn::Item::Const(x) => &x.attrs,
-            syn::Item::Enum(x) => &x.attrs,
-            syn::Item::Fn(x) => &x.attrs,
-            syn::Item::Impl(x) => &x.attrs,
-            syn::Item::Macro(x) => &x.attrs,
-            syn::Item::Mod(x) => &x.attrs,
-            syn::Item::Static(x) => &x.attrs,
-            syn::Item::Struct(x) => &x.attrs,
-            syn::Item::Trait(x) => &x.attrs,
-            syn::Item::Use(x) => &x.attrs,
-            _ => return visit::visit_item(self, i),
-        };
-        if !is_test(attrs) {
-            visit::visit_item(self, i);
-        }
+        self.unless_test(i, visit::visit_item);
     }
 
     fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
@@ -431,14 +485,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_impl_item(&mut self, i: &'ast syn::ImplItem) {
-        let skip = match i {
-            syn::ImplItem::Fn(f) => is_test(&f.attrs),
-            syn::ImplItem::Const(c) => is_test(&c.attrs),
-            _ => false,
-        };
-        if !skip {
-            visit::visit_impl_item(self, i);
-        }
+        self.unless_test(i, visit::visit_impl_item);
     }
 
     fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
@@ -450,11 +497,11 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_trait_item_fn(&mut self, i: &'ast syn::TraitItemFn) {
-        if !is_test(&i.attrs) {
-            self.scoped(i.sig.ident.to_string(), |s| {
+        self.unless_test(i, |s, i| {
+            s.scoped(i.sig.ident.to_string(), |s| {
                 visit::visit_trait_item_fn(s, i)
-            });
-        }
+            })
+        });
     }
 
     fn visit_trait_item_const(&mut self, i: &'ast syn::TraitItemConst) {
@@ -462,25 +509,10 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_stmt(&mut self, s: &'ast syn::Stmt) {
-        let test = match s {
-            syn::Stmt::Local(l) => is_test(&l.attrs),
-            syn::Stmt::Macro(m) => is_test(&m.attrs),
-            _ => false,
-        };
-        if !test {
-            visit::visit_stmt(self, s);
-        }
+        self.unless_test(s, visit::visit_stmt);
     }
 
     fn visit_expr(&mut self, e: &'ast syn::Expr) {
-        let attrs: &[syn::Attribute] = match e {
-            syn::Expr::Block(b) => &b.attrs,
-            syn::Expr::Call(c) => &c.attrs,
-            syn::Expr::MethodCall(c) => &c.attrs,
-            _ => &[],
-        };
-        if !is_test(attrs) {
-            visit::visit_expr(self, e);
-        }
+        self.unless_test(e, visit::visit_expr);
     }
 }

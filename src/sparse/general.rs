@@ -57,9 +57,6 @@ impl<T: Scalar> GeneralCsc<T> {
         Self::from_dense_row_major_with(n, a, |_| 0, "GeneralCsc")
     }
 
-    /// [`from_dense_row_major`](Self::from_dense_row_major) with column `j`
-    /// read from row `first_row(j)` on (`|j| j` for a lower triangle); `ty`
-    /// names the calling type in the error.
     pub(crate) fn from_dense_row_major_with(
         n: usize,
         a: &[T],

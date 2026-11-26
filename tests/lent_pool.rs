@@ -63,8 +63,9 @@ fn pools() -> Vec<(&'static str, Arc<dyn Pool>)> {
     ]
 }
 
-fn grid3d(k: usize) -> CscMatrix<f64> {
-    let n = k * k * k;
+type Triplets = (Vec<usize>, Vec<usize>, Vec<f64>);
+
+fn grid3d_triplets(k: usize, coef: [(f64, f64); 3], lower: bool) -> Triplets {
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for z in 0..k {
@@ -74,49 +75,37 @@ fn grid3d(k: usize) -> CscMatrix<f64> {
                 r.push(p);
                 c.push(p);
                 v.push(6.0);
-                for (q, ok) in [
-                    (idx((x + 1) % k, y, z), x + 1 < k),
-                    (idx(x, (y + 1) % k, z), y + 1 < k),
-                    (idx(x, y, (z + 1) % k), z + 1 < k),
+                for (q, ok, (down, up)) in [
+                    (idx((x + 1) % k, y, z), x + 1 < k, coef[0]),
+                    (idx(x, (y + 1) % k, z), y + 1 < k, coef[1]),
+                    (idx(x, y, (z + 1) % k), z + 1 < k, coef[2]),
                 ] {
                     if ok {
-                        r.push(p.max(q));
-                        c.push(p.min(q));
-                        v.push(-1.0);
+                        r.push(q);
+                        c.push(p);
+                        v.push(down);
+                        if !lower {
+                            r.push(p);
+                            c.push(q);
+                            v.push(up);
+                        }
                     }
                 }
             }
         }
     }
-    CscMatrix::from_triplets(n, &r, &c, &v).unwrap()
+    (r, c, v)
+}
+
+fn grid3d(k: usize) -> CscMatrix<f64> {
+    let (r, c, v) = grid3d_triplets(k, [(-1.0, -1.0); 3], true);
+    CscMatrix::from_triplets(k * k * k, &r, &c, &v).unwrap()
 }
 
 fn grid3d_conv(k: usize) -> GeneralCsc<f64> {
-    let n = k * k * k;
-    let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
-    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
-    for z in 0..k {
-        for y in 0..k {
-            for x in 0..k {
-                let p = idx(x, y, z);
-                r.push(p);
-                c.push(p);
-                v.push(6.0);
-                for (q, ok, down, up) in [
-                    (idx((x + 1) % k, y, z), x + 1 < k, -1.3, -0.7),
-                    (idx(x, (y + 1) % k, z), y + 1 < k, -1.2, -0.8),
-                    (idx(x, y, (z + 1) % k), z + 1 < k, -1.1, -0.9),
-                ] {
-                    if ok {
-                        r.extend([q, p]);
-                        c.extend([p, q]);
-                        v.extend([down, up]);
-                    }
-                }
-            }
-        }
-    }
-    GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
+    let coef = [(-1.3, -0.7), (-1.2, -0.8), (-1.1, -0.9)];
+    let (r, c, v) = grid3d_triplets(k, coef, false);
+    GeneralCsc::from_triplets(k * k * k, &r, &c, &v).unwrap()
 }
 
 fn bits<T: Copy>(x: &[T]) -> Vec<u8> {

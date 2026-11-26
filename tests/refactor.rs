@@ -5,10 +5,11 @@
 use rslab::prelude::*;
 use rslab::{GeneralCsc, LdltSymbolic, LuSymbolic, SolveWork};
 
-fn grid(m: usize, shift: f64) -> GeneralCsc<f64> {
-    let n = m * m;
+type Triplets = (Vec<usize>, Vec<usize>, Vec<f64>);
+
+fn grid_triplets(m: usize, shift: f64, lower: bool) -> Triplets {
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
-    for i in 0..n {
+    for i in 0..m * m {
         r.push(i);
         c.push(i);
         v.push(4.5 + (i % 3) as f64 * 0.1 + shift);
@@ -18,12 +19,19 @@ fn grid(m: usize, shift: f64) -> GeneralCsc<f64> {
             r.push(j);
             c.push(i);
             v.push(-1.0 - shift * (j % 3) as f64);
-            r.push(i);
-            c.push(j);
-            v.push(-0.8 + shift);
+            if !lower {
+                r.push(i);
+                c.push(j);
+                v.push(-0.8 + shift);
+            }
         }
     }
-    GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
+    (r, c, v)
+}
+
+fn grid(m: usize, shift: f64) -> GeneralCsc<f64> {
+    let (r, c, v) = grid_triplets(m, shift, false);
+    GeneralCsc::from_triplets(m * m, &r, &c, &v).unwrap()
 }
 
 #[test]
@@ -66,21 +74,8 @@ fn a_failed_refactor_refuses_to_solve_until_the_next_succeeds() {
 }
 
 fn sym_grid(m: usize, shift: f64) -> CscMatrix<f64> {
-    let n = m * m;
-    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
-    for i in 0..n {
-        r.push(i);
-        c.push(i);
-        v.push(4.5 + (i % 3) as f64 * 0.1 + shift);
-        let right = (i % m + 1 < m).then_some(i + 1);
-        let down = (i / m + 1 < m).then_some(i + m);
-        for j in right.into_iter().chain(down) {
-            r.push(j);
-            c.push(i);
-            v.push(-1.0 - shift * (j % 3) as f64);
-        }
-    }
-    CscMatrix::from_triplets(n, &r, &c, &v).unwrap()
+    let (r, c, v) = grid_triplets(m, shift, true);
+    CscMatrix::from_triplets(m * m, &r, &c, &v).unwrap()
 }
 
 #[test]
