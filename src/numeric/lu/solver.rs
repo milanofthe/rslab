@@ -10,11 +10,9 @@ use crate::constants::{
     LU_PERM_SCALE_BYTES_PER_COL, LU_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 
-/// What the symmetrized pattern costs per entry (its bucket sorts).
 static SYMMETRIZE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// What the diagonal check costs per entry.
 static DIAGONAL_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
@@ -25,20 +23,12 @@ use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 
-/// Lower triangle of the symmetrized pattern `B union B^T` as CSC `(col_ptr,
-/// row_idx)`, `B` the pattern of `a` with row `r` renamed `row_map[r]` (the
-/// matching's row permutation, applied on the fly). The symmetric analysis
-/// needs a structurally symmetric pattern so the elimination tree carries
-/// fill for both `L` and `U`. The buckets are compacted in place, so the
-/// pattern is built in one buffer of an index per entry of `a`.
 fn symmetrized_lower_pattern<T: Scalar>(
     a: &GeneralCsc<T>,
     row_map: Option<&[usize]>,
 ) -> (Vec<usize>, Vec<usize>) {
     let n = a.n;
     let row = |k: usize| row_map.map_or(a.row_idx[k], |m| m[a.row_idx[k]]);
-    // Counting-scatter: each entry contributes a lower-triangle pair
-    // `(hi, lo)` to bucket `lo`; the buckets are then sorted and deduped.
     let mut start = vec![0usize; n + 1];
     for j in 0..n {
         for k in a.col_ptr[j]..a.col_ptr[j + 1] {
@@ -58,7 +48,6 @@ fn symmetrized_lower_pattern<T: Scalar>(
             cursor[lo] += 1;
         }
     }
-    // Sort and dedup every bucket in place (in parallel), then compact.
     let mut buckets: Vec<&mut [usize]> = Vec::with_capacity(n);
     let mut rest: &mut [usize] = &mut scattered;
     for j in 0..n {
@@ -91,17 +80,6 @@ fn symmetrized_lower_pattern<T: Scalar>(
     (col_ptr, scattered)
 }
 
-/// Whether the row matching is needed: some column's diagonal entry is
-/// missing, zero, or negligible against the column (`|a_jj|` below
-/// `negligible` times its largest entry). There the front-local
-/// pivot search has no usable diagonal and the element growth runs away;
-/// the circuit matrices of the KLU corpus all have such columns and factor to
-/// roundoff only with the matching. Where every diagonal entry can pivot the
-/// permutation buys nothing and costs: on the MoM near-field matrices it
-/// breaks the diagonal the pivoting would use, adding 5 to 20 percent fill,
-/// hundreds of perturbed pivots and residuals up to seven orders of
-/// magnitude worse, and the circuits with a full diagonal factor the same
-/// either way.
 fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> bool {
     let scan = crate::parallel::Work::of(a.nnz() as f64, &DIAGONAL_RATE);
     crate::parallel::any(a.n, scan, |j| {
@@ -115,17 +93,13 @@ fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> boo
     })
 }
 
-/// The MC64 row matching the analysis was done under: the factored matrix
-/// is `B = diag(r) P A diag(c)` with `B` row `i` = `A` row `row_of[i]`.
 pub(super) struct LuMatching {
     pub(super) row_of: Vec<usize>,
-    /// `A`-row scaling.
     pub(super) r: Vec<f64>,
     pub(super) c: Vec<f64>,
 }
 
 impl LuMatching {
-    /// `map[r]`: the row of `B` that row `r` of `A` becomes.
     pub(super) fn row_map(&self) -> Vec<usize> {
         let mut map = vec![0usize; self.row_of.len()];
         for (i, &r) in self.row_of.iter().enumerate() {
@@ -140,19 +114,9 @@ pub struct LuSymbolic {
     pub(super) n: usize,
     pub(super) nnz: usize,
     pub(super) matching: Option<LuMatching>,
-    /// The ordering the analysis was asked for, carried into the
-    /// diagnostics of every factorization reusing it.
     pub(super) requested_ordering: crate::symbolic::OrderingMethod,
-    /// [`estimate_memory`](Self::estimate_memory) results.
     pub(super) est_cache: crate::diagnostics::EstimateCache,
-    /// The split permuted input's program
-    /// ([`InputProgram::general`](crate::numeric::supernodal::InputProgram)),
-    /// built at the first factorization: every (re)factorization reads the
-    /// values where they are through it (row matching and equilibration applied
-    /// on the way).
     pub(super) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
-    /// The exact structures of `L` and `U`, tighter than the analysis's
-    /// symmetric one on an unsymmetric pattern.
     pub(super) structure: LuStructure,
 }
 
@@ -191,8 +155,6 @@ impl LuSymbolic {
         Self::analyze_from(a, opts, None)
     }
 
-    /// [`analyze`](Self::analyze) with the ordering race's minimum-degree
-    /// candidate given (`amd`, an ordering of the columns of `a`).
     pub(crate) fn analyze_from<T: Scalar>(
         a: &GeneralCsc<T>,
         opts: &SolverSettings,
@@ -214,10 +176,6 @@ impl LuSymbolic {
             });
         }
         let _s = rsprobe::scope!("analyze");
-        // MC64 row matching: analyze the row-permuted matrix `B` whose
-        // diagonal carries the matched entries, where the diagonal of `A`
-        // cannot carry the pivots itself.
-        // Delayed pivoting pairs with the matching on every column.
         let matching = if opts.pivoting.delayed
             || (opts.matching.enabled
                 && diagonal_needs_matching(a, opts.matching.negligible_diagonal))
@@ -232,8 +190,6 @@ impl LuSymbolic {
             };
             if cache.n_matched == n {
                 let (r, c) = crate::scaling::mc64::unsymmetric_scaling(&cache);
-                // `cache.perm[j]` is the row matched to column `j`: it becomes
-                // row `j` of `B`.
                 Some(LuMatching {
                     row_of: cache.perm,
                     r,
@@ -249,7 +205,6 @@ impl LuSymbolic {
         } else {
             None
         };
-        // The lower triangle lives only until the full pattern is built.
         let (pattern, lower_nnz) = {
             let _s = rsprobe::scope!(DEBUG, "symmetrize");
             let row_map = matching.as_ref().map(LuMatching::row_map);
@@ -316,8 +271,6 @@ impl LuSymbolic {
         let _s = rsprobe::scope!("factor");
         let pools = super::node::LuPools::new();
         let (l, ut, factors, nnz, diagnostics, opts) = self.numeric(a, opts, None, &pools)?;
-        // Solve layout: supernodal panels of `L` and `U^T` plus the tree
-        // schedule; the CSC arrays are released so the factor is held once.
         let (plan_l, plan_u) = {
             let _s = rsprobe::scope!("solve layout");
             let plan = crate::numeric::supernodal::solve::SolvePlan::from_panels;
@@ -336,8 +289,6 @@ impl LuSymbolic {
             solves: Default::default(),
             works: Default::default(),
             factored: true,
-            // A one-time factor does not hold on to the scratch; the first
-            // refactorization grows its own and keeps it.
             pools: super::node::LuPools::new(),
         })
     }
@@ -374,10 +325,6 @@ impl LuSymbolic {
         Ok(())
     }
 
-    /// The numeric factorization both [`factor`](Self::factor) and
-    /// [`refactor`](Self::refactor) run: the panels of `L` and `U^T` (in
-    /// `storage` when given), the pivots, the fill, the diagnostics and the
-    /// settings pinned to the resolved thread count.
     #[allow(clippy::type_complexity)]
     fn numeric<T: Scalar>(
         &self,
@@ -435,7 +382,6 @@ impl LuSymbolic {
                 perturbed: factors.floors.len(),
                 two_by_two: None,
                 inertia: None,
-                // from the factor the solver holds, see `diagnostics`
                 min_pivot: None,
                 delayed: Some(delayed),
                 forced: Some(forced),
@@ -490,7 +436,6 @@ impl LuSymbolic {
             .map(|s| {
                 let nc = sym.supernodes[s].ncol;
                 let cnrow = sched.rows(s).len().saturating_sub(nc);
-                // L: diagonal lower-triangle + off-diagonal rows; U: upper-tri + U12.
                 let l = nc * (nc + 1) / 2 + cnrow * nc;
                 let u = nc * (nc + 1) / 2 + nc * cnrow;
                 l + u
@@ -502,9 +447,6 @@ impl LuSymbolic {
         self.est_cache.get::<T>(|| self.estimate_memory_for::<T>())
     }
 
-    /// The uncached estimate body, a pure function of the symbolic structure
-    /// and the scalar type. Its peak is the [`memory_plan`](Self::memory_plan)
-    /// on all cores, the most scratch the kernels can hold.
     fn estimate_memory_for<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
         let Some((sym, _)) = self.symb.sym_and_levels() else {
@@ -513,8 +455,6 @@ impl LuSymbolic {
                 ..Default::default()
             };
         };
-        // The `L` and `U^T` panels of a supernode, `(w + m_l) x w` and
-        // `(w + m_u) x w` on the exact structure; they are the stored factor.
         let st = &self.structure;
         let nsuper = sym.supernodes.len();
         let panels: u64 = (0..nsuper)
@@ -562,16 +502,12 @@ impl LuSymbolic {
             return plan;
         };
         let st = &self.structure;
-        // After the schedule above is built: it is part of the analysis.
         plan.analysis_bytes = self.heap_bytes();
         let vb = std::mem::size_of::<T>();
         let k = opts.kernel().k;
         let (n, nnz, ns) = (sym.n, self.nnz, sym.supernodes.len());
         let w = |s: usize| sym.supernodes[s].ncol;
         let widths: Vec<usize> = (0..ns).map(w).collect();
-        // The arenas' slots, and with delayed pivots the values they may add
-        // over them (`delay`): the grown fronts' buffers while the forest is
-        // factored, the factor's growth after it.
         let delay_growth = super::factor::delay_growth(opts);
         let (l_slots, u_slots) = super::factor::lu_slots(sym, st);
         let allowance = super::factor::delay_allowance(&l_slots, &u_slots, delay_growth);
@@ -582,8 +518,6 @@ impl LuSymbolic {
             .sum::<usize>()
             + allowance;
         let rows: usize = l_slots.iter().chain(&u_slots).map(|&(_, m)| m).sum();
-        // With delayed pivots, every supernode's record may hold its rows and
-        // columns past its pivots.
         let passing: usize = if delay_growth > 0.0 {
             (0..ns)
                 .map(|s| st.rows_l(s).len() + st.cols_u(s).len())
@@ -609,9 +543,6 @@ impl LuSymbolic {
             &opts.solve,
             cores,
         );
-        // The input program the first factorization keeps (the indices and
-        // the entries of `A` they read, two pointer arrays), and the peak of
-        // its build.
         let (growth, growth_build) = if self.input.get().is_some() {
             (0, 0)
         } else {
@@ -620,8 +551,6 @@ impl LuSymbolic {
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LU_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
-        // Held by the factor: the `L` and `U^T` panels with their schedules, `U`'s reciprocal diagonal, both
-        // permutations and scalings, and the supernode tree.
         let factor_with = |panels: usize| {
             vb * (panels + n)
                 + (layout_l.held + layout_u.held) as usize
@@ -629,11 +558,6 @@ impl LuSymbolic {
                 + WORD_BYTES * ns
         };
         let factor = factor_with(panels);
-        // While the forest is factored: the scalings (by `A`'s and by
-        // elimination index), both arenas, the emit cells (refcounts, offsets, panel records,
-        // positions and permutations) and the forest's lists, every node's
-        // row permutation and emitted rows until the end, the workers'
-        // scratch and the heaviest set of nodes running at once.
         let cells =
             ns * LU_NODE_CELL_BYTES + LU_NODE_CELL_BYTES_PER_COL * n + IDX32_BYTES * passing;
         let slots =
@@ -643,7 +567,6 @@ impl LuSymbolic {
             .collect();
         let mut planes: Vec<(usize, usize)> = scratch.iter().map(|&(_, p, c)| (p, c)).collect();
         let (workers, kept) = crate::memory::worker_bytes::<T>(n, 2, threads, &mut planes);
-        // The node kernel's, the tiled `cmod`'s and the arena's pools.
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LU_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
@@ -651,8 +574,6 @@ impl LuSymbolic {
             + workers
             + pooled
             + nodes;
-        // After it: the factor, the emitted row lists until the plans have
-        // copied them, and a plan's build.
         let after = factor_with(panels) as u64
             + (IDX32_BYTES * rows + 2 * VEC_HEADER_BYTES * ns) as u64
             + layout_l.build.max(layout_u.build);
@@ -661,8 +582,6 @@ impl LuSymbolic {
         plan.kept_bytes = kept + pooled;
         plan.factor_peak_bytes = (growth_build as u64).max(growth as u64 + during.max(after))
             + crate::constants::BOOKKEEPING;
-        // The permuted right-hand sides, the solution and the larger of the
-        // two sweeps' scratch.
         plan.solve_bytes = (nrhs * vb) as u64
             * (2 * n as u64 + layout_l.solve_per_rhs.max(layout_u.solve_per_rhs));
         plan
@@ -676,26 +595,14 @@ impl LuSymbolic {
 #[derive(Clone)]
 pub struct LuSolver<T> {
     factors: LuPivots<T>,
-    /// `L` and `U^T` (the panels, their only storage) with the tree schedule
-    /// of [`crate::numeric::supernodal::solve`]; `factors` carries the
-    /// permutations, scalings and counters with empty CSC arrays.
     pub(crate) plan_l: crate::numeric::supernodal::solve::SolvePlan<T>,
     plan_u: crate::numeric::supernodal::solve::SolvePlan<T>,
     nnz: usize,
     diagnostics: crate::diagnostics::Diagnostics,
-    /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
-    /// The works of its own `solve*` calls.
     works: crate::numeric::direct::WorkPool<T>,
-    /// The worker policy the factorization ran with, which a Krylov solve
-    /// preconditioned by this factor orthogonalizes under.
     solve_threads: crate::numeric::settings::Threads,
-    /// Whether it holds a factor: a failed [`LuSymbolic::refactor`] leaves
-    /// it without one.
     factored: bool,
-    /// The kernels' scratch: empty after [`LuSymbolic::factor`], grown by
-    /// the first refactorization and kept for the next ones, which then
-    /// allocate nothing of their own.
     pools: super::node::LuPools<T>,
 }
 
@@ -719,10 +626,9 @@ impl<T: Scalar> LuSolver<T> {
     pub fn diagnostics(&self) -> crate::diagnostics::Diagnostics {
         let mut d = self.diagnostics.clone();
         d.solves = self.solves.snapshot();
-        // `U`'s diagonal, held as its reciprocals
-        let r = self.plan_u.diag_inv();
-        d.numeric.min_pivot = (self.factored && !r.is_empty())
-            .then(|| 1.0 / r.iter().map(|v| v.magnitude()).fold(0.0, f64::max));
+        let u_diag_inv = self.plan_u.diag_inv();
+        d.numeric.min_pivot = (self.factored && !u_diag_inv.is_empty())
+            .then(|| 1.0 / u_diag_inv.iter().map(|v| v.magnitude()).fold(0.0, f64::max));
         d
     }
 
@@ -755,9 +661,6 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         &self.factors.floors
     }
 
-    /// `P_r D_r A D_c P_c^T = L U`: `det A` is the product of `U`'s
-    /// diagonal, the signs of both permutations and the reciprocal
-    /// scalings.
     fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {
         if !self.factored {
             return Err(RslabError::InvalidInput(
@@ -777,10 +680,6 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         Ok(d)
     }
 
-    /// The factored matrix is `(P_r D_r) A (D_c P_c^T) = L U`. `A x = b`
-    /// gathers through the row side, sweeps `L` forward and `U` backward and
-    /// scatters through the column side; `A^T x = b` is the mirror image,
-    /// `U^T` forward and `L^T` backward.
     fn solve_raw_into(
         &self,
         b: &[T],
@@ -801,8 +700,6 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LuSolver<T> {
         } else {
             (&f.perm_row, &f.d_row, &f.perm, &f.d_col)
         };
-        // The sweeps take the block row-major: y[e * nrhs + c]; the copies
-        // inside the first sweep and the last.
         let y = &mut work.y;
         let (first, last) = if transpose {
             (&self.plan_u, &self.plan_l)

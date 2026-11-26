@@ -28,7 +28,8 @@ use super::factor::{factor_numeric, LdltNumeric};
 use super::pivots::LdltPivots;
 use crate::constants::{
     IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY, LDLT_INPUT_BUILD_BYTES_PER_COL,
-    LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, VEC_HEADER_BYTES, WORD_BYTES,
+    LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, SINGULAR_VALUE_DISCRIMINANT, VEC_HEADER_BYTES,
+    WORD_BYTES,
 };
 use crate::error::RslabError;
 use crate::numeric::settings::SolverSettings;
@@ -45,29 +46,14 @@ mod sparse;
 /// sides. Generic over the scalar field `T` (`f64` or `Complex<f64>`).
 #[derive(Clone)]
 pub struct LdltSolver<T> {
-    /// Factors of the equilibrated matrix `A_hat = D A D`, in factorization order.
     factors: LdltPivots<T>,
-    /// Real symmetric equilibration diagonal `s` (`D = diag(s)`).
     scale: Vec<f64>,
-    /// Per-call factor diagnostics (stages, decisions, numeric outcome).
     diagnostics: crate::diagnostics::Diagnostics,
-    /// Solve-phase accumulators (every `solve*` call records into them).
     solves: crate::diagnostics::SolveCounter,
-    /// The works of its own `solve*` calls.
     works: crate::numeric::direct::WorkPool<T>,
-    /// The worker policy the factorization ran with, which a Krylov solve
-    /// preconditioned by this factor orthogonalizes under.
     solve_threads: crate::numeric::settings::Threads,
-    /// The factor `L` (the panels, its only storage) with the tree schedule;
-    /// `factors` carries `D`, the permutation and the outcome with empty CSC
-    /// arrays.
     pub(crate) plan: crate::numeric::supernodal::solve::SolvePlan<T>,
-    /// Whether it holds a factor: a failed [`LdltSymbolic::refactor`] leaves
-    /// it without one.
     factored: bool,
-    /// The kernels' scratch: empty after [`LdltSymbolic::factor`], grown by
-    /// the first refactorization and kept for the next ones, which then
-    /// allocate nothing of their own.
     pools: super::bunch_kaufman::BkPools<T>,
 }
 
@@ -95,8 +81,6 @@ impl<T: Scalar> LdltSolver<T> {
         d
     }
 
-    /// The smallest pivot magnitude of `D`: its 1x1 pivots and the smallest
-    /// singular value of each 2x2 block, `|det| / sigma_max`.
     fn min_pivot(&self) -> f64 {
         let f = &self.factors;
         let mut m = f64::MAX;
@@ -106,7 +90,9 @@ impl<T: Scalar> LdltSolver<T> {
                 let (a, b, c) = (f.d_diag[k], f.d_subdiag[k], f.d_diag[k + 1]);
                 let det = (a * c - b * b).magnitude();
                 let fro = a.magnitude_sq() + 2.0 * b.magnitude_sq() + c.magnitude_sq();
-                let disc = (fro * fro - 4.0 * det * det).max(0.0).sqrt(); // lit: the discriminant of the 2x2 singular values
+                let disc = (fro * fro - SINGULAR_VALUE_DISCRIMINANT * det * det)
+                    .max(0.0)
+                    .sqrt();
                 let smax = ((fro + disc) / 2.0).sqrt();
                 m = m.min(if smax > 0.0 { det / smax } else { 0.0 });
                 k += 2;
@@ -160,9 +146,6 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
         &self.factors.floors
     }
 
-    /// `P S A S P^T = L D L^T`: `det A` is the product of `D`'s 1x1 and
-    /// 2x2 blocks over the squared scaling (the symmetric permutation
-    /// cancels).
     fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {
         if !self.factored {
             return Err(RslabError::InvalidInput(
@@ -189,9 +172,6 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
         Ok(d)
     }
 
-    /// `x = D P (A_hat^-1 (P^T D b))`: the equilibration is fused into the
-    /// permutation gather and scatter around the triangular sweeps. `A` is
-    /// symmetric, so the transpose is the same solve.
     fn solve_raw_into(
         &self,
         b: &[T],
@@ -206,7 +186,6 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
             ));
         }
         let n = self.factors.n;
-        // The sweeps take the block row-major: y[i * nrhs + c].
         let y = &mut work.y;
         let (perm, scale) = (&self.factors.perm[..], &self.scale[..]);
         self.plan
@@ -224,9 +203,6 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for LdltSolver<T> {
 
 crate::numeric::direct::direct_solver!(LdltSolver);
 
-/// Fast native one-pass inf-norm scaling on a generic (`f64`/`Complex`) matrix:
-/// `s_i = 1/sqrt(max_j |A_ij|)`. The [`ScalingStrategy::OnePassInfNorm`] default, kept
-/// on the generic type so the shipped path never densifies to a magnitude copy.
 fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
     let n = a.n;
     let mut row_max = vec![0.0f64; n];
@@ -248,20 +224,6 @@ fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
         .collect()
 }
 
-/// Symmetric equilibration `A_hat = D A D` under the chosen [`ScalingStrategy`]:
-/// the real scaling `s`, applied while the values are permuted for the
-/// factorization, so no scaled copy of `A` is held; `None` for `Identity`.
-///
-/// The [`OnePassInfNorm`](ScalingStrategy::OnePassInfNorm) default and
-/// [`Identity`](ScalingStrategy::Identity) run natively on `T` (no magnitude
-/// copy, bit-identical to the historical one-pass); the iterative / matching
-/// strategies ([`InfNorm`](ScalingStrategy::InfNorm),
-/// [`Mc64Symmetric`](ScalingStrategy::Mc64Symmetric),
-/// [`External`](ScalingStrategy::External))
-/// route through [`crate::scaling::compute_scaling`] on the `|A|` magnitude
-/// pattern (a real `D` derived from magnitudes is the correct congruence for a
-/// complex-symmetric `A`). Scaling changes only values, so the sparsity pattern
-/// and the a-priori memory estimate are unaffected.
 fn equilibration<T: Scalar>(
     a: &CscMatrix<T>,
     strategy: &crate::scaling::ScalingStrategy,
@@ -271,7 +233,6 @@ fn equilibration<T: Scalar>(
         ScalingStrategy::OnePassInfNorm => onepass_scale(a),
         ScalingStrategy::Identity => return Ok(None),
         other => {
-            // Real magnitude view `|A|` (same pattern) for the f64 scaling machinery.
             let mag = CscMatrix::<f64> {
                 n: a.n,
                 col_ptr: a.col_ptr.clone(),
@@ -310,10 +271,7 @@ fn equilibration<T: Scalar>(
 pub struct LdltSymbolic {
     symbolic: SupernodalAnalysis,
     nnz: usize,
-    /// The ordering the analysis was asked for, carried into the diagnostics
-    /// of every factorization reusing it.
     requested_ordering: crate::symbolic::OrderingMethod,
-    /// [`estimate_memory`](Self::estimate_memory) results.
     est_cache: crate::diagnostics::EstimateCache,
 }
 
@@ -334,8 +292,6 @@ impl LdltSymbolic {
         Self::analyze_from(a, opts, None)
     }
 
-    /// [`analyze`](Self::analyze) with the ordering race's minimum-degree
-    /// candidate given (`amd`, an ordering of the columns of `a`).
     pub(crate) fn analyze_from<T: Scalar>(
         a: &CscMatrix<T>,
         opts: &SolverSettings,
@@ -398,9 +354,6 @@ impl LdltSymbolic {
         self.est_cache.get::<T>(|| self.estimate_memory_for::<T>())
     }
 
-    /// The uncached estimate body, a pure function of the symbolic structure
-    /// and the scalar type. Its peak is the [`memory_plan`](Self::memory_plan)
-    /// on all cores, the most scratch the kernels can hold.
     fn estimate_memory_for<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         let value_bytes = std::mem::size_of::<T>();
         let (Some((sym, levels)), Some(sched)) =
@@ -413,7 +366,6 @@ impl LdltSymbolic {
         };
         let nsuper = sym.supernodes.len();
         let dims = |s: usize| (sym.supernodes[s].ncol as u64, sched.rows(s).len() as u64);
-        // One dense panel per supernode, which is the stored factor.
         let panels: u64 = (0..nsuper)
             .map(|s| {
                 let (nc, nr) = dims(s);
@@ -425,13 +377,11 @@ impl LdltSymbolic {
             ..SolverSettings::default()
         };
         let plan = self.memory_plan::<T>(&settings, 1);
-        // Critical path (Amdahl bound) + tree width for the thread-aware v2 model.
-        // Supernodes are in elimination (postorder) order, so children precede their
-        // parent and a single forward pass computes the longest leaf-to-root chain.
         let mut crit = vec![0u64; nsuper];
         let mut cp = 0u64;
         let mut flops = 0u64;
         for s in 0..nsuper {
+            debug_assert!(sym.supernodes[s].children.iter().all(|&c| c < s));
             let (nc, nr) = dims(s);
             let ff = nr * nr * nc;
             flops += ff;
@@ -478,7 +428,6 @@ impl LdltSymbolic {
         ) else {
             return plan;
         };
-        // After the schedule above is built: it is part of the analysis.
         plan.analysis_bytes = self.heap_bytes();
         let vb = std::mem::size_of::<T>();
         let k = opts.kernel().k;
@@ -487,7 +436,6 @@ impl LdltSymbolic {
         let r = |s: usize| sched.rows(s).len();
         let widths: Vec<usize> = (0..ns).map(w).collect();
         let off: Vec<usize> = (0..ns).map(|s| r(s) - w(s)).collect();
-        // the panels as the factorization writes them and the solve plan holds them
         let panels: usize = (0..ns)
             .map(|s| crate::numeric::supernodal::panel::Layout::new(w(s), off[s]).len())
             .sum();
@@ -501,9 +449,6 @@ impl LdltSymbolic {
             &opts.solve,
             crate::numeric::settings::all_cores(),
         );
-        // The input program the first factorization keeps (the indices and
-        // the entries of `A` they read, two pointer arrays), and the peak of
-        // its build.
         let (growth, growth_build) = if inner.input.get().is_some() {
             (0, 0)
         } else {
@@ -512,9 +457,6 @@ impl LdltSymbolic {
                 INPUT_PROGRAM_BYTES_PER_ENTRY * nnz + LDLT_INPUT_BUILD_BYTES_PER_COL * n,
             )
         };
-        // Held by the factor: the panels and their
-        // schedule, D, the 2x2 flags, the permutation, the supernode tree and
-        // the scaling.
         let factor_with = |panels: usize| {
             vb * panels
                 + layout.held as usize
@@ -522,12 +464,6 @@ impl LdltSymbolic {
                 + WORD_BYTES * ns
         };
         let factor = factor_with(panels);
-        // While the forest is factored: the scaling (by `A`'s and by
-        // elimination index), the arena, the emit cells (refcounts, offsets,
-        // panel records, the pivots by column) and the forest's own lists,
-        // every node's slot (D, the flags and the row permutation) and emitted
-        // rows until the end, the workers' scratch and the heaviest set of
-        // nodes running at once.
         let cells = ns * LDLT_NODE_CELL_BYTES + n * (WORD_BYTES + WORD_BYTES + 2 * vb + 1);
         let slots: usize = (0..ns)
             .map(|s| w(s) * (2 * vb + 1) + WORD_BYTES * r(s))
@@ -538,15 +474,11 @@ impl LdltSymbolic {
             .collect();
         let mut planes: Vec<(usize, usize)> = scratch.iter().map(|&(_, p, c)| (p, c)).collect();
         let (workers, kept) = crate::memory::worker_bytes::<T>(n, 1, threads, &mut planes);
-        // The panel kernel's, the deep-row replay's, the `cmod`'s and the
-        // arena's pools.
         let largest = scratch.iter().map(|&(b, _, _)| b).max().unwrap_or(0);
         let pooled = crate::memory::pooled_bytes(LDLT_SCRATCH_POOLS, threads, largest);
         let nodes = crate::memory::concurrent_peak(sym, threads, |s| scratch[s].0);
         let during =
             (2 * WORD_BYTES * n + vb * panels + cells + slots) as u64 + workers + pooled + nodes;
-        // After it: the factor, the emitted row lists until the plan has
-        // copied them, and the plan's build.
         let after = factor_with(panels) as u64
             + (IDX32_BYTES * rows + VEC_HEADER_BYTES * ns) as u64
             + layout.build;
@@ -555,7 +487,6 @@ impl LdltSymbolic {
         plan.kept_bytes = kept + pooled;
         plan.factor_peak_bytes = (growth_build as u64).max(growth as u64 + during.max(after))
             + crate::constants::BOOKKEEPING;
-        // The permuted right-hand sides, the solution and the sweeps' scratch.
         plan.solve_bytes = (nrhs * vb) as u64 * (2 * n as u64 + layout.solve_per_rhs);
         plan
     }
@@ -571,8 +502,6 @@ impl LdltSymbolic {
         let _s = rsprobe::scope!("factor");
         let pools = super::bunch_kaufman::BkPools::new();
         let (factor, factors, scale, diagnostics, opts) = self.numeric(a, opts, None, &pools)?;
-        // Solve layout: supernodal panels plus the tree schedule; the CSC
-        // arrays are released so the factor is held once.
         let plan = {
             let _s = rsprobe::scope!("solve layout");
             crate::numeric::supernodal::solve::SolvePlan::from_panels(
@@ -591,8 +520,6 @@ impl LdltSymbolic {
             solve_threads: opts.threads,
             plan,
             factored: true,
-            // A one-time factor does not hold on to the scratch; the first
-            // refactorization grows its own and keeps it.
             pools: super::bunch_kaufman::BkPools::new(),
         })
     }
@@ -627,10 +554,6 @@ impl LdltSymbolic {
         Ok(())
     }
 
-    /// The numeric factorization both [`factor`](Self::factor) and
-    /// [`refactor`](Self::refactor) run: the panels of `L` (in `storage`
-    /// when given), `D` and the pivots, the equilibration, the diagnostics
-    /// and the settings pinned to the resolved thread count.
     #[allow(clippy::type_complexity)]
     fn numeric<T: Scalar>(
         &self,
@@ -650,7 +573,6 @@ impl LdltSymbolic {
     > {
         a.validate()?;
         let estimate = self.estimate_memory::<T>();
-        // The concrete worker count actually used (realizes Threads::Auto).
         let resolved_threads = opts.threads.resolve(|cap| {
             crate::numeric::supernodal::analysis::auto_threads(&self.symbolic, &estimate, cap)
         });
@@ -688,7 +610,6 @@ impl LdltSymbolic {
                     factors.inertia.negative,
                     factors.inertia.zero,
                 )),
-                // from the factor the solver holds, see `diagnostics`
                 min_pivot: None,
                 delayed: None,
                 forced: None,
@@ -708,8 +629,6 @@ mod tests {
     use crate::test_constants::{fixed_refinement, gamma, solve_backward_error, U64, UC64};
     use num_complex::Complex;
 
-    /// 7-point 3D grid Laplacian (SPD-shifted), the canonical pattern where
-    /// nested dissection beats minimum degree.
     fn grid3d(k: usize) -> CscMatrix<f64> {
         let n = k * k * k;
         let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
@@ -738,12 +657,9 @@ mod tests {
         CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
     }
 
-    /// The ordering race must never return a pick with worse exact symbolic
-    /// fill than the plain AMD default (it includes AMD as a candidate and
-    /// selects by exact fill), and the pick must factor + solve correctly.
     #[test]
     fn race_is_pareto_on_plain_grid() {
-        let a = grid3d(24); // n = 13824
+        let a = grid3d(24);
         let sym_amd = LdltSymbolic::analyze(
             &a,
             &SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::Amd),
@@ -764,14 +680,10 @@ mod tests {
         assert!(backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64));
     }
 
-    /// End-to-end guarantee on the default analysis for a large curl-curl
-    /// system: the ordering race must realise the nested-dissection-class win
-    /// over the AMD default - this is the regression that cost 10x factor
-    /// time in the rapidfem FEM sweep.
     #[cfg(feature = "matgen")]
     #[test]
     fn race_finds_nd_class_win_on_curl_curl() {
-        let a = crate::matgen::fem::curl_curl(&[22, 22, 22], 0.8, 0.1); // n = 31944
+        let a = crate::matgen::fem::curl_curl(&[22, 22, 22], 0.8, 0.1);
         let sym_amd = LdltSymbolic::analyze(
             &a,
             &SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::Amd),
@@ -792,8 +704,6 @@ mod tests {
 
     #[test]
     fn f64_badly_scaled_diagonal() {
-        // Diagonal entries spanning ~10 orders of magnitude. Equilibration
-        // should keep the solve accurate on the original system.
         let n = 12;
         let mut rows = Vec::new();
         let mut cols = Vec::new();
@@ -801,7 +711,7 @@ mod tests {
         for j in 0..n {
             rows.push(j);
             cols.push(j);
-            vals.push(10.0_f64.powi(j as i32 - 6)); // 1e-6 .. 1e5
+            vals.push(10.0_f64.powi(j as i32 - 6));
             if j + 1 < n {
                 rows.push(j + 1);
                 cols.push(j);
@@ -831,11 +741,6 @@ mod tests {
 
     #[test]
     fn critical_path_and_thread_aware_runtime() {
-        // 3D grid: a deep assembly tree, so the critical path is a real fraction of
-        // the total work. The estimate must populate a positive critical path that
-        // is a subset of the total flops, a tree width >= 1, and the thread-aware
-        // runtime must never fall below the Amdahl serial-critical-path floor no
-        // matter how large the speedup argument.
         let m = 12;
         let n = m * m * m;
         let idx = |a: usize, b: usize, c: usize| (a * m + b) * m + c;
@@ -876,18 +781,15 @@ mod tests {
             est.factor_flops
         );
         assert!(est.max_tree_width >= 1, "tree width populated");
-        // Amdahl floor: at a huge speedup the parallel term vanishes but the serial
-        // critical path remains, so the thread-aware estimate stays >= that floor.
-        let rate1 = 2.0; // gflops
-        let floor_ms = est.critical_path_flops as f64 / (rate1 * 1e9) * 1e3;
-        let t_huge = est.est_runtime_ms_threaded(rate1, 1e9);
+        let gflops = 2.0;
+        let floor_ms = est.critical_path_flops as f64 / (gflops * 1e9) * 1e3;
+        let t_huge = est.est_runtime_ms_threaded(gflops, 1e9);
         assert_eq!(
             t_huge, floor_ms,
             "thread-aware runtime hits the critical-path floor"
         );
-        // The plain model would keep shrinking with speedup (no floor).
         assert!(
-            est.est_runtime_ms(rate1, 1e9) < floor_ms,
+            est.est_runtime_ms(gflops, 1e9) < floor_ms,
             "plain model has no Amdahl floor"
         );
     }
@@ -895,10 +797,6 @@ mod tests {
     #[test]
     fn scaling_strategy_knob_all_variants_solve() {
         use crate::scaling::ScalingStrategy;
-        // Well-conditioned SPD tridiagonal-plus-grid: every equilibration strategy
-        // (and Identity/off) must factor and solve to a tiny residual, proving the
-        // knob is threaded end-to-end (SolverSettings.scaling -> equilibration ->
-        // compute_scaling). The default OnePassInfNorm stays bit-identical.
         let m = 6;
         let n = m * m;
         let idx = |a: usize, b: usize| a * m + b;
@@ -939,7 +837,6 @@ mod tests {
                 "strategy {strat:?} backward error {omega}"
             );
         }
-        // Default preserves the historical one-pass scaling exactly.
         assert_eq!(
             SolverSettings::default().scaling,
             ScalingStrategy::OnePassInfNorm
@@ -963,7 +860,6 @@ mod tests {
         let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
         let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
         let nrhs = 4;
-        // Column-major B.
         let b: Vec<f64> = (0..n * nrhs).map(|k| (k % 5) as f64 - 2.0).collect();
         let x = f.solve_many(&b, nrhs).unwrap();
         for c in 0..nrhs {
@@ -977,8 +873,6 @@ mod tests {
 
     #[test]
     fn f64_inertia_diagonal_signs() {
-        // Pure diagonal -> all 1x1 pivots; (positive) equilibration preserves
-        // signs, so the inertia is the diagonal's signature.
         let diag = [2.0_f64, -3.0, 4.0, -1.0, 5.0];
         let n = diag.len();
         let (rows, cols): (Vec<_>, Vec<_>) = (0..n).map(|i| (i, i)).unzip();
@@ -994,8 +888,6 @@ mod tests {
 
     #[test]
     fn f64_inertia_indefinite_2x2() {
-        // [[0,1],[1,0]] has eigenvalues +/-1 -> Bunch-Kaufman takes one 2x2 block
-        // with det < 0, classified as one positive + one negative.
         let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 0], &[0.0, 1.0]).unwrap();
         let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
         assert_eq!(
@@ -1006,9 +898,6 @@ mod tests {
 
     #[test]
     fn phased_analyze_then_factor_many_matches_one_shot() {
-        // PARDISO workflow: analyze the pattern once, factor two different
-        // value sets that share it. Each must match the one-shot factor and
-        // solve its own system - the FEM Newton / frequency-sweep use case.
         let c = |re, im| Complex::new(re, im);
         let n = 8;
         let (mut rows, mut cols) = (Vec::new(), Vec::new());
@@ -1020,7 +909,6 @@ mod tests {
                 cols.push(j);
             }
         }
-        // Pattern template (values irrelevant for analysis).
         let template = CscMatrix::<Complex<f64>>::from_triplets(
             n,
             &rows,
@@ -1032,7 +920,6 @@ mod tests {
         assert_eq!(analysis.n(), n);
 
         for shift in [0.0, 2.0, -1.5] {
-            // Same pattern, different values.
             let vals: Vec<Complex<f64>> = rows
                 .iter()
                 .zip(&cols)
@@ -1052,7 +939,6 @@ mod tests {
             let x_phased = phased.solve(&b).unwrap();
             let x_one = one_shot.solve(&b).unwrap();
 
-            // Same factor -> identical solve.
             assert_eq!(x_phased, x_one);
             assert!(backward_error(&a, &x_phased, &b) <= solve_backward_error(n, UC64));
         }
@@ -1060,8 +946,6 @@ mod tests {
 
     #[test]
     fn auto_threads_wiring() {
-        // A thin tridiagonal: the predictor caps it low (no parallelism source),
-        // a fixed budget overrides exactly, and the cap clamps.
         let n = 3000;
         let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
         for j in 0..n {
@@ -1076,7 +960,6 @@ mod tests {
         }
         let a = CscMatrix::<f64>::from_triplets(n, &r, &cc, &v).unwrap();
         let sym = LdltSymbolic::analyze(&a, &SolverSettings::default()).unwrap();
-        // Auto capped at 8: a tridiagonal is thin/narrow -> policy returns 2.
         let auto = sym
             .factor(
                 &a,
@@ -1088,12 +971,10 @@ mod tests {
             2,
             "thin matrix auto-capped to 2"
         );
-        // Fixed overrides the predictor exactly.
         let fixed = sym
             .factor(&a, &SolverSettings::default().with_threads(5))
             .unwrap();
         assert_eq!(fixed.diagnostics().threads, 5);
-        // The auto cap clamps the prediction.
         let cap1 = sym
             .factor(
                 &a,
@@ -1101,15 +982,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cap1.diagnostics().threads, 1);
-        // All still solve correctly.
         let b = vec![1.0_f64; n];
         assert!(auto.solve(&b).is_ok() && fixed.solve(&b).is_ok());
     }
 
     #[test]
     fn analyze_options_default_matches_bare_analyze() {
-        // The composable default must reproduce the bare analyze exactly: same
-        // symbolic shape (fill), so existing callers are unaffected.
         let n = 200;
         let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
         for j in 0..n {
@@ -1131,8 +1009,6 @@ mod tests {
 
     #[test]
     fn analyze_with_alternative_knobs_still_solves() {
-        // Changing ordering / nemin / relax changes the symbolic shape but must
-        // still produce a correct factorization.
         let c = |re, im| Complex::new(re, im);
         let m = 8;
         let n = m * m;
@@ -1180,7 +1056,6 @@ mod tests {
         let a =
             CscMatrix::<f64>::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0]).unwrap();
         let analysis = LdltSymbolic::analyze(&a, &SolverSettings::default()).unwrap();
-        // A different pattern (extra off-diagonal) must be rejected.
         let a2 = CscMatrix::<f64>::from_triplets(
             3,
             &[0, 1, 1, 2],
@@ -1225,7 +1100,6 @@ mod tests {
         let a = CscMatrix::<Complex<f64>>::from_triplets(n, &rows, &cols, &vals).unwrap();
         let solver = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
 
-        // Solve against two different right-hand sides with the one factor.
         for shift in [0.0, 1.0] {
             let b: Vec<Complex<f64>> = (0..n).map(|i| c(i as f64 - 10.0 + shift, 1.0)).collect();
             let x = solver.solve(&b).unwrap();
@@ -1239,8 +1113,6 @@ mod tests {
 
     #[test]
     fn refined_solve_is_no_worse_than_plain() {
-        // Complex-symmetric tridiagonal; refinement must not increase the
-        // residual and should reach near machine precision.
         let c = |re, im| Complex::new(re, im);
         let n = 30;
         let mut rows = Vec::new();

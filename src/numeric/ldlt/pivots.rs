@@ -2,9 +2,6 @@
 
 use crate::refine::PivotFloor;
 
-/// Everything of `P^T A P = L D L^T` except `L`, which the solve plan holds
-/// in panel form: the block diagonal `D`, the permutation and the numeric
-/// outcome. The permutation is symmetric, so factoring preserves symmetry.
 #[derive(Debug, Clone)]
 pub(crate) struct LdltPivots<T> {
     pub n: usize,
@@ -27,8 +24,6 @@ pub(crate) struct LdltPivots<T> {
 }
 
 impl<T> LdltPivots<T> {
-    /// Heap bytes held: `D`, the permutation, the supernode tree and the
-    /// pivot floors.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
         vec_bytes(&self.d_diag)

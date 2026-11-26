@@ -92,7 +92,6 @@ impl LuStructure {
             snode_of[sn.first_col..sn.first_col + sn.ncol].fill(s);
         }
         let end = |s: usize| sym.supernodes[s].first_col + sym.supernodes[s].ncol;
-        // Seeds: the entries of `B` below or right of their diagonal block.
         let (mut lseed, mut useed): (Vec<Vec<Li>>, Vec<Vec<Li>>) =
             (vec![Vec::new(); nsuper], vec![Vec::new(); nsuper]);
         for j in 0..n {
@@ -107,9 +106,7 @@ impl LuStructure {
                 }
             }
         }
-        // Per supernode its `L` rows and `U` columns past its own columns.
         let mut ext: Vec<(Vec<Li>, Vec<Li>)> = (lseed.into_iter()).zip(useed).collect();
-        // Progress in columns, level by level.
         let steps = crate::progress::Steps::new(rsprobe::active!(), n as u64);
         for level in levels {
             let entries: usize = (level.iter())
@@ -120,7 +117,6 @@ impl LuStructure {
                 })
                 .sum();
             let work = crate::parallel::Work::of(entries as f64, &STRUCTURE_RATE);
-            // Only lower levels are read: this level's seeds move out.
             let seeds: Vec<_> = (level.iter())
                 .map(|&s| (s, std::mem::take(&mut ext[s])))
                 .collect();
@@ -173,7 +169,5 @@ impl LuStructure {
     }
 }
 
-/// What an entry of the sets costs their build (collected, sorted and
-/// deduplicated).
 static STRUCTURE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);

@@ -8,10 +8,6 @@ use crate::test_constants::{
     fixed_refinement, forward_error, gamma, solve_backward_error, varah_condition, U64, UC32, UC64,
 };
 
-/// A badly scaled, row-scrambled unsymmetric system: without the MC64
-/// row matching the front-restricted pivoting finds no usable pivot or
-/// loses digits; with it (the default) the componentwise backward error
-/// is roundoff.
 #[test]
 fn lu_matching_bounds_pivot_growth() {
     let m = 40usize;
@@ -51,9 +47,6 @@ fn lu_matching_bounds_pivot_growth() {
         values,
     };
     let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
-    // Componentwise backward error `max_i |r_i| / (|A||x| + |b|)_i`: the
-    // rows span twelve decades, so a normwise residual would only
-    // measure the largest rows.
     let omega = |x: &[f64]| {
         let mut r = b.clone();
         let mut d: Vec<f64> = b.iter().map(|v| v.abs()).collect();
@@ -77,20 +70,10 @@ fn lu_matching_bounds_pivot_growth() {
         "backward error with matching {}",
         omega(&x)
     );
-    // Without the matching the shifted rows leave the fully-summed
-    // blocks without a usable pivot.
     let s0 = LuSolver::factor(&a, &opts.with_matching(false));
     assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
 }
 
-/// Rows and columns scaled independently over twelve decades, the diagonal
-/// kept (the scale disparity of a saddle `D_r A D_c` whose current and charge
-/// rows and columns carry unrelated scales): the one-step equilibration
-/// leaves rows and columns far below the unit scale, their pivots fall under
-/// the static floor and the factor misses its matrix; the iterated (Ruiz)
-/// equilibration brings every row and column maximum to one, floors no pivot
-/// and solves to roundoff. Under the row matching the matching's scaling
-/// already does this, and the equilibration setting changes nothing.
 #[test]
 fn iterated_equilibration_lifts_the_floored_pivots() {
     use crate::scaling::ScalingStrategy;
@@ -124,7 +107,6 @@ fn iterated_equilibration_lifts_the_floored_pivots() {
     }
     let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
     let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
-    // componentwise backward error: the rows span twelve decades
     let omega = |x: &[f64]| {
         let mut res = b.clone();
         let mut d: Vec<f64> = b.iter().map(|v| v.abs()).collect();
@@ -173,8 +155,6 @@ fn iterated_equilibration_lifts_the_floored_pivots() {
         "iterated: backward error {}",
         omega(&x2)
     );
-    // the matching's scaling is the equilibration under the matching (made to
-    // run: every diagonal counts as missing)
     let mut matched = opts.clone().with_matching(true);
     matched.matching.negligible_diagonal = 2.0;
     let sm = LuSolver::factor(&a, &matched).unwrap();
@@ -216,7 +196,6 @@ fn magnitudes<T: Scalar>(a: &GeneralCsc<T>) -> Vec<(usize, usize, f64)> {
 
 #[test]
 fn f64_unsymmetric_tridiag() {
-    // Unsymmetric real tridiagonal (full storage): diag 4, sub -1, super -2.
     let n = 20;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
@@ -274,13 +253,6 @@ fn lu_solve_many_matches_single() {
     }
 }
 
-/// Every column of a block solve is BITWISE the single-column solve, whatever the
-/// block width: a non-flexible Krylov method applies the solve to blocks in its Arnoldi
-/// steps and to one column in its update, and any difference breaks the Arnoldi
-/// relation (a single-precision factor made it 1e-3 on a saddle system). Covers the
-/// leaf subtrees and the ancestor levels (a 2D grid) and the apex nodes with rows below
-/// them (a 3D grid). Under FMA the fused complex multiply-add is not symmetric in its
-/// factors, so the operand order of every single-column branch matters.
 #[test]
 fn lu_block_solve_is_the_single_solve_to_rounding() {
     let mut seed = 12345u64;
@@ -314,8 +286,6 @@ fn lu_block_solve_is_the_single_solve_to_rounding() {
         }
         (m * m, r, cc, v)
     };
-    // a 3D grid: its top separators are large enough for the apex sweep, with rows
-    // below them (the off-block product)
     let grid3 = |m: usize, rnd: &mut dyn FnMut() -> f64| {
         let (mut r, mut cc, mut v) = (Vec::new(), Vec::new(), Vec::new());
         let id = |a: usize, b: usize, e: usize| (a * m + b) * m + e;
@@ -366,9 +336,6 @@ fn lu_block_solve_is_the_single_solve_to_rounding() {
     }
 }
 
-/// An analysis on a given ordering: its own ordering reproduces the factor, a
-/// neighbouring pattern takes it with the elimination tree and counts recomputed, and a
-/// non-permutation is refused.
 #[test]
 fn analysis_on_a_given_ordering() {
     let m = 12;
@@ -404,7 +371,6 @@ fn analysis_on_a_given_ordering() {
     assert_eq!(f1.factor_nnz(), f0.factor_nnz());
     let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
     assert_eq!(f1.solve(&b).unwrap(), f0.solve(&b).unwrap());
-    // a neighbouring pattern (one more coupling) on the same ordering
     let (mut r2, mut c2, mut v2) = (r.clone(), c.clone(), v.clone());
     r2.extend([0, n - 1]);
     c2.extend([n - 1, 0]);
@@ -417,17 +383,12 @@ fn analysis_on_a_given_ordering() {
         omega <= solve_backward_error(n, U64),
         "backward error on the reused ordering {omega:.1e}"
     );
-    // not a permutation
     let bad: Vec<usize> = (0..n).map(|i| i / 2).collect();
     assert!(LuSymbolic::analyze(&a, &o.clone().with_permutation(bad.into())).is_err());
 }
 
 #[test]
 fn pivoting_triggered_small_diagonal() {
-    // Small diagonal, large off-diagonals -> partial pivoting fires on
-    // (nearly) every column. Well-conditioned overall, so the solve must
-    // still hit a tiny residual: this isolates the pivoting/perm logic
-    // (correctness) from numerical stability.
     let c = |re, im| Complex::new(re, im);
     let m = 6;
     let n = m * m;
@@ -438,12 +399,12 @@ fn pivoting_triggered_small_diagonal() {
             let p = idx(a, b);
             rr.push(p);
             cc.push(p);
-            vv.push(c(0.3, 0.05)); // small diagonal
+            vv.push(c(0.3, 0.05));
             if b + 1 < m {
                 let q = idx(a, b + 1);
                 rr.push(p);
                 cc.push(q);
-                vv.push(c(2.0, 0.3)); // large off-diagonal
+                vv.push(c(2.0, 0.3));
                 rr.push(q);
                 cc.push(p);
                 vv.push(c(1.5, -0.2));
@@ -472,11 +433,6 @@ fn pivoting_triggered_small_diagonal() {
 
 #[test]
 fn lu_pivot_u_knob_wired_and_solves() {
-    // The tunable threshold `u` governs the left-looking LU pivot test. On a
-    // well-scaled, diagonally-dominant grid the pivot never needs to move, so
-    // every `u in [0, 1]` must solve to a tiny residual (the knob changes the
-    // factor path but not correctness here). Verifies the field is threaded
-    // end-to-end (SolverSettings -> KernelTuning -> kernel) and clamps.
     let c = |re, im| Complex::new(re, im);
     let m = 7;
     let n = m * m;
@@ -487,7 +443,7 @@ fn lu_pivot_u_knob_wired_and_solves() {
             let p = idx(a, b);
             rr.push(p);
             cc.push(p);
-            vv.push(c(12.0, 1.0)); // dominant diagonal -> no interchange needed
+            vv.push(c(12.0, 1.0));
             if b + 1 < m {
                 let q = idx(a, b + 1);
                 rr.push(p);
@@ -520,7 +476,6 @@ fn lu_pivot_u_knob_wired_and_solves() {
             "pivot_u={u} backward error {omega}"
         );
     }
-    // Out-of-range values clamp into [0, 1].
     assert_eq!(
         SolverSettings::default()
             .with_pivot_threshold(5.0)
@@ -539,11 +494,6 @@ fn lu_pivot_u_knob_wired_and_solves() {
 
 #[test]
 fn static_pivot_reuse_across_value_sweep() {
-    // Solver-in-the-loop: analyze the pattern once, then factor a *sweep* of
-    // value sets that share it with static pivoting (`pivot_u = 0`, no pivot
-    // search per column). On a diagonally-dominant family each static factor
-    // solves accurately, and iterative refinement against the original matrix
-    // recovers full accuracy - the frequency-sweep / time-stepping use case.
     let c = |re, im| Complex::new(re, im);
     let m = 8;
     let n = m * m;
@@ -587,7 +537,6 @@ fn static_pivot_reuse_across_value_sweep() {
             })
             .collect();
         let a = GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vv).unwrap();
-        // Reuse the one analysis; static factor (no pivot search).
         let f = &analysis.factor(&a, &static_opts).unwrap();
         let x = f
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
@@ -603,7 +552,6 @@ fn static_pivot_reuse_across_value_sweep() {
 
 #[test]
 fn complex_unsymmetric_2d_grid() {
-    // 2D 5-point grid with unsymmetric neighbor couplings (right != left).
     let c = |re, im| Complex::new(re, im);
     let m = 8;
     let n = m * m;
@@ -619,10 +567,10 @@ fn complex_unsymmetric_2d_grid() {
                 let q = idx(a, b + 1);
                 rr.push(p);
                 cc.push(q);
-                vv.push(c(-1.0, 0.2)); // p,q
+                vv.push(c(-1.0, 0.2));
                 rr.push(q);
                 cc.push(p);
-                vv.push(c(-2.0, 0.1)); // q,p (different!)
+                vv.push(c(-2.0, 0.1));
             }
             if a + 1 < m {
                 let q = idx(a + 1, b);
@@ -648,7 +596,6 @@ fn complex_unsymmetric_2d_grid() {
 
 #[test]
 fn complex_f32_lu_solves() {
-    // The Complex<f32> LU path (used by the mixed-precision preconditioner).
     let c = |re: f32, im: f32| num_complex::Complex::<f32>::new(re, im);
     let m = 10;
     let n = m * m;
@@ -691,9 +638,6 @@ fn complex_f32_lu_solves() {
 
 #[test]
 fn phased_general_lu_analyze_once_factor_many() {
-    // PARDISO workflow for the unsymmetric path: analyze the pattern once,
-    // factor several value sets that share it - each must match the
-    // one-shot factor's solve. The frequency-sweep / Newton use case.
     let c = |re, im| Complex::new(re, im);
     let m = 7;
     let n = m * m;
@@ -718,7 +662,6 @@ fn phased_general_lu_analyze_once_factor_many() {
             }
         }
     }
-    // Template (values irrelevant) -> analyze once.
     let template =
         GeneralCsc::<Complex<f64>>::from_triplets(n, &rr, &cc, &vec![c(1.0, 0.0); rr.len()])
             .unwrap();
@@ -748,11 +691,6 @@ fn phased_general_lu_analyze_once_factor_many() {
     }
 }
 
-/// A random unsymmetric matrix with a dominant diagonal (every column its
-/// diagonal plus a few random rows, so `A + A^T` is much larger than `A`);
-/// with `holes` every
-/// seventh diagonal entry is left out, its column carrying the pivot of the
-/// next row instead (a 2x2 swap the matching has to find).
 fn unsymmetric_holes(n: usize, per_col: usize, seed: u64, holes: bool) -> GeneralCsc<f64> {
     let mut x = seed;
     let mut next = move || {
@@ -784,9 +722,6 @@ fn unsymmetric_holes(n: usize, per_col: usize, seed: u64, holes: bool) -> Genera
     GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-/// The exact structure bounds the numeric factor: every `U12` column the
-/// factorization keeps is in `ucols(s)`, and no supernode keeps more `L` rows
-/// than `lrows(s)` has.
 #[test]
 fn exact_structure_bounds_the_factor() {
     for (seed, matching) in [(7u64, false), (11, true), (13, true)] {
@@ -838,8 +773,6 @@ fn exact_structure_bounds_the_factor() {
     }
 }
 
-/// The row matching runs only where a diagonal entry is missing: with a full
-/// diagonal the matrix is analyzed as given.
 #[test]
 fn matching_only_where_the_diagonal_needs_it() {
     let opts = SolverSettings::default();
@@ -850,9 +783,6 @@ fn matching_only_where_the_diagonal_needs_it() {
     }
 }
 
-/// The transposed solve runs `U^T` forward and `L^T` backward on the same
-/// panels, with and without the row matching, and a column-major block of
-/// transposed solves is the columns solved one by one.
 #[test]
 fn lu_solve_transpose_on_the_same_factors() {
     use crate::numeric::krylov::Factorization;
@@ -898,7 +828,6 @@ fn lu_solve_transpose_on_the_same_factors() {
     assert!(backward_error(&a.transpose(), &x, &b) <= solve_backward_error(a.n, UC64));
 }
 
-/// The three direct solvers behind one trait object.
 #[test]
 fn every_direct_solver_is_a_factorization() {
     use crate::numeric::krylov::Factorization;
@@ -948,14 +877,10 @@ fn every_direct_solver_is_a_factorization() {
             .unwrap();
         assert!(out.certified && (xr[0] - x[0]).abs() <= (solved + refined) * xnorm);
         assert_eq!(f.n_perturbed(), 0);
-        // two solves here, one more for the reference on the first
         assert_eq!(f.diagnostics().solves.calls, if k == 0 { 3 } else { 2 });
     }
 }
 
-/// The analysis keeps no pattern once its schedule is built (an index per
-/// entry of `A + A^T`, the largest part of an analysis), and its
-/// factorizations still solve.
 #[test]
 fn analysis_drops_the_pattern() {
     let a = unsymmetric_holes(600, 3, 7, false);
@@ -972,9 +897,6 @@ fn analysis_drops_the_pattern() {
     );
 }
 
-/// FNV-1a over everything an analysis decides: the ordering, the
-/// supernodes, the levels, the schedule and, for LU, the exact `L` and `U`
-/// structures and the row matching.
 #[cfg(feature = "matgen")]
 mod fingerprint {
     use super::*;
@@ -1063,12 +985,6 @@ mod fingerprint {
     }
 }
 
-/// The analyses of a set of patterns, fingerprinted bit for bit against the
-/// ones recorded with release 1.8.0: a memory or speed change of the
-/// analysis must not change the ordering or the symbolic structure. The
-/// cases cover nested dissection (with and without the compressed graph),
-/// the race with dissection and its seed ensemble, minimum degree, a given
-/// permutation, the row matching, and a lower-triangle (LDL^T) input.
 #[cfg(feature = "matgen")]
 #[test]
 fn analyses_match_the_recorded_fingerprints() {
@@ -1129,12 +1045,6 @@ fn analyses_match_the_recorded_fingerprints() {
     assert_eq!(got.map(|(_, v)| v), recorded, "{report:#?}");
 }
 
-/// A matrix whose stable pivots lie off the diagonal: a `k x k` grid of
-/// unknowns coupled to their neighbours by entries of order one (unsymmetric
-/// values, random signs), the diagonal `diag` small at every other point
-/// and two elsewhere. A front can pivot such a column only on a coupling to
-/// a row it holds; a column whose couplings all lead to rows of its
-/// ancestors has no stable pivot in its front.
 fn off_diagonal_pivots(k: usize, diag: f64, seed: u64) -> GeneralCsc<f64> {
     let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
     let mut next = || {
@@ -1192,7 +1102,6 @@ fn delayed_pivots_keep_the_factor_stable() {
         omega <= bound && omega0 > bound,
         "backward error {omega:.1e} with delays, {omega0:.1e} without"
     );
-    // The transposed solve runs on the same factor.
     let xt = delayed.solve_transpose(&b).unwrap();
     let omegat = backward_error(&a.transpose(), &xt, &b);
     assert!(omegat <= bound, "transposed backward error {omegat:.1e}");
@@ -1213,7 +1122,6 @@ fn delayed_pivots_are_deterministic_and_refactor_bitwise() {
     assert!(d1.unwrap() > 0);
     assert_eq!(d1, d4);
     assert!(x1.iter().zip(&x4).all(|(p, q)| p.to_bits() == q.to_bits()));
-    // A refactorization in the buffers of a factor with delays: the same bits.
     let s = delays_settings(true).with_threads(Threads::Fixed(4));
     let sym = LuSymbolic::analyze(&a, &s).unwrap();
     let mut f = sym.factor(&a, &s).unwrap();
@@ -1285,9 +1193,6 @@ fn delays_past_their_allowance_fall_back() {
     assert!(dropped.delays_dropped && dropped.delayed == 0);
 }
 
-/// [`off_diagonal_pivots`] with one direction of every third coupling
-/// dropped: a structurally unsymmetric pattern, where the rows a delayed
-/// pivot carries may lie outside its parent's exact structure.
 fn unsymmetric_off_diagonal_pivots(k: usize, diag: f64, seed: u64) -> GeneralCsc<f64> {
     let g = off_diagonal_pivots(k, diag, seed);
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -1322,13 +1227,6 @@ fn delayed_pivots_carry_rows_beyond_the_structure() {
     );
 }
 
-/// The update of a node in units of its layout (the forking path, which a
-/// node of enough update work takes; here every node) solves the system
-/// as the sequential update does on structurally unsymmetric patterns:
-/// there an updater whose `U` columns alone reach a node carries columns
-/// past it that the node's structure lacks. Without and with the row
-/// matching, and with delayed pivots that carry rows and columns beyond
-/// the structure.
 #[test]
 fn forked_update_on_unsymmetric_structures() {
     use crate::numeric::settings::{KernelSettings, Threads};
@@ -1366,4 +1264,32 @@ fn forked_update_on_unsymmetric_structures() {
             );
         }
     }
+}
+
+#[test]
+fn row_passes_give_the_same_bits_serial_and_parallel() {
+    use super::node::{deep_scale, deep_update};
+    let (rows, cols) = (1usize << 16, 16usize);
+    let mut seed = 7u64;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let lrect: Vec<f64> = (0..rows * cols).map(|_| rnd()).collect();
+    let kb = cols / 2;
+    let u: Vec<f64> = (kb..cols).map(|_| rnd()).collect();
+    let mut serial: Vec<f64> = (0..rows).map(|_| rnd()).collect();
+    let mut parallel = serial.clone();
+    let top_serial = deep_update(&lrect, rows, kb, &u, &mut serial, true, false);
+    let top_parallel = deep_update(&lrect, rows, kb, &u, &mut parallel, true, true);
+    assert_eq!(top_serial.to_bits(), top_parallel.to_bits());
+    let pinv = rnd();
+    deep_scale(&mut serial, pinv, false);
+    deep_scale(&mut parallel, pinv, true);
+    assert!(serial
+        .iter()
+        .zip(&parallel)
+        .all(|(p, q)| p.to_bits() == q.to_bits()));
 }

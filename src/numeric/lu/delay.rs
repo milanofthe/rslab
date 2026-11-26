@@ -30,8 +30,6 @@
 use super::structure::LuStructure;
 use crate::numeric::supernodal::Li;
 
-/// What a factored supernode leaves for its parent, its ancestors' updates
-/// and the emit.
 pub(super) struct NodePivots<T> {
     /// Pivots taken: the columns of the finished panel.
     pub npiv: usize,
@@ -97,14 +95,11 @@ impl<T> crate::memory::HeapBytes for crate::numeric::supernodal::Cells<NodePivot
 }
 
 impl<T> NodePivots<T> {
-    /// Pivots passed to the parent.
     #[inline]
     pub(super) fn passed(&self) -> usize {
         self.rows.len() - self.npiv
     }
 
-    /// The pivot count and the rows and columns past the pivots of the
-    /// finished panels of supernode `k` (`ncol` columns in the analysis).
     #[inline]
     pub(super) fn off<'a>(
         &'a self,
