@@ -1,7 +1,3 @@
-/// The MC64 transversal keeps the diagonal-preference pivoting on the
-/// diagonal: on a row-scrambled, badly scaled grid the numeric fill
-/// equals the symbolic estimate, while the structural transversal
-/// pivots off the diagonal and fills.
 #[test]
 fn klu_matching_keeps_fill_at_the_symbolic_estimate() {
     let m = 40usize;
@@ -110,9 +106,6 @@ fn solution_gap(a: &GeneralCsc<f64>, x: &[f64]) -> f64 {
     2.0 * fe * x.iter().map(|v| v.abs()).fold(0.0, f64::max) / (1.0 - fe)
 }
 
-/// Circuit-shaped test matrix: sparse, unsymmetric, diagonally weighted,
-/// structurally nonsingular, with genuinely reducible structure (a
-/// one-directional bridge between two internally coupled halves).
 fn circuit_like(n: usize, seed: u64) -> GeneralCsc<f64> {
     let mut rng = Rng(seed | 1);
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -121,7 +114,6 @@ fn circuit_like(n: usize, seed: u64) -> GeneralCsc<f64> {
         r.push(j);
         c.push(j);
         v.push(4.0 + rng.next_f64());
-        // couplings within the same half only (keeps two SCC groups)
         let base = if j < half { 0 } else { half };
         let span = if j < half { half } else { n - half };
         for t in 1..=3usize {
@@ -133,8 +125,6 @@ fn circuit_like(n: usize, seed: u64) -> GeneralCsc<f64> {
             }
         }
     }
-    // one-directional bridge: second half feeds the first (rows in the
-    // first half, columns in the second) -> reducible, never a single SCC
     for k in 0..4usize {
         r.push(k * 3 % half);
         c.push(half + (k * 5) % (n - half));
@@ -143,18 +133,8 @@ fn circuit_like(n: usize, seed: u64) -> GeneralCsc<f64> {
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-/// Off-diagonal pivots must not cascade: when a tiny diagonal forces an
-/// off-diagonal pivot, the displaced diagonal row is reassigned to the
-/// column whose diagonal row was stolen (SuiteSparse KLU's repair), so
-/// later columns keep their diagonal preference and the fill stays near
-/// the symbolic diagonal-pivoting prediction instead of degenerating
-/// toward partial-pivoting fill (the scircuit/rajat15 2x fill blow-up).
 #[test]
 fn klu_offdiagonal_pivot_reassigns_diagonal() {
-    // scircuit's mechanism in miniature: power-net rows (uniform
-    // conductances -> every entry is that row's max, so row-max scaling
-    // turns them into permanent large pivot candidates in every column
-    // they touch) plus a few tiny diagonals that force the first steal.
     let n = 900;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..n {
@@ -163,23 +143,20 @@ fn klu_offdiagonal_pivot_reassigns_diagonal() {
             c.push(j);
             v.push(1.0);
         }
-        let tiny = j % 21 == 5; // j = 2 mod 3: never on a power-net column
+        let tiny = j % 21 == 5;
+        assert!(!tiny || j % 3 == 2);
         r.push(j);
         c.push(j);
         v.push(if tiny { 1e-9 } else { 4.0 });
         if tiny {
-            // the steal target: dominant candidate in the tiny column...
             r.push(j + 1);
             c.push(j);
             v.push(10.0);
-            // ...whose own column keeps the displaced row available, but
-            // small enough that plain partial pivoting would not pick it
             r.push(j);
             c.push(j + 1);
             v.push(0.3);
         }
     }
-    // power nets: rows touching every 3rd column with uniform values
     for k in 0..6usize {
         let p = 100 + 130 * k;
         for j in (0..n).step_by(3) {
@@ -232,9 +209,6 @@ fn klu_solves_circuit_like_and_matches_lu() {
 
 #[test]
 fn klu_complex_small_diagonal_pivots() {
-    // Small diagonal, large off-diagonals: threshold pivoting must
-    // abandon the diagonal and still solve accurately (same layout as
-    // the supernodal LU pivoting test).
     let c = |re, im| Complex::new(re, im);
     let m = 6;
     let n = m * m;
@@ -279,8 +253,6 @@ fn klu_complex_small_diagonal_pivots() {
 
 #[test]
 fn klu_lower_triangular_needs_no_fill() {
-    // Lower bidiagonal: BTF flips it upper triangular; every block is a
-    // singleton, so the factor stores no L/U entries at all.
     let n = 50;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
@@ -296,7 +268,6 @@ fn klu_lower_triangular_needs_no_fill() {
     let a = GeneralCsc::<f64>::from_triplets(n, &r, &c, &v).unwrap();
     let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     assert_eq!(s.n_blocks(), n);
-    // factor_nnz = n diagonal entries + (n-1) off-block entries, zero fill
     assert_eq!(s.factor_nnz(), 2 * n - 1);
     let b: Vec<f64> = (0..n).map(|i| i as f64 - 7.0).collect();
     let x = s.solve(&b).unwrap();
@@ -305,8 +276,6 @@ fn klu_lower_triangular_needs_no_fill() {
 
 #[test]
 fn klu_structurally_singular_detected() {
-    // Column 2 shares its only row pattern with column 0 -> no complete
-    // matching regardless of values.
     let a = GeneralCsc::<f64>::from_triplets(3, &[0, 1, 0], &[0, 1, 2], &[1.0, 1.0, 5.0]).unwrap();
     match KluSymbolic::analyze(&a, &KluSettings::default()) {
         Err(RslabError::StructurallySingular) => {}
@@ -316,8 +285,6 @@ fn klu_structurally_singular_detected() {
 
 #[test]
 fn klu_numerically_singular_detected() {
-    // Structurally fine 2x2 block, but rank 1 numerically: the second
-    // pivot must come up exactly zero.
     let a =
         GeneralCsc::<f64>::from_triplets(2, &[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 2.0, 2.0, 4.0])
             .unwrap();
@@ -345,8 +312,6 @@ fn klu_refactor_replays_and_matches_fresh_factor() {
     let a = circuit_like(150, 99);
     let mut s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
 
-    // Same values: the replay reproduces the factor up to the rounding of
-    // its own elimination order, so its solve meets the same bound.
     s.refactor(&a).unwrap();
     let b0: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();
     let x0 = s.solve(&b0).unwrap();
@@ -356,7 +321,6 @@ fn klu_refactor_replays_and_matches_fresh_factor() {
         resid(&a, &x0, &b0)
     );
 
-    // New values, same pattern: the refactored solve must be accurate.
     let a2 = GeneralCsc::from_triplets(
         a.n,
         &{
@@ -394,8 +358,6 @@ fn klu_refactor_replays_and_matches_fresh_factor() {
     );
 }
 
-/// 2D convection-diffusion 5-point grid: one large irreducible block with
-/// wide elimination-DAG wavefronts - the level-schedule target shape.
 fn grid_cd(m: usize) -> (GeneralCsc<f64>, Vec<f64>) {
     let n = m * m;
     let idx = |i: usize, j: usize| i * m + j;
@@ -430,10 +392,6 @@ fn grid_cd(m: usize) -> (GeneralCsc<f64>, Vec<f64>) {
     (a, b)
 }
 
-/// The a-priori estimate is the exact symbolic fill on a structurally
-/// symmetric pattern and an upper bound on an unsymmetric one; on a chain,
-/// which eliminates without fill, it is the factor itself: `3n - 2` entries,
-/// one division and one multiply-subtract per column but the last.
 #[test]
 fn klu_estimate_bounds_the_symbolic_fill() {
     let settings = KluSettings::default();
@@ -461,8 +419,6 @@ fn klu_estimate_bounds_the_symbolic_fill() {
     assert_eq!(s.estimated_flops(), 2 * (n as u64 - 1));
 }
 
-/// Pieces on threads of their own per run, each taking the next one; every
-/// section free, so every one worth anything goes wide.
 struct Threaded(usize);
 
 impl crate::parallel::Pool for Threaded {
@@ -490,14 +446,8 @@ impl crate::parallel::Pool for Threaded {
 
 #[test]
 fn klu_parallel_replays_are_bit_identical_to_sequential() {
-    // One irreducible 1024-column block, forced into a parallel replay (the
-    // gates only decide when it pays, not whether it is correct): level by
-    // level on a lent pool, then pipelined on rayon, each twice (the second
-    // pipelined replay reuses the column numbers). The values must be the
-    // sequential replay's, not just the residual.
     let (a, b) = grid_cd(32);
     let seq = KluSettings::default().with_parallel(KluParallel::Off);
-    // On the caller's pool: the lent one, then rayon's.
     let par = (KluSettings::default())
         .with_parallel(KluParallel::On)
         .with_threads(crate::Threads::Ambient);
@@ -529,7 +479,6 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
         assert_eq!(s_seq.factors.udiag, s.factors.udiag, "{what}: diag differs");
     };
     let lent: std::sync::Arc<dyn crate::parallel::Pool> = std::sync::Arc::new(Threaded(4));
-    // On: the time only picks how, never whether.
     crate::parallel::install(lent.clone(), || s_par.refactor(&a2)).unwrap();
     assert_ne!(
         s_par.factors.modes[..],
@@ -565,7 +514,6 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
 fn klu_refactor_rejects_changed_pattern() {
     let a = circuit_like(60, 5);
     let mut s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
-    // Move one off-diagonal entry to a fresh position (same nnz).
     let (mut rows, mut cols, vals): (Vec<usize>, Vec<usize>, Vec<f64>) = {
         let mut rr = Vec::new();
         let mut cc = Vec::new();
@@ -584,20 +532,17 @@ fn klu_refactor_rejects_changed_pattern() {
     cols[moved] = (cols[moved] + 1) % a.n;
     let a2 = GeneralCsc::from_triplets(a.n, &rows, &cols, &vals).unwrap();
     if a2.nnz() != a.nnz() {
-        return; // duplicate collapse: not the case under test
+        return;
     }
     assert!(s.refactor(&a2).is_err(), "changed pattern must be rejected");
 }
 
-/// Normwise backward error of the *transposed* system `A^T x = b`.
 fn resid_t<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
     resid(&a.transpose(), x, b)
 }
 
 #[test]
 fn klu_solve_transpose_matches_factored_transpose() {
-    // Reducible circuit-shaped matrix: solve_transpose on A's factors must
-    // agree with a fresh factorization of A^T, and satisfy A^T x = b.
     let a = circuit_like(200, 42);
     let b: Vec<f64> = (0..200).map(|i| ((i * 3) % 13) as f64 - 6.0).collect();
     let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
@@ -623,9 +568,6 @@ fn klu_solve_transpose_matches_factored_transpose() {
 
 #[test]
 fn klu_solve_transpose_complex_plain_not_conjugate() {
-    // Complex: solve_transpose must solve the PLAIN transpose A^T x = b
-    // (adjoint convention: the caller conjugates for A^H). Off-diagonal
-    // pivoting pressure included (small diagonal), as in the solve test.
     let c = |re, im| Complex::new(re, im);
     let m = 6;
     let n = m * m;
@@ -668,7 +610,6 @@ fn klu_solve_transpose_complex_plain_not_conjugate() {
         "residual {}",
         resid_t(&a, &x, &b)
     );
-    // A^H x = b via the documented conjugation recipe.
     let bc: Vec<Complex<f64>> = b.iter().map(|v| v.conj()).collect();
     let xh: Vec<Complex<f64>> = s
         .solve_transpose(&bc)
@@ -690,8 +631,6 @@ fn klu_solve_transpose_complex_plain_not_conjugate() {
 
 #[test]
 fn klu_solve_transpose_singleton_blocks_and_options() {
-    // Lower bidiagonal (all-singleton BTF blocks, pure F off-block path),
-    // plus the no-BTF and no-scaling configurations on the circuit matrix.
     let n = 50;
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
@@ -731,7 +670,6 @@ fn klu_solve_transpose_singleton_blocks_and_options() {
 
 #[test]
 fn klu_solve_transpose_after_refactor() {
-    // The transpose solve must read the refactored values, not stale ones.
     let a = circuit_like(150, 99);
     let mut s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     let a2 = {
@@ -828,9 +766,6 @@ fn klu_empty_matrix() {
 
 #[test]
 fn klu_estimate_matches_actual_fill_on_dominant_matrix() {
-    // Diagonally dominant -> threshold pivoting keeps every diagonal, so
-    // the diagonal-pivot symbolic fill must be EXACT, and the estimate's
-    // factor_nnz must equal the factored fill.
     let a = circuit_like(150, 33);
     let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
     let est = sym.estimate_memory::<f64>();
@@ -846,8 +781,6 @@ fn klu_estimate_matches_actual_fill_on_dominant_matrix() {
 fn klu_diagnostics_phased_vs_oneshot() {
     let a = circuit_like(100, 4);
     let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
-    // factor() never estimates implicitly: the estimate is attached only
-    // when it was computed explicitly beforehand.
     let s0 = sym.factor(&a, &KluSettings::default()).unwrap();
     assert!(s0.diagnostics().estimate.is_none());
     let _ = sym.estimate_memory::<f64>();
@@ -859,14 +792,11 @@ fn klu_diagnostics_phased_vs_oneshot() {
     assert_eq!(d.factor_bytes, s0.diagnostics().factor_bytes);
 
     let mut s2 = KluSolver::factor(&a, &KluSettings::default()).unwrap();
-    // the one-shot factor fills its diagnostics like the phased path
     assert_eq!(s2.diagnostics().factor_nnz, d.factor_nnz);
     s2.refactor(&a).unwrap();
     assert_eq!(s2.diagnostics().factor_nnz, d.factor_nnz);
 }
 
-/// Cascaded stages with one-way inter-stage feeds: `stages` irreducible
-/// diagonal blocks in the BTF (the reducible shape the Auto gate keys on).
 fn cascaded(n: usize, stages: usize, seed: u64) -> GeneralCsc<f64> {
     let mut rng = Rng(seed | 1);
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -878,7 +808,6 @@ fn cascaded(n: usize, stages: usize, seed: u64) -> GeneralCsc<f64> {
         r.push(j);
         c.push(j);
         v.push(6.0 + rng.next_f64());
-        // ring coupling inside the stage keeps the block irreducible
         let fwd = lo + (j - lo + 1) % (hi - lo);
         if fwd != j {
             r.push(fwd);
@@ -888,7 +817,6 @@ fn cascaded(n: usize, stages: usize, seed: u64) -> GeneralCsc<f64> {
             c.push(fwd);
             v.push(-1.0 + 0.1 * rng.next_f64());
         }
-        // one-way feed from the previous stage
         if s > 0 {
             r.push(j - stage);
             c.push(j);
@@ -898,7 +826,6 @@ fn cascaded(n: usize, stages: usize, seed: u64) -> GeneralCsc<f64> {
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-/// [`Threaded`] at a given section cost.
 struct Costed(usize, crate::parallel::Dispatch);
 
 impl crate::parallel::Pool for Costed {
@@ -919,8 +846,6 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
     let on = |d: Dispatch| -> std::sync::Arc<dyn crate::parallel::Pool> {
         std::sync::Arc::new(Costed(4, d))
     };
-    // Many blocks: wide where sections are free, serial where they cost
-    // more than any work, and Off always wins.
     let a = cascaded(4000, 6, 9);
     let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
     let wide = |s: &KluSettings| sym.parallel_blocks::<f64>(s);
@@ -937,7 +862,6 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
         wide(&KluSettings::default().with_parallel(KluParallel::Off))
     });
     assert!(!off);
-    // The user's structural floor in place of the time: the old gate.
     let floor = KluSettings {
         par_min_nnz: Some(usize::MAX),
         ..KluSettings::default()
@@ -951,8 +875,6 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
     let s = install(on(Dispatch::never()), || wide(&floor));
     assert!(s, "a floor below it goes wide whatever the cost");
 
-    // A refactor decides on the pool it runs on, every time: one block of
-    // 1024 columns whose DAG offers wide levels.
     let (a, _) = grid_cd(32);
     let mut s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     install(on(Dispatch::new(vec![1e12; 5])), || s.refactor(&a)).unwrap();
@@ -961,7 +883,6 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
         [Mode::Serial],
         "sections costing more than the work"
     );
-    // On a free pool a block goes wide where nothing says otherwise.
     let plan = &s.factors.plan;
     let bp = &plan.blocks[0];
     let bn = s.factors.block_ptr[bp.block + 1] - s.factors.block_ptr[bp.block];
@@ -971,8 +892,6 @@ fn klu_parallel_auto_gate_decides_on_the_pool() {
         Mode::Serial,
         "free sections go wide"
     );
-    // its light columns start level by level only where the workers wait
-    // awake between the levels: on a lent pool, not on rayon's
     assert_eq!(decide.mode(plan, bp, bn), Mode::Serial);
     let costly = super::refactor::Decide::on(Dispatch::new(vec![1e12; 5]), 4);
     assert_eq!(costly.mode(plan, bp, bn), Mode::Serial);
@@ -1003,7 +922,6 @@ fn klu_parallel_factor_bit_identical() {
     let x2 = s2.solve(&b).unwrap();
     assert_eq!(bits(&x1), bits(&x2));
 
-    // Refactor honors the same opt-in and stays bit-identical too.
     let a2 = GeneralCsc {
         n: a.n,
         col_ptr: a.col_ptr.clone(),
@@ -1028,7 +946,6 @@ fn klu_composes_as_gmres_preconditioner() {
     let a = circuit_like(120, 55);
     let m = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     let b: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();
-    // Exact preconditioner -> GMRES converges in one iteration.
     let settings = crate::KrylovSettings::default()
         .with_tol(1e-12)
         .with_max_iter(5)
@@ -1063,8 +980,6 @@ fn klu_settings_compose() {
     assert!(resid(&a, &x, &b) <= solve_backward_error(a.n, U64));
 }
 
-/// The exported factors reproduce the factored matrix, `P_r R A P_c =
-/// L U + F`, with `L` and `U` inside the diagonal blocks and `F` above.
 #[test]
 fn exported_factors_reproduce_the_matrix() {
     for (seed, scaling, btf) in [(10, true, true), (20, false, true), (30, true, false)] {
@@ -1090,7 +1005,6 @@ fn exported_factors_reproduce_the_matrix() {
             }
         }
         assert!((0..l.n).all(|j| l.row_idx[l.col_ptr[j]] == j && l.values[l.col_ptr[j]] == 1.0));
-        // (L U + F) x against P_r R A P_c x.
         let n = a.n;
         let mut rng = Rng(seed | 99);
         let x: Vec<f64> = (0..n).map(|_| rng.next_f64()).collect();
@@ -1121,7 +1035,6 @@ fn exported_factors_reproduce_the_matrix() {
     }
 }
 
-/// The exported factors of a complex matrix reproduce it too.
 #[test]
 fn exported_complex_factors_reproduce_the_matrix() {
     use num_complex::Complex;
